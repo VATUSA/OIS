@@ -129,10 +129,13 @@ export function AdminAccessControl() {
   }
   function onSave() {
     if (cid == null || !reason.trim()) return;
+    // Only send assignable roles. Non-assignable roles the target may hold
+    // (e.g. SERVER_ADMIN) are not editable here and are preserved server-side.
+    const assignable = new Set(catalog.data?.roles ?? []);
     const scopes = Object.entries(working).map(([key, val]) => ({
       artcc_id: key === "" ? null : key,
       permissions: buildTree(val.perms) as unknown as Record<string, never>,
-      role_names: val.roles,
+      role_names: val.roles.filter((role) => assignable.has(role)),
     }));
     save.mutate({ cid, body: { reason: reason.trim(), scopes } satisfies UpdateBody });
   }
