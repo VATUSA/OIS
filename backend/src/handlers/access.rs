@@ -1,9 +1,9 @@
 //! The access-editor backend: read the catalog, read a user's access, and save
 //! roles + permission grants with a required reason (audited). Ported from osmium's
-//! admin access handlers; national (unscoped) grants only for now — the `artcc_id`
-//! scope dimension is present in the schema and enforced per-domain later.
+//! admin access handlers and extended with per-ARTCC scope: grants can be national
+//! (`artcc_id = null`) or scoped to a facility.
 
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 
 use axum::{
     Json,
@@ -14,16 +14,18 @@ use axum::{
 use crate::{
     auth::{
         acl::{
-            PermissionPath, fetch_user_access, is_server_admin, normalize_permission_tree,
-            permission_tree_from_names, permission_tree_from_paths,
+            fetch_user_access, is_server_admin, normalize_permission_tree,
+            permission_tree_from_names,
         },
         context::CurrentUser,
         permissions::{AccessCatalogRead, AccessSelfRead, AccessUsersRead, AccessUsersUpdate},
         require_permission::RequirePermission,
     },
     errors::ApiError,
-    models::{AccessCatalogBody, SelfAccessBody, UpdateUserAccessRequest, UserAccessBody},
-    repos::{access as access_repo, audit as audit_repo},
+    models::{
+        AccessCatalogBody, ScopeAccess, SelfAccessBody, UpdateUserAccessRequest, UserAccessBody,
+    },
+    repos::{access as access_repo, audit as audit_repo, org as org_repo},
     state::AppState,
 };
 
@@ -39,6 +41,7 @@ pub async fn get_access_catalog(
             .map(|role| role.to_string())
             .collect(),
         permissions: permission_tree_from_names(&permission_names)?,
+        facilities: org_repo::list_facilities(pool).await?,
     }))
 }
 
@@ -52,7 +55,7 @@ pub async fn get_self_access(
     Ok(Json(SelfAccessBody {
         server_admin: is_server_admin(&roles),
         role_names: roles,
-        permissions: permission_tree_from_paths(&permissions),
+        permissions: crate::auth::acl::permission_tree_from_paths(&permissions),
     }))
 }
 
@@ -65,8 +68,11 @@ pub async fn get_user_access(
     let target = access_repo::find_current_user_by_cid(pool, cid)
         .await?
         .ok_or(ApiError::NotFound)?;
-    let (roles, permissions) = fetch_user_access(state.db.as_ref(), &target.id).await?;
-    Ok(Json(build_user_access_body(&target, &roles, permissions)))
+    let grants = access_repo::fetch_user_direct_grants(pool, &target.id).await?;
+    let roles = access_repo::fetch_user_role_grants(pool, &target.id).await?;
+    Ok(Json(build_user_access_body(
+        &target.id, target.cid, grants, roles,
+    )?))
 }
 
 pub async fn update_user_access(
@@ -85,82 +91,100 @@ pub async fn update_user_access(
         return Err(ApiError::BadRequest);
     }
 
-    // Validate + normalize the edited tree, and reject unknown permission names.
-    let requested_names =
-        normalize_permission_tree(&payload.permissions).map_err(|_| ApiError::BadRequest)?;
     let catalog: BTreeSet<String> = access_repo::fetch_access_catalog_names(pool)
         .await?
         .into_iter()
         .collect();
-    if let Some(unknown) = requested_names.iter().find(|name| !catalog.contains(*name)) {
-        tracing::warn!(
-            permission = unknown.as_str(),
-            "unknown permission in access save"
-        );
-        return Err(ApiError::BadRequest);
-    }
-    let requested_permissions =
-        access_repo::permission_names_to_permissions(requested_names.clone())?;
+    let facility_ids: BTreeSet<String> = org_repo::list_facilities(pool)
+        .await?
+        .into_iter()
+        .map(|facility| facility.id)
+        .collect();
 
-    // Reject unknown role names.
-    if let Some(role_names) = payload.role_names.as_ref() {
-        for role_name in role_names {
-            if !access_repo::ASSIGNABLE_USER_ROLES.contains(&role_name.as_str()) {
+    // Validate + normalize every scope up front.
+    let mut norm_scopes: Vec<NormScope> = Vec::with_capacity(payload.scopes.len());
+    for scope in &payload.scopes {
+        let artcc = scope
+            .artcc_id
+            .as_deref()
+            .map(|value| value.trim().to_ascii_uppercase())
+            .filter(|value| !value.is_empty());
+        if let Some(artcc_id) = &artcc {
+            if !facility_ids.contains(artcc_id) {
                 return Err(ApiError::BadRequest);
             }
         }
+
+        let names = scope_permission_names(&scope.permissions)?;
+        if let Some(unknown) = names.iter().find(|name| !catalog.contains(*name)) {
+            tracing::warn!(
+                permission = unknown.as_str(),
+                "unknown permission in access save"
+            );
+            return Err(ApiError::BadRequest);
+        }
+
+        if let Some(role_names) = scope.role_names.as_ref() {
+            for role_name in role_names {
+                if !access_repo::ASSIGNABLE_USER_ROLES.contains(&role_name.as_str()) {
+                    return Err(ApiError::BadRequest);
+                }
+            }
+        }
+
+        norm_scopes.push(NormScope {
+            artcc,
+            names,
+            roles: scope.role_names.clone(),
+        });
     }
 
     let target_user_id = access_repo::find_user_id_by_cid(pool, cid)
         .await?
         .ok_or(ApiError::NotFound)?;
-    let target_before = access_repo::find_current_user_by_cid(pool, cid)
+    let target = access_repo::find_current_user_by_cid(pool, cid)
         .await?
         .ok_or(ApiError::NotFound)?;
-    let (before_roles, before_permissions) =
-        fetch_user_access(state.db.as_ref(), &target_before.id).await?;
 
-    // Self-scope guard: a non-SERVER_ADMIN actor may only add/remove *direct* grants
-    // they themselves effectively hold. Diff against existing direct grants so a
-    // target's role-derived or other-granted permissions aren't disturbed.
-    let existing_direct_names =
-        access_repo::fetch_user_direct_permission_names(pool, &target_user_id).await?;
-    let existing_direct = access_repo::permission_names_to_permissions(existing_direct_names)?;
-    validate_permission_changes_within_scope(
-        &state,
-        user,
-        &existing_direct,
-        &requested_permissions,
-    )
-    .await?;
+    let before_grants = access_repo::fetch_user_direct_grants(pool, &target_user_id).await?;
+    let before_roles = access_repo::fetch_user_role_grants(pool, &target_user_id).await?;
+    let before_body = build_user_access_body(
+        &target_user_id,
+        target.cid,
+        before_grants.clone(),
+        before_roles.clone(),
+    )?;
 
-    // ...and may only grant/revoke roles they themselves hold.
-    if let Some(role_names) = payload.role_names.as_ref() {
-        let (actor_roles, _) = fetch_user_access(state.db.as_ref(), &user.id).await?;
-        if !is_server_admin(&actor_roles) {
-            for role_name in role_names {
-                if !actor_roles.contains(role_name) {
-                    return Err(ApiError::Forbidden);
-                }
-            }
-        }
-    }
+    enforce_actor_scope(&state, user, &norm_scopes, &before_grants, &before_roles).await?;
 
     let mut tx = pool.begin().await.map_err(|_| ApiError::Internal)?;
-    access_repo::replace_user_permissions(&mut tx, &target_user_id, &requested_names).await?;
-    if let Some(role_names) = payload.role_names.as_ref() {
-        for role_name in access_repo::ASSIGNABLE_USER_ROLES {
-            let held = role_names.iter().any(|r| r == role_name);
-            access_repo::set_user_role_manual(&mut tx, &target_user_id, role_name, held).await?;
+    for scope in &norm_scopes {
+        access_repo::replace_user_permissions_scoped(
+            &mut tx,
+            &target_user_id,
+            scope.artcc.as_deref(),
+            &scope.names,
+        )
+        .await?;
+        if let Some(role_names) = scope.roles.as_ref() {
+            for role_name in access_repo::ASSIGNABLE_USER_ROLES {
+                let held = role_names.iter().any(|r| r == role_name);
+                access_repo::set_user_role_manual_scoped(
+                    &mut tx,
+                    &target_user_id,
+                    role_name,
+                    held,
+                    scope.artcc.as_deref(),
+                )
+                .await?;
+            }
         }
     }
     tx.commit().await.map_err(|_| ApiError::Internal)?;
 
-    let updated = access_repo::find_current_user_by_cid(pool, cid)
-        .await?
-        .ok_or(ApiError::NotFound)?;
-    let (roles, permissions) = fetch_user_access(state.db.as_ref(), &updated.id).await?;
-    let response = build_user_access_body(&updated, &roles, permissions);
+    let after_grants = access_repo::fetch_user_direct_grants(pool, &target_user_id).await?;
+    let after_roles = access_repo::fetch_user_role_grants(pool, &target_user_id).await?;
+    let response = build_user_access_body(&target_user_id, target.cid, after_grants, after_roles)?;
 
     let actor_id = audit_repo::fetch_user_actor_id(pool, &user.id).await?;
     audit_repo::record_audit(
@@ -169,19 +193,11 @@ pub async fn update_user_access(
             actor_id,
             action: "UPDATE".to_string(),
             resource_type: "USER_ACCESS".to_string(),
-            resource_id: Some(updated.id.clone()),
+            resource_id: Some(target_user_id.clone()),
             artcc_id: None,
             reason: Some(reason.to_string()),
-            before_state: Some(serde_json::json!({
-                "server_admin": is_server_admin(&before_roles),
-                "role_names": before_roles,
-                "permissions": permission_tree_from_paths(&before_permissions),
-            })),
-            after_state: Some(serde_json::json!({
-                "server_admin": response.server_admin,
-                "role_names": response.role_names,
-                "permissions": response.permissions,
-            })),
+            before_state: serde_json::to_value(&before_body).ok(),
+            after_state: serde_json::to_value(&response).ok(),
             ip_address: audit_repo::client_ip(&headers),
         },
     )
@@ -190,39 +206,136 @@ pub async fn update_user_access(
     Ok(Json(response))
 }
 
-async fn validate_permission_changes_within_scope(
+/// A validated, normalized scope from the save payload.
+struct NormScope {
+    artcc: Option<String>,
+    names: Vec<String>,
+    /// `None` = leave this scope's roles untouched; `Some` = replace them.
+    roles: Option<Vec<String>>,
+}
+
+/// Empty object `{}` means "clear this scope's direct grants"; anything else must be a
+/// valid permission tree.
+fn scope_permission_names(tree: &serde_json::Value) -> Result<Vec<String>, ApiError> {
+    if tree.as_object().is_some_and(|object| object.is_empty()) {
+        return Ok(Vec::new());
+    }
+    normalize_permission_tree(tree).map_err(|_| ApiError::BadRequest)
+}
+
+/// Self-scope guard: a non-SERVER_ADMIN actor may only add/remove direct grants and
+/// roles they themselves hold, and only within the scopes they are editing. Diffs
+/// against the target's current grants so untouched scopes/permissions aren't disturbed.
+async fn enforce_actor_scope(
     state: &AppState,
     actor: &CurrentUser,
-    existing_direct: &[PermissionPath],
-    requested: &[PermissionPath],
+    norm_scopes: &[NormScope],
+    before_grants: &[(Option<String>, String)],
+    before_roles: &[(Option<String>, String)],
 ) -> Result<(), ApiError> {
     let (actor_roles, actor_permissions) = fetch_user_access(state.db.as_ref(), &actor.id).await?;
     if is_server_admin(&actor_roles) {
         return Ok(());
     }
+    let actor_perm_names: BTreeSet<String> = actor_permissions
+        .iter()
+        .map(|path| path.as_db_value())
+        .collect();
 
-    let existing_set: BTreeSet<&PermissionPath> = existing_direct.iter().collect();
-    let requested_set: BTreeSet<&PermissionPath> = requested.iter().collect();
-    let actor_set: BTreeSet<&PermissionPath> = actor_permissions.iter().collect();
-
-    for changed in requested_set.symmetric_difference(&existing_set) {
-        if !actor_set.contains(changed) {
+    // Permissions: only scopes present in the payload are changed.
+    let payload_scopes: BTreeSet<Option<String>> = norm_scopes
+        .iter()
+        .map(|scope| scope.artcc.clone())
+        .collect();
+    let requested_perms: BTreeSet<(Option<String>, String)> = norm_scopes
+        .iter()
+        .flat_map(|scope| {
+            scope
+                .names
+                .iter()
+                .map(move |name| (scope.artcc.clone(), name.clone()))
+        })
+        .collect();
+    let existing_perms: BTreeSet<(Option<String>, String)> = before_grants
+        .iter()
+        .filter(|(artcc, _)| payload_scopes.contains(artcc))
+        .cloned()
+        .collect();
+    for (_, name) in requested_perms.symmetric_difference(&existing_perms) {
+        if !actor_perm_names.contains(name) {
             return Err(ApiError::Unauthorized);
         }
     }
+
+    // Roles: only scopes whose `roles` is present are changed.
+    let role_scopes: BTreeSet<Option<String>> = norm_scopes
+        .iter()
+        .filter(|scope| scope.roles.is_some())
+        .map(|scope| scope.artcc.clone())
+        .collect();
+    let requested_roles: BTreeSet<(Option<String>, String)> = norm_scopes
+        .iter()
+        .filter_map(|scope| {
+            scope
+                .roles
+                .as_ref()
+                .map(|roles| (scope.artcc.clone(), roles))
+        })
+        .flat_map(|(artcc, roles)| roles.iter().map(move |role| (artcc.clone(), role.clone())))
+        .collect();
+    let existing_roles: BTreeSet<(Option<String>, String)> = before_roles
+        .iter()
+        .filter(|(artcc, role)| {
+            role_scopes.contains(artcc)
+                && access_repo::ASSIGNABLE_USER_ROLES.contains(&role.as_str())
+        })
+        .cloned()
+        .collect();
+    for (_, role) in requested_roles.symmetric_difference(&existing_roles) {
+        if !actor_roles.contains(role) {
+            return Err(ApiError::Forbidden);
+        }
+    }
+
     Ok(())
 }
 
+/// Groups direct grants + role assignments into per-scope `ScopeAccess` (national first).
 fn build_user_access_body(
-    user: &CurrentUser,
-    roles: &[String],
-    permissions: Vec<PermissionPath>,
-) -> UserAccessBody {
-    UserAccessBody {
-        id: user.id.clone(),
-        cid: user.cid,
-        server_admin: is_server_admin(roles),
-        role_names: roles.to_vec(),
-        permissions: permission_tree_from_paths(&permissions),
+    user_id: &str,
+    cid: i64,
+    grants: Vec<(Option<String>, String)>,
+    roles: Vec<(Option<String>, String)>,
+) -> Result<UserAccessBody, ApiError> {
+    let national_roles: Vec<String> = roles
+        .iter()
+        .filter(|(artcc, _)| artcc.is_none())
+        .map(|(_, role)| role.clone())
+        .collect();
+    let server_admin = is_server_admin(&national_roles);
+
+    let mut map: BTreeMap<Option<String>, (Vec<String>, Vec<String>)> = BTreeMap::new();
+    map.entry(None).or_default(); // national scope always present
+    for (artcc, role) in roles {
+        map.entry(artcc).or_default().0.push(role);
     }
+    for (artcc, permission) in grants {
+        map.entry(artcc).or_default().1.push(permission);
+    }
+
+    let mut scopes = Vec::with_capacity(map.len());
+    for (artcc_id, (role_names, perm_names)) in map {
+        scopes.push(ScopeAccess {
+            artcc_id,
+            role_names,
+            permissions: permission_tree_from_names(&perm_names)?,
+        });
+    }
+
+    Ok(UserAccessBody {
+        id: user_id.to_string(),
+        cid,
+        server_admin,
+        scopes,
+    })
 }

@@ -47,8 +47,16 @@ National scale (all ARTCCs), built on the architecture proven in [osmium](../../
   `GET /access/self`, `GET|POST /admin/users/{cid}/access`. Required reason →
   `access.audit_logs` with before/after; self-scope guards (non-admin can only grant/revoke what they hold); catalog +
   role validation. Verified end-to-end.
+- [x] Facilities (`org.facilities`) seeded with the VATUSA ARTCCs; `artcc_id` is now a
+      real FK on the grant tables; public facilities read API; facility list folded
+      into the access catalog. Verified: seed, lookup, 404, FK rejects bogus ARTCC.
+- [x] ARTCC-scoped grant editing: the access editor reads/writes grants + roles per
+      scope (national + per-ARTCC), FK-validated, with untouched scopes preserved and
+      the self-scope guard applied per scope. Verified end-to-end. (Scope-aware
+      *enforcement* in the effective-permissions view is deferred to the first domain
+      that checks scope.)
 - [ ] OpenAPI mount (utoipa) — deferred until more domains exist.
-- [ ] VATUSA roster/facility sync (identity, org).
+- [ ] VATUSA roster sync (identity, org membership) — facilities now exist to sync into.
 - [ ] Service account management endpoints + API keys (bot auth). *(schema + bearer resolution already in place; needs
   create/rotate endpoints.)*
 
