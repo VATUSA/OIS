@@ -1,7 +1,7 @@
 //! The OIS permission + role catalog (DRAFT — refined per feature spec in
 //! `docs/features/*`). This is the national-scale evolution of osmium's catalog:
 //! the shared domains carry over, and OIS adds `tmu` (NTML/ADV/TMI), `ace`,
-//! `flow` (the vatflow replacement), `discord`, and `facilities`.
+//! `flow` (traffic management), `discord`, and `facilities`.
 //!
 //! Grants are additionally *scoped* by ARTCC at the assignment layer (a nullable
 //! `artcc_id` on `access.user_roles` / `access.user_permissions`; `NULL` = national).
@@ -69,12 +69,15 @@ pub fn default_roles() -> Vec<&'static str> {
 /// below are the new national tooling and are firmed up in their feature specs.
 pub fn draft_new_permission_names() -> Vec<&'static str> {
     vec![
-        // --- events (national workflow additions on top of osmium's events.*) ---
-        "events.approval.decide", // approve/reject a submitted event
-        "events.featured.update", // feature other facilities on a posting
+        // --- events (operational coordination; posting/review stays in the current
+        // VATUSA website — OIS owns the prior/during/post window) ---
         "events.staffing_requests.create", // CC an ARTCC / request staffing
         "events.staffing_requests.read",
-        "events.discord.publish", // trigger event thread + staff ping
+        "events.staffing_requests.decide", // acknowledge/decline a staffing request
+        "events.slots.claim",              // book an open event position slot
+        "events.discord.publish",          // open the coordination thread + ping staff
+        "events.debrief.read",             // read the post-event debrief
+        "events.debrief.create",           // write a post-event debrief entry
         // --- tmu: NTML / ADV / TMI ---
         "tmu.ntml.read",
         "tmu.ntml.create",
@@ -83,8 +86,10 @@ pub fn draft_new_permission_names() -> Vec<&'static str> {
         "tmu.adv.read",
         "tmu.adv.create",
         "tmu.adv.update",
+        "tmu.adv.publish",
         "tmu.tmi.read",
         "tmu.tmi.create",
+        "tmu.tmi.update",
         "tmu.tmi.publish",
         "tmu.tmi.delete",
         "tmu.delays.read",
@@ -95,7 +100,7 @@ pub fn draft_new_permission_names() -> Vec<&'static str> {
         "ace.requests.decide",
         "ace.team.read",
         "ace.team.update",
-        // --- flow: the vatflow.io replacement ---
+        // --- flow: traffic management (vatflow-style capabilities, native to OIS) ---
         "flow.programs.read",
         "flow.programs.create",
         "flow.programs.update",

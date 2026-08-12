@@ -1,0 +1,36 @@
+# OIS documentation
+
+The design and plan for the OIS platform — the VATUSA operations system that replaces
+the current backend, website, and flow tool.
+
+## Start here
+
+- **[PROPOSAL.md](PROPOSAL.md)** — the leadership proposal: problem, solution, plan,
+  and the ask. Read this first for the case for OIS.
+- **[PLAN.md](PLAN.md)** — the phased build plan, locked decisions, and current status.
+
+## Architecture
+
+- [architecture/overview.md](architecture/overview.md) — the four services and how they fit together.
+- [architecture/data-model.md](architecture/data-model.md) — Postgres schemas and key tables.
+- [architecture/permissions.md](architecture/permissions.md) — the fine-grained permission model.
+- [architecture/api-conventions.md](architecture/api-conventions.md) — REST shape, auth, errors, OpenAPI.
+- [architecture/integrations.md](architecture/integrations.md) — VATSIM, VATUSA, Discord, email, service accounts.
+
+## Feature specs
+
+Each states the problem, data model, exact permissions, API surface, and Discord touchpoints.
+
+- [access-control.md](features/access-control.md) — permissions + editor **(built)**
+- [events-workflow.md](features/events-workflow.md) — event operations: coordination, staffing, sign-up, debrief (posting stays in the current VATUSA site)
+- [tmu-ntml-adv-tmi.md](features/tmu-ntml-adv-tmi.md) — traffic management: NTML / ADV / TMI, delays
+- [ace-support.md](features/ace-support.md) — ACE support requests
+- [flow.md](features/flow.md) — traffic management: flow programs, live traffic, delay feed
+- [discord-integration.md](features/discord-integration.md) — the bot and the outbound-job queue
+- [features/README.md](features/README.md) — index + the spec template
+
+## Status at a glance
+
+Built and verified: VATSIM auth + sessions + `/me`, the permission model, and the
+access-editor API. Everything else is designed (these docs) and sequenced in
+[PLAN.md](PLAN.md).

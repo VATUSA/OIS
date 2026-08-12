@@ -1,5 +1,11 @@
 # Architecture overview
 
+This is the map. Deeper detail lives in the sibling docs:
+[data-model.md](data-model.md) (schemas + tables),
+[permissions.md](permissions.md) (the access model),
+[api-conventions.md](api-conventions.md) (REST shape, auth, errors, OpenAPI), and
+[integrations.md](integrations.md) (VATSIM, VATUSA, Discord, email).
+
 ## Services
 
 - **backend** (`backend/`) — a single Axum (Rust 2024) binary over Postgres. Per-domain schemas (`identity`, `access`,

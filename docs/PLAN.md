@@ -2,9 +2,12 @@
 
 ## What OIS is
 
-The VATUSA platform: one monorepo replacing the current cobalt (backend) + webapps
-(frontend) + [vatflow.io](https://github.com/djbrombizzle/vatflow) stack, adding first-class Discord integration and,
-later, a native desktop app. National scale (all ARTCCs), built on the architecture proven in [osmium](../../osmium).
+OIS (Event Operational Information System) — one monorepo (backend, web, Discord bot,
+and later a desktop app) that brings VATUSA's **event operations, traffic management
+(superseding [vatflow.io](https://github.com/djbrombizzle/vatflow)), ACE, and access
+tooling** under one platform. It **works alongside the current VATUSA website** — which
+retains event creation, review, and posting — rather than replacing it wholesale.
+National scale (all ARTCCs), built on the architecture proven in [osmium](../../osmium).
 
 ## Locked decisions
 
@@ -57,9 +60,10 @@ See [features/README.md](features/README.md).
 
 ### Phase 2 — Backend API (domain by domain)
 
-Order: identity/access → **events** (approval workflow, lead-time, featured, CC-ARTCC staffing, slots) → **tmu**
-(NTML/ADV → plain-language, TMI publish, delay page) → **ace** (support requests) → **discord** outbound queue +
-config → **flow** (vatflow replacement) → sim-traffic. OpenAPI emitted throughout.
+Order: identity/access → **events** (operational coordination: CC-ARTCC staffing, position sign-up/slots, debrief —
+posting/review stays in the current VATUSA site) → **tmu** (NTML/ADV → plain-language, TMI publish, delay page) →
+**ace** (support requests) → **discord** outbound queue + config → **flow** (traffic management, VATSIM-data-feed
+ingestion). OpenAPI emitted throughout.
 
 ### Phase 3 — Web (Next.js)
 
@@ -82,25 +86,29 @@ Native-only tools: live flow/traffic monitor, always-on TMU display, native noti
 
 Mapped from the event feature audit (cobalt/webapps):
 
-| Request                                     | Home in OIS                                            |
+Event **posting, review, and approval stay in the current VATUSA website**; OIS owns the
+operational window (prior / during / post). Rows below are split accordingly.
+
+| Request                                     | Home                                                   |
 |---------------------------------------------|--------------------------------------------------------|
-| Approval workflow before public posting     | events (Phase 2) — port osmium `review_status` model   |
-| Min lead time (no posting within 7 days)    | events (Phase 2) — `CreateEvent` validation            |
-| Auto cross-post VATUSA→myVATSIM             | events — pending VATSIM API                            |
-| AECs (not just ECs) can post                | access — `AEC` role, first-class (Phase 0/2)           |
-| CC an ARTCC + staffing-request notification | events `staffing_requests.*` (Phase 2)                 |
-| Auto T1 staffing per DP003 (FNOs)           | events / jobs (Phase 2)                                |
-| Event slots (booking/signup)                | events `positions`/slots (Phase 2)                     |
-| Feature other facilities                    | events `featured.*` (Phase 2)                          |
-| Structured event metadata + API             | events API (Phase 2) — multi-host, not single facility |
-| Auto DCC Discord thread + staff ping        | discord + events `discord.publish` (Phase 4)           |
-| NTML/ADV → plain-language TMU section       | tmu (Phase 2)                                          |
-| NTML/ADV onto site + API                    | tmu (Phase 2)                                          |
-| Average delay page                          | tmu `delays.read` (Phase 2)                            |
-| SimTraffic migration                        | flow / sim-traffic — **build our own**, not SimTraffic |
-| ACE requests merged into site               | ace (Phase 2)                                          |
-| Auto-post ACE requests to #aceteam-requests | ace + discord (Phase 4)                                |
-| Notify ECs on claim/book                    | ace + discord (Phase 4)                                |
+| Approval workflow before public posting     | Current VATUSA site (not OIS)                          |
+| Min lead time (no posting within 7 days)    | Current VATUSA site (not OIS)                          |
+| Auto cross-post VATUSA→myVATSIM             | Current VATUSA site — pending VATSIM API               |
+| AECs (not just ECs) can post                | Current VATUSA site (posting); OIS `AEC` role scopes coordination |
+| Feature other facilities                    | Current VATUSA site (posting)                          |
+| Structured event metadata + API             | Current VATUSA site (posting)                          |
+| CC an ARTCC + staffing-request notification | **OIS** events `staffing_requests.*`                   |
+| Auto T1 staffing per DP003 (FNOs)           | **OIS** events / jobs                                  |
+| Event position sign-up / slots              | **OIS** events `positions` / `slots`                   |
+| Auto DCC Discord thread + staff ping        | **OIS** events `discord.publish` + discord bot         |
+| Post-event debrief                          | **OIS** events `debrief.*`                             |
+| NTML/ADV → plain-language TMU section       | **OIS** tmu                                            |
+| NTML/ADV onto site + API                    | **OIS** tmu                                            |
+| Average delay page                          | **OIS** tmu `delays.read` (via flow data feed)         |
+| Traffic-management tooling (vatflow/SimTraffic) | **OIS** flow — native reimplementation, VATSIM data feed |
+| ACE requests merged into site               | **OIS** ace                                            |
+| Auto-post ACE requests to #aceteam-requests | **OIS** ace + discord                                  |
+| Notify ECs on claim/book                    | **OIS** ace + discord                                  |
 
 ## Local validation
 
