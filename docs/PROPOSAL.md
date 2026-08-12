@@ -166,7 +166,7 @@ step. Sequencing is fixed; calendar dates depend on contributor availability.
 | Approval before postings go public | Current VATUSA site | Not OIS |
 | Minimum lead time (no posting within 7 days) | Current VATUSA site | Not OIS |
 | Auto cross-post VATUSA → myVATSIM | Current VATUSA site | Pending VATSIM API |
-| AECs (not just ECs) can post events | Current VATUSA site (posting) | OIS `AEC` role scopes coordination |
+| AECs (not just ECs) can post events | Current VATUSA site (posting) | OIS EC / EVENTS_TEAM roles scope coordination |
 | Feature other facilities on a posting | Current VATUSA site | Not OIS |
 | Structured event metadata + API | Current VATUSA site | Not OIS |
 | CC an ARTCC + staffing-request notification | OIS · events | Design ready |

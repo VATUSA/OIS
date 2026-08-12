@@ -69,10 +69,10 @@ rollups; the flow live view reads recent samples.
 | permission | purpose | holders |
 | --- | --- | --- |
 | `flow.programs.read` | view programs | public / TMU staff |
-| `flow.programs.create` | define a program | `TMU_NATIONAL`, ARTCC-scoped TMU staff |
+| `flow.programs.create` | define a program | `NTMO`, ARTCC-scoped TMU staff |
 | `flow.programs.update` | edit a program | same |
-| `flow.programs.publish` | publish a program | `TMU_NATIONAL`, ARTCC-scoped TMU staff |
-| `flow.programs.delete` | remove a program | `TMU_NATIONAL` |
+| `flow.programs.publish` | publish a program | `NTMO`, ARTCC-scoped TMU staff |
+| `flow.programs.delete` | remove a program | `NTMO` |
 | `flow.data.read` | live traffic view + delay feed | public (reads may be unauthenticated) |
 
 Ingestion is a **backend job**, not a user-facing permission.

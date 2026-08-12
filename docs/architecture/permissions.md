@@ -62,9 +62,9 @@ Shared domains (access/auth/users/events/training/…) are ported from osmium in
 
 ## Roles
 
-National roles (`VATUSA_STAFF`, `EVENTS_NATIONAL`, `TMU_NATIONAL`, `ACE_NATIONAL`,
-`WEB_TEAM`) plus facility roles (`ATM, DATM, TA, EC, AEC, WM, FE, INS, MTR`) that are meaningful in combination with an
-ARTCC scope. `AEC` (assistant EC) is first-class so event-coordination capabilities can be granted to it, scoped to a
-facility, without making someone a full EC.
-`SERVER_ADMIN` is a bootstrapped singleton (env CID) that holds every permission implicitly. Machine actors: `BOT`,
-`SERVICE_APP`.
+The assignable positional roles are `VATUSA_STAFF`, `EVENTS_TEAM`, `EC`, `ACE`, `NTMO`,
+and `DCC_STAFF`. Any of them can be granted nationally or **scoped to an ARTCC** via the
+grant's `artcc_id` (e.g. an `EC` scoped to ZDC vs. a national `EC`) — scope is on the
+grant, not baked into the role. `SERVER_ADMIN` is a bootstrapped singleton (env CID)
+that holds every permission implicitly and is never assignable in the UI. `USER` is the
+baseline role; machine actors are `BOT` and `SERVICE_APP`.

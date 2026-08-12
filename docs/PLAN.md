@@ -108,7 +108,7 @@ operational window (prior / during / post). Rows below are split accordingly.
 | Approval workflow before public posting     | Current VATUSA site (not OIS)                          |
 | Min lead time (no posting within 7 days)    | Current VATUSA site (not OIS)                          |
 | Auto cross-post VATUSA→myVATSIM             | Current VATUSA site — pending VATSIM API               |
-| AECs (not just ECs) can post                | Current VATUSA site (posting); OIS `AEC` role scopes coordination |
+| AECs (not just ECs) can post                | Current VATUSA site (posting); OIS EC / EVENTS_TEAM roles scope coordination |
 | Feature other facilities                    | Current VATUSA site (posting)                          |
 | Structured event metadata + API             | Current VATUSA site (posting)                          |
 | CC an ARTCC + staffing-request notification | **OIS** events `staffing_requests.*`                   |

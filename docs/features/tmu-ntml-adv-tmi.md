@@ -100,7 +100,7 @@ user writes. The average-delay page aggregates these into rolling averages per a
 ## Permissions
 
 Path-based `segments.action`, enforced with `RequirePermission<P>`. Per-ARTCC scope via nullable `artcc_id`; a national
-grant covers all ARTCCs. Held by `TMU_NATIONAL` (national scope) and ARTCC-scoped TMU staff (scoped to their ARTCC).
+grant covers all ARTCCs. Held by `NTMO` (national scope) and ARTCC-scoped TMU staff (scoped to their ARTCC).
 
 | Permission | Action | Notes |
 | --- | --- | --- |
