@@ -64,7 +64,7 @@ Shared domains (access/auth/users/events/training/…) are ported from osmium in
 
 National roles (`VATUSA_STAFF`, `EVENTS_NATIONAL`, `TMU_NATIONAL`, `ACE_NATIONAL`,
 `WEB_TEAM`) plus facility roles (`ATM, DATM, TA, EC, AEC, WM, FE, INS, MTR`) that are meaningful in combination with an
-ARTCC scope. `AEC` (assistant EC) is first-class so it can post events without being a full EC — directly answering the
-feature request.
+ARTCC scope. `AEC` (assistant EC) is first-class so event-coordination capabilities can be granted to it, scoped to a
+facility, without making someone a full EC.
 `SERVER_ADMIN` is a bootstrapped singleton (env CID) that holds every permission implicitly. Machine actors: `BOT`,
 `SERVICE_APP`.

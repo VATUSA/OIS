@@ -6,14 +6,17 @@ touchpoints.
 
 ## Index
 
-| Spec                                             | Domain(s)            | Status     |
-|--------------------------------------------------|----------------------|------------|
-| [events-workflow.md](events-workflow.md)         | events               | draft stub |
-| [tmu-ntml-adv-tmi.md](tmu-ntml-adv-tmi.md)       | tmu                  | draft stub |
-| [ace-support.md](ace-support.md)                 | ace, discord         | draft stub |
-| [discord-integration.md](discord-integration.md) | discord, integration | draft stub |
-| [flow.md](flow.md)                               | flow                 | draft stub |
-| [sim-traffic.md](sim-traffic.md)                 | flow / stats         | draft stub |
+| Spec                                             | Domain(s)            | Status  |
+|--------------------------------------------------|----------------------|---------|
+| [access-control.md](access-control.md)           | access               | built   |
+| [events-workflow.md](events-workflow.md)         | events               | spec    |
+| [tmu-ntml-adv-tmi.md](tmu-ntml-adv-tmi.md)       | tmu                  | spec    |
+| [ace-support.md](ace-support.md)                 | ace, discord         | spec    |
+| [discord-integration.md](discord-integration.md) | discord, integration | spec    |
+| [flow.md](flow.md)                               | flow                 | spec    |
+
+Event **posting, review, and approval remain in the current VATUSA website**; the
+events spec above covers only OIS's operational window (prior / during / post).
 
 ## Template
 

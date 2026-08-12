@@ -1,8 +1,9 @@
 # OIS
 
 VATUSA Event Operational Information System — a custom Rust backend, a Next.js web app, a Rust Discord bot, and (later) a Tauri
-desktop app. It consolidates and replaces the current VATUSA tooling: the cobalt backend, the webapps frontend, and
-[vatflow.io](https://vatflow.io) ([source](https://github.com/djbrombizzle/vatflow)).
+desktop app. It brings VATUSA's event-operations, traffic-management (superseding
+[vatflow.io](https://vatflow.io) — [source](https://github.com/djbrombizzle/vatflow)), ACE, and access tooling under one
+platform, working alongside the current VATUSA website — which retains event creation, review, and posting.
 
 The authorization model and service architecture are ported from
 [osmium](../osmium) (the vZDC backend), evolved to national, multi-ARTCC scale.
@@ -11,7 +12,7 @@ The authorization model and service architecture are ported from
 
 | Path                  | Stack           | What it is                                                                                                |
 |-----------------------|-----------------|-----------------------------------------------------------------------------------------------------------|
-| `backend/`            | Rust · Axum     | The API. Postgres, sqlx, embedded migrations, OpenAPI. Replaces cobalt.                                   |
+| `backend/`            | Rust · Axum     | The API. Postgres, sqlx, embedded migrations, OpenAPI.                                                    |
 | `discord/`            | Rust · serenity | The bot. Drains the backend outbound-job queue; calls back via REST as a service account.                 |
 | `web/`                | Next.js         | The website. Consumes the generated typed API client.                                                     |
 | `desktop/`            | Tauri           | Native app (Phase 5). Distinct feature set, not a website wrapper.                                        |
