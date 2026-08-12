@@ -28,7 +28,7 @@ pnpm --filter @ois/api-client codegen
 ```ts
 import {createOisClient} from "@ois/api-client";
 
-export const ois = createOisClient(process.env.NEXT_PUBLIC_OIS_API_URL!);
+export const ois = createOisClient(import.meta.env.VITE_OIS_API_URL!);
 ```
 
 The client factory takes the base URL so each app (web, desktop) configures its own host + credentials. Auth glue

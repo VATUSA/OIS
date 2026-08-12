@@ -27,7 +27,7 @@ National scale (all ARTCCs), built on the architecture proven in [osmium](../../
   singleton, per-ARTCC scope. See
   [architecture/permissions.md](architecture/permissions.md).
 - **Discord**: backend enqueues jobs; bot executes and reports back via REST.
-- **Web**: Next.js consuming a client generated from the backend's OpenAPI.
+- **Web**: Vite + React (TanStack Router + Query) consuming a client generated from the backend's OpenAPI; shadcn/ui in the shared `packages/ui`.
 - **Desktop**: Tauri, sharing UI packages but with native-only features.
 
 ## Phased build order
@@ -55,10 +55,12 @@ National scale (all ARTCCs), built on the architecture proven in [osmium](../../
       the self-scope guard applied per scope. Verified end-to-end. (Scope-aware
       *enforcement* in the effective-permissions view is deferred to the first domain
       that checks scope.)
-- [ ] OpenAPI mount (utoipa) — deferred until more domains exist.
+- [x] Audit-log read endpoint (`GET /admin/audit`, paged + filterable, `audit.logs.read`).
+- [x] Service-account management (`/admin/service-accounts`: create/list/rotate/disable/
+      set-roles). Hashed bearer tokens shown once; `SERVER_ADMIN` never assignable.
+- [x] OpenAPI mount (utoipa) at `/docs/api/v1/openapi.json` — 15 paths, 14 schemas; the
+      URL the `@ois/api-client` codegen reads.
 - [ ] VATUSA roster sync (identity, org membership) — facilities now exist to sync into.
-- [ ] Service account management endpoints + API keys (bot auth). *(schema + bearer resolution already in place; needs
-  create/rotate endpoints.)*
 
 ### Phase 1 — Feature specs
 
@@ -73,12 +75,16 @@ posting/review stays in the current VATUSA site) → **tmu** (NTML/ADV → plain
 **ace** (support requests) → **discord** outbound queue + config → **flow** (traffic management, VATSIM-data-feed
 ingestion). OpenAPI emitted throughout.
 
-### Phase 3 — Web (Next.js)
+### Phase 3 — Web (Vite + React)  *(started)*
 
-Types generated from the backend's `openapi.json` with `openapi-typescript` into the shared `packages/api-client`
-(`@ois/api-client`), consumed via `openapi-fetch`
-(`createClient<paths>`) and per-domain TanStack Query hooks — the same tooling as osmium's website, packaged so
-`desktop` reuses it. Surfaces: the permission editor (grouped-checkbox UI), roster, events, TMU/NTML dashboards, ACE
+Vite + React + TanStack Router/Query. shadcn/ui in the shared `packages/ui` (so the
+Tauri desktop reuses the same components + theme). Types generated from the backend's
+`openapi.json` with `openapi-typescript` into `packages/api-client` (`@ois/api-client`),
+consumed via `openapi-fetch` (`createOisClient(baseUrl)`). **Done so far:** app shell
+(nav bar, light/dark theme toggle), VATSIM login + `/me` auth, signed-in dashboard, the
+**server admin portal** at `/admin` (sidebar + Overview + Audit Log + Service Accounts),
+and the **access-control permission editor** (grouped-checkbox tree + roles + ARTCC scope
++ reason → save). Surfaces still to build: roster, events, TMU/NTML dashboards, ACE
 queue, flow dashboards.
 
 ### Phase 4 — Discord bot

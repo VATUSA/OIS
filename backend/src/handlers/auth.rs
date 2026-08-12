@@ -51,6 +51,12 @@ pub struct CallbackQuery {
     state: Option<String>,
 }
 
+#[utoipa::path(
+    get,
+    path = "/api/v1/me",
+    tag = "auth",
+    responses((status = 200, body = MeBody), (status = 401))
+)]
 pub async fn me(
     State(state): State<AppState>,
     _permission: RequirePermission<AuthProfileRead>,
@@ -60,6 +66,13 @@ pub async fn me(
     Ok(Json(build_me_body(&state, user).await?))
 }
 
+#[utoipa::path(
+    get,
+    path = "/api/v1/auth/vatsim/login",
+    tag = "auth",
+    params(("return_to" = Option<String>, Query, description = "Post-login redirect (must be an allowed origin)")),
+    responses((status = 307, description = "Redirect to VATSIM OAuth"))
+)]
 pub async fn vatsim_login(
     jar: CookieJar,
     headers: HeaderMap,
@@ -101,6 +114,12 @@ pub async fn vatsim_login(
     Ok((jar, Redirect::temporary(&authorize_url)))
 }
 
+#[utoipa::path(
+    get,
+    path = "/api/v1/auth/vatsim/callback",
+    tag = "auth",
+    responses((status = 302, description = "Login complete; redirect to return_to or /me"), (status = 400))
+)]
 pub async fn vatsim_callback(
     State(state): State<AppState>,
     jar: CookieJar,
@@ -186,6 +205,12 @@ pub async fn vatsim_callback(
     ))
 }
 
+#[utoipa::path(
+    post,
+    path = "/api/v1/auth/logout",
+    tag = "auth",
+    responses((status = 204, description = "Session revoked"), (status = 401))
+)]
 pub async fn logout(
     State(state): State<AppState>,
     _permission: RequirePermission<AuthSessionsDelete>,

@@ -2,11 +2,12 @@
 //! access editor's required reason ("Recorded as a dossier entry on this controller's
 //! log") is stored on the same row as the before/after snapshot.
 
+use chrono::{DateTime, Utc};
 use http::HeaderMap;
 use serde_json::Value;
 use sqlx::PgPool;
 
-use crate::errors::ApiError;
+use crate::{errors::ApiError, models::AuditLogEntry};
 
 pub struct AuditEntry {
     pub actor_id: Option<String>,
@@ -65,6 +66,84 @@ pub async fn record_audit(pool: &PgPool, entry: AuditEntry) -> Result<(), ApiErr
     .map_err(|_| ApiError::Internal)?;
 
     Ok(())
+}
+
+pub struct AuditLogFilters {
+    pub resource_type: Option<String>,
+    pub action: Option<String>,
+    pub limit: i64,
+    pub offset: i64,
+}
+
+pub async fn count_audit_logs(pool: &PgPool, filters: &AuditLogFilters) -> Result<i64, ApiError> {
+    sqlx::query_scalar::<_, i64>(
+        "select count(*) from access.audit_logs \
+         where ($1::text is null or resource_type = $1) \
+           and ($2::text is null or action = $2)",
+    )
+    .bind(filters.resource_type.as_deref())
+    .bind(filters.action.as_deref())
+    .fetch_one(pool)
+    .await
+    .map_err(|_| ApiError::Internal)
+}
+
+#[derive(sqlx::FromRow)]
+struct AuditLogRow {
+    id: String,
+    action: String,
+    resource_type: String,
+    resource_id: Option<String>,
+    artcc_id: Option<String>,
+    reason: Option<String>,
+    actor_cid: Option<i64>,
+    actor_display_name: Option<String>,
+    before_state: Option<String>,
+    after_state: Option<String>,
+    created_at: DateTime<Utc>,
+}
+
+pub async fn fetch_audit_logs(
+    pool: &PgPool,
+    filters: &AuditLogFilters,
+) -> Result<Vec<AuditLogEntry>, ApiError> {
+    let rows = sqlx::query_as::<_, AuditLogRow>(
+        "select l.id, l.action, l.resource_type, l.resource_id, l.artcc_id, l.reason, \
+                u.cid as actor_cid, u.display_name as actor_display_name, \
+                l.before_state::text as before_state, l.after_state::text as after_state, \
+                l.created_at \
+         from access.audit_logs l \
+         left join access.actors a on a.id = l.actor_id \
+         left join identity.users u on u.id = a.user_id \
+         where ($1::text is null or l.resource_type = $1) \
+           and ($2::text is null or l.action = $2) \
+         order by l.created_at desc \
+         limit $3 offset $4",
+    )
+    .bind(filters.resource_type.as_deref())
+    .bind(filters.action.as_deref())
+    .bind(filters.limit)
+    .bind(filters.offset)
+    .fetch_all(pool)
+    .await
+    .map_err(|_| ApiError::Internal)?;
+
+    Ok(rows
+        .into_iter()
+        .map(|row| AuditLogEntry {
+            id: row.id,
+            action: row.action,
+            resource_type: row.resource_type,
+            resource_id: row.resource_id,
+            artcc_id: row.artcc_id,
+            reason: row.reason,
+            actor_cid: row.actor_cid,
+            actor_display_name: row.actor_display_name,
+            before_state: row.before_state.and_then(|s| serde_json::from_str(&s).ok()),
+            after_state: row.after_state.and_then(|s| serde_json::from_str(&s).ok()),
+            created_at: row.created_at,
+        })
+        .collect())
 }
 
 /// Best-effort client IP from proxy headers (first `X-Forwarded-For` hop, else

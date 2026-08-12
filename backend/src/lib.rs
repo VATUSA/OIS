@@ -3,6 +3,7 @@ pub mod config;
 pub mod errors;
 pub mod handlers;
 pub mod models;
+pub mod openapi;
 pub mod repos;
 pub mod router;
 pub mod state;

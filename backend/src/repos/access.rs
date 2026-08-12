@@ -225,6 +225,14 @@ pub async fn fetch_access_catalog_names(pool: &PgPool) -> Result<Vec<String>, Ap
         .map_err(|_| ApiError::Internal)
 }
 
+/// All role names in the catalog.
+pub async fn fetch_role_names(pool: &PgPool) -> Result<Vec<String>, ApiError> {
+    sqlx::query_scalar::<_, String>("select name from access.roles order by name")
+        .fetch_all(pool)
+        .await
+        .map_err(|_| ApiError::Internal)
+}
+
 /// A user's national (unscoped) direct permission grants — the set the national
 /// editor owns. Facility-scoped grants (artcc_id not null) are left untouched.
 pub async fn fetch_user_direct_permission_names(

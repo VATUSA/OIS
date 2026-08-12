@@ -1,0 +1,7 @@
+@import "tailwindcss";
+
+/* Shared OIS theme tokens + dark variant (also used by the desktop app). */
+@import "../../packages/ui/src/styles/globals.css";
+
+/* Scan the shared UI package for Tailwind classes (it lives outside web/). */
+@source "../../packages/ui/src";
