@@ -14,6 +14,9 @@ permission!(AccessCatalogRead, ["access", "catalog"], Read);
 permission!(AccessUsersRead, ["access", "users"], Read);
 permission!(AccessUsersUpdate, ["access", "users"], Update);
 
+// users directory
+permission!(UsersDirectoryRead, ["users", "directory"], Read);
+
 // audit log
 permission!(AuditLogsRead, ["audit", "logs"], Read);
 

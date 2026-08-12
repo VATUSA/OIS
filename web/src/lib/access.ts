@@ -5,6 +5,23 @@ import {ois} from "./api";
 
 export type PermTree = { [key: string]: PermTree | string[] };
 export type UpdateBody = components["schemas"]["UpdateUserAccessRequest"];
+export type UserMatch = components["schemas"]["UserSummary"];
+
+/** Fuzzy user search by name or CID (enabled once the term is non-empty). */
+export function useUserSearch(term: string) {
+  return useQuery({
+    enabled: term.length >= 1,
+    queryKey: ["user-search", term],
+    placeholderData: (prev) => prev,
+    queryFn: async () => {
+      const { data, error } = await ois.GET("/api/v1/users", {
+        params: { query: { q: term, limit: 12 } },
+      });
+      if (error || !data) throw new Error("search failed");
+      return data;
+    },
+  });
+}
 
 /** Flatten a permission tree into concrete `segments.action` strings. */
 export function flattenTree(tree: PermTree, prefix: string[] = []): string[] {

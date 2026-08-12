@@ -18,6 +18,14 @@ pub struct MeBody {
     pub permissions: Value,
 }
 
+/// A lightweight user match for the directory search.
+#[derive(Debug, Serialize, ToSchema, sqlx::FromRow)]
+pub struct UserSummary {
+    pub cid: i64,
+    pub display_name: String,
+    pub rating: Option<String>,
+}
+
 /// A VATUSA facility (ARTCC). `artcc_id` scope values reference `id`.
 #[derive(Debug, Serialize, ToSchema, sqlx::FromRow)]
 pub struct FacilityBody {
