@@ -13,3 +13,12 @@ permission!(AccessSelfRead, ["access", "self"], Read);
 permission!(AccessCatalogRead, ["access", "catalog"], Read);
 permission!(AccessUsersRead, ["access", "users"], Read);
 permission!(AccessUsersUpdate, ["access", "users"], Update);
+
+// audit log
+permission!(AuditLogsRead, ["audit", "logs"], Read);
+
+// service accounts (bot credential management)
+permission!(ServiceAccountsRead, ["service_accounts"], Read);
+permission!(ServiceAccountsCreate, ["service_accounts"], Create);
+permission!(ServiceAccountsUpdate, ["service_accounts"], Update);
+permission!(ServiceAccountsDelete, ["service_accounts"], Delete);

@@ -1,18 +1,19 @@
 use axum::{
     Router, middleware,
-    routing::{get, post},
+    routing::{get, post, put},
 };
 
 use crate::{
     auth::middleware::resolve_current_user,
     config::build_cors_layer,
-    handlers::{access, auth, facilities, health},
+    handlers::{access, audit, auth, docs, facilities, health, service_accounts},
     state::AppState,
 };
 
 pub fn build_router(state: AppState) -> Router {
     Router::new()
         .route("/health", get(health::health))
+        .route("/docs/api/v1/openapi.json", get(docs::openapi_json))
         .route("/api/v1/auth/vatsim/login", get(auth::vatsim_login))
         .route("/api/v1/auth/vatsim/callback", get(auth::vatsim_callback))
         .route("/api/v1/auth/logout", post(auth::logout))
@@ -26,6 +27,26 @@ pub fn build_router(state: AppState) -> Router {
         .route(
             "/api/v1/admin/users/{cid}/access",
             get(access::get_user_access).post(access::update_user_access),
+        )
+        // Audit log
+        .route("/api/v1/admin/audit", get(audit::list_audit_logs))
+        // Service accounts (bot credentials)
+        .route(
+            "/api/v1/admin/service-accounts",
+            get(service_accounts::list_service_accounts)
+                .post(service_accounts::create_service_account),
+        )
+        .route(
+            "/api/v1/admin/service-accounts/{id}/rotate",
+            post(service_accounts::rotate_service_account),
+        )
+        .route(
+            "/api/v1/admin/service-accounts/{id}/disable",
+            post(service_accounts::disable_service_account),
+        )
+        .route(
+            "/api/v1/admin/service-accounts/{id}/roles",
+            put(service_accounts::set_service_account_roles),
         )
         // Runs before handlers so CurrentUser / service account are in extensions.
         .layer(middleware::from_fn_with_state(

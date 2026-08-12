@@ -7,6 +7,12 @@ use axum::{
 
 use crate::{errors::ApiError, models::FacilityBody, repos::org as org_repo, state::AppState};
 
+#[utoipa::path(
+    get,
+    path = "/api/v1/facilities",
+    tag = "facilities",
+    responses((status = 200, body = Vec<FacilityBody>))
+)]
 pub async fn list_facilities(
     State(state): State<AppState>,
 ) -> Result<Json<Vec<FacilityBody>>, ApiError> {
@@ -14,6 +20,13 @@ pub async fn list_facilities(
     Ok(Json(org_repo::list_facilities(pool).await?))
 }
 
+#[utoipa::path(
+    get,
+    path = "/api/v1/facilities/{id}",
+    tag = "facilities",
+    params(("id" = String, Path, description = "ARTCC id (e.g. ZDC)")),
+    responses((status = 200, body = FacilityBody), (status = 404))
+)]
 pub async fn get_facility(
     State(state): State<AppState>,
     Path(id): Path<String>,

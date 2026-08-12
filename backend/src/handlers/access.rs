@@ -29,6 +29,12 @@ use crate::{
     state::AppState,
 };
 
+#[utoipa::path(
+    get,
+    path = "/api/v1/access/catalog",
+    tag = "access",
+    responses((status = 200, body = AccessCatalogBody), (status = 401))
+)]
 pub async fn get_access_catalog(
     State(state): State<AppState>,
     _permission: RequirePermission<AccessCatalogRead>,
@@ -45,6 +51,12 @@ pub async fn get_access_catalog(
     }))
 }
 
+#[utoipa::path(
+    get,
+    path = "/api/v1/access/self",
+    tag = "access",
+    responses((status = 200, body = SelfAccessBody), (status = 401))
+)]
 pub async fn get_self_access(
     State(state): State<AppState>,
     _permission: RequirePermission<AccessSelfRead>,
@@ -59,6 +71,13 @@ pub async fn get_self_access(
     }))
 }
 
+#[utoipa::path(
+    get,
+    path = "/api/v1/admin/users/{cid}/access",
+    tag = "access",
+    params(("cid" = i64, Path, description = "VATSIM CID")),
+    responses((status = 200, body = UserAccessBody), (status = 401), (status = 404))
+)]
 pub async fn get_user_access(
     State(state): State<AppState>,
     _permission: RequirePermission<AccessUsersRead>,
@@ -75,6 +94,14 @@ pub async fn get_user_access(
     )?))
 }
 
+#[utoipa::path(
+    post,
+    path = "/api/v1/admin/users/{cid}/access",
+    tag = "access",
+    params(("cid" = i64, Path, description = "VATSIM CID")),
+    request_body = UpdateUserAccessRequest,
+    responses((status = 200, body = UserAccessBody), (status = 400), (status = 401), (status = 403), (status = 404))
+)]
 pub async fn update_user_access(
     State(state): State<AppState>,
     _permission: RequirePermission<AccessUsersUpdate>,

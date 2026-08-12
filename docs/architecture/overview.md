@@ -15,7 +15,7 @@ This is the map. Deeper detail lives in the sibling docs:
 - **discord** (`discord/`) — a serenity/poise bot. Owns no data: it drains
   `integration.outbound_jobs` from the backend and calls back via REST as a service account for interactions (claim
   buttons, slash commands).
-- **web** (`web/`) — Next.js, consuming a typed client generated from the backend's OpenAPI (`packages/api-client`).
+- **web** (`web/`) — Vite + React (TanStack Router + Query), consuming a typed client generated from the backend's OpenAPI (`packages/api-client`). shadcn/ui components live in the shared `packages/ui`.
 - **desktop** (`desktop/`) — Tauri (Phase 5). Shares UI packages with web; native-only features (live flow monitor,
   always-on TMU display, notifications).
 
