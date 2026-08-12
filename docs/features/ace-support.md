@@ -4,7 +4,7 @@
 
 The ACE Team provides live controller coverage/support; controllers ask for that support today through off-site channels
 (Discord DMs, forum posts), and the OIS ACE page is **hardcoded mock data** with no backend wiring. The backend has an
-`ace` schema and an `ACE_NATIONAL` role but no `requests` concept and no `team` table, so nothing on the page is real.
+`ace` schema and an `ACE` role but no `requests` concept and no `team` table, so nothing on the page is real.
 
 This feature makes ACE support a first-class OIS workflow:
 
@@ -91,12 +91,12 @@ implements the handlers behind them. `claim` uses the OIS-added `Claim` action (
 
 | permission            | action   | who holds it                        | purpose                                        |
 | --------------------- | -------- | ----------------------------------- | ---------------------------------------------- |
-| `ace.requests.read`   | `read`   | `ACE_NATIONAL`, ACE team members    | view the request queue                         |
+| `ace.requests.read`   | `read`   | `ACE`, ACE team members    | view the request queue                         |
 | `ace.requests.create` | `create` | any controller (`USER`)             | open a support request                         |
-| `ace.requests.claim`  | `claim`  | `ACE_NATIONAL`, ACE team members    | claim an `open` request                        |
-| `ace.requests.decide` | `decide` | `ACE_NATIONAL`                      | complete / cancel a request                    |
+| `ace.requests.claim`  | `claim`  | `ACE`, ACE team members    | claim an `open` request                        |
+| `ace.requests.decide` | `decide` | `ACE`                      | complete / cancel a request                    |
 | `ace.team.read`       | `read`   | public/`USER` (roster display)      | read the ACE roster                            |
-| `ace.team.update`     | `update` | `ACE_NATIONAL`                      | manage the roster (Later)                      |
+| `ace.team.update`     | `update` | `ACE`                      | manage the roster (Later)                      |
 
 Notes:
 
@@ -118,9 +118,9 @@ Versioned REST under `/api/v1`, flat routes registered in `backend/src/router.rs
 | `GET  /api/v1/ace/requests`            | `ace.requests.read`   | ACE team                     | queue; supports `status` / `artcc_id` filters                         |
 | `GET  /api/v1/ace/requests/{id}`       | `ace.requests.read`   | ACE team                     | single request detail                                                 |
 | `POST /api/v1/ace/requests/{id}/claim` | `ace.requests.claim`  | ACE member / bot svc account | **data-dependent: request must be `status='open'`** (409 otherwise)   |
-| `POST /api/v1/ace/requests/{id}/decide`| `ace.requests.decide` | `ACE_NATIONAL`               | body `{ outcome: 'completed' \| 'cancelled' }`; must not be terminal  |
+| `POST /api/v1/ace/requests/{id}/decide`| `ace.requests.decide` | `ACE`               | body `{ outcome: 'completed' \| 'cancelled' }`; must not be terminal  |
 | `GET  /api/v1/ace/team`                | `ace.team.read`       | site (roster display)        | real data for the ACE page (replaces mock)                            |
-| `PUT/PATCH /api/v1/ace/team/{id}`      | `ace.team.update`     | `ACE_NATIONAL`               | roster management (Later)                                             |
+| `PUT/PATCH /api/v1/ace/team/{id}`      | `ace.team.update`     | `ACE`               | roster management (Later)                                             |
 
 **Claim is doubly gated**: the `RequirePermission<AceRequestsClaim>` extractor authorizes the *caller*, and the handler
 then re-reads the row inside the transaction and rejects unless `status='open'` — mirroring OIS's convention that
@@ -147,13 +147,13 @@ Flow:
 4. Handler flips `open → claimed` and enqueues `ace_request_notify`.
 5. Bot notifies the EC and edits the embed in place.
 
-The EC targeted by `ace_request_notify` is resolved from the request's `artcc_id` (facility-scoped `EC`/`AEC` role
+The EC targeted by `ace_request_notify` is resolved from the request's `artcc_id` (facility-scoped `EC` role
 holders for that ARTCC). Channel/role mapping lives in the `integration` config tables (edited via
 `discord.config.{read,update}`), per the Discord integration spec.
 
 ## Open questions
 
-- **Who may claim** — any `ACE_NATIONAL`/ACE team member nationally, or scoped by the request's ARTCC and/or the
+- **Who may claim** — any `ACE`/ACE team member nationally, or scoped by the request's ARTCC and/or the
   claimer's rating? (ARTCC scope is stored on assignments but not yet enforced by the effective-permissions view, so
   scoped claiming would need an explicit handler check.)
 - **Booking / scheduling model** for a claimed request: is `claimed` the end state for v1, or does a claim lead to a

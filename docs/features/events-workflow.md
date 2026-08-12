@@ -93,20 +93,20 @@ grants event *posting/approval* — that lives in the current VATUSA site.**
 | permission | purpose | holders |
 | --- | --- | --- |
 | `events.items.read` | view the operational record | scoped staff |
-| `events.items.create` | attach/link an OIS operational record to a canonical event | `EC`, `AEC`, `ATM`, `DATM` (ARTCC-scoped); `EVENTS_NATIONAL` |
+| `events.items.create` | attach/link an OIS operational record to a canonical event | `EC` (ARTCC-scoped); `EVENTS_TEAM` |
 | `events.items.update` | edit coordination fields (plan, status) | same |
-| `events.items.delete` | remove the operational record | `EC`, `AEC`, `ATM`, `DATM`; `EVENTS_NATIONAL` |
-| `events.positions.assign` | assign a controller to a position | `EC`, `AEC`, `EVENTS_NATIONAL` |
-| `events.positions.publish` | publish the position roster | `EC`, `AEC`, `EVENTS_NATIONAL` |
-| `events.positions.delete` | remove a position | `EC`, `AEC`, `EVENTS_NATIONAL` |
+| `events.items.delete` | remove the operational record | `EC`; `EVENTS_TEAM` |
+| `events.positions.assign` | assign a controller to a position | `EC`, `EVENTS_TEAM` |
+| `events.positions.publish` | publish the position roster | `EC`, `EVENTS_TEAM` |
+| `events.positions.delete` | remove a position | `EC`, `EVENTS_TEAM` |
 | `events.positions.self.request` | request a position for yourself | any authenticated controller |
 | `events.slots.claim` | book an open slot | any authenticated controller |
-| `events.staffing_requests.create` | CC an ARTCC | `EC`, `AEC`, `ATM`, `DATM`; `EVENTS_NATIONAL` |
+| `events.staffing_requests.create` | CC an ARTCC | `EC`; `EVENTS_TEAM` |
 | `events.staffing_requests.read` | see incoming requests for your ARTCC | same |
-| `events.staffing_requests.decide` | acknowledge/decline a request | `EC`, `AEC`, `ATM`, `DATM` |
-| `events.discord.publish` | open the coordination thread + ping staff | `EC`, `AEC`, `EVENTS_NATIONAL` |
+| `events.staffing_requests.decide` | acknowledge/decline a request | `EC` |
+| `events.discord.publish` | open the coordination thread + ping staff | `EC`, `EVENTS_TEAM` |
 | `events.debrief.read` | read the debrief | scoped staff |
-| `events.debrief.create` | write a debrief entry | `EC`, `AEC`, `EVENTS_NATIONAL` |
+| `events.debrief.create` | write a debrief entry | `EC`, `EVENTS_TEAM` |
 
 ## API
 

@@ -196,25 +196,17 @@ pub async fn find_current_user_by_cid(
     .map_err(|_| ApiError::Internal)
 }
 
-/// Roles a staff user may assign through the access editor. Excludes SERVER_ADMIN
-/// (env-bootstrapped only) and the machine roles (BOT / SERVICE_APP). Kept in sync
-/// with crates/ois-core/src/catalog.rs.
+/// Positional roles a staff user may assign through the access editor. Excludes
+/// SERVER_ADMIN (env-bootstrapped only), the baseline USER role, and the machine roles
+/// (BOT / SERVICE_APP). Kept in sync with crates/ois-core/src/catalog.rs and the DB
+/// role catalog (migration 0007).
 pub const ASSIGNABLE_USER_ROLES: &[&str] = &[
-    "USER",
     "VATUSA_STAFF",
-    "EVENTS_NATIONAL",
-    "TMU_NATIONAL",
-    "ACE_NATIONAL",
-    "WEB_TEAM",
-    "ATM",
-    "DATM",
-    "TA",
+    "EVENTS_TEAM",
     "EC",
-    "AEC",
-    "WM",
-    "FE",
-    "INS",
-    "MTR",
+    "ACE",
+    "NTMO",
+    "DCC_STAFF",
 ];
 
 /// All permission names in the catalog (the assignable set for the editor).

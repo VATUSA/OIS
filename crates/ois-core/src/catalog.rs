@@ -42,22 +42,13 @@ pub fn default_roles() -> Vec<&'static str> {
     vec![
         SERVER_ADMIN_ROLE,
         "USER",
-        // National staff
-        "VATUSA_STAFF", // division staff (broad national)
-        "EVENTS_NATIONAL",
-        "TMU_NATIONAL",
-        "ACE_NATIONAL",
-        "WEB_TEAM",
-        // Facility staff (scoped per-ARTCC)
-        "ATM",
-        "DATM",
-        "TA",
-        "EC",
-        "AEC", // assistant EC — first-class, not just EC (feature request)
-        "WM",
-        "FE",
-        "INS",
-        "MTR",
+        // Positional / staff roles (assignable; scopable per-ARTCC via artcc_id)
+        "VATUSA_STAFF", // division staff
+        "EVENTS_TEAM",  // events team
+        "EC",           // events coordinator
+        "ACE",          // ACE team
+        "NTMO",         // national traffic management officer
+        "DCC_STAFF",    // DCC staff
         // Machine actors
         "BOT",
         "SERVICE_APP",
