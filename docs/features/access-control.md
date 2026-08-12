@@ -55,11 +55,13 @@ The save path enforces:
   hold, and only assign roles they hold, within the scopes they edit — so no one can
   escalate a target above their own authority.
 
-## UI
+## UI  *(built)*
 
-The web editor renders the catalog as grouped, collapsible permission checkboxes with
-a search box and a reason field — the permission-editor screen this project started
-from. *(Backend done; the web UI is Phase 3.)*
+The web editor lives in the admin portal at `/admin/access`: look up a controller by
+CID, pick a scope (National or an ARTCC), toggle roles and grouped/collapsible
+permission checkboxes (with search + per-group select-all), enter a required reason, and
+save. Editing one scope leaves the others untouched. Verified end-to-end against the
+backend.
 
 ## Not yet
 
