@@ -1,6 +1,6 @@
 # OIS
 
-OIS is the VATUSA platform monorepo — a custom Rust backend, a Next.js web app, a Rust Discord bot, and (later) a Tauri
+VATUSA Event Operational Information System — a custom Rust backend, a Next.js web app, a Rust Discord bot, and (later) a Tauri
 desktop app. It consolidates and replaces the current VATUSA tooling: the cobalt backend, the webapps frontend, and
 [vatflow.io](https://vatflow.io) ([source](https://github.com/djbrombizzle/vatflow)).
 
