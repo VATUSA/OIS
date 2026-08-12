@@ -16,6 +16,7 @@ use utoipa::OpenApi;
         crate::handlers::auth::vatsim_login,
         crate::handlers::auth::vatsim_callback,
         crate::handlers::auth::logout,
+        crate::handlers::users::search_users,
         crate::handlers::facilities::list_facilities,
         crate::handlers::facilities::get_facility,
         crate::handlers::access::get_access_catalog,
@@ -31,6 +32,7 @@ use utoipa::OpenApi;
     ),
     components(schemas(
         crate::models::MeBody,
+        crate::models::UserSummary,
         crate::models::FacilityBody,
         crate::models::AccessCatalogBody,
         crate::models::SelfAccessBody,
@@ -48,6 +50,7 @@ use utoipa::OpenApi;
     tags(
         (name = "system", description = "Health"),
         (name = "auth", description = "Authentication + current user"),
+        (name = "users", description = "User directory"),
         (name = "facilities", description = "ARTCC directory"),
         (name = "access", description = "Fine-grained access control"),
         (name = "audit", description = "Audit log"),

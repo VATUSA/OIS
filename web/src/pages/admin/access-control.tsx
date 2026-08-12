@@ -1,5 +1,5 @@
-import {type FormEvent, useEffect, useMemo, useState} from "react";
-import {Badge, Button, Card, CardContent, cn, Input,} from "@ois/ui";
+import {useEffect, useMemo, useState} from "react";
+import {Badge, Button, Card, CardContent, cn, Input} from "@ois/ui";
 import {ChevronRight, Save, Search} from "lucide-react";
 
 import {
@@ -8,8 +8,10 @@ import {
   type PermTree,
   type UpdateBody,
   useCatalog,
+  type UserMatch,
   useSaveUserAccess,
   useUserAccess,
+  useUserSearch,
 } from "@/lib/access";
 
 type ScopeState = { roles: string[]; perms: string[] };
@@ -24,8 +26,13 @@ function saveErrorMessage(error: unknown): string {
 }
 
 export function AdminAccessControl() {
-  const [cidInput, setCidInput] = useState("");
   const [cid, setCid] = useState<number | undefined>(undefined);
+  const [userQuery, setUserQuery] = useState("");
+  const [debouncedQuery, setDebouncedQuery] = useState("");
+  const [selected, setSelected] = useState<{ cid: number; name: string } | null>(
+    null,
+  );
+  const [showResults, setShowResults] = useState(false);
 
   const catalog = useCatalog();
   const access = useUserAccess(cid);
@@ -53,6 +60,12 @@ export function AdminAccessControl() {
     setReason("");
     save.reset();
   }, [access.data]); // eslint-disable-line react-hooks/exhaustive-deps
+
+  useEffect(() => {
+    const timer = setTimeout(() => setDebouncedQuery(userQuery.trim()), 200);
+    return () => clearTimeout(timer);
+  }, [userQuery]);
+  const userSearch = useUserSearch(debouncedQuery);
 
   const current: ScopeState = working[scope] ?? { roles: [], perms: [] };
 
@@ -108,10 +121,11 @@ export function AdminAccessControl() {
     });
   }
 
-  function onLoad(event: FormEvent) {
-    event.preventDefault();
-    const parsed = Number.parseInt(cidInput.trim(), 10);
-    if (!Number.isNaN(parsed)) setCid(parsed);
+  function pickUser(user: UserMatch) {
+    setSelected({ cid: user.cid, name: user.display_name });
+    setCid(user.cid);
+    setUserQuery(user.display_name);
+    setShowResults(false);
   }
   function onSave() {
     if (cid == null || !reason.trim()) return;
@@ -135,19 +149,51 @@ export function AdminAccessControl() {
 
       <Card>
         <CardContent className="pt-6">
-          <form onSubmit={onLoad} className="flex items-end gap-3">
-            <div className="flex flex-col gap-1.5">
-              <label className="text-sm font-medium">Controller CID</label>
+          <div className="flex flex-col gap-1.5">
+            <label className="text-sm font-medium">Find a controller</label>
+            <div className="relative w-full max-w-md">
+              <Search className="absolute left-2.5 top-2.5 size-4 text-muted-foreground" />
               <Input
-                value={cidInput}
-                onChange={(e) => setCidInput(e.target.value)}
-                placeholder="e.g. 1652726"
-                inputMode="numeric"
-                className="w-48"
+                value={userQuery}
+                onChange={(e) => {
+                  setUserQuery(e.target.value);
+                  setShowResults(true);
+                }}
+                onFocus={() => setShowResults(true)}
+                onBlur={() => setTimeout(() => setShowResults(false), 150)}
+                placeholder="Search by name or CID"
+                className="pl-8"
               />
+              {showResults && debouncedQuery.length >= 1 && (
+                <div className="absolute z-30 mt-1 max-h-72 w-full overflow-auto rounded-md border bg-popover shadow-md">
+                  {userSearch.isLoading ? (
+                    <div className="px-3 py-2 text-sm text-muted-foreground">
+                      Searching…
+                    </div>
+                  ) : (userSearch.data?.length ?? 0) === 0 ? (
+                    <div className="px-3 py-2 text-sm text-muted-foreground">
+                      No matches.
+                    </div>
+                  ) : (
+                    userSearch.data!.map((user) => (
+                      <button
+                        key={user.cid}
+                        type="button"
+                        onClick={() => pickUser(user)}
+                        className="flex w-full items-center justify-between gap-3 px-3 py-2 text-left text-sm hover:bg-accent"
+                      >
+                        <span className="font-medium">{user.display_name}</span>
+                        <span className="text-xs text-muted-foreground">
+                          CID {user.cid}
+                          {user.rating ? ` · ${user.rating}` : ""}
+                        </span>
+                      </button>
+                    ))
+                  )}
+                </div>
+              )}
             </div>
-            <Button type="submit">Load</Button>
-          </form>
+          </div>
         </CardContent>
       </Card>
 
@@ -174,7 +220,12 @@ export function AdminAccessControl() {
           <CardContent className="flex flex-col gap-6 pt-6">
             <div className="flex flex-wrap items-center justify-between gap-3">
               <div className="flex items-center gap-2">
-                <span className="text-lg font-semibold">CID {access.data.cid}</span>
+                <span className="text-lg font-semibold">
+                  {selected?.name ?? `CID ${access.data.cid}`}
+                </span>
+                <span className="text-sm text-muted-foreground">
+                  CID {access.data.cid}
+                </span>
                 {access.data.server_admin && (
                   <Badge variant="success">Server admin</Badge>
                 )}

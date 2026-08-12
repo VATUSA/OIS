@@ -228,6 +228,22 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/v1/users": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get: operations["search_users"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/health": {
         parameters: {
             query?: never;
@@ -369,6 +385,13 @@ export interface components {
             id: string;
             scopes: components["schemas"]["ScopeAccess"][];
             server_admin: boolean;
+        };
+        /** @description A lightweight user match for the directory search. */
+        UserSummary: {
+            /** Format: int64 */
+            cid: number;
+            display_name: string;
+            rating?: string | null;
         };
     };
     responses: never;
@@ -851,6 +874,36 @@ export interface operations {
                 };
                 content: {
                     "application/json": components["schemas"]["MeBody"];
+                };
+            };
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+        };
+    };
+    search_users: {
+        parameters: {
+            query?: {
+                /** @description Name substring or CID prefix */
+                q?: string;
+                /** @description Max results (default 20, max 50) */
+                limit?: number;
+            };
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["UserSummary"][];
                 };
             };
             401: {

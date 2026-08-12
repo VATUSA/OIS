@@ -6,7 +6,7 @@ use axum::{
 use crate::{
     auth::middleware::resolve_current_user,
     config::build_cors_layer,
-    handlers::{access, audit, auth, docs, facilities, health, service_accounts},
+    handlers::{access, audit, auth, docs, facilities, health, service_accounts, users},
     state::AppState,
 };
 
@@ -18,6 +18,8 @@ pub fn build_router(state: AppState) -> Router {
         .route("/api/v1/auth/vatsim/callback", get(auth::vatsim_callback))
         .route("/api/v1/auth/logout", post(auth::logout))
         .route("/api/v1/me", get(auth::me))
+        // User directory search
+        .route("/api/v1/users", get(users::search_users))
         // Facilities (ARTCC directory) — public reference data
         .route("/api/v1/facilities", get(facilities::list_facilities))
         .route("/api/v1/facilities/{id}", get(facilities::get_facility))
