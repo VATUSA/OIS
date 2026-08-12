@@ -249,29 +249,43 @@ pub async fn set_user_role_manual(
     role_name: &str,
     held: bool,
 ) -> Result<(), ApiError> {
+    set_user_role_manual_scoped(tx, user_id, role_name, held, None).await
+}
+
+/// Grants or revokes a single role at one scope (`artcc_id = None` national). Only
+/// touches that scope; other scopes' assignments are preserved.
+pub async fn set_user_role_manual_scoped(
+    tx: &mut Transaction<'_, Postgres>,
+    user_id: &str,
+    role_name: &str,
+    held: bool,
+    artcc_id: Option<&str>,
+) -> Result<(), ApiError> {
     if held {
         sqlx::query(
             r#"
-            insert into access.user_roles (user_id, role_name)
-            select $1, $2
+            insert into access.user_roles (user_id, role_name, artcc_id)
+            select $1, $2, $3
             where not exists (
                 select 1 from access.user_roles
-                where user_id = $1 and role_name = $2 and artcc_id is null
+                where user_id = $1 and role_name = $2 and artcc_id is not distinct from $3
             )
             "#,
         )
         .bind(user_id)
         .bind(role_name)
+        .bind(artcc_id)
         .execute(&mut **tx)
         .await
         .map_err(|_| ApiError::Internal)?;
     } else {
         sqlx::query(
             "delete from access.user_roles \
-             where user_id = $1 and role_name = $2 and artcc_id is null",
+             where user_id = $1 and role_name = $2 and artcc_id is not distinct from $3",
         )
         .bind(user_id)
         .bind(role_name)
+        .bind(artcc_id)
         .execute(&mut **tx)
         .await
         .map_err(|_| ApiError::Internal)?;
@@ -316,25 +330,74 @@ pub async fn revoke_server_admin(
     Ok(result.rows_affected() > 0)
 }
 
+/// All direct permission grants (granted = true), as `(artcc_id, permission_name)`.
+/// `artcc_id = None` is national. Ordered national-first then by name.
+pub async fn fetch_user_direct_grants(
+    pool: &PgPool,
+    user_id: &str,
+) -> Result<Vec<(Option<String>, String)>, ApiError> {
+    sqlx::query_as::<_, (Option<String>, String)>(
+        "select artcc_id, permission_name from access.user_permissions \
+         where user_id = $1 and granted = true \
+         order by artcc_id nulls first, permission_name",
+    )
+    .bind(user_id)
+    .fetch_all(pool)
+    .await
+    .map_err(|_| ApiError::Internal)
+}
+
+/// All role grants, as `(artcc_id, role_name)`. `artcc_id = None` is national.
+pub async fn fetch_user_role_grants(
+    pool: &PgPool,
+    user_id: &str,
+) -> Result<Vec<(Option<String>, String)>, ApiError> {
+    sqlx::query_as::<_, (Option<String>, String)>(
+        "select artcc_id, role_name from access.user_roles \
+         where user_id = $1 order by artcc_id nulls first, role_name",
+    )
+    .bind(user_id)
+    .fetch_all(pool)
+    .await
+    .map_err(|_| ApiError::Internal)
+}
+
 /// Replaces a user's national (unscoped) direct permission grants with `names`.
 pub async fn replace_user_permissions(
     tx: &mut Transaction<'_, Postgres>,
     user_id: &str,
     names: &[String],
 ) -> Result<(), ApiError> {
-    sqlx::query("delete from access.user_permissions where user_id = $1 and artcc_id is null")
-        .bind(user_id)
-        .execute(&mut **tx)
-        .await
-        .map_err(|_| ApiError::Internal)?;
+    replace_user_permissions_scoped(tx, user_id, None, names).await
+}
+
+/// Replaces the direct permission grants at one scope (`artcc_id = None` national)
+/// with `names`. Deletes everything at that scope first (denies included), then
+/// inserts `granted = true` rows. Other scopes are untouched.
+pub async fn replace_user_permissions_scoped(
+    tx: &mut Transaction<'_, Postgres>,
+    user_id: &str,
+    artcc_id: Option<&str>,
+    names: &[String],
+) -> Result<(), ApiError> {
+    sqlx::query(
+        "delete from access.user_permissions \
+         where user_id = $1 and artcc_id is not distinct from $2",
+    )
+    .bind(user_id)
+    .bind(artcc_id)
+    .execute(&mut **tx)
+    .await
+    .map_err(|_| ApiError::Internal)?;
 
     for name in names {
         sqlx::query(
-            "insert into access.user_permissions (user_id, permission_name, granted) \
-             values ($1, $2, true)",
+            "insert into access.user_permissions (user_id, permission_name, granted, artcc_id) \
+             values ($1, $2, true, $3)",
         )
         .bind(user_id)
         .bind(name)
+        .bind(artcc_id)
         .execute(&mut **tx)
         .await
         .map_err(|_| ApiError::Internal)?;
