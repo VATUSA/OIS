@@ -1,0 +1,24 @@
+# Rust
+/target
+**/target
+
+# Node
+node_modules
+.pnpm-store
+.turbo
+.next
+dist
+
+# Tauri
+desktop/src-tauri/target
+
+# Env / secrets
+.env
+.env.local
+*.local
+
+# OS / editor
+.DS_Store
+.idea
+.vscode/*
+!.vscode/extensions.json

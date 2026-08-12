@@ -1,0 +1,23 @@
+{
+  "name": "@ois/api-client",
+  "version": "0.0.0",
+  "private": true,
+  "type": "module",
+  "exports": {
+    ".": "./src/index.ts",
+    "./hooks": "./src/hooks/index.ts"
+  },
+  "scripts": {
+    "codegen": "openapi-typescript \"${OIS_OPENAPI_URL:-http://127.0.0.1:3000/docs/api/v1/openapi.json}\" -o src/generated/schema.d.ts"
+  },
+  "dependencies": {
+    "openapi-fetch": "^0.17.0"
+  },
+  "peerDependencies": {
+    "@tanstack/react-query": "^5"
+  },
+  "devDependencies": {
+    "openapi-typescript": "^7.13.0",
+    "typescript": "^5"
+  }
+}
