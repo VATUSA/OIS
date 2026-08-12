@@ -1,0 +1,56 @@
+[workspace]
+resolver = "2"
+members = [
+    "backend",
+    "discord",
+    "crates/ois-core",
+    "crates/ois-client",
+    # "desktop/src-tauri",  # added in Phase 5
+]
+
+[workspace.package]
+edition = "2024"
+license = "MIT"
+rust-version = "1.85"
+
+# Versions are pinned once here and referenced by members with `<dep>.workspace = true`.
+# Mirrors the versions proven in osmium so the ported permission core builds unchanged.
+[workspace.dependencies]
+# --- async runtime / web ---
+tokio = { version = "1.52.3", features = ["macros", "rt-multi-thread", "signal", "fs"] }
+axum = { version = "0.8.9", features = ["multipart"] }
+axum-extra = { version = "0.12.6", features = ["cookie"] }
+tower-http = { version = "0.6.6", features = ["cors", "trace"] }
+http = "1.3.1"
+reqwest = { version = "0.13.3", default-features = false, features = ["json", "rustls", "form", "query"] }
+
+# --- data / serialization ---
+serde = { version = "1.0.228", features = ["derive"] }
+serde_json = "1.0.145"
+sqlx = { version = "0.8.6", features = ["postgres", "runtime-tokio-native-tls", "macros", "migrate", "chrono", "uuid"] }
+chrono = { version = "0.4.44", features = ["serde"] }
+chrono-tz = "0.10.4"
+uuid = { version = "1.23.1", features = ["v4", "serde"] }
+
+# --- crypto ---
+sha2 = "0.11.0"
+
+# --- errors / logging ---
+thiserror = "2.0.17"
+tracing = "0.1.41"
+tracing-subscriber = { version = "0.3.20", features = ["env-filter", "fmt"] }
+
+# --- docs / openapi ---
+utoipa = { version = "5.5.0", features = ["axum_extras", "chrono"] }
+utoipa-swagger-ui = { version = "9.0.2", features = ["axum"] }
+
+# --- config ---
+dotenvy = "0.15.7"
+
+# --- discord bot ---
+serenity = { version = "0.12", default-features = false, features = ["client", "gateway", "rustls_backend", "model"] }
+poise = "0.6"
+
+# --- internal crates ---
+ois-core = { path = "crates/ois-core" }
+ois-client = { path = "crates/ois-client" }

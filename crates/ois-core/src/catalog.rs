@@ -1,0 +1,112 @@
+//! The OIS permission + role catalog (DRAFT — refined per feature spec in
+//! `docs/features/*`). This is the national-scale evolution of osmium's catalog:
+//! the shared domains carry over, and OIS adds `tmu` (NTML/ADV/TMI), `ace`,
+//! `flow` (the vatflow replacement), `discord`, and `facilities`.
+//!
+//! Grants are additionally *scoped* by ARTCC at the assignment layer (a nullable
+//! `artcc_id` on `access.user_roles` / `access.user_permissions`; `NULL` = national).
+//! Scope is orthogonal to the permission string itself and is enforced in the backend.
+
+pub const SERVER_ADMIN_ROLE: &str = "SERVER_ADMIN";
+
+/// Top-level permission domains — the collapsible groups in the access editor.
+pub const DOMAINS: &[&str] = &[
+    "access",
+    "ace",
+    "api_keys",
+    "audit",
+    "auth",
+    "discord",
+    "emails",
+    "events",
+    "facilities",
+    "feedback",
+    "files",
+    "flow",
+    "integrations",
+    "org",
+    "pages",
+    "publications",
+    "stats",
+    "system",
+    "system_rate_limit",
+    "tmu",
+    "training",
+    "users",
+    "web",
+];
+
+/// Starter role set (draft). National roles + facility roles; facility roles are
+/// meaningful only in combination with an ARTCC scope on the assignment.
+pub fn default_roles() -> Vec<&'static str> {
+    vec![
+        SERVER_ADMIN_ROLE,
+        "USER",
+        // National staff
+        "VATUSA_STAFF", // division staff (broad national)
+        "EVENTS_NATIONAL",
+        "TMU_NATIONAL",
+        "ACE_NATIONAL",
+        "WEB_TEAM",
+        // Facility staff (scoped per-ARTCC)
+        "ATM",
+        "DATM",
+        "TA",
+        "EC",
+        "AEC", // assistant EC — first-class, not just EC (feature request)
+        "WM",
+        "FE",
+        "INS",
+        "MTR",
+        // Machine actors
+        "BOT",
+        "SERVICE_APP",
+    ]
+}
+
+/// Draft permission catalog for the OIS-specific domains. The shared domains
+/// (access/auth/users/events/…) are ported from osmium during Phase 0; the entries
+/// below are the new national tooling and are firmed up in their feature specs.
+pub fn draft_new_permission_names() -> Vec<&'static str> {
+    vec![
+        // --- events (national workflow additions on top of osmium's events.*) ---
+        "events.approval.decide", // approve/reject a submitted event
+        "events.featured.update", // feature other facilities on a posting
+        "events.staffing_requests.create", // CC an ARTCC / request staffing
+        "events.staffing_requests.read",
+        "events.discord.publish", // trigger event thread + staff ping
+        // --- tmu: NTML / ADV / TMI ---
+        "tmu.ntml.read",
+        "tmu.ntml.create",
+        "tmu.ntml.update",
+        "tmu.ntml.delete",
+        "tmu.adv.read",
+        "tmu.adv.create",
+        "tmu.adv.update",
+        "tmu.tmi.read",
+        "tmu.tmi.create",
+        "tmu.tmi.publish",
+        "tmu.tmi.delete",
+        "tmu.delays.read",
+        // --- ace: support requests + team ---
+        "ace.requests.read",
+        "ace.requests.create",
+        "ace.requests.claim",
+        "ace.requests.decide",
+        "ace.team.read",
+        "ace.team.update",
+        // --- flow: the vatflow.io replacement ---
+        "flow.programs.read",
+        "flow.programs.create",
+        "flow.programs.update",
+        "flow.programs.publish",
+        "flow.programs.delete",
+        "flow.data.read",
+        // --- discord config ---
+        "discord.config.read",
+        "discord.config.update",
+        // --- facilities ---
+        "facilities.directory.read",
+        "facilities.directory.update",
+    ]
+}

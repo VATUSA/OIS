@@ -1,0 +1,26 @@
+[package]
+name = "ois-discord"
+version = "0.1.0"
+edition.workspace = true
+license.workspace = true
+
+[[bin]]
+name = "ois-discord"
+path = "src/main.rs"
+
+# The bot never touches Postgres. It drains the backend's outbound-job queue and
+# calls back via `ois-client` as a service account. `ois-core` gives it the shared
+# permission vocabulary.
+[dependencies]
+ois-core.workspace = true
+ois-client.workspace = true
+
+tokio.workspace = true
+serenity.workspace = true
+poise.workspace = true
+
+serde.workspace = true
+serde_json.workspace = true
+tracing.workspace = true
+tracing-subscriber.workspace = true
+dotenvy.workspace = true
