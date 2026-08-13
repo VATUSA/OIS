@@ -558,6 +558,8 @@ export interface components {
             eta?: string | null;
             /** @description True when a program excludes this aircraft from metering (still shown). */
             excluded: boolean;
+            /** @description Arrival gate (STAR/fix) derived from the filed route; null if none matched. */
+            gate?: string | null;
             /** Format: int64 */
             groundspeed: number;
             /** @description `airborne` | `ground` | `proposed` | `arrived`. */

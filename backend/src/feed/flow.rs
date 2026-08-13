@@ -25,6 +25,8 @@ pub struct FlowFlight {
     pub callsign: String,
     pub dep: String,
     pub aircraft_type: String,
+    /// Arrival gate (STAR/fix) derived from the filed route; null if none matched.
+    pub gate: Option<String>,
     /// `airborne` | `ground` | `proposed` | `arrived`.
     pub status: String,
     pub distance_nm: Option<f64>,
@@ -75,6 +77,7 @@ pub fn compute(
         }
         let (ty, wake) = fp.aircraft_type_wake();
         let dep = fp.departure.to_ascii_uppercase();
+        let gate = arrival_gate(&fp.route, icao);
         let excluded = program.is_some_and(|pg| is_excluded(&ty, &wake, pg));
 
         let dist_to_arr = arr.map(|(alat, alon)| gc_dist(p.latitude, p.longitude, alat, alon));
@@ -86,6 +89,7 @@ pub fn compute(
                 callsign: p.callsign.clone(),
                 dep,
                 aircraft_type: ty,
+                gate: gate.clone(),
                 status: "arrived".into(),
                 distance_nm: dist_to_arr,
                 eta: Some(now),
@@ -107,6 +111,7 @@ pub fn compute(
                 callsign: p.callsign.clone(),
                 dep,
                 aircraft_type: ty,
+                gate: gate.clone(),
                 status: "airborne".into(),
                 distance_nm: Some(dist),
                 eta: Some(now + minutes(ete_min)),
@@ -120,6 +125,7 @@ pub fn compute(
                 callsign: p.callsign.clone(),
                 dep,
                 aircraft_type: ty,
+                gate,
                 status: "ground".into(),
                 distance_nm: Some(route_nm),
                 eta: Some(now + minutes(ft_min)),
@@ -139,6 +145,7 @@ pub fn compute(
         }
         let (ty, wake) = fp.aircraft_type_wake();
         let dep = fp.departure.to_ascii_uppercase();
+        let gate = arrival_gate(&fp.route, icao);
         let excluded = program.is_some_and(|pg| is_excluded(&ty, &wake, pg));
         let (route_nm, ft_min) = ground_estimate(&dep, arr, fp, airports);
         let etd = proposed_etd(&fp.deptime, now);
@@ -146,6 +153,7 @@ pub fn compute(
             callsign: pf.callsign.clone(),
             dep,
             aircraft_type: ty,
+            gate,
             status: "proposed".into(),
             distance_nm: Some(route_nm),
             eta: Some(etd + minutes(ft_min)),
@@ -242,6 +250,60 @@ fn minutes(m: f64) -> Duration {
 fn parse_tas(raw: &str) -> f64 {
     let n: f64 = raw.trim().parse().unwrap_or(0.0);
     if n >= 60.0 && n <= 1200.0 { n } else { 420.0 }
+}
+
+/// Arrival gate (STAR/fix) heuristic ported from vatflow's `arrivalGate`: scan the filed
+/// route from the end and return the first token that looks like a 5-letter RNAV fix, a
+/// 3-letter navaid, or a STAR/SID name (e.g. `OZZZI4`). `arr` must be uppercase.
+fn arrival_gate(route: &str, arr: &str) -> Option<String> {
+    if route.trim().is_empty() {
+        return None;
+    }
+    let toks: Vec<String> = route
+        .to_ascii_uppercase()
+        .split_whitespace()
+        .map(|t| {
+            t.split('/')
+                .next()
+                .unwrap_or("")
+                .chars()
+                .filter(|c| c.is_ascii_alphanumeric())
+                .collect::<String>()
+        })
+        .collect();
+    for t in toks.iter().rev() {
+        if t.is_empty() || t == "DCT" || t == arr {
+            continue;
+        }
+        if is_fix(t) || is_navaid(t) || is_star(t) {
+            return Some(t.clone());
+        }
+    }
+    None
+}
+
+/// Exactly five uppercase letters — a named RNAV fix (CAMRN, LENDY).
+fn is_fix(t: &str) -> bool {
+    t.len() == 5 && t.bytes().all(|b| b.is_ascii_uppercase())
+}
+
+/// Exactly three uppercase letters — a VOR/navaid (JFK).
+fn is_navaid(t: &str) -> bool {
+    t.len() == 3 && t.bytes().all(|b| b.is_ascii_uppercase())
+}
+
+/// A STAR/SID name: 3–5 letters, a digit, then an optional trailing letter (OZZZI4, PARCH3A).
+fn is_star(t: &str) -> bool {
+    let b = t.as_bytes();
+    let letters_ok =
+        |s: &[u8]| (3..=5).contains(&s.len()) && s.iter().all(|c| c.is_ascii_uppercase());
+    match b.last() {
+        Some(c) if c.is_ascii_digit() => letters_ok(&b[..b.len() - 1]),
+        Some(c) if c.is_ascii_uppercase() => {
+            b.len() >= 5 && b[b.len() - 2].is_ascii_digit() && letters_ok(&b[..b.len() - 2])
+        }
+        _ => false,
+    }
 }
 
 /// Great-circle distance in nautical miles.

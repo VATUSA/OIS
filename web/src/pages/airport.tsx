@@ -23,6 +23,43 @@ function minutesUntil(iso: string | null | undefined, now: number): number | nul
   return (t - now) / 60000;
 }
 
+const GATE_PALETTE = [
+  "#54b8e8",
+  "#57d98a",
+  "#f5a83d",
+  "#c792ea",
+  "#f07178",
+  "#38bdf8",
+  "#fbbf24",
+];
+
+/** Drop the STAR revision digit so OZZZI1 / OZZZI2 group as OZZZI. */
+function summaryGateName(gate: string | null | undefined): string | null {
+  if (!gate) return null;
+  const m = gate.toUpperCase().match(/^([A-Z]{3,5})\d[A-Z]?$/);
+  return m ? m[1] : gate.toUpperCase();
+}
+
+/** Metered (non-arrived, non-excluded) flights grouped by gate, busiest first. */
+function gateCounts(flights: FlowFlight[]): [string, number][] {
+  const counts: Record<string, number> = {};
+  for (const f of flights) {
+    if (f.status === "arrived" || f.excluded) continue;
+    const g = summaryGateName(f.gate);
+    if (!g) continue;
+    counts[g] = (counts[g] ?? 0) + 1;
+  }
+  return Object.entries(counts).sort((a, b) => b[1] - a[1] || a[0].localeCompare(b[0]));
+}
+
+function gateColorMap(flights: FlowFlight[]): Record<string, string> {
+  const map: Record<string, string> = {};
+  gateCounts(flights).forEach(([g], i) => {
+    map[g] = GATE_PALETTE[i % GATE_PALETTE.length];
+  });
+  return map;
+}
+
 // --- Summary ---
 
 function StatusBar({ flow }: { flow: Flow }) {
@@ -143,18 +180,71 @@ function SummaryView({ flow }: { flow: Flow }) {
         <div className="border-t pt-6">
           <DemandRing flow={flow} />
         </div>
+
+        <GateBreakdown flow={flow} />
       </CardContent>
     </Card>
   );
 }
 
+function GateBreakdown({ flow }: { flow: Flow }) {
+  const gates = gateCounts(flow.flights);
+  const colors = gateColorMap(flow.flights);
+  const max = gates.length ? gates[0][1] : 1;
+
+  return (
+    <div className="border-t pt-6">
+      <div className="mb-3 text-xs font-medium uppercase tracking-wide text-muted-foreground">
+        Aircraft by arrival gate
+        <span className="ml-2 normal-case text-muted-foreground/70">
+          · STAR revisions grouped (PARCH3/4 → PARCH)
+        </span>
+      </div>
+      {gates.length === 0 ? (
+        <p className="text-sm text-muted-foreground">
+          No gated arrivals in the metered stream right now.
+        </p>
+      ) : (
+        <div className="flex flex-col gap-2">
+          {gates.map(([g, n]) => (
+            <div key={g} className="flex items-center gap-3">
+              <span
+                className="w-16 shrink-0 font-mono text-sm font-medium"
+                style={{ color: colors[g] }}
+              >
+                {g}
+              </span>
+              <div className="h-2 flex-1 overflow-hidden rounded-full bg-muted">
+                <div
+                  className="h-full rounded-full"
+                  style={{ width: `${(n / max) * 100}%`, backgroundColor: colors[g] }}
+                />
+              </div>
+              <span className="w-6 shrink-0 text-right text-sm tabular-nums">{n}</span>
+            </div>
+          ))}
+        </div>
+      )}
+    </div>
+  );
+}
+
 // --- Aircraft list ---
 
-type ColKey = "callsign" | "aircraft_type" | "dep" | "status" | "distance_nm" | "groundspeed" | "eta";
+type ColKey =
+  | "callsign"
+  | "aircraft_type"
+  | "dep"
+  | "gate"
+  | "status"
+  | "distance_nm"
+  | "groundspeed"
+  | "eta";
 const COLUMNS: { key: ColKey; label: string; num?: boolean; right?: boolean }[] = [
   { key: "callsign", label: "Callsign" },
   { key: "aircraft_type", label: "Type" },
   { key: "dep", label: "Dep" },
+  { key: "gate", label: "Gate" },
   { key: "status", label: "Status" },
   { key: "distance_nm", label: "Dist", num: true, right: true },
   { key: "groundspeed", label: "GS", num: true, right: true },
@@ -198,6 +288,8 @@ function AircraftView({ flow }: { flow: Flow }) {
     );
   }
 
+  const gateColors = gateColorMap(flow.flights);
+
   return (
     <Card>
       <CardContent className="pt-6">
@@ -228,6 +320,12 @@ function AircraftView({ flow }: { flow: Flow }) {
                     <td className="py-1.5 pr-3 font-mono font-medium">{f.callsign}</td>
                     <td className="py-1.5 pr-3">{f.aircraft_type}</td>
                     <td className="py-1.5 pr-3 font-mono text-xs">{f.dep}</td>
+                    <td
+                      className="py-1.5 pr-3 font-mono text-xs"
+                      style={{ color: f.gate ? gateColors[summaryGateName(f.gate)!] : undefined }}
+                    >
+                      {f.gate ?? "—"}
+                    </td>
                     <td className={`py-1.5 pr-3 ${st.text}`}>{st.label}</td>
                     <td className="py-1.5 pr-3 text-right tabular-nums">
                       {f.distance_nm == null ? "—" : Math.round(f.distance_nm)}
@@ -262,6 +360,7 @@ function LadderView({ flow }: { flow: Flow }) {
   const H = win * PX;
   const yOf = (min: number) => H - (Math.max(0, Math.min(min, win)) / win) * H;
   const step = win <= 90 ? 10 : win <= 180 ? 15 : 30;
+  const gateColors = gateColorMap(flow.flights);
 
   // Flights in window, earliest (nearest NOW) first — bottom to top.
   const items = flow.flights
@@ -358,6 +457,8 @@ function LadderView({ flow }: { flow: Flow }) {
 
             {placed.map(({ f, y }) => {
               const st = STATUS_STYLE[f.status] ?? STATUS_STYLE.arrived;
+              const gname = summaryGateName(f.gate);
+              const color = (gname && gateColors[gname]) || st.color;
               return (
                 <div
                   key={f.callsign}
@@ -367,16 +468,21 @@ function LadderView({ flow }: { flow: Flow }) {
                   {/* connector tick to the axis */}
                   <span
                     className="h-0.5 w-3 shrink-0"
-                    style={{ backgroundColor: st.color }}
+                    style={{ backgroundColor: color }}
                   />
                   <span
                     className={`flex items-center gap-2 rounded-md border border-border/70 bg-muted/40 py-1 pl-2 pr-2.5 text-xs ${f.status === "proposed" ? "opacity-75" : ""}`}
-                    style={{ borderLeftWidth: 3, borderLeftColor: st.color }}
+                    style={{ borderLeftWidth: 3, borderLeftColor: color }}
                   >
                     <span className="font-mono font-medium">{f.callsign}</span>
                     <span className="font-mono text-muted-foreground">
                       {hhmmZulu(f.eta)}
                     </span>
+                    {f.gate && (
+                      <span className="font-mono text-muted-foreground/80">
+                        {f.gate}
+                      </span>
+                    )}
                   </span>
                 </div>
               );
