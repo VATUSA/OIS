@@ -1,18 +1,21 @@
 use sqlx::{PgPool, postgres::PgPoolOptions};
 
-use crate::feed::{self, FeedState};
+use crate::feed::{self, FeedState, facilities::FacilityState};
 
 /// Lean application state: the DB pool (optional so the process can boot without a
-/// database, e.g. for `--help`-style runs and tests) and the live VATSIM feed.
+/// database, e.g. for `--help`-style runs and tests), the live VATSIM feed, and the
+/// facility → airports map.
 #[derive(Clone)]
 pub struct AppState {
     pub db: Option<PgPool>,
     pub feed: FeedState,
+    pub facilities: FacilityState,
 }
 
 impl AppState {
     pub async fn from_env() -> Result<Self, sqlx::Error> {
         let feed = feed::new_state();
+        let facilities = feed::facilities::new_state();
         if let Ok(database_url) = std::env::var("DATABASE_URL") {
             let pool = PgPoolOptions::new()
                 .max_connections(10)
@@ -21,16 +24,22 @@ impl AppState {
             return Ok(Self {
                 db: Some(pool),
                 feed,
+                facilities,
             });
         }
 
-        Ok(Self { db: None, feed })
+        Ok(Self {
+            db: None,
+            feed,
+            facilities,
+        })
     }
 
     pub fn without_db() -> Self {
         Self {
             db: None,
             feed: feed::new_state(),
+            facilities: feed::facilities::new_state(),
         }
     }
 }

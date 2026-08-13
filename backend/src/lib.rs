@@ -21,6 +21,7 @@ pub async fn run() -> Result<(), Box<dyn std::error::Error>> {
     run_startup_migrations(&state).await?;
 
     feed::spawn_poller(state.feed.clone());
+    feed::facilities::spawn_refresh(state.facilities.clone());
 
     let app = router::build_router(state);
 

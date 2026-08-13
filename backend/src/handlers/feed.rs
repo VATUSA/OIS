@@ -150,8 +150,11 @@ pub async fn list_departures(
     let dep = dep.trim().to_ascii_uppercase();
 
     // Resolve the field: an airport is just itself; a TRACON/ARTCC spans many airports.
-    let facility_kind = facilities::lookup(&dep).map(|f| f.kind.clone());
-    let mut airports = facilities::member_airports(&dep);
+    let (facility_kind, mut airports) = {
+        let map = state.facilities.read().await;
+        let kind = map.get(&dep).map(|f| f.kind.clone());
+        (kind, facilities::member_airports(&map, &dep))
+    };
     airports.sort();
     let member_set: HashSet<String> = airports.iter().cloned().collect();
 
