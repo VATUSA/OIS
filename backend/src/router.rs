@@ -73,6 +73,14 @@ pub fn build_router(state: AppState) -> Router {
             "/api/v1/events/{id}/dcc",
             get(events::get_event_dcc).put(events::update_event_dcc),
         )
+        .route(
+            "/api/v1/events/{id}/facilities",
+            get(events::list_event_facilities),
+        )
+        .route(
+            "/api/v1/events/{id}/facilities/{facility}",
+            put(events::upsert_event_facility).delete(events::delete_event_facility),
+        )
         // Live VATSIM feed
         .route("/api/v1/feed/status", get(feed::feed_status))
         .route("/api/v1/tmu/flow/{icao}", get(feed::airport_flow))

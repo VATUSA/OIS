@@ -5,7 +5,7 @@ use chrono::{DateTime, Utc};
 use sqlx::PgPool;
 
 use crate::errors::ApiError;
-use crate::models::{DccRequestBody, EventBody};
+use crate::models::{DccRequestBody, EventBody, FacilitySupportBody};
 
 const EVENT_SELECT: &str = "select id, title, body, banner_image_url, facility, \
     start_time, end_time, review_status from events.event";
@@ -107,4 +107,80 @@ pub async fn upsert_dcc(
     .await
     .map_err(|_| ApiError::Internal)?;
     Ok(())
+}
+
+// --- facility support matrix ---
+
+const FS_SELECT: &str = "select f.facility, f.level, f.notes, f.updated_at, \
+    u.display_name as updated_by \
+    from events.facility_support f left join identity.users u on u.id = f.updated_by";
+
+pub async fn list_facility_support(
+    pool: &PgPool,
+    event_id: i64,
+) -> Result<Vec<FacilitySupportBody>, ApiError> {
+    sqlx::query_as::<_, FacilitySupportBody>(&format!(
+        "{FS_SELECT} where f.event_id = $1 order by f.facility"
+    ))
+    .bind(event_id)
+    .fetch_all(pool)
+    .await
+    .map_err(|_| ApiError::Internal)
+}
+
+pub async fn get_facility_support(
+    pool: &PgPool,
+    event_id: i64,
+    facility: &str,
+) -> Result<Option<FacilitySupportBody>, ApiError> {
+    sqlx::query_as::<_, FacilitySupportBody>(&format!(
+        "{FS_SELECT} where f.event_id = $1 and f.facility = $2"
+    ))
+    .bind(event_id)
+    .bind(facility)
+    .fetch_optional(pool)
+    .await
+    .map_err(|_| ApiError::Internal)
+}
+
+pub async fn upsert_facility_support(
+    pool: &PgPool,
+    event_id: i64,
+    facility: &str,
+    level: &str,
+    notes: &str,
+    actor: &str,
+) -> Result<(), ApiError> {
+    sqlx::query(
+        "insert into events.facility_support (event_id, facility, level, notes, updated_by)
+         values ($1, $2, $3, $4, $5)
+         on conflict (event_id, facility) do update set
+             level = excluded.level,
+             notes = excluded.notes,
+             updated_by = excluded.updated_by",
+    )
+    .bind(event_id)
+    .bind(facility)
+    .bind(level)
+    .bind(notes)
+    .bind(actor)
+    .execute(pool)
+    .await
+    .map_err(|_| ApiError::Internal)?;
+    Ok(())
+}
+
+pub async fn delete_facility_support(
+    pool: &PgPool,
+    event_id: i64,
+    facility: &str,
+) -> Result<bool, ApiError> {
+    let result =
+        sqlx::query("delete from events.facility_support where event_id = $1 and facility = $2")
+            .bind(event_id)
+            .bind(facility)
+            .execute(pool)
+            .await
+            .map_err(|_| ApiError::Internal)?;
+    Ok(result.rows_affected() > 0)
 }
