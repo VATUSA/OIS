@@ -295,6 +295,26 @@ pub struct UpdateDccRequest {
     pub notes: Option<String>,
 }
 
+/// One facility's support level for an event.
+#[derive(Debug, Serialize, ToSchema, sqlx::FromRow)]
+pub struct FacilitySupportBody {
+    /// ARTCC/TRACON id (e.g. ZTL, N90).
+    pub facility: String,
+    /// required | preferred | not_required
+    pub level: String,
+    pub notes: String,
+    pub updated_at: DateTime<Utc>,
+    pub updated_by: Option<String>,
+}
+
+#[derive(Debug, Deserialize, ToSchema)]
+pub struct UpsertFacilitySupportRequest {
+    /// required | preferred | not_required
+    pub level: String,
+    #[serde(default)]
+    pub notes: Option<String>,
+}
+
 // --- TMU rate programs ---
 
 /// One per-gate restriction inside a program: an arrival fix/STAR with its own spacing.

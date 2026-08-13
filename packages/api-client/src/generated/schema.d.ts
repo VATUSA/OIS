@@ -228,6 +228,38 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/v1/events/{id}/facilities": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get: operations["list_event_facilities"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/events/{id}/facilities/{facility}": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put: operations["upsert_event_facility"];
+        post?: never;
+        delete: operations["delete_event_facility"];
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/v1/facilities": {
         parameters: {
             query?: never;
@@ -697,6 +729,17 @@ export interface components {
             name: string;
             region?: string | null;
         };
+        /** @description One facility's support level for an event. */
+        FacilitySupportBody: {
+            /** @description ARTCC/TRACON id (e.g. ZTL, N90). */
+            facility: string;
+            /** @description required | preferred | not_required */
+            level: string;
+            notes: string;
+            /** Format: date-time */
+            updated_at: string;
+            updated_by?: string | null;
+        };
         FeedStatusBody: {
             airports_loaded: number;
             /** @description True when the last datafeed fetch succeeded. */
@@ -975,6 +1018,11 @@ export interface components {
         UpdateUserAccessRequest: {
             reason: string;
             scopes: components["schemas"]["ScopeUpdate"][];
+        };
+        UpsertFacilitySupportRequest: {
+            /** @description required | preferred | not_required */
+            level: string;
+            notes?: string | null;
         };
         /** @description Upsert a program (`PUT /tmu/programs/{icao}`) — the full normalized program body. */
         UpsertProgramRequest: {
@@ -1540,6 +1588,114 @@ export interface operations {
                 };
             };
             400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+        };
+    };
+    list_event_facilities: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /** @description VATUSA event id */
+                id: number;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["FacilitySupportBody"][];
+                };
+            };
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+        };
+    };
+    upsert_event_facility: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /** @description VATUSA event id */
+                id: number;
+                /** @description ARTCC/TRACON id */
+                facility: string;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["UpsertFacilitySupportRequest"];
+            };
+        };
+        responses: {
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["FacilitySupportBody"];
+                };
+            };
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+        };
+    };
+    delete_event_facility: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /** @description VATUSA event id */
+                id: number;
+                /** @description ARTCC/TRACON id */
+                facility: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            204: {
                 headers: {
                     [name: string]: unknown;
                 };

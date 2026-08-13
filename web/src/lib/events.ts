@@ -7,6 +7,9 @@ import {ois} from "./api";
 export type EventSummary = components["schemas"]["EventBody"];
 export type Dcc = components["schemas"]["DccRequestBody"];
 export type UpdateDcc = components["schemas"]["UpdateDccRequest"];
+export type FacilitySupport = components["schemas"]["FacilitySupportBody"];
+export type UpsertFacilitySupport =
+  components["schemas"]["UpsertFacilitySupportRequest"];
 
 /** Upcoming (and in-progress) VATUSA events, soonest first. */
 export function useUpcomingEvents() {
@@ -67,6 +70,69 @@ export function useUpdateDcc(eventId: number) {
       toast.success("DCC support updated");
     },
     onError: () => toast.error("Couldn’t update DCC support"),
+  });
+}
+
+/** Facility support matrix for one event. */
+export function useFacilitySupport(eventId: number) {
+  return useQuery({
+    queryKey: ["event-facilities", eventId],
+    queryFn: async () => {
+      const { data, error } = await ois.GET("/api/v1/events/{id}/facilities", {
+        params: { path: { id: eventId } },
+      });
+      if (error || !data) throw new Error("failed to load facility support");
+      return data;
+    },
+    enabled: Number.isFinite(eventId),
+  });
+}
+
+export function useUpsertFacilitySupport(eventId: number) {
+  const queryClient = useQueryClient();
+  const toast = useToast();
+  return useMutation({
+    mutationFn: async ({
+      facility,
+      body,
+    }: {
+      facility: string;
+      body: UpsertFacilitySupport;
+    }) => {
+      const { data, error } = await ois.PUT(
+        "/api/v1/events/{id}/facilities/{facility}",
+        { params: { path: { id: eventId, facility } }, body },
+      );
+      if (error || !data) throw new Error("save failed");
+      return data;
+    },
+    onSuccess: () => {
+      queryClient.invalidateQueries({
+        queryKey: ["event-facilities", eventId],
+      });
+    },
+    onError: () => toast.error("Couldn’t save the facility"),
+  });
+}
+
+export function useRemoveFacilitySupport(eventId: number) {
+  const queryClient = useQueryClient();
+  const toast = useToast();
+  return useMutation({
+    mutationFn: async (facility: string) => {
+      const { error } = await ois.DELETE(
+        "/api/v1/events/{id}/facilities/{facility}",
+        { params: { path: { id: eventId, facility } } },
+      );
+      if (error) throw new Error("remove failed");
+    },
+    onSuccess: () => {
+      queryClient.invalidateQueries({
+        queryKey: ["event-facilities", eventId],
+      });
+      toast.success("Facility removed");
+    },
+    onError: () => toast.error("Couldn’t remove the facility"),
   });
 }
 
