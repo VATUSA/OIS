@@ -484,6 +484,38 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/v1/flow/fcas/{id}/order": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put: operations["reorder_fca"];
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/flow/fcas/{id}/release/{callsign}": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        post: operations["mark_release"];
+        delete: operations["clear_release"];
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/v1/flow/fcas/{id}/traffic": {
         parameters: {
             query?: never;
@@ -987,6 +1019,9 @@ export interface components {
             enabled: boolean;
             fixes: string[];
             id: string;
+            /** @description Controller's manual crossing order (callsigns); empty = auto. */
+            manual_order: string[];
+            manual_seq: boolean;
             /** Format: int32 */
             max_fl?: number | null;
             /** Format: int32 */
@@ -1035,6 +1070,11 @@ export interface components {
             distance_nm: number;
             /**
              * Format: date-time
+             * @description Release / wheels-up time when a CFR has been issued.
+             */
+            edct?: string | null;
+            /**
+             * Format: date-time
              * @description Unmetered ETA to the crossing.
              */
             eta?: string | null;
@@ -1046,6 +1086,8 @@ export interface components {
             lat: number;
             /** Format: double */
             lon: number;
+            /** @description True when this aircraft has a frozen (issued) CFR release. */
+            released: boolean;
             /**
              * Format: int64
              * @description 1-based sequence in the metered order.
@@ -1218,6 +1260,17 @@ export interface components {
             updated_at: string;
             /** @description Display name of whoever last edited the program. */
             updated_by?: string | null;
+        };
+        /**
+         * @description Issue a CFR release for a crossing aircraft. `ready` (HHMMz) pins a wheels-up time;
+         *     omitted = release at the earliest metered slot.
+         */
+        ReleaseRequest: {
+            ready?: string | null;
+        };
+        /** @description Replace an FCA's manual crossing order (callsigns, in sequence). */
+        ReorderRequest: {
+            order: string[];
         };
         /** @description Direct grants + roles at one scope. `artcc_id = null` is national. */
         ScopeAccess: {
@@ -2779,6 +2832,124 @@ export interface operations {
                     [name: string]: unknown;
                 };
                 content?: never;
+            };
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+        };
+    };
+    reorder_fca: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /** @description FCA id */
+                id: string;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["ReorderRequest"];
+            };
+        };
+        responses: {
+            204: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+        };
+    };
+    mark_release: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /** @description FCA id */
+                id: string;
+                /** @description Aircraft callsign */
+                callsign: string;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["ReleaseRequest"];
+            };
+        };
+        responses: {
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["FcaFlight"][];
+                };
+            };
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+        };
+    };
+    clear_release: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /** @description FCA id */
+                id: string;
+                /** @description Aircraft callsign */
+                callsign: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["FcaFlight"][];
+                };
             };
             401: {
                 headers: {

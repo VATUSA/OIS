@@ -104,6 +104,71 @@ export function useFcaTraffic(id: string | null) {
   });
 }
 
+/** Issue a CFR release (RDY = earliest slot; `ready` HHMMz = pinned wheels-up). */
+export function useMarkRelease(fcaId: string) {
+  const queryClient = useQueryClient();
+  const toast = useToast();
+  return useMutation({
+    mutationFn: async ({
+      callsign,
+      ready,
+    }: {
+      callsign: string;
+      ready?: string;
+    }) => {
+      const { data, error } = await ois.POST(
+        "/api/v1/flow/fcas/{id}/release/{callsign}",
+        { params: { path: { id: fcaId, callsign } }, body: { ready } },
+      );
+      if (error || !data) throw new Error("release failed");
+      return data;
+    },
+    onSuccess: (data) => {
+      queryClient.setQueryData(["fca-traffic", fcaId], data);
+    },
+    onError: () => toast.error("Couldn’t issue the release"),
+  });
+}
+
+export function useClearRelease(fcaId: string) {
+  const queryClient = useQueryClient();
+  const toast = useToast();
+  return useMutation({
+    mutationFn: async (callsign: string) => {
+      const { data, error } = await ois.DELETE(
+        "/api/v1/flow/fcas/{id}/release/{callsign}",
+        { params: { path: { id: fcaId, callsign } } },
+      );
+      if (error || !data) throw new Error("clear failed");
+      return data;
+    },
+    onSuccess: (data) => {
+      queryClient.setQueryData(["fca-traffic", fcaId], data);
+    },
+    onError: () => toast.error("Couldn’t clear the release"),
+  });
+}
+
+/** Set the manual crossing order (empty array resets to auto). */
+export function useReorderFca(fcaId: string) {
+  const queryClient = useQueryClient();
+  const toast = useToast();
+  return useMutation({
+    mutationFn: async (order: string[]) => {
+      const { error } = await ois.PUT("/api/v1/flow/fcas/{id}/order", {
+        params: { path: { id: fcaId } },
+        body: { order },
+      });
+      if (error) throw new Error("reorder failed");
+    },
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ["fca-traffic", fcaId] });
+      queryClient.invalidateQueries({ queryKey: ["fcas"] });
+    },
+    onError: () => toast.error("Couldn’t reorder"),
+  });
+}
+
 /** Build an upsert payload from an existing FCA (for toggles / edits). */
 export function toUpsert(fca: Fca): UpsertFca {
   return {

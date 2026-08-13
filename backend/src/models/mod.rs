@@ -423,6 +423,9 @@ pub struct FcaBody {
     pub rate: i32,
     pub mit: i32,
     pub enabled: bool,
+    /// Controller's manual crossing order (callsigns); empty = auto.
+    pub manual_order: Vec<String>,
+    pub manual_seq: bool,
     pub updated_at: DateTime<Utc>,
     pub updated_by: Option<String>,
 }
@@ -484,9 +487,27 @@ pub struct FcaFlight {
     pub delay_min: i64,
     /// 1-based sequence in the metered order.
     pub seq: i64,
+    /// Release / wheels-up time when a CFR has been issued.
+    pub edct: Option<DateTime<Utc>>,
+    /// True when this aircraft has a frozen (issued) CFR release.
+    pub released: bool,
     pub groundspeed: i64,
     pub altitude: i64,
     pub heading: i64,
+}
+
+/// Issue a CFR release for a crossing aircraft. `ready` (HHMMz) pins a wheels-up time;
+/// omitted = release at the earliest metered slot.
+#[derive(Debug, Deserialize, ToSchema)]
+pub struct ReleaseRequest {
+    #[serde(default)]
+    pub ready: Option<String>,
+}
+
+/// Replace an FCA's manual crossing order (callsigns, in sequence).
+#[derive(Debug, Deserialize, ToSchema)]
+pub struct ReorderRequest {
+    pub order: Vec<String>,
 }
 
 /// A lightweight live-traffic record for plotting on the FCA map.

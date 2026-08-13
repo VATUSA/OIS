@@ -1,7 +1,11 @@
-import {useMemo} from "react";
-import {Badge} from "@ois/ui";
+import {useMemo, useState} from "react";
+import {Badge, Button, Input} from "@ois/ui";
+import {closestCenter, DndContext, type DragEndEvent, PointerSensor, useSensor, useSensors,} from "@dnd-kit/core";
+import {arrayMove, SortableContext, useSortable, verticalListSortingStrategy,} from "@dnd-kit/sortable";
+import {CSS} from "@dnd-kit/utilities";
+import {GripVertical, RotateCcw, X} from "lucide-react";
 
-import {type Fca, type FcaFlight} from "@/lib/fca";
+import {type Fca, type FcaFlight, useClearRelease, useMarkRelease, useReorderFca,} from "@/lib/fca";
 import {hhmmZulu} from "@/lib/time";
 
 const STATUS = {
@@ -29,7 +33,7 @@ function fmtDelay(min: number): string {
 
 /** Metering ladder — plots each flight by its metered crossing time (now at bottom). */
 function Ladder({ flights, now }: { flights: FcaFlight[]; now: number }) {
-  const WIN = 60; // minutes
+  const WIN = 60;
   const PX = 5;
   const ROW = 22;
   const GUTTER = 54;
@@ -42,7 +46,6 @@ function Ladder({ flights, now }: { flights: FcaFlight[]; now: number }) {
     .filter((x) => x.min >= -1 && x.min <= WIN)
     .sort((a, b) => a.min - b.min);
 
-  // Declutter bottom→top so tags never overlap.
   let lastY = H + ROW;
   const placed = items.map(({ f, min }) => {
     const y = Math.min(yOf(min), lastY - ROW);
@@ -124,15 +127,130 @@ function Ladder({ flights, now }: { flights: FcaFlight[]; now: number }) {
   );
 }
 
+function Strip({
+  f,
+  canEdit,
+  onRelease,
+  onClear,
+}: {
+  f: FcaFlight;
+  canEdit: boolean;
+  onRelease: (callsign: string, ready?: string) => void;
+  onClear: (callsign: string) => void;
+}) {
+  const { attributes, listeners, setNodeRef, transform, transition, isDragging } =
+    useSortable({ id: f.callsign });
+  const [hhmm, setHhmm] = useState("");
+  const st = statusOf(f.status);
+  const canCfr = canEdit && f.status !== "airborne";
+
+  const style = {
+    transform: CSS.Transform.toString(transform),
+    transition,
+    opacity: isDragging ? 0.5 : 1,
+  };
+
+  return (
+    <li ref={setNodeRef} style={style} className="border-b bg-background px-3 py-2 text-sm">
+      <div className="flex items-center justify-between gap-2">
+        <span className="flex items-center gap-1.5">
+          {canEdit && (
+            <button
+              type="button"
+              className="cursor-grab text-muted-foreground/60 hover:text-foreground"
+              {...attributes}
+              {...listeners}
+            >
+              <GripVertical className="size-3.5" />
+            </button>
+          )}
+          <span className="w-4 text-right tabular-nums text-muted-foreground">
+            {f.seq}
+          </span>
+          <span
+            className="rounded px-1 text-[10px] font-semibold"
+            style={{ color: st.color, border: `1px solid ${st.color}` }}
+          >
+            {f.released ? "CFR" : st.label}
+          </span>
+          <span className="font-mono font-semibold">{f.callsign}</span>
+          <span className="text-xs text-muted-foreground">{f.aircraft_type}</span>
+        </span>
+        <span className="text-right font-mono">
+          <span className={st.text}>{hhmmZulu(f.cross_time)}</span>
+          {f.delay_min > 0 && (
+            <span className="ml-1.5 text-xs text-destructive">+{f.delay_min}m</span>
+          )}
+        </span>
+      </div>
+
+      <div className="mt-0.5 flex items-center gap-2 pl-6 text-xs text-muted-foreground">
+        <span className="font-mono">
+          {f.dep}→{f.arr}
+        </span>
+        <span>{Math.round(f.distance_nm)}nm to line</span>
+        {f.altitude > 0 && <span>FL{Math.round(f.altitude / 100)}</span>}
+      </div>
+
+      {canCfr && (
+        <div className="mt-1.5 flex items-center gap-1.5 pl-6">
+          {f.released ? (
+            <>
+              <Badge variant="success">RLSD {hhmmZulu(f.edct)}z</Badge>
+              <button
+                type="button"
+                title="Clear release"
+                onClick={() => onClear(f.callsign)}
+                className="text-muted-foreground transition-colors hover:text-destructive"
+              >
+                <X className="size-3.5" />
+              </button>
+            </>
+          ) : (
+            <>
+              <Input
+                className="h-7 w-20 font-mono"
+                placeholder="HHMMz"
+                maxLength={5}
+                value={hhmm}
+                onChange={(e) => setHhmm(e.target.value)}
+              />
+              <Button
+                size="sm"
+                variant="secondary"
+                disabled={hhmm.trim().length < 4}
+                onClick={() => onRelease(f.callsign, hhmm.trim())}
+              >
+                SET
+              </Button>
+              <Button size="sm" onClick={() => onRelease(f.callsign)}>
+                RDY
+              </Button>
+            </>
+          )}
+        </div>
+      )}
+    </li>
+  );
+}
+
 export function FcaDetail({
   fca,
   flights,
+  canEdit,
 }: {
   fca: Fca;
   flights: FcaFlight[] | undefined;
+  canEdit: boolean;
 }) {
   const now = Date.now();
   const list = flights ?? [];
+  const markRelease = useMarkRelease(fca.id);
+  const clearRelease = useClearRelease(fca.id);
+  const reorder = useReorderFca(fca.id);
+  const sensors = useSensors(
+    useSensor(PointerSensor, { activationConstraint: { distance: 6 } }),
+  );
 
   const stats = useMemo(() => {
     const air = list.filter((f) => f.status === "airborne").length;
@@ -141,17 +259,34 @@ export function FcaDetail({
     return { air, grd, delay, total: list.length };
   }, [list]);
 
+  function onDragEnd(e: DragEndEvent) {
+    const { active, over } = e;
+    if (!over || active.id === over.id) return;
+    const ids = list.map((f) => f.callsign);
+    const from = ids.indexOf(String(active.id));
+    const to = ids.indexOf(String(over.id));
+    if (from < 0 || to < 0) return;
+    reorder.mutate(arrayMove(ids, from, to));
+  }
+
   return (
     <div className="flex h-full w-96 shrink-0 flex-col border-l bg-background">
       <div className="flex items-center gap-2 border-b px-4 py-3">
-        <span
-          className="size-3 rounded-full"
-          style={{ background: fca.color }}
-        />
+        <span className="size-3 rounded-full" style={{ background: fca.color }} />
         <span className="font-mono font-semibold">{fca.name}</span>
         <Badge variant="secondary">
           {fca.mode === "mit" ? `${fca.mit} MIT` : `${fca.rate}/hr`}
         </Badge>
+        {fca.manual_seq && (
+          <button
+            type="button"
+            title="Reset to automatic sequencing"
+            onClick={() => reorder.mutate([])}
+            className="ml-auto flex items-center gap-1 text-xs text-muted-foreground hover:text-foreground"
+          >
+            <RotateCcw className="size-3" /> manual
+          </button>
+        )}
       </div>
 
       <div className="flex flex-wrap gap-x-4 gap-y-1 border-b px-4 py-2 text-xs">
@@ -195,47 +330,30 @@ export function FcaDetail({
             <Ladder flights={list} now={now} />
           </div>
 
-          <ul>
-            {list.map((f) => {
-              const st = statusOf(f.status);
-              return (
-                <li key={f.callsign} className="border-b px-3 py-2 text-sm">
-                  <div className="flex items-center justify-between gap-2">
-                    <span className="flex items-center gap-2">
-                      <span className="w-5 text-right tabular-nums text-muted-foreground">
-                        {f.seq}
-                      </span>
-                      <span
-                        className="rounded px-1 text-[10px] font-semibold"
-                        style={{ color: st.color, border: `1px solid ${st.color}` }}
-                      >
-                        {st.label}
-                      </span>
-                      <span className="font-mono font-semibold">{f.callsign}</span>
-                      <span className="text-xs text-muted-foreground">
-                        {f.aircraft_type}
-                      </span>
-                    </span>
-                    <span className="text-right font-mono">
-                      <span className={st.text}>{hhmmZulu(f.cross_time)}</span>
-                      {f.delay_min > 0 && (
-                        <span className="ml-1.5 text-xs text-destructive">
-                          +{f.delay_min}m
-                        </span>
-                      )}
-                    </span>
-                  </div>
-                  <div className="mt-0.5 flex items-center gap-2 pl-7 text-xs text-muted-foreground">
-                    <span className="font-mono">
-                      {f.dep}→{f.arr}
-                    </span>
-                    <span>{Math.round(f.distance_nm)}nm to line</span>
-                    {f.altitude > 0 && <span>FL{Math.round(f.altitude / 100)}</span>}
-                  </div>
-                </li>
-              );
-            })}
-          </ul>
+          <DndContext
+            sensors={sensors}
+            collisionDetection={closestCenter}
+            onDragEnd={onDragEnd}
+          >
+            <SortableContext
+              items={list.map((f) => f.callsign)}
+              strategy={verticalListSortingStrategy}
+            >
+              <ul>
+                {list.map((f) => (
+                  <Strip
+                    key={f.callsign}
+                    f={f}
+                    canEdit={canEdit}
+                    onRelease={(callsign, ready) =>
+                      markRelease.mutate({ callsign, ready })
+                    }
+                    onClear={(callsign) => clearRelease.mutate(callsign)}
+                  />
+                ))}
+              </ul>
+            </SortableContext>
+          </DndContext>
         </div>
       )}
     </div>

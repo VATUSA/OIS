@@ -441,7 +441,11 @@ export function FcaPage() {
 
       {/* Detail board for the selected FCA (metering ladder + strips). */}
       {selectedFca && !draft && (
-        <FcaDetail fca={selectedFca} flights={fcaTraffic.data} />
+        <FcaDetail
+          fca={selectedFca}
+          flights={fcaTraffic.data}
+          canEdit={canEdit}
+        />
       )}
     </div>
   );
