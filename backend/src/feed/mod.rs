@@ -3,6 +3,7 @@
 //! read to meter arrivals against rate programs.
 
 pub mod airports;
+pub mod events;
 pub mod facilities;
 pub mod flow;
 pub mod taxi;

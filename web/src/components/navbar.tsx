@@ -151,7 +151,7 @@ export function Navbar() {
   const canPrograms = hasPermission(me, "tmu.program.read");
   const canTmiRead = hasPermission(me, "tmu.tmi.read");
   const canOps = canPrograms || canTmiRead;
-  const canPlan = canTmiRead || hasPermission(me, "tmu.tmi.create");
+  const canPlan = hasPermission(me, "events.plan.read");
 
   return (
     <header className="sticky top-0 z-40 border-b bg-background/80 backdrop-blur">
@@ -213,9 +213,9 @@ export function Navbar() {
           {canPlan && (
             <NavGroup label="Planning" activePrefix="/planning">
               <DropdownMenuItem asChild>
-                <Link to="/planning/tmi">
+                <Link to="/planning/events">
                   <CalendarClock />
-                  Event TMI planning
+                  Events
                 </Link>
               </DropdownMenuItem>
             </NavGroup>

@@ -43,3 +43,6 @@ permission!(TmuGroundStopPublish, ["tmu", "groundstop"], Publish);
 permission!(TmuGroundStopDelete, ["tmu", "groundstop"], Delete);
 
 permission!(TmuCfrAssign, ["tmu", "cfr"], Assign);
+
+// events — per-event planning
+permission!(EventsPlanRead, ["events", "plan"], Read);

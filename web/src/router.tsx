@@ -8,7 +8,8 @@ import {DeparturesPage} from "@/pages/departures";
 import {MyDashboardPage} from "@/pages/my-dashboard";
 import {TaxiMonitorPage} from "@/pages/taxi";
 import {TmuPage} from "@/pages/tmu";
-import {PlanningTmiPage} from "@/pages/planning/tmi";
+import {PlanningEventsPage} from "@/pages/planning/events";
+import {EventPlanningPage} from "@/pages/planning/event";
 import {AdminLayout} from "@/pages/admin/layout";
 import {AdminOverview} from "@/pages/admin/overview";
 import {AdminAccessControl} from "@/pages/admin/access-control";
@@ -91,14 +92,20 @@ const planningIndexRoute = createRoute({
   getParentRoute: () => planningRoute,
   path: "/",
   beforeLoad: () => {
-    throw redirect({ to: "/planning/tmi" });
+    throw redirect({ to: "/planning/events" });
   },
 });
 
-const planningTmiRoute = createRoute({
+const planningEventsRoute = createRoute({
   getParentRoute: () => planningRoute,
-  path: "tmi",
-  component: PlanningTmiPage,
+  path: "events",
+  component: PlanningEventsPage,
+});
+
+const planningEventRoute = createRoute({
+  getParentRoute: () => planningRoute,
+  path: "events/$eventId",
+  component: EventPlanningPage,
 });
 
 // --- Admin ---
@@ -163,7 +170,11 @@ const routeTree = rootRoute.addChildren([
     tmuRoute,
     myDashboardRoute,
   ]),
-  planningRoute.addChildren([planningIndexRoute, planningTmiRoute]),
+  planningRoute.addChildren([
+    planningIndexRoute,
+    planningEventsRoute,
+    planningEventRoute,
+  ]),
   adminRoute.addChildren([
     adminIndexRoute,
     adminAccessRoute,
