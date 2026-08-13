@@ -254,31 +254,47 @@ function AircraftView({ flow }: { flow: Flow }) {
 function LadderView({ flow }: { flow: Flow }) {
   const [win, setWin] = useState(60);
   const now = Date.now();
-  const PX = 7;
+
+  const PX = 7; // px per minute
+  const ROW = 26; // min vertical spacing between adjacent tags
+  const GUTTER = 62; // left column for the time axis
+  const PAD = 12;
   const H = win * PX;
-  const yOf = (min: number) => H - (Math.max(min, 0) / win) * H;
+  const yOf = (min: number) => H - (Math.max(0, Math.min(min, win)) / win) * H;
   const step = win <= 90 ? 10 : win <= 180 ? 15 : 30;
 
-  const flights = flow.flights
+  // Flights in window, earliest (nearest NOW) first — bottom to top.
+  const items = flow.flights
     .filter((f) => f.status !== "arrived" && !f.excluded && f.eta)
     .map((f) => ({ f, min: minutesUntil(f.eta, now)! }))
     .filter((x) => x.min >= -1 && x.min <= win)
     .sort((a, b) => a.min - b.min);
 
-  const lanes = [8, 172, 336];
-  let prevY = Infinity;
-  let lane = 0;
+  // Declutter: walk bottom→top, pushing each tag up so labels never overlap.
+  let lastY = H + ROW;
+  const placed = items.map(({ f, min }) => {
+    const y = Math.min(yOf(min), lastY - ROW);
+    lastY = y;
+    return { f, min, y };
+  });
+  // Shift the whole stack down if decluttering pushed the top tag off-canvas.
+  const topY = placed.length ? placed[placed.length - 1].y : H;
+  const shift = topY < PAD ? PAD - topY : 0;
+  const contentH = H + shift + PAD;
 
   const gridlines = [];
   for (let k = 0; k <= win / step; k++) {
     const min = k * step;
-    const y = yOf(min);
+    const y = yOf(min) + shift;
     gridlines.push(
       <div key={`g${k}`}>
-        <div className="absolute left-0 right-0 border-t border-border/50" style={{ top: y }} />
+        <div
+          className="absolute border-t border-border/40"
+          style={{ top: y, left: GUTTER, right: 0 }}
+        />
         <span
-          className="absolute left-0 font-mono text-[10px] text-muted-foreground"
-          style={{ top: y - 12 }}
+          className="absolute font-mono text-[10px] text-muted-foreground"
+          style={{ top: y - 6, left: 0, width: GUTTER - 12, textAlign: "right" }}
         >
           {hhmmZulu(new Date(now + min * 60000).toISOString())}
         </span>
@@ -313,39 +329,54 @@ function LadderView({ flow }: { flow: Flow }) {
           </div>
         </div>
         <div className="overflow-x-auto">
-          <div className="relative ml-10" style={{ height: H, minWidth: 480 }}>
-            {gridlines}
+          <div className="relative" style={{ height: contentH, minWidth: 360 }}>
+            {/* vertical time axis */}
             <div
-              className="absolute left-0 right-0 border-t-2 border-primary"
-              style={{ top: yOf(0) }}
+              className="absolute top-0 bottom-0 border-l border-border/60"
+              style={{ left: GUTTER }}
+            />
+            {gridlines}
+
+            {/* NOW baseline */}
+            <div
+              className="absolute border-t-2 border-primary"
+              style={{ top: yOf(0) + shift, left: GUTTER, right: 0 }}
             >
-              <span className="absolute -top-2 -left-10 text-[10px] font-semibold text-primary">
+              <span
+                className="absolute -top-2 text-[10px] font-semibold text-primary"
+                style={{ left: 0, width: GUTTER - 12, textAlign: "right" }}
+              >
                 NOW
               </span>
             </div>
-            {flights.length === 0 && (
+
+            {placed.length === 0 && (
               <div className="absolute inset-x-0 top-1/2 text-center text-sm text-muted-foreground">
                 No ETAs in window
               </div>
             )}
-            {flights.map(({ f, min }) => {
-              const y = yOf(min);
-              lane = prevY - y < 20 ? (lane + 1) % lanes.length : 0;
-              prevY = y;
+
+            {placed.map(({ f, y }) => {
               const st = STATUS_STYLE[f.status] ?? STATUS_STYLE.arrived;
               return (
                 <div
                   key={f.callsign}
-                  className="absolute flex items-center gap-1"
-                  style={{ top: y - 9, left: lanes[lane] }}
+                  className="absolute flex items-center"
+                  style={{ top: y + shift - 11, left: GUTTER }}
                 >
+                  {/* connector tick to the axis */}
                   <span
-                    className={`rounded border-l-4 bg-muted/60 px-1.5 py-0.5 text-xs ${f.status === "proposed" ? "opacity-70" : ""}`}
-                    style={{ borderColor: st.color }}
+                    className="h-0.5 w-3 shrink-0"
+                    style={{ backgroundColor: st.color }}
+                  />
+                  <span
+                    className={`flex items-center gap-2 rounded-md border border-border/70 bg-muted/40 py-1 pl-2 pr-2.5 text-xs ${f.status === "proposed" ? "opacity-75" : ""}`}
+                    style={{ borderLeftWidth: 3, borderLeftColor: st.color }}
                   >
-                    <span className={`mr-1 inline-block size-1.5 rounded-full ${st.dot}`} />
-                    <span className="font-mono font-medium">{f.callsign}</span>{" "}
-                    <span className="font-mono text-muted-foreground">{hhmmZulu(f.eta)}</span>
+                    <span className="font-mono font-medium">{f.callsign}</span>
+                    <span className="font-mono text-muted-foreground">
+                      {hhmmZulu(f.eta)}
+                    </span>
                   </span>
                 </div>
               );
