@@ -7,7 +7,8 @@ use crate::{
     auth::middleware::resolve_current_user,
     config::build_cors_layer,
     handlers::{
-        access, audit, auth, docs, events, facilities, feed, health, service_accounts, tmu, users,
+        access, audit, auth, docs, events, facilities, feed, flow, health, service_accounts, tmu,
+        users,
     },
     state::AppState,
 };
@@ -114,6 +115,16 @@ pub fn build_router(state: AppState) -> Router {
             "/api/v1/events/{id}/packages/{package_id}/activate",
             post(events::activate_event_package),
         )
+        // Flow constrained areas (FCAs) + live map traffic
+        .route(
+            "/api/v1/flow/fcas",
+            get(flow::list_fcas).post(flow::create_fca),
+        )
+        .route(
+            "/api/v1/flow/fcas/{id}",
+            put(flow::update_fca).delete(flow::delete_fca),
+        )
+        .route("/api/v1/flow/traffic", get(flow::list_traffic))
         // Live VATSIM feed
         .route("/api/v1/feed/status", get(feed::feed_status))
         .route("/api/v1/tmu/flow/{icao}", get(feed::airport_flow))

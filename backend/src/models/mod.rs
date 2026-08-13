@@ -398,6 +398,83 @@ pub struct AddPackageItemRequest {
     pub payload: Value,
 }
 
+// --- flow constrained areas (FCAs) ---
+
+/// A Flow Constrained Area — a drawn polyline the metering engine sequences traffic against.
+#[derive(Debug, Serialize, ToSchema, sqlx::FromRow)]
+pub struct FcaBody {
+    pub id: String,
+    pub name: String,
+    pub color: String,
+    pub artcc: String,
+    /// Polyline vertices as `[lat, lon]` pairs (>= 2).
+    #[schema(value_type = Vec<Vec<f64>>)]
+    pub points: sqlx::types::Json<Vec<[f64; 2]>>,
+    pub dests: Vec<String>,
+    pub origins: Vec<String>,
+    pub fixes: Vec<String>,
+    pub scope: Vec<String>,
+    pub min_fl: Option<i32>,
+    pub max_fl: Option<i32>,
+    /// any | N | S | E | W
+    pub dir: String,
+    /// rate | mit
+    pub mode: String,
+    pub rate: i32,
+    pub mit: i32,
+    pub enabled: bool,
+    pub updated_at: DateTime<Utc>,
+    pub updated_by: Option<String>,
+}
+
+#[derive(Debug, Deserialize, ToSchema)]
+pub struct UpsertFcaRequest {
+    pub name: String,
+    #[serde(default)]
+    pub color: Option<String>,
+    #[serde(default)]
+    pub artcc: String,
+    /// Polyline vertices as `[lat, lon]` pairs (>= 2).
+    #[schema(value_type = Vec<Vec<f64>>)]
+    pub points: Vec<[f64; 2]>,
+    #[serde(default)]
+    pub dests: Vec<String>,
+    #[serde(default)]
+    pub origins: Vec<String>,
+    #[serde(default)]
+    pub fixes: Vec<String>,
+    #[serde(default)]
+    pub scope: Vec<String>,
+    #[serde(default)]
+    pub min_fl: Option<i32>,
+    #[serde(default)]
+    pub max_fl: Option<i32>,
+    #[serde(default)]
+    pub dir: Option<String>,
+    #[serde(default)]
+    pub mode: Option<String>,
+    #[serde(default)]
+    pub rate: Option<i32>,
+    #[serde(default)]
+    pub mit: Option<i32>,
+    #[serde(default)]
+    pub enabled: Option<bool>,
+}
+
+/// A lightweight live-traffic record for plotting on the FCA map.
+#[derive(Debug, Serialize, ToSchema)]
+pub struct TrafficAircraft {
+    pub callsign: String,
+    pub lat: f64,
+    pub lon: f64,
+    pub heading: i64,
+    pub gs: i64,
+    pub alt: i64,
+    pub dep: String,
+    pub arr: String,
+    pub actype: String,
+}
+
 // --- TMU rate programs ---
 
 /// One per-gate restriction inside a program: an arrival fix/STAR with its own spacing.

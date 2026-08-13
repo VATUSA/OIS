@@ -53,3 +53,8 @@ permission!(
     ["events", "staffing_requests"],
     Create
 );
+
+// flow — flow constrained areas (FCAs)
+permission!(FlowFcaRead, ["flow", "fca"], Read);
+permission!(FlowFcaUpdate, ["flow", "fca"], Update);
+permission!(FlowFcaDelete, ["flow", "fca"], Delete);
