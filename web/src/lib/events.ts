@@ -1,9 +1,12 @@
-import {useQuery} from "@tanstack/react-query";
+import {useMutation, useQuery, useQueryClient} from "@tanstack/react-query";
 import type {components} from "@ois/api-client";
+import {useToast} from "@ois/ui";
 
 import {ois} from "./api";
 
 export type EventSummary = components["schemas"]["EventBody"];
+export type Dcc = components["schemas"]["DccRequestBody"];
+export type UpdateDcc = components["schemas"]["UpdateDccRequest"];
 
 /** Upcoming (and in-progress) VATUSA events, soonest first. */
 export function useUpcomingEvents() {
@@ -29,6 +32,41 @@ export function useEvent(id: number) {
       return data;
     },
     enabled: Number.isFinite(id),
+  });
+}
+
+/** DCC support state for one event (defaults to not_needed when unset). */
+export function useDcc(eventId: number) {
+  return useQuery({
+    queryKey: ["event-dcc", eventId],
+    queryFn: async () => {
+      const { data, error } = await ois.GET("/api/v1/events/{id}/dcc", {
+        params: { path: { id: eventId } },
+      });
+      if (error || !data) throw new Error("failed to load DCC support");
+      return data;
+    },
+    enabled: Number.isFinite(eventId),
+  });
+}
+
+export function useUpdateDcc(eventId: number) {
+  const queryClient = useQueryClient();
+  const toast = useToast();
+  return useMutation({
+    mutationFn: async (body: UpdateDcc) => {
+      const { data, error } = await ois.PUT("/api/v1/events/{id}/dcc", {
+        params: { path: { id: eventId } },
+        body,
+      });
+      if (error || !data) throw new Error("save failed");
+      return data;
+    },
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ["event-dcc", eventId] });
+      toast.success("DCC support updated");
+    },
+    onError: () => toast.error("Couldn’t update DCC support"),
   });
 }
 

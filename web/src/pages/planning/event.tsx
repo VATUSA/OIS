@@ -1,11 +1,12 @@
 import {Badge, Card, CardContent} from "@ois/ui";
 import {Link, useParams} from "@tanstack/react-router";
-import {ArrowLeft, CalendarClock, Gauge, Layers, type LucideIcon, Radio, Users, Waypoints,} from "lucide-react";
+import {ArrowLeft, CalendarClock, Gauge, Layers, type LucideIcon, Users, Waypoints,} from "lucide-react";
 
 import {useMe} from "@/lib/auth";
 import {eventBodyText, useEvent} from "@/lib/events";
 import {hasPermission} from "@/lib/permissions";
 import {formatZulu} from "@/lib/time";
+import {DccSection} from "@/pages/planning/dcc";
 
 type Module = {
   icon: LucideIcon;
@@ -19,11 +20,6 @@ const MODULES: Module[] = [
     title: "TMI packages",
     description:
       "Draft the programs, restrictions, and ground stops for the event, then activate them live.",
-  },
-  {
-    icon: Radio,
-    title: "DCC support",
-    description: "Flag whether the event needs national DCC coverage.",
   },
   {
     icon: Waypoints,
@@ -165,10 +161,11 @@ export function EventPlanningPage() {
       </Card>
 
       {/* Planning modules */}
-      <div>
-        <h2 className="mb-3 text-sm font-medium uppercase tracking-wide text-muted-foreground">
+      <div className="flex flex-col gap-4">
+        <h2 className="text-sm font-medium uppercase tracking-wide text-muted-foreground">
           Planning
         </h2>
+        <DccSection eventId={id} />
         <div className="grid gap-4 sm:grid-cols-2 lg:grid-cols-3">
           {MODULES.map((mod) => (
             <ModuleCard key={mod.title} mod={mod} />

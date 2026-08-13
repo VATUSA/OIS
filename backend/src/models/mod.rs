@@ -276,6 +276,25 @@ pub struct EventBody {
     pub review_status: String,
 }
 
+/// Whether an event needs national DCC support.
+#[derive(Debug, Serialize, ToSchema, sqlx::FromRow)]
+pub struct DccRequestBody {
+    /// not_needed | requested | confirmed
+    pub status: String,
+    pub notes: String,
+    pub updated_at: Option<DateTime<Utc>>,
+    /// Display name of whoever last set it.
+    pub updated_by: Option<String>,
+}
+
+#[derive(Debug, Deserialize, ToSchema)]
+pub struct UpdateDccRequest {
+    /// not_needed | requested | confirmed
+    pub status: String,
+    #[serde(default)]
+    pub notes: Option<String>,
+}
+
 // --- TMU rate programs ---
 
 /// One per-gate restriction inside a program: an arrival fix/STAR with its own spacing.
