@@ -4,9 +4,10 @@ import {useMe} from "@/lib/auth";
 import {hasPermission} from "@/lib/permissions";
 import {GroundStopsTab} from "@/pages/tmu/ground-stops";
 import {ProgramsTab} from "@/pages/tmu/programs";
+import {RateCalculatorTab} from "@/pages/tmu/rate-calc";
 import {RestrictionsTab} from "@/pages/tmu/restrictions";
 
-type Tab = "programs" | "restrictions" | "ground-stops";
+type Tab = "programs" | "restrictions" | "ground-stops" | "rate-calculator";
 
 export function TmuPage() {
   const { data: me } = useMe();
@@ -18,6 +19,7 @@ export function TmuPage() {
     canPrograms && { id: "programs" as const, label: "Programs" },
     canRestrictions && { id: "restrictions" as const, label: "Restrictions" },
     canGroundStops && { id: "ground-stops" as const, label: "Ground stops" },
+    canPrograms && { id: "rate-calculator" as const, label: "Rate calculator" },
   ].filter(Boolean) as { id: Tab; label: string }[];
 
   const [tab, setTab] = useState<Tab>(tabs[0]?.id ?? "programs");
@@ -57,6 +59,7 @@ export function TmuPage() {
       {active === "programs" && <ProgramsTab />}
       {active === "restrictions" && <RestrictionsTab />}
       {active === "ground-stops" && <GroundStopsTab />}
+      {active === "rate-calculator" && <RateCalculatorTab />}
     </div>
   );
 }

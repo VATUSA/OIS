@@ -286,6 +286,8 @@ pub struct ProgramBody {
     pub exclude_wake: Vec<String>,
     pub exclude_types: Vec<String>,
     pub jets_only: bool,
+    /// Scheduled end; null = indefinite. Auto-removed an hour after this time.
+    pub active_until: Option<DateTime<Utc>>,
     pub updated_at: DateTime<Utc>,
     /// Display name of whoever last edited the program.
     pub updated_by: Option<String>,
@@ -307,6 +309,8 @@ pub struct UpsertProgramRequest {
     pub exclude_types: Vec<String>,
     #[serde(default)]
     pub jets_only: bool,
+    #[serde(default)]
+    pub active_until: Option<DateTime<Utc>>,
 }
 
 // --- service accounts ---
