@@ -12,15 +12,30 @@ use utoipa::ToSchema;
 use super::airports::AirportDb;
 use super::vatsim::VatsimData;
 
+/// Nominal arrival-stream groundspeed used to convert miles-in-trail to a time gap.
+const MIT_NOMINAL_KT: f64 = 360.0; // 6 nm/min
+
+/// A per-gate spacing rule (subset of `GateRule` the scheduler needs).
+pub struct GateSpacing {
+    pub name: String,
+    pub trail: i32,
+    pub mit: i32,
+}
+
 /// The program fields that affect metering. Built from a `ProgramBody` by the handler.
 pub struct ProgramInputs {
     pub aar: i32,
+    /// Airport-wide minutes-in-trail default.
+    pub trail: i32,
+    /// Airport-wide miles-in-trail (overrides `trail` when > 0).
+    pub mit: i32,
+    pub gates: Vec<GateSpacing>,
     pub exclude_wake: Vec<String>,
     pub exclude_types: Vec<String>,
     pub jets_only: bool,
 }
 
-#[derive(Debug, Serialize, ToSchema)]
+#[derive(Debug, Default, Serialize, ToSchema)]
 pub struct FlowFlight {
     pub callsign: String,
     pub dep: String,
@@ -34,6 +49,14 @@ pub struct FlowFlight {
     pub groundspeed: i64,
     /// True when a program excludes this aircraft from metering (still shown).
     pub excluded: bool,
+    /// Metered (scheduled) time of arrival after CFR/EDCT sequencing; null if unmetered.
+    pub sta: Option<DateTime<Utc>>,
+    /// Metering delay in minutes (0 if none / unmetered).
+    pub delay_min: i64,
+    /// Sequence number in the metered arrival order; null if unmetered.
+    pub seq: Option<i64>,
+    /// Proposed wheels-up (EDCT / Call-For-Release) for ground & proposed flights.
+    pub cfr: Option<DateTime<Utc>>,
 }
 
 #[derive(Debug, Serialize, ToSchema)]
@@ -69,6 +92,9 @@ pub fn compute(
 ) -> Flow {
     let arr = airports.get(icao).copied();
     let mut flights: Vec<FlowFlight> = Vec::new();
+    // Estimated departure time (ms) per flight, aligned with `flights`; used to back out
+    // wheels-up (CFR) from the metered STA. None for airborne/arrived (already flying).
+    let mut etd_ms: Vec<Option<i64>> = Vec::new();
 
     for p in &data.pilots {
         let Some(fp) = &p.flight_plan else { continue };
@@ -95,7 +121,9 @@ pub fn compute(
                 eta: Some(now),
                 groundspeed: p.groundspeed,
                 excluded,
+                ..Default::default()
             });
+            etd_ms.push(None);
         } else if airborne && dist_to_arr.is_some() {
             let dist = dist_to_arr.unwrap();
             let gs = (p.groundspeed.max(120)) as f64;
@@ -117,7 +145,9 @@ pub fn compute(
                 eta: Some(now + minutes(ete_min)),
                 groundspeed: p.groundspeed,
                 excluded,
+                ..Default::default()
             });
+            etd_ms.push(None);
         } else {
             // On the ground (or position-less): estimate a full route flight time.
             let (route_nm, ft_min) = ground_estimate(&dep, arr, fp, airports);
@@ -131,7 +161,10 @@ pub fn compute(
                 eta: Some(now + minutes(ft_min)),
                 groundspeed: p.groundspeed,
                 excluded,
+                ..Default::default()
             });
+            // Assumed ready-to-go now; CFR delay (if any) is the only hold.
+            etd_ms.push(Some(now.timestamp_millis()));
         }
     }
 
@@ -159,7 +192,14 @@ pub fn compute(
             eta: Some(etd + minutes(ft_min)),
             groundspeed: 0,
             excluded,
+            ..Default::default()
         });
+        etd_ms.push(Some(etd.timestamp_millis()));
+    }
+
+    // Metering runs only when a program (AAR) exists — it's the opt-in TMU feature.
+    if let Some(pg) = program {
+        apply_metering(&mut flights, &etd_ms, pg, now);
     }
 
     let horizon = now + Duration::hours(1);
@@ -201,6 +241,135 @@ fn is_excluded(ty: &str, wake: &str, pg: &ProgramInputs) -> bool {
         }
     }
     false
+}
+
+/// Same-route in-trail interval (ms) from a spacing rule: MIT (converted at the nominal
+/// arrival speed) if set, else minutes-in-trail — never below the runway interval.
+fn route_interval_ms(trail: i32, mit: i32, runway_ms: f64) -> f64 {
+    let ri = if mit > 0 {
+        (mit as f64 / MIT_NOMINAL_KT) * 3_600_000.0
+    } else {
+        trail as f64 * 60_000.0
+    };
+    runway_ms.max(ri)
+}
+
+/// In-trail interval (ms) for a specific arrival gate: a matching per-gate rule wins,
+/// else the program-wide trail/MIT, never below the runway interval.
+fn gate_spacing_ms(pg: &ProgramInputs, runway_ms: f64, gate: &str) -> f64 {
+    if let Some(g) = pg.gates.iter().find(|g| g.name == gate) {
+        return route_interval_ms(g.trail, g.mit, runway_ms);
+    }
+    route_interval_ms(pg.trail, pg.mit, runway_ms)
+}
+
+fn eta_ms(f: &FlowFlight, now_ms: i64) -> i64 {
+    f.eta.map(|e| e.timestamp_millis()).unwrap_or(now_ms)
+}
+
+/// Two-tier CFR/EDCT scheduler (ported from vatflow). Airborne traffic flies its ETA and
+/// is only delayed by runway + same-gate in-trail spacing; ground/proposed traffic slots
+/// into the remaining capacity, absorbing its delay on the ground as a wheels-up (CFR).
+/// Fills `sta`, `delay_min`, `seq`, and `cfr` on each metered flight.
+fn apply_metering(
+    flights: &mut [FlowFlight],
+    etd_ms: &[Option<i64>],
+    pg: &ProgramInputs,
+    now: DateTime<Utc>,
+) {
+    let now_ms = now.timestamp_millis();
+    let runway = 3_600_000.0 / pg.aar.max(1) as f64; // runway interval (ms)
+
+    let metered: Vec<usize> = (0..flights.len())
+        .filter(|&i| !flights[i].excluded && flights[i].status != "arrived")
+        .collect();
+
+    let mut airborne: Vec<usize> = metered
+        .iter()
+        .copied()
+        .filter(|&i| flights[i].status == "airborne")
+        .collect();
+    airborne.sort_by_key(|&i| eta_ms(&flights[i], now_ms));
+
+    let mut ground: Vec<usize> = metered
+        .iter()
+        .copied()
+        .filter(|&i| matches!(flights[i].status.as_str(), "ground" | "proposed"))
+        .collect();
+    ground.sort_by_key(|&i| eta_ms(&flights[i], now_ms));
+
+    let mut assigned: Vec<(f64, String)> = Vec::new(); // (sta_ms, gate)
+    let mut prev_sta = f64::NEG_INFINITY;
+    let mut last_gate_sta: HashMap<String, f64> = HashMap::new();
+
+    // Tier 1 — airborne fly their ETA, delayed only by runway + same-gate in-trail.
+    for &i in &airborne {
+        let eta = eta_ms(&flights[i], now_ms) as f64;
+        let mut sta = eta.max(prev_sta + runway);
+        if let Some(g) = &flights[i].gate {
+            if let Some(&lg) = last_gate_sta.get(g) {
+                sta = sta.max(lg + gate_spacing_ms(pg, runway, g));
+            }
+        }
+        write_meter(&mut flights[i], sta, eta, etd_ms[i]);
+        prev_sta = sta;
+        if let Some(g) = flights[i].gate.clone() {
+            last_gate_sta.insert(g, sta);
+        }
+        assigned.push((sta, flights[i].gate.clone().unwrap_or_default()));
+    }
+
+    // Tier 2 — ground/proposed slot into the first gap clear of every assigned slot.
+    for &i in &ground {
+        let eta = eta_ms(&flights[i], now_ms) as f64;
+        let gate = flights[i].gate.clone();
+        let mut cand = eta;
+        let mut moved = true;
+        while moved {
+            moved = false;
+            for (t, sg) in &assigned {
+                let req = match &gate {
+                    Some(g) if !sg.is_empty() && g == sg => gate_spacing_ms(pg, runway, g),
+                    _ => runway,
+                };
+                if (cand - t).abs() < req {
+                    cand = t + req;
+                    moved = true;
+                }
+            }
+        }
+        write_meter(&mut flights[i], cand, eta, etd_ms[i]);
+        assigned.push((cand, gate.unwrap_or_default()));
+    }
+
+    // Sequence numbers follow the metered arrival order.
+    let mut order = metered;
+    order.sort_by(|&a, &b| {
+        let sa = flights[a]
+            .sta
+            .map(|s| s.timestamp_millis())
+            .unwrap_or(i64::MAX);
+        let sb = flights[b]
+            .sta
+            .map(|s| s.timestamp_millis())
+            .unwrap_or(i64::MAX);
+        sa.cmp(&sb)
+    });
+    for (n, &i) in order.iter().enumerate() {
+        flights[i].seq = Some(n as i64 + 1);
+    }
+}
+
+/// Write the metering outputs onto a flight: STA, delay, and (for ground/proposed) the
+/// wheels-up CFR — which is the original ETD pushed back by the metering delay.
+fn write_meter(f: &mut FlowFlight, sta_ms: f64, eta_ms: f64, etd_ms: Option<i64>) {
+    let sta = sta_ms as i64;
+    f.sta = DateTime::from_timestamp_millis(sta);
+    let delay = sta - eta_ms as i64;
+    f.delay_min = (delay.max(0) as f64 / 60_000.0).round() as i64;
+    if let Some(etd) = etd_ms {
+        f.cfr = DateTime::from_timestamp_millis(etd + delay.max(0));
+    }
 }
 
 /// Route length (nm) and full flight time (min) for a ground/proposed flight.

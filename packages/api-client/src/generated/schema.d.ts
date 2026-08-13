@@ -551,6 +551,16 @@ export interface components {
         FlowFlight: {
             aircraft_type: string;
             callsign: string;
+            /**
+             * Format: date-time
+             * @description Proposed wheels-up (EDCT / Call-For-Release) for ground & proposed flights.
+             */
+            cfr?: string | null;
+            /**
+             * Format: int64
+             * @description Metering delay in minutes (0 if none / unmetered).
+             */
+            delay_min: number;
             dep: string;
             /** Format: double */
             distance_nm?: number | null;
@@ -562,6 +572,16 @@ export interface components {
             gate?: string | null;
             /** Format: int64 */
             groundspeed: number;
+            /**
+             * Format: int64
+             * @description Sequence number in the metered arrival order; null if unmetered.
+             */
+            seq?: number | null;
+            /**
+             * Format: date-time
+             * @description Metered (scheduled) time of arrival after CFR/EDCT sequencing; null if unmetered.
+             */
+            sta?: string | null;
             /** @description `airborne` | `ground` | `proposed` | `arrived`. */
             status: string;
         };
