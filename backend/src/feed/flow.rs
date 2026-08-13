@@ -455,6 +455,64 @@ fn write_meter(f: &mut FlowFlight, sta_ms: f64, eta_ms: f64, etd_ms: Option<i64>
     }
 }
 
+/// Given a pilot's ready wheels-up, return the earliest runway slot at or after it that is
+/// clear of every other metered arrival — i.e. the wheels-up to lock. `icao`/`callsign`
+/// uppercase. Returns None if the flight isn't a metered ground/proposed departure.
+pub fn ready_time_slot(
+    icao: &str,
+    program: &ProgramInputs,
+    data: &VatsimData,
+    airports: &AirportDb,
+    issued: &HashMap<String, DateTime<Utc>>,
+    callsign: &str,
+    ready: DateTime<Utc>,
+    now: DateTime<Utc>,
+) -> Option<DateTime<Utc>> {
+    let flow = compute(icao, Some(program), data, airports, issued, now);
+    let target = flow.flights.iter().find(|f| f.callsign == callsign)?;
+    // enroute time = STA - proposed wheels-up (both already computed for this flight)
+    let sta = target.sta?.timestamp_millis();
+    let cfr = target.cfr?.timestamp_millis();
+    let flight_ms = sta - cfr;
+    let runway = 3_600_000.0 / program.aar.max(1) as f64;
+    let gate = target.gate.clone();
+
+    // Every other metered arrival's assigned slot.
+    let assigned: Vec<(f64, String)> = flow
+        .flights
+        .iter()
+        .filter(|f| {
+            f.callsign != callsign && !f.excluded && f.status != "arrived" && f.sta.is_some()
+        })
+        .map(|f| {
+            (
+                f.sta.unwrap().timestamp_millis() as f64,
+                f.gate.clone().unwrap_or_default(),
+            )
+        })
+        .collect();
+
+    // Slot the flight's arrival from (ready + enroute) forward past any conflicts. Never
+    // earlier than now — a release can't be issued in the past.
+    let base_ms = ready.timestamp_millis().max(now.timestamp_millis());
+    let mut cand = (base_ms + flight_ms) as f64;
+    let mut moved = true;
+    while moved {
+        moved = false;
+        for (t, sg) in &assigned {
+            let req = match &gate {
+                Some(g) if !sg.is_empty() && g == sg => gate_spacing_ms(program, runway, g),
+                _ => runway,
+            };
+            if (cand - t).abs() < req {
+                cand = t + req;
+                moved = true;
+            }
+        }
+    }
+    DateTime::from_timestamp_millis(cand as i64 - flight_ms)
+}
+
 /// Route length (nm) and full flight time (min) for a ground/proposed flight.
 fn ground_estimate(
     dep: &str,

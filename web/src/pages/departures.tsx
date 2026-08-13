@@ -4,7 +4,7 @@ import {Badge, Button, Card, CardContent, Input} from "@ois/ui";
 import {useMe} from "@/lib/auth";
 import {type Departure, useDepartures, useIssueCfr, useReleaseCfr,} from "@/lib/departures";
 import {hasPermission} from "@/lib/permissions";
-import {hhmmZulu} from "@/lib/time";
+import {hhmmZulu, parseHhmm} from "@/lib/time";
 
 function delayClass(min: number): string {
   if (min >= 15) return "text-destructive";
@@ -15,9 +15,19 @@ function delayClass(min: number): string {
 function DepartureRow({ d, canIssue }: { d: Departure; canIssue: boolean }) {
   const issue = useIssueCfr();
   const release = useReleaseCfr();
+  const [ready, setReady] = useState("");
   const busy = issue.isPending || release.isPending;
   const now = Date.now();
   const releaseNow = d.cfr ? new Date(d.cfr).getTime() <= now + 60_000 : false;
+
+  function setReadyTime() {
+    const iso = parseHhmm(ready);
+    if (!iso) return;
+    issue.mutate(
+      { callsign: d.callsign, airport: d.arrival, readyTime: iso },
+      { onSuccess: () => setReady("") },
+    );
+  }
 
   return (
     <tr className="border-t">
@@ -43,6 +53,29 @@ function DepartureRow({ d, canIssue }: { d: Departure; canIssue: boolean }) {
           </span>
         ) : (
           "—"
+        )}
+      </td>
+      <td className="py-2 pr-3">
+        {d.has_program && !d.cfr_issued && canIssue ? (
+          <div className="flex items-center gap-1">
+            <Input
+              className="h-8 w-20 font-mono text-xs"
+              placeholder="HHMMz"
+              value={ready}
+              onChange={(e) => setReady(e.target.value)}
+              onKeyDown={(e) => e.key === "Enter" && setReadyTime()}
+            />
+            <Button
+              size="sm"
+              variant="secondary"
+              disabled={busy || !parseHhmm(ready)}
+              onClick={setReadyTime}
+            >
+              Set
+            </Button>
+          </div>
+        ) : (
+          <span className="text-muted-foreground">—</span>
         )}
       </td>
       <td className="py-2 pr-3">
@@ -220,6 +253,7 @@ export function DeparturesPage() {
                         <th className="pb-2 pr-3 font-medium">ETA</th>
                         <th className="pb-2 pr-3 text-right font-medium">Delay</th>
                         <th className="pb-2 pr-3 text-right font-medium">CFR</th>
+                        <th className="pb-2 pr-3 font-medium">Ready</th>
                         <th className="pb-2 pr-3 font-medium" />
                         <th className="pb-2" />
                       </tr>
