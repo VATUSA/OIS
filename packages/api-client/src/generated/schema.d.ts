@@ -1020,13 +1020,23 @@ export interface components {
             cross_lat: number;
             /** Format: double */
             cross_lon: number;
+            /**
+             * Format: date-time
+             * @description Metered crossing time (after sequencing).
+             */
+            cross_time?: string | null;
+            /** Format: int64 */
+            delay_min: number;
             dep: string;
             /**
              * Format: int64
              * @description Distance along the (remaining) route to the crossing, nm.
              */
             distance_nm: number;
-            /** Format: date-time */
+            /**
+             * Format: date-time
+             * @description Unmetered ETA to the crossing.
+             */
             eta?: string | null;
             /** Format: int64 */
             groundspeed: number;
@@ -1036,6 +1046,11 @@ export interface components {
             lat: number;
             /** Format: double */
             lon: number;
+            /**
+             * Format: int64
+             * @description 1-based sequence in the metered order.
+             */
+            seq: number;
             /** @description airborne | ground | proposed */
             status: string;
         };

@@ -242,6 +242,7 @@ pub async fn fca_traffic(
     let airports = &guard.airports;
     let nav = state.nav.as_ref();
     let mut out: Vec<FcaFlight> = Vec::new();
+    let mut metas: Vec<fca::MeterInput> = Vec::new();
 
     // Connected pilots — airborne or on the ground.
     for p in &snap.data.pilots {
@@ -264,6 +265,13 @@ pub async fn fca_traffic(
         ) else {
             continue;
         };
+        let eta = eta_to_crossing(airborne, cross.along_nm, p.groundspeed, &fp.cruise_tas, now);
+        let tas = fp.cruise_tas.parse::<f64>().unwrap_or(0.0);
+        metas.push(fca::MeterInput {
+            eta_ms: eta.map(|e| e.timestamp_millis()).unwrap_or(0),
+            airborne,
+            cross_speed: if airborne { p.groundspeed as f64 } else { tas },
+        });
         out.push(FcaFlight {
             callsign: p.callsign.clone(),
             dep: fp.departure.clone(),
@@ -275,7 +283,10 @@ pub async fn fca_traffic(
             cross_lat: cross.lat,
             cross_lon: cross.lon,
             distance_nm: cross.along_nm.round() as i64,
-            eta: eta_to_crossing(airborne, cross.along_nm, p.groundspeed, &fp.cruise_tas, now),
+            eta,
+            cross_time: None,
+            delay_min: 0,
+            seq: 0,
             groundspeed: p.groundspeed,
             altitude: p.altitude,
             heading: p.heading,
@@ -306,6 +317,12 @@ pub async fn fca_traffic(
             .get(&fp.departure.to_ascii_uppercase())
             .copied()
             .unwrap_or((0.0, 0.0));
+        let eta = eta_to_crossing(false, cross.along_nm, 0, &fp.cruise_tas, now);
+        metas.push(fca::MeterInput {
+            eta_ms: eta.map(|e| e.timestamp_millis()).unwrap_or(0),
+            airborne: false,
+            cross_speed: fp.cruise_tas.parse::<f64>().unwrap_or(0.0),
+        });
         out.push(FcaFlight {
             callsign: pf.callsign.clone(),
             dep: fp.departure.clone(),
@@ -317,13 +334,23 @@ pub async fn fca_traffic(
             cross_lat: cross.lat,
             cross_lon: cross.lon,
             distance_nm: cross.along_nm.round() as i64,
-            eta: eta_to_crossing(false, cross.along_nm, 0, &fp.cruise_tas, now),
+            eta,
+            cross_time: None,
+            delay_min: 0,
+            seq: 0,
             groundspeed: 0,
             altitude: 0,
             heading: 0,
         });
     }
 
-    out.sort_by_key(|f| f.eta);
+    // Sequence the crossing traffic (airborne priority; ground floats into gaps).
+    let metered = fca::meter(&metas, &fca.mode, fca.rate, fca.mit);
+    for (f, m) in out.iter_mut().zip(&metered) {
+        f.cross_time = DateTime::from_timestamp_millis(m.sched_ms);
+        f.delay_min = (m.delay_sec + 30) / 60;
+        f.seq = m.seq;
+    }
+    out.sort_by_key(|f| f.seq);
     Ok(Json(out))
 }

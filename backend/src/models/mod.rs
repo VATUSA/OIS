@@ -477,7 +477,13 @@ pub struct FcaFlight {
     pub cross_lon: f64,
     /// Distance along the (remaining) route to the crossing, nm.
     pub distance_nm: i64,
+    /// Unmetered ETA to the crossing.
     pub eta: Option<DateTime<Utc>>,
+    /// Metered crossing time (after sequencing).
+    pub cross_time: Option<DateTime<Utc>>,
+    pub delay_min: i64,
+    /// 1-based sequence in the metered order.
+    pub seq: i64,
     pub groundspeed: i64,
     pub altitude: i64,
     pub heading: i64,
