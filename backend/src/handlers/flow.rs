@@ -274,31 +274,68 @@ pub async fn aircraft_route(
         .snapshot
         .as_ref()
         .ok_or(ApiError::ServiceUnavailable)?;
-    let fp = snap
+    let airports = &guard.airports;
+    let nav = state.nav.as_ref();
+
+    // Connected pilot: draw the remaining route from its live position.
+    if let Some(p) = snap
         .data
         .pilots
         .iter()
         .find(|p| p.callsign.eq_ignore_ascii_case(&cs))
-        .and_then(|p| p.flight_plan.as_ref())
-        .or_else(|| {
-            snap.data
-                .prefiles
-                .iter()
-                .find(|pf| pf.callsign.eq_ignore_ascii_case(&cs))
-                .and_then(|pf| pf.flight_plan.as_ref())
-        })
-        .ok_or(ApiError::NotFound)?;
-    let points = fca::full_route(
-        state.nav.as_ref(),
-        &guard.airports,
-        &fp.departure,
-        &fp.arrival,
-        &fp.route,
-    );
-    Ok(Json(AircraftRoute {
-        callsign: cs,
-        points,
-    }))
+    {
+        let fp = p.flight_plan.as_ref().ok_or(ApiError::NotFound)?;
+        let (_, unresolved) =
+            fca::full_route_verbose(nav, airports, &fp.departure, &fp.arrival, &fp.route);
+        let points = fca::route_path(
+            nav,
+            airports,
+            &fp.departure,
+            &fp.arrival,
+            &fp.route,
+            p.latitude,
+            p.longitude,
+            p.heading,
+            p.groundspeed,
+        )
+        .unwrap_or_default();
+        return Ok(Json(AircraftRoute {
+            callsign: cs,
+            aircraft_type: fp.aircraft_short.clone(),
+            dep: fp.departure.clone(),
+            arr: fp.arrival.clone(),
+            altitude: p.altitude,
+            groundspeed: p.groundspeed,
+            route: fp.route.clone(),
+            points,
+            unresolved,
+        }));
+    }
+
+    // Prefile: full filed route (no live position).
+    if let Some(pf) = snap
+        .data
+        .prefiles
+        .iter()
+        .find(|pf| pf.callsign.eq_ignore_ascii_case(&cs))
+    {
+        let fp = pf.flight_plan.as_ref().ok_or(ApiError::NotFound)?;
+        let (points, unresolved) =
+            fca::full_route_verbose(nav, airports, &fp.departure, &fp.arrival, &fp.route);
+        return Ok(Json(AircraftRoute {
+            callsign: cs,
+            aircraft_type: fp.aircraft_short.clone(),
+            dep: fp.departure.clone(),
+            arr: fp.arrival.clone(),
+            altitude: 0,
+            groundspeed: 0,
+            route: fp.route.clone(),
+            points,
+            unresolved,
+        }));
+    }
+
+    Err(ApiError::NotFound)
 }
 
 #[utoipa::path(

@@ -21,7 +21,7 @@ pub struct FcaCrossing {
 }
 
 /// Resolve the filed route to lat/lon anchors: departure → resolved fixes/navaids →
-/// arrival. Unresolved tokens (airways, procedures) are skipped.
+/// arrival. Unresolved tokens (airways, procedures, non-US fixes) are skipped.
 fn route_anchors(
     nav: &NavData,
     airports: &AirportDb,
@@ -29,7 +29,19 @@ fn route_anchors(
     arr: &str,
     route: &str,
 ) -> Vec<[f64; 2]> {
+    route_anchors_verbose(nav, airports, dep, arr, route).0
+}
+
+/// Like `route_anchors`, but also returns the route tokens that couldn't be resolved.
+fn route_anchors_verbose(
+    nav: &NavData,
+    airports: &AirportDb,
+    dep: &str,
+    arr: &str,
+    route: &str,
+) -> (Vec<[f64; 2]>, Vec<String>) {
     let mut anchors: Vec<[f64; 2]> = Vec::new();
+    let mut unresolved: Vec<String> = Vec::new();
     let dep_c = airports.get(dep).map(|&(a, b)| [a, b]);
     let arr_c = airports.get(arr).map(|&(a, b)| [a, b]);
 
@@ -42,10 +54,17 @@ fn route_anchors(
         if clean.is_empty() || clean == "DCT" {
             continue;
         }
-        if let Some(c) = nav.resolve(&clean, airports, prev) {
-            if anchors.last() != Some(&c) {
-                anchors.push(c);
-                prev = Some(c);
+        match nav.resolve(&clean, airports, prev) {
+            Some(c) => {
+                if anchors.last() != Some(&c) {
+                    anchors.push(c);
+                    prev = Some(c);
+                }
+            }
+            None => {
+                if !unresolved.contains(&clean) {
+                    unresolved.push(clean);
+                }
             }
         }
     }
@@ -54,7 +73,24 @@ fn route_anchors(
             anchors.push(c);
         }
     }
-    anchors
+    (anchors, unresolved)
+}
+
+/// The full filed route as anchors + the tokens that couldn't be resolved.
+pub fn full_route_verbose(
+    nav: &NavData,
+    airports: &AirportDb,
+    dep: &str,
+    arr: &str,
+    route: &str,
+) -> (Vec<[f64; 2]>, Vec<String>) {
+    route_anchors_verbose(
+        nav,
+        airports,
+        &dep.to_ascii_uppercase(),
+        &arr.to_ascii_uppercase(),
+        route,
+    )
 }
 
 /// Trim anchors already behind an airborne aircraft; prepend its current position.
@@ -175,24 +211,6 @@ pub fn route_path(
         anchors
     };
     (path.len() >= 2).then_some(path)
-}
-
-/// The full filed route resolved to lat/lon anchors (departure → fixes → arrival), for
-/// plotting an aircraft's track on the map.
-pub fn full_route(
-    nav: &NavData,
-    airports: &AirportDb,
-    dep: &str,
-    arr: &str,
-    route: &str,
-) -> Vec<[f64; 2]> {
-    route_anchors(
-        nav,
-        airports,
-        &dep.to_ascii_uppercase(),
-        &arr.to_ascii_uppercase(),
-        route,
-    )
 }
 
 /// Where a pre-resolved `path` crosses the FCA line (airborne crossings must be ahead).

@@ -2,12 +2,14 @@ import {useEffect, useMemo, useRef, useState} from "react";
 import L from "leaflet";
 import "leaflet/dist/leaflet.css";
 import {Button, Input} from "@ois/ui";
-import {Pencil, Plus, Trash2} from "lucide-react";
+import {Pencil, Plus, Trash2, X} from "lucide-react";
 
 import {useMe} from "@/lib/auth";
 import {hasPermission} from "@/lib/permissions";
 import {
+  type AircraftRoute,
   type Fca,
+  type FcaFlight,
   toUpsert,
   type UpsertFca,
   useAircraftRoute,
@@ -212,10 +214,11 @@ export function FcaPage() {
   useEffect(() => {
     if (!containerRef.current || mapRef.current) return;
     const map = L.map(containerRef.current, {
-      zoomControl: true,
+      zoomControl: false,
       worldCopyJump: false,
       doubleClickZoom: false,
     }).setView([38.5, -77], 6);
+    L.control.zoom({ position: "topright" }).addTo(map);
     L.tileLayer("https://{s}.basemaps.cartocdn.com/dark_all/{z}/{x}/{y}{r}.png", {
       maxZoom: 14,
       attribution:
@@ -737,6 +740,17 @@ export function FcaPage() {
             </div>
           </div>
         )}
+
+        {routeCallsign && aircraftRoute.data && (
+          <RoutePopup
+            route={aircraftRoute.data}
+            fca={selectedFca}
+            match={fcaTraffic.data?.find(
+              (f) => f.callsign === aircraftRoute.data!.callsign,
+            )}
+            onClose={() => setRouteCallsign(null)}
+          />
+        )}
       </div>
 
       {/* Detail board for the selected FCA (metering ladder + strips). */}
@@ -746,6 +760,87 @@ export function FcaPage() {
           flights={fcaTraffic.data}
           canEdit={canEdit}
         />
+      )}
+    </div>
+  );
+}
+
+function RoutePopup({
+  route,
+  fca,
+  match,
+  onClose,
+}: {
+  route: AircraftRoute;
+  fca: Fca | null | undefined;
+  match: FcaFlight | undefined;
+  onClose: () => void;
+}) {
+  const pts = route.points as LatLng[];
+  const nm = Math.round(lineNm(pts));
+  const unresolved = route.unresolved ?? [];
+  return (
+    <div className="absolute left-3 top-3 z-[600] w-[min(92vw,26rem)] rounded-xl border border-border/70 bg-background/95 p-4 shadow-2xl backdrop-blur">
+      <div className="flex items-start justify-between gap-3">
+        <div className="min-w-0 font-mono">
+          <span className="text-lg font-bold tracking-tight text-sky-400">
+            {route.callsign}
+          </span>
+          {route.aircraft_type && (
+            <span className="ml-2 text-sm text-muted-foreground">
+              {route.aircraft_type}
+            </span>
+          )}
+        </div>
+        <button
+          type="button"
+          onClick={onClose}
+          className="-mr-1 -mt-1 rounded p-1 text-muted-foreground transition-colors hover:bg-muted hover:text-foreground"
+          aria-label="Close"
+        >
+          <X className="size-4" />
+        </button>
+      </div>
+
+      <div className="mt-1 font-mono text-sm text-muted-foreground">
+        {route.dep || "????"} → {route.arr || "????"}
+        {route.altitude > 0 && <> · FL{Math.round(route.altitude / 100)}</>}
+        {route.groundspeed > 0 && <> · {route.groundspeed}kt</>}
+        {nm > 0 && <> · {nm} NM</>} · {pts.length} pts
+      </div>
+
+      <div className="mt-3 max-h-40 overflow-y-auto rounded-lg border border-border/60 bg-muted/20 p-2.5 font-mono text-xs leading-relaxed break-words">
+        {route.route || "(no filed route)"}
+      </div>
+
+      <p className="mt-2 text-[11px] leading-snug text-muted-foreground/70">
+        FAA NASR route — fixes, navaids, airways, SID/STAR when known.
+        {unresolved.length > 0 && (
+          <>
+            {" "}
+            <span className="text-amber-500/80">
+              Unresolved: {unresolved.slice(0, 14).join(", ")}
+              {unresolved.length > 14 ? "…" : ""}.
+            </span>
+          </>
+        )}
+      </p>
+
+      {fca && (
+        <div className="mt-3 flex items-baseline gap-1.5 border-t border-border/60 pt-2.5 font-mono text-xs">
+          <span className="font-semibold" style={{ color: fca.color }}>
+            {fca.name}
+          </span>
+          {match ? (
+            <span className="text-emerald-400">
+              IN SEQUENCE #{match.seq} — crosses in {match.distance_nm}nm.
+            </span>
+          ) : (
+            <span className="text-muted-foreground">
+              not crossing this FCA.
+            </span>
+          )}
+        </div>
       )}
     </div>
   );
