@@ -10,11 +10,16 @@ use serde::Deserialize;
 use crate::{
     auth::{
         context::CurrentUser,
-        permissions::{TmuTmiCreate, TmuTmiDelete, TmuTmiPublish, TmuTmiRead, TmuTmiUpdate},
+        permissions::{
+            TmuProgramDelete, TmuProgramRead, TmuProgramUpdate, TmuTmiCreate, TmuTmiDelete,
+            TmuTmiPublish, TmuTmiRead, TmuTmiUpdate,
+        },
         require_permission::RequirePermission,
     },
     errors::ApiError,
-    models::{CreateTmiRequest, TmiBody, UpdateTmiRequest},
+    models::{
+        CreateTmiRequest, GateRule, ProgramBody, TmiBody, UpdateTmiRequest, UpsertProgramRequest,
+    },
     repos::tmu as tmu_repo,
     state::AppState,
 };
@@ -168,6 +173,129 @@ pub async fn delete_tmi(
 ) -> Result<StatusCode, ApiError> {
     let pool = state.db.as_ref().ok_or(ApiError::ServiceUnavailable)?;
     if !tmu_repo::delete_tmi(pool, &id).await? {
+        return Err(ApiError::NotFound);
+    }
+    Ok(StatusCode::NO_CONTENT)
+}
+
+// --- rate programs ---
+
+/// Uppercase alphanumerics only; keep 3–4 char ICAOs, else reject.
+fn normalize_icao(raw: &str) -> Option<String> {
+    let cleaned: String = raw
+        .chars()
+        .filter(|c| c.is_ascii_alphanumeric())
+        .collect::<String>()
+        .to_ascii_uppercase();
+    (cleaned.len() >= 3 && cleaned.len() <= 4).then_some(cleaned)
+}
+
+fn clean_alnum(raw: &str, min: usize, max: usize) -> Option<String> {
+    let s: String = raw
+        .chars()
+        .filter(|c| c.is_ascii_alphanumeric())
+        .collect::<String>()
+        .to_ascii_uppercase();
+    (s.len() >= min && s.len() <= max).then_some(s)
+}
+
+/// Normalize a program payload the way vatflow's `normRate` does: clamp/validate the
+/// airport-wide fields (400 on a bad AAR), drop malformed gates/exclusions, and enforce
+/// that miles-in-trail overrides minutes-in-trail. Returns the normalized gate list.
+fn normalize_program(payload: &mut UpsertProgramRequest) -> Result<Vec<GateRule>, ApiError> {
+    if !(1..=200).contains(&payload.aar) {
+        return Err(ApiError::BadRequest);
+    }
+    payload.trail = payload.trail.clamp(0, 60);
+    payload.mit = payload.mit.clamp(0, 300);
+    if payload.mit > 0 {
+        payload.trail = 0; // MIT overrides minutes-in-trail at the airport level.
+    }
+
+    let gates: Vec<GateRule> = payload
+        .gates
+        .iter()
+        .filter_map(|g| {
+            let name = clean_alnum(&g.name, 1, 8)?;
+            let mit = g.mit.clamp(0, 300);
+            let trail = if mit > 0 { 0 } else { g.trail.clamp(0, 60) };
+            Some(GateRule { name, trail, mit })
+        })
+        .take(10)
+        .collect();
+
+    payload.exclude_wake = payload
+        .exclude_wake
+        .iter()
+        .map(|w| w.trim().to_ascii_uppercase())
+        .filter(|w| matches!(w.as_str(), "L" | "M" | "H" | "J"))
+        .collect();
+    payload.exclude_types = payload
+        .exclude_types
+        .iter()
+        .filter_map(|t| clean_alnum(t, 2, 4))
+        .collect();
+
+    Ok(gates)
+}
+
+#[utoipa::path(
+    get,
+    path = "/api/v1/tmu/programs",
+    tag = "tmu",
+    responses((status = 200, body = Vec<ProgramBody>), (status = 401))
+)]
+pub async fn list_programs(
+    State(state): State<AppState>,
+    _permission: RequirePermission<TmuProgramRead>,
+) -> Result<Json<Vec<ProgramBody>>, ApiError> {
+    let pool = state.db.as_ref().ok_or(ApiError::ServiceUnavailable)?;
+    Ok(Json(tmu_repo::list_programs(pool).await?))
+}
+
+#[utoipa::path(
+    put,
+    path = "/api/v1/tmu/programs/{icao}",
+    tag = "tmu",
+    params(("icao" = String, Path, description = "Airport ICAO")),
+    request_body = UpsertProgramRequest,
+    responses((status = 200, body = ProgramBody), (status = 400), (status = 401))
+)]
+pub async fn upsert_program(
+    State(state): State<AppState>,
+    _permission: RequirePermission<TmuProgramUpdate>,
+    Extension(current_user): Extension<Option<CurrentUser>>,
+    Path(icao): Path<String>,
+    Json(mut payload): Json<UpsertProgramRequest>,
+) -> Result<Json<ProgramBody>, ApiError> {
+    let user = current_user.as_ref().ok_or(ApiError::Unauthorized)?;
+    let pool = state.db.as_ref().ok_or(ApiError::ServiceUnavailable)?;
+
+    let icao = normalize_icao(&icao).ok_or(ApiError::BadRequest)?;
+    let gates = normalize_program(&mut payload)?;
+
+    tmu_repo::upsert_program(pool, &icao, &payload, &gates, &user.id).await?;
+    let program = tmu_repo::get_program(pool, &icao)
+        .await?
+        .ok_or(ApiError::Internal)?;
+    Ok(Json(program))
+}
+
+#[utoipa::path(
+    delete,
+    path = "/api/v1/tmu/programs/{icao}",
+    tag = "tmu",
+    params(("icao" = String, Path, description = "Airport ICAO")),
+    responses((status = 204), (status = 401), (status = 404))
+)]
+pub async fn delete_program(
+    State(state): State<AppState>,
+    _permission: RequirePermission<TmuProgramDelete>,
+    Path(icao): Path<String>,
+) -> Result<StatusCode, ApiError> {
+    let pool = state.db.as_ref().ok_or(ApiError::ServiceUnavailable)?;
+    let icao = normalize_icao(&icao).ok_or(ApiError::BadRequest)?;
+    if !tmu_repo::delete_program(pool, &icao).await? {
         return Err(ApiError::NotFound);
     }
     Ok(StatusCode::NO_CONTENT)

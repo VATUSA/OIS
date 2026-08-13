@@ -41,6 +41,12 @@ pub fn build_router(state: AppState) -> Router {
         )
         .route("/api/v1/tmu/tmis/{id}/publish", post(tmu::publish_tmi))
         .route("/api/v1/tmu/tmis/{id}/cancel", post(tmu::cancel_tmi))
+        // TMU — airport rate programs
+        .route("/api/v1/tmu/programs", get(tmu::list_programs))
+        .route(
+            "/api/v1/tmu/programs/{icao}",
+            put(tmu::upsert_program).delete(tmu::delete_program),
+        )
         // Audit log
         .route("/api/v1/admin/audit", get(audit::list_audit_logs))
         // Service accounts (bot credentials)

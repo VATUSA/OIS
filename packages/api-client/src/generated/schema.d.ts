@@ -228,6 +228,38 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/v1/tmu/programs": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get: operations["list_programs"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/tmu/programs/{icao}": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put: operations["upsert_program"];
+        post?: never;
+        delete: operations["delete_program"];
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/v1/tmu/tmis": {
         parameters: {
             query?: never;
@@ -383,6 +415,21 @@ export interface components {
             name: string;
             region?: string | null;
         };
+        /** @description One per-gate restriction inside a program: an arrival fix/STAR with its own spacing. */
+        GateRule: {
+            /**
+             * Format: int32
+             * @description Miles-in-trail for this gate (0 = unused; overrides `trail` when > 0).
+             */
+            mit?: number;
+            /** @description Arrival fix / STAR name (uppercase alphanumeric). */
+            name: string;
+            /**
+             * Format: int32
+             * @description Minutes-in-trail for this gate (0 = use MIT or airport default).
+             */
+            trail?: number;
+        };
         /** @description The `/me` response for an authenticated session. */
         MeBody: {
             /** Format: int64 */
@@ -395,6 +442,30 @@ export interface components {
             rating?: string | null;
             role_names: string[];
             server_admin: boolean;
+        };
+        /** @description An airport rate program (vatflow "TMU tab"). Keyed by ICAO. */
+        ProgramBody: {
+            /** Format: int32 */
+            aar: number;
+            exclude_types: string[];
+            exclude_wake: string[];
+            gates: components["schemas"]["GateRule"][];
+            icao: string;
+            jets_only: boolean;
+            /**
+             * Format: int32
+             * @description Airport-wide miles-in-trail (overrides `trail` when > 0).
+             */
+            mit: number;
+            /**
+             * Format: int32
+             * @description Airport-wide minutes-in-trail default.
+             */
+            trail: number;
+            /** Format: date-time */
+            updated_at: string;
+            /** @description Display name of whoever last edited the program. */
+            updated_by?: string | null;
         };
         /** @description Direct grants + roles at one scope. `artcc_id = null` is national. */
         ScopeAccess: {
@@ -476,6 +547,19 @@ export interface components {
         UpdateUserAccessRequest: {
             reason: string;
             scopes: components["schemas"]["ScopeUpdate"][];
+        };
+        /** @description Upsert a program (`PUT /tmu/programs/{icao}`) — the full normalized program body. */
+        UpsertProgramRequest: {
+            /** Format: int32 */
+            aar: number;
+            exclude_types?: string[];
+            exclude_wake?: string[];
+            gates?: components["schemas"]["GateRule"][];
+            jets_only?: boolean;
+            /** Format: int32 */
+            mit?: number;
+            /** Format: int32 */
+            trail?: number;
         };
         /**
          * @description A target user's editable access: direct permission grants + role assignments,
@@ -979,6 +1063,101 @@ export interface operations {
                 };
             };
             401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+        };
+    };
+    list_programs: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ProgramBody"][];
+                };
+            };
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+        };
+    };
+    upsert_program: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /** @description Airport ICAO */
+                icao: string;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["UpsertProgramRequest"];
+            };
+        };
+        responses: {
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ProgramBody"];
+                };
+            };
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+        };
+    };
+    delete_program: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /** @description Airport ICAO */
+                icao: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            204: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            404: {
                 headers: {
                     [name: string]: unknown;
                 };
