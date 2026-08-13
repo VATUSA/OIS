@@ -309,6 +309,7 @@ pub async fn aircraft_route(
             route: fp.route.clone(),
             points,
             unresolved,
+            nav_cycle: nav.cycle().to_string(),
         }));
     }
 
@@ -332,6 +333,7 @@ pub async fn aircraft_route(
             route: fp.route.clone(),
             points,
             unresolved,
+            nav_cycle: nav.cycle().to_string(),
         }));
     }
 

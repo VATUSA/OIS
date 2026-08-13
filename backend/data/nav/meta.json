@@ -1,0 +1,18 @@
+{
+  "source": "FAA NASR 2026-07-09 (FIX/NAV/PFR) + @squawk airways/procedures",
+  "nasrCycleDate": "2026-07-09",
+  "cifpCycleDate": "2026-06-11",
+  "enrouteCycleDate": "2026-06-11",
+  "generatedAt": "2026-07-09T18:16:41.692Z",
+  "bbox": [
+    23.5,
+    -130,
+    51.5,
+    -63
+  ],
+  "fixCount": 64816,
+  "navaidCount": 2799,
+  "airwayCount": 1189,
+  "procedureCount": 2857,
+  "preferredRouteCount": 7661
+}

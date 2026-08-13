@@ -1,19 +1,115 @@
-//! Navigation database — resolves filed-route tokens (fixes / navaids) to coordinates.
-//! Bundled from vatflow's FAA-NASR export (`data/nav/{fixes,navaids}.json`), each a
-//! `{ NAME: [[lat, lon], ...] }` map (a name may have several candidate coordinates).
-//! Airway / SID / STAR expansion is not yet implemented — those tokens are skipped and
-//! the surrounding resolved anchors are joined by great circle.
+//! Navigation database — full US enroute route expansion: fixes, navaids, airways,
+//! SID/STAR procedures, and preferred routes. This is the single source of truth for
+//! turning a filed route string into an accurate great-circle track; every consumer
+//! (FCA matching, crossing detection, the aircraft-route popup, metering ETAs) resolves
+//! through [`NavData::build_anchors`].
+//!
+//! Ported from vatflow's `route-engine.js`. Data is bundled at compile time from the FAA
+//! NASR / CIFP export (`data/nav/*.json`); the cycle date lives in `meta.json`.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
+
+use serde::Deserialize;
 
 use super::airports::AirportDb;
 
-pub type CoordList = Vec<[f64; 2]>;
+pub type Ll = [f64; 2];
+pub type CoordList = Vec<Ll>;
+
+/// A single procedure/airway leg as `(name, lat, lon)`.
+type Leg = (String, f64, f64);
+
+const R_NM: f64 = 3440.065;
+
+/// What a resolved anchor represents. Retained for future labeled rendering; only the
+/// coordinate is consumed by the geometry today.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+#[allow(dead_code)]
+pub enum Kind {
+    Apt,
+    Nav,
+    Fix,
+    Sid,
+    Star,
+    Awy,
+}
+
+/// One resolved point along a route.
+#[derive(Clone, Debug)]
+pub struct Anchor {
+    #[allow(dead_code)]
+    pub name: String,
+    pub ll: Ll,
+    #[allow(dead_code)]
+    pub kind: Kind,
+}
+
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+enum ProcType {
+    Sid,
+    Star,
+}
+
+struct Procedure {
+    ptype: ProcType,
+    common: Vec<Leg>,
+    transitions: HashMap<String, Vec<Leg>>,
+}
+
+struct Airway {
+    w: Vec<Leg>,
+}
+
+/// The result of expanding a filed route.
+#[derive(Default, Debug)]
+pub struct RouteResult {
+    pub anchors: Vec<Anchor>,
+    /// Tokens inside US coverage that couldn't be resolved to a coordinate.
+    pub unresolved: Vec<String>,
+    /// Tokens deliberately dropped past an international/oceanic truncation.
+    pub oceanic_skipped: Vec<String>,
+    /// True when the route was truncated at the edge of US nav coverage.
+    pub truncated_international: bool,
+}
+
+// --- raw JSON shapes (bundled files) ---
+
+#[derive(Deserialize)]
+struct RawAirway {
+    #[serde(default)]
+    w: Vec<Leg>,
+}
+
+#[derive(Deserialize)]
+struct RawProc {
+    #[serde(rename = "type")]
+    ptype: String,
+    #[serde(default)]
+    common: Vec<Leg>,
+    #[serde(default)]
+    transitions: HashMap<String, Vec<Leg>>,
+}
+
+#[derive(Deserialize, Default)]
+struct RawMeta {
+    #[serde(default)]
+    bbox: Option<[f64; 4]>,
+    #[serde(rename = "nasrCycleDate", default)]
+    nasr_cycle_date: Option<String>,
+}
 
 #[derive(Default)]
 pub struct NavData {
     navaids: HashMap<String, CoordList>,
     fixes: HashMap<String, CoordList>,
+    airways: HashMap<String, Airway>,
+    procedures: HashMap<String, Procedure>,
+    /// `DEP|ARR` → canonical route string.
+    preferred: HashMap<String, String>,
+    /// Shortest procedure key for a bare letter prefix (e.g. `DOTSS` → `DOTSS2`).
+    proc_by_prefix: HashMap<String, String>,
+    bbox: [f64; 4],
+    cycle: String,
 }
 
 impl NavData {
@@ -23,7 +119,66 @@ impl NavData {
             serde_json::from_str(include_str!("../../data/nav/navaids.json")).unwrap_or_default();
         let fixes: HashMap<String, CoordList> =
             serde_json::from_str(include_str!("../../data/nav/fixes.json")).unwrap_or_default();
-        Self { navaids, fixes }
+        let raw_airways: HashMap<String, RawAirway> =
+            serde_json::from_str(include_str!("../../data/nav/airways.json")).unwrap_or_default();
+        let raw_procs: HashMap<String, RawProc> =
+            serde_json::from_str(include_str!("../../data/nav/procedures.json"))
+                .unwrap_or_default();
+        let preferred: HashMap<String, String> =
+            serde_json::from_str(include_str!("../../data/nav/preferred.json")).unwrap_or_default();
+        let meta: RawMeta =
+            serde_json::from_str(include_str!("../../data/nav/meta.json")).unwrap_or_default();
+
+        let airways = raw_airways
+            .into_iter()
+            .map(|(k, v)| (k, Airway { w: v.w }))
+            .collect();
+
+        let procedures: HashMap<String, Procedure> = raw_procs
+            .into_iter()
+            .map(|(k, v)| {
+                let ptype = if v.ptype.eq_ignore_ascii_case("STAR") {
+                    ProcType::Star
+                } else {
+                    ProcType::Sid
+                };
+                (
+                    k,
+                    Procedure {
+                        ptype,
+                        common: v.common,
+                        transitions: v.transitions,
+                    },
+                )
+            })
+            .collect();
+
+        // Index procedures by their bare letter prefix, keeping the shortest key so a
+        // route filed without the revision digit (e.g. `DOTSS`) still resolves.
+        let mut proc_by_prefix: HashMap<String, String> = HashMap::new();
+        for key in procedures.keys() {
+            if let Some(pfx) = proc_prefix(key) {
+                proc_by_prefix
+                    .entry(pfx)
+                    .and_modify(|cur| {
+                        if key.len() < cur.len() {
+                            *cur = key.clone();
+                        }
+                    })
+                    .or_insert_with(|| key.clone());
+            }
+        }
+
+        Self {
+            navaids,
+            fixes,
+            airways,
+            procedures,
+            preferred,
+            proc_by_prefix,
+            bbox: meta.bbox.unwrap_or([23.5, -130.0, 51.5, -63.0]),
+            cycle: meta.nasr_cycle_date.unwrap_or_default(),
+        }
     }
 
     pub fn len(&self) -> usize {
@@ -34,29 +189,451 @@ impl NavData {
         self.len() == 0
     }
 
-    /// Resolve a route token to a coordinate. Priority: airport → navaid → fix; when a
-    /// name has multiple candidates, pick the one nearest `prev`.
-    pub fn resolve(
-        &self,
-        token: &str,
-        airports: &AirportDb,
-        prev: Option<[f64; 2]>,
-    ) -> Option<[f64; 2]> {
-        if let Some(&(lat, lon)) = airports.get(token) {
-            return Some([lat, lon]);
+    /// FAA NASR cycle date (e.g. `2026-07-09`), for display.
+    pub fn cycle(&self) -> &str {
+        &self.cycle
+    }
+
+    /// Split a filed route into cleaned tokens (uppercased, `DCT` removed).
+    pub fn parse_tokens(route: &str) -> Vec<String> {
+        route
+            .replace(['\n', '\r'], " ")
+            .split_whitespace()
+            .map(|t| t.to_ascii_uppercase())
+            .filter(|t| t != "DCT")
+            .collect()
+    }
+
+    /// Whether a coordinate lies within the modeled US nav coverage box.
+    pub fn in_nav_coverage(&self, lat: f64, lon: f64) -> bool {
+        lat >= self.bbox[0] && lat <= self.bbox[2] && lon >= self.bbox[1] && lon <= self.bbox[3]
+    }
+
+    /// True when the filed destination is outside the US airport system we model.
+    fn is_international_route(&self, arr: &str, destination: Option<Ll>) -> bool {
+        let code = arr.to_ascii_uppercase();
+        if code.len() >= 3 {
+            let b = code.as_bytes();
+            if b[0] == b'K' {
+                return false;
+            }
+            if b[0] == b'P' && matches!(b[1], b'A' | b'H' | b'T' | b'G' | b'J' | b'F') {
+                return false;
+            }
+            if b[0] == b'T' && matches!(b[1], b'J' | b'I' | b'P') {
+                return false;
+            }
+            if b[0] == b'M' && b[1] == b'D' {
+                return false;
+            }
+            return true;
         }
-        let cands = self.navaids.get(token).or_else(|| self.fixes.get(token))?;
-        Some(nearest(cands, prev))
+        destination.is_some_and(|d| !self.in_nav_coverage(d[0], d[1]))
+    }
+
+    /// If the pilot filed a bare `DEP..ARR` (≤2 airport tokens) and a preferred route
+    /// exists, substitute it. Otherwise keep the filed route.
+    fn maybe_preferred_route(
+        &self,
+        airports: &AirportDb,
+        dep: &str,
+        arr: &str,
+        route: &str,
+    ) -> String {
+        if dep.is_empty() || arr.is_empty() {
+            return route.to_string();
+        }
+        let Some(pr) = self.preferred.get(&format!("{dep}|{arr}")) else {
+            return route.to_string();
+        };
+        let toks = Self::parse_tokens(route);
+        if toks.len() <= 2 && toks.iter().all(|t| airports.get(&clean_token(t)).is_some()) {
+            return pr.clone();
+        }
+        route.to_string()
+    }
+
+    fn find_procedure(&self, id: &str) -> Option<&Procedure> {
+        let key = clean_token(id);
+        if let Some(p) = self.procedures.get(&key) {
+            return Some(p);
+        }
+        let pfx = proc_prefix(&key)?;
+        self.proc_by_prefix
+            .get(&pfx)
+            .and_then(|k| self.procedures.get(k))
+    }
+
+    /// Resolve a single token to a point. Priority: airport → navaid → fix → procedure
+    /// (first leg). Duplicate names are disambiguated by nearest to `ref_ll`.
+    fn resolve_token(
+        &self,
+        name: &str,
+        airports: &AirportDb,
+        ref_ll: Option<Ll>,
+        dep: &str,
+        arr: &str,
+    ) -> Option<Anchor> {
+        let id = clean_token(name);
+        if id.len() < 2 || id == dep || id == arr {
+            return None;
+        }
+        if let Some(&(lat, lon)) = airports.get(&id) {
+            return Some(Anchor {
+                name: id,
+                ll: [lat, lon],
+                kind: Kind::Apt,
+            });
+        }
+        if let Some(cands) = self.navaids.get(&id) {
+            return Some(Anchor {
+                name: id,
+                ll: nearest(cands, ref_ll),
+                kind: Kind::Nav,
+            });
+        }
+        if let Some(cands) = self.fixes.get(&id) {
+            return Some(Anchor {
+                name: id,
+                ll: nearest(cands, ref_ll),
+                kind: Kind::Fix,
+            });
+        }
+        if let Some((first, kind)) = self
+            .find_procedure(&id)
+            .and_then(|p| proc_first_leg(p).map(|f| ([f.1, f.2], proc_kind(p))))
+        {
+            return Some(Anchor {
+                name: id,
+                ll: first,
+                kind,
+            });
+        }
+        None
+    }
+
+    /// Expand an airway between the waypoints nearest `from`/`to` (shorter direction).
+    fn expand_airway(&self, id: &str, from: Option<Ll>, to: Option<Ll>) -> Vec<Anchor> {
+        let awy = match self.airways.get(&clean_token(id)) {
+            Some(a) if a.w.len() >= 2 => a,
+            _ => return Vec::new(),
+        };
+        let wps = &awy.w;
+        let from = from.unwrap_or([wps[0].1, wps[0].2]);
+        let to = to.unwrap_or([wps[wps.len() - 1].1, wps[wps.len() - 1].2]);
+        let i0 = nearest_wp_index(wps, from);
+        let i1 = nearest_wp_index(wps, to);
+        let to_anchor = |leg: &Leg| Anchor {
+            name: leg.0.clone(),
+            ll: [leg.1, leg.2],
+            kind: Kind::Awy,
+        };
+        if i0 == i1 {
+            return vec![to_anchor(&wps[i0])];
+        }
+        let (lo, hi) = (i0.min(i1), i0.max(i1));
+        let slice: Vec<&Leg> = wps[lo..=hi].iter().collect();
+        // Emit in travel order (reverse when the route runs against the airway's storage).
+        let ordered: Vec<&Leg> = if i0 <= i1 {
+            slice
+        } else {
+            slice.into_iter().rev().collect()
+        };
+        ordered.into_iter().map(to_anchor).collect()
+    }
+
+    /// Expand a SID/STAR into its leg sequence, splicing the named transition when given.
+    fn expand_procedure(&self, proc: &Procedure, transition: Option<&str>) -> Vec<Anchor> {
+        let kind = proc_kind(proc);
+        let legs: Vec<Leg> = match transition.and_then(|t| proc.transitions.get(t)) {
+            Some(trans) => merge_procedure_legs(trans, &proc.common),
+            None if proc.common.len() >= 2 => proc.common.clone(),
+            None => return Vec::new(),
+        };
+        legs.into_iter()
+            .map(|leg| Anchor {
+                name: leg.0,
+                ll: [leg.1, leg.2],
+                kind,
+            })
+            .collect()
+    }
+
+    /// Resolve a filed route to ordered lat/lon anchors: departure → expanded enroute
+    /// (fixes/navaids/airways/SID/STAR) → arrival. Handles preferred-route substitution
+    /// and truncates cleanly at the edge of US coverage for international routes.
+    pub fn build_anchors(
+        &self,
+        airports: &AirportDb,
+        dep: &str,
+        arr: &str,
+        route: &str,
+    ) -> RouteResult {
+        let dep = dep.to_ascii_uppercase();
+        let arr = arr.to_ascii_uppercase();
+        let origin = airports.get(&dep).map(|&(a, b)| [a, b]);
+        let destination = airports.get(&arr).map(|&(a, b)| [a, b]);
+        let route_str = self.maybe_preferred_route(airports, &dep, &arr, route);
+        let tokens = Self::parse_tokens(&route_str);
+        let intl = self.is_international_route(&arr, destination);
+
+        let mut anchors: Vec<Anchor> = Vec::new();
+        let mut unresolved: Vec<String> = Vec::new();
+        let mut oceanic: Vec<String> = Vec::new();
+        let mut ref_ll = origin;
+        let mut truncated = false;
+
+        if let Some(o) = origin {
+            anchors.push(Anchor {
+                name: if dep.is_empty() {
+                    "DEP".into()
+                } else {
+                    dep.clone()
+                },
+                ll: o,
+                kind: Kind::Apt,
+            });
+        }
+
+        let drain_oceanic = |oceanic: &mut Vec<String>, from: usize| {
+            for t in tokens.iter().skip(from) {
+                oceanic.push(clean_token(t));
+            }
+        };
+
+        let mut i = 0;
+        while i < tokens.len() {
+            let tok = clean_token(&tokens[i]);
+
+            // A transition fix immediately preceding its STAR/SID is consumed by the
+            // procedure expansion, not emitted as a standalone point.
+            if let Some(next) = tokens.get(i + 1)
+                && let Some(np) = self.find_procedure(&clean_token(next))
+                && np.transitions.contains_key(&tok)
+            {
+                i += 1;
+                continue;
+            }
+
+            if is_airway_token(&tok) {
+                // Look ahead for the airway's exit fix (first resolvable, stop at next airway).
+                let mut to_ll = None;
+                for t in tokens.iter().skip(i + 1) {
+                    if let Some(nx) = self.resolve_token(t, airports, ref_ll, &dep, &arr) {
+                        to_ll = Some(nx.ll);
+                        break;
+                    }
+                    if is_airway_token(&clean_token(t)) {
+                        break;
+                    }
+                }
+                if ref_ll.is_none() {
+                    if !intl {
+                        unresolved.push(tok);
+                    }
+                    truncated = intl;
+                    i += 1;
+                    continue;
+                }
+                let expanded = self.expand_airway(&tok, ref_ll, to_ll);
+                if expanded.is_empty() {
+                    if !intl {
+                        unresolved.push(tok);
+                    }
+                    truncated = intl;
+                    i += 1;
+                    continue;
+                }
+                for pt in expanded {
+                    if intl && !self.in_nav_coverage(pt.ll[0], pt.ll[1]) {
+                        truncated = true;
+                        break;
+                    }
+                    ref_ll = Some(push_anchor(&mut anchors, pt));
+                }
+                if truncated {
+                    drain_oceanic(&mut oceanic, i + 1);
+                    break;
+                }
+                i += 1;
+                continue;
+            }
+
+            // Procedure? Only where a SID/STAR is plausible: a token with a digit, or a
+            // bare name at the route edges that isn't itself a known point.
+            let has_digit = tok.bytes().any(|c| c.is_ascii_digit());
+            let at_edge = i <= 1 || i + 2 >= tokens.len();
+            let at_arrival_edge = i + 2 >= tokens.len();
+            let known_point = self.navaids.contains_key(&tok)
+                || self.fixes.contains_key(&tok)
+                || airports.get(&tok).is_some();
+            let proc = if has_digit || (at_edge && !known_point) {
+                self.find_procedure(&tok)
+            } else {
+                None
+            };
+            if let Some(proc) = proc {
+                if intl && at_arrival_edge && proc.ptype == ProcType::Star {
+                    truncated = true;
+                    oceanic.push(tok);
+                    drain_oceanic(&mut oceanic, i + 1);
+                    break;
+                }
+                let prev_tok = if i > 0 {
+                    clean_token(&tokens[i - 1])
+                } else {
+                    String::new()
+                };
+                let transition = if proc.transitions.contains_key(&prev_tok) {
+                    Some(prev_tok.as_str())
+                } else {
+                    None
+                };
+                for pt in self.expand_procedure(proc, transition) {
+                    if intl && !self.in_nav_coverage(pt.ll[0], pt.ll[1]) {
+                        truncated = true;
+                        break;
+                    }
+                    ref_ll = Some(push_anchor(&mut anchors, pt));
+                }
+                if truncated {
+                    drain_oceanic(&mut oceanic, i + 1);
+                    break;
+                }
+                i += 1;
+                continue;
+            }
+
+            // Plain fix/navaid/airport.
+            match self.resolve_token(&tok, airports, ref_ll, &dep, &arr) {
+                None => {
+                    if intl {
+                        truncated = true;
+                        oceanic.push(tok);
+                        drain_oceanic(&mut oceanic, i + 1);
+                        break;
+                    }
+                    if airports.get(&tok).is_none() && tok.len() >= 2 {
+                        unresolved.push(tok);
+                    }
+                }
+                Some(resolved) => {
+                    if intl && !self.in_nav_coverage(resolved.ll[0], resolved.ll[1]) {
+                        truncated = true;
+                        oceanic.push(tok);
+                        drain_oceanic(&mut oceanic, i + 1);
+                        break;
+                    }
+                    // Guard against a bad duplicate-name pick jumping across the country.
+                    if let Some(r) = ref_ll
+                        && haversine_nm(r, resolved.ll) > 900.0
+                    {
+                        if intl {
+                            truncated = true;
+                            oceanic.push(tok);
+                            drain_oceanic(&mut oceanic, i + 1);
+                            break;
+                        }
+                        unresolved.push(tok);
+                        i += 1;
+                        continue;
+                    }
+                    ref_ll = Some(push_anchor(&mut anchors, resolved));
+                }
+            }
+            i += 1;
+        }
+
+        if let Some(d) = destination
+            && anchors.last().is_none_or(|l| l.ll != d)
+        {
+            anchors.push(Anchor {
+                name: if arr.is_empty() {
+                    "ARR".into()
+                } else {
+                    arr.clone()
+                },
+                ll: d,
+                kind: Kind::Apt,
+            });
+        }
+
+        // De-duplicate the unresolved list, preserving first-seen order.
+        let mut seen = HashSet::new();
+        unresolved.retain(|t| seen.insert(t.clone()));
+
+        RouteResult {
+            anchors,
+            unresolved,
+            oceanic_skipped: oceanic,
+            truncated_international: truncated,
+        }
+    }
+
+    /// Back-compat convenience: resolve a single token to a coordinate (airport → navaid
+    /// → fix → procedure), nearest to `prev`.
+    pub fn resolve(&self, token: &str, airports: &AirportDb, prev: Option<Ll>) -> Option<Ll> {
+        self.resolve_token(token, airports, prev, "", "")
+            .map(|a| a.ll)
     }
 }
 
-fn nearest(cands: &[[f64; 2]], prev: Option<[f64; 2]>) -> [f64; 2] {
-    match prev {
-        Some(p) if cands.len() > 1 => *cands
+// --- helpers ---
+
+fn clean_token(t: &str) -> String {
+    t.split('/').next().unwrap_or("").to_ascii_uppercase()
+}
+
+fn proc_kind(proc: &Procedure) -> Kind {
+    match proc.ptype {
+        ProcType::Star => Kind::Star,
+        ProcType::Sid => Kind::Sid,
+    }
+}
+
+/// First usable leg of a procedure: common if it has ≥2 legs, else the first transition.
+fn proc_first_leg(proc: &Procedure) -> Option<&Leg> {
+    if proc.common.len() >= 2 {
+        proc.common.first()
+    } else {
+        proc.transitions.values().next().and_then(|t| t.first())
+    }
+}
+
+/// Concatenate a transition's legs with the procedure's common legs, avoiding a duplicate
+/// join fix.
+fn merge_procedure_legs(trans: &[Leg], common: &[Leg]) -> Vec<Leg> {
+    if trans.is_empty() {
+        return common.to_vec();
+    }
+    if common.is_empty() {
+        return trans.to_vec();
+    }
+    let mut out = trans.to_vec();
+    let last_fix = &trans[trans.len() - 1].0;
+    let start = if &common[0].0 == last_fix { 1 } else { 0 };
+    out.extend_from_slice(&common[start..]);
+    out
+}
+
+fn push_anchor(anchors: &mut Vec<Anchor>, pt: Anchor) -> Ll {
+    match anchors.last() {
+        Some(l) if l.ll == pt.ll => l.ll,
+        _ => {
+            let ll = pt.ll;
+            anchors.push(pt);
+            ll
+        }
+    }
+}
+
+fn nearest(cands: &[Ll], refll: Option<Ll>) -> Ll {
+    match refll {
+        Some(r) if cands.len() > 1 => *cands
             .iter()
             .min_by(|a, b| {
-                dist2(a, &p)
-                    .partial_cmp(&dist2(b, &p))
+                haversine_nm(r, **a)
+                    .partial_cmp(&haversine_nm(r, **b))
                     .unwrap_or(std::cmp::Ordering::Equal)
             })
             .unwrap_or(&cands[0]),
@@ -64,8 +641,165 @@ fn nearest(cands: &[[f64; 2]], prev: Option<[f64; 2]>) -> [f64; 2] {
     }
 }
 
-fn dist2(a: &[f64; 2], b: &[f64; 2]) -> f64 {
-    let dx = a[0] - b[0];
-    let dy = a[1] - b[1];
-    dx * dx + dy * dy
+fn nearest_wp_index(wps: &[Leg], ll: Ll) -> usize {
+    let mut best = 0;
+    let mut bd = f64::MAX;
+    for (i, w) in wps.iter().enumerate() {
+        let d = haversine_nm(ll, [w.1, w.2]);
+        if d < bd {
+            bd = d;
+            best = i;
+        }
+    }
+    best
+}
+
+fn haversine_nm(a: Ll, b: Ll) -> f64 {
+    let (la1, lo1) = (a[0].to_radians(), a[1].to_radians());
+    let (la2, lo2) = (b[0].to_radians(), b[1].to_radians());
+    let dla = la2 - la1;
+    let dlo = lo2 - lo1;
+    let h = (dla / 2.0).sin().powi(2) + la1.cos() * la2.cos() * (dlo / 2.0).sin().powi(2);
+    2.0 * R_NM * h.sqrt().asin()
+}
+
+/// Airway designators: US `J/Q/V/T`, oceanic/international `A/B/G/R/L/M/N/P/W/Y`, and
+/// European upper `U[LMNPQT]`. Digits must follow the prefix immediately so 5-letter
+/// fixes, procedures (`DOTSS2`) and NRS waypoints (`KD60U`) never match.
+fn is_airway_token(id: &str) -> bool {
+    let b = id.as_bytes();
+    if b.len() < 2 {
+        return false;
+    }
+    let mut k = match b[0] {
+        b'A' | b'B' | b'G' | b'J' | b'L' | b'M' | b'N' | b'P' | b'Q' | b'R' | b'T' | b'V'
+        | b'W' | b'Y' => 1,
+        b'U' if matches!(b[1], b'L' | b'M' | b'N' | b'P' | b'Q' | b'T') => 2,
+        _ => return false,
+    };
+    let mut digits = 0;
+    while k < b.len() && b[k].is_ascii_digit() {
+        k += 1;
+        digits += 1;
+    }
+    if !(1..=4).contains(&digits) {
+        return false;
+    }
+    if k < b.len() {
+        if b[k].is_ascii_uppercase() {
+            k += 1;
+        } else {
+            return false;
+        }
+    }
+    k == b.len()
+}
+
+/// The letter prefix of a procedure token matching `^[A-Z]{3,6}\d[A-Z]?$` (e.g. `DOTSS2`
+/// → `DOTSS`), or None.
+fn proc_prefix(id: &str) -> Option<String> {
+    let b = id.as_bytes();
+    let mut k = 0;
+    while k < b.len() && b[k].is_ascii_uppercase() {
+        k += 1;
+    }
+    let letters = k;
+    if !(3..=6).contains(&letters) || k >= b.len() || !b[k].is_ascii_digit() {
+        return None;
+    }
+    k += 1;
+    if k < b.len() {
+        if b[k].is_ascii_uppercase() {
+            k += 1;
+        } else {
+            return None;
+        }
+    }
+    (k == b.len()).then(|| id[..letters].to_string())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::collections::HashMap;
+
+    #[test]
+    fn airway_and_proc_token_classification() {
+        for t in ["J121", "Q22", "V16", "T449", "UL10", "A509"] {
+            assert!(is_airway_token(t), "{t} should be an airway");
+        }
+        for t in ["DOTSS2", "LUCIT3", "KD60U", "MERIT", "SIE", "ULM", "ATA315"] {
+            assert!(!is_airway_token(t), "{t} should NOT be an airway");
+        }
+        assert_eq!(proc_prefix("DOTSS2").as_deref(), Some("DOTSS"));
+        assert_eq!(proc_prefix("LUCIT3"), Some("LUCIT".to_string()));
+        assert_eq!(proc_prefix("SIE"), None);
+        assert_eq!(proc_prefix("J121"), None);
+    }
+
+    #[test]
+    fn expands_a_real_airway() {
+        let nav = NavData::load();
+        // J10: LAX → JUGLI → CIVET → RUSTT → PIONE → TNP → ... (US high airway).
+        let full = nav.expand_airway("J10", None, None);
+        assert!(full.len() >= 6, "full airway returns its waypoint chain");
+        assert_eq!(full[0].name, "LAX");
+        assert_eq!(full[1].name, "JUGLI");
+        // A sub-span between the 2nd and 5th waypoints keeps only that inclusive slice.
+        let from = [full[1].ll[0], full[1].ll[1]];
+        let to = [full[4].ll[0], full[4].ll[1]];
+        let span = nav.expand_airway("J10", Some(from), Some(to));
+        assert_eq!(span.len(), 4);
+        assert_eq!(span.first().unwrap().name, "JUGLI");
+        assert_eq!(span.last().unwrap().name, "PIONE");
+    }
+
+    #[test]
+    fn expands_a_real_star_with_transition() {
+        let nav = NavData::load();
+        let proc = nav.find_procedure("LUCIT3").expect("LUCIT3 STAR resolves");
+        assert_eq!(proc.ptype, ProcType::Star);
+        // COOKS transition then common legs, ending at the runway-side common fix.
+        let legs = nav.expand_procedure(proc, Some("COOKS"));
+        assert!(legs.len() >= 3);
+        assert_eq!(legs.first().unwrap().name, "COOKS");
+        assert!(legs.iter().any(|l| l.name == "LUCIT"));
+    }
+
+    #[test]
+    fn build_anchors_expands_airway_between_fixes() {
+        let nav = NavData::load();
+        let ap: AirportDb = HashMap::new();
+        // Bare navaid→navaid vs. via the airway should differ: the airway inserts its
+        // intermediate waypoints between the endpoints.
+        let direct = nav.build_anchors(&ap, "", "", "LAX TNP");
+        let via = nav.build_anchors(&ap, "", "", "LAX J10 TNP");
+        assert!(
+            via.anchors.len() > direct.anchors.len(),
+            "airway expansion should add intermediate waypoints ({} vs {})",
+            via.anchors.len(),
+            direct.anchors.len()
+        );
+        assert!(via.unresolved.is_empty(), "airway must not be unresolved");
+    }
+
+    #[test]
+    fn preferred_route_substituted_for_bare_filing() {
+        let nav = NavData::load();
+        // ABE|ACY has a preferred route "FJC ARD CYN"; a bare airport-to-airport filing
+        // should pick it up (all three fixes resolve).
+        let ap = HashMap::from([
+            ("KABE".to_string(), (40.65, -75.44)),
+            ("KACY".to_string(), (39.46, -74.58)),
+        ]);
+        // Preferred keys are 3-letter (FAA) codes; emulate with matching dep/arr.
+        let res = nav.build_anchors(&ap, "ABE", "ACY", "");
+        // With no origin/destination airports in `ap` for 3-letter codes, anchors come
+        // purely from the substituted preferred route fixes.
+        assert!(
+            res.anchors.len() >= 3,
+            "preferred route should expand to its fixes, got {}",
+            res.anchors.len()
+        );
+    }
 }

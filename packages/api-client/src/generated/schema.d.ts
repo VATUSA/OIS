@@ -896,6 +896,8 @@ export interface components {
             dep: string;
             /** Format: int64 */
             groundspeed: number;
+            /** @description FAA NASR cycle date backing the resolution (e.g. `2026-07-09`). */
+            nav_cycle: string;
             /** @description Resolved route anchors as `[lat, lon]` pairs (the drawn track). */
             points: number[][];
             /** @description Raw filed route string. */

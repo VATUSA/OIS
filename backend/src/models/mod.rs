@@ -526,6 +526,8 @@ pub struct AircraftRoute {
     pub points: Vec<[f64; 2]>,
     /// Filed tokens that couldn't be resolved to a coordinate.
     pub unresolved: Vec<String>,
+    /// FAA NASR cycle date backing the resolution (e.g. `2026-07-09`).
+    pub nav_cycle: String,
 }
 
 /// A lightweight live-traffic record for plotting on the FCA map.
