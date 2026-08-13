@@ -89,9 +89,26 @@ pub async fn get_user_access(
         .ok_or(ApiError::NotFound)?;
     let grants = access_repo::fetch_user_direct_grants(pool, &target.id).await?;
     let roles = access_repo::fetch_user_role_grants(pool, &target.id).await?;
-    Ok(Json(build_user_access_body(
-        &target.id, target.cid, grants, roles,
-    )?))
+    let mut body = build_user_access_body(&target.id, target.cid, grants, roles)?;
+    fill_server_admin_permissions(pool, &mut body).await?;
+    Ok(Json(body))
+}
+
+/// Server admins implicitly hold every permission (via the effective-permissions view).
+/// Surface that in the editor by showing the full catalog at the national scope; the UI
+/// renders the permission tree read-only (roles remain editable).
+async fn fill_server_admin_permissions(
+    pool: &sqlx::PgPool,
+    body: &mut UserAccessBody,
+) -> Result<(), ApiError> {
+    if body.server_admin {
+        let all = access_repo::fetch_access_catalog_names(pool).await?;
+        let tree = permission_tree_from_names(&all)?;
+        if let Some(national) = body.scopes.iter_mut().find(|s| s.artcc_id.is_none()) {
+            national.permissions = tree;
+        }
+    }
+    Ok(())
 }
 
 #[utoipa::path(
@@ -182,17 +199,24 @@ pub async fn update_user_access(
         before_roles.clone(),
     )?;
 
+    // A server admin's *permissions* are not editable — they hold everything implicitly
+    // via the effective view. Their roles remain editable, so we still process role
+    // changes but skip any direct-permission changes for a server-admin target.
+    let target_is_server_admin = before_body.server_admin;
+
     enforce_actor_scope(&state, user, &norm_scopes, &before_grants, &before_roles).await?;
 
     let mut tx = pool.begin().await.map_err(|_| ApiError::Internal)?;
     for scope in &norm_scopes {
-        access_repo::replace_user_permissions_scoped(
-            &mut tx,
-            &target_user_id,
-            scope.artcc.as_deref(),
-            &scope.names,
-        )
-        .await?;
+        if !target_is_server_admin {
+            access_repo::replace_user_permissions_scoped(
+                &mut tx,
+                &target_user_id,
+                scope.artcc.as_deref(),
+                &scope.names,
+            )
+            .await?;
+        }
         if let Some(role_names) = scope.roles.as_ref() {
             for role_name in access_repo::ASSIGNABLE_USER_ROLES {
                 let held = role_names.iter().any(|r| r == role_name);
@@ -211,7 +235,9 @@ pub async fn update_user_access(
 
     let after_grants = access_repo::fetch_user_direct_grants(pool, &target_user_id).await?;
     let after_roles = access_repo::fetch_user_role_grants(pool, &target_user_id).await?;
-    let response = build_user_access_body(&target_user_id, target.cid, after_grants, after_roles)?;
+    let mut response =
+        build_user_access_body(&target_user_id, target.cid, after_grants, after_roles)?;
+    fill_server_admin_permissions(pool, &mut response).await?;
 
     let actor_id = audit_repo::fetch_user_actor_id(pool, &user.id).await?;
     audit_repo::record_audit(
