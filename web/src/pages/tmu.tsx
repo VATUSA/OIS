@@ -1,20 +1,11 @@
 import {useState} from "react";
-import {Badge, Button, Card, CardContent, CardHeader, CardTitle, Input,} from "@ois/ui";
-import {Plus} from "lucide-react";
+import {Badge, Button, Card, CardContent, Input} from "@ois/ui";
+import {Plus, X} from "lucide-react";
 
-import {useFacilities} from "@/lib/admin";
 import {useMe} from "@/lib/auth";
 import {hasPermission} from "@/lib/permissions";
-import {type CreateTmi, type Tmi, useCancelTmi, useCreateTmi, useDeleteTmi, usePublishTmi, useTmis,} from "@/lib/tmu";
-
-const KINDS = [
-  "MIT",
-  "MINIT",
-  "Ground Stop",
-  "Ground Delay",
-  "Reroute",
-  "Other",
-];
+import {formatZulu, parseZulu} from "@/lib/time";
+import {type Tmi, useCancelTmi, useCreateTmi, useDeleteTmi, usePublishTmi, useTmis,} from "@/lib/tmu";
 
 function statusVariant(
   status: string,
@@ -25,94 +16,129 @@ function statusVariant(
   return "secondary";
 }
 
-const EMPTY: CreateTmi = {
-  kind: "MIT",
-  element: "",
-  restriction: "",
-  reason: "",
-  artcc_id: null,
+type FormState = {
+  requesting: string;
+  providing: string;
+  restriction: string;
+  start: string;
+  stop: string;
 };
 
+const EMPTY: FormState = {
+  requesting: "",
+  providing: "",
+  restriction: "",
+  start: "",
+  stop: "",
+};
+
+const COLS =
+  "grid grid-cols-[minmax(0,1fr)_minmax(0,1fr)_minmax(0,3fr)_minmax(0,1.2fr)_minmax(0,1.2fr)_auto] items-end gap-3";
+
+function Head({ children }: { children: React.ReactNode }) {
+  return (
+    <span className="text-xs font-medium uppercase tracking-wide text-muted-foreground">
+      {children}
+    </span>
+  );
+}
+
 function CreateForm() {
-  const facilities = useFacilities();
   const create = useCreateTmi();
-  const [form, setForm] = useState<CreateTmi>(EMPTY);
+  const [form, setForm] = useState<FormState>(EMPTY);
+  const [error, setError] = useState<string | null>(null);
 
-  const valid =
-    !!form.kind && !!form.element?.trim() && !!form.restriction?.trim();
+  function set<K extends keyof FormState>(key: K, value: string) {
+    setForm((f) => ({ ...f, [key]: value }));
+  }
 
-  const field = "h-9 rounded-md border border-input bg-background px-3 text-sm";
+  function submit() {
+    if (
+      !form.requesting.trim() ||
+      !form.providing.trim() ||
+      !form.restriction.trim()
+    ) {
+      setError("Requesting, providing, and restriction are required.");
+      return;
+    }
+    const start = form.start.trim() ? parseZulu(form.start) : null;
+    const stop = form.stop.trim() ? parseZulu(form.stop) : null;
+    if (form.start.trim() && !start) {
+      setError("Start time must be DD/HHMMz (e.g. 12/1430z).");
+      return;
+    }
+    if (form.stop.trim() && !stop) {
+      setError("Stop time must be DD/HHMMz (e.g. 12/1830z).");
+      return;
+    }
+    setError(null);
+    create.mutate(
+      {
+        requesting: form.requesting,
+        providing: form.providing,
+        restriction: form.restriction,
+        start_time: start,
+        stop_time: stop,
+      },
+      { onSuccess: () => setForm(EMPTY) },
+    );
+  }
 
   return (
     <Card>
-      <CardHeader>
-        <CardTitle>New TMI</CardTitle>
-      </CardHeader>
-      <CardContent>
-        <div className="flex flex-wrap items-end gap-3">
-          <label className="flex flex-col gap-1 text-xs font-medium text-muted-foreground">
-            Kind
-            <select
-              className={field}
-              value={form.kind}
-              onChange={(e) => setForm({ ...form, kind: e.target.value })}
-            >
-              {KINDS.map((k) => (
-                <option key={k}>{k}</option>
-              ))}
-            </select>
-          </label>
-          <label className="flex flex-col gap-1 text-xs font-medium text-muted-foreground">
-            Element
+      <CardContent className="flex flex-col gap-3 pt-6">
+        <div className="overflow-x-auto">
+          <div className={`${COLS} min-w-[720px]`}>
+            <Head>Requesting</Head>
+            <Head>Providing</Head>
+            <Head>Restriction</Head>
+            <Head>Start time</Head>
+            <Head>Stop time</Head>
+            <span />
+
             <Input
-              className="w-32"
-              placeholder="ORD / OTT"
-              value={form.element}
-              onChange={(e) => setForm({ ...form, element: e.target.value })}
+              placeholder="ARTCC/TRACON"
+              value={form.requesting}
+              onChange={(e) => set("requesting", e.target.value)}
             />
-          </label>
-          <label className="flex flex-col gap-1 text-xs font-medium text-muted-foreground">
-            Restriction
             <Input
-              className="w-40"
-              placeholder="20 MIT"
+              placeholder="ARTCC/TRACON"
+              value={form.providing}
+              onChange={(e) => set("providing", e.target.value)}
+            />
+            <Input
+              placeholder="e.g. 20 MIT jets / 250kt"
               value={form.restriction}
-              onChange={(e) => setForm({ ...form, restriction: e.target.value })}
+              onChange={(e) => set("restriction", e.target.value)}
             />
-          </label>
-          <label className="flex flex-col gap-1 text-xs font-medium text-muted-foreground">
-            ARTCC
-            <select
-              className={field}
-              value={form.artcc_id ?? ""}
-              onChange={(e) =>
-                setForm({ ...form, artcc_id: e.target.value || null })
-              }
-            >
-              <option value="">National</option>
-              {facilities.data?.map((f) => (
-                <option key={f.id} value={f.id}>
-                  {f.id}
-                </option>
-              ))}
-            </select>
-          </label>
-          <label className="flex flex-1 flex-col gap-1 text-xs font-medium text-muted-foreground">
-            Reason
             <Input
-              placeholder="Optional"
-              value={form.reason ?? ""}
-              onChange={(e) => setForm({ ...form, reason: e.target.value })}
+              placeholder="DD/HHMMz"
+              value={form.start}
+              onChange={(e) => set("start", e.target.value)}
             />
-          </label>
-          <Button
-            disabled={!valid || create.isPending}
-            onClick={() =>
-              create.mutate(form, { onSuccess: () => setForm(EMPTY) })
-            }
-          >
+            <Input
+              placeholder="DD/HHMMz"
+              value={form.stop}
+              onChange={(e) => set("stop", e.target.value)}
+            />
+            <button
+              type="button"
+              title="Clear row"
+              onClick={() => {
+                setForm(EMPTY);
+                setError(null);
+              }}
+              className="flex size-9 items-center justify-center rounded-md text-muted-foreground transition-colors hover:text-destructive"
+            >
+              <X className="size-4" />
+            </button>
+          </div>
+        </div>
+        <div className="flex items-center justify-between gap-3">
+          <p className="text-sm text-destructive">{error ?? ""}</p>
+          <Button disabled={create.isPending} onClick={submit}>
             <Plus />
-            Add draft
+            Add TMI
           </Button>
         </div>
       </CardContent>
@@ -138,11 +164,14 @@ function TmiRow({
       <td className="py-2 pr-3">
         <Badge variant={statusVariant(tmi.status)}>{tmi.status}</Badge>
       </td>
-      <td className="py-2 pr-3 font-medium">{tmi.kind}</td>
-      <td className="py-2 pr-3 font-mono text-xs">{tmi.element}</td>
+      <td className="py-2 pr-3 font-mono text-xs">{tmi.requesting}</td>
+      <td className="py-2 pr-3 font-mono text-xs">{tmi.providing}</td>
       <td className="py-2 pr-3">{tmi.restriction}</td>
-      <td className="py-2 pr-3 text-muted-foreground">
-        {tmi.artcc_id ?? "National"}
+      <td className="py-2 pr-3 font-mono text-xs text-muted-foreground">
+        {formatZulu(tmi.start_time)}
+      </td>
+      <td className="py-2 pr-3 font-mono text-xs text-muted-foreground">
+        {formatZulu(tmi.stop_time)}
       </td>
       <td className="py-2 pr-3 text-muted-foreground">{tmi.author ?? "—"}</td>
       <td className="py-2 text-right">
@@ -157,16 +186,17 @@ function TmiRow({
               Publish
             </Button>
           )}
-          {canPublish && (tmi.status === "draft" || tmi.status === "published") && (
-            <Button
-              size="sm"
-              variant="ghost"
-              disabled={cancel.isPending}
-              onClick={() => cancel.mutate(tmi.id)}
-            >
-              Cancel
-            </Button>
-          )}
+          {canPublish &&
+            (tmi.status === "draft" || tmi.status === "published") && (
+              <Button
+                size="sm"
+                variant="ghost"
+                disabled={cancel.isPending}
+                onClick={() => cancel.mutate(tmi.id)}
+              >
+                Cancel
+              </Button>
+            )}
           {canDelete && (
             <Button
               size="sm"
@@ -224,10 +254,11 @@ export function TmuPage() {
                 <thead>
                   <tr className="text-left text-xs uppercase tracking-wide text-muted-foreground">
                     <th className="pb-2 pr-3 font-medium">Status</th>
-                    <th className="pb-2 pr-3 font-medium">Kind</th>
-                    <th className="pb-2 pr-3 font-medium">Element</th>
+                    <th className="pb-2 pr-3 font-medium">Requesting</th>
+                    <th className="pb-2 pr-3 font-medium">Providing</th>
                     <th className="pb-2 pr-3 font-medium">Restriction</th>
-                    <th className="pb-2 pr-3 font-medium">ARTCC</th>
+                    <th className="pb-2 pr-3 font-medium">Start</th>
+                    <th className="pb-2 pr-3 font-medium">Stop</th>
                     <th className="pb-2 pr-3 font-medium">Author</th>
                     <th className="pb-2" />
                   </tr>

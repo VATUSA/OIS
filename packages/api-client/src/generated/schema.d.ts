@@ -368,15 +368,13 @@ export interface components {
             name: string;
         };
         CreateTmiRequest: {
-            artcc_id?: string | null;
-            /** Format: date-time */
-            effective_end?: string | null;
-            /** Format: date-time */
-            effective_start?: string | null;
-            element: string;
-            kind: string;
-            reason?: string | null;
+            providing: string;
+            requesting: string;
             restriction: string;
+            /** Format: date-time */
+            start_time?: string | null;
+            /** Format: date-time */
+            stop_time?: string | null;
         };
         /** @description A VATUSA facility (ARTCC). `artcc_id` scope values reference `id`. */
         FacilityBody: {
@@ -443,34 +441,32 @@ export interface components {
         };
         /** @description A Traffic Management Initiative. */
         TmiBody: {
-            artcc_id?: string | null;
             /** @description Author display name (from the creating user). */
             author?: string | null;
             /** Format: date-time */
             created_at: string;
-            /** Format: date-time */
-            effective_end?: string | null;
-            /** Format: date-time */
-            effective_start: string;
-            element: string;
             id: string;
-            kind: string;
+            /** @description Providing facility (ARTCC/TRACON). */
+            providing: string;
             /** Format: date-time */
             published_at?: string | null;
-            reason?: string | null;
+            /** @description Requesting facility (ARTCC/TRACON). */
+            requesting: string;
             restriction: string;
+            /** Format: date-time */
+            start_time: string;
             status: string;
+            /** Format: date-time */
+            stop_time?: string | null;
         };
         UpdateTmiRequest: {
-            artcc_id?: string | null;
-            /** Format: date-time */
-            effective_end?: string | null;
-            /** Format: date-time */
-            effective_start?: string | null;
-            element?: string | null;
-            kind?: string | null;
-            reason?: string | null;
+            providing?: string | null;
+            requesting?: string | null;
             restriction?: string | null;
+            /** Format: date-time */
+            start_time?: string | null;
+            /** Format: date-time */
+            stop_time?: string | null;
         };
         /**
          * @description The editor's SAVE payload. `reason` is required (audited). Each entry in `scopes`

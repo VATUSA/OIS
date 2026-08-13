@@ -130,13 +130,13 @@ pub struct AuditLogPage {
 #[derive(Debug, Serialize, ToSchema, sqlx::FromRow)]
 pub struct TmiBody {
     pub id: String,
-    pub artcc_id: Option<String>,
-    pub kind: String,
-    pub element: String,
+    /// Requesting facility (ARTCC/TRACON).
+    pub requesting: String,
+    /// Providing facility (ARTCC/TRACON).
+    pub providing: String,
     pub restriction: String,
-    pub reason: Option<String>,
-    pub effective_start: DateTime<Utc>,
-    pub effective_end: Option<DateTime<Utc>>,
+    pub start_time: DateTime<Utc>,
+    pub stop_time: Option<DateTime<Utc>>,
     pub status: String,
     pub published_at: Option<DateTime<Utc>>,
     pub created_at: DateTime<Utc>,
@@ -146,35 +146,27 @@ pub struct TmiBody {
 
 #[derive(Debug, Deserialize, ToSchema)]
 pub struct CreateTmiRequest {
-    pub kind: String,
-    pub element: String,
+    pub requesting: String,
+    pub providing: String,
     pub restriction: String,
     #[serde(default)]
-    pub reason: Option<String>,
+    pub start_time: Option<DateTime<Utc>>,
     #[serde(default)]
-    pub artcc_id: Option<String>,
-    #[serde(default)]
-    pub effective_start: Option<DateTime<Utc>>,
-    #[serde(default)]
-    pub effective_end: Option<DateTime<Utc>>,
+    pub stop_time: Option<DateTime<Utc>>,
 }
 
 #[derive(Debug, Deserialize, ToSchema)]
 pub struct UpdateTmiRequest {
     #[serde(default)]
-    pub kind: Option<String>,
+    pub requesting: Option<String>,
     #[serde(default)]
-    pub element: Option<String>,
+    pub providing: Option<String>,
     #[serde(default)]
     pub restriction: Option<String>,
     #[serde(default)]
-    pub reason: Option<String>,
+    pub start_time: Option<DateTime<Utc>>,
     #[serde(default)]
-    pub artcc_id: Option<String>,
-    #[serde(default)]
-    pub effective_start: Option<DateTime<Utc>>,
-    #[serde(default)]
-    pub effective_end: Option<DateTime<Utc>>,
+    pub stop_time: Option<DateTime<Utc>>,
 }
 
 // --- service accounts ---

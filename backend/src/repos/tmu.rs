@@ -7,8 +7,8 @@ use crate::{
     models::{CreateTmiRequest, TmiBody, UpdateTmiRequest},
 };
 
-const SELECT: &str = "select t.id, t.artcc_id, t.kind, t.element, t.restriction, t.reason, \
-    t.effective_start, t.effective_end, t.status, t.published_at, t.created_at, \
+const SELECT: &str = "select t.id, t.requesting, t.providing, t.restriction, \
+    t.start_time, t.stop_time, t.status, t.published_at, t.created_at, \
     u.display_name as author \
     from tmu.tmis t left join identity.users u on u.id = t.created_by";
 
@@ -37,16 +37,14 @@ pub async fn create_tmi(
 ) -> Result<String, ApiError> {
     sqlx::query_scalar::<_, String>(
         "insert into tmu.tmis \
-         (artcc_id, kind, element, restriction, reason, effective_start, effective_end, created_by) \
-         values ($1, $2, $3, $4, $5, coalesce($6, now()), $7, $8) returning id",
+         (requesting, providing, restriction, start_time, stop_time, created_by) \
+         values ($1, $2, $3, coalesce($4, now()), $5, $6) returning id",
     )
-    .bind(&req.artcc_id)
-    .bind(&req.kind)
-    .bind(&req.element)
+    .bind(&req.requesting)
+    .bind(&req.providing)
     .bind(&req.restriction)
-    .bind(&req.reason)
-    .bind(req.effective_start)
-    .bind(req.effective_end)
+    .bind(req.start_time)
+    .bind(req.stop_time)
     .bind(created_by)
     .fetch_one(pool)
     .await
@@ -58,23 +56,19 @@ pub async fn create_tmi(
 pub async fn update_tmi(pool: &PgPool, id: &str, req: &UpdateTmiRequest) -> Result<bool, ApiError> {
     let result = sqlx::query(
         "update tmu.tmis set \
-            kind = coalesce($2, kind), \
-            element = coalesce($3, element), \
+            requesting = coalesce($2, requesting), \
+            providing = coalesce($3, providing), \
             restriction = coalesce($4, restriction), \
-            reason = coalesce($5, reason), \
-            artcc_id = coalesce($6, artcc_id), \
-            effective_start = coalesce($7, effective_start), \
-            effective_end = coalesce($8, effective_end) \
+            start_time = coalesce($5, start_time), \
+            stop_time = coalesce($6, stop_time) \
          where id = $1",
     )
     .bind(id)
-    .bind(&req.kind)
-    .bind(&req.element)
+    .bind(&req.requesting)
+    .bind(&req.providing)
     .bind(&req.restriction)
-    .bind(&req.reason)
-    .bind(&req.artcc_id)
-    .bind(req.effective_start)
-    .bind(req.effective_end)
+    .bind(req.start_time)
+    .bind(req.stop_time)
     .execute(pool)
     .await
     .map_err(|_| ApiError::Internal)?;
