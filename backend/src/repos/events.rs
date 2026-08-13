@@ -5,7 +5,7 @@ use chrono::{DateTime, Utc};
 use sqlx::PgPool;
 
 use crate::errors::ApiError;
-use crate::models::EventBody;
+use crate::models::{DccRequestBody, EventBody};
 
 const EVENT_SELECT: &str = "select id, title, body, banner_image_url, facility, \
     start_time, end_time, review_status from events.event";
@@ -69,4 +69,42 @@ pub async fn prune(pool: &PgPool, cutoff: DateTime<Utc>) -> Result<u64, ApiError
         .await
         .map_err(|_| ApiError::Internal)?;
     Ok(result.rows_affected())
+}
+
+// --- DCC support ---
+
+const DCC_SELECT: &str = "select d.status, d.notes, d.updated_at, u.display_name as updated_by \
+    from events.dcc_request d left join identity.users u on u.id = d.updated_by";
+
+pub async fn get_dcc(pool: &PgPool, event_id: i64) -> Result<Option<DccRequestBody>, ApiError> {
+    sqlx::query_as::<_, DccRequestBody>(&format!("{DCC_SELECT} where d.event_id = $1"))
+        .bind(event_id)
+        .fetch_optional(pool)
+        .await
+        .map_err(|_| ApiError::Internal)
+}
+
+pub async fn upsert_dcc(
+    pool: &PgPool,
+    event_id: i64,
+    status: &str,
+    notes: &str,
+    actor: &str,
+) -> Result<(), ApiError> {
+    sqlx::query(
+        "insert into events.dcc_request (event_id, status, notes, updated_by)
+         values ($1, $2, $3, $4)
+         on conflict (event_id) do update set
+             status = excluded.status,
+             notes = excluded.notes,
+             updated_by = excluded.updated_by",
+    )
+    .bind(event_id)
+    .bind(status)
+    .bind(notes)
+    .bind(actor)
+    .execute(pool)
+    .await
+    .map_err(|_| ApiError::Internal)?;
+    Ok(())
 }

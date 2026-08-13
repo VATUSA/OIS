@@ -212,6 +212,22 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/v1/events/{id}/dcc": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get: operations["get_event_dcc"];
+        put: operations["update_event_dcc"];
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/v1/facilities": {
         parameters: {
             query?: never;
@@ -605,6 +621,16 @@ export interface components {
             /** Format: date-time */
             stop_time?: string | null;
         };
+        /** @description Whether an event needs national DCC support. */
+        DccRequestBody: {
+            notes: string;
+            /** @description not_needed | requested | confirmed */
+            status: string;
+            /** Format: date-time */
+            updated_at?: string | null;
+            /** @description Display name of whoever last set it. */
+            updated_by?: string | null;
+        };
         /** @description A pending ground/proposed departure out of a field (for the Departures view). */
         DepartureFlight: {
             aircraft_type: string;
@@ -926,6 +952,11 @@ export interface components {
             status: string;
             /** Format: date-time */
             stop_time?: string | null;
+        };
+        UpdateDccRequest: {
+            notes?: string | null;
+            /** @description not_needed | requested | confirmed */
+            status: string;
         };
         UpdateTmiRequest: {
             providing?: string | null;
@@ -1441,6 +1472,78 @@ export interface operations {
                 content: {
                     "application/json": components["schemas"]["EventBody"];
                 };
+            };
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+        };
+    };
+    get_event_dcc: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /** @description VATUSA event id */
+                id: number;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["DccRequestBody"];
+                };
+            };
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+        };
+    };
+    update_event_dcc: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /** @description VATUSA event id */
+                id: number;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["UpdateDccRequest"];
+            };
+        };
+        responses: {
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["DccRequestBody"];
+                };
+            };
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
             };
             401: {
                 headers: {

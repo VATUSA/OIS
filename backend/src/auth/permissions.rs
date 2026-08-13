@@ -46,3 +46,4 @@ permission!(TmuCfrAssign, ["tmu", "cfr"], Assign);
 
 // events — per-event planning
 permission!(EventsPlanRead, ["events", "plan"], Read);
+permission!(EventsPlanUpdate, ["events", "plan"], Update);

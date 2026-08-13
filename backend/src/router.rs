@@ -69,6 +69,10 @@ pub fn build_router(state: AppState) -> Router {
         // Events (VATUSA cache — anchors per-event planning)
         .route("/api/v1/events", get(events::list_events))
         .route("/api/v1/events/{id}", get(events::get_event))
+        .route(
+            "/api/v1/events/{id}/dcc",
+            get(events::get_event_dcc).put(events::update_event_dcc),
+        )
         // Live VATSIM feed
         .route("/api/v1/feed/status", get(feed::feed_status))
         .route("/api/v1/tmu/flow/{icao}", get(feed::airport_flow))
