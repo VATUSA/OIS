@@ -257,6 +257,25 @@ pub struct CreateGroundStopRequest {
     pub until: Option<String>,
 }
 
+// --- events (per-event planning) ---
+
+/// A VATUSA event, cached from the events API — the anchor for per-event planning.
+#[derive(Debug, Serialize, ToSchema, sqlx::FromRow)]
+pub struct EventBody {
+    /// VATUSA event id.
+    pub id: i64,
+    pub title: String,
+    /// HTML/BBCode blurb straight from VATUSA (render sanitized on the client).
+    pub body: String,
+    pub banner_image_url: String,
+    /// Host ARTCC id (e.g. ZTL).
+    pub facility: String,
+    pub start_time: DateTime<Utc>,
+    pub end_time: DateTime<Utc>,
+    /// VATUSA review state (e.g. "approved").
+    pub review_status: String,
+}
+
 // --- TMU rate programs ---
 
 /// One per-gate restriction inside a program: an arrival fix/STAR with its own spacing.

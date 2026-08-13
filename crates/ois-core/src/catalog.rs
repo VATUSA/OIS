@@ -62,6 +62,9 @@ pub fn draft_new_permission_names() -> Vec<&'static str> {
     vec![
         // --- events (operational coordination; posting/review stays in the current
         // VATUSA website — OIS owns the prior/during/post window) ---
+        "events.plan.read",                // view an event's planning package
+        "events.plan.update",              // edit DCC / facility support / TMI packages
+        "events.rate.update",              // set an event's airport AAR/ADR (facility-scoped)
         "events.staffing_requests.create", // CC an ARTCC / request staffing
         "events.staffing_requests.read",
         "events.staffing_requests.decide", // acknowledge/decline a staffing request
