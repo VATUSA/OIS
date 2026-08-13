@@ -404,6 +404,22 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/v1/tmu/taxi/{icao}": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get: operations["taxi_stats"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/v1/tmu/tmis": {
         parameters: {
             query?: never;
@@ -810,6 +826,34 @@ export interface components {
         };
         SetServiceAccountRolesRequest: {
             role_names: string[];
+        };
+        /** @description A departure currently being timed at a field. */
+        TaxiActive: {
+            /** Format: int64 */
+            alt: number;
+            callsign: string;
+            dest: string;
+            /** Format: int64 */
+            gs: number;
+            /** @description `watching` (not yet moving) | `rolling` (taxi in progress). */
+            phase: string;
+            /**
+             * Format: date-time
+             * @description When the roll began, for a live client-side timer; null while watching.
+             */
+            rolling_since?: string | null;
+        };
+        /** @description The Taxi Monitor view for one field: stats plus the in-progress departures. */
+        TaxiField: {
+            active: components["schemas"]["TaxiActive"][];
+            /** Format: int64 */
+            avg_min?: number | null;
+            icao: string;
+            /** Format: int64 */
+            last_sec?: number | null;
+            sample_count: number;
+            trend: string;
+            volume: number;
         };
         /** @description A Traffic Management Initiative. */
         TmiBody: {
@@ -1781,6 +1825,34 @@ export interface operations {
                 content?: never;
             };
             404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+        };
+    };
+    taxi_stats: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /** @description Airport ICAO */
+                icao: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["TaxiField"];
+                };
+            };
+            401: {
                 headers: {
                     [name: string]: unknown;
                 };

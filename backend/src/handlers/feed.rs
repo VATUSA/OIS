@@ -22,6 +22,7 @@ use crate::{
     errors::ApiError,
     feed::facilities,
     feed::flow::{self, ProgramInputs},
+    feed::taxi,
     models::{DepartureFlight, DeparturesResponse, IssueCfrRequest, IssuedCfrBody},
     repos::tmu as tmu_repo,
     state::AppState,
@@ -132,6 +133,32 @@ pub async fn airport_flow(
     let pool = state.db.as_ref().ok_or(ApiError::ServiceUnavailable)?;
     let icao = icao.trim().to_ascii_uppercase();
     Ok(Json(flow_for(&state, pool, &icao).await?))
+}
+
+#[utoipa::path(
+    get,
+    path = "/api/v1/tmu/taxi/{icao}",
+    tag = "tmu",
+    params(("icao" = String, Path, description = "Airport ICAO")),
+    responses((status = 200, body = crate::feed::taxi::TaxiField), (status = 401))
+)]
+pub async fn taxi_stats(
+    State(state): State<AppState>,
+    _permission: RequirePermission<TmuProgramRead>,
+    Path(icao): Path<String>,
+) -> Json<taxi::TaxiField> {
+    let icao = icao.trim().to_ascii_uppercase();
+    let now = Utc::now();
+    let guard = state.feed.read().await;
+    let empty = crate::feed::vatsim::VatsimData::default();
+    let data = guard.snapshot.as_ref().map(|s| &s.data).unwrap_or(&empty);
+    Json(taxi::field(
+        &guard.taxi_sessions,
+        guard.taxi_samples.get(&icao),
+        data,
+        &icao,
+        now,
+    ))
 }
 
 #[utoipa::path(
