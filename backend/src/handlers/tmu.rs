@@ -11,9 +11,9 @@ use crate::{
     auth::{
         context::CurrentUser,
         permissions::{
-            TmuGroundStopCreate, TmuGroundStopDelete, TmuGroundStopRead, TmuProgramDelete,
-            TmuProgramRead, TmuProgramUpdate, TmuTmiCreate, TmuTmiDelete, TmuTmiPublish,
-            TmuTmiRead, TmuTmiUpdate,
+            TmuGroundStopCreate, TmuGroundStopDelete, TmuGroundStopPublish, TmuGroundStopRead,
+            TmuProgramDelete, TmuProgramRead, TmuProgramUpdate, TmuTmiCreate, TmuTmiDelete,
+            TmuTmiPublish, TmuTmiRead, TmuTmiUpdate,
         },
         require_permission::RequirePermission,
     },
@@ -388,6 +388,52 @@ pub async fn create_ground_stop(
     let gs = tmu_repo::get_ground_stop(pool, &id)
         .await?
         .ok_or(ApiError::Internal)?;
+    Ok(Json(gs))
+}
+
+#[utoipa::path(
+    post,
+    path = "/api/v1/tmu/ground-stops/{id}/publish",
+    tag = "tmu",
+    params(("id" = String, Path, description = "Ground stop id")),
+    responses((status = 200, body = GroundStopBody), (status = 401), (status = 409))
+)]
+pub async fn publish_ground_stop(
+    State(state): State<AppState>,
+    _permission: RequirePermission<TmuGroundStopPublish>,
+    Extension(current_user): Extension<Option<CurrentUser>>,
+    Path(id): Path<String>,
+) -> Result<Json<GroundStopBody>, ApiError> {
+    let user = current_user.as_ref().ok_or(ApiError::Unauthorized)?;
+    let pool = state.db.as_ref().ok_or(ApiError::ServiceUnavailable)?;
+    if !tmu_repo::publish_ground_stop(pool, &id, &user.id).await? {
+        return Err(ApiError::Conflict); // not a draft (or absent)
+    }
+    let gs = tmu_repo::get_ground_stop(pool, &id)
+        .await?
+        .ok_or(ApiError::NotFound)?;
+    Ok(Json(gs))
+}
+
+#[utoipa::path(
+    post,
+    path = "/api/v1/tmu/ground-stops/{id}/cancel",
+    tag = "tmu",
+    params(("id" = String, Path, description = "Ground stop id")),
+    responses((status = 200, body = GroundStopBody), (status = 401), (status = 409))
+)]
+pub async fn cancel_ground_stop(
+    State(state): State<AppState>,
+    _permission: RequirePermission<TmuGroundStopPublish>,
+    Path(id): Path<String>,
+) -> Result<Json<GroundStopBody>, ApiError> {
+    let pool = state.db.as_ref().ok_or(ApiError::ServiceUnavailable)?;
+    if !tmu_repo::cancel_ground_stop(pool, &id).await? {
+        return Err(ApiError::Conflict);
+    }
+    let gs = tmu_repo::get_ground_stop(pool, &id)
+        .await?
+        .ok_or(ApiError::NotFound)?;
     Ok(Json(gs))
 }
 

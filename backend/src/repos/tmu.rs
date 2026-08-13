@@ -180,8 +180,8 @@ pub async fn delete_program(pool: &PgPool, icao: &str) -> Result<bool, ApiError>
 
 // --- ground stops ---
 
-const GS_SELECT: &str = "select g.id, g.airport, g.scope, g.until, g.updated_at, \
-    u.display_name as updated_by \
+const GS_SELECT: &str = "select g.id, g.airport, g.scope, g.until, g.status, \
+    g.published_at, g.updated_at, u.display_name as updated_by \
     from tmu.ground_stops g left join identity.users u on u.id = g.updated_by";
 
 pub async fn list_ground_stops(pool: &PgPool) -> Result<Vec<GroundStopBody>, ApiError> {
@@ -217,6 +217,37 @@ pub async fn create_ground_stop(
     .fetch_one(pool)
     .await
     .map_err(|_| ApiError::Internal)
+}
+
+/// Publishes a draft ground stop. Returns false if it isn't currently a draft.
+pub async fn publish_ground_stop(
+    pool: &PgPool,
+    id: &str,
+    published_by: &str,
+) -> Result<bool, ApiError> {
+    let result = sqlx::query(
+        "update tmu.ground_stops set status = 'published', published_by = $2, published_at = now() \
+         where id = $1 and status = 'draft'",
+    )
+    .bind(id)
+    .bind(published_by)
+    .execute(pool)
+    .await
+    .map_err(|_| ApiError::Internal)?;
+    Ok(result.rows_affected() > 0)
+}
+
+/// Cancels a draft or published ground stop. Returns false if it's already terminal.
+pub async fn cancel_ground_stop(pool: &PgPool, id: &str) -> Result<bool, ApiError> {
+    let result = sqlx::query(
+        "update tmu.ground_stops set status = 'cancelled' \
+         where id = $1 and status in ('draft', 'published')",
+    )
+    .bind(id)
+    .execute(pool)
+    .await
+    .map_err(|_| ApiError::Internal)?;
+    Ok(result.rows_affected() > 0)
 }
 
 pub async fn delete_ground_stop(pool: &PgPool, id: &str) -> Result<bool, ApiError> {

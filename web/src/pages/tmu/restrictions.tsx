@@ -1,6 +1,6 @@
 import {useState} from "react";
 import {Badge, Button, Card, CardContent, Input} from "@ois/ui";
-import {Plus, X} from "lucide-react";
+import {Plus} from "lucide-react";
 
 import {hasPermission} from "@/lib/permissions";
 import {formatZulu, parseZulu} from "@/lib/time";
@@ -88,7 +88,7 @@ function CreateForm() {
     <Card>
       <CardContent className="flex flex-col gap-3 pt-6">
         <div className="overflow-x-auto">
-          <div className={`${COLS} min-w-[720px]`}>
+          <div className={`${COLS} min-w-[860px]`}>
             <Head>Requesting</Head>
             <Head>Providing</Head>
             <Head>Restriction</Head>
@@ -121,26 +121,17 @@ function CreateForm() {
               value={form.stop}
               onChange={(e) => set("stop", e.target.value)}
             />
-            <button
-              type="button"
-              title="Clear row"
-              onClick={() => {
-                setForm(EMPTY);
-                setError(null);
-              }}
-              className="flex size-9 items-center justify-center rounded-md text-muted-foreground transition-colors hover:text-destructive"
+            <Button
+              className="whitespace-nowrap"
+              disabled={create.isPending}
+              onClick={submit}
             >
-              <X className="size-4" />
-            </button>
+              <Plus />
+              Add restriction
+            </Button>
           </div>
         </div>
-        <div className="flex items-center justify-between gap-3">
-          <p className="text-sm text-destructive">{error ?? ""}</p>
-          <Button disabled={create.isPending} onClick={submit}>
-            <Plus />
-            Add restriction
-          </Button>
-        </div>
+        {error && <p className="text-sm text-destructive">{error}</p>}
       </CardContent>
     </Card>
   );
