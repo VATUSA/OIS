@@ -208,7 +208,8 @@ pub async fn fca_counts(
         return Ok(Json(counts));
     };
     let airports = &guard.airports;
-    let nav = state.nav.as_ref();
+    let nav_db = state.nav.load_full();
+    let nav = nav_db.as_ref();
 
     // Resolve each aircraft's route once, then test it against every active FCA.
     let mut tally = |fp: &FlightPlan, lat: f64, lon: f64, hdg: i64, gs: i64, alt: i64| {
@@ -275,7 +276,8 @@ pub async fn aircraft_route(
         .as_ref()
         .ok_or(ApiError::ServiceUnavailable)?;
     let airports = &guard.airports;
-    let nav = state.nav.as_ref();
+    let nav_db = state.nav.load_full();
+    let nav = nav_db.as_ref();
 
     // Connected pilot: draw the remaining route from its live position.
     if let Some(p) = snap
@@ -599,7 +601,7 @@ pub async fn fca_traffic(
                 &fca,
                 &snap.data,
                 &guard.airports,
-                state.nav.as_ref(),
+                state.nav.load_full().as_ref(),
                 &releases,
                 now,
             )
@@ -646,7 +648,7 @@ pub async fn mark_release(
                 &fca,
                 &snap.data,
                 &guard.airports,
-                state.nav.as_ref(),
+                state.nav.load_full().as_ref(),
                 &releases,
                 now,
             )
@@ -728,7 +730,7 @@ pub async fn clear_release(
                 &fca,
                 &snap.data,
                 &guard.airports,
-                state.nav.as_ref(),
+                state.nav.load_full().as_ref(),
                 &releases,
                 now,
             )
