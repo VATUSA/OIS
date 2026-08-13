@@ -20,8 +20,8 @@ pub struct FcaCrossing {
     pub along_nm: f64,
 }
 
-/// Resolve the filed route to lat/lon anchors: departure → resolved fixes/navaids →
-/// arrival. Unresolved tokens (airways, procedures, non-US fixes) are skipped.
+/// Resolve the filed route to lat/lon anchors: departure → expanded enroute
+/// (fixes/navaids/airways/SID/STAR) → arrival, via the nav engine ([`NavData::build_anchors`]).
 fn route_anchors(
     nav: &NavData,
     airports: &AirportDb,
@@ -29,51 +29,11 @@ fn route_anchors(
     arr: &str,
     route: &str,
 ) -> Vec<[f64; 2]> {
-    route_anchors_verbose(nav, airports, dep, arr, route).0
-}
-
-/// Like `route_anchors`, but also returns the route tokens that couldn't be resolved.
-fn route_anchors_verbose(
-    nav: &NavData,
-    airports: &AirportDb,
-    dep: &str,
-    arr: &str,
-    route: &str,
-) -> (Vec<[f64; 2]>, Vec<String>) {
-    let mut anchors: Vec<[f64; 2]> = Vec::new();
-    let mut unresolved: Vec<String> = Vec::new();
-    let dep_c = airports.get(dep).map(|&(a, b)| [a, b]);
-    let arr_c = airports.get(arr).map(|&(a, b)| [a, b]);
-
-    if let Some(c) = dep_c {
-        anchors.push(c);
-    }
-    let mut prev = dep_c;
-    for tok in route.split_whitespace() {
-        let clean = tok.split('/').next().unwrap_or("").to_ascii_uppercase();
-        if clean.is_empty() || clean == "DCT" {
-            continue;
-        }
-        match nav.resolve(&clean, airports, prev) {
-            Some(c) => {
-                if anchors.last() != Some(&c) {
-                    anchors.push(c);
-                    prev = Some(c);
-                }
-            }
-            None => {
-                if !unresolved.contains(&clean) {
-                    unresolved.push(clean);
-                }
-            }
-        }
-    }
-    if let Some(c) = arr_c {
-        if anchors.last() != Some(&c) {
-            anchors.push(c);
-        }
-    }
-    (anchors, unresolved)
+    nav.build_anchors(airports, dep, arr, route)
+        .anchors
+        .into_iter()
+        .map(|a| a.ll)
+        .collect()
 }
 
 /// The full filed route as anchors + the tokens that couldn't be resolved.
@@ -84,12 +44,10 @@ pub fn full_route_verbose(
     arr: &str,
     route: &str,
 ) -> (Vec<[f64; 2]>, Vec<String>) {
-    route_anchors_verbose(
-        nav,
-        airports,
-        &dep.to_ascii_uppercase(),
-        &arr.to_ascii_uppercase(),
-        route,
+    let res = nav.build_anchors(airports, dep, arr, route);
+    (
+        res.anchors.into_iter().map(|a| a.ll).collect(),
+        res.unresolved,
     )
 }
 

@@ -814,7 +814,8 @@ function RoutePopup({
       </div>
 
       <p className="mt-2 text-[11px] leading-snug text-muted-foreground/70">
-        FAA NASR route — fixes, navaids, airways, SID/STAR when known.
+        FAA NASR route{route.nav_cycle ? ` (${route.nav_cycle})` : ""} — fixes,
+        navaids, airways, SID/STAR when known.
         {unresolved.length > 0 && (
           <>
             {" "}
