@@ -1,6 +1,8 @@
 //! Access-control queries: session/service-account resolution, effective permissions,
 //! and the login-time role/permission reconciliation.
 
+use std::collections::HashSet;
+
 use sha2::{Digest, Sha256};
 use sqlx::{PgPool, Postgres, Transaction};
 
@@ -345,6 +347,74 @@ pub async fn fetch_user_direct_grants(
     .fetch_all(pool)
     .await
     .map_err(|_| ApiError::Internal)
+}
+
+/// A user's authority for one permission: national (every ARTCC) or a specific set.
+#[derive(Debug, Clone)]
+pub enum PermissionScope {
+    National,
+    Facilities(HashSet<String>),
+}
+
+impl PermissionScope {
+    /// Whether this scope covers `artcc`. `None` (an airport with no resolvable owning
+    /// ARTCC) is editable only at national scope.
+    pub fn allows(&self, artcc: Option<&str>) -> bool {
+        match self {
+            PermissionScope::National => true,
+            PermissionScope::Facilities(set) => artcc.is_some_and(|a| set.contains(a)),
+        }
+    }
+}
+
+/// Resolve which ARTCCs a user effectively holds `permission_name` in. Server admins and
+/// anyone with a national (unscoped) grant — direct or via a role — get `National`;
+/// otherwise the set of ARTCC ids from their scoped grants (direct + role-derived).
+pub async fn permission_scope(
+    pool: &PgPool,
+    user_id: &str,
+    permission_name: &str,
+) -> Result<PermissionScope, ApiError> {
+    let national: bool = sqlx::query_scalar::<_, bool>(
+        "select exists(
+             select 1 from access.user_roles
+                 where user_id = $1 and role_name = 'SERVER_ADMIN'
+             union all
+             select 1 from access.user_permissions
+                 where user_id = $1 and permission_name = $2
+                   and granted = true and artcc_id is null
+             union all
+             select 1 from access.user_roles ur
+                 join access.role_permissions rp on rp.role_name = ur.role_name
+                 where ur.user_id = $1 and rp.permission_name = $2 and ur.artcc_id is null
+         )",
+    )
+    .bind(user_id)
+    .bind(permission_name)
+    .fetch_one(pool)
+    .await
+    .map_err(|_| ApiError::Internal)?;
+
+    if national {
+        return Ok(PermissionScope::National);
+    }
+
+    let scoped = sqlx::query_scalar::<_, String>(
+        "select artcc_id from access.user_permissions
+             where user_id = $1 and permission_name = $2
+               and granted = true and artcc_id is not null
+         union
+         select ur.artcc_id from access.user_roles ur
+             join access.role_permissions rp on rp.role_name = ur.role_name
+             where ur.user_id = $1 and rp.permission_name = $2 and ur.artcc_id is not null",
+    )
+    .bind(user_id)
+    .bind(permission_name)
+    .fetch_all(pool)
+    .await
+    .map_err(|_| ApiError::Internal)?;
+
+    Ok(PermissionScope::Facilities(scoped.into_iter().collect()))
 }
 
 /// All role grants, as `(artcc_id, role_name)`. `artcc_id = None` is national.

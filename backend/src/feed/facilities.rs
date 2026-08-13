@@ -52,6 +52,13 @@ pub fn member_airports(map: &FacilityMap, id: &str) -> Vec<String> {
     }
 }
 
+/// The ARTCC (center) that owns `icao`, if the map knows it. `icao` must be uppercase.
+pub fn artcc_for_airport(map: &FacilityMap, icao: &str) -> Option<String> {
+    map.iter()
+        .find(|(_, f)| f.kind == "artcc" && f.airports.iter().any(|a| a == icao))
+        .map(|(id, _)| id.clone())
+}
+
 /// Spawn the daily refresh job. Fires once at startup, then every 24h; on failure it keeps
 /// the current map (the bundled snapshot until a fetch succeeds).
 pub fn spawn_refresh(state: FacilityState) {
@@ -258,6 +265,13 @@ mod tests {
     fn plain_airport_resolves_to_itself() {
         let map = bundled();
         assert_eq!(member_airports(&map, "KBOS"), vec!["KBOS".to_string()]);
+    }
+
+    #[test]
+    fn resolves_owning_artcc_for_an_airport() {
+        let map = bundled();
+        assert_eq!(artcc_for_airport(&map, "KJFK").as_deref(), Some("ZNY"));
+        assert_eq!(artcc_for_airport(&map, "XXXX"), None);
     }
 
     #[test]

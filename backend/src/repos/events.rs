@@ -5,7 +5,7 @@ use chrono::{DateTime, Utc};
 use sqlx::PgPool;
 
 use crate::errors::ApiError;
-use crate::models::{DccRequestBody, EventBody, FacilitySupportBody};
+use crate::models::{AirportRateBody, DccRequestBody, EventBody, FacilitySupportBody};
 
 const EVENT_SELECT: &str = "select id, title, body, banner_image_url, facility, \
     start_time, end_time, review_status from events.event";
@@ -182,5 +182,83 @@ pub async fn delete_facility_support(
             .execute(pool)
             .await
             .map_err(|_| ApiError::Internal)?;
+    Ok(result.rows_affected() > 0)
+}
+
+// --- airport rates (AAR/ADR) ---
+
+const RATE_SELECT: &str = "select r.icao, r.aar, r.adr, r.artcc, r.updated_at, \
+    u.display_name as updated_by \
+    from events.airport_rate r left join identity.users u on u.id = r.updated_by";
+
+pub async fn list_airport_rates(
+    pool: &PgPool,
+    event_id: i64,
+) -> Result<Vec<AirportRateBody>, ApiError> {
+    sqlx::query_as::<_, AirportRateBody>(&format!(
+        "{RATE_SELECT} where r.event_id = $1 order by r.icao"
+    ))
+    .bind(event_id)
+    .fetch_all(pool)
+    .await
+    .map_err(|_| ApiError::Internal)
+}
+
+pub async fn get_airport_rate(
+    pool: &PgPool,
+    event_id: i64,
+    icao: &str,
+) -> Result<Option<AirportRateBody>, ApiError> {
+    sqlx::query_as::<_, AirportRateBody>(&format!(
+        "{RATE_SELECT} where r.event_id = $1 and r.icao = $2"
+    ))
+    .bind(event_id)
+    .bind(icao)
+    .fetch_optional(pool)
+    .await
+    .map_err(|_| ApiError::Internal)
+}
+
+pub async fn upsert_airport_rate(
+    pool: &PgPool,
+    event_id: i64,
+    icao: &str,
+    aar: i32,
+    adr: i32,
+    artcc: &str,
+    actor: &str,
+) -> Result<(), ApiError> {
+    sqlx::query(
+        "insert into events.airport_rate (event_id, icao, aar, adr, artcc, updated_by)
+         values ($1, $2, $3, $4, $5, $6)
+         on conflict (event_id, icao) do update set
+             aar = excluded.aar,
+             adr = excluded.adr,
+             artcc = excluded.artcc,
+             updated_by = excluded.updated_by",
+    )
+    .bind(event_id)
+    .bind(icao)
+    .bind(aar)
+    .bind(adr)
+    .bind(artcc)
+    .bind(actor)
+    .execute(pool)
+    .await
+    .map_err(|_| ApiError::Internal)?;
+    Ok(())
+}
+
+pub async fn delete_airport_rate(
+    pool: &PgPool,
+    event_id: i64,
+    icao: &str,
+) -> Result<bool, ApiError> {
+    let result = sqlx::query("delete from events.airport_rate where event_id = $1 and icao = $2")
+        .bind(event_id)
+        .bind(icao)
+        .execute(pool)
+        .await
+        .map_err(|_| ApiError::Internal)?;
     Ok(result.rows_affected() > 0)
 }

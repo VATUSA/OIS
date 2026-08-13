@@ -315,6 +315,29 @@ pub struct UpsertFacilitySupportRequest {
     pub notes: Option<String>,
 }
 
+/// A planned per-airport arrival/departure rate for an event.
+#[derive(Debug, Serialize, ToSchema, sqlx::FromRow)]
+pub struct AirportRateBody {
+    pub icao: String,
+    /// Airport arrival rate (per hour).
+    pub aar: i32,
+    /// Airport departure rate (per hour).
+    pub adr: i32,
+    /// Owning ARTCC resolved when set; empty if unknown.
+    pub artcc: String,
+    pub updated_at: DateTime<Utc>,
+    pub updated_by: Option<String>,
+    /// Whether the requesting user may edit this airport's rate (per their ARTCC scope).
+    #[sqlx(default)]
+    pub editable: bool,
+}
+
+#[derive(Debug, Deserialize, ToSchema)]
+pub struct UpsertAirportRateRequest {
+    pub aar: i32,
+    pub adr: i32,
+}
+
 // --- TMU rate programs ---
 
 /// One per-gate restriction inside a program: an arrival fix/STAR with its own spacing.

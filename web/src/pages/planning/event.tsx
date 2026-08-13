@@ -1,6 +1,6 @@
 import {Badge, Card, CardContent} from "@ois/ui";
 import {Link, useParams} from "@tanstack/react-router";
-import {ArrowLeft, CalendarClock, Gauge, Layers, type LucideIcon, Users,} from "lucide-react";
+import {ArrowLeft, CalendarClock, Layers, type LucideIcon, Users,} from "lucide-react";
 
 import {useMe} from "@/lib/auth";
 import {eventBodyText, useEvent} from "@/lib/events";
@@ -8,6 +8,7 @@ import {hasPermission} from "@/lib/permissions";
 import {formatZulu} from "@/lib/time";
 import {DccSection} from "@/pages/planning/dcc";
 import {FacilitySupportSection} from "@/pages/planning/facility-support";
+import {AirportRatesSection} from "@/pages/planning/airport-rates";
 
 type Module = {
   icon: LucideIcon;
@@ -26,11 +27,6 @@ const MODULES: Module[] = [
     icon: Users,
     title: "ACE request",
     description: "Request ACE staffing — positions wanted vs signed up.",
-  },
-  {
-    icon: Gauge,
-    title: "Airport rates",
-    description: "Set per-airport AAR/ADR that feeds the live rate programs.",
   },
 ];
 
@@ -163,6 +159,7 @@ export function EventPlanningPage() {
         </h2>
         <DccSection eventId={id} />
         <FacilitySupportSection eventId={id} />
+        <AirportRatesSection eventId={id} />
         <div className="grid gap-4 sm:grid-cols-2 lg:grid-cols-3">
           {MODULES.map((mod) => (
             <ModuleCard key={mod.title} mod={mod} />
