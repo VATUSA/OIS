@@ -1,6 +1,5 @@
 import {Badge, Card, CardContent} from "@ois/ui";
-import {Link} from "@tanstack/react-router";
-import {CalendarClock} from "lucide-react";
+import {useNavigate} from "@tanstack/react-router";
 
 import {useMe} from "@/lib/auth";
 import {type EventSummary, useUpcomingEvents} from "@/lib/events";
@@ -15,37 +14,35 @@ function reviewVariant(
   return "secondary";
 }
 
-function EventCard({ event }: { event: EventSummary }) {
+function EventRow({ event }: { event: EventSummary }) {
+  const navigate = useNavigate();
+  const open = () =>
+    navigate({
+      to: "/planning/events/$eventId",
+      params: { eventId: String(event.id) },
+    });
+
   return (
-    <Link
-      to="/planning/events/$eventId"
-      params={{ eventId: String(event.id) }}
-      className="block"
+    <tr
+      className="cursor-pointer border-t transition-colors hover:bg-accent/50"
+      onClick={open}
     >
-      <Card className="h-full transition-colors hover:border-primary/60">
-        <CardContent className="flex h-full flex-col gap-3 pt-6">
-          <div className="flex items-start justify-between gap-3">
-            <span className="font-semibold leading-snug">{event.title}</span>
-            {event.review_status && (
-              <Badge variant={reviewVariant(event.review_status)}>
-                {event.review_status}
-              </Badge>
-            )}
-          </div>
-          <div className="mt-auto flex flex-wrap items-center gap-x-3 gap-y-1 text-sm text-muted-foreground">
-            {event.facility && (
-              <span className="font-mono font-medium text-foreground">
-                {event.facility}
-              </span>
-            )}
-            <span className="flex items-center gap-1.5">
-              <CalendarClock className="size-3.5" />
-              {formatZulu(event.start_time)} – {formatZulu(event.end_time)}
-            </span>
-          </div>
-        </CardContent>
-      </Card>
-    </Link>
+      <td className="py-2 pr-3 font-medium">{event.title}</td>
+      <td className="py-2 pr-3 font-mono text-xs">{event.facility || "—"}</td>
+      <td className="py-2 pr-3 font-mono text-xs text-muted-foreground">
+        {formatZulu(event.start_time)}
+      </td>
+      <td className="py-2 pr-3 font-mono text-xs text-muted-foreground">
+        {formatZulu(event.end_time)}
+      </td>
+      <td className="py-2 text-right">
+        {event.review_status && (
+          <Badge variant={reviewVariant(event.review_status)}>
+            {event.review_status}
+          </Badge>
+        )}
+      </td>
+    </tr>
   );
 }
 
@@ -64,37 +61,46 @@ export function PlanningEventsPage() {
         </p>
       </div>
 
-      {!canPlan ? (
-        <Card>
-          <CardContent className="py-16 text-center text-sm text-muted-foreground">
-            You don&apos;t have event planning access yet.
-          </CardContent>
-        </Card>
-      ) : events.isError ? (
-        <Card>
-          <CardContent className="py-16 text-center text-sm text-muted-foreground">
-            Couldn&apos;t load events.
-          </CardContent>
-        </Card>
-      ) : !events.data ? (
-        <Card>
-          <CardContent className="py-16 text-center text-sm text-muted-foreground">
-            Loading events…
-          </CardContent>
-        </Card>
-      ) : events.data.length === 0 ? (
-        <Card>
-          <CardContent className="py-16 text-center text-sm text-muted-foreground">
-            No upcoming events on the VATUSA calendar right now.
-          </CardContent>
-        </Card>
-      ) : (
-        <div className="grid gap-4 sm:grid-cols-2 lg:grid-cols-3">
-          {events.data.map((event) => (
-            <EventCard key={event.id} event={event} />
-          ))}
-        </div>
-      )}
+      <Card>
+        <CardContent className="pt-6">
+          {!canPlan ? (
+            <p className="py-8 text-center text-sm text-muted-foreground">
+              You don&apos;t have event planning access yet.
+            </p>
+          ) : events.isError ? (
+            <p className="py-8 text-center text-sm text-muted-foreground">
+              Couldn&apos;t load events.
+            </p>
+          ) : !events.data ? (
+            <p className="py-8 text-center text-sm text-muted-foreground">
+              Loading…
+            </p>
+          ) : events.data.length === 0 ? (
+            <p className="py-8 text-center text-sm text-muted-foreground">
+              No upcoming events on the VATUSA calendar right now.
+            </p>
+          ) : (
+            <div className="overflow-x-auto">
+              <table className="w-full text-sm">
+                <thead>
+                  <tr className="text-left text-xs uppercase tracking-wide text-muted-foreground">
+                    <th className="pb-2 pr-3 font-medium">Event</th>
+                    <th className="pb-2 pr-3 font-medium">Facility</th>
+                    <th className="pb-2 pr-3 font-medium">Start</th>
+                    <th className="pb-2 pr-3 font-medium">End</th>
+                    <th className="pb-2 text-right font-medium">Status</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {events.data.map((event) => (
+                    <EventRow key={event.id} event={event} />
+                  ))}
+                </tbody>
+              </table>
+            </div>
+          )}
+        </CardContent>
+      </Card>
     </div>
   );
 }
