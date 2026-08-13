@@ -665,3 +665,399 @@ static ENGINE_REF: LazyLock<HashMap<&'static str, Engine>> = LazyLock::new(|| {
     }
     m
 });
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::feed::vatsim::{FlightPlan, Pilot, Prefile, VatsimData};
+
+    // A fixed reference time so ETA/STA arithmetic is deterministic.
+    fn t0() -> DateTime<Utc> {
+        DateTime::from_timestamp(1_700_000_000, 0).unwrap()
+    }
+
+    fn base_program() -> ProgramInputs {
+        ProgramInputs {
+            aar: 30,
+            trail: 0,
+            mit: 0,
+            gates: vec![],
+            exclude_wake: vec![],
+            exclude_types: vec![],
+            jets_only: false,
+        }
+    }
+
+    fn airports() -> AirportDb {
+        // KJFK and KBOS (lat, lon).
+        HashMap::from([
+            ("KJFK".to_string(), (40.6413, -73.7781)),
+            ("KBOS".to_string(), (42.3656, -71.0096)),
+        ])
+    }
+
+    fn fp(dep: &str, arr: &str, route: &str) -> FlightPlan {
+        FlightPlan {
+            departure: dep.into(),
+            arrival: arr.into(),
+            route: route.into(),
+            aircraft_short: "B738".into(),
+            cruise_tas: "420".into(),
+            ..Default::default()
+        }
+    }
+
+    fn pilot(cs: &str, lat: f64, lon: f64, alt: i64, gs: i64, plan: FlightPlan) -> Pilot {
+        Pilot {
+            callsign: cs.into(),
+            latitude: lat,
+            longitude: lon,
+            altitude: alt,
+            groundspeed: gs,
+            flight_plan: Some(plan),
+        }
+    }
+
+    /// A FlowFlight with a given ETA offset (minutes) from t0.
+    fn ff(cs: &str, status: &str, eta_min: i64, gate: Option<&str>) -> FlowFlight {
+        FlowFlight {
+            callsign: cs.into(),
+            status: status.into(),
+            eta: Some(t0() + Duration::minutes(eta_min)),
+            gate: gate.map(Into::into),
+            ..Default::default()
+        }
+    }
+
+    fn min_after(base: DateTime<Utc>, t: Option<DateTime<Utc>>) -> i64 {
+        (t.unwrap() - base).num_minutes()
+    }
+
+    fn ms(t: Option<DateTime<Utc>>) -> i64 {
+        t.unwrap().timestamp_millis()
+    }
+
+    // ---- gate derivation ----
+
+    #[test]
+    fn gate_predicates() {
+        assert!(is_fix("CAMRN"));
+        assert!(!is_fix("JFK"));
+        assert!(!is_fix("CAMRN4"));
+
+        assert!(is_navaid("JFK"));
+        assert!(!is_navaid("CAMRN"));
+
+        assert!(is_star("OZZZI4"));
+        assert!(is_star("PARCH3"));
+        assert!(is_star("CAMRN4A"));
+        assert!(!is_star("CAMRN")); // no digit
+        assert!(!is_star("N0450F350")); // interior digits, not a STAR name
+        assert!(!is_star("AB3")); // too few letters
+    }
+
+    #[test]
+    fn arrival_gate_scans_from_the_end() {
+        assert_eq!(
+            arrival_gate("DCT CAMRN KJFK", "KJFK").as_deref(),
+            Some("CAMRN")
+        );
+        assert_eq!(
+            arrival_gate("KBOS PARCH4", "KJFK").as_deref(),
+            Some("PARCH4")
+        );
+        assert_eq!(arrival_gate("DCT JFK", "KJFK").as_deref(), Some("JFK"));
+        assert_eq!(arrival_gate("N0450F350 DCT", "KJFK"), None);
+        assert_eq!(arrival_gate("", "KJFK"), None);
+        assert_eq!(arrival_gate("DCT KJFK", "KJFK"), None); // only the destination
+    }
+
+    // ---- geometry / parsing ----
+
+    #[test]
+    fn gc_dist_matches_known_distances() {
+        // 1 degree of latitude ~= 60 nm.
+        assert!((gc_dist(0.0, 0.0, 1.0, 0.0) - 60.0).abs() < 0.5);
+        // KJFK -> KBOS is ~162 nm (187 statute miles).
+        let d = gc_dist(40.6413, -73.7781, 42.3656, -71.0096);
+        assert!((d - 162.0).abs() < 3.0, "got {d}");
+        assert_eq!(gc_dist(40.0, -73.0, 40.0, -73.0), 0.0);
+    }
+
+    #[test]
+    fn parse_tas_defaults_when_implausible() {
+        assert_eq!(parse_tas("480"), 480.0);
+        assert_eq!(parse_tas(""), 420.0);
+        assert_eq!(parse_tas("abc"), 420.0);
+        assert_eq!(parse_tas("50"), 420.0); // below floor
+        assert_eq!(parse_tas("2000"), 420.0); // above ceiling
+    }
+
+    // ---- spacing math ----
+
+    #[test]
+    fn route_interval_mit_beats_minutes_and_floors_at_runway() {
+        let runway = 60_000.0; // 1 min
+        // 20 MIT at 360kt = 200s.
+        assert_eq!(route_interval_ms(0, 20, runway), 200_000.0);
+        // 5 minutes-in-trail = 300s.
+        assert_eq!(route_interval_ms(5, 0, runway), 300_000.0);
+        // MIT overrides minutes when both set.
+        assert_eq!(route_interval_ms(5, 20, runway), 200_000.0);
+        // Never below the runway interval.
+        assert_eq!(route_interval_ms(0, 1, 600_000.0), 600_000.0);
+    }
+
+    #[test]
+    fn gate_spacing_prefers_matching_gate_rule() {
+        let runway = 60_000.0;
+        let pg = ProgramInputs {
+            mit: 15, // airport-wide 15 MIT = 150s, above the runway floor
+            gates: vec![GateSpacing {
+                name: "CAMRN".into(),
+                trail: 0,
+                mit: 20,
+            }],
+            ..base_program()
+        };
+        // Matching gate rule (20 MIT) wins.
+        assert_eq!(gate_spacing_ms(&pg, runway, "CAMRN"), 200_000.0);
+        // No matching rule -> airport-wide mit (15 nm).
+        let expected = (15.0 / MIT_NOMINAL_KT) * 3_600_000.0;
+        assert_eq!(gate_spacing_ms(&pg, runway, "LENDY"), expected);
+    }
+
+    #[test]
+    fn proposed_etd_uses_deptime_or_floor() {
+        use chrono::Timelike;
+        // A filed deptime well ahead of now is honored.
+        let etd = proposed_etd("2330", t0());
+        assert_eq!((etd.hour(), etd.minute()), (23, 30));
+        // Blank deptime -> now + 20 minutes.
+        let etd = proposed_etd("", t0());
+        assert_eq!(etd, t0() + Duration::minutes(20));
+    }
+
+    // ---- exclusions ----
+
+    #[test]
+    fn exclusions_by_wake_type_and_jets_only() {
+        let by_wake = ProgramInputs {
+            exclude_wake: vec!["L".into()],
+            ..base_program()
+        };
+        assert!(is_excluded("B738", "L", &by_wake));
+        assert!(!is_excluded("B738", "H", &by_wake));
+
+        let by_type = ProgramInputs {
+            exclude_types: vec!["C172".into()],
+            ..base_program()
+        };
+        assert!(is_excluded("C172", "", &by_type));
+        assert!(!is_excluded("B738", "", &by_type));
+
+        let jets = ProgramInputs {
+            jets_only: true,
+            ..base_program()
+        };
+        assert!(is_excluded("C172", "", &jets)); // piston
+        assert!(!is_excluded("B738", "", &jets)); // jet
+        assert!(is_excluded("ZZZZ", "L", &jets)); // unknown + light wake
+        assert!(!is_excluded("ZZZZ", "", &jets)); // unknown, included by default
+    }
+
+    // ---- classification (compute) ----
+
+    #[test]
+    fn compute_classifies_and_counts() {
+        let data = VatsimData {
+            pilots: vec![
+                // On the ground at KBOS, bound for KJFK.
+                pilot(
+                    "GRD1",
+                    42.36,
+                    -71.0,
+                    0,
+                    0,
+                    fp("KBOS", "KJFK", "DCT CAMRN KJFK"),
+                ),
+                // Airborne ~38 nm south of KJFK.
+                pilot(
+                    "AIR1",
+                    40.0,
+                    -73.7781,
+                    15_000,
+                    300,
+                    fp("KBOS", "KJFK", "PARCH4"),
+                ),
+                // Sitting on the field at KJFK (arrived).
+                pilot("ARR1", 40.6413, -73.7781, 0, 0, fp("KBOS", "KJFK", "DCT")),
+                // Not our airport.
+                pilot("OTH1", 41.0, -73.0, 0, 0, fp("KBOS", "KLGA", "DCT")),
+            ],
+            prefiles: vec![Prefile {
+                callsign: "PRE1".into(),
+                flight_plan: Some(fp("KBOS", "KJFK", "DCT LENDY KJFK")),
+            }],
+            ..Default::default()
+        };
+        let pg = base_program();
+        let flow = compute("KJFK", Some(&pg), &data, &airports(), &HashMap::new(), t0());
+
+        assert_eq!(flow.airborne, 1);
+        assert_eq!(flow.ground, 1);
+        assert_eq!(flow.proposed, 1);
+        assert_eq!(flow.inbound, 3); // excludes the arrived flight
+
+        let by = |cs: &str| flow.flights.iter().find(|f| f.callsign == cs).unwrap();
+        assert_eq!(by("GRD1").status, "ground");
+        assert_eq!(by("AIR1").status, "airborne");
+        assert_eq!(by("AIR1").gate.as_deref(), Some("PARCH4"));
+        assert_eq!(by("ARR1").status, "arrived");
+        assert_eq!(by("PRE1").status, "proposed");
+        // OTH1 is bound for KLGA and should not appear.
+        assert!(flow.flights.iter().all(|f| f.callsign != "OTH1"));
+    }
+
+    #[test]
+    fn pending_departures_lists_ground_and_prefiles() {
+        let data = VatsimData {
+            pilots: vec![
+                pilot("G1", 42.36, -71.0, 0, 0, fp("KBOS", "KJFK", "DCT")),
+                // Airborne — already departed, excluded.
+                pilot("AIR", 42.5, -71.5, 12_000, 350, fp("KBOS", "KJFK", "DCT")),
+                // Departs elsewhere.
+                pilot("X", 42.36, -71.0, 0, 0, fp("KLGA", "KJFK", "DCT")),
+            ],
+            prefiles: vec![Prefile {
+                callsign: "P1".into(),
+                flight_plan: Some(fp("KBOS", "KMIA", "DCT")),
+            }],
+            ..Default::default()
+        };
+        let deps = pending_departures("KBOS", &data);
+        let names: Vec<_> = deps.iter().map(|d| d.callsign.as_str()).collect();
+        assert!(names.contains(&"G1"));
+        assert!(names.contains(&"P1"));
+        assert!(!names.contains(&"AIR")); // airborne
+        assert!(!names.contains(&"X")); // wrong field
+    }
+
+    // ---- scheduler (apply_metering) ----
+
+    #[test]
+    fn airborne_spaced_at_runway_interval() {
+        let now = t0();
+        let mut flights = vec![
+            ff("A1", "airborne", 1, None),
+            ff("A2", "airborne", 2, None),
+            ff("A3", "airborne", 3, None),
+        ];
+        let etd = vec![None, None, None];
+        apply_metering(
+            &mut flights,
+            &etd,
+            &base_program_aar(10),
+            &HashMap::new(),
+            now,
+        );
+
+        // 6-minute runway interval (AAR 10).
+        assert_eq!(min_after(now, flights[0].sta), 1);
+        assert_eq!(min_after(now, flights[1].sta), 7);
+        assert_eq!(min_after(now, flights[2].sta), 13);
+        assert_eq!(flights[1].delay_min, 5);
+        assert_eq!(flights[2].delay_min, 10);
+        assert_eq!(flights[0].seq, Some(1));
+        assert_eq!(flights[2].seq, Some(3));
+    }
+
+    #[test]
+    fn ground_flight_gets_wheels_up_cfr() {
+        let now = t0();
+        let mut flights = vec![
+            ff("AIR", "airborne", 5, None),
+            ff("GRD", "ground", 10, None),
+        ];
+        // Ground flight is assumed ready now.
+        let etd = vec![None, Some(now.timestamp_millis())];
+        apply_metering(
+            &mut flights,
+            &etd,
+            &base_program_aar(10),
+            &HashMap::new(),
+            now,
+        );
+
+        // AIR at +5, GRD conflicts (within 6 min) so slots to +11.
+        assert_eq!(min_after(now, flights[0].sta), 5);
+        assert_eq!(min_after(now, flights[1].sta), 11);
+        assert_eq!(flights[1].delay_min, 1);
+        // wheels-up = etd(now) + delay(1 min).
+        assert_eq!(min_after(now, flights[1].cfr), 1);
+    }
+
+    #[test]
+    fn same_gate_traffic_gets_in_trail_spacing() {
+        let now = t0();
+        let pg = ProgramInputs {
+            aar: 60, // 1-min runway
+            gates: vec![GateSpacing {
+                name: "CAMRN".into(),
+                trail: 0,
+                mit: 20, // 200s in-trail
+            }],
+            ..base_program()
+        };
+        let mut flights = vec![
+            ff("A1", "airborne", 1, Some("CAMRN")),
+            ff("A2", "airborne", 2, Some("CAMRN")),
+        ];
+        let etd = vec![None, None];
+        apply_metering(&mut flights, &etd, &pg, &HashMap::new(), now);
+        // The gate in-trail (200s) exceeds the runway interval.
+        assert_eq!(ms(flights[1].sta) - ms(flights[0].sta), 200_000);
+    }
+
+    #[test]
+    fn issued_cfr_is_reserved_at_its_locked_wheels_up() {
+        let now = t0();
+        let wheels = now + Duration::minutes(30);
+        let mut flights = vec![ff("GRD", "ground", 10, None)];
+        let etd = vec![Some(now.timestamp_millis())];
+        let issued = HashMap::from([("GRD".to_string(), wheels)]);
+        apply_metering(&mut flights, &etd, &base_program_aar(10), &issued, now);
+
+        assert!(flights[0].cfr_issued);
+        assert_eq!(flights[0].cfr, Some(wheels));
+    }
+
+    #[test]
+    fn ready_time_slot_never_before_ready_or_now() {
+        let data = VatsimData {
+            pilots: vec![pilot("GRD1", 42.36, -71.0, 0, 0, fp("KBOS", "KJFK", "DCT"))],
+            ..Default::default()
+        };
+        let pg = base_program();
+        let ready = t0() + Duration::minutes(60);
+        let slot = ready_time_slot(
+            "KJFK",
+            &pg,
+            &data,
+            &airports(),
+            &HashMap::new(),
+            "GRD1",
+            ready,
+            t0(),
+        )
+        .unwrap();
+        assert!(slot >= ready, "slot {slot} should be >= ready {ready}");
+    }
+
+    fn base_program_aar(aar: i32) -> ProgramInputs {
+        ProgramInputs {
+            aar,
+            ..base_program()
+        }
+    }
+}

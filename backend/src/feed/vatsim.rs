@@ -109,3 +109,75 @@ pub async fn fetch(client: &reqwest::Client) -> Result<VatsimData, reqwest::Erro
         .json::<VatsimData>()
         .await
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn plan(aircraft: &str, short: &str, faa: &str) -> FlightPlan {
+        FlightPlan {
+            aircraft: aircraft.into(),
+            aircraft_short: short.into(),
+            aircraft_faa: faa.into(),
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn type_and_wake_from_icao_equipment() {
+        let (ty, wake) = plan("H/B77W/L", "B77W", "").aircraft_type_wake();
+        assert_eq!(ty, "B77W");
+        assert_eq!(wake, "H");
+    }
+
+    #[test]
+    fn wake_empty_when_leading_segment_is_not_a_category() {
+        let (ty, wake) = plan("B738/L", "B738", "").aircraft_type_wake();
+        assert_eq!(ty, "B738");
+        assert_eq!(wake, "");
+    }
+
+    #[test]
+    fn type_falls_back_to_faa_then_zzzz() {
+        assert_eq!(plan("", "", "A320").aircraft_type_wake().0, "A320");
+        assert_eq!(plan("", "", "").aircraft_type_wake().0, "ZZZZ");
+    }
+
+    #[test]
+    fn vfr_detection() {
+        let vfr = FlightPlan {
+            flight_rules: "V".into(),
+            ..Default::default()
+        };
+        assert!(vfr.is_vfr());
+        let ifr = FlightPlan {
+            flight_rules: "I".into(),
+            ..Default::default()
+        };
+        assert!(!ifr.is_vfr());
+        assert!(!FlightPlan::default().is_vfr());
+    }
+
+    #[test]
+    fn deserializes_datafeed_subset() {
+        let data: VatsimData = serde_json::from_value(serde_json::json!({
+            "general": { "update_timestamp": "2026-01-01T00:00:00Z" },
+            "pilots": [{
+                "callsign": "AAL1",
+                "latitude": 40.0, "longitude": -73.0,
+                "altitude": 10000, "groundspeed": 300,
+                "flight_plan": {
+                    "departure": "KBOS", "arrival": "KJFK",
+                    "route": "DCT CAMRN", "aircraft_short": "B738"
+                }
+            }],
+            "prefiles": []
+        }))
+        .unwrap();
+        assert_eq!(data.pilots.len(), 1);
+        assert_eq!(data.pilots[0].callsign, "AAL1");
+        let fp = data.pilots[0].flight_plan.as_ref().unwrap();
+        assert_eq!(fp.arrival, "KJFK");
+        assert_eq!(fp.route, "DCT CAMRN");
+    }
+}

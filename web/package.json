@@ -7,6 +7,7 @@
     "build": "vite build",
     "preview": "vite preview --port 4173",
     "typecheck": "tsc --noEmit",
+    "test": "vitest run",
     "codegen": "pnpm --filter @ois/api-client codegen"
   },
   "devDependencies": {
@@ -16,7 +17,8 @@
     "@vitejs/plugin-react": "^6.0.5",
     "tailwindcss": "^4.3.3",
     "typescript": "^5",
-    "vite": "^8.2.1"
+    "vite": "^8.2.1",
+    "vitest": "^4.1.10"
   },
   "dependencies": {
     "@ois/api-client": "workspace:^",
