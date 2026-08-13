@@ -510,13 +510,22 @@ pub struct ReorderRequest {
     pub order: Vec<String>,
 }
 
-/// An aircraft's filed route resolved to lat/lon anchors, for plotting on the map.
+/// An aircraft's filed route resolved to lat/lon anchors, for plotting + a detail popup.
 #[derive(Debug, Serialize, ToSchema)]
 pub struct AircraftRoute {
     pub callsign: String,
-    /// Route anchors as `[lat, lon]` pairs.
+    pub aircraft_type: String,
+    pub dep: String,
+    pub arr: String,
+    pub altitude: i64,
+    pub groundspeed: i64,
+    /// Raw filed route string.
+    pub route: String,
+    /// Resolved route anchors as `[lat, lon]` pairs (the drawn track).
     #[schema(value_type = Vec<Vec<f64>>)]
     pub points: Vec<[f64; 2]>,
+    /// Filed tokens that couldn't be resolved to a coordinate.
+    pub unresolved: Vec<String>,
 }
 
 /// A lightweight live-traffic record for plotting on the FCA map.

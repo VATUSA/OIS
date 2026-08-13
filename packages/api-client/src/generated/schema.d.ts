@@ -886,11 +886,22 @@ export interface components {
             kind: string;
             payload: Record<string, never>;
         };
-        /** @description An aircraft's filed route resolved to lat/lon anchors, for plotting on the map. */
+        /** @description An aircraft's filed route resolved to lat/lon anchors, for plotting + a detail popup. */
         AircraftRoute: {
+            aircraft_type: string;
+            /** Format: int64 */
+            altitude: number;
+            arr: string;
             callsign: string;
-            /** @description Route anchors as `[lat, lon]` pairs. */
+            dep: string;
+            /** Format: int64 */
+            groundspeed: number;
+            /** @description Resolved route anchors as `[lat, lon]` pairs (the drawn track). */
             points: number[][];
+            /** @description Raw filed route string. */
+            route: string;
+            /** @description Filed tokens that couldn't be resolved to a coordinate. */
+            unresolved: string[];
         };
         /** @description A planned per-airport arrival/departure rate for an event. */
         AirportRateBody: {

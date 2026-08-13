@@ -8,6 +8,7 @@ export type Fca = components["schemas"]["FcaBody"];
 export type UpsertFca = components["schemas"]["UpsertFcaRequest"];
 export type TrafficAircraft = components["schemas"]["TrafficAircraft"];
 export type FcaFlight = components["schemas"]["FcaFlight"];
+export type AircraftRoute = components["schemas"]["AircraftRoute"];
 
 /** All FCAs (shared across controllers). */
 export function useFcas() {
