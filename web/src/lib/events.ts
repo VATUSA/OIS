@@ -15,6 +15,8 @@ export type UpsertAirportRate =
   components["schemas"]["UpsertAirportRateRequest"];
 export type StaffingRequest = components["schemas"]["StaffingRequestBody"];
 export type UpsertStaffing = components["schemas"]["UpsertStaffingRequest"];
+export type TmiPackage = components["schemas"]["TmiPackageBody"];
+export type TmiPackageItem = components["schemas"]["TmiPackageItemBody"];
 
 /** Upcoming (and in-progress) VATUSA events, soonest first. */
 export function useUpcomingEvents() {
@@ -268,6 +270,141 @@ export function useRemoveStaffing(eventId: number) {
       toast.success("Staffing request removed");
     },
     onError: () => toast.error("Couldn’t remove the staffing request"),
+  });
+}
+
+/** TMI packages (draft bundles of programs/restrictions/ground stops) for an event. */
+export function usePackages(eventId: number) {
+  return useQuery({
+    queryKey: ["event-packages", eventId],
+    queryFn: async () => {
+      const { data, error } = await ois.GET("/api/v1/events/{id}/packages", {
+        params: { path: { id: eventId } },
+      });
+      if (error || !data) throw new Error("failed to load packages");
+      return data;
+    },
+    enabled: Number.isFinite(eventId),
+  });
+}
+
+export function useCreatePackage(eventId: number) {
+  const queryClient = useQueryClient();
+  const toast = useToast();
+  return useMutation({
+    mutationFn: async (name: string) => {
+      const { data, error } = await ois.POST("/api/v1/events/{id}/packages", {
+        params: { path: { id: eventId } },
+        body: { name },
+      });
+      if (error || !data) throw new Error("create failed");
+      return data;
+    },
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ["event-packages", eventId] });
+      toast.success("Package created");
+    },
+    onError: () => toast.error("Couldn’t create the package"),
+  });
+}
+
+export function useDeletePackage(eventId: number) {
+  const queryClient = useQueryClient();
+  const toast = useToast();
+  return useMutation({
+    mutationFn: async (packageId: string) => {
+      const { error } = await ois.DELETE(
+        "/api/v1/events/{id}/packages/{package_id}",
+        { params: { path: { id: eventId, package_id: packageId } } },
+      );
+      if (error) throw new Error("delete failed");
+    },
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ["event-packages", eventId] });
+      toast.success("Package deleted");
+    },
+    onError: () => toast.error("Couldn’t delete the package"),
+  });
+}
+
+export function useAddPackageItem(eventId: number) {
+  const queryClient = useQueryClient();
+  const toast = useToast();
+  return useMutation({
+    mutationFn: async ({
+      packageId,
+      kind,
+      payload,
+    }: {
+      packageId: string;
+      kind: string;
+      payload: Record<string, unknown>;
+    }) => {
+      const { data, error } = await ois.POST(
+        "/api/v1/events/{id}/packages/{package_id}/items",
+        {
+          params: { path: { id: eventId, package_id: packageId } },
+          // payload is a free-form object typed as Object in the schema
+          body: { kind, payload } as components["schemas"]["AddPackageItemRequest"],
+        },
+      );
+      if (error || !data) throw new Error("add failed");
+      return data;
+    },
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ["event-packages", eventId] });
+    },
+    onError: () => toast.error("Couldn’t add the item — check the fields"),
+  });
+}
+
+export function useDeletePackageItem(eventId: number) {
+  const queryClient = useQueryClient();
+  return useMutation({
+    mutationFn: async ({
+      packageId,
+      itemId,
+    }: {
+      packageId: string;
+      itemId: string;
+    }) => {
+      const { error } = await ois.DELETE(
+        "/api/v1/events/{id}/packages/{package_id}/items/{item_id}",
+        {
+          params: {
+            path: { id: eventId, package_id: packageId, item_id: itemId },
+          },
+        },
+      );
+      if (error) throw new Error("remove failed");
+    },
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ["event-packages", eventId] });
+    },
+  });
+}
+
+export function useActivatePackage(eventId: number) {
+  const queryClient = useQueryClient();
+  const toast = useToast();
+  return useMutation({
+    mutationFn: async (packageId: string) => {
+      const { data, error } = await ois.POST(
+        "/api/v1/events/{id}/packages/{package_id}/activate",
+        { params: { path: { id: eventId, package_id: packageId } } },
+      );
+      if (error || !data) throw new Error("activate failed");
+      return data;
+    },
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ["event-packages", eventId] });
+      // live TMU rows changed
+      queryClient.invalidateQueries({ queryKey: ["tmu-programs"] });
+      queryClient.invalidateQueries({ queryKey: ["tmis"] });
+      queryClient.invalidateQueries({ queryKey: ["ground-stops"] });
+      toast.success("Package activated — live in Operations");
+    },
+    onError: () => toast.error("Couldn’t activate the package"),
   });
 }
 

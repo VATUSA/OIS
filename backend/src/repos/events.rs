@@ -4,9 +4,12 @@
 use chrono::{DateTime, Utc};
 use sqlx::PgPool;
 
+use serde_json::Value;
+
 use crate::errors::ApiError;
 use crate::models::{
     AirportRateBody, DccRequestBody, EventBody, FacilitySupportBody, StaffingRequestBody,
+    TmiPackageBody, TmiPackageItemBody,
 };
 
 const EVENT_SELECT: &str = "select id, title, body, banner_image_url, facility, \
@@ -347,4 +350,151 @@ pub async fn delete_staffing(
             .await
             .map_err(|_| ApiError::Internal)?;
     Ok(result.rows_affected() > 0)
+}
+
+// --- TMI packages ---
+
+/// A package's own columns (items are loaded separately).
+#[derive(sqlx::FromRow)]
+struct PackageRow {
+    id: String,
+    name: String,
+    status: String,
+    activated_at: Option<DateTime<Utc>>,
+    updated_at: DateTime<Utc>,
+    updated_by: Option<String>,
+}
+
+const PACKAGE_SELECT: &str = "select p.id, p.name, p.status, p.activated_at, p.updated_at, \
+    u.display_name as updated_by \
+    from events.tmi_package p left join identity.users u on u.id = p.updated_by";
+
+pub async fn list_package_items(
+    pool: &PgPool,
+    package_id: &str,
+) -> Result<Vec<TmiPackageItemBody>, ApiError> {
+    sqlx::query_as::<_, TmiPackageItemBody>(
+        "select id, kind, payload from events.tmi_package_item \
+         where package_id = $1 order by created_at",
+    )
+    .bind(package_id)
+    .fetch_all(pool)
+    .await
+    .map_err(|_| ApiError::Internal)
+}
+
+pub async fn list_packages(pool: &PgPool, event_id: i64) -> Result<Vec<TmiPackageBody>, ApiError> {
+    let rows = sqlx::query_as::<_, PackageRow>(&format!(
+        "{PACKAGE_SELECT} where p.event_id = $1 order by p.created_at"
+    ))
+    .bind(event_id)
+    .fetch_all(pool)
+    .await
+    .map_err(|_| ApiError::Internal)?;
+
+    let mut packages = Vec::with_capacity(rows.len());
+    for r in rows {
+        let items = list_package_items(pool, &r.id).await?;
+        packages.push(TmiPackageBody {
+            id: r.id,
+            name: r.name,
+            status: r.status,
+            activated_at: r.activated_at,
+            updated_at: r.updated_at,
+            updated_by: r.updated_by,
+            items,
+        });
+    }
+    Ok(packages)
+}
+
+/// One package (for scope/ownership checks). Returns (event_id, status).
+pub async fn get_package_owner(
+    pool: &PgPool,
+    package_id: &str,
+) -> Result<Option<(i64, String)>, ApiError> {
+    sqlx::query_as::<_, (i64, String)>(
+        "select event_id, status from events.tmi_package where id = $1",
+    )
+    .bind(package_id)
+    .fetch_optional(pool)
+    .await
+    .map_err(|_| ApiError::Internal)
+}
+
+pub async fn create_package(
+    pool: &PgPool,
+    event_id: i64,
+    name: &str,
+    actor: &str,
+) -> Result<String, ApiError> {
+    sqlx::query_scalar::<_, String>(
+        "insert into events.tmi_package (event_id, name, updated_by) \
+         values ($1, $2, $3) returning id",
+    )
+    .bind(event_id)
+    .bind(name)
+    .bind(actor)
+    .fetch_one(pool)
+    .await
+    .map_err(|_| ApiError::Internal)
+}
+
+pub async fn delete_package(pool: &PgPool, package_id: &str) -> Result<bool, ApiError> {
+    let result = sqlx::query("delete from events.tmi_package where id = $1")
+        .bind(package_id)
+        .execute(pool)
+        .await
+        .map_err(|_| ApiError::Internal)?;
+    Ok(result.rows_affected() > 0)
+}
+
+pub async fn add_package_item(
+    pool: &PgPool,
+    package_id: &str,
+    kind: &str,
+    payload: &Value,
+) -> Result<String, ApiError> {
+    sqlx::query_scalar::<_, String>(
+        "insert into events.tmi_package_item (package_id, kind, payload) \
+         values ($1, $2, $3) returning id",
+    )
+    .bind(package_id)
+    .bind(kind)
+    .bind(sqlx::types::Json(payload))
+    .fetch_one(pool)
+    .await
+    .map_err(|_| ApiError::Internal)
+}
+
+pub async fn delete_package_item(
+    pool: &PgPool,
+    package_id: &str,
+    item_id: &str,
+) -> Result<bool, ApiError> {
+    let result =
+        sqlx::query("delete from events.tmi_package_item where package_id = $1 and id = $2")
+            .bind(package_id)
+            .bind(item_id)
+            .execute(pool)
+            .await
+            .map_err(|_| ApiError::Internal)?;
+    Ok(result.rows_affected() > 0)
+}
+
+pub async fn mark_package_activated(
+    pool: &PgPool,
+    package_id: &str,
+    actor: &str,
+) -> Result<(), ApiError> {
+    sqlx::query(
+        "update events.tmi_package set status = 'activated', activated_at = now(), \
+         updated_by = $2 where id = $1",
+    )
+    .bind(package_id)
+    .bind(actor)
+    .execute(pool)
+    .await
+    .map_err(|_| ApiError::Internal)?;
+    Ok(())
 }

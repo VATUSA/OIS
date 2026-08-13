@@ -94,6 +94,26 @@ pub fn build_router(state: AppState) -> Router {
             "/api/v1/events/{id}/staffing/{facility}",
             put(events::upsert_event_staffing).delete(events::delete_event_staffing),
         )
+        .route(
+            "/api/v1/events/{id}/packages",
+            get(events::list_event_packages).post(events::create_event_package),
+        )
+        .route(
+            "/api/v1/events/{id}/packages/{package_id}",
+            delete(events::delete_event_package),
+        )
+        .route(
+            "/api/v1/events/{id}/packages/{package_id}/items",
+            post(events::add_event_package_item),
+        )
+        .route(
+            "/api/v1/events/{id}/packages/{package_id}/items/{item_id}",
+            delete(events::delete_event_package_item),
+        )
+        .route(
+            "/api/v1/events/{id}/packages/{package_id}/activate",
+            post(events::activate_event_package),
+        )
         // Live VATSIM feed
         .route("/api/v1/feed/status", get(feed::feed_status))
         .route("/api/v1/tmu/flow/{icao}", get(feed::airport_flow))

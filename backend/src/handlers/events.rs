@@ -4,6 +4,9 @@ use axum::{
     Json,
     extract::{Extension, Path, State},
 };
+use chrono::{DateTime, Utc};
+use serde::{Deserialize, Serialize};
+use serde_json::Value;
 
 use crate::{
     auth::{
@@ -14,13 +17,89 @@ use crate::{
     errors::ApiError,
     feed,
     models::{
-        AirportRateBody, DccRequestBody, EventBody, FacilitySupportBody, StaffingRequestBody,
-        UpdateDccRequest, UpsertAirportRateRequest, UpsertFacilitySupportRequest,
-        UpsertStaffingRequest,
+        AddPackageItemRequest, AirportRateBody, CreateGroundStopRequest, CreatePackageRequest,
+        CreateTmiRequest, DccRequestBody, EventBody, FacilitySupportBody, StaffingRequestBody,
+        TmiPackageBody, UpdateDccRequest, UpsertAirportRateRequest, UpsertFacilitySupportRequest,
+        UpsertProgramRequest, UpsertStaffingRequest,
     },
-    repos::{access as access_repo, events as events_repo},
+    repos::{access as access_repo, events as events_repo, tmu as tmu_repo},
     state::AppState,
 };
+
+// --- TMI-package item payloads (the create-shape per kind) ---
+
+#[derive(Debug, Deserialize, Serialize)]
+struct ProgramItem {
+    icao: String,
+    aar: i32,
+    #[serde(default)]
+    trail: i32,
+    #[serde(default)]
+    mit: i32,
+}
+
+#[derive(Debug, Deserialize, Serialize)]
+struct RestrictionItem {
+    requesting: String,
+    providing: String,
+    restriction: String,
+    #[serde(default)]
+    start_time: Option<DateTime<Utc>>,
+    #[serde(default)]
+    stop_time: Option<DateTime<Utc>>,
+}
+
+#[derive(Debug, Deserialize, Serialize)]
+struct GroundStopItem {
+    airport: String,
+    #[serde(default)]
+    scope: Option<String>,
+    #[serde(default)]
+    until: Option<String>,
+}
+
+/// Validate + normalize a package item's payload for its kind (canonical for storage).
+fn normalize_item(kind: &str, payload: Value) -> Result<Value, ApiError> {
+    match kind {
+        "program" => {
+            let mut p: ProgramItem =
+                serde_json::from_value(payload).map_err(|_| ApiError::BadRequest)?;
+            p.icao = normalize_icao(&p.icao).ok_or(ApiError::BadRequest)?;
+            if !(0..=200).contains(&p.aar) {
+                return Err(ApiError::BadRequest);
+            }
+            p.trail = p.trail.max(0);
+            p.mit = p.mit.max(0);
+            serde_json::to_value(p).map_err(|_| ApiError::Internal)
+        }
+        "restriction" => {
+            let mut r: RestrictionItem =
+                serde_json::from_value(payload).map_err(|_| ApiError::BadRequest)?;
+            r.requesting = r.requesting.trim().to_string();
+            r.providing = r.providing.trim().to_string();
+            r.restriction = r.restriction.trim().to_string();
+            if r.requesting.is_empty() || r.providing.is_empty() || r.restriction.is_empty() {
+                return Err(ApiError::BadRequest);
+            }
+            serde_json::to_value(r).map_err(|_| ApiError::Internal)
+        }
+        "ground_stop" => {
+            let mut g: GroundStopItem =
+                serde_json::from_value(payload).map_err(|_| ApiError::BadRequest)?;
+            g.airport = normalize_icao(&g.airport).ok_or(ApiError::BadRequest)?;
+            g.scope = g
+                .scope
+                .map(|s| s.trim().to_ascii_uppercase())
+                .filter(|s| !s.is_empty());
+            g.until = g
+                .until
+                .map(|s| s.trim().to_string())
+                .filter(|s| !s.is_empty());
+            serde_json::to_value(g).map_err(|_| ApiError::Internal)
+        }
+        _ => Err(ApiError::BadRequest),
+    }
+}
 
 const DCC_STATUSES: [&str; 3] = ["not_needed", "requested", "confirmed"];
 const SUPPORT_LEVELS: [&str; 3] = ["required", "preferred", "not_required"];
@@ -428,4 +507,215 @@ pub async fn delete_event_staffing(
     } else {
         Err(ApiError::NotFound)
     }
+}
+
+// --- TMI packages ---
+
+/// Confirm a package exists and belongs to `event_id`; returns its status.
+async fn package_status(
+    pool: &sqlx::PgPool,
+    event_id: i64,
+    package_id: &str,
+) -> Result<String, ApiError> {
+    let (owner_event, status) = events_repo::get_package_owner(pool, package_id)
+        .await?
+        .ok_or(ApiError::NotFound)?;
+    if owner_event != event_id {
+        return Err(ApiError::NotFound);
+    }
+    Ok(status)
+}
+
+#[utoipa::path(
+    get,
+    path = "/api/v1/events/{id}/packages",
+    tag = "events",
+    params(("id" = i64, Path, description = "VATUSA event id")),
+    responses((status = 200, body = Vec<TmiPackageBody>), (status = 401))
+)]
+pub async fn list_event_packages(
+    State(state): State<AppState>,
+    _permission: RequirePermission<EventsPlanRead>,
+    Path(id): Path<i64>,
+) -> Result<Json<Vec<TmiPackageBody>>, ApiError> {
+    let pool = state.db.as_ref().ok_or(ApiError::ServiceUnavailable)?;
+    Ok(Json(events_repo::list_packages(pool, id).await?))
+}
+
+#[utoipa::path(
+    post,
+    path = "/api/v1/events/{id}/packages",
+    tag = "events",
+    params(("id" = i64, Path, description = "VATUSA event id")),
+    request_body = CreatePackageRequest,
+    responses((status = 200, body = Vec<TmiPackageBody>), (status = 400), (status = 401), (status = 404))
+)]
+pub async fn create_event_package(
+    State(state): State<AppState>,
+    _permission: RequirePermission<EventsPlanUpdate>,
+    Extension(current_user): Extension<Option<CurrentUser>>,
+    Path(id): Path<i64>,
+    Json(payload): Json<CreatePackageRequest>,
+) -> Result<Json<Vec<TmiPackageBody>>, ApiError> {
+    let user = current_user.as_ref().ok_or(ApiError::Unauthorized)?;
+    let pool = state.db.as_ref().ok_or(ApiError::ServiceUnavailable)?;
+    let name = payload.name.trim();
+    if name.is_empty() {
+        return Err(ApiError::BadRequest);
+    }
+    if events_repo::get(pool, id).await?.is_none() {
+        return Err(ApiError::NotFound);
+    }
+    events_repo::create_package(pool, id, name, &user.id).await?;
+    Ok(Json(events_repo::list_packages(pool, id).await?))
+}
+
+#[utoipa::path(
+    delete,
+    path = "/api/v1/events/{id}/packages/{package_id}",
+    tag = "events",
+    params(
+        ("id" = i64, Path, description = "VATUSA event id"),
+        ("package_id" = String, Path, description = "Package id")
+    ),
+    responses((status = 200, body = Vec<TmiPackageBody>), (status = 401), (status = 404))
+)]
+pub async fn delete_event_package(
+    State(state): State<AppState>,
+    _permission: RequirePermission<EventsPlanUpdate>,
+    Path((id, package_id)): Path<(i64, String)>,
+) -> Result<Json<Vec<TmiPackageBody>>, ApiError> {
+    let pool = state.db.as_ref().ok_or(ApiError::ServiceUnavailable)?;
+    package_status(pool, id, &package_id).await?;
+    events_repo::delete_package(pool, &package_id).await?;
+    Ok(Json(events_repo::list_packages(pool, id).await?))
+}
+
+#[utoipa::path(
+    post,
+    path = "/api/v1/events/{id}/packages/{package_id}/items",
+    tag = "events",
+    params(
+        ("id" = i64, Path, description = "VATUSA event id"),
+        ("package_id" = String, Path, description = "Package id")
+    ),
+    request_body = AddPackageItemRequest,
+    responses((status = 200, body = Vec<TmiPackageBody>), (status = 400), (status = 401), (status = 404), (status = 409))
+)]
+pub async fn add_event_package_item(
+    State(state): State<AppState>,
+    _permission: RequirePermission<EventsPlanUpdate>,
+    Path((id, package_id)): Path<(i64, String)>,
+    Json(payload): Json<AddPackageItemRequest>,
+) -> Result<Json<Vec<TmiPackageBody>>, ApiError> {
+    let pool = state.db.as_ref().ok_or(ApiError::ServiceUnavailable)?;
+    if package_status(pool, id, &package_id).await? != "draft" {
+        return Err(ApiError::Conflict); // can't edit an activated package
+    }
+    let canonical = normalize_item(&payload.kind, payload.payload)?;
+    events_repo::add_package_item(pool, &package_id, &payload.kind, &canonical).await?;
+    Ok(Json(events_repo::list_packages(pool, id).await?))
+}
+
+#[utoipa::path(
+    delete,
+    path = "/api/v1/events/{id}/packages/{package_id}/items/{item_id}",
+    tag = "events",
+    params(
+        ("id" = i64, Path, description = "VATUSA event id"),
+        ("package_id" = String, Path, description = "Package id"),
+        ("item_id" = String, Path, description = "Item id")
+    ),
+    responses((status = 200, body = Vec<TmiPackageBody>), (status = 401), (status = 404))
+)]
+pub async fn delete_event_package_item(
+    State(state): State<AppState>,
+    _permission: RequirePermission<EventsPlanUpdate>,
+    Path((id, package_id, item_id)): Path<(i64, String, String)>,
+) -> Result<Json<Vec<TmiPackageBody>>, ApiError> {
+    let pool = state.db.as_ref().ok_or(ApiError::ServiceUnavailable)?;
+    package_status(pool, id, &package_id).await?;
+    if !events_repo::delete_package_item(pool, &package_id, &item_id).await? {
+        return Err(ApiError::NotFound);
+    }
+    Ok(Json(events_repo::list_packages(pool, id).await?))
+}
+
+#[utoipa::path(
+    post,
+    path = "/api/v1/events/{id}/packages/{package_id}/activate",
+    tag = "events",
+    params(
+        ("id" = i64, Path, description = "VATUSA event id"),
+        ("package_id" = String, Path, description = "Package id")
+    ),
+    responses((status = 200, body = Vec<TmiPackageBody>), (status = 401), (status = 404), (status = 409))
+)]
+pub async fn activate_event_package(
+    State(state): State<AppState>,
+    _permission: RequirePermission<EventsPlanUpdate>,
+    Extension(current_user): Extension<Option<CurrentUser>>,
+    Path((id, package_id)): Path<(i64, String)>,
+) -> Result<Json<Vec<TmiPackageBody>>, ApiError> {
+    let user = current_user.as_ref().ok_or(ApiError::Unauthorized)?;
+    let pool = state.db.as_ref().ok_or(ApiError::ServiceUnavailable)?;
+
+    if package_status(pool, id, &package_id).await? != "draft" {
+        return Err(ApiError::Conflict); // already activated
+    }
+    let event = events_repo::get(pool, id)
+        .await?
+        .ok_or(ApiError::NotFound)?;
+    let items = events_repo::list_package_items(pool, &package_id).await?;
+
+    // Materialize each draft item into the live TMU tables.
+    for item in &items {
+        let payload = item.payload.0.clone();
+        match item.kind.as_str() {
+            "program" => {
+                let p: ProgramItem =
+                    serde_json::from_value(payload).map_err(|_| ApiError::Internal)?;
+                let req = UpsertProgramRequest {
+                    aar: p.aar,
+                    trail: p.trail,
+                    mit: p.mit,
+                    gates: Vec::new(),
+                    exclude_wake: Vec::new(),
+                    exclude_types: Vec::new(),
+                    jets_only: false,
+                    // planned programs auto-expire an hour after the event ends
+                    active_until: Some(event.end_time),
+                };
+                tmu_repo::upsert_program(pool, &p.icao, &req, &[], &user.id).await?;
+            }
+            "restriction" => {
+                let r: RestrictionItem =
+                    serde_json::from_value(payload).map_err(|_| ApiError::Internal)?;
+                let req = CreateTmiRequest {
+                    requesting: r.requesting,
+                    providing: r.providing,
+                    restriction: r.restriction,
+                    start_time: r.start_time,
+                    stop_time: r.stop_time,
+                };
+                tmu_repo::create_tmi(pool, &req, &user.id).await?;
+            }
+            "ground_stop" => {
+                let g: GroundStopItem =
+                    serde_json::from_value(payload).map_err(|_| ApiError::Internal)?;
+                let scope = g.scope.clone().unwrap_or_default();
+                let req = CreateGroundStopRequest {
+                    airport: g.airport.clone(),
+                    scope: g.scope.clone(),
+                    until: g.until.clone(),
+                };
+                tmu_repo::create_ground_stop(pool, &req, &scope, g.until.as_deref(), &user.id)
+                    .await?;
+            }
+            _ => {}
+        }
+    }
+
+    events_repo::mark_package_activated(pool, &package_id, &user.id).await?;
+    Ok(Json(events_repo::list_packages(pool, id).await?))
 }
