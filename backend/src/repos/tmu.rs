@@ -348,3 +348,63 @@ pub async fn prune_stale_cfrs(pool: &PgPool) -> Result<(), ApiError> {
         .map_err(|_| ApiError::Internal)?;
     Ok(())
 }
+
+// --- cleanup ---
+
+/// Rows touched by a cleanup pass.
+pub struct CleanupStats {
+    pub expired: u64,
+    pub deleted: u64,
+}
+
+/// Auto-expire finished restrictions/ground stops, then delete anything that ended (or was
+/// cancelled) more than an hour ago — leaving a grace window where finished items still
+/// show as `expired` before they disappear.
+pub async fn run_cleanup(pool: &PgPool) -> Result<CleanupStats, ApiError> {
+    let internal = |_| ApiError::Internal;
+
+    // 1. Expire actives whose end has passed (so the UI reflects it during the grace hour).
+    let e_tmi = sqlx::query(
+        "update tmu.tmis set status = 'expired' \
+         where status in ('draft', 'published') \
+           and stop_time is not null and stop_time < now()",
+    )
+    .execute(pool)
+    .await
+    .map_err(internal)?;
+
+    let e_gs = sqlx::query(
+        "update tmu.ground_stops set status = 'expired' \
+         where status in ('draft', 'published') \
+           and tmu.ground_stop_until_ts(created_at, until) is not null \
+           and tmu.ground_stop_until_ts(created_at, until) < now()",
+    )
+    .execute(pool)
+    .await
+    .map_err(internal)?;
+
+    // 2. Delete records whose end (or cancellation) was more than an hour ago.
+    let d_tmi = sqlx::query(
+        "delete from tmu.tmis \
+         where (stop_time is not null and stop_time < now() - interval '1 hour') \
+            or (status in ('cancelled', 'expired') and updated_at < now() - interval '1 hour')",
+    )
+    .execute(pool)
+    .await
+    .map_err(internal)?;
+
+    let d_gs = sqlx::query(
+        "delete from tmu.ground_stops \
+         where (tmu.ground_stop_until_ts(created_at, until) is not null \
+                and tmu.ground_stop_until_ts(created_at, until) < now() - interval '1 hour') \
+            or (status in ('cancelled', 'expired') and updated_at < now() - interval '1 hour')",
+    )
+    .execute(pool)
+    .await
+    .map_err(internal)?;
+
+    Ok(CleanupStats {
+        expired: e_tmi.rows_affected() + e_gs.rows_affected(),
+        deleted: d_tmi.rows_affected() + d_gs.rows_affected(),
+    })
+}
