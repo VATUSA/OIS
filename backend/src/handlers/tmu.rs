@@ -15,29 +15,13 @@ use crate::{
     },
     errors::ApiError,
     models::{CreateTmiRequest, TmiBody, UpdateTmiRequest},
-    repos::{org as org_repo, tmu as tmu_repo},
+    repos::tmu as tmu_repo,
     state::AppState,
 };
 
 #[derive(Deserialize)]
 pub struct TmiListQuery {
     status: Option<String>,
-}
-
-async fn validate_artcc(
-    pool: &sqlx::PgPool,
-    artcc_id: Option<&str>,
-) -> Result<Option<String>, ApiError> {
-    match artcc_id.map(str::trim).filter(|v| !v.is_empty()) {
-        None => Ok(None),
-        Some(id) => {
-            let id = id.to_ascii_uppercase();
-            if org_repo::find_facility(pool, &id).await?.is_none() {
-                return Err(ApiError::BadRequest);
-            }
-            Ok(Some(id))
-        }
-    }
 }
 
 #[utoipa::path(
@@ -77,13 +61,15 @@ pub async fn create_tmi(
     let user = current_user.as_ref().ok_or(ApiError::Unauthorized)?;
     let pool = state.db.as_ref().ok_or(ApiError::ServiceUnavailable)?;
 
-    if payload.kind.trim().is_empty()
-        || payload.element.trim().is_empty()
-        || payload.restriction.trim().is_empty()
+    payload.requesting = payload.requesting.trim().to_ascii_uppercase();
+    payload.providing = payload.providing.trim().to_ascii_uppercase();
+    payload.restriction = payload.restriction.trim().to_string();
+    if payload.requesting.is_empty()
+        || payload.providing.is_empty()
+        || payload.restriction.is_empty()
     {
         return Err(ApiError::BadRequest);
     }
-    payload.artcc_id = validate_artcc(pool, payload.artcc_id.as_deref()).await?;
 
     let id = tmu_repo::create_tmi(pool, &payload, &user.id).await?;
     let tmi = tmu_repo::get_tmi(pool, &id)
@@ -107,8 +93,11 @@ pub async fn update_tmi(
     Json(mut payload): Json<UpdateTmiRequest>,
 ) -> Result<Json<TmiBody>, ApiError> {
     let pool = state.db.as_ref().ok_or(ApiError::ServiceUnavailable)?;
-    if payload.artcc_id.is_some() {
-        payload.artcc_id = validate_artcc(pool, payload.artcc_id.as_deref()).await?;
+    if let Some(requesting) = &payload.requesting {
+        payload.requesting = Some(requesting.trim().to_ascii_uppercase());
+    }
+    if let Some(providing) = &payload.providing {
+        payload.providing = Some(providing.trim().to_ascii_uppercase());
     }
     if !tmu_repo::update_tmi(pool, &id, &payload).await? {
         return Err(ApiError::NotFound);

@@ -1,3 +1,46 @@
+/** Format an ISO timestamp as NTML "DD/HHMMz" (day-of-month + Zulu time). */
+export function formatZulu(iso: string | null | undefined): string {
+  if (!iso) return "—";
+  const d = new Date(iso);
+  if (Number.isNaN(d.getTime())) return "—";
+  const dd = String(d.getUTCDate()).padStart(2, "0");
+  const hh = String(d.getUTCHours()).padStart(2, "0");
+  const mm = String(d.getUTCMinutes()).padStart(2, "0");
+  return `${dd}/${hh}${mm}z`;
+}
+
+/**
+ * Parse NTML "DD/HHMMz" (day-of-month + Zulu time) into an ISO timestamp, relative to
+ * the current UTC month. If the day has already passed this month it rolls to the next
+ * month. Returns null on empty or malformed input.
+ */
+export function parseZulu(input: string): string | null {
+  const m = /^(\d{1,2})\/(\d{2})(\d{2})z?$/i.exec(input.trim());
+  if (!m) return null;
+  const day = Number(m[1]);
+  const hour = Number(m[2]);
+  const minute = Number(m[3]);
+  if (day < 1 || day > 31 || hour > 23 || minute > 59) return null;
+
+  const now = new Date();
+  let year = now.getUTCFullYear();
+  let month = now.getUTCMonth();
+  let ts = Date.UTC(year, month, day, hour, minute);
+  // If the entry is more than a day in the past, assume it's for next month.
+  if (ts < now.getTime() - 24 * 3600 * 1000) {
+    month += 1;
+    if (month > 11) {
+      month = 0;
+      year += 1;
+    }
+    ts = Date.UTC(year, month, day, hour, minute);
+  }
+  const d = new Date(ts);
+  // Reject impossible days (e.g. 31 in a 30-day month, which JS would roll forward).
+  if (d.getUTCDate() !== day) return null;
+  return d.toISOString();
+}
+
 /** Compact relative time, e.g. "22h ago". */
 export function timeAgo(iso: string): string {
   const then = new Date(iso).getTime();
