@@ -10,6 +10,7 @@ import {
   type Fca,
   toUpsert,
   type UpsertFca,
+  useAircraftRoute,
   useCreateFca,
   useDeleteFca,
   useFcaCounts,
@@ -139,6 +140,30 @@ function labelIcon(color: string, name: string) {
     iconAnchor: [-6, 6],
   });
 }
+/** A sequenced, heading-pointed marker for a matched (crossing) aircraft. */
+function numberedIcon(seq: number, color: string, heading: number) {
+  return L.divIcon({
+    className: "",
+    html: `<div style="width:30px;height:30px;position:relative">
+      <svg width="30" height="30" viewBox="0 0 30 30" style="position:absolute;inset:0;transform:rotate(${heading}deg)"><path d="M15 1 L19.5 9 L10.5 9 Z" fill="${color}"/></svg>
+      <div style="position:absolute;left:5px;top:5px;width:20px;height:20px;border-radius:50%;background:${color};color:#0a0a0a;font:700 11px ui-monospace,monospace;display:flex;align-items:center;justify-content:center;box-shadow:0 0 0 1px rgba(0,0,0,.5)">${seq}</div>
+    </div>`,
+    iconSize: [30, 30],
+    iconAnchor: [15, 15],
+  });
+}
+function aircraftTip(ac: {
+  callsign: string;
+  actype: string;
+  dep: string;
+  arr: string;
+  alt: number;
+  gs: number;
+}): string {
+  return `<div style="font:700 13px ui-monospace,monospace"><span style="color:#22d3ee">${ac.callsign}</span> <span style="color:#94a3b8">${ac.actype}</span></div>
+    <div style="font:12px ui-monospace,monospace;color:#cbd5e1">${ac.dep} → ${ac.arr}</div>
+    <div style="font:12px ui-monospace,monospace;color:#94a3b8">FL${Math.round(ac.alt / 100)} ${ac.gs}kt</div>`;
+}
 
 export function FcaPage() {
   const { data: me } = useMe();
@@ -155,11 +180,13 @@ export function FcaPage() {
   const [draft, setDraft] = useState<Draft | null>(null);
   const [phase, setPhase] = useState<Phase>("draw");
   const [selectedId, setSelectedId] = useState<string | null>(null);
+  const [routeCallsign, setRouteCallsign] = useState<string | null>(null);
   const [filter, setFilter] = useState("");
   const [artccFilter, setArtccFilter] = useState("");
 
   const fcaTraffic = useFcaTraffic(draft ? null : selectedId);
   const counts = useFcaCounts();
+  const aircraftRoute = useAircraftRoute(routeCallsign);
 
   // --- Leaflet refs ---
   const containerRef = useRef<HTMLDivElement>(null);
@@ -167,6 +194,7 @@ export function FcaPage() {
   const aircraftLayer = useRef<L.LayerGroup | null>(null);
   const fcaLayer = useRef<L.LayerGroup | null>(null);
   const matchedLayer = useRef<L.LayerGroup | null>(null);
+  const routeLayer = useRef<L.LayerGroup | null>(null);
   const draftLayer = useRef<L.LayerGroup | null>(null);
   const drawingRef = useRef(false);
   useEffect(() => {
@@ -220,9 +248,10 @@ export function FcaPage() {
       }).addTo(map);
     }
 
-    aircraftLayer.current = L.layerGroup().addTo(map);
+    routeLayer.current = L.layerGroup().addTo(map);
     fcaLayer.current = L.layerGroup().addTo(map);
     matchedLayer.current = L.layerGroup().addTo(map);
+    aircraftLayer.current = L.layerGroup().addTo(map);
     draftLayer.current = L.layerGroup().addTo(map);
 
     map.on("click", (e: L.LeafletMouseEvent) => {
@@ -265,7 +294,7 @@ export function FcaPage() {
     return () => window.removeEventListener("keydown", onKey);
   }, [draft, phase]);
 
-  // Live aircraft.
+  // Live aircraft — hover for details, click to plot the route.
   useEffect(() => {
     const layer = aircraftLayer.current;
     if (!layer) return;
@@ -273,11 +302,47 @@ export function FcaPage() {
     for (const ac of traffic.data ?? []) {
       L.marker([ac.lat, ac.lon], {
         icon: aircraftIcon(ac.heading),
-        interactive: false,
         keyboard: false,
-      }).addTo(layer);
+      })
+        .bindTooltip(aircraftTip(ac), {
+          direction: "top",
+          offset: [0, -6],
+          className: "fca-tip",
+        })
+        .on("click", (e) => {
+          L.DomEvent.stop(e);
+          setRouteCallsign((cur) => (cur === ac.callsign ? null : ac.callsign));
+        })
+        .addTo(layer);
     }
   }, [traffic.data]);
+
+  // Plotted route for a clicked aircraft.
+  useEffect(() => {
+    const layer = routeLayer.current;
+    if (!layer) return;
+    layer.clearLayers();
+    const pts = aircraftRoute.data?.points as LatLng[] | undefined;
+    if (pts && pts.length >= 2) {
+      L.polyline(pts, {
+        color: "#22d3ee",
+        weight: 2,
+        opacity: 0.85,
+        dashArray: "6 6",
+        interactive: false,
+      }).addTo(layer);
+      for (const end of [pts[0], pts[pts.length - 1]]) {
+        L.circleMarker(end, {
+          radius: 4,
+          color: "#22d3ee",
+          weight: 1,
+          fillColor: "#22d3ee",
+          fillOpacity: 1,
+          interactive: false,
+        }).addTo(layer);
+      }
+    }
+  }, [aircraftRoute.data]);
 
   // Saved FCAs (skip the one being edited — drawn on the draft layer).
   useEffect(() => {
@@ -291,15 +356,29 @@ export function FcaPage() {
       const selected = fca.id === selectedId;
       L.polyline(pts, {
         color: fca.color,
-        weight: selected ? 6 : fca.enabled ? 4 : 2,
-        opacity: fca.enabled ? 0.9 : 0.35,
-        dashArray: fca.enabled ? undefined : "4 6",
+        weight: selected ? 5 : 3,
+        opacity: fca.enabled ? (selected ? 1 : 0.85) : 0.3,
+        // solid when selected, dashed otherwise
+        dashArray: selected ? undefined : "4 8",
       })
         .on("click", (e) => {
           L.DomEvent.stop(e);
           setSelectedId((cur) => (cur === fca.id ? null : fca.id));
         })
         .addTo(layer);
+      if (selected) {
+        pts.forEach((pt, i) => {
+          const end = i === 0 || i === pts.length - 1;
+          L.circleMarker(pt, {
+            radius: end ? 6 : 5,
+            color: end ? "#ffffff" : fca.color,
+            weight: 2,
+            fillColor: end ? "#ffffff" : fca.color,
+            fillOpacity: 1,
+            interactive: false,
+          }).addTo(layer);
+        });
+      }
       const mid = pts[Math.floor(pts.length / 2)];
       L.marker(mid, {
         icon: labelIcon(fca.color, fca.name),
@@ -309,33 +388,57 @@ export function FcaPage() {
     }
   }, [fcas.data, draft?.id, selectedId]);
 
-  // Matched (crossing) traffic for the selected FCA.
+  // Matched (crossing) traffic for the selected FCA — numbered, in the FCA colour.
+  const selectedColor = fcas.data?.find((f) => f.id === selectedId)?.color;
   useEffect(() => {
     const layer = matchedLayer.current;
     if (!layer) return;
     layer.clearLayers();
-    if (draft) return;
+    if (draft || !selectedColor) return;
+    const color = selectedColor;
     for (const f of fcaTraffic.data ?? []) {
+      const hasPos = f.lat !== 0 || f.lon !== 0;
+      if (hasPos) {
+        // dashed line from the aircraft to its crossing point
+        L.polyline(
+          [
+            [f.lat, f.lon],
+            [f.cross_lat, f.cross_lon],
+          ],
+          {
+            color,
+            weight: 1.5,
+            opacity: 0.7,
+            dashArray: "3 6",
+            interactive: false,
+          },
+        ).addTo(layer);
+      }
       L.circleMarker([f.cross_lat, f.cross_lon], {
         radius: 3,
         color: "#ffffff",
         weight: 1,
         fillColor: "#ffffff",
         fillOpacity: 0.9,
+        interactive: false,
       }).addTo(layer);
-      if (f.lat !== 0 || f.lon !== 0) {
-        L.circleMarker([f.lat, f.lon], {
-          radius: 5,
-          color: "#22c55e",
-          weight: 2,
-          fillColor: "#22c55e",
-          fillOpacity: 0.45,
+      if (hasPos) {
+        L.marker([f.lat, f.lon], {
+          icon: numberedIcon(f.seq, color, f.heading),
+          keyboard: false,
         })
-          .bindTooltip(`${f.callsign} · ${f.dep}→${f.arr}`, { direction: "top" })
+          .bindTooltip(
+            `<div style="font:700 12px ui-monospace,monospace">#${f.seq} <span style="color:#22d3ee">${f.callsign}</span></div><div style="font:11px ui-monospace,monospace;color:#cbd5e1">${f.dep} → ${f.arr}</div>`,
+            { direction: "top", offset: [0, -12], className: "fca-tip" },
+          )
+          .on("click", (e) => {
+            L.DomEvent.stop(e);
+            setRouteCallsign((cur) => (cur === f.callsign ? null : f.callsign));
+          })
           .addTo(layer);
       }
     }
-  }, [fcaTraffic.data, draft]);
+  }, [fcaTraffic.data, draft, selectedColor]);
 
   // Working draft (dashed polyline + draggable vertex handles).
   useEffect(() => {
@@ -389,11 +492,13 @@ export function FcaPage() {
 
   const startNew = () => {
     setSelectedId(null);
+    setRouteCallsign(null);
     setDraft(blankDraft(fcas.data?.length ?? 0));
     setPhase("draw");
   };
   const startEdit = (fca: Fca) => {
     setSelectedId(null);
+    setRouteCallsign(null);
     setDraft(draftFrom(fca));
     setPhase("edit");
   };

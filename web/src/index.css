@@ -5,3 +5,20 @@
 
 /* Scan the shared UI package for Tailwind classes (it lives outside web/). */
 @source "../../packages/ui/src";
+
+/* FCA map — crosshair cursor + dark tooltips. */
+.leaflet-container {
+  cursor: crosshair !important;
+  background: #0a0a0a;
+}
+.leaflet-tooltip.fca-tip {
+  background: #0b1220;
+  border: 1px solid #1e293b;
+  color: #e2e8f0;
+  border-radius: 6px;
+  padding: 4px 8px;
+  box-shadow: 0 2px 10px rgba(0, 0, 0, 0.6);
+}
+.leaflet-tooltip.fca-tip.leaflet-tooltip-top::before {
+  border-top-color: #1e293b;
+}

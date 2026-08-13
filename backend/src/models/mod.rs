@@ -510,6 +510,15 @@ pub struct ReorderRequest {
     pub order: Vec<String>,
 }
 
+/// An aircraft's filed route resolved to lat/lon anchors, for plotting on the map.
+#[derive(Debug, Serialize, ToSchema)]
+pub struct AircraftRoute {
+    pub callsign: String,
+    /// Route anchors as `[lat, lon]` pairs.
+    #[schema(value_type = Vec<Vec<f64>>)]
+    pub points: Vec<[f64; 2]>,
+}
+
 /// A lightweight live-traffic record for plotting on the FCA map.
 #[derive(Debug, Serialize, ToSchema)]
 pub struct TrafficAircraft {
