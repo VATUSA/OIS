@@ -51,6 +51,24 @@ export function parseZulu(input: string): string | null {
   return d.toISOString();
 }
 
+/**
+ * Parse a bare Zulu clock time "HHMMz" into an ISO timestamp on today's UTC date,
+ * nudged to the nearest occurrence around `now`. Returns null on malformed input.
+ */
+export function parseHhmm(input: string, now = Date.now()): string | null {
+  const m = /^(\d{2})(\d{2})z?$/i.exec(input.trim());
+  if (!m) return null;
+  const h = Number(m[1]);
+  const min = Number(m[2]);
+  if (h > 23 || min > 59) return null;
+  const d = new Date(now);
+  d.setUTCHours(h, min, 0, 0);
+  let t = d.getTime();
+  if (t < now - 12 * 3600_000) t += 24 * 3600_000;
+  else if (t - now > 12 * 3600_000) t -= 24 * 3600_000;
+  return new Date(t).toISOString();
+}
+
 /** Compact relative time, e.g. "22h ago". */
 export function timeAgo(iso: string): string {
   const then = new Date(iso).getTime();

@@ -263,9 +263,28 @@ pub async fn issue_cfr(
         return Err(ApiError::BadRequest);
     }
 
-    // Lock the requested time, or the flight's currently proposed wheels-up, or now.
+    // With a ready time, lock the closest open runway slot at or after it. Otherwise
+    // lock the flight's currently proposed wheels-up (or now if it has none).
     let wheels_up = match payload.ready_time {
-        Some(t) => t,
+        Some(ready) => {
+            let program = program_inputs(pool, &airport).await?;
+            let issued = tmu_repo::issued_cfr_map(pool, &airport).await?;
+            let guard = state.feed.read().await;
+            match (program.as_ref(), guard.snapshot.as_ref()) {
+                (Some(pg), Some(snap)) => flow::ready_time_slot(
+                    &airport,
+                    pg,
+                    &snap.data,
+                    &guard.airports,
+                    &issued,
+                    &callsign,
+                    ready,
+                    Utc::now(),
+                )
+                .unwrap_or(ready),
+                _ => ready,
+            }
+        }
         None => {
             let flow = flow_for(&state, pool, &airport).await?;
             flow.flights
