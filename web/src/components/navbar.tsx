@@ -22,6 +22,7 @@ import {
   Radar,
   Route,
   ShieldCheck,
+  Waypoints,
 } from "lucide-react";
 
 import {login, useLogout, useMe} from "@/lib/auth";
@@ -150,7 +151,8 @@ export function Navbar() {
 
   const canPrograms = hasPermission(me, "tmu.program.read");
   const canTmiRead = hasPermission(me, "tmu.tmi.read");
-  const canOps = canPrograms || canTmiRead;
+  const canFca = hasPermission(me, "flow.fca.read");
+  const canOps = canPrograms || canTmiRead || canFca;
   const canPlan = hasPermission(me, "events.plan.read");
 
   return (
@@ -204,6 +206,14 @@ export function Navbar() {
                   <Link to="/ops/my">
                     <LayoutDashboard />
                     My dashboard
+                  </Link>
+                </DropdownMenuItem>
+              )}
+              {canFca && (
+                <DropdownMenuItem asChild>
+                  <Link to="/ops/fca">
+                    <Waypoints />
+                    FCA flow
                   </Link>
                 </DropdownMenuItem>
               )}

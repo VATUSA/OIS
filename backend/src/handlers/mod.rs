@@ -5,6 +5,7 @@ pub mod docs;
 pub mod events;
 pub mod facilities;
 pub mod feed;
+pub mod flow;
 pub mod health;
 pub mod service_accounts;
 pub mod tmu;

@@ -327,6 +327,7 @@ mod tests {
                 longitude: -74.0,
                 altitude: alt,
                 groundspeed: gs,
+                heading: 0,
                 flight_plan: Some(FlightPlan {
                     departure: "KAAA".into(),
                     arrival: "KBBB".into(),

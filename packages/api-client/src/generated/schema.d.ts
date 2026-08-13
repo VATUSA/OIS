@@ -452,6 +452,54 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/v1/flow/fcas": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get: operations["list_fcas"];
+        put?: never;
+        post: operations["create_fca"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/flow/fcas/{id}": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put: operations["update_fca"];
+        post?: never;
+        delete: operations["delete_fca"];
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/flow/traffic": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get: operations["list_traffic"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/v1/me": {
         parameters: {
             query?: never;
@@ -913,6 +961,35 @@ export interface components {
             updated_at: string;
             updated_by?: string | null;
         };
+        /** @description A Flow Constrained Area — a drawn polyline the metering engine sequences traffic against. */
+        FcaBody: {
+            artcc: string;
+            color: string;
+            dests: string[];
+            /** @description any | N | S | E | W */
+            dir: string;
+            enabled: boolean;
+            fixes: string[];
+            id: string;
+            /** Format: int32 */
+            max_fl?: number | null;
+            /** Format: int32 */
+            min_fl?: number | null;
+            /** Format: int32 */
+            mit: number;
+            /** @description rate | mit */
+            mode: string;
+            name: string;
+            origins: string[];
+            /** @description Polyline vertices as `[lat, lon]` pairs (>= 2). */
+            points: number[][];
+            /** Format: int32 */
+            rate: number;
+            scope: string[];
+            /** Format: date-time */
+            updated_at: string;
+            updated_by?: string | null;
+        };
         FeedStatusBody: {
             airports_loaded: number;
             /** @description True when the last datafeed fetch succeeded. */
@@ -1204,6 +1281,23 @@ export interface components {
             kind: string;
             payload: Record<string, never>;
         };
+        /** @description A lightweight live-traffic record for plotting on the FCA map. */
+        TrafficAircraft: {
+            actype: string;
+            /** Format: int64 */
+            alt: number;
+            arr: string;
+            callsign: string;
+            dep: string;
+            /** Format: int64 */
+            gs: number;
+            /** Format: int64 */
+            heading: number;
+            /** Format: double */
+            lat: number;
+            /** Format: double */
+            lon: number;
+        };
         UpdateDccRequest: {
             notes?: string | null;
             /** @description not_needed | requested | confirmed */
@@ -1237,6 +1331,28 @@ export interface components {
             /** @description required | preferred | not_required */
             level: string;
             notes?: string | null;
+        };
+        UpsertFcaRequest: {
+            artcc?: string;
+            color?: string | null;
+            dests?: string[];
+            dir?: string | null;
+            enabled?: boolean | null;
+            fixes?: string[];
+            /** Format: int32 */
+            max_fl?: number | null;
+            /** Format: int32 */
+            min_fl?: number | null;
+            /** Format: int32 */
+            mit?: number | null;
+            mode?: string | null;
+            name: string;
+            origins?: string[];
+            /** @description Polyline vertices as `[lat, lon]` pairs (>= 2). */
+            points: number[][];
+            /** Format: int32 */
+            rate?: number | null;
+            scope?: string[];
         };
         /** @description Upsert a program (`PUT /tmu/programs/{icao}`) — the full normalized program body. */
         UpsertProgramRequest: {
@@ -2468,6 +2584,167 @@ export interface operations {
                 };
                 content: {
                     "application/json": components["schemas"]["FeedStatusBody"];
+                };
+            };
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+        };
+    };
+    list_fcas: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["FcaBody"][];
+                };
+            };
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+        };
+    };
+    create_fca: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["UpsertFcaRequest"];
+            };
+        };
+        responses: {
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["FcaBody"];
+                };
+            };
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+        };
+    };
+    update_fca: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /** @description FCA id */
+                id: string;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["UpsertFcaRequest"];
+            };
+        };
+        responses: {
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["FcaBody"];
+                };
+            };
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+        };
+    };
+    delete_fca: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /** @description FCA id */
+                id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            204: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+        };
+    };
+    list_traffic: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["TrafficAircraft"][];
                 };
             };
             401: {

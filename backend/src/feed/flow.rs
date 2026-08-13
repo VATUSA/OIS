@@ -720,6 +720,7 @@ mod tests {
             longitude: lon,
             altitude: alt,
             groundspeed: gs,
+            heading: 0,
             flight_plan: Some(plan),
         }
     }

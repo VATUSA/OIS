@@ -1,0 +1,103 @@
+//! Flow Constrained Area (FCA) storage. Shared, server-side — one FCA set for everyone.
+
+use sqlx::PgPool;
+
+use crate::errors::ApiError;
+use crate::models::{FcaBody, UpsertFcaRequest};
+
+const FCA_SELECT: &str = "select f.id, f.name, f.color, f.artcc, f.points, f.dests, \
+    f.origins, f.fixes, f.scope, f.min_fl, f.max_fl, f.dir, f.mode, f.rate, f.mit, \
+    f.enabled, f.updated_at, u.display_name as updated_by \
+    from flow.fca f left join identity.users u on u.id = f.updated_by";
+
+pub async fn list_fcas(pool: &PgPool) -> Result<Vec<FcaBody>, ApiError> {
+    sqlx::query_as::<_, FcaBody>(&format!("{FCA_SELECT} order by f.name"))
+        .fetch_all(pool)
+        .await
+        .map_err(|_| ApiError::Internal)
+}
+
+pub async fn get_fca(pool: &PgPool, id: &str) -> Result<Option<FcaBody>, ApiError> {
+    sqlx::query_as::<_, FcaBody>(&format!("{FCA_SELECT} where f.id = $1"))
+        .bind(id)
+        .fetch_optional(pool)
+        .await
+        .map_err(|_| ApiError::Internal)
+}
+
+/// Bind every FCA column from a normalized request. Shared by insert + update.
+fn bind_fca<'q>(
+    q: sqlx::query::Query<'q, sqlx::Postgres, sqlx::postgres::PgArguments>,
+    req: &'q UpsertFcaRequest,
+    actor: &'q str,
+) -> sqlx::query::Query<'q, sqlx::Postgres, sqlx::postgres::PgArguments> {
+    q.bind(req.name.trim())
+        .bind(req.color.as_deref().unwrap_or("#f59e0b"))
+        .bind(req.artcc.trim().to_ascii_uppercase())
+        .bind(sqlx::types::Json(&req.points))
+        .bind(&req.dests)
+        .bind(&req.origins)
+        .bind(&req.fixes)
+        .bind(&req.scope)
+        .bind(req.min_fl)
+        .bind(req.max_fl)
+        .bind(req.dir.as_deref().unwrap_or("any"))
+        .bind(req.mode.as_deref().unwrap_or("rate"))
+        .bind(req.rate.unwrap_or(30).clamp(0, 240))
+        .bind(req.mit.unwrap_or(15).clamp(0, 200))
+        .bind(req.enabled.unwrap_or(true))
+        .bind(actor)
+}
+
+pub async fn create_fca(
+    pool: &PgPool,
+    req: &UpsertFcaRequest,
+    actor: &str,
+) -> Result<String, ApiError> {
+    let q = sqlx::query(
+        "insert into flow.fca
+             (name, color, artcc, points, dests, origins, fixes, scope, min_fl, max_fl,
+              dir, mode, rate, mit, enabled, updated_by, created_by)
+         values ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$16)
+         returning id",
+    );
+    // bind_fca sets $1..$16 (the 16 shared columns, $16 = actor → updated_by);
+    // created_by reuses $16 in the SQL, so no extra bind is needed.
+    let row = bind_fca(q, req, actor)
+        .fetch_one(pool)
+        .await
+        .map_err(|_| ApiError::Internal)?;
+    use sqlx::Row;
+    row.try_get::<String, _>("id")
+        .map_err(|_| ApiError::Internal)
+}
+
+pub async fn update_fca(
+    pool: &PgPool,
+    id: &str,
+    req: &UpsertFcaRequest,
+    actor: &str,
+) -> Result<bool, ApiError> {
+    let q = sqlx::query(
+        "update flow.fca set
+             name = $1, color = $2, artcc = $3, points = $4, dests = $5, origins = $6,
+             fixes = $7, scope = $8, min_fl = $9, max_fl = $10, dir = $11, mode = $12,
+             rate = $13, mit = $14, enabled = $15, updated_by = $16
+         where id = $17",
+    );
+    let result = bind_fca(q, req, actor)
+        .bind(id)
+        .execute(pool)
+        .await
+        .map_err(|_| ApiError::Internal)?;
+    Ok(result.rows_affected() > 0)
+}
+
+pub async fn delete_fca(pool: &PgPool, id: &str) -> Result<bool, ApiError> {
+    let result = sqlx::query("delete from flow.fca where id = $1")
+        .bind(id)
+        .execute(pool)
+        .await
+        .map_err(|_| ApiError::Internal)?;
+    Ok(result.rows_affected() > 0)
+}

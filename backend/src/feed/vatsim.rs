@@ -33,6 +33,8 @@ pub struct Pilot {
     #[serde(default)]
     pub groundspeed: i64,
     #[serde(default)]
+    pub heading: i64,
+    #[serde(default)]
     pub flight_plan: Option<FlightPlan>,
 }
 
