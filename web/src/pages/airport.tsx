@@ -1,5 +1,6 @@
 import {useMemo, useState} from "react";
 import {Button, Card, CardContent, Input} from "@ois/ui";
+import {Lock} from "lucide-react";
 
 import {type Flow, type FlowFlight, useAirportFlow} from "@/lib/feed";
 import {hhmmZulu} from "@/lib/time";
@@ -265,6 +266,45 @@ function delayClass(min: number): string {
   return "text-muted-foreground";
 }
 
+/**
+ * CFR cell. An *issued* CFR is a locked wheels-up actually given to a pilot (matching
+ * the Departures/CFR page) — shown bold with a lock, green once it's due. A CFR that's
+ * merely the scheduler's proposed slot renders faint, so controllers can tell them apart.
+ */
+function CfrCell({ f, now }: { f: FlowFlight; now: number }) {
+  if (!f.cfr) {
+    return (
+      <td className="py-1.5 text-right font-mono text-xs tabular-nums text-muted-foreground">
+        —
+      </td>
+    );
+  }
+  const imminent = new Date(f.cfr).getTime() <= now + 60000;
+  if (f.cfr_issued) {
+    return (
+      <td className="py-1.5 text-right font-mono text-xs tabular-nums">
+        <span
+          className={`inline-flex items-center justify-end gap-1 font-semibold ${imminent ? "text-emerald-500" : "text-foreground"}`}
+          title="Call-for-release issued — locked wheels-up"
+        >
+          <Lock className="size-3" />
+          {hhmmZulu(f.cfr)}
+        </span>
+      </td>
+    );
+  }
+  return (
+    <td className="py-1.5 text-right font-mono text-xs tabular-nums">
+      <span
+        className="text-muted-foreground/60"
+        title="Proposed wheels-up — auto-slotted, not yet issued"
+      >
+        {hhmmZulu(f.cfr)}
+      </span>
+    </td>
+  );
+}
+
 function AircraftView({ flow }: { flow: Flow }) {
   const [sortKey, setSortKey] = useState<ColKey>("seq");
   const [dir, setDir] = useState<1 | -1>(1);
@@ -360,27 +400,19 @@ function AircraftView({ flow }: { flow: Flow }) {
                     >
                       {f.delay_min > 0 ? `+${f.delay_min}` : "—"}
                     </td>
-                    <td className="py-1.5 text-right font-mono text-xs tabular-nums">
-                      {f.cfr ? (
-                        <span
-                          className={
-                            new Date(f.cfr).getTime() <= now + 60000
-                              ? "text-emerald-500"
-                              : "text-amber-500"
-                          }
-                        >
-                          {hhmmZulu(f.cfr)}
-                        </span>
-                      ) : (
-                        "—"
-                      )}
-                    </td>
+                    <CfrCell f={f} now={now} />
                   </tr>
                 );
               })}
             </tbody>
           </table>
         </div>
+        {flow.flights.some((f) => f.cfr_issued) && (
+          <p className="mt-3 flex items-center gap-1.5 text-xs text-muted-foreground">
+            <Lock className="size-3" /> issued CFR — a locked wheels-up given to the
+            pilot; faint times are proposed slots.
+          </p>
+        )}
       </CardContent>
     </Card>
   );
