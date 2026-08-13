@@ -5,8 +5,10 @@
 pub mod airports;
 pub mod facilities;
 pub mod flow;
+pub mod taxi;
 pub mod vatsim;
 
+use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -40,6 +42,10 @@ pub struct FeedInner {
     pub snapshot: Option<Snapshot>,
     pub airports: AirportDb,
     pub status: FeedStatus,
+    /// Departures currently being timed (callsign -> session).
+    pub taxi_sessions: HashMap<String, taxi::TaxiSession>,
+    /// Completed taxi samples per airport (rolling 3h).
+    pub taxi_samples: HashMap<String, Vec<taxi::TaxiSample>>,
 }
 
 /// Shared, cheaply-cloneable handle to the feed state.
@@ -97,6 +103,14 @@ async fn poller(state: FeedState) {
                 guard.status.last_error = None;
                 guard.status.pilots = pilots;
                 guard.status.prefiles = prefiles;
+                // Advance the taxi state machine before the data is moved into the snapshot.
+                let FeedInner {
+                    taxi_sessions,
+                    taxi_samples,
+                    airports,
+                    ..
+                } = &mut *guard;
+                taxi::process(taxi_sessions, taxi_samples, airports, &data, now);
                 guard.snapshot = Some(Snapshot {
                     fetched_at: now,
                     source_timestamp,

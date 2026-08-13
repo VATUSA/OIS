@@ -623,7 +623,7 @@ fn is_star(t: &str) -> bool {
 }
 
 /// Great-circle distance in nautical miles.
-fn gc_dist(lat1: f64, lon1: f64, lat2: f64, lon2: f64) -> f64 {
+pub fn gc_dist(lat1: f64, lon1: f64, lat2: f64, lon2: f64) -> f64 {
     let r = 3440.065; // Earth radius in nm
     let (p1, p2) = (lat1.to_radians(), lat2.to_radians());
     let dphi = (lat2 - lat1).to_radians();
