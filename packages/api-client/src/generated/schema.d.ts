@@ -484,6 +484,22 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/v1/flow/fcas/{id}/traffic": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get: operations["fca_traffic"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/v1/flow/traffic": {
         parameters: {
             query?: never;
@@ -989,6 +1005,39 @@ export interface components {
             /** Format: date-time */
             updated_at: string;
             updated_by?: string | null;
+        };
+        /** @description An aircraft whose filed route crosses an FCA, with its ETA to the crossing. */
+        FcaFlight: {
+            aircraft_type: string;
+            /** Format: int64 */
+            altitude: number;
+            arr: string;
+            callsign: string;
+            /**
+             * Format: double
+             * @description Where the route crosses the FCA line.
+             */
+            cross_lat: number;
+            /** Format: double */
+            cross_lon: number;
+            dep: string;
+            /**
+             * Format: int64
+             * @description Distance along the (remaining) route to the crossing, nm.
+             */
+            distance_nm: number;
+            /** Format: date-time */
+            eta?: string | null;
+            /** Format: int64 */
+            groundspeed: number;
+            /** Format: int64 */
+            heading: number;
+            /** Format: double */
+            lat: number;
+            /** Format: double */
+            lon: number;
+            /** @description airborne | ground | proposed */
+            status: string;
         };
         FeedStatusBody: {
             airports_loaded: number;
@@ -2715,6 +2764,40 @@ export interface operations {
                     [name: string]: unknown;
                 };
                 content?: never;
+            };
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+        };
+    };
+    fca_traffic: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /** @description FCA id */
+                id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["FcaFlight"][];
+                };
             };
             401: {
                 headers: {
