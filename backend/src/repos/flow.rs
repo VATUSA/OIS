@@ -7,7 +7,7 @@ use crate::models::{FcaBody, UpsertFcaRequest};
 
 const FCA_SELECT: &str = "select f.id, f.name, f.color, f.artcc, f.points, f.dests, \
     f.origins, f.fixes, f.scope, f.min_fl, f.max_fl, f.dir, f.mode, f.rate, f.mit, \
-    f.enabled, f.updated_at, u.display_name as updated_by \
+    f.enabled, f.manual_order, f.manual_seq, f.updated_at, u.display_name as updated_by \
     from flow.fca f left join identity.users u on u.id = f.updated_by";
 
 pub async fn list_fcas(pool: &PgPool) -> Result<Vec<FcaBody>, ApiError> {
@@ -96,6 +96,78 @@ pub async fn update_fca(
 pub async fn delete_fca(pool: &PgPool, id: &str) -> Result<bool, ApiError> {
     let result = sqlx::query("delete from flow.fca where id = $1")
         .bind(id)
+        .execute(pool)
+        .await
+        .map_err(|_| ApiError::Internal)?;
+    Ok(result.rows_affected() > 0)
+}
+
+/// Set (or clear) an FCA's manual crossing order.
+pub async fn set_manual_order(
+    pool: &PgPool,
+    id: &str,
+    order: &[String],
+    manual_seq: bool,
+    actor: &str,
+) -> Result<bool, ApiError> {
+    let result = sqlx::query(
+        "update flow.fca set manual_order = $2, manual_seq = $3, updated_by = $4 where id = $1",
+    )
+    .bind(id)
+    .bind(order)
+    .bind(manual_seq)
+    .bind(actor)
+    .execute(pool)
+    .await
+    .map_err(|_| ApiError::Internal)?;
+    Ok(result.rows_affected() > 0)
+}
+
+// --- frozen CFR releases ---
+
+/// Frozen releases for an FCA as (callsign, cta_ms, edct_ms).
+pub async fn list_releases(
+    pool: &PgPool,
+    fca_id: &str,
+) -> Result<Vec<(String, i64, i64)>, ApiError> {
+    sqlx::query_as::<_, (String, i64, i64)>(
+        "select callsign, cta_ms, edct_ms from flow.fca_release where fca_id = $1",
+    )
+    .bind(fca_id)
+    .fetch_all(pool)
+    .await
+    .map_err(|_| ApiError::Internal)
+}
+
+pub async fn upsert_release(
+    pool: &PgPool,
+    fca_id: &str,
+    callsign: &str,
+    cta_ms: i64,
+    edct_ms: i64,
+    actor: &str,
+) -> Result<(), ApiError> {
+    sqlx::query(
+        "insert into flow.fca_release (fca_id, callsign, cta_ms, edct_ms, updated_by)
+         values ($1, $2, $3, $4, $5)
+         on conflict (fca_id, callsign) do update set
+             cta_ms = excluded.cta_ms, edct_ms = excluded.edct_ms, updated_by = excluded.updated_by",
+    )
+    .bind(fca_id)
+    .bind(callsign)
+    .bind(cta_ms)
+    .bind(edct_ms)
+    .bind(actor)
+    .execute(pool)
+    .await
+    .map_err(|_| ApiError::Internal)?;
+    Ok(())
+}
+
+pub async fn delete_release(pool: &PgPool, fca_id: &str, callsign: &str) -> Result<bool, ApiError> {
+    let result = sqlx::query("delete from flow.fca_release where fca_id = $1 and callsign = $2")
+        .bind(fca_id)
+        .bind(callsign)
         .execute(pool)
         .await
         .map_err(|_| ApiError::Internal)?;

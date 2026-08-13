@@ -200,6 +200,8 @@ pub struct MeterInput {
     pub airborne: bool,
     /// Predicted crossing groundspeed (kt) — used for MIT spacing.
     pub cross_speed: f64,
+    /// A frozen (issued-CFR) metered crossing time; pins this aircraft like an airborne one.
+    pub frozen_ms: Option<i64>,
 }
 
 pub struct MeterOutput {
@@ -210,11 +212,19 @@ pub struct MeterOutput {
     pub seq: i64,
 }
 
-/// Sequence crossing traffic: airborne aircraft hold their ETA (priority), ground
-/// aircraft slot into the first gap that clears every committed crossing by the
-/// separation (rate → constant MINIT; MIT → distance ÷ crossing speed). Ported from
-/// vatflow's `scheduleAuto`.
-pub fn meter(cands: &[MeterInput], mode: &str, rate: i32, mit: i32) -> Vec<MeterOutput> {
+/// Sequence crossing traffic. Auto mode: airborne + frozen (issued-CFR) aircraft are
+/// fixed constraints; unreleased ground floats into the first gap clear of every
+/// committed crossing by the separation (rate → constant MINIT; MIT → distance ÷ cross
+/// speed). Manual mode (`order` = candidate indices): chain in the controller's order,
+/// spacing each behind the previous, splicing any newcomers by ETA. Ported from
+/// vatflow's `scheduleAuto` / `scheduleCandidates`.
+pub fn meter(
+    cands: &[MeterInput],
+    mode: &str,
+    rate: i32,
+    mit: i32,
+    order: Option<&[usize]>,
+) -> Vec<MeterOutput> {
     let sep_ms = |c: &MeterInput| -> i64 {
         let secs = if mode == "mit" {
             (mit as f64 / c.cross_speed.max(60.0)) * 3600.0
@@ -226,25 +236,47 @@ pub fn meter(cands: &[MeterInput], mode: &str, rate: i32, mit: i32) -> Vec<Meter
         (secs * 1000.0) as i64
     };
 
-    // Airborne first (by ETA), then ground (by ETA).
-    let mut order: Vec<usize> = (0..cands.len()).collect();
-    order.sort_by(|&a, &b| {
-        cands[b]
-            .airborne
-            .cmp(&cands[a].airborne)
-            .then(cands[a].eta_ms.cmp(&cands[b].eta_ms))
-    });
+    let n = cands.len();
+    let mut sched = vec![0i64; n];
 
-    let mut committed: Vec<i64> = Vec::new();
-    let mut sched = vec![0i64; cands.len()];
-    for &i in &order {
-        let c = &cands[i];
-        sched[i] = if c.airborne {
-            c.eta_ms
-        } else {
-            slot_against(c.eta_ms, &committed, sep_ms(c))
-        };
-        committed.push(sched[i]);
+    if let Some(seq) = order {
+        // Manual: honour the controller's order; splice newcomers by ETA at the end.
+        let mut ordered: Vec<usize> = seq.iter().copied().filter(|&i| i < n).collect();
+        let seen: std::collections::HashSet<usize> = ordered.iter().copied().collect();
+        let mut rest: Vec<usize> = (0..n).filter(|i| !seen.contains(i)).collect();
+        rest.sort_by_key(|&i| cands[i].eta_ms);
+        ordered.extend(rest);
+        let mut prev: Option<i64> = None;
+        for &i in &ordered {
+            let c = &cands[i];
+            let base = c.frozen_ms.unwrap_or(c.eta_ms);
+            sched[i] = match prev {
+                Some(p) => base.max(p + sep_ms(c)),
+                None => base,
+            };
+            prev = Some(sched[i]);
+        }
+    } else {
+        // Auto: pinned (airborne + frozen) first, then advisory ground floats.
+        let pinned = |c: &MeterInput| c.airborne || c.frozen_ms.is_some();
+        let mut o: Vec<usize> = (0..n).collect();
+        o.sort_by(|&a, &b| {
+            pinned(&cands[b])
+                .cmp(&pinned(&cands[a]))
+                .then(cands[a].eta_ms.cmp(&cands[b].eta_ms))
+        });
+        let mut committed: Vec<i64> = Vec::new();
+        for &i in &o {
+            let c = &cands[i];
+            sched[i] = if c.airborne {
+                c.eta_ms
+            } else if let Some(f) = c.frozen_ms {
+                f
+            } else {
+                earliest_slot(c.eta_ms, &committed, sep_ms(c))
+            };
+            committed.push(sched[i]);
+        }
     }
 
     let mut by_time: Vec<usize> = (0..cands.len()).collect();
@@ -263,8 +295,8 @@ pub fn meter(cands: &[MeterInput], mode: &str, rate: i32, mit: i32) -> Vec<Meter
         .collect()
 }
 
-/// Earliest time ≥ `eta` clear of every committed crossing by `sep`.
-fn slot_against(eta: i64, committed: &[i64], sep: i64) -> i64 {
+/// Earliest time ≥ `eta` clear of every committed crossing by `sep` (ms).
+pub fn earliest_slot(eta: i64, committed: &[i64], sep: i64) -> i64 {
     if sep <= 0 {
         return eta;
     }
@@ -452,19 +484,22 @@ mod tests {
                 eta_ms: 0,
                 airborne: false,
                 cross_speed: 400.0,
+                frozen_ms: None,
             },
             MeterInput {
                 eta_ms: 60_000,
                 airborne: false,
                 cross_speed: 400.0,
+                frozen_ms: None,
             },
             MeterInput {
                 eta_ms: 200_000,
                 airborne: false,
                 cross_speed: 400.0,
+                frozen_ms: None,
             },
         ];
-        let out = meter(&cands, "rate", 30, 15);
+        let out = meter(&cands, "rate", 30, 15, None);
         assert_eq!(out[0].sched_ms, 0);
         assert_eq!(out[1].sched_ms, 120_000); // bumped 120s after the first
         assert_eq!(out[2].sched_ms, 240_000); // bumped 120s after the second
@@ -481,14 +516,16 @@ mod tests {
                 eta_ms: 0,
                 airborne: false,
                 cross_speed: 400.0,
+                frozen_ms: None,
             },
             MeterInput {
                 eta_ms: 30_000,
                 airborne: true,
                 cross_speed: 450.0,
+                frozen_ms: None,
             },
         ];
-        let out = meter(&cands, "rate", 30, 15);
+        let out = meter(&cands, "rate", 30, 15, None);
         assert_eq!(out[1].sched_ms, 30_000); // airborne keeps its ETA
         assert_eq!(out[1].delay_sec, 0);
         assert!(
@@ -497,6 +534,47 @@ mod tests {
         );
         assert_eq!(out[1].seq, 1);
         assert_eq!(out[0].seq, 2);
+    }
+
+    #[test]
+    fn frozen_release_is_pinned_and_ground_floats_around_it() {
+        // A frozen (issued-CFR) crossing at 100s holds; an advisory ground at ETA 0
+        // yields to the first slot ≥ 0 clear of it by the 120s separation.
+        let cands = vec![
+            MeterInput {
+                eta_ms: 0,
+                airborne: false,
+                cross_speed: 400.0,
+                frozen_ms: None,
+            },
+            MeterInput {
+                eta_ms: 90_000,
+                airborne: false,
+                cross_speed: 400.0,
+                frozen_ms: Some(100_000),
+            },
+        ];
+        let out = meter(&cands, "rate", 30, 15, None);
+        assert_eq!(out[1].sched_ms, 100_000); // frozen stays put
+        assert_eq!(out[0].sched_ms, 220_000); // advisory floats 120s after it
+    }
+
+    #[test]
+    fn manual_order_chains_by_separation() {
+        // Three aircraft all ETA 0; controller's order [2,1,0] chains them 120s apart.
+        let cands = (0..3)
+            .map(|_| MeterInput {
+                eta_ms: 0,
+                airborne: false,
+                cross_speed: 400.0,
+                frozen_ms: None,
+            })
+            .collect::<Vec<_>>();
+        let out = meter(&cands, "rate", 30, 15, Some(&[2, 1, 0]));
+        assert_eq!(out[2].sched_ms, 0);
+        assert_eq!(out[1].sched_ms, 120_000);
+        assert_eq!(out[0].sched_ms, 240_000);
+        assert_eq!((out[2].seq, out[1].seq, out[0].seq), (1, 2, 3));
     }
 
     #[test]

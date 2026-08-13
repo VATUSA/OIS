@@ -125,6 +125,11 @@ pub fn build_router(state: AppState) -> Router {
             put(flow::update_fca).delete(flow::delete_fca),
         )
         .route("/api/v1/flow/fcas/{id}/traffic", get(flow::fca_traffic))
+        .route("/api/v1/flow/fcas/{id}/order", put(flow::reorder_fca))
+        .route(
+            "/api/v1/flow/fcas/{id}/release/{callsign}",
+            post(flow::mark_release).delete(flow::clear_release),
+        )
         .route("/api/v1/flow/traffic", get(flow::list_traffic))
         // Live VATSIM feed
         .route("/api/v1/feed/status", get(feed::feed_status))
