@@ -2,7 +2,7 @@
 //! ground / proposed), estimates ETAs, and meters demand against a program's AAR.
 //! Ported from vatflow's `computeFlow`, minus the winds-aloft and CFR-scheduling layers.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::sync::LazyLock;
 
 use chrono::{DateTime, Duration, Utc};
@@ -87,19 +87,22 @@ enum Engine {
 /// A pending departure out of a field (before any metering is applied).
 pub struct PendingDep {
     pub callsign: String,
+    /// Origin airport ICAO.
+    pub dep: String,
     pub arrival: String,
     pub aircraft_type: String,
     pub gate: Option<String>,
     pub status: String, // "ground" | "proposed"
 }
 
-/// All pending (not-yet-airborne) departures out of `dep`, regardless of destination.
-/// `dep` must be uppercase.
-pub fn pending_departures(dep: &str, data: &VatsimData) -> Vec<PendingDep> {
+/// All pending (not-yet-airborne) departures out of any field in `deps`, regardless of
+/// destination. `deps` entries must be uppercase.
+pub fn pending_departures(deps: &HashSet<String>, data: &VatsimData) -> Vec<PendingDep> {
     let mut out: Vec<PendingDep> = Vec::new();
     for p in &data.pilots {
         let Some(fp) = &p.flight_plan else { continue };
-        if fp.departure.to_ascii_uppercase() != dep {
+        let dep = fp.departure.to_ascii_uppercase();
+        if !deps.contains(&dep) {
             continue;
         }
         // Already airborne means it has departed — not a pending departure.
@@ -110,6 +113,7 @@ pub fn pending_departures(dep: &str, data: &VatsimData) -> Vec<PendingDep> {
         let (ty, _wake) = fp.aircraft_type_wake();
         out.push(PendingDep {
             callsign: p.callsign.clone(),
+            dep,
             gate: arrival_gate(&fp.route, &arrival),
             arrival,
             aircraft_type: ty,
@@ -118,7 +122,8 @@ pub fn pending_departures(dep: &str, data: &VatsimData) -> Vec<PendingDep> {
     }
     for pf in &data.prefiles {
         let Some(fp) = &pf.flight_plan else { continue };
-        if fp.departure.to_ascii_uppercase() != dep {
+        let dep = fp.departure.to_ascii_uppercase();
+        if !deps.contains(&dep) {
             continue;
         }
         if out.iter().any(|d| d.callsign == pf.callsign) {
@@ -128,6 +133,7 @@ pub fn pending_departures(dep: &str, data: &VatsimData) -> Vec<PendingDep> {
         let (ty, _wake) = fp.aircraft_type_wake();
         out.push(PendingDep {
             callsign: pf.callsign.clone(),
+            dep,
             gate: arrival_gate(&fp.route, &arrival),
             arrival,
             aircraft_type: ty,
@@ -935,7 +941,8 @@ mod tests {
             }],
             ..Default::default()
         };
-        let deps = pending_departures("KBOS", &data);
+        let fields = HashSet::from(["KBOS".to_string()]);
+        let deps = pending_departures(&fields, &data);
         let names: Vec<_> = deps.iter().map(|d| d.callsign.as_str()).collect();
         assert!(names.contains(&"G1"));
         assert!(names.contains(&"P1"));

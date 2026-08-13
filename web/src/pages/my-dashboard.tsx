@@ -44,12 +44,12 @@ export function MyDashboardPage() {
     setQuery("");
   }
 
-  // Combine every field's departures into one list, tagged with its origin field.
+  // Combine every field's departures into one list (deduped, since facilities can overlap).
+  const seen = new Set<string>();
   const rows = fields
-    .flatMap((f, i) =>
-      (results[i].data?.departures ?? []).map((d) => ({ from: f, d })),
-    )
-    .sort((a, b) => cfrMs(a.d) - cfrMs(b.d));
+    .flatMap((_f, i) => results[i].data?.departures ?? [])
+    .filter((d) => (seen.has(d.callsign) ? false : (seen.add(d.callsign), true)))
+    .sort((a, b) => cfrMs(a) - cfrMs(b));
 
   const loading = results.some((r) => r.isLoading);
   const total = rows.length;
@@ -63,8 +63,9 @@ export function MyDashboardPage() {
       <div>
         <h1 className="text-2xl font-semibold tracking-tight">My dashboard</h1>
         <p className="text-muted-foreground">
-          Your fields, combined. Pending departures across everything you&apos;re
-          working, with their Call-For-Release times. Field list stays on this device.
+          Your fields, combined — airports, approaches (N90), or centers (ZNY). Pending
+          departures across everything you&apos;re working, with their Call-For-Release
+          times. Field list stays on this device.
         </p>
       </div>
 
@@ -76,7 +77,7 @@ export function MyDashboardPage() {
               <Input
                 className="w-32 font-mono uppercase"
                 maxLength={4}
-                placeholder="KBOS"
+                placeholder="KBOS / N90"
                 value={query}
                 onChange={(e) => setQuery(e.target.value)}
                 onKeyDown={(e) => e.key === "Enter" && addField()}
@@ -165,12 +166,12 @@ export function MyDashboardPage() {
                       </tr>
                     </thead>
                     <tbody>
-                      {rows.map(({ from, d }) => (
+                      {rows.map((d) => (
                         <DepartureRow
-                          key={`${from}-${d.callsign}`}
+                          key={d.callsign}
                           d={d}
                           canIssue={canIssue}
-                          leading={<span className="font-mono text-xs">{from}</span>}
+                          leading={<span className="font-mono text-xs">{d.dep}</span>}
                         />
                       ))}
                     </tbody>

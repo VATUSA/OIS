@@ -173,19 +173,20 @@ export function DeparturesPage() {
           {field ? `${field} departures` : "Departures"}
         </h1>
         <p className="text-muted-foreground">
-          Every pending departure out of a field. Ones bound for a metered destination
-          get a Call-For-Release (CFR); the rest release at will.
+          Every pending departure out of a field — an airport, an approach (e.g. N90), or
+          a center (e.g. ZNY). Ones bound for a metered destination get a Call-For-Release
+          (CFR); the rest release at will.
         </p>
       </div>
 
       <Card>
         <CardContent className="flex flex-wrap items-end gap-3 pt-6">
           <label className="flex flex-col gap-1 text-xs font-medium uppercase tracking-wide text-muted-foreground">
-            Departure field
+            Field
             <Input
               className="w-32 font-mono uppercase"
               maxLength={4}
-              placeholder="KBOS"
+              placeholder="KBOS / N90 / ZNY"
               value={query}
               onChange={(e) => setQuery(e.target.value)}
               onKeyDown={(e) => e.key === "Enter" && load()}
@@ -222,6 +223,17 @@ export function DeparturesPage() {
         <>
           <Card>
             <CardContent className="flex flex-col gap-4 pt-6">
+              {departures.data.facility_kind && (
+                <p className="text-sm text-muted-foreground">
+                  <span className="font-medium capitalize text-foreground">
+                    {departures.data.facility_kind}
+                  </span>{" "}
+                  facility ·{" "}
+                  <span className="font-mono text-foreground">
+                    {departures.data.airports.join(" ")}
+                  </span>
+                </p>
+              )}
               <div className="flex flex-wrap gap-10">
                 <Stat label="Total" value={departures.data.total} />
                 <Stat label="To metered fields" value={departures.data.to_metered} />
@@ -251,7 +263,7 @@ export function DeparturesPage() {
                   <table className="w-full text-sm">
                     <thead>
                       <tr className="text-left text-xs uppercase tracking-wide text-muted-foreground">
-                        <th className="pb-2 pr-3 text-right font-medium">#</th>
+                        <th className="pb-2 pr-3 font-medium">From</th>
                         <th className="pb-2 pr-3 font-medium">Callsign</th>
                         <th className="pb-2 pr-3 font-medium">To</th>
                         <th className="pb-2 pr-3 font-medium">Type</th>
@@ -270,7 +282,7 @@ export function DeparturesPage() {
                           key={d.callsign}
                           d={d}
                           canIssue={canIssue}
-                          leading={d.seq ?? "—"}
+                          leading={<span className="font-mono text-xs">{d.dep}</span>}
                         />
                       ))}
                     </tbody>

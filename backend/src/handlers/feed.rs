@@ -20,6 +20,7 @@ use crate::{
         require_permission::RequirePermission,
     },
     errors::ApiError,
+    feed::facilities,
     feed::flow::{self, ProgramInputs},
     models::{DepartureFlight, DeparturesResponse, IssueCfrRequest, IssuedCfrBody},
     repos::tmu as tmu_repo,
@@ -137,7 +138,7 @@ pub async fn airport_flow(
     get,
     path = "/api/v1/tmu/departures/{dep}",
     tag = "tmu",
-    params(("dep" = String, Path, description = "Departure field ICAO")),
+    params(("dep" = String, Path, description = "Departure field: airport, TRACON, or ARTCC")),
     responses((status = 200, body = crate::models::DeparturesResponse), (status = 401), (status = 503))
 )]
 pub async fn list_departures(
@@ -148,18 +149,24 @@ pub async fn list_departures(
     let pool = state.db.as_ref().ok_or(ApiError::ServiceUnavailable)?;
     let dep = dep.trim().to_ascii_uppercase();
 
+    // Resolve the field: an airport is just itself; a TRACON/ARTCC spans many airports.
+    let facility_kind = facilities::lookup(&dep).map(|f| f.kind.clone());
+    let mut airports = facilities::member_airports(&dep);
+    airports.sort();
+    let member_set: HashSet<String> = airports.iter().cloned().collect();
+
     let metered: HashSet<String> = tmu_repo::list_programs(pool)
         .await?
         .into_iter()
         .map(|p| p.icao)
         .collect();
 
-    // Every pending departure out of the field (read the snapshot, then release the lock
-    // before computing per-destination flows).
+    // Every pending departure out of the resolved airports (read the snapshot, then release
+    // the lock before computing per-destination flows).
     let pending = {
         let guard = state.feed.read().await;
         match &guard.snapshot {
-            Some(snap) => flow::pending_departures(&dep, &snap.data),
+            Some(snap) => flow::pending_departures(&member_set, &snap.data),
             None => Vec::new(),
         }
     };
@@ -195,6 +202,7 @@ pub async fn list_departures(
             let m = meta.remove(&d.callsign).unwrap_or_default();
             DepartureFlight {
                 callsign: d.callsign,
+                dep: d.dep,
                 arrival: d.arrival,
                 aircraft_type: d.aircraft_type,
                 gate: d.gate,
@@ -222,6 +230,8 @@ pub async fn list_departures(
     program_destinations.sort();
 
     Ok(Json(DeparturesResponse {
+        facility_kind,
+        airports,
         total,
         to_metered,
         holding_on_cfr,

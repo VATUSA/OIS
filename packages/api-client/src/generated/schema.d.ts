@@ -568,6 +568,8 @@ export interface components {
             cfr_issued: boolean;
             /** Format: int64 */
             delay_min: number;
+            /** @description Origin airport ICAO (a facility query spans several). */
+            dep: string;
             /** Format: date-time */
             eta?: string | null;
             gate?: string | null;
@@ -579,12 +581,16 @@ export interface components {
             sta?: string | null;
             status: string;
         };
-        /** @description The Departures view for one field: all pending departures plus summary counts. */
+        /** @description The Departures view for one field (airport, TRACON, or ARTCC) plus summary counts. */
         DeparturesResponse: {
+            /** @description The airports the field resolved to (one for an airport; several for a facility). */
+            airports: string[];
             departures: components["schemas"]["DepartureFlight"][];
+            /** @description `tracon` | `artcc` when the queried field is a facility, else null (plain airport). */
+            facility_kind?: string | null;
             /** @description How many are currently held by a metering delay. */
             holding_on_cfr: number;
-            /** @description This field's destinations that have a TMU program. */
+            /** @description The destinations (across all origin airports) that have a TMU program. */
             program_destinations: string[];
             /** @description How many departures are bound for a metered destination. */
             to_metered: number;
@@ -1457,7 +1463,7 @@ export interface operations {
             query?: never;
             header?: never;
             path: {
-                /** @description Departure field ICAO */
+                /** @description Departure field: airport, TRACON, or ARTCC */
                 dep: string;
             };
             cookie?: never;
