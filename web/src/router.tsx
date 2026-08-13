@@ -1,5 +1,6 @@
 import {createRootRoute, createRoute, createRouter, Outlet,} from "@tanstack/react-router";
 
+import {FeedWatcher} from "@/components/feed-watcher";
 import {Navbar} from "@/components/navbar";
 import {AirportPage} from "@/pages/airport";
 import {DashboardPage} from "@/pages/dashboard";
@@ -16,6 +17,7 @@ import {AdminServiceAccounts} from "@/pages/admin/service-accounts";
 const rootRoute = createRootRoute({
   component: () => (
     <div className="min-h-screen bg-background text-foreground">
+      <FeedWatcher />
       <Navbar />
       <main className="mx-auto w-full max-w-7xl px-4 py-8">
         <Outlet />
