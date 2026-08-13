@@ -124,6 +124,59 @@ pub struct AuditLogPage {
     pub page_size: i64,
 }
 
+// --- tmu: traffic management initiatives (TMIs) ---
+
+/// A Traffic Management Initiative.
+#[derive(Debug, Serialize, ToSchema, sqlx::FromRow)]
+pub struct TmiBody {
+    pub id: String,
+    pub artcc_id: Option<String>,
+    pub kind: String,
+    pub element: String,
+    pub restriction: String,
+    pub reason: Option<String>,
+    pub effective_start: DateTime<Utc>,
+    pub effective_end: Option<DateTime<Utc>>,
+    pub status: String,
+    pub published_at: Option<DateTime<Utc>>,
+    pub created_at: DateTime<Utc>,
+    /// Author display name (from the creating user).
+    pub author: Option<String>,
+}
+
+#[derive(Debug, Deserialize, ToSchema)]
+pub struct CreateTmiRequest {
+    pub kind: String,
+    pub element: String,
+    pub restriction: String,
+    #[serde(default)]
+    pub reason: Option<String>,
+    #[serde(default)]
+    pub artcc_id: Option<String>,
+    #[serde(default)]
+    pub effective_start: Option<DateTime<Utc>>,
+    #[serde(default)]
+    pub effective_end: Option<DateTime<Utc>>,
+}
+
+#[derive(Debug, Deserialize, ToSchema)]
+pub struct UpdateTmiRequest {
+    #[serde(default)]
+    pub kind: Option<String>,
+    #[serde(default)]
+    pub element: Option<String>,
+    #[serde(default)]
+    pub restriction: Option<String>,
+    #[serde(default)]
+    pub reason: Option<String>,
+    #[serde(default)]
+    pub artcc_id: Option<String>,
+    #[serde(default)]
+    pub effective_start: Option<DateTime<Utc>>,
+    #[serde(default)]
+    pub effective_end: Option<DateTime<Utc>>,
+}
+
 // --- service accounts ---
 
 #[derive(Debug, Deserialize, ToSchema)]

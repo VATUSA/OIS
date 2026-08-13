@@ -1,12 +1,12 @@
 use axum::{
     Router, middleware,
-    routing::{get, post, put},
+    routing::{get, patch, post, put},
 };
 
 use crate::{
     auth::middleware::resolve_current_user,
     config::build_cors_layer,
-    handlers::{access, audit, auth, docs, facilities, health, service_accounts, users},
+    handlers::{access, audit, auth, docs, facilities, health, service_accounts, tmu, users},
     state::AppState,
 };
 
@@ -30,6 +30,17 @@ pub fn build_router(state: AppState) -> Router {
             "/api/v1/admin/users/{cid}/access",
             get(access::get_user_access).post(access::update_user_access),
         )
+        // TMU — Traffic Management Initiatives
+        .route(
+            "/api/v1/tmu/tmis",
+            get(tmu::list_tmis).post(tmu::create_tmi),
+        )
+        .route(
+            "/api/v1/tmu/tmis/{id}",
+            patch(tmu::update_tmi).delete(tmu::delete_tmi),
+        )
+        .route("/api/v1/tmu/tmis/{id}/publish", post(tmu::publish_tmi))
+        .route("/api/v1/tmu/tmis/{id}/cancel", post(tmu::cancel_tmi))
         // Audit log
         .route("/api/v1/admin/audit", get(audit::list_audit_logs))
         // Service accounts (bot credentials)

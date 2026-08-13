@@ -14,7 +14,7 @@ import {
 import {LogOut, Radar} from "lucide-react";
 
 import {login, useLogout, useMe} from "@/lib/auth";
-import {isAdmin} from "@/lib/permissions";
+import {hasPermission, isAdmin} from "@/lib/permissions";
 
 function initials(name: string) {
   return name
@@ -85,6 +85,11 @@ export function Navbar() {
           <Link to="/" activeOptions={{ exact: true }} className={linkClass}>
             Dashboard
           </Link>
+          {hasPermission(me, "tmu.tmi.read") && (
+            <Link to="/tmu" className={linkClass}>
+              TMU
+            </Link>
+          )}
           {isAdmin(me) && (
             <Link to="/admin" className={linkClass}>
               Admin

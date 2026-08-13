@@ -25,3 +25,10 @@ permission!(ServiceAccountsRead, ["service_accounts"], Read);
 permission!(ServiceAccountsCreate, ["service_accounts"], Create);
 permission!(ServiceAccountsUpdate, ["service_accounts"], Update);
 permission!(ServiceAccountsDelete, ["service_accounts"], Delete);
+
+// tmu — traffic management initiatives (TMIs)
+permission!(TmuTmiRead, ["tmu", "tmi"], Read);
+permission!(TmuTmiCreate, ["tmu", "tmi"], Create);
+permission!(TmuTmiUpdate, ["tmu", "tmi"], Update);
+permission!(TmuTmiPublish, ["tmu", "tmi"], Publish);
+permission!(TmuTmiDelete, ["tmu", "tmi"], Delete);
