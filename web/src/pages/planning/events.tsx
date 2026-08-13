@@ -51,6 +51,13 @@ export function PlanningEventsPage() {
   const canPlan = hasPermission(me, "events.plan.read");
   const events = useUpcomingEvents();
 
+  const sorted = events.data
+    ? [...events.data].sort(
+        (a, b) =>
+          new Date(a.start_time).getTime() - new Date(b.start_time).getTime(),
+      )
+    : undefined;
+
   return (
     <div className="flex flex-col gap-6">
       <div>
@@ -71,11 +78,11 @@ export function PlanningEventsPage() {
             <p className="py-8 text-center text-sm text-muted-foreground">
               Couldn&apos;t load events.
             </p>
-          ) : !events.data ? (
+          ) : !sorted ? (
             <p className="py-8 text-center text-sm text-muted-foreground">
               Loading…
             </p>
-          ) : events.data.length === 0 ? (
+          ) : sorted.length === 0 ? (
             <p className="py-8 text-center text-sm text-muted-foreground">
               No upcoming events on the VATUSA calendar right now.
             </p>
@@ -92,7 +99,7 @@ export function PlanningEventsPage() {
                   </tr>
                 </thead>
                 <tbody>
-                  {events.data.map((event) => (
+                  {sorted.map((event) => (
                     <EventRow key={event.id} event={event} />
                   ))}
                 </tbody>
