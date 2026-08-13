@@ -1,4 +1,4 @@
-import {Link} from "@tanstack/react-router";
+import {Link, useRouterState} from "@tanstack/react-router";
 import {
   Avatar,
   AvatarFallback,
@@ -11,7 +11,18 @@ import {
   DropdownMenuTrigger,
   ThemeToggle,
 } from "@ois/ui";
-import {LogOut, Radar} from "lucide-react";
+import {
+  CalendarClock,
+  ChevronDown,
+  Gauge,
+  LayoutDashboard,
+  LogOut,
+  Plane,
+  PlaneTakeoff,
+  Radar,
+  Route,
+  ShieldCheck,
+} from "lucide-react";
 
 import {login, useLogout, useMe} from "@/lib/auth";
 import {useFeedStatus} from "@/lib/feed";
@@ -49,6 +60,34 @@ function initials(name: string) {
     .join("");
 }
 
+/** A top-nav dropdown group whose trigger highlights while on a matching route. */
+function NavGroup({
+  label,
+  activePrefix,
+  children,
+}: {
+  label: string;
+  activePrefix: string;
+  children: React.ReactNode;
+}) {
+  const pathname = useRouterState({ select: (s) => s.location.pathname });
+  const active = pathname.startsWith(activePrefix);
+  return (
+    <DropdownMenu>
+      <DropdownMenuTrigger
+        className={
+          "flex items-center gap-1 rounded-md px-3 py-1.5 outline-none transition-colors hover:bg-accent hover:text-accent-foreground focus-visible:ring-2 focus-visible:ring-ring " +
+          (active ? "text-foreground" : "")
+        }
+      >
+        {label}
+        <ChevronDown className="size-3.5" />
+      </DropdownMenuTrigger>
+      <DropdownMenuContent align="start">{children}</DropdownMenuContent>
+    </DropdownMenu>
+  );
+}
+
 function UserMenu() {
   const { data: me, isLoading } = useMe();
   const logout = useLogout();
@@ -81,6 +120,17 @@ function UserMenu() {
           </div>
         </DropdownMenuLabel>
         <DropdownMenuSeparator />
+        {isAdmin(me) && (
+          <>
+            <DropdownMenuItem asChild>
+              <Link to="/admin">
+                <ShieldCheck />
+                Admin
+              </Link>
+            </DropdownMenuItem>
+            <DropdownMenuSeparator />
+          </>
+        )}
         <DropdownMenuItem
           onSelect={() => logout.mutate()}
           className="text-destructive focus:text-destructive"
@@ -98,6 +148,11 @@ export function Navbar() {
   const linkClass =
     "rounded-md px-3 py-1.5 transition-colors hover:bg-accent hover:text-accent-foreground [&.active]:text-foreground";
 
+  const canPrograms = hasPermission(me, "tmu.program.read");
+  const canTmiRead = hasPermission(me, "tmu.tmi.read");
+  const canOps = canPrograms || canTmiRead;
+  const canPlan = canTmiRead || hasPermission(me, "tmu.tmi.create");
+
   return (
     <header className="sticky top-0 z-40 border-b bg-background/80 backdrop-blur">
       <div className="mx-auto flex h-14 w-full max-w-7xl items-center gap-6 px-4">
@@ -107,42 +162,67 @@ export function Navbar() {
         </Link>
         <nav className="hidden items-center gap-1 text-sm text-muted-foreground sm:flex">
           <Link to="/" activeOptions={{ exact: true }} className={linkClass}>
-            Dashboard
+            Home
           </Link>
-          {hasPermission(me, "tmu.program.read") && (
-            <Link to="/airport" className={linkClass}>
-              Airport
-            </Link>
+
+          {canOps && (
+            <NavGroup label="Operations" activePrefix="/ops">
+              {canPrograms && (
+                <DropdownMenuItem asChild>
+                  <Link to="/ops/airport">
+                    <Plane />
+                    Airport
+                  </Link>
+                </DropdownMenuItem>
+              )}
+              {canPrograms && (
+                <DropdownMenuItem asChild>
+                  <Link to="/ops/departures">
+                    <PlaneTakeoff />
+                    Departures
+                  </Link>
+                </DropdownMenuItem>
+              )}
+              {canPrograms && (
+                <DropdownMenuItem asChild>
+                  <Link to="/ops/taxi">
+                    <Route />
+                    Taxi
+                  </Link>
+                </DropdownMenuItem>
+              )}
+              {canOps && (
+                <DropdownMenuItem asChild>
+                  <Link to="/ops/tmu">
+                    <Gauge />
+                    TMU
+                  </Link>
+                </DropdownMenuItem>
+              )}
+              {canPrograms && (
+                <DropdownMenuItem asChild>
+                  <Link to="/ops/my">
+                    <LayoutDashboard />
+                    My dashboard
+                  </Link>
+                </DropdownMenuItem>
+              )}
+            </NavGroup>
           )}
-          {hasPermission(me, "tmu.program.read") && (
-            <Link to="/departures" className={linkClass}>
-              Departures
-            </Link>
-          )}
-          {hasPermission(me, "tmu.program.read") && (
-            <Link to="/my" className={linkClass}>
-              My dashboard
-            </Link>
-          )}
-          {hasPermission(me, "tmu.program.read") && (
-            <Link to="/taxi" className={linkClass}>
-              Taxi
-            </Link>
-          )}
-          {(hasPermission(me, "tmu.program.read") ||
-            hasPermission(me, "tmu.tmi.read")) && (
-            <Link to="/tmu" className={linkClass}>
-              TMU
-            </Link>
-          )}
-          {isAdmin(me) && (
-            <Link to="/admin" className={linkClass}>
-              Admin
-            </Link>
+
+          {canPlan && (
+            <NavGroup label="Planning" activePrefix="/planning">
+              <DropdownMenuItem asChild>
+                <Link to="/planning/tmi">
+                  <CalendarClock />
+                  Event TMI planning
+                </Link>
+              </DropdownMenuItem>
+            </NavGroup>
           )}
         </nav>
         <div className="ml-auto flex items-center gap-2">
-          {hasPermission(me, "tmu.program.read") && <FeedPill />}
+          {canPrograms && <FeedPill />}
           <ThemeToggle />
           <UserMenu />
         </div>
