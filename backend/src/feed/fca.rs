@@ -148,8 +148,55 @@ fn path_crossing(path: &[[f64; 2]], fca: &[[f64; 2]]) -> Option<FcaCrossing> {
     best
 }
 
-/// Whether an aircraft's filed route crosses the FCA, and where. `gs`/`hdg` drive the
-/// airborne remaining-route trim + the crossing-ahead check.
+/// Resolve an aircraft's filed route to a great-circle path (the remaining route, for
+/// airborne aircraft). Returns None when the route can't be resolved to ≥2 anchors.
+/// Resolve this ONCE per aircraft, then test it against many FCAs with `crosses`.
+#[allow(clippy::too_many_arguments)]
+pub fn route_path(
+    nav: &NavData,
+    airports: &AirportDb,
+    dep: &str,
+    arr: &str,
+    route: &str,
+    lat: f64,
+    lon: f64,
+    hdg: i64,
+    gs: i64,
+) -> Option<Vec<[f64; 2]>> {
+    let dep = dep.to_ascii_uppercase();
+    let arr = arr.to_ascii_uppercase();
+    let anchors = route_anchors(nav, airports, &dep, &arr, route);
+    if anchors.len() < 2 {
+        return None;
+    }
+    let path = if gs >= 50 {
+        remaining_anchors(&anchors, lat, lon, hdg as f64)
+    } else {
+        anchors
+    };
+    (path.len() >= 2).then_some(path)
+}
+
+/// Where a pre-resolved `path` crosses the FCA line (airborne crossings must be ahead).
+pub fn crosses(
+    path: &[[f64; 2]],
+    fca_points: &[[f64; 2]],
+    airborne: bool,
+    lat: f64,
+    lon: f64,
+    hdg: i64,
+) -> Option<FcaCrossing> {
+    let cross = path_crossing(path, fca_points)?;
+    if airborne {
+        let brg = bearing_deg([lat, lon], [cross.lat, cross.lon]);
+        if angle_diff(hdg as f64, brg) > AHEAD_TOL_DEG {
+            return None;
+        }
+    }
+    Some(cross)
+}
+
+/// Whether an aircraft's filed route crosses the FCA, and where.
 #[allow(clippy::too_many_arguments)]
 pub fn crossing_for(
     fca_points: &[[f64; 2]],
@@ -163,31 +210,8 @@ pub fn crossing_for(
     hdg: i64,
     gs: i64,
 ) -> Option<FcaCrossing> {
-    let dep = dep.to_ascii_uppercase();
-    let arr = arr.to_ascii_uppercase();
-    let anchors = route_anchors(nav, airports, &dep, &arr, route);
-    if anchors.len() < 2 {
-        return None;
-    }
-
-    let airborne = gs >= 50;
-    let path = if airborne {
-        remaining_anchors(&anchors, lat, lon, hdg as f64)
-    } else {
-        anchors
-    };
-    if path.len() < 2 {
-        return None;
-    }
-
-    let cross = path_crossing(&path, fca_points)?;
-    if airborne {
-        let brg = bearing_deg([lat, lon], [cross.lat, cross.lon]);
-        if angle_diff(hdg as f64, brg) > AHEAD_TOL_DEG {
-            return None;
-        }
-    }
-    Some(cross)
+    let path = route_path(nav, airports, dep, arr, route, lat, lon, hdg, gs)?;
+    crosses(&path, fca_points, gs >= 50, lat, lon, hdg)
 }
 
 // --- metering (sequence crossing traffic) ---

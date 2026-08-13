@@ -75,6 +75,19 @@ export function useDeleteFca() {
   });
 }
 
+/** Matched-aircraft counts per FCA (all FCAs), refreshed every 15s. */
+export function useFcaCounts() {
+  return useQuery({
+    queryKey: ["fca-counts"],
+    queryFn: async () => {
+      const { data, error } = await ois.GET("/api/v1/flow/counts");
+      if (error || !data) throw new Error("failed to load counts");
+      return data as Record<string, number>;
+    },
+    refetchInterval: 15_000,
+  });
+}
+
 /** Live VATSIM traffic for the map, refreshed every 15s. */
 export function useTraffic() {
   return useQuery({
