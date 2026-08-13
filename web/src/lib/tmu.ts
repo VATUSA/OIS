@@ -1,5 +1,6 @@
 import {useMutation, useQuery, useQueryClient} from "@tanstack/react-query";
 import type {components} from "@ois/api-client";
+import {useToast} from "@ois/ui";
 
 import {ois} from "./api";
 
@@ -24,13 +25,18 @@ export function useTmis() {
 
 export function useCreateTmi() {
   const queryClient = useQueryClient();
+  const toast = useToast();
   return useMutation({
     mutationFn: async (body: CreateTmi) => {
       const { data, error } = await ois.POST("/api/v1/tmu/tmis", { body });
       if (error || !data) throw new Error("create failed");
       return data;
     },
-    onSuccess: () => queryClient.invalidateQueries({ queryKey: ["tmis"] }),
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ["tmis"] });
+      toast.success("Restriction added");
+    },
+    onError: () => toast.error("Couldn’t add the restriction"),
   });
 }
 
@@ -38,6 +44,8 @@ function useTmiIdAction(
   verb: "publish" | "cancel",
 ): ReturnType<typeof useMutation<Tmi, Error, string>> {
   const queryClient = useQueryClient();
+  const toast = useToast();
+  const past = verb === "publish" ? "published" : "cancelled";
   return useMutation<Tmi, Error, string>({
     mutationFn: async (id: string) => {
       const { data, error } = await ois.POST(
@@ -47,7 +55,11 @@ function useTmiIdAction(
       if (error || !data) throw new Error(`${verb} failed`);
       return data;
     },
-    onSuccess: () => queryClient.invalidateQueries({ queryKey: ["tmis"] }),
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ["tmis"] });
+      toast.success(`Restriction ${past}`);
+    },
+    onError: () => toast.error(`Couldn’t ${verb} the restriction`),
   });
 }
 
@@ -56,6 +68,7 @@ export const useCancelTmi = () => useTmiIdAction("cancel");
 
 export function useDeleteTmi() {
   const queryClient = useQueryClient();
+  const toast = useToast();
   return useMutation({
     mutationFn: async (id: string) => {
       const { error } = await ois.DELETE("/api/v1/tmu/tmis/{id}", {
@@ -63,7 +76,11 @@ export function useDeleteTmi() {
       });
       if (error) throw new Error("delete failed");
     },
-    onSuccess: () => queryClient.invalidateQueries({ queryKey: ["tmis"] }),
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ["tmis"] });
+      toast.success("Restriction deleted");
+    },
+    onError: () => toast.error("Couldn’t delete the restriction"),
   });
 }
 
@@ -82,6 +99,7 @@ export function usePrograms() {
 
 export function useUpsertProgram() {
   const queryClient = useQueryClient();
+  const toast = useToast();
   return useMutation({
     mutationFn: async ({ icao, body }: { icao: string; body: UpsertProgram }) => {
       const { data, error } = await ois.PUT("/api/v1/tmu/programs/{icao}", {
@@ -91,12 +109,17 @@ export function useUpsertProgram() {
       if (error || !data) throw new Error("save failed");
       return data;
     },
-    onSuccess: () => queryClient.invalidateQueries({ queryKey: ["tmu-programs"] }),
+    onSuccess: (data) => {
+      queryClient.invalidateQueries({ queryKey: ["tmu-programs"] });
+      toast.success(`Program saved`, { description: data.icao });
+    },
+    onError: () => toast.error("Couldn’t save the program"),
   });
 }
 
 export function useDeleteProgram() {
   const queryClient = useQueryClient();
+  const toast = useToast();
   return useMutation({
     mutationFn: async (icao: string) => {
       const { error } = await ois.DELETE("/api/v1/tmu/programs/{icao}", {
@@ -104,7 +127,11 @@ export function useDeleteProgram() {
       });
       if (error) throw new Error("delete failed");
     },
-    onSuccess: () => queryClient.invalidateQueries({ queryKey: ["tmu-programs"] }),
+    onSuccess: (_data, icao) => {
+      queryClient.invalidateQueries({ queryKey: ["tmu-programs"] });
+      toast.success("Program removed", { description: icao });
+    },
+    onError: () => toast.error("Couldn’t remove the program"),
   });
 }
 
@@ -123,13 +150,18 @@ export function useGroundStops() {
 
 export function useCreateGroundStop() {
   const queryClient = useQueryClient();
+  const toast = useToast();
   return useMutation({
     mutationFn: async (body: CreateGroundStop) => {
       const { data, error } = await ois.POST("/api/v1/tmu/ground-stops", { body });
       if (error || !data) throw new Error("create failed");
       return data;
     },
-    onSuccess: () => queryClient.invalidateQueries({ queryKey: ["ground-stops"] }),
+    onSuccess: (data) => {
+      queryClient.invalidateQueries({ queryKey: ["ground-stops"] });
+      toast.success("Ground stop added", { description: data.airport });
+    },
+    onError: () => toast.error("Couldn’t issue the ground stop"),
   });
 }
 
@@ -137,6 +169,8 @@ function useGroundStopIdAction(
   verb: "publish" | "cancel",
 ): ReturnType<typeof useMutation<GroundStop, Error, string>> {
   const queryClient = useQueryClient();
+  const toast = useToast();
+  const past = verb === "publish" ? "published" : "cancelled";
   return useMutation<GroundStop, Error, string>({
     mutationFn: async (id: string) => {
       const { data, error } = await ois.POST(
@@ -146,7 +180,11 @@ function useGroundStopIdAction(
       if (error || !data) throw new Error(`${verb} failed`);
       return data;
     },
-    onSuccess: () => queryClient.invalidateQueries({ queryKey: ["ground-stops"] }),
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ["ground-stops"] });
+      toast.success(`Ground stop ${past}`);
+    },
+    onError: () => toast.error(`Couldn’t ${verb} the ground stop`),
   });
 }
 
@@ -155,6 +193,7 @@ export const useCancelGroundStop = () => useGroundStopIdAction("cancel");
 
 export function useDeleteGroundStop() {
   const queryClient = useQueryClient();
+  const toast = useToast();
   return useMutation({
     mutationFn: async (id: string) => {
       const { error } = await ois.DELETE("/api/v1/tmu/ground-stops/{id}", {
@@ -162,6 +201,10 @@ export function useDeleteGroundStop() {
       });
       if (error) throw new Error("delete failed");
     },
-    onSuccess: () => queryClient.invalidateQueries({ queryKey: ["ground-stops"] }),
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ["ground-stops"] });
+      toast.success("Ground stop removed");
+    },
+    onError: () => toast.error("Couldn’t remove the ground stop"),
   });
 }

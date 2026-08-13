@@ -1,7 +1,9 @@
 import {useMutation, useQueries, useQuery, useQueryClient,} from "@tanstack/react-query";
 import type {components} from "@ois/api-client";
+import {useToast} from "@ois/ui";
 
 import {ois} from "./api";
+import {hhmmZulu} from "./time";
 
 async function fetchDepartures(dep: string) {
   const { data, error } = await ois.GET("/api/v1/tmu/departures/{dep}", {
@@ -38,6 +40,7 @@ export function useMultiDepartures(fields: string[]) {
 /** Issue (lock) a CFR: proposed wheels-up, or `readyTime` when supplied. */
 export function useIssueCfr() {
   const queryClient = useQueryClient();
+  const toast = useToast();
   return useMutation({
     mutationFn: async (args: {
       callsign: string;
@@ -54,12 +57,19 @@ export function useIssueCfr() {
       if (error || !data) throw new Error("issue failed");
       return data;
     },
-    onSuccess: () => queryClient.invalidateQueries({ queryKey: ["departures"] }),
+    onSuccess: (data) => {
+      queryClient.invalidateQueries({ queryKey: ["departures"] });
+      toast.success(`CFR issued · ${data.callsign}`, {
+        description: `Wheels-up ${hhmmZulu(data.wheels_up)}`,
+      });
+    },
+    onError: () => toast.error("Couldn’t issue the CFR"),
   });
 }
 
 export function useReleaseCfr() {
   const queryClient = useQueryClient();
+  const toast = useToast();
   return useMutation({
     mutationFn: async (callsign: string) => {
       const { error } = await ois.DELETE("/api/v1/tmu/cfr/{callsign}", {
@@ -67,6 +77,10 @@ export function useReleaseCfr() {
       });
       if (error) throw new Error("release failed");
     },
-    onSuccess: () => queryClient.invalidateQueries({ queryKey: ["departures"] }),
+    onSuccess: (_data, callsign) => {
+      queryClient.invalidateQueries({ queryKey: ["departures"] });
+      toast.success("CFR released", { description: callsign });
+    },
+    onError: () => toast.error("Couldn’t release the CFR"),
   });
 }

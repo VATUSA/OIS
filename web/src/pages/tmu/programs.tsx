@@ -1,5 +1,5 @@
 import {useState} from "react";
-import {Badge, Button, Card, CardContent, Input} from "@ois/ui";
+import {Badge, Button, Card, CardContent, Input, useToast} from "@ois/ui";
 import {Plus, X} from "lucide-react";
 
 import {useMe} from "@/lib/auth";
@@ -107,25 +107,24 @@ function TrailSelect({
 
 function SetProgramForm() {
   const upsert = useUpsertProgram();
+  const toast = useToast();
   const [icao, setIcao] = useState("");
   const [aar, setAar] = useState("30");
   const [trail, setTrail] = useState(0);
   const [mit, setMit] = useState("");
-  const [error, setError] = useState<string | null>(null);
 
   function submit() {
     const cleanIcao = icao.replace(/[^a-zA-Z0-9]/g, "").toUpperCase();
     if (cleanIcao.length < 3 || cleanIcao.length > 4) {
-      setError("Enter a 3–4 character ICAO.");
+      toast.warning("Enter a 3–4 character ICAO");
       return;
     }
     const aarN = Math.round(Number(aar));
     if (!Number.isFinite(aarN) || aarN < 1 || aarN > 200) {
-      setError("AAR must be between 1 and 200.");
+      toast.warning("AAR must be between 1 and 200");
       return;
     }
     const mitN = mit.trim() ? Math.round(Number(mit)) : 0;
-    setError(null);
     upsert.mutate(
       {
         icao: cleanIcao,
@@ -194,7 +193,6 @@ function SetProgramForm() {
           <Plus />
           Set program
         </Button>
-        <p className="w-full text-sm text-destructive">{error ?? ""}</p>
       </CardContent>
     </Card>
   );
