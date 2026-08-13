@@ -455,3 +455,49 @@ pub async fn delete_ground_stop(
     }
     Ok(StatusCode::NO_CONTENT)
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn icao_normalization() {
+        assert_eq!(normalize_icao("kjfk").as_deref(), Some("KJFK"));
+        assert_eq!(normalize_icao("k jfk!").as_deref(), Some("KJFK"));
+        assert_eq!(normalize_icao("zzz").as_deref(), Some("ZZZ"));
+        assert_eq!(normalize_icao("xx"), None); // too short
+        assert_eq!(normalize_icao("toolong"), None); // too long
+    }
+
+    #[test]
+    fn clean_alnum_bounds() {
+        assert_eq!(clean_alnum("c172", 2, 4).as_deref(), Some("C172"));
+        assert_eq!(clean_alnum("pa-28", 2, 4).as_deref(), Some("PA28"));
+        assert_eq!(clean_alnum("x", 2, 4), None);
+        assert_eq!(clean_alnum("toolong", 2, 4), None);
+    }
+
+    #[test]
+    fn scope_normalization() {
+        assert_eq!(normalize_scope(Some("ztl  zjx")), "ZTL ZJX");
+        assert_eq!(normalize_scope(Some("  zdc ")), "ZDC");
+        assert_eq!(normalize_scope(None), "");
+    }
+
+    #[test]
+    fn until_normalization() {
+        assert_eq!(
+            normalize_until(Some("200z")).unwrap().as_deref(),
+            Some("0200")
+        );
+        assert_eq!(
+            normalize_until(Some("1430")).unwrap().as_deref(),
+            Some("1430")
+        );
+        assert_eq!(normalize_until(Some("")).unwrap(), None);
+        assert_eq!(normalize_until(None).unwrap(), None);
+        assert!(normalize_until(Some("9999")).is_err()); // hour 99
+        assert!(normalize_until(Some("2460")).is_err()); // hour 24
+        assert!(normalize_until(Some("1275")).is_err()); // minute 75
+    }
+}
