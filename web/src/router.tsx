@@ -2,6 +2,7 @@ import {createRootRoute, createRoute, createRouter, Outlet,} from "@tanstack/rea
 
 import {Navbar} from "@/components/navbar";
 import {DashboardPage} from "@/pages/dashboard";
+import {TmuPage} from "@/pages/tmu";
 import {AdminLayout} from "@/pages/admin/layout";
 import {AdminOverview} from "@/pages/admin/overview";
 import {AdminAccessControl} from "@/pages/admin/access-control";
@@ -23,6 +24,12 @@ const indexRoute = createRoute({
   getParentRoute: () => rootRoute,
   path: "/",
   component: DashboardPage,
+});
+
+const tmuRoute = createRoute({
+  getParentRoute: () => rootRoute,
+  path: "/tmu",
+  component: TmuPage,
 });
 
 const adminRoute = createRoute({
@@ -57,6 +64,7 @@ const adminServiceAccountsRoute = createRoute({
 
 const routeTree = rootRoute.addChildren([
   indexRoute,
+  tmuRoute,
   adminRoute.addChildren([
     adminIndexRoute,
     adminAccessRoute,

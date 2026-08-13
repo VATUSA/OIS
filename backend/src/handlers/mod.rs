@@ -5,4 +5,5 @@ pub mod docs;
 pub mod facilities;
 pub mod health;
 pub mod service_accounts;
+pub mod tmu;
 pub mod users;

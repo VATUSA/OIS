@@ -228,6 +228,70 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/v1/tmu/tmis": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get: operations["list_tmis"];
+        put?: never;
+        post: operations["create_tmi"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/tmu/tmis/{id}": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        post?: never;
+        delete: operations["delete_tmi"];
+        options?: never;
+        head?: never;
+        patch: operations["update_tmi"];
+        trace?: never;
+    };
+    "/api/v1/tmu/tmis/{id}/cancel": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        post: operations["cancel_tmi"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/tmu/tmis/{id}/publish": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        post: operations["publish_tmi"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/v1/users": {
         parameters: {
             query?: never;
@@ -303,6 +367,17 @@ export interface components {
             description?: string | null;
             name: string;
         };
+        CreateTmiRequest: {
+            artcc_id?: string | null;
+            /** Format: date-time */
+            effective_end?: string | null;
+            /** Format: date-time */
+            effective_start?: string | null;
+            element: string;
+            kind: string;
+            reason?: string | null;
+            restriction: string;
+        };
         /** @description A VATUSA facility (ARTCC). `artcc_id` scope values reference `id`. */
         FacilityBody: {
             active: boolean;
@@ -365,6 +440,37 @@ export interface components {
         };
         SetServiceAccountRolesRequest: {
             role_names: string[];
+        };
+        /** @description A Traffic Management Initiative. */
+        TmiBody: {
+            artcc_id?: string | null;
+            /** @description Author display name (from the creating user). */
+            author?: string | null;
+            /** Format: date-time */
+            created_at: string;
+            /** Format: date-time */
+            effective_end?: string | null;
+            /** Format: date-time */
+            effective_start: string;
+            element: string;
+            id: string;
+            kind: string;
+            /** Format: date-time */
+            published_at?: string | null;
+            reason?: string | null;
+            restriction: string;
+            status: string;
+        };
+        UpdateTmiRequest: {
+            artcc_id?: string | null;
+            /** Format: date-time */
+            effective_end?: string | null;
+            /** Format: date-time */
+            effective_start?: string | null;
+            element?: string | null;
+            kind?: string | null;
+            reason?: string | null;
+            restriction?: string | null;
         };
         /**
          * @description The editor's SAVE payload. `reason` is required (audited). Each entry in `scopes`
@@ -877,6 +983,213 @@ export interface operations {
                 };
             };
             401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+        };
+    };
+    list_tmis: {
+        parameters: {
+            query?: {
+                /** @description Filter by status */
+                status?: string;
+            };
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["TmiBody"][];
+                };
+            };
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+        };
+    };
+    create_tmi: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["CreateTmiRequest"];
+            };
+        };
+        responses: {
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["TmiBody"];
+                };
+            };
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+        };
+    };
+    delete_tmi: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /** @description TMI id */
+                id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            204: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+        };
+    };
+    update_tmi: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /** @description TMI id */
+                id: string;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["UpdateTmiRequest"];
+            };
+        };
+        responses: {
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["TmiBody"];
+                };
+            };
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+        };
+    };
+    cancel_tmi: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /** @description TMI id */
+                id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["TmiBody"];
+                };
+            };
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            409: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+        };
+    };
+    publish_tmi: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /** @description TMI id */
+                id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["TmiBody"];
+                };
+            };
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            409: {
                 headers: {
                     [name: string]: unknown;
                 };
