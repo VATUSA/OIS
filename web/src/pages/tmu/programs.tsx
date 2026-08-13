@@ -5,7 +5,7 @@ import {Plus, X} from "lucide-react";
 import {useMe} from "@/lib/auth";
 import {useAirportFlow} from "@/lib/feed";
 import {hasPermission} from "@/lib/permissions";
-import {timeAgo} from "@/lib/time";
+import {formatZulu, parseZulu, timeAgo} from "@/lib/time";
 import {type GateRule, type Program, useDeleteProgram, usePrograms, useUpsertProgram,} from "@/lib/tmu";
 
 // Live arrival demand for the airport, polled from the VATSIM feed.
@@ -51,6 +51,7 @@ type Draft = {
   exclude_wake: string[];
   exclude_types: string[];
   jets_only: boolean;
+  active_until: string | null;
 };
 
 function toDraft(p: Program): Draft {
@@ -62,6 +63,7 @@ function toDraft(p: Program): Draft {
     exclude_wake: [...p.exclude_wake],
     exclude_types: [...p.exclude_types],
     jets_only: p.jets_only,
+    active_until: p.active_until ?? null,
   };
 }
 
@@ -112,6 +114,7 @@ function SetProgramForm() {
   const [aar, setAar] = useState("30");
   const [trail, setTrail] = useState(0);
   const [mit, setMit] = useState("");
+  const [until, setUntil] = useState("");
 
   function submit() {
     const cleanIcao = icao.replace(/[^a-zA-Z0-9]/g, "").toUpperCase();
@@ -123,6 +126,14 @@ function SetProgramForm() {
     if (!Number.isFinite(aarN) || aarN < 1 || aarN > 200) {
       toast.warning("AAR must be between 1 and 200");
       return;
+    }
+    let activeUntil: string | null = null;
+    if (until.trim()) {
+      activeUntil = parseZulu(until);
+      if (!activeUntil) {
+        toast.warning("Active until must be DD/HHMMz (e.g. 12/0400z)");
+        return;
+      }
     }
     const mitN = mit.trim() ? Math.round(Number(mit)) : 0;
     upsert.mutate(
@@ -136,6 +147,7 @@ function SetProgramForm() {
           exclude_wake: [],
           exclude_types: [],
           jets_only: false,
+          active_until: activeUntil,
         },
       },
       {
@@ -144,6 +156,7 @@ function SetProgramForm() {
           setAar("30");
           setTrail(0);
           setMit("");
+          setUntil("");
         },
       },
     );
@@ -189,6 +202,15 @@ function SetProgramForm() {
             onChange={(e) => setMit(e.target.value)}
           />
         </label>
+        <label className="flex flex-col gap-1 text-xs font-medium uppercase tracking-wide text-muted-foreground">
+          Active until
+          <Input
+            className="w-28 font-mono"
+            placeholder="DD/HHMMz"
+            value={until}
+            onChange={(e) => setUntil(e.target.value)}
+          />
+        </label>
         <Button disabled={upsert.isPending} onClick={submit}>
           <Plus />
           Set program
@@ -215,13 +237,19 @@ function ProgramCard({
   const server = toDraft(program);
   const [draft, setDraft] = useState<Draft>(server);
   const [typesStr, setTypesStr] = useState(server.exclude_types.join(", "));
+  const untilOf = (d: Draft) => (d.active_until ? formatZulu(d.active_until) : "");
+  const [untilStr, setUntilStr] = useState(untilOf(server));
   // Reset local edits when the server record changes (e.g. after a save).
   const [syncKey, setSyncKey] = useState(program.updated_at);
   if (program.updated_at !== syncKey) {
     setSyncKey(program.updated_at);
     setDraft(server);
     setTypesStr(server.exclude_types.join(", "));
+    setUntilStr(untilOf(server));
   }
+
+  const endsInPast =
+    !!draft.active_until && new Date(draft.active_until).getTime() < Date.now();
 
   const dirty = JSON.stringify(draft) !== JSON.stringify(server);
 
@@ -243,6 +271,11 @@ function ProgramCard({
         {/* header */}
         <div className="flex flex-wrap items-center gap-4">
           <span className="font-mono text-lg font-semibold">{program.icao}</span>
+          {draft.active_until && (
+            <Badge variant={endsInPast ? "destructive" : "secondary"}>
+              {endsInPast ? "ended" : "until"} {formatZulu(draft.active_until)}
+            </Badge>
+          )}
           <div className="ml-auto flex items-center gap-3 text-xs text-muted-foreground">
             {program.updated_by && (
               <span>
@@ -316,9 +349,31 @@ function ProgramCard({
               </span>
             )}
           </label>
+          <label className="flex flex-col gap-1 text-xs font-medium uppercase tracking-wide text-muted-foreground">
+            Active until
+            {canEdit ? (
+              <Input
+                className="w-28 font-mono"
+                placeholder="DD/HHMMz"
+                value={untilStr}
+                onChange={(e) => {
+                  setUntilStr(e.target.value);
+                  patch({
+                    active_until: e.target.value.trim()
+                      ? parseZulu(e.target.value)
+                      : null,
+                  });
+                }}
+              />
+            ) : (
+              <span className="text-base text-foreground">
+                {draft.active_until ? formatZulu(draft.active_until) : "indefinite"}
+              </span>
+            )}
+          </label>
           <span className="pb-2 text-xs text-muted-foreground">
-            airport-wide default · everything else uses this unless a gate below
-            overrides it
+            airport-wide default · blank “active until” keeps the program until you
+            remove it
           </span>
         </div>
 

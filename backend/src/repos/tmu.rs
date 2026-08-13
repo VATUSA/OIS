@@ -121,7 +121,7 @@ pub async fn delete_tmi(pool: &PgPool, id: &str) -> Result<bool, ApiError> {
 // --- rate programs ---
 
 const PROGRAM_SELECT: &str = "select p.icao, p.aar, p.trail, p.mit, p.gates, \
-    p.exclude_wake, p.exclude_types, p.jets_only, p.updated_at, \
+    p.exclude_wake, p.exclude_types, p.jets_only, p.active_until, p.updated_at, \
     u.display_name as updated_by \
     from tmu.programs p left join identity.users u on u.id = p.updated_by";
 
@@ -150,13 +150,13 @@ pub async fn upsert_program(
 ) -> Result<(), ApiError> {
     sqlx::query(
         "insert into tmu.programs \
-         (icao, aar, trail, mit, gates, exclude_wake, exclude_types, jets_only, created_by, updated_by) \
-         values ($1, $2, $3, $4, $5, $6, $7, $8, $9, $9) \
+         (icao, aar, trail, mit, gates, exclude_wake, exclude_types, jets_only, active_until, created_by, updated_by) \
+         values ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $10) \
          on conflict (icao) do update set \
             aar = excluded.aar, trail = excluded.trail, mit = excluded.mit, \
             gates = excluded.gates, exclude_wake = excluded.exclude_wake, \
             exclude_types = excluded.exclude_types, jets_only = excluded.jets_only, \
-            updated_by = excluded.updated_by",
+            active_until = excluded.active_until, updated_by = excluded.updated_by",
     )
     .bind(icao)
     .bind(req.aar)
@@ -166,6 +166,7 @@ pub async fn upsert_program(
     .bind(&req.exclude_wake)
     .bind(&req.exclude_types)
     .bind(req.jets_only)
+    .bind(req.active_until)
     .bind(actor)
     .execute(pool)
     .await
@@ -403,8 +404,17 @@ pub async fn run_cleanup(pool: &PgPool) -> Result<CleanupStats, ApiError> {
     .await
     .map_err(internal)?;
 
+    // Programs have no status; they're just removed an hour after their scheduled end.
+    let d_pgm = sqlx::query(
+        "delete from tmu.programs \
+         where active_until is not null and active_until < now() - interval '1 hour'",
+    )
+    .execute(pool)
+    .await
+    .map_err(internal)?;
+
     Ok(CleanupStats {
         expired: e_tmi.rows_affected() + e_gs.rows_affected(),
-        deleted: d_tmi.rows_affected() + d_gs.rows_affected(),
+        deleted: d_tmi.rows_affected() + d_gs.rows_affected() + d_pgm.rows_affected(),
     })
 }

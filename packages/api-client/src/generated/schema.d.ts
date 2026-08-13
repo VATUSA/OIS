@@ -743,6 +743,11 @@ export interface components {
         ProgramBody: {
             /** Format: int32 */
             aar: number;
+            /**
+             * Format: date-time
+             * @description Scheduled end; null = indefinite. Auto-removed an hour after this time.
+             */
+            active_until?: string | null;
             exclude_types: string[];
             exclude_wake: string[];
             gates: components["schemas"]["GateRule"][];
@@ -848,6 +853,8 @@ export interface components {
         UpsertProgramRequest: {
             /** Format: int32 */
             aar: number;
+            /** Format: date-time */
+            active_until?: string | null;
             exclude_types?: string[];
             exclude_wake?: string[];
             gates?: components["schemas"]["GateRule"][];
