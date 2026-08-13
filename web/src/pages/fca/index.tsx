@@ -140,16 +140,17 @@ function labelIcon(color: string, name: string) {
     iconAnchor: [-6, 6],
   });
 }
-/** A sequenced, heading-pointed marker for a matched (crossing) aircraft. */
-function numberedIcon(seq: number, color: string, heading: number) {
+/** A matched (crossing) aircraft: the plane glyph tinted the FCA colour, with its
+ *  crossing-sequence number as a small badge beside it. */
+function matchedIcon(seq: number, color: string, heading: number) {
   return L.divIcon({
     className: "",
-    html: `<div style="width:30px;height:30px;position:relative">
-      <svg width="30" height="30" viewBox="0 0 30 30" style="position:absolute;inset:0;transform:rotate(${heading}deg)"><path d="M15 1 L19.5 9 L10.5 9 Z" fill="${color}"/></svg>
-      <div style="position:absolute;left:5px;top:5px;width:20px;height:20px;border-radius:50%;background:${color};color:#0a0a0a;font:700 11px ui-monospace,monospace;display:flex;align-items:center;justify-content:center;box-shadow:0 0 0 1px rgba(0,0,0,.5)">${seq}</div>
+    html: `<div style="position:relative;width:14px;height:14px">
+      <svg width="14" height="14" viewBox="0 0 12 12" style="transform: rotate(${heading}deg)"><path d="M6 0 L10.5 11 L6 8.5 L1.5 11 Z" fill="${color}"/></svg>
+      <span style="position:absolute;left:13px;top:-7px;height:14px;min-width:14px;padding:0 2px;border-radius:8px;background:${color};color:#0a0a0a;font:700 10px ui-monospace,monospace;line-height:14px;text-align:center;box-shadow:0 0 0 1px rgba(0,0,0,.4)">${seq}</span>
     </div>`,
-    iconSize: [30, 30],
-    iconAnchor: [15, 15],
+    iconSize: [14, 14],
+    iconAnchor: [7, 7],
   });
 }
 function aircraftTip(ac: {
@@ -250,8 +251,8 @@ export function FcaPage() {
 
     routeLayer.current = L.layerGroup().addTo(map);
     fcaLayer.current = L.layerGroup().addTo(map);
-    matchedLayer.current = L.layerGroup().addTo(map);
     aircraftLayer.current = L.layerGroup().addTo(map);
+    matchedLayer.current = L.layerGroup().addTo(map);
     draftLayer.current = L.layerGroup().addTo(map);
 
     map.on("click", (e: L.LeafletMouseEvent) => {
@@ -294,12 +295,15 @@ export function FcaPage() {
     return () => window.removeEventListener("keydown", onKey);
   }, [draft, phase]);
 
-  // Live aircraft — hover for details, click to plot the route.
+  // Live aircraft — hover for details, click to plot the route. Aircraft matched to
+  // the selected FCA are drawn (tinted + numbered) by the matched layer instead.
   useEffect(() => {
     const layer = aircraftLayer.current;
     if (!layer) return;
     layer.clearLayers();
+    const matched = new Set((fcaTraffic.data ?? []).map((f) => f.callsign));
     for (const ac of traffic.data ?? []) {
+      if (matched.has(ac.callsign)) continue;
       L.marker([ac.lat, ac.lon], {
         icon: aircraftIcon(ac.heading),
         keyboard: false,
@@ -315,7 +319,7 @@ export function FcaPage() {
         })
         .addTo(layer);
     }
-  }, [traffic.data]);
+  }, [traffic.data, fcaTraffic.data]);
 
   // Plotted route for a clicked aircraft.
   useEffect(() => {
@@ -424,12 +428,14 @@ export function FcaPage() {
       }).addTo(layer);
       if (hasPos) {
         L.marker([f.lat, f.lon], {
-          icon: numberedIcon(f.seq, color, f.heading),
+          icon: matchedIcon(f.seq, color, f.heading),
           keyboard: false,
         })
           .bindTooltip(
-            `<div style="font:700 12px ui-monospace,monospace">#${f.seq} <span style="color:#22d3ee">${f.callsign}</span></div><div style="font:11px ui-monospace,monospace;color:#cbd5e1">${f.dep} → ${f.arr}</div>`,
-            { direction: "top", offset: [0, -12], className: "fca-tip" },
+            `<div style="font:700 13px ui-monospace,monospace">#${f.seq} <span style="color:${color}">${f.callsign}</span> <span style="color:#94a3b8">${f.aircraft_type}</span></div>
+             <div style="font:12px ui-monospace,monospace;color:#cbd5e1">${f.dep} → ${f.arr}</div>
+             <div style="font:12px ui-monospace,monospace;color:#94a3b8">FL${Math.round(f.altitude / 100)} ${f.groundspeed}kt · ${Math.round(f.distance_nm)}nm to line</div>`,
+            { direction: "top", offset: [0, -8], className: "fca-tip" },
           )
           .on("click", (e) => {
             L.DomEvent.stop(e);
