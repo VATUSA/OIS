@@ -1,11 +1,34 @@
 import {useState} from "react";
-import {Button, Card, CardContent, Input} from "@ois/ui";
+import {Badge, Button, Card, CardContent, Input} from "@ois/ui";
 import {Plus, X} from "lucide-react";
 
 import {useMe} from "@/lib/auth";
+import {useAirportFlow} from "@/lib/feed";
 import {hasPermission} from "@/lib/permissions";
 import {timeAgo} from "@/lib/time";
 import {type GateRule, type Program, useDeleteProgram, usePrograms, useUpsertProgram,} from "@/lib/tmu";
+
+// Live arrival demand for the airport, polled from the VATSIM feed.
+function LiveDemand({ icao, aar }: { icao: string; aar: number }) {
+  const flow = useAirportFlow(icao);
+  if (!flow.data) {
+    return <span className="text-xs text-muted-foreground">live demand…</span>;
+  }
+  const d = flow.data;
+  const over = d.demand_60min > aar;
+  return (
+    <div className="flex flex-wrap items-center gap-2 text-xs">
+      <Badge variant={over ? "destructive" : "success"}>
+        {d.demand_60min}/{aar} · 60 min
+      </Badge>
+      {over && <span className="font-medium text-destructive">over capacity</span>}
+      <span className="text-muted-foreground">
+        {d.inbound} inbound — {d.airborne} airborne · {d.ground} ground ·{" "}
+        {d.proposed} proposed
+      </span>
+    </div>
+  );
+}
 
 const TRAIL_OPTS: [number, string][] = [
   [0, "AUTO"],
@@ -241,6 +264,8 @@ function ProgramCard({
             )}
           </div>
         </div>
+
+        <LiveDemand icao={program.icao} aar={draft.aar} />
 
         {/* airport-wide spacing */}
         <div className="flex flex-wrap items-end gap-4">

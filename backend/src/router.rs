@@ -6,7 +6,7 @@ use axum::{
 use crate::{
     auth::middleware::resolve_current_user,
     config::build_cors_layer,
-    handlers::{access, audit, auth, docs, facilities, health, service_accounts, tmu, users},
+    handlers::{access, audit, auth, docs, facilities, feed, health, service_accounts, tmu, users},
     state::AppState,
 };
 
@@ -47,6 +47,9 @@ pub fn build_router(state: AppState) -> Router {
             "/api/v1/tmu/programs/{icao}",
             put(tmu::upsert_program).delete(tmu::delete_program),
         )
+        // Live VATSIM feed
+        .route("/api/v1/feed/status", get(feed::feed_status))
+        .route("/api/v1/tmu/flow/{icao}", get(feed::airport_flow))
         // Audit log
         .route("/api/v1/admin/audit", get(audit::list_audit_logs))
         // Service accounts (bot credentials)
