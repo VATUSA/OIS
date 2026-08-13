@@ -16,6 +16,7 @@ import {
   useTraffic,
   useUpdateFca,
 } from "@/lib/fca";
+import {FcaDetail} from "@/pages/fca/detail";
 
 const FCA_COLORS = [
   "#f59e0b",
@@ -307,6 +308,8 @@ export function FcaPage() {
     );
   }, [fcas.data, filter]);
 
+  const selectedFca = fcas.data?.find((f) => f.id === selectedId);
+
   if (!canRead) {
     return (
       <div className="flex h-[calc(100vh-3.5rem)] items-center justify-center text-sm text-muted-foreground">
@@ -432,7 +435,14 @@ export function FcaPage() {
       </aside>
 
       {/* Map */}
-      <div ref={containerRef} className="relative flex-1" />
+      {/* `isolate` traps Leaflet's internal z-indexes so the navbar dropdowns
+          (portaled, higher z) sit in front of the map. */}
+      <div ref={containerRef} className="relative flex-1 isolate" />
+
+      {/* Detail board for the selected FCA (metering ladder + strips). */}
+      {selectedFca && !draft && (
+        <FcaDetail fca={selectedFca} flights={fcaTraffic.data} />
+      )}
     </div>
   );
 }

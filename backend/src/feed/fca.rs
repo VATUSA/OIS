@@ -190,6 +190,102 @@ pub fn crossing_for(
     Some(cross)
 }
 
+// --- metering (sequence crossing traffic) ---
+
+/// One aircraft to sequence across the FCA.
+pub struct MeterInput {
+    /// Unmetered ETA to the crossing, epoch millis.
+    pub eta_ms: i64,
+    /// Airborne aircraft are fixed constraints (never delayed); ground floats into gaps.
+    pub airborne: bool,
+    /// Predicted crossing groundspeed (kt) — used for MIT spacing.
+    pub cross_speed: f64,
+}
+
+pub struct MeterOutput {
+    /// Metered crossing time, epoch millis.
+    pub sched_ms: i64,
+    pub delay_sec: i64,
+    /// 1-based order by metered time.
+    pub seq: i64,
+}
+
+/// Sequence crossing traffic: airborne aircraft hold their ETA (priority), ground
+/// aircraft slot into the first gap that clears every committed crossing by the
+/// separation (rate → constant MINIT; MIT → distance ÷ crossing speed). Ported from
+/// vatflow's `scheduleAuto`.
+pub fn meter(cands: &[MeterInput], mode: &str, rate: i32, mit: i32) -> Vec<MeterOutput> {
+    let sep_ms = |c: &MeterInput| -> i64 {
+        let secs = if mode == "mit" {
+            (mit as f64 / c.cross_speed.max(60.0)) * 3600.0
+        } else if rate > 0 {
+            3600.0 / rate as f64
+        } else {
+            0.0
+        };
+        (secs * 1000.0) as i64
+    };
+
+    // Airborne first (by ETA), then ground (by ETA).
+    let mut order: Vec<usize> = (0..cands.len()).collect();
+    order.sort_by(|&a, &b| {
+        cands[b]
+            .airborne
+            .cmp(&cands[a].airborne)
+            .then(cands[a].eta_ms.cmp(&cands[b].eta_ms))
+    });
+
+    let mut committed: Vec<i64> = Vec::new();
+    let mut sched = vec![0i64; cands.len()];
+    for &i in &order {
+        let c = &cands[i];
+        sched[i] = if c.airborne {
+            c.eta_ms
+        } else {
+            slot_against(c.eta_ms, &committed, sep_ms(c))
+        };
+        committed.push(sched[i]);
+    }
+
+    let mut by_time: Vec<usize> = (0..cands.len()).collect();
+    by_time.sort_by_key(|&i| sched[i]);
+    let mut seq_of = vec![0i64; cands.len()];
+    for (rank, &i) in by_time.iter().enumerate() {
+        seq_of[i] = rank as i64 + 1;
+    }
+
+    (0..cands.len())
+        .map(|i| MeterOutput {
+            sched_ms: sched[i],
+            delay_sec: ((sched[i] - cands[i].eta_ms).max(0)) / 1000,
+            seq: seq_of[i],
+        })
+        .collect()
+}
+
+/// Earliest time ≥ `eta` clear of every committed crossing by `sep`.
+fn slot_against(eta: i64, committed: &[i64], sep: i64) -> i64 {
+    if sep <= 0 {
+        return eta;
+    }
+    let mut sorted = committed.to_vec();
+    sorted.sort_unstable();
+    let mut t = eta;
+    loop {
+        let mut bumped = false;
+        for &c in &sorted {
+            if (t - c).abs() < sep {
+                t = c + sep;
+                bumped = true;
+            }
+        }
+        if !bumped {
+            break;
+        }
+    }
+    t
+}
+
 // --- geometry primitives ---
 
 fn local(refp: [f64; 2], p: [f64; 2]) -> (f64, f64) {
@@ -346,6 +442,61 @@ mod tests {
             "route via RBV WHITE SIE should cross the lat-39.5 line"
         );
         assert!((c.unwrap().lat - 39.5).abs() < 0.2);
+    }
+
+    #[test]
+    fn meters_ground_traffic_by_rate() {
+        // 30/hr → 120s separation; three ground aircraft close together.
+        let cands = vec![
+            MeterInput {
+                eta_ms: 0,
+                airborne: false,
+                cross_speed: 400.0,
+            },
+            MeterInput {
+                eta_ms: 60_000,
+                airborne: false,
+                cross_speed: 400.0,
+            },
+            MeterInput {
+                eta_ms: 200_000,
+                airborne: false,
+                cross_speed: 400.0,
+            },
+        ];
+        let out = meter(&cands, "rate", 30, 15);
+        assert_eq!(out[0].sched_ms, 0);
+        assert_eq!(out[1].sched_ms, 120_000); // bumped 120s after the first
+        assert_eq!(out[2].sched_ms, 240_000); // bumped 120s after the second
+        assert_eq!(out[1].delay_sec, 60);
+        assert_eq!(out[2].delay_sec, 40);
+        assert_eq!((out[0].seq, out[1].seq, out[2].seq), (1, 2, 3));
+    }
+
+    #[test]
+    fn airborne_holds_priority_over_ground() {
+        // Ground at ETA 0 must yield to an airborne aircraft crossing at 30s.
+        let cands = vec![
+            MeterInput {
+                eta_ms: 0,
+                airborne: false,
+                cross_speed: 400.0,
+            },
+            MeterInput {
+                eta_ms: 30_000,
+                airborne: true,
+                cross_speed: 450.0,
+            },
+        ];
+        let out = meter(&cands, "rate", 30, 15);
+        assert_eq!(out[1].sched_ms, 30_000); // airborne keeps its ETA
+        assert_eq!(out[1].delay_sec, 0);
+        assert!(
+            out[0].sched_ms >= 150_000,
+            "ground slots 120s after the airborne"
+        );
+        assert_eq!(out[1].seq, 1);
+        assert_eq!(out[0].seq, 2);
     }
 
     #[test]
