@@ -12,12 +12,14 @@ import {
   type UpsertFca,
   useCreateFca,
   useDeleteFca,
+  useFcaCounts,
   useFcas,
   useFcaTraffic,
   useTraffic,
   useUpdateFca,
 } from "@/lib/fca";
 import {FcaDetail} from "@/pages/fca/detail";
+import boundariesGeo from "@/assets/artcc-boundaries.json";
 
 const FCA_COLORS = [
   "#f59e0b",
@@ -154,8 +156,10 @@ export function FcaPage() {
   const [phase, setPhase] = useState<Phase>("draw");
   const [selectedId, setSelectedId] = useState<string | null>(null);
   const [filter, setFilter] = useState("");
+  const [artccFilter, setArtccFilter] = useState("");
 
   const fcaTraffic = useFcaTraffic(draft ? null : selectedId);
+  const counts = useFcaCounts();
 
   // --- Leaflet refs ---
   const containerRef = useRef<HTMLDivElement>(null);
@@ -185,8 +189,37 @@ export function FcaPage() {
     }).setView([38.5, -77], 6);
     L.tileLayer("https://{s}.basemaps.cartocdn.com/dark_all/{z}/{x}/{y}{r}.png", {
       maxZoom: 14,
-      attribution: "© OpenStreetMap, © CARTO · traffic: VATSIM",
+      attribution:
+        "© OpenStreetMap, © CARTO · traffic: VATSIM · boundaries: FAA NASR / ERAM",
     }).addTo(map);
+
+    // ARTCC boundary outlines (below everything else) + faded center labels.
+    L.geoJSON(boundariesGeo as GeoJSON.GeoJsonObject, {
+      style: { color: "#64748b", weight: 1, opacity: 0.4, fill: false },
+      interactive: false,
+    }).addTo(map);
+    for (const feat of (boundariesGeo as GeoJSON.FeatureCollection).features) {
+      const geom = feat.geometry;
+      if (geom.type !== "Polygon") continue;
+      const ring = geom.coordinates[0];
+      let sx = 0;
+      let sy = 0;
+      for (const [lon, lat] of ring) {
+        sx += lon;
+        sy += lat;
+      }
+      const c: LatLng = [sy / ring.length, sx / ring.length];
+      L.marker(c, {
+        icon: L.divIcon({
+          className: "",
+          html: `<span style="color:#64748b;font:600 11px ui-monospace,monospace;opacity:.5">${feat.properties?.id ?? ""}</span>`,
+          iconSize: [0, 0],
+        }),
+        interactive: false,
+        keyboard: false,
+      }).addTo(map);
+    }
+
     aircraftLayer.current = L.layerGroup().addTo(map);
     fcaLayer.current = L.layerGroup().addTo(map);
     matchedLayer.current = L.layerGroup().addTo(map);
@@ -339,6 +372,21 @@ export function FcaPage() {
     });
   }, [draft]);
 
+  // Zoom to the selected FCA.
+  useEffect(() => {
+    const map = mapRef.current;
+    if (!map || !selectedId) return;
+    const fca = fcas.data?.find((f) => f.id === selectedId);
+    const pts = (fca?.points as LatLng[]) ?? [];
+    if (pts.length >= 2) {
+      map.fitBounds(pts as L.LatLngBoundsExpression, {
+        padding: [80, 80],
+        maxZoom: 9,
+      });
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [selectedId]);
+
   const startNew = () => {
     setSelectedId(null);
     setDraft(blankDraft(fcas.data?.length ?? 0));
@@ -383,11 +431,17 @@ export function FcaPage() {
     const q = filter.trim().toUpperCase();
     return (fcas.data ?? []).filter(
       (f) =>
-        !q ||
-        f.name.toUpperCase().includes(q) ||
-        f.artcc.toUpperCase().includes(q),
+        (!q ||
+          f.name.toUpperCase().includes(q) ||
+          f.artcc.toUpperCase().includes(q)) &&
+        (!artccFilter || f.artcc === artccFilter),
     );
-  }, [fcas.data, filter]);
+  }, [fcas.data, filter, artccFilter]);
+
+  const artccOptions = useMemo(() => {
+    const s = new Set((fcas.data ?? []).map((f) => f.artcc).filter(Boolean));
+    return [...s].sort();
+  }, [fcas.data]);
 
   const selectedFca = fcas.data?.find((f) => f.id === selectedId);
   const editing = !!draft && phase === "edit";
@@ -443,9 +497,21 @@ export function FcaPage() {
                 )}
               </div>
             )}
-            <div className="border-b p-3">
+            <div className="flex flex-col gap-2 border-b p-3">
+              <select
+                value={artccFilter}
+                onChange={(e) => setArtccFilter(e.target.value)}
+                className="h-9 w-full rounded-md border border-input bg-background px-2 text-sm outline-none focus-visible:ring-2 focus-visible:ring-ring"
+              >
+                <option value="">ALL ARTCCs</option>
+                {artccOptions.map((a) => (
+                  <option key={a} value={a}>
+                    {a}
+                  </option>
+                ))}
+              </select>
               <Input
-                placeholder="filter — name or ARTCC…"
+                placeholder="filter — name or fix…"
                 value={filter}
                 onChange={(e) => setFilter(e.target.value)}
               />
@@ -491,11 +557,21 @@ export function FcaPage() {
                           </span>
                         )}
                       </button>
-                      {fca.id === selectedId && (
-                        <span className="shrink-0 rounded bg-primary/15 px-1.5 text-xs font-medium tabular-nums text-primary">
-                          {fcaTraffic.data?.length ?? "…"}
-                        </span>
-                      )}
+                      {(() => {
+                        const c = counts.data?.[fca.id] ?? 0;
+                        return (
+                          <span
+                            className={
+                              "shrink-0 rounded px-1.5 text-xs font-medium tabular-nums " +
+                              (c > 0
+                                ? "bg-primary/15 text-primary"
+                                : "text-muted-foreground/50")
+                            }
+                          >
+                            {c}
+                          </span>
+                        );
+                      })()}
                       {canEdit && (
                         <button
                           type="button"

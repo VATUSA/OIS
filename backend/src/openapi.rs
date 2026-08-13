@@ -64,6 +64,7 @@ use utoipa::OpenApi;
         crate::handlers::flow::mark_release,
         crate::handlers::flow::clear_release,
         crate::handlers::flow::reorder_fca,
+        crate::handlers::flow::fca_counts,
         crate::handlers::flow::list_traffic,
         crate::handlers::feed::feed_status,
         crate::handlers::feed::airport_flow,

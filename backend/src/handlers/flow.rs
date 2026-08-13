@@ -183,6 +183,80 @@ pub async fn delete_fca(
 
 #[utoipa::path(
     get,
+    path = "/api/v1/flow/counts",
+    tag = "flow",
+    responses((status = 200, body = std::collections::HashMap<String, i64>), (status = 401))
+)]
+pub async fn fca_counts(
+    State(state): State<AppState>,
+    _permission: RequirePermission<FlowFcaRead>,
+) -> Result<Json<HashMap<String, i64>>, ApiError> {
+    let pool = state.db.as_ref().ok_or(ApiError::ServiceUnavailable)?;
+    let fcas = flow_repo::list_fcas(pool).await?;
+    let mut counts: HashMap<String, i64> = fcas.iter().map(|f| (f.id.clone(), 0)).collect();
+    let active: Vec<&FcaBody> = fcas
+        .iter()
+        .filter(|f| f.enabled && f.points.0.len() >= 2)
+        .collect();
+    if active.is_empty() {
+        return Ok(Json(counts));
+    }
+
+    let guard = state.feed.read().await;
+    let Some(snap) = guard.snapshot.as_ref() else {
+        return Ok(Json(counts));
+    };
+    let airports = &guard.airports;
+    let nav = state.nav.as_ref();
+
+    // Resolve each aircraft's route once, then test it against every active FCA.
+    let mut tally = |fp: &FlightPlan, lat: f64, lon: f64, hdg: i64, gs: i64, alt: i64| {
+        let airborne = gs >= 50;
+        let Some(path) = fca::route_path(
+            nav,
+            airports,
+            &fp.departure,
+            &fp.arrival,
+            &fp.route,
+            lat,
+            lon,
+            hdg,
+            gs,
+        ) else {
+            return;
+        };
+        for f in &active {
+            if !passes_filters(f, fp, alt, airborne) {
+                continue;
+            }
+            if fca::crosses(&path, &f.points.0, airborne, lat, lon, hdg).is_some() {
+                *counts.get_mut(&f.id).unwrap() += 1;
+            }
+        }
+    };
+
+    for p in &snap.data.pilots {
+        if let Some(fp) = &p.flight_plan {
+            tally(
+                fp,
+                p.latitude,
+                p.longitude,
+                p.heading,
+                p.groundspeed,
+                p.altitude,
+            );
+        }
+    }
+    for pf in &snap.data.prefiles {
+        if let Some(fp) = &pf.flight_plan {
+            tally(fp, 0.0, 0.0, 0, 0, 0);
+        }
+    }
+    Ok(Json(counts))
+}
+
+#[utoipa::path(
+    get,
     path = "/api/v1/flow/traffic",
     tag = "flow",
     responses((status = 200, body = Vec<TrafficAircraft>), (status = 401))
