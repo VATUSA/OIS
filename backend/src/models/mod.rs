@@ -180,6 +180,9 @@ pub struct GroundStopBody {
     pub scope: String,
     /// HHMM Zulu clock time the stop runs until; null = until further notice.
     pub until: Option<String>,
+    /// Lifecycle: draft | published | expired | cancelled.
+    pub status: String,
+    pub published_at: Option<DateTime<Utc>>,
     pub updated_at: DateTime<Utc>,
     /// Display name of whoever last touched the stop.
     pub updated_by: Option<String>,

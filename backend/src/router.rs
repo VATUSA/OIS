@@ -50,6 +50,14 @@ pub fn build_router(state: AppState) -> Router {
             "/api/v1/tmu/ground-stops/{id}",
             delete(tmu::delete_ground_stop),
         )
+        .route(
+            "/api/v1/tmu/ground-stops/{id}/publish",
+            post(tmu::publish_ground_stop),
+        )
+        .route(
+            "/api/v1/tmu/ground-stops/{id}/cancel",
+            post(tmu::cancel_ground_stop),
+        )
         // TMU — airport rate programs
         .route("/api/v1/tmu/programs", get(tmu::list_programs))
         .route(

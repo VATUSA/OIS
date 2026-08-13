@@ -133,6 +133,26 @@ export function useCreateGroundStop() {
   });
 }
 
+function useGroundStopIdAction(
+  verb: "publish" | "cancel",
+): ReturnType<typeof useMutation<GroundStop, Error, string>> {
+  const queryClient = useQueryClient();
+  return useMutation<GroundStop, Error, string>({
+    mutationFn: async (id: string) => {
+      const { data, error } = await ois.POST(
+        `/api/v1/tmu/ground-stops/{id}/${verb}` as "/api/v1/tmu/ground-stops/{id}/publish",
+        { params: { path: { id } } },
+      );
+      if (error || !data) throw new Error(`${verb} failed`);
+      return data;
+    },
+    onSuccess: () => queryClient.invalidateQueries({ queryKey: ["ground-stops"] }),
+  });
+}
+
+export const usePublishGroundStop = () => useGroundStopIdAction("publish");
+export const useCancelGroundStop = () => useGroundStopIdAction("cancel");
+
 export function useDeleteGroundStop() {
   const queryClient = useQueryClient();
   return useMutation({

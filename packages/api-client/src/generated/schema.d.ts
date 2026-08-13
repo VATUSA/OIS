@@ -292,6 +292,38 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/v1/tmu/ground-stops/{id}/cancel": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        post: operations["cancel_ground_stop"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/tmu/ground-stops/{id}/publish": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        post: operations["publish_ground_stop"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/v1/tmu/programs": {
         parameters: {
             query?: never;
@@ -550,8 +582,12 @@ export interface components {
         GroundStopBody: {
             airport: string;
             id: string;
+            /** Format: date-time */
+            published_at?: string | null;
             /** @description Space-separated ARTCC/FIR codes; empty = every departure (field-wide). */
             scope: string;
+            /** @description Lifecycle: draft | published | expired | cancelled. */
+            status: string;
             /** @description HHMM Zulu clock time the stop runs until; null = until further notice. */
             until?: string | null;
             /** Format: date-time */
@@ -1343,6 +1379,74 @@ export interface operations {
                 content?: never;
             };
             404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+        };
+    };
+    cancel_ground_stop: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /** @description Ground stop id */
+                id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["GroundStopBody"];
+                };
+            };
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            409: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+        };
+    };
+    publish_ground_stop: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /** @description Ground stop id */
+                id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["GroundStopBody"];
+                };
+            };
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            409: {
                 headers: {
                     [name: string]: unknown;
                 };

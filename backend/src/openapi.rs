@@ -34,6 +34,8 @@ use utoipa::OpenApi;
         crate::handlers::tmu::delete_program,
         crate::handlers::tmu::list_ground_stops,
         crate::handlers::tmu::create_ground_stop,
+        crate::handlers::tmu::publish_ground_stop,
+        crate::handlers::tmu::cancel_ground_stop,
         crate::handlers::tmu::delete_ground_stop,
         crate::handlers::feed::feed_status,
         crate::handlers::feed::airport_flow,
