@@ -84,6 +84,59 @@ enum Engine {
     Jet,
 }
 
+/// A pending departure out of a field (before any metering is applied).
+pub struct PendingDep {
+    pub callsign: String,
+    pub arrival: String,
+    pub aircraft_type: String,
+    pub gate: Option<String>,
+    pub status: String, // "ground" | "proposed"
+}
+
+/// All pending (not-yet-airborne) departures out of `dep`, regardless of destination.
+/// `dep` must be uppercase.
+pub fn pending_departures(dep: &str, data: &VatsimData) -> Vec<PendingDep> {
+    let mut out: Vec<PendingDep> = Vec::new();
+    for p in &data.pilots {
+        let Some(fp) = &p.flight_plan else { continue };
+        if fp.departure.to_ascii_uppercase() != dep {
+            continue;
+        }
+        // Already airborne means it has departed — not a pending departure.
+        if p.groundspeed > 60 && p.altitude > 300 {
+            continue;
+        }
+        let arrival = fp.arrival.to_ascii_uppercase();
+        let (ty, _wake) = fp.aircraft_type_wake();
+        out.push(PendingDep {
+            callsign: p.callsign.clone(),
+            gate: arrival_gate(&fp.route, &arrival),
+            arrival,
+            aircraft_type: ty,
+            status: "ground".into(),
+        });
+    }
+    for pf in &data.prefiles {
+        let Some(fp) = &pf.flight_plan else { continue };
+        if fp.departure.to_ascii_uppercase() != dep {
+            continue;
+        }
+        if out.iter().any(|d| d.callsign == pf.callsign) {
+            continue;
+        }
+        let arrival = fp.arrival.to_ascii_uppercase();
+        let (ty, _wake) = fp.aircraft_type_wake();
+        out.push(PendingDep {
+            callsign: pf.callsign.clone(),
+            gate: arrival_gate(&fp.route, &arrival),
+            arrival,
+            aircraft_type: ty,
+            status: "proposed".into(),
+        });
+    }
+    out
+}
+
 /// Compute a full arrival picture for `icao`. `icao` must already be uppercase. `issued`
 /// maps callsign -> locked wheels-up for any CFRs already issued into this field.
 pub fn compute(

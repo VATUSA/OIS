@@ -191,21 +191,36 @@ pub struct IssueCfrRequest {
     pub ready_time: Option<DateTime<Utc>>,
 }
 
-/// A pending ground/proposed departure into a metered field (for the Departures view).
+/// A pending ground/proposed departure out of a field (for the Departures view).
 #[derive(Debug, Serialize, ToSchema)]
 pub struct DepartureFlight {
     pub callsign: String,
-    /// Metered arrival airport.
+    /// Destination airport.
     pub arrival: String,
     pub aircraft_type: String,
     pub gate: Option<String>,
     pub status: String,
+    /// True when the destination has a TMU program (so this departure is metered).
+    pub has_program: bool,
     pub eta: Option<DateTime<Utc>>,
     pub sta: Option<DateTime<Utc>>,
     pub delay_min: i64,
     pub cfr: Option<DateTime<Utc>>,
     pub cfr_issued: bool,
     pub seq: Option<i64>,
+}
+
+/// The Departures view for one field: all pending departures plus summary counts.
+#[derive(Debug, Serialize, ToSchema)]
+pub struct DeparturesResponse {
+    pub total: usize,
+    /// How many departures are bound for a metered destination.
+    pub to_metered: usize,
+    /// How many are currently held by a metering delay.
+    pub holding_on_cfr: usize,
+    /// This field's destinations that have a TMU program.
+    pub program_destinations: Vec<String>,
+    pub departures: Vec<DepartureFlight>,
 }
 
 // --- TMU ground stops ---

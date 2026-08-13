@@ -71,6 +71,7 @@ use utoipa::OpenApi;
         crate::feed::flow::Flow,
         crate::feed::flow::FlowFlight,
         crate::models::DepartureFlight,
+        crate::models::DeparturesResponse,
         crate::models::IssueCfrRequest,
         crate::models::IssuedCfrBody,
         crate::models::AuditLogEntry,

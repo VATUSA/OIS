@@ -46,14 +46,18 @@ function DepartureRow({ d, canIssue }: { d: Departure; canIssue: boolean }) {
         )}
       </td>
       <td className="py-2 pr-3">
-        {d.cfr_issued ? (
+        {!d.has_program ? (
+          <Badge variant="outline">no program</Badge>
+        ) : d.cfr_issued ? (
           <Badge variant="success">issued</Badge>
         ) : (
           <Badge variant="secondary">proposed</Badge>
         )}
       </td>
       <td className="py-2 text-right">
-        {canIssue && (
+        {!d.has_program ? (
+          <span className="text-xs text-muted-foreground">Release at will</span>
+        ) : canIssue ? (
           <div className="flex justify-end gap-1">
             {d.cfr_issued ? (
               <Button
@@ -94,9 +98,20 @@ function DepartureRow({ d, canIssue }: { d: Departure; canIssue: boolean }) {
               </>
             )}
           </div>
-        )}
+        ) : null}
       </td>
     </tr>
+  );
+}
+
+function Stat({ label, value }: { label: string; value: number }) {
+  return (
+    <div className="flex flex-col">
+      <span className="text-3xl font-semibold tabular-nums">{value}</span>
+      <span className="text-xs uppercase tracking-wide text-muted-foreground">
+        {label}
+      </span>
+    </div>
   );
 }
 
@@ -115,10 +130,12 @@ export function DeparturesPage() {
   return (
     <div className="flex flex-col gap-6">
       <div>
-        <h1 className="text-2xl font-semibold tracking-tight">Departures</h1>
+        <h1 className="text-2xl font-semibold tracking-tight">
+          {field ? `${field} departures` : "Departures"}
+        </h1>
         <p className="text-muted-foreground">
-          Pending departures out of a field into any metered destination, with their
-          Call-For-Release (CFR) times.
+          Every pending departure out of a field. Ones bound for a metered destination
+          get a Call-For-Release (CFR); the rest release at will.
         </p>
       </div>
 
@@ -147,51 +164,77 @@ export function DeparturesPage() {
       {!field ? (
         <Card>
           <CardContent className="py-12 text-center text-sm text-muted-foreground">
-            Enter a departure field to see its metered departures.
+            Enter a departure field to see its departures.
+          </CardContent>
+        </Card>
+      ) : departures.isError ? (
+        <Card>
+          <CardContent className="py-12 text-center text-sm text-muted-foreground">
+            Couldn&apos;t load departures for {field}.
+          </CardContent>
+        </Card>
+      ) : !departures.data ? (
+        <Card>
+          <CardContent className="py-12 text-center text-sm text-muted-foreground">
+            Loading {field}…
           </CardContent>
         </Card>
       ) : (
-        <Card>
-          <CardContent className="pt-6">
-            {departures.isError ? (
-              <p className="py-8 text-center text-sm text-muted-foreground">
-                Couldn&apos;t load departures for {field}.
-              </p>
-            ) : !departures.data ? (
-              <p className="py-8 text-center text-sm text-muted-foreground">
-                Loading…
-              </p>
-            ) : departures.data.length === 0 ? (
-              <p className="py-8 text-center text-sm text-muted-foreground">
-                No pending departures out of {field} into a metered field.
-              </p>
-            ) : (
-              <div className="overflow-x-auto">
-                <table className="w-full text-sm">
-                  <thead>
-                    <tr className="text-left text-xs uppercase tracking-wide text-muted-foreground">
-                      <th className="pb-2 pr-3 text-right font-medium">#</th>
-                      <th className="pb-2 pr-3 font-medium">Callsign</th>
-                      <th className="pb-2 pr-3 font-medium">To</th>
-                      <th className="pb-2 pr-3 font-medium">Type</th>
-                      <th className="pb-2 pr-3 font-medium">Gate</th>
-                      <th className="pb-2 pr-3 font-medium">ETA</th>
-                      <th className="pb-2 pr-3 text-right font-medium">Delay</th>
-                      <th className="pb-2 pr-3 text-right font-medium">CFR</th>
-                      <th className="pb-2 pr-3 font-medium" />
-                      <th className="pb-2" />
-                    </tr>
-                  </thead>
-                  <tbody>
-                    {departures.data.map((d) => (
-                      <DepartureRow key={d.callsign} d={d} canIssue={canIssue} />
-                    ))}
-                  </tbody>
-                </table>
+        <>
+          <Card>
+            <CardContent className="flex flex-col gap-4 pt-6">
+              <div className="flex flex-wrap gap-10">
+                <Stat label="Total" value={departures.data.total} />
+                <Stat label="To metered fields" value={departures.data.to_metered} />
+                <Stat label="Holding on CFR" value={departures.data.holding_on_cfr} />
               </div>
-            )}
-          </CardContent>
-        </Card>
+              <p className="text-sm text-muted-foreground">
+                Destinations with a TMU program:{" "}
+                {departures.data.program_destinations.length ? (
+                  <span className="font-mono text-foreground">
+                    {departures.data.program_destinations.join(", ")}
+                  </span>
+                ) : (
+                  "none"
+                )}
+              </p>
+            </CardContent>
+          </Card>
+
+          <Card>
+            <CardContent className="pt-6">
+              {departures.data.departures.length === 0 ? (
+                <p className="py-8 text-center text-sm text-muted-foreground">
+                  No pending departures out of {field}.
+                </p>
+              ) : (
+                <div className="overflow-x-auto">
+                  <table className="w-full text-sm">
+                    <thead>
+                      <tr className="text-left text-xs uppercase tracking-wide text-muted-foreground">
+                        <th className="pb-2 pr-3 text-right font-medium">#</th>
+                        <th className="pb-2 pr-3 font-medium">Callsign</th>
+                        <th className="pb-2 pr-3 font-medium">To</th>
+                        <th className="pb-2 pr-3 font-medium">Type</th>
+                        <th className="pb-2 pr-3 font-medium">Gate</th>
+                        <th className="pb-2 pr-3 font-medium">ETA</th>
+                        <th className="pb-2 pr-3 text-right font-medium">Delay</th>
+                        <th className="pb-2 pr-3 text-right font-medium">CFR</th>
+                        <th className="pb-2 pr-3 font-medium" />
+                        <th className="pb-2" />
+                      </tr>
+                    </thead>
+                    <tbody>
+                      {departures.data.departures.map((d) => (
+                        <DepartureRow key={d.callsign} d={d} canIssue={canIssue} />
+                      ))}
+                    </tbody>
+                  </table>
+                </div>
+              )}
+            </CardContent>
+          </Card>
+        </>
       )}
     </div>
   );

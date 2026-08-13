@@ -557,10 +557,10 @@ export interface components {
             /** Format: date-time */
             stop_time?: string | null;
         };
-        /** @description A pending ground/proposed departure into a metered field (for the Departures view). */
+        /** @description A pending ground/proposed departure out of a field (for the Departures view). */
         DepartureFlight: {
             aircraft_type: string;
-            /** @description Metered arrival airport. */
+            /** @description Destination airport. */
             arrival: string;
             callsign: string;
             /** Format: date-time */
@@ -571,11 +571,24 @@ export interface components {
             /** Format: date-time */
             eta?: string | null;
             gate?: string | null;
+            /** @description True when the destination has a TMU program (so this departure is metered). */
+            has_program: boolean;
             /** Format: int64 */
             seq?: number | null;
             /** Format: date-time */
             sta?: string | null;
             status: string;
+        };
+        /** @description The Departures view for one field: all pending departures plus summary counts. */
+        DeparturesResponse: {
+            departures: components["schemas"]["DepartureFlight"][];
+            /** @description How many are currently held by a metering delay. */
+            holding_on_cfr: number;
+            /** @description This field's destinations that have a TMU program. */
+            program_destinations: string[];
+            /** @description How many departures are bound for a metered destination. */
+            to_metered: number;
+            total: number;
         };
         /** @description A VATUSA facility (ARTCC). `artcc_id` scope values reference `id`. */
         FacilityBody: {
@@ -1456,7 +1469,7 @@ export interface operations {
                     [name: string]: unknown;
                 };
                 content: {
-                    "application/json": components["schemas"]["DepartureFlight"][];
+                    "application/json": components["schemas"]["DeparturesResponse"];
                 };
             };
             401: {

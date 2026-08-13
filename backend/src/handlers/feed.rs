@@ -1,6 +1,8 @@
 //! Live-feed handlers: feed health, per-airport arrival flow (metered against a program),
 //! the departure-field CFR view, and issuing/releasing CFRs.
 
+use std::collections::{HashMap, HashSet};
+
 use axum::{
     Json,
     extract::{Extension, Path, State},
@@ -19,7 +21,7 @@ use crate::{
     },
     errors::ApiError,
     feed::flow::{self, ProgramInputs},
-    models::{DepartureFlight, IssueCfrRequest, IssuedCfrBody},
+    models::{DepartureFlight, DeparturesResponse, IssueCfrRequest, IssuedCfrBody},
     repos::tmu as tmu_repo,
     state::AppState,
 };
@@ -136,42 +138,107 @@ pub async fn airport_flow(
     path = "/api/v1/tmu/departures/{dep}",
     tag = "tmu",
     params(("dep" = String, Path, description = "Departure field ICAO")),
-    responses((status = 200, body = Vec<DepartureFlight>), (status = 401), (status = 503))
+    responses((status = 200, body = crate::models::DeparturesResponse), (status = 401), (status = 503))
 )]
 pub async fn list_departures(
     State(state): State<AppState>,
     _permission: RequirePermission<TmuProgramRead>,
     Path(dep): Path<String>,
-) -> Result<Json<Vec<DepartureFlight>>, ApiError> {
+) -> Result<Json<DeparturesResponse>, ApiError> {
     let pool = state.db.as_ref().ok_or(ApiError::ServiceUnavailable)?;
     let dep = dep.trim().to_ascii_uppercase();
 
-    // A departure needs a metered destination, so we scan every programmed airport.
-    let programs = tmu_repo::list_programs(pool).await?;
-    let mut rows: Vec<DepartureFlight> = Vec::new();
-    for pgm in &programs {
-        let flow = flow_for(&state, pool, &pgm.icao).await?;
+    let metered: HashSet<String> = tmu_repo::list_programs(pool)
+        .await?
+        .into_iter()
+        .map(|p| p.icao)
+        .collect();
+
+    // Every pending departure out of the field (read the snapshot, then release the lock
+    // before computing per-destination flows).
+    let pending = {
+        let guard = state.feed.read().await;
+        match &guard.snapshot {
+            Some(snap) => flow::pending_departures(&dep, &snap.data),
+            None => Vec::new(),
+        }
+    };
+
+    // Metering data (by callsign) for destinations that have a program.
+    let dests: HashSet<String> = pending
+        .iter()
+        .map(|d| d.arrival.clone())
+        .filter(|a| metered.contains(a))
+        .collect();
+    let mut meta: HashMap<String, MeteredCfr> = HashMap::new();
+    for dest in &dests {
+        let flow = flow_for(&state, pool, dest).await?;
         for f in flow.flights {
-            if f.dep == dep && matches!(f.status.as_str(), "ground" | "proposed") {
-                rows.push(DepartureFlight {
-                    callsign: f.callsign,
-                    arrival: pgm.icao.clone(),
-                    aircraft_type: f.aircraft_type,
-                    gate: f.gate,
-                    status: f.status,
+            meta.insert(
+                f.callsign,
+                MeteredCfr {
                     eta: f.eta,
                     sta: f.sta,
                     delay_min: f.delay_min,
                     cfr: f.cfr,
                     cfr_issued: f.cfr_issued,
                     seq: f.seq,
-                });
-            }
+                },
+            );
         }
     }
-    // Nearest release first.
-    rows.sort_by_key(|r| r.cfr.map(|c| c.timestamp_millis()).unwrap_or(i64::MAX));
-    Ok(Json(rows))
+
+    let mut departures: Vec<DepartureFlight> = pending
+        .into_iter()
+        .map(|d| {
+            let has_program = metered.contains(&d.arrival);
+            let m = meta.remove(&d.callsign).unwrap_or_default();
+            DepartureFlight {
+                callsign: d.callsign,
+                arrival: d.arrival,
+                aircraft_type: d.aircraft_type,
+                gate: d.gate,
+                status: d.status,
+                has_program,
+                eta: m.eta,
+                sta: m.sta,
+                delay_min: m.delay_min,
+                cfr: m.cfr,
+                cfr_issued: m.cfr_issued,
+                seq: m.seq,
+            }
+        })
+        .collect();
+    // Metered (with a CFR) first, ordered by release; unmetered fall to the bottom.
+    departures.sort_by_key(|r| r.cfr.map(|c| c.timestamp_millis()).unwrap_or(i64::MAX));
+
+    let total = departures.len();
+    let to_metered = departures.iter().filter(|r| r.has_program).count();
+    let holding_on_cfr = departures
+        .iter()
+        .filter(|r| r.has_program && (r.cfr_issued || r.delay_min > 0))
+        .count();
+    let mut program_destinations: Vec<String> = dests.into_iter().collect();
+    program_destinations.sort();
+
+    Ok(Json(DeparturesResponse {
+        total,
+        to_metered,
+        holding_on_cfr,
+        program_destinations,
+        departures,
+    }))
+}
+
+/// Per-callsign metering outputs pulled from a destination's computed flow.
+#[derive(Default)]
+struct MeteredCfr {
+    eta: Option<DateTime<Utc>>,
+    sta: Option<DateTime<Utc>>,
+    delay_min: i64,
+    cfr: Option<DateTime<Utc>>,
+    cfr_issued: bool,
+    seq: Option<i64>,
 }
 
 #[utoipa::path(
