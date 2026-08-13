@@ -8,24 +8,37 @@ use axum::{
 use crate::{
     auth::{
         context::CurrentUser,
-        permissions::{EventsPlanRead, EventsPlanUpdate},
+        permissions::{EventsPlanRead, EventsPlanUpdate, EventsRateUpdate},
         require_permission::RequirePermission,
     },
     errors::ApiError,
+    feed,
     models::{
-        DccRequestBody, EventBody, FacilitySupportBody, UpdateDccRequest,
-        UpsertFacilitySupportRequest,
+        AirportRateBody, DccRequestBody, EventBody, FacilitySupportBody, UpdateDccRequest,
+        UpsertAirportRateRequest, UpsertFacilitySupportRequest,
     },
-    repos::events as events_repo,
+    repos::{access as access_repo, events as events_repo},
     state::AppState,
 };
 
 const DCC_STATUSES: [&str; 3] = ["not_needed", "requested", "confirmed"];
 const SUPPORT_LEVELS: [&str; 3] = ["required", "preferred", "not_required"];
+const RATE_PERMISSION: &str = "events.rate.update";
 
 fn normalize_facility(raw: &str) -> Option<String> {
     let f = raw.trim().to_ascii_uppercase();
     (!f.is_empty() && f.len() <= 8 && f.chars().all(|c| c.is_ascii_alphanumeric())).then_some(f)
+}
+
+fn normalize_icao(raw: &str) -> Option<String> {
+    let s = raw.trim().to_ascii_uppercase();
+    (s.len() >= 3 && s.len() <= 4 && s.chars().all(|c| c.is_ascii_alphanumeric())).then_some(s)
+}
+
+/// The ARTCC that owns `icao`, from the live facility map (None if unknown).
+async fn owning_artcc(state: &AppState, icao: &str) -> Option<String> {
+    let map = state.facilities.read().await;
+    feed::facilities::artcc_for_airport(&map, icao)
 }
 
 fn default_dcc() -> DccRequestBody {
@@ -207,4 +220,120 @@ pub async fn delete_event_facility(
     } else {
         Err(ApiError::NotFound)
     }
+}
+
+#[utoipa::path(
+    get,
+    path = "/api/v1/events/{id}/rates",
+    tag = "events",
+    params(("id" = i64, Path, description = "VATUSA event id")),
+    responses((status = 200, body = Vec<AirportRateBody>), (status = 401))
+)]
+pub async fn list_event_rates(
+    State(state): State<AppState>,
+    _permission: RequirePermission<EventsPlanRead>,
+    Extension(current_user): Extension<Option<CurrentUser>>,
+    Path(id): Path<i64>,
+) -> Result<Json<Vec<AirportRateBody>>, ApiError> {
+    let pool = state.db.as_ref().ok_or(ApiError::ServiceUnavailable)?;
+    let mut rates = events_repo::list_airport_rates(pool, id).await?;
+
+    // Mark each row editable per the caller's ARTCC scope for events.rate.update.
+    if let Some(user) = current_user.as_ref() {
+        let scope = access_repo::permission_scope(pool, &user.id, RATE_PERMISSION).await?;
+        for r in rates.iter_mut() {
+            let artcc = (!r.artcc.is_empty()).then_some(r.artcc.as_str());
+            r.editable = scope.allows(artcc);
+        }
+    }
+    Ok(Json(rates))
+}
+
+#[utoipa::path(
+    put,
+    path = "/api/v1/events/{id}/rates/{icao}",
+    tag = "events",
+    params(
+        ("id" = i64, Path, description = "VATUSA event id"),
+        ("icao" = String, Path, description = "Airport ICAO")
+    ),
+    request_body = UpsertAirportRateRequest,
+    responses((status = 200, body = AirportRateBody), (status = 400), (status = 401), (status = 403), (status = 404))
+)]
+pub async fn upsert_event_rate(
+    State(state): State<AppState>,
+    _permission: RequirePermission<EventsRateUpdate>,
+    Extension(current_user): Extension<Option<CurrentUser>>,
+    Path((id, icao)): Path<(i64, String)>,
+    Json(payload): Json<UpsertAirportRateRequest>,
+) -> Result<Json<AirportRateBody>, ApiError> {
+    let user = current_user.as_ref().ok_or(ApiError::Unauthorized)?;
+    let pool = state.db.as_ref().ok_or(ApiError::ServiceUnavailable)?;
+
+    let icao = normalize_icao(&icao).ok_or(ApiError::BadRequest)?;
+    if !(0..=200).contains(&payload.aar) || !(0..=200).contains(&payload.adr) {
+        return Err(ApiError::BadRequest);
+    }
+    if events_repo::get(pool, id).await?.is_none() {
+        return Err(ApiError::NotFound);
+    }
+
+    // Facility scope: the caller must hold events.rate.update nationally or for the
+    // airport's owning ARTCC.
+    let artcc = owning_artcc(&state, &icao).await;
+    let scope = access_repo::permission_scope(pool, &user.id, RATE_PERMISSION).await?;
+    if !scope.allows(artcc.as_deref()) {
+        return Err(ApiError::Forbidden);
+    }
+
+    events_repo::upsert_airport_rate(
+        pool,
+        id,
+        &icao,
+        payload.aar,
+        payload.adr,
+        artcc.as_deref().unwrap_or(""),
+        &user.id,
+    )
+    .await?;
+    let mut row = events_repo::get_airport_rate(pool, id, &icao)
+        .await?
+        .ok_or(ApiError::Internal)?;
+    row.editable = true;
+    Ok(Json(row))
+}
+
+#[utoipa::path(
+    delete,
+    path = "/api/v1/events/{id}/rates/{icao}",
+    tag = "events",
+    params(
+        ("id" = i64, Path, description = "VATUSA event id"),
+        ("icao" = String, Path, description = "Airport ICAO")
+    ),
+    responses((status = 204), (status = 401), (status = 403), (status = 404))
+)]
+pub async fn delete_event_rate(
+    State(state): State<AppState>,
+    _permission: RequirePermission<EventsRateUpdate>,
+    Extension(current_user): Extension<Option<CurrentUser>>,
+    Path((id, icao)): Path<(i64, String)>,
+) -> Result<axum::http::StatusCode, ApiError> {
+    let user = current_user.as_ref().ok_or(ApiError::Unauthorized)?;
+    let pool = state.db.as_ref().ok_or(ApiError::ServiceUnavailable)?;
+
+    let icao = normalize_icao(&icao).ok_or(ApiError::BadRequest)?;
+    let existing = events_repo::get_airport_rate(pool, id, &icao)
+        .await?
+        .ok_or(ApiError::NotFound)?;
+
+    // Scope-check against the ARTCC recorded on the row.
+    let artcc = (!existing.artcc.is_empty()).then_some(existing.artcc.as_str());
+    let scope = access_repo::permission_scope(pool, &user.id, RATE_PERMISSION).await?;
+    if !scope.allows(artcc) {
+        return Err(ApiError::Forbidden);
+    }
+
+    events_repo::delete_airport_rate(pool, id, &icao).await?;
+    Ok(axum::http::StatusCode::NO_CONTENT)
 }

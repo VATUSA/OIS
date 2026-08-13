@@ -260,6 +260,38 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/v1/events/{id}/rates": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get: operations["list_event_rates"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/events/{id}/rates/{icao}": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put: operations["upsert_event_rate"];
+        post?: never;
+        delete: operations["delete_event_rate"];
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/v1/facilities": {
         parameters: {
             query?: never;
@@ -608,6 +640,27 @@ export interface components {
             /** @description Every assignable permission as the nested checkbox tree. */
             permissions: Record<string, never>;
             roles: string[];
+        };
+        /** @description A planned per-airport arrival/departure rate for an event. */
+        AirportRateBody: {
+            /**
+             * Format: int32
+             * @description Airport arrival rate (per hour).
+             */
+            aar: number;
+            /**
+             * Format: int32
+             * @description Airport departure rate (per hour).
+             */
+            adr: number;
+            /** @description Owning ARTCC resolved when set; empty if unknown. */
+            artcc: string;
+            /** @description Whether the requesting user may edit this airport's rate (per their ARTCC scope). */
+            editable: boolean;
+            icao: string;
+            /** Format: date-time */
+            updated_at: string;
+            updated_by?: string | null;
         };
         /** @description One audit-log entry (the "recorded on this controller's log" trail). */
         AuditLogEntry: {
@@ -1018,6 +1071,12 @@ export interface components {
         UpdateUserAccessRequest: {
             reason: string;
             scopes: components["schemas"]["ScopeUpdate"][];
+        };
+        UpsertAirportRateRequest: {
+            /** Format: int32 */
+            aar: number;
+            /** Format: int32 */
+            adr: number;
         };
         UpsertFacilitySupportRequest: {
             /** @description required | preferred | not_required */
@@ -1702,6 +1761,126 @@ export interface operations {
                 content?: never;
             };
             401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+        };
+    };
+    list_event_rates: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /** @description VATUSA event id */
+                id: number;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["AirportRateBody"][];
+                };
+            };
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+        };
+    };
+    upsert_event_rate: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /** @description VATUSA event id */
+                id: number;
+                /** @description Airport ICAO */
+                icao: string;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["UpsertAirportRateRequest"];
+            };
+        };
+        responses: {
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["AirportRateBody"];
+                };
+            };
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+        };
+    };
+    delete_event_rate: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /** @description VATUSA event id */
+                id: number;
+                /** @description Airport ICAO */
+                icao: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            204: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            403: {
                 headers: {
                     [name: string]: unknown;
                 };
