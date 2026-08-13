@@ -14,7 +14,31 @@ import {
 import {LogOut, Radar} from "lucide-react";
 
 import {login, useLogout, useMe} from "@/lib/auth";
+import {useFeedStatus} from "@/lib/feed";
 import {hasPermission, isAdmin} from "@/lib/permissions";
+
+function FeedPill() {
+  const { data } = useFeedStatus();
+  const healthy = !!data?.healthy;
+  return (
+    <span
+      className="hidden items-center gap-1.5 rounded-full border px-2.5 py-1 text-xs text-muted-foreground sm:flex"
+      title={
+        data
+          ? `${data.pilots} pilots · ${data.airports_loaded} airports`
+          : "connecting to VATSIM feed"
+      }
+    >
+      <span
+        className={
+          "size-2 rounded-full " +
+          (healthy ? "bg-emerald-500" : "bg-muted-foreground/40")
+        }
+      />
+      {data ? (healthy ? "Feed live" : "Feed down") : "Feed…"}
+    </span>
+  );
+}
 
 function initials(name: string) {
   return name
@@ -85,6 +109,11 @@ export function Navbar() {
           <Link to="/" activeOptions={{ exact: true }} className={linkClass}>
             Dashboard
           </Link>
+          {hasPermission(me, "tmu.program.read") && (
+            <Link to="/airport" className={linkClass}>
+              Airport
+            </Link>
+          )}
           {(hasPermission(me, "tmu.program.read") ||
             hasPermission(me, "tmu.tmi.read")) && (
             <Link to="/tmu" className={linkClass}>
@@ -98,6 +127,7 @@ export function Navbar() {
           )}
         </nav>
         <div className="ml-auto flex items-center gap-2">
+          {hasPermission(me, "tmu.program.read") && <FeedPill />}
           <ThemeToggle />
           <UserMenu />
         </div>

@@ -1,6 +1,7 @@
 pub mod auth;
 pub mod config;
 pub mod errors;
+pub mod feed;
 pub mod handlers;
 pub mod models;
 pub mod openapi;
@@ -18,6 +19,8 @@ pub async fn run() -> Result<(), Box<dyn std::error::Error>> {
 
     let state = state::AppState::from_env().await?;
     run_startup_migrations(&state).await?;
+
+    feed::spawn_poller(state.feed.clone());
 
     let app = router::build_router(state);
 

@@ -212,6 +212,22 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/v1/feed/status": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get: operations["feed_status"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/v1/me": {
         parameters: {
             query?: never;
@@ -220,6 +236,22 @@ export interface paths {
             cookie?: never;
         };
         get: operations["me"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/tmu/flow/{icao}": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get: operations["airport_flow"];
         put?: never;
         post?: never;
         delete?: never;
@@ -414,6 +446,53 @@ export interface components {
             id: string;
             name: string;
             region?: string | null;
+        };
+        FeedStatusBody: {
+            airports_loaded: number;
+            /** @description True when the last datafeed fetch succeeded. */
+            healthy: boolean;
+            last_error?: string | null;
+            /**
+             * Format: date-time
+             * @description When OIS last ingested the feed.
+             */
+            last_updated?: string | null;
+            pilots: number;
+            prefiles: number;
+            /** @description The feed's own `update_timestamp` from VATSIM. */
+            source_timestamp?: string | null;
+        };
+        Flow: {
+            /**
+             * Format: int32
+             * @description Program AAR, if a program exists for this airport.
+             */
+            aar?: number | null;
+            airborne: number;
+            /** @description Metered arrivals estimated to land within the next 60 minutes. */
+            demand_60min: number;
+            flights: components["schemas"]["FlowFlight"][];
+            ground: number;
+            icao: string;
+            inbound: number;
+            /** @description `demand_60min > aar` when a program exists, else null. */
+            over_capacity?: boolean | null;
+            proposed: number;
+        };
+        FlowFlight: {
+            aircraft_type: string;
+            callsign: string;
+            dep: string;
+            /** Format: double */
+            distance_nm?: number | null;
+            /** Format: date-time */
+            eta?: string | null;
+            /** @description True when a program excludes this aircraft from metering (still shown). */
+            excluded: boolean;
+            /** Format: int64 */
+            groundspeed: number;
+            /** @description `airborne` | `ground` | `proposed` | `arrived`. */
+            status: string;
         };
         /** @description One per-gate restriction inside a program: an arrival fix/STAR with its own spacing. */
         GateRule: {
@@ -1045,6 +1124,31 @@ export interface operations {
             };
         };
     };
+    feed_status: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["FeedStatusBody"];
+                };
+            };
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+        };
+    };
     me: {
         parameters: {
             query?: never;
@@ -1063,6 +1167,40 @@ export interface operations {
                 };
             };
             401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+        };
+    };
+    airport_flow: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /** @description Arrival airport ICAO */
+                icao: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Flow"];
+                };
+            };
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            503: {
                 headers: {
                     [name: string]: unknown;
                 };

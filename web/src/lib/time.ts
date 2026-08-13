@@ -9,6 +9,16 @@ export function formatZulu(iso: string | null | undefined): string {
   return `${dd}/${hh}${mm}z`;
 }
 
+/** Format an ISO timestamp as a bare Zulu time "HHMMz". */
+export function hhmmZulu(iso: string | null | undefined): string {
+  if (!iso) return "—";
+  const d = new Date(iso);
+  if (Number.isNaN(d.getTime())) return "—";
+  const hh = String(d.getUTCHours()).padStart(2, "0");
+  const mm = String(d.getUTCMinutes()).padStart(2, "0");
+  return `${hh}${mm}z`;
+}
+
 /**
  * Parse NTML "DD/HHMMz" (day-of-month + Zulu time) into an ISO timestamp, relative to
  * the current UTC month. If the day has already passed this month it rolls to the next

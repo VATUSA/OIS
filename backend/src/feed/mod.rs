@@ -1,0 +1,113 @@
+//! Live VATSIM feed: a background poller keeps an in-memory snapshot of network
+//! traffic (plus a cached airport-coordinate database) that the TMU flow endpoints
+//! read to meter arrivals against rate programs.
+
+pub mod airports;
+pub mod flow;
+pub mod vatsim;
+
+use std::sync::Arc;
+use std::time::Duration;
+
+use chrono::{DateTime, Utc};
+use tokio::sync::RwLock;
+
+use airports::AirportDb;
+use vatsim::VatsimData;
+
+const POLL_SECS: u64 = 15;
+
+pub struct Snapshot {
+    pub fetched_at: DateTime<Utc>,
+    pub source_timestamp: String,
+    pub data: VatsimData,
+}
+
+#[derive(Clone, Default)]
+pub struct FeedStatus {
+    pub healthy: bool,
+    pub last_ok: Option<DateTime<Utc>>,
+    pub source_timestamp: Option<String>,
+    pub last_error: Option<String>,
+    pub pilots: usize,
+    pub prefiles: usize,
+    pub airports_loaded: usize,
+}
+
+#[derive(Default)]
+pub struct FeedInner {
+    pub snapshot: Option<Snapshot>,
+    pub airports: AirportDb,
+    pub status: FeedStatus,
+}
+
+/// Shared, cheaply-cloneable handle to the feed state.
+pub type FeedState = Arc<RwLock<FeedInner>>;
+
+pub fn new_state() -> FeedState {
+    Arc::new(RwLock::new(FeedInner::default()))
+}
+
+/// Spawn the background poller. Safe to call once at startup; it loads the airport
+/// database, then refreshes the traffic snapshot every `POLL_SECS`.
+pub fn spawn_poller(state: FeedState) {
+    tokio::spawn(async move { poller(state).await });
+}
+
+async fn poller(state: FeedState) {
+    let client = match reqwest::Client::builder()
+        .user_agent("ois-backend/0.1 (+https://vatusa.net)")
+        .timeout(Duration::from_secs(20))
+        .build()
+    {
+        Ok(c) => c,
+        Err(e) => {
+            tracing::error!(error = %e, "feed poller: failed to build HTTP client");
+            return;
+        }
+    };
+
+    match airports::fetch(&client).await {
+        Ok(db) => {
+            let n = db.len();
+            let mut guard = state.write().await;
+            guard.status.airports_loaded = n;
+            guard.airports = db;
+            tracing::info!(airports = n, "feed: airport database loaded");
+        }
+        Err(e) => {
+            tracing::warn!(error = %e, "feed: airport database load failed; ETAs degraded");
+        }
+    }
+
+    let mut ticker = tokio::time::interval(Duration::from_secs(POLL_SECS));
+    loop {
+        ticker.tick().await;
+        match vatsim::fetch(&client).await {
+            Ok(data) => {
+                let now = Utc::now();
+                let pilots = data.pilots.len();
+                let prefiles = data.prefiles.len();
+                let source_timestamp = data.general.update_timestamp.clone();
+                let mut guard = state.write().await;
+                guard.status.healthy = true;
+                guard.status.last_ok = Some(now);
+                guard.status.source_timestamp = Some(source_timestamp.clone());
+                guard.status.last_error = None;
+                guard.status.pilots = pilots;
+                guard.status.prefiles = prefiles;
+                guard.snapshot = Some(Snapshot {
+                    fetched_at: now,
+                    source_timestamp,
+                    data,
+                });
+            }
+            Err(e) => {
+                let mut guard = state.write().await;
+                guard.status.healthy = false;
+                guard.status.last_error = Some(e.to_string());
+                tracing::warn!(error = %e, "feed: vatsim fetch failed");
+            }
+        }
+    }
+}

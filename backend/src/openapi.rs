@@ -32,6 +32,8 @@ use utoipa::OpenApi;
         crate::handlers::tmu::list_programs,
         crate::handlers::tmu::upsert_program,
         crate::handlers::tmu::delete_program,
+        crate::handlers::feed::feed_status,
+        crate::handlers::feed::airport_flow,
         crate::handlers::audit::list_audit_logs,
         crate::handlers::service_accounts::list_service_accounts,
         crate::handlers::service_accounts::create_service_account,
@@ -55,6 +57,9 @@ use utoipa::OpenApi;
         crate::models::GateRule,
         crate::models::ProgramBody,
         crate::models::UpsertProgramRequest,
+        crate::handlers::feed::FeedStatusBody,
+        crate::feed::flow::Flow,
+        crate::feed::flow::FlowFlight,
         crate::models::AuditLogEntry,
         crate::models::AuditLogPage,
         crate::models::CreateServiceAccountRequest,
@@ -69,6 +74,7 @@ use utoipa::OpenApi;
         (name = "facilities", description = "ARTCC directory"),
         (name = "access", description = "Fine-grained access control"),
         (name = "tmu", description = "Traffic management (NTML / ADV / TMI)"),
+        (name = "feed", description = "Live VATSIM traffic feed"),
         (name = "audit", description = "Audit log"),
         (name = "service-accounts", description = "Machine client credentials")
     )
