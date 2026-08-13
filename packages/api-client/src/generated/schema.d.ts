@@ -260,6 +260,38 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/v1/tmu/ground-stops": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get: operations["list_ground_stops"];
+        put?: never;
+        post: operations["create_ground_stop"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/tmu/ground-stops/{id}": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        post?: never;
+        delete: operations["delete_ground_stop"];
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/v1/tmu/programs": {
         parameters: {
             query?: never;
@@ -427,6 +459,11 @@ export interface components {
             /** Format: int64 */
             total: number;
         };
+        CreateGroundStopRequest: {
+            airport: string;
+            scope?: string | null;
+            until?: string | null;
+        };
         CreateServiceAccountRequest: {
             description?: string | null;
             name: string;
@@ -508,6 +545,19 @@ export interface components {
              * @description Minutes-in-trail for this gate (0 = use MIT or airport default).
              */
             trail?: number;
+        };
+        /** @description A ground stop: holds departures into `airport` from within `scope` until `until`. */
+        GroundStopBody: {
+            airport: string;
+            id: string;
+            /** @description Space-separated ARTCC/FIR codes; empty = every departure (field-wide). */
+            scope: string;
+            /** @description HHMM Zulu clock time the stop runs until; null = until further notice. */
+            until?: string | null;
+            /** Format: date-time */
+            updated_at: string;
+            /** @description Display name of whoever last touched the stop. */
+            updated_by?: string | null;
         };
         /** @description The `/me` response for an authenticated session. */
         MeBody: {
@@ -1201,6 +1251,98 @@ export interface operations {
                 content?: never;
             };
             503: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+        };
+    };
+    list_ground_stops: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["GroundStopBody"][];
+                };
+            };
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+        };
+    };
+    create_ground_stop: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["CreateGroundStopRequest"];
+            };
+        };
+        responses: {
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["GroundStopBody"];
+                };
+            };
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+        };
+    };
+    delete_ground_stop: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /** @description Ground stop id */
+                id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            204: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            404: {
                 headers: {
                     [name: string]: unknown;
                 };

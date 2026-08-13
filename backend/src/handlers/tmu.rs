@@ -11,14 +11,16 @@ use crate::{
     auth::{
         context::CurrentUser,
         permissions::{
-            TmuProgramDelete, TmuProgramRead, TmuProgramUpdate, TmuTmiCreate, TmuTmiDelete,
-            TmuTmiPublish, TmuTmiRead, TmuTmiUpdate,
+            TmuGroundStopCreate, TmuGroundStopDelete, TmuGroundStopRead, TmuProgramDelete,
+            TmuProgramRead, TmuProgramUpdate, TmuTmiCreate, TmuTmiDelete, TmuTmiPublish,
+            TmuTmiRead, TmuTmiUpdate,
         },
         require_permission::RequirePermission,
     },
     errors::ApiError,
     models::{
-        CreateTmiRequest, GateRule, ProgramBody, TmiBody, UpdateTmiRequest, UpsertProgramRequest,
+        CreateGroundStopRequest, CreateTmiRequest, GateRule, GroundStopBody, ProgramBody, TmiBody,
+        UpdateTmiRequest, UpsertProgramRequest,
     },
     repos::tmu as tmu_repo,
     state::AppState,
@@ -296,6 +298,113 @@ pub async fn delete_program(
     let pool = state.db.as_ref().ok_or(ApiError::ServiceUnavailable)?;
     let icao = normalize_icao(&icao).ok_or(ApiError::BadRequest)?;
     if !tmu_repo::delete_program(pool, &icao).await? {
+        return Err(ApiError::NotFound);
+    }
+    Ok(StatusCode::NO_CONTENT)
+}
+
+// --- ground stops ---
+
+/// Normalize the scope: uppercase ARTCC/FIR codes, single-spaced. Empty = field-wide.
+fn normalize_scope(raw: Option<&str>) -> String {
+    raw.unwrap_or("")
+        .split_whitespace()
+        .map(|c| c.to_ascii_uppercase())
+        .collect::<Vec<_>>()
+        .join(" ")
+}
+
+/// Normalize an "until" clock time to canonical `HHMM`. Blank -> None (until further
+/// notice); anything present but not a valid HHMM -> Err (400).
+fn normalize_until(raw: Option<&str>) -> Result<Option<String>, ApiError> {
+    let digits: String = raw
+        .unwrap_or("")
+        .chars()
+        .filter(|c| c.is_ascii_digit())
+        .collect();
+    if digits.is_empty() {
+        return Ok(None);
+    }
+    let padded = if digits.len() == 3 {
+        format!("0{digits}")
+    } else {
+        digits
+    };
+    if padded.len() != 4 {
+        return Err(ApiError::BadRequest);
+    }
+    let hh: u32 = padded[0..2].parse().map_err(|_| ApiError::BadRequest)?;
+    let mm: u32 = padded[2..4].parse().map_err(|_| ApiError::BadRequest)?;
+    if hh >= 24 || mm >= 60 {
+        return Err(ApiError::BadRequest);
+    }
+    Ok(Some(padded))
+}
+
+#[utoipa::path(
+    get,
+    path = "/api/v1/tmu/ground-stops",
+    tag = "tmu",
+    responses((status = 200, body = Vec<GroundStopBody>), (status = 401))
+)]
+pub async fn list_ground_stops(
+    State(state): State<AppState>,
+    _permission: RequirePermission<TmuGroundStopRead>,
+) -> Result<Json<Vec<GroundStopBody>>, ApiError> {
+    let pool = state.db.as_ref().ok_or(ApiError::ServiceUnavailable)?;
+    Ok(Json(tmu_repo::list_ground_stops(pool).await?))
+}
+
+#[utoipa::path(
+    post,
+    path = "/api/v1/tmu/ground-stops",
+    tag = "tmu",
+    request_body = CreateGroundStopRequest,
+    responses((status = 200, body = GroundStopBody), (status = 400), (status = 401))
+)]
+pub async fn create_ground_stop(
+    State(state): State<AppState>,
+    _permission: RequirePermission<TmuGroundStopCreate>,
+    Extension(current_user): Extension<Option<CurrentUser>>,
+    Json(mut payload): Json<CreateGroundStopRequest>,
+) -> Result<Json<GroundStopBody>, ApiError> {
+    let user = current_user.as_ref().ok_or(ApiError::Unauthorized)?;
+    let pool = state.db.as_ref().ok_or(ApiError::ServiceUnavailable)?;
+
+    payload.airport = payload
+        .airport
+        .chars()
+        .filter(|c| c.is_ascii_alphanumeric())
+        .collect::<String>()
+        .to_ascii_uppercase();
+    if payload.airport.len() < 3 || payload.airport.len() > 4 {
+        return Err(ApiError::BadRequest);
+    }
+    let scope = normalize_scope(payload.scope.as_deref());
+    let until = normalize_until(payload.until.as_deref())?;
+
+    let id =
+        tmu_repo::create_ground_stop(pool, &payload, &scope, until.as_deref(), &user.id).await?;
+    let gs = tmu_repo::get_ground_stop(pool, &id)
+        .await?
+        .ok_or(ApiError::Internal)?;
+    Ok(Json(gs))
+}
+
+#[utoipa::path(
+    delete,
+    path = "/api/v1/tmu/ground-stops/{id}",
+    tag = "tmu",
+    params(("id" = String, Path, description = "Ground stop id")),
+    responses((status = 204), (status = 401), (status = 404))
+)]
+pub async fn delete_ground_stop(
+    State(state): State<AppState>,
+    _permission: RequirePermission<TmuGroundStopDelete>,
+    Path(id): Path<String>,
+) -> Result<StatusCode, ApiError> {
+    let pool = state.db.as_ref().ok_or(ApiError::ServiceUnavailable)?;
+    if !tmu_repo::delete_ground_stop(pool, &id).await? {
         return Err(ApiError::NotFound);
     }
     Ok(StatusCode::NO_CONTENT)

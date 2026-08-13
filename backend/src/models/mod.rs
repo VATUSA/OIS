@@ -169,6 +169,31 @@ pub struct UpdateTmiRequest {
     pub stop_time: Option<DateTime<Utc>>,
 }
 
+// --- TMU ground stops ---
+
+/// A ground stop: holds departures into `airport` from within `scope` until `until`.
+#[derive(Debug, Serialize, ToSchema, sqlx::FromRow)]
+pub struct GroundStopBody {
+    pub id: String,
+    pub airport: String,
+    /// Space-separated ARTCC/FIR codes; empty = every departure (field-wide).
+    pub scope: String,
+    /// HHMM Zulu clock time the stop runs until; null = until further notice.
+    pub until: Option<String>,
+    pub updated_at: DateTime<Utc>,
+    /// Display name of whoever last touched the stop.
+    pub updated_by: Option<String>,
+}
+
+#[derive(Debug, Deserialize, ToSchema)]
+pub struct CreateGroundStopRequest {
+    pub airport: String,
+    #[serde(default)]
+    pub scope: Option<String>,
+    #[serde(default)]
+    pub until: Option<String>,
+}
+
 // --- TMU rate programs ---
 
 /// One per-gate restriction inside a program: an arrival fix/STAR with its own spacing.

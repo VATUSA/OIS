@@ -36,3 +36,7 @@ permission!(TmuTmiDelete, ["tmu", "tmi"], Delete);
 permission!(TmuProgramRead, ["tmu", "program"], Read);
 permission!(TmuProgramUpdate, ["tmu", "program"], Update);
 permission!(TmuProgramDelete, ["tmu", "program"], Delete);
+
+permission!(TmuGroundStopRead, ["tmu", "groundstop"], Read);
+permission!(TmuGroundStopCreate, ["tmu", "groundstop"], Create);
+permission!(TmuGroundStopDelete, ["tmu", "groundstop"], Delete);

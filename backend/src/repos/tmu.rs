@@ -5,7 +5,8 @@ use sqlx::PgPool;
 use crate::{
     errors::ApiError,
     models::{
-        CreateTmiRequest, GateRule, ProgramBody, TmiBody, UpdateTmiRequest, UpsertProgramRequest,
+        CreateGroundStopRequest, CreateTmiRequest, GateRule, GroundStopBody, ProgramBody, TmiBody,
+        UpdateTmiRequest, UpsertProgramRequest,
     },
 };
 
@@ -171,6 +172,56 @@ pub async fn upsert_program(
 pub async fn delete_program(pool: &PgPool, icao: &str) -> Result<bool, ApiError> {
     let result = sqlx::query("delete from tmu.programs where icao = $1")
         .bind(icao)
+        .execute(pool)
+        .await
+        .map_err(|_| ApiError::Internal)?;
+    Ok(result.rows_affected() > 0)
+}
+
+// --- ground stops ---
+
+const GS_SELECT: &str = "select g.id, g.airport, g.scope, g.until, g.updated_at, \
+    u.display_name as updated_by \
+    from tmu.ground_stops g left join identity.users u on u.id = g.updated_by";
+
+pub async fn list_ground_stops(pool: &PgPool) -> Result<Vec<GroundStopBody>, ApiError> {
+    sqlx::query_as::<_, GroundStopBody>(&format!("{GS_SELECT} order by g.updated_at desc"))
+        .fetch_all(pool)
+        .await
+        .map_err(|_| ApiError::Internal)
+}
+
+pub async fn get_ground_stop(pool: &PgPool, id: &str) -> Result<Option<GroundStopBody>, ApiError> {
+    sqlx::query_as::<_, GroundStopBody>(&format!("{GS_SELECT} where g.id = $1"))
+        .bind(id)
+        .fetch_optional(pool)
+        .await
+        .map_err(|_| ApiError::Internal)
+}
+
+pub async fn create_ground_stop(
+    pool: &PgPool,
+    req: &CreateGroundStopRequest,
+    scope: &str,
+    until: Option<&str>,
+    actor: &str,
+) -> Result<String, ApiError> {
+    sqlx::query_scalar::<_, String>(
+        "insert into tmu.ground_stops (airport, scope, until, created_by, updated_by) \
+         values ($1, $2, $3, $4, $4) returning id",
+    )
+    .bind(&req.airport)
+    .bind(scope)
+    .bind(until)
+    .bind(actor)
+    .fetch_one(pool)
+    .await
+    .map_err(|_| ApiError::Internal)
+}
+
+pub async fn delete_ground_stop(pool: &PgPool, id: &str) -> Result<bool, ApiError> {
+    let result = sqlx::query("delete from tmu.ground_stops where id = $1")
+        .bind(id)
         .execute(pool)
         .await
         .map_err(|_| ApiError::Internal)?;

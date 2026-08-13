@@ -1,6 +1,6 @@
 use axum::{
     Router, middleware,
-    routing::{get, patch, post, put},
+    routing::{delete, get, patch, post, put},
 };
 
 use crate::{
@@ -41,6 +41,15 @@ pub fn build_router(state: AppState) -> Router {
         )
         .route("/api/v1/tmu/tmis/{id}/publish", post(tmu::publish_tmi))
         .route("/api/v1/tmu/tmis/{id}/cancel", post(tmu::cancel_tmi))
+        // TMU — ground stops
+        .route(
+            "/api/v1/tmu/ground-stops",
+            get(tmu::list_ground_stops).post(tmu::create_ground_stop),
+        )
+        .route(
+            "/api/v1/tmu/ground-stops/{id}",
+            delete(tmu::delete_ground_stop),
+        )
         // TMU — airport rate programs
         .route("/api/v1/tmu/programs", get(tmu::list_programs))
         .route(
