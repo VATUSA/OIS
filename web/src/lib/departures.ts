@@ -1,7 +1,15 @@
-import {useMutation, useQuery, useQueryClient} from "@tanstack/react-query";
+import {useMutation, useQueries, useQuery, useQueryClient,} from "@tanstack/react-query";
 import type {components} from "@ois/api-client";
 
 import {ois} from "./api";
+
+async function fetchDepartures(dep: string) {
+  const { data, error } = await ois.GET("/api/v1/tmu/departures/{dep}", {
+    params: { path: { dep } },
+  });
+  if (error || !data) throw new Error("failed to load departures");
+  return data;
+}
 
 export type Departure = components["schemas"]["DepartureFlight"];
 export type DeparturesResponse = components["schemas"]["DeparturesResponse"];
@@ -10,15 +18,20 @@ export type DeparturesResponse = components["schemas"]["DeparturesResponse"];
 export function useDepartures(dep: string) {
   return useQuery({
     queryKey: ["departures", dep],
-    queryFn: async () => {
-      const { data, error } = await ois.GET("/api/v1/tmu/departures/{dep}", {
-        params: { path: { dep } },
-      });
-      if (error || !data) throw new Error("failed to load departures");
-      return data;
-    },
+    queryFn: () => fetchDepartures(dep),
     enabled: !!dep,
     refetchInterval: 20_000,
+  });
+}
+
+/** One departures query per field, for the personal multi-field dashboard. */
+export function useMultiDepartures(fields: string[]) {
+  return useQueries({
+    queries: fields.map((dep) => ({
+      queryKey: ["departures", dep],
+      queryFn: () => fetchDepartures(dep),
+      refetchInterval: 20_000,
+    })),
   });
 }
 

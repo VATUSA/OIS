@@ -3,17 +3,16 @@ import {describe, expect, it} from "vitest";
 import type {Me} from "./auth";
 import {hasPermission, isAdmin} from "./permissions";
 
-function me(overrides: Partial<Me>): Me {
+function me(overrides: { server_admin?: boolean; permissions?: unknown }): Me {
   return {
     id: "u1",
     cid: 1,
     email: "a@b.c",
     display_name: "Tester",
     rating: null,
-    server_admin: false,
+    server_admin: overrides.server_admin ?? false,
     role_names: [],
-    permissions: {},
-    ...overrides,
+    permissions: (overrides.permissions ?? {}) as Me["permissions"],
   } as Me;
 }
 
