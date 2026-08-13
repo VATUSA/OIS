@@ -244,6 +244,54 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/v1/tmu/cfr": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        post: operations["issue_cfr"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/tmu/cfr/{callsign}": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        post?: never;
+        delete: operations["release_cfr"];
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/tmu/departures/{dep}": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get: operations["list_departures"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/v1/tmu/flow/{icao}": {
         parameters: {
             query?: never;
@@ -509,6 +557,26 @@ export interface components {
             /** Format: date-time */
             stop_time?: string | null;
         };
+        /** @description A pending ground/proposed departure into a metered field (for the Departures view). */
+        DepartureFlight: {
+            aircraft_type: string;
+            /** @description Metered arrival airport. */
+            arrival: string;
+            callsign: string;
+            /** Format: date-time */
+            cfr?: string | null;
+            cfr_issued: boolean;
+            /** Format: int64 */
+            delay_min: number;
+            /** Format: date-time */
+            eta?: string | null;
+            gate?: string | null;
+            /** Format: int64 */
+            seq?: number | null;
+            /** Format: date-time */
+            sta?: string | null;
+            status: string;
+        };
         /** @description A VATUSA facility (ARTCC). `artcc_id` scope values reference `id`. */
         FacilityBody: {
             active: boolean;
@@ -556,6 +624,8 @@ export interface components {
              * @description Proposed wheels-up (EDCT / Call-For-Release) for ground & proposed flights.
              */
             cfr?: string | null;
+            /** @description True when the CFR has been issued (locked) rather than merely proposed. */
+            cfr_issued: boolean;
             /**
              * Format: int64
              * @description Metering delay in minutes (0 if none / unmetered).
@@ -616,6 +686,26 @@ export interface components {
             updated_at: string;
             /** @description Display name of whoever last touched the stop. */
             updated_by?: string | null;
+        };
+        IssueCfrRequest: {
+            /** @description The metered arrival airport this departure is bound for. */
+            airport: string;
+            callsign: string;
+            /**
+             * Format: date-time
+             * @description Explicit wheels-up to lock; when omitted, the flight's proposed CFR is used.
+             */
+            ready_time?: string | null;
+        };
+        /** @description A locked (issued) Call-For-Release wheels-up time. */
+        IssuedCfrBody: {
+            airport: string;
+            callsign: string;
+            /** Format: date-time */
+            issued_at: string;
+            issued_by?: string | null;
+            /** Format: date-time */
+            wheels_up: string;
         };
         /** @description The `/me` response for an authenticated session. */
         MeBody: {
@@ -1275,6 +1365,107 @@ export interface operations {
                 };
             };
             401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+        };
+    };
+    issue_cfr: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["IssueCfrRequest"];
+            };
+        };
+        responses: {
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["IssuedCfrBody"];
+                };
+            };
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+        };
+    };
+    release_cfr: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /** @description Flight callsign */
+                callsign: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            204: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+        };
+    };
+    list_departures: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /** @description Departure field ICAO */
+                dep: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["DepartureFlight"][];
+                };
+            };
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            503: {
                 headers: {
                     [name: string]: unknown;
                 };

@@ -2,11 +2,15 @@
 
 use sqlx::PgPool;
 
+use std::collections::HashMap;
+
+use chrono::{DateTime, Utc};
+
 use crate::{
     errors::ApiError,
     models::{
-        CreateGroundStopRequest, CreateTmiRequest, GateRule, GroundStopBody, ProgramBody, TmiBody,
-        UpdateTmiRequest, UpsertProgramRequest,
+        CreateGroundStopRequest, CreateTmiRequest, GateRule, GroundStopBody, IssuedCfrBody,
+        ProgramBody, TmiBody, UpdateTmiRequest, UpsertProgramRequest,
     },
 };
 
@@ -257,4 +261,90 @@ pub async fn delete_ground_stop(pool: &PgPool, id: &str) -> Result<bool, ApiErro
         .await
         .map_err(|_| ApiError::Internal)?;
     Ok(result.rows_affected() > 0)
+}
+
+// --- issued CFRs ---
+
+/// Locked wheels-up times (callsign -> wheels_up) for one metered airport.
+pub async fn issued_cfr_map(
+    pool: &PgPool,
+    airport: &str,
+) -> Result<HashMap<String, DateTime<Utc>>, ApiError> {
+    let rows = sqlx::query_as::<_, (String, DateTime<Utc>)>(
+        "select callsign, wheels_up from tmu.issued_cfrs where airport = $1",
+    )
+    .bind(airport)
+    .fetch_all(pool)
+    .await
+    .map_err(|_| ApiError::Internal)?;
+    Ok(rows.into_iter().collect())
+}
+
+/// Every issued CFR as (callsign, airport, wheels_up).
+pub async fn all_issued_cfrs(
+    pool: &PgPool,
+) -> Result<Vec<(String, String, DateTime<Utc>)>, ApiError> {
+    sqlx::query_as::<_, (String, String, DateTime<Utc>)>(
+        "select callsign, airport, wheels_up from tmu.issued_cfrs",
+    )
+    .fetch_all(pool)
+    .await
+    .map_err(|_| ApiError::Internal)
+}
+
+pub async fn upsert_issued_cfr(
+    pool: &PgPool,
+    callsign: &str,
+    airport: &str,
+    wheels_up: DateTime<Utc>,
+    actor: &str,
+) -> Result<(), ApiError> {
+    sqlx::query(
+        "insert into tmu.issued_cfrs (callsign, airport, wheels_up, issued_by) \
+         values ($1, $2, $3, $4) \
+         on conflict (callsign) do update set \
+            airport = excluded.airport, wheels_up = excluded.wheels_up, \
+            issued_by = excluded.issued_by, issued_at = now()",
+    )
+    .bind(callsign)
+    .bind(airport)
+    .bind(wheels_up)
+    .bind(actor)
+    .execute(pool)
+    .await
+    .map_err(|_| ApiError::Internal)?;
+    Ok(())
+}
+
+pub async fn get_issued_cfr(
+    pool: &PgPool,
+    callsign: &str,
+) -> Result<Option<IssuedCfrBody>, ApiError> {
+    sqlx::query_as::<_, IssuedCfrBody>(
+        "select c.callsign, c.airport, c.wheels_up, u.display_name as issued_by, c.issued_at \
+         from tmu.issued_cfrs c left join identity.users u on u.id = c.issued_by \
+         where c.callsign = $1",
+    )
+    .bind(callsign)
+    .fetch_optional(pool)
+    .await
+    .map_err(|_| ApiError::Internal)
+}
+
+pub async fn delete_issued_cfr(pool: &PgPool, callsign: &str) -> Result<bool, ApiError> {
+    let result = sqlx::query("delete from tmu.issued_cfrs where callsign = $1")
+        .bind(callsign)
+        .execute(pool)
+        .await
+        .map_err(|_| ApiError::Internal)?;
+    Ok(result.rows_affected() > 0)
+}
+
+/// Opportunistic cleanup: drop CFRs issued long ago (their flights have since departed).
+pub async fn prune_stale_cfrs(pool: &PgPool) -> Result<(), ApiError> {
+    sqlx::query("delete from tmu.issued_cfrs where issued_at < now() - interval '12 hours'")
+        .execute(pool)
+        .await
+        .map_err(|_| ApiError::Internal)?;
+    Ok(())
 }

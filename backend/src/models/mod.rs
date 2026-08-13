@@ -169,6 +169,45 @@ pub struct UpdateTmiRequest {
     pub stop_time: Option<DateTime<Utc>>,
 }
 
+// --- TMU CFR / departures ---
+
+/// A locked (issued) Call-For-Release wheels-up time.
+#[derive(Debug, Serialize, ToSchema, sqlx::FromRow)]
+pub struct IssuedCfrBody {
+    pub callsign: String,
+    pub airport: String,
+    pub wheels_up: DateTime<Utc>,
+    pub issued_by: Option<String>,
+    pub issued_at: DateTime<Utc>,
+}
+
+#[derive(Debug, Deserialize, ToSchema)]
+pub struct IssueCfrRequest {
+    pub callsign: String,
+    /// The metered arrival airport this departure is bound for.
+    pub airport: String,
+    /// Explicit wheels-up to lock; when omitted, the flight's proposed CFR is used.
+    #[serde(default)]
+    pub ready_time: Option<DateTime<Utc>>,
+}
+
+/// A pending ground/proposed departure into a metered field (for the Departures view).
+#[derive(Debug, Serialize, ToSchema)]
+pub struct DepartureFlight {
+    pub callsign: String,
+    /// Metered arrival airport.
+    pub arrival: String,
+    pub aircraft_type: String,
+    pub gate: Option<String>,
+    pub status: String,
+    pub eta: Option<DateTime<Utc>>,
+    pub sta: Option<DateTime<Utc>>,
+    pub delay_min: i64,
+    pub cfr: Option<DateTime<Utc>>,
+    pub cfr_issued: bool,
+    pub seq: Option<i64>,
+}
+
 // --- TMU ground stops ---
 
 /// A ground stop: holds departures into `airport` from within `scope` until `until`.

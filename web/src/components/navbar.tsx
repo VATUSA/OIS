@@ -114,6 +114,11 @@ export function Navbar() {
               Airport
             </Link>
           )}
+          {hasPermission(me, "tmu.program.read") && (
+            <Link to="/departures" className={linkClass}>
+              Departures
+            </Link>
+          )}
           {(hasPermission(me, "tmu.program.read") ||
             hasPermission(me, "tmu.tmi.read")) && (
             <Link to="/tmu" className={linkClass}>
