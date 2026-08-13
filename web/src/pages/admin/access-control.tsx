@@ -68,6 +68,9 @@ export function AdminAccessControl() {
   const userSearch = useUserSearch(debouncedQuery);
 
   const current: ScopeState = working[scope] ?? { roles: [], perms: [] };
+  // Server admins hold every permission implicitly — their permission tree is
+  // read-only, but their roles are still editable.
+  const permsReadOnly = !!access.data?.server_admin;
 
   const allPerms = useMemo(
     () => flattenTree((catalog.data?.permissions ?? {}) as PermTree).sort(),
@@ -129,12 +132,15 @@ export function AdminAccessControl() {
   }
   function onSave() {
     if (cid == null || !reason.trim()) return;
-    // Only send assignable roles. Non-assignable roles the target may hold
-    // (e.g. SERVER_ADMIN) are not editable here and are preserved server-side.
+    // Only send assignable roles. Non-assignable roles the target may hold (e.g.
+    // SERVER_ADMIN) are preserved server-side. For a server admin the permission tree
+    // is not editable, so send no permission changes (the server ignores them anyway).
     const assignable = new Set(catalog.data?.roles ?? []);
     const scopes = Object.entries(working).map(([key, val]) => ({
       artcc_id: key === "" ? null : key,
-      permissions: buildTree(val.perms) as unknown as Record<string, never>,
+      permissions: (permsReadOnly
+        ? {}
+        : buildTree(val.perms)) as unknown as Record<string, never>,
       role_names: val.roles.filter((role) => assignable.has(role)),
     }));
     save.mutate({ cid, body: { reason: reason.trim(), scopes } satisfies UpdateBody });
@@ -256,6 +262,14 @@ export function AdminAccessControl() {
               </div>
             </div>
 
+            {permsReadOnly && (
+              <div className="rounded-md border border-primary/30 bg-primary/5 px-3 py-2 text-sm text-muted-foreground">
+                Server admins hold every permission implicitly (managed via{" "}
+                <code>OIS_SERVER_ADMIN_CID</code>), so the permission tree is
+                read-only. Roles can still be changed.
+              </div>
+            )}
+
             {/* Roles */}
             <section className="flex flex-col gap-2">
               <h3 className="text-sm font-semibold">Roles</h3>
@@ -305,6 +319,7 @@ export function AdminAccessControl() {
                         <input
                           type="checkbox"
                           className="size-4 accent-primary"
+                          disabled={permsReadOnly}
                           checked={allOn}
                           ref={(el) => {
                             if (el) el.indeterminate = checked > 0 && !allOn;
@@ -338,6 +353,7 @@ export function AdminAccessControl() {
                               <input
                                 type="checkbox"
                                 className="size-4 accent-primary"
+                                disabled={permsReadOnly}
                                 checked={current.perms.includes(perm)}
                                 onChange={() => togglePerm(perm)}
                               />
