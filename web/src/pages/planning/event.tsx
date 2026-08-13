@@ -1,6 +1,6 @@
 import {Badge, Card, CardContent} from "@ois/ui";
 import {Link, useParams} from "@tanstack/react-router";
-import {ArrowLeft, CalendarClock, Layers, type LucideIcon,} from "lucide-react";
+import {ArrowLeft, CalendarClock} from "lucide-react";
 
 import {useMe} from "@/lib/auth";
 import {eventBodyText, useEvent} from "@/lib/events";
@@ -10,40 +10,7 @@ import {DccSection} from "@/pages/planning/dcc";
 import {FacilitySupportSection} from "@/pages/planning/facility-support";
 import {AirportRatesSection} from "@/pages/planning/airport-rates";
 import {AceSection} from "@/pages/planning/ace";
-
-type Module = {
-  icon: LucideIcon;
-  title: string;
-  description: string;
-};
-
-const MODULES: Module[] = [
-  {
-    icon: Layers,
-    title: "TMI packages",
-    description:
-      "Draft the programs, restrictions, and ground stops for the event, then activate them live.",
-  },
-];
-
-function ModuleCard({ mod }: { mod: Module }) {
-  return (
-    <Card className="h-full">
-      <CardContent className="flex h-full flex-col gap-2 pt-6">
-        <div className="flex items-center gap-2">
-          <span className="flex size-8 items-center justify-center rounded-md bg-primary/10 text-primary">
-            <mod.icon className="size-4" />
-          </span>
-          <span className="font-semibold">{mod.title}</span>
-        </div>
-        <p className="text-sm text-muted-foreground">{mod.description}</p>
-        <span className="mt-auto pt-2 text-xs font-medium uppercase tracking-wide text-muted-foreground/70">
-          Coming soon
-        </span>
-      </CardContent>
-    </Card>
-  );
-}
+import {TmiPackagesSection} from "@/pages/planning/tmi-packages";
 
 export function EventPlanningPage() {
   const { eventId } = useParams({ from: "/planning/events/$eventId" });
@@ -157,11 +124,7 @@ export function EventPlanningPage() {
         <FacilitySupportSection eventId={id} />
         <AirportRatesSection eventId={id} />
         <AceSection eventId={id} />
-        <div className="grid gap-4 sm:grid-cols-2 lg:grid-cols-3">
-          {MODULES.map((mod) => (
-            <ModuleCard key={mod.title} mod={mod} />
-          ))}
-        </div>
+        <TmiPackagesSection eventId={id} />
       </div>
     </div>
   );

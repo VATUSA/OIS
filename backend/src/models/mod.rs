@@ -362,6 +362,42 @@ pub struct UpsertStaffingRequest {
     pub notes: Option<String>,
 }
 
+/// One draft TMI inside a package (kind + the create-shape payload for that kind).
+#[derive(Debug, Serialize, ToSchema, sqlx::FromRow)]
+pub struct TmiPackageItemBody {
+    pub id: String,
+    /// program | restriction | ground_stop
+    pub kind: String,
+    #[schema(value_type = Object)]
+    pub payload: sqlx::types::Json<Value>,
+}
+
+/// A named bundle of draft TMIs for an event; activating it creates live tmu.* rows.
+#[derive(Debug, Serialize, ToSchema)]
+pub struct TmiPackageBody {
+    pub id: String,
+    pub name: String,
+    /// draft | activated
+    pub status: String,
+    pub activated_at: Option<DateTime<Utc>>,
+    pub updated_at: DateTime<Utc>,
+    pub updated_by: Option<String>,
+    pub items: Vec<TmiPackageItemBody>,
+}
+
+#[derive(Debug, Deserialize, ToSchema)]
+pub struct CreatePackageRequest {
+    pub name: String,
+}
+
+#[derive(Debug, Deserialize, ToSchema)]
+pub struct AddPackageItemRequest {
+    /// program | restriction | ground_stop
+    pub kind: String,
+    #[schema(value_type = Object)]
+    pub payload: Value,
+}
+
 // --- TMU rate programs ---
 
 /// One per-gate restriction inside a program: an arrival fix/STAR with its own spacing.
