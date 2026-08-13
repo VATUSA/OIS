@@ -154,7 +154,7 @@ function Overview() {
       {/* Operational lists */}
       <div className="grid gap-4 lg:grid-cols-3">
         {canPrograms && (
-          <Section title="Metering programs" count={progList.length} to="/tmu">
+          <Section title="Metering programs" count={progList.length} to="/ops/tmu">
             {progList.length === 0 ? (
               <Empty>No active programs.</Empty>
             ) : (
@@ -180,7 +180,7 @@ function Overview() {
         )}
 
         {canGroundStops && (
-          <Section title="Ground stops" count={gsList.length} to="/tmu">
+          <Section title="Ground stops" count={gsList.length} to="/ops/tmu">
             {gsList.length === 0 ? (
               <Empty>No ground stops.</Empty>
             ) : (
@@ -207,7 +207,7 @@ function Overview() {
         )}
 
         {canTmis && (
-          <Section title="Restrictions" count={tmiList.length} to="/tmu">
+          <Section title="Restrictions" count={tmiList.length} to="/ops/tmu">
             {tmiList.length === 0 ? (
               <Empty>No published restrictions.</Empty>
             ) : (

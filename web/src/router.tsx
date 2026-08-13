@@ -1,4 +1,4 @@
-import {createRootRoute, createRoute, createRouter, Outlet,} from "@tanstack/react-router";
+import {createRootRoute, createRoute, createRouter, Outlet, redirect,} from "@tanstack/react-router";
 
 import {FeedWatcher} from "@/components/feed-watcher";
 import {Navbar} from "@/components/navbar";
@@ -8,6 +8,7 @@ import {DeparturesPage} from "@/pages/departures";
 import {MyDashboardPage} from "@/pages/my-dashboard";
 import {TaxiMonitorPage} from "@/pages/taxi";
 import {TmuPage} from "@/pages/tmu";
+import {PlanningTmiPage} from "@/pages/planning/tmi";
 import {AdminLayout} from "@/pages/admin/layout";
 import {AdminOverview} from "@/pages/admin/overview";
 import {AdminAccessControl} from "@/pages/admin/access-control";
@@ -32,35 +33,75 @@ const indexRoute = createRoute({
   component: DashboardPage,
 });
 
-const airportRoute = createRoute({
+// --- Operations (live, during-event) ---
+
+const opsRoute = createRoute({
   getParentRoute: () => rootRoute,
-  path: "/airport",
+  path: "ops",
+  component: Outlet,
+});
+
+const opsIndexRoute = createRoute({
+  getParentRoute: () => opsRoute,
+  path: "/",
+  beforeLoad: () => {
+    throw redirect({ to: "/ops/airport" });
+  },
+});
+
+const airportRoute = createRoute({
+  getParentRoute: () => opsRoute,
+  path: "airport",
   component: AirportPage,
 });
 
 const departuresRoute = createRoute({
-  getParentRoute: () => rootRoute,
-  path: "/departures",
+  getParentRoute: () => opsRoute,
+  path: "departures",
   component: DeparturesPage,
 });
 
-const myDashboardRoute = createRoute({
-  getParentRoute: () => rootRoute,
-  path: "/my",
-  component: MyDashboardPage,
-});
-
 const taxiRoute = createRoute({
-  getParentRoute: () => rootRoute,
-  path: "/taxi",
+  getParentRoute: () => opsRoute,
+  path: "taxi",
   component: TaxiMonitorPage,
 });
 
 const tmuRoute = createRoute({
-  getParentRoute: () => rootRoute,
-  path: "/tmu",
+  getParentRoute: () => opsRoute,
+  path: "tmu",
   component: TmuPage,
 });
+
+const myDashboardRoute = createRoute({
+  getParentRoute: () => opsRoute,
+  path: "my",
+  component: MyDashboardPage,
+});
+
+// --- Planning (pre-event) ---
+
+const planningRoute = createRoute({
+  getParentRoute: () => rootRoute,
+  path: "planning",
+  component: Outlet,
+});
+
+const planningIndexRoute = createRoute({
+  getParentRoute: () => planningRoute,
+  path: "/",
+  beforeLoad: () => {
+    throw redirect({ to: "/planning/tmi" });
+  },
+});
+
+const planningTmiRoute = createRoute({
+  getParentRoute: () => planningRoute,
+  path: "tmi",
+  component: PlanningTmiPage,
+});
+
+// --- Admin ---
 
 const adminRoute = createRoute({
   getParentRoute: () => rootRoute,
@@ -92,19 +133,44 @@ const adminServiceAccountsRoute = createRoute({
   component: AdminServiceAccounts,
 });
 
+// --- Legacy path redirects (old flat routes → /ops/*) ---
+
+const legacyRedirects = (
+  [
+    ["/airport", "/ops/airport"],
+    ["/departures", "/ops/departures"],
+    ["/taxi", "/ops/taxi"],
+    ["/tmu", "/ops/tmu"],
+    ["/my", "/ops/my"],
+  ] as const
+).map(([from, to]) =>
+  createRoute({
+    getParentRoute: () => rootRoute,
+    path: from,
+    beforeLoad: () => {
+      throw redirect({ to });
+    },
+  }),
+);
+
 const routeTree = rootRoute.addChildren([
   indexRoute,
-  airportRoute,
-  departuresRoute,
-  myDashboardRoute,
-  taxiRoute,
-  tmuRoute,
+  opsRoute.addChildren([
+    opsIndexRoute,
+    airportRoute,
+    departuresRoute,
+    taxiRoute,
+    tmuRoute,
+    myDashboardRoute,
+  ]),
+  planningRoute.addChildren([planningIndexRoute, planningTmiRoute]),
   adminRoute.addChildren([
     adminIndexRoute,
     adminAccessRoute,
     adminAuditRoute,
     adminServiceAccountsRoute,
   ]),
+  ...legacyRedirects,
 ]);
 
 export const router = createRouter({ routeTree });
