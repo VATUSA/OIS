@@ -3,6 +3,7 @@ import {createRootRoute, createRoute, createRouter, Outlet,} from "@tanstack/rea
 import {Navbar} from "@/components/navbar";
 import {AirportPage} from "@/pages/airport";
 import {DashboardPage} from "@/pages/dashboard";
+import {DeparturesPage} from "@/pages/departures";
 import {TmuPage} from "@/pages/tmu";
 import {AdminLayout} from "@/pages/admin/layout";
 import {AdminOverview} from "@/pages/admin/overview";
@@ -31,6 +32,12 @@ const airportRoute = createRoute({
   getParentRoute: () => rootRoute,
   path: "/airport",
   component: AirportPage,
+});
+
+const departuresRoute = createRoute({
+  getParentRoute: () => rootRoute,
+  path: "/departures",
+  component: DeparturesPage,
 });
 
 const tmuRoute = createRoute({
@@ -72,6 +79,7 @@ const adminServiceAccountsRoute = createRoute({
 const routeTree = rootRoute.addChildren([
   indexRoute,
   airportRoute,
+  departuresRoute,
   tmuRoute,
   adminRoute.addChildren([
     adminIndexRoute,

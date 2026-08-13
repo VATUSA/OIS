@@ -41,3 +41,5 @@ permission!(TmuGroundStopRead, ["tmu", "groundstop"], Read);
 permission!(TmuGroundStopCreate, ["tmu", "groundstop"], Create);
 permission!(TmuGroundStopPublish, ["tmu", "groundstop"], Publish);
 permission!(TmuGroundStopDelete, ["tmu", "groundstop"], Delete);
+
+permission!(TmuCfrAssign, ["tmu", "cfr"], Assign);

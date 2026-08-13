@@ -57,6 +57,8 @@ pub struct FlowFlight {
     pub seq: Option<i64>,
     /// Proposed wheels-up (EDCT / Call-For-Release) for ground & proposed flights.
     pub cfr: Option<DateTime<Utc>>,
+    /// True when the CFR has been issued (locked) rather than merely proposed.
+    pub cfr_issued: bool,
 }
 
 #[derive(Debug, Serialize, ToSchema)]
@@ -82,12 +84,14 @@ enum Engine {
     Jet,
 }
 
-/// Compute a full arrival picture for `icao`. `icao` must already be uppercase.
+/// Compute a full arrival picture for `icao`. `icao` must already be uppercase. `issued`
+/// maps callsign -> locked wheels-up for any CFRs already issued into this field.
 pub fn compute(
     icao: &str,
     program: Option<&ProgramInputs>,
     data: &VatsimData,
     airports: &AirportDb,
+    issued: &HashMap<String, DateTime<Utc>>,
     now: DateTime<Utc>,
 ) -> Flow {
     let arr = airports.get(icao).copied();
@@ -199,7 +203,7 @@ pub fn compute(
 
     // Metering runs only when a program (AAR) exists — it's the opt-in TMU feature.
     if let Some(pg) = program {
-        apply_metering(&mut flights, &etd_ms, pg, now);
+        apply_metering(&mut flights, &etd_ms, pg, issued, now);
     }
 
     let horizon = now + Duration::hours(1);
@@ -275,6 +279,7 @@ fn apply_metering(
     flights: &mut [FlowFlight],
     etd_ms: &[Option<i64>],
     pg: &ProgramInputs,
+    issued: &HashMap<String, DateTime<Utc>>,
     now: DateTime<Utc>,
 ) {
     let now_ms = now.timestamp_millis();
@@ -291,10 +296,21 @@ fn apply_metering(
         .collect();
     airborne.sort_by_key(|&i| eta_ms(&flights[i], now_ms));
 
-    let mut ground: Vec<usize> = metered
+    // Ground/proposed, split into flights with a locked (issued) CFR vs auto-slotted.
+    let ground_all: Vec<usize> = metered
         .iter()
         .copied()
         .filter(|&i| matches!(flights[i].status.as_str(), "ground" | "proposed"))
+        .collect();
+    let ground_issued: Vec<usize> = ground_all
+        .iter()
+        .copied()
+        .filter(|&i| issued.contains_key(&flights[i].callsign))
+        .collect();
+    let mut ground: Vec<usize> = ground_all
+        .iter()
+        .copied()
+        .filter(|&i| !issued.contains_key(&flights[i].callsign))
         .collect();
     ground.sort_by_key(|&i| eta_ms(&flights[i], now_ms));
 
@@ -319,7 +335,21 @@ fn apply_metering(
         assigned.push((sta, flights[i].gate.clone().unwrap_or_default()));
     }
 
-    // Tier 2 — ground/proposed slot into the first gap clear of every assigned slot.
+    // Tier 2a — issued CFRs keep their locked wheels-up; the slot is reserved for them.
+    for &i in &ground_issued {
+        let wheels = issued[&flights[i].callsign];
+        let wheels_ms = wheels.timestamp_millis();
+        let eta = eta_ms(&flights[i], now_ms);
+        let flight_ms = eta - etd_ms[i].unwrap_or(now_ms); // enroute time
+        let sta = wheels_ms + flight_ms;
+        flights[i].sta = DateTime::from_timestamp_millis(sta);
+        flights[i].delay_min = ((sta - eta).max(0) as f64 / 60_000.0).round() as i64;
+        flights[i].cfr = Some(wheels);
+        flights[i].cfr_issued = true;
+        assigned.push((sta as f64, flights[i].gate.clone().unwrap_or_default()));
+    }
+
+    // Tier 2b — everything else on the ground slots into the first gap clear of every slot.
     for &i in &ground {
         let eta = eta_ms(&flights[i], now_ms) as f64;
         let gate = flights[i].gate.clone();
