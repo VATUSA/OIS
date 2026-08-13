@@ -12,7 +12,15 @@ function delayClass(min: number): string {
   return "text-muted-foreground";
 }
 
-function DepartureRow({ d, canIssue }: { d: Departure; canIssue: boolean }) {
+export function DepartureRow({
+  d,
+  canIssue,
+  leading,
+}: {
+  d: Departure;
+  canIssue: boolean;
+  leading: React.ReactNode;
+}) {
   const issue = useIssueCfr();
   const release = useReleaseCfr();
   const [ready, setReady] = useState("");
@@ -31,9 +39,7 @@ function DepartureRow({ d, canIssue }: { d: Departure; canIssue: boolean }) {
 
   return (
     <tr className="border-t">
-      <td className="py-2 pr-3 text-right tabular-nums text-muted-foreground">
-        {d.seq ?? "—"}
-      </td>
+      <td className="py-2 pr-3 tabular-nums text-muted-foreground">{leading}</td>
       <td className="py-2 pr-3 font-mono font-medium">{d.callsign}</td>
       <td className="py-2 pr-3 font-mono text-xs">{d.arrival}</td>
       <td className="py-2 pr-3">{d.aircraft_type}</td>
@@ -260,7 +266,12 @@ export function DeparturesPage() {
                     </thead>
                     <tbody>
                       {departures.data.departures.map((d) => (
-                        <DepartureRow key={d.callsign} d={d} canIssue={canIssue} />
+                        <DepartureRow
+                          key={d.callsign}
+                          d={d}
+                          canIssue={canIssue}
+                          leading={d.seq ?? "—"}
+                        />
                       ))}
                     </tbody>
                   </table>

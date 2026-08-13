@@ -4,6 +4,7 @@ import {Navbar} from "@/components/navbar";
 import {AirportPage} from "@/pages/airport";
 import {DashboardPage} from "@/pages/dashboard";
 import {DeparturesPage} from "@/pages/departures";
+import {MyDashboardPage} from "@/pages/my-dashboard";
 import {TmuPage} from "@/pages/tmu";
 import {AdminLayout} from "@/pages/admin/layout";
 import {AdminOverview} from "@/pages/admin/overview";
@@ -38,6 +39,12 @@ const departuresRoute = createRoute({
   getParentRoute: () => rootRoute,
   path: "/departures",
   component: DeparturesPage,
+});
+
+const myDashboardRoute = createRoute({
+  getParentRoute: () => rootRoute,
+  path: "/my",
+  component: MyDashboardPage,
 });
 
 const tmuRoute = createRoute({
@@ -80,6 +87,7 @@ const routeTree = rootRoute.addChildren([
   indexRoute,
   airportRoute,
   departuresRoute,
+  myDashboardRoute,
   tmuRoute,
   adminRoute.addChildren([
     adminIndexRoute,

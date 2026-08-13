@@ -119,6 +119,11 @@ export function Navbar() {
               Departures
             </Link>
           )}
+          {hasPermission(me, "tmu.program.read") && (
+            <Link to="/my" className={linkClass}>
+              My dashboard
+            </Link>
+          )}
           {(hasPermission(me, "tmu.program.read") ||
             hasPermission(me, "tmu.tmi.read")) && (
             <Link to="/tmu" className={linkClass}>
