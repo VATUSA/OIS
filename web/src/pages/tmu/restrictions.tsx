@@ -1,5 +1,5 @@
 import {useState} from "react";
-import {Badge, Button, Card, CardContent, Input} from "@ois/ui";
+import {Badge, Button, Card, CardContent, Input, useToast} from "@ois/ui";
 import {Plus} from "lucide-react";
 
 import {hasPermission} from "@/lib/permissions";
@@ -45,8 +45,8 @@ function Head({ children }: { children: React.ReactNode }) {
 
 function CreateForm() {
   const create = useCreateTmi();
+  const toast = useToast();
   const [form, setForm] = useState<FormState>(EMPTY);
-  const [error, setError] = useState<string | null>(null);
 
   function set<K extends keyof FormState>(key: K, value: string) {
     setForm((f) => ({ ...f, [key]: value }));
@@ -58,20 +58,19 @@ function CreateForm() {
       !form.providing.trim() ||
       !form.restriction.trim()
     ) {
-      setError("Requesting, providing, and restriction are required.");
+      toast.warning("Requesting, providing, and restriction are required");
       return;
     }
     const start = form.start.trim() ? parseZulu(form.start) : null;
     const stop = form.stop.trim() ? parseZulu(form.stop) : null;
     if (form.start.trim() && !start) {
-      setError("Start time must be DD/HHMMz (e.g. 12/1430z).");
+      toast.warning("Start time must be DD/HHMMz (e.g. 12/1430z)");
       return;
     }
     if (form.stop.trim() && !stop) {
-      setError("Stop time must be DD/HHMMz (e.g. 12/1830z).");
+      toast.warning("Stop time must be DD/HHMMz (e.g. 12/1830z)");
       return;
     }
-    setError(null);
     create.mutate(
       {
         requesting: form.requesting,
@@ -131,7 +130,6 @@ function CreateForm() {
             </Button>
           </div>
         </div>
-        {error && <p className="text-sm text-destructive">{error}</p>}
       </CardContent>
     </Card>
   );

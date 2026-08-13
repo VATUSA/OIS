@@ -1,5 +1,6 @@
 import {useMutation, useQuery, useQueryClient} from "@tanstack/react-query";
 import type {components} from "@ois/api-client";
+import {useToast} from "@ois/ui";
 
 import {ois} from "./api";
 
@@ -95,6 +96,7 @@ export function useUserAccess(cid: number | undefined) {
 
 export function useSaveUserAccess() {
   const queryClient = useQueryClient();
+  const toast = useToast();
   return useMutation({
     mutationFn: async ({ cid, body }: { cid: number; body: UpdateBody }) => {
       const { data, error, response } = await ois.POST(
@@ -110,6 +112,8 @@ export function useSaveUserAccess() {
     },
     onSuccess: (data, variables) => {
       queryClient.setQueryData(["user-access", variables.cid], data);
+      toast.success("Access saved", { description: `CID ${variables.cid}` });
     },
+    onError: () => toast.error("Couldn’t save access changes"),
   });
 }

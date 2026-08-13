@@ -19,5 +19,12 @@ export {
   DropdownMenuSeparator,
 } from "./components/dropdown-menu";
 export { Avatar, AvatarImage, AvatarFallback } from "./components/avatar";
+export {
+  ToastProvider,
+  useToast,
+  type ToastApi,
+  type ToastVariant,
+  type ToastOptions,
+} from "./components/toast";
 export { ThemeProvider, useTheme } from "./theme/theme-provider";
 export { ThemeToggle } from "./theme/theme-toggle";

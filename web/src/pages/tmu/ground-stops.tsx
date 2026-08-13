@@ -1,5 +1,5 @@
 import {useState} from "react";
-import {Badge, Button, Card, CardContent, Input} from "@ois/ui";
+import {Badge, Button, Card, CardContent, Input, useToast} from "@ois/ui";
 import {Plus} from "lucide-react";
 
 import {useMe} from "@/lib/auth";
@@ -39,8 +39,8 @@ const EMPTY: CreateGroundStop = { airport: "", scope: "", until: "" };
 
 function CreateForm() {
   const create = useCreateGroundStop();
+  const toast = useToast();
   const [form, setForm] = useState<CreateGroundStop>(EMPTY);
-  const [error, setError] = useState<string | null>(null);
 
   function set<K extends keyof CreateGroundStop>(key: K, value: string) {
     setForm((f) => ({ ...f, [key]: value }));
@@ -49,16 +49,12 @@ function CreateForm() {
   function submit() {
     const airport = (form.airport ?? "").replace(/[^a-zA-Z0-9]/g, "");
     if (airport.length < 3 || airport.length > 4) {
-      setError("Enter a 3–4 character airport ICAO.");
+      toast.warning("Enter a 3–4 character airport ICAO");
       return;
     }
-    setError(null);
     create.mutate(
       { airport, scope: form.scope, until: form.until },
-      {
-        onSuccess: () => setForm(EMPTY),
-        onError: () => setError("Couldn’t issue the ground stop — check the UNTIL time."),
-      },
+      { onSuccess: () => setForm(EMPTY) },
     );
   }
 
@@ -105,7 +101,6 @@ function CreateForm() {
             </Button>
           </div>
         </div>
-        {error && <p className="text-sm text-destructive">{error}</p>}
       </CardContent>
     </Card>
   );
