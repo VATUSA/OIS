@@ -195,6 +195,8 @@ pub struct IssueCfrRequest {
 #[derive(Debug, Serialize, ToSchema)]
 pub struct DepartureFlight {
     pub callsign: String,
+    /// Origin airport ICAO (a facility query spans several).
+    pub dep: String,
     /// Destination airport.
     pub arrival: String,
     pub aircraft_type: String,
@@ -210,15 +212,19 @@ pub struct DepartureFlight {
     pub seq: Option<i64>,
 }
 
-/// The Departures view for one field: all pending departures plus summary counts.
+/// The Departures view for one field (airport, TRACON, or ARTCC) plus summary counts.
 #[derive(Debug, Serialize, ToSchema)]
 pub struct DeparturesResponse {
+    /// `tracon` | `artcc` when the queried field is a facility, else null (plain airport).
+    pub facility_kind: Option<String>,
+    /// The airports the field resolved to (one for an airport; several for a facility).
+    pub airports: Vec<String>,
     pub total: usize,
     /// How many departures are bound for a metered destination.
     pub to_metered: usize,
     /// How many are currently held by a metering delay.
     pub holding_on_cfr: usize,
-    /// This field's destinations that have a TMU program.
+    /// The destinations (across all origin airports) that have a TMU program.
     pub program_destinations: Vec<String>,
     pub departures: Vec<DepartureFlight>,
 }
