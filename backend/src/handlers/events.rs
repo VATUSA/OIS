@@ -8,14 +8,15 @@ use axum::{
 use crate::{
     auth::{
         context::CurrentUser,
-        permissions::{EventsPlanRead, EventsPlanUpdate, EventsRateUpdate},
+        permissions::{EventsPlanRead, EventsPlanUpdate, EventsRateUpdate, EventsStaffingCreate},
         require_permission::RequirePermission,
     },
     errors::ApiError,
     feed,
     models::{
-        AirportRateBody, DccRequestBody, EventBody, FacilitySupportBody, UpdateDccRequest,
-        UpsertAirportRateRequest, UpsertFacilitySupportRequest,
+        AirportRateBody, DccRequestBody, EventBody, FacilitySupportBody, StaffingRequestBody,
+        UpdateDccRequest, UpsertAirportRateRequest, UpsertFacilitySupportRequest,
+        UpsertStaffingRequest,
     },
     repos::{access as access_repo, events as events_repo},
     state::AppState,
@@ -23,6 +24,7 @@ use crate::{
 
 const DCC_STATUSES: [&str; 3] = ["not_needed", "requested", "confirmed"];
 const SUPPORT_LEVELS: [&str; 3] = ["required", "preferred", "not_required"];
+const STAFFING_STATUSES: [&str; 3] = ["open", "met", "closed"];
 const RATE_PERMISSION: &str = "events.rate.update";
 
 fn normalize_facility(raw: &str) -> Option<String> {
@@ -336,4 +338,94 @@ pub async fn delete_event_rate(
 
     events_repo::delete_airport_rate(pool, id, &icao).await?;
     Ok(axum::http::StatusCode::NO_CONTENT)
+}
+
+#[utoipa::path(
+    get,
+    path = "/api/v1/events/{id}/staffing",
+    tag = "events",
+    params(("id" = i64, Path, description = "VATUSA event id")),
+    responses((status = 200, body = Vec<StaffingRequestBody>), (status = 401))
+)]
+pub async fn list_event_staffing(
+    State(state): State<AppState>,
+    _permission: RequirePermission<EventsPlanRead>,
+    Path(id): Path<i64>,
+) -> Result<Json<Vec<StaffingRequestBody>>, ApiError> {
+    let pool = state.db.as_ref().ok_or(ApiError::ServiceUnavailable)?;
+    Ok(Json(events_repo::list_staffing(pool, id).await?))
+}
+
+#[utoipa::path(
+    put,
+    path = "/api/v1/events/{id}/staffing/{facility}",
+    tag = "events",
+    params(
+        ("id" = i64, Path, description = "VATUSA event id"),
+        ("facility" = String, Path, description = "ARTCC id")
+    ),
+    request_body = UpsertStaffingRequest,
+    responses((status = 200, body = StaffingRequestBody), (status = 400), (status = 401), (status = 404))
+)]
+pub async fn upsert_event_staffing(
+    State(state): State<AppState>,
+    _permission: RequirePermission<EventsStaffingCreate>,
+    Extension(current_user): Extension<Option<CurrentUser>>,
+    Path((id, facility)): Path<(i64, String)>,
+    Json(payload): Json<UpsertStaffingRequest>,
+) -> Result<Json<StaffingRequestBody>, ApiError> {
+    let user = current_user.as_ref().ok_or(ApiError::Unauthorized)?;
+    let pool = state.db.as_ref().ok_or(ApiError::ServiceUnavailable)?;
+
+    let facility = normalize_facility(&facility).ok_or(ApiError::BadRequest)?;
+    if !STAFFING_STATUSES.contains(&payload.status.as_str())
+        || !(0..=999).contains(&payload.positions_requested)
+        || !(0..=999).contains(&payload.positions_filled)
+    {
+        return Err(ApiError::BadRequest);
+    }
+    if events_repo::get(pool, id).await?.is_none() {
+        return Err(ApiError::NotFound);
+    }
+
+    let notes = payload.notes.unwrap_or_default();
+    events_repo::upsert_staffing(
+        pool,
+        id,
+        &facility,
+        payload.positions_requested,
+        payload.positions_filled,
+        &payload.status,
+        notes.trim(),
+        &user.id,
+    )
+    .await?;
+    events_repo::get_staffing(pool, id, &facility)
+        .await?
+        .map(Json)
+        .ok_or(ApiError::Internal)
+}
+
+#[utoipa::path(
+    delete,
+    path = "/api/v1/events/{id}/staffing/{facility}",
+    tag = "events",
+    params(
+        ("id" = i64, Path, description = "VATUSA event id"),
+        ("facility" = String, Path, description = "ARTCC id")
+    ),
+    responses((status = 204), (status = 401), (status = 404))
+)]
+pub async fn delete_event_staffing(
+    State(state): State<AppState>,
+    _permission: RequirePermission<EventsStaffingCreate>,
+    Path((id, facility)): Path<(i64, String)>,
+) -> Result<axum::http::StatusCode, ApiError> {
+    let pool = state.db.as_ref().ok_or(ApiError::ServiceUnavailable)?;
+    let facility = normalize_facility(&facility).ok_or(ApiError::BadRequest)?;
+    if events_repo::delete_staffing(pool, id, &facility).await? {
+        Ok(axum::http::StatusCode::NO_CONTENT)
+    } else {
+        Err(ApiError::NotFound)
+    }
 }

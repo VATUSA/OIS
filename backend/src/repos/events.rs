@@ -5,7 +5,9 @@ use chrono::{DateTime, Utc};
 use sqlx::PgPool;
 
 use crate::errors::ApiError;
-use crate::models::{AirportRateBody, DccRequestBody, EventBody, FacilitySupportBody};
+use crate::models::{
+    AirportRateBody, DccRequestBody, EventBody, FacilitySupportBody, StaffingRequestBody,
+};
 
 const EVENT_SELECT: &str = "select id, title, body, banner_image_url, facility, \
     start_time, end_time, review_status from events.event";
@@ -260,5 +262,89 @@ pub async fn delete_airport_rate(
         .execute(pool)
         .await
         .map_err(|_| ApiError::Internal)?;
+    Ok(result.rows_affected() > 0)
+}
+
+// --- ACE staffing requests ---
+
+const STAFFING_SELECT: &str = "select s.facility, s.positions_requested, s.positions_filled, \
+    s.status, s.notes, s.updated_at, u.display_name as updated_by \
+    from events.staffing_request s left join identity.users u on u.id = s.updated_by";
+
+pub async fn list_staffing(
+    pool: &PgPool,
+    event_id: i64,
+) -> Result<Vec<StaffingRequestBody>, ApiError> {
+    sqlx::query_as::<_, StaffingRequestBody>(&format!(
+        "{STAFFING_SELECT} where s.event_id = $1 order by s.facility"
+    ))
+    .bind(event_id)
+    .fetch_all(pool)
+    .await
+    .map_err(|_| ApiError::Internal)
+}
+
+pub async fn get_staffing(
+    pool: &PgPool,
+    event_id: i64,
+    facility: &str,
+) -> Result<Option<StaffingRequestBody>, ApiError> {
+    sqlx::query_as::<_, StaffingRequestBody>(&format!(
+        "{STAFFING_SELECT} where s.event_id = $1 and s.facility = $2"
+    ))
+    .bind(event_id)
+    .bind(facility)
+    .fetch_optional(pool)
+    .await
+    .map_err(|_| ApiError::Internal)
+}
+
+#[allow(clippy::too_many_arguments)]
+pub async fn upsert_staffing(
+    pool: &PgPool,
+    event_id: i64,
+    facility: &str,
+    requested: i32,
+    filled: i32,
+    status: &str,
+    notes: &str,
+    actor: &str,
+) -> Result<(), ApiError> {
+    sqlx::query(
+        "insert into events.staffing_request
+             (event_id, facility, positions_requested, positions_filled, status, notes, updated_by)
+         values ($1, $2, $3, $4, $5, $6, $7)
+         on conflict (event_id, facility) do update set
+             positions_requested = excluded.positions_requested,
+             positions_filled = excluded.positions_filled,
+             status = excluded.status,
+             notes = excluded.notes,
+             updated_by = excluded.updated_by",
+    )
+    .bind(event_id)
+    .bind(facility)
+    .bind(requested)
+    .bind(filled)
+    .bind(status)
+    .bind(notes)
+    .bind(actor)
+    .execute(pool)
+    .await
+    .map_err(|_| ApiError::Internal)?;
+    Ok(())
+}
+
+pub async fn delete_staffing(
+    pool: &PgPool,
+    event_id: i64,
+    facility: &str,
+) -> Result<bool, ApiError> {
+    let result =
+        sqlx::query("delete from events.staffing_request where event_id = $1 and facility = $2")
+            .bind(event_id)
+            .bind(facility)
+            .execute(pool)
+            .await
+            .map_err(|_| ApiError::Internal)?;
     Ok(result.rows_affected() > 0)
 }

@@ -338,6 +338,30 @@ pub struct UpsertAirportRateRequest {
     pub adr: i32,
 }
 
+/// One facility's ACE staffing request for an event (positions wanted vs signed up).
+#[derive(Debug, Serialize, ToSchema, sqlx::FromRow)]
+pub struct StaffingRequestBody {
+    /// ARTCC id (e.g. ZTL).
+    pub facility: String,
+    pub positions_requested: i32,
+    pub positions_filled: i32,
+    /// open | met | closed
+    pub status: String,
+    pub notes: String,
+    pub updated_at: DateTime<Utc>,
+    pub updated_by: Option<String>,
+}
+
+#[derive(Debug, Deserialize, ToSchema)]
+pub struct UpsertStaffingRequest {
+    pub positions_requested: i32,
+    pub positions_filled: i32,
+    /// open | met | closed
+    pub status: String,
+    #[serde(default)]
+    pub notes: Option<String>,
+}
+
 // --- TMU rate programs ---
 
 /// One per-gate restriction inside a program: an arrival fix/STAR with its own spacing.
