@@ -698,7 +698,9 @@ pub async fn activate_event_package(
                     start_time: r.start_time,
                     stop_time: r.stop_time,
                 };
-                tmu_repo::create_tmi(pool, &req, &user.id).await?;
+                // Activation goes live: create then publish so the restriction is active.
+                let tmi_id = tmu_repo::create_tmi(pool, &req, &user.id).await?;
+                tmu_repo::publish_tmi(pool, &tmi_id, &user.id).await?;
             }
             "ground_stop" => {
                 let g: GroundStopItem =
@@ -709,8 +711,10 @@ pub async fn activate_event_package(
                     scope: g.scope.clone(),
                     until: g.until.clone(),
                 };
-                tmu_repo::create_ground_stop(pool, &req, &scope, g.until.as_deref(), &user.id)
-                    .await?;
+                let gs_id =
+                    tmu_repo::create_ground_stop(pool, &req, &scope, g.until.as_deref(), &user.id)
+                        .await?;
+                tmu_repo::publish_ground_stop(pool, &gs_id, &user.id).await?;
             }
             _ => {}
         }
