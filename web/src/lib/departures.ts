@@ -4,6 +4,7 @@ import type {components} from "@ois/api-client";
 import {ois} from "./api";
 
 export type Departure = components["schemas"]["DepartureFlight"];
+export type DeparturesResponse = components["schemas"]["DeparturesResponse"];
 
 /** Pending departures out of a field into any metered destination, refreshed every 20s. */
 export function useDepartures(dep: string) {
