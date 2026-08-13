@@ -3,6 +3,7 @@ pub mod config;
 pub mod errors;
 pub mod feed;
 pub mod handlers;
+pub mod jobs;
 pub mod models;
 pub mod openapi;
 pub mod repos;
@@ -22,6 +23,9 @@ pub async fn run() -> Result<(), Box<dyn std::error::Error>> {
 
     feed::spawn_poller(state.feed.clone());
     feed::facilities::spawn_refresh(state.facilities.clone());
+    if let Some(pool) = state.db.clone() {
+        jobs::spawn_cleanup(pool);
+    }
 
     let app = router::build_router(state);
 
