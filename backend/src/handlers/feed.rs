@@ -72,6 +72,18 @@ pub async fn airport_flow(
         .await?
         .map(|p| ProgramInputs {
             aar: p.aar,
+            trail: p.trail,
+            mit: p.mit,
+            gates: p
+                .gates
+                .0
+                .iter()
+                .map(|g| flow::GateSpacing {
+                    name: g.name.clone(),
+                    trail: g.trail,
+                    mit: g.mit,
+                })
+                .collect(),
             exclude_wake: p.exclude_wake,
             exclude_types: p.exclude_types,
             jets_only: p.jets_only,

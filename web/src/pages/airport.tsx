@@ -232,34 +232,50 @@ function GateBreakdown({ flow }: { flow: Flow }) {
 // --- Aircraft list ---
 
 type ColKey =
+  | "seq"
   | "callsign"
   | "aircraft_type"
   | "dep"
   | "gate"
   | "status"
   | "distance_nm"
-  | "groundspeed"
-  | "eta";
+  | "eta"
+  | "sta"
+  | "delay_min"
+  | "cfr";
 const COLUMNS: { key: ColKey; label: string; num?: boolean; right?: boolean }[] = [
+  { key: "seq", label: "#", num: true },
   { key: "callsign", label: "Callsign" },
   { key: "aircraft_type", label: "Type" },
   { key: "dep", label: "Dep" },
   { key: "gate", label: "Gate" },
   { key: "status", label: "Status" },
   { key: "distance_nm", label: "Dist", num: true, right: true },
-  { key: "groundspeed", label: "GS", num: true, right: true },
   { key: "eta", label: "ETA", right: true },
+  { key: "sta", label: "STA", right: true },
+  { key: "delay_min", label: "Delay", num: true, right: true },
+  { key: "cfr", label: "CFR", right: true },
 ];
+const DATE_KEYS = new Set<ColKey>(["eta", "sta", "cfr"]);
+const NUM_KEYS = new Set<ColKey>(["seq", "distance_nm", "delay_min"]);
+
+function delayClass(min: number): string {
+  if (min >= 15) return "text-destructive";
+  if (min > 0) return "text-amber-500";
+  return "text-muted-foreground";
+}
 
 function AircraftView({ flow }: { flow: Flow }) {
-  const [sortKey, setSortKey] = useState<ColKey>("eta");
+  const [sortKey, setSortKey] = useState<ColKey>("seq");
   const [dir, setDir] = useState<1 | -1>(1);
+  const now = Date.now();
 
   const rows = useMemo(() => {
     const val = (f: FlowFlight, k: ColKey): number | string => {
       const v = f[k];
-      if (k === "eta") return v ? new Date(v as string).getTime() : Infinity;
-      return v == null ? (typeof v === "number" ? Infinity : "") : (v as number | string);
+      if (DATE_KEYS.has(k)) return v == null ? Infinity : new Date(v as string).getTime();
+      if (NUM_KEYS.has(k)) return v == null ? Infinity : (v as number);
+      return v == null ? "" : (v as string);
     };
     return [...flow.flights].sort((a, b) => {
       const va = val(a, sortKey);
@@ -317,6 +333,9 @@ function AircraftView({ flow }: { flow: Flow }) {
                     key={f.callsign}
                     className={`border-t ${f.excluded ? "opacity-45" : ""}`}
                   >
+                    <td className="py-1.5 pr-3 text-right tabular-nums text-muted-foreground">
+                      {f.seq ?? "—"}
+                    </td>
                     <td className="py-1.5 pr-3 font-mono font-medium">{f.callsign}</td>
                     <td className="py-1.5 pr-3">{f.aircraft_type}</td>
                     <td className="py-1.5 pr-3 font-mono text-xs">{f.dep}</td>
@@ -330,11 +349,31 @@ function AircraftView({ flow }: { flow: Flow }) {
                     <td className="py-1.5 pr-3 text-right tabular-nums">
                       {f.distance_nm == null ? "—" : Math.round(f.distance_nm)}
                     </td>
-                    <td className="py-1.5 pr-3 text-right tabular-nums">
-                      {f.groundspeed || "—"}
+                    <td className="py-1.5 pr-3 text-right font-mono text-xs tabular-nums text-muted-foreground">
+                      {hhmmZulu(f.eta)}
+                    </td>
+                    <td className="py-1.5 pr-3 text-right font-mono text-xs tabular-nums">
+                      {hhmmZulu(f.sta)}
+                    </td>
+                    <td
+                      className={`py-1.5 pr-3 text-right tabular-nums ${delayClass(f.delay_min)}`}
+                    >
+                      {f.delay_min > 0 ? `+${f.delay_min}` : "—"}
                     </td>
                     <td className="py-1.5 text-right font-mono text-xs tabular-nums">
-                      {hhmmZulu(f.eta)}
+                      {f.cfr ? (
+                        <span
+                          className={
+                            new Date(f.cfr).getTime() <= now + 60000
+                              ? "text-emerald-500"
+                              : "text-amber-500"
+                          }
+                        >
+                          {hhmmZulu(f.cfr)}
+                        </span>
+                      ) : (
+                        "—"
+                      )}
                     </td>
                   </tr>
                 );
@@ -362,10 +401,12 @@ function LadderView({ flow }: { flow: Flow }) {
   const step = win <= 90 ? 10 : win <= 180 ? 15 : 30;
   const gateColors = gateColorMap(flow.flights);
 
+  // Position by metered STA when available, else raw ETA.
+  const timeOf = (f: FlowFlight) => f.sta ?? f.eta;
   // Flights in window, earliest (nearest NOW) first — bottom to top.
   const items = flow.flights
-    .filter((f) => f.status !== "arrived" && !f.excluded && f.eta)
-    .map((f) => ({ f, min: minutesUntil(f.eta, now)! }))
+    .filter((f) => f.status !== "arrived" && !f.excluded && timeOf(f))
+    .map((f) => ({ f, min: minutesUntil(timeOf(f), now)! }))
     .filter((x) => x.min >= -1 && x.min <= win)
     .sort((a, b) => a.min - b.min);
 
@@ -406,7 +447,8 @@ function LadderView({ flow }: { flow: Flow }) {
       <CardContent className="pt-6">
         <div className="mb-3 flex items-center justify-between">
           <span className="text-xs font-medium uppercase tracking-wide text-muted-foreground">
-            Arrival ladder · {win} min · now at bottom
+            Arrival ladder · {win} min · {flow.aar != null ? "metered STA" : "ETA"} · now
+            at bottom
           </span>
           <div className="flex gap-1">
             <Button
@@ -476,7 +518,7 @@ function LadderView({ flow }: { flow: Flow }) {
                   >
                     <span className="font-mono font-medium">{f.callsign}</span>
                     <span className="font-mono text-muted-foreground">
-                      {hhmmZulu(f.eta)}
+                      {hhmmZulu(timeOf(f))}
                     </span>
                     {f.gate && (
                       <span className="font-mono text-muted-foreground/80">
