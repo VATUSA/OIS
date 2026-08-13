@@ -8,6 +8,8 @@ export type CreateTmi = components["schemas"]["CreateTmiRequest"];
 export type Program = components["schemas"]["ProgramBody"];
 export type GateRule = components["schemas"]["GateRule"];
 export type UpsertProgram = components["schemas"]["UpsertProgramRequest"];
+export type GroundStop = components["schemas"]["GroundStopBody"];
+export type CreateGroundStop = components["schemas"]["CreateGroundStopRequest"];
 
 export function useTmis() {
   return useQuery({
@@ -103,5 +105,43 @@ export function useDeleteProgram() {
       if (error) throw new Error("delete failed");
     },
     onSuccess: () => queryClient.invalidateQueries({ queryKey: ["tmu-programs"] }),
+  });
+}
+
+// --- ground stops ---
+
+export function useGroundStops() {
+  return useQuery({
+    queryKey: ["ground-stops"],
+    queryFn: async () => {
+      const { data, error } = await ois.GET("/api/v1/tmu/ground-stops");
+      if (error || !data) throw new Error("failed to load ground stops");
+      return data;
+    },
+  });
+}
+
+export function useCreateGroundStop() {
+  const queryClient = useQueryClient();
+  return useMutation({
+    mutationFn: async (body: CreateGroundStop) => {
+      const { data, error } = await ois.POST("/api/v1/tmu/ground-stops", { body });
+      if (error || !data) throw new Error("create failed");
+      return data;
+    },
+    onSuccess: () => queryClient.invalidateQueries({ queryKey: ["ground-stops"] }),
+  });
+}
+
+export function useDeleteGroundStop() {
+  const queryClient = useQueryClient();
+  return useMutation({
+    mutationFn: async (id: string) => {
+      const { error } = await ois.DELETE("/api/v1/tmu/ground-stops/{id}", {
+        params: { path: { id } },
+      });
+      if (error) throw new Error("delete failed");
+    },
+    onSuccess: () => queryClient.invalidateQueries({ queryKey: ["ground-stops"] }),
   });
 }
