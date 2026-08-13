@@ -177,6 +177,24 @@ pub fn route_path(
     (path.len() >= 2).then_some(path)
 }
 
+/// The full filed route resolved to lat/lon anchors (departure → fixes → arrival), for
+/// plotting an aircraft's track on the map.
+pub fn full_route(
+    nav: &NavData,
+    airports: &AirportDb,
+    dep: &str,
+    arr: &str,
+    route: &str,
+) -> Vec<[f64; 2]> {
+    route_anchors(
+        nav,
+        airports,
+        &dep.to_ascii_uppercase(),
+        &arr.to_ascii_uppercase(),
+        route,
+    )
+}
+
 /// Where a pre-resolved `path` crosses the FCA line (airborne crossings must be ahead).
 pub fn crosses(
     path: &[[f64; 2]],

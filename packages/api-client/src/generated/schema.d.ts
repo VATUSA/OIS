@@ -452,6 +452,22 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/v1/flow/aircraft/{callsign}/route": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get: operations["aircraft_route"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/v1/flow/counts": {
         parameters: {
             query?: never;
@@ -869,6 +885,12 @@ export interface components {
             /** @description program | restriction | ground_stop */
             kind: string;
             payload: Record<string, never>;
+        };
+        /** @description An aircraft's filed route resolved to lat/lon anchors, for plotting on the map. */
+        AircraftRoute: {
+            callsign: string;
+            /** @description Route anchors as `[lat, lon]` pairs. */
+            points: number[][];
         };
         /** @description A planned per-airport arrival/departure rate for an event. */
         AirportRateBody: {
@@ -2720,6 +2742,40 @@ export interface operations {
                 };
             };
             401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+        };
+    };
+    aircraft_route: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /** @description Aircraft callsign */
+                callsign: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["AircraftRoute"];
+                };
+            };
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            404: {
                 headers: {
                     [name: string]: unknown;
                 };

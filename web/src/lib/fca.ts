@@ -75,6 +75,23 @@ export function useDeleteFca() {
   });
 }
 
+/** An aircraft's filed route (lat/lon anchors) — fetched on demand when clicked. */
+export function useAircraftRoute(callsign: string | null) {
+  return useQuery({
+    queryKey: ["aircraft-route", callsign],
+    queryFn: async () => {
+      const { data, error } = await ois.GET(
+        "/api/v1/flow/aircraft/{callsign}/route",
+        { params: { path: { callsign: callsign! } } },
+      );
+      if (error || !data) throw new Error("failed to load route");
+      return data;
+    },
+    enabled: !!callsign,
+    staleTime: 30_000,
+  });
+}
+
 /** Matched-aircraft counts per FCA (all FCAs), refreshed every 15s. */
 export function useFcaCounts() {
   return useQuery({

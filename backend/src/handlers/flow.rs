@@ -18,7 +18,8 @@ use crate::{
     errors::ApiError,
     feed::{airports::AirportDb, fca, nav::NavData, vatsim::FlightPlan, vatsim::VatsimData},
     models::{
-        FcaBody, FcaFlight, ReleaseRequest, ReorderRequest, TrafficAircraft, UpsertFcaRequest,
+        AircraftRoute, FcaBody, FcaFlight, ReleaseRequest, ReorderRequest, TrafficAircraft,
+        UpsertFcaRequest,
     },
     repos::flow as flow_repo,
     state::AppState,
@@ -253,6 +254,51 @@ pub async fn fca_counts(
         }
     }
     Ok(Json(counts))
+}
+
+#[utoipa::path(
+    get,
+    path = "/api/v1/flow/aircraft/{callsign}/route",
+    tag = "flow",
+    params(("callsign" = String, Path, description = "Aircraft callsign")),
+    responses((status = 200, body = AircraftRoute), (status = 401), (status = 404))
+)]
+pub async fn aircraft_route(
+    State(state): State<AppState>,
+    _permission: RequirePermission<FlowFcaRead>,
+    Path(callsign): Path<String>,
+) -> Result<Json<AircraftRoute>, ApiError> {
+    let cs = callsign.to_ascii_uppercase();
+    let guard = state.feed.read().await;
+    let snap = guard
+        .snapshot
+        .as_ref()
+        .ok_or(ApiError::ServiceUnavailable)?;
+    let fp = snap
+        .data
+        .pilots
+        .iter()
+        .find(|p| p.callsign.eq_ignore_ascii_case(&cs))
+        .and_then(|p| p.flight_plan.as_ref())
+        .or_else(|| {
+            snap.data
+                .prefiles
+                .iter()
+                .find(|pf| pf.callsign.eq_ignore_ascii_case(&cs))
+                .and_then(|pf| pf.flight_plan.as_ref())
+        })
+        .ok_or(ApiError::NotFound)?;
+    let points = fca::full_route(
+        state.nav.as_ref(),
+        &guard.airports,
+        &fp.departure,
+        &fp.arrival,
+        &fp.route,
+    );
+    Ok(Json(AircraftRoute {
+        callsign: cs,
+        points,
+    }))
 }
 
 #[utoipa::path(
