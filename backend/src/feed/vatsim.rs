@@ -59,6 +59,8 @@ pub struct FlightPlan {
     #[serde(default)]
     pub flight_rules: String,
     #[serde(default)]
+    pub route: String,
+    #[serde(default)]
     pub cruise_tas: String,
     #[serde(default)]
     pub deptime: String,
