@@ -292,6 +292,38 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/v1/events/{id}/staffing": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get: operations["list_event_staffing"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/events/{id}/staffing/{facility}": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put: operations["upsert_event_staffing"];
+        post?: never;
+        delete: operations["delete_event_staffing"];
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/v1/facilities": {
         parameters: {
             query?: never;
@@ -1001,6 +1033,21 @@ export interface components {
         SetServiceAccountRolesRequest: {
             role_names: string[];
         };
+        /** @description One facility's ACE staffing request for an event (positions wanted vs signed up). */
+        StaffingRequestBody: {
+            /** @description ARTCC id (e.g. ZTL). */
+            facility: string;
+            notes: string;
+            /** Format: int32 */
+            positions_filled: number;
+            /** Format: int32 */
+            positions_requested: number;
+            /** @description open | met | closed */
+            status: string;
+            /** Format: date-time */
+            updated_at: string;
+            updated_by?: string | null;
+        };
         /** @description A departure currently being timed at a field. */
         TaxiActive: {
             /** Format: int64 */
@@ -1097,6 +1144,15 @@ export interface components {
             mit?: number;
             /** Format: int32 */
             trail?: number;
+        };
+        UpsertStaffingRequest: {
+            notes?: string | null;
+            /** Format: int32 */
+            positions_filled: number;
+            /** Format: int32 */
+            positions_requested: number;
+            /** @description open | met | closed */
+            status: string;
         };
         /**
          * @description A target user's editable access: direct permission grants + role assignments,
@@ -1881,6 +1937,114 @@ export interface operations {
                 content?: never;
             };
             403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+        };
+    };
+    list_event_staffing: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /** @description VATUSA event id */
+                id: number;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["StaffingRequestBody"][];
+                };
+            };
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+        };
+    };
+    upsert_event_staffing: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /** @description VATUSA event id */
+                id: number;
+                /** @description ARTCC id */
+                facility: string;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["UpsertStaffingRequest"];
+            };
+        };
+        responses: {
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["StaffingRequestBody"];
+                };
+            };
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+        };
+    };
+    delete_event_staffing: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /** @description VATUSA event id */
+                id: number;
+                /** @description ARTCC id */
+                facility: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            204: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            401: {
                 headers: {
                     [name: string]: unknown;
                 };
