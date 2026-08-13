@@ -85,7 +85,8 @@ export function Navbar() {
           <Link to="/" activeOptions={{ exact: true }} className={linkClass}>
             Dashboard
           </Link>
-          {hasPermission(me, "tmu.tmi.read") && (
+          {(hasPermission(me, "tmu.program.read") ||
+            hasPermission(me, "tmu.tmi.read")) && (
             <Link to="/tmu" className={linkClass}>
               TMU
             </Link>

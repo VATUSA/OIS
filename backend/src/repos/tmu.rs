@@ -4,7 +4,9 @@ use sqlx::PgPool;
 
 use crate::{
     errors::ApiError,
-    models::{CreateTmiRequest, TmiBody, UpdateTmiRequest},
+    models::{
+        CreateTmiRequest, GateRule, ProgramBody, TmiBody, UpdateTmiRequest, UpsertProgramRequest,
+    },
 };
 
 const SELECT: &str = "select t.id, t.requesting, t.providing, t.restriction, \
@@ -105,6 +107,70 @@ pub async fn cancel_tmi(pool: &PgPool, id: &str) -> Result<bool, ApiError> {
 pub async fn delete_tmi(pool: &PgPool, id: &str) -> Result<bool, ApiError> {
     let result = sqlx::query("delete from tmu.tmis where id = $1")
         .bind(id)
+        .execute(pool)
+        .await
+        .map_err(|_| ApiError::Internal)?;
+    Ok(result.rows_affected() > 0)
+}
+
+// --- rate programs ---
+
+const PROGRAM_SELECT: &str = "select p.icao, p.aar, p.trail, p.mit, p.gates, \
+    p.exclude_wake, p.exclude_types, p.jets_only, p.updated_at, \
+    u.display_name as updated_by \
+    from tmu.programs p left join identity.users u on u.id = p.updated_by";
+
+pub async fn list_programs(pool: &PgPool) -> Result<Vec<ProgramBody>, ApiError> {
+    sqlx::query_as::<_, ProgramBody>(&format!("{PROGRAM_SELECT} order by p.icao"))
+        .fetch_all(pool)
+        .await
+        .map_err(|_| ApiError::Internal)
+}
+
+pub async fn get_program(pool: &PgPool, icao: &str) -> Result<Option<ProgramBody>, ApiError> {
+    sqlx::query_as::<_, ProgramBody>(&format!("{PROGRAM_SELECT} where p.icao = $1"))
+        .bind(icao)
+        .fetch_optional(pool)
+        .await
+        .map_err(|_| ApiError::Internal)
+}
+
+/// Creates or replaces the program for an airport (vatflow "SET PROGRAM").
+pub async fn upsert_program(
+    pool: &PgPool,
+    icao: &str,
+    req: &UpsertProgramRequest,
+    gates: &[GateRule],
+    actor: &str,
+) -> Result<(), ApiError> {
+    sqlx::query(
+        "insert into tmu.programs \
+         (icao, aar, trail, mit, gates, exclude_wake, exclude_types, jets_only, created_by, updated_by) \
+         values ($1, $2, $3, $4, $5, $6, $7, $8, $9, $9) \
+         on conflict (icao) do update set \
+            aar = excluded.aar, trail = excluded.trail, mit = excluded.mit, \
+            gates = excluded.gates, exclude_wake = excluded.exclude_wake, \
+            exclude_types = excluded.exclude_types, jets_only = excluded.jets_only, \
+            updated_by = excluded.updated_by",
+    )
+    .bind(icao)
+    .bind(req.aar)
+    .bind(req.trail)
+    .bind(req.mit)
+    .bind(sqlx::types::Json(gates))
+    .bind(&req.exclude_wake)
+    .bind(&req.exclude_types)
+    .bind(req.jets_only)
+    .bind(actor)
+    .execute(pool)
+    .await
+    .map_err(|_| ApiError::Internal)?;
+    Ok(())
+}
+
+pub async fn delete_program(pool: &PgPool, icao: &str) -> Result<bool, ApiError> {
+    let result = sqlx::query("delete from tmu.programs where icao = $1")
+        .bind(icao)
         .execute(pool)
         .await
         .map_err(|_| ApiError::Internal)?;

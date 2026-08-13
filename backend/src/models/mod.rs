@@ -169,6 +169,58 @@ pub struct UpdateTmiRequest {
     pub stop_time: Option<DateTime<Utc>>,
 }
 
+// --- TMU rate programs ---
+
+/// One per-gate restriction inside a program: an arrival fix/STAR with its own spacing.
+#[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
+pub struct GateRule {
+    /// Arrival fix / STAR name (uppercase alphanumeric).
+    pub name: String,
+    /// Minutes-in-trail for this gate (0 = use MIT or airport default).
+    #[serde(default)]
+    pub trail: i32,
+    /// Miles-in-trail for this gate (0 = unused; overrides `trail` when > 0).
+    #[serde(default)]
+    pub mit: i32,
+}
+
+/// An airport rate program (vatflow "TMU tab"). Keyed by ICAO.
+#[derive(Debug, Serialize, ToSchema, sqlx::FromRow)]
+pub struct ProgramBody {
+    pub icao: String,
+    pub aar: i32,
+    /// Airport-wide minutes-in-trail default.
+    pub trail: i32,
+    /// Airport-wide miles-in-trail (overrides `trail` when > 0).
+    pub mit: i32,
+    #[schema(value_type = Vec<GateRule>)]
+    pub gates: sqlx::types::Json<Vec<GateRule>>,
+    pub exclude_wake: Vec<String>,
+    pub exclude_types: Vec<String>,
+    pub jets_only: bool,
+    pub updated_at: DateTime<Utc>,
+    /// Display name of whoever last edited the program.
+    pub updated_by: Option<String>,
+}
+
+/// Upsert a program (`PUT /tmu/programs/{icao}`) — the full normalized program body.
+#[derive(Debug, Deserialize, ToSchema)]
+pub struct UpsertProgramRequest {
+    pub aar: i32,
+    #[serde(default)]
+    pub trail: i32,
+    #[serde(default)]
+    pub mit: i32,
+    #[serde(default)]
+    pub gates: Vec<GateRule>,
+    #[serde(default)]
+    pub exclude_wake: Vec<String>,
+    #[serde(default)]
+    pub exclude_types: Vec<String>,
+    #[serde(default)]
+    pub jets_only: bool,
+}
+
 // --- service accounts ---
 
 #[derive(Debug, Deserialize, ToSchema)]

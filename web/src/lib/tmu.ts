@@ -5,6 +5,9 @@ import {ois} from "./api";
 
 export type Tmi = components["schemas"]["TmiBody"];
 export type CreateTmi = components["schemas"]["CreateTmiRequest"];
+export type Program = components["schemas"]["ProgramBody"];
+export type GateRule = components["schemas"]["GateRule"];
+export type UpsertProgram = components["schemas"]["UpsertProgramRequest"];
 
 export function useTmis() {
   return useQuery({
@@ -59,5 +62,46 @@ export function useDeleteTmi() {
       if (error) throw new Error("delete failed");
     },
     onSuccess: () => queryClient.invalidateQueries({ queryKey: ["tmis"] }),
+  });
+}
+
+// --- rate programs ---
+
+export function usePrograms() {
+  return useQuery({
+    queryKey: ["tmu-programs"],
+    queryFn: async () => {
+      const { data, error } = await ois.GET("/api/v1/tmu/programs");
+      if (error || !data) throw new Error("failed to load programs");
+      return data;
+    },
+  });
+}
+
+export function useUpsertProgram() {
+  const queryClient = useQueryClient();
+  return useMutation({
+    mutationFn: async ({ icao, body }: { icao: string; body: UpsertProgram }) => {
+      const { data, error } = await ois.PUT("/api/v1/tmu/programs/{icao}", {
+        params: { path: { icao } },
+        body,
+      });
+      if (error || !data) throw new Error("save failed");
+      return data;
+    },
+    onSuccess: () => queryClient.invalidateQueries({ queryKey: ["tmu-programs"] }),
+  });
+}
+
+export function useDeleteProgram() {
+  const queryClient = useQueryClient();
+  return useMutation({
+    mutationFn: async (icao: string) => {
+      const { error } = await ois.DELETE("/api/v1/tmu/programs/{icao}", {
+        params: { path: { icao } },
+      });
+      if (error) throw new Error("delete failed");
+    },
+    onSuccess: () => queryClient.invalidateQueries({ queryKey: ["tmu-programs"] }),
   });
 }
