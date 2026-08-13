@@ -8,6 +8,7 @@ pub mod facilities;
 pub mod fca;
 pub mod flow;
 pub mod nav;
+pub mod nav_source;
 pub mod taxi;
 pub mod vatsim;
 

@@ -113,21 +113,39 @@ pub struct NavData {
 }
 
 impl NavData {
-    /// Parse the bundled nav JSON (embedded at compile time).
+    /// Parse the bundled nav JSON (embedded at compile time). Used to seed the in-memory
+    /// database at boot; the refresh job later hot-swaps in freshly fetched data.
     pub fn load() -> Self {
-        let navaids: HashMap<String, CoordList> =
-            serde_json::from_str(include_str!("../../data/nav/navaids.json")).unwrap_or_default();
-        let fixes: HashMap<String, CoordList> =
-            serde_json::from_str(include_str!("../../data/nav/fixes.json")).unwrap_or_default();
+        Self::from_json(
+            include_str!("../../data/nav/navaids.json"),
+            include_str!("../../data/nav/fixes.json"),
+            include_str!("../../data/nav/airways.json"),
+            include_str!("../../data/nav/procedures.json"),
+            include_str!("../../data/nav/preferred.json"),
+            include_str!("../../data/nav/meta.json"),
+        )
+    }
+
+    /// Build a [`NavData`] from the six nav JSON blobs (bundled schema). Both the
+    /// compile-time bundle and the runtime fetcher (which re-serializes fetched data into
+    /// this same schema) go through here, so indexing/expansion behaviour is identical.
+    pub fn from_json(
+        navaids: &str,
+        fixes: &str,
+        airways: &str,
+        procedures: &str,
+        preferred: &str,
+        meta: &str,
+    ) -> Self {
+        let navaids: HashMap<String, CoordList> = serde_json::from_str(navaids).unwrap_or_default();
+        let fixes: HashMap<String, CoordList> = serde_json::from_str(fixes).unwrap_or_default();
         let raw_airways: HashMap<String, RawAirway> =
-            serde_json::from_str(include_str!("../../data/nav/airways.json")).unwrap_or_default();
+            serde_json::from_str(airways).unwrap_or_default();
         let raw_procs: HashMap<String, RawProc> =
-            serde_json::from_str(include_str!("../../data/nav/procedures.json"))
-                .unwrap_or_default();
+            serde_json::from_str(procedures).unwrap_or_default();
         let preferred: HashMap<String, String> =
-            serde_json::from_str(include_str!("../../data/nav/preferred.json")).unwrap_or_default();
-        let meta: RawMeta =
-            serde_json::from_str(include_str!("../../data/nav/meta.json")).unwrap_or_default();
+            serde_json::from_str(preferred).unwrap_or_default();
+        let meta: RawMeta = serde_json::from_str(meta).unwrap_or_default();
 
         let airways = raw_airways
             .into_iter()

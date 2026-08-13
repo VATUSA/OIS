@@ -34,3 +34,8 @@ utoipa-swagger-ui.workspace = true
 
 dotenvy.workspace = true
 reqwest.workspace = true
+
+# --- nav data (runtime NASR fetch + hot-swap) ---
+flate2 = "1"
+zip = { version = "3", default-features = false, features = ["deflate"] }
+arc-swap = "1"
