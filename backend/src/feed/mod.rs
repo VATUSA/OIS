@@ -5,7 +5,9 @@
 pub mod airports;
 pub mod events;
 pub mod facilities;
+pub mod fca;
 pub mod flow;
+pub mod nav;
 pub mod taxi;
 pub mod vatsim;
 

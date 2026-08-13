@@ -5,6 +5,7 @@ use axum::{
     extract::{Extension, Path, State},
     http::StatusCode,
 };
+use chrono::{DateTime, Duration, Utc};
 
 use crate::{
     auth::{
@@ -13,10 +14,69 @@ use crate::{
         require_permission::RequirePermission,
     },
     errors::ApiError,
-    models::{FcaBody, TrafficAircraft, UpsertFcaRequest},
+    feed::{fca, vatsim::FlightPlan},
+    models::{FcaBody, FcaFlight, TrafficAircraft, UpsertFcaRequest},
     repos::flow as flow_repo,
     state::AppState,
 };
+
+/// Airport-code match, tolerant of a leading `K` (KJFK ~ JFK).
+fn airport_match(filter: &str, code: &str) -> bool {
+    let (f, c) = (filter.to_ascii_uppercase(), code.to_ascii_uppercase());
+    f == c || c.strip_prefix('K') == Some(f.as_str()) || f.strip_prefix('K') == Some(c.as_str())
+}
+
+/// Whether the filed route mentions `fix` as a token (revision digit tolerant).
+fn route_has_fix(route: &str, fix: &str) -> bool {
+    let fix = fix.to_ascii_uppercase();
+    route.split_whitespace().any(|tok| {
+        let t = tok.split('/').next().unwrap_or("").to_ascii_uppercase();
+        t == fix || t.trim_end_matches(|c: char| c.is_ascii_digit()) == fix
+    })
+}
+
+/// Membership filters (dest / origin / fix / altitude). Altitude is checked only for
+/// airborne aircraft (current alt); scope (ARTCC polygon) is not yet enforced.
+fn passes_filters(fca: &FcaBody, fp: &FlightPlan, alt: i64, airborne: bool) -> bool {
+    if !fca.dests.is_empty() && !fca.dests.iter().any(|d| airport_match(d, &fp.arrival)) {
+        return false;
+    }
+    if !fca.origins.is_empty() && !fca.origins.iter().any(|o| airport_match(o, &fp.departure)) {
+        return false;
+    }
+    if !fca.fixes.is_empty() && !fca.fixes.iter().any(|f| route_has_fix(&fp.route, f)) {
+        return false;
+    }
+    if airborne {
+        if let Some(min) = fca.min_fl {
+            if alt < min as i64 * 100 {
+                return false;
+            }
+        }
+        if let Some(max) = fca.max_fl {
+            if alt > max as i64 * 100 {
+                return false;
+            }
+        }
+    }
+    true
+}
+
+fn eta_to_crossing(
+    airborne: bool,
+    along_nm: f64,
+    gs: i64,
+    cruise_tas: &str,
+    now: DateTime<Utc>,
+) -> Option<DateTime<Utc>> {
+    let minutes = if airborne {
+        along_nm / (gs.max(100) as f64) * 60.0
+    } else {
+        let tas = cruise_tas.parse::<f64>().unwrap_or(0.0).max(120.0);
+        along_nm / tas * 60.0 + 12.0
+    };
+    Some(now + Duration::seconds((minutes * 60.0) as i64))
+}
 
 fn validate_fca(req: &UpsertFcaRequest) -> Result<(), ApiError> {
     if req.name.trim().is_empty() || req.points.len() < 2 {
@@ -151,4 +211,119 @@ pub async fn list_traffic(
         })
         .unwrap_or_default();
     Json(aircraft)
+}
+
+#[utoipa::path(
+    get,
+    path = "/api/v1/flow/fcas/{id}/traffic",
+    tag = "flow",
+    params(("id" = String, Path, description = "FCA id")),
+    responses((status = 200, body = Vec<FcaFlight>), (status = 401), (status = 404))
+)]
+pub async fn fca_traffic(
+    State(state): State<AppState>,
+    _permission: RequirePermission<FlowFcaRead>,
+    Path(id): Path<String>,
+) -> Result<Json<Vec<FcaFlight>>, ApiError> {
+    let pool = state.db.as_ref().ok_or(ApiError::ServiceUnavailable)?;
+    let fca = flow_repo::get_fca(pool, &id)
+        .await?
+        .ok_or(ApiError::NotFound)?;
+    let pts = fca.points.0.clone();
+    if pts.len() < 2 {
+        return Ok(Json(Vec::new()));
+    }
+
+    let now = Utc::now();
+    let guard = state.feed.read().await;
+    let Some(snap) = guard.snapshot.as_ref() else {
+        return Ok(Json(Vec::new()));
+    };
+    let airports = &guard.airports;
+    let nav = state.nav.as_ref();
+    let mut out: Vec<FcaFlight> = Vec::new();
+
+    // Connected pilots — airborne or on the ground.
+    for p in &snap.data.pilots {
+        let Some(fp) = &p.flight_plan else { continue };
+        let airborne = p.groundspeed >= 50;
+        if !passes_filters(&fca, fp, p.altitude, airborne) {
+            continue;
+        }
+        let Some(cross) = fca::crossing_for(
+            &pts,
+            nav,
+            airports,
+            &fp.departure,
+            &fp.arrival,
+            &fp.route,
+            p.latitude,
+            p.longitude,
+            p.heading,
+            p.groundspeed,
+        ) else {
+            continue;
+        };
+        out.push(FcaFlight {
+            callsign: p.callsign.clone(),
+            dep: fp.departure.clone(),
+            arr: fp.arrival.clone(),
+            aircraft_type: fp.aircraft_short.clone(),
+            status: if airborne { "airborne" } else { "ground" }.to_string(),
+            lat: p.latitude,
+            lon: p.longitude,
+            cross_lat: cross.lat,
+            cross_lon: cross.lon,
+            distance_nm: cross.along_nm.round() as i64,
+            eta: eta_to_crossing(airborne, cross.along_nm, p.groundspeed, &fp.cruise_tas, now),
+            groundspeed: p.groundspeed,
+            altitude: p.altitude,
+            heading: p.heading,
+        });
+    }
+
+    // Prefiles — not yet connected; treated as proposed departures from their field.
+    for pf in &snap.data.prefiles {
+        let Some(fp) = &pf.flight_plan else { continue };
+        if !passes_filters(&fca, fp, 0, false) {
+            continue;
+        }
+        let Some(cross) = fca::crossing_for(
+            &pts,
+            nav,
+            airports,
+            &fp.departure,
+            &fp.arrival,
+            &fp.route,
+            0.0,
+            0.0,
+            0,
+            0,
+        ) else {
+            continue;
+        };
+        let (dep_lat, dep_lon) = airports
+            .get(&fp.departure.to_ascii_uppercase())
+            .copied()
+            .unwrap_or((0.0, 0.0));
+        out.push(FcaFlight {
+            callsign: pf.callsign.clone(),
+            dep: fp.departure.clone(),
+            arr: fp.arrival.clone(),
+            aircraft_type: fp.aircraft_short.clone(),
+            status: "proposed".to_string(),
+            lat: dep_lat,
+            lon: dep_lon,
+            cross_lat: cross.lat,
+            cross_lon: cross.lon,
+            distance_nm: cross.along_nm.round() as i64,
+            eta: eta_to_crossing(false, cross.along_nm, 0, &fp.cruise_tas, now),
+            groundspeed: 0,
+            altitude: 0,
+            heading: 0,
+        });
+    }
+
+    out.sort_by_key(|f| f.eta);
+    Ok(Json(out))
 }

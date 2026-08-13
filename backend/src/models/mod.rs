@@ -461,6 +461,28 @@ pub struct UpsertFcaRequest {
     pub enabled: Option<bool>,
 }
 
+/// An aircraft whose filed route crosses an FCA, with its ETA to the crossing.
+#[derive(Debug, Serialize, ToSchema)]
+pub struct FcaFlight {
+    pub callsign: String,
+    pub dep: String,
+    pub arr: String,
+    pub aircraft_type: String,
+    /// airborne | ground | proposed
+    pub status: String,
+    pub lat: f64,
+    pub lon: f64,
+    /// Where the route crosses the FCA line.
+    pub cross_lat: f64,
+    pub cross_lon: f64,
+    /// Distance along the (remaining) route to the crossing, nm.
+    pub distance_nm: i64,
+    pub eta: Option<DateTime<Utc>>,
+    pub groundspeed: i64,
+    pub altitude: i64,
+    pub heading: i64,
+}
+
 /// A lightweight live-traffic record for plotting on the FCA map.
 #[derive(Debug, Serialize, ToSchema)]
 pub struct TrafficAircraft {

@@ -6,7 +6,16 @@ import {Check, Pencil, Plus, Trash2, X} from "lucide-react";
 
 import {useMe} from "@/lib/auth";
 import {hasPermission} from "@/lib/permissions";
-import {type Fca, toUpsert, useCreateFca, useDeleteFca, useFcas, useTraffic, useUpdateFca,} from "@/lib/fca";
+import {
+  type Fca,
+  toUpsert,
+  useCreateFca,
+  useDeleteFca,
+  useFcas,
+  useFcaTraffic,
+  useTraffic,
+  useUpdateFca,
+} from "@/lib/fca";
 
 const FCA_COLORS = [
   "#f59e0b",
@@ -84,13 +93,17 @@ export function FcaPage() {
 
   const [draft, setDraft] = useState<Draft | null>(null);
   const [editingId, setEditingId] = useState<string | null>(null);
+  const [selectedId, setSelectedId] = useState<string | null>(null);
   const [filter, setFilter] = useState("");
+
+  const fcaTraffic = useFcaTraffic(draft ? null : selectedId);
 
   // --- Leaflet refs ---
   const containerRef = useRef<HTMLDivElement>(null);
   const mapRef = useRef<L.Map | null>(null);
   const aircraftLayer = useRef<L.LayerGroup | null>(null);
   const fcaLayer = useRef<L.LayerGroup | null>(null);
+  const matchedLayer = useRef<L.LayerGroup | null>(null);
   const draftLayer = useRef<L.LayerGroup | null>(null);
   const draftRef = useRef<Draft | null>(null);
   useEffect(() => {
@@ -114,6 +127,7 @@ export function FcaPage() {
     ).addTo(map);
     aircraftLayer.current = L.layerGroup().addTo(map);
     fcaLayer.current = L.layerGroup().addTo(map);
+    matchedLayer.current = L.layerGroup().addTo(map);
     draftLayer.current = L.layerGroup().addTo(map);
     map.on("click", (e: L.LeafletMouseEvent) => {
       const d = draftRef.current;
@@ -151,12 +165,18 @@ export function FcaPage() {
       if (fca.id === editingId) continue;
       const pts = fca.points as LatLng[];
       if (!pts || pts.length < 2) continue;
+      const selected = fca.id === selectedId;
       L.polyline(pts, {
         color: fca.color,
-        weight: fca.enabled ? 4 : 2,
+        weight: selected ? 6 : fca.enabled ? 4 : 2,
         opacity: fca.enabled ? 0.9 : 0.35,
         dashArray: fca.enabled ? undefined : "4 6",
-      }).addTo(layer);
+      })
+        .on("click", (e) => {
+          L.DomEvent.stop(e);
+          setSelectedId((cur) => (cur === fca.id ? null : fca.id));
+        })
+        .addTo(layer);
       const mid = pts[Math.floor(pts.length / 2)];
       L.marker(mid, {
         icon: labelIcon(fca.color, fca.name),
@@ -164,7 +184,35 @@ export function FcaPage() {
         keyboard: false,
       }).addTo(layer);
     }
-  }, [fcas.data, editingId]);
+  }, [fcas.data, editingId, selectedId]);
+
+  // Redraw matched (crossing) traffic for the selected FCA.
+  useEffect(() => {
+    const layer = matchedLayer.current;
+    if (!layer) return;
+    layer.clearLayers();
+    if (draft) return;
+    for (const f of fcaTraffic.data ?? []) {
+      L.circleMarker([f.cross_lat, f.cross_lon], {
+        radius: 3,
+        color: "#ffffff",
+        weight: 1,
+        fillColor: "#ffffff",
+        fillOpacity: 0.9,
+      }).addTo(layer);
+      if (f.lat !== 0 || f.lon !== 0) {
+        L.circleMarker([f.lat, f.lon], {
+          radius: 5,
+          color: "#22c55e",
+          weight: 2,
+          fillColor: "#22c55e",
+          fillOpacity: 0.45,
+        })
+          .bindTooltip(`${f.callsign} · ${f.dep}→${f.arr}`, { direction: "top" })
+          .addTo(layer);
+      }
+    }
+  }, [fcaTraffic.data, draft]);
 
   // Redraw the working draft (polyline + draggable vertex handles).
   useEffect(() => {
@@ -203,6 +251,7 @@ export function FcaPage() {
 
   const startNew = () => {
     const color = FCA_COLORS[(fcas.data?.length ?? 0) % FCA_COLORS.length];
+    setSelectedId(null);
     setEditingId(null);
     setDraft({
       name: `FCA ${(fcas.data?.length ?? 0) + 1}`,
@@ -216,6 +265,7 @@ export function FcaPage() {
   };
 
   const startEdit = (fca: Fca) => {
+    setSelectedId(null);
     setEditingId(fca.id);
     setDraft(draftFrom(fca));
   };
@@ -314,7 +364,10 @@ export function FcaPage() {
                   {shown.map((fca) => (
                     <li
                       key={fca.id}
-                      className="flex items-center gap-2 border-b px-3 py-2 text-sm"
+                      className={
+                        "flex items-center gap-2 border-b px-3 py-2 text-sm " +
+                        (fca.id === selectedId ? "bg-accent/40" : "")
+                      }
                     >
                       <button
                         type="button"
@@ -326,14 +379,25 @@ export function FcaPage() {
                           border: `2px solid ${fca.color}`,
                         }}
                       />
-                      <span className="flex-1 truncate font-mono">
+                      <button
+                        type="button"
+                        onClick={() =>
+                          setSelectedId((cur) => (cur === fca.id ? null : fca.id))
+                        }
+                        className="flex-1 truncate text-left font-mono"
+                      >
                         {fca.name}
                         {fca.artcc && (
                           <span className="ml-1.5 text-xs text-muted-foreground">
                             {fca.artcc}
                           </span>
                         )}
-                      </span>
+                      </button>
+                      {fca.id === selectedId && (
+                        <span className="shrink-0 rounded bg-primary/15 px-1.5 text-xs font-medium tabular-nums text-primary">
+                          {fcaTraffic.data?.length ?? "…"}
+                        </span>
+                      )}
                       {canEdit && (
                         <button
                           type="button"

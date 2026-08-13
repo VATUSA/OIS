@@ -7,6 +7,7 @@ import {ois} from "./api";
 export type Fca = components["schemas"]["FcaBody"];
 export type UpsertFca = components["schemas"]["UpsertFcaRequest"];
 export type TrafficAircraft = components["schemas"]["TrafficAircraft"];
+export type FcaFlight = components["schemas"]["FcaFlight"];
 
 /** All FCAs (shared across controllers). */
 export function useFcas() {
@@ -83,6 +84,22 @@ export function useTraffic() {
       if (error || !data) throw new Error("failed to load traffic");
       return data;
     },
+    refetchInterval: 15_000,
+  });
+}
+
+/** Aircraft whose filed route crosses one FCA, with ETA to the crossing. */
+export function useFcaTraffic(id: string | null) {
+  return useQuery({
+    queryKey: ["fca-traffic", id],
+    queryFn: async () => {
+      const { data, error } = await ois.GET("/api/v1/flow/fcas/{id}/traffic", {
+        params: { path: { id: id! } },
+      });
+      if (error || !data) throw new Error("failed to load FCA traffic");
+      return data;
+    },
+    enabled: !!id,
     refetchInterval: 15_000,
   });
 }
