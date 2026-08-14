@@ -117,6 +117,7 @@ use utoipa::OpenApi;
         crate::models::ReleaseRequest,
         crate::models::ReorderRequest,
         crate::models::AircraftRoute,
+        crate::models::RouteWaypoint,
         crate::models::TrafficAircraft,
         crate::handlers::feed::FeedStatusBody,
         crate::feed::flow::Flow,

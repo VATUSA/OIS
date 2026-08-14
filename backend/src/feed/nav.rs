@@ -37,7 +37,6 @@ pub enum Kind {
 /// One resolved point along a route.
 #[derive(Clone, Debug)]
 pub struct Anchor {
-    #[allow(dead_code)]
     pub name: String,
     pub ll: Ll,
     #[allow(dead_code)]

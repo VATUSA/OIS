@@ -904,6 +904,8 @@ export interface components {
             route: string;
             /** @description Filed tokens that couldn't be resolved to a coordinate. */
             unresolved: string[];
+            /** @description Named anchors along the full filed route, for on-map labels. */
+            waypoints: components["schemas"]["RouteWaypoint"][];
         };
         /** @description A planned per-airport arrival/departure rate for an event. */
         AirportRateBody: {
@@ -1137,6 +1139,11 @@ export interface components {
             lat: number;
             /** Format: double */
             lon: number;
+            /**
+             * @description The resolved route track (remaining route for airborne) as `[lat, lon]` pairs, for
+             *     drawing the aircraft's full path across the FCA.
+             */
+            path: number[][];
             /** @description True when this aircraft has a frozen (issued) CFR release. */
             released: boolean;
             /**
@@ -1322,6 +1329,14 @@ export interface components {
         /** @description Replace an FCA's manual crossing order (callsigns, in sequence). */
         ReorderRequest: {
             order: string[];
+        };
+        /** @description A named point along a resolved route. */
+        RouteWaypoint: {
+            /** Format: double */
+            lat: number;
+            /** Format: double */
+            lon: number;
+            name: string;
         };
         /** @description Direct grants + roles at one scope. `artcc_id = null` is national. */
         ScopeAccess: {

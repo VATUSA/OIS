@@ -478,6 +478,10 @@ pub struct FcaFlight {
     /// Where the route crosses the FCA line.
     pub cross_lat: f64,
     pub cross_lon: f64,
+    /// The resolved route track (remaining route for airborne) as `[lat, lon]` pairs, for
+    /// drawing the aircraft's full path across the FCA.
+    #[schema(value_type = Vec<Vec<f64>>)]
+    pub path: Vec<[f64; 2]>,
     /// Distance along the (remaining) route to the crossing, nm.
     pub distance_nm: i64,
     /// Unmetered ETA to the crossing.
@@ -526,8 +530,18 @@ pub struct AircraftRoute {
     pub points: Vec<[f64; 2]>,
     /// Filed tokens that couldn't be resolved to a coordinate.
     pub unresolved: Vec<String>,
+    /// Named anchors along the full filed route, for on-map labels.
+    pub waypoints: Vec<RouteWaypoint>,
     /// FAA NASR cycle date backing the resolution (e.g. `2026-07-09`).
     pub nav_cycle: String,
+}
+
+/// A named point along a resolved route.
+#[derive(Debug, Serialize, ToSchema)]
+pub struct RouteWaypoint {
+    pub name: String,
+    pub lat: f64,
+    pub lon: f64,
 }
 
 /// A lightweight live-traffic record for plotting on the FCA map.

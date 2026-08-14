@@ -36,19 +36,23 @@ fn route_anchors(
         .collect()
 }
 
-/// The full filed route as anchors + the tokens that couldn't be resolved.
-pub fn full_route_verbose(
+/// The full filed route as `(name, lat, lon)` anchors + the unresolved tokens. Anchors
+/// with an empty name (e.g. unnamed procedure legs) are dropped so callers can label them.
+pub fn full_route_named(
     nav: &NavData,
     airports: &AirportDb,
     dep: &str,
     arr: &str,
     route: &str,
-) -> (Vec<[f64; 2]>, Vec<String>) {
+) -> (Vec<(String, f64, f64)>, Vec<String>) {
     let res = nav.build_anchors(airports, dep, arr, route);
-    (
-        res.anchors.into_iter().map(|a| a.ll).collect(),
-        res.unresolved,
-    )
+    let waypoints = res
+        .anchors
+        .into_iter()
+        .filter(|a| !a.name.is_empty())
+        .map(|a| (a.name, a.ll[0], a.ll[1]))
+        .collect();
+    (waypoints, res.unresolved)
 }
 
 /// Trim anchors already behind an airborne aircraft; prepend its current position.

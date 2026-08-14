@@ -16,10 +16,13 @@ use crate::{
         require_permission::RequirePermission,
     },
     errors::ApiError,
-    feed::{airports::AirportDb, fca, nav::NavData, vatsim::FlightPlan, vatsim::VatsimData},
+    feed::{
+        airports::AirportDb, airspace::Boundaries, fca, nav::NavData, vatsim::FlightPlan,
+        vatsim::VatsimData,
+    },
     models::{
-        AircraftRoute, FcaBody, FcaFlight, ReleaseRequest, ReorderRequest, TrafficAircraft,
-        UpsertFcaRequest,
+        AircraftRoute, FcaBody, FcaFlight, ReleaseRequest, ReorderRequest, RouteWaypoint,
+        TrafficAircraft, UpsertFcaRequest,
     },
     repos::flow as flow_repo,
     state::AppState,
@@ -45,6 +48,15 @@ fn route_has_fix(route: &str, fix: &str) -> bool {
 
 /// Membership filters (dest / origin / fix / altitude). Altitude is checked only for
 /// airborne aircraft (current alt); scope (ARTCC polygon) is not yet enforced.
+/// Whether the FCA's crossing point falls within its scoped ARTCCs. An empty scope (or no
+/// boundary data) means no restriction.
+fn passes_scope(fca: &FcaBody, airspace: &Boundaries, lat: f64, lon: f64) -> bool {
+    if fca.scope.is_empty() || airspace.is_empty() {
+        return true;
+    }
+    fca.scope.iter().any(|z| airspace.contains(z, lat, lon))
+}
+
 fn passes_filters(fca: &FcaBody, fp: &FlightPlan, alt: i64, airborne: bool) -> bool {
     if !fca.dests.is_empty() && !fca.dests.iter().any(|d| airport_match(d, &fp.arrival)) {
         return false;
@@ -287,8 +299,8 @@ pub async fn aircraft_route(
         .find(|p| p.callsign.eq_ignore_ascii_case(&cs))
     {
         let fp = p.flight_plan.as_ref().ok_or(ApiError::NotFound)?;
-        let (_, unresolved) =
-            fca::full_route_verbose(nav, airports, &fp.departure, &fp.arrival, &fp.route);
+        let (named, unresolved) =
+            fca::full_route_named(nav, airports, &fp.departure, &fp.arrival, &fp.route);
         let points = fca::route_path(
             nav,
             airports,
@@ -311,6 +323,7 @@ pub async fn aircraft_route(
             route: fp.route.clone(),
             points,
             unresolved,
+            waypoints: to_waypoints(named),
             nav_cycle: nav.cycle().to_string(),
         }));
     }
@@ -323,8 +336,9 @@ pub async fn aircraft_route(
         .find(|pf| pf.callsign.eq_ignore_ascii_case(&cs))
     {
         let fp = pf.flight_plan.as_ref().ok_or(ApiError::NotFound)?;
-        let (points, unresolved) =
-            fca::full_route_verbose(nav, airports, &fp.departure, &fp.arrival, &fp.route);
+        let (named, unresolved) =
+            fca::full_route_named(nav, airports, &fp.departure, &fp.arrival, &fp.route);
+        let points = named.iter().map(|(_, lat, lon)| [*lat, *lon]).collect();
         return Ok(Json(AircraftRoute {
             callsign: cs,
             aircraft_type: fp.aircraft_short.clone(),
@@ -335,6 +349,7 @@ pub async fn aircraft_route(
             route: fp.route.clone(),
             points,
             unresolved,
+            waypoints: to_waypoints(named),
             nav_cycle: nav.cycle().to_string(),
         }));
     }
@@ -400,6 +415,14 @@ fn parse_hhmm_z(s: &str, now: DateTime<Utc>) -> Option<i64> {
     Some(t)
 }
 
+fn to_waypoints(named: Vec<(String, f64, f64)>) -> Vec<RouteWaypoint> {
+    named
+        .into_iter()
+        .map(|(name, lat, lon)| RouteWaypoint { name, lat, lon })
+        .collect()
+}
+
+#[allow(clippy::too_many_arguments)]
 fn fca_flight(
     callsign: &str,
     fp: &FlightPlan,
@@ -407,6 +430,7 @@ fn fca_flight(
     lat: f64,
     lon: f64,
     cross: &fca::FcaCrossing,
+    path: Vec<[f64; 2]>,
     eta: Option<DateTime<Utc>>,
     gs: i64,
     alt: i64,
@@ -423,6 +447,7 @@ fn fca_flight(
         lon,
         cross_lat: cross.lat,
         cross_lon: cross.lon,
+        path,
         distance_nm: cross.along_nm.round() as i64,
         eta,
         cross_time: None,
@@ -437,11 +462,13 @@ fn fca_flight(
 }
 
 /// Build the crossing candidates for an FCA from a live snapshot (no metering yet).
+#[allow(clippy::too_many_arguments)]
 fn build_candidates(
     fca: &FcaBody,
     data: &VatsimData,
     airports: &AirportDb,
     nav: &NavData,
+    airspace: &Boundaries,
     releases: &ReleaseMap,
     now: DateTime<Utc>,
 ) -> (Vec<FcaFlight>, Vec<fca::MeterInput>) {
@@ -455,8 +482,7 @@ fn build_candidates(
         if !passes_filters(fca, fp, p.altitude, airborne) {
             continue;
         }
-        let Some(cross) = fca::crossing_for(
-            &pts,
+        let Some(path) = fca::route_path(
             nav,
             airports,
             &fp.departure,
@@ -469,6 +495,13 @@ fn build_candidates(
         ) else {
             continue;
         };
+        let Some(cross) = fca::crosses(&path, &pts, airborne, p.latitude, p.longitude, p.heading)
+        else {
+            continue;
+        };
+        if !passes_scope(fca, airspace, cross.lat, cross.lon) {
+            continue;
+        }
         let eta = eta_to_crossing(airborne, cross.along_nm, p.groundspeed, &fp.cruise_tas, now);
         let tas = fp.cruise_tas.parse::<f64>().unwrap_or(0.0);
         let rel = releases.get(&p.callsign);
@@ -485,6 +518,7 @@ fn build_candidates(
             p.latitude,
             p.longitude,
             &cross,
+            path,
             eta,
             p.groundspeed,
             p.altitude,
@@ -498,8 +532,7 @@ fn build_candidates(
         if !passes_filters(fca, fp, 0, false) {
             continue;
         }
-        let Some(cross) = fca::crossing_for(
-            &pts,
+        let Some(path) = fca::route_path(
             nav,
             airports,
             &fp.departure,
@@ -512,6 +545,12 @@ fn build_candidates(
         ) else {
             continue;
         };
+        let Some(cross) = fca::crosses(&path, &pts, false, 0.0, 0.0, 0) else {
+            continue;
+        };
+        if !passes_scope(fca, airspace, cross.lat, cross.lon) {
+            continue;
+        }
         let (dep_lat, dep_lon) = airports
             .get(&fp.departure.to_ascii_uppercase())
             .copied()
@@ -531,6 +570,7 @@ fn build_candidates(
             dep_lat,
             dep_lon,
             &cross,
+            path,
             eta,
             0,
             0,
@@ -602,6 +642,7 @@ pub async fn fca_traffic(
                 &snap.data,
                 &guard.airports,
                 state.nav.load_full().as_ref(),
+                state.airspace.as_ref(),
                 &releases,
                 now,
             )
@@ -649,6 +690,7 @@ pub async fn mark_release(
                 &snap.data,
                 &guard.airports,
                 state.nav.load_full().as_ref(),
+                state.airspace.as_ref(),
                 &releases,
                 now,
             )
@@ -731,6 +773,7 @@ pub async fn clear_release(
                 &snap.data,
                 &guard.airports,
                 state.nav.load_full().as_ref(),
+                state.airspace.as_ref(),
                 &releases,
                 now,
             )
