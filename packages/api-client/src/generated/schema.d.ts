@@ -621,6 +621,27 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/v1/flow/runway/{icao}": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** The runway-balancer board for one airport (runway config + live assigned arrivals). */
+        get: operations["get_runway"];
+        /**
+         * Save the shared runway config (active ends, STAR rules, overrides, window) and return
+         *     the recomputed board.
+         */
+        put: operations["put_runway"];
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/v1/flow/traffic": {
         parameters: {
             query?: never;
@@ -1430,6 +1451,71 @@ export interface components {
             /** Format: double */
             lon: number;
             name: string;
+        };
+        /** @description One inbound arrival with its assigned runway. */
+        RunwayArrival: {
+            actype: string;
+            cs: string;
+            dep: string;
+            /** Format: int64 */
+            dist_nm: number;
+            /** Format: date-time */
+            eta: string;
+            /** @description Assigned runway id (null if no active runways). */
+            rwy?: string | null;
+            /** @description How the runway was chosen: `man` | `star` | `auto`. */
+            src: string;
+            /** @description Arrival STAR/gate (base name), if detected. */
+            star?: string | null;
+        };
+        /** @description The full runway-balancer board for one airport. */
+        RunwayBoard: {
+            arrivals: components["schemas"]["RunwayArrival"][];
+            /** @description Number of 10-min bins in the demand window. */
+            bins: number;
+            demand: components["schemas"]["RunwayDemand"][];
+            ends: components["schemas"]["RunwayEnd"][];
+            icao: string;
+            overrides: Record<string, never>;
+            /** @description `built-in` (dataset) or `none — add ends manually`. */
+            source: string;
+            star_rules: Record<string, never>;
+            /** Format: int64 */
+            window_min: number;
+        };
+        /** @description Saved runway configuration for an airport. */
+        RunwayConfigRequest: {
+            active_ends?: string[];
+            overrides?: Record<string, never>;
+            star_rules?: Record<string, never>;
+            /** Format: int32 */
+            window_min?: number | null;
+        };
+        /** @description Per-runway demand: count and level per 10-min bin. */
+        RunwayDemand: {
+            bins: number[];
+            id: string;
+            /** @description `green` | `yellow` | `red` per bin. */
+            levels: string[];
+        };
+        /** @description One landing/departure runway end. */
+        RunwayEnd: {
+            /** @description Selected as an active landing runway. */
+            active: boolean;
+            /**
+             * Format: int32
+             * @description True heading, degrees.
+             */
+            hdg: number;
+            /** @description e.g. `04L`. */
+            id: string;
+            /**
+             * Format: int32
+             * @description Length, ft.
+             */
+            len: number;
+            /** @description The runway pair this end belongs to, e.g. `04L/22R`. */
+            pair: string;
         };
         /** @description Direct grants + roles at one scope. `artcc_id = null` is national. */
         ScopeAccess: {
@@ -3288,6 +3374,72 @@ export interface operations {
                 };
                 content: {
                     "application/json": components["schemas"]["CoverageReport"];
+                };
+            };
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            503: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+        };
+    };
+    get_runway: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /** @description Airport ICAO */
+                icao: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["RunwayBoard"];
+                };
+            };
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+        };
+    };
+    put_runway: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /** @description Airport ICAO */
+                icao: string;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["RunwayConfigRequest"];
+            };
+        };
+        responses: {
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["RunwayBoard"];
                 };
             };
             401: {

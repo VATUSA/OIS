@@ -58,3 +58,5 @@ permission!(
 permission!(FlowFcaRead, ["flow", "fca"], Read);
 permission!(FlowFcaUpdate, ["flow", "fca"], Update);
 permission!(FlowFcaDelete, ["flow", "fca"], Delete);
+permission!(FlowRunwayRead, ["flow", "runway"], Read);
+permission!(FlowRunwayUpdate, ["flow", "runway"], Update);

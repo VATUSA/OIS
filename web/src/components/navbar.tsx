@@ -22,6 +22,7 @@ import {
   Radar,
   Route,
   ShieldCheck,
+  Split,
   Waypoints,
 } from "lucide-react";
 
@@ -153,7 +154,8 @@ export function Navbar() {
   const canPrograms = hasPermission(me, "tmu.program.read");
   const canTmiRead = hasPermission(me, "tmu.tmi.read");
   const canFca = hasPermission(me, "flow.fca.read");
-  const canOps = canPrograms || canTmiRead || canFca;
+  const canRunway = hasPermission(me, "flow.runway.read");
+  const canOps = canPrograms || canTmiRead || canFca || canRunway;
   const canPlan = hasPermission(me, "events.plan.read");
 
   return (
@@ -215,6 +217,14 @@ export function Navbar() {
                   <Link to="/ops/fca">
                     <Waypoints />
                     FCA flow
+                  </Link>
+                </DropdownMenuItem>
+              )}
+              {canRunway && (
+                <DropdownMenuItem asChild>
+                  <Link to="/ops/runway">
+                    <Split />
+                    Runway balancer
                   </Link>
                 </DropdownMenuItem>
               )}

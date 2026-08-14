@@ -7,8 +7,8 @@ use crate::{
     auth::middleware::resolve_current_user,
     config::build_cors_layer,
     handlers::{
-        access, audit, auth, docs, events, facilities, feed, flow, health, service_accounts, tmu,
-        users,
+        access, audit, auth, docs, events, facilities, feed, flow, health, runway,
+        service_accounts, tmu, users,
     },
     state::AppState,
 };
@@ -139,6 +139,10 @@ pub fn build_router(state: AppState) -> Router {
         .route("/api/v1/flow/data-status", get(flow::data_status))
         .route("/api/v1/flow/data-refresh", post(flow::data_refresh))
         .route("/api/v1/flow/route-coverage", get(flow::route_coverage))
+        .route(
+            "/api/v1/flow/runway/{icao}",
+            get(runway::get_runway).put(runway::put_runway),
+        )
         // Live VATSIM feed
         .route("/api/v1/feed/status", get(feed::feed_status))
         .route("/api/v1/tmu/flow/{icao}", get(feed::airport_flow))
