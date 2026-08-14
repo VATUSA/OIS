@@ -6,7 +6,7 @@ use sqlx::PgPool;
 
 use crate::{errors::ApiError, models::GdpBody};
 
-const GDP_SELECT: &str = "select g.id, g.airport, g.aar, g.start_time, g.end_time, \
+const GDP_SELECT: &str = "select g.id, g.airport, g.aar, g.scope, g.start_time, g.end_time, \
     g.max_enroute_min, g.exempt_airborne, g.status, g.published_at, g.updated_at, \
     u.display_name as updated_by \
     from tmu.gdp g left join identity.users u on u.id = g.updated_by";
@@ -27,10 +27,12 @@ pub async fn get_gdp(pool: &PgPool, id: &str) -> Result<Option<GdpBody>, ApiErro
 }
 
 #[allow(clippy::too_many_arguments)]
+#[allow(clippy::too_many_arguments)]
 pub async fn create_gdp(
     pool: &PgPool,
     airport: &str,
     aar: i32,
+    scope: &str,
     start_time: &str,
     end_time: &str,
     max_enroute_min: Option<i32>,
@@ -39,12 +41,13 @@ pub async fn create_gdp(
 ) -> Result<String, ApiError> {
     sqlx::query_scalar::<_, String>(
         "insert into tmu.gdp \
-           (airport, aar, start_time, end_time, max_enroute_min, exempt_airborne, \
+           (airport, aar, scope, start_time, end_time, max_enroute_min, exempt_airborne, \
             created_by, updated_by) \
-         values ($1, $2, $3, $4, $5, $6, $7, $7) returning id",
+         values ($1, $2, $3, $4, $5, $6, $7, $8, $8) returning id",
     )
     .bind(airport)
     .bind(aar)
+    .bind(scope)
     .bind(start_time)
     .bind(end_time)
     .bind(max_enroute_min)

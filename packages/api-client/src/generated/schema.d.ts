@@ -1211,6 +1211,7 @@ export interface components {
             exempt_airborne?: boolean;
             /** Format: int32 */
             max_enroute_min?: number | null;
+            scope?: string | null;
             start_time: string;
         };
         CreateGroundStopRequest: {
@@ -1555,6 +1556,8 @@ export interface components {
             max_enroute_min?: number | null;
             /** @description True when control times are frozen (program published). */
             published: boolean;
+            /** @description Space-separated departure ARTCC codes in scope; empty = all departures. */
+            scope: string;
             start_time: string;
             stats: components["schemas"]["GdpStats"];
             status: string;
@@ -1582,6 +1585,8 @@ export interface components {
             max_enroute_min?: number | null;
             /** Format: date-time */
             published_at?: string | null;
+            /** @description Space-separated departure ARTCC codes in scope; empty = all departures. */
+            scope: string;
             /** @description HHMM Zulu program window start. */
             start_time: string;
             /** @description Lifecycle: draft | published | expired | cancelled. */

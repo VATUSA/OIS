@@ -264,6 +264,8 @@ pub struct GdpBody {
     pub airport: String,
     /// Airport Acceptance Rate (arrivals/hour) the program meters to.
     pub aar: i32,
+    /// Space-separated departure ARTCC codes in scope; empty = all departures.
+    pub scope: String,
     /// HHMM Zulu program window start.
     pub start_time: String,
     /// HHMM Zulu program window end.
@@ -285,6 +287,8 @@ pub struct CreateGdpRequest {
     pub aar: i32,
     pub start_time: String,
     pub end_time: String,
+    #[serde(default)]
+    pub scope: Option<String>,
     #[serde(default)]
     pub max_enroute_min: Option<i32>,
     #[serde(default = "default_true")]

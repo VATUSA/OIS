@@ -23,13 +23,16 @@ const RED_FACTOR: f64 = 1.25;
 /// Why an inbound was exempted from control.
 pub const EXEMPT_AIRBORNE: &str = "airborne";
 pub const EXEMPT_WINDOW: &str = "outside window";
-pub const EXEMPT_TIER: &str = "out of scope";
+pub const EXEMPT_SCOPE: &str = "out of scope";
+pub const EXEMPT_TIER: &str = "beyond tier";
 
 /// One inbound flight fed into RBS, projected from the live arrival flow.
 #[derive(Debug, Clone)]
 pub struct Inbound {
     pub cs: String,
     pub dep: String,
+    /// Departure ARTCC (center) that owns the origin field, if known — for scope filtering.
+    pub dep_artcc: Option<String>,
     /// `airborne` | `ground` | `proposed`.
     pub status: String,
     pub eta_ms: i64,
@@ -65,6 +68,7 @@ pub fn ration_by_schedule(
     window_start_ms: i64,
     window_end_ms: i64,
     exempt_airborne: bool,
+    scope: &[String],
     max_enroute_min: Option<i32>,
 ) -> Vec<Assignment> {
     let slot_ms = (3_600_000_f64 / aar.max(1) as f64) as i64; // spacing between arrival slots
@@ -77,10 +81,16 @@ pub fn ration_by_schedule(
         let enroute_ms = f.etd_ms.map(|etd| (f.eta_ms - etd).max(0));
         let enroute_min = enroute_ms.map(|ms| ms / 60_000);
 
+        let in_scope = scope.is_empty()
+            || f.dep_artcc
+                .as_deref()
+                .is_some_and(|a| scope.iter().any(|s| s == a));
         let exempt_reason = if exempt_airborne && f.status == "airborne" {
             Some(EXEMPT_AIRBORNE.to_string())
         } else if f.eta_ms < window_start_ms || f.eta_ms > window_end_ms {
             Some(EXEMPT_WINDOW.to_string())
+        } else if !in_scope {
+            Some(EXEMPT_SCOPE.to_string())
         } else if matches!((max_enroute_min, enroute_min), (Some(max), Some(er)) if er > max as i64)
         {
             Some(EXEMPT_TIER.to_string())
@@ -250,6 +260,8 @@ pub struct GdpBoard {
     pub id: String,
     pub airport: String,
     pub aar: i32,
+    /// Space-separated departure ARTCC codes in scope; empty = all departures.
+    pub scope: String,
     pub status: String,
     pub start_time: String,
     pub end_time: String,
@@ -275,6 +287,7 @@ mod tests {
         Inbound {
             cs: cs.into(),
             dep: "KXXX".into(),
+            dep_artcc: Some("ZAB".into()),
             status: "ground".into(),
             eta_ms,
             etd_ms: Some(etd_ms),
@@ -293,7 +306,7 @@ mod tests {
             ground("C", 0, -30 * MIN),
             ground("D", 0, -30 * MIN),
         ];
-        let out = ration_by_schedule(inbounds, 30, 0, HOUR, true, None);
+        let out = ration_by_schedule(inbounds, 30, 0, HOUR, true, &[], None);
         let ctas: Vec<i64> = out.iter().map(|a| a.cta_ms / MIN).collect();
         assert_eq!(ctas, vec![0, 2, 4, 6]); // 2-min spacing
         let delays: Vec<i64> = out.iter().map(|a| a.delay_min).collect();
@@ -309,7 +322,7 @@ mod tests {
             ground("Y", 0, -30 * MIN),                  // eta 0, enroute 30min
         ];
         // AAR 30 (2-min slots). Y lands at 0, X wants 10min and is free → no delay for X.
-        let out = ration_by_schedule(inbounds, 30, 0, HOUR, true, None);
+        let out = ration_by_schedule(inbounds, 30, 0, HOUR, true, &[], None);
         let x = out.iter().find(|a| a.cs == "X").unwrap();
         assert_eq!(x.delay_min, 0);
         assert_eq!(x.cta_ms, 10 * MIN);
@@ -321,11 +334,12 @@ mod tests {
         let inbounds = vec![Inbound {
             cs: "AIR1".into(),
             dep: "KYYY".into(),
+            dep_artcc: None,
             status: "airborne".into(),
             eta_ms: 20 * MIN,
             etd_ms: None,
         }];
-        let out = ration_by_schedule(inbounds, 30, 0, HOUR, true, None);
+        let out = ration_by_schedule(inbounds, 30, 0, HOUR, true, &[], None);
         let a = &out[0];
         assert!(!a.controlled);
         assert_eq!(a.exempt_reason.as_deref(), Some(EXEMPT_AIRBORNE));
@@ -340,12 +354,35 @@ mod tests {
             ground("LATE", 2 * HOUR, 90 * MIN), // ETA past the 1h window end
             ground("FAR", 30 * MIN, 30 * MIN - 90 * MIN), // enroute 90min > tier 60
         ];
-        let out = ration_by_schedule(inbounds, 30, 0, HOUR, true, Some(60));
+        let out = ration_by_schedule(inbounds, 30, 0, HOUR, true, &[], Some(60));
         let late = out.iter().find(|a| a.cs == "LATE").unwrap();
         assert_eq!(late.exempt_reason.as_deref(), Some(EXEMPT_WINDOW));
         let far = out.iter().find(|a| a.cs == "FAR").unwrap();
         assert_eq!(far.exempt_reason.as_deref(), Some(EXEMPT_TIER));
         assert!(out.iter().all(|a| !a.controlled));
+    }
+
+    #[test]
+    fn out_of_scope_artcc_is_exempt() {
+        // Scope = ZLA only. A ZAB-origin flight (the ground() default) is out of scope.
+        let scope = vec!["ZLA".to_string()];
+        let out = ration_by_schedule(
+            vec![ground("ZABGUY", 10 * MIN, 0)],
+            30,
+            0,
+            HOUR,
+            true,
+            &scope,
+            None,
+        );
+        assert_eq!(out[0].exempt_reason.as_deref(), Some(EXEMPT_SCOPE));
+        assert!(!out[0].controlled);
+
+        // In-scope flight is controlled.
+        let mut inb = ground("ZLAGUY", 10 * MIN, 0);
+        inb.dep_artcc = Some("ZLA".into());
+        let out2 = ration_by_schedule(vec![inb], 30, 0, HOUR, true, &scope, None);
+        assert!(out2[0].controlled);
     }
 
     #[test]
@@ -356,13 +393,14 @@ mod tests {
             Inbound {
                 cs: "AIR".into(),
                 dep: "KZZZ".into(),
+                dep_artcc: None,
                 status: "airborne".into(),
                 eta_ms: 0,
                 etd_ms: None,
             },
             ground("GND", 0, -30 * MIN),
         ];
-        let out = ration_by_schedule(inbounds, 30, 0, HOUR, true, None);
+        let out = ration_by_schedule(inbounds, 30, 0, HOUR, true, &[], None);
         let gnd = out.iter().find(|a| a.cs == "GND").unwrap();
         assert_eq!(gnd.cta_ms, 2 * MIN); // bumped one slot behind the exempt arrival
         assert_eq!(gnd.delay_min, 2);
@@ -376,7 +414,7 @@ mod tests {
             ground("B", 2 * MIN, 0),
             ground("C", 3 * MIN, 0),
         ];
-        let out = ration_by_schedule(inbounds, 4, 0, HOUR, true, None);
+        let out = ration_by_schedule(inbounds, 4, 0, HOUR, true, &[], None);
         let bins = demand_bins(&out, 0, HOUR, 4);
         assert_eq!(bins[0].cap, 1);
         assert!(bins[0].count >= 1);
@@ -415,7 +453,7 @@ mod tests {
             ground("B", 0, -30 * MIN),
             ground("C", 0, -30 * MIN),
         ];
-        let out = ration_by_schedule(inbounds, 30, 0, HOUR, true, None); // delays 0,2,4
+        let out = ration_by_schedule(inbounds, 30, 0, HOUR, true, &[], None); // delays 0,2,4
         let s = program_stats(&out);
         assert_eq!(s.controlled, 3);
         assert_eq!(s.exempt, 0);

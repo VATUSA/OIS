@@ -18,6 +18,7 @@ use crate::{
         require_permission::RequirePermission,
     },
     errors::ApiError,
+    feed::facilities,
     feed::flow,
     feed::gdp::{self, GdpBoard, GdpFlightView},
     models::{CreateGdpRequest, GdpBody},
@@ -50,6 +51,15 @@ fn norm_hhmm(raw: &str) -> Result<String, ApiError> {
     Ok(format!("{:02}{:02}", m / 60, m % 60))
 }
 
+/// Normalize a departure scope: uppercase ARTCC codes, single-spaced. Empty = all departures.
+fn normalize_scope(raw: Option<&str>) -> String {
+    raw.unwrap_or("")
+        .split_whitespace()
+        .map(|c| c.to_ascii_uppercase())
+        .collect::<Vec<_>>()
+        .join(" ")
+}
+
 /// Resolve the program's HHMM window to concrete timestamps: start = the occurrence of
 /// `start` nearest to `now` (±12h), end = the first occurrence of `end` strictly after start.
 fn resolve_window(now: DateTime<Utc>, start: &str, end: &str) -> Option<(i64, i64)> {
@@ -70,8 +80,8 @@ fn resolve_window(now: DateTime<Utc>, start: &str, end: &str) -> Option<(i64, i6
     Some((start_ts.timestamp_millis(), end_ts.timestamp_millis()))
 }
 
-/// Project the live feed into GDP inbounds for `icao` (raw classification + ETA + ETD, no
-/// metering). Airborne/ground/proposed only — already-arrived flights are dropped.
+/// Project the live feed into GDP inbounds for `icao` (raw classification + ETA + ETD +
+/// departure ARTCC, no metering). Airborne/ground/proposed only — arrived flights dropped.
 async fn live_inbounds(state: &AppState, icao: &str, now: DateTime<Utc>) -> Vec<gdp::Inbound> {
     let (snapshot, airports) = {
         let guard = state.feed.read().await;
@@ -89,13 +99,21 @@ async fn live_inbounds(state: &AppState, icao: &str, now: DateTime<Utc>) -> Vec<
         &HashMap::new(),
         now,
     );
+    // Resolve each origin field's owning ARTCC once, memoized across shared departures.
+    let map = state.facilities.read().await;
+    let mut artcc_of: HashMap<String, Option<String>> = HashMap::new();
     flow.flights
         .into_iter()
         .filter(|f| f.status != "arrived")
         .filter_map(|f| {
+            let dep_artcc = artcc_of
+                .entry(f.dep.clone())
+                .or_insert_with(|| facilities::artcc_for_airport(&map, &f.dep.to_ascii_uppercase()))
+                .clone();
             Some(gdp::Inbound {
                 cs: f.callsign,
                 dep: f.dep,
+                dep_artcc,
                 status: f.status,
                 eta_ms: f.eta?.timestamp_millis(),
                 etd_ms: f.etd.map(|e| e.timestamp_millis()),
@@ -117,12 +135,14 @@ async fn fresh_assignments(
     let (win_start, win_end) =
         resolve_window(now, &gdp.start_time, &gdp.end_time).ok_or(ApiError::Internal)?;
     let inbounds = live_inbounds(state, &gdp.airport.to_ascii_uppercase(), now).await;
+    let scope: Vec<String> = gdp.scope.split_whitespace().map(String::from).collect();
     let assignments = gdp::ration_by_schedule(
         inbounds,
         gdp.aar,
         win_start,
         win_end,
         gdp.exempt_airborne,
+        &scope,
         gdp.max_enroute_min,
     );
     Ok((win_start, win_end, assignments))
@@ -194,6 +214,7 @@ async fn build_board(
         id: gdp.id.clone(),
         airport: gdp.airport.clone(),
         aar: gdp.aar,
+        scope: gdp.scope.clone(),
         status: gdp.status.clone(),
         start_time: gdp.start_time.clone(),
         end_time: gdp.end_time.clone(),
@@ -253,12 +274,14 @@ pub async fn create_gdp(
     }
     let start = norm_hhmm(&payload.start_time)?;
     let end = norm_hhmm(&payload.end_time)?;
+    let scope = normalize_scope(payload.scope.as_deref());
     let max_enroute = payload.max_enroute_min.filter(|m| *m > 0);
 
     let id = gdp_repo::create_gdp(
         pool,
         &airport,
         payload.aar,
+        &scope,
         &start,
         &end,
         max_enroute,
