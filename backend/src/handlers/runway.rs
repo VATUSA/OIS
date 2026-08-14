@@ -100,17 +100,20 @@ async fn build_board(state: &AppState, icao: &str) -> Result<RunwayBoard, ApiErr
         })
         .collect();
 
+    let now_ms = now.timestamp_millis();
     let demand_input: Vec<(Option<String>, i64)> = arrivals
         .iter()
         .zip(&assigned)
         .map(|(a, (rwy, _))| (rwy.clone(), a.eta_ms))
         .collect();
-    let (demand, bins) = runway::demand_bins(
-        &demand_input,
-        &active_ids,
-        now.timestamp_millis(),
-        window_min,
-    );
+    let (demand, bins) = runway::demand_bins(&demand_input, &active_ids, now_ms, window_min);
+
+    let rec_input: Vec<(String, Option<String>, String, i64)> = arrivals
+        .iter()
+        .zip(&assigned)
+        .map(|(a, (rwy, src))| (a.cs.clone(), rwy.clone(), src.to_string(), a.eta_ms))
+        .collect();
+    let recs = runway::recommendations(&rec_input, &active_ids, now_ms, window_min);
 
     Ok(RunwayBoard {
         icao,
@@ -121,6 +124,7 @@ async fn build_board(state: &AppState, icao: &str) -> Result<RunwayBoard, ApiErr
         window_min,
         arrivals: out_arrivals,
         demand,
+        recs,
         bins,
     })
 }

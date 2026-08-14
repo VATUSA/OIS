@@ -130,6 +130,7 @@ use utoipa::OpenApi;
         crate::feed::runway::RunwayEnd,
         crate::feed::runway::RunwayArrival,
         crate::feed::runway::RunwayDemand,
+        crate::feed::runway::RunwayRec,
         crate::feed::runway::RunwayConfigRequest,
         crate::models::TrafficAircraft,
         crate::handlers::feed::FeedStatusBody,

@@ -1476,18 +1476,28 @@ export interface components {
             demand: components["schemas"]["RunwayDemand"][];
             ends: components["schemas"]["RunwayEnd"][];
             icao: string;
-            overrides: Record<string, never>;
+            overrides: {
+                [key: string]: string;
+            };
+            /** @description Rebalance suggestions — aircraft that should move off a congested runway. */
+            recs: components["schemas"]["RunwayRec"][];
             /** @description `built-in` (dataset) or `none — add ends manually`. */
             source: string;
-            star_rules: Record<string, never>;
+            star_rules: {
+                [key: string]: string;
+            };
             /** Format: int64 */
             window_min: number;
         };
         /** @description Saved runway configuration for an airport. */
         RunwayConfigRequest: {
             active_ends?: string[];
-            overrides?: Record<string, never>;
-            star_rules?: Record<string, never>;
+            overrides?: {
+                [key: string]: string;
+            };
+            star_rules?: {
+                [key: string]: string;
+            };
             /** Format: int32 */
             window_min?: number | null;
         };
@@ -1516,6 +1526,14 @@ export interface components {
             len: number;
             /** @description The runway pair this end belongs to, e.g. `04L/22R`. */
             pair: string;
+        };
+        /** @description A suggestion to move an arrival off a congested runway. */
+        RunwayRec: {
+            cs: string;
+            /** @description Congestion level being relieved: `yellow` | `red`. */
+            level: string;
+            /** @description Runway the aircraft should move to. */
+            to_rwy: string;
         };
         /** @description Direct grants + roles at one scope. `artcc_id = null` is national. */
         ScopeAccess: {
