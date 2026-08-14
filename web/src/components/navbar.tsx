@@ -25,6 +25,7 @@ import {
   Waypoints,
 } from "lucide-react";
 
+import {ZuluClock} from "@/components/zulu-clock";
 import {login, useLogout, useMe} from "@/lib/auth";
 import {useFeedStatus} from "@/lib/feed";
 import {hasPermission, isAdmin} from "@/lib/permissions";
@@ -233,6 +234,7 @@ export function Navbar() {
         </nav>
         <div className="ml-auto flex items-center gap-2">
           {canPrograms && <FeedPill />}
+          <ZuluClock className="hidden rounded-md border bg-muted/40 px-2 py-1 text-muted-foreground sm:inline" />
           <ThemeToggle />
           <UserMenu />
         </div>
