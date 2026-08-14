@@ -108,17 +108,16 @@ fn ms(v: i64, fallback: DateTime<Utc>) -> DateTime<Utc> {
     DateTime::from_timestamp_millis(v).unwrap_or(fallback)
 }
 
-/// Run RBS off the current feed for `gdp`, applying frozen control times when published.
-async fn assign_live(
+/// Fresh RBS off the current feed for `gdp` — no frozen overrides applied.
+async fn fresh_assignments(
     state: &AppState,
-    pool: &sqlx::PgPool,
     gdp: &GdpBody,
     now: DateTime<Utc>,
 ) -> Result<(i64, i64, Vec<gdp::Assignment>), ApiError> {
     let (win_start, win_end) =
         resolve_window(now, &gdp.start_time, &gdp.end_time).ok_or(ApiError::Internal)?;
     let inbounds = live_inbounds(state, &gdp.airport.to_ascii_uppercase(), now).await;
-    let mut assignments = gdp::ration_by_schedule(
+    let assignments = gdp::ration_by_schedule(
         inbounds,
         gdp.aar,
         win_start,
@@ -126,6 +125,17 @@ async fn assign_live(
         gdp.exempt_airborne,
         gdp.max_enroute_min,
     );
+    Ok((win_start, win_end, assignments))
+}
+
+/// Run RBS off the current feed for `gdp`, applying frozen control times when published.
+async fn assign_live(
+    state: &AppState,
+    pool: &sqlx::PgPool,
+    gdp: &GdpBody,
+    now: DateTime<Utc>,
+) -> Result<(i64, i64, Vec<gdp::Assignment>), ApiError> {
+    let (win_start, win_end, mut assignments) = fresh_assignments(state, gdp, now).await?;
     // Freeze: once published, matched flights hold their persisted control times.
     if gdp.status == "published" {
         let frozen = gdp_repo::list_slots(pool, &gdp.id).await?;
@@ -362,4 +372,132 @@ pub async fn delete_gdp(
         return Err(ApiError::NotFound);
     }
     Ok(StatusCode::NO_CONTENT)
+}
+
+/// Lock a controlled flight's current (advisory) control time into a frozen slot. Used to
+/// pin a pop-up that appeared after publish so its EDCT stops drifting.
+#[utoipa::path(
+    post,
+    path = "/api/v1/tmu/gdp/{id}/slots/{callsign}",
+    tag = "tmu",
+    params(
+        ("id" = String, Path, description = "GDP id"),
+        ("callsign" = String, Path, description = "Flight callsign")
+    ),
+    responses((status = 200, body = GdpBoard), (status = 401), (status = 404), (status = 409), (status = 503))
+)]
+pub async fn lock_slot(
+    State(state): State<AppState>,
+    _permission: RequirePermission<TmuGdpPublish>,
+    Path((id, callsign)): Path<(String, String)>,
+) -> Result<Json<GdpBoard>, ApiError> {
+    let pool = state.db.as_ref().ok_or(ApiError::ServiceUnavailable)?;
+    let gdp = gdp_repo::get_gdp(pool, &id)
+        .await?
+        .ok_or(ApiError::NotFound)?;
+    if gdp.status != "published" {
+        return Err(ApiError::Conflict); // only a live program has slots to lock
+    }
+    let now = Utc::now();
+    let callsign = callsign.to_ascii_uppercase();
+    // Freeze the flight's current advisory assignment (fresh RBS, no existing overrides).
+    let (_s, _e, assignments) = fresh_assignments(&state, &gdp, now).await?;
+    let a = assignments
+        .iter()
+        .find(|a| a.controlled && a.cs.eq_ignore_ascii_case(&callsign))
+        .ok_or(ApiError::NotFound)?; // not an eligible controlled flight
+    gdp_repo::upsert_slot(
+        pool,
+        &gdp.id,
+        &gdp_repo::GdpSlotRow {
+            callsign: a.cs.clone(),
+            dep: a.dep.clone(),
+            original_eta: ms(a.original_eta_ms, now),
+            cta: ms(a.cta_ms, now),
+            edct: a.edct_ms.map(|v| ms(v, now)),
+            delay_min: a.delay_min as i32,
+        },
+    )
+    .await?;
+    Ok(Json(build_board(&state, pool, &gdp).await?))
+}
+
+/// Unlock (remove) a frozen slot — the flight reverts to a live advisory control time.
+#[utoipa::path(
+    delete,
+    path = "/api/v1/tmu/gdp/{id}/slots/{callsign}",
+    tag = "tmu",
+    params(
+        ("id" = String, Path, description = "GDP id"),
+        ("callsign" = String, Path, description = "Flight callsign")
+    ),
+    responses((status = 200, body = GdpBoard), (status = 401), (status = 404), (status = 503))
+)]
+pub async fn unlock_slot(
+    State(state): State<AppState>,
+    _permission: RequirePermission<TmuGdpPublish>,
+    Path((id, callsign)): Path<(String, String)>,
+) -> Result<Json<GdpBoard>, ApiError> {
+    let pool = state.db.as_ref().ok_or(ApiError::ServiceUnavailable)?;
+    let gdp = gdp_repo::get_gdp(pool, &id)
+        .await?
+        .ok_or(ApiError::NotFound)?;
+    if !gdp_repo::delete_slot(pool, &gdp.id, &callsign.to_ascii_uppercase()).await? {
+        return Err(ApiError::NotFound);
+    }
+    Ok(Json(build_board(&state, pool, &gdp).await?))
+}
+
+/// Compress the program: reclaim capacity freed by departed/cancelled flights by pulling each
+/// frozen slot to its current fresh-RBS time — earlier only, never later than already issued.
+/// Frozen flights that have left the arrival picture are dropped.
+#[utoipa::path(
+    post,
+    path = "/api/v1/tmu/gdp/{id}/compress",
+    tag = "tmu",
+    params(("id" = String, Path, description = "GDP id")),
+    responses((status = 200, body = GdpBoard), (status = 401), (status = 404), (status = 409), (status = 503))
+)]
+pub async fn compress_gdp(
+    State(state): State<AppState>,
+    _permission: RequirePermission<TmuGdpPublish>,
+    Path(id): Path<String>,
+) -> Result<Json<GdpBoard>, ApiError> {
+    let pool = state.db.as_ref().ok_or(ApiError::ServiceUnavailable)?;
+    let gdp = gdp_repo::get_gdp(pool, &id)
+        .await?
+        .ok_or(ApiError::NotFound)?;
+    if gdp.status != "published" {
+        return Err(ApiError::Conflict);
+    }
+    let now = Utc::now();
+    let (_s, _e, fresh) = fresh_assignments(&state, &gdp, now).await?;
+    let frozen = gdp_repo::list_slots(pool, &gdp.id).await?;
+    let frozen_cta: HashMap<&str, i64> = frozen
+        .iter()
+        .map(|s| (s.callsign.as_str(), s.cta.timestamp_millis()))
+        .collect();
+
+    // Keep only flights that are both currently controllable and previously frozen; pull each
+    // to its compressed time. Frozen flights no longer inbound simply fall away.
+    let mut new_slots = Vec::new();
+    for a in &fresh {
+        if !a.controlled {
+            continue;
+        }
+        let Some(&frozen_cta_ms) = frozen_cta.get(a.cs.as_str()) else {
+            continue;
+        };
+        let (cta_ms, edct_ms, delay_min) = gdp::compress_slot(a, frozen_cta_ms);
+        new_slots.push(gdp_repo::GdpSlotRow {
+            callsign: a.cs.clone(),
+            dep: a.dep.clone(),
+            original_eta: ms(a.original_eta_ms, now),
+            cta: ms(cta_ms, now),
+            edct: edct_ms.map(|v| ms(v, now)),
+            delay_min: delay_min as i32,
+        });
+    }
+    gdp_repo::replace_slots(pool, &gdp.id, &new_slots).await?;
+    Ok(Json(build_board(&state, pool, &gdp).await?))
 }

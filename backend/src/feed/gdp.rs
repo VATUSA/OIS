@@ -127,6 +127,19 @@ pub fn ration_by_schedule(
     out
 }
 
+/// Recompute a frozen flight's control times after compression: the CTA is pulled to
+/// `fresh_cta` when that's earlier but never pushed later than the already-issued
+/// `frozen_cta_ms` (a controller/crew can absorb an earlier release, not a later one). The
+/// enroute time is held constant (backed out of the fresh assignment). Returns
+/// `(cta_ms, edct_ms, delay_min)`.
+pub fn compress_slot(fresh: &Assignment, frozen_cta_ms: i64) -> (i64, Option<i64>, i64) {
+    let cta = fresh.cta_ms.min(frozen_cta_ms);
+    let enroute = fresh.edct_ms.map(|e| fresh.cta_ms - e); // cta − edct
+    let edct = enroute.map(|er| cta - er);
+    let delay_min = ((cta - fresh.original_eta_ms).max(0)) / 60_000;
+    (cta, edct, delay_min)
+}
+
 /// Per-bin arrival demand vs the AAR-derived capacity, for the program window.
 #[derive(Debug, Serialize, ToSchema)]
 pub struct GdpDemand {
@@ -368,6 +381,31 @@ mod tests {
         assert_eq!(bins[0].cap, 1);
         assert!(bins[0].count >= 1);
         assert_eq!(bins.len(), 4); // 60min / 15min
+    }
+
+    #[test]
+    fn compress_pulls_earlier_never_later() {
+        // Fresh RBS now lands this flight at t=5min (enroute 30min → EDCT −25min), but it was
+        // frozen at t=20min. Compression pulls it to 5min.
+        let fresh = Assignment {
+            cs: "A".into(),
+            dep: "KXXX".into(),
+            status: "ground".into(),
+            original_eta_ms: 0,
+            cta_ms: 5 * MIN,
+            edct_ms: Some(5 * MIN - 30 * MIN),
+            delay_min: 5,
+            controlled: true,
+            frozen: false,
+            exempt_reason: None,
+        };
+        let (cta, edct, delay) = compress_slot(&fresh, 20 * MIN);
+        assert_eq!(cta, 5 * MIN); // pulled earlier
+        assert_eq!(edct, Some(5 * MIN - 30 * MIN)); // enroute (30m) held constant
+        assert_eq!(delay, 5);
+        // If fresh RBS would push it later than the frozen time, keep the frozen time.
+        let (cta2, _e2, _d2) = compress_slot(&fresh, 3 * MIN);
+        assert_eq!(cta2, 3 * MIN); // clamped to the earlier frozen CTA
     }
 
     #[test]

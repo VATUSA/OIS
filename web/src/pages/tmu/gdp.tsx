@@ -11,11 +11,14 @@ import {
   type GdpBoard,
   type GdpFlightView,
   useCancelGdp,
+  useCompressGdp,
   useCreateGdp,
   useDeleteGdp,
   useGdpBoard,
   useGdps,
+  useLockSlot,
   usePublishGdp,
+  useUnlockSlot,
 } from "@/lib/gdp";
 
 function statusVariant(
@@ -290,11 +293,20 @@ function FlightsTable({
   rows,
   published,
   exempt,
+  gdpId,
+  canPublish,
 }: {
   rows: GdpFlightView[];
   published: boolean;
   exempt?: boolean;
+  gdpId?: string;
+  canPublish?: boolean;
 }) {
+  const lock = useLockSlot();
+  const unlock = useUnlockSlot();
+  // Lock/unlock only make sense for the controlled table of a published program.
+  const showActions = !exempt && published && !!canPublish && !!gdpId;
+
   if (rows.length === 0) {
     return (
       <p className="py-6 text-center text-sm text-muted-foreground">
@@ -320,6 +332,7 @@ function FlightsTable({
               </>
             )}
             <th className="pb-2 pr-3 font-medium">Status</th>
+            {showActions && <th className="pb-2" />}
           </tr>
         </thead>
         <tbody>
@@ -364,6 +377,29 @@ function FlightsTable({
                     </Badge>
                   )}
                 </td>
+                {showActions && (
+                  <td className="py-1.5 text-right">
+                    {f.frozen ? (
+                      <Button
+                        size="sm"
+                        variant="ghost"
+                        disabled={unlock.isPending}
+                        onClick={() => unlock.mutate({ id: gdpId!, callsign: f.cs })}
+                      >
+                        Unlock
+                      </Button>
+                    ) : (
+                      <Button
+                        size="sm"
+                        variant="secondary"
+                        disabled={lock.isPending}
+                        onClick={() => lock.mutate({ id: gdpId!, callsign: f.cs })}
+                      >
+                        Lock
+                      </Button>
+                    )}
+                  </td>
+                )}
               </tr>
             );
           })}
@@ -376,6 +412,7 @@ function FlightsTable({
 function BoardView({ id, canPublish }: { id: string; canPublish: boolean }) {
   const board = useGdpBoard(id);
   const publish = usePublishGdp();
+  const compress = useCompressGdp();
   const b = board.data;
 
   if (board.isError) {
@@ -417,6 +454,16 @@ function BoardView({ id, canPublish }: { id: string; canPublish: boolean }) {
               Publish &amp; freeze EDCTs
             </Button>
           )}
+          {canPublish && b.status === "published" && (
+            <Button
+              variant="secondary"
+              disabled={compress.isPending}
+              onClick={() => compress.mutate(b.id)}
+              title="Reclaim capacity freed by departed/cancelled flights — pulls EDCTs earlier"
+            >
+              Compress
+            </Button>
+          )}
         </div>
 
         {b.status === "draft" && (
@@ -445,7 +492,12 @@ function BoardView({ id, canPublish }: { id: string; canPublish: boolean }) {
           <p className="mb-2 text-xs font-medium uppercase tracking-wide text-muted-foreground">
             Controlled flights
           </p>
-          <FlightsTable rows={b.flights} published={b.published} />
+          <FlightsTable
+            rows={b.flights}
+            published={b.published}
+            gdpId={b.id}
+            canPublish={canPublish}
+          />
         </div>
 
         {b.exempt.length > 0 && (

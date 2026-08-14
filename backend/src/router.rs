@@ -73,6 +73,11 @@ pub fn build_router(state: AppState) -> Router {
         .route("/api/v1/tmu/gdp/{id}/board", get(gdp::get_gdp_board))
         .route("/api/v1/tmu/gdp/{id}/publish", post(gdp::publish_gdp))
         .route("/api/v1/tmu/gdp/{id}/cancel", post(gdp::cancel_gdp))
+        .route("/api/v1/tmu/gdp/{id}/compress", post(gdp::compress_gdp))
+        .route(
+            "/api/v1/tmu/gdp/{id}/slots/{callsign}",
+            post(gdp::lock_slot).delete(gdp::unlock_slot),
+        )
         // Events (VATUSA cache — anchors per-event planning)
         .route("/api/v1/events", get(events::list_events))
         .route("/api/v1/events/{id}", get(events::get_event))
