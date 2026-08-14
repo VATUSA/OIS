@@ -37,6 +37,9 @@ const BUNDLED_NAVAIDS: &str = include_str!("../../data/nav/navaids.json");
 const BUNDLED_AIRWAYS: &str = include_str!("../../data/nav/airways.json");
 const BUNDLED_PROCEDURES: &str = include_str!("../../data/nav/procedures.json");
 const BUNDLED_PREFERRED: &str = include_str!("../../data/nav/preferred.json");
+// Magnetic variation is quasi-static (drifts over years), so the bundled table is reused
+// across NASR cycle refreshes rather than re-fetched.
+const BUNDLED_NAVVAR: &str = include_str!("../../data/nav/navvar.json");
 
 /// Fetch the latest NASR data and assemble a fresh [`NavData`]. Best-effort per component
 /// with bundle fallback; returns `Err` only if assembly itself fails (never for a single
@@ -115,6 +118,7 @@ pub async fn fetch_latest() -> Fetched<NavData> {
         &procedures_json,
         &preferred_json,
         &meta_json,
+        BUNDLED_NAVVAR,
     ))
 }
 
