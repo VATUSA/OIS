@@ -189,6 +189,12 @@ pub fn build_router(state: AppState) -> Router {
             "/api/v1/admin/service-accounts/{id}/roles",
             put(service_accounts::set_service_account_roles),
         )
+        // Innermost app layer: records every successful mutation to the audit log. Added
+        // before resolve_current_user so it runs *after* it inbound and sees CurrentUser.
+        .layer(middleware::from_fn_with_state(
+            state.clone(),
+            crate::audit::audit_mutations,
+        ))
         // Runs before handlers so CurrentUser / service account are in extensions.
         .layer(middleware::from_fn_with_state(
             state.clone(),

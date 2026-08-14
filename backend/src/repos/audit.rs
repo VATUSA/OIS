@@ -32,6 +32,31 @@ pub async fn fetch_user_actor_id(pool: &PgPool, user_id: &str) -> Result<Option<
     .map_err(|_| ApiError::Internal)
 }
 
+/// The user's audit actor id, creating the actor row if it doesn't exist yet. Used by the
+/// audit middleware so an action is still attributed even if the user predates actor seeding.
+pub async fn resolve_user_actor_id(
+    pool: &PgPool,
+    user_id: &str,
+    display_name: &str,
+) -> Result<Option<String>, ApiError> {
+    if let Some(id) = fetch_user_actor_id(pool, user_id).await? {
+        return Ok(Some(id));
+    }
+    sqlx::query(
+        "insert into access.actors (actor_type, user_id, display_name) \
+         select 'user', $1, $2 \
+         where not exists ( \
+             select 1 from access.actors where actor_type = 'user' and user_id = $1 \
+         )",
+    )
+    .bind(user_id)
+    .bind(display_name)
+    .execute(pool)
+    .await
+    .map_err(|_| ApiError::Internal)?;
+    fetch_user_actor_id(pool, user_id).await
+}
+
 pub async fn record_audit(pool: &PgPool, entry: AuditEntry) -> Result<(), ApiError> {
     // before/after are serialized to text and cast to jsonb so we don't need sqlx's
     // `json` feature. ip is cast to inet (null-safe).
