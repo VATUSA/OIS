@@ -37,6 +37,9 @@ export function ActivityList({ items }: { items: AuditLogEntry[] }) {
               <span className="text-muted-foreground">
                 {entry.resource_type}
               </span>
+              {entry.resource_id ? (
+                <span className="font-mono text-xs"> · {entry.resource_id}</span>
+              ) : null}
               {entry.reason ? ` — ${entry.reason}` : ""}
             </p>
             <p className="text-xs text-muted-foreground">
