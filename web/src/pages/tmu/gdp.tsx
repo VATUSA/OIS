@@ -41,6 +41,7 @@ const EMPTY: CreateGdp = {
   aar: 30,
   start_time: "",
   end_time: "",
+  scope: "",
   max_enroute_min: undefined,
   exempt_airborne: true,
 };
@@ -70,6 +71,7 @@ function CreateForm({ onCreated }: { onCreated: (id: string) => void }) {
         aar: Number(form.aar),
         start_time: form.start_time,
         end_time: form.end_time,
+        scope: form.scope,
         max_enroute_min: form.max_enroute_min ? Number(form.max_enroute_min) : undefined,
         exempt_airborne: form.exempt_airborne,
       },
@@ -137,6 +139,17 @@ function CreateForm({ onCreated }: { onCreated: (id: string) => void }) {
               maxLength={4}
               value={form.end_time}
               onChange={(e) => setForm((f) => ({ ...f, end_time: e.target.value }))}
+            />
+          </label>
+          <label className="flex flex-col gap-1">
+            <span className="text-xs font-medium uppercase tracking-wide text-muted-foreground">
+              Scope (ARTCC)
+            </span>
+            <Input
+              className="w-32 font-mono uppercase"
+              placeholder="all"
+              value={form.scope ?? ""}
+              onChange={(e) => setForm((f) => ({ ...f, scope: e.target.value }))}
             />
           </label>
           <label className="flex flex-col gap-1">
@@ -209,6 +222,9 @@ function GdpRow({
       <td className="py-2 pr-3 font-mono text-xs">{gdp.aar}/hr</td>
       <td className="py-2 pr-3 font-mono text-xs">
         {gdp.start_time}z–{gdp.end_time}z
+      </td>
+      <td className="py-2 pr-3 font-mono text-xs">
+        {gdp.scope ? gdp.scope : <span className="text-muted-foreground">All</span>}
       </td>
       <td className="py-2 pr-3 font-mono text-xs text-muted-foreground">
         {gdp.max_enroute_min ? `≤${gdp.max_enroute_min}m` : "—"}
@@ -443,6 +459,7 @@ function BoardView({ id, canPublish }: { id: string; canPublish: boolean }) {
             <Badge variant={statusVariant(b.status)}>{b.status}</Badge>
             <span className="font-mono text-sm text-muted-foreground">
               AAR {b.aar}/hr · {hhmmZulu(b.window_start)}z–{hhmmZulu(b.window_end)}z
+              {b.scope ? ` · ${b.scope}` : ""}
               {b.max_enroute_min ? ` · ≤${b.max_enroute_min}m` : ""}
             </span>
           </div>
@@ -547,6 +564,7 @@ export function GdpTab() {
                     <th className="pb-2 pr-3 font-medium">AAR</th>
                     <th className="pb-2 pr-3 font-medium">Window</th>
                     <th className="pb-2 pr-3 font-medium">Scope</th>
+                    <th className="pb-2 pr-3 font-medium">Tier</th>
                     <th className="pb-2 pr-3 font-medium">Updated</th>
                     <th className="pb-2" />
                   </tr>
