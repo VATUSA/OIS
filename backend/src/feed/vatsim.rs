@@ -64,6 +64,9 @@ pub struct FlightPlan {
     pub route: String,
     #[serde(default)]
     pub cruise_tas: String,
+    /// Filed cruise altitude, e.g. `"35000"` or `"FL350"`.
+    #[serde(default)]
+    pub altitude: String,
     #[serde(default)]
     pub deptime: String,
 }
