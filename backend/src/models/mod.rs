@@ -544,6 +544,24 @@ pub struct RouteWaypoint {
     pub lon: f64,
 }
 
+/// Health of the runtime nav + winds data backing route/ETA prediction.
+#[derive(Debug, Serialize, ToSchema)]
+pub struct DataStatus {
+    /// FAA NASR cycle date currently loaded (e.g. `2026-08-06`).
+    pub nav_cycle: String,
+    /// Provenance of the loaded nav data (e.g. `runtime fetch (faa)` or the bundle).
+    pub nav_source: String,
+    pub fixes: usize,
+    pub navaids: usize,
+    pub airways: usize,
+    pub procedures: usize,
+    /// Last successful runtime nav fetch (null = still on the compile-time bundle seed).
+    pub nav_refreshed: Option<DateTime<Utc>>,
+    pub winds_stations: usize,
+    /// Last successful winds fetch (null = still air, not yet fetched).
+    pub winds_refreshed: Option<DateTime<Utc>>,
+}
+
 /// A lightweight live-traffic record for plotting on the FCA map.
 #[derive(Debug, Serialize, ToSchema)]
 pub struct TrafficAircraft {

@@ -2,7 +2,7 @@ import {useCallback, useEffect, useMemo, useRef, useState} from "react";
 import L from "leaflet";
 import "leaflet/dist/leaflet.css";
 import {Button, Input, useTheme} from "@ois/ui";
-import {Maximize2, Minus, Pencil, Plus, Trash2, X} from "lucide-react";
+import {Maximize2, Minus, Pencil, Plus, RefreshCw, Trash2, X} from "lucide-react";
 
 import {useMe} from "@/lib/auth";
 import {hasPermission} from "@/lib/permissions";
@@ -14,10 +14,12 @@ import {
   type UpsertFca,
   useAircraftRoute,
   useCreateFca,
+  useDataStatus,
   useDeleteFca,
   useFcaCounts,
   useFcas,
   useFcaTraffic,
+  useRefreshData,
   useTraffic,
   useUpdateFca,
 } from "@/lib/fca";
@@ -63,6 +65,14 @@ const parseFl = (s: string): number | null => {
   const n = parseInt(s.trim(), 10);
   return Number.isFinite(n) ? n : null;
 };
+
+/** Age in whole days of a `YYYY-MM-DD` NASR cycle date, or null if unparseable. */
+function cycleAgeDays(cycle: string): number | null {
+  const m = /^(\d{4})-(\d{2})-(\d{2})$/.exec(cycle);
+  if (!m) return null;
+  const d = Date.UTC(Number(m[1]), Number(m[2]) - 1, Number(m[3]));
+  return Math.floor((Date.now() - d) / 86_400_000);
+}
 
 /** CARTO basemaps + map background per theme. */
 const CARTO = {
@@ -229,6 +239,10 @@ export function FcaPage() {
   const fcaTraffic = useFcaTraffic(draft ? null : selectedId);
   const counts = useFcaCounts();
   const aircraftRoute = useAircraftRoute(routeCallsign);
+  const dataStatus = useDataStatus();
+  const refreshData = useRefreshData();
+  const cycleAge = dataStatus.data ? cycleAgeDays(dataStatus.data.nav_cycle) : null;
+  const navStale = cycleAge != null && cycleAge > 35;
 
   const { resolvedTheme } = useTheme();
 
@@ -790,14 +804,78 @@ export function FcaPage() {
           </>
         )}
 
-        <div className="border-t px-4 py-2 text-xs text-muted-foreground">
-          {traffic.data ? `traffic ${traffic.data.length}` : "traffic…"}
+        <div className="border-t px-4 py-2 text-xs">
+          {dataStatus.data ? (
+            <div className="flex items-center justify-between gap-2">
+              <div className="min-w-0">
+                <div className="flex items-center gap-1.5 font-mono">
+                  <span
+                    className={`size-1.5 shrink-0 rounded-full ${
+                      navStale ? "bg-amber-500" : "bg-emerald-500"
+                    }`}
+                  />
+                  <span>NASR {dataStatus.data.nav_cycle}</span>
+                  {cycleAge != null && (
+                    <span
+                      className={
+                        navStale ? "text-amber-500" : "text-muted-foreground"
+                      }
+                    >
+                      · {cycleAge}d
+                    </span>
+                  )}
+                </div>
+                <div className="truncate text-muted-foreground">
+                  {dataStatus.data.winds_stations} winds ·{" "}
+                  {traffic.data?.length ?? 0} traffic
+                </div>
+              </div>
+              {canEdit && (
+                <button
+                  type="button"
+                  onClick={() => refreshData.mutate()}
+                  disabled={refreshData.isPending}
+                  title="Refresh nav + winds now"
+                  className="shrink-0 rounded p-1 text-muted-foreground transition-colors hover:bg-muted hover:text-foreground disabled:opacity-50"
+                >
+                  <RefreshCw
+                    className={`size-3.5 ${refreshData.isPending ? "animate-spin" : ""}`}
+                  />
+                </button>
+              )}
+            </div>
+          ) : (
+            <span className="text-muted-foreground">
+              {traffic.data ? `traffic ${traffic.data.length}` : "traffic…"}
+            </span>
+          )}
         </div>
       </aside>
 
       {/* Map — `isolate` traps Leaflet z-indexes below the navbar dropdowns. */}
       <div className="relative isolate flex-1">
         <div ref={setContainer} className="absolute inset-0" />
+
+        {navStale && (
+          <div className="pointer-events-none absolute inset-x-0 top-3 z-[500] flex justify-center">
+            <div className="pointer-events-auto flex items-center gap-2 rounded-lg border border-amber-500/50 bg-amber-500/10 px-3 py-1.5 text-xs text-amber-700 shadow-lg backdrop-blur dark:text-amber-200">
+              <RefreshCw className="size-3.5" />
+              <span>
+                NASR data is {cycleAge} days old ({dataStatus.data?.nav_cycle}).
+              </span>
+              {canEdit && (
+                <button
+                  type="button"
+                  onClick={() => refreshData.mutate()}
+                  disabled={refreshData.isPending}
+                  className="font-semibold underline underline-offset-2 disabled:opacity-50"
+                >
+                  Refresh now
+                </button>
+              )}
+            </div>
+          </div>
+        )}
         {drawing && (
           <div className="pointer-events-none absolute inset-x-0 bottom-6 z-[500] flex justify-center">
             <div className="pointer-events-auto flex items-center gap-2.5 rounded-lg border border-primary/60 bg-background/95 px-5 py-3 text-sm shadow-lg backdrop-blur">

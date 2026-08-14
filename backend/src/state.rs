@@ -1,4 +1,5 @@
 use std::sync::Arc;
+use std::sync::atomic::AtomicI64;
 
 use arc_swap::ArcSwap;
 use sqlx::{PgPool, postgres::PgPoolOptions};
@@ -23,6 +24,9 @@ pub struct AppState {
     /// Winds aloft, for ETA correction. Starts empty (still air) and is hot-swapped by
     /// `jobs::spawn_winds_refresh`, so it sits behind an `ArcSwap` for lock-free reads.
     pub winds: Arc<ArcSwap<Winds>>,
+    /// Epoch-ms of the last successful nav / winds fetch (0 = not yet fetched at runtime).
+    pub nav_refreshed: Arc<AtomicI64>,
+    pub winds_refreshed: Arc<AtomicI64>,
 }
 
 impl AppState {
@@ -32,6 +36,8 @@ impl AppState {
         let nav = Arc::new(ArcSwap::from_pointee(NavData::load()));
         let airspace = Arc::new(Boundaries::load());
         let winds = Arc::new(ArcSwap::from_pointee(Winds::default()));
+        let nav_refreshed = Arc::new(AtomicI64::new(0));
+        let winds_refreshed = Arc::new(AtomicI64::new(0));
         tracing::info!(
             nav_points = nav.load().len(),
             nav_cycle = nav.load().cycle(),
@@ -50,6 +56,8 @@ impl AppState {
                 nav,
                 airspace,
                 winds,
+                nav_refreshed,
+                winds_refreshed,
             });
         }
 
@@ -60,6 +68,8 @@ impl AppState {
             nav,
             airspace,
             winds,
+            nav_refreshed,
+            winds_refreshed,
         })
     }
 
@@ -71,6 +81,8 @@ impl AppState {
             nav: Arc::new(ArcSwap::from_pointee(NavData::default())),
             airspace: Arc::new(Boundaries::load()),
             winds: Arc::new(ArcSwap::from_pointee(Winds::default())),
+            nav_refreshed: Arc::new(AtomicI64::new(0)),
+            winds_refreshed: Arc::new(AtomicI64::new(0)),
         }
     }
 }

@@ -95,6 +95,8 @@ struct RawMeta {
     bbox: Option<[f64; 4]>,
     #[serde(rename = "nasrCycleDate", default)]
     nasr_cycle_date: Option<String>,
+    #[serde(default)]
+    source: Option<String>,
 }
 
 #[derive(Default)]
@@ -109,6 +111,7 @@ pub struct NavData {
     proc_by_prefix: HashMap<String, String>,
     bbox: [f64; 4],
     cycle: String,
+    source: String,
 }
 
 impl NavData {
@@ -195,6 +198,7 @@ impl NavData {
             proc_by_prefix,
             bbox: meta.bbox.unwrap_or([23.5, -130.0, 51.5, -63.0]),
             cycle: meta.nasr_cycle_date.unwrap_or_default(),
+            source: meta.source.unwrap_or_default(),
         }
     }
 
@@ -209,6 +213,27 @@ impl NavData {
     /// FAA NASR cycle date (e.g. `2026-07-09`), for display.
     pub fn cycle(&self) -> &str {
         &self.cycle
+    }
+
+    /// Human-readable provenance of the loaded data (e.g. `runtime fetch (faa)`).
+    pub fn source(&self) -> &str {
+        &self.source
+    }
+
+    pub fn fix_count(&self) -> usize {
+        self.fixes.len()
+    }
+
+    pub fn navaid_count(&self) -> usize {
+        self.navaids.len()
+    }
+
+    pub fn airway_count(&self) -> usize {
+        self.airways.len()
+    }
+
+    pub fn procedure_count(&self) -> usize {
+        self.procedures.len()
     }
 
     /// Split a filed route into cleaned tokens (uppercased, `DCT` removed).
