@@ -1,5 +1,5 @@
 import {useState} from "react";
-import {Badge, Button, Card, CardContent, Input, useToast} from "@ois/ui";
+import {Badge, Button, Card, CardContent, ConfirmButton, Input, useToast} from "@ois/ui";
 import {Plus} from "lucide-react";
 
 import {useMe} from "@/lib/auth";
@@ -246,15 +246,13 @@ function GdpRow({
             </Button>
           )}
           {canDelete && (
-            <Button
+            <ConfirmButton
               size="sm"
-              variant="ghost"
-              className="text-destructive hover:text-destructive"
-              disabled={del.isPending}
-              onClick={() => del.mutate(gdp.id)}
+              onConfirm={() => del.mutate(gdp.id)}
+              warn={`Delete the GDP for ${gdp.airport}?`}
             >
               Delete
-            </Button>
+            </ConfirmButton>
           )}
         </div>
       </td>

@@ -1,5 +1,5 @@
 import {useState} from "react";
-import {Badge, Button, Card, CardContent, Input, useToast} from "@ois/ui";
+import {Badge, Button, Card, CardContent, ConfirmButton, Input, useToast} from "@ois/ui";
 import {Plus} from "lucide-react";
 
 import {useMe} from "@/lib/auth";
@@ -159,15 +159,13 @@ function GroundStopRow({
               </Button>
             )}
           {canDelete && (
-            <Button
+            <ConfirmButton
               size="sm"
-              variant="ghost"
-              className="text-destructive hover:text-destructive"
-              disabled={del.isPending}
-              onClick={() => del.mutate(gs.id)}
+              onConfirm={() => del.mutate(gs.id)}
+              warn={`Delete the ${gs.airport} ground stop?`}
             >
               Delete
-            </Button>
+            </ConfirmButton>
           )}
         </div>
       </td>

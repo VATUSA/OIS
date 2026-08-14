@@ -1,5 +1,5 @@
 import {useEffect, useMemo, useState} from "react";
-import {Badge, Button, Card, CardContent, Input} from "@ois/ui";
+import {Badge, Button, Card, CardContent, ConfirmButton, Input} from "@ois/ui";
 import {Users, X} from "lucide-react";
 
 import {useMe} from "@/lib/auth";
@@ -144,14 +144,15 @@ function StaffingRow({
         />
       </td>
       <td className="py-2 text-right">
-        <button
-          type="button"
+        <ConfirmButton
+          size="icon"
           title={`Remove ${row.facility}`}
-          onClick={() => remove.mutate(row.facility)}
-          className="text-muted-foreground transition-colors hover:text-destructive"
+          aria-label={`Remove ${row.facility}`}
+          onConfirm={() => remove.mutate(row.facility)}
+          warn={`Remove ${row.facility} from the ACE team?`}
         >
           <X className="size-4" />
-        </button>
+        </ConfirmButton>
       </td>
     </tr>
   );

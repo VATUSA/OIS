@@ -1,5 +1,5 @@
 import {useMemo, useState} from "react";
-import {Button, Input} from "@ois/ui";
+import {Button, ConfirmButton, Input, usePrompt} from "@ois/ui";
 
 import {ZuluClock} from "@/components/zulu-clock";
 import {useMe} from "@/lib/auth";
@@ -60,6 +60,7 @@ export function RunwayPage() {
   const configs = useSavedConfigs(icao);
   const saveCfg = useSaveConfig(icao ?? "");
   const deleteCfg = useDeleteConfig(icao ?? "");
+  const prompt = usePrompt();
   const [selectedCfg, setSelectedCfg] = useState("");
   const b = board.data;
 
@@ -121,9 +122,16 @@ export function RunwayPage() {
       star_rules: cfg.star_rules,
     });
   }
-  function saveCurrentConfig() {
+  async function saveCurrentConfig() {
     if (!b) return;
-    const name = window.prompt("Save this runway config as:")?.trim();
+    const name = (
+      await prompt({
+        title: "Save runway config",
+        label: "Config name",
+        placeholder: "e.g. West flow",
+        confirmText: "Save",
+      })
+    )?.trim();
     if (!name) return;
     saveCfg.mutate({ name, active_ends: activeIds, star_rules: b.star_rules });
     setSelectedCfg(name);
@@ -265,15 +273,20 @@ export function RunwayPage() {
                   >
                     Save
                   </Button>
-                  <button
-                    type="button"
-                    onClick={deleteSelectedConfig}
+                  <ConfirmButton
+                    size="icon"
+                    className="size-7"
                     disabled={!selectedCfg}
-                    className="rounded p-1 text-muted-foreground hover:text-destructive disabled:opacity-40"
                     aria-label="Delete saved config"
+                    onConfirm={deleteSelectedConfig}
+                    warn={
+                      selectedCfg
+                        ? `Delete the “${selectedCfg}” config?`
+                        : "Delete this config?"
+                    }
                   >
                     ×
-                  </button>
+                  </ConfirmButton>
                 </div>
               )}
               <div className="mb-2 flex flex-wrap gap-1.5">

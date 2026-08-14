@@ -1,5 +1,5 @@
 import {useState} from "react";
-import {Badge, Button, Card, CardContent, Input, useToast} from "@ois/ui";
+import {Badge, Button, Card, CardContent, ConfirmButton, Input, useToast} from "@ois/ui";
 import {Plus, X} from "lucide-react";
 
 import {useMe} from "@/lib/auth";
@@ -283,15 +283,13 @@ function ProgramCard({
               </span>
             )}
             {canDelete && (
-              <Button
+              <ConfirmButton
                 size="sm"
-                variant="ghost"
-                className="text-destructive hover:text-destructive"
-                disabled={del.isPending}
-                onClick={() => del.mutate(program.icao)}
+                onConfirm={() => del.mutate(program.icao)}
+                warn={`Remove the ${program.icao} program?`}
               >
                 Remove
-              </Button>
+              </ConfirmButton>
             )}
           </div>
         </div>

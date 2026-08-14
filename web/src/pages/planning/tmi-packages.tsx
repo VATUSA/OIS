@@ -1,5 +1,5 @@
 import {useState} from "react";
-import {Badge, Button, Card, CardContent, Input} from "@ois/ui";
+import {Badge, Button, Card, CardContent, ConfirmButton, Input, useConfirm} from "@ois/ui";
 import {Layers, Play, Plus, X} from "lucide-react";
 
 import {useMe} from "@/lib/auth";
@@ -164,6 +164,7 @@ function PackageCard({
   const del = useDeletePackage(eventId);
   const removeItem = useDeletePackageItem(eventId);
   const activate = useActivatePackage(eventId);
+  const confirm = useConfirm();
   const draft = pkg.status === "draft";
   const editable = canEdit && draft;
 
@@ -184,15 +185,14 @@ function PackageCard({
             {draft && (
               <Button
                 size="sm"
-                onClick={() => {
-                  if (
-                    pkg.items.length > 0 &&
-                    window.confirm(
-                      `Activate "${pkg.name}"? This creates ${pkg.items.length} live TMU item(s).`,
-                    )
-                  ) {
-                    activate.mutate(pkg.id);
-                  }
+                onClick={async () => {
+                  if (pkg.items.length === 0) return;
+                  const ok = await confirm({
+                    title: `Activate “${pkg.name}”?`,
+                    description: `This creates ${pkg.items.length} live TMU item(s).`,
+                    confirmText: "Activate",
+                  });
+                  if (ok) activate.mutate(pkg.id);
                 }}
                 disabled={pkg.items.length === 0 || activate.isPending}
               >
@@ -200,14 +200,15 @@ function PackageCard({
                 Activate
               </Button>
             )}
-            <button
-              type="button"
+            <ConfirmButton
+              size="icon"
               title="Delete package"
-              onClick={() => del.mutate(pkg.id)}
-              className="text-muted-foreground transition-colors hover:text-destructive"
+              aria-label="Delete package"
+              onConfirm={() => del.mutate(pkg.id)}
+              warn={`Delete the “${pkg.name}” package?`}
             >
               <X className="size-4" />
-            </button>
+            </ConfirmButton>
           </div>
         )}
       </div>
@@ -227,16 +228,17 @@ function PackageCard({
                   <span className="font-mono text-xs">{itemSummary(item)}</span>
                 </span>
                 {editable && (
-                  <button
-                    type="button"
+                  <ConfirmButton
+                    size="icon"
                     title="Remove item"
-                    onClick={() =>
+                    aria-label="Remove item"
+                    onConfirm={() =>
                       removeItem.mutate({ packageId: pkg.id, itemId: item.id })
                     }
-                    className="text-muted-foreground transition-colors hover:text-destructive"
+                    warn="Remove this item from the package?"
                   >
                     <X className="size-4" />
-                  </button>
+                  </ConfirmButton>
                 )}
               </li>
             ))}
