@@ -1540,18 +1540,28 @@ export interface components {
             /** Format: int64 */
             window_min: number;
         };
-        /** @description Saved runway configuration for an airport. */
+        /**
+         * @description Saved runway configuration for an airport. Every field is optional: a `PUT` updates only
+         *     the fields it carries and leaves the rest of the shared config untouched (server-side
+         *     `coalesce`), so one controller toggling a runway can't clobber another's STAR rule.
+         */
         RunwayConfigRequest: {
-            active_ends?: string[];
+            /** @description When present, replaces the active runway ends; omit to keep them unchanged. */
+            active_ends?: string[] | null;
             /** @description When present, replaces the stored manual ends; omit to keep them unchanged. */
             custom_ends?: components["schemas"]["CustomEnd"][] | null;
+            /** @description When present, replaces the per-aircraft overrides; omit to keep them unchanged. */
             overrides?: {
                 [key: string]: string;
-            };
+            } | null;
+            /** @description When present, replaces the STAR→runway rules; omit to keep them unchanged. */
             star_rules?: {
                 [key: string]: string;
-            };
-            /** Format: int32 */
+            } | null;
+            /**
+             * Format: int32
+             * @description When present, replaces the demand horizon; omit to keep it unchanged.
+             */
             window_min?: number | null;
         };
         /** @description Per-runway demand: count and level per 10-min bin. */

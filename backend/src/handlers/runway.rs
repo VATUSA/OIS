@@ -87,7 +87,8 @@ async fn build_board(state: &AppState, icao: &str) -> Result<RunwayBoard, ApiErr
         },
         None => default(),
     };
-    let window_min = window_min as i64;
+    // Clamp defensively: the write path already bounds this, but guard any out-of-range row.
+    let window_min = (window_min as i64).clamp(30, 240);
 
     // Runway ends from the bundled dataset, plus any manually-added ones.
     let mut ends = state.runways.ends_for(&icao);
@@ -102,7 +103,12 @@ async fn build_board(state: &AppState, icao: &str) -> Result<RunwayBoard, ApiErr
     for e in &mut ends {
         e.active = active_set.contains(e.id.as_str());
     }
+    // Don't duplicate a real dataset end if a manual end was added with a colliding id.
+    let dataset_ids: HashSet<String> = ends.iter().map(|e| e.id.clone()).collect();
     for ce in &custom_ends {
+        if dataset_ids.contains(&ce.id) {
+            continue;
+        }
         ends.push(RunwayEnd {
             id: ce.id.clone(),
             hdg: ((ce.hdg % 360) + 360) % 360,
@@ -222,13 +228,13 @@ pub async fn put_runway(
     let user = current_user.as_ref().ok_or(ApiError::Unauthorized)?;
     let pool = state.db.as_ref().ok_or(ApiError::ServiceUnavailable)?;
     let icao = icao.to_ascii_uppercase();
-    let window = body.window_min.unwrap_or(DEFAULT_WINDOW_MIN).clamp(30, 240);
+    let window = body.window_min.map(|w| w.clamp(30, 240));
     runway_repo::upsert_config(
         pool,
         &icao,
-        &body.active_ends,
-        &body.star_rules,
-        &body.overrides,
+        body.active_ends.as_deref(),
+        body.star_rules.as_ref(),
+        body.overrides.as_ref(),
         window,
         &user.id,
         body.custom_ends.as_ref(),

@@ -68,14 +68,15 @@ export function RunwayPage() {
     [b?.ends],
   );
 
-  function save(active: string[], windowMin?: number) {
+  // Each edit sends only the field(s) it changes; the server coalesces the rest, so a
+  // controller toggling a runway can't clobber another's STAR rules on this shared board.
+  function save(active: string[]) {
     if (!icao || !b) return;
-    update.mutate({
-      active_ends: active,
-      star_rules: b.star_rules,
-      overrides: b.overrides,
-      window_min: windowMin ?? b.window_min,
-    });
+    update.mutate({ active_ends: active });
+  }
+  function setWindow(windowMin: number) {
+    if (!icao || !b) return;
+    update.mutate({ window_min: windowMin });
   }
   function toggleEnd(id: string) {
     if (!canEdit) return;
@@ -96,12 +97,7 @@ export function RunwayPage() {
   }
   function saveRules(rules: Record<string, string>) {
     if (!icao || !b) return;
-    update.mutate({
-      active_ends: activeIds,
-      star_rules: rules,
-      overrides: b.overrides,
-      window_min: b.window_min,
-    });
+    update.mutate({ star_rules: rules });
   }
   function addRule() {
     const s = starBase(newStar);
@@ -123,8 +119,6 @@ export function RunwayPage() {
     update.mutate({
       active_ends: cfg.active_ends,
       star_rules: cfg.star_rules,
-      overrides: b.overrides,
-      window_min: b.window_min,
     });
   }
   function saveCurrentConfig() {
@@ -148,13 +142,7 @@ export function RunwayPage() {
       ...(b.custom_ends ?? []).filter((c) => c.id !== id),
       { id, hdg: ((hdg % 360) + 360) % 360, len: 0 },
     ];
-    update.mutate({
-      active_ends: activeIds,
-      star_rules: b.star_rules,
-      overrides: b.overrides,
-      window_min: b.window_min,
-      custom_ends,
-    });
+    update.mutate({ custom_ends });
     setNewEndId("");
     setNewEndHdg("");
   }
@@ -162,9 +150,6 @@ export function RunwayPage() {
     if (!canEdit || !b) return;
     update.mutate({
       active_ends: activeIds.filter((x) => x !== id),
-      star_rules: b.star_rules,
-      overrides: b.overrides,
-      window_min: b.window_min,
       custom_ends: (b.custom_ends ?? []).filter((c) => c.id !== id),
     });
   }
@@ -178,12 +163,7 @@ export function RunwayPage() {
     const pruned = Object.fromEntries(
       Object.entries(next).filter(([c]) => live.has(c)),
     );
-    update.mutate({
-      active_ends: activeIds,
-      star_rules: b.star_rules,
-      overrides: pruned,
-      window_min: b.window_min,
-    });
+    update.mutate({ overrides: pruned });
   }
 
   const load = () => {
@@ -475,7 +455,7 @@ export function RunwayPage() {
                 <select
                   disabled={!canEdit}
                   value={b?.window_min ?? 90}
-                  onChange={(e) => save(activeIds, Number(e.target.value))}
+                  onChange={(e) => setWindow(Number(e.target.value))}
                   className="h-8 rounded-md border border-input bg-background px-2 text-sm outline-none disabled:opacity-50"
                 >
                   {[60, 90, 120, 180].map((w) => (

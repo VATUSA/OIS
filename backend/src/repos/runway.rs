@@ -30,31 +30,37 @@ pub async fn get_config(pool: &PgPool, icao: &str) -> Result<Option<RunwayConfig
     .map_err(|_| ApiError::Internal)
 }
 
-/// Insert or replace the config for `icao`. `custom_ends` is preserved when `None`
-/// (`coalesce` keeps the existing manual ends).
+/// Insert or update the config for `icao`. Every field is preserved when its argument is
+/// `None` (`coalesce` keeps the existing value), so a partial `PUT` that touches only, say,
+/// the active ends leaves another controller's STAR rules and overrides intact.
 #[allow(clippy::too_many_arguments)]
 pub async fn upsert_config(
     pool: &PgPool,
     icao: &str,
-    active_ends: &[String],
-    star_rules: &HashMap<String, String>,
-    overrides: &HashMap<String, String>,
-    window_min: i32,
+    active_ends: Option<&[String]>,
+    star_rules: Option<&HashMap<String, String>>,
+    overrides: Option<&HashMap<String, String>>,
+    window_min: Option<i32>,
     user_id: &str,
     custom_ends: Option<&Vec<crate::feed::runway::CustomEnd>>,
 ) -> Result<(), ApiError> {
     sqlx::query(
         "insert into flow.runway_config \
            (icao, active_ends, star_rules, overrides, window_min, updated_by, custom_ends) \
-         values ($1, $2, $3, $4, $5, $6, coalesce($7, '[]'::jsonb)) \
+         values ($1, coalesce($2, '{}'::text[]), coalesce($3, '{}'::jsonb), \
+                 coalesce($4, '{}'::jsonb), coalesce($5, 90), $6, coalesce($7, '[]'::jsonb)) \
          on conflict (icao) do update set \
-           active_ends = $2, star_rules = $3, overrides = $4, window_min = $5, updated_by = $6, \
+           active_ends = coalesce($2, flow.runway_config.active_ends), \
+           star_rules = coalesce($3, flow.runway_config.star_rules), \
+           overrides = coalesce($4, flow.runway_config.overrides), \
+           window_min = coalesce($5, flow.runway_config.window_min), \
+           updated_by = $6, \
            custom_ends = coalesce($7, flow.runway_config.custom_ends)",
     )
     .bind(icao)
     .bind(active_ends)
-    .bind(Json(star_rules))
-    .bind(Json(overrides))
+    .bind(star_rules.map(Json))
+    .bind(overrides.map(Json))
     .bind(window_min)
     .bind(user_id)
     .bind(custom_ends.map(Json))

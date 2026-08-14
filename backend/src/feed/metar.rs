@@ -45,9 +45,17 @@ pub async fn fetch_one(client: &reqwest::Client, icao: &str) -> Option<MetarInfo
 pub fn flight_category(metar: &str) -> &'static str {
     let mut vis = 10.0_f64;
     let mut ceil = 99_999_i32;
-    for tok in metar.split_whitespace() {
+    let toks: Vec<&str> = metar.split_whitespace().collect();
+    for (i, tok) in toks.iter().enumerate() {
         if let Some(v) = parse_vis(tok) {
-            vis = v;
+            // US METARs split mixed fractions across two tokens: `1 1/2SM`. When this
+            // fraction token is preceded by a bare integer, add the whole part back in.
+            let whole = if tok.contains('/') && i > 0 {
+                toks[i - 1].parse::<f64>().ok()
+            } else {
+                None
+            };
+            vis = v + whole.unwrap_or(0.0);
         }
         if let Some(c) = parse_ceiling(tok) {
             ceil = ceil.min(c);
@@ -93,10 +101,13 @@ fn parse_wind(metar: &str) -> Option<String> {
         let Some(w) = tok.strip_suffix("KT") else {
             continue;
         };
+        // `w.get(..3)` (not `w[..3]`) so a non-ASCII byte boundary yields None, not a panic.
         let (dir, rest) = if let Some(r) = w.strip_prefix("VRB") {
             ("VRB", r)
-        } else if w.len() >= 3 && w[..3].bytes().all(|b| b.is_ascii_digit()) {
-            (&w[..3], &w[3..])
+        } else if let (Some(d), Some(r)) = (w.get(..3), w.get(3..))
+            && d.bytes().all(|b| b.is_ascii_digit())
+        {
+            (d, r)
         } else {
             continue;
         };
@@ -104,7 +115,10 @@ fn parse_wind(metar: &str) -> Option<String> {
             Some((s, g)) => (s, g.parse::<i32>().ok()),
             None => (rest, None),
         };
-        let spd: i32 = spd.parse().ok()?;
+        // A malformed speed skips this token rather than abandoning the whole search.
+        let Ok(spd) = spd.parse::<i32>() else {
+            continue;
+        };
         return Some(match gust {
             Some(g) => format!("{dir}@{spd}G{g}kt"),
             None => format!("{dir}@{spd}kt"),
@@ -135,5 +149,26 @@ mod tests {
         );
         assert_eq!(parse_wind("KJFK VRB03KT").as_deref(), Some("VRB@3kt"));
         assert_eq!(parse_wind("KJFK 10SM CLR"), None);
+    }
+
+    #[test]
+    fn mixed_fraction_visibility() {
+        // `1 1/2SM` is two tokens; the whole part must be added back (1.5 SM → IFR, not LIFR).
+        assert_eq!(flight_category("KJFK 1 1/2SM OVC020"), "IFR");
+        // A bare fraction stays as-is (0.5 SM → LIFR).
+        assert_eq!(flight_category("KJFK 1/2SM OVC020"), "LIFR");
+        // `3 1/2SM` → 3.5 SM (no ceiling layer) → MVFR.
+        assert_eq!(flight_category("KJFK 3 1/2SM SCT030"), "MVFR");
+    }
+
+    #[test]
+    fn wind_parser_is_panic_free_and_skips_junk() {
+        // A `KT` token split on a non-ASCII byte boundary must not panic (get(), not [..]).
+        assert_eq!(parse_wind("KJFK 12€KT 10SM"), None);
+        // A malformed leading wind token must not abort the search for a later valid one.
+        assert_eq!(
+            parse_wind("KJFK 100XXKT 27015KT").as_deref(),
+            Some("270@15kt")
+        );
     }
 }
