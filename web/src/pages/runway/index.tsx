@@ -200,7 +200,6 @@ export function RunwayPage() {
   }
 
   const arrivals = b?.arrivals ?? [];
-  const assigned = arrivals.filter((a) => a.rwy);
   const pairs = groupPairs(b?.ends ?? []);
   const recMap = new Map((b?.recs ?? []).map((r) => [r.cs, r]));
   const customIds = new Set((b?.custom_ends ?? []).map((c) => c.id));
@@ -222,23 +221,6 @@ export function RunwayPage() {
         <Button size="sm" onClick={load} disabled={!field.trim()}>
           Load
         </Button>
-        {b && (
-          <span className="flex items-center gap-3 text-xs text-muted-foreground">
-            <span className="inline-flex items-center gap-1.5">
-              <span className="size-1.5 rounded-full bg-emerald-500" /> live
-            </span>
-            <span>
-              arrivals <b className="text-foreground">{arrivals.length}</b>
-            </span>
-            <span>
-              assigned <b className="text-foreground">{assigned.length}</b>
-            </span>
-            <span>
-              {b.icao} rwy data:{" "}
-              <span className="text-foreground">{b.source}</span>
-            </span>
-          </span>
-        )}
         {!canEdit && (
           <span className="rounded border border-amber-500/50 bg-amber-500/10 px-2 py-0.5 text-xs text-amber-700 dark:text-amber-200">
             View only — sign in with VATSIM to edit.
