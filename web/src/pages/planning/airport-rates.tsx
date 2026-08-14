@@ -1,5 +1,5 @@
 import {useEffect, useState} from "react";
-import {Button, Card, CardContent, Input} from "@ois/ui";
+import {Button, Card, CardContent, ConfirmButton, Input} from "@ois/ui";
 import {Gauge, Plus, X} from "lucide-react";
 
 import {useMe} from "@/lib/auth";
@@ -75,14 +75,15 @@ function RateRow({ eventId, row }: { eventId: number; row: AirportRate }) {
         />
       </td>
       <td className="py-2 text-right">
-        <button
-          type="button"
+        <ConfirmButton
+          size="icon"
           title={`Remove ${row.icao}`}
-          onClick={() => remove.mutate(row.icao)}
-          className="text-muted-foreground transition-colors hover:text-destructive"
+          aria-label={`Remove ${row.icao}`}
+          onConfirm={() => remove.mutate(row.icao)}
+          warn={`Remove the ${row.icao} rate?`}
         >
           <X className="size-4" />
-        </button>
+        </ConfirmButton>
       </td>
     </tr>
   );

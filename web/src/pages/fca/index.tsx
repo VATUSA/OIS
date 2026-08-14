@@ -1,7 +1,7 @@
 import {useCallback, useEffect, useMemo, useRef, useState} from "react";
 import L from "leaflet";
 import "leaflet/dist/leaflet.css";
-import {Button, Input, useTheme} from "@ois/ui";
+import {Button, ConfirmButton, Input, useTheme} from "@ois/ui";
 import {ChevronDown, Maximize2, Minus, Pencil, Plus, RefreshCw, Trash2, X,} from "lucide-react";
 
 import {useMe} from "@/lib/auth";
@@ -788,14 +788,16 @@ export function FcaPage() {
                         </button>
                       )}
                       {canDelete && (
-                        <button
-                          type="button"
+                        <ConfirmButton
+                          size="icon"
+                          className="size-7"
                           title="Delete"
-                          onClick={() => deleteFca.mutate(fca.id)}
-                          className="text-muted-foreground hover:text-destructive"
+                          aria-label="Delete FCA"
+                          onConfirm={() => deleteFca.mutate(fca.id)}
+                          warn={`Delete the “${fca.name}” FCA?`}
                         >
                           <Trash2 className="size-3.5" />
-                        </button>
+                        </ConfirmButton>
                       )}
                     </li>
                   ))}

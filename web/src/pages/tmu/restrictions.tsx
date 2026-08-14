@@ -1,5 +1,5 @@
 import {useState} from "react";
-import {Badge, Button, Card, CardContent, Input, useToast} from "@ois/ui";
+import {Badge, Button, Card, CardContent, ConfirmButton, Input, useToast} from "@ois/ui";
 import {Plus} from "lucide-react";
 
 import {hasPermission} from "@/lib/permissions";
@@ -187,15 +187,13 @@ function TmiRow({
               </Button>
             )}
           {canDelete && (
-            <Button
+            <ConfirmButton
               size="sm"
-              variant="ghost"
-              className="text-destructive hover:text-destructive"
-              disabled={del.isPending}
-              onClick={() => del.mutate(tmi.id)}
+              onConfirm={() => del.mutate(tmi.id)}
+              warn="Delete this restriction?"
             >
               Delete
-            </Button>
+            </ConfirmButton>
           )}
         </div>
       </td>
