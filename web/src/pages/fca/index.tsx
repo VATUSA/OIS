@@ -2,7 +2,7 @@ import {useCallback, useEffect, useMemo, useRef, useState} from "react";
 import L from "leaflet";
 import "leaflet/dist/leaflet.css";
 import {Button, Input, useTheme} from "@ois/ui";
-import {Pencil, Plus, Trash2, X} from "lucide-react";
+import {Maximize2, Minus, Pencil, Plus, Trash2, X} from "lucide-react";
 
 import {useMe} from "@/lib/auth";
 import {hasPermission} from "@/lib/permissions";
@@ -855,9 +855,76 @@ function RoutePopup({
   const pts = route.points as LatLng[];
   const nm = Math.round(lineNm(pts));
   const unresolved = route.unresolved ?? [];
+
+  // Drag anywhere over the map by the header; position is a pixel offset within the map.
+  const [pos, setPos] = useState({ x: 12, y: 12 });
+  const [minimized, setMinimized] = useState(false);
+  const drag = useRef<{ px: number; py: number; ox: number; oy: number } | null>(
+    null,
+  );
+  const onDown = (e: React.PointerEvent) => {
+    if (e.button !== 0) return;
+    drag.current = { px: e.clientX, py: e.clientY, ox: pos.x, oy: pos.y };
+    e.currentTarget.setPointerCapture(e.pointerId);
+  };
+  const onMove = (e: React.PointerEvent) => {
+    if (!drag.current) return;
+    setPos({
+      x: drag.current.ox + (e.clientX - drag.current.px),
+      y: drag.current.oy + (e.clientY - drag.current.py),
+    });
+  };
+  const onUp = () => {
+    drag.current = null;
+  };
+  const stopPointer = (e: React.PointerEvent) => e.stopPropagation();
+
+  if (minimized) {
+    return (
+      <div className="absolute z-[600]" style={{ left: pos.x, top: pos.y }}>
+        <div
+          onPointerDown={onDown}
+          onPointerMove={onMove}
+          onPointerUp={onUp}
+          className="flex cursor-move touch-none select-none items-center gap-2 rounded-lg border border-border/70 bg-background/95 px-2.5 py-1.5 shadow-2xl backdrop-blur"
+        >
+          <span className="font-mono text-sm font-bold text-sky-400">
+            {route.callsign}
+          </span>
+          <button
+            type="button"
+            onPointerDown={stopPointer}
+            onClick={() => setMinimized(false)}
+            className="rounded p-0.5 text-muted-foreground transition-colors hover:bg-muted hover:text-foreground"
+            aria-label="Expand"
+          >
+            <Maximize2 className="size-3.5" />
+          </button>
+          <button
+            type="button"
+            onPointerDown={stopPointer}
+            onClick={onClose}
+            className="rounded p-0.5 text-muted-foreground transition-colors hover:bg-muted hover:text-foreground"
+            aria-label="Close"
+          >
+            <X className="size-3.5" />
+          </button>
+        </div>
+      </div>
+    );
+  }
+
   return (
-    <div className="absolute left-3 top-3 z-[600] w-[min(92vw,26rem)] rounded-xl border border-border/70 bg-background/95 p-4 shadow-2xl backdrop-blur">
-      <div className="flex items-start justify-between gap-3">
+    <div
+      className="absolute z-[600] w-[min(92vw,26rem)] rounded-xl border border-border/70 bg-background/95 p-4 shadow-2xl backdrop-blur"
+      style={{ left: pos.x, top: pos.y }}
+    >
+      <div
+        onPointerDown={onDown}
+        onPointerMove={onMove}
+        onPointerUp={onUp}
+        className="flex cursor-move touch-none select-none items-start justify-between gap-3"
+      >
         <div className="min-w-0 font-mono">
           <span className="text-lg font-bold tracking-tight text-sky-400">
             {route.callsign}
@@ -868,14 +935,26 @@ function RoutePopup({
             </span>
           )}
         </div>
-        <button
-          type="button"
-          onClick={onClose}
-          className="-mr-1 -mt-1 rounded p-1 text-muted-foreground transition-colors hover:bg-muted hover:text-foreground"
-          aria-label="Close"
-        >
-          <X className="size-4" />
-        </button>
+        <div className="-mr-1 -mt-1 flex items-center gap-0.5">
+          <button
+            type="button"
+            onPointerDown={stopPointer}
+            onClick={() => setMinimized(true)}
+            className="rounded p-1 text-muted-foreground transition-colors hover:bg-muted hover:text-foreground"
+            aria-label="Minimize"
+          >
+            <Minus className="size-4" />
+          </button>
+          <button
+            type="button"
+            onPointerDown={stopPointer}
+            onClick={onClose}
+            className="rounded p-1 text-muted-foreground transition-colors hover:bg-muted hover:text-foreground"
+            aria-label="Close"
+          >
+            <X className="size-4" />
+          </button>
+        </div>
       </div>
 
       <div className="mt-1 font-mono text-sm text-muted-foreground">
