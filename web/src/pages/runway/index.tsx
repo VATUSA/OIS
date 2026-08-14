@@ -4,7 +4,15 @@ import {Button, Input} from "@ois/ui";
 import {ZuluClock} from "@/components/zulu-clock";
 import {useMe} from "@/lib/auth";
 import {hasPermission} from "@/lib/permissions";
-import {type RunwayArrival, type RunwayEnd, useRunway, useUpdateRunway,} from "@/lib/runway";
+import {
+  type RunwayArrival,
+  type RunwayEnd,
+  useDeleteConfig,
+  useRunway,
+  useSaveConfig,
+  useSavedConfigs,
+  useUpdateRunway,
+} from "@/lib/runway";
 
 const BIN_MAX = 5;
 const PRESET_HDG: Record<string, number> = { W: 270, E: 90, N: 360, S: 180 };
@@ -41,6 +49,10 @@ export function RunwayPage() {
   const [newRwy, setNewRwy] = useState("");
   const board = useRunway(icao);
   const update = useUpdateRunway(icao ?? "");
+  const configs = useSavedConfigs(icao);
+  const saveCfg = useSaveConfig(icao ?? "");
+  const deleteCfg = useDeleteConfig(icao ?? "");
+  const [selectedCfg, setSelectedCfg] = useState("");
   const b = board.data;
 
   const activeIds = useMemo(
@@ -95,6 +107,29 @@ export function RunwayPage() {
     const next = { ...b.star_rules };
     delete next[star];
     saveRules(next);
+  }
+  function applyConfig(name: string) {
+    setSelectedCfg(name);
+    const cfg = configs.data?.find((c) => c.name === name);
+    if (!cfg || !b || !icao) return;
+    update.mutate({
+      active_ends: cfg.active_ends,
+      star_rules: cfg.star_rules,
+      overrides: b.overrides,
+      window_min: b.window_min,
+    });
+  }
+  function saveCurrentConfig() {
+    if (!b) return;
+    const name = window.prompt("Save this runway config as:")?.trim();
+    if (!name) return;
+    saveCfg.mutate({ name, active_ends: activeIds, star_rules: b.star_rules });
+    setSelectedCfg(name);
+  }
+  function deleteSelectedConfig() {
+    if (!selectedCfg) return;
+    deleteCfg.mutate(selectedCfg);
+    setSelectedCfg("");
   }
   function setOverride(cs: string, rwy: string) {
     if (!canEdit || !b) return;
@@ -186,6 +221,39 @@ export function RunwayPage() {
               <h2 className="mb-2 text-xs font-semibold uppercase tracking-wide text-muted-foreground">
                 Landing runways
               </h2>
+              {canEdit && (
+                <div className="mb-2 flex items-center gap-1">
+                  <select
+                    value={selectedCfg}
+                    onChange={(e) => applyConfig(e.target.value)}
+                    className="h-7 flex-1 rounded border border-input bg-background px-2 text-xs outline-none"
+                  >
+                    <option value="">— saved configs —</option>
+                    {(configs.data ?? []).map((c) => (
+                      <option key={c.name} value={c.name}>
+                        {c.name}
+                      </option>
+                    ))}
+                  </select>
+                  <Button
+                    size="sm"
+                    variant="outline"
+                    onClick={saveCurrentConfig}
+                    className="h-7 px-2 text-xs"
+                  >
+                    Save
+                  </Button>
+                  <button
+                    type="button"
+                    onClick={deleteSelectedConfig}
+                    disabled={!selectedCfg}
+                    className="rounded p-1 text-muted-foreground hover:text-destructive disabled:opacity-40"
+                    aria-label="Delete saved config"
+                  >
+                    ×
+                  </button>
+                </div>
+              )}
               <div className="mb-2 flex flex-wrap gap-1.5">
                 {["W", "E", "N", "S", "OFF"].map((p) => (
                   <button
