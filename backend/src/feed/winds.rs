@@ -1,0 +1,379 @@
+//! US winds aloft from the Aviation Weather Center FB (winds/temps) tables, for enroute
+//! ETA correction. Fetched at runtime and hot-swapped; fails safe to still air whenever
+//! data is missing. Ported from vatflow's `winds-aloft.js`.
+
+use std::collections::HashMap;
+
+use super::airports::AirportDb;
+
+const R_NM: f64 = 3440.065;
+/// AWC FB "low level" tables cover the CONUS in these six regions.
+const REGIONS: [&str; 6] = ["bos", "mia", "chi", "dfw", "slc", "sfo"];
+/// A station further than this from the query point contributes no wind (nm).
+const MAX_STATION_NM: f64 = 600.0;
+
+/// Wind at one forecast level: direction (deg true, None when calm) and speed (kt).
+#[derive(Clone, Copy)]
+pub struct WindLevel {
+    pub dir: Option<f64>,
+    pub spd: f64,
+}
+
+struct Station {
+    lat: f64,
+    lon: f64,
+    /// `(altitude_ft, wind)` forecast levels.
+    levels: Vec<(i32, WindLevel)>,
+}
+
+#[derive(Default)]
+pub struct Winds {
+    stations: Vec<Station>,
+}
+
+impl Winds {
+    pub fn is_empty(&self) -> bool {
+        self.stations.is_empty()
+    }
+
+    pub fn station_count(&self) -> usize {
+        self.stations.len()
+    }
+
+    /// Nearest station's wind at the level closest to `alt_ft`, within [`MAX_STATION_NM`].
+    fn nearest_wind(&self, lat: f64, lon: f64, alt_ft: f64) -> Option<WindLevel> {
+        let mut best: Option<&Station> = None;
+        let mut bd = f64::MAX;
+        for s in &self.stations {
+            let d = gc_dist(lat, lon, s.lat, s.lon);
+            if d < bd {
+                bd = d;
+                best = Some(s);
+            }
+        }
+        let s = best?;
+        if bd > MAX_STATION_NM {
+            return None;
+        }
+        s.levels
+            .iter()
+            .min_by(|(a, _), (b, _)| {
+                (*a as f64 - alt_ft)
+                    .abs()
+                    .total_cmp(&(*b as f64 - alt_ft).abs())
+            })
+            .map(|(_, w)| *w)
+    }
+
+    /// Mean headwind (kt; `+` = headwind, `-` = tailwind) along a `[lat, lon]` polyline at
+    /// `alt_ft`. None when no station covers the route (caller flies still air).
+    pub fn route_headwind(&self, points: &[[f64; 2]], alt_ft: f64) -> Option<f64> {
+        if points.len() < 2 || self.stations.is_empty() {
+            return None;
+        }
+        let mut sum = 0.0;
+        let mut cnt = 0;
+        for seg in points.windows(2) {
+            let (a, b) = (seg[0], seg[1]);
+            let course = bearing_deg(a[0], a[1], b[0], b[1]);
+            let (mlat, mlon) = ((a[0] + b[0]) / 2.0, (a[1] + b[1]) / 2.0);
+            if let Some(w) = self.nearest_wind(mlat, mlon, alt_ft) {
+                match w.dir {
+                    Some(dir) if w.spd > 0.0 => {
+                        sum += w.spd * (dir - course).to_radians().cos();
+                        cnt += 1;
+                    }
+                    // Calm level (9900) counts as a zero-wind sample.
+                    _ if w.spd == 0.0 => cnt += 1,
+                    _ => {}
+                }
+            }
+        }
+        (cnt > 0).then(|| sum / cnt as f64)
+    }
+
+    /// Headwind (kt) at a single point along `course_deg`.
+    pub fn point_headwind(&self, lat: f64, lon: f64, course_deg: f64, alt_ft: f64) -> Option<f64> {
+        let w = self.nearest_wind(lat, lon, alt_ft)?;
+        match w.dir {
+            Some(dir) => Some(w.spd * (dir - course_deg).to_radians().cos()),
+            None => (w.spd == 0.0).then_some(0.0),
+        }
+    }
+}
+
+/// Fetch and assemble the current winds-aloft picture. Best-effort per region; an empty
+/// result simply means the model flies still air until the next refresh.
+pub async fn fetch(client: &reqwest::Client, airports: &AirportDb) -> Winds {
+    let mut merged: HashMap<String, Vec<(i32, WindLevel)>> = HashMap::new();
+    for reg in REGIONS {
+        let url = format!("https://aviationweather.gov/api/data/windtemp?region={reg}&level=low");
+        let text = match client
+            .get(&url)
+            .send()
+            .await
+            .and_then(|r| r.error_for_status())
+        {
+            Ok(resp) => match resp.text().await {
+                Ok(t) => t,
+                Err(_) => continue,
+            },
+            Err(e) => {
+                tracing::debug!(region = reg, error = %e, "winds region fetch failed");
+                continue;
+            }
+        };
+        if !text.contains("FT") {
+            continue;
+        }
+        for (id, levels) in parse_windtemp(&text) {
+            merged.insert(id, levels);
+        }
+    }
+
+    // Resolve each FB station id to airport coordinates (K.., P.., or bare).
+    let mut stations = Vec::new();
+    for (id, levels) in merged {
+        let coord = airports
+            .get(&format!("K{id}"))
+            .or_else(|| airports.get(&format!("P{id}")))
+            .or_else(|| airports.get(&id));
+        if let Some(&(lat, lon)) = coord {
+            stations.push(Station { lat, lon, levels });
+        }
+    }
+    Winds { stations }
+}
+
+/// Parse an AWC FB table into `(station_id, levels)`. Columns are matched to their nearest
+/// header altitude by character position, tolerating irregular spacing.
+pub fn parse_windtemp(text: &str) -> Vec<(String, Vec<(i32, WindLevel)>)> {
+    let mut levels: Option<Vec<(i32, f64)>> = None;
+    let mut out = Vec::new();
+
+    for raw in text.lines() {
+        let line = raw.replace('\t', " ");
+
+        // Header row: contains "FT" and the altitude columns.
+        if line.contains("FT") {
+            let cols = level_columns(&line);
+            if !cols.is_empty() {
+                levels = Some(cols);
+                continue;
+            }
+        }
+        let Some(cols) = &levels else { continue };
+
+        // Station row: three alphanumerics followed by whitespace.
+        let Some((id, scan_from)) = station_id(&line) else {
+            continue;
+        };
+        let mut lev: Vec<(i32, WindLevel)> = Vec::new();
+        for (center, tok) in tokens_with_centers(&line, scan_from) {
+            let Some(w) = decode_fb(tok) else { continue };
+            // Assign the token to the nearest altitude column.
+            if let Some((alt, _)) = cols
+                .iter()
+                .min_by(|(_, ca), (_, cb)| (ca - center).abs().total_cmp(&(cb - center).abs()))
+            {
+                lev.push((*alt, w));
+            }
+        }
+        if !lev.is_empty() {
+            out.push((id, lev));
+        }
+    }
+    out
+}
+
+/// Decode an FB group like `2427+21`, `9900`, or `274131` → wind. `9900` = light/variable.
+fn decode_fb(g: &str) -> Option<WindLevel> {
+    let b = g.as_bytes();
+    if b.len() < 4 || !b[..4].iter().all(u8::is_ascii_digit) {
+        return None;
+    }
+    if &g[..4] == "9900" {
+        return Some(WindLevel {
+            dir: None,
+            spd: 0.0,
+        });
+    }
+    let mut dd: i32 = g[0..2].parse().ok()?;
+    let mut ss: i32 = g[2..4].parse().ok()?;
+    if dd > 36 {
+        dd -= 50;
+        ss += 100;
+    }
+    Some(WindLevel {
+        dir: Some(((dd * 10) % 360) as f64),
+        spd: ss as f64,
+    })
+}
+
+/// Altitude columns `(alt_ft, center_char)` from a header row's 4–5 digit runs.
+fn level_columns(line: &str) -> Vec<(i32, f64)> {
+    let b = line.as_bytes();
+    let mut out = Vec::new();
+    let mut i = 0;
+    while i < b.len() {
+        if b[i].is_ascii_digit() {
+            let start = i;
+            while i < b.len() && b[i].is_ascii_digit() {
+                i += 1;
+            }
+            let len = i - start;
+            if (4..=5).contains(&len)
+                && let Ok(alt) = line[start..i].parse::<i32>()
+            {
+                out.push((alt, start as f64 + len as f64 / 2.0));
+            }
+        } else {
+            i += 1;
+        }
+    }
+    out
+}
+
+/// A station id is exactly three alphanumerics at the line start followed by whitespace;
+/// returns `(id, byte_offset_after_id)`.
+fn station_id(line: &str) -> Option<(String, usize)> {
+    let b = line.as_bytes();
+    let mut i = 0;
+    while i < b.len() && b[i].is_ascii_whitespace() {
+        i += 1;
+    }
+    if i + 3 > b.len() {
+        return None;
+    }
+    let id = &line[i..i + 3];
+    if !id.bytes().all(|c| c.is_ascii_alphanumeric())
+        || !id.bytes().any(|c| c.is_ascii_alphabetic())
+    {
+        return None;
+    }
+    if i + 3 < b.len() && !b[i + 3].is_ascii_whitespace() {
+        return None;
+    }
+    Some((id.to_string(), i + 3))
+}
+
+/// Whitespace-separated tokens with their center char position, from `from`.
+fn tokens_with_centers(s: &str, from: usize) -> Vec<(f64, &str)> {
+    let b = s.as_bytes();
+    let mut out = Vec::new();
+    let mut i = from;
+    while i < b.len() {
+        if b[i].is_ascii_whitespace() {
+            i += 1;
+            continue;
+        }
+        let start = i;
+        while i < b.len() && !b[i].is_ascii_whitespace() {
+            i += 1;
+        }
+        let tok = &s[start..i];
+        out.push((start as f64 + tok.len() as f64 / 2.0, tok));
+    }
+    out
+}
+
+fn gc_dist(la1: f64, lo1: f64, la2: f64, lo2: f64) -> f64 {
+    let (p1, p2) = (la1.to_radians(), la2.to_radians());
+    let dla = (la2 - la1).to_radians();
+    let dlo = (lo2 - lo1).to_radians();
+    let a = (dla / 2.0).sin().powi(2) + p1.cos() * p2.cos() * (dlo / 2.0).sin().powi(2);
+    2.0 * R_NM * a.sqrt().asin()
+}
+
+fn bearing_deg(la1: f64, lo1: f64, la2: f64, lo2: f64) -> f64 {
+    let dlo = (lo2 - lo1).to_radians();
+    let y = dlo.sin() * la2.to_radians().cos();
+    let x = la1.to_radians().cos() * la2.to_radians().sin()
+        - la1.to_radians().sin() * la2.to_radians().cos() * dlo.cos();
+    (y.atan2(x).to_degrees() + 360.0) % 360.0
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    const SAMPLE: &str = "\
+DATA BASED ON 131800Z
+VALID 140000Z   FOR USE 2000-0300Z. TEMPS NEG ABV 24000
+
+FT  3000    6000    9000   12000   18000   24000  30000  34000  39000
+BRL 1817 2427+21 2727+14 2928+09 2933-05 2736-15 274131 264142 243352
+FWA 9900 2605+16 2708+12 2818+07 3025-05 2740-15 265031 265541 256053
+";
+
+    #[test]
+    fn decodes_fb_groups() {
+        // 2427 → from 240°, 27 kt.
+        let w = decode_fb("2427+21").unwrap();
+        assert_eq!(w.dir, Some(240.0));
+        assert_eq!(w.spd, 27.0);
+        // 9900 → calm / light-variable.
+        let calm = decode_fb("9900").unwrap();
+        assert_eq!(calm.dir, None);
+        assert_eq!(calm.spd, 0.0);
+        // dd>36 encodes speed ≥ 100 kt: 7420 → dir 240°, 120 kt.
+        let fast = decode_fb("7420").unwrap();
+        assert_eq!(fast.dir, Some(240.0));
+        assert_eq!(fast.spd, 120.0);
+        assert!(decode_fb("+21").is_none());
+    }
+
+    #[test]
+    fn parses_a_windtemp_table() {
+        let stations = parse_windtemp(SAMPLE);
+        let brl = stations
+            .iter()
+            .find(|(id, _)| id == "BRL")
+            .expect("BRL parsed");
+        // Nine levels, matching the nine header columns.
+        assert_eq!(brl.1.len(), 9);
+        // 3000 ft column: 1817 → 180°, 17 kt.
+        let (_, low) = brl.1.iter().find(|(a, _)| *a == 3000).unwrap();
+        assert_eq!(low.dir, Some(180.0));
+        assert_eq!(low.spd, 17.0);
+        // 39000 ft column: 2433 → 240°, 33+100 = ... actually 24 ≤ 36 so 240°, 33 kt.
+        let (_, high) = brl.1.iter().find(|(a, _)| *a == 39000).unwrap();
+        assert_eq!(high.dir, Some(240.0));
+        // FWA at 3000 is calm (9900).
+        let fwa = stations.iter().find(|(id, _)| id == "FWA").unwrap();
+        let (_, fwa_low) = fwa.1.iter().find(|(a, _)| *a == 3000).unwrap();
+        assert_eq!(fwa_low.spd, 0.0);
+    }
+
+    #[test]
+    fn headwind_projection() {
+        // One station at (40,-90) with a due-west 240°/50kt-ish wind; flying east (090°)
+        // into it should read as a headwind component.
+        let winds = Winds {
+            stations: vec![Station {
+                lat: 40.0,
+                lon: -90.0,
+                levels: vec![(
+                    35000,
+                    WindLevel {
+                        dir: Some(90.0),
+                        spd: 50.0,
+                    },
+                )],
+            }],
+        };
+        // Flying east (course ~090) directly into a 090° wind → +50 kt headwind.
+        let hw = winds
+            .route_headwind(&[[40.0, -90.5], [40.0, -89.5]], 35000.0)
+            .unwrap();
+        assert!(
+            (hw - 50.0).abs() < 1.0,
+            "expected ~+50kt headwind, got {hw}"
+        );
+        // Flying west → tailwind (negative).
+        let tw = winds
+            .route_headwind(&[[40.0, -89.5], [40.0, -90.5]], 35000.0)
+            .unwrap();
+        assert!(tw < -40.0, "expected strong tailwind, got {tw}");
+    }
+}

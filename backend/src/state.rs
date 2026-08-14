@@ -3,7 +3,9 @@ use std::sync::Arc;
 use arc_swap::ArcSwap;
 use sqlx::{PgPool, postgres::PgPoolOptions};
 
-use crate::feed::{self, FeedState, airspace::Boundaries, facilities::FacilityState, nav::NavData};
+use crate::feed::{
+    self, FeedState, airspace::Boundaries, facilities::FacilityState, nav::NavData, winds::Winds,
+};
 
 /// Lean application state: the DB pool (optional so the process can boot without a
 /// database, e.g. for `--help`-style runs and tests), the live VATSIM feed, the
@@ -18,6 +20,9 @@ pub struct AppState {
     pub nav: Arc<ArcSwap<NavData>>,
     /// ARTCC boundary polygons, for FCA scope filtering (immutable, compile-time bundled).
     pub airspace: Arc<Boundaries>,
+    /// Winds aloft, for ETA correction. Starts empty (still air) and is hot-swapped by
+    /// `jobs::spawn_winds_refresh`, so it sits behind an `ArcSwap` for lock-free reads.
+    pub winds: Arc<ArcSwap<Winds>>,
 }
 
 impl AppState {
@@ -26,6 +31,7 @@ impl AppState {
         let facilities = feed::facilities::new_state();
         let nav = Arc::new(ArcSwap::from_pointee(NavData::load()));
         let airspace = Arc::new(Boundaries::load());
+        let winds = Arc::new(ArcSwap::from_pointee(Winds::default()));
         tracing::info!(
             nav_points = nav.load().len(),
             nav_cycle = nav.load().cycle(),
@@ -43,6 +49,7 @@ impl AppState {
                 facilities,
                 nav,
                 airspace,
+                winds,
             });
         }
 
@@ -52,6 +59,7 @@ impl AppState {
             facilities,
             nav,
             airspace,
+            winds,
         })
     }
 
@@ -62,6 +70,7 @@ impl AppState {
             facilities: feed::facilities::new_state(),
             nav: Arc::new(ArcSwap::from_pointee(NavData::default())),
             airspace: Arc::new(Boundaries::load()),
+            winds: Arc::new(ArcSwap::from_pointee(Winds::default())),
         }
     }
 }

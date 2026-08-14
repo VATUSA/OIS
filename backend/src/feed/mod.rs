@@ -11,7 +11,9 @@ pub mod flow;
 pub mod nav;
 pub mod nav_source;
 pub mod taxi;
+pub mod trajectory;
 pub mod vatsim;
+pub mod winds;
 
 use std::collections::HashMap;
 use std::sync::Arc;

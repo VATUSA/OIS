@@ -17,8 +17,8 @@ use crate::{
     },
     errors::ApiError,
     feed::{
-        airports::AirportDb, airspace::Boundaries, fca, nav::NavData, vatsim::FlightPlan,
-        vatsim::VatsimData,
+        airports::AirportDb, airspace::Boundaries, fca, nav::NavData, trajectory,
+        vatsim::FlightPlan, vatsim::VatsimData, winds::Winds,
     },
     models::{
         AircraftRoute, FcaBody, FcaFlight, ReleaseRequest, ReorderRequest, RouteWaypoint,
@@ -82,20 +82,28 @@ fn passes_filters(fca: &FcaBody, fp: &FlightPlan, alt: i64, airborne: bool) -> b
     true
 }
 
+/// Taxi + spool-up allowance added to a ground aircraft's flight time (the profile model
+/// covers the climb itself).
+const GROUND_TAXI_SEC: f64 = 8.0 * 60.0;
+
+/// ETA to the FCA crossing via the shared climb-profile + winds model. Airborne aircraft
+/// start from their current altitude; ground aircraft climb from the surface and carry a
+/// taxi allowance.
 fn eta_to_crossing(
     airborne: bool,
     along_nm: f64,
-    gs: i64,
-    cruise_tas: &str,
+    cur_alt_ft: f64,
+    cruise_alt_ft: f64,
+    tas: f64,
+    headwind: Option<f64>,
     now: DateTime<Utc>,
-) -> Option<DateTime<Utc>> {
-    let minutes = if airborne {
-        along_nm / (gs.max(100) as f64) * 60.0
-    } else {
-        let tas = cruise_tas.parse::<f64>().unwrap_or(0.0).max(120.0);
-        along_nm / tas * 60.0 + 12.0
-    };
-    Some(now + Duration::seconds((minutes * 60.0) as i64))
+) -> DateTime<Utc> {
+    let from_alt = if airborne { cur_alt_ft } else { 0.0 };
+    let mut sec = trajectory::profile_transit_sec(along_nm, from_alt, cruise_alt_ft, tas, headwind);
+    if !airborne {
+        sec += GROUND_TAXI_SEC;
+    }
+    now + Duration::seconds(sec as i64)
 }
 
 fn validate_fca(req: &UpsertFcaRequest) -> Result<(), ApiError> {
@@ -469,6 +477,7 @@ fn build_candidates(
     airports: &AirportDb,
     nav: &NavData,
     airspace: &Boundaries,
+    winds: &Winds,
     releases: &ReleaseMap,
     now: DateTime<Utc>,
 ) -> (Vec<FcaFlight>, Vec<fca::MeterInput>) {
@@ -502,13 +511,23 @@ fn build_candidates(
         if !passes_scope(fca, airspace, cross.lat, cross.lon) {
             continue;
         }
-        let eta = eta_to_crossing(airborne, cross.along_nm, p.groundspeed, &fp.cruise_tas, now);
-        let tas = fp.cruise_tas.parse::<f64>().unwrap_or(0.0);
+        let cruise = trajectory::parse_alt_ft(&fp.altitude);
+        let tas = trajectory::tas_or_default(fp.cruise_tas.parse().unwrap_or(0.0), cruise);
+        let headwind = winds.route_headwind(&path, cruise);
+        let eta = eta_to_crossing(
+            airborne,
+            cross.along_nm,
+            p.altitude as f64,
+            cruise,
+            tas,
+            headwind,
+            now,
+        );
         let rel = releases.get(&p.callsign);
         metas.push(fca::MeterInput {
-            eta_ms: eta.map(|e| e.timestamp_millis()).unwrap_or(0),
+            eta_ms: eta.timestamp_millis(),
             airborne,
-            cross_speed: if airborne { p.groundspeed as f64 } else { tas },
+            cross_speed: trajectory::predicted_cross_speed(tas, cruise, headwind),
             frozen_ms: rel.map(|(cta, _)| *cta),
         });
         flights.push(fca_flight(
@@ -519,7 +538,7 @@ fn build_candidates(
             p.longitude,
             &cross,
             path,
-            eta,
+            Some(eta),
             p.groundspeed,
             p.altitude,
             p.heading,
@@ -555,12 +574,15 @@ fn build_candidates(
             .get(&fp.departure.to_ascii_uppercase())
             .copied()
             .unwrap_or((0.0, 0.0));
-        let eta = eta_to_crossing(false, cross.along_nm, 0, &fp.cruise_tas, now);
+        let cruise = trajectory::parse_alt_ft(&fp.altitude);
+        let tas = trajectory::tas_or_default(fp.cruise_tas.parse().unwrap_or(0.0), cruise);
+        let headwind = winds.route_headwind(&path, cruise);
+        let eta = eta_to_crossing(false, cross.along_nm, 0.0, cruise, tas, headwind, now);
         let rel = releases.get(&pf.callsign);
         metas.push(fca::MeterInput {
-            eta_ms: eta.map(|e| e.timestamp_millis()).unwrap_or(0),
+            eta_ms: eta.timestamp_millis(),
             airborne: false,
-            cross_speed: fp.cruise_tas.parse::<f64>().unwrap_or(0.0),
+            cross_speed: trajectory::predicted_cross_speed(tas, cruise, headwind),
             frozen_ms: rel.map(|(cta, _)| *cta),
         });
         flights.push(fca_flight(
@@ -571,7 +593,7 @@ fn build_candidates(
             dep_lon,
             &cross,
             path,
-            eta,
+            Some(eta),
             0,
             0,
             0,
@@ -643,6 +665,7 @@ pub async fn fca_traffic(
                 &guard.airports,
                 state.nav.load_full().as_ref(),
                 state.airspace.as_ref(),
+                state.winds.load_full().as_ref(),
                 &releases,
                 now,
             )
@@ -691,6 +714,7 @@ pub async fn mark_release(
                 &guard.airports,
                 state.nav.load_full().as_ref(),
                 state.airspace.as_ref(),
+                state.winds.load_full().as_ref(),
                 &releases,
                 now,
             )
@@ -774,6 +798,7 @@ pub async fn clear_release(
                 &guard.airports,
                 state.nav.load_full().as_ref(),
                 state.airspace.as_ref(),
+                state.winds.load_full().as_ref(),
                 &releases,
                 now,
             )
