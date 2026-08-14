@@ -15,12 +15,13 @@ pub struct RunwayConfigRow {
     pub star_rules: Json<HashMap<String, String>>,
     pub overrides: Json<HashMap<String, String>>,
     pub window_min: i32,
+    pub custom_ends: Json<Vec<crate::feed::runway::CustomEnd>>,
 }
 
 /// The stored config for `icao`, or None if the airport has never been configured.
 pub async fn get_config(pool: &PgPool, icao: &str) -> Result<Option<RunwayConfigRow>, ApiError> {
     sqlx::query_as::<_, RunwayConfigRow>(
-        "select active_ends, star_rules, overrides, window_min \
+        "select active_ends, star_rules, overrides, window_min, custom_ends \
          from flow.runway_config where icao = $1",
     )
     .bind(icao)
@@ -29,7 +30,8 @@ pub async fn get_config(pool: &PgPool, icao: &str) -> Result<Option<RunwayConfig
     .map_err(|_| ApiError::Internal)
 }
 
-/// Insert or replace the config for `icao`.
+/// Insert or replace the config for `icao`. `custom_ends` is preserved when `None`
+/// (`coalesce` keeps the existing manual ends).
 #[allow(clippy::too_many_arguments)]
 pub async fn upsert_config(
     pool: &PgPool,
@@ -39,13 +41,15 @@ pub async fn upsert_config(
     overrides: &HashMap<String, String>,
     window_min: i32,
     user_id: &str,
+    custom_ends: Option<&Vec<crate::feed::runway::CustomEnd>>,
 ) -> Result<(), ApiError> {
     sqlx::query(
         "insert into flow.runway_config \
-           (icao, active_ends, star_rules, overrides, window_min, updated_by) \
-         values ($1, $2, $3, $4, $5, $6) \
+           (icao, active_ends, star_rules, overrides, window_min, updated_by, custom_ends) \
+         values ($1, $2, $3, $4, $5, $6, coalesce($7, '[]'::jsonb)) \
          on conflict (icao) do update set \
-           active_ends = $2, star_rules = $3, overrides = $4, window_min = $5, updated_by = $6",
+           active_ends = $2, star_rules = $3, overrides = $4, window_min = $5, updated_by = $6, \
+           custom_ends = coalesce($7, flow.runway_config.custom_ends)",
     )
     .bind(icao)
     .bind(active_ends)
@@ -53,6 +57,7 @@ pub async fn upsert_config(
     .bind(Json(overrides))
     .bind(window_min)
     .bind(user_id)
+    .bind(custom_ends.map(Json))
     .execute(pool)
     .await
     .map_err(|_| ApiError::Internal)?;

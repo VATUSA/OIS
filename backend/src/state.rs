@@ -1,4 +1,6 @@
+use std::collections::HashMap;
 use std::sync::Arc;
+use std::sync::Mutex;
 use std::sync::atomic::AtomicI64;
 
 use arc_swap::ArcSwap;
@@ -30,6 +32,8 @@ pub struct AppState {
     /// Epoch-ms of the last successful nav / winds fetch (0 = not yet fetched at runtime).
     pub nav_refreshed: Arc<AtomicI64>,
     pub winds_refreshed: Arc<AtomicI64>,
+    /// Per-airport METAR cache `(info, fetched_ms)` for the runway board (server-side fetch).
+    pub metar_cache: Arc<Mutex<HashMap<String, (feed::metar::MetarInfo, i64)>>>,
 }
 
 impl AppState {
@@ -42,6 +46,7 @@ impl AppState {
         let winds = Arc::new(ArcSwap::from_pointee(Winds::default()));
         let nav_refreshed = Arc::new(AtomicI64::new(0));
         let winds_refreshed = Arc::new(AtomicI64::new(0));
+        let metar_cache = Arc::new(Mutex::new(HashMap::new()));
         tracing::info!(
             nav_points = nav.load().len(),
             nav_cycle = nav.load().cycle(),
@@ -63,6 +68,7 @@ impl AppState {
                 winds,
                 nav_refreshed,
                 winds_refreshed,
+                metar_cache,
             });
         }
 
@@ -76,6 +82,7 @@ impl AppState {
             winds,
             nav_refreshed,
             winds_refreshed,
+            metar_cache,
         })
     }
 
@@ -90,6 +97,7 @@ impl AppState {
             winds: Arc::new(ArcSwap::from_pointee(Winds::default())),
             nav_refreshed: Arc::new(AtomicI64::new(0)),
             winds_refreshed: Arc::new(AtomicI64::new(0)),
+            metar_cache: Arc::new(Mutex::new(HashMap::new())),
         }
     }
 }

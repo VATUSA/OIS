@@ -10,6 +10,7 @@ export type RunwayArrival = components["schemas"]["RunwayArrival"];
 export type RunwayDemand = components["schemas"]["RunwayDemand"];
 export type RunwayRec = components["schemas"]["RunwayRec"];
 export type SavedRunwayConfig = components["schemas"]["SavedRunwayConfig"];
+export type CustomEnd = components["schemas"]["CustomEnd"];
 export type RunwayConfigRequest = components["schemas"]["RunwayConfigRequest"];
 
 /** The shared runway-balancer board for an airport, refreshed every 15s. */

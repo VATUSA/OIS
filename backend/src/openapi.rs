@@ -131,6 +131,7 @@ use utoipa::OpenApi;
         crate::feed::coverage::UnresolvedToken,
         crate::feed::runway::RunwayBoard,
         crate::feed::runway::RunwayEnd,
+        crate::feed::runway::CustomEnd,
         crate::feed::runway::RunwayArrival,
         crate::feed::runway::RunwayDemand,
         crate::feed::runway::RunwayRec,

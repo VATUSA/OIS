@@ -18,7 +18,7 @@ use crate::{
     },
     errors::ApiError,
     feed::runway::{
-        self, RunwayArrival, RunwayBoard, RunwayConfigRequest, SavedConfigRequest,
+        self, RunwayArrival, RunwayBoard, RunwayConfigRequest, RunwayEnd, SavedConfigRequest,
         SavedRunwayConfig,
     },
     repos::runway as runway_repo,
@@ -26,6 +26,38 @@ use crate::{
 };
 
 const DEFAULT_WINDOW_MIN: i32 = 90;
+/// METAR is refreshed at most this often per airport.
+const METAR_TTL_MS: i64 = 10 * 60_000;
+
+/// Latest METAR for `icao`, from the shared cache; fetched server-side (no CORS) when stale.
+async fn metar_for(state: &AppState, icao: &str) -> Option<crate::feed::metar::MetarInfo> {
+    let now = Utc::now().timestamp_millis();
+    if let Ok(cache) = state.metar_cache.lock()
+        && let Some((info, at)) = cache.get(icao)
+        && now - at < METAR_TTL_MS
+    {
+        return Some(info.clone());
+    }
+    let client = reqwest::Client::builder()
+        .user_agent("ois-metar/1.0 (+https://vatusa.net)")
+        .timeout(std::time::Duration::from_secs(15))
+        .build()
+        .unwrap_or_default();
+    match crate::feed::metar::fetch_one(&client, icao).await {
+        Some(info) => {
+            if let Ok(mut cache) = state.metar_cache.lock() {
+                cache.insert(icao.to_string(), (info.clone(), now));
+            }
+            Some(info)
+        }
+        // On a failed fetch, fall back to whatever (possibly stale) value we have.
+        None => state
+            .metar_cache
+            .lock()
+            .ok()
+            .and_then(|c| c.get(icao).map(|(i, _)| i.clone())),
+    }
+}
 
 /// Assemble the full board for `icao`: stored config + runway ends + live arrivals assigned
 /// to runways + demand bins.
@@ -33,35 +65,51 @@ async fn build_board(state: &AppState, icao: &str) -> Result<RunwayBoard, ApiErr
     let icao = icao.to_ascii_uppercase();
 
     // Stored config (shared), or defaults when the airport has never been configured.
-    let (active_ends, star_rules, overrides, window_min) = match state.db.as_ref() {
-        Some(pool) => match runway_repo::get_config(pool, &icao).await? {
-            Some(c) => (c.active_ends, c.star_rules.0, c.overrides.0, c.window_min),
-            None => (
-                Vec::new(),
-                HashMap::new(),
-                HashMap::new(),
-                DEFAULT_WINDOW_MIN,
-            ),
-        },
-        None => (
+    let default = || {
+        (
             Vec::new(),
             HashMap::new(),
             HashMap::new(),
             DEFAULT_WINDOW_MIN,
-        ),
+            Vec::new(),
+        )
+    };
+    let (active_ends, star_rules, overrides, window_min, custom_ends) = match state.db.as_ref() {
+        Some(pool) => match runway_repo::get_config(pool, &icao).await? {
+            Some(c) => (
+                c.active_ends,
+                c.star_rules.0,
+                c.overrides.0,
+                c.window_min,
+                c.custom_ends.0,
+            ),
+            None => default(),
+        },
+        None => default(),
     };
     let window_min = window_min as i64;
 
-    // Runway ends from the bundled dataset; flag the configured-active ones.
+    // Runway ends from the bundled dataset, plus any manually-added ones.
     let mut ends = state.runways.ends_for(&icao);
-    let source = if ends.is_empty() {
+    let source = if !ends.is_empty() {
+        "built-in".to_string()
+    } else if custom_ends.is_empty() {
         "none — add ends manually".to_string()
     } else {
-        "built-in".to_string()
+        "manual".to_string()
     };
     let active_set: HashSet<&str> = active_ends.iter().map(String::as_str).collect();
     for e in &mut ends {
         e.active = active_set.contains(e.id.as_str());
+    }
+    for ce in &custom_ends {
+        ends.push(RunwayEnd {
+            id: ce.id.clone(),
+            hdg: ((ce.hdg % 360) + 360) % 360,
+            len: ce.len,
+            active: active_set.contains(ce.id.as_str()),
+            pair: ce.id.clone(),
+        });
     }
     let active_ids: Vec<String> = ends
         .iter()
@@ -118,11 +166,13 @@ async fn build_board(state: &AppState, icao: &str) -> Result<RunwayBoard, ApiErr
         .map(|(a, (rwy, src))| (a.cs.clone(), rwy.clone(), src.to_string(), a.eta_ms))
         .collect();
     let recs = runway::recommendations(&rec_input, &active_ids, now_ms, window_min);
+    let metar = metar_for(state, &icao).await;
 
     Ok(RunwayBoard {
         icao,
         source,
         ends,
+        custom_ends,
         star_rules,
         overrides,
         window_min,
@@ -130,6 +180,9 @@ async fn build_board(state: &AppState, icao: &str) -> Result<RunwayBoard, ApiErr
         demand,
         recs,
         bins,
+        metar: metar.as_ref().map(|m| m.raw.clone()),
+        flight_category: metar.as_ref().map(|m| m.category.clone()),
+        wind: metar.as_ref().and_then(|m| m.wind.clone()),
     })
 }
 
@@ -178,6 +231,7 @@ pub async fn put_runway(
         &body.overrides,
         window,
         &user.id,
+        body.custom_ends.as_ref(),
     )
     .await?;
     Ok(Json(build_board(&state, &icao).await?))
