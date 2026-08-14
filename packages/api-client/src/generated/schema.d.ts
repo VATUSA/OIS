@@ -1102,6 +1102,14 @@ export interface components {
             /** Format: date-time */
             stop_time?: string | null;
         };
+        /** @description A manually-added runway end (for fields the bundled dataset lacks). */
+        CustomEnd: {
+            /** Format: int32 */
+            hdg: number;
+            id: string;
+            /** Format: int32 */
+            len?: number;
+        };
         /** @description Health of the runtime nav + winds data backing route/ETA prediction. */
         DataStatus: {
             airways: number;
@@ -1508,9 +1516,15 @@ export interface components {
             arrivals: components["schemas"]["RunwayArrival"][];
             /** @description Number of 10-min bins in the demand window. */
             bins: number;
+            /** @description Manually-added ends stored for this airport (also merged into `ends`). */
+            custom_ends: components["schemas"]["CustomEnd"][];
             demand: components["schemas"]["RunwayDemand"][];
             ends: components["schemas"]["RunwayEnd"][];
+            /** @description Flight category from the METAR: `VFR` | `MVFR` | `IFR` | `LIFR`. */
+            flight_category?: string | null;
             icao: string;
+            /** @description Latest raw METAR for the field (server-fetched, cached ~10 min). */
+            metar?: string | null;
             overrides: {
                 [key: string]: string;
             };
@@ -1521,12 +1535,16 @@ export interface components {
             star_rules: {
                 [key: string]: string;
             };
+            /** @description Human wind, e.g. `270@15G25kt`. */
+            wind?: string | null;
             /** Format: int64 */
             window_min: number;
         };
         /** @description Saved runway configuration for an airport. */
         RunwayConfigRequest: {
             active_ends?: string[];
+            /** @description When present, replaces the stored manual ends; omit to keep them unchanged. */
+            custom_ends?: components["schemas"]["CustomEnd"][] | null;
             overrides?: {
                 [key: string]: string;
             };

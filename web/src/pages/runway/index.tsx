@@ -21,6 +21,12 @@ const LEVEL_COLOR: Record<string, string> = {
   yellow: "#e8a838",
   red: "#d45c5c",
 };
+const CAT_COLOR: Record<string, string> = {
+  VFR: "#22c55e",
+  MVFR: "#3b82f6",
+  IFR: "#ef4444",
+  LIFR: "#d946ef",
+};
 
 function angleDiff(a: number, b: number): number {
   return Math.abs((((a - b) % 360) + 540) % 360 - 180);
@@ -47,6 +53,8 @@ export function RunwayPage() {
   const [icao, setIcao] = useState<string | null>(null);
   const [newStar, setNewStar] = useState("");
   const [newRwy, setNewRwy] = useState("");
+  const [newEndId, setNewEndId] = useState("");
+  const [newEndHdg, setNewEndHdg] = useState("");
   const board = useRunway(icao);
   const update = useUpdateRunway(icao ?? "");
   const configs = useSavedConfigs(icao);
@@ -131,6 +139,35 @@ export function RunwayPage() {
     deleteCfg.mutate(selectedCfg);
     setSelectedCfg("");
   }
+  function addEnd() {
+    if (!canEdit || !b) return;
+    const id = newEndId.trim().toUpperCase();
+    const hdg = parseInt(newEndHdg.trim(), 10);
+    if (!id || !Number.isFinite(hdg)) return;
+    const custom_ends = [
+      ...(b.custom_ends ?? []).filter((c) => c.id !== id),
+      { id, hdg: ((hdg % 360) + 360) % 360, len: 0 },
+    ];
+    update.mutate({
+      active_ends: activeIds,
+      star_rules: b.star_rules,
+      overrides: b.overrides,
+      window_min: b.window_min,
+      custom_ends,
+    });
+    setNewEndId("");
+    setNewEndHdg("");
+  }
+  function removeEnd(id: string) {
+    if (!canEdit || !b) return;
+    update.mutate({
+      active_ends: activeIds.filter((x) => x !== id),
+      star_rules: b.star_rules,
+      overrides: b.overrides,
+      window_min: b.window_min,
+      custom_ends: (b.custom_ends ?? []).filter((c) => c.id !== id),
+    });
+  }
   function setOverride(cs: string, rwy: string) {
     if (!canEdit || !b) return;
     const next: Record<string, string> = { ...b.overrides };
@@ -166,6 +203,7 @@ export function RunwayPage() {
   const assigned = arrivals.filter((a) => a.rwy);
   const pairs = groupPairs(b?.ends ?? []);
   const recMap = new Map((b?.recs ?? []).map((r) => [r.cs, r]));
+  const customIds = new Set((b?.custom_ends ?? []).map((c) => c.id));
 
   return (
     <div className="flex h-[calc(100vh-3.5rem)] flex-col">
@@ -204,6 +242,28 @@ export function RunwayPage() {
         {!canEdit && (
           <span className="rounded border border-amber-500/50 bg-amber-500/10 px-2 py-0.5 text-xs text-amber-700 dark:text-amber-200">
             View only — sign in with VATSIM to edit.
+          </span>
+        )}
+        {b?.metar && (
+          <span className="flex min-w-0 items-center gap-2 font-mono text-xs">
+            {b.flight_category && (
+              <span
+                className="rounded px-1.5 py-0.5 font-semibold"
+                style={{
+                  color: CAT_COLOR[b.flight_category] ?? "#888",
+                  background: `${CAT_COLOR[b.flight_category] ?? "#888"}22`,
+                }}
+              >
+                {b.flight_category}
+              </span>
+            )}
+            {b.wind && <span className="text-foreground">{b.wind}</span>}
+            <span
+              className="hidden truncate text-muted-foreground lg:inline"
+              title={b.metar}
+            >
+              {b.metar}
+            </span>
           </span>
         )}
         <ZuluClock className="ml-auto rounded-md border bg-muted/40 px-2 py-1 font-mono text-muted-foreground" />
@@ -294,14 +354,56 @@ export function RunwayPage() {
                       </button>
                     ))}
                     <span className="w-14 shrink-0 text-right font-mono text-[10px] text-muted-foreground">
-                      {ends[0].len ? `${ends[0].len}ft` : ""}
+                      {ends.length === 1 &&
+                      customIds.has(ends[0].id) &&
+                      canEdit ? (
+                        <button
+                          type="button"
+                          onClick={() => removeEnd(ends[0].id)}
+                          className="hover:text-destructive"
+                          aria-label="Remove end"
+                        >
+                          × remove
+                        </button>
+                      ) : ends[0].len ? (
+                        `${ends[0].len}ft`
+                      ) : (
+                        ""
+                      )}
                     </span>
                   </div>
                 ))}
               </div>
+              {canEdit && (
+                <div className="mt-2 flex items-center gap-1">
+                  <Input
+                    value={newEndId}
+                    onChange={(e) => setNewEndId(e.target.value)}
+                    placeholder="RWY"
+                    className="h-7 w-16 font-mono text-xs uppercase"
+                  />
+                  <Input
+                    value={newEndHdg}
+                    onChange={(e) => setNewEndHdg(e.target.value)}
+                    onKeyDown={(e) => e.key === "Enter" && addEnd()}
+                    placeholder="HDG"
+                    inputMode="numeric"
+                    className="h-7 w-16 font-mono text-xs"
+                  />
+                  <Button
+                    size="sm"
+                    variant="outline"
+                    onClick={addEnd}
+                    disabled={!newEndId.trim() || !newEndHdg.trim()}
+                    className="h-7 px-2 text-xs"
+                  >
+                    Add end
+                  </Button>
+                </div>
+              )}
               <p className="mt-2 text-[11px] leading-snug text-muted-foreground">
                 Presets pick ends by final-approach direction (WEST = landing
-                westbound, 270 ± 65°). Click chips to toggle individual ends.
+                westbound, 270 ± 65°). Add End covers fields missing runway data.
               </p>
             </section>
 

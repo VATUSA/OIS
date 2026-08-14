@@ -26,6 +26,15 @@ const DEMAND_OPEN: i32 = 2;
 /// Preset activates ends whose heading is within this of the approach direction.
 const PRESET_TOL: f64 = 65.0;
 
+/// A manually-added runway end (for fields the bundled dataset lacks).
+#[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
+pub struct CustomEnd {
+    pub id: String,
+    pub hdg: i32,
+    #[serde(default)]
+    pub len: i32,
+}
+
 /// One landing/departure runway end.
 #[derive(Debug, Clone, Serialize, ToSchema)]
 pub struct RunwayEnd {
@@ -83,6 +92,8 @@ pub struct RunwayBoard {
     /// `built-in` (dataset) or `none — add ends manually`.
     pub source: String,
     pub ends: Vec<RunwayEnd>,
+    /// Manually-added ends stored for this airport (also merged into `ends`).
+    pub custom_ends: Vec<CustomEnd>,
     #[schema(value_type = std::collections::HashMap<String, String>)]
     pub star_rules: HashMap<String, String>,
     #[schema(value_type = std::collections::HashMap<String, String>)]
@@ -94,6 +105,12 @@ pub struct RunwayBoard {
     pub recs: Vec<RunwayRec>,
     /// Number of 10-min bins in the demand window.
     pub bins: usize,
+    /// Latest raw METAR for the field (server-fetched, cached ~10 min).
+    pub metar: Option<String>,
+    /// Flight category from the METAR: `VFR` | `MVFR` | `IFR` | `LIFR`.
+    pub flight_category: Option<String>,
+    /// Human wind, e.g. `270@15G25kt`.
+    pub wind: Option<String>,
 }
 
 /// Saved runway configuration for an airport.
@@ -108,6 +125,8 @@ pub struct RunwayConfigRequest {
     #[schema(value_type = std::collections::HashMap<String, String>)]
     pub overrides: HashMap<String, String>,
     pub window_min: Option<i32>,
+    /// When present, replaces the stored manual ends; omit to keep them unchanged.
+    pub custom_ends: Option<Vec<CustomEnd>>,
 }
 
 /// A named, reusable runway configuration (e.g. "West Ops").
