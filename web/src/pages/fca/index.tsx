@@ -856,12 +856,25 @@ function RoutePopup({
   const nm = Math.round(lineNm(pts));
   const unresolved = route.unresolved ?? [];
 
-  // Drag anywhere over the map by the header; position is a pixel offset within the map.
+  // Drag by the header; position is a pixel offset within the map, clamped so the card
+  // can never leave the map region.
   const [pos, setPos] = useState({ x: 12, y: 12 });
   const [minimized, setMinimized] = useState(false);
+  const rootRef = useRef<HTMLDivElement>(null);
   const drag = useRef<{ px: number; py: number; ox: number; oy: number } | null>(
     null,
   );
+  const clampPos = (x: number, y: number) => {
+    const el = rootRef.current;
+    const parent = el?.offsetParent as HTMLElement | null;
+    if (!el || !parent) return { x, y };
+    const maxX = Math.max(0, parent.clientWidth - el.offsetWidth);
+    const maxY = Math.max(0, parent.clientHeight - el.offsetHeight);
+    return {
+      x: Math.min(Math.max(0, x), maxX),
+      y: Math.min(Math.max(0, y), maxY),
+    };
+  };
   const onDown = (e: React.PointerEvent) => {
     if (e.button !== 0) return;
     drag.current = { px: e.clientX, py: e.clientY, ox: pos.x, oy: pos.y };
@@ -869,19 +882,35 @@ function RoutePopup({
   };
   const onMove = (e: React.PointerEvent) => {
     if (!drag.current) return;
-    setPos({
-      x: drag.current.ox + (e.clientX - drag.current.px),
-      y: drag.current.oy + (e.clientY - drag.current.py),
-    });
+    setPos(
+      clampPos(
+        drag.current.ox + (e.clientX - drag.current.px),
+        drag.current.oy + (e.clientY - drag.current.py),
+      ),
+    );
   };
   const onUp = () => {
     drag.current = null;
   };
   const stopPointer = (e: React.PointerEvent) => e.stopPropagation();
 
+  // Re-clamp when the card resizes (minimize/expand) or the map region resizes, so it
+  // stays fully inside its new bounds.
+  useEffect(() => {
+    const reclamp = () => setPos((p) => clampPos(p.x, p.y));
+    reclamp();
+    window.addEventListener("resize", reclamp);
+    return () => window.removeEventListener("resize", reclamp);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [minimized]);
+
   if (minimized) {
     return (
-      <div className="absolute z-[600]" style={{ left: pos.x, top: pos.y }}>
+      <div
+        ref={rootRef}
+        className="absolute z-[600]"
+        style={{ left: pos.x, top: pos.y }}
+      >
         <div
           onPointerDown={onDown}
           onPointerMove={onMove}
@@ -916,6 +945,7 @@ function RoutePopup({
 
   return (
     <div
+      ref={rootRef}
       className="absolute z-[600] w-[min(92vw,26rem)] rounded-xl border border-border/70 bg-background/95 p-4 shadow-2xl backdrop-blur"
       style={{ left: pos.x, top: pos.y }}
     >
