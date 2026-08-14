@@ -601,6 +601,26 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/v1/flow/route-coverage": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * How much of the current live filed traffic the nav engine fully resolves, plus the most
+         *     common tokens it still can't (surfaces real data-coverage gaps).
+         */
+        get: operations["route_coverage"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/v1/flow/traffic": {
         parameters: {
             query?: never;
@@ -990,6 +1010,20 @@ export interface components {
             page_size: number;
             /** Format: int64 */
             total: number;
+        };
+        CoverageReport: {
+            /** @description …of those, how many resolved with zero unresolved tokens. */
+            fully_resolved: number;
+            partial: number;
+            /** @description Pilots with a non-empty filed route. */
+            pilots_with_route: number;
+            /**
+             * Format: double
+             * @description Percentage of routed pilots fully resolved.
+             */
+            resolved_pct: number;
+            /** @description Most common unresolved tokens, most-frequent first (capped). */
+            top_unresolved: components["schemas"]["UnresolvedToken"][];
         };
         CreateGroundStopRequest: {
             airport: string;
@@ -1539,6 +1573,10 @@ export interface components {
             lat: number;
             /** Format: double */
             lon: number;
+        };
+        UnresolvedToken: {
+            count: number;
+            token: string;
         };
         UpdateDccRequest: {
             notes?: string | null;
@@ -3228,6 +3266,37 @@ export interface operations {
                 content?: never;
             };
             404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+        };
+    };
+    route_coverage: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["CoverageReport"];
+                };
+            };
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            503: {
                 headers: {
                     [name: string]: unknown;
                 };

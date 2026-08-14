@@ -402,6 +402,30 @@ pub async fn data_status(
     Json(build_data_status(&state))
 }
 
+/// How much of the current live filed traffic the nav engine fully resolves, plus the most
+/// common tokens it still can't (surfaces real data-coverage gaps).
+#[utoipa::path(
+    get,
+    path = "/api/v1/flow/route-coverage",
+    tag = "flow",
+    responses((status = 200, body = crate::feed::coverage::CoverageReport), (status = 401), (status = 503))
+)]
+pub async fn route_coverage(
+    State(state): State<AppState>,
+    _permission: RequirePermission<FlowFcaRead>,
+) -> Result<Json<crate::feed::coverage::CoverageReport>, ApiError> {
+    let guard = state.feed.read().await;
+    let snap = guard
+        .snapshot
+        .as_ref()
+        .ok_or(ApiError::ServiceUnavailable)?;
+    Ok(Json(crate::feed::coverage::analyze(
+        state.nav.load_full().as_ref(),
+        &guard.airports,
+        &snap.data,
+    )))
+}
+
 /// Force an immediate nav + winds refresh, then return the updated status. Failures are
 /// logged and leave the current data in place.
 #[utoipa::path(
