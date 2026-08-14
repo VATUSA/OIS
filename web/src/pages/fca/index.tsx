@@ -155,6 +155,18 @@ function matchedIcon(seq: number, color: string, heading: number) {
     iconAnchor: [7, 7],
   });
 }
+/** A small dot + name label for a route waypoint along a plotted route. */
+function waypointLabelIcon(name: string) {
+  return L.divIcon({
+    className: "",
+    html: `<div style="display:flex;align-items:center;gap:3px;transform:translate(4px,-1px)">
+      <span style="display:block;width:4px;height:4px;border-radius:9999px;background:#38bdf8;box-shadow:0 0 0 1px rgba(0,0,0,.6)"></span>
+      <span style="font:600 10px ui-monospace,monospace;color:#7dd3fc;white-space:nowrap;text-shadow:0 0 3px #000,0 1px 2px #000">${name}</span>
+    </div>`,
+    iconSize: [0, 0],
+    iconAnchor: [0, 0],
+  });
+}
 function aircraftTip(ac: {
   callsign: string;
   actype: string;
@@ -348,6 +360,15 @@ export function FcaPage() {
           interactive: false,
         }).addTo(layer);
       }
+      // Label each named waypoint along the route.
+      for (const wp of aircraftRoute.data?.waypoints ?? []) {
+        L.marker([wp.lat, wp.lon], {
+          icon: waypointLabelIcon(wp.name),
+          interactive: false,
+          keyboard: false,
+          zIndexOffset: -200,
+        }).addTo(layer);
+      }
     }
   }, [aircraftRoute.data]);
 
@@ -406,20 +427,21 @@ export function FcaPage() {
     for (const f of fcaTraffic.data ?? []) {
       const hasPos = f.lat !== 0 || f.lon !== 0;
       if (hasPos) {
-        // dashed line from the aircraft to its crossing point
-        L.polyline(
-          [
-            [f.lat, f.lon],
-            [f.cross_lat, f.cross_lon],
-          ],
-          {
-            color,
-            weight: 1.5,
-            opacity: 0.7,
-            dashArray: "3 6",
-            interactive: false,
-          },
-        ).addTo(layer);
+        // Full resolved route (remaining route for airborne), in the FCA colour.
+        const path = f.path as LatLng[] | undefined;
+        const line =
+          path && path.length >= 2
+            ? path
+            : ([
+                [f.lat, f.lon],
+                [f.cross_lat, f.cross_lon],
+              ] as LatLng[]);
+        L.polyline(line, {
+          color,
+          weight: 1.5,
+          opacity: 0.55,
+          interactive: false,
+        }).addTo(layer);
       }
       L.circleMarker([f.cross_lat, f.cross_lon], {
         radius: 3,
