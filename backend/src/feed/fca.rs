@@ -271,10 +271,18 @@ pub fn meter(
         let mut prev: Option<i64> = None;
         for &i in &ordered {
             let c = &cands[i];
-            let base = c.frozen_ms.unwrap_or(c.eta_ms);
-            sched[i] = match prev {
-                Some(p) => base.max(p + sep_ms(c)),
-                None => base,
+            // Airborne + frozen (issued-CFR) crossings are fixed constraints even in manual
+            // mode — they are never delayed; only unreleased ground aircraft are chained
+            // behind the previous crossing by the separation.
+            sched[i] = if c.airborne {
+                c.eta_ms
+            } else if let Some(f) = c.frozen_ms {
+                f
+            } else {
+                match prev {
+                    Some(p) => c.eta_ms.max(p + sep_ms(c)),
+                    None => c.eta_ms,
+                }
             };
             prev = Some(sched[i]);
         }
@@ -579,6 +587,36 @@ mod tests {
         let out = meter(&cands, "rate", 30, 15, None);
         assert_eq!(out[1].sched_ms, 100_000); // frozen stays put
         assert_eq!(out[0].sched_ms, 220_000); // advisory floats 120s after it
+    }
+
+    #[test]
+    fn manual_order_pins_airborne_and_frozen() {
+        // Controller ordered a ground aircraft ahead of an airborne one and a frozen CFR.
+        // The airborne and frozen crossings must keep their fixed times (never delayed).
+        let cands = vec![
+            MeterInput {
+                eta_ms: 0,
+                airborne: false,
+                cross_speed: 400.0,
+                frozen_ms: None,
+            },
+            MeterInput {
+                eta_ms: 30_000,
+                airborne: true,
+                cross_speed: 450.0,
+                frozen_ms: None,
+            },
+            MeterInput {
+                eta_ms: 40_000,
+                airborne: false,
+                cross_speed: 400.0,
+                frozen_ms: Some(50_000),
+            },
+        ];
+        let out = meter(&cands, "rate", 30, 15, Some(&[0, 1, 2]));
+        assert_eq!(out[1].sched_ms, 30_000, "airborne must not be delayed");
+        assert_eq!(out[1].delay_sec, 0);
+        assert_eq!(out[2].sched_ms, 50_000, "frozen CFR must stay pinned");
     }
 
     #[test]
