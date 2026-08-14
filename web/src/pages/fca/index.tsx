@@ -80,6 +80,23 @@ function lineNm(pts: LatLng[]): number {
   for (let i = 0; i < pts.length - 1; i++) d += haversine(pts[i], pts[i + 1]);
   return d;
 }
+/** The point halfway along a polyline by arc length (the true visual center). */
+function midpointOf(pts: LatLng[]): LatLng {
+  if (pts.length < 2) return pts[0];
+  const segs = pts.slice(1).map((p, i) => haversine(pts[i], p));
+  let half = segs.reduce((a, b) => a + b, 0) / 2;
+  for (let i = 0; i < segs.length; i++) {
+    if (half <= segs[i]) {
+      const f = segs[i] ? half / segs[i] : 0;
+      return [
+        pts[i][0] + (pts[i + 1][0] - pts[i][0]) * f,
+        pts[i][1] + (pts[i + 1][1] - pts[i][1]) * f,
+      ];
+    }
+    half -= segs[i];
+  }
+  return pts[pts.length - 1];
+}
 
 function blankDraft(count: number): Draft {
   return {
@@ -135,11 +152,14 @@ function vertexIcon(color: string) {
   });
 }
 function labelIcon(color: string, name: string) {
+  // Centered on the anchor and lifted above the line (no connector to it).
   return L.divIcon({
     className: "",
-    html: `<span style="white-space:nowrap;font:600 12px ui-monospace,monospace;color:${color};text-shadow:0 1px 2px #000">▮ ${name}</span>`,
+    html: `<div style="display:flex;align-items:center;gap:5px;white-space:nowrap;font:600 12px ui-monospace,monospace;color:${color};text-shadow:0 1px 3px #000,0 0 4px #000;transform:translate(-50%,calc(-100% - 9px))">
+      <span style="display:block;width:4px;height:13px;background:${color};box-shadow:0 0 0 1px rgba(0,0,0,.4)"></span>${name}
+    </div>`,
     iconSize: [0, 0],
-    iconAnchor: [-6, 6],
+    iconAnchor: [0, 0],
   });
 }
 /** A matched (crossing) aircraft: the plane glyph tinted the FCA colour, with its
@@ -382,33 +402,30 @@ export function FcaPage() {
       const pts = fca.points as LatLng[];
       if (!pts || pts.length < 2) continue;
       const selected = fca.id === selectedId;
+      const opacity = fca.enabled ? (selected ? 1 : 0.85) : 0.3;
       L.polyline(pts, {
         color: fca.color,
-        weight: selected ? 5 : 3,
-        opacity: fca.enabled ? (selected ? 1 : 0.85) : 0.3,
-        // solid when selected, dashed otherwise
-        dashArray: selected ? undefined : "4 8",
+        weight: selected ? 4 : 3,
+        opacity,
+        dashArray: "4 8",
       })
         .on("click", (e) => {
           L.DomEvent.stop(e);
           setSelectedId((cur) => (cur === fca.id ? null : fca.id));
         })
         .addTo(layer);
-      if (selected) {
-        pts.forEach((pt, i) => {
-          const end = i === 0 || i === pts.length - 1;
-          L.circleMarker(pt, {
-            radius: end ? 6 : 5,
-            color: end ? "#ffffff" : fca.color,
-            weight: 2,
-            fillColor: end ? "#ffffff" : fca.color,
-            fillOpacity: 1,
-            interactive: false,
-          }).addTo(layer);
-        });
+      // Filled colour dots at the first and last point.
+      for (const end of [pts[0], pts[pts.length - 1]]) {
+        L.circleMarker(end, {
+          radius: selected ? 5 : 4,
+          color: fca.color,
+          weight: 1,
+          fillColor: fca.color,
+          fillOpacity: opacity,
+          interactive: false,
+        }).addTo(layer);
       }
-      const mid = pts[Math.floor(pts.length / 2)];
-      L.marker(mid, {
+      L.marker(midpointOf(pts), {
         icon: labelIcon(fca.color, fca.name),
         interactive: false,
         keyboard: false,
