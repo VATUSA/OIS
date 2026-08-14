@@ -5,7 +5,8 @@ use arc_swap::ArcSwap;
 use sqlx::{PgPool, postgres::PgPoolOptions};
 
 use crate::feed::{
-    self, FeedState, airspace::Boundaries, facilities::FacilityState, nav::NavData, winds::Winds,
+    self, FeedState, airspace::Boundaries, facilities::FacilityState, nav::NavData,
+    runway_db::RunwayDb, winds::Winds,
 };
 
 /// Lean application state: the DB pool (optional so the process can boot without a
@@ -21,6 +22,8 @@ pub struct AppState {
     pub nav: Arc<ArcSwap<NavData>>,
     /// ARTCC boundary polygons, for FCA scope filtering (immutable, compile-time bundled).
     pub airspace: Arc<Boundaries>,
+    /// Runway ends per US airport, for the Runway Balancer (immutable, compile-time bundled).
+    pub runways: Arc<RunwayDb>,
     /// Winds aloft, for ETA correction. Starts empty (still air) and is hot-swapped by
     /// `jobs::spawn_winds_refresh`, so it sits behind an `ArcSwap` for lock-free reads.
     pub winds: Arc<ArcSwap<Winds>>,
@@ -35,6 +38,7 @@ impl AppState {
         let facilities = feed::facilities::new_state();
         let nav = Arc::new(ArcSwap::from_pointee(NavData::load()));
         let airspace = Arc::new(Boundaries::load());
+        let runways = Arc::new(RunwayDb::load());
         let winds = Arc::new(ArcSwap::from_pointee(Winds::default()));
         let nav_refreshed = Arc::new(AtomicI64::new(0));
         let winds_refreshed = Arc::new(AtomicI64::new(0));
@@ -55,6 +59,7 @@ impl AppState {
                 facilities,
                 nav,
                 airspace,
+                runways,
                 winds,
                 nav_refreshed,
                 winds_refreshed,
@@ -67,6 +72,7 @@ impl AppState {
             facilities,
             nav,
             airspace,
+            runways,
             winds,
             nav_refreshed,
             winds_refreshed,
@@ -80,6 +86,7 @@ impl AppState {
             facilities: feed::facilities::new_state(),
             nav: Arc::new(ArcSwap::from_pointee(NavData::default())),
             airspace: Arc::new(Boundaries::load()),
+            runways: Arc::new(RunwayDb::load()),
             winds: Arc::new(ArcSwap::from_pointee(Winds::default())),
             nav_refreshed: Arc::new(AtomicI64::new(0)),
             winds_refreshed: Arc::new(AtomicI64::new(0)),

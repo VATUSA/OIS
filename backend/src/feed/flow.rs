@@ -587,7 +587,7 @@ fn parse_tas(raw: &str) -> f64 {
 /// Arrival gate (STAR/fix) heuristic ported from vatflow's `arrivalGate`: scan the filed
 /// route from the end and return the first token that looks like a 5-letter RNAV fix, a
 /// 3-letter navaid, or a STAR/SID name (e.g. `OZZZI4`). `arr` must be uppercase.
-fn arrival_gate(route: &str, arr: &str) -> Option<String> {
+pub fn arrival_gate(route: &str, arr: &str) -> Option<String> {
     if route.trim().is_empty() {
         return None;
     }

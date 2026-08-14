@@ -4,6 +4,7 @@ import {FeedWatcher} from "@/components/feed-watcher";
 import {Navbar} from "@/components/navbar";
 import {AirportPage} from "@/pages/airport";
 import {FcaPage} from "@/pages/fca";
+import {RunwayPage} from "@/pages/runway";
 import {DashboardPage} from "@/pages/dashboard";
 import {DeparturesPage} from "@/pages/departures";
 import {MyDashboardPage} from "@/pages/my-dashboard";
@@ -20,7 +21,8 @@ import {AdminServiceAccounts} from "@/pages/admin/service-accounts";
 function RootLayout() {
   // Full-bleed routes (the FCA map) escape the centered, padded main wrapper.
   const pathname = useRouterState({ select: (s) => s.location.pathname });
-  const fullBleed = pathname.startsWith("/ops/fca");
+  const fullBleed =
+    pathname.startsWith("/ops/fca") || pathname.startsWith("/ops/runway");
   return (
     <div className="min-h-screen bg-background text-foreground">
       <FeedWatcher />
@@ -94,6 +96,12 @@ const fcaRoute = createRoute({
   getParentRoute: () => opsRoute,
   path: "fca",
   component: FcaPage,
+});
+
+const runwayRoute = createRoute({
+  getParentRoute: () => opsRoute,
+  path: "runway",
+  component: RunwayPage,
 });
 
 // --- Planning (pre-event) ---
@@ -186,6 +194,7 @@ const routeTree = rootRoute.addChildren([
     tmuRoute,
     myDashboardRoute,
     fcaRoute,
+    runwayRoute,
   ]),
   planningRoute.addChildren([
     planningIndexRoute,
