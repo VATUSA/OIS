@@ -20,9 +20,10 @@ const KNOWN_VERBS: &[&str] = &[
 ];
 
 /// resource_types whose handlers already write their own richer audit entry (so the generic
-/// middleware entry would just be a duplicate). Everything else is logged.
+/// middleware entry would just be a duplicate). Everything else is logged. `admin.users` is the
+/// access editor (`PUT /admin/users/{id}/access`), which records its own before/after entry.
 fn is_excluded(resource_type: &str) -> bool {
-    resource_type == "access.users"
+    resource_type == "admin.users"
 }
 
 /// Fallback action for a bare create/update/delete with no verb segment.
@@ -244,8 +245,17 @@ mod tests {
 
     #[test]
     fn access_editor_is_excluded() {
-        // Derives fine, but the handler logs its own richer entry, so the middleware skips it.
-        assert!(is_excluded("access.users"));
+        // PUT /admin/users/{id}/access derives to "admin.users"; the handler logs its own
+        // richer before/after entry, so the middleware skips it to avoid a duplicate.
+        assert_eq!(
+            d(
+                Method::PUT,
+                "/api/v1/admin/users/{id}/access",
+                "/api/v1/admin/users/U1/access"
+            ),
+            ("access".into(), "admin.users".into(), Some("U1".into())),
+        );
+        assert!(is_excluded("admin.users"));
         assert!(!is_excluded("tmu.programs"));
     }
 }
