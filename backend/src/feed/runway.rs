@@ -113,17 +113,20 @@ pub struct RunwayBoard {
     pub wind: Option<String>,
 }
 
-/// Saved runway configuration for an airport.
+/// Saved runway configuration for an airport. Every field is optional: a `PUT` updates only
+/// the fields it carries and leaves the rest of the shared config untouched (server-side
+/// `coalesce`), so one controller toggling a runway can't clobber another's STAR rule.
 #[derive(Debug, Deserialize, ToSchema)]
 pub struct RunwayConfigRequest {
-    #[serde(default)]
-    pub active_ends: Vec<String>,
-    #[serde(default)]
-    #[schema(value_type = std::collections::HashMap<String, String>)]
-    pub star_rules: HashMap<String, String>,
-    #[serde(default)]
-    #[schema(value_type = std::collections::HashMap<String, String>)]
-    pub overrides: HashMap<String, String>,
+    /// When present, replaces the active runway ends; omit to keep them unchanged.
+    pub active_ends: Option<Vec<String>>,
+    /// When present, replaces the STAR→runway rules; omit to keep them unchanged.
+    #[schema(value_type = Option<std::collections::HashMap<String, String>>)]
+    pub star_rules: Option<HashMap<String, String>>,
+    /// When present, replaces the per-aircraft overrides; omit to keep them unchanged.
+    #[schema(value_type = Option<std::collections::HashMap<String, String>>)]
+    pub overrides: Option<HashMap<String, String>>,
+    /// When present, replaces the demand horizon; omit to keep it unchanged.
     pub window_min: Option<i32>,
     /// When present, replaces the stored manual ends; omit to keep them unchanged.
     pub custom_ends: Option<Vec<CustomEnd>>,
