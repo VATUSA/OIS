@@ -9,7 +9,7 @@
 /* FCA map — crosshair cursor + dark tooltips. */
 .leaflet-container {
   cursor: crosshair !important;
-  background: #0a0a0a;
+  /* Background is set inline per theme in the FCA page (dark/light basemap). */
 }
 .leaflet-tooltip.fca-tip {
   background: #0b1220;

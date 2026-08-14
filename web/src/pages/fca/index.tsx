@@ -1,7 +1,7 @@
-import {useEffect, useMemo, useRef, useState} from "react";
+import {useCallback, useEffect, useMemo, useRef, useState} from "react";
 import L from "leaflet";
 import "leaflet/dist/leaflet.css";
-import {Button, Input} from "@ois/ui";
+import {Button, Input, useTheme} from "@ois/ui";
 import {Pencil, Plus, Trash2, X} from "lucide-react";
 
 import {useMe} from "@/lib/auth";
@@ -63,6 +63,13 @@ const parseFl = (s: string): number | null => {
   const n = parseInt(s.trim(), 10);
   return Number.isFinite(n) ? n : null;
 };
+
+/** CARTO basemaps + map background per theme. */
+const CARTO = {
+  dark: "https://{s}.basemaps.cartocdn.com/dark_all/{z}/{x}/{y}{r}.png",
+  light: "https://{s}.basemaps.cartocdn.com/light_all/{z}/{x}/{y}{r}.png",
+} as const;
+const MAP_BG = { dark: "#0a0a0a", light: "#e5e7eb" } as const;
 
 function haversine(a: LatLng, b: LatLng): number {
   const R = 3440.065;
@@ -223,9 +230,15 @@ export function FcaPage() {
   const counts = useFcaCounts();
   const aircraftRoute = useAircraftRoute(routeCallsign);
 
+  const { resolvedTheme } = useTheme();
+
   // --- Leaflet refs ---
-  const containerRef = useRef<HTMLDivElement>(null);
   const mapRef = useRef<L.Map | null>(null);
+  const tileRef = useRef<L.TileLayer | null>(null);
+  const roRef = useRef<ResizeObserver | null>(null);
+  // Flips true once the map + layer groups exist, so the drawing effects below re-run and
+  // paint even when their data resolved before the map mounted.
+  const [mapReady, setMapReady] = useState(false);
   const aircraftLayer = useRef<L.LayerGroup | null>(null);
   const fcaLayer = useRef<L.LayerGroup | null>(null);
   const matchedLayer = useRef<L.LayerGroup | null>(null);
@@ -242,16 +255,29 @@ export function FcaPage() {
       return d;
     });
 
-  // Init map once.
-  useEffect(() => {
-    if (!containerRef.current || mapRef.current) return;
-    const map = L.map(containerRef.current, {
+  // Initialize (and tear down) the map via a callback ref rather than a one-shot effect,
+  // so it's created whenever the container actually mounts — including a hard refresh where
+  // the container appears only after `me`/permissions resolve (a `[]` effect would have
+  // already run as a no-op and never retried, leaving the map black).
+  const setContainer = useCallback((node: HTMLDivElement | null) => {
+    if (!node) {
+      roRef.current?.disconnect();
+      roRef.current = null;
+      mapRef.current?.remove();
+      mapRef.current = null;
+      tileRef.current = null;
+      setMapReady(false);
+      return;
+    }
+    if (mapRef.current) return;
+    const map = L.map(node, {
       zoomControl: false,
       worldCopyJump: false,
       doubleClickZoom: false,
     }).setView([38.5, -77], 6);
     L.control.zoom({ position: "topright" }).addTo(map);
-    L.tileLayer("https://{s}.basemaps.cartocdn.com/dark_all/{z}/{x}/{y}{r}.png", {
+    node.style.background = MAP_BG[resolvedTheme];
+    tileRef.current = L.tileLayer(CARTO[resolvedTheme], {
       maxZoom: 14,
       attribution:
         "© OpenStreetMap, © CARTO · traffic: VATSIM · boundaries: FAA NASR / ERAM",
@@ -305,12 +331,23 @@ export function FcaPage() {
     });
 
     mapRef.current = map;
-    setTimeout(() => map.invalidateSize(), 100);
-    return () => {
-      map.remove();
-      mapRef.current = null;
-    };
+    // The container can still be sizing when the map inits (full-bleed layout settles late),
+    // which would leave Leaflet with no tiles. Recompute size on every resize so tiles load
+    // as soon as it has real dimensions.
+    const ro = new ResizeObserver(() => map.invalidateSize());
+    ro.observe(node);
+    roRef.current = ro;
+    map.invalidateSize();
+    setMapReady(true);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
+
+  // React to light/dark toggles: swap the basemap tiles and map background.
+  useEffect(() => {
+    tileRef.current?.setUrl(CARTO[resolvedTheme]);
+    const c = mapRef.current?.getContainer();
+    if (c) c.style.background = MAP_BG[resolvedTheme];
+  }, [resolvedTheme]);
 
   // Keyboard while drawing: Enter finish · Esc cancel · Backspace undo.
   useEffect(() => {
@@ -354,7 +391,7 @@ export function FcaPage() {
         })
         .addTo(layer);
     }
-  }, [traffic.data, fcaTraffic.data]);
+  }, [traffic.data, fcaTraffic.data, mapReady]);
 
   // Plotted route for a clicked aircraft.
   useEffect(() => {
@@ -390,7 +427,7 @@ export function FcaPage() {
         }).addTo(layer);
       }
     }
-  }, [aircraftRoute.data]);
+  }, [aircraftRoute.data, mapReady]);
 
   // Saved FCAs (skip the one being edited — drawn on the draft layer).
   useEffect(() => {
@@ -431,7 +468,7 @@ export function FcaPage() {
         keyboard: false,
       }).addTo(layer);
     }
-  }, [fcas.data, draft?.id, selectedId]);
+  }, [fcas.data, draft?.id, selectedId, mapReady]);
 
   // Matched (crossing) traffic for the selected FCA — numbered, in the FCA colour.
   const selectedColor = fcas.data?.find((f) => f.id === selectedId)?.color;
@@ -486,7 +523,7 @@ export function FcaPage() {
           .addTo(layer);
       }
     }
-  }, [fcaTraffic.data, draft, selectedColor]);
+  }, [fcaTraffic.data, draft, selectedColor, mapReady]);
 
   // Working draft (dashed polyline + draggable vertex handles).
   useEffect(() => {
@@ -521,7 +558,7 @@ export function FcaPage() {
       });
       handle.addTo(layer);
     });
-  }, [draft]);
+  }, [draft, mapReady]);
 
   // Zoom to the selected FCA.
   useEffect(() => {
@@ -760,7 +797,7 @@ export function FcaPage() {
 
       {/* Map — `isolate` traps Leaflet z-indexes below the navbar dropdowns. */}
       <div className="relative isolate flex-1">
-        <div ref={containerRef} className="absolute inset-0" />
+        <div ref={setContainer} className="absolute inset-0" />
         {drawing && (
           <div className="pointer-events-none absolute inset-x-0 bottom-6 z-[500] flex justify-center">
             <div className="pointer-events-auto flex items-center gap-2.5 rounded-lg border border-primary/60 bg-background/95 px-5 py-3 text-sm shadow-lg backdrop-blur">
