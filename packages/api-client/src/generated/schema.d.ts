@@ -837,6 +837,27 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/v1/tmu/gdp/{id}/compress": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Compress the program: reclaim capacity freed by departed/cancelled flights by pulling each
+         *     frozen slot to its current fresh-RBS time — earlier only, never later than already issued.
+         *     Frozen flights that have left the arrival picture are dropped.
+         */
+        post: operations["compress_gdp"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/v1/tmu/gdp/{id}/publish": {
         parameters: {
             query?: never;
@@ -848,6 +869,27 @@ export interface paths {
         put?: never;
         post: operations["publish_gdp"];
         delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/tmu/gdp/{id}/slots/{callsign}": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Lock a controlled flight's current (advisory) control time into a frozen slot. Used to
+         *     pin a pop-up that appeared after publish so its EDCT stops drifting.
+         */
+        post: operations["lock_slot"];
+        /** Unlock (remove) a frozen slot — the flight reverts to a live advisory control time. */
+        delete: operations["unlock_slot"];
         options?: never;
         head?: never;
         patch?: never;
@@ -4256,6 +4298,52 @@ export interface operations {
             };
         };
     };
+    compress_gdp: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /** @description GDP id */
+                id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["GdpBoard"];
+                };
+            };
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            409: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            503: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+        };
+    };
     publish_gdp: {
         parameters: {
             query?: never;
@@ -4283,6 +4371,96 @@ export interface operations {
                 content?: never;
             };
             409: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            503: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+        };
+    };
+    lock_slot: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /** @description GDP id */
+                id: string;
+                /** @description Flight callsign */
+                callsign: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["GdpBoard"];
+                };
+            };
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            409: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            503: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+        };
+    };
+    unlock_slot: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /** @description GDP id */
+                id: string;
+                /** @description Flight callsign */
+                callsign: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["GdpBoard"];
+                };
+            };
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            404: {
                 headers: {
                     [name: string]: unknown;
                 };

@@ -98,6 +98,68 @@ export function useCancelGdp() {
   });
 }
 
+/** Lock a controlled flight's advisory EDCT into a frozen slot. */
+export function useLockSlot() {
+  const queryClient = useQueryClient();
+  const toast = useToast();
+  return useMutation<GdpBoard, Error, { id: string; callsign: string }>({
+    mutationFn: async ({ id, callsign }) => {
+      const { data, error } = await ois.POST(
+        "/api/v1/tmu/gdp/{id}/slots/{callsign}",
+        { params: { path: { id, callsign } } },
+      );
+      if (error || !data) throw new Error("lock failed");
+      return data;
+    },
+    onSuccess: (data) => {
+      queryClient.setQueryData(["gdp-board", data.id], data);
+      toast.success("EDCT locked");
+    },
+    onError: () => toast.error("Couldn’t lock the EDCT"),
+  });
+}
+
+/** Unlock a frozen slot — the flight reverts to an advisory control time. */
+export function useUnlockSlot() {
+  const queryClient = useQueryClient();
+  const toast = useToast();
+  return useMutation<GdpBoard, Error, { id: string; callsign: string }>({
+    mutationFn: async ({ id, callsign }) => {
+      const { data, error } = await ois.DELETE(
+        "/api/v1/tmu/gdp/{id}/slots/{callsign}",
+        { params: { path: { id, callsign } } },
+      );
+      if (error || !data) throw new Error("unlock failed");
+      return data;
+    },
+    onSuccess: (data) => {
+      queryClient.setQueryData(["gdp-board", data.id], data);
+      toast.success("EDCT unlocked");
+    },
+    onError: () => toast.error("Couldn’t unlock the EDCT"),
+  });
+}
+
+/** Compress the program — reclaim freed capacity, pulling EDCTs earlier. */
+export function useCompressGdp() {
+  const queryClient = useQueryClient();
+  const toast = useToast();
+  return useMutation<GdpBoard, Error, string>({
+    mutationFn: async (id: string) => {
+      const { data, error } = await ois.POST("/api/v1/tmu/gdp/{id}/compress", {
+        params: { path: { id } },
+      });
+      if (error || !data) throw new Error("compress failed");
+      return data;
+    },
+    onSuccess: (data) => {
+      queryClient.setQueryData(["gdp-board", data.id], data);
+      toast.success("Program compressed");
+    },
+    onError: () => toast.error("Couldn’t compress the program"),
+  });
+}
+
 /** Delete a GDP. */
 export function useDeleteGdp() {
   const queryClient = useQueryClient();

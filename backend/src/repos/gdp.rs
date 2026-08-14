@@ -147,3 +147,37 @@ pub async fn replace_slots(
     tx.commit().await.map_err(|_| ApiError::Internal)?;
     Ok(())
 }
+
+/// Insert or replace a single frozen slot (used to lock a pop-up's advisory EDCT).
+pub async fn upsert_slot(pool: &PgPool, gdp_id: &str, s: &GdpSlotRow) -> Result<(), ApiError> {
+    sqlx::query(
+        "insert into tmu.gdp_slot \
+           (gdp_id, callsign, dep, original_eta, cta, edct, delay_min) \
+         values ($1, $2, $3, $4, $5, $6, $7) \
+         on conflict (gdp_id, callsign) do update set \
+           dep = excluded.dep, original_eta = excluded.original_eta, cta = excluded.cta, \
+           edct = excluded.edct, delay_min = excluded.delay_min, assigned_at = now()",
+    )
+    .bind(gdp_id)
+    .bind(&s.callsign)
+    .bind(&s.dep)
+    .bind(s.original_eta)
+    .bind(s.cta)
+    .bind(s.edct)
+    .bind(s.delay_min)
+    .execute(pool)
+    .await
+    .map_err(|_| ApiError::Internal)?;
+    Ok(())
+}
+
+/// Remove one frozen slot (unlock). Returns whether a row was removed.
+pub async fn delete_slot(pool: &PgPool, gdp_id: &str, callsign: &str) -> Result<bool, ApiError> {
+    let r = sqlx::query("delete from tmu.gdp_slot where gdp_id = $1 and callsign = $2")
+        .bind(gdp_id)
+        .bind(callsign)
+        .execute(pool)
+        .await
+        .map_err(|_| ApiError::Internal)?;
+    Ok(r.rows_affected() > 0)
+}
