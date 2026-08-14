@@ -2,23 +2,31 @@ import {useState} from "react";
 
 import {useMe} from "@/lib/auth";
 import {hasPermission} from "@/lib/permissions";
+import {GdpTab} from "@/pages/tmu/gdp";
 import {GroundStopsTab} from "@/pages/tmu/ground-stops";
 import {ProgramsTab} from "@/pages/tmu/programs";
 import {RateCalculatorTab} from "@/pages/tmu/rate-calc";
 import {RestrictionsTab} from "@/pages/tmu/restrictions";
 
-type Tab = "programs" | "restrictions" | "ground-stops" | "rate-calculator";
+type Tab =
+  | "programs"
+  | "restrictions"
+  | "ground-stops"
+  | "gdp"
+  | "rate-calculator";
 
 export function TmuPage() {
   const { data: me } = useMe();
   const canPrograms = hasPermission(me, "tmu.program.read");
   const canRestrictions = hasPermission(me, "tmu.tmi.read");
   const canGroundStops = hasPermission(me, "tmu.groundstop.read");
+  const canGdp = hasPermission(me, "tmu.gdp.read");
 
   const tabs: { id: Tab; label: string }[] = [
     canPrograms && { id: "programs" as const, label: "Programs" },
     canRestrictions && { id: "restrictions" as const, label: "Restrictions" },
     canGroundStops && { id: "ground-stops" as const, label: "Ground stops" },
+    canGdp && { id: "gdp" as const, label: "Ground delay" },
     canPrograms && { id: "rate-calculator" as const, label: "Rate calculator" },
   ].filter(Boolean) as { id: Tab; label: string }[];
 
@@ -59,6 +67,7 @@ export function TmuPage() {
       {active === "programs" && <ProgramsTab />}
       {active === "restrictions" && <RestrictionsTab />}
       {active === "ground-stops" && <GroundStopsTab />}
+      {active === "gdp" && <GdpTab />}
       {active === "rate-calculator" && <RateCalculatorTab />}
     </div>
   );

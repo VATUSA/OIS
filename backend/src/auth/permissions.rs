@@ -42,6 +42,11 @@ permission!(TmuGroundStopCreate, ["tmu", "groundstop"], Create);
 permission!(TmuGroundStopPublish, ["tmu", "groundstop"], Publish);
 permission!(TmuGroundStopDelete, ["tmu", "groundstop"], Delete);
 
+permission!(TmuGdpRead, ["tmu", "gdp"], Read);
+permission!(TmuGdpCreate, ["tmu", "gdp"], Create);
+permission!(TmuGdpPublish, ["tmu", "gdp"], Publish);
+permission!(TmuGdpDelete, ["tmu", "gdp"], Delete);
+
 permission!(TmuCfrAssign, ["tmu", "cfr"], Assign);
 
 // events — per-event planning

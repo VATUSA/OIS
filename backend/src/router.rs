@@ -7,7 +7,7 @@ use crate::{
     auth::middleware::resolve_current_user,
     config::build_cors_layer,
     handlers::{
-        access, audit, auth, docs, events, facilities, feed, flow, health, runway,
+        access, audit, auth, docs, events, facilities, feed, flow, gdp, health, runway,
         service_accounts, tmu, users,
     },
     state::AppState,
@@ -67,6 +67,12 @@ pub fn build_router(state: AppState) -> Router {
             "/api/v1/tmu/programs/{icao}",
             put(tmu::upsert_program).delete(tmu::delete_program),
         )
+        // TMU — Ground Delay Programs (GDP)
+        .route("/api/v1/tmu/gdp", get(gdp::list_gdps).post(gdp::create_gdp))
+        .route("/api/v1/tmu/gdp/{id}", delete(gdp::delete_gdp))
+        .route("/api/v1/tmu/gdp/{id}/board", get(gdp::get_gdp_board))
+        .route("/api/v1/tmu/gdp/{id}/publish", post(gdp::publish_gdp))
+        .route("/api/v1/tmu/gdp/{id}/cancel", post(gdp::cancel_gdp))
         // Events (VATUSA cache — anchors per-event planning)
         .route("/api/v1/events", get(events::list_events))
         .route("/api/v1/events/{id}", get(events::get_event))

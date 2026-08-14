@@ -86,6 +86,10 @@ pub fn draft_new_permission_names() -> Vec<&'static str> {
         "tmu.tmi.update",
         "tmu.tmi.publish",
         "tmu.tmi.delete",
+        "tmu.gdp.read",
+        "tmu.gdp.create",
+        "tmu.gdp.publish",
+        "tmu.gdp.delete",
         "tmu.delays.read",
         // --- ace: support requests + team ---
         "ace.requests.read",

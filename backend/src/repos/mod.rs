@@ -3,6 +3,7 @@ pub mod audit;
 pub mod auth;
 pub mod events;
 pub mod flow;
+pub mod gdp;
 pub mod org;
 pub mod runway;
 pub mod service_accounts;

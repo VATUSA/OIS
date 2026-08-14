@@ -773,6 +773,86 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/v1/tmu/gdp": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get: operations["list_gdps"];
+        put?: never;
+        post: operations["create_gdp"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/tmu/gdp/{id}": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        post?: never;
+        delete: operations["delete_gdp"];
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/tmu/gdp/{id}/board": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get: operations["get_gdp_board"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/tmu/gdp/{id}/cancel": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        post: operations["cancel_gdp"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/tmu/gdp/{id}/publish": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        post: operations["publish_gdp"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/v1/tmu/ground-stops": {
         parameters: {
             query?: never;
@@ -1081,6 +1161,16 @@ export interface components {
             /** @description Most common unresolved tokens, most-frequent first (capped). */
             top_unresolved: components["schemas"]["UnresolvedToken"][];
         };
+        CreateGdpRequest: {
+            /** Format: int32 */
+            aar: number;
+            airport: string;
+            end_time: string;
+            exempt_airborne?: boolean;
+            /** Format: int32 */
+            max_enroute_min?: number | null;
+            start_time: string;
+        };
         CreateGroundStopRequest: {
             airport: string;
             scope?: string | null;
@@ -1363,6 +1453,12 @@ export interface components {
             distance_nm?: number | null;
             /** Format: date-time */
             eta?: string | null;
+            /**
+             * Format: date-time
+             * @description Estimated wheels-up for ground/proposed inbounds (ready-now or filed ETD); null once
+             *     airborne. Used to back out enroute time for GDP EDCTs.
+             */
+            etd?: string | null;
             /** @description True when a program excludes this aircraft from metering (still shown). */
             excluded: boolean;
             /** @description Arrival gate (STAR/fix) derived from the filed route; null if none matched. */
@@ -1396,6 +1492,121 @@ export interface components {
              * @description Minutes-in-trail for this gate (0 = use MIT or airport default).
              */
             trail?: number;
+        };
+        /**
+         * @description The full GDP board: the program, its window, controlled + exempt flights, demand vs AAR,
+         *     and delay stats — everything the frontend needs in one payload.
+         */
+        GdpBoard: {
+            /** Format: int32 */
+            aar: number;
+            airport: string;
+            demand: components["schemas"]["GdpDemand"][];
+            end_time: string;
+            /** @description Exempt inbounds (airborne / out-of-window / out-of-scope), sorted by ETA. */
+            exempt: components["schemas"]["GdpFlightView"][];
+            exempt_airborne: boolean;
+            /** @description Controlled flights (frozen when published, advisory when draft), sorted by CTA. */
+            flights: components["schemas"]["GdpFlightView"][];
+            id: string;
+            /** Format: int32 */
+            max_enroute_min?: number | null;
+            /** @description True when control times are frozen (program published). */
+            published: boolean;
+            start_time: string;
+            stats: components["schemas"]["GdpStats"];
+            status: string;
+            /** Format: date-time */
+            window_end: string;
+            /** Format: date-time */
+            window_start: string;
+        };
+        /** @description A Ground Delay Program — meters inbound demand to a constrained airport to its AAR. */
+        GdpBody: {
+            /**
+             * Format: int32
+             * @description Airport Acceptance Rate (arrivals/hour) the program meters to.
+             */
+            aar: number;
+            airport: string;
+            /** @description HHMM Zulu program window end. */
+            end_time: string;
+            exempt_airborne: boolean;
+            id: string;
+            /**
+             * Format: int32
+             * @description Scope tier: only inbounds within this many enroute minutes are controllable; null = no limit.
+             */
+            max_enroute_min?: number | null;
+            /** Format: date-time */
+            published_at?: string | null;
+            /** @description HHMM Zulu program window start. */
+            start_time: string;
+            /** @description Lifecycle: draft | published | expired | cancelled. */
+            status: string;
+            /** Format: date-time */
+            updated_at: string;
+            /** @description Display name of whoever last touched the program. */
+            updated_by?: string | null;
+        };
+        /** @description Per-bin arrival demand vs the AAR-derived capacity, for the program window. */
+        GdpDemand: {
+            /**
+             * Format: int64
+             * @description Slots available in this bin (AAR × bin width).
+             */
+            cap: number;
+            /** Format: int64 */
+            count: number;
+            /** @description `green` | `yellow` | `red`. */
+            level: string;
+            /** Format: date-time */
+            start: string;
+        };
+        /**
+         * @description One flight on the GDP board — a controlled/exempt inbound with its control times joined
+         *     to current live state.
+         */
+        GdpFlightView: {
+            controlled: boolean;
+            cs: string;
+            /**
+             * Format: date-time
+             * @description Controlled Time of Arrival (assigned slot); equals ETA for exempt flights.
+             */
+            cta: string;
+            /** Format: int64 */
+            delay_min: number;
+            dep: string;
+            /**
+             * Format: date-time
+             * @description Controlled wheels-up (EDCT); null for exempt flights.
+             */
+            edct?: string | null;
+            /**
+             * Format: date-time
+             * @description Current estimated time of arrival.
+             */
+            eta: string;
+            /** @description Set for exempt flights: why they weren't controlled. */
+            exempt_reason?: string | null;
+            /** @description True once the control time is frozen (persisted at publish). */
+            frozen: boolean;
+            /** @description Current live status: `airborne` | `ground` | `proposed`. */
+            status: string;
+        };
+        /** @description Program-wide delay tallies over the controlled flights. */
+        GdpStats: {
+            /** Format: int64 */
+            avg_delay_min: number;
+            /** Format: int64 */
+            controlled: number;
+            /** Format: int64 */
+            exempt: number;
+            /** Format: int64 */
+            max_delay_min: number;
+            /** Format: int64 */
+            total_delay_min: number;
         };
         /** @description A ground stop: holds departures into `airport` from within `scope` until `until`. */
         GroundStopBody: {
@@ -3842,6 +4053,236 @@ export interface operations {
                 };
             };
             401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            503: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+        };
+    };
+    list_gdps: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["GdpBody"][];
+                };
+            };
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            503: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+        };
+    };
+    create_gdp: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["CreateGdpRequest"];
+            };
+        };
+        responses: {
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["GdpBody"];
+                };
+            };
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            503: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+        };
+    };
+    delete_gdp: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /** @description GDP id */
+                id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            204: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            503: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+        };
+    };
+    get_gdp_board: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /** @description GDP id */
+                id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["GdpBoard"];
+                };
+            };
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            503: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+        };
+    };
+    cancel_gdp: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /** @description GDP id */
+                id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["GdpBody"];
+                };
+            };
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            409: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            503: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+        };
+    };
+    publish_gdp: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /** @description GDP id */
+                id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["GdpBoard"];
+                };
+            };
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            409: {
                 headers: {
                     [name: string]: unknown;
                 };
