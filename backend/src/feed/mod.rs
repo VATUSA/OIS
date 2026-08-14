@@ -47,8 +47,11 @@ pub struct FeedStatus {
 
 #[derive(Default)]
 pub struct FeedInner {
-    pub snapshot: Option<Snapshot>,
-    pub airports: AirportDb,
+    /// Behind `Arc` so read handlers can clone it and drop the feed lock before doing the
+    /// heavy per-request CPU (route resolution / metering), instead of holding the read
+    /// guard across it and stalling the poller's writes.
+    pub snapshot: Option<Arc<Snapshot>>,
+    pub airports: Arc<AirportDb>,
     pub status: FeedStatus,
     /// Departures currently being timed (callsign -> session).
     pub taxi_sessions: HashMap<String, taxi::TaxiSession>,
@@ -87,7 +90,7 @@ async fn poller(state: FeedState) {
             let n = db.len();
             let mut guard = state.write().await;
             guard.status.airports_loaded = n;
-            guard.airports = db;
+            guard.airports = Arc::new(db);
             tracing::info!(airports = n, "feed: airport database loaded");
         }
         Err(e) => {
@@ -119,11 +122,11 @@ async fn poller(state: FeedState) {
                     ..
                 } = &mut *guard;
                 taxi::process(taxi_sessions, taxi_samples, airports, &data, now);
-                guard.snapshot = Some(Snapshot {
+                guard.snapshot = Some(Arc::new(Snapshot {
                     fetched_at: now,
                     source_timestamp,
                     data,
-                });
+                }));
             }
             Err(e) => {
                 let mut guard = state.write().await;

@@ -1,6 +1,7 @@
 //! Flow handlers — FCA CRUD + a lightweight live-traffic feed for the FCA map.
 
 use std::collections::HashMap;
+use std::sync::Arc;
 use std::sync::atomic::Ordering;
 
 use axum::{
@@ -32,6 +33,14 @@ use crate::{
 
 /// Frozen releases keyed by callsign: (cta_ms, edct_ms).
 type ReleaseMap = HashMap<String, (i64, i64)>;
+
+/// Clone the current feed snapshot + airport database under a brief read lock, so callers
+/// can do heavy per-request CPU (route resolution / metering) without holding the feed
+/// lock — which would otherwise stall the 15s poller's writes and other readers.
+async fn feed_view(state: &AppState) -> (Option<Arc<crate::feed::Snapshot>>, Arc<AirportDb>) {
+    let guard = state.feed.read().await;
+    (guard.snapshot.clone(), guard.airports.clone())
+}
 
 /// Airport-code match, tolerant of a leading `K` (KJFK ~ JFK).
 fn airport_match(filter: &str, code: &str) -> bool {
@@ -225,11 +234,13 @@ pub async fn fca_counts(
         return Ok(Json(counts));
     }
 
-    let guard = state.feed.read().await;
-    let Some(snap) = guard.snapshot.as_ref() else {
+    // Clone the snapshot + airport handles and release the feed lock before the heavy
+    // per-aircraft route resolution, so the poller's writes never queue behind this CPU.
+    let (snapshot, airports) = feed_view(&state).await;
+    let Some(snap) = snapshot else {
         return Ok(Json(counts));
     };
-    let airports = &guard.airports;
+    let airports = airports.as_ref();
     let nav_db = state.nav.load_full();
     let nav = nav_db.as_ref();
 
@@ -292,12 +303,9 @@ pub async fn aircraft_route(
     Path(callsign): Path<String>,
 ) -> Result<Json<AircraftRoute>, ApiError> {
     let cs = callsign.to_ascii_uppercase();
-    let guard = state.feed.read().await;
-    let snap = guard
-        .snapshot
-        .as_ref()
-        .ok_or(ApiError::ServiceUnavailable)?;
-    let airports = &guard.airports;
+    let (snapshot, airports) = feed_view(&state).await;
+    let snap = snapshot.ok_or(ApiError::ServiceUnavailable)?;
+    let airports = airports.as_ref();
     let nav_db = state.nav.load_full();
     let nav = nav_db.as_ref();
 
@@ -414,14 +422,11 @@ pub async fn route_coverage(
     State(state): State<AppState>,
     _permission: RequirePermission<FlowFcaRead>,
 ) -> Result<Json<crate::feed::coverage::CoverageReport>, ApiError> {
-    let guard = state.feed.read().await;
-    let snap = guard
-        .snapshot
-        .as_ref()
-        .ok_or(ApiError::ServiceUnavailable)?;
+    let (snapshot, airports) = feed_view(&state).await;
+    let snap = snapshot.ok_or(ApiError::ServiceUnavailable)?;
     Ok(Json(crate::feed::coverage::analyze(
         state.nav.load_full().as_ref(),
-        &guard.airports,
+        airports.as_ref(),
         &snap.data,
     )))
 }
@@ -464,9 +469,8 @@ pub async fn list_traffic(
     State(state): State<AppState>,
     _permission: RequirePermission<FlowFcaRead>,
 ) -> Json<Vec<TrafficAircraft>> {
-    let guard = state.feed.read().await;
-    let aircraft = guard
-        .snapshot
+    let snapshot = state.feed.read().await.snapshot.clone();
+    let aircraft = snapshot
         .as_ref()
         .map(|snap| {
             snap.data
@@ -745,21 +749,21 @@ pub async fn fca_traffic(
     let releases = load_releases(pool, &id).await?;
     let now = Utc::now();
 
-    let built = {
-        let guard = state.feed.read().await;
-        guard.snapshot.as_ref().map(|snap| {
-            build_candidates(
-                &fca,
-                &snap.data,
-                &guard.airports,
-                state.nav.load_full().as_ref(),
-                state.airspace.as_ref(),
-                state.winds.load_full().as_ref(),
-                &releases,
-                now,
-            )
-        })
-    };
+    // Release the feed lock before the metering CPU (build_candidates resolves every
+    // matching route) by cloning the snapshot + airport handles.
+    let (snapshot, airports) = feed_view(&state).await;
+    let built = snapshot.as_ref().map(|snap| {
+        build_candidates(
+            &fca,
+            &snap.data,
+            airports.as_ref(),
+            state.nav.load_full().as_ref(),
+            state.airspace.as_ref(),
+            state.winds.load_full().as_ref(),
+            &releases,
+            now,
+        )
+    });
     let Some((flights, metas)) = built else {
         return Ok(Json(Vec::new()));
     };
@@ -794,21 +798,21 @@ pub async fn mark_release(
     let now_ms = now.timestamp_millis();
     let releases = load_releases(pool, &id).await?;
 
-    let built = {
-        let guard = state.feed.read().await;
-        guard.snapshot.as_ref().map(|snap| {
-            build_candidates(
-                &fca,
-                &snap.data,
-                &guard.airports,
-                state.nav.load_full().as_ref(),
-                state.airspace.as_ref(),
-                state.winds.load_full().as_ref(),
-                &releases,
-                now,
-            )
-        })
-    };
+    // Release the feed lock before the metering CPU (build_candidates resolves every
+    // matching route) by cloning the snapshot + airport handles.
+    let (snapshot, airports) = feed_view(&state).await;
+    let built = snapshot.as_ref().map(|snap| {
+        build_candidates(
+            &fca,
+            &snap.data,
+            airports.as_ref(),
+            state.nav.load_full().as_ref(),
+            state.airspace.as_ref(),
+            state.winds.load_full().as_ref(),
+            &releases,
+            now,
+        )
+    });
     let Some((mut flights, mut metas)) = built else {
         return Err(ApiError::ServiceUnavailable);
     };
@@ -878,21 +882,21 @@ pub async fn clear_release(
     let releases = load_releases(pool, &id).await?;
     let now = Utc::now();
 
-    let built = {
-        let guard = state.feed.read().await;
-        guard.snapshot.as_ref().map(|snap| {
-            build_candidates(
-                &fca,
-                &snap.data,
-                &guard.airports,
-                state.nav.load_full().as_ref(),
-                state.airspace.as_ref(),
-                state.winds.load_full().as_ref(),
-                &releases,
-                now,
-            )
-        })
-    };
+    // Release the feed lock before the metering CPU (build_candidates resolves every
+    // matching route) by cloning the snapshot + airport handles.
+    let (snapshot, airports) = feed_view(&state).await;
+    let built = snapshot.as_ref().map(|snap| {
+        build_candidates(
+            &fca,
+            &snap.data,
+            airports.as_ref(),
+            state.nav.load_full().as_ref(),
+            state.airspace.as_ref(),
+            state.winds.load_full().as_ref(),
+            &releases,
+            now,
+        )
+    });
     let Some((flights, metas)) = built else {
         return Ok(Json(Vec::new()));
     };

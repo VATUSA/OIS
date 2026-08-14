@@ -47,7 +47,15 @@ pub fn tas_or_default(tas: f64, cruise_alt_ft: f64) -> f64 {
 pub fn effective_gs(tas: f64, headwind: Option<f64>) -> f64 {
     match headwind {
         None => tas,
-        Some(hw) => (tas - hw).clamp(tas * 0.4, tas * 1.6),
+        Some(hw) => {
+            // Order the bounds so a nonsensical negative TAS can't invert the clamp range.
+            let (lo, hi) = if tas >= 0.0 {
+                (tas * 0.4, tas * 1.6)
+            } else {
+                (tas * 1.6, tas * 0.4)
+            };
+            (tas - hw).clamp(lo, hi)
+        }
     }
 }
 

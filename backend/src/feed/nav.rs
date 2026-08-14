@@ -946,6 +946,34 @@ mod tests {
     }
 
     #[test]
+    fn build_anchors_never_panics_on_garbage() {
+        let nav = NavData::load();
+        let ap: AirportDb = HashMap::new();
+        let garbage = [
+            "",
+            "     ",
+            "DCT DCT DCT",
+            "AAAAAAAAAAAAAAAAAAAA",
+            "123456789012345",
+            "N",
+            "999999999",
+            "//// / /..//",
+            "A1 B22 Q99999",
+            "RBV999999 RBV000000 RBV060000",
+            "34N 150E N150E 91N200E",
+            "😀FIX RBV\u{0301}",
+            "RBV060013 34N150E VFR IFR SVFR DOTSS2 J121 LUCIT3",
+            "J Q V T A B G R Y",
+        ];
+        for r in garbage {
+            // Must not panic for any dep/arr combination.
+            let _ = nav.build_anchors(&ap, "KJFK", "KLAX", r);
+            let _ = nav.build_anchors(&ap, "", "", r);
+            let _ = nav.build_anchors(&ap, "RJAA", "PHNL", r);
+        }
+    }
+
+    #[test]
     fn resolves_fix_radial_distance() {
         let nav = NavData::load();
         let empty = HashMap::new();

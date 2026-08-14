@@ -93,13 +93,17 @@ async fn program_inputs(pool: &PgPool, icao: &str) -> Result<Option<ProgramInput
 async fn flow_for(state: &AppState, pool: &PgPool, icao: &str) -> Result<flow::Flow, ApiError> {
     let program = program_inputs(pool, icao).await?;
     let issued = tmu_repo::issued_cfr_map(pool, icao).await?;
-    let guard = state.feed.read().await;
-    let flow = match &guard.snapshot {
+    // Clone the snapshot + airport handles and drop the feed lock before metering.
+    let (snapshot, airports) = {
+        let guard = state.feed.read().await;
+        (guard.snapshot.clone(), guard.airports.clone())
+    };
+    let flow = match &snapshot {
         Some(snap) => flow::compute(
             icao,
             program.as_ref(),
             &snap.data,
-            &guard.airports,
+            airports.as_ref(),
             state.winds.load_full().as_ref(),
             &issued,
             Utc::now(),
@@ -310,13 +314,16 @@ pub async fn issue_cfr(
         Some(ready) => {
             let program = program_inputs(pool, &airport).await?;
             let issued = tmu_repo::issued_cfr_map(pool, &airport).await?;
-            let guard = state.feed.read().await;
-            match (program.as_ref(), guard.snapshot.as_ref()) {
+            let (snapshot, airports) = {
+                let guard = state.feed.read().await;
+                (guard.snapshot.clone(), guard.airports.clone())
+            };
+            match (program.as_ref(), snapshot.as_ref()) {
                 (Some(pg), Some(snap)) => flow::ready_time_slot(
                     &airport,
                     pg,
                     &snap.data,
-                    &guard.airports,
+                    airports.as_ref(),
                     state.winds.load_full().as_ref(),
                     &issued,
                     &callsign,

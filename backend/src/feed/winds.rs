@@ -154,8 +154,9 @@ pub fn parse_windtemp(text: &str) -> Vec<(String, Vec<(i32, WindLevel)>)> {
     for raw in text.lines() {
         let line = raw.replace('\t', " ");
 
-        // Header row: contains "FT" and the altitude columns.
-        if line.contains("FT") {
+        // Header row: its first token is exactly `FT`, followed by the altitude columns.
+        // (Matching a bare `contains("FT")` would misread stations like `FTW`.)
+        if line.split_whitespace().next() == Some("FT") {
             let cols = level_columns(&line);
             if !cols.is_empty() {
                 levels = Some(cols);
@@ -201,6 +202,10 @@ fn decode_fb(g: &str) -> Option<WindLevel> {
     let mut dd: i32 = g[0..2].parse().ok()?;
     let mut ss: i32 = g[2..4].parse().ok()?;
     if dd > 36 {
+        // Codes 51–86 encode ≥100 kt (subtract 50, add 100 kt); 37–50 are invalid.
+        if dd < 51 {
+            return None;
+        }
         dd -= 50;
         ss += 100;
     }
@@ -242,7 +247,7 @@ fn station_id(line: &str) -> Option<(String, usize)> {
     while i < b.len() && b[i].is_ascii_whitespace() {
         i += 1;
     }
-    if i + 3 > b.len() {
+    if i + 3 > b.len() || !line.is_char_boundary(i + 3) {
         return None;
     }
     let id = &line[i..i + 3];
@@ -343,6 +348,31 @@ FWA 9900 2605+16 2708+12 2818+07 3025-05 2740-15 265031 265541 256053
         let fwa = stations.iter().find(|(id, _)| id == "FWA").unwrap();
         let (_, fwa_low) = fwa.1.iter().find(|(a, _)| *a == 3000).unwrap();
         assert_eq!(fwa_low.spd, 0.0);
+    }
+
+    #[test]
+    fn station_id_containing_ft_is_not_a_header() {
+        // FTW (Fort Worth) contains "FT" — it must parse as a station, not a header, and
+        // must not corrupt the altitude columns for stations that follow it.
+        let sample = "\
+FT  3000    6000    9000
+FTW 1817 2427+21 2727+14
+BRL 2013 2110+18 2308+12
+";
+        let stations = parse_windtemp(sample);
+        let ftw = stations
+            .iter()
+            .find(|(id, _)| id == "FTW")
+            .expect("FTW parses as a station");
+        assert_eq!(
+            ftw.1.iter().find(|(a, _)| *a == 3000).map(|(_, w)| w.dir),
+            Some(Some(180.0)),
+            "FTW 3000ft = 180°/17kt"
+        );
+        assert!(
+            stations.iter().any(|(id, _)| id == "BRL"),
+            "the station after FTW must still parse"
+        );
     }
 
     #[test]
