@@ -10,6 +10,22 @@ export type TrafficAircraft = components["schemas"]["TrafficAircraft"];
 export type FcaFlight = components["schemas"]["FcaFlight"];
 export type AircraftRoute = components["schemas"]["AircraftRoute"];
 export type DataStatus = components["schemas"]["DataStatus"];
+export type CoverageReport = components["schemas"]["CoverageReport"];
+
+/** How much of live filed traffic the nav engine resolves; refreshed every 60s. */
+export function useRouteCoverage() {
+  return useQuery({
+    queryKey: ["route-coverage"],
+    queryFn: async () => {
+      const { data, error } = await ois.GET("/api/v1/flow/route-coverage");
+      if (error || !data) throw new Error("failed to load coverage");
+      return data;
+    },
+    staleTime: 60_000,
+    refetchInterval: 60_000,
+    retry: false,
+  });
+}
 
 /** Health of the runtime nav + winds data, refreshed every 60s. */
 export function useDataStatus() {
