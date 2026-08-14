@@ -110,6 +110,25 @@ pub struct RunwayConfigRequest {
     pub window_min: Option<i32>,
 }
 
+/// A named, reusable runway configuration (e.g. "West Ops").
+#[derive(Debug, Serialize, ToSchema)]
+pub struct SavedRunwayConfig {
+    pub name: String,
+    pub active_ends: Vec<String>,
+    #[schema(value_type = std::collections::HashMap<String, String>)]
+    pub star_rules: HashMap<String, String>,
+}
+
+/// Body for saving a named config.
+#[derive(Debug, Deserialize, ToSchema)]
+pub struct SavedConfigRequest {
+    #[serde(default)]
+    pub active_ends: Vec<String>,
+    #[serde(default)]
+    #[schema(value_type = std::collections::HashMap<String, String>)]
+    pub star_rules: HashMap<String, String>,
+}
+
 /// A live inbound arrival (before runway assignment).
 pub struct Arrival {
     pub cs: String,

@@ -143,6 +143,14 @@ pub fn build_router(state: AppState) -> Router {
             "/api/v1/flow/runway/{icao}",
             get(runway::get_runway).put(runway::put_runway),
         )
+        .route(
+            "/api/v1/flow/runway/{icao}/configs",
+            get(runway::list_saved_configs),
+        )
+        .route(
+            "/api/v1/flow/runway/{icao}/configs/{name}",
+            put(runway::save_config).delete(runway::delete_config),
+        )
         // Live VATSIM feed
         .route("/api/v1/feed/status", get(feed::feed_status))
         .route("/api/v1/tmu/flow/{icao}", get(feed::airport_flow))

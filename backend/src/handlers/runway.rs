@@ -6,6 +6,7 @@ use std::collections::{HashMap, HashSet};
 use axum::{
     Json,
     extract::{Extension, Path, State},
+    http::StatusCode,
 };
 use chrono::{DateTime, Utc};
 
@@ -16,7 +17,10 @@ use crate::{
         require_permission::RequirePermission,
     },
     errors::ApiError,
-    feed::runway::{self, RunwayArrival, RunwayBoard, RunwayConfigRequest},
+    feed::runway::{
+        self, RunwayArrival, RunwayBoard, RunwayConfigRequest, SavedConfigRequest,
+        SavedRunwayConfig,
+    },
     repos::runway as runway_repo,
     state::AppState,
 };
@@ -177,4 +181,93 @@ pub async fn put_runway(
     )
     .await?;
     Ok(Json(build_board(&state, &icao).await?))
+}
+
+/// List the named runway configs saved for an airport.
+#[utoipa::path(
+    get,
+    path = "/api/v1/flow/runway/{icao}/configs",
+    tag = "flow",
+    params(("icao" = String, Path, description = "Airport ICAO")),
+    responses((status = 200, body = Vec<SavedRunwayConfig>), (status = 401), (status = 503))
+)]
+pub async fn list_saved_configs(
+    State(state): State<AppState>,
+    _permission: RequirePermission<FlowRunwayRead>,
+    Path(icao): Path<String>,
+) -> Result<Json<Vec<SavedRunwayConfig>>, ApiError> {
+    let pool = state.db.as_ref().ok_or(ApiError::ServiceUnavailable)?;
+    let rows = runway_repo::list_saved(pool, &icao.to_ascii_uppercase()).await?;
+    Ok(Json(
+        rows.into_iter()
+            .map(|r| SavedRunwayConfig {
+                name: r.name,
+                active_ends: r.payload.0.active_ends,
+                star_rules: r.payload.0.star_rules,
+            })
+            .collect(),
+    ))
+}
+
+/// Save (or replace) a named runway config for an airport.
+#[utoipa::path(
+    put,
+    path = "/api/v1/flow/runway/{icao}/configs/{name}",
+    tag = "flow",
+    params(
+        ("icao" = String, Path, description = "Airport ICAO"),
+        ("name" = String, Path, description = "Config name")
+    ),
+    request_body = SavedConfigRequest,
+    responses((status = 204), (status = 400), (status = 401), (status = 503))
+)]
+pub async fn save_config(
+    State(state): State<AppState>,
+    _permission: RequirePermission<FlowRunwayUpdate>,
+    Extension(current_user): Extension<Option<CurrentUser>>,
+    Path((icao, name)): Path<(String, String)>,
+    Json(body): Json<SavedConfigRequest>,
+) -> Result<StatusCode, ApiError> {
+    let user = current_user.as_ref().ok_or(ApiError::Unauthorized)?;
+    let pool = state.db.as_ref().ok_or(ApiError::ServiceUnavailable)?;
+    let name = name.trim();
+    if name.is_empty() {
+        return Err(ApiError::BadRequest);
+    }
+    runway_repo::upsert_saved(
+        pool,
+        &icao.to_ascii_uppercase(),
+        name,
+        &runway_repo::SavedPayload {
+            active_ends: body.active_ends,
+            star_rules: body.star_rules,
+        },
+        &user.id,
+    )
+    .await?;
+    Ok(StatusCode::NO_CONTENT)
+}
+
+/// Delete a named runway config.
+#[utoipa::path(
+    delete,
+    path = "/api/v1/flow/runway/{icao}/configs/{name}",
+    tag = "flow",
+    params(
+        ("icao" = String, Path, description = "Airport ICAO"),
+        ("name" = String, Path, description = "Config name")
+    ),
+    responses((status = 204), (status = 401), (status = 404), (status = 503))
+)]
+pub async fn delete_config(
+    State(state): State<AppState>,
+    _permission: RequirePermission<FlowRunwayUpdate>,
+    Path((icao, name)): Path<(String, String)>,
+) -> Result<StatusCode, ApiError> {
+    let pool = state.db.as_ref().ok_or(ApiError::ServiceUnavailable)?;
+    if runway_repo::delete_saved(pool, &icao.to_ascii_uppercase(), name.trim()).await? {
+        Ok(StatusCode::NO_CONTENT)
+    } else {
+        Err(ApiError::NotFound)
+    }
 }

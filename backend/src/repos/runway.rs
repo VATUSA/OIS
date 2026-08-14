@@ -58,3 +58,63 @@ pub async fn upsert_config(
     .map_err(|_| ApiError::Internal)?;
     Ok(())
 }
+
+/// The active-ends + STAR-rules payload of a named runway config.
+#[derive(Debug, serde::Serialize, serde::Deserialize)]
+pub struct SavedPayload {
+    #[serde(default)]
+    pub active_ends: Vec<String>,
+    #[serde(default)]
+    pub star_rules: HashMap<String, String>,
+}
+
+#[derive(Debug, sqlx::FromRow)]
+pub struct SavedConfigRow {
+    pub name: String,
+    pub payload: Json<SavedPayload>,
+}
+
+/// All named configs saved for `icao`, alphabetically.
+pub async fn list_saved(pool: &PgPool, icao: &str) -> Result<Vec<SavedConfigRow>, ApiError> {
+    sqlx::query_as::<_, SavedConfigRow>(
+        "select name, payload from flow.runway_saved_config where icao = $1 order by name",
+    )
+    .bind(icao)
+    .fetch_all(pool)
+    .await
+    .map_err(|_| ApiError::Internal)
+}
+
+/// Insert or replace a named config for `icao`.
+pub async fn upsert_saved(
+    pool: &PgPool,
+    icao: &str,
+    name: &str,
+    payload: &SavedPayload,
+    user_id: &str,
+) -> Result<(), ApiError> {
+    sqlx::query(
+        "insert into flow.runway_saved_config (icao, name, payload, updated_by) \
+         values ($1, $2, $3, $4) \
+         on conflict (icao, name) do update set payload = $3, updated_by = $4",
+    )
+    .bind(icao)
+    .bind(name)
+    .bind(Json(payload))
+    .bind(user_id)
+    .execute(pool)
+    .await
+    .map_err(|_| ApiError::Internal)?;
+    Ok(())
+}
+
+/// Delete a named config; returns whether a row was removed.
+pub async fn delete_saved(pool: &PgPool, icao: &str, name: &str) -> Result<bool, ApiError> {
+    let r = sqlx::query("delete from flow.runway_saved_config where icao = $1 and name = $2")
+        .bind(icao)
+        .bind(name)
+        .execute(pool)
+        .await
+        .map_err(|_| ApiError::Internal)?;
+    Ok(r.rows_affected() > 0)
+}

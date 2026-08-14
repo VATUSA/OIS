@@ -642,6 +642,41 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/v1/flow/runway/{icao}/configs": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** List the named runway configs saved for an airport. */
+        get: operations["list_saved_configs"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/flow/runway/{icao}/configs/{name}": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        /** Save (or replace) a named runway config for an airport. */
+        put: operations["save_config"];
+        post?: never;
+        /** Delete a named runway config. */
+        delete: operations["delete_config"];
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/v1/flow/traffic": {
         parameters: {
             query?: never;
@@ -1534,6 +1569,21 @@ export interface components {
             level: string;
             /** @description Runway the aircraft should move to. */
             to_rwy: string;
+        };
+        /** @description Body for saving a named config. */
+        SavedConfigRequest: {
+            active_ends?: string[];
+            star_rules?: {
+                [key: string]: string;
+            };
+        };
+        /** @description A named, reusable runway configuration (e.g. "West Ops"). */
+        SavedRunwayConfig: {
+            active_ends: string[];
+            name: string;
+            star_rules: {
+                [key: string]: string;
+            };
         };
         /** @description Direct grants + roles at one scope. `artcc_id = null` is national. */
         ScopeAccess: {
@@ -3461,6 +3511,124 @@ export interface operations {
                 };
             };
             401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            503: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+        };
+    };
+    list_saved_configs: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /** @description Airport ICAO */
+                icao: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["SavedRunwayConfig"][];
+                };
+            };
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            503: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+        };
+    };
+    save_config: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /** @description Airport ICAO */
+                icao: string;
+                /** @description Config name */
+                name: string;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["SavedConfigRequest"];
+            };
+        };
+        responses: {
+            204: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            503: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+        };
+    };
+    delete_config: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /** @description Airport ICAO */
+                icao: string;
+                /** @description Config name */
+                name: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            204: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            404: {
                 headers: {
                     [name: string]: unknown;
                 };
