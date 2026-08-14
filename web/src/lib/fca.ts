@@ -9,6 +9,42 @@ export type UpsertFca = components["schemas"]["UpsertFcaRequest"];
 export type TrafficAircraft = components["schemas"]["TrafficAircraft"];
 export type FcaFlight = components["schemas"]["FcaFlight"];
 export type AircraftRoute = components["schemas"]["AircraftRoute"];
+export type DataStatus = components["schemas"]["DataStatus"];
+
+/** Health of the runtime nav + winds data, refreshed every 60s. */
+export function useDataStatus() {
+  return useQuery({
+    queryKey: ["flow-data-status"],
+    queryFn: async () => {
+      const { data, error } = await ois.GET("/api/v1/flow/data-status");
+      if (error || !data) throw new Error("failed to load data status");
+      return data;
+    },
+    staleTime: 60_000,
+    refetchInterval: 60_000,
+  });
+}
+
+/** Force an immediate nav + winds refresh (requires flow.fca.update). */
+export function useRefreshData() {
+  const queryClient = useQueryClient();
+  const toast = useToast();
+  return useMutation({
+    mutationFn: async () => {
+      const { data, error } = await ois.POST("/api/v1/flow/data-refresh");
+      if (error || !data) throw new Error("refresh failed");
+      return data;
+    },
+    onSuccess: (data) => {
+      queryClient.setQueryData(["flow-data-status"], data);
+      // Freshly resolved routes may shift matches/ETAs.
+      queryClient.invalidateQueries({ queryKey: ["fca-traffic"] });
+      queryClient.invalidateQueries({ queryKey: ["aircraft-route"] });
+      toast.success(`Nav ${data.nav_cycle} · ${data.winds_stations} wind stations`);
+    },
+    onError: () => toast.error("Refresh failed"),
+  });
+}
 
 /** All FCAs (shared across controllers). */
 export function useFcas() {

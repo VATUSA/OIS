@@ -484,6 +484,43 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/v1/flow/data-refresh": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Force an immediate nav + winds refresh, then return the updated status. Failures are
+         *     logged and leave the current data in place.
+         */
+        post: operations["data_refresh"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/flow/data-status": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** Health of the runtime nav + winds data (cycle, source, counts, last-refresh times). */
+        get: operations["data_status"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/v1/flow/fcas": {
         parameters: {
             query?: never;
@@ -974,6 +1011,28 @@ export interface components {
             start_time?: string | null;
             /** Format: date-time */
             stop_time?: string | null;
+        };
+        /** @description Health of the runtime nav + winds data backing route/ETA prediction. */
+        DataStatus: {
+            airways: number;
+            fixes: number;
+            /** @description FAA NASR cycle date currently loaded (e.g. `2026-08-06`). */
+            nav_cycle: string;
+            /**
+             * Format: date-time
+             * @description Last successful runtime nav fetch (null = still on the compile-time bundle seed).
+             */
+            nav_refreshed?: string | null;
+            /** @description Provenance of the loaded nav data (e.g. `runtime fetch (faa)` or the bundle). */
+            nav_source: string;
+            navaids: number;
+            procedures: number;
+            /**
+             * Format: date-time
+             * @description Last successful winds fetch (null = still air, not yet fetched).
+             */
+            winds_refreshed?: string | null;
+            winds_stations: number;
         };
         /** @description Whether an event needs national DCC support. */
         DccRequestBody: {
@@ -2828,6 +2887,56 @@ export interface operations {
                     "application/json": {
                         [key: string]: number;
                     };
+                };
+            };
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+        };
+    };
+    data_refresh: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["DataStatus"];
+                };
+            };
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+        };
+    };
+    data_status: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["DataStatus"];
                 };
             };
             401: {

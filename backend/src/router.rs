@@ -136,6 +136,8 @@ pub fn build_router(state: AppState) -> Router {
             get(flow::aircraft_route),
         )
         .route("/api/v1/flow/traffic", get(flow::list_traffic))
+        .route("/api/v1/flow/data-status", get(flow::data_status))
+        .route("/api/v1/flow/data-refresh", post(flow::data_refresh))
         // Live VATSIM feed
         .route("/api/v1/feed/status", get(feed::feed_status))
         .route("/api/v1/tmu/flow/{icao}", get(feed::airport_flow))

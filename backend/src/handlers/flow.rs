@@ -1,6 +1,7 @@
 //! Flow handlers — FCA CRUD + a lightweight live-traffic feed for the FCA map.
 
 use std::collections::HashMap;
+use std::sync::atomic::Ordering;
 
 use axum::{
     Json,
@@ -20,9 +21,10 @@ use crate::{
         airports::AirportDb, airspace::Boundaries, fca, nav::NavData, trajectory,
         vatsim::FlightPlan, vatsim::VatsimData, winds::Winds,
     },
+    jobs,
     models::{
-        AircraftRoute, FcaBody, FcaFlight, ReleaseRequest, ReorderRequest, RouteWaypoint,
-        TrafficAircraft, UpsertFcaRequest,
+        AircraftRoute, DataStatus, FcaBody, FcaFlight, ReleaseRequest, ReorderRequest,
+        RouteWaypoint, TrafficAircraft, UpsertFcaRequest,
     },
     repos::flow as flow_repo,
     state::AppState,
@@ -363,6 +365,69 @@ pub async fn aircraft_route(
     }
 
     Err(ApiError::NotFound)
+}
+
+fn build_data_status(state: &AppState) -> DataStatus {
+    let nav = state.nav.load_full();
+    let winds = state.winds.load_full();
+    let to_dt = |ms: i64| {
+        (ms > 0)
+            .then(|| DateTime::from_timestamp_millis(ms))
+            .flatten()
+    };
+    DataStatus {
+        nav_cycle: nav.cycle().to_string(),
+        nav_source: nav.source().to_string(),
+        fixes: nav.fix_count(),
+        navaids: nav.navaid_count(),
+        airways: nav.airway_count(),
+        procedures: nav.procedure_count(),
+        nav_refreshed: to_dt(state.nav_refreshed.load(Ordering::Relaxed)),
+        winds_stations: winds.station_count(),
+        winds_refreshed: to_dt(state.winds_refreshed.load(Ordering::Relaxed)),
+    }
+}
+
+/// Health of the runtime nav + winds data (cycle, source, counts, last-refresh times).
+#[utoipa::path(
+    get,
+    path = "/api/v1/flow/data-status",
+    tag = "flow",
+    responses((status = 200, body = DataStatus), (status = 401))
+)]
+pub async fn data_status(
+    State(state): State<AppState>,
+    _permission: RequirePermission<FlowFcaRead>,
+) -> Json<DataStatus> {
+    Json(build_data_status(&state))
+}
+
+/// Force an immediate nav + winds refresh, then return the updated status. Failures are
+/// logged and leave the current data in place.
+#[utoipa::path(
+    post,
+    path = "/api/v1/flow/data-refresh",
+    tag = "flow",
+    responses((status = 200, body = DataStatus), (status = 401))
+)]
+pub async fn data_refresh(
+    State(state): State<AppState>,
+    _permission: RequirePermission<FlowFcaUpdate>,
+) -> Json<DataStatus> {
+    if let Err(e) = jobs::refresh_nav_once(&state.nav, &state.nav_refreshed).await {
+        tracing::warn!(error = %e, "manual nav refresh failed");
+    }
+    let client = reqwest::Client::builder()
+        .user_agent("ois-winds/1.0 (+https://vatusa.net)")
+        .timeout(std::time::Duration::from_secs(90))
+        .build()
+        .unwrap_or_default();
+    match jobs::refresh_winds_once(&state.feed, &state.winds, &state.winds_refreshed, &client).await
+    {
+        None => tracing::warn!("manual winds refresh: airport database not loaded yet"),
+        Some(n) => tracing::info!(stations = n, "manual winds refresh"),
+    }
+    Json(build_data_status(&state))
 }
 
 #[utoipa::path(

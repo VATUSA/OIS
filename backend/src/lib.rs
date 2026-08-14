@@ -23,8 +23,12 @@ pub async fn run() -> Result<(), Box<dyn std::error::Error>> {
 
     feed::spawn_poller(state.feed.clone());
     feed::facilities::spawn_refresh(state.facilities.clone());
-    jobs::spawn_nav_refresh(state.nav.clone());
-    jobs::spawn_winds_refresh(state.feed.clone(), state.winds.clone());
+    jobs::spawn_nav_refresh(state.nav.clone(), state.nav_refreshed.clone());
+    jobs::spawn_winds_refresh(
+        state.feed.clone(),
+        state.winds.clone(),
+        state.winds_refreshed.clone(),
+    );
     if let Some(pool) = state.db.clone() {
         jobs::spawn_cleanup(pool.clone());
         feed::events::spawn_sync(pool);
