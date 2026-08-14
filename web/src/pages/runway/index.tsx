@@ -25,6 +25,10 @@ function zulu(iso: string): string {
 function minsFromNow(iso: string): number {
   return Math.round((new Date(iso).getTime() - Date.now()) / 60000);
 }
+/** STAR base name — strip the trailing revision (CAMRN4 → CAMRN). */
+function starBase(name: string): string {
+  return name.trim().toUpperCase().replace(/\d[A-Z]?$/, "");
+}
 
 export function RunwayPage() {
   const { data: me } = useMe();
@@ -33,6 +37,8 @@ export function RunwayPage() {
 
   const [field, setField] = useState("");
   const [icao, setIcao] = useState<string | null>(null);
+  const [newStar, setNewStar] = useState("");
+  const [newRwy, setNewRwy] = useState("");
   const board = useRunway(icao);
   const update = useUpdateRunway(icao ?? "");
   const b = board.data;
@@ -68,6 +74,45 @@ export function RunwayPage() {
             .map((e) => e.id);
     save(next);
   }
+  function saveRules(rules: Record<string, string>) {
+    if (!icao || !b) return;
+    update.mutate({
+      active_ends: activeIds,
+      star_rules: rules,
+      overrides: b.overrides,
+      window_min: b.window_min,
+    });
+  }
+  function addRule() {
+    const s = starBase(newStar);
+    if (!canEdit || !b || !s || !newRwy) return;
+    saveRules({ ...b.star_rules, [s]: newRwy });
+    setNewStar("");
+    setNewRwy("");
+  }
+  function removeRule(star: string) {
+    if (!b) return;
+    const next = { ...b.star_rules };
+    delete next[star];
+    saveRules(next);
+  }
+  function setOverride(cs: string, rwy: string) {
+    if (!canEdit || !b) return;
+    const next: Record<string, string> = { ...b.overrides };
+    if (rwy === "AUTO") delete next[cs];
+    else next[cs] = rwy;
+    // Prune overrides for aircraft that are no longer arriving.
+    const live = new Set((b.arrivals ?? []).map((a) => a.cs));
+    const pruned = Object.fromEntries(
+      Object.entries(next).filter(([c]) => live.has(c)),
+    );
+    update.mutate({
+      active_ends: activeIds,
+      star_rules: b.star_rules,
+      overrides: pruned,
+      window_min: b.window_min,
+    });
+  }
 
   const load = () => {
     const f = field.trim().toUpperCase();
@@ -85,6 +130,7 @@ export function RunwayPage() {
   const arrivals = b?.arrivals ?? [];
   const assigned = arrivals.filter((a) => a.rwy);
   const pairs = groupPairs(b?.ends ?? []);
+  const recMap = new Map((b?.recs ?? []).map((r) => [r.cs, r]));
 
   return (
     <div className="flex h-[calc(100vh-3.5rem)] flex-col">
@@ -193,6 +239,83 @@ export function RunwayPage() {
 
             <section>
               <h2 className="mb-2 text-xs font-semibold uppercase tracking-wide text-muted-foreground">
+                STAR → runway rules
+              </h2>
+              <div className="flex flex-col gap-1.5">
+                {Object.entries(b?.star_rules ?? {}).map(([star, rwy]) => (
+                  <div key={star} className="flex items-center gap-2 text-xs">
+                    <span className="flex-1 font-mono font-semibold">{star}</span>
+                    <select
+                      disabled={!canEdit}
+                      value={rwy}
+                      onChange={(e) =>
+                        saveRules({ ...(b?.star_rules ?? {}), [star]: e.target.value })
+                      }
+                      className="h-7 rounded border border-input bg-background px-1 font-mono text-xs outline-none disabled:opacity-50"
+                    >
+                      {activeIds.map((id) => (
+                        <option key={id} value={id}>
+                          {id}
+                        </option>
+                      ))}
+                    </select>
+                    <button
+                      type="button"
+                      disabled={!canEdit}
+                      onClick={() => removeRule(star)}
+                      className="text-muted-foreground hover:text-destructive disabled:opacity-50"
+                      aria-label="Remove rule"
+                    >
+                      ×
+                    </button>
+                  </div>
+                ))}
+                {Object.keys(b?.star_rules ?? {}).length === 0 && (
+                  <p className="text-[11px] text-muted-foreground">
+                    No rules — arrivals auto-balance.
+                  </p>
+                )}
+              </div>
+              {canEdit && (
+                <div className="mt-2 flex items-center gap-1">
+                  <Input
+                    value={newStar}
+                    onChange={(e) => setNewStar(e.target.value)}
+                    onKeyDown={(e) => e.key === "Enter" && addRule()}
+                    placeholder="STAR e.g. CAMRN"
+                    className="h-7 flex-1 font-mono text-xs uppercase"
+                  />
+                  <select
+                    value={newRwy}
+                    onChange={(e) => setNewRwy(e.target.value)}
+                    className="h-7 rounded border border-input bg-background px-1 font-mono text-xs outline-none"
+                  >
+                    <option value="">rwy</option>
+                    {activeIds.map((id) => (
+                      <option key={id} value={id}>
+                        {id}
+                      </option>
+                    ))}
+                  </select>
+                  <Button
+                    size="sm"
+                    variant="outline"
+                    onClick={addRule}
+                    disabled={!newStar.trim() || !newRwy}
+                    className="h-7 px-2 text-xs"
+                  >
+                    Pin
+                  </Button>
+                </div>
+              )}
+              <p className="mt-2 text-[11px] leading-snug text-muted-foreground">
+                A rule sends every arrival on that STAR to one runway. Aircraft
+                overrides beat rules.
+              </p>
+            </section>
+
+            <section>
+              <h2 className="mb-2 text-xs font-semibold uppercase tracking-wide text-muted-foreground">
                 Settings
               </h2>
               <label className="flex items-center gap-2 text-xs">
@@ -223,6 +346,10 @@ export function RunwayPage() {
             <ArrivalsByRunway
               ends={(b?.ends ?? []).filter((e) => e.active)}
               arrivals={arrivals}
+              activeIds={activeIds}
+              recMap={recMap}
+              onOverride={setOverride}
+              canEdit={canEdit}
             />
           </div>
         </div>
@@ -316,9 +443,17 @@ function DemandChart({
 function ArrivalsByRunway({
   ends,
   arrivals,
+  activeIds,
+  recMap,
+  onOverride,
+  canEdit,
 }: {
   ends: RunwayEnd[];
   arrivals: RunwayArrival[];
+  activeIds: string[];
+  recMap: Map<string, { to_rwy: string; level: string }>;
+  onOverride: (cs: string, rwy: string) => void;
+  canEdit: boolean;
 }) {
   const groups: { id: string; hdg?: number; list: RunwayArrival[] }[] = ends.map(
     (e) => ({
@@ -358,34 +493,67 @@ function ArrivalsByRunway({
             ) : (
               <table className="w-full text-xs">
                 <tbody>
-                  {g.list.map((a) => (
-                    <tr key={a.cs} className="border-b last:border-0">
-                      <td className="px-3 py-1.5 font-mono font-semibold">{a.cs}</td>
-                      <td className="py-1.5 font-mono text-muted-foreground">{a.dep}</td>
-                      <td className="py-1.5 font-mono text-muted-foreground">
-                        {a.star ?? "—"}
-                      </td>
-                      <td className="py-1.5 font-mono">
-                        {zulu(a.eta)}{" "}
-                        <span className="text-muted-foreground">
-                          +{minsFromNow(a.eta)}
-                        </span>
-                      </td>
-                      <td className="px-3 py-1.5 text-right">
-                        <span
-                          className={`rounded px-1 py-0.5 font-mono text-[10px] uppercase ${
-                            a.src === "man"
-                              ? "bg-sky-500/15 text-sky-500"
-                              : a.src === "star"
-                                ? "bg-violet-500/15 text-violet-500"
-                                : "bg-muted text-muted-foreground"
-                          }`}
-                        >
-                          {a.src}
-                        </span>
-                      </td>
-                    </tr>
-                  ))}
+                  {g.list.map((a) => {
+                    const rec = recMap.get(a.cs);
+                    return (
+                      <tr
+                        key={a.cs}
+                        className={`border-b last:border-0 ${rec ? "bg-amber-500/5" : ""}`}
+                      >
+                        <td className="px-3 py-1.5 font-mono font-semibold">{a.cs}</td>
+                        <td className="py-1.5 font-mono text-muted-foreground">{a.dep}</td>
+                        <td className="py-1.5 font-mono text-muted-foreground">
+                          {a.star ?? "—"}
+                        </td>
+                        <td className="py-1.5 font-mono">
+                          {zulu(a.eta)}{" "}
+                          <span className="text-muted-foreground">
+                            +{minsFromNow(a.eta)}
+                          </span>
+                        </td>
+                        <td className="px-3 py-1.5">
+                          <div className="flex items-center justify-end gap-1.5">
+                            {rec && (
+                              <span
+                                className="rounded px-1 py-0.5 font-mono text-[10px] font-semibold"
+                                title={`Rebalance: move to ${rec.to_rwy}`}
+                                style={{
+                                  color: LEVEL_COLOR[rec.level] ?? "#888",
+                                  background: `${LEVEL_COLOR[rec.level] ?? "#888"}22`,
+                                }}
+                              >
+                                → {rec.to_rwy}
+                              </span>
+                            )}
+                            <span
+                              className={`rounded px-1 py-0.5 font-mono text-[10px] uppercase ${
+                                a.src === "man"
+                                  ? "bg-sky-500/15 text-sky-500"
+                                  : a.src === "star"
+                                    ? "bg-violet-500/15 text-violet-500"
+                                    : "bg-muted text-muted-foreground"
+                              }`}
+                            >
+                              {a.src}
+                            </span>
+                            <select
+                              disabled={!canEdit}
+                              value={a.src === "man" ? (a.rwy ?? "AUTO") : "AUTO"}
+                              onChange={(e) => onOverride(a.cs, e.target.value)}
+                              className="h-6 rounded border border-input bg-background px-1 font-mono text-[10px] outline-none disabled:opacity-50"
+                            >
+                              <option value="AUTO">AUTO</option>
+                              {activeIds.map((id) => (
+                                <option key={id} value={id}>
+                                  {id}
+                                </option>
+                              ))}
+                            </select>
+                          </div>
+                        </td>
+                      </tr>
+                    );
+                  })}
                 </tbody>
               </table>
             )}

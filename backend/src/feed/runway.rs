@@ -21,6 +21,8 @@ use super::winds::Winds;
 const BIN_MIN: i64 = 10;
 const DEMAND_YELLOW: i32 = 4;
 const DEMAND_RED: i32 = 6;
+/// A runway with at most this many in a bin can absorb a rebalanced arrival.
+const DEMAND_OPEN: i32 = 2;
 /// Preset activates ends whose heading is within this of the approach direction.
 const PRESET_TOL: f64 = 65.0;
 
@@ -55,6 +57,16 @@ pub struct RunwayArrival {
     pub src: String,
 }
 
+/// A suggestion to move an arrival off a congested runway.
+#[derive(Debug, Serialize, ToSchema)]
+pub struct RunwayRec {
+    pub cs: String,
+    /// Runway the aircraft should move to.
+    pub to_rwy: String,
+    /// Congestion level being relieved: `yellow` | `red`.
+    pub level: String,
+}
+
 /// Per-runway demand: count and level per 10-min bin.
 #[derive(Debug, Serialize, ToSchema)]
 pub struct RunwayDemand {
@@ -71,13 +83,15 @@ pub struct RunwayBoard {
     /// `built-in` (dataset) or `none — add ends manually`.
     pub source: String,
     pub ends: Vec<RunwayEnd>,
-    #[schema(value_type = Object)]
+    #[schema(value_type = std::collections::HashMap<String, String>)]
     pub star_rules: HashMap<String, String>,
-    #[schema(value_type = Object)]
+    #[schema(value_type = std::collections::HashMap<String, String>)]
     pub overrides: HashMap<String, String>,
     pub window_min: i64,
     pub arrivals: Vec<RunwayArrival>,
     pub demand: Vec<RunwayDemand>,
+    /// Rebalance suggestions — aircraft that should move off a congested runway.
+    pub recs: Vec<RunwayRec>,
     /// Number of 10-min bins in the demand window.
     pub bins: usize,
 }
@@ -88,10 +102,10 @@ pub struct RunwayConfigRequest {
     #[serde(default)]
     pub active_ends: Vec<String>,
     #[serde(default)]
-    #[schema(value_type = Object)]
+    #[schema(value_type = std::collections::HashMap<String, String>)]
     pub star_rules: HashMap<String, String>,
     #[serde(default)]
-    #[schema(value_type = Object)]
+    #[schema(value_type = std::collections::HashMap<String, String>)]
     pub overrides: HashMap<String, String>,
     pub window_min: Option<i32>,
 }
@@ -305,6 +319,81 @@ pub fn demand_bins(
     (demand, bins)
 }
 
+/// Rebalance suggestions: bin by bin, when a runway's 10-min bin is yellow/red, move its
+/// *latest* non-manual arrivals to another active runway with an open slot (≤2) in that same
+/// bin. Projected counts mutate as suggestions are placed, so we don't over-recommend.
+/// `items` is `(callsign, assigned_runway, source, eta_ms)` per arrival.
+pub fn recommendations(
+    items: &[(String, Option<String>, String, i64)],
+    active_ids: &[String],
+    now_ms: i64,
+    window_min: i64,
+) -> Vec<RunwayRec> {
+    let bins = (window_min as f64 / BIN_MIN as f64).ceil() as usize;
+    let bin_of = |eta: i64| (eta - now_ms) / (BIN_MIN * 60_000);
+
+    // runway -> bin -> [(callsign, source, eta_ms)]
+    type BinGrid = HashMap<String, Vec<Vec<(String, String, i64)>>>;
+    let mut counts: HashMap<String, Vec<i32>> = active_ids
+        .iter()
+        .map(|s| (s.clone(), vec![0; bins]))
+        .collect();
+    let mut in_bin: BinGrid = active_ids
+        .iter()
+        .map(|s| (s.clone(), vec![Vec::new(); bins]))
+        .collect();
+
+    for (cs, rwy, src, eta) in items {
+        let Some(r) = rwy else { continue };
+        if !counts.contains_key(r) {
+            continue;
+        }
+        let b = bin_of(*eta);
+        if b >= 0 && (b as usize) < bins {
+            let b = b as usize;
+            counts.get_mut(r).unwrap()[b] += 1;
+            in_bin.get_mut(r).unwrap()[b].push((cs.clone(), src.clone(), *eta));
+        }
+    }
+
+    let mut recs: Vec<RunwayRec> = Vec::new();
+    for b in 0..bins {
+        for e in active_ids {
+            let level = bin_level(counts[e][b]);
+            if level == "green" {
+                continue;
+            }
+            // Movable = non-manual arrivals in this bin, latest ETA first (least disruptive).
+            let mut movable: Vec<(String, i64)> = in_bin[e][b]
+                .iter()
+                .filter(|(_, src, _)| src != "man")
+                .map(|(cs, _, eta)| (cs.clone(), *eta))
+                .collect();
+            movable.sort_by(|a, c| c.1.cmp(&a.1));
+
+            for (cs, _) in movable {
+                if bin_level(counts[e][b]) == "green" {
+                    break; // relieved enough
+                }
+                // A different active runway with an open slot in the same bin.
+                let target = active_ids
+                    .iter()
+                    .find(|t| *t != e && counts[*t][b] <= DEMAND_OPEN)
+                    .cloned();
+                let Some(target) = target else { break };
+                recs.push(RunwayRec {
+                    cs,
+                    to_rwy: target.clone(),
+                    level: level.to_string(),
+                });
+                counts.get_mut(e).unwrap()[b] -= 1;
+                counts.get_mut(&target).unwrap()[b] += 1;
+            }
+        }
+    }
+    recs
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -386,6 +475,37 @@ mod tests {
             .filter(|(r, _)| r.as_deref() == Some("04R"))
             .count();
         assert_eq!((left, right), (2, 2), "AUTO should split evenly");
+    }
+
+    #[test]
+    fn recommends_moving_latest_off_a_crowded_runway() {
+        // 04L holds 5 arrivals (yellow) in bin 0; 04R is empty. Recommend moving the
+        // latest one(s) to 04R until 04L drops below yellow.
+        let active = vec!["04L".to_string(), "04R".to_string()];
+        let mut items: Vec<(String, Option<String>, String, i64)> = (0..5)
+            .map(|i| {
+                (
+                    format!("A{i}"),
+                    Some("04L".to_string()),
+                    "auto".to_string(),
+                    i * 1000,
+                )
+            })
+            .collect();
+        // A manual assignment must never be recommended for a move.
+        items[0].2 = "man".to_string();
+        let recs = recommendations(&items, &active, 0, 90);
+        assert!(
+            !recs.is_empty(),
+            "should suggest moving off the crowded runway"
+        );
+        assert!(recs.iter().all(|r| r.to_rwy == "04R"));
+        assert!(
+            !recs.iter().any(|r| r.cs == "A0"),
+            "manual A0 must not be moved"
+        );
+        // The moved aircraft are the latest ETAs (highest index).
+        assert!(recs.iter().any(|r| r.cs == "A4"));
     }
 
     #[test]
