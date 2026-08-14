@@ -6,6 +6,7 @@ pub mod events;
 pub mod facilities;
 pub mod feed;
 pub mod flow;
+pub mod gdp;
 pub mod health;
 pub mod runway;
 pub mod service_accounts;

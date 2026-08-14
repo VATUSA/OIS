@@ -257,6 +257,44 @@ pub struct CreateGroundStopRequest {
     pub until: Option<String>,
 }
 
+/// A Ground Delay Program — meters inbound demand to a constrained airport to its AAR.
+#[derive(Debug, Serialize, ToSchema, sqlx::FromRow)]
+pub struct GdpBody {
+    pub id: String,
+    pub airport: String,
+    /// Airport Acceptance Rate (arrivals/hour) the program meters to.
+    pub aar: i32,
+    /// HHMM Zulu program window start.
+    pub start_time: String,
+    /// HHMM Zulu program window end.
+    pub end_time: String,
+    /// Scope tier: only inbounds within this many enroute minutes are controllable; null = no limit.
+    pub max_enroute_min: Option<i32>,
+    pub exempt_airborne: bool,
+    /// Lifecycle: draft | published | expired | cancelled.
+    pub status: String,
+    pub published_at: Option<DateTime<Utc>>,
+    pub updated_at: DateTime<Utc>,
+    /// Display name of whoever last touched the program.
+    pub updated_by: Option<String>,
+}
+
+#[derive(Debug, Deserialize, ToSchema)]
+pub struct CreateGdpRequest {
+    pub airport: String,
+    pub aar: i32,
+    pub start_time: String,
+    pub end_time: String,
+    #[serde(default)]
+    pub max_enroute_min: Option<i32>,
+    #[serde(default = "default_true")]
+    pub exempt_airborne: bool,
+}
+
+fn default_true() -> bool {
+    true
+}
+
 // --- events (per-event planning) ---
 
 /// A VATUSA event, cached from the events API — the anchor for per-event planning.

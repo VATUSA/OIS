@@ -52,6 +52,9 @@ pub struct FlowFlight {
     pub status: String,
     pub distance_nm: Option<f64>,
     pub eta: Option<DateTime<Utc>>,
+    /// Estimated wheels-up for ground/proposed inbounds (ready-now or filed ETD); null once
+    /// airborne. Used to back out enroute time for GDP EDCTs.
+    pub etd: Option<DateTime<Utc>>,
     pub groundspeed: i64,
     /// True when a program excludes this aircraft from metering (still shown).
     pub excluded: bool,
@@ -226,6 +229,7 @@ pub fn compute(
                 status: "ground".into(),
                 distance_nm: Some(route_nm),
                 eta: Some(now + minutes(ft_min)),
+                etd: Some(now),
                 groundspeed: p.groundspeed,
                 excluded,
                 ..Default::default()
@@ -257,6 +261,7 @@ pub fn compute(
             status: "proposed".into(),
             distance_nm: Some(route_nm),
             eta: Some(etd + minutes(ft_min)),
+            etd: Some(etd),
             groundspeed: 0,
             excluded,
             ..Default::default()
