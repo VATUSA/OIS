@@ -109,6 +109,8 @@ pub struct NavData {
     preferred: HashMap<String, String>,
     /// Shortest procedure key for a bare letter prefix (e.g. `DOTSS` → `DOTSS2`).
     proc_by_prefix: HashMap<String, String>,
+    /// Navaid id → magnetic variation (deg, East positive), for fix-radial-distance points.
+    nav_magvar: HashMap<String, f64>,
     bbox: [f64; 4],
     cycle: String,
     source: String,
@@ -125,12 +127,14 @@ impl NavData {
             include_str!("../../data/nav/procedures.json"),
             include_str!("../../data/nav/preferred.json"),
             include_str!("../../data/nav/meta.json"),
+            include_str!("../../data/nav/navvar.json"),
         )
     }
 
     /// Build a [`NavData`] from the six nav JSON blobs (bundled schema). Both the
     /// compile-time bundle and the runtime fetcher (which re-serializes fetched data into
     /// this same schema) go through here, so indexing/expansion behaviour is identical.
+    #[allow(clippy::too_many_arguments)]
     pub fn from_json(
         navaids: &str,
         fixes: &str,
@@ -138,8 +142,10 @@ impl NavData {
         procedures: &str,
         preferred: &str,
         meta: &str,
+        navvar: &str,
     ) -> Self {
         let navaids: HashMap<String, CoordList> = serde_json::from_str(navaids).unwrap_or_default();
+        let nav_magvar: HashMap<String, f64> = serde_json::from_str(navvar).unwrap_or_default();
         let fixes: HashMap<String, CoordList> = serde_json::from_str(fixes).unwrap_or_default();
         let raw_airways: HashMap<String, RawAirway> =
             serde_json::from_str(airways).unwrap_or_default();
@@ -196,6 +202,7 @@ impl NavData {
             procedures,
             preferred,
             proc_by_prefix,
+            nav_magvar,
             bbox: meta.bbox.unwrap_or([23.5, -130.0, 51.5, -63.0]),
             cycle: meta.nasr_cycle_date.unwrap_or_default(),
             source: meta.source.unwrap_or_default(),
@@ -351,7 +358,49 @@ impl NavData {
                 kind,
             });
         }
-        None
+        // Fix-radial-distance (e.g. DAN060013 = 13 nm on DAN's 060° radial).
+        self.resolve_frd(&id, ref_ll)
+    }
+
+    /// Resolve a fix-radial-distance token: a 2–5 char navaid/fix identifier followed by a
+    /// 3-digit magnetic radial and a 2–3 digit distance in nm. The point is projected along
+    /// the great circle from the station, correcting the (magnetic) radial to true with the
+    /// navaid's published variation when known.
+    fn resolve_frd(&self, id: &str, ref_ll: Option<Ll>) -> Option<Anchor> {
+        let letters = id.bytes().take_while(u8::is_ascii_uppercase).count();
+        if !(2..=5).contains(&letters) {
+            return None;
+        }
+        let digits = &id[letters..];
+        if !(5..=6).contains(&digits.len()) || !digits.bytes().all(|c| c.is_ascii_digit()) {
+            return None;
+        }
+        let radial: f64 = digits[..3].parse().ok()?;
+        let dist: f64 = digits[3..].parse().ok()?;
+        if radial > 360.0 || dist <= 0.0 {
+            return None;
+        }
+        let base = &id[..letters];
+        let (ll, magvar) = if let Some(cands) = self.navaids.get(base) {
+            (nearest(cands, ref_ll), self.nav_magvar.get(base).copied())
+        } else if let Some(cands) = self.fixes.get(base) {
+            (nearest(cands, ref_ll), None)
+        } else {
+            return None;
+        };
+        // Radials are magnetic; true = radial + declination (East positive).
+        let true_brg = radial + magvar.unwrap_or(0.0);
+        Some(Anchor {
+            name: id.to_string(),
+            ll: project(ll, true_brg, dist),
+            kind: Kind::Fix,
+        })
+    }
+
+    /// Magnetic variation (deg, East positive) published for a navaid, if known.
+    #[allow(dead_code)]
+    pub fn magvar(&self, id: &str) -> Option<f64> {
+        self.nav_magvar.get(&id.to_ascii_uppercase()).copied()
     }
 
     /// Expand an airway between the waypoints nearest `from`/`to` (shorter direction).
@@ -696,6 +745,20 @@ fn nearest_wp_index(wps: &[Leg], ll: Ll) -> usize {
     best
 }
 
+/// Great-circle destination `dist_nm` from `from` along `bearing_deg` (true).
+fn project(from: Ll, bearing_deg: f64, dist_nm: f64) -> Ll {
+    let ang = dist_nm / R_NM;
+    let brg = bearing_deg.to_radians();
+    let (lat1, lon1) = (from[0].to_radians(), from[1].to_radians());
+    let lat2 = (lat1.sin() * ang.cos() + lat1.cos() * ang.sin() * brg.cos()).asin();
+    let lon2 =
+        lon1 + (brg.sin() * ang.sin() * lat1.cos()).atan2(ang.cos() - lat1.sin() * lat2.sin());
+    [
+        lat2.to_degrees(),
+        (lon2.to_degrees() + 540.0) % 360.0 - 180.0,
+    ]
+}
+
 fn haversine_nm(a: Ll, b: Ll) -> f64 {
     let (la1, lo1) = (a[0].to_radians(), a[1].to_radians());
     let (la2, lo2) = (b[0].to_radians(), b[1].to_radians());
@@ -823,6 +886,37 @@ mod tests {
             direct.anchors.len()
         );
         assert!(via.unresolved.is_empty(), "airway must not be unresolved");
+    }
+
+    #[test]
+    fn resolves_fix_radial_distance() {
+        let nav = NavData::load();
+        let empty = HashMap::new();
+        // Robbinsville VOR carries a published 10°W variation.
+        assert_eq!(nav.magvar("RBV"), Some(-10.0));
+        let rbv = nav.resolve("RBV", &empty, None).expect("RBV resolves");
+        // RBV060013 = 13 nm out on the (magnetic) 060 radial.
+        let frd = nav
+            .resolve("RBV060013", &empty, None)
+            .expect("FRD resolves");
+        let d = haversine_nm(rbv, frd);
+        assert!((d - 13.0).abs() < 0.6, "expected ~13 nm from RBV, got {d}");
+        // Variation is applied: true bearing = 060 + (-10) = 050°, not 060°.
+        let brg = bearing_deg(rbv[0], rbv[1], frd[0], frd[1]);
+        assert!((brg - 50.0).abs() < 2.0, "expected ~050° true, got {brg}");
+        // A radial > 360 is not a valid FRD.
+        assert!(nav.resolve("RBV999013", &empty, None).is_none());
+        // A plain 5-letter fix is untouched.
+        assert!(nav.resolve("MERIT", &empty, None).is_some());
+    }
+
+    /// A local bearing helper for the FRD test (nav.rs keeps geometry in fca.rs/winds.rs).
+    fn bearing_deg(la1: f64, lo1: f64, la2: f64, lo2: f64) -> f64 {
+        let dlo = (lo2 - lo1).to_radians();
+        let y = dlo.sin() * la2.to_radians().cos();
+        let x = la1.to_radians().cos() * la2.to_radians().sin()
+            - la1.to_radians().sin() * la2.to_radians().cos() * dlo.cos();
+        (y.atan2(x).to_degrees() + 360.0) % 360.0
     }
 
     #[test]
