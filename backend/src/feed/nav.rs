@@ -32,6 +32,8 @@ pub enum Kind {
     Sid,
     Star,
     Awy,
+    /// An explicit lat/lon waypoint — an unambiguous coordinate (no duplicate-name risk).
+    Coord,
 }
 
 /// One resolved point along a route.
@@ -243,13 +245,14 @@ impl NavData {
         self.procedures.len()
     }
 
-    /// Split a filed route into cleaned tokens (uppercased, `DCT` removed).
+    /// Split a filed route into cleaned tokens (uppercased; `DCT` and flight-rule noise
+    /// like `VFR`/`IFR` removed).
     pub fn parse_tokens(route: &str) -> Vec<String> {
         route
             .replace(['\n', '\r'], " ")
             .split_whitespace()
             .map(|t| t.to_ascii_uppercase())
-            .filter(|t| t != "DCT")
+            .filter(|t| !matches!(t.as_str(), "DCT" | "VFR" | "IFR" | "SVFR" | "DVFR"))
             .collect()
     }
 
@@ -356,6 +359,14 @@ impl NavData {
                 name: id,
                 ll: first,
                 kind,
+            });
+        }
+        // Explicit lat/lon waypoint (e.g. 34N150E), common on oceanic segments.
+        if let Some(ll) = decode_latlon(&id) {
+            return Some(Anchor {
+                name: id,
+                ll,
+                kind: Kind::Coord,
             });
         }
         // Fix-radial-distance (e.g. DAN060013 = 13 nm on DAN's 060° radial).
@@ -616,7 +627,9 @@ impl NavData {
                         break;
                     }
                     // Guard against a bad duplicate-name pick jumping across the country.
+                    // Exempt explicit coordinates — long oceanic legs are legitimate.
                     if let Some(r) = ref_ll
+                        && resolved.kind != Kind::Coord
                         && haversine_nm(r, resolved.ll) > 900.0
                     {
                         if intl {
@@ -743,6 +756,50 @@ fn nearest_wp_index(wps: &[Leg], ll: Ll) -> usize {
         }
     }
     best
+}
+
+/// Decode an explicit lat/lon waypoint: `<lat><N|S><lon><E|W>` where each coordinate is
+/// whole degrees or degrees-minutes (`34N150E`, `4130N07000W`). Returns `[lat, lon]`.
+fn decode_latlon(id: &str) -> Option<Ll> {
+    let b = id.as_bytes();
+    let ns = b.iter().position(|&c| c == b'N' || c == b'S')?;
+    let ew = b.iter().rposition(|&c| c == b'E' || c == b'W')?;
+    // Structure: digits, N/S, digits, E/W at the very end.
+    if ns == 0 || ew != b.len() - 1 || ew <= ns + 1 {
+        return None;
+    }
+    let lat_s = &id[..ns];
+    let lon_s = &id[ns + 1..ew];
+    if !lat_s.bytes().all(|c| c.is_ascii_digit()) || !lon_s.bytes().all(|c| c.is_ascii_digit()) {
+        return None;
+    }
+    let mut lat = parse_deg_min(lat_s)?;
+    let mut lon = parse_deg_min(lon_s)?;
+    if b[ns] == b'S' {
+        lat = -lat;
+    }
+    if b[ew] == b'W' {
+        lon = -lon;
+    }
+    (lat.abs() <= 90.0 && lon.abs() <= 180.0).then_some([lat, lon])
+}
+
+/// Whole degrees (2–3 digits) or degrees+minutes (4–5 digits, `DDMM`/`DDDMM`).
+fn parse_deg_min(s: &str) -> Option<f64> {
+    match s.len() {
+        2 | 3 => s.parse().ok(),
+        4 => {
+            let d: f64 = s[..2].parse().ok()?;
+            let m: f64 = s[2..].parse().ok()?;
+            Some(d + m / 60.0)
+        }
+        5 => {
+            let d: f64 = s[..3].parse().ok()?;
+            let m: f64 = s[3..].parse().ok()?;
+            Some(d + m / 60.0)
+        }
+        _ => None,
+    }
 }
 
 /// Great-circle destination `dist_nm` from `from` along `bearing_deg` (true).
@@ -908,6 +965,20 @@ mod tests {
         assert!(nav.resolve("RBV999013", &empty, None).is_none());
         // A plain 5-letter fix is untouched.
         assert!(nav.resolve("MERIT", &empty, None).is_some());
+    }
+
+    #[test]
+    fn decodes_latlon_waypoints() {
+        assert_eq!(decode_latlon("34N150E"), Some([34.0, 150.0]));
+        assert_eq!(decode_latlon("41N140W"), Some([41.0, -140.0]));
+        assert_eq!(decode_latlon("30S170W"), Some([-30.0, -170.0]));
+        // Degrees-minutes form.
+        let dm = decode_latlon("4130N07000W").unwrap();
+        assert!((dm[0] - 41.5).abs() < 1e-9 && (dm[1] + 70.0).abs() < 1e-9);
+        // Not coordinates.
+        assert_eq!(decode_latlon("MERIT"), None);
+        assert_eq!(decode_latlon("RBV060013"), None);
+        assert_eq!(decode_latlon("91N010E"), None); // lat out of range
     }
 
     /// A local bearing helper for the FRD test (nav.rs keeps geometry in fca.rs/winds.rs).
