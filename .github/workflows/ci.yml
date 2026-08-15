@@ -18,13 +18,14 @@ jobs:
       - run: cargo check --workspace --all-targets
       - run: cargo test --workspace --all-targets -- --test-threads=1
 
-  # web/ + packages/* land in Phase 3; enable once they exist.
-  # js:
-  #   runs-on: ubuntu-latest
-  #   steps:
-  #     - uses: actions/checkout@v4
-  #     - uses: pnpm/action-setup@v4
-  #     - uses: actions/setup-node@v4
-  #       with: { node-version: 20, cache: pnpm }
-  #     - run: pnpm install --frozen-lockfile
-  #     - run: pnpm lint && pnpm typecheck
+  js:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: pnpm/action-setup@v4
+      - uses: actions/setup-node@v4
+        with: { node-version: 22, cache: pnpm }
+      - run: pnpm install --frozen-lockfile
+      - run: pnpm lint
+      - run: pnpm typecheck
+      - run: pnpm test
