@@ -58,10 +58,9 @@ fn route_has_fix(route: &str, fix: &str) -> bool {
     })
 }
 
-/// Membership filters (dest / origin / fix / altitude). Altitude is checked only for
-/// airborne aircraft (current alt); scope (ARTCC polygon) is not yet enforced.
 /// Whether the FCA's crossing point falls within its scoped ARTCCs. An empty scope (or no
-/// boundary data) means no restriction.
+/// boundary data) means no restriction. Enforced separately from `passes_filters` because it
+/// needs the resolved crossing coordinate, not just the flight plan.
 fn passes_scope(fca: &FcaBody, airspace: &Boundaries, lat: f64, lon: f64) -> bool {
     if fca.scope.is_empty() || airspace.is_empty() {
         return true;
@@ -69,6 +68,8 @@ fn passes_scope(fca: &FcaBody, airspace: &Boundaries, lat: f64, lon: f64) -> boo
     fca.scope.iter().any(|z| airspace.contains(z, lat, lon))
 }
 
+/// Membership filters (dest / origin / fix / altitude). Altitude is checked only for airborne
+/// aircraft (current alt). ARTCC scope is enforced separately by `passes_scope` on the crossing.
 fn passes_filters(fca: &FcaBody, fp: &FlightPlan, alt: i64, airborne: bool) -> bool {
     if !fca.dests.is_empty() && !fca.dests.iter().any(|d| airport_match(d, &fp.arrival)) {
         return false;

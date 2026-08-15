@@ -21,7 +21,7 @@ use crate::{
     feed::facilities,
     feed::flow,
     feed::gdp::{self, GdpBoard, GdpFlightView},
-    models::{CreateGdpRequest, GdpBody, UpdateGdpRequest},
+    models::{AarStep, CreateGdpRequest, GdpBody, UpdateGdpRequest},
     repos::gdp as gdp_repo,
     state::AppState,
 };
@@ -80,6 +80,46 @@ fn resolve_window(now: DateTime<Utc>, start: &str, end: &str) -> Option<(i64, i6
     Some((start_ts.timestamp_millis(), end_ts.timestamp_millis()))
 }
 
+/// Resolve an AAR-step's HHMM to a concrete instant inside the resolved window (the first
+/// occurrence at/after the window start). Steps outside the window are dropped.
+fn resolve_step_ms(win_start_ms: i64, win_end_ms: i64, hhmm: &str) -> Option<i64> {
+    let m = hhmm_to_min(hhmm)?;
+    let ws = DateTime::from_timestamp_millis(win_start_ms)?;
+    let base = ws.date_naive().and_hms_opt(0, 0, 0)?.and_utc();
+    let mut cand = base + Duration::minutes(m);
+    while cand.timestamp_millis() < win_start_ms {
+        cand += Duration::days(1);
+    }
+    (cand.timestamp_millis() <= win_end_ms).then_some(cand.timestamp_millis())
+}
+
+/// The program's (possibly time-varying) rate schedule over its resolved window.
+fn rate_schedule(gdp: &GdpBody, win_start: i64, win_end: i64) -> gdp::RateSchedule {
+    let steps: Vec<(i64, i32)> = gdp
+        .aar_steps
+        .0
+        .iter()
+        .filter_map(|s| resolve_step_ms(win_start, win_end, &s.start_time).map(|ms| (ms, s.aar)))
+        .collect();
+    gdp::RateSchedule::new(gdp.aar, win_start, &steps)
+}
+
+/// Validate AAR steps (each a valid HHMM + AAR in 1..=200), returning canonical HHMM steps.
+fn validate_steps(steps: &[AarStep]) -> Result<Vec<AarStep>, ApiError> {
+    steps
+        .iter()
+        .map(|s| {
+            if !(1..=200).contains(&s.aar) {
+                return Err(ApiError::BadRequest);
+            }
+            Ok(AarStep {
+                start_time: norm_hhmm(&s.start_time)?,
+                aar: s.aar,
+            })
+        })
+        .collect()
+}
+
 /// Project the live feed into GDP inbounds for `icao` (raw classification + ETA + ETD +
 /// departure ARTCC, no metering). Airborne/ground/proposed only — arrived flights dropped.
 async fn live_inbounds(state: &AppState, icao: &str, now: DateTime<Utc>) -> Vec<gdp::Inbound> {
@@ -136,9 +176,10 @@ async fn fresh_assignments(
         resolve_window(now, &gdp.start_time, &gdp.end_time).ok_or(ApiError::Internal)?;
     let inbounds = live_inbounds(state, &gdp.airport.to_ascii_uppercase(), now).await;
     let scope: Vec<String> = gdp.scope.split_whitespace().map(String::from).collect();
+    let rates = rate_schedule(gdp, win_start, win_end);
     let assignments = gdp::ration_by_schedule(
         inbounds,
-        gdp.aar,
+        &rates,
         win_start,
         win_end,
         gdp.exempt_airborne,
@@ -208,7 +249,8 @@ async fn build_board(
 ) -> Result<GdpBoard, ApiError> {
     let now = Utc::now();
     let (win_start, win_end, assignments) = assign_live(state, pool, gdp, now).await?;
-    let demand = gdp::demand_bins(&assignments, win_start, win_end, gdp.aar);
+    let rates = rate_schedule(gdp, win_start, win_end);
+    let demand = gdp::demand_bins(&assignments, win_start, win_end, &rates);
     let stats = gdp::program_stats(&assignments);
 
     let mut flights = Vec::new();
@@ -247,6 +289,7 @@ async fn build_board(
         window_end: ms(win_end, now),
         max_enroute_min: gdp.max_enroute_min,
         exempt_airborne: gdp.exempt_airborne,
+        aar_steps: gdp.aar_steps.0.clone(),
         published: gdp.status == "published",
         flights,
         exempt,
@@ -301,6 +344,7 @@ pub async fn create_gdp(
     let end = norm_hhmm(&payload.end_time)?;
     let scope = normalize_scope(payload.scope.as_deref());
     let max_enroute = payload.max_enroute_min.filter(|m| *m > 0);
+    let steps = validate_steps(&payload.aar_steps)?;
 
     let id = gdp_repo::create_gdp(
         pool,
@@ -311,6 +355,7 @@ pub async fn create_gdp(
         &end,
         max_enroute,
         payload.exempt_airborne,
+        &steps,
         &user.id,
     )
     .await?;
@@ -348,6 +393,7 @@ pub async fn revise_gdp(
     let end = norm_hhmm(&payload.end_time)?;
     let scope = normalize_scope(payload.scope.as_deref());
     let max_enroute = payload.max_enroute_min.filter(|m| *m > 0);
+    let steps = validate_steps(&payload.aar_steps)?;
 
     // 404 if absent, 409 if terminal (expired/cancelled — nothing to revise).
     if gdp_repo::get_gdp(pool, &id).await?.is_none() {
@@ -362,6 +408,7 @@ pub async fn revise_gdp(
         &end,
         max_enroute,
         payload.exempt_airborne,
+        &steps,
         &user.id,
     )
     .await?

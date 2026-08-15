@@ -4,10 +4,13 @@
 use chrono::{DateTime, Utc};
 use sqlx::PgPool;
 
-use crate::{errors::ApiError, models::GdpBody};
+use crate::{
+    errors::ApiError,
+    models::{AarStep, GdpBody},
+};
 
 const GDP_SELECT: &str = "select g.id, g.airport, g.aar, g.scope, g.start_time, g.end_time, \
-    g.max_enroute_min, g.exempt_airborne, g.status, g.published_at, g.updated_at, \
+    g.max_enroute_min, g.exempt_airborne, g.aar_steps, g.status, g.published_at, g.updated_at, \
     u.display_name as updated_by \
     from tmu.gdp g left join identity.users u on u.id = g.updated_by";
 
@@ -36,13 +39,14 @@ pub async fn create_gdp(
     end_time: &str,
     max_enroute_min: Option<i32>,
     exempt_airborne: bool,
+    aar_steps: &[AarStep],
     actor: &str,
 ) -> Result<String, ApiError> {
     sqlx::query_scalar::<_, String>(
         "insert into tmu.gdp \
            (airport, aar, scope, start_time, end_time, max_enroute_min, exempt_airborne, \
-            created_by, updated_by) \
-         values ($1, $2, $3, $4, $5, $6, $7, $8, $8) returning id",
+            aar_steps, created_by, updated_by) \
+         values ($1, $2, $3, $4, $5, $6, $7, $8, $9, $9) returning id",
     )
     .bind(airport)
     .bind(aar)
@@ -51,6 +55,7 @@ pub async fn create_gdp(
     .bind(end_time)
     .bind(max_enroute_min)
     .bind(exempt_airborne)
+    .bind(sqlx::types::Json(aar_steps))
     .bind(actor)
     .fetch_one(pool)
     .await
@@ -69,12 +74,13 @@ pub async fn update_gdp(
     end_time: &str,
     max_enroute_min: Option<i32>,
     exempt_airborne: bool,
+    aar_steps: &[AarStep],
     actor: &str,
 ) -> Result<bool, ApiError> {
     let result = sqlx::query(
         "update tmu.gdp set \
             aar = $2, scope = $3, start_time = $4, end_time = $5, \
-            max_enroute_min = $6, exempt_airborne = $7, updated_by = $8 \
+            max_enroute_min = $6, exempt_airborne = $7, aar_steps = $8, updated_by = $9 \
          where id = $1 and status in ('draft', 'published')",
     )
     .bind(id)
@@ -84,6 +90,7 @@ pub async fn update_gdp(
     .bind(end_time)
     .bind(max_enroute_min)
     .bind(exempt_airborne)
+    .bind(sqlx::types::Json(aar_steps))
     .bind(actor)
     .execute(pool)
     .await

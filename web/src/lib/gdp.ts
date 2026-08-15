@@ -7,6 +7,7 @@ import {ois} from "./api";
 export type Gdp = components["schemas"]["GdpBody"];
 export type CreateGdp = components["schemas"]["CreateGdpRequest"];
 export type UpdateGdp = components["schemas"]["UpdateGdpRequest"];
+export type AarStep = components["schemas"]["AarStep"];
 export type GdpBoard = components["schemas"]["GdpBoard"];
 export type GdpFlightView = components["schemas"]["GdpFlightView"];
 export type GdpDemand = components["schemas"]["GdpDemand"];
