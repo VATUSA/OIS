@@ -195,6 +195,9 @@ pub fn build_router(state: AppState) -> Router {
             state.clone(),
             crate::audit::audit_mutations,
         ))
+        // Dev request log — one line per request. Outside audit (so its latency covers the
+        // whole request), inside resolve_current_user (so it can name the actor).
+        .layer(middleware::from_fn(crate::reqlog::log_requests))
         // Runs before handlers so CurrentUser / service account are in extensions.
         .layer(middleware::from_fn_with_state(
             state.clone(),

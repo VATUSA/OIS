@@ -8,6 +8,7 @@ pub mod jobs;
 pub mod models;
 pub mod openapi;
 pub mod repos;
+pub mod reqlog;
 pub mod router;
 pub mod state;
 
