@@ -745,6 +745,38 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/v1/public/board": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get: operations["get_board"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/public/fcas": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get: operations["list_fcas"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/v1/tmu/cfr": {
         parameters: {
             query?: never;
@@ -1769,6 +1801,112 @@ export interface components {
             updated_at: string;
             /** @description Display name of whoever last edited the program. */
             updated_by?: string | null;
+        };
+        /** @description The full public advisories board — every active initiative in one payload. */
+        PublicBoard: {
+            /**
+             * Format: date-time
+             * @description Server time this snapshot was taken (for the "updated" line).
+             */
+            as_of: string;
+            gdps: components["schemas"]["PublicGdp"][];
+            ground_stops: components["schemas"]["PublicGroundStop"][];
+            programs: components["schemas"]["PublicProgram"][];
+            restrictions: components["schemas"]["PublicRestriction"][];
+        };
+        /** @description An enabled Flow Constrained Area, read-only for the public overview. */
+        PublicFca: {
+            artcc: string;
+            color: string;
+            dests: string[];
+            /** @description any | N | S | E | W */
+            dir: string;
+            fixes: string[];
+            id: string;
+            /** Format: int32 */
+            max_fl?: number | null;
+            /** Format: int32 */
+            min_fl?: number | null;
+            /** Format: int32 */
+            mit: number;
+            /** @description rate | mit */
+            mode: string;
+            name: string;
+            origins: string[];
+            /** @description Polyline vertices as `[lat, lon]` pairs (>= 2). */
+            points: number[][];
+            /** Format: int32 */
+            rate: number;
+            scope: string[];
+        };
+        /** @description An active Ground Delay Program. */
+        PublicGdp: {
+            /**
+             * Format: int32
+             * @description Airport Acceptance Rate the program meters to (arrivals/hour).
+             */
+            aar: number;
+            airport: string;
+            /** @description HHMM Zulu window end. */
+            end_time: string;
+            exempt_airborne: boolean;
+            id: string;
+            /** Format: int32 */
+            max_enroute_min?: number | null;
+            /** @description Space-separated departure ARTCC codes in scope; empty = all departures. */
+            scope: string;
+            /** @description HHMM Zulu window start. */
+            start_time: string;
+        };
+        /** @description An active ground stop. */
+        PublicGroundStop: {
+            airport: string;
+            id: string;
+            /** @description Space-separated ARTCC/FIR codes; empty = field-wide. */
+            scope: string;
+            /** @description HHMM Zulu clock the stop runs until; null = until further notice. */
+            until?: string | null;
+        };
+        /** @description An active airport rate program (AAR + spacing). */
+        PublicProgram: {
+            /** Format: int32 */
+            aar: number;
+            /**
+             * Format: date-time
+             * @description Scheduled end; null = indefinite.
+             */
+            active_until?: string | null;
+            exclude_types: string[];
+            exclude_wake: string[];
+            gates: components["schemas"]["GateRule"][];
+            icao: string;
+            jets_only: boolean;
+            /**
+             * Format: int32
+             * @description Airport-wide miles-in-trail (overrides `trail` when > 0).
+             */
+            mit: number;
+            /**
+             * Format: int32
+             * @description Airport-wide minutes-in-trail default.
+             */
+            trail: number;
+        };
+        /** @description An active inter-facility restriction (MIT / spacing) as pilots see it. */
+        PublicRestriction: {
+            id: string;
+            /** @description Providing facility (ARTCC/TRACON). */
+            providing: string;
+            /** @description Requesting facility (ARTCC/TRACON). */
+            requesting: string;
+            restriction: string;
+            /** Format: date-time */
+            start_time: string;
+            /**
+             * Format: date-time
+             * @description null = until further notice.
+             */
+            stop_time?: string | null;
         };
         /**
          * @description Issue a CFR release for a crossing aircraft. `ready` (HHMMz) pins a wheels-up time;
@@ -4179,6 +4317,44 @@ export interface operations {
                     [name: string]: unknown;
                 };
                 content?: never;
+            };
+        };
+    };
+    get_board: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["PublicBoard"];
+                };
+            };
+        };
+    };
+    list_fcas: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["PublicFca"][];
+                };
             };
         };
     };

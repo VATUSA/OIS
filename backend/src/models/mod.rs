@@ -745,3 +745,104 @@ pub struct ServiceAccountTokenBody {
     pub account: ServiceAccountBody,
     pub token: String,
 }
+
+// --- public advisories board (no-auth, read-only) ---
+//
+// Lean, pilot-facing projections of the active TMIs and FCAs. These intentionally
+// omit internal/author fields (updated_by, manual ordering, draft rows) and are
+// served without any permission — see handlers/public.rs.
+
+/// An active inter-facility restriction (MIT / spacing) as pilots see it.
+#[derive(Debug, Serialize, ToSchema, sqlx::FromRow)]
+pub struct PublicRestriction {
+    pub id: String,
+    /// Requesting facility (ARTCC/TRACON).
+    pub requesting: String,
+    /// Providing facility (ARTCC/TRACON).
+    pub providing: String,
+    pub restriction: String,
+    pub start_time: DateTime<Utc>,
+    /// null = until further notice.
+    pub stop_time: Option<DateTime<Utc>>,
+}
+
+/// An active ground stop.
+#[derive(Debug, Serialize, ToSchema, sqlx::FromRow)]
+pub struct PublicGroundStop {
+    pub id: String,
+    pub airport: String,
+    /// Space-separated ARTCC/FIR codes; empty = field-wide.
+    pub scope: String,
+    /// HHMM Zulu clock the stop runs until; null = until further notice.
+    pub until: Option<String>,
+}
+
+/// An active Ground Delay Program.
+#[derive(Debug, Serialize, ToSchema, sqlx::FromRow)]
+pub struct PublicGdp {
+    pub id: String,
+    pub airport: String,
+    /// Airport Acceptance Rate the program meters to (arrivals/hour).
+    pub aar: i32,
+    /// Space-separated departure ARTCC codes in scope; empty = all departures.
+    pub scope: String,
+    /// HHMM Zulu window start.
+    pub start_time: String,
+    /// HHMM Zulu window end.
+    pub end_time: String,
+    pub max_enroute_min: Option<i32>,
+    pub exempt_airborne: bool,
+}
+
+/// An active airport rate program (AAR + spacing).
+#[derive(Debug, Serialize, ToSchema, sqlx::FromRow)]
+pub struct PublicProgram {
+    pub icao: String,
+    pub aar: i32,
+    /// Airport-wide minutes-in-trail default.
+    pub trail: i32,
+    /// Airport-wide miles-in-trail (overrides `trail` when > 0).
+    pub mit: i32,
+    #[schema(value_type = Vec<GateRule>)]
+    pub gates: sqlx::types::Json<Vec<GateRule>>,
+    pub exclude_wake: Vec<String>,
+    pub exclude_types: Vec<String>,
+    pub jets_only: bool,
+    /// Scheduled end; null = indefinite.
+    pub active_until: Option<DateTime<Utc>>,
+}
+
+/// The full public advisories board — every active initiative in one payload.
+#[derive(Debug, Serialize, ToSchema)]
+pub struct PublicBoard {
+    pub ground_stops: Vec<PublicGroundStop>,
+    pub gdps: Vec<PublicGdp>,
+    pub restrictions: Vec<PublicRestriction>,
+    pub programs: Vec<PublicProgram>,
+    /// Server time this snapshot was taken (for the "updated" line).
+    pub as_of: DateTime<Utc>,
+}
+
+/// An enabled Flow Constrained Area, read-only for the public overview.
+#[derive(Debug, Serialize, ToSchema, sqlx::FromRow)]
+pub struct PublicFca {
+    pub id: String,
+    pub name: String,
+    pub color: String,
+    pub artcc: String,
+    /// Polyline vertices as `[lat, lon]` pairs (>= 2).
+    #[schema(value_type = Vec<Vec<f64>>)]
+    pub points: sqlx::types::Json<Vec<[f64; 2]>>,
+    pub dests: Vec<String>,
+    pub origins: Vec<String>,
+    pub fixes: Vec<String>,
+    pub scope: Vec<String>,
+    pub min_fl: Option<i32>,
+    pub max_fl: Option<i32>,
+    /// any | N | S | E | W
+    pub dir: String,
+    /// rate | mit
+    pub mode: String,
+    pub rate: i32,
+    pub mit: i32,
+}

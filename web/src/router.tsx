@@ -2,6 +2,8 @@ import {createRootRoute, createRoute, createRouter, Outlet, redirect, useRouterS
 
 import {FeedWatcher} from "@/components/feed-watcher";
 import {Navbar} from "@/components/navbar";
+import {AdvisoriesPage} from "@/pages/advisories";
+import {AdvisoriesFcaPage} from "@/pages/advisories/fcas";
 import {AirportPage} from "@/pages/airport";
 import {FcaPage} from "@/pages/fca";
 import {RunwayPage} from "@/pages/runway";
@@ -22,7 +24,9 @@ function RootLayout() {
   // Full-bleed routes (the FCA map) escape the centered, padded main wrapper.
   const pathname = useRouterState({ select: (s) => s.location.pathname });
   const fullBleed =
-    pathname.startsWith("/ops/fca") || pathname.startsWith("/ops/runway");
+    pathname.startsWith("/ops/fca") ||
+    pathname.startsWith("/ops/runway") ||
+    pathname.startsWith("/advisories/fcas");
   return (
     <div className="min-h-screen bg-background text-foreground">
       <FeedWatcher />
@@ -102,6 +106,26 @@ const runwayRoute = createRoute({
   getParentRoute: () => opsRoute,
   path: "runway",
   component: RunwayPage,
+});
+
+// --- Advisories (public, read-only) ---
+
+const advisoriesRoute = createRoute({
+  getParentRoute: () => rootRoute,
+  path: "advisories",
+  component: Outlet,
+});
+
+const advisoriesIndexRoute = createRoute({
+  getParentRoute: () => advisoriesRoute,
+  path: "/",
+  component: AdvisoriesPage,
+});
+
+const advisoriesFcaRoute = createRoute({
+  getParentRoute: () => advisoriesRoute,
+  path: "fcas",
+  component: AdvisoriesFcaPage,
 });
 
 // --- Planning (pre-event) ---
@@ -196,6 +220,7 @@ const routeTree = rootRoute.addChildren([
     fcaRoute,
     runwayRoute,
   ]),
+  advisoriesRoute.addChildren([advisoriesIndexRoute, advisoriesFcaRoute]),
   planningRoute.addChildren([
     planningIndexRoute,
     planningEventsRoute,

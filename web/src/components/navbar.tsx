@@ -17,6 +17,7 @@ import {
   Gauge,
   LayoutDashboard,
   LogOut,
+  Megaphone,
   Plane,
   PlaneTakeoff,
   Radar,
@@ -169,6 +170,22 @@ export function Navbar() {
           <Link to="/" activeOptions={{ exact: true }} className={linkClass}>
             Home
           </Link>
+
+          {/* Public, always visible — pilots view active TMIs + FCAs here. */}
+          <NavGroup label="Advisories" activePrefix="/advisories">
+            <DropdownMenuItem asChild>
+              <Link to="/advisories">
+                <Megaphone />
+                TMI board
+              </Link>
+            </DropdownMenuItem>
+            <DropdownMenuItem asChild>
+              <Link to="/advisories/fcas">
+                <Waypoints />
+                FCA overview
+              </Link>
+            </DropdownMenuItem>
+          </NavGroup>
 
           {canOps && (
             <NavGroup label="Operations" activePrefix="/ops">
