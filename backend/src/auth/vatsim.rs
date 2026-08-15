@@ -349,10 +349,10 @@ fn validate_url(name: &str, raw: &str) -> Result<String, ApiError> {
 
 fn find_string(value: &Value, paths: &[&str]) -> Option<String> {
     for path in paths {
-        if let Some(raw) = get_path(value, path) {
-            if let Some(s) = raw.as_str() {
-                return Some(s.to_string());
-            }
+        if let Some(raw) = get_path(value, path)
+            && let Some(s) = raw.as_str()
+        {
+            return Some(s.to_string());
         }
     }
     None
@@ -360,10 +360,10 @@ fn find_string(value: &Value, paths: &[&str]) -> Option<String> {
 
 fn find_number(value: &Value, paths: &[&str]) -> Option<i64> {
     for path in paths {
-        if let Some(raw) = get_path(value, path) {
-            if let Some(num) = raw.as_i64() {
-                return Some(num);
-            }
+        if let Some(raw) = get_path(value, path)
+            && let Some(num) = raw.as_i64()
+        {
+            return Some(num);
         }
     }
     None

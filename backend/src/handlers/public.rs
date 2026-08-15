@@ -3,6 +3,8 @@
 //! so they're reachable while signed out (see handlers/facilities.rs for the same
 //! pattern), and only ever return active/published/enabled rows.
 
+use std::collections::{HashMap, HashSet};
+
 use axum::{Json, extract::State};
 use chrono::Utc;
 
@@ -26,17 +28,40 @@ pub async fn get_board(State(state): State<AppState>) -> Result<Json<PublicBoard
         repo::active_programs(pool),
     )?;
 
-    // Enrich the metered airports with live inbound demand (next 60 min) so pilots
-    // see current pressure vs the AAR, not just that a program exists.
+    // Enrich the metered airports with live inbound demand (next 60 min) so pilots see current
+    // pressure vs the AAR. Compute each unique airport's demand once, concurrently.
+    let airports: HashSet<String> = gdps
+        .iter()
+        .map(|g| g.airport.clone())
+        .chain(programs.iter().map(|p| p.icao.clone()))
+        .collect();
+    let mut tasks = tokio::task::JoinSet::new();
+    for airport in airports {
+        let state = state.clone();
+        let pool = pool.clone();
+        tasks.spawn(async move {
+            let demand = flow_for(&state, &pool, &airport)
+                .await
+                .map(|f| f.demand_60min as i64)
+                .unwrap_or(0);
+            (airport, demand)
+        });
+    }
+    let mut demand: HashMap<String, i64> = HashMap::new();
+    while let Some(res) = tasks.join_next().await {
+        if let Ok((airport, d)) = res {
+            demand.insert(airport, d);
+        }
+    }
     for g in &mut gdps {
-        let demand = flow_for(&state, pool, &g.airport).await?.demand_60min as i64;
-        g.demand_60min = demand;
-        g.over_capacity = g.aar > 0 && demand > g.aar as i64;
+        let d = demand.get(&g.airport).copied().unwrap_or(0);
+        g.demand_60min = d;
+        g.over_capacity = g.aar > 0 && d > g.aar as i64;
     }
     for p in &mut programs {
-        let demand = flow_for(&state, pool, &p.icao).await?.demand_60min as i64;
-        p.demand_60min = demand;
-        p.over_capacity = p.aar > 0 && demand > p.aar as i64;
+        let d = demand.get(&p.icao).copied().unwrap_or(0);
+        p.demand_60min = d;
+        p.over_capacity = p.aar > 0 && d > p.aar as i64;
     }
 
     Ok(Json(PublicBoard {

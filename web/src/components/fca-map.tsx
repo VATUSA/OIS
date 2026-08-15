@@ -19,6 +19,7 @@ import {
 } from "lucide-react";
 
 import {aircraftIconUrl} from "@/lib/aircraft-icons";
+import {aircraftCanvasLayer, type AircraftCanvasLayer, type CanvasAircraft,} from "@/components/aircraft-canvas-layer";
 import {useMe} from "@/lib/auth";
 import {hasPermission} from "@/lib/permissions";
 import {
@@ -247,24 +248,9 @@ function routeFormFrom(r: MapRoute): RouteForm {
   };
 }
 
-function aircraftIcon(heading: number) {
-  return L.divIcon({
-    className: "",
-    html: `<svg width="12" height="12" viewBox="0 0 12 12" style="transform: rotate(${heading}deg)"><path d="M6 0 L10.5 11 L6 8.5 L1.5 11 Z" fill="#22d3ee" fill-opacity="0.85"/></svg>`,
-    iconSize: [12, 12],
-    iconAnchor: [6, 6],
-  });
-}
-// Type-shaped VATSIM Radar silhouette (white, black-outlined), rotated to heading.
+// Type-shaped VATSIM Radar silhouette size. Plain live traffic is drawn on a canvas layer
+// (aircraft-canvas-layer.ts); only the matched-traffic badges below still use DOM icons.
 const AC_ICON_SIZE = 22;
-function silhouetteIcon(actype: string, heading: number) {
-  return L.divIcon({
-    className: "",
-    html: `<img src="${aircraftIconUrl(actype)}" style="display:block;width:${AC_ICON_SIZE}px;height:${AC_ICON_SIZE}px;object-fit:contain;transform:rotate(${heading}deg);filter:drop-shadow(0 0 1px rgba(0,0,0,.85))"/>`,
-    iconSize: [AC_ICON_SIZE, AC_ICON_SIZE],
-    iconAnchor: [AC_ICON_SIZE / 2, AC_ICON_SIZE / 2],
-  });
-}
 /** Matched-traffic silhouette: FCA-colour glow + crossing-sequence badge. */
 function matchedSilhouetteIcon(
   actype: string,
@@ -403,7 +389,6 @@ export function FcaMap({
   const [offsetsKey, setOffsetsKey] = useState("0");
   // Bumped whenever the map settles (pan/zoom end) so the aircraft layer can
   // re-cull to the visible bounds — only markers on screen are kept in the DOM.
-  const [viewVersion, setViewVersion] = useState(0);
   // Per-user: render live traffic as VATSIM Radar type silhouettes vs. plain
   // triangles. Persisted locally; defaults to triangles.
   const [planeIcons, setPlaneIcons] = useState(() => {
@@ -439,7 +424,9 @@ export function FcaMap({
   // paint even when their data resolved before the map mounted.
   const [mapReady, setMapReady] = useState(false);
   const boundaryLayer = useRef<L.LayerGroup | null>(null);
-  const aircraftLayer = useRef<L.LayerGroup | null>(null);
+  // Live traffic renders to a single canvas (not ~1000 DOM markers) for smooth zoom/pan.
+  const aircraftCanvasRef = useRef<AircraftCanvasLayer | null>(null);
+  const acTooltipRef = useRef<L.Tooltip | null>(null);
   const fcaLayer = useRef<L.LayerGroup | null>(null);
   const matchedLayer = useRef<L.LayerGroup | null>(null);
   const routeLayer = useRef<L.LayerGroup | null>(null);
@@ -526,7 +513,30 @@ export function FcaMap({
     routeLayer.current = L.layerGroup().addTo(map);
     namedRouteLayer.current = L.layerGroup().addTo(map);
     fcaLayer.current = L.layerGroup().addTo(map);
-    aircraftLayer.current = L.layerGroup().addTo(map);
+    // Live aircraft on a single canvas — hover for a tooltip, click to plot the route.
+    const acLayer = aircraftCanvasLayer({
+      onClick: (callsign) =>
+        setRouteCallsign((cur) => (cur === callsign ? null : callsign)),
+      onHover: (ac) => {
+        const m = mapRef.current;
+        if (!m) return;
+        if (!ac) {
+          if (acTooltipRef.current) m.closeTooltip(acTooltipRef.current);
+          return;
+        }
+        if (!acTooltipRef.current) {
+          acTooltipRef.current = L.tooltip({
+            direction: "top",
+            offset: [0, -6],
+            className: "fca-tip",
+          });
+        }
+        acTooltipRef.current.setLatLng([ac.lat, ac.lon]).setContent(aircraftTip(ac));
+        m.openTooltip(acTooltipRef.current);
+      },
+    });
+    acLayer.addTo(map);
+    aircraftCanvasRef.current = acLayer as AircraftCanvasLayer;
     matchedLayer.current = L.layerGroup().addTo(map);
     draftLayer.current = L.layerGroup().addTo(map);
 
@@ -552,10 +562,6 @@ export function FcaMap({
       setOffsetsKey((cur) => (cur === key ? cur : key));
     };
     map.on("moveend zoomend", syncOffsets);
-    // Re-cull the aircraft layer whenever the view settles — including `resize`,
-    // so a container that lays out late (0×0 at first paint) still populates once
-    // it gets real dimensions, not only after the first pan/zoom.
-    map.on("moveend zoomend resize", () => setViewVersion((v) => v + 1));
     syncOffsets();
 
     mapRef.current = map;
@@ -639,43 +645,15 @@ export function FcaMap({
   }, [offsetsKey, mapReady]);
 
   // Live aircraft — hover for details, click to plot the route. Aircraft matched to
-  // the selected FCA are drawn (tinted + numbered) by the matched layer instead. Drawn on
-  // every visible world copy so they persist as you scroll.
+  // the selected FCA are excluded here and drawn (tinted + numbered) by the matched layer
+  // instead. All traffic goes to one canvas layer, which handles its own pan/zoom repaint
+  // and world-copy wrapping, so this effect only pushes fresh data.
   useEffect(() => {
-    const layer = aircraftLayer.current;
-    const map = mapRef.current;
-    if (!layer || !map) return;
-    layer.clearLayers();
-    const offsets = offsetsKey.split(",").map(Number);
+    const layer = aircraftCanvasRef.current;
+    if (!layer || !mapReady) return;
     const matched = new Set((fcaTraffic.data ?? []).map((f) => f.callsign));
-    // Only build markers for aircraft actually on screen (padded a little so a
-    // small pan doesn't reveal blank edges). At high zoom this turns 1000+ DOM
-    // nodes into ~the visible handful, which is what keeps the zoom smooth.
-    const bounds = map.getBounds().pad(0.25);
-    for (const ac of traffic.data ?? []) {
-      if (matched.has(ac.callsign)) continue;
-      for (const off of offsets) {
-        const pos: LatLng = [ac.lat, ac.lon + off];
-        if (!bounds.contains(pos)) continue;
-        L.marker(pos, {
-          icon: planeIcons
-            ? silhouetteIcon(ac.actype, ac.heading)
-            : aircraftIcon(ac.heading),
-          keyboard: false,
-        })
-          .bindTooltip(aircraftTip(ac), {
-            direction: "top",
-            offset: [0, -6],
-            className: "fca-tip",
-          })
-          .on("click", (e) => {
-            L.DomEvent.stop(e);
-            setRouteCallsign((cur) => (cur === ac.callsign ? null : ac.callsign));
-          })
-          .addTo(layer);
-      }
-    }
-  }, [traffic.data, fcaTraffic.data, offsetsKey, mapReady, planeIcons, viewVersion]);
+    layer.setData((traffic.data ?? []) as CanvasAircraft[], matched, planeIcons);
+  }, [traffic.data, fcaTraffic.data, mapReady, planeIcons]);
 
   // Plotted route for a clicked aircraft.
   useEffect(() => {

@@ -104,16 +104,25 @@ fn rate_schedule(gdp: &GdpBody, win_start: i64, win_end: i64) -> gdp::RateSchedu
     gdp::RateSchedule::new(gdp.aar, win_start, &steps)
 }
 
-/// Validate AAR steps (each a valid HHMM + AAR in 1..=200), returning canonical HHMM steps.
-fn validate_steps(steps: &[AarStep]) -> Result<Vec<AarStep>, ApiError> {
+/// Validate AAR steps: each a valid HHMM + AAR in 1..=200 that lands inside the program
+/// window (a step outside the window would be silently inert). Returns canonical HHMM steps.
+fn validate_steps(
+    steps: &[AarStep],
+    win_start: i64,
+    win_end: i64,
+) -> Result<Vec<AarStep>, ApiError> {
     steps
         .iter()
         .map(|s| {
             if !(1..=200).contains(&s.aar) {
                 return Err(ApiError::BadRequest);
             }
+            let hhmm = norm_hhmm(&s.start_time)?;
+            if resolve_step_ms(win_start, win_end, &hhmm).is_none() {
+                return Err(ApiError::BadRequest); // outside the window → rejected
+            }
             Ok(AarStep {
-                start_time: norm_hhmm(&s.start_time)?,
+                start_time: hhmm,
                 aar: s.aar,
             })
         })
@@ -344,7 +353,8 @@ pub async fn create_gdp(
     let end = norm_hhmm(&payload.end_time)?;
     let scope = normalize_scope(payload.scope.as_deref());
     let max_enroute = payload.max_enroute_min.filter(|m| *m > 0);
-    let steps = validate_steps(&payload.aar_steps)?;
+    let (ws, we) = resolve_window(Utc::now(), &start, &end).ok_or(ApiError::BadRequest)?;
+    let steps = validate_steps(&payload.aar_steps, ws, we)?;
 
     let id = gdp_repo::create_gdp(
         pool,
@@ -393,7 +403,8 @@ pub async fn revise_gdp(
     let end = norm_hhmm(&payload.end_time)?;
     let scope = normalize_scope(payload.scope.as_deref());
     let max_enroute = payload.max_enroute_min.filter(|m| *m > 0);
-    let steps = validate_steps(&payload.aar_steps)?;
+    let (ws, we) = resolve_window(Utc::now(), &start, &end).ok_or(ApiError::BadRequest)?;
+    let steps = validate_steps(&payload.aar_steps, ws, we)?;
 
     // 404 if absent, 409 if terminal (expired/cancelled — nothing to revise).
     if gdp_repo::get_gdp(pool, &id).await?.is_none() {

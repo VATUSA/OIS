@@ -1,8 +1,8 @@
 //! Developer-facing request logging. Emits one readable, level-coded line per HTTP request
 //! (INFO for 2xx/3xx, WARN for 4xx, ERROR for 5xx) so failures stand out at a glance. Each
 //! line carries the method, path (with real ids inline), status, latency, the actor (user CID
-//! + name, or service account), the client IP when present, and a short sequential request id
-//! that is also echoed in the `x-request-id` response header for correlation.
+//! and name, or service account), the client IP when present, and a short sequential request
+//! id that is also echoed in the `x-request-id` response header for correlation.
 //!
 //! Runs inside `resolve_current_user` (so the actor is known) and outside the audit layer (so
 //! its latency reflects the whole app-level request). Toggle verbosity with `RUST_LOG`

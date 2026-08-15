@@ -156,12 +156,11 @@ pub fn process(
         }
         // Guard against a turnaround aircraft that's actually arriving at its destination.
         let dest = fp.arrival.to_ascii_uppercase();
-        if gs <= GS_STOP {
-            if let Some((alat, alon)) = airports.get(&dest).copied() {
-                if gc_dist(p.latitude, p.longitude, alat, alon) < 5.0 {
-                    continue;
-                }
-            }
+        if gs <= GS_STOP
+            && let Some((alat, alon)) = airports.get(&dest).copied()
+            && gc_dist(p.latitude, p.longitude, alat, alon) < 5.0
+        {
+            continue;
         }
         sessions.insert(
             p.callsign.clone(),

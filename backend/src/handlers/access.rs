@@ -153,10 +153,10 @@ pub async fn update_user_access(
             .as_deref()
             .map(|value| value.trim().to_ascii_uppercase())
             .filter(|value| !value.is_empty());
-        if let Some(artcc_id) = &artcc {
-            if !facility_ids.contains(artcc_id) {
-                return Err(ApiError::BadRequest);
-            }
+        if let Some(artcc_id) = &artcc
+            && !facility_ids.contains(artcc_id)
+        {
+            return Err(ApiError::BadRequest);
         }
 
         let names = scope_permission_names(&scope.permissions)?;
@@ -273,7 +273,7 @@ fn scope_permission_names(tree: &serde_json::Value) -> Result<Vec<String>, ApiEr
     if tree.as_object().is_some_and(|object| object.is_empty()) {
         return Ok(Vec::new());
     }
-    normalize_permission_tree(tree).map_err(|_| ApiError::BadRequest)
+    normalize_permission_tree(tree).ok_or(ApiError::BadRequest)
 }
 
 /// Self-scope guard: a non-SERVER_ADMIN actor may only add/remove direct grants and
