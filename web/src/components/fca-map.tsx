@@ -20,6 +20,7 @@ import {
 
 import {aircraftIconUrl} from "@/lib/aircraft-icons";
 import {aircraftCanvasLayer, type AircraftCanvasLayer, type CanvasAircraft,} from "@/components/aircraft-canvas-layer";
+import {enableSmoothWheelZoom} from "@/components/smooth-wheel-zoom";
 import {useMe} from "@/lib/auth";
 import {hasPermission} from "@/lib/permissions";
 import {
@@ -488,18 +489,18 @@ export function FcaMap({
     const map = L.map(node, {
       zoomControl: false,
       doubleClickZoom: false,
-      // Smooth, continuous zoom (VATSIM Radar feel) instead of snapping to
-      // integer levels: settle at any fractional zoom, small button/key steps,
-      // and a gentler wheel so the trackpad glides rather than jumps.
+      // Settle at any fractional zoom (no snap to integer levels); small button/key steps.
+      // The scroll wheel is handled by enableSmoothWheelZoom below, not Leaflet's default.
       zoomSnap: 0,
       zoomDelta: 0.5,
-      wheelPxPerZoomLevel: 36,
-      wheelDebounceTime: 10,
       // Render vector overlays (ARTCC boundaries, FCA/route lines, fix dots) on
       // a canvas rather than one SVG node each — far cheaper to pan/zoom with
       // hundreds of paths on screen.
       preferCanvas: true,
     }).setView(US_HOME.center, US_HOME.zoom);
+    // Continuous, eased wheel/trackpad zoom (VATSIM Radar / Google Maps feel) in place of
+    // the default handler's per-burst animation, which stutters when trackpad events overlap.
+    enableSmoothWheelZoom(map);
     L.control.zoom({ position: "topright" }).addTo(map);
     node.style.background = MAP_BG[resolvedTheme];
     tileRef.current = L.tileLayer(CARTO[resolvedTheme], {
