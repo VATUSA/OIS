@@ -761,22 +761,6 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
-    "/api/v1/public/fcas": {
-        parameters: {
-            query?: never;
-            header?: never;
-            path?: never;
-            cookie?: never;
-        };
-        get: operations["list_fcas"];
-        put?: never;
-        post?: never;
-        delete?: never;
-        options?: never;
-        head?: never;
-        patch?: never;
-        trace?: never;
-    };
     "/api/v1/tmu/cfr": {
         parameters: {
             query?: never;
@@ -1813,31 +1797,6 @@ export interface components {
             ground_stops: components["schemas"]["PublicGroundStop"][];
             programs: components["schemas"]["PublicProgram"][];
             restrictions: components["schemas"]["PublicRestriction"][];
-        };
-        /** @description An enabled Flow Constrained Area, read-only for the public overview. */
-        PublicFca: {
-            artcc: string;
-            color: string;
-            dests: string[];
-            /** @description any | N | S | E | W */
-            dir: string;
-            fixes: string[];
-            id: string;
-            /** Format: int32 */
-            max_fl?: number | null;
-            /** Format: int32 */
-            min_fl?: number | null;
-            /** Format: int32 */
-            mit: number;
-            /** @description rate | mit */
-            mode: string;
-            name: string;
-            origins: string[];
-            /** @description Polyline vertices as `[lat, lon]` pairs (>= 2). */
-            points: number[][];
-            /** Format: int32 */
-            rate: number;
-            scope: string[];
         };
         /** @description An active Ground Delay Program. */
         PublicGdp: {
@@ -4335,25 +4294,6 @@ export interface operations {
                 };
                 content: {
                     "application/json": components["schemas"]["PublicBoard"];
-                };
-            };
-        };
-    };
-    list_fcas: {
-        parameters: {
-            query?: never;
-            header?: never;
-            path?: never;
-            cookie?: never;
-        };
-        requestBody?: never;
-        responses: {
-            200: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": components["schemas"]["PublicFca"][];
                 };
             };
         };

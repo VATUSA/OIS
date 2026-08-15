@@ -6,10 +6,7 @@
 use axum::{Json, extract::State};
 use chrono::Utc;
 
-use crate::{
-    errors::ApiError, models::PublicBoard, models::PublicFca, repos::public as repo,
-    state::AppState,
-};
+use crate::{errors::ApiError, models::PublicBoard, repos::public as repo, state::AppState};
 
 #[utoipa::path(
     get,
@@ -32,15 +29,4 @@ pub async fn get_board(State(state): State<AppState>) -> Result<Json<PublicBoard
         programs,
         as_of: Utc::now(),
     }))
-}
-
-#[utoipa::path(
-    get,
-    path = "/api/v1/public/fcas",
-    tag = "public",
-    responses((status = 200, body = Vec<PublicFca>))
-)]
-pub async fn list_fcas(State(state): State<AppState>) -> Result<Json<Vec<PublicFca>>, ApiError> {
-    let pool = state.db.as_ref().ok_or(ApiError::ServiceUnavailable)?;
-    Ok(Json(repo::enabled_fcas(pool).await?))
 }

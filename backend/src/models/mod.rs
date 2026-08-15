@@ -823,26 +823,5 @@ pub struct PublicBoard {
     pub as_of: DateTime<Utc>,
 }
 
-/// An enabled Flow Constrained Area, read-only for the public overview.
-#[derive(Debug, Serialize, ToSchema, sqlx::FromRow)]
-pub struct PublicFca {
-    pub id: String,
-    pub name: String,
-    pub color: String,
-    pub artcc: String,
-    /// Polyline vertices as `[lat, lon]` pairs (>= 2).
-    #[schema(value_type = Vec<Vec<f64>>)]
-    pub points: sqlx::types::Json<Vec<[f64; 2]>>,
-    pub dests: Vec<String>,
-    pub origins: Vec<String>,
-    pub fixes: Vec<String>,
-    pub scope: Vec<String>,
-    pub min_fl: Option<i32>,
-    pub max_fl: Option<i32>,
-    /// any | N | S | E | W
-    pub dir: String,
-    /// rate | mit
-    pub mode: String,
-    pub rate: i32,
-    pub mit: i32,
-}
+// (The public FCA overview reuses the shared FCA map + the now-public
+// GET /api/v1/flow/fcas, so no separate lean FCA projection is needed.)

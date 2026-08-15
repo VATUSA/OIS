@@ -26,9 +26,9 @@ pub fn build_router(state: AppState) -> Router {
         // Facilities (ARTCC directory) — public reference data
         .route("/api/v1/facilities", get(facilities::list_facilities))
         .route("/api/v1/facilities/{id}", get(facilities::get_facility))
-        // Public advisories — read-only, no auth (active TMIs + enabled FCAs)
+        // Public advisories — read-only, no auth (active TMIs). The FCA overview
+        // reuses the now-public GET /api/v1/flow/fcas via the shared map.
         .route("/api/v1/public/board", get(public::get_board))
-        .route("/api/v1/public/fcas", get(public::list_fcas))
         // Access editor
         .route("/api/v1/access/catalog", get(access::get_access_catalog))
         .route("/api/v1/access/self", get(access::get_self_access))

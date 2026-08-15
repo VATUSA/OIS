@@ -7,7 +7,7 @@ use sqlx::PgPool;
 
 use crate::{
     errors::ApiError,
-    models::{PublicFca, PublicGdp, PublicGroundStop, PublicProgram, PublicRestriction},
+    models::{PublicGdp, PublicGroundStop, PublicProgram, PublicRestriction},
 };
 
 pub async fn active_restrictions(pool: &PgPool) -> Result<Vec<PublicRestriction>, ApiError> {
@@ -54,19 +54,6 @@ pub async fn active_programs(pool: &PgPool) -> Result<Vec<PublicProgram>, ApiErr
          from tmu.programs \
          where active_until is null or active_until > now() \
          order by icao",
-    )
-    .fetch_all(pool)
-    .await
-    .map_err(|_| ApiError::Internal)
-}
-
-pub async fn enabled_fcas(pool: &PgPool) -> Result<Vec<PublicFca>, ApiError> {
-    sqlx::query_as::<_, PublicFca>(
-        "select id, name, color, artcc, points, dests, origins, fixes, scope, \
-                min_fl, max_fl, dir, mode, rate, mit \
-         from flow.fca \
-         where enabled = true \
-         order by artcc, name",
     )
     .fetch_all(pool)
     .await

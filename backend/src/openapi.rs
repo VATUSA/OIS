@@ -20,7 +20,6 @@ use utoipa::OpenApi;
         crate::handlers::facilities::list_facilities,
         crate::handlers::facilities::get_facility,
         crate::handlers::public::get_board,
-        crate::handlers::public::list_fcas,
         crate::handlers::access::get_access_catalog,
         crate::handlers::access::get_self_access,
         crate::handlers::access::get_user_access,
@@ -182,7 +181,6 @@ use utoipa::OpenApi;
         crate::models::PublicGroundStop,
         crate::models::PublicGdp,
         crate::models::PublicProgram,
-        crate::models::PublicFca,
     )),
     tags(
         (name = "system", description = "Health"),
