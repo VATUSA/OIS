@@ -31,6 +31,15 @@ function ScopeChip({ scope }: { scope: string }) {
   );
 }
 
+/** Live inbound demand (next 60 min), red when it exceeds the AAR. */
+function DemandChip({ demand, over }: { demand: number; over: boolean }) {
+  return (
+    <Badge variant={over ? "destructive" : "outline"} className="font-mono">
+      ↓ {demand}/hr{over ? " over" : ""}
+    </Badge>
+  );
+}
+
 /** A framed list for one initiative type. */
 function Section({
   title,
@@ -98,6 +107,7 @@ function GdpRow({ gdp }: { gdp: PublicGdp }) {
       <div className="flex flex-wrap items-center gap-2">
         <span className="font-mono text-sm font-semibold">{gdp.airport}</span>
         <Badge variant="secondary">AAR {gdp.aar}</Badge>
+        <DemandChip demand={gdp.demand_60min} over={gdp.over_capacity} />
         <ScopeChip scope={gdp.scope} />
         {gdp.max_enroute_min != null && (
           <Badge variant="outline">≤{gdp.max_enroute_min}min out</Badge>
@@ -105,6 +115,16 @@ function GdpRow({ gdp }: { gdp: PublicGdp }) {
         <span className="ml-auto font-mono text-xs text-muted-foreground">
           {hhmm(gdp.start_time)}–{hhmm(gdp.end_time)}
         </span>
+      </div>
+      <div className="flex flex-wrap items-center gap-x-2 text-xs text-muted-foreground">
+        {gdp.controlled > 0 ? (
+          <span className="font-mono">
+            {gdp.controlled} delayed · avg {gdp.avg_delay_min}′ · max{" "}
+            {gdp.max_delay_min}′
+          </span>
+        ) : (
+          <span className="font-mono">no controlled flights</span>
+        )}
       </div>
     </Row>
   );
@@ -140,6 +160,7 @@ function ProgramRow({ p }: { p: PublicProgram }) {
       <div className="flex flex-wrap items-center gap-2">
         <span className="font-mono text-sm font-semibold">{p.icao}</span>
         <Badge variant="secondary">AAR {p.aar}</Badge>
+        <DemandChip demand={p.demand_60min} over={p.over_capacity} />
         <Badge variant="outline">{spacing(p.trail, p.mit)}</Badge>
         {p.jets_only && <Badge variant="outline">jets only</Badge>}
         {p.gates.length > 0 && (
