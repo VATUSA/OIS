@@ -236,6 +236,7 @@ fn resolve_route_body(nav: &NavData, airports: &AirportDb, row: flow_repo::Route
         dep: row.dep,
         arr: row.arr,
         points,
+        waypoints: to_waypoints(named),
         unresolved,
         updated_at: row.updated_at,
         updated_by: row.updated_by,

@@ -522,6 +522,8 @@ pub struct RouteBody {
     /// Resolved track vertices as `[lat, lon]` pairs.
     #[schema(value_type = Vec<Vec<f64>>)]
     pub points: Vec<[f64; 2]>,
+    /// Named waypoints along the route (for optional per-route fix labels).
+    pub waypoints: Vec<RouteWaypoint>,
     /// Route tokens the nav engine couldn't resolve (shown as a warning).
     pub unresolved: Vec<String>,
     pub updated_at: DateTime<Utc>,

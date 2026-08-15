@@ -1802,6 +1802,8 @@ export interface components {
             /** Format: date-time */
             updated_at: string;
             updated_by?: string | null;
+            /** @description Named waypoints along the route (for optional per-route fix labels). */
+            waypoints: components["schemas"]["RouteWaypoint"][];
         };
         /** @description A named point along a resolved route. */
         RouteWaypoint: {

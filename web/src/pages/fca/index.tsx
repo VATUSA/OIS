@@ -2,7 +2,7 @@ import {useCallback, useEffect, useMemo, useRef, useState} from "react";
 import L from "leaflet";
 import "leaflet/dist/leaflet.css";
 import {Button, ConfirmButton, Input, useTheme} from "@ois/ui";
-import {ChevronDown, Maximize2, Minus, Pencil, Plus, RefreshCw, Trash2, X,} from "lucide-react";
+import {ChevronDown, Maximize2, Minus, Pencil, Plus, RefreshCw, Tag, Trash2, X,} from "lucide-react";
 
 import {useMe} from "@/lib/auth";
 import {hasPermission} from "@/lib/permissions";
@@ -319,6 +319,8 @@ export function FcaPage() {
   const [selectedId, setSelectedId] = useState<string | null>(null);
   const [selectedRouteId, setSelectedRouteId] = useState<string | null>(null);
   const [routeForm, setRouteForm] = useState<RouteForm | null>(null);
+  // Route ids whose fix (waypoint) names are shown on the map — toggled per route.
+  const [labeledRoutes, setLabeledRoutes] = useState<Set<string>>(new Set());
   const [routeCallsign, setRouteCallsign] = useState<string | null>(null);
   const [filter, setFilter] = useState("");
   const [artccFilter, setArtccFilter] = useState("");
@@ -625,6 +627,7 @@ export function FcaPage() {
       if (!raw || raw.length < 2) continue;
       const base = unwrapLng(raw);
       const selected = r.id === selectedRouteId;
+      const showFixes = labeledRoutes.has(r.id);
       for (const off of offsetsKey.split(",").map(Number)) {
         const pts = shiftLine(base, off);
         // Routes are display-only — not clickable on the map.
@@ -649,9 +652,20 @@ export function FcaPage() {
           interactive: false,
           keyboard: false,
         }).addTo(layer);
+        // Per-route fix names (toggled).
+        if (showFixes) {
+          for (const wp of r.waypoints) {
+            L.marker([wp.lat, wp.lon + off], {
+              icon: waypointLabelIcon(wp.name),
+              interactive: false,
+              keyboard: false,
+              zIndexOffset: -100,
+            }).addTo(layer);
+          }
+        }
       }
     }
-  }, [routes.data, draft?.id, selectedRouteId, offsetsKey, mapReady]);
+  }, [routes.data, draft?.id, selectedRouteId, labeledRoutes, offsetsKey, mapReady]);
 
   // Matched (crossing) traffic for the selected FCA — numbered, in the FCA colour.
   const selectedColor = fcas.data?.find((f) => f.id === selectedId)?.color;
@@ -782,6 +796,13 @@ export function FcaPage() {
     setSelectedRouteId(null);
     setRouteForm(routeFormFrom(r));
   };
+  const toggleFixes = (id: string) =>
+    setLabeledRoutes((s) => {
+      const next = new Set(s);
+      if (next.has(id)) next.delete(id);
+      else next.add(id);
+      return next;
+    });
   const saveRoute = () => {
     if (!routeForm || !routeForm.name.trim() || !routeForm.route.trim()) return;
     const body: UpsertRoute = {
@@ -1056,6 +1077,23 @@ export function FcaPage() {
                                 ⚠{r.unresolved.length}
                               </span>
                             )}
+                          </button>
+                          <button
+                            type="button"
+                            title={
+                              labeledRoutes.has(r.id)
+                                ? "Hide fix names"
+                                : "Show fix names"
+                            }
+                            onClick={() => toggleFixes(r.id)}
+                            className={
+                              "transition-colors " +
+                              (labeledRoutes.has(r.id)
+                                ? "text-primary"
+                                : "text-muted-foreground hover:text-foreground")
+                            }
+                          >
+                            <Tag className="size-3.5" />
                           </button>
                           {canEditRoute && (
                             <button
