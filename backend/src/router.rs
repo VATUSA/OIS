@@ -8,7 +8,7 @@ use crate::{
     config::build_cors_layer,
     handlers::{
         access, atc, audit, auth, docs, events, facilities, feed, flow, gdp, health, public,
-        runway, service_accounts, tmu, users,
+        runway, service_accounts, tmu, users, webhooks,
     },
     state::AppState,
 };
@@ -32,6 +32,11 @@ pub fn build_router(state: AppState) -> Router {
         .route(
             "/api/v1/public/flight/{callsign}",
             get(flow::flight_advisory),
+        )
+        // Inbound VATUSA roster-change webhook — no session; verified by HMAC signature.
+        .route(
+            "/api/v1/webhooks/vatusa/{facility}",
+            post(webhooks::vatusa_webhook),
         )
         // Access editor
         .route("/api/v1/access/catalog", get(access::get_access_catalog))

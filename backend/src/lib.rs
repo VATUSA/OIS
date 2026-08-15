@@ -34,7 +34,10 @@ pub async fn run() -> Result<(), Box<dyn std::error::Error>> {
     );
     if let Some(pool) = state.db.clone() {
         jobs::spawn_cleanup(pool.clone());
-        feed::events::spawn_sync(pool);
+        feed::events::spawn_sync(pool.clone());
+        // VATUSA member sync: register the roster-change webhook and periodically reconcile.
+        feed::vatusa::spawn_register_webhooks(pool.clone());
+        feed::vatusa::spawn_reconcile(pool);
     }
 
     let app = router::build_router(state);
