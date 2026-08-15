@@ -6,6 +6,7 @@ import {
   ChevronDown,
   Home,
   Maximize2,
+  Menu,
   Minus,
   Pencil,
   Plane,
@@ -393,6 +394,8 @@ export function FcaMap({
   const [labeledRoutes, setLabeledRoutes] = useState<Set<string>>(new Set());
   const [routeCallsign, setRouteCallsign] = useState<string | null>(null);
   const [flightQuery, setFlightQuery] = useState("");
+  // Mobile-only: the FCA list slides in as an overlay drawer (full map otherwise).
+  const [mobileList, setMobileList] = useState(false);
   const [filter, setFilter] = useState("");
   const [artccFilter, setArtccFilter] = useState("");
   // Which world copies are visible, as a stable key ("-360,0,360"). Bumped on pan/zoom so the
@@ -1030,13 +1033,33 @@ export function FcaMap({
   }
 
   return (
-    <div className="flex h-[calc(100vh-3.5rem)]">
-      {/* Sidebar */}
-      <aside className="flex w-80 shrink-0 flex-col border-r bg-background">
+    <div className="relative flex h-[calc(100vh-3.5rem)]">
+      {/* Backdrop behind the mobile drawer. */}
+      {mobileList && (
+        <div
+          className="absolute inset-0 z-[650] bg-black/40 md:hidden"
+          onClick={() => setMobileList(false)}
+        />
+      )}
+      {/* Sidebar — static column on desktop, slide-in drawer on mobile. */}
+      <aside
+        className={
+          "flex w-80 shrink-0 flex-col border-r bg-background max-md:absolute max-md:inset-y-0 max-md:left-0 max-md:z-[700] max-md:w-[85%] max-md:max-w-xs max-md:shadow-2xl max-md:transition-transform " +
+          (mobileList ? "max-md:translate-x-0" : "max-md:-translate-x-full")
+        }
+      >
         <div className="flex items-center justify-between border-b px-4 py-3">
           <span className="text-sm font-semibold uppercase tracking-wide">
             Flow Constrained Areas
           </span>
+          <button
+            type="button"
+            aria-label="Close list"
+            onClick={() => setMobileList(false)}
+            className="text-muted-foreground hover:text-foreground md:hidden"
+          >
+            <X className="size-4" />
+          </button>
         </div>
 
         {editing ? (
@@ -1119,9 +1142,10 @@ export function FcaMap({
                       />
                       <button
                         type="button"
-                        onClick={() =>
-                          setSelectedId((cur) => (cur === fca.id ? null : fca.id))
-                        }
+                        onClick={() => {
+                          setSelectedId((cur) => (cur === fca.id ? null : fca.id));
+                          setMobileList(false);
+                        }}
                         className="flex-1 truncate text-left font-mono"
                       >
                         {fca.name}
@@ -1338,7 +1362,16 @@ export function FcaMap({
         <div ref={setContainer} className="absolute inset-0" />
 
         {/* Map controls: recenter on the US + traffic-icon style toggle. */}
-        <div className="absolute left-3 top-3 z-[500] flex items-center gap-2">
+        <div className="absolute left-3 top-3 z-[500] flex max-w-[calc(100%-1.5rem)] flex-wrap items-center gap-2">
+          <button
+            type="button"
+            onClick={() => setMobileList(true)}
+            title="Show the FCA list"
+            className="flex items-center gap-1.5 rounded-lg border bg-background/95 px-2.5 py-1.5 text-xs font-medium shadow-lg backdrop-blur transition-colors hover:bg-muted md:hidden"
+          >
+            <Menu className="size-3.5 text-muted-foreground" />
+            List
+          </button>
           <button
             type="button"
             onClick={() =>
@@ -1443,6 +1476,7 @@ export function FcaMap({
           fca={selectedFca}
           flights={fcaTraffic.data}
           canEdit={canEdit}
+          onClose={() => setSelectedId(null)}
         />
       )}
     </div>
