@@ -1,6 +1,8 @@
 import {useMemo, useState} from "react";
 import {Button, ConfirmButton, Input, usePrompt} from "@ois/ui";
+import {SlidersHorizontal} from "lucide-react";
 
+import {BottomSheet} from "@/components/bottom-sheet";
 import {ZuluClock} from "@/components/zulu-clock";
 import {useMe} from "@/lib/auth";
 import {hasPermission} from "@/lib/permissions";
@@ -62,6 +64,8 @@ export function RunwayPage() {
   const deleteCfg = useDeleteConfig(icao ?? "");
   const prompt = usePrompt();
   const [selectedCfg, setSelectedCfg] = useState("");
+  // Mobile: the config panel is a bottom drawer opened from the header.
+  const [configOpen, setConfigOpen] = useState(false);
   const b = board.data;
 
   const activeIds = useMemo(
@@ -195,7 +199,7 @@ export function RunwayPage() {
   return (
     <div className="flex h-[calc(100vh-3.5rem)] flex-col">
       {/* Header */}
-      <div className="flex items-center gap-4 border-b px-5 py-2.5 text-sm">
+      <div className="flex flex-wrap items-center gap-x-4 gap-y-2 border-b px-4 py-2.5 text-sm sm:px-5">
         <span className="font-semibold uppercase tracking-wider">
           Runway <span className="text-primary">Balancer</span>
         </span>
@@ -204,11 +208,22 @@ export function RunwayPage() {
           onChange={(e) => setField(e.target.value)}
           onKeyDown={(e) => e.key === "Enter" && load()}
           placeholder="ICAO"
-          className="h-8 w-28 font-mono uppercase"
+          className="h-8 w-24 font-mono uppercase sm:w-28"
         />
         <Button size="sm" onClick={load} disabled={!field.trim()}>
           Load
         </Button>
+        {icao && (
+          <Button
+            size="sm"
+            variant="outline"
+            onClick={() => setConfigOpen(true)}
+            className="gap-1.5 md:hidden"
+          >
+            <SlidersHorizontal className="size-3.5" />
+            Config
+          </Button>
+        )}
         {!canEdit && (
           <span className="rounded border border-amber-500/50 bg-amber-500/10 px-2 py-0.5 text-xs text-amber-700 dark:text-amber-200">
             View only — sign in with VATSIM to edit.
@@ -244,9 +259,15 @@ export function RunwayPage() {
           Load an airport to balance its arrival runways.
         </div>
       ) : (
-        <div className="flex min-h-0 flex-1">
-          {/* Sidebar — config */}
-          <aside className="flex w-80 shrink-0 flex-col gap-4 overflow-y-auto border-r p-4">
+        <div className="relative flex min-h-0 flex-1">
+          {/* Config — a fixed side column on desktop, a bottom drawer on mobile. */}
+          <BottomSheet
+            open={configOpen}
+            onClose={() => setConfigOpen(false)}
+            desktopClassName="w-80 shrink-0 border-r"
+            initialFraction={0.55}
+          >
+            <div className="flex flex-1 flex-col gap-4 overflow-y-auto p-4">
             <section>
               <h2 className="mb-2 text-xs font-semibold uppercase tracking-wide text-muted-foreground">
                 Landing runways
@@ -483,7 +504,8 @@ export function RunwayPage() {
                 use a climb-profile + winds model.
               </p>
             </section>
-          </aside>
+            </div>
+          </BottomSheet>
 
           {/* Main — demand + arrivals */}
           <div className="min-w-0 flex-1 overflow-y-auto p-4">
@@ -636,6 +658,7 @@ function ArrivalsByRunway({
                 No arrivals
               </div>
             ) : (
+              <div className="overflow-x-auto">
               <table className="w-full text-xs">
                 <tbody>
                   {g.list.map((a) => {
@@ -701,6 +724,7 @@ function ArrivalsByRunway({
                   })}
                 </tbody>
               </table>
+              </div>
             )}
           </div>
         ))}

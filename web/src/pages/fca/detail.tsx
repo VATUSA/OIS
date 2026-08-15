@@ -1,5 +1,7 @@
-import {useEffect, useMemo, useRef, useState} from "react";
+import {useMemo, useState} from "react";
 import {Badge, Button, Input} from "@ois/ui";
+
+import {BottomSheet} from "@/components/bottom-sheet";
 import {closestCenter, DndContext, type DragEndEvent, PointerSensor, useSensor, useSensors,} from "@dnd-kit/core";
 import {arrayMove, SortableContext, useSortable, verticalListSortingStrategy,} from "@dnd-kit/sortable";
 import {CSS} from "@dnd-kit/utilities";
@@ -234,20 +236,6 @@ function Strip({
   );
 }
 
-/** True on phone-width viewports (matches the Tailwind `md` breakpoint). */
-function useIsMobile() {
-  const [mobile, setMobile] = useState(
-    () => window.matchMedia("(max-width: 767px)").matches,
-  );
-  useEffect(() => {
-    const mq = window.matchMedia("(max-width: 767px)");
-    const on = () => setMobile(mq.matches);
-    mq.addEventListener("change", on);
-    return () => mq.removeEventListener("change", on);
-  }, []);
-  return mobile;
-}
-
 export function FcaDetail({
   fca,
   flights,
@@ -268,37 +256,6 @@ export function FcaDetail({
     useSensor(PointerSensor, { activationConstraint: { distance: 6 } }),
   );
 
-  // Mobile: render as a bottom sheet whose height the user can drag to resize,
-  // keeping the map visible above it. Ignored on desktop (fixed side panel).
-  const isMobile = useIsMobile();
-  const [sheetH, setSheetH] = useState(() =>
-    Math.round(window.innerHeight * 0.45),
-  );
-  const drag = useRef<{ startY: number; startH: number } | null>(null);
-  const onHandleDown = (e: React.PointerEvent) => {
-    drag.current = { startY: e.clientY, startH: sheetH };
-    try {
-      e.currentTarget.setPointerCapture(e.pointerId);
-    } catch {
-      /* capture unsupported — dragging still works via move events */
-    }
-  };
-  const onHandleMove = (e: React.PointerEvent) => {
-    if (!drag.current) return;
-    const dy = drag.current.startY - e.clientY; // drag up ⇒ taller
-    const min = 120;
-    const max = Math.round(window.innerHeight * 0.85);
-    setSheetH(Math.min(max, Math.max(min, drag.current.startH + dy)));
-  };
-  const onHandleUp = (e: React.PointerEvent) => {
-    drag.current = null;
-    try {
-      e.currentTarget.releasePointerCapture(e.pointerId);
-    } catch {
-      /* pointer already released */
-    }
-  };
-
   const stats = useMemo(() => {
     const air = list.filter((f) => f.status === "airborne").length;
     const grd = list.length - air;
@@ -317,19 +274,11 @@ export function FcaDetail({
   }
 
   return (
-    <div
-      className="flex h-full w-96 shrink-0 flex-col border-l bg-background max-md:absolute max-md:inset-x-0 max-md:bottom-0 max-md:z-[700] max-md:w-full max-md:rounded-t-2xl max-md:border-l-0 max-md:border-t max-md:shadow-2xl"
-      style={isMobile ? { height: sheetH } : undefined}
+    <BottomSheet
+      desktopClassName="h-full w-96 shrink-0 border-l"
+      onClose={onClose}
+      initialFraction={0.45}
     >
-      {/* Drag handle — resize the sheet on mobile. */}
-      <div
-        onPointerDown={onHandleDown}
-        onPointerMove={onHandleMove}
-        onPointerUp={onHandleUp}
-        className="flex shrink-0 cursor-row-resize touch-none items-center justify-center pb-1 pt-2 md:hidden"
-      >
-        <span className="h-1.5 w-10 rounded-full bg-muted-foreground/40" />
-      </div>
       <div className="flex items-center gap-2 border-b px-4 py-3">
         <span className="size-3 rounded-full" style={{ background: fca.color }} />
         <span className="font-mono font-semibold">{fca.name}</span>
@@ -346,16 +295,8 @@ export function FcaDetail({
             <RotateCcw className="size-3" /> manual
           </button>
         )}
-        {onClose && (
-          <button
-            type="button"
-            aria-label="Close"
-            onClick={onClose}
-            className="ml-auto text-muted-foreground hover:text-foreground md:hidden"
-          >
-            <X className="size-4" />
-          </button>
-        )}
+        {/* Extra right padding on mobile so the header clears the sheet's close X. */}
+        <span className="w-6 shrink-0 md:hidden" />
       </div>
 
       <div className="flex flex-wrap gap-x-4 gap-y-1 border-b px-4 py-2 text-xs">
@@ -425,6 +366,6 @@ export function FcaDetail({
           </DndContext>
         </div>
       )}
-    </div>
+    </BottomSheet>
   );
 }
