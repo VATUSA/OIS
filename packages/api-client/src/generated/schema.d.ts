@@ -870,7 +870,12 @@ export interface paths {
             cookie?: never;
         };
         get?: never;
-        put?: never;
+        /**
+         * Revise a GDP — change the AAR, window, tier, scope, or airborne policy. On a published
+         *     program this re-rations off the live feed and re-freezes control times (EDCTs may shift);
+         *     on a draft it just updates the parameters. Airport is immutable.
+         */
+        put: operations["revise_gdp"];
         post?: never;
         delete: operations["delete_gdp"];
         options?: never;
@@ -2318,6 +2323,24 @@ export interface components {
             notes?: string | null;
             /** @description not_needed | requested | confirmed */
             status: string;
+        };
+        /**
+         * @description Revise a GDP — a full replace of its mutable fields (the airport can't change).
+         *     Revising a *published* program re-rations off the live feed and re-freezes control
+         *     times, so issued EDCTs may shift.
+         */
+        UpdateGdpRequest: {
+            /** Format: int32 */
+            aar: number;
+            end_time: string;
+            exempt_airborne?: boolean;
+            /**
+             * Format: int32
+             * @description null clears the distance tier.
+             */
+            max_enroute_min?: number | null;
+            scope?: string | null;
+            start_time: string;
         };
         UpdateTmiRequest: {
             providing?: string | null;
@@ -4653,6 +4676,62 @@ export interface operations {
                 content?: never;
             };
             401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            503: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+        };
+    };
+    revise_gdp: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /** @description GDP id */
+                id: string;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["UpdateGdpRequest"];
+            };
+        };
+        responses: {
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["GdpBoard"];
+                };
+            };
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            409: {
                 headers: {
                     [name: string]: unknown;
                 };

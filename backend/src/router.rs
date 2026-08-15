@@ -76,7 +76,10 @@ pub fn build_router(state: AppState) -> Router {
         )
         // TMU — Ground Delay Programs (GDP)
         .route("/api/v1/tmu/gdp", get(gdp::list_gdps).post(gdp::create_gdp))
-        .route("/api/v1/tmu/gdp/{id}", delete(gdp::delete_gdp))
+        .route(
+            "/api/v1/tmu/gdp/{id}",
+            put(gdp::revise_gdp).delete(gdp::delete_gdp),
+        )
         .route("/api/v1/tmu/gdp/{id}/board", get(gdp::get_gdp_board))
         .route("/api/v1/tmu/gdp/{id}/publish", post(gdp::publish_gdp))
         .route("/api/v1/tmu/gdp/{id}/cancel", post(gdp::cancel_gdp))

@@ -1,6 +1,6 @@
 import {useState} from "react";
 import {Badge, Button, Card, CardContent, ConfirmButton, Input, useToast} from "@ois/ui";
-import {Plus} from "lucide-react";
+import {Pencil, Plus} from "lucide-react";
 
 import {useMe} from "@/lib/auth";
 import {hasPermission} from "@/lib/permissions";
@@ -10,6 +10,7 @@ import {
   type Gdp,
   type GdpBoard,
   type GdpFlightView,
+  type UpdateGdp,
   useCancelGdp,
   useCompressGdp,
   useCreateGdp,
@@ -18,6 +19,7 @@ import {
   useGdps,
   useLockSlot,
   usePublishGdp,
+  useReviseGdp,
   useUnlockSlot,
 } from "@/lib/gdp";
 
@@ -423,10 +425,150 @@ function FlightsTable({
   );
 }
 
-function BoardView({ id, canPublish }: { id: string; canPublish: boolean }) {
+/** Inline edit form for a GDP's parameters (airport is immutable). */
+function ReviseForm({ board, onDone }: { board: GdpBoard; onDone: () => void }) {
+  const revise = useReviseGdp();
+  const toast = useToast();
+  const [form, setForm] = useState<UpdateGdp>({
+    aar: board.aar,
+    start_time: board.start_time,
+    end_time: board.end_time,
+    scope: board.scope,
+    max_enroute_min: board.max_enroute_min ?? undefined,
+    exempt_airborne: board.exempt_airborne,
+  });
+
+  function submit() {
+    if (!form.aar || form.aar < 1 || form.aar > 200) {
+      toast.warning("AAR must be between 1 and 200");
+      return;
+    }
+    if (!/^\d{3,4}$/.test(form.start_time) || !/^\d{3,4}$/.test(form.end_time)) {
+      toast.warning("Enter start/end as Zulu HHMM (e.g. 1800)");
+      return;
+    }
+    revise.mutate(
+      {
+        id: board.id,
+        body: {
+          aar: Number(form.aar),
+          start_time: form.start_time,
+          end_time: form.end_time,
+          scope: form.scope,
+          max_enroute_min: form.max_enroute_min ? Number(form.max_enroute_min) : null,
+          exempt_airborne: form.exempt_airborne,
+        },
+      },
+      { onSuccess: onDone },
+    );
+  }
+
+  const field = "flex flex-col gap-1";
+  const lbl =
+    "text-xs font-medium uppercase tracking-wide text-muted-foreground";
+  return (
+    <div className="flex flex-col gap-3 rounded-md border bg-muted/30 p-3">
+      <div className="flex items-center gap-2 text-sm font-medium">
+        <Pencil className="size-3.5" />
+        Revise {board.airport}
+      </div>
+      {board.status === "published" && (
+        <p className="rounded bg-amber-500/10 px-2 py-1 text-xs text-amber-700 dark:text-amber-300">
+          This program is live — saving re-rations off the current feed and
+          reissues EDCTs to controlled flights.
+        </p>
+      )}
+      <div className="flex flex-wrap items-end gap-3">
+        <label className={field}>
+          <span className={lbl}>AAR /hr</span>
+          <Input
+            className="w-20 font-mono"
+            inputMode="numeric"
+            value={form.aar ?? ""}
+            onChange={(e) =>
+              setForm((f) => ({ ...f, aar: Number(e.target.value) || 0 }))
+            }
+          />
+        </label>
+        <label className={field}>
+          <span className={lbl}>Start (Z)</span>
+          <Input
+            className="w-20 font-mono"
+            maxLength={4}
+            value={form.start_time}
+            onChange={(e) => setForm((f) => ({ ...f, start_time: e.target.value }))}
+          />
+        </label>
+        <label className={field}>
+          <span className={lbl}>End (Z)</span>
+          <Input
+            className="w-20 font-mono"
+            maxLength={4}
+            value={form.end_time}
+            onChange={(e) => setForm((f) => ({ ...f, end_time: e.target.value }))}
+          />
+        </label>
+        <label className={field}>
+          <span className={lbl}>Scope (ARTCC)</span>
+          <Input
+            className="w-32 font-mono uppercase"
+            placeholder="all"
+            value={form.scope ?? ""}
+            onChange={(e) => setForm((f) => ({ ...f, scope: e.target.value }))}
+          />
+        </label>
+        <label className={field}>
+          <span className={lbl}>Max enroute (min)</span>
+          <Input
+            className="w-28 font-mono"
+            inputMode="numeric"
+            placeholder="none"
+            value={form.max_enroute_min ?? ""}
+            onChange={(e) =>
+              setForm((f) => ({
+                ...f,
+                max_enroute_min: e.target.value ? Number(e.target.value) : undefined,
+              }))
+            }
+          />
+        </label>
+        <label className="flex items-center gap-2 pb-2 text-sm">
+          <input
+            type="checkbox"
+            className="size-4"
+            checked={form.exempt_airborne}
+            onChange={(e) =>
+              setForm((f) => ({ ...f, exempt_airborne: e.target.checked }))
+            }
+          />
+          Exempt airborne
+        </label>
+        <div className="flex gap-2 pb-0.5">
+          <Button disabled={revise.isPending} onClick={submit}>
+            Save changes
+          </Button>
+          <Button variant="ghost" onClick={onDone}>
+            Cancel
+          </Button>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+function BoardView({
+  id,
+  canPublish,
+  canRevise,
+}: {
+  id: string;
+  canPublish: boolean;
+  canRevise: boolean;
+}) {
   const board = useGdpBoard(id);
   const publish = usePublishGdp();
   const compress = useCompressGdp();
+  const [editing, setEditing] = useState(false);
   const b = board.data;
 
   if (board.isError) {
@@ -461,27 +603,41 @@ function BoardView({ id, canPublish }: { id: string; canPublish: boolean }) {
               {b.max_enroute_min ? ` · ≤${b.max_enroute_min}m` : ""}
             </span>
           </div>
-          {canPublish && b.status === "draft" && (
-            <Button
-              disabled={publish.isPending}
-              onClick={() => publish.mutate(b.id)}
-            >
-              Publish &amp; freeze EDCTs
-            </Button>
-          )}
-          {canPublish && b.status === "published" && (
-            <Button
-              variant="secondary"
-              disabled={compress.isPending}
-              onClick={() => compress.mutate(b.id)}
-              title="Reclaim capacity freed by departed/cancelled flights — pulls EDCTs earlier"
-            >
-              Compress
-            </Button>
-          )}
+          <div className="flex gap-2">
+            {canRevise &&
+              (b.status === "draft" || b.status === "published") &&
+              !editing && (
+                <Button variant="outline" onClick={() => setEditing(true)}>
+                  <Pencil />
+                  Revise
+                </Button>
+              )}
+            {canPublish && b.status === "draft" && (
+              <Button
+                disabled={publish.isPending}
+                onClick={() => publish.mutate(b.id)}
+              >
+                Publish &amp; freeze EDCTs
+              </Button>
+            )}
+            {canPublish && b.status === "published" && (
+              <Button
+                variant="secondary"
+                disabled={compress.isPending}
+                onClick={() => compress.mutate(b.id)}
+                title="Reclaim capacity freed by departed/cancelled flights — pulls EDCTs earlier"
+              >
+                Compress
+              </Button>
+            )}
+          </div>
         </div>
 
-        {b.status === "draft" && (
+        {editing && (
+          <ReviseForm key={b.id} board={b} onDone={() => setEditing(false)} />
+        )}
+
+        {b.status === "draft" && !editing && (
           <p className="rounded-md bg-muted/50 px-3 py-2 text-xs text-muted-foreground">
             Draft preview — control times are advisory and recompute live. Publish to freeze
             EDCTs so they hold.
@@ -585,7 +741,14 @@ export function GdpTab() {
         </CardContent>
       </Card>
 
-      {selected && <BoardView id={selected} canPublish={canPublish} />}
+      {selected && (
+        <BoardView
+          key={selected}
+          id={selected}
+          canPublish={canPublish}
+          canRevise={canCreate}
+        />
+      )}
     </div>
   );
 }

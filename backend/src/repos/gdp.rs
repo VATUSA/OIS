@@ -27,7 +27,6 @@ pub async fn get_gdp(pool: &PgPool, id: &str) -> Result<Option<GdpBody>, ApiErro
 }
 
 #[allow(clippy::too_many_arguments)]
-#[allow(clippy::too_many_arguments)]
 pub async fn create_gdp(
     pool: &PgPool,
     airport: &str,
@@ -56,6 +55,40 @@ pub async fn create_gdp(
     .fetch_one(pool)
     .await
     .map_err(|_| ApiError::Internal)
+}
+
+/// Revise a GDP's mutable fields (airport is immutable). Only draft/published programs
+/// are editable. Returns false when the id is absent or terminal.
+#[allow(clippy::too_many_arguments)]
+pub async fn update_gdp(
+    pool: &PgPool,
+    id: &str,
+    aar: i32,
+    scope: &str,
+    start_time: &str,
+    end_time: &str,
+    max_enroute_min: Option<i32>,
+    exempt_airborne: bool,
+    actor: &str,
+) -> Result<bool, ApiError> {
+    let result = sqlx::query(
+        "update tmu.gdp set \
+            aar = $2, scope = $3, start_time = $4, end_time = $5, \
+            max_enroute_min = $6, exempt_airborne = $7, updated_by = $8 \
+         where id = $1 and status in ('draft', 'published')",
+    )
+    .bind(id)
+    .bind(aar)
+    .bind(scope)
+    .bind(start_time)
+    .bind(end_time)
+    .bind(max_enroute_min)
+    .bind(exempt_airborne)
+    .bind(actor)
+    .execute(pool)
+    .await
+    .map_err(|_| ApiError::Internal)?;
+    Ok(result.rows_affected() > 0)
 }
 
 /// Publish a draft GDP. Returns false if it isn't currently a draft.
