@@ -16,6 +16,7 @@ pub mod nav_source;
 pub mod runway;
 pub mod runway_db;
 pub mod taxi;
+pub mod tracon;
 pub mod trajectory;
 pub mod vatsim;
 pub mod winds;
@@ -56,6 +57,8 @@ pub struct FeedInner {
     /// guard across it and stalling the poller's writes.
     pub snapshot: Option<Arc<Snapshot>>,
     pub airports: Arc<AirportDb>,
+    /// IATA → ICAO, for resolving US-style ATC callsign prefixes (`SFO_TWR` → `KSFO`).
+    pub iata: Arc<airports::IataMap>,
     pub status: FeedStatus,
     /// Departures currently being timed (callsign -> session).
     pub taxi_sessions: HashMap<String, taxi::TaxiSession>,
@@ -90,11 +93,12 @@ async fn poller(state: FeedState) {
     };
 
     match airports::fetch(&client).await {
-        Ok(db) => {
+        Ok((db, iata)) => {
             let n = db.len();
             let mut guard = state.write().await;
             guard.status.airports_loaded = n;
             guard.airports = Arc::new(db);
+            guard.iata = Arc::new(iata);
             tracing::info!(airports = n, "feed: airport database loaded");
         }
         Err(e) => {

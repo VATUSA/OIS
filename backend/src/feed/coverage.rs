@@ -83,7 +83,7 @@ mod tests {
             .user_agent("ois-coverage/1.0")
             .build()
             .unwrap();
-        let airports = crate::feed::airports::fetch(&client).await.unwrap();
+        let (airports, _iata) = crate::feed::airports::fetch(&client).await.unwrap();
         let data = crate::feed::vatsim::fetch(&client).await.unwrap();
         let r = analyze(&nav, &airports, &data);
         println!(

@@ -7,8 +7,8 @@ use crate::{
     auth::middleware::resolve_current_user,
     config::build_cors_layer,
     handlers::{
-        access, audit, auth, docs, events, facilities, feed, flow, gdp, health, public, runway,
-        service_accounts, tmu, users,
+        access, atc, audit, auth, docs, events, facilities, feed, flow, gdp, health, public,
+        runway, service_accounts, tmu, users,
     },
     state::AppState,
 };
@@ -166,6 +166,7 @@ pub fn build_router(state: AppState) -> Router {
             get(flow::aircraft_route),
         )
         .route("/api/v1/flow/traffic", get(flow::list_traffic))
+        .route("/api/v1/flow/atc", get(atc::list_atc))
         .route("/api/v1/flow/data-status", get(flow::data_status))
         .route("/api/v1/flow/data-refresh", post(flow::data_refresh))
         .route("/api/v1/flow/route-coverage", get(flow::route_coverage))
