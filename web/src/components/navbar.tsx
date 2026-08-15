@@ -185,6 +185,12 @@ export function Navbar() {
                 FCA overview
               </Link>
             </DropdownMenuItem>
+            <DropdownMenuItem asChild>
+              <Link to="/pilot">
+                <PlaneTakeoff />
+                My flight
+              </Link>
+            </DropdownMenuItem>
           </NavGroup>
 
           {canOps && (
