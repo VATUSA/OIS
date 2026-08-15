@@ -413,8 +413,32 @@ pub async fn run_cleanup(pool: &PgPool) -> Result<CleanupStats, ApiError> {
     .await
     .map_err(internal)?;
 
+    // GDPs — expire once the window (anchored to publish/creation) has passed, then delete
+    // after the grace hour. Slots cascade on the delete.
+    const GDP_END: &str =
+        "tmu.gdp_end_ts(coalesce(published_at, created_at), start_time, end_time)";
+    let e_gdp = sqlx::query(&format!(
+        "update tmu.gdp set status = 'expired' \
+         where status in ('draft', 'published') and {GDP_END} is not null and {GDP_END} < now()"
+    ))
+    .execute(pool)
+    .await
+    .map_err(internal)?;
+
+    let d_gdp = sqlx::query(&format!(
+        "delete from tmu.gdp \
+         where ({GDP_END} is not null and {GDP_END} < now() - interval '1 hour') \
+            or (status in ('cancelled', 'expired') and updated_at < now() - interval '1 hour')"
+    ))
+    .execute(pool)
+    .await
+    .map_err(internal)?;
+
     Ok(CleanupStats {
-        expired: e_tmi.rows_affected() + e_gs.rows_affected(),
-        deleted: d_tmi.rows_affected() + d_gs.rows_affected() + d_pgm.rows_affected(),
+        expired: e_tmi.rows_affected() + e_gs.rows_affected() + e_gdp.rows_affected(),
+        deleted: d_tmi.rows_affected()
+            + d_gs.rows_affected()
+            + d_pgm.rows_affected()
+            + d_gdp.rows_affected(),
     })
 }

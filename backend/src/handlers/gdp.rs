@@ -21,7 +21,7 @@ use crate::{
     feed::facilities,
     feed::flow,
     feed::gdp::{self, GdpBoard, GdpFlightView},
-    models::{CreateGdpRequest, GdpBody},
+    models::{CreateGdpRequest, GdpBody, UpdateGdpRequest},
     repos::gdp as gdp_repo,
     state::AppState,
 };
@@ -146,6 +146,31 @@ async fn fresh_assignments(
         gdp.max_enroute_min,
     );
     Ok((win_start, win_end, assignments))
+}
+
+/// Freeze control times: run fresh RBS off the current feed with the program's current
+/// params and persist the controlled slots (replacing any existing ones). Used on publish
+/// and when revising a published program.
+async fn freeze_slots(
+    state: &AppState,
+    pool: &sqlx::PgPool,
+    gdp: &GdpBody,
+    now: DateTime<Utc>,
+) -> Result<(), ApiError> {
+    let (_s, _e, assignments) = fresh_assignments(state, gdp, now).await?;
+    let slots: Vec<gdp_repo::GdpSlotRow> = assignments
+        .iter()
+        .filter(|a| a.controlled)
+        .map(|a| gdp_repo::GdpSlotRow {
+            callsign: a.cs.clone(),
+            dep: a.dep.clone(),
+            original_eta: ms(a.original_eta_ms, now),
+            cta: ms(a.cta_ms, now),
+            edct: a.edct_ms.map(|v| ms(v, now)),
+            delay_min: a.delay_min as i32,
+        })
+        .collect();
+    gdp_repo::replace_slots(pool, &gdp.id, &slots).await
 }
 
 /// Run RBS off the current feed for `gdp`, applying frozen control times when published.
@@ -295,6 +320,65 @@ pub async fn create_gdp(
     Ok(Json(gdp))
 }
 
+/// Revise a GDP — change the AAR, window, tier, scope, or airborne policy. On a published
+/// program this re-rations off the live feed and re-freezes control times (EDCTs may shift);
+/// on a draft it just updates the parameters. Airport is immutable.
+#[utoipa::path(
+    put,
+    path = "/api/v1/tmu/gdp/{id}",
+    tag = "tmu",
+    params(("id" = String, Path, description = "GDP id")),
+    request_body = UpdateGdpRequest,
+    responses((status = 200, body = GdpBoard), (status = 400), (status = 401), (status = 404), (status = 409), (status = 503))
+)]
+pub async fn revise_gdp(
+    State(state): State<AppState>,
+    _permission: RequirePermission<TmuGdpCreate>,
+    Extension(current_user): Extension<Option<CurrentUser>>,
+    Path(id): Path<String>,
+    Json(payload): Json<UpdateGdpRequest>,
+) -> Result<Json<GdpBoard>, ApiError> {
+    let user = current_user.as_ref().ok_or(ApiError::Unauthorized)?;
+    let pool = state.db.as_ref().ok_or(ApiError::ServiceUnavailable)?;
+
+    if !(1..=200).contains(&payload.aar) {
+        return Err(ApiError::BadRequest);
+    }
+    let start = norm_hhmm(&payload.start_time)?;
+    let end = norm_hhmm(&payload.end_time)?;
+    let scope = normalize_scope(payload.scope.as_deref());
+    let max_enroute = payload.max_enroute_min.filter(|m| *m > 0);
+
+    // 404 if absent, 409 if terminal (expired/cancelled — nothing to revise).
+    if gdp_repo::get_gdp(pool, &id).await?.is_none() {
+        return Err(ApiError::NotFound);
+    }
+    if !gdp_repo::update_gdp(
+        pool,
+        &id,
+        payload.aar,
+        &scope,
+        &start,
+        &end,
+        max_enroute,
+        payload.exempt_airborne,
+        &user.id,
+    )
+    .await?
+    {
+        return Err(ApiError::Conflict); // present but terminal
+    }
+
+    let gdp = gdp_repo::get_gdp(pool, &id)
+        .await?
+        .ok_or(ApiError::NotFound)?;
+    // A live program re-rations + re-freezes with the new parameters.
+    if gdp.status == "published" {
+        freeze_slots(&state, pool, &gdp, Utc::now()).await?;
+    }
+    Ok(Json(build_board(&state, pool, &gdp).await?))
+}
+
 #[utoipa::path(
     get,
     path = "/api/v1/tmu/gdp/{id}/board",
@@ -336,22 +420,8 @@ pub async fn publish_gdp(
         .await?
         .ok_or(ApiError::NotFound)?;
 
-    // Freeze control times: run RBS off the current feed and persist the controlled slots.
-    let now = Utc::now();
-    let (_s, _e, assignments) = assign_live(&state, pool, &gdp, now).await?;
-    let slots: Vec<gdp_repo::GdpSlotRow> = assignments
-        .iter()
-        .filter(|a| a.controlled)
-        .map(|a| gdp_repo::GdpSlotRow {
-            callsign: a.cs.clone(),
-            dep: a.dep.clone(),
-            original_eta: ms(a.original_eta_ms, now),
-            cta: ms(a.cta_ms, now),
-            edct: a.edct_ms.map(|v| ms(v, now)),
-            delay_min: a.delay_min as i32,
-        })
-        .collect();
-    gdp_repo::replace_slots(pool, &gdp.id, &slots).await?;
+    // Freeze control times off the current feed so issued EDCTs hold.
+    freeze_slots(&state, pool, &gdp, Utc::now()).await?;
 
     Ok(Json(build_board(&state, pool, &gdp).await?))
 }

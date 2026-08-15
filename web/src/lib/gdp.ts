@@ -6,6 +6,7 @@ import {ois} from "./api";
 
 export type Gdp = components["schemas"]["GdpBody"];
 export type CreateGdp = components["schemas"]["CreateGdpRequest"];
+export type UpdateGdp = components["schemas"]["UpdateGdpRequest"];
 export type GdpBoard = components["schemas"]["GdpBoard"];
 export type GdpFlightView = components["schemas"]["GdpFlightView"];
 export type GdpDemand = components["schemas"]["GdpDemand"];
@@ -53,6 +54,30 @@ export function useCreateGdp() {
       toast.success("GDP created", { description: data.airport });
     },
     onError: () => toast.error("Couldn’t create the GDP"),
+  });
+}
+
+/** Revise a GDP — change AAR/window/tier/scope. Re-rations a published program. */
+export function useReviseGdp() {
+  const queryClient = useQueryClient();
+  const toast = useToast();
+  return useMutation<GdpBoard, Error, { id: string; body: UpdateGdp }>({
+    mutationFn: async ({ id, body }) => {
+      const { data, error } = await ois.PUT("/api/v1/tmu/gdp/{id}", {
+        params: { path: { id } },
+        body,
+      });
+      if (error || !data) throw new Error("revise failed");
+      return data;
+    },
+    onSuccess: (data) => {
+      queryClient.invalidateQueries({ queryKey: ["gdps"] });
+      queryClient.setQueryData(["gdp-board", data.id], data);
+      toast.success(
+        data.published ? "GDP revised — control times reissued" : "GDP revised",
+      );
+    },
+    onError: () => toast.error("Couldn’t revise the GDP"),
   });
 }
 

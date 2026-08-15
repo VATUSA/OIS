@@ -295,6 +295,23 @@ pub struct CreateGdpRequest {
     pub exempt_airborne: bool,
 }
 
+/// Revise a GDP — a full replace of its mutable fields (the airport can't change).
+/// Revising a *published* program re-rations off the live feed and re-freezes control
+/// times, so issued EDCTs may shift.
+#[derive(Debug, Deserialize, ToSchema)]
+pub struct UpdateGdpRequest {
+    pub aar: i32,
+    pub start_time: String,
+    pub end_time: String,
+    #[serde(default)]
+    pub scope: Option<String>,
+    /// null clears the distance tier.
+    #[serde(default)]
+    pub max_enroute_min: Option<i32>,
+    #[serde(default = "default_true")]
+    pub exempt_airborne: bool,
+}
+
 fn default_true() -> bool {
     true
 }
