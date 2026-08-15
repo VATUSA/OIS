@@ -25,6 +25,7 @@ import {
   Route,
   ShieldCheck,
   Split,
+  User as UserIcon,
   Waypoints,
 } from "lucide-react";
 
@@ -124,6 +125,13 @@ function UserMenu() {
             </span>
           </div>
         </DropdownMenuLabel>
+        <DropdownMenuSeparator />
+        <DropdownMenuItem asChild>
+          <Link to="/profile">
+            <UserIcon />
+            Profile
+          </Link>
+        </DropdownMenuItem>
         <DropdownMenuSeparator />
         {isAdmin(me) && (
           <>

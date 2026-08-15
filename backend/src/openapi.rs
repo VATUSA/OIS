@@ -107,6 +107,8 @@ use utoipa::OpenApi;
     ),
     components(schemas(
         crate::models::MeBody,
+        crate::models::VatusaProfile,
+        crate::models::VatusaRoleEntry,
         crate::models::UserSummary,
         crate::models::FacilityBody,
         crate::models::AccessCatalogBody,

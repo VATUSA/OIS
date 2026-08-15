@@ -16,6 +16,28 @@ pub struct MeBody {
     /// Effective permissions as the nested tree the access editor renders.
     #[schema(value_type = Object)]
     pub permissions: Value,
+    /// VATUSA member details, once synced (null until the first successful sync).
+    pub vatusa: Option<VatusaProfile>,
+}
+
+/// A signed-in member's VATUSA details, surfaced on their profile.
+#[derive(Debug, Serialize, ToSchema)]
+pub struct VatusaProfile {
+    pub home_facility: Option<String>,
+    pub rating_numeric: Option<i32>,
+    pub home_controller: Option<bool>,
+    pub facility_join: Option<DateTime<Utc>>,
+    pub synced_at: Option<DateTime<Utc>>,
+    pub roles: Vec<VatusaRoleEntry>,
+    /// Facilities the member visits.
+    pub visits: Vec<String>,
+}
+
+/// One VATUSA role, e.g. `INS` at `ZDC`.
+#[derive(Debug, Serialize, ToSchema)]
+pub struct VatusaRoleEntry {
+    pub facility: String,
+    pub role: String,
 }
 
 /// A lightweight user match for the directory search.
