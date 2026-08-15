@@ -37,11 +37,24 @@ pub async fn active_ground_stops(pool: &PgPool) -> Result<Vec<PublicGroundStop>,
 }
 
 pub async fn active_gdps(pool: &PgPool) -> Result<Vec<PublicGdp>, ApiError> {
+    // Delay stats come from the frozen control slots; demand_60min/over_capacity
+    // are placeholders the handler fills from the live feed.
     sqlx::query_as::<_, PublicGdp>(
-        "select id, airport, aar, scope, start_time, end_time, max_enroute_min, exempt_airborne \
-         from tmu.gdp \
-         where status = 'published' \
-         order by airport",
+        "select g.id, g.airport, g.aar, g.scope, g.start_time, g.end_time, \
+                g.max_enroute_min, g.exempt_airborne, \
+                coalesce(s.controlled, 0::bigint) as controlled, \
+                coalesce(s.avg_delay, 0::bigint) as avg_delay_min, \
+                coalesce(s.max_delay, 0::bigint) as max_delay_min, \
+                0::bigint as demand_60min, false as over_capacity \
+         from tmu.gdp g \
+         left join ( \
+             select gdp_id, count(*)::bigint as controlled, \
+                    round(avg(delay_min))::bigint as avg_delay, \
+                    max(delay_min)::bigint as max_delay \
+             from tmu.gdp_slot group by gdp_id \
+         ) s on s.gdp_id = g.id \
+         where g.status = 'published' \
+         order by g.airport",
     )
     .fetch_all(pool)
     .await
@@ -50,7 +63,8 @@ pub async fn active_gdps(pool: &PgPool) -> Result<Vec<PublicGdp>, ApiError> {
 
 pub async fn active_programs(pool: &PgPool) -> Result<Vec<PublicProgram>, ApiError> {
     sqlx::query_as::<_, PublicProgram>(
-        "select icao, aar, trail, mit, gates, exclude_wake, exclude_types, jets_only, active_until \
+        "select icao, aar, trail, mit, gates, exclude_wake, exclude_types, jets_only, active_until, \
+                0::bigint as demand_60min, false as over_capacity \
          from tmu.programs \
          where active_until is null or active_until > now() \
          order by icao",

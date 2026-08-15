@@ -90,7 +90,11 @@ async fn program_inputs(pool: &PgPool, icao: &str) -> Result<Option<ProgramInput
 }
 
 /// Compute the live, metered flow for one arrival airport (loads program + issued CFRs).
-async fn flow_for(state: &AppState, pool: &PgPool, icao: &str) -> Result<flow::Flow, ApiError> {
+pub(crate) async fn flow_for(
+    state: &AppState,
+    pool: &PgPool,
+    icao: &str,
+) -> Result<flow::Flow, ApiError> {
     let program = program_inputs(pool, icao).await?;
     let issued = tmu_repo::issued_cfr_map(pool, icao).await?;
     // Clone the snapshot + airport handles and drop the feed lock before metering.

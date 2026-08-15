@@ -1806,12 +1806,34 @@ export interface components {
              */
             aar: number;
             airport: string;
+            /**
+             * Format: int64
+             * @description Average assigned delay across controlled flights (minutes).
+             */
+            avg_delay_min: number;
+            /**
+             * Format: int64
+             * @description Number of controlled (delayed) flights, from the frozen slots.
+             */
+            controlled: number;
+            /**
+             * Format: int64
+             * @description Live inbounds estimated to land within the next 60 min (feed-derived).
+             */
+            demand_60min: number;
             /** @description HHMM Zulu window end. */
             end_time: string;
             exempt_airborne: boolean;
             id: string;
+            /**
+             * Format: int64
+             * @description Worst assigned delay (minutes).
+             */
+            max_delay_min: number;
             /** Format: int32 */
             max_enroute_min?: number | null;
+            /** @description True when live demand exceeds the AAR. */
+            over_capacity: boolean;
             /** @description Space-separated departure ARTCC codes in scope; empty = all departures. */
             scope: string;
             /** @description HHMM Zulu window start. */
@@ -1835,6 +1857,11 @@ export interface components {
              * @description Scheduled end; null = indefinite.
              */
             active_until?: string | null;
+            /**
+             * Format: int64
+             * @description Live inbounds estimated to land within the next 60 min (feed-derived).
+             */
+            demand_60min: number;
             exclude_types: string[];
             exclude_wake: string[];
             gates: components["schemas"]["GateRule"][];
@@ -1845,6 +1872,8 @@ export interface components {
              * @description Airport-wide miles-in-trail (overrides `trail` when > 0).
              */
             mit: number;
+            /** @description True when live demand exceeds the AAR. */
+            over_capacity: boolean;
             /**
              * Format: int32
              * @description Airport-wide minutes-in-trail default.

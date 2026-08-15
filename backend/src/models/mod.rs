@@ -792,6 +792,16 @@ pub struct PublicGdp {
     pub end_time: String,
     pub max_enroute_min: Option<i32>,
     pub exempt_airborne: bool,
+    /// Number of controlled (delayed) flights, from the frozen slots.
+    pub controlled: i64,
+    /// Average assigned delay across controlled flights (minutes).
+    pub avg_delay_min: i64,
+    /// Worst assigned delay (minutes).
+    pub max_delay_min: i64,
+    /// Live inbounds estimated to land within the next 60 min (feed-derived).
+    pub demand_60min: i64,
+    /// True when live demand exceeds the AAR.
+    pub over_capacity: bool,
 }
 
 /// An active airport rate program (AAR + spacing).
@@ -810,6 +820,10 @@ pub struct PublicProgram {
     pub jets_only: bool,
     /// Scheduled end; null = indefinite.
     pub active_until: Option<DateTime<Utc>>,
+    /// Live inbounds estimated to land within the next 60 min (feed-derived).
+    pub demand_60min: i64,
+    /// True when live demand exceeds the AAR.
+    pub over_capacity: bool,
 }
 
 /// The full public advisories board — every active initiative in one payload.
