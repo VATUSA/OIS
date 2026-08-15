@@ -281,6 +281,15 @@ function waypointLabelIcon(name: string) {
     iconAnchor: [0, 0],
   });
 }
+/** A route fix's name, offset from its dot (the dot is a separate centered circleMarker). */
+function fixNameIcon(name: string, color: string) {
+  return L.divIcon({
+    className: "",
+    html: `<span style="display:inline-block;font:600 10px ui-monospace,monospace;color:${color};white-space:nowrap;text-shadow:0 0 3px #000,0 1px 2px #000;transform:translate(6px,-2px)">${name}</span>`,
+    iconSize: [0, 0],
+    iconAnchor: [0, 0],
+  });
+}
 function aircraftTip(ac: {
   callsign: string;
   actype: string;
@@ -652,11 +661,20 @@ export function FcaPage() {
           interactive: false,
           keyboard: false,
         }).addTo(layer);
-        // Per-route fix names (toggled).
+        // Per-route fixes (toggled): a tiny dot at each fix + its name beside it.
         if (showFixes) {
           for (const wp of r.waypoints) {
-            L.marker([wp.lat, wp.lon + off], {
-              icon: waypointLabelIcon(wp.name),
+            const at: LatLng = [wp.lat, wp.lon + off];
+            L.circleMarker(at, {
+              radius: 2.5,
+              color: r.color,
+              weight: 1,
+              fillColor: r.color,
+              fillOpacity: 1,
+              interactive: false,
+            }).addTo(layer);
+            L.marker(at, {
+              icon: fixNameIcon(wp.name, r.color),
               interactive: false,
               keyboard: false,
               zIndexOffset: -100,
