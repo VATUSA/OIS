@@ -238,10 +238,12 @@ export function FcaDetail({
   fca,
   flights,
   canEdit,
+  onClose,
 }: {
   fca: Fca;
   flights: FcaFlight[] | undefined;
   canEdit: boolean;
+  onClose?: () => void;
 }) {
   const now = Date.now();
   const list = flights ?? [];
@@ -270,7 +272,7 @@ export function FcaDetail({
   }
 
   return (
-    <div className="flex h-full w-96 shrink-0 flex-col border-l bg-background">
+    <div className="flex h-full w-96 shrink-0 flex-col border-l bg-background max-md:absolute max-md:inset-y-0 max-md:right-0 max-md:z-[700] max-md:w-[92%] max-md:max-w-sm max-md:shadow-2xl">
       <div className="flex items-center gap-2 border-b px-4 py-3">
         <span className="size-3 rounded-full" style={{ background: fca.color }} />
         <span className="font-mono font-semibold">{fca.name}</span>
@@ -285,6 +287,16 @@ export function FcaDetail({
             className="ml-auto flex items-center gap-1 text-xs text-muted-foreground hover:text-foreground"
           >
             <RotateCcw className="size-3" /> manual
+          </button>
+        )}
+        {onClose && (
+          <button
+            type="button"
+            aria-label="Close"
+            onClick={onClose}
+            className="ml-auto text-muted-foreground hover:text-foreground md:hidden"
+          >
+            <X className="size-4" />
           </button>
         )}
       </div>

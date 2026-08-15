@@ -18,6 +18,7 @@ import {
   LayoutDashboard,
   LogOut,
   Megaphone,
+  Menu,
   Plane,
   PlaneTakeoff,
   Radar,
@@ -147,6 +148,132 @@ function UserMenu() {
   );
 }
 
+/** The full nav collapsed into a hamburger dropdown for small screens. */
+function MobileMenu({
+  canOps,
+  canPrograms,
+  canFca,
+  canRunway,
+  canPlan,
+}: {
+  canOps: boolean;
+  canPrograms: boolean;
+  canFca: boolean;
+  canRunway: boolean;
+  canPlan: boolean;
+}) {
+  return (
+    <DropdownMenu>
+      <DropdownMenuTrigger
+        aria-label="Menu"
+        className="flex items-center rounded-md p-1.5 text-muted-foreground outline-none transition-colors hover:bg-accent hover:text-accent-foreground focus-visible:ring-2 focus-visible:ring-ring sm:hidden"
+      >
+        <Menu className="size-5" />
+      </DropdownMenuTrigger>
+      <DropdownMenuContent align="start" className="max-h-[80vh] w-56 overflow-y-auto">
+        <DropdownMenuItem asChild>
+          <Link to="/">Home</Link>
+        </DropdownMenuItem>
+
+        <DropdownMenuSeparator />
+        <DropdownMenuLabel>Advisories</DropdownMenuLabel>
+        <DropdownMenuItem asChild>
+          <Link to="/advisories">
+            <Megaphone />
+            TMI board
+          </Link>
+        </DropdownMenuItem>
+        <DropdownMenuItem asChild>
+          <Link to="/advisories/fcas">
+            <Waypoints />
+            FCA overview
+          </Link>
+        </DropdownMenuItem>
+        <DropdownMenuItem asChild>
+          <Link to="/pilot">
+            <PlaneTakeoff />
+            My flight
+          </Link>
+        </DropdownMenuItem>
+
+        {canOps && (
+          <>
+            <DropdownMenuSeparator />
+            <DropdownMenuLabel>Operations</DropdownMenuLabel>
+            {canPrograms && (
+              <DropdownMenuItem asChild>
+                <Link to="/ops/airport">
+                  <Plane />
+                  Airport
+                </Link>
+              </DropdownMenuItem>
+            )}
+            {canPrograms && (
+              <DropdownMenuItem asChild>
+                <Link to="/ops/departures">
+                  <PlaneTakeoff />
+                  Departures
+                </Link>
+              </DropdownMenuItem>
+            )}
+            {canPrograms && (
+              <DropdownMenuItem asChild>
+                <Link to="/ops/taxi">
+                  <Route />
+                  Taxi
+                </Link>
+              </DropdownMenuItem>
+            )}
+            <DropdownMenuItem asChild>
+              <Link to="/ops/tmu">
+                <Gauge />
+                TMU
+              </Link>
+            </DropdownMenuItem>
+            {canPrograms && (
+              <DropdownMenuItem asChild>
+                <Link to="/ops/my">
+                  <LayoutDashboard />
+                  My dashboard
+                </Link>
+              </DropdownMenuItem>
+            )}
+            {canFca && (
+              <DropdownMenuItem asChild>
+                <Link to="/ops/fca">
+                  <Waypoints />
+                  FCA flow
+                </Link>
+              </DropdownMenuItem>
+            )}
+            {canRunway && (
+              <DropdownMenuItem asChild>
+                <Link to="/ops/runway">
+                  <Split />
+                  Runway balancer
+                </Link>
+              </DropdownMenuItem>
+            )}
+          </>
+        )}
+
+        {canPlan && (
+          <>
+            <DropdownMenuSeparator />
+            <DropdownMenuLabel>Planning</DropdownMenuLabel>
+            <DropdownMenuItem asChild>
+              <Link to="/planning/events">
+                <CalendarClock />
+                Events
+              </Link>
+            </DropdownMenuItem>
+          </>
+        )}
+      </DropdownMenuContent>
+    </DropdownMenu>
+  );
+}
+
 export function Navbar() {
   const { data: me } = useMe();
   const linkClass =
@@ -161,7 +288,14 @@ export function Navbar() {
 
   return (
     <header className="sticky top-0 z-40 border-b bg-background/80 backdrop-blur">
-      <div className="mx-auto flex h-14 w-full max-w-7xl items-center gap-6 px-4">
+      <div className="mx-auto flex h-14 w-full max-w-7xl items-center gap-3 px-4 sm:gap-6">
+        <MobileMenu
+          canOps={canOps}
+          canPrograms={canPrograms}
+          canFca={canFca}
+          canRunway={canRunway}
+          canPlan={canPlan}
+        />
         <Link to="/" className="flex items-center gap-2 font-semibold">
           <Radar className="size-5 text-primary" />
           <span>OIS</span>
