@@ -3,10 +3,67 @@
 
 use std::collections::HashSet;
 
+use chrono::{DateTime, Utc};
 use sqlx::PgPool;
 
 use crate::errors::ApiError;
 use crate::feed::vatusa::VatusaMember;
+use crate::models::{VatusaProfile, VatusaRoleEntry};
+
+/// The member's VATUSA details (for their profile / `/me`), or `None` if never synced.
+pub async fn fetch_profile(pool: &PgPool, cid: i64) -> Result<Option<VatusaProfile>, ApiError> {
+    type Row = (
+        Option<String>,
+        Option<i32>,
+        Option<bool>,
+        Option<DateTime<Utc>>,
+        Option<DateTime<Utc>>,
+    );
+    let row = sqlx::query_as::<_, Row>(
+        "select home_facility, rating_numeric, flag_home_controller, facility_join, vatusa_synced_at
+         from identity.users where cid = $1",
+    )
+    .bind(cid)
+    .fetch_optional(pool)
+    .await
+    .map_err(|_| ApiError::Internal)?;
+
+    let Some((home_facility, rating_numeric, home_controller, facility_join, synced_at)) = row
+    else {
+        return Ok(None);
+    };
+    if synced_at.is_none() {
+        return Ok(None); // user exists but hasn't been synced from VATUSA yet
+    }
+
+    let roles = sqlx::query_as::<_, (String, String)>(
+        "select facility, role from identity.vatusa_roles where cid = $1 order by facility, role",
+    )
+    .bind(cid)
+    .fetch_all(pool)
+    .await
+    .map_err(|_| ApiError::Internal)?;
+    let visits = sqlx::query_scalar::<_, String>(
+        "select facility from identity.vatusa_visits where cid = $1 order by facility",
+    )
+    .bind(cid)
+    .fetch_all(pool)
+    .await
+    .map_err(|_| ApiError::Internal)?;
+
+    Ok(Some(VatusaProfile {
+        home_facility,
+        rating_numeric,
+        home_controller,
+        facility_join,
+        synced_at,
+        roles: roles
+            .into_iter()
+            .map(|(facility, role)| VatusaRoleEntry { facility, role })
+            .collect(),
+        visits,
+    }))
+}
 
 /// Update a member's details and fully replace their roles/visits, keyed on CID. Only touches
 /// users we already have (the row is created at login); a missing CID updates zero rows.

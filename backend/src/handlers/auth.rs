@@ -235,6 +235,10 @@ pub async fn logout(
 
 async fn build_me_body(state: &AppState, user: &CurrentUser) -> Result<MeBody, ApiError> {
     let (roles, permissions) = fetch_user_access(state.db.as_ref(), &user.id).await?;
+    let vatusa = match state.db.as_ref() {
+        Some(pool) => crate::repos::vatusa::fetch_profile(pool, user.cid).await?,
+        None => None,
+    };
     Ok(MeBody {
         id: user.id.clone(),
         cid: user.cid,
@@ -244,6 +248,7 @@ async fn build_me_body(state: &AppState, user: &CurrentUser) -> Result<MeBody, A
         server_admin: is_server_admin(&roles),
         role_names: roles,
         permissions: permission_tree_from_paths(&permissions),
+        vatusa,
     })
 }
 

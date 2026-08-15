@@ -5,6 +5,7 @@ import {Navbar} from "@/components/navbar";
 import {AdvisoriesPage} from "@/pages/advisories";
 import {AdvisoriesFcaPage} from "@/pages/advisories/fcas";
 import {PilotPage} from "@/pages/pilot";
+import {ProfilePage} from "@/pages/profile";
 import {AirportPage} from "@/pages/airport";
 import {FcaPage} from "@/pages/fca";
 import {RunwayPage} from "@/pages/runway";
@@ -139,6 +140,12 @@ const pilotRoute = createRoute({
   component: PilotPage,
 });
 
+const profileRoute = createRoute({
+  getParentRoute: () => rootRoute,
+  path: "profile",
+  component: ProfilePage,
+});
+
 // --- Planning (pre-event) ---
 
 const planningRoute = createRoute({
@@ -233,6 +240,7 @@ const routeTree = rootRoute.addChildren([
   ]),
   advisoriesRoute.addChildren([advisoriesIndexRoute, advisoriesFcaRoute]),
   pilotRoute,
+  profileRoute,
   planningRoute.addChildren([
     planningIndexRoute,
     planningEventsRoute,

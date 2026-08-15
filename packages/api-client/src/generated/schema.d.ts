@@ -1951,6 +1951,7 @@ export interface components {
             rating?: string | null;
             role_names: string[];
             server_admin: boolean;
+            vatusa?: null | components["schemas"]["VatusaProfile"];
         };
         /** @description An airport rate program (vatflow "TMU tab"). Keyed by ICAO. */
         ProgramBody: {
@@ -2524,6 +2525,25 @@ export interface components {
             cid: number;
             display_name: string;
             rating?: string | null;
+        };
+        /** @description A signed-in member's VATUSA details, surfaced on their profile. */
+        VatusaProfile: {
+            /** Format: date-time */
+            facility_join?: string | null;
+            home_controller?: boolean | null;
+            home_facility?: string | null;
+            /** Format: int32 */
+            rating_numeric?: number | null;
+            roles: components["schemas"]["VatusaRoleEntry"][];
+            /** Format: date-time */
+            synced_at?: string | null;
+            /** @description Facilities the member visits. */
+            visits: string[];
+        };
+        /** @description One VATUSA role, e.g. `INS` at `ZDC`. */
+        VatusaRoleEntry: {
+            facility: string;
+            role: string;
         };
     };
     responses: never;
