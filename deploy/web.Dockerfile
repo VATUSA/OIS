@@ -20,7 +20,13 @@ FROM nginx:1-alpine AS runtime
 # Templated at container start via the nginx image's envsubst (only ${BACKEND_URL} is defined,
 # so nginx's own $uri/$host are left intact).
 COPY deploy/nginx.conf /etc/nginx/templates/default.conf.template
+# Writes /config.js from OIS_API_URL at startup so one image serves any environment.
+COPY deploy/40-ois-config.sh /docker-entrypoint.d/40-ois-config.sh
+RUN chmod +x /docker-entrypoint.d/40-ois-config.sh
 COPY --from=builder /app/web/dist /usr/share/nginx/html
-# Where nginx forwards API traffic. Override per environment (e.g. http://ois-backend:3000).
+# The API base the SPA calls. Set to the API's public origin for a cross-origin deploy
+# (e.g. https://api-ois.vzdc.org), or leave empty for same-origin (SPA uses /api on its host).
+ENV OIS_API_URL=""
+# Where nginx forwards same-origin /api traffic (used only when OIS_API_URL is empty).
 ENV BACKEND_URL=http://backend:3000
 EXPOSE 80
