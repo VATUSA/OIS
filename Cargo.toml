@@ -34,6 +34,8 @@ uuid = { version = "1.23.1", features = ["v4", "serde"] }
 
 # --- crypto ---
 sha2 = "0.11.0"
+hmac = "0.13.0"
+hex = "0.4.3"
 
 # --- errors / logging ---
 thiserror = "2.0.17"

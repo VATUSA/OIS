@@ -171,6 +171,10 @@ pub async fn vatsim_callback(
 
     ensure_user_login_access(pool, &user_id, profile.cid, was_new_user).await?;
 
+    // Enrich with VATUSA member details in the background (best-effort — login never waits on,
+    // nor fails because of, VATUSA availability). No-ops when VATUSA_API_KEY is unset.
+    crate::feed::vatusa::spawn_member_sync(pool.clone(), profile.cid);
+
     let session_token = Uuid::new_v4().to_string();
     auth_repo::insert_session(pool, &session_token, &user_id).await?;
 

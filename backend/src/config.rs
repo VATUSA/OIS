@@ -56,6 +56,31 @@ pub fn configured_allowed_origins() -> Vec<String> {
         .collect()
 }
 
+fn trimmed_env(name: &str) -> Option<String> {
+    std::env::var(name)
+        .ok()
+        .map(|v| v.trim().trim_end_matches('/').to_string())
+        .filter(|v| !v.is_empty())
+}
+
+/// VATUSA API base, e.g. `https://api.vatusa.net` (no trailing slash). Versioned paths
+/// (`/v2/...`, `/v3/...`) are appended by callers.
+pub fn vatusa_api_base() -> String {
+    trimmed_env("VATUSA_API_BASE").unwrap_or_else(|| "https://api.vatusa.net".to_string())
+}
+
+/// The VATUSA API key (`apikey` query param for v2, `x-api-key` header for v3). When unset,
+/// VATUSA sync is disabled: sign-in fetch, webhook registration, and reconciliation all no-op.
+pub fn vatusa_api_key() -> Option<String> {
+    trimmed_env("VATUSA_API_KEY")
+}
+
+/// This deployment's public HTTPS base URL, used to register the webhook receiver with VATUSA
+/// (e.g. `https://ois.vatusa.net`). Webhook registration is skipped when unset.
+pub fn ois_public_url() -> Option<String> {
+    trimmed_env("OIS_PUBLIC_URL")
+}
+
 pub fn build_cors_layer() -> CorsLayer {
     let layer = CorsLayer::new()
         .allow_credentials(true)
