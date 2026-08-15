@@ -63,5 +63,9 @@ permission!(
 permission!(FlowFcaRead, ["flow", "fca"], Read);
 permission!(FlowFcaUpdate, ["flow", "fca"], Update);
 permission!(FlowFcaDelete, ["flow", "fca"], Delete);
+// Routes are visible to anyone who can view the flow map (FlowFcaRead); editing/deleting
+// them needs these dedicated perms.
+permission!(FlowRouteUpdate, ["flow", "route"], Update);
+permission!(FlowRouteDelete, ["flow", "route"], Delete);
 permission!(FlowRunwayRead, ["flow", "runway"], Read);
 permission!(FlowRunwayUpdate, ["flow", "runway"], Update);

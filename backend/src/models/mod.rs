@@ -506,6 +506,30 @@ pub struct UpsertFcaRequest {
     pub enabled: Option<bool>,
 }
 
+/// A named polyline drawn on the flow map (a shared reference route). Simpler than an FCA:
+/// no metering or membership filters.
+#[derive(Debug, Serialize, ToSchema, sqlx::FromRow)]
+pub struct RouteBody {
+    pub id: String,
+    pub name: String,
+    pub color: String,
+    /// Polyline vertices as `[lat, lon]` pairs (>= 2).
+    #[schema(value_type = Vec<Vec<f64>>)]
+    pub points: sqlx::types::Json<Vec<[f64; 2]>>,
+    pub updated_at: DateTime<Utc>,
+    pub updated_by: Option<String>,
+}
+
+#[derive(Debug, Deserialize, ToSchema)]
+pub struct UpsertRouteRequest {
+    pub name: String,
+    #[serde(default)]
+    pub color: Option<String>,
+    /// Polyline vertices as `[lat, lon]` pairs (>= 2).
+    #[schema(value_type = Vec<Vec<f64>>)]
+    pub points: Vec<[f64; 2]>,
+}
+
 /// An aircraft whose filed route crosses an FCA, with its ETA to the crossing.
 #[derive(Debug, Serialize, ToSchema)]
 pub struct FcaFlight {
