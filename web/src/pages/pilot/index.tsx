@@ -1,8 +1,10 @@
 import {useState} from "react";
 import {Link} from "@tanstack/react-router";
-import {Badge, Button, Card, CardContent, Input} from "@ois/ui";
+import {Badge, Card, CardContent} from "@ois/ui";
 import {OctagonX, Plane, Split, Timer, Waypoints} from "lucide-react";
 
+import {FlightSearch} from "@/components/flight-search";
+import {useTraffic} from "@/lib/fca";
 import {hhmmZulu} from "@/lib/time";
 import {type FlightAdvisory, usePublicFlight} from "@/lib/public";
 
@@ -191,15 +193,9 @@ function Result({ f }: { f: FlightAdvisory }) {
 }
 
 export function PilotPage() {
-  const [query, setQuery] = useState("");
   const [callsign, setCallsign] = useState<string | null>(null);
+  const traffic = useTraffic();
   const flight = usePublicFlight(callsign);
-
-  const submit = (e: React.FormEvent) => {
-    e.preventDefault();
-    const cs = query.trim().toUpperCase();
-    if (cs) setCallsign(cs);
-  };
 
   return (
     <div className="mx-auto flex w-full max-w-2xl flex-col gap-6">
@@ -210,18 +206,12 @@ export function PilotPage() {
         </p>
       </div>
 
-      <form onSubmit={submit} className="flex gap-2">
-        <Input
-          placeholder="Callsign — e.g. AAL1234"
-          value={query}
-          onChange={(e) => setQuery(e.target.value)}
-          className="font-mono uppercase"
-          autoFocus
-        />
-        <Button type="submit" disabled={!query.trim()}>
-          Look up
-        </Button>
-      </form>
+      <FlightSearch
+        aircraft={traffic.data ?? []}
+        onSelect={setCallsign}
+        placeholder="Callsign — e.g. AAL1234"
+        autoFocus
+      />
 
       {callsign &&
         (flight.isLoading ? (
