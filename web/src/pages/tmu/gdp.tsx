@@ -6,6 +6,7 @@ import {useMe} from "@/lib/auth";
 import {hasPermission} from "@/lib/permissions";
 import {formatZulu, hhmmZulu} from "@/lib/time";
 import {
+  type AarStep,
   type CreateGdp,
   type Gdp,
   type GdpBoard,
@@ -46,7 +47,80 @@ const EMPTY: CreateGdp = {
   scope: "",
   max_enroute_min: undefined,
   exempt_airborne: true,
+  aar_steps: [],
 };
+
+/** Add/remove time-varying AAR steps ("@1600z 45/hr"). */
+function StepsEditor({
+  steps,
+  onChange,
+}: {
+  steps: AarStep[];
+  onChange: (s: AarStep[]) => void;
+}) {
+  const [time, setTime] = useState("");
+  const [rate, setRate] = useState("");
+  const add = () => {
+    if (!/^\d{3,4}$/.test(time) || !Number(rate)) return;
+    const hhmm = time.padStart(4, "0");
+    onChange(
+      [...steps.filter((s) => s.start_time !== hhmm), { start_time: hhmm, aar: Number(rate) }].sort(
+        (a, b) => a.start_time.localeCompare(b.start_time),
+      ),
+    );
+    setTime("");
+    setRate("");
+  };
+  return (
+    <div className="flex flex-col gap-1">
+      <span className="text-xs font-medium uppercase tracking-wide text-muted-foreground">
+        Rate steps (optional)
+      </span>
+      <div className="flex flex-wrap items-center gap-1.5">
+        {steps.map((s) => (
+          <span
+            key={s.start_time}
+            className="flex items-center gap-1 rounded border bg-muted/40 px-1.5 py-1 font-mono text-xs"
+          >
+            @{s.start_time}z {s.aar}/hr
+            <button
+              type="button"
+              aria-label="Remove step"
+              onClick={() => onChange(steps.filter((x) => x.start_time !== s.start_time))}
+              className="text-muted-foreground hover:text-destructive"
+            >
+              ×
+            </button>
+          </span>
+        ))}
+        <Input
+          className="w-16 font-mono text-xs"
+          placeholder="HHMM"
+          maxLength={4}
+          value={time}
+          onChange={(e) => setTime(e.target.value)}
+        />
+        <Input
+          className="w-14 font-mono text-xs"
+          placeholder="AAR"
+          inputMode="numeric"
+          value={rate}
+          onChange={(e) => setRate(e.target.value)}
+          onKeyDown={(e) => e.key === "Enter" && add()}
+        />
+        <Button
+          size="sm"
+          variant="outline"
+          className="h-8 px-2 text-xs"
+          onClick={add}
+          disabled={!time.trim() || !rate.trim()}
+        >
+          + step
+        </Button>
+      </div>
+    </div>
+  );
+}
 
 function CreateForm({ onCreated }: { onCreated: (id: string) => void }) {
   const create = useCreateGdp();
@@ -76,6 +150,7 @@ function CreateForm({ onCreated }: { onCreated: (id: string) => void }) {
         scope: form.scope,
         max_enroute_min: form.max_enroute_min ? Number(form.max_enroute_min) : undefined,
         exempt_airborne: form.exempt_airborne,
+        aar_steps: form.aar_steps,
       },
       {
         onSuccess: (g) => {
@@ -191,6 +266,10 @@ function CreateForm({ onCreated }: { onCreated: (id: string) => void }) {
             Create GDP
           </Button>
         </div>
+        <StepsEditor
+          steps={form.aar_steps ?? []}
+          onChange={(s) => setForm((f) => ({ ...f, aar_steps: s }))}
+        />
       </CardContent>
     </Card>
   );
@@ -436,6 +515,7 @@ function ReviseForm({ board, onDone }: { board: GdpBoard; onDone: () => void }) 
     scope: board.scope,
     max_enroute_min: board.max_enroute_min ?? undefined,
     exempt_airborne: board.exempt_airborne,
+    aar_steps: board.aar_steps,
   });
 
   function submit() {
@@ -457,6 +537,7 @@ function ReviseForm({ board, onDone }: { board: GdpBoard; onDone: () => void }) 
           scope: form.scope,
           max_enroute_min: form.max_enroute_min ? Number(form.max_enroute_min) : null,
           exempt_airborne: form.exempt_airborne,
+          aar_steps: form.aar_steps,
         },
       },
       { onSuccess: onDone },
@@ -543,14 +624,18 @@ function ReviseForm({ board, onDone }: { board: GdpBoard; onDone: () => void }) 
           />
           Exempt airborne
         </label>
-        <div className="flex gap-2 pb-0.5">
-          <Button disabled={revise.isPending} onClick={submit}>
-            Save changes
-          </Button>
-          <Button variant="ghost" onClick={onDone}>
-            Cancel
-          </Button>
-        </div>
+      </div>
+      <StepsEditor
+        steps={form.aar_steps ?? []}
+        onChange={(s) => setForm((f) => ({ ...f, aar_steps: s }))}
+      />
+      <div className="flex gap-2">
+        <Button disabled={revise.isPending} onClick={submit}>
+          Save changes
+        </Button>
+        <Button variant="ghost" onClick={onDone}>
+          Cancel
+        </Button>
       </div>
     </div>
   );
@@ -598,7 +683,9 @@ function BoardView({
             <h3 className="font-mono text-lg font-semibold">{b.airport}</h3>
             <Badge variant={statusVariant(b.status)}>{b.status}</Badge>
             <span className="font-mono text-sm text-muted-foreground">
-              AAR {b.aar}/hr · {hhmmZulu(b.window_start)}z–{hhmmZulu(b.window_end)}z
+              AAR {b.aar}/hr
+              {b.aar_steps.map((s) => ` → ${s.aar} @${s.start_time}z`).join("")} ·{" "}
+              {hhmmZulu(b.window_start)}z–{hhmmZulu(b.window_end)}z
               {b.scope ? ` · ${b.scope}` : ""}
               {b.max_enroute_min ? ` · ≤${b.max_enroute_min}m` : ""}
             </span>

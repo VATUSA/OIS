@@ -60,18 +60,64 @@ pub struct Assignment {
     pub exempt_reason: Option<String>,
 }
 
-/// Assign control times to `inbounds` via Ration-By-Schedule, metering to `aar` across the
-/// program window `[window_start_ms, window_end_ms]`.
+/// A piecewise-constant AAR across the program window: a base rate from the window start plus
+/// optional step changes, each `(start_ms, aar)` taking effect from its start onward. The
+/// arrival-slot spacing at any instant is `3600s / rate_at(t)`.
+#[derive(Debug, Clone)]
+pub struct RateSchedule {
+    /// Sorted by start_ms; `[0]` is `(window_start, base_aar)`.
+    segments: Vec<(i64, i32)>,
+}
+
+impl RateSchedule {
+    /// A single flat rate for the whole window.
+    pub fn flat(aar: i32, window_start_ms: i64) -> Self {
+        Self {
+            segments: vec![(window_start_ms, aar.max(1))],
+        }
+    }
+
+    /// Base rate + step changes. Steps are clamped to `>= window_start` and `aar >= 1`, then
+    /// sorted; a step at the same instant as an earlier segment overrides it.
+    pub fn new(base_aar: i32, window_start_ms: i64, steps: &[(i64, i32)]) -> Self {
+        let mut segments = vec![(window_start_ms, base_aar.max(1))];
+        for &(start, aar) in steps {
+            segments.push((start.max(window_start_ms), aar.max(1)));
+        }
+        segments.sort_by_key(|(s, _)| *s); // stable → later-listed step wins at equal start
+        Self { segments }
+    }
+
+    /// The AAR in effect at time `t`.
+    pub fn rate_at(&self, t: i64) -> i32 {
+        let mut rate = self.segments[0].1;
+        for &(start, aar) in &self.segments {
+            if start <= t {
+                rate = aar;
+            } else {
+                break;
+            }
+        }
+        rate
+    }
+
+    /// Arrival-slot spacing (ms) at time `t`.
+    fn slot_ms_at(&self, t: i64) -> i64 {
+        (3_600_000_f64 / self.rate_at(t).max(1) as f64) as i64
+    }
+}
+
+/// Assign control times to `inbounds` via Ration-By-Schedule, metering to the (possibly
+/// time-varying) rate schedule across the program window `[window_start_ms, window_end_ms]`.
 pub fn ration_by_schedule(
     mut inbounds: Vec<Inbound>,
-    aar: i32,
+    rates: &RateSchedule,
     window_start_ms: i64,
     window_end_ms: i64,
     exempt_airborne: bool,
     scope: &[String],
     max_enroute_min: Option<i32>,
 ) -> Vec<Assignment> {
-    let slot_ms = (3_600_000_f64 / aar.max(1) as f64) as i64; // spacing between arrival slots
     inbounds.sort_by_key(|f| f.eta_ms); // earliest demand first
 
     // Next free arrival slot; advances as each flight (exempt or controlled) consumes one.
@@ -100,7 +146,7 @@ pub fn ration_by_schedule(
 
         // The slot this flight lands in — no earlier than its own ETA or the running cursor.
         let slot = cursor.max(f.eta_ms);
-        cursor = slot + slot_ms; // consume the slot either way
+        cursor = slot + rates.slot_ms_at(slot); // consume the slot at the current rate's spacing
 
         if exempt_reason.is_some() {
             // Exempt: arrives at its own ETA, no delay, no EDCT.
@@ -161,17 +207,17 @@ pub struct GdpDemand {
     pub level: String,
 }
 
-/// Bin every assignment (controlled + exempt, by its CTA) against per-bin capacity.
+/// Bin every assignment (controlled + exempt, by its CTA) against per-bin capacity. The
+/// capacity of each bin follows the rate schedule active at that bin's start.
 pub fn demand_bins(
     assignments: &[Assignment],
     window_start_ms: i64,
     window_end_ms: i64,
-    aar: i32,
+    rates: &RateSchedule,
 ) -> Vec<GdpDemand> {
     let bin_ms = BIN_MIN * 60_000;
     let span = (window_end_ms - window_start_ms).max(0);
     let bins = ((span as f64) / (bin_ms as f64)).ceil() as usize;
-    let cap = ((aar.max(1) as f64) * (BIN_MIN as f64) / 60.0).round() as i64;
 
     let mut counts = vec![0i64; bins];
     for a in assignments {
@@ -184,6 +230,9 @@ pub fn demand_bins(
         .into_iter()
         .enumerate()
         .map(|(i, count)| {
+            let bin_start = window_start_ms + (i as i64) * bin_ms;
+            let cap =
+                ((rates.rate_at(bin_start).max(1) as f64) * (BIN_MIN as f64) / 60.0).round() as i64;
             let level = if count as f64 <= cap as f64 * YELLOW_FACTOR {
                 "green"
             } else if count as f64 <= cap as f64 * RED_FACTOR {
@@ -192,8 +241,7 @@ pub fn demand_bins(
                 "red"
             };
             GdpDemand {
-                start: DateTime::from_timestamp_millis(window_start_ms + (i as i64) * bin_ms)
-                    .unwrap_or_else(Utc::now),
+                start: DateTime::from_timestamp_millis(bin_start).unwrap_or_else(Utc::now),
                 count,
                 cap,
                 level: level.to_string(),
@@ -269,6 +317,8 @@ pub struct GdpBoard {
     pub window_end: DateTime<Utc>,
     pub max_enroute_min: Option<i32>,
     pub exempt_airborne: bool,
+    /// Configured rate changes across the window (empty = flat AAR).
+    pub aar_steps: Vec<crate::models::AarStep>,
     /// True when control times are frozen (program published).
     pub published: bool,
     /// Controlled flights (frozen when published, advisory when draft), sorted by CTA.
@@ -306,7 +356,15 @@ mod tests {
             ground("C", 0, -30 * MIN),
             ground("D", 0, -30 * MIN),
         ];
-        let out = ration_by_schedule(inbounds, 30, 0, HOUR, true, &[], None);
+        let out = ration_by_schedule(
+            inbounds,
+            &RateSchedule::flat(30, 0),
+            0,
+            HOUR,
+            true,
+            &[],
+            None,
+        );
         let ctas: Vec<i64> = out.iter().map(|a| a.cta_ms / MIN).collect();
         assert_eq!(ctas, vec![0, 2, 4, 6]); // 2-min spacing
         let delays: Vec<i64> = out.iter().map(|a| a.delay_min).collect();
@@ -322,7 +380,15 @@ mod tests {
             ground("Y", 0, -30 * MIN),                  // eta 0, enroute 30min
         ];
         // AAR 30 (2-min slots). Y lands at 0, X wants 10min and is free → no delay for X.
-        let out = ration_by_schedule(inbounds, 30, 0, HOUR, true, &[], None);
+        let out = ration_by_schedule(
+            inbounds,
+            &RateSchedule::flat(30, 0),
+            0,
+            HOUR,
+            true,
+            &[],
+            None,
+        );
         let x = out.iter().find(|a| a.cs == "X").unwrap();
         assert_eq!(x.delay_min, 0);
         assert_eq!(x.cta_ms, 10 * MIN);
@@ -339,7 +405,15 @@ mod tests {
             eta_ms: 20 * MIN,
             etd_ms: None,
         }];
-        let out = ration_by_schedule(inbounds, 30, 0, HOUR, true, &[], None);
+        let out = ration_by_schedule(
+            inbounds,
+            &RateSchedule::flat(30, 0),
+            0,
+            HOUR,
+            true,
+            &[],
+            None,
+        );
         let a = &out[0];
         assert!(!a.controlled);
         assert_eq!(a.exempt_reason.as_deref(), Some(EXEMPT_AIRBORNE));
@@ -354,7 +428,15 @@ mod tests {
             ground("LATE", 2 * HOUR, 90 * MIN), // ETA past the 1h window end
             ground("FAR", 30 * MIN, 30 * MIN - 90 * MIN), // enroute 90min > tier 60
         ];
-        let out = ration_by_schedule(inbounds, 30, 0, HOUR, true, &[], Some(60));
+        let out = ration_by_schedule(
+            inbounds,
+            &RateSchedule::flat(30, 0),
+            0,
+            HOUR,
+            true,
+            &[],
+            Some(60),
+        );
         let late = out.iter().find(|a| a.cs == "LATE").unwrap();
         assert_eq!(late.exempt_reason.as_deref(), Some(EXEMPT_WINDOW));
         let far = out.iter().find(|a| a.cs == "FAR").unwrap();
@@ -368,7 +450,7 @@ mod tests {
         let scope = vec!["ZLA".to_string()];
         let out = ration_by_schedule(
             vec![ground("ZABGUY", 10 * MIN, 0)],
-            30,
+            &RateSchedule::flat(30, 0),
             0,
             HOUR,
             true,
@@ -381,7 +463,15 @@ mod tests {
         // In-scope flight is controlled.
         let mut inb = ground("ZLAGUY", 10 * MIN, 0);
         inb.dep_artcc = Some("ZLA".into());
-        let out2 = ration_by_schedule(vec![inb], 30, 0, HOUR, true, &scope, None);
+        let out2 = ration_by_schedule(
+            vec![inb],
+            &RateSchedule::flat(30, 0),
+            0,
+            HOUR,
+            true,
+            &scope,
+            None,
+        );
         assert!(out2[0].controlled);
     }
 
@@ -400,7 +490,15 @@ mod tests {
             },
             ground("GND", 0, -30 * MIN),
         ];
-        let out = ration_by_schedule(inbounds, 30, 0, HOUR, true, &[], None);
+        let out = ration_by_schedule(
+            inbounds,
+            &RateSchedule::flat(30, 0),
+            0,
+            HOUR,
+            true,
+            &[],
+            None,
+        );
         let gnd = out.iter().find(|a| a.cs == "GND").unwrap();
         assert_eq!(gnd.cta_ms, 2 * MIN); // bumped one slot behind the exempt arrival
         assert_eq!(gnd.delay_min, 2);
@@ -414,11 +512,32 @@ mod tests {
             ground("B", 2 * MIN, 0),
             ground("C", 3 * MIN, 0),
         ];
-        let out = ration_by_schedule(inbounds, 4, 0, HOUR, true, &[], None);
-        let bins = demand_bins(&out, 0, HOUR, 4);
+        let rates = RateSchedule::flat(4, 0);
+        let out = ration_by_schedule(inbounds, &rates, 0, HOUR, true, &[], None);
+        let bins = demand_bins(&out, 0, HOUR, &rates);
         assert_eq!(bins[0].cap, 1);
         assert!(bins[0].count >= 1);
         assert_eq!(bins.len(), 4); // 60min / 15min
+    }
+
+    #[test]
+    fn stepped_rate_tightens_spacing_after_change() {
+        // AAR 30 (2-min slots) until +30min, then AAR 60 (1-min slots). Four flights all
+        // demanding t=30min land at the post-step 1-min spacing.
+        let inbounds = (0..4)
+            .map(|i| ground(&format!("F{i}"), 30 * MIN, 0))
+            .collect::<Vec<_>>();
+        let rates = RateSchedule::new(30, 0, &[(30 * MIN, 60)]);
+        let out = ration_by_schedule(inbounds, &rates, 0, 2 * HOUR, true, &[], None);
+        let ctas: Vec<i64> = out.iter().map(|a| a.cta_ms / MIN).collect();
+        assert_eq!(ctas, vec![30, 31, 32, 33]); // 1-min spacing at AAR 60
+        // The rate function itself steps at +30min.
+        assert_eq!(rates.rate_at(29 * MIN), 30);
+        assert_eq!(rates.rate_at(30 * MIN), 60);
+        // Per-bin capacity follows the active rate: pre-step bins carry AAR 30, post-step 60.
+        let bins = demand_bins(&out, 0, 2 * HOUR, &rates);
+        assert_eq!(bins[0].cap, 8); // round(30 · 15/60)
+        assert_eq!(bins[2].cap, 15); // bin at +30min → round(60 · 15/60)
     }
 
     #[test]
@@ -453,7 +572,15 @@ mod tests {
             ground("B", 0, -30 * MIN),
             ground("C", 0, -30 * MIN),
         ];
-        let out = ration_by_schedule(inbounds, 30, 0, HOUR, true, &[], None); // delays 0,2,4
+        let out = ration_by_schedule(
+            inbounds,
+            &RateSchedule::flat(30, 0),
+            0,
+            HOUR,
+            true,
+            &[],
+            None,
+        ); // delays 0,2,4
         let s = program_stats(&out);
         assert_eq!(s.controlled, 3);
         assert_eq!(s.exempt, 0);

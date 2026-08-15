@@ -125,6 +125,7 @@ use utoipa::OpenApi;
         crate::models::GdpBody,
         crate::models::CreateGdpRequest,
         crate::models::UpdateGdpRequest,
+        crate::models::AarStep,
         crate::feed::gdp::GdpBoard,
         crate::feed::gdp::GdpFlightView,
         crate::feed::gdp::GdpDemand,

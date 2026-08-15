@@ -1186,6 +1186,16 @@ export interface paths {
 export type webhooks = Record<string, never>;
 export interface components {
     schemas: {
+        /**
+         * @description One rate change within a GDP window: the AAR takes effect at `start_time` (HHMM Zulu)
+         *     and holds until the next step or the window end.
+         */
+        AarStep: {
+            /** Format: int32 */
+            aar: number;
+            /** @description HHMM Zulu when this rate begins. */
+            start_time: string;
+        };
         /** @description Assignable roles + permission catalog + facilities for the access editor. */
         AccessCatalogBody: {
             /** @description ARTCCs a grant can be scoped to (drives the scope selector in the editor). */
@@ -1284,6 +1294,8 @@ export interface components {
         CreateGdpRequest: {
             /** Format: int32 */
             aar: number;
+            /** @description Optional rate changes across the window (empty = flat AAR). */
+            aar_steps?: components["schemas"]["AarStep"][];
             airport: string;
             end_time: string;
             exempt_airborne?: boolean;
@@ -1710,6 +1722,8 @@ export interface components {
         GdpBoard: {
             /** Format: int32 */
             aar: number;
+            /** @description Configured rate changes across the window (empty = flat AAR). */
+            aar_steps: components["schemas"]["AarStep"][];
             airport: string;
             demand: components["schemas"]["GdpDemand"][];
             end_time: string;
@@ -1740,6 +1754,8 @@ export interface components {
              * @description Airport Acceptance Rate (arrivals/hour) the program meters to.
              */
             aar: number;
+            /** @description Rate changes across the window (empty = flat AAR). */
+            aar_steps: components["schemas"]["AarStep"][];
             airport: string;
             /** @description HHMM Zulu program window end. */
             end_time: string;
@@ -2332,6 +2348,8 @@ export interface components {
         UpdateGdpRequest: {
             /** Format: int32 */
             aar: number;
+            /** @description Optional rate changes across the window (empty = flat AAR). */
+            aar_steps?: components["schemas"]["AarStep"][];
             end_time: string;
             exempt_airborne?: boolean;
             /**

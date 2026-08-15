@@ -273,12 +273,24 @@ pub struct GdpBody {
     /// Scope tier: only inbounds within this many enroute minutes are controllable; null = no limit.
     pub max_enroute_min: Option<i32>,
     pub exempt_airborne: bool,
+    /// Rate changes across the window (empty = flat AAR).
+    #[schema(value_type = Vec<AarStep>)]
+    pub aar_steps: sqlx::types::Json<Vec<AarStep>>,
     /// Lifecycle: draft | published | expired | cancelled.
     pub status: String,
     pub published_at: Option<DateTime<Utc>>,
     pub updated_at: DateTime<Utc>,
     /// Display name of whoever last touched the program.
     pub updated_by: Option<String>,
+}
+
+/// One rate change within a GDP window: the AAR takes effect at `start_time` (HHMM Zulu)
+/// and holds until the next step or the window end.
+#[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
+pub struct AarStep {
+    /// HHMM Zulu when this rate begins.
+    pub start_time: String,
+    pub aar: i32,
 }
 
 #[derive(Debug, Deserialize, ToSchema)]
@@ -293,6 +305,9 @@ pub struct CreateGdpRequest {
     pub max_enroute_min: Option<i32>,
     #[serde(default = "default_true")]
     pub exempt_airborne: bool,
+    /// Optional rate changes across the window (empty = flat AAR).
+    #[serde(default)]
+    pub aar_steps: Vec<AarStep>,
 }
 
 /// Revise a GDP — a full replace of its mutable fields (the airport can't change).
@@ -310,6 +325,9 @@ pub struct UpdateGdpRequest {
     pub max_enroute_min: Option<i32>,
     #[serde(default = "default_true")]
     pub exempt_airborne: bool,
+    /// Optional rate changes across the window (empty = flat AAR).
+    #[serde(default)]
+    pub aar_steps: Vec<AarStep>,
 }
 
 fn default_true() -> bool {
