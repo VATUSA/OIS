@@ -468,6 +468,22 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/v1/flow/atc": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get: operations["list_atc"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/v1/flow/counts": {
         parameters: {
             query?: never;
@@ -1250,6 +1266,54 @@ export interface components {
             /** Format: date-time */
             updated_at: string;
             updated_by?: string | null;
+        };
+        /** @description One staffed airport and its ground-level positions (DEL/GND/TWR/ATIS), for the badge stack. */
+        AtcAirport: {
+            icao: string;
+            /** Format: double */
+            lat: number;
+            /** Format: double */
+            lon: number;
+            positions: components["schemas"]["AtcPosition"][];
+        };
+        /**
+         * @description A TRACON/approach area: the matched SimAware polygon (or a circle fallback) plus the
+         *     positions working it. `rings` are outer rings in `[lat, lon]`; empty when `circle` is set.
+         */
+        AtcArea: {
+            /** @description Fallback center `[lat, lon]` for an approach with no matching polygon. */
+            circle?: number[] | null;
+            id: string;
+            /** @description Preferred label anchor `[lat, lon]`. */
+            label?: number[] | null;
+            name?: string | null;
+            positions: components["schemas"]["AtcPosition"][];
+            rings: number[][][];
+        };
+        /**
+         * @description Everything the ATC layer needs: airport ground stations (badges), TRACON areas, and
+         *     center positions. TRACON polygons are inlined (only the active ones); centers reference
+         *     an ARTCC id the client already has boundary geometry for.
+         */
+        AtcBoard: {
+            airports: components["schemas"]["AtcAirport"][];
+            /** Format: date-time */
+            as_of: string;
+            centers: components["schemas"]["AtcCenter"][];
+            tracons: components["schemas"]["AtcArea"][];
+        };
+        /** @description A center (ARTCC) position. The client shades its own bundled ARTCC polygon by `id`. */
+        AtcCenter: {
+            id: string;
+            positions: components["schemas"]["AtcPosition"][];
+        };
+        /** @description A single ATC position. `kind` is one of DEL/GND/TWR/APP/CTR/FSS/ATIS. */
+        AtcPosition: {
+            /** @description ATIS broadcast letter, only for `kind == "ATIS"`. */
+            atis_code?: string | null;
+            callsign: string;
+            frequency: string;
+            kind: string;
         };
         /** @description One audit-log entry (the "recorded on this controller's log" trail). */
         AuditLogEntry: {
@@ -3690,6 +3754,25 @@ export interface operations {
                     [name: string]: unknown;
                 };
                 content?: never;
+            };
+        };
+    };
+    list_atc: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["AtcBoard"];
+                };
             };
         };
     };

@@ -13,6 +13,35 @@ pub struct VatsimData {
     pub pilots: Vec<Pilot>,
     #[serde(default)]
     pub prefiles: Vec<Prefile>,
+    #[serde(default)]
+    pub controllers: Vec<Controller>,
+    #[serde(default)]
+    pub atis: Vec<Atis>,
+}
+
+/// An online ATC position. `facility` is the datafeed enum:
+/// 0 OBS · 1 FSS · 2 DEL · 3 GND · 4 TWR · 5 APP · 6 CTR.
+#[derive(Debug, Clone, Deserialize)]
+pub struct Controller {
+    pub callsign: String,
+    #[serde(default)]
+    pub frequency: String,
+    #[serde(default)]
+    pub facility: i32,
+    #[serde(default)]
+    pub rating: i32,
+}
+
+/// An online ATIS (its own datafeed array). `atis_code` is the broadcast letter.
+#[derive(Debug, Clone, Deserialize)]
+pub struct Atis {
+    pub callsign: String,
+    #[serde(default)]
+    pub frequency: String,
+    #[serde(default)]
+    pub atis_code: Option<String>,
+    #[serde(default)]
+    pub text_atis: Option<Vec<String>>,
 }
 
 #[derive(Debug, Default, Deserialize)]

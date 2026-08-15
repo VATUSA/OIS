@@ -25,6 +25,7 @@ pub async fn run() -> Result<(), Box<dyn std::error::Error>> {
 
     feed::spawn_poller(state.feed.clone());
     feed::facilities::spawn_refresh(state.facilities.clone());
+    feed::tracon::spawn_refresh(state.tracons.clone());
     jobs::spawn_nav_refresh(state.nav.clone(), state.nav_refreshed.clone());
     jobs::spawn_winds_refresh(
         state.feed.clone(),

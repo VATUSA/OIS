@@ -690,6 +690,64 @@ pub struct TrafficAircraft {
     pub actype: String,
 }
 
+// --- Online ATC (the map "ATC" layer) ---
+
+/// Everything the ATC layer needs: airport ground stations (badges), TRACON areas, and
+/// center positions. TRACON polygons are inlined (only the active ones); centers reference
+/// an ARTCC id the client already has boundary geometry for.
+#[derive(Debug, Serialize, ToSchema)]
+pub struct AtcBoard {
+    pub airports: Vec<AtcAirport>,
+    pub tracons: Vec<AtcArea>,
+    pub centers: Vec<AtcCenter>,
+    pub as_of: DateTime<Utc>,
+}
+
+/// One staffed airport and its ground-level positions (DEL/GND/TWR/ATIS), for the badge stack.
+#[derive(Debug, Serialize, ToSchema)]
+pub struct AtcAirport {
+    pub icao: String,
+    pub lat: f64,
+    pub lon: f64,
+    pub positions: Vec<AtcPosition>,
+}
+
+/// A single ATC position. `kind` is one of DEL/GND/TWR/APP/CTR/FSS/ATIS.
+#[derive(Debug, Serialize, ToSchema)]
+pub struct AtcPosition {
+    pub kind: String,
+    pub callsign: String,
+    pub frequency: String,
+    /// ATIS broadcast letter, only for `kind == "ATIS"`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub atis_code: Option<String>,
+}
+
+/// A TRACON/approach area: the matched SimAware polygon (or a circle fallback) plus the
+/// positions working it. `rings` are outer rings in `[lat, lon]`; empty when `circle` is set.
+#[derive(Debug, Serialize, ToSchema)]
+pub struct AtcArea {
+    pub id: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub name: Option<String>,
+    /// Preferred label anchor `[lat, lon]`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub label: Option<[f64; 2]>,
+    pub positions: Vec<AtcPosition>,
+    #[schema(value_type = Vec<Vec<[f64; 2]>>)]
+    pub rings: Vec<Vec<[f64; 2]>>,
+    /// Fallback center `[lat, lon]` for an approach with no matching polygon.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub circle: Option<[f64; 2]>,
+}
+
+/// A center (ARTCC) position. The client shades its own bundled ARTCC polygon by `id`.
+#[derive(Debug, Serialize, ToSchema)]
+pub struct AtcCenter {
+    pub id: String,
+    pub positions: Vec<AtcPosition>,
+}
+
 // --- TMU rate programs ---
 
 /// One per-gate restriction inside a program: an arrival fix/STAR with its own spacing.

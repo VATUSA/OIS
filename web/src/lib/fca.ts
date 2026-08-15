@@ -7,6 +7,11 @@ import {ois} from "./api";
 export type Fca = components["schemas"]["FcaBody"];
 export type UpsertFca = components["schemas"]["UpsertFcaRequest"];
 export type TrafficAircraft = components["schemas"]["TrafficAircraft"];
+export type AtcBoard = components["schemas"]["AtcBoard"];
+export type AtcAirport = components["schemas"]["AtcAirport"];
+export type AtcArea = components["schemas"]["AtcArea"];
+export type AtcCenter = components["schemas"]["AtcCenter"];
+export type AtcPosition = components["schemas"]["AtcPosition"];
 export type FcaFlight = components["schemas"]["FcaFlight"];
 export type AircraftRoute = components["schemas"]["AircraftRoute"];
 export type DataStatus = components["schemas"]["DataStatus"];
@@ -168,6 +173,21 @@ export function useTraffic() {
       return data;
     },
     refetchInterval: 15_000,
+  });
+}
+
+/** Online ATC (badges + TRACON areas + centers) for the map ATC layer. Only polls while
+ * the layer is enabled; the geometry is heavier than traffic so it refreshes every 30s. */
+export function useAtc(enabled: boolean) {
+  return useQuery({
+    queryKey: ["flow-atc"],
+    queryFn: async () => {
+      const { data, error } = await ois.GET("/api/v1/flow/atc");
+      if (error || !data) throw new Error("failed to load ATC");
+      return data;
+    },
+    enabled,
+    refetchInterval: 30_000,
   });
 }
 

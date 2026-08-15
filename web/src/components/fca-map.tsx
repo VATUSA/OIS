@@ -2,7 +2,21 @@ import {useCallback, useEffect, useMemo, useRef, useState} from "react";
 import L from "leaflet";
 import "leaflet/dist/leaflet.css";
 import {Button, ConfirmButton, Input, useTheme, useToast} from "@ois/ui";
-import {ChevronDown, Home, Maximize2, Menu, Minus, Pencil, Plane, Plus, RefreshCw, Tag, Trash2, X,} from "lucide-react";
+import {
+  ChevronDown,
+  Home,
+  Maximize2,
+  Menu,
+  Minus,
+  Pencil,
+  Plane,
+  Plus,
+  RadioTower,
+  RefreshCw,
+  Tag,
+  Trash2,
+  X,
+} from "lucide-react";
 
 import {aircraftIconUrl} from "@/lib/aircraft-icons";
 import {aircraftCanvasLayer, type AircraftCanvasLayer, type CanvasAircraft,} from "@/components/aircraft-canvas-layer";
@@ -12,11 +26,14 @@ import {useMe} from "@/lib/auth";
 import {hasPermission} from "@/lib/permissions";
 import {
   type AircraftRoute,
+  type AtcAirport,
+  type AtcPosition,
   type Fca,
   type FcaFlight,
   toUpsert,
   type UpsertFca,
   useAircraftRoute,
+  useAtc,
   useCreateFca,
   useDataStatus,
   useDeleteFca,
@@ -322,6 +339,91 @@ function aircraftTip(ac: {
     <div style="font:12px ui-monospace,monospace;color:#94a3b8">FL${Math.round(ac.alt / 100)} ${ac.gs}kt</div>`;
 }
 
+// --- Online ATC layer ---
+
+/** Per-facility colours for ATC badges/areas (my own palette; readable on the dark map). */
+const ATC_COLORS: Record<string, string> = {
+  DEL: "#60a5fa", // blue
+  GND: "#4ade80", // green
+  TWR: "#f87171", // red
+  APP: "#fb923c", // orange
+  CTR: "#2dd4bf", // teal
+  ATIS: "#facc15", // yellow
+};
+/** Facility letter shown in the badge pill. */
+function atcLetter(kind: string): string {
+  return kind === "ATIS" ? "A" : kind[0];
+}
+
+/** A centered stack of colored facility pills (DEL/GND/TWR/ATIS) at a staffed airport. */
+function atcBadgeIcon(ap: AtcAirport): L.DivIcon {
+  const kinds = ["DEL", "GND", "TWR", "ATIS"].filter((k) =>
+    ap.positions.some((p) => p.kind === k),
+  );
+  const pills = kinds
+    .map((k) => {
+      const c = ATC_COLORS[k] ?? "#94a3b8";
+      return `<span style="display:inline-flex;align-items:center;justify-content:center;width:14px;height:14px;background:${c};color:#0a0a0a;font:800 10px ui-monospace,monospace;border-radius:3px;box-shadow:0 0 0 1px rgba(0,0,0,.5)">${atcLetter(k)}</span>`;
+    })
+    .join("");
+  const w = kinds.length * 15;
+  return L.divIcon({
+    className: "",
+    html: `<div style="display:flex;gap:1px">${pills}</div>`,
+    iconSize: [w, 14],
+    iconAnchor: [w / 2, 7],
+  });
+}
+
+/** Tooltip listing every position at an airport with its frequency. */
+function atcAirportTip(ap: AtcAirport): string {
+  const rows = ap.positions
+    .map((p) => {
+      const c = ATC_COLORS[p.kind] ?? "#94a3b8";
+      const name =
+        p.kind === "ATIS"
+          ? `ATIS${p.atis_code ? " " + p.atis_code : ""}`
+          : p.callsign;
+      return `<div style="font:12px ui-monospace,monospace;color:#cbd5e1"><span style="color:${c};font-weight:700">${p.kind}</span> ${name} · ${p.frequency}</div>`;
+    })
+    .join("");
+  return `<div style="font:700 13px ui-monospace,monospace;color:#e2e8f0">${ap.icao}</div>${rows}`;
+}
+
+/** Tooltip for a TRACON/center area: header id/name + each position + frequency. */
+function atcAreaTip(id: string, name: string | null | undefined, positions: AtcPosition[], color: string): string {
+  const head = `<div style="font:700 13px ui-monospace,monospace"><span style="color:${color}">${id}</span>${name ? ` <span style="color:#94a3b8">${name}</span>` : ""}</div>`;
+  const rows = positions
+    .map(
+      (p) =>
+        `<div style="font:12px ui-monospace,monospace;color:#cbd5e1">${p.callsign} · ${p.frequency}</div>`,
+    )
+    .join("");
+  return head + rows;
+}
+
+/** A small label pill (TRACON id / ARTCC id) anchored on an area. */
+function atcAreaLabel(text: string, color: string): L.DivIcon {
+  return L.divIcon({
+    className: "",
+    html: `<span style="display:inline-block;padding:1px 5px;background:rgba(10,10,10,.85);color:${color};font:700 11px ui-monospace,monospace;border-radius:4px;box-shadow:0 0 0 1px ${color}66">${text}</span>`,
+    iconSize: [0, 0],
+  });
+}
+
+/** Centroid `[lat, lon]` of a polygon's outer ring (rings already in `[lat, lon]`). */
+function ringsCentroid(rings: number[][][]): [number, number] | null {
+  const outer = rings[0];
+  if (!outer || outer.length === 0) return null;
+  let slat = 0;
+  let slon = 0;
+  for (const [lat, lon] of outer) {
+    slat += lat;
+    slon += lon;
+  }
+  return [slat / outer.length, slon / outer.length];
+}
+
 /**
  * The Flow Constrained Area map. Shared by the controller tool (`/ops/fca`,
  * fully editable per the viewer's permissions) and the public advisories
@@ -393,6 +495,23 @@ export function FcaMap({
     }
   }, [planeIcons]);
 
+  // Online ATC layer toggle (persisted). Only polls the ATC endpoint while enabled.
+  const [showAtc, setShowAtc] = useState(() => {
+    try {
+      return localStorage.getItem("fca.atc") === "1";
+    } catch {
+      return false;
+    }
+  });
+  useEffect(() => {
+    try {
+      localStorage.setItem("fca.atc", showAtc ? "1" : "0");
+    } catch {
+      /* non-fatal */
+    }
+  }, [showAtc]);
+  const atc = useAtc(showAtc);
+
   const fcaTraffic = useFcaTraffic(draft ? null : selectedId);
   const counts = useFcaCounts();
   const aircraftRoute = useAircraftRoute(routeCallsign);
@@ -411,6 +530,10 @@ export function FcaMap({
   // paint even when their data resolved before the map mounted.
   const [mapReady, setMapReady] = useState(false);
   const boundaryLayer = useRef<L.LayerGroup | null>(null);
+  // Online ATC: shaded center/TRACON areas (below) + airport badge markers (above).
+  const atcCenterLayer = useRef<L.LayerGroup | null>(null);
+  const atcTraconLayer = useRef<L.LayerGroup | null>(null);
+  const atcBadgeLayer = useRef<L.LayerGroup | null>(null);
   // Live traffic renders to a single canvas (not ~1000 DOM markers) for smooth zoom/pan.
   const aircraftCanvasRef = useRef<AircraftCanvasLayer | null>(null);
   const acTooltipRef = useRef<L.Tooltip | null>(null);
@@ -497,6 +620,9 @@ export function FcaMap({
 
     // ARTCC boundaries render below everything, redrawn per visible world copy in an effect.
     boundaryLayer.current = L.layerGroup().addTo(map);
+    // ATC shaded areas sit just above boundaries (below FCAs/routes/traffic).
+    atcCenterLayer.current = L.layerGroup().addTo(map);
+    atcTraconLayer.current = L.layerGroup().addTo(map);
     routeLayer.current = L.layerGroup().addTo(map);
     namedRouteLayer.current = L.layerGroup().addTo(map);
     fcaLayer.current = L.layerGroup().addTo(map);
@@ -525,6 +651,8 @@ export function FcaMap({
     acLayer.addTo(map);
     aircraftCanvasRef.current = acLayer as AircraftCanvasLayer;
     matchedLayer.current = L.layerGroup().addTo(map);
+    // Airport ATC badges are markers, so they sit above the traffic canvas.
+    atcBadgeLayer.current = L.layerGroup().addTo(map);
     draftLayer.current = L.layerGroup().addTo(map);
 
     map.on("click", (e: L.LeafletMouseEvent) => {
@@ -630,6 +758,139 @@ export function FcaMap({
       }
     }
   }, [offsetsKey, mapReady]);
+
+  // ATC — center (ARTCC) areas: shade the bundled boundary polygon for each online center.
+  useEffect(() => {
+    const layer = atcCenterLayer.current;
+    if (!layer) return;
+    layer.clearLayers();
+    if (!showAtc || !mapReady) return;
+    const centers = atc.data?.centers ?? [];
+    if (centers.length === 0) return;
+    const fc = boundariesGeo as GeoJSON.FeatureCollection;
+    const byId = new Map<string, GeoJSON.Feature>();
+    for (const f of fc.features) {
+      const id = String(f.properties?.id ?? "").toUpperCase();
+      if (id) byId.set(id, f);
+    }
+    const offsets = offsetsKey.split(",").map(Number);
+    const color = ATC_COLORS.CTR;
+    for (const c of centers) {
+      const feat = byId.get(c.id.toUpperCase());
+      if (!feat) continue; // unknown / non-US center — no bundled polygon
+      const geom = feat.geometry;
+      const polys: number[][][][] =
+        geom.type === "Polygon"
+          ? [geom.coordinates]
+          : geom.type === "MultiPolygon"
+            ? geom.coordinates
+            : [];
+      if (polys.length === 0) continue;
+      const tip = atcAreaTip(c.id, null, c.positions, color);
+      for (const off of offsets) {
+        for (const poly of polys) {
+          const outer = poly[0].map(([lon, lat]) => [lat, lon + off] as LatLng);
+          L.polygon(outer, {
+            color,
+            weight: 1.5,
+            opacity: 0.55,
+            fillColor: color,
+            fillOpacity: 0.08,
+          })
+            .bindTooltip(tip, { sticky: true, className: "fca-tip" })
+            .addTo(layer);
+        }
+        const first = polys[0][0];
+        let sx = 0;
+        let sy = 0;
+        for (const [lon, lat] of first) {
+          sx += lon;
+          sy += lat;
+        }
+        L.marker([sy / first.length, sx / first.length + off], {
+          icon: atcAreaLabel(c.id, color),
+          interactive: false,
+          keyboard: false,
+        }).addTo(layer);
+      }
+    }
+  }, [atc.data, offsetsKey, mapReady, showAtc]);
+
+  // ATC — TRACON/approach areas: the matched SimAware polygon (or a circle fallback).
+  useEffect(() => {
+    const layer = atcTraconLayer.current;
+    if (!layer) return;
+    layer.clearLayers();
+    if (!showAtc || !mapReady) return;
+    const tracons = atc.data?.tracons ?? [];
+    const offsets = offsetsKey.split(",").map(Number);
+    const color = ATC_COLORS.APP;
+    for (const t of tracons) {
+      const tip = atcAreaTip(t.id, t.name, t.positions, color);
+      const anchor =
+        (t.label as [number, number] | null) ??
+        (t.circle as [number, number] | null) ??
+        ringsCentroid(t.rings);
+      for (const off of offsets) {
+        if (t.circle) {
+          L.circle([t.circle[0], t.circle[1] + off], {
+            radius: 46300, // ~25 NM, VATSIM-Radar-style fallback
+            color,
+            weight: 1.5,
+            opacity: 0.6,
+            fillColor: color,
+            fillOpacity: 0.06,
+          })
+            .bindTooltip(tip, { sticky: true, className: "fca-tip" })
+            .addTo(layer);
+        } else {
+          for (const ring of t.rings) {
+            const latlngs = ring.map(([lat, lon]) => [lat, lon + off] as LatLng);
+            L.polygon(latlngs, {
+              color,
+              weight: 1.5,
+              opacity: 0.7,
+              fillColor: color,
+              fillOpacity: 0.1,
+            })
+              .bindTooltip(tip, { sticky: true, className: "fca-tip" })
+              .addTo(layer);
+          }
+        }
+        if (anchor) {
+          L.marker([anchor[0], anchor[1] + off], {
+            icon: atcAreaLabel(t.id, color),
+            interactive: false,
+            keyboard: false,
+          }).addTo(layer);
+        }
+      }
+    }
+  }, [atc.data, offsetsKey, mapReady, showAtc]);
+
+  // ATC — airport badges (DEL/GND/TWR/ATIS pill stacks) at each staffed airport.
+  useEffect(() => {
+    const layer = atcBadgeLayer.current;
+    if (!layer) return;
+    layer.clearLayers();
+    if (!showAtc || !mapReady) return;
+    const airports = atc.data?.airports ?? [];
+    const offsets = offsetsKey.split(",").map(Number);
+    for (const ap of airports) {
+      for (const off of offsets) {
+        L.marker([ap.lat, ap.lon + off], {
+          icon: atcBadgeIcon(ap),
+          keyboard: false,
+        })
+          .bindTooltip(atcAirportTip(ap), {
+            direction: "top",
+            offset: [0, -8],
+            className: "fca-tip",
+          })
+          .addTo(layer);
+      }
+    }
+  }, [atc.data, offsetsKey, mapReady, showAtc]);
 
   // Live aircraft — hover for details, click to plot the route. Aircraft matched to
   // the selected FCA are excluded here and drawn (tinted + numbered) by the matched layer
@@ -1364,6 +1625,22 @@ export function FcaMap({
               className={`size-3.5 ${planeIcons ? "text-primary" : "text-muted-foreground"}`}
             />
             {planeIcons ? "Aircraft icons" : "Triangles"}
+          </button>
+          <button
+            type="button"
+            onClick={() => setShowAtc((v) => !v)}
+            title="Toggle online ATC (positions, approach & center areas)"
+            aria-pressed={showAtc}
+            className={`flex items-center gap-1.5 rounded-lg border px-2.5 py-1.5 text-xs font-medium shadow-lg backdrop-blur transition-colors ${
+              showAtc
+                ? "border-primary/60 bg-primary/15 text-primary"
+                : "bg-background/95 hover:bg-muted"
+            }`}
+          >
+            <RadioTower
+              className={`size-3.5 ${showAtc ? "text-primary" : "text-muted-foreground"}`}
+            />
+            ATC
           </button>
           {/* Fuzzy find a specific flight, fly to it, and plot its route. */}
           <FlightSearch

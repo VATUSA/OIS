@@ -8,7 +8,7 @@ use sqlx::{PgPool, postgres::PgPoolOptions};
 
 use crate::feed::{
     self, FeedState, airspace::Boundaries, facilities::FacilityState, nav::NavData,
-    runway_db::RunwayDb, winds::Winds,
+    runway_db::RunwayDb, tracon::TraconState, winds::Winds,
 };
 
 /// Lean application state: the DB pool (optional so the process can boot without a
@@ -24,6 +24,9 @@ pub struct AppState {
     pub nav: Arc<ArcSwap<NavData>>,
     /// ARTCC boundary polygons, for FCA scope filtering (immutable, compile-time bundled).
     pub airspace: Arc<Boundaries>,
+    /// SimAware TRACON boundaries for the ATC layer. Starts empty, refreshed daily
+    /// (`feed::tracon::spawn_refresh`); behind `ArcSwap` for lock-free reads.
+    pub tracons: TraconState,
     /// Runway ends per US airport, for the Runway Balancer (immutable, compile-time bundled).
     pub runways: Arc<RunwayDb>,
     /// Winds aloft, for ETA correction. Starts empty (still air) and is hot-swapped by
@@ -40,6 +43,7 @@ impl AppState {
     pub async fn from_env() -> Result<Self, sqlx::Error> {
         let feed = feed::new_state();
         let facilities = feed::facilities::new_state();
+        let tracons = feed::tracon::new_state();
         let nav = Arc::new(ArcSwap::from_pointee(NavData::load()));
         let airspace = Arc::new(Boundaries::load());
         let runways = Arc::new(RunwayDb::load());
@@ -62,6 +66,7 @@ impl AppState {
                 db: Some(pool),
                 feed,
                 facilities,
+                tracons,
                 nav,
                 airspace,
                 runways,
@@ -76,6 +81,7 @@ impl AppState {
             db: None,
             feed,
             facilities,
+            tracons,
             nav,
             airspace,
             runways,
@@ -91,6 +97,7 @@ impl AppState {
             db: None,
             feed: feed::new_state(),
             facilities: feed::facilities::new_state(),
+            tracons: feed::tracon::new_state(),
             nav: Arc::new(ArcSwap::from_pointee(NavData::default())),
             airspace: Arc::new(Boundaries::load()),
             runways: Arc::new(RunwayDb::load()),
