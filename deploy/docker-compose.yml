@@ -1,0 +1,55 @@
+# Full-stack deployment for a dev / staging / prod box: Postgres + backend + web (nginx).
+# Pulls the images built by .github/workflows/build-images.yml. Copy deploy/.env.example to
+# .env, fill it in, then: `docker compose -f deploy/docker-compose.yml up -d`.
+#
+# The web container terminates plain HTTP on WEB_PORT and proxies /api to the backend; put a
+# TLS terminator (Caddy/Traefik/Cloudflare/your LB) in front of it for public HTTPS.
+
+services:
+  postgres:
+    image: postgres:17
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:-ois}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?set POSTGRES_PASSWORD in .env}
+      POSTGRES_DB: ${POSTGRES_DB:-ois}
+    volumes:
+      - ois_pg:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-ois}"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+    restart: unless-stopped
+
+  backend:
+    image: ${REGISTRY:-ghcr.io}/${IMAGE_REPO:?set IMAGE_REPO, e.g. your-org/ois}-backend:${IMAGE_TAG:-latest}
+    depends_on:
+      postgres:
+        condition: service_healthy
+    environment:
+      DATABASE_URL: postgres://${POSTGRES_USER:-ois}:${POSTGRES_PASSWORD}@postgres:5432/${POSTGRES_DB:-ois}
+      BIND_ADDR: 0.0.0.0:3000
+      # Behind a TLS terminator → Secure cookies.
+      COOKIE_SECURE: ${COOKIE_SECURE:-1}
+      # The public origin (used for the OAuth return_to allowlist + redirect URI).
+      CORS_ALLOWED_ORIGINS: ${PUBLIC_URL}
+      VATSIM_CLIENT_ID: ${VATSIM_CLIENT_ID}
+      VATSIM_CLIENT_SECRET: ${VATSIM_CLIENT_SECRET}
+      VATSIM_REDIRECT_URI: ${PUBLIC_URL}/api/v1/auth/vatsim/callback
+      OIS_SERVER_ADMIN_CID: ${OIS_SERVER_ADMIN_CID:-}
+      # VATUSA sync (optional; leave blank to disable).
+      VATUSA_API_KEY: ${VATUSA_API_KEY:-}
+      OIS_PUBLIC_URL: ${PUBLIC_URL:-}
+    restart: unless-stopped
+
+  web:
+    image: ${REGISTRY:-ghcr.io}/${IMAGE_REPO:?set IMAGE_REPO, e.g. your-org/ois}-web:${IMAGE_TAG:-latest}
+    depends_on: [backend]
+    environment:
+      BACKEND_URL: http://backend:3000
+    ports:
+      - "${WEB_PORT:-8080}:80"
+    restart: unless-stopped
+
+volumes:
+  ois_pg:

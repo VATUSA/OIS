@@ -1,0 +1,15 @@
+# Keep the build context small and reproducible. Migrations are NOT ignored — the backend
+# embeds them at compile time (sqlx::migrate!).
+**/target
+**/node_modules
+**/dist
+.git
+.github
+.claude
+docs
+*.md
+.env
+.env.*
+**/.env
+**/.env.*
+!.env.example
