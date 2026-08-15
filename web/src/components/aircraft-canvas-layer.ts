@@ -51,6 +51,9 @@ const AircraftCanvasLayer = L.Layer.extend({
     this._exclude = new Set<string>();
     this._planeIcons = false;
     this._positions = [] as { ac: CanvasAircraft; x: number; y: number }[];
+    // Map state at the last full repaint; the zoom transform is measured against it.
+    this._drawnZoom = null as number | null;
+    this._drawnBounds = null as L.LatLngBounds | null;
   },
 
   /** Replace the aircraft set. `exclude` are callsigns drawn by another layer (matched). */
@@ -87,6 +90,9 @@ const AircraftCanvasLayer = L.Layer.extend({
     map.getPane("aircraftCanvas")!.appendChild(canvas);
 
     map.on("moveend zoomend viewreset resize", this._reset, this);
+    // `zoom` fires every frame of a continuous (smooth-wheel) zoom; `zoomanim` fires once
+    // for Leaflet's built-in animated zoom. Both keep the canvas glued to the map.
+    map.on("zoom", this._onZoom, this);
     if (animated) map.on("zoomanim", this._animateZoom, this);
     map.on("click", this._onClick, this);
     map.on("mousemove", this._onMove, this);
@@ -96,6 +102,7 @@ const AircraftCanvasLayer = L.Layer.extend({
   onRemove(this: any, map: L.Map) {
     L.DomUtil.remove(this._canvas);
     map.off("moveend zoomend viewreset resize", this._reset, this);
+    map.off("zoom", this._onZoom, this);
     map.off("zoomanim", this._animateZoom, this);
     map.off("click", this._onClick, this);
     map.off("mousemove", this._onMove, this);
@@ -107,18 +114,32 @@ const AircraftCanvasLayer = L.Layer.extend({
     if (this._canvas.height !== size.y) this._canvas.height = size.y;
     const topLeft = this._map.containerPointToLayerPoint([0, 0]);
     L.DomUtil.setPosition(this._canvas, topLeft);
+    // Capture the state the pixels were drawn at, so the zoom transform is measured from it.
+    this._drawnZoom = this._map.getZoom();
+    this._drawnBounds = this._map.getBounds();
     this._redraw();
   },
 
-  // Mirror L.Canvas: scale + shift the already-drawn canvas to track the zoom animation.
-  _animateZoom(this: any, e: L.ZoomAnimEvent) {
-    const scale = this._map.getZoomScale(e.zoom, this._map.getZoom());
-    const offset = (this._map as any)._latLngBoundsToNewLayerBounds(
-      this._map.getBounds(),
-      e.zoom,
-      e.center,
+  // Scale + shift the already-drawn canvas to track a zoom in progress, measuring against the
+  // state at the last repaint (mirrors how L.Canvas / GridLayer follow the same events).
+  _applyZoomTransform(this: any, zoom: number, center: L.LatLng) {
+    if (this._drawnBounds == null || this._drawnZoom == null) return;
+    const map = this._map;
+    const scale = map.getZoomScale(zoom, this._drawnZoom);
+    const offset = (map as any)._latLngBoundsToNewLayerBounds(
+      this._drawnBounds,
+      zoom,
+      center,
     ).min;
     L.DomUtil.setTransform(this._canvas, offset, scale);
+  },
+
+  _animateZoom(this: any, e: L.ZoomAnimEvent) {
+    this._applyZoomTransform(e.zoom, e.center);
+  },
+
+  _onZoom(this: any) {
+    this._applyZoomTransform(this._map.getZoom(), this._map.getCenter());
   },
 
   // World-copy longitude offsets covering the current view (so aircraft repeat as you scroll).
