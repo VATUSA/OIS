@@ -364,6 +364,9 @@ export function FcaPage() {
   // Which world copies are visible, as a stable key ("-360,0,360"). Bumped on pan/zoom so the
   // overlay layers re-draw themselves onto every visible copy of the world.
   const [offsetsKey, setOffsetsKey] = useState("0");
+  // Bumped whenever the map settles (pan/zoom end) so the aircraft layer can
+  // re-cull to the visible bounds — only markers on screen are kept in the DOM.
+  const [viewVersion, setViewVersion] = useState(0);
   // Per-user: render live traffic as VATSIM Radar type silhouettes vs. plain
   // triangles. Persisted locally; defaults to triangles.
   const [planeIcons, setPlaneIcons] = useState(() => {
@@ -434,6 +437,17 @@ export function FcaPage() {
     const map = L.map(node, {
       zoomControl: false,
       doubleClickZoom: false,
+      // Smooth, continuous zoom (VATSIM Radar feel) instead of snapping to
+      // integer levels: settle at any fractional zoom, small button/key steps,
+      // and a gentler wheel so the trackpad glides rather than jumps.
+      zoomSnap: 0,
+      zoomDelta: 0.5,
+      wheelPxPerZoomLevel: 36,
+      wheelDebounceTime: 10,
+      // Render vector overlays (ARTCC boundaries, FCA/route lines, fix dots) on
+      // a canvas rather than one SVG node each — far cheaper to pan/zoom with
+      // hundreds of paths on screen.
+      preferCanvas: true,
     }).setView([38.5, -77], 6);
     L.control.zoom({ position: "topright" }).addTo(map);
     node.style.background = MAP_BG[resolvedTheme];
@@ -474,6 +488,10 @@ export function FcaPage() {
       setOffsetsKey((cur) => (cur === key ? cur : key));
     };
     map.on("moveend zoomend", syncOffsets);
+    // Re-cull the aircraft layer whenever the view settles — including `resize`,
+    // so a container that lays out late (0×0 at first paint) still populates once
+    // it gets real dimensions, not only after the first pan/zoom.
+    map.on("moveend zoomend resize", () => setViewVersion((v) => v + 1));
     syncOffsets();
 
     mapRef.current = map;
@@ -561,14 +579,21 @@ export function FcaPage() {
   // every visible world copy so they persist as you scroll.
   useEffect(() => {
     const layer = aircraftLayer.current;
-    if (!layer) return;
+    const map = mapRef.current;
+    if (!layer || !map) return;
     layer.clearLayers();
     const offsets = offsetsKey.split(",").map(Number);
     const matched = new Set((fcaTraffic.data ?? []).map((f) => f.callsign));
+    // Only build markers for aircraft actually on screen (padded a little so a
+    // small pan doesn't reveal blank edges). At high zoom this turns 1000+ DOM
+    // nodes into ~the visible handful, which is what keeps the zoom smooth.
+    const bounds = map.getBounds().pad(0.25);
     for (const ac of traffic.data ?? []) {
       if (matched.has(ac.callsign)) continue;
       for (const off of offsets) {
-        L.marker([ac.lat, ac.lon + off], {
+        const pos: LatLng = [ac.lat, ac.lon + off];
+        if (!bounds.contains(pos)) continue;
+        L.marker(pos, {
           icon: planeIcons
             ? silhouetteIcon(ac.actype, ac.heading)
             : aircraftIcon(ac.heading),
@@ -586,7 +611,7 @@ export function FcaPage() {
           .addTo(layer);
       }
     }
-  }, [traffic.data, fcaTraffic.data, offsetsKey, mapReady, planeIcons]);
+  }, [traffic.data, fcaTraffic.data, offsetsKey, mapReady, planeIcons, viewVersion]);
 
   // Plotted route for a clicked aircraft.
   useEffect(() => {
