@@ -215,16 +215,35 @@ pub async fn delete_fca(
     }
 }
 
-// --- flow map routes (shared named polylines) ---
+// --- flow map routes (shared filed-route strings, resolved by the nav engine on read) ---
 
 fn validate_route(req: &UpsertRouteRequest) -> Result<(), ApiError> {
-    if req.name.trim().is_empty() || req.points.len() < 2 {
+    if req.name.trim().is_empty() || req.route.trim().is_empty() {
         return Err(ApiError::BadRequest);
     }
     Ok(())
 }
 
-/// All shared map routes. Visible to anyone who can view the flow map (FlowFcaRead).
+/// Resolve a stored route row to its drawn track via the nav engine.
+fn resolve_route_body(nav: &NavData, airports: &AirportDb, row: flow_repo::RouteRow) -> RouteBody {
+    let (named, unresolved) = fca::full_route_named(nav, airports, &row.dep, &row.arr, &row.route);
+    let points = named.iter().map(|(_, lat, lon)| [*lat, *lon]).collect();
+    RouteBody {
+        id: row.id,
+        name: row.name,
+        color: row.color,
+        route: row.route,
+        dep: row.dep,
+        arr: row.arr,
+        points,
+        unresolved,
+        updated_at: row.updated_at,
+        updated_by: row.updated_by,
+    }
+}
+
+/// All shared map routes, each resolved to a track. Visible to anyone who can view the flow
+/// map (FlowFcaRead).
 #[utoipa::path(
     get,
     path = "/api/v1/flow/routes",
@@ -236,7 +255,30 @@ pub async fn list_routes(
     _permission: RequirePermission<FlowFcaRead>,
 ) -> Result<Json<Vec<RouteBody>>, ApiError> {
     let pool = state.db.as_ref().ok_or(ApiError::ServiceUnavailable)?;
-    Ok(Json(flow_repo::list_routes(pool).await?))
+    let rows = flow_repo::list_routes(pool).await?;
+    let (_, airports) = feed_view(&state).await;
+    let nav_db = state.nav.load_full();
+    let nav = nav_db.as_ref();
+    let airports = airports.as_ref();
+    Ok(Json(
+        rows.into_iter()
+            .map(|r| resolve_route_body(nav, airports, r))
+            .collect(),
+    ))
+}
+
+async fn route_response(state: &AppState, id: &str) -> Result<Json<RouteBody>, ApiError> {
+    let pool = state.db.as_ref().ok_or(ApiError::ServiceUnavailable)?;
+    let row = flow_repo::get_route(pool, id)
+        .await?
+        .ok_or(ApiError::NotFound)?;
+    let (_, airports) = feed_view(state).await;
+    let nav_db = state.nav.load_full();
+    Ok(Json(resolve_route_body(
+        nav_db.as_ref(),
+        airports.as_ref(),
+        row,
+    )))
 }
 
 #[utoipa::path(
@@ -256,10 +298,7 @@ pub async fn create_route(
     let pool = state.db.as_ref().ok_or(ApiError::ServiceUnavailable)?;
     validate_route(&payload)?;
     let id = flow_repo::create_route(pool, &payload, &user.id).await?;
-    flow_repo::get_route(pool, &id)
-        .await?
-        .map(Json)
-        .ok_or(ApiError::Internal)
+    route_response(&state, &id).await
 }
 
 #[utoipa::path(
@@ -283,10 +322,7 @@ pub async fn update_route(
     if !flow_repo::update_route(pool, &id, &payload, &user.id).await? {
         return Err(ApiError::NotFound);
     }
-    flow_repo::get_route(pool, &id)
-        .await?
-        .map(Json)
-        .ok_or(ApiError::NotFound)
+    route_response(&state, &id).await
 }
 
 #[utoipa::path(
