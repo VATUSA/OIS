@@ -101,6 +101,23 @@ function lineNm(pts: LatLng[]): number {
   for (let i = 0; i < pts.length - 1; i++) d += haversine(pts[i], pts[i + 1]);
   return d;
 }
+/** Make a polyline's longitudes continuous so it draws the *short* way across the
+ *  antimeridian (Pacific) instead of wrapping the long way around the whole map. Each point's
+ *  longitude is shifted by ±360 to stay within 180° of the previous one; the resulting
+ *  longitudes may exceed ±180, which Leaflet renders correctly on the wrapped world copies. */
+function unwrapLng(pts: LatLng[]): LatLng[] {
+  if (pts.length === 0) return pts;
+  const out: LatLng[] = [pts[0]];
+  for (let i = 1; i < pts.length; i++) {
+    const prev = out[i - 1][1];
+    let lng = pts[i][1];
+    while (lng - prev > 180) lng -= 360;
+    while (lng - prev < -180) lng += 360;
+    out.push([pts[i][0], lng]);
+  }
+  return out;
+}
+
 /** The point halfway along a polyline by arc length (the true visual center). */
 function midpointOf(pts: LatLng[]): LatLng {
   if (pts.length < 2) return pts[0];
@@ -330,7 +347,8 @@ export function FcaPage() {
     if (mapRef.current) return;
     const map = L.map(node, {
       zoomControl: false,
-      worldCopyJump: false,
+      // Pan left/right forever — markers + lines re-home onto the copy in view.
+      worldCopyJump: true,
       doubleClickZoom: false,
     }).setView([38.5, -77], 6);
     L.control.zoom({ position: "topright" }).addTo(map);
@@ -377,7 +395,9 @@ export function FcaPage() {
 
     map.on("click", (e: L.LeafletMouseEvent) => {
       if (!drawingRef.current) return;
-      const p: LatLng = [e.latlng.lat, e.latlng.lng];
+      // Clicking on a wrapped world copy can give lng outside ±180 — normalize it.
+      const w = e.latlng.wrap();
+      const p: LatLng = [w.lat, w.lng];
       setDraft((d) => {
         if (!d) return d;
         const last = d.points[d.points.length - 1];
@@ -457,8 +477,9 @@ export function FcaPage() {
     const layer = routeLayer.current;
     if (!layer) return;
     layer.clearLayers();
-    const pts = aircraftRoute.data?.points as LatLng[] | undefined;
-    if (pts && pts.length >= 2) {
+    const raw = aircraftRoute.data?.points as LatLng[] | undefined;
+    if (raw && raw.length >= 2) {
+      const pts = unwrapLng(raw);
       L.polyline(pts, {
         color: "#22d3ee",
         weight: 2,
@@ -495,8 +516,9 @@ export function FcaPage() {
     layer.clearLayers();
     for (const fca of fcas.data ?? []) {
       if (fca.id === draft?.id) continue;
-      const pts = fca.points as LatLng[];
-      if (!pts || pts.length < 2) continue;
+      const raw = fca.points as LatLng[];
+      if (!raw || raw.length < 2) continue;
+      const pts = unwrapLng(raw);
       const selected = fca.id === selectedId;
       const opacity = fca.enabled ? (selected ? 1 : 0.85) : 0.3;
       L.polyline(pts, {
@@ -536,8 +558,9 @@ export function FcaPage() {
     layer.clearLayers();
     for (const r of routes.data ?? []) {
       if (r.id === draft?.id) continue; // the one being edited is on the draft layer
-      const pts = r.points as LatLng[];
-      if (!pts || pts.length < 2) continue;
+      const raw = r.points as LatLng[];
+      if (!raw || raw.length < 2) continue;
+      const pts = unwrapLng(raw);
       const selected = r.id === selectedRouteId;
       L.polyline(pts, {
         color: r.color,
@@ -587,7 +610,7 @@ export function FcaPage() {
                 [f.lat, f.lon],
                 [f.cross_lat, f.cross_lon],
               ] as LatLng[]);
-        L.polyline(line, {
+        L.polyline(unwrapLng(line), {
           color,
           weight: 1.5,
           opacity: 0.55,
@@ -629,7 +652,7 @@ export function FcaPage() {
     layer.clearLayers();
     if (!draft) return;
     if (draft.points.length >= 2) {
-      L.polyline(draft.points, {
+      L.polyline(unwrapLng(draft.points), {
         color: draft.color,
         weight: 4,
         dashArray: "6 6",
@@ -641,7 +664,7 @@ export function FcaPage() {
         icon: vertexIcon(draft.color),
       });
       handle.on("dragend", (e) => {
-        const ll = (e.target as L.Marker).getLatLng();
+        const ll = (e.target as L.Marker).getLatLng().wrap();
         setDraft((prev) =>
           prev
             ? {
