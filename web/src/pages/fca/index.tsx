@@ -118,6 +118,24 @@ function unwrapLng(pts: LatLng[]): LatLng[] {
   return out;
 }
 
+/** The longitude offsets (multiples of 360°) that cover the current horizontal view, so
+ *  overlays can be drawn on every visible copy of the world — like the repeating tiles.
+ *  Capped so an extreme zoom-out can't spawn a runaway number of copies. */
+function copyOffsets(map: L.Map): number[] {
+  const b = map.getBounds();
+  const start = Math.floor(b.getWest() / 360);
+  const end = Math.ceil(b.getEast() / 360);
+  const out: number[] = [];
+  for (let i = start; i <= end && out.length < 9; i++) out.push(i * 360);
+  return out.length ? out : [0];
+}
+/** Shift every vertex's longitude by `off` (a multiple of 360°) to place it on another copy. */
+const shiftLine = (pts: LatLng[], off: number): LatLng[] =>
+  off ? pts.map((p) => [p[0], p[1] + off] as LatLng) : pts;
+/** Normalize each vertex's longitude back into [-180, 180) for storage. */
+const normPoints = (pts: LatLng[]): LatLng[] =>
+  pts.map(([lat, lng]) => [lat, ((((lng + 180) % 360) + 360) % 360) - 180]);
+
 /** The point halfway along a polyline by arc length (the true visual center). */
 function midpointOf(pts: LatLng[]): LatLng {
   if (pts.length < 2) return pts[0];
@@ -295,6 +313,9 @@ export function FcaPage() {
   const [routeCallsign, setRouteCallsign] = useState<string | null>(null);
   const [filter, setFilter] = useState("");
   const [artccFilter, setArtccFilter] = useState("");
+  // Which world copies are visible, as a stable key ("-360,0,360"). Bumped on pan/zoom so the
+  // overlay layers re-draw themselves onto every visible copy of the world.
+  const [offsetsKey, setOffsetsKey] = useState("0");
 
   const fcaTraffic = useFcaTraffic(draft ? null : selectedId);
   const counts = useFcaCounts();
@@ -313,6 +334,7 @@ export function FcaPage() {
   // Flips true once the map + layer groups exist, so the drawing effects below re-run and
   // paint even when their data resolved before the map mounted.
   const [mapReady, setMapReady] = useState(false);
+  const boundaryLayer = useRef<L.LayerGroup | null>(null);
   const aircraftLayer = useRef<L.LayerGroup | null>(null);
   const fcaLayer = useRef<L.LayerGroup | null>(null);
   const matchedLayer = useRef<L.LayerGroup | null>(null);
@@ -347,8 +369,6 @@ export function FcaPage() {
     if (mapRef.current) return;
     const map = L.map(node, {
       zoomControl: false,
-      // Pan left/right forever — markers + lines re-home onto the copy in view.
-      worldCopyJump: true,
       doubleClickZoom: false,
     }).setView([38.5, -77], 6);
     L.control.zoom({ position: "topright" }).addTo(map);
@@ -359,33 +379,8 @@ export function FcaPage() {
         "© OpenStreetMap, © CARTO · traffic: VATSIM · boundaries: FAA NASR / ERAM",
     }).addTo(map);
 
-    // ARTCC boundary outlines (below everything else) + faded center labels.
-    L.geoJSON(boundariesGeo as GeoJSON.GeoJsonObject, {
-      style: { color: "#64748b", weight: 1, opacity: 0.4, fill: false },
-      interactive: false,
-    }).addTo(map);
-    for (const feat of (boundariesGeo as GeoJSON.FeatureCollection).features) {
-      const geom = feat.geometry;
-      if (geom.type !== "Polygon") continue;
-      const ring = geom.coordinates[0];
-      let sx = 0;
-      let sy = 0;
-      for (const [lon, lat] of ring) {
-        sx += lon;
-        sy += lat;
-      }
-      const c: LatLng = [sy / ring.length, sx / ring.length];
-      L.marker(c, {
-        icon: L.divIcon({
-          className: "",
-          html: `<span style="color:#64748b;font:600 11px ui-monospace,monospace;opacity:.5">${feat.properties?.id ?? ""}</span>`,
-          iconSize: [0, 0],
-        }),
-        interactive: false,
-        keyboard: false,
-      }).addTo(map);
-    }
-
+    // ARTCC boundaries render below everything, redrawn per visible world copy in an effect.
+    boundaryLayer.current = L.layerGroup().addTo(map);
     routeLayer.current = L.layerGroup().addTo(map);
     namedRouteLayer.current = L.layerGroup().addTo(map);
     fcaLayer.current = L.layerGroup().addTo(map);
@@ -395,9 +390,9 @@ export function FcaPage() {
 
     map.on("click", (e: L.LeafletMouseEvent) => {
       if (!drawingRef.current) return;
-      // Clicking on a wrapped world copy can give lng outside ±180 — normalize it.
-      const w = e.latlng.wrap();
-      const p: LatLng = [w.lat, w.lng];
+      // Keep the clicked longitude as-is (even on a wrapped copy) so the line appears where
+      // it's drawn; longitudes are normalized to ±180 on save.
+      const p: LatLng = [e.latlng.lat, e.latlng.lng];
       setDraft((d) => {
         if (!d) return d;
         const last = d.points[d.points.length - 1];
@@ -408,6 +403,14 @@ export function FcaPage() {
     map.on("dblclick", () => {
       if (drawingRef.current) finishLine();
     });
+
+    // Track which world copies are on screen; overlay effects redraw when this set changes.
+    const syncOffsets = () => {
+      const key = copyOffsets(map).join(",");
+      setOffsetsKey((cur) => (cur === key ? cur : key));
+    };
+    map.on("moveend zoomend", syncOffsets);
+    syncOffsets();
 
     mapRef.current = map;
     // The container can still be sizing when the map inits (full-bleed layout settles late),
@@ -446,31 +449,78 @@ export function FcaPage() {
     return () => window.removeEventListener("keydown", onKey);
   }, [draft, phase]);
 
+  // ARTCC boundary outlines + labels, drawn on every visible copy of the world.
+  useEffect(() => {
+    const layer = boundaryLayer.current;
+    if (!layer) return;
+    layer.clearLayers();
+    const offsets = offsetsKey.split(",").map(Number);
+    const fc = boundariesGeo as GeoJSON.FeatureCollection;
+    for (const off of offsets) {
+      for (const feat of fc.features) {
+        const geom = feat.geometry;
+        const rings: number[][][] =
+          geom.type === "Polygon"
+            ? geom.coordinates
+            : geom.type === "MultiPolygon"
+              ? geom.coordinates.flat()
+              : [];
+        if (rings.length === 0) continue;
+        for (const ring of rings) {
+          L.polyline(
+            ring.map(([lon, lat]) => [lat, lon + off] as LatLng),
+            { color: "#64748b", weight: 1, opacity: 0.4, interactive: false },
+          ).addTo(layer);
+        }
+        const outer = rings[0];
+        let sx = 0;
+        let sy = 0;
+        for (const [lon, lat] of outer) {
+          sx += lon;
+          sy += lat;
+        }
+        L.marker([sy / outer.length, sx / outer.length + off], {
+          icon: L.divIcon({
+            className: "",
+            html: `<span style="color:#64748b;font:600 11px ui-monospace,monospace;opacity:.5">${feat.properties?.id ?? ""}</span>`,
+            iconSize: [0, 0],
+          }),
+          interactive: false,
+          keyboard: false,
+        }).addTo(layer);
+      }
+    }
+  }, [offsetsKey, mapReady]);
+
   // Live aircraft — hover for details, click to plot the route. Aircraft matched to
-  // the selected FCA are drawn (tinted + numbered) by the matched layer instead.
+  // the selected FCA are drawn (tinted + numbered) by the matched layer instead. Drawn on
+  // every visible world copy so they persist as you scroll.
   useEffect(() => {
     const layer = aircraftLayer.current;
     if (!layer) return;
     layer.clearLayers();
+    const offsets = offsetsKey.split(",").map(Number);
     const matched = new Set((fcaTraffic.data ?? []).map((f) => f.callsign));
     for (const ac of traffic.data ?? []) {
       if (matched.has(ac.callsign)) continue;
-      L.marker([ac.lat, ac.lon], {
-        icon: aircraftIcon(ac.heading),
-        keyboard: false,
-      })
-        .bindTooltip(aircraftTip(ac), {
-          direction: "top",
-          offset: [0, -6],
-          className: "fca-tip",
+      for (const off of offsets) {
+        L.marker([ac.lat, ac.lon + off], {
+          icon: aircraftIcon(ac.heading),
+          keyboard: false,
         })
-        .on("click", (e) => {
-          L.DomEvent.stop(e);
-          setRouteCallsign((cur) => (cur === ac.callsign ? null : ac.callsign));
-        })
-        .addTo(layer);
+          .bindTooltip(aircraftTip(ac), {
+            direction: "top",
+            offset: [0, -6],
+            className: "fca-tip",
+          })
+          .on("click", (e) => {
+            L.DomEvent.stop(e);
+            setRouteCallsign((cur) => (cur === ac.callsign ? null : ac.callsign));
+          })
+          .addTo(layer);
+      }
     }
-  }, [traffic.data, fcaTraffic.data, mapReady]);
+  }, [traffic.data, fcaTraffic.data, offsetsKey, mapReady]);
 
   // Plotted route for a clicked aircraft.
   useEffect(() => {
@@ -479,35 +529,37 @@ export function FcaPage() {
     layer.clearLayers();
     const raw = aircraftRoute.data?.points as LatLng[] | undefined;
     if (raw && raw.length >= 2) {
-      const pts = unwrapLng(raw);
-      L.polyline(pts, {
-        color: "#22d3ee",
-        weight: 2,
-        opacity: 0.85,
-        dashArray: "6 6",
-        interactive: false,
-      }).addTo(layer);
-      for (const end of [pts[0], pts[pts.length - 1]]) {
-        L.circleMarker(end, {
-          radius: 4,
+      const base = unwrapLng(raw);
+      for (const off of offsetsKey.split(",").map(Number)) {
+        const pts = shiftLine(base, off);
+        L.polyline(pts, {
           color: "#22d3ee",
-          weight: 1,
-          fillColor: "#22d3ee",
-          fillOpacity: 1,
+          weight: 2,
+          opacity: 0.85,
+          dashArray: "6 6",
           interactive: false,
         }).addTo(layer);
-      }
-      // Label each named waypoint along the route.
-      for (const wp of aircraftRoute.data?.waypoints ?? []) {
-        L.marker([wp.lat, wp.lon], {
-          icon: waypointLabelIcon(wp.name),
-          interactive: false,
-          keyboard: false,
-          zIndexOffset: -200,
-        }).addTo(layer);
+        for (const end of [pts[0], pts[pts.length - 1]]) {
+          L.circleMarker(end, {
+            radius: 4,
+            color: "#22d3ee",
+            weight: 1,
+            fillColor: "#22d3ee",
+            fillOpacity: 1,
+            interactive: false,
+          }).addTo(layer);
+        }
+        for (const wp of aircraftRoute.data?.waypoints ?? []) {
+          L.marker([wp.lat, wp.lon + off], {
+            icon: waypointLabelIcon(wp.name),
+            interactive: false,
+            keyboard: false,
+            zIndexOffset: -200,
+          }).addTo(layer);
+        }
       }
     }
-  }, [aircraftRoute.data, mapReady]);
+  }, [aircraftRoute.data, offsetsKey, mapReady]);
 
   // Saved FCAs (skip the one being edited — drawn on the draft layer).
   useEffect(() => {
@@ -518,38 +570,40 @@ export function FcaPage() {
       if (fca.id === draft?.id) continue;
       const raw = fca.points as LatLng[];
       if (!raw || raw.length < 2) continue;
-      const pts = unwrapLng(raw);
+      const base = unwrapLng(raw);
       const selected = fca.id === selectedId;
       const opacity = fca.enabled ? (selected ? 1 : 0.85) : 0.3;
-      L.polyline(pts, {
-        color: fca.color,
-        weight: selected ? 4 : 3,
-        opacity,
-        dashArray: "4 8",
-      })
-        .on("click", (e) => {
-          L.DomEvent.stop(e);
-          setSelectedId((cur) => (cur === fca.id ? null : fca.id));
-        })
-        .addTo(layer);
-      // Filled colour dots at the first and last point.
-      for (const end of [pts[0], pts[pts.length - 1]]) {
-        L.circleMarker(end, {
-          radius: selected ? 5 : 4,
+      for (const off of offsetsKey.split(",").map(Number)) {
+        const pts = shiftLine(base, off);
+        L.polyline(pts, {
           color: fca.color,
-          weight: 1,
-          fillColor: fca.color,
-          fillOpacity: opacity,
+          weight: selected ? 4 : 3,
+          opacity,
+          dashArray: "4 8",
+        })
+          .on("click", (e) => {
+            L.DomEvent.stop(e);
+            setSelectedId((cur) => (cur === fca.id ? null : fca.id));
+          })
+          .addTo(layer);
+        for (const end of [pts[0], pts[pts.length - 1]]) {
+          L.circleMarker(end, {
+            radius: selected ? 5 : 4,
+            color: fca.color,
+            weight: 1,
+            fillColor: fca.color,
+            fillOpacity: opacity,
+            interactive: false,
+          }).addTo(layer);
+        }
+        L.marker(midpointOf(pts), {
+          icon: labelIcon(fca.color, fca.name),
           interactive: false,
+          keyboard: false,
         }).addTo(layer);
       }
-      L.marker(midpointOf(pts), {
-        icon: labelIcon(fca.color, fca.name),
-        interactive: false,
-        keyboard: false,
-      }).addTo(layer);
     }
-  }, [fcas.data, draft?.id, selectedId, mapReady]);
+  }, [fcas.data, draft?.id, selectedId, offsetsKey, mapReady]);
 
   // Saved named routes — solid polylines (distinct from the dashed FCAs).
   useEffect(() => {
@@ -560,35 +614,38 @@ export function FcaPage() {
       if (r.id === draft?.id) continue; // the one being edited is on the draft layer
       const raw = r.points as LatLng[];
       if (!raw || raw.length < 2) continue;
-      const pts = unwrapLng(raw);
+      const base = unwrapLng(raw);
       const selected = r.id === selectedRouteId;
-      L.polyline(pts, {
-        color: r.color,
-        weight: selected ? 5 : 3,
-        opacity: selected ? 1 : 0.85,
-      })
-        .on("click", (e) => {
-          L.DomEvent.stop(e);
-          setSelectedRouteId((cur) => (cur === r.id ? null : r.id));
-        })
-        .addTo(layer);
-      for (const end of [pts[0], pts[pts.length - 1]]) {
-        L.circleMarker(end, {
-          radius: selected ? 5 : 4,
+      for (const off of offsetsKey.split(",").map(Number)) {
+        const pts = shiftLine(base, off);
+        L.polyline(pts, {
           color: r.color,
-          weight: 1,
-          fillColor: r.color,
-          fillOpacity: 0.9,
+          weight: selected ? 5 : 3,
+          opacity: selected ? 1 : 0.85,
+        })
+          .on("click", (e) => {
+            L.DomEvent.stop(e);
+            setSelectedRouteId((cur) => (cur === r.id ? null : r.id));
+          })
+          .addTo(layer);
+        for (const end of [pts[0], pts[pts.length - 1]]) {
+          L.circleMarker(end, {
+            radius: selected ? 5 : 4,
+            color: r.color,
+            weight: 1,
+            fillColor: r.color,
+            fillOpacity: 0.9,
+            interactive: false,
+          }).addTo(layer);
+        }
+        L.marker(midpointOf(pts), {
+          icon: labelIcon(r.color, r.name),
           interactive: false,
+          keyboard: false,
         }).addTo(layer);
       }
-      L.marker(midpointOf(pts), {
-        icon: labelIcon(r.color, r.name),
-        interactive: false,
-        keyboard: false,
-      }).addTo(layer);
     }
-  }, [routes.data, draft?.id, selectedRouteId, mapReady]);
+  }, [routes.data, draft?.id, selectedRouteId, offsetsKey, mapReady]);
 
   // Matched (crossing) traffic for the selected FCA — numbered, in the FCA colour.
   const selectedColor = fcas.data?.find((f) => f.id === selectedId)?.color;
@@ -598,52 +655,55 @@ export function FcaPage() {
     layer.clearLayers();
     if (draft || !selectedColor) return;
     const color = selectedColor;
+    const offsets = offsetsKey.split(",").map(Number);
     for (const f of fcaTraffic.data ?? []) {
       const hasPos = f.lat !== 0 || f.lon !== 0;
-      if (hasPos) {
-        // Full resolved route (remaining route for airborne), in the FCA colour.
-        const path = f.path as LatLng[] | undefined;
-        const line =
-          path && path.length >= 2
-            ? path
-            : ([
-                [f.lat, f.lon],
-                [f.cross_lat, f.cross_lon],
-              ] as LatLng[]);
-        L.polyline(unwrapLng(line), {
-          color,
-          weight: 1.5,
-          opacity: 0.55,
+      const path = f.path as LatLng[] | undefined;
+      const line =
+        path && path.length >= 2
+          ? path
+          : ([
+              [f.lat, f.lon],
+              [f.cross_lat, f.cross_lon],
+            ] as LatLng[]);
+      const base = unwrapLng(line);
+      for (const off of offsets) {
+        if (hasPos) {
+          L.polyline(shiftLine(base, off), {
+            color,
+            weight: 1.5,
+            opacity: 0.55,
+            interactive: false,
+          }).addTo(layer);
+        }
+        L.circleMarker([f.cross_lat, f.cross_lon + off], {
+          radius: 3,
+          color: "#ffffff",
+          weight: 1,
+          fillColor: "#ffffff",
+          fillOpacity: 0.9,
           interactive: false,
         }).addTo(layer);
-      }
-      L.circleMarker([f.cross_lat, f.cross_lon], {
-        radius: 3,
-        color: "#ffffff",
-        weight: 1,
-        fillColor: "#ffffff",
-        fillOpacity: 0.9,
-        interactive: false,
-      }).addTo(layer);
-      if (hasPos) {
-        L.marker([f.lat, f.lon], {
-          icon: matchedIcon(f.seq, color, f.heading),
-          keyboard: false,
-        })
-          .bindTooltip(
-            `<div style="font:700 13px ui-monospace,monospace">#${f.seq} <span style="color:${color}">${f.callsign}</span> <span style="color:#94a3b8">${f.aircraft_type}</span></div>
+        if (hasPos) {
+          L.marker([f.lat, f.lon + off], {
+            icon: matchedIcon(f.seq, color, f.heading),
+            keyboard: false,
+          })
+            .bindTooltip(
+              `<div style="font:700 13px ui-monospace,monospace">#${f.seq} <span style="color:${color}">${f.callsign}</span> <span style="color:#94a3b8">${f.aircraft_type}</span></div>
              <div style="font:12px ui-monospace,monospace;color:#cbd5e1">${f.dep} → ${f.arr}</div>
              <div style="font:12px ui-monospace,monospace;color:#94a3b8">FL${Math.round(f.altitude / 100)} ${f.groundspeed}kt · ${Math.round(f.distance_nm)}nm to line</div>`,
-            { direction: "top", offset: [0, -8], className: "fca-tip" },
-          )
-          .on("click", (e) => {
-            L.DomEvent.stop(e);
-            setRouteCallsign((cur) => (cur === f.callsign ? null : f.callsign));
-          })
-          .addTo(layer);
+              { direction: "top", offset: [0, -8], className: "fca-tip" },
+            )
+            .on("click", (e) => {
+              L.DomEvent.stop(e);
+              setRouteCallsign((cur) => (cur === f.callsign ? null : f.callsign));
+            })
+            .addTo(layer);
+        }
       }
     }
-  }, [fcaTraffic.data, draft, selectedColor, mapReady]);
+  }, [fcaTraffic.data, draft, selectedColor, offsetsKey, mapReady]);
 
   // Working draft (dashed polyline + draggable vertex handles).
   useEffect(() => {
@@ -664,7 +724,7 @@ export function FcaPage() {
         icon: vertexIcon(draft.color),
       });
       handle.on("dragend", (e) => {
-        const ll = (e.target as L.Marker).getLatLng().wrap();
+        const ll = (e.target as L.Marker).getLatLng();
         setDraft((prev) =>
           prev
             ? {
@@ -729,7 +789,7 @@ export function FcaPage() {
       const body: UpsertRoute = {
         name: draft.name.trim() || "Route",
         color: draft.color,
-        points: draft.points,
+        points: normPoints(draft.points),
       };
       if (draft.id) {
         updateRoute.mutate({ id: draft.id, body }, { onSuccess: cancel });
@@ -742,7 +802,7 @@ export function FcaPage() {
       name: draft.name.trim() || "FCA",
       color: draft.color,
       artcc: draft.artcc.trim().toUpperCase(),
-      points: draft.points,
+      points: normPoints(draft.points),
       dests: parseList(draft.dests),
       origins: parseList(draft.origins),
       fixes: parseList(draft.fixes),
