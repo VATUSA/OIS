@@ -83,7 +83,7 @@ fn derive(
     let resource_type = t
         .iter()
         .enumerate()
-        .filter(|(i, s)| !is_param(s) && !(verb_is_last && *i == last_idx))
+        .filter(|(i, s)| !(is_param(s) || verb_is_last && *i == last_idx))
         .map(|(_, s)| s.as_str())
         .collect::<Vec<_>>()
         .join(".");
@@ -94,8 +94,7 @@ fn derive(
     let resource_id = t
         .iter()
         .enumerate()
-        .filter(|(_, s)| is_param(s))
-        .next_back()
+        .rfind(|(_, s)| is_param(s))
         .and_then(|(i, _)| p.get(i).cloned());
 
     Some((action, resource_type, resource_id))

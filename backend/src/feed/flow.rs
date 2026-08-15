@@ -390,10 +390,10 @@ fn apply_metering(
     for &i in &airborne {
         let eta = eta_ms(&flights[i], now_ms) as f64;
         let mut sta = eta.max(prev_sta + runway);
-        if let Some(g) = &flights[i].gate {
-            if let Some(&lg) = last_gate_sta.get(g) {
-                sta = sta.max(lg + gate_spacing_ms(pg, runway, g));
-            }
+        if let Some(g) = &flights[i].gate
+            && let Some(&lg) = last_gate_sta.get(g)
+        {
+            sta = sta.max(lg + gate_spacing_ms(pg, runway, g));
         }
         write_meter(&mut flights[i], sta, eta, etd_ms[i]);
         prev_sta = sta;
@@ -564,16 +564,17 @@ fn proposed_etd(deptime: &str, now: DateTime<Utc>) -> DateTime<Utc> {
     if deptime.len() == 4 && deptime.chars().all(|c| c.is_ascii_digit()) {
         let h: u32 = deptime[0..2].parse().unwrap_or(99);
         let m: u32 = deptime[2..4].parse().unwrap_or(99);
-        if h < 24 && m < 60 {
-            if let Some(naive) = now.date_naive().and_hms_opt(h, m, 0) {
-                let mut t = naive.and_utc();
-                if t < now - Duration::hours(2) {
-                    t += Duration::hours(24);
-                } else if t - now > Duration::hours(12) {
-                    t -= Duration::hours(24);
-                }
-                return t.max(floor);
+        if h < 24
+            && m < 60
+            && let Some(naive) = now.date_naive().and_hms_opt(h, m, 0)
+        {
+            let mut t = naive.and_utc();
+            if t < now - Duration::hours(2) {
+                t += Duration::hours(24);
+            } else if t - now > Duration::hours(12) {
+                t -= Duration::hours(24);
             }
+            return t.max(floor);
         }
     }
     floor
@@ -586,7 +587,11 @@ fn minutes(m: f64) -> Duration {
 /// Filed cruise TAS (knots); defaults to 420 for missing/implausible values.
 fn parse_tas(raw: &str) -> f64 {
     let n: f64 = raw.trim().parse().unwrap_or(0.0);
-    if n >= 60.0 && n <= 1200.0 { n } else { 420.0 }
+    if (60.0..=1200.0).contains(&n) {
+        n
+    } else {
+        420.0
+    }
 }
 
 /// Arrival gate (STAR/fix) heuristic ported from vatflow's `arrivalGate`: scan the filed

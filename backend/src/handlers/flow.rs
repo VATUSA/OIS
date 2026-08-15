@@ -81,15 +81,15 @@ fn passes_filters(fca: &FcaBody, fp: &FlightPlan, alt: i64, airborne: bool) -> b
         return false;
     }
     if airborne {
-        if let Some(min) = fca.min_fl {
-            if alt < min as i64 * 100 {
-                return false;
-            }
+        if let Some(min) = fca.min_fl
+            && alt < min as i64 * 100
+        {
+            return false;
         }
-        if let Some(max) = fca.max_fl {
-            if alt > max as i64 * 100 {
-                return false;
-            }
+        if let Some(max) = fca.max_fl
+            && alt > max as i64 * 100
+        {
+            return false;
         }
     }
     true
@@ -123,10 +123,11 @@ fn validate_fca(req: &UpsertFcaRequest) -> Result<(), ApiError> {
     if req.name.trim().is_empty() || req.points.len() < 2 {
         return Err(ApiError::BadRequest);
     }
-    if let Some(m) = &req.mode {
-        if m != "rate" && m != "mit" {
-            return Err(ApiError::BadRequest);
-        }
+    if let Some(m) = &req.mode
+        && m != "rate"
+        && m != "mit"
+    {
+        return Err(ApiError::BadRequest);
     }
     Ok(())
 }
@@ -369,6 +370,7 @@ pub async fn fca_counts(
     let airports = airports.as_ref();
     let nav_db = state.nav.load_full();
     let nav = nav_db.as_ref();
+    let airspace = state.airspace.as_ref();
 
     // Resolve each aircraft's route once, then test it against every active FCA.
     let mut tally = |fp: &FlightPlan, lat: f64, lon: f64, hdg: i64, gs: i64, alt: i64| {
@@ -390,7 +392,10 @@ pub async fn fca_counts(
             if !passes_filters(f, fp, alt, airborne) {
                 continue;
             }
-            if fca::crosses(&path, &f.points.0, airborne, lat, lon, hdg).is_some() {
+            // Match the metering board: only count crossings within the FCA's ARTCC scope.
+            if let Some(cross) = fca::crosses(&path, &f.points.0, airborne, lat, lon, hdg)
+                && passes_scope(f, airspace, cross.lat, cross.lon)
+            {
                 *counts.get_mut(&f.id).unwrap() += 1;
             }
         }
@@ -657,16 +662,46 @@ pub async fn flight_advisory(
         }
     }
 
-    // FCA crossings — meter each enabled FCA and pick out this flight.
+    // FCA crossings — meter only the enabled FCAs this flight actually crosses.
     if let Some(snap) = snapshot.as_ref() {
         let nav = state.nav.load_full();
         let winds = state.winds.load_full();
         let now = Utc::now();
+        // Resolve this flight's route once for the cheap crossing pre-filter, so we don't run
+        // the full per-FCA metering (which resolves every matching pilot's route) for FCAs it
+        // never crosses.
+        let path = fp.as_ref().and_then(|f| {
+            fca::route_path(
+                nav.as_ref(),
+                airports.as_ref(),
+                &f.departure,
+                &f.arrival,
+                &f.route,
+                lat,
+                lon,
+                heading,
+                groundspeed,
+            )
+        });
         for fca in flow_repo::list_fcas(pool)
             .await?
             .iter()
             .filter(|f| f.enabled && f.points.0.len() >= 2)
         {
+            // Same predicate build_candidates uses to include this flight: filters + a scoped
+            // crossing. If it doesn't cross, metering this FCA can't produce a slot for it.
+            let crosses = match (&path, &fp) {
+                (Some(p), Some(plan)) => {
+                    passes_filters(fca, plan, altitude, airborne)
+                        && fca::crosses(p, &fca.points.0, airborne, lat, lon, heading).is_some_and(
+                            |c| passes_scope(fca, state.airspace.as_ref(), c.lat, c.lon),
+                        )
+                }
+                _ => false,
+            };
+            if !crosses {
+                continue;
+            }
             let releases = load_releases(pool, &fca.id).await?;
             let (flights, metas) = build_candidates(
                 fca,

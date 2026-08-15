@@ -128,17 +128,17 @@ pub fn permission_tree_from_paths(permissions: &[PermissionPath]) -> Value {
 }
 
 /// Inverse of [`permission_tree_from_paths`]: validate + flatten an edited tree back
-/// to sorted `segments.action` strings. Returns `Err(())` on a malformed shape.
-pub fn normalize_permission_tree(value: &Value) -> Result<Vec<String>, ()> {
+/// to sorted `segments.action` strings. Returns `None` on a malformed shape.
+pub fn normalize_permission_tree(value: &Value) -> Option<Vec<String>> {
     let Value::Object(root) = value else {
-        return Err(());
+        return None;
     };
     let mut normalized = BTreeSet::new();
     collect_permission_tree(root, &mut Vec::new(), &mut normalized)?;
     if normalized.is_empty() {
-        return Err(());
+        return None;
     }
-    Ok(normalized.into_iter().collect())
+    Some(normalized.into_iter().collect())
 }
 
 fn insert_permission_path(root: &mut Map<String, Value>, permission: &PermissionPath) {
@@ -171,10 +171,10 @@ fn collect_permission_tree(
     node: &Map<String, Value>,
     path: &mut Vec<String>,
     normalized: &mut BTreeSet<String>,
-) -> Result<(), ()> {
+) -> Option<()> {
     for (key, value) in node {
         if !is_valid_permission_segment(key) {
-            return Err(());
+            return None;
         }
         match value {
             Value::Object(child) => {
@@ -184,12 +184,12 @@ fn collect_permission_tree(
             }
             Value::Array(actions) => {
                 if actions.is_empty() {
-                    return Err(());
+                    return None;
                 }
                 let mut action_set = BTreeSet::new();
                 for action_value in actions {
-                    let action_name = action_value.as_str().ok_or(())?;
-                    let action = PermissionAction::from_value(action_name).ok_or(())?;
+                    let action_name = action_value.as_str()?;
+                    let action = PermissionAction::from_value(action_name)?;
                     action_set.insert(action.as_value().to_string());
                 }
                 let mut segments = path.clone();
@@ -198,10 +198,10 @@ fn collect_permission_tree(
                     normalized.insert(format!("{}.{}", segments.join("."), action));
                 }
             }
-            _ => return Err(()),
+            _ => return None,
         }
     }
-    Ok(())
+    Some(())
 }
 
 #[cfg(test)]
@@ -247,6 +247,6 @@ mod tests {
 
     #[test]
     fn rejects_bad_shape() {
-        assert!(normalize_permission_tree(&json!({ "events": "read" })).is_err());
+        assert!(normalize_permission_tree(&json!({ "events": "read" })).is_none());
     }
 }
