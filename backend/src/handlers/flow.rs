@@ -14,9 +14,7 @@ use chrono::{DateTime, Duration, Utc};
 use crate::{
     auth::{
         context::CurrentUser,
-        permissions::{
-            FlowFcaDelete, FlowFcaRead, FlowFcaUpdate, FlowRouteDelete, FlowRouteUpdate,
-        },
+        permissions::{FlowFcaDelete, FlowFcaUpdate, FlowRouteDelete, FlowRouteUpdate},
         require_permission::RequirePermission,
     },
     errors::ApiError,
@@ -137,10 +135,7 @@ fn validate_fca(req: &UpsertFcaRequest) -> Result<(), ApiError> {
     tag = "flow",
     responses((status = 200, body = Vec<FcaBody>), (status = 401))
 )]
-pub async fn list_fcas(
-    State(state): State<AppState>,
-    _permission: RequirePermission<FlowFcaRead>,
-) -> Result<Json<Vec<FcaBody>>, ApiError> {
+pub async fn list_fcas(State(state): State<AppState>) -> Result<Json<Vec<FcaBody>>, ApiError> {
     let pool = state.db.as_ref().ok_or(ApiError::ServiceUnavailable)?;
     Ok(Json(flow_repo::list_fcas(pool).await?))
 }
@@ -251,10 +246,7 @@ fn resolve_route_body(nav: &NavData, airports: &AirportDb, row: flow_repo::Route
     tag = "flow",
     responses((status = 200, body = Vec<RouteBody>), (status = 401))
 )]
-pub async fn list_routes(
-    State(state): State<AppState>,
-    _permission: RequirePermission<FlowFcaRead>,
-) -> Result<Json<Vec<RouteBody>>, ApiError> {
+pub async fn list_routes(State(state): State<AppState>) -> Result<Json<Vec<RouteBody>>, ApiError> {
     let pool = state.db.as_ref().ok_or(ApiError::ServiceUnavailable)?;
     let rows = flow_repo::list_routes(pool).await?;
     let (_, airports) = feed_view(&state).await;
@@ -354,7 +346,6 @@ pub async fn delete_route(
 )]
 pub async fn fca_counts(
     State(state): State<AppState>,
-    _permission: RequirePermission<FlowFcaRead>,
 ) -> Result<Json<HashMap<String, i64>>, ApiError> {
     let pool = state.db.as_ref().ok_or(ApiError::ServiceUnavailable)?;
     let fcas = flow_repo::list_fcas(pool).await?;
@@ -432,7 +423,6 @@ pub async fn fca_counts(
 )]
 pub async fn aircraft_route(
     State(state): State<AppState>,
-    _permission: RequirePermission<FlowFcaRead>,
     Path(callsign): Path<String>,
 ) -> Result<Json<AircraftRoute>, ApiError> {
     let cs = callsign.to_ascii_uppercase();
@@ -536,10 +526,7 @@ fn build_data_status(state: &AppState) -> DataStatus {
     tag = "flow",
     responses((status = 200, body = DataStatus), (status = 401))
 )]
-pub async fn data_status(
-    State(state): State<AppState>,
-    _permission: RequirePermission<FlowFcaRead>,
-) -> Json<DataStatus> {
+pub async fn data_status(State(state): State<AppState>) -> Json<DataStatus> {
     Json(build_data_status(&state))
 }
 
@@ -553,7 +540,6 @@ pub async fn data_status(
 )]
 pub async fn route_coverage(
     State(state): State<AppState>,
-    _permission: RequirePermission<FlowFcaRead>,
 ) -> Result<Json<crate::feed::coverage::CoverageReport>, ApiError> {
     let (snapshot, airports) = feed_view(&state).await;
     let snap = snapshot.ok_or(ApiError::ServiceUnavailable)?;
@@ -598,10 +584,7 @@ pub async fn data_refresh(
     tag = "flow",
     responses((status = 200, body = Vec<TrafficAircraft>), (status = 401))
 )]
-pub async fn list_traffic(
-    State(state): State<AppState>,
-    _permission: RequirePermission<FlowFcaRead>,
-) -> Json<Vec<TrafficAircraft>> {
+pub async fn list_traffic(State(state): State<AppState>) -> Json<Vec<TrafficAircraft>> {
     let snapshot = state.feed.read().await.snapshot.clone();
     let aircraft = snapshot
         .as_ref()
@@ -869,7 +852,6 @@ async fn load_releases(pool: &sqlx::PgPool, id: &str) -> Result<ReleaseMap, ApiE
 )]
 pub async fn fca_traffic(
     State(state): State<AppState>,
-    _permission: RequirePermission<FlowFcaRead>,
     Path(id): Path<String>,
 ) -> Result<Json<Vec<FcaFlight>>, ApiError> {
     let pool = state.db.as_ref().ok_or(ApiError::ServiceUnavailable)?;
