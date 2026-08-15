@@ -2,8 +2,9 @@ import {useCallback, useEffect, useMemo, useRef, useState} from "react";
 import L from "leaflet";
 import "leaflet/dist/leaflet.css";
 import {Button, ConfirmButton, Input, useTheme} from "@ois/ui";
-import {ChevronDown, Maximize2, Minus, Pencil, Plus, RefreshCw, Tag, Trash2, X,} from "lucide-react";
+import {ChevronDown, Maximize2, Minus, Pencil, Plane, Plus, RefreshCw, Tag, Trash2, X,} from "lucide-react";
 
+import {aircraftIconUrl} from "@/lib/aircraft-icons";
 import {useMe} from "@/lib/auth";
 import {hasPermission} from "@/lib/permissions";
 import {
@@ -237,6 +238,33 @@ function aircraftIcon(heading: number) {
     iconAnchor: [6, 6],
   });
 }
+// Type-shaped VATSIM Radar silhouette (white, black-outlined), rotated to heading.
+const AC_ICON_SIZE = 22;
+function silhouetteIcon(actype: string, heading: number) {
+  return L.divIcon({
+    className: "",
+    html: `<img src="${aircraftIconUrl(actype)}" style="display:block;width:${AC_ICON_SIZE}px;height:${AC_ICON_SIZE}px;object-fit:contain;transform:rotate(${heading}deg);filter:drop-shadow(0 0 1px rgba(0,0,0,.85))"/>`,
+    iconSize: [AC_ICON_SIZE, AC_ICON_SIZE],
+    iconAnchor: [AC_ICON_SIZE / 2, AC_ICON_SIZE / 2],
+  });
+}
+/** Matched-traffic silhouette: FCA-colour glow + crossing-sequence badge. */
+function matchedSilhouetteIcon(
+  actype: string,
+  seq: number,
+  color: string,
+  heading: number,
+) {
+  return L.divIcon({
+    className: "",
+    html: `<div style="position:relative;width:${AC_ICON_SIZE}px;height:${AC_ICON_SIZE}px">
+      <img src="${aircraftIconUrl(actype)}" style="display:block;width:${AC_ICON_SIZE}px;height:${AC_ICON_SIZE}px;object-fit:contain;transform:rotate(${heading}deg);filter:drop-shadow(0 0 2px ${color}) drop-shadow(0 0 2px ${color})"/>
+      <span style="position:absolute;left:${AC_ICON_SIZE - 2}px;top:-6px;height:14px;min-width:14px;padding:0 2px;border-radius:8px;background:${color};color:#0a0a0a;font:700 10px ui-monospace,monospace;line-height:14px;text-align:center;box-shadow:0 0 0 1px rgba(0,0,0,.4)">${seq}</span>
+    </div>`,
+    iconSize: [AC_ICON_SIZE, AC_ICON_SIZE],
+    iconAnchor: [AC_ICON_SIZE / 2, AC_ICON_SIZE / 2],
+  });
+}
 function vertexIcon(color: string) {
   return L.divIcon({
     className: "",
@@ -336,6 +364,22 @@ export function FcaPage() {
   // Which world copies are visible, as a stable key ("-360,0,360"). Bumped on pan/zoom so the
   // overlay layers re-draw themselves onto every visible copy of the world.
   const [offsetsKey, setOffsetsKey] = useState("0");
+  // Per-user: render live traffic as VATSIM Radar type silhouettes vs. plain
+  // triangles. Persisted locally; defaults to triangles.
+  const [planeIcons, setPlaneIcons] = useState(() => {
+    try {
+      return localStorage.getItem("fca.planeIcons") === "1";
+    } catch {
+      return false;
+    }
+  });
+  useEffect(() => {
+    try {
+      localStorage.setItem("fca.planeIcons", planeIcons ? "1" : "0");
+    } catch {
+      /* private mode / disabled storage — non-fatal */
+    }
+  }, [planeIcons]);
 
   const fcaTraffic = useFcaTraffic(draft ? null : selectedId);
   const counts = useFcaCounts();
@@ -396,7 +440,7 @@ export function FcaPage() {
     tileRef.current = L.tileLayer(CARTO[resolvedTheme], {
       maxZoom: 14,
       attribution:
-        "© OpenStreetMap, © CARTO · traffic: VATSIM · boundaries: FAA NASR / ERAM",
+        '© OpenStreetMap, © CARTO · traffic: VATSIM · boundaries: FAA NASR / ERAM · planes: <a href="https://github.com/VATSIM-Radar/vatsim-radar" target="_blank" rel="noopener noreferrer">VATSIM Radar</a> (CC BY-NC)',
     }).addTo(map);
 
     // ARTCC boundaries render below everything, redrawn per visible world copy in an effect.
@@ -525,7 +569,9 @@ export function FcaPage() {
       if (matched.has(ac.callsign)) continue;
       for (const off of offsets) {
         L.marker([ac.lat, ac.lon + off], {
-          icon: aircraftIcon(ac.heading),
+          icon: planeIcons
+            ? silhouetteIcon(ac.actype, ac.heading)
+            : aircraftIcon(ac.heading),
           keyboard: false,
         })
           .bindTooltip(aircraftTip(ac), {
@@ -540,7 +586,7 @@ export function FcaPage() {
           .addTo(layer);
       }
     }
-  }, [traffic.data, fcaTraffic.data, offsetsKey, mapReady]);
+  }, [traffic.data, fcaTraffic.data, offsetsKey, mapReady, planeIcons]);
 
   // Plotted route for a clicked aircraft.
   useEffect(() => {
@@ -724,7 +770,9 @@ export function FcaPage() {
         }).addTo(layer);
         if (hasPos) {
           L.marker([f.lat, f.lon + off], {
-            icon: matchedIcon(f.seq, color, f.heading),
+            icon: planeIcons
+              ? matchedSilhouetteIcon(f.aircraft_type, f.seq, color, f.heading)
+              : matchedIcon(f.seq, color, f.heading),
             keyboard: false,
           })
             .bindTooltip(
@@ -741,7 +789,7 @@ export function FcaPage() {
         }
       }
     }
-  }, [fcaTraffic.data, draft, selectedColor, offsetsKey, mapReady]);
+  }, [fcaTraffic.data, draft, selectedColor, offsetsKey, mapReady, planeIcons]);
 
   // Working draft (dashed polyline + draggable vertex handles).
   useEffect(() => {
@@ -1202,6 +1250,25 @@ export function FcaPage() {
       {/* Map — `isolate` traps Leaflet z-indexes below the navbar dropdowns. */}
       <div className="relative isolate flex-1">
         <div ref={setContainer} className="absolute inset-0" />
+
+        {/* Per-user: type-shaped aircraft silhouettes vs. plain triangles. */}
+        <div className="absolute left-3 top-3 z-[500]">
+          <button
+            type="button"
+            onClick={() => setPlaneIcons((v) => !v)}
+            title={
+              planeIcons
+                ? "Live traffic: aircraft-type silhouettes (click for triangles)"
+                : "Live traffic: plain triangles (click for aircraft icons)"
+            }
+            className="flex items-center gap-1.5 rounded-lg border bg-background/95 px-2.5 py-1.5 text-xs font-medium shadow-lg backdrop-blur transition-colors hover:bg-muted"
+          >
+            <Plane
+              className={`size-3.5 ${planeIcons ? "text-primary" : "text-muted-foreground"}`}
+            />
+            {planeIcons ? "Aircraft icons" : "Triangles"}
+          </button>
+        </div>
 
         {navStale && (
           <div className="pointer-events-none absolute inset-x-0 top-3 z-[500] flex justify-center">
