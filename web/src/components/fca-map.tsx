@@ -2,25 +2,12 @@ import {useCallback, useEffect, useMemo, useRef, useState} from "react";
 import L from "leaflet";
 import "leaflet/dist/leaflet.css";
 import {Button, ConfirmButton, Input, useTheme, useToast} from "@ois/ui";
-import {
-  ChevronDown,
-  Home,
-  Maximize2,
-  Menu,
-  Minus,
-  Pencil,
-  Plane,
-  Plus,
-  RefreshCw,
-  Search,
-  Tag,
-  Trash2,
-  X,
-} from "lucide-react";
+import {ChevronDown, Home, Maximize2, Menu, Minus, Pencil, Plane, Plus, RefreshCw, Tag, Trash2, X,} from "lucide-react";
 
 import {aircraftIconUrl} from "@/lib/aircraft-icons";
 import {aircraftCanvasLayer, type AircraftCanvasLayer, type CanvasAircraft,} from "@/components/aircraft-canvas-layer";
 import {enableSmoothWheelZoom} from "@/components/smooth-wheel-zoom";
+import {FlightSearch} from "@/components/flight-search";
 import {useMe} from "@/lib/auth";
 import {hasPermission} from "@/lib/permissions";
 import {
@@ -380,7 +367,6 @@ export function FcaMap({
   // Route ids whose fix (waypoint) names are shown on the map — toggled per route.
   const [labeledRoutes, setLabeledRoutes] = useState<Set<string>>(new Set());
   const [routeCallsign, setRouteCallsign] = useState<string | null>(null);
-  const [flightQuery, setFlightQuery] = useState("");
   // Mobile-only: the FCA list slides in as an overlay drawer (full map otherwise).
   const [mobileList, setMobileList] = useState(false);
   const [filter, setFilter] = useState("");
@@ -1379,23 +1365,13 @@ export function FcaMap({
             />
             {planeIcons ? "Aircraft icons" : "Triangles"}
           </button>
-          {/* Find a specific flight, fly to it, and plot its route. */}
-          <form
-            onSubmit={(e) => {
-              e.preventDefault();
-              focusFlight(flightQuery);
-            }}
-            className="flex items-center gap-1 rounded-lg border bg-background/95 px-2 shadow-lg backdrop-blur focus-within:ring-2 focus-within:ring-ring"
-          >
-            <Search className="size-3.5 shrink-0 text-muted-foreground" />
-            <input
-              value={flightQuery}
-              onChange={(e) => setFlightQuery(e.target.value)}
-              placeholder="find flight…"
-              aria-label="Find flight by callsign"
-              className="h-8 w-28 bg-transparent font-mono text-xs uppercase outline-none placeholder:normal-case placeholder:text-muted-foreground"
-            />
-          </form>
+          {/* Fuzzy find a specific flight, fly to it, and plot its route. */}
+          <FlightSearch
+            aircraft={traffic.data ?? []}
+            onSelect={focusFlight}
+            placeholder="find flight…"
+            variant="overlay"
+          />
         </div>
 
         {navStale && (
