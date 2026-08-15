@@ -2,7 +2,7 @@ import {useCallback, useEffect, useMemo, useRef, useState} from "react";
 import L from "leaflet";
 import "leaflet/dist/leaflet.css";
 import {Button, ConfirmButton, Input, useTheme} from "@ois/ui";
-import {ChevronDown, Maximize2, Minus, Pencil, Plane, Plus, RefreshCw, Tag, Trash2, X,} from "lucide-react";
+import {ChevronDown, Home, Maximize2, Minus, Pencil, Plane, Plus, RefreshCw, Tag, Trash2, X,} from "lucide-react";
 
 import {aircraftIconUrl} from "@/lib/aircraft-icons";
 import {useMe} from "@/lib/auth";
@@ -28,6 +28,9 @@ import {
 import {type MapRoute, type UpsertRoute, useCreateRoute, useDeleteRoute, useRoutes, useUpdateRoute,} from "@/lib/route";
 import {FcaDetail} from "@/pages/fca/detail";
 import boundariesGeo from "@/assets/artcc-boundaries.json";
+
+// Default "home" view — frames the contiguous US (center of CONUS ≈ 39.8N 98.6W).
+const US_HOME = { center: [39.5, -98.35] as LatLng, zoom: 4.3 };
 
 const FCA_COLORS = [
   "#f59e0b",
@@ -448,7 +451,7 @@ export function FcaPage() {
       // a canvas rather than one SVG node each — far cheaper to pan/zoom with
       // hundreds of paths on screen.
       preferCanvas: true,
-    }).setView([38.5, -77], 6);
+    }).setView(US_HOME.center, US_HOME.zoom);
     L.control.zoom({ position: "topright" }).addTo(map);
     node.style.background = MAP_BG[resolvedTheme];
     tileRef.current = L.tileLayer(CARTO[resolvedTheme], {
@@ -1276,8 +1279,21 @@ export function FcaPage() {
       <div className="relative isolate flex-1">
         <div ref={setContainer} className="absolute inset-0" />
 
-        {/* Per-user: type-shaped aircraft silhouettes vs. plain triangles. */}
-        <div className="absolute left-3 top-3 z-[500]">
+        {/* Map controls: recenter on the US + traffic-icon style toggle. */}
+        <div className="absolute left-3 top-3 z-[500] flex items-center gap-2">
+          <button
+            type="button"
+            onClick={() =>
+              mapRef.current?.flyTo(US_HOME.center, US_HOME.zoom, {
+                duration: 0.8,
+              })
+            }
+            title="Center on the United States"
+            className="flex items-center gap-1.5 rounded-lg border bg-background/95 px-2.5 py-1.5 text-xs font-medium shadow-lg backdrop-blur transition-colors hover:bg-muted"
+          >
+            <Home className="size-3.5 text-muted-foreground" />
+            Home
+          </button>
           <button
             type="button"
             onClick={() => setPlaneIcons((v) => !v)}
