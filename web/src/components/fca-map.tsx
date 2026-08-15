@@ -406,7 +406,7 @@ function atcAreaTip(id: string, name: string | null | undefined, positions: AtcP
 function atcAreaLabel(text: string, color: string): L.DivIcon {
   return L.divIcon({
     className: "",
-    html: `<span style="display:inline-block;padding:1px 5px;background:rgba(10,10,10,.85);color:${color};font:700 11px ui-monospace,monospace;border-radius:4px;box-shadow:0 0 0 1px ${color}66">${text}</span>`,
+    html: `<span style="display:inline-block;padding:1px 5px;background:rgba(10,10,10,.85);color:${color};font:700 11px ui-monospace,monospace;border-radius:4px;box-shadow:0 0 0 1px ${color}66;cursor:pointer">${text}</span>`,
     iconSize: [0, 0],
   });
 }
@@ -790,15 +790,15 @@ export function FcaMap({
       for (const off of offsets) {
         for (const poly of polys) {
           const outer = poly[0].map(([lon, lat]) => [lat, lon + off] as LatLng);
+          // Non-interactive: the tooltip lives on the label tag, not the whole area.
           L.polygon(outer, {
             color,
             weight: 1.5,
             opacity: 0.55,
             fillColor: color,
             fillOpacity: 0.08,
-          })
-            .bindTooltip(tip, { sticky: true, className: "fca-tip" })
-            .addTo(layer);
+            interactive: false,
+          }).addTo(layer);
         }
         const first = polys[0][0];
         let sx = 0;
@@ -809,9 +809,10 @@ export function FcaMap({
         }
         L.marker([sy / first.length, sx / first.length + off], {
           icon: atcAreaLabel(c.id, color),
-          interactive: false,
           keyboard: false,
-        }).addTo(layer);
+        })
+          .bindTooltip(tip, { direction: "top", offset: [0, -2], className: "fca-tip" })
+          .addTo(layer);
       }
     }
   }, [atc.data, offsetsKey, mapReady, showAtc]);
@@ -832,6 +833,7 @@ export function FcaMap({
         (t.circle as [number, number] | null) ??
         ringsCentroid(t.rings);
       for (const off of offsets) {
+        // Non-interactive areas: the tooltip lives on the label tag, not the whole area.
         if (t.circle) {
           L.circle([t.circle[0], t.circle[1] + off], {
             radius: 46300, // ~25 NM, VATSIM-Radar-style fallback
@@ -840,9 +842,8 @@ export function FcaMap({
             opacity: 0.6,
             fillColor: color,
             fillOpacity: 0.06,
-          })
-            .bindTooltip(tip, { sticky: true, className: "fca-tip" })
-            .addTo(layer);
+            interactive: false,
+          }).addTo(layer);
         } else {
           for (const ring of t.rings) {
             const latlngs = ring.map(([lat, lon]) => [lat, lon + off] as LatLng);
@@ -852,17 +853,17 @@ export function FcaMap({
               opacity: 0.7,
               fillColor: color,
               fillOpacity: 0.1,
-            })
-              .bindTooltip(tip, { sticky: true, className: "fca-tip" })
-              .addTo(layer);
+              interactive: false,
+            }).addTo(layer);
           }
         }
         if (anchor) {
           L.marker([anchor[0], anchor[1] + off], {
             icon: atcAreaLabel(t.id, color),
-            interactive: false,
             keyboard: false,
-          }).addTo(layer);
+          })
+            .bindTooltip(tip, { direction: "top", offset: [0, -2], className: "fca-tip" })
+            .addTo(layer);
         }
       }
     }
