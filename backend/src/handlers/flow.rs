@@ -24,10 +24,11 @@ use crate::{
     },
     jobs,
     models::{
-        AircraftRoute, DataStatus, FcaBody, FcaFlight, ReleaseRequest, ReorderRequest, RouteBody,
+        AircraftRoute, DataStatus, FcaBody, FcaFlight, FlightAdvisory, FlightFcaCrossing,
+        FlightGdp, FlightGroundStop, FlightProgram, ReleaseRequest, ReorderRequest, RouteBody,
         RouteWaypoint, TrafficAircraft, UpsertFcaRequest, UpsertRouteRequest,
     },
-    repos::flow as flow_repo,
+    repos::{flow as flow_repo, public as public_repo},
     state::AppState,
 };
 
@@ -528,6 +529,180 @@ fn build_data_status(state: &AppState) -> DataStatus {
 )]
 pub async fn data_status(State(state): State<AppState>) -> Json<DataStatus> {
     Json(build_data_status(&state))
+}
+
+/// Public "my flight" lookup — everything currently affecting one callsign: its
+/// arrival GDP / ground stop / rate program (with this flight's delay + EDCT) and
+/// every FCA it crosses (metered). No auth. `found` is false if it isn't live.
+#[utoipa::path(
+    get,
+    path = "/api/v1/public/flight/{callsign}",
+    tag = "public",
+    params(("callsign" = String, Path, description = "Aircraft callsign")),
+    responses((status = 200, body = FlightAdvisory))
+)]
+pub async fn flight_advisory(
+    State(state): State<AppState>,
+    Path(callsign): Path<String>,
+) -> Result<Json<FlightAdvisory>, ApiError> {
+    let pool = state.db.as_ref().ok_or(ApiError::ServiceUnavailable)?;
+    let cs = callsign.trim().to_ascii_uppercase();
+
+    // Locate the flight in the live feed (clone just the fields we need).
+    let (snapshot, airports) = feed_view(&state).await;
+    let hit = snapshot.as_ref().and_then(|s| {
+        s.data
+            .pilots
+            .iter()
+            .find(|p| p.callsign.eq_ignore_ascii_case(&cs))
+            .map(|p| {
+                (
+                    p.latitude,
+                    p.longitude,
+                    p.altitude,
+                    p.groundspeed,
+                    p.heading,
+                    p.flight_plan.clone(),
+                )
+            })
+    });
+    let Some((lat, lon, altitude, groundspeed, heading, fp)) = hit else {
+        return Ok(Json(FlightAdvisory {
+            callsign: cs,
+            found: false,
+            ..Default::default()
+        }));
+    };
+    let arr = fp
+        .as_ref()
+        .map(|f| f.arrival.to_ascii_uppercase())
+        .unwrap_or_default();
+    let airborne = groundspeed >= 50;
+
+    let mut adv = FlightAdvisory {
+        callsign: cs.clone(),
+        found: true,
+        dep: fp.as_ref().map(|f| f.departure.clone()).unwrap_or_default(),
+        arr: arr.clone(),
+        aircraft_type: fp
+            .as_ref()
+            .map(|f| f.aircraft_short.clone())
+            .unwrap_or_default(),
+        status: if airborne { "airborne" } else { "ground" }.to_string(),
+        altitude,
+        groundspeed,
+        lat,
+        lon,
+        heading,
+        ..Default::default()
+    };
+
+    let mut delays: Vec<i64> = Vec::new();
+    let mut edcts: Vec<DateTime<Utc>> = Vec::new();
+
+    if !arr.is_empty() {
+        // Arrival GDP (+ this flight's frozen slot, if controlled).
+        if let Some((gid, aar, start, end)) = public_repo::gdp_for_airport(pool, &arr).await? {
+            let (controlled, edct, cta, delay) =
+                match public_repo::gdp_slot_for(pool, &gid, &cs).await? {
+                    Some((edct, cta, d)) => (true, edct, Some(cta), d as i64),
+                    None => (false, None, None, 0),
+                };
+            if delay > 0 {
+                delays.push(delay);
+            }
+            if let Some(e) = edct {
+                edcts.push(e);
+            }
+            adv.gdp = Some(FlightGdp {
+                airport: arr.clone(),
+                aar,
+                start_time: start,
+                end_time: end,
+                controlled,
+                edct,
+                cta,
+                delay_min: delay,
+            });
+        }
+
+        // Arrival ground stop.
+        if let Some((scope, until)) = public_repo::ground_stop_for_airport(pool, &arr).await? {
+            adv.ground_stop = Some(FlightGroundStop {
+                airport: arr.clone(),
+                scope,
+                until,
+            });
+        }
+
+        // Arrival rate program — this flight's metered delay from the live flow.
+        let flow = crate::handlers::feed::flow_for(&state, pool, &arr).await?;
+        if let (Some(aar), Some(ff)) = (
+            flow.aar,
+            flow.flights
+                .iter()
+                .find(|f| f.callsign.eq_ignore_ascii_case(&cs)),
+        ) {
+            if ff.delay_min > 0 {
+                delays.push(ff.delay_min);
+            }
+            adv.rate_program = Some(FlightProgram {
+                airport: arr.clone(),
+                aar,
+                delay_min: ff.delay_min,
+                sta: ff.sta,
+                cfr: ff.cfr,
+            });
+        }
+    }
+
+    // FCA crossings — meter each enabled FCA and pick out this flight.
+    if let Some(snap) = snapshot.as_ref() {
+        let nav = state.nav.load_full();
+        let winds = state.winds.load_full();
+        let now = Utc::now();
+        for fca in flow_repo::list_fcas(pool)
+            .await?
+            .iter()
+            .filter(|f| f.enabled && f.points.0.len() >= 2)
+        {
+            let releases = load_releases(pool, &fca.id).await?;
+            let (flights, metas) = build_candidates(
+                fca,
+                &snap.data,
+                airports.as_ref(),
+                nav.as_ref(),
+                state.airspace.as_ref(),
+                winds.as_ref(),
+                &releases,
+                now,
+            );
+            if let Some(f) = finalize(fca, flights, &metas)
+                .into_iter()
+                .find(|f| f.callsign.eq_ignore_ascii_case(&cs))
+            {
+                if f.delay_min > 0 {
+                    delays.push(f.delay_min);
+                }
+                if let Some(e) = f.edct {
+                    edcts.push(e);
+                }
+                adv.fcas.push(FlightFcaCrossing {
+                    fca_id: fca.id.clone(),
+                    fca_name: fca.name.clone(),
+                    color: fca.color.clone(),
+                    cross_time: f.cross_time,
+                    delay_min: f.delay_min,
+                    edct: f.edct,
+                    seq: Some(f.seq),
+                });
+            }
+        }
+    }
+
+    adv.total_delay_min = delays.into_iter().max().unwrap_or(0);
+    adv.edct = edcts.into_iter().max();
+    Ok(Json(adv))
 }
 
 /// How much of the current live filed traffic the nav engine fully resolves, plus the most

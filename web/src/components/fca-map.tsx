@@ -1,8 +1,21 @@
 import {useCallback, useEffect, useMemo, useRef, useState} from "react";
 import L from "leaflet";
 import "leaflet/dist/leaflet.css";
-import {Button, ConfirmButton, Input, useTheme} from "@ois/ui";
-import {ChevronDown, Home, Maximize2, Minus, Pencil, Plane, Plus, RefreshCw, Tag, Trash2, X,} from "lucide-react";
+import {Button, ConfirmButton, Input, useTheme, useToast} from "@ois/ui";
+import {
+  ChevronDown,
+  Home,
+  Maximize2,
+  Minus,
+  Pencil,
+  Plane,
+  Plus,
+  RefreshCw,
+  Search,
+  Tag,
+  Trash2,
+  X,
+} from "lucide-react";
 
 import {aircraftIconUrl} from "@/lib/aircraft-icons";
 import {useMe} from "@/lib/auth";
@@ -341,8 +354,16 @@ function aircraftTip(ac: {
  * create/edit/delete affordance suppressed). Its live data comes from the
  * flow read endpoints, which are public.
  */
-export function FcaMap({ readOnly = false }: { readOnly?: boolean }) {
+export function FcaMap({
+  readOnly = false,
+  initialFlight,
+}: {
+  readOnly?: boolean;
+  /** Callsign to auto-locate + plot once, when linked in from the pilot page. */
+  initialFlight?: string;
+}) {
   const { data: me } = useMe();
+  const toast = useToast();
   // `readOnly` forces the view-only experience regardless of the viewer's
   // permissions; otherwise editing is gated on the usual flow perms.
   const canRead = readOnly || hasPermission(me, "flow.fca.read");
@@ -371,6 +392,7 @@ export function FcaMap({ readOnly = false }: { readOnly?: boolean }) {
   // Route ids whose fix (waypoint) names are shown on the map — toggled per route.
   const [labeledRoutes, setLabeledRoutes] = useState<Set<string>>(new Set());
   const [routeCallsign, setRouteCallsign] = useState<string | null>(null);
+  const [flightQuery, setFlightQuery] = useState("");
   const [filter, setFilter] = useState("");
   const [artccFilter, setArtccFilter] = useState("");
   // Which world copies are visible, as a stable key ("-360,0,360"). Bumped on pan/zoom so the
@@ -430,6 +452,33 @@ export function FcaMap({ readOnly = false }: { readOnly?: boolean }) {
       if (d && d.points.length >= 2) setPhase("edit");
       return d;
     });
+
+  // Locate a callsign in the live traffic, fly to it, and plot its route.
+  const focusFlight = (callsign: string) => {
+    const cs = callsign.trim().toUpperCase();
+    if (!cs) return;
+    const ac = traffic.data?.find((a) => a.callsign.toUpperCase() === cs);
+    if (ac && mapRef.current) {
+      mapRef.current.flyTo(
+        [ac.lat, ac.lon],
+        Math.max(mapRef.current.getZoom(), 6),
+        { duration: 0.7 },
+      );
+      setRouteCallsign(cs);
+    } else {
+      toast.warning(`${cs} isn’t in the live traffic right now`);
+    }
+  };
+
+  // Deep link from the pilot page (?flight=CALLSIGN): locate it once traffic loads.
+  const deepLinked = useRef(false);
+  useEffect(() => {
+    if (!initialFlight || deepLinked.current) return;
+    if (!mapReady || !traffic.data) return;
+    deepLinked.current = true;
+    focusFlight(initialFlight);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [initialFlight, mapReady, traffic.data]);
 
   // Initialize (and tear down) the map via a callback ref rather than a one-shot effect,
   // so it's created whenever the container actually mounts — including a hard refresh where
@@ -1318,6 +1367,23 @@ export function FcaMap({ readOnly = false }: { readOnly?: boolean }) {
             />
             {planeIcons ? "Aircraft icons" : "Triangles"}
           </button>
+          {/* Find a specific flight, fly to it, and plot its route. */}
+          <form
+            onSubmit={(e) => {
+              e.preventDefault();
+              focusFlight(flightQuery);
+            }}
+            className="flex items-center gap-1 rounded-lg border bg-background/95 px-2 shadow-lg backdrop-blur focus-within:ring-2 focus-within:ring-ring"
+          >
+            <Search className="size-3.5 shrink-0 text-muted-foreground" />
+            <input
+              value={flightQuery}
+              onChange={(e) => setFlightQuery(e.target.value)}
+              placeholder="find flight…"
+              aria-label="Find flight by callsign"
+              className="h-8 w-28 bg-transparent font-mono text-xs uppercase outline-none placeholder:normal-case placeholder:text-muted-foreground"
+            />
+          </form>
         </div>
 
         {navStale && (

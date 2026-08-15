@@ -826,6 +826,80 @@ pub struct PublicProgram {
     pub over_capacity: bool,
 }
 
+// --- public per-flight advisory ("my flight" lookup) ---
+
+/// A GDP affecting a looked-up flight (its arrival airport), with this flight's
+/// frozen control times when it's a controlled slot.
+#[derive(Debug, Serialize, ToSchema)]
+pub struct FlightGdp {
+    pub airport: String,
+    pub aar: i32,
+    pub start_time: String,
+    pub end_time: String,
+    /// True when this flight holds a frozen control slot (subject to an EDCT).
+    pub controlled: bool,
+    pub edct: Option<DateTime<Utc>>,
+    pub cta: Option<DateTime<Utc>>,
+    pub delay_min: i64,
+}
+
+/// A ground stop affecting a looked-up flight's arrival airport.
+#[derive(Debug, Serialize, ToSchema)]
+pub struct FlightGroundStop {
+    pub airport: String,
+    pub scope: String,
+    pub until: Option<String>,
+}
+
+/// A rate program metering a looked-up flight into its arrival airport.
+#[derive(Debug, Serialize, ToSchema)]
+pub struct FlightProgram {
+    pub airport: String,
+    pub aar: i32,
+    pub delay_min: i64,
+    pub sta: Option<DateTime<Utc>>,
+    pub cfr: Option<DateTime<Utc>>,
+}
+
+/// An FCA a looked-up flight crosses, with its metered crossing.
+#[derive(Debug, Serialize, ToSchema)]
+pub struct FlightFcaCrossing {
+    pub fca_id: String,
+    pub fca_name: String,
+    pub color: String,
+    pub cross_time: Option<DateTime<Utc>>,
+    pub delay_min: i64,
+    pub edct: Option<DateTime<Utc>>,
+    pub seq: Option<i64>,
+}
+
+/// Everything currently affecting one flight (by callsign), for the public "my
+/// flight" lookup and the FCA-map search. `found` is false when the callsign
+/// isn't in the live feed.
+#[derive(Debug, Default, Serialize, ToSchema)]
+pub struct FlightAdvisory {
+    pub callsign: String,
+    pub found: bool,
+    pub dep: String,
+    pub arr: String,
+    pub aircraft_type: String,
+    /// `airborne` | `ground`.
+    pub status: String,
+    pub altitude: i64,
+    pub groundspeed: i64,
+    pub lat: f64,
+    pub lon: f64,
+    pub heading: i64,
+    pub gdp: Option<FlightGdp>,
+    pub ground_stop: Option<FlightGroundStop>,
+    pub rate_program: Option<FlightProgram>,
+    pub fcas: Vec<FlightFcaCrossing>,
+    /// The binding (worst) predicted delay across all applicable initiatives.
+    pub total_delay_min: i64,
+    /// The latest expect-departure-clearance time across ground programs, if any.
+    pub edct: Option<DateTime<Utc>>,
+}
+
 /// The full public advisories board — every active initiative in one payload.
 #[derive(Debug, Serialize, ToSchema)]
 pub struct PublicBoard {

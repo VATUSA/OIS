@@ -4,6 +4,7 @@ import {FeedWatcher} from "@/components/feed-watcher";
 import {Navbar} from "@/components/navbar";
 import {AdvisoriesPage} from "@/pages/advisories";
 import {AdvisoriesFcaPage} from "@/pages/advisories/fcas";
+import {PilotPage} from "@/pages/pilot";
 import {AirportPage} from "@/pages/airport";
 import {FcaPage} from "@/pages/fca";
 import {RunwayPage} from "@/pages/runway";
@@ -126,6 +127,16 @@ const advisoriesFcaRoute = createRoute({
   getParentRoute: () => advisoriesRoute,
   path: "fcas",
   component: AdvisoriesFcaPage,
+  validateSearch: (search: Record<string, unknown>): { flight?: string } => ({
+    flight: typeof search.flight === "string" ? search.flight : undefined,
+  }),
+});
+
+// Pilot "my flight" lookup — public, its own top-level route.
+const pilotRoute = createRoute({
+  getParentRoute: () => rootRoute,
+  path: "pilot",
+  component: PilotPage,
 });
 
 // --- Planning (pre-event) ---
@@ -221,6 +232,7 @@ const routeTree = rootRoute.addChildren([
     runwayRoute,
   ]),
   advisoriesRoute.addChildren([advisoriesIndexRoute, advisoriesFcaRoute]),
+  pilotRoute,
   planningRoute.addChildren([
     planningIndexRoute,
     planningEventsRoute,

@@ -761,6 +761,27 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/v1/public/flight/{callsign}": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * Public "my flight" lookup — everything currently affecting one callsign: its
+         *     arrival GDP / ground stop / rate program (with this flight's delay + EDCT) and
+         *     every FCA it crosses (metered). No auth. `found` is false if it isn't live.
+         */
+        get: operations["flight_advisory"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/v1/tmu/cfr": {
         parameters: {
             query?: never;
@@ -1510,6 +1531,95 @@ export interface components {
             prefiles: number;
             /** @description The feed's own `update_timestamp` from VATSIM. */
             source_timestamp?: string | null;
+        };
+        /**
+         * @description Everything currently affecting one flight (by callsign), for the public "my
+         *     flight" lookup and the FCA-map search. `found` is false when the callsign
+         *     isn't in the live feed.
+         */
+        FlightAdvisory: {
+            aircraft_type: string;
+            /** Format: int64 */
+            altitude: number;
+            arr: string;
+            callsign: string;
+            dep: string;
+            /**
+             * Format: date-time
+             * @description The latest expect-departure-clearance time across ground programs, if any.
+             */
+            edct?: string | null;
+            fcas: components["schemas"]["FlightFcaCrossing"][];
+            found: boolean;
+            gdp?: null | components["schemas"]["FlightGdp"];
+            ground_stop?: null | components["schemas"]["FlightGroundStop"];
+            /** Format: int64 */
+            groundspeed: number;
+            /** Format: int64 */
+            heading: number;
+            /** Format: double */
+            lat: number;
+            /** Format: double */
+            lon: number;
+            rate_program?: null | components["schemas"]["FlightProgram"];
+            /** @description `airborne` | `ground`. */
+            status: string;
+            /**
+             * Format: int64
+             * @description The binding (worst) predicted delay across all applicable initiatives.
+             */
+            total_delay_min: number;
+        };
+        /** @description An FCA a looked-up flight crosses, with its metered crossing. */
+        FlightFcaCrossing: {
+            color: string;
+            /** Format: date-time */
+            cross_time?: string | null;
+            /** Format: int64 */
+            delay_min: number;
+            /** Format: date-time */
+            edct?: string | null;
+            fca_id: string;
+            fca_name: string;
+            /** Format: int64 */
+            seq?: number | null;
+        };
+        /**
+         * @description A GDP affecting a looked-up flight (its arrival airport), with this flight's
+         *     frozen control times when it's a controlled slot.
+         */
+        FlightGdp: {
+            /** Format: int32 */
+            aar: number;
+            airport: string;
+            /** @description True when this flight holds a frozen control slot (subject to an EDCT). */
+            controlled: boolean;
+            /** Format: date-time */
+            cta?: string | null;
+            /** Format: int64 */
+            delay_min: number;
+            /** Format: date-time */
+            edct?: string | null;
+            end_time: string;
+            start_time: string;
+        };
+        /** @description A ground stop affecting a looked-up flight's arrival airport. */
+        FlightGroundStop: {
+            airport: string;
+            scope: string;
+            until?: string | null;
+        };
+        /** @description A rate program metering a looked-up flight into its arrival airport. */
+        FlightProgram: {
+            /** Format: int32 */
+            aar: number;
+            airport: string;
+            /** Format: date-time */
+            cfr?: string | null;
+            /** Format: int64 */
+            delay_min: number;
+            /** Format: date-time */
+            sta?: string | null;
         };
         Flow: {
             /**
@@ -4323,6 +4433,28 @@ export interface operations {
                 };
                 content: {
                     "application/json": components["schemas"]["PublicBoard"];
+                };
+            };
+        };
+    };
+    flight_advisory: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /** @description Aircraft callsign */
+                callsign: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["FlightAdvisory"];
                 };
             };
         };

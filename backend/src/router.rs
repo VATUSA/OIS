@@ -29,6 +29,10 @@ pub fn build_router(state: AppState) -> Router {
         // Public advisories — read-only, no auth (active TMIs). The FCA overview
         // reuses the now-public GET /api/v1/flow/fcas via the shared map.
         .route("/api/v1/public/board", get(public::get_board))
+        .route(
+            "/api/v1/public/flight/{callsign}",
+            get(flow::flight_advisory),
+        )
         // Access editor
         .route("/api/v1/access/catalog", get(access::get_access_catalog))
         .route("/api/v1/access/self", get(access::get_self_access))
