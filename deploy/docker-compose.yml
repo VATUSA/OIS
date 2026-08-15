@@ -1,9 +1,17 @@
-# Full-stack deployment for a dev / staging / prod box: Postgres + backend + web (nginx).
-# Pulls the images built by .github/workflows/build-images.yml. Copy deploy/.env.example to
-# .env, fill it in, then: `docker compose -f deploy/docker-compose.yml up -d`.
+# Full stack for one environment (dev / staging / prod), fronted by your own Caddy.
 #
-# The web container terminates plain HTTP on WEB_PORT and proxies /api to the backend; put a
-# TLS terminator (Caddy/Traefik/Cloudflare/your LB) in front of it for public HTTPS.
+# Each service publishes a port on loopback; point Caddy at them (see deploy/Caddyfile.example):
+#   api-ois.vzdc.org  ->  127.0.0.1:${API_PORT}   (backend)
+#   ois.vzdc.org      ->  127.0.0.1:${WEB_PORT}    (web / SPA)
+#
+# The SPA is cross-origin: it calls the API at ${API_ORIGIN} (baked into the web container at
+# start via OIS_API_URL). Since both are subdomains of one site, the session cookie works.
+#
+# Setup:  cp deploy/.env.example deploy/.env  &&  edit  &&
+#         docker compose -f deploy/docker-compose.yml --env-file deploy/.env up -d
+#
+# (If your Caddy runs in Docker too, drop the "127.0.0.1:" prefixes and attach Caddy to this
+#  compose network instead of proxying to host ports.)
 
 services:
   postgres:
@@ -22,33 +30,36 @@ services:
     restart: unless-stopped
 
   backend:
-    image: ${REGISTRY:-ghcr.io}/${IMAGE_REPO:?set IMAGE_REPO, e.g. your-org/ois}-backend:${IMAGE_TAG:-latest}
+    image: ${REGISTRY:-ghcr.io}/${IMAGE_REPO:?set IMAGE_REPO, e.g. vzdc/ois}-backend:${IMAGE_TAG:-latest}
     depends_on:
       postgres:
         condition: service_healthy
     environment:
       DATABASE_URL: postgres://${POSTGRES_USER:-ois}:${POSTGRES_PASSWORD}@postgres:5432/${POSTGRES_DB:-ois}
       BIND_ADDR: 0.0.0.0:3000
-      # Behind a TLS terminator → Secure cookies.
-      COOKIE_SECURE: ${COOKIE_SECURE:-1}
-      # The public origin (used for the OAuth return_to allowlist + redirect URI).
-      CORS_ALLOWED_ORIGINS: ${PUBLIC_URL}
-      VATSIM_CLIENT_ID: ${VATSIM_CLIENT_ID}
-      VATSIM_CLIENT_SECRET: ${VATSIM_CLIENT_SECRET}
-      VATSIM_REDIRECT_URI: ${PUBLIC_URL}/api/v1/auth/vatsim/callback
+      # Caddy terminates TLS in front, so cookies are Secure.
+      COOKIE_SECURE: "1"
+      # Browser origin allowed to call the API with credentials (the web app).
+      CORS_ALLOWED_ORIGINS: ${WEB_ORIGIN:?e.g. https://ois.vzdc.org}
+      # OAuth callback lands on the API origin.
+      VATSIM_CLIENT_ID: ${VATSIM_CLIENT_ID:?}
+      VATSIM_CLIENT_SECRET: ${VATSIM_CLIENT_SECRET:?}
+      VATSIM_REDIRECT_URI: ${API_ORIGIN:?e.g. https://api-ois.vzdc.org}/api/v1/auth/vatsim/callback
       OIS_SERVER_ADMIN_CID: ${OIS_SERVER_ADMIN_CID:-}
-      # VATUSA sync (optional; leave blank to disable).
+      # VATUSA sync (optional; blank disables). Webhook receiver lives on the API origin.
       VATUSA_API_KEY: ${VATUSA_API_KEY:-}
-      OIS_PUBLIC_URL: ${PUBLIC_URL:-}
+      OIS_PUBLIC_URL: ${API_ORIGIN}
+    ports:
+      - "127.0.0.1:${API_PORT:-3000}:3000"
     restart: unless-stopped
 
   web:
-    image: ${REGISTRY:-ghcr.io}/${IMAGE_REPO:?set IMAGE_REPO, e.g. your-org/ois}-web:${IMAGE_TAG:-latest}
-    depends_on: [backend]
+    image: ${REGISTRY:-ghcr.io}/${IMAGE_REPO:?set IMAGE_REPO, e.g. vzdc/ois}-web:${IMAGE_TAG:-latest}
     environment:
-      BACKEND_URL: http://backend:3000
+      # The API origin the SPA calls (injected into /config.js at container start).
+      OIS_API_URL: ${API_ORIGIN}
     ports:
-      - "${WEB_PORT:-8080}:80"
+      - "127.0.0.1:${WEB_PORT:-8080}:80"
     restart: unless-stopped
 
 volumes:
