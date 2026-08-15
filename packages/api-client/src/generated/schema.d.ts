@@ -628,7 +628,10 @@ export interface paths {
             path?: never;
             cookie?: never;
         };
-        /** All shared map routes. Visible to anyone who can view the flow map (FlowFcaRead). */
+        /**
+         * All shared map routes, each resolved to a track. Visible to anyone who can view the flow
+         *     map (FlowFcaRead).
+         */
         get: operations["list_routes"];
         put?: never;
         post: operations["create_route"];
@@ -1779,15 +1782,23 @@ export interface components {
             order: string[];
         };
         /**
-         * @description A named polyline drawn on the flow map (a shared reference route). Simpler than an FCA:
-         *     no metering or membership filters.
+         * @description A named reference route on the flow map, defined by a filed-route string and resolved to a
+         *     track by the nav engine (kept fresh on every read). Shared; not tied to any aircraft.
          */
         RouteBody: {
+            /** @description Optional arrival airport ICAO (helps STAR resolution). */
+            arr: string;
             color: string;
+            /** @description Optional departure airport ICAO (helps SID / preferred-route resolution). */
+            dep: string;
             id: string;
             name: string;
-            /** @description Polyline vertices as `[lat, lon]` pairs (>= 2). */
+            /** @description Resolved track vertices as `[lat, lon]` pairs. */
             points: number[][];
+            /** @description The filed-route string, e.g. `RBV Q430 BYRDD J48 MOL FLASK OZZZI2`. */
+            route: string;
+            /** @description Route tokens the nav engine couldn't resolve (shown as a warning). */
+            unresolved: string[];
             /** Format: date-time */
             updated_at: string;
             updated_by?: string | null;
@@ -2137,10 +2148,12 @@ export interface components {
             trail?: number;
         };
         UpsertRouteRequest: {
+            arr?: string | null;
             color?: string | null;
+            dep?: string | null;
             name: string;
-            /** @description Polyline vertices as `[lat, lon]` pairs (>= 2). */
-            points: number[][];
+            /** @description The filed-route string to resolve, e.g. `RBV Q430 BYRDD J48 MOL FLASK OZZZI2`. */
+            route: string;
         };
         UpsertStaffingRequest: {
             notes?: string | null;

@@ -28,9 +28,15 @@ export function useCreateRoute() {
       if (error || !data) throw new Error("create failed");
       return data;
     },
-    onSuccess: () => {
+    onSuccess: (data) => {
       queryClient.invalidateQueries({ queryKey: ["routes"] });
-      toast.success("Route created");
+      if (data.unresolved.length > 0) {
+        toast.warning(`Route created — ${data.unresolved.length} token(s) unresolved`, {
+          description: data.unresolved.join(" "),
+        });
+      } else {
+        toast.success("Route created");
+      }
     },
     onError: () => toast.error("Couldn’t create the route"),
   });
@@ -48,7 +54,14 @@ export function useUpdateRoute() {
       if (error || !data) throw new Error("save failed");
       return data;
     },
-    onSuccess: () => queryClient.invalidateQueries({ queryKey: ["routes"] }),
+    onSuccess: (data) => {
+      queryClient.invalidateQueries({ queryKey: ["routes"] });
+      if (data.unresolved.length > 0) {
+        toast.warning(`Saved — ${data.unresolved.length} token(s) unresolved`, {
+          description: data.unresolved.join(" "),
+        });
+      }
+    },
     onError: () => toast.error("Couldn’t save the route"),
   });
 }

@@ -506,16 +506,24 @@ pub struct UpsertFcaRequest {
     pub enabled: Option<bool>,
 }
 
-/// A named polyline drawn on the flow map (a shared reference route). Simpler than an FCA:
-/// no metering or membership filters.
-#[derive(Debug, Serialize, ToSchema, sqlx::FromRow)]
+/// A named reference route on the flow map, defined by a filed-route string and resolved to a
+/// track by the nav engine (kept fresh on every read). Shared; not tied to any aircraft.
+#[derive(Debug, Serialize, ToSchema)]
 pub struct RouteBody {
     pub id: String,
     pub name: String,
     pub color: String,
-    /// Polyline vertices as `[lat, lon]` pairs (>= 2).
+    /// The filed-route string, e.g. `RBV Q430 BYRDD J48 MOL FLASK OZZZI2`.
+    pub route: String,
+    /// Optional departure airport ICAO (helps SID / preferred-route resolution).
+    pub dep: String,
+    /// Optional arrival airport ICAO (helps STAR resolution).
+    pub arr: String,
+    /// Resolved track vertices as `[lat, lon]` pairs.
     #[schema(value_type = Vec<Vec<f64>>)]
-    pub points: sqlx::types::Json<Vec<[f64; 2]>>,
+    pub points: Vec<[f64; 2]>,
+    /// Route tokens the nav engine couldn't resolve (shown as a warning).
+    pub unresolved: Vec<String>,
     pub updated_at: DateTime<Utc>,
     pub updated_by: Option<String>,
 }
@@ -525,9 +533,12 @@ pub struct UpsertRouteRequest {
     pub name: String,
     #[serde(default)]
     pub color: Option<String>,
-    /// Polyline vertices as `[lat, lon]` pairs (>= 2).
-    #[schema(value_type = Vec<Vec<f64>>)]
-    pub points: Vec<[f64; 2]>,
+    /// The filed-route string to resolve, e.g. `RBV Q430 BYRDD J48 MOL FLASK OZZZI2`.
+    pub route: String,
+    #[serde(default)]
+    pub dep: Option<String>,
+    #[serde(default)]
+    pub arr: Option<String>,
 }
 
 /// An aircraft whose filed route crosses an FCA, with its ETA to the crossing.

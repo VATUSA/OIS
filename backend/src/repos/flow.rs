@@ -3,7 +3,7 @@
 use sqlx::PgPool;
 
 use crate::errors::ApiError;
-use crate::models::{FcaBody, RouteBody, UpsertFcaRequest, UpsertRouteRequest};
+use crate::models::{FcaBody, UpsertFcaRequest, UpsertRouteRequest};
 
 const FCA_SELECT: &str = "select f.id, f.name, f.color, f.artcc, f.points, f.dests, \
     f.origins, f.fixes, f.scope, f.min_fl, f.max_fl, f.dir, f.mode, f.rate, f.mit, \
@@ -102,21 +102,34 @@ pub async fn delete_fca(pool: &PgPool, id: &str) -> Result<bool, ApiError> {
     Ok(result.rows_affected() > 0)
 }
 
-// --- flow map routes (shared named polylines) ---
+// --- flow map routes (shared filed-route strings, resolved on read) ---
 
-const ROUTE_SELECT: &str = "select r.id, r.name, r.color, r.points, r.updated_at, \
-    u.display_name as updated_by \
+/// The stored fields of a route; the handler resolves `route` to a track for the API response.
+#[derive(Debug, sqlx::FromRow)]
+pub struct RouteRow {
+    pub id: String,
+    pub name: String,
+    pub color: String,
+    pub route: String,
+    pub dep: String,
+    pub arr: String,
+    pub updated_at: chrono::DateTime<chrono::Utc>,
+    pub updated_by: Option<String>,
+}
+
+const ROUTE_SELECT: &str = "select r.id, r.name, r.color, r.route, r.dep, r.arr, \
+    r.updated_at, u.display_name as updated_by \
     from flow.route r left join identity.users u on u.id = r.updated_by";
 
-pub async fn list_routes(pool: &PgPool) -> Result<Vec<RouteBody>, ApiError> {
-    sqlx::query_as::<_, RouteBody>(&format!("{ROUTE_SELECT} order by r.name"))
+pub async fn list_routes(pool: &PgPool) -> Result<Vec<RouteRow>, ApiError> {
+    sqlx::query_as::<_, RouteRow>(&format!("{ROUTE_SELECT} order by r.name"))
         .fetch_all(pool)
         .await
         .map_err(|_| ApiError::Internal)
 }
 
-pub async fn get_route(pool: &PgPool, id: &str) -> Result<Option<RouteBody>, ApiError> {
-    sqlx::query_as::<_, RouteBody>(&format!("{ROUTE_SELECT} where r.id = $1"))
+pub async fn get_route(pool: &PgPool, id: &str) -> Result<Option<RouteRow>, ApiError> {
+    sqlx::query_as::<_, RouteRow>(&format!("{ROUTE_SELECT} where r.id = $1"))
         .bind(id)
         .fetch_optional(pool)
         .await
@@ -129,12 +142,14 @@ pub async fn create_route(
     actor: &str,
 ) -> Result<String, ApiError> {
     sqlx::query_scalar::<_, String>(
-        "insert into flow.route (name, color, points, updated_by, created_by) \
-         values ($1, $2, $3, $4, $4) returning id",
+        "insert into flow.route (name, color, route, dep, arr, updated_by, created_by) \
+         values ($1, $2, $3, $4, $5, $6, $6) returning id",
     )
     .bind(req.name.trim())
     .bind(req.color.as_deref().unwrap_or("#38bdf8"))
-    .bind(sqlx::types::Json(&req.points))
+    .bind(req.route.trim())
+    .bind(req.dep.as_deref().unwrap_or("").trim().to_ascii_uppercase())
+    .bind(req.arr.as_deref().unwrap_or("").trim().to_ascii_uppercase())
     .bind(actor)
     .fetch_one(pool)
     .await
@@ -148,12 +163,14 @@ pub async fn update_route(
     actor: &str,
 ) -> Result<bool, ApiError> {
     let result = sqlx::query(
-        "update flow.route set name = $1, color = $2, points = $3, updated_by = $4 \
-         where id = $5",
+        "update flow.route set name = $1, color = $2, route = $3, dep = $4, arr = $5, \
+         updated_by = $6 where id = $7",
     )
     .bind(req.name.trim())
     .bind(req.color.as_deref().unwrap_or("#38bdf8"))
-    .bind(sqlx::types::Json(&req.points))
+    .bind(req.route.trim())
+    .bind(req.dep.as_deref().unwrap_or("").trim().to_ascii_uppercase())
+    .bind(req.arr.as_deref().unwrap_or("").trim().to_ascii_uppercase())
     .bind(actor)
     .bind(id)
     .execute(pool)

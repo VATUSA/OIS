@@ -41,8 +41,6 @@ type LatLng = [number, number];
 type Phase = "draw" | "edit";
 
 type Draft = {
-  /** "fca" = a metered flow-constrained area; "route" = a plain named polyline. */
-  kind: "fca" | "route";
   id: string | null;
   name: string;
   color: string;
@@ -156,7 +154,6 @@ function midpointOf(pts: LatLng[]): LatLng {
 
 function blankDraft(count: number): Draft {
   return {
-    kind: "fca",
     id: null,
     name: `FCA ${count + 1}`,
     color: FCA_COLORS[count % FCA_COLORS.length],
@@ -175,7 +172,6 @@ function blankDraft(count: number): Draft {
 }
 function draftFrom(fca: Fca): Draft {
   return {
-    kind: "fca",
     id: fca.id,
     name: fca.name,
     color: fca.color,
@@ -202,22 +198,34 @@ const ROUTE_COLORS = [
   "#f472b6",
   "#facc15",
 ];
-function blankRouteDraft(count: number): Draft {
+
+/** Editing state for a route (a filed-route string, not a drawn line). */
+type RouteForm = {
+  id: string | null;
+  name: string;
+  route: string;
+  dep: string;
+  arr: string;
+  color: string;
+};
+function blankRouteForm(count: number): RouteForm {
   return {
-    ...blankDraft(count),
-    kind: "route",
+    id: null,
     name: `Route ${count + 1}`,
+    route: "",
+    dep: "",
+    arr: "",
     color: ROUTE_COLORS[count % ROUTE_COLORS.length],
   };
 }
-function draftFromRoute(r: MapRoute): Draft {
+function routeFormFrom(r: MapRoute): RouteForm {
   return {
-    ...blankDraft(0),
-    kind: "route",
     id: r.id,
     name: r.name,
+    route: r.route,
+    dep: r.dep,
+    arr: r.arr,
     color: r.color,
-    points: (r.points as LatLng[]) ?? [],
   };
 }
 
@@ -310,6 +318,7 @@ export function FcaPage() {
   const [phase, setPhase] = useState<Phase>("draw");
   const [selectedId, setSelectedId] = useState<string | null>(null);
   const [selectedRouteId, setSelectedRouteId] = useState<string | null>(null);
+  const [routeForm, setRouteForm] = useState<RouteForm | null>(null);
   const [routeCallsign, setRouteCallsign] = useState<string | null>(null);
   const [filter, setFilter] = useState("");
   const [artccFilter, setArtccFilter] = useState("");
@@ -618,16 +627,13 @@ export function FcaPage() {
       const selected = r.id === selectedRouteId;
       for (const off of offsetsKey.split(",").map(Number)) {
         const pts = shiftLine(base, off);
+        // Routes are display-only — not clickable on the map.
         L.polyline(pts, {
           color: r.color,
           weight: selected ? 5 : 3,
           opacity: selected ? 1 : 0.85,
-        })
-          .on("click", (e) => {
-            L.DomEvent.stop(e);
-            setSelectedRouteId((cur) => (cur === r.id ? null : r.id));
-          })
-          .addTo(layer);
+          interactive: false,
+        }).addTo(layer);
         for (const end of [pts[0], pts[pts.length - 1]]) {
           L.circleMarker(end, {
             radius: selected ? 5 : 4,
@@ -767,37 +773,35 @@ export function FcaPage() {
     setDraft(draftFrom(fca));
     setPhase("edit");
   };
+  // Routes are edited as a filed-route string (not drawn on the map).
   const startNewRoute = () => {
-    setSelectedId(null);
     setSelectedRouteId(null);
-    setRouteCallsign(null);
-    setDraft(blankRouteDraft(routes.data?.length ?? 0));
-    setPhase("draw");
+    setRouteForm(blankRouteForm(routes.data?.length ?? 0));
   };
   const startEditRoute = (r: MapRoute) => {
-    setSelectedId(null);
     setSelectedRouteId(null);
-    setRouteCallsign(null);
-    setDraft(draftFromRoute(r));
-    setPhase("edit");
+    setRouteForm(routeFormFrom(r));
+  };
+  const saveRoute = () => {
+    if (!routeForm || !routeForm.name.trim() || !routeForm.route.trim()) return;
+    const body: UpsertRoute = {
+      name: routeForm.name.trim(),
+      color: routeForm.color,
+      route: routeForm.route.trim().toUpperCase(),
+      dep: routeForm.dep.trim().toUpperCase(),
+      arr: routeForm.arr.trim().toUpperCase(),
+    };
+    const done = () => setRouteForm(null);
+    if (routeForm.id) {
+      updateRoute.mutate({ id: routeForm.id, body }, { onSuccess: done });
+    } else {
+      createRoute.mutate(body, { onSuccess: done });
+    }
   };
   const cancel = () => setDraft(null);
 
   const save = () => {
     if (!draft || draft.points.length < 2) return;
-    if (draft.kind === "route") {
-      const body: UpsertRoute = {
-        name: draft.name.trim() || "Route",
-        color: draft.color,
-        points: normPoints(draft.points),
-      };
-      if (draft.id) {
-        updateRoute.mutate({ id: draft.id, body }, { onSuccess: cancel });
-      } else {
-        createRoute.mutate(body, { onSuccess: cancel });
-      }
-      return;
-    }
     const body: UpsertFca = {
       name: draft.name.trim() || "FCA",
       color: draft.color,
@@ -872,18 +876,13 @@ export function FcaPage() {
               setPhase("draw");
             }}
             onCancel={cancel}
-            saving={
-              createFca.isPending ||
-              updateFca.isPending ||
-              createRoute.isPending ||
-              updateRoute.isPending
-            }
+            saving={createFca.isPending || updateFca.isPending}
           />
         ) : (
           <>
             {canEdit && (
               <div className="border-b p-3">
-                {drawing && draft?.kind === "fca" ? (
+                {drawing ? (
                   <Button
                     variant="secondary"
                     className="w-full"
@@ -1002,84 +1001,94 @@ export function FcaPage() {
               )}
             </div>
 
-            {/* Shared named routes (polylines) */}
+            {/* Shared routes (filed-route strings resolved by the nav engine) */}
             <div className="flex flex-col border-t">
-              <div className="flex items-center justify-between px-3 pt-3">
-                <span className="text-xs font-semibold uppercase tracking-wide text-muted-foreground">
-                  Routes
-                </span>
-                {canEditRoute &&
-                  (drawing && draft?.kind === "route" ? (
-                    <button
-                      type="button"
-                      onClick={cancel}
-                      className="text-xs text-muted-foreground hover:text-foreground"
-                    >
-                      Cancel drawing
-                    </button>
-                  ) : (
-                    <button
-                      type="button"
-                      onClick={startNewRoute}
-                      className="flex items-center gap-1 text-xs text-primary hover:underline"
-                    >
-                      <Plus className="size-3.5" />
-                      New route
-                    </button>
-                  ))}
-              </div>
-              {routes.data && routes.data.length > 0 ? (
-                <ul className="max-h-48 overflow-y-auto p-1">
-                  {routes.data.map((r) => (
-                    <li
-                      key={r.id}
-                      className={
-                        "flex items-center gap-2 rounded px-2 py-1.5 text-sm " +
-                        (r.id === selectedRouteId ? "bg-accent/40" : "")
-                      }
-                    >
-                      <span
-                        className="size-3 shrink-0 rounded-full"
-                        style={{ background: r.color, border: `2px solid ${r.color}` }}
-                      />
+              {routeForm ? (
+                <RouteEditor
+                  form={routeForm}
+                  onChange={setRouteForm}
+                  onSave={saveRoute}
+                  onCancel={() => setRouteForm(null)}
+                  saving={createRoute.isPending || updateRoute.isPending}
+                />
+              ) : (
+                <>
+                  <div className="flex items-center justify-between px-3 pt-3">
+                    <span className="text-xs font-semibold uppercase tracking-wide text-muted-foreground">
+                      Routes
+                    </span>
+                    {canEditRoute && (
                       <button
                         type="button"
-                        onClick={() =>
-                          setSelectedRouteId((cur) => (cur === r.id ? null : r.id))
-                        }
-                        className="flex-1 truncate text-left font-mono"
+                        onClick={startNewRoute}
+                        className="flex items-center gap-1 text-xs text-primary hover:underline"
                       >
-                        {r.name}
+                        <Plus className="size-3.5" />
+                        New route
                       </button>
-                      {canEditRoute && (
-                        <button
-                          type="button"
-                          title="Edit"
-                          onClick={() => startEditRoute(r)}
-                          className="text-muted-foreground hover:text-foreground"
+                    )}
+                  </div>
+                  {routes.data && routes.data.length > 0 ? (
+                    <ul className="max-h-48 overflow-y-auto p-1">
+                      {routes.data.map((r) => (
+                        <li
+                          key={r.id}
+                          className={
+                            "flex items-center gap-2 rounded px-2 py-1.5 text-sm " +
+                            (r.id === selectedRouteId ? "bg-accent/40" : "")
+                          }
                         >
-                          <Pencil className="size-3.5" />
-                        </button>
-                      )}
-                      {canDeleteRoute && (
-                        <ConfirmButton
-                          size="icon"
-                          className="size-7"
-                          title="Delete"
-                          aria-label="Delete route"
-                          onConfirm={() => deleteRoute.mutate(r.id)}
-                          warn={`Delete the “${r.name}” route?`}
-                        >
-                          <Trash2 className="size-3.5" />
-                        </ConfirmButton>
-                      )}
-                    </li>
-                  ))}
-                </ul>
-              ) : (
-                <p className="px-3 py-3 text-xs text-muted-foreground">
-                  No routes yet.{canEditRoute && " Draw one with “New route”."}
-                </p>
+                          <span
+                            className="size-3 shrink-0 rounded-full"
+                            style={{ background: r.color, border: `2px solid ${r.color}` }}
+                          />
+                          <button
+                            type="button"
+                            title={r.route}
+                            onClick={() =>
+                              setSelectedRouteId((cur) => (cur === r.id ? null : r.id))
+                            }
+                            className="flex-1 truncate text-left font-mono"
+                          >
+                            {r.name}
+                            {r.unresolved.length > 0 && (
+                              <span className="ml-1.5 text-xs text-amber-500" title={`Unresolved: ${r.unresolved.join(" ")}`}>
+                                ⚠{r.unresolved.length}
+                              </span>
+                            )}
+                          </button>
+                          {canEditRoute && (
+                            <button
+                              type="button"
+                              title="Edit"
+                              onClick={() => startEditRoute(r)}
+                              className="text-muted-foreground hover:text-foreground"
+                            >
+                              <Pencil className="size-3.5" />
+                            </button>
+                          )}
+                          {canDeleteRoute && (
+                            <ConfirmButton
+                              size="icon"
+                              className="size-7"
+                              title="Delete"
+                              aria-label="Delete route"
+                              onConfirm={() => deleteRoute.mutate(r.id)}
+                              warn={`Delete the “${r.name}” route?`}
+                            >
+                              <Trash2 className="size-3.5" />
+                            </ConfirmButton>
+                          )}
+                        </li>
+                      ))}
+                    </ul>
+                  ) : (
+                    <p className="px-3 py-3 text-xs text-muted-foreground">
+                      No routes yet.
+                      {canEditRoute && " Add one with “New route”."}
+                    </p>
+                  )}
+                </>
               )}
             </div>
           </>
@@ -1468,6 +1477,98 @@ function Field({
   );
 }
 
+function RouteEditor({
+  form,
+  onChange,
+  onSave,
+  onCancel,
+  saving,
+}: {
+  form: RouteForm;
+  onChange: (f: RouteForm) => void;
+  onSave: () => void;
+  onCancel: () => void;
+  saving: boolean;
+}) {
+  const set = <K extends keyof RouteForm>(k: K, v: RouteForm[K]) =>
+    onChange({ ...form, [k]: v });
+  return (
+    <div className="flex flex-col gap-3 p-3">
+      <div className="text-sm font-semibold text-primary">
+        {form.id ? "EDIT ROUTE" : "NEW ROUTE"}
+      </div>
+      <Field label="Name">
+        <Input value={form.name} onChange={(e) => set("name", e.target.value)} />
+      </Field>
+      <Field
+        label="Route"
+        help="A filed-route string — fixes, navaids, airways, SID/STAR. The nav engine draws it."
+      >
+        <textarea
+          value={form.route}
+          onChange={(e) => set("route", e.target.value)}
+          rows={3}
+          placeholder="RBV Q430 BYRDD J48 MOL FLASK OZZZI2"
+          className="w-full rounded-md border border-input bg-background px-3 py-2 font-mono text-sm uppercase outline-none focus-visible:ring-2 focus-visible:ring-ring"
+        />
+      </Field>
+      <div className="grid grid-cols-2 gap-3">
+        <Field label="Dep" help="Optional — improves SID / preferred-route resolution.">
+          <Input
+            className="font-mono uppercase"
+            maxLength={4}
+            placeholder="KJFK"
+            value={form.dep}
+            onChange={(e) => set("dep", e.target.value)}
+          />
+        </Field>
+        <Field label="Arr" help="Optional — improves STAR resolution.">
+          <Input
+            className="font-mono uppercase"
+            maxLength={4}
+            placeholder="KBOS"
+            value={form.arr}
+            onChange={(e) => set("arr", e.target.value)}
+          />
+        </Field>
+      </div>
+      <div className="flex flex-col gap-1">
+        <span className="text-xs font-medium uppercase tracking-wide text-muted-foreground">
+          Color
+        </span>
+        <div className="flex flex-wrap gap-1.5">
+          {ROUTE_COLORS.map((c) => (
+            <button
+              key={c}
+              type="button"
+              onClick={() => set("color", c)}
+              className={
+                "size-6 rounded-full " +
+                (form.color === c
+                  ? "ring-2 ring-ring ring-offset-2 ring-offset-background"
+                  : "")
+              }
+              style={{ background: c }}
+            />
+          ))}
+        </div>
+      </div>
+      <div className="flex gap-2 pt-1">
+        <Button
+          className="flex-1"
+          onClick={onSave}
+          disabled={!form.name.trim() || !form.route.trim() || saving}
+        >
+          Save route
+        </Button>
+        <Button variant="ghost" onClick={onCancel}>
+          Cancel
+        </Button>
+      </div>
+    </div>
+  );
+}
+
 function DraftEditor({
   draft,
   onChange,
@@ -1485,60 +1586,6 @@ function DraftEditor({
 }) {
   const set = <K extends keyof Draft>(k: K, v: Draft[K]) =>
     onChange({ ...draft, [k]: v });
-
-  // Routes are just a name + color + polyline — a slim editor, no metering fields.
-  if (draft.kind === "route") {
-    return (
-      <div className="flex flex-1 flex-col gap-3 overflow-y-auto p-3">
-        <div className="text-sm font-semibold text-primary">
-          {draft.id ? "EDIT ROUTE" : "NEW ROUTE"} ·{" "}
-          <span className="tabular-nums">{draft.points.length}</span> pts ·{" "}
-          <span className="tabular-nums">{Math.round(lineNm(draft.points))}</span> nm
-        </div>
-        <Field label="Name">
-          <Input value={draft.name} onChange={(e) => set("name", e.target.value)} />
-        </Field>
-        <div className="flex flex-col gap-1">
-          <span className="text-xs font-medium uppercase tracking-wide text-muted-foreground">
-            Color
-          </span>
-          <div className="flex flex-wrap gap-1.5">
-            {ROUTE_COLORS.map((c) => (
-              <button
-                key={c}
-                type="button"
-                onClick={() => set("color", c)}
-                className={
-                  "size-6 rounded-full " +
-                  (draft.color === c
-                    ? "ring-2 ring-ring ring-offset-2 ring-offset-background"
-                    : "")
-                }
-                style={{ background: c }}
-              />
-            ))}
-          </div>
-        </div>
-        <div className="mt-auto flex flex-col gap-2 pt-2">
-          <div className="flex gap-2">
-            <Button variant="secondary" className="flex-1" onClick={onRedraw}>
-              ↻ Redraw line
-            </Button>
-            <Button
-              className="flex-1"
-              onClick={onSave}
-              disabled={draft.points.length < 2 || saving}
-            >
-              Save route
-            </Button>
-          </div>
-          <Button variant="ghost" onClick={onCancel}>
-            Cancel
-          </Button>
-        </div>
-      </div>
-    );
-  }
 
   return (
     <div className="flex flex-1 flex-col gap-3 overflow-y-auto p-3">
