@@ -108,6 +108,8 @@ pub fn draft_new_permission_names() -> Vec<&'static str> {
         "flow.fca.read",
         "flow.fca.update",
         "flow.fca.delete",
+        "flow.route.update",
+        "flow.route.delete",
         "flow.runway.read",
         "flow.runway.update",
         // --- discord config ---

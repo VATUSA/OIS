@@ -621,6 +621,39 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/v1/flow/routes": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** All shared map routes. Visible to anyone who can view the flow map (FlowFcaRead). */
+        get: operations["list_routes"];
+        put?: never;
+        post: operations["create_route"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/flow/routes/{id}": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put: operations["update_route"];
+        post?: never;
+        delete: operations["delete_route"];
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/v1/flow/runway/{icao}": {
         parameters: {
             query?: never;
@@ -1745,6 +1778,20 @@ export interface components {
         ReorderRequest: {
             order: string[];
         };
+        /**
+         * @description A named polyline drawn on the flow map (a shared reference route). Simpler than an FCA:
+         *     no metering or membership filters.
+         */
+        RouteBody: {
+            color: string;
+            id: string;
+            name: string;
+            /** @description Polyline vertices as `[lat, lon]` pairs (>= 2). */
+            points: number[][];
+            /** Format: date-time */
+            updated_at: string;
+            updated_by?: string | null;
+        };
         /** @description A named point along a resolved route. */
         RouteWaypoint: {
             /** Format: double */
@@ -2088,6 +2135,12 @@ export interface components {
             mit?: number;
             /** Format: int32 */
             trail?: number;
+        };
+        UpsertRouteRequest: {
+            color?: string | null;
+            name: string;
+            /** @description Polyline vertices as `[lat, lon]` pairs (>= 2). */
+            points: number[][];
         };
         UpsertStaffingRequest: {
             notes?: string | null;
@@ -3737,6 +3790,142 @@ export interface operations {
                 content?: never;
             };
             503: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+        };
+    };
+    list_routes: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["RouteBody"][];
+                };
+            };
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+        };
+    };
+    create_route: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["UpsertRouteRequest"];
+            };
+        };
+        responses: {
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["RouteBody"];
+                };
+            };
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+        };
+    };
+    update_route: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /** @description Route id */
+                id: string;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["UpsertRouteRequest"];
+            };
+        };
+        responses: {
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["RouteBody"];
+                };
+            };
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+        };
+    };
+    delete_route: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /** @description Route id */
+                id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            204: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            404: {
                 headers: {
                     [name: string]: unknown;
                 };

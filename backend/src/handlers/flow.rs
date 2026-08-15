@@ -14,7 +14,9 @@ use chrono::{DateTime, Duration, Utc};
 use crate::{
     auth::{
         context::CurrentUser,
-        permissions::{FlowFcaDelete, FlowFcaRead, FlowFcaUpdate},
+        permissions::{
+            FlowFcaDelete, FlowFcaRead, FlowFcaUpdate, FlowRouteDelete, FlowRouteUpdate,
+        },
         require_permission::RequirePermission,
     },
     errors::ApiError,
@@ -24,8 +26,8 @@ use crate::{
     },
     jobs,
     models::{
-        AircraftRoute, DataStatus, FcaBody, FcaFlight, ReleaseRequest, ReorderRequest,
-        RouteWaypoint, TrafficAircraft, UpsertFcaRequest,
+        AircraftRoute, DataStatus, FcaBody, FcaFlight, ReleaseRequest, ReorderRequest, RouteBody,
+        RouteWaypoint, TrafficAircraft, UpsertFcaRequest, UpsertRouteRequest,
     },
     repos::flow as flow_repo,
     state::AppState,
@@ -207,6 +209,100 @@ pub async fn delete_fca(
 ) -> Result<StatusCode, ApiError> {
     let pool = state.db.as_ref().ok_or(ApiError::ServiceUnavailable)?;
     if flow_repo::delete_fca(pool, &id).await? {
+        Ok(StatusCode::NO_CONTENT)
+    } else {
+        Err(ApiError::NotFound)
+    }
+}
+
+// --- flow map routes (shared named polylines) ---
+
+fn validate_route(req: &UpsertRouteRequest) -> Result<(), ApiError> {
+    if req.name.trim().is_empty() || req.points.len() < 2 {
+        return Err(ApiError::BadRequest);
+    }
+    Ok(())
+}
+
+/// All shared map routes. Visible to anyone who can view the flow map (FlowFcaRead).
+#[utoipa::path(
+    get,
+    path = "/api/v1/flow/routes",
+    tag = "flow",
+    responses((status = 200, body = Vec<RouteBody>), (status = 401))
+)]
+pub async fn list_routes(
+    State(state): State<AppState>,
+    _permission: RequirePermission<FlowFcaRead>,
+) -> Result<Json<Vec<RouteBody>>, ApiError> {
+    let pool = state.db.as_ref().ok_or(ApiError::ServiceUnavailable)?;
+    Ok(Json(flow_repo::list_routes(pool).await?))
+}
+
+#[utoipa::path(
+    post,
+    path = "/api/v1/flow/routes",
+    tag = "flow",
+    request_body = UpsertRouteRequest,
+    responses((status = 200, body = RouteBody), (status = 400), (status = 401))
+)]
+pub async fn create_route(
+    State(state): State<AppState>,
+    _permission: RequirePermission<FlowRouteUpdate>,
+    Extension(current_user): Extension<Option<CurrentUser>>,
+    Json(payload): Json<UpsertRouteRequest>,
+) -> Result<Json<RouteBody>, ApiError> {
+    let user = current_user.as_ref().ok_or(ApiError::Unauthorized)?;
+    let pool = state.db.as_ref().ok_or(ApiError::ServiceUnavailable)?;
+    validate_route(&payload)?;
+    let id = flow_repo::create_route(pool, &payload, &user.id).await?;
+    flow_repo::get_route(pool, &id)
+        .await?
+        .map(Json)
+        .ok_or(ApiError::Internal)
+}
+
+#[utoipa::path(
+    put,
+    path = "/api/v1/flow/routes/{id}",
+    tag = "flow",
+    params(("id" = String, Path, description = "Route id")),
+    request_body = UpsertRouteRequest,
+    responses((status = 200, body = RouteBody), (status = 400), (status = 401), (status = 404))
+)]
+pub async fn update_route(
+    State(state): State<AppState>,
+    _permission: RequirePermission<FlowRouteUpdate>,
+    Extension(current_user): Extension<Option<CurrentUser>>,
+    Path(id): Path<String>,
+    Json(payload): Json<UpsertRouteRequest>,
+) -> Result<Json<RouteBody>, ApiError> {
+    let user = current_user.as_ref().ok_or(ApiError::Unauthorized)?;
+    let pool = state.db.as_ref().ok_or(ApiError::ServiceUnavailable)?;
+    validate_route(&payload)?;
+    if !flow_repo::update_route(pool, &id, &payload, &user.id).await? {
+        return Err(ApiError::NotFound);
+    }
+    flow_repo::get_route(pool, &id)
+        .await?
+        .map(Json)
+        .ok_or(ApiError::NotFound)
+}
+
+#[utoipa::path(
+    delete,
+    path = "/api/v1/flow/routes/{id}",
+    tag = "flow",
+    params(("id" = String, Path, description = "Route id")),
+    responses((status = 204), (status = 401), (status = 404))
+)]
+pub async fn delete_route(
+    State(state): State<AppState>,
+    _permission: RequirePermission<FlowRouteDelete>,
+    Path(id): Path<String>,
+) -> Result<StatusCode, ApiError> {
+    let pool = state.db.as_ref().ok_or(ApiError::ServiceUnavailable)?;
+    if flow_repo::delete_route(pool, &id).await? {
         Ok(StatusCode::NO_CONTENT)
     } else {
         Err(ApiError::NotFound)

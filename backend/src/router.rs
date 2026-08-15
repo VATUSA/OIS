@@ -141,6 +141,15 @@ pub fn build_router(state: AppState) -> Router {
             "/api/v1/flow/fcas/{id}/release/{callsign}",
             post(flow::mark_release).delete(flow::clear_release),
         )
+        // Shared named map routes (polylines)
+        .route(
+            "/api/v1/flow/routes",
+            get(flow::list_routes).post(flow::create_route),
+        )
+        .route(
+            "/api/v1/flow/routes/{id}",
+            put(flow::update_route).delete(flow::delete_route),
+        )
         .route("/api/v1/flow/counts", get(flow::fca_counts))
         .route(
             "/api/v1/flow/aircraft/{callsign}/route",

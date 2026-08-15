@@ -24,6 +24,7 @@ import {
   useTraffic,
   useUpdateFca,
 } from "@/lib/fca";
+import {type MapRoute, type UpsertRoute, useCreateRoute, useDeleteRoute, useRoutes, useUpdateRoute,} from "@/lib/route";
 import {FcaDetail} from "@/pages/fca/detail";
 import boundariesGeo from "@/assets/artcc-boundaries.json";
 
@@ -40,6 +41,8 @@ type LatLng = [number, number];
 type Phase = "draw" | "edit";
 
 type Draft = {
+  /** "fca" = a metered flow-constrained area; "route" = a plain named polyline. */
+  kind: "fca" | "route";
   id: string | null;
   name: string;
   color: string;
@@ -118,6 +121,7 @@ function midpointOf(pts: LatLng[]): LatLng {
 
 function blankDraft(count: number): Draft {
   return {
+    kind: "fca",
     id: null,
     name: `FCA ${count + 1}`,
     color: FCA_COLORS[count % FCA_COLORS.length],
@@ -136,6 +140,7 @@ function blankDraft(count: number): Draft {
 }
 function draftFrom(fca: Fca): Draft {
   return {
+    kind: "fca",
     id: fca.id,
     name: fca.name,
     color: fca.color,
@@ -150,6 +155,34 @@ function draftFrom(fca: Fca): Draft {
     mode: fca.mode === "mit" ? "mit" : "rate",
     rate: fca.rate,
     mit: fca.mit,
+  };
+}
+
+/** Distinct palette for routes so they read differently from FCAs on the map. */
+const ROUTE_COLORS = [
+  "#38bdf8",
+  "#22d3ee",
+  "#34d399",
+  "#a78bfa",
+  "#f472b6",
+  "#facc15",
+];
+function blankRouteDraft(count: number): Draft {
+  return {
+    ...blankDraft(count),
+    kind: "route",
+    name: `Route ${count + 1}`,
+    color: ROUTE_COLORS[count % ROUTE_COLORS.length],
+  };
+}
+function draftFromRoute(r: MapRoute): Draft {
+  return {
+    ...blankDraft(0),
+    kind: "route",
+    id: r.id,
+    name: r.name,
+    color: r.color,
+    points: (r.points as LatLng[]) ?? [],
   };
 }
 
@@ -230,9 +263,18 @@ export function FcaPage() {
   const updateFca = useUpdateFca();
   const deleteFca = useDeleteFca();
 
+  // Shared named routes (polylines drawn on the same map).
+  const routes = useRoutes();
+  const createRoute = useCreateRoute();
+  const updateRoute = useUpdateRoute();
+  const deleteRoute = useDeleteRoute();
+  const canEditRoute = hasPermission(me, "flow.route.update");
+  const canDeleteRoute = hasPermission(me, "flow.route.delete");
+
   const [draft, setDraft] = useState<Draft | null>(null);
   const [phase, setPhase] = useState<Phase>("draw");
   const [selectedId, setSelectedId] = useState<string | null>(null);
+  const [selectedRouteId, setSelectedRouteId] = useState<string | null>(null);
   const [routeCallsign, setRouteCallsign] = useState<string | null>(null);
   const [filter, setFilter] = useState("");
   const [artccFilter, setArtccFilter] = useState("");
@@ -258,6 +300,7 @@ export function FcaPage() {
   const fcaLayer = useRef<L.LayerGroup | null>(null);
   const matchedLayer = useRef<L.LayerGroup | null>(null);
   const routeLayer = useRef<L.LayerGroup | null>(null);
+  const namedRouteLayer = useRef<L.LayerGroup | null>(null);
   const draftLayer = useRef<L.LayerGroup | null>(null);
   const drawingRef = useRef(false);
   useEffect(() => {
@@ -326,6 +369,7 @@ export function FcaPage() {
     }
 
     routeLayer.current = L.layerGroup().addTo(map);
+    namedRouteLayer.current = L.layerGroup().addTo(map);
     fcaLayer.current = L.layerGroup().addTo(map);
     aircraftLayer.current = L.layerGroup().addTo(map);
     matchedLayer.current = L.layerGroup().addTo(map);
@@ -485,6 +529,44 @@ export function FcaPage() {
     }
   }, [fcas.data, draft?.id, selectedId, mapReady]);
 
+  // Saved named routes — solid polylines (distinct from the dashed FCAs).
+  useEffect(() => {
+    const layer = namedRouteLayer.current;
+    if (!layer) return;
+    layer.clearLayers();
+    for (const r of routes.data ?? []) {
+      if (r.id === draft?.id) continue; // the one being edited is on the draft layer
+      const pts = r.points as LatLng[];
+      if (!pts || pts.length < 2) continue;
+      const selected = r.id === selectedRouteId;
+      L.polyline(pts, {
+        color: r.color,
+        weight: selected ? 5 : 3,
+        opacity: selected ? 1 : 0.85,
+      })
+        .on("click", (e) => {
+          L.DomEvent.stop(e);
+          setSelectedRouteId((cur) => (cur === r.id ? null : r.id));
+        })
+        .addTo(layer);
+      for (const end of [pts[0], pts[pts.length - 1]]) {
+        L.circleMarker(end, {
+          radius: selected ? 5 : 4,
+          color: r.color,
+          weight: 1,
+          fillColor: r.color,
+          fillOpacity: 0.9,
+          interactive: false,
+        }).addTo(layer);
+      }
+      L.marker(midpointOf(pts), {
+        icon: labelIcon(r.color, r.name),
+        interactive: false,
+        keyboard: false,
+      }).addTo(layer);
+    }
+  }, [routes.data, draft?.id, selectedRouteId, mapReady]);
+
   // Matched (crossing) traffic for the selected FCA — numbered, in the FCA colour.
   const selectedColor = fcas.data?.find((f) => f.id === selectedId)?.color;
   useEffect(() => {
@@ -602,10 +684,37 @@ export function FcaPage() {
     setDraft(draftFrom(fca));
     setPhase("edit");
   };
+  const startNewRoute = () => {
+    setSelectedId(null);
+    setSelectedRouteId(null);
+    setRouteCallsign(null);
+    setDraft(blankRouteDraft(routes.data?.length ?? 0));
+    setPhase("draw");
+  };
+  const startEditRoute = (r: MapRoute) => {
+    setSelectedId(null);
+    setSelectedRouteId(null);
+    setRouteCallsign(null);
+    setDraft(draftFromRoute(r));
+    setPhase("edit");
+  };
   const cancel = () => setDraft(null);
 
   const save = () => {
     if (!draft || draft.points.length < 2) return;
+    if (draft.kind === "route") {
+      const body: UpsertRoute = {
+        name: draft.name.trim() || "Route",
+        color: draft.color,
+        points: draft.points,
+      };
+      if (draft.id) {
+        updateRoute.mutate({ id: draft.id, body }, { onSuccess: cancel });
+      } else {
+        createRoute.mutate(body, { onSuccess: cancel });
+      }
+      return;
+    }
     const body: UpsertFca = {
       name: draft.name.trim() || "FCA",
       color: draft.color,
@@ -680,13 +789,18 @@ export function FcaPage() {
               setPhase("draw");
             }}
             onCancel={cancel}
-            saving={createFca.isPending || updateFca.isPending}
+            saving={
+              createFca.isPending ||
+              updateFca.isPending ||
+              createRoute.isPending ||
+              updateRoute.isPending
+            }
           />
         ) : (
           <>
             {canEdit && (
               <div className="border-b p-3">
-                {drawing ? (
+                {drawing && draft?.kind === "fca" ? (
                   <Button
                     variant="secondary"
                     className="w-full"
@@ -802,6 +916,87 @@ export function FcaPage() {
                     </li>
                   ))}
                 </ul>
+              )}
+            </div>
+
+            {/* Shared named routes (polylines) */}
+            <div className="flex flex-col border-t">
+              <div className="flex items-center justify-between px-3 pt-3">
+                <span className="text-xs font-semibold uppercase tracking-wide text-muted-foreground">
+                  Routes
+                </span>
+                {canEditRoute &&
+                  (drawing && draft?.kind === "route" ? (
+                    <button
+                      type="button"
+                      onClick={cancel}
+                      className="text-xs text-muted-foreground hover:text-foreground"
+                    >
+                      Cancel drawing
+                    </button>
+                  ) : (
+                    <button
+                      type="button"
+                      onClick={startNewRoute}
+                      className="flex items-center gap-1 text-xs text-primary hover:underline"
+                    >
+                      <Plus className="size-3.5" />
+                      New route
+                    </button>
+                  ))}
+              </div>
+              {routes.data && routes.data.length > 0 ? (
+                <ul className="max-h-48 overflow-y-auto p-1">
+                  {routes.data.map((r) => (
+                    <li
+                      key={r.id}
+                      className={
+                        "flex items-center gap-2 rounded px-2 py-1.5 text-sm " +
+                        (r.id === selectedRouteId ? "bg-accent/40" : "")
+                      }
+                    >
+                      <span
+                        className="size-3 shrink-0 rounded-full"
+                        style={{ background: r.color, border: `2px solid ${r.color}` }}
+                      />
+                      <button
+                        type="button"
+                        onClick={() =>
+                          setSelectedRouteId((cur) => (cur === r.id ? null : r.id))
+                        }
+                        className="flex-1 truncate text-left font-mono"
+                      >
+                        {r.name}
+                      </button>
+                      {canEditRoute && (
+                        <button
+                          type="button"
+                          title="Edit"
+                          onClick={() => startEditRoute(r)}
+                          className="text-muted-foreground hover:text-foreground"
+                        >
+                          <Pencil className="size-3.5" />
+                        </button>
+                      )}
+                      {canDeleteRoute && (
+                        <ConfirmButton
+                          size="icon"
+                          className="size-7"
+                          title="Delete"
+                          aria-label="Delete route"
+                          onConfirm={() => deleteRoute.mutate(r.id)}
+                          warn={`Delete the “${r.name}” route?`}
+                        >
+                          <Trash2 className="size-3.5" />
+                        </ConfirmButton>
+                      )}
+                    </li>
+                  ))}
+                </ul>
+              ) : (
+                <p className="px-3 py-3 text-xs text-muted-foreground">
+                  No routes yet.{canEditRoute && " Draw one with “New route”."}
+                </p>
               )}
             </div>
           </>
@@ -1207,6 +1402,60 @@ function DraftEditor({
 }) {
   const set = <K extends keyof Draft>(k: K, v: Draft[K]) =>
     onChange({ ...draft, [k]: v });
+
+  // Routes are just a name + color + polyline — a slim editor, no metering fields.
+  if (draft.kind === "route") {
+    return (
+      <div className="flex flex-1 flex-col gap-3 overflow-y-auto p-3">
+        <div className="text-sm font-semibold text-primary">
+          {draft.id ? "EDIT ROUTE" : "NEW ROUTE"} ·{" "}
+          <span className="tabular-nums">{draft.points.length}</span> pts ·{" "}
+          <span className="tabular-nums">{Math.round(lineNm(draft.points))}</span> nm
+        </div>
+        <Field label="Name">
+          <Input value={draft.name} onChange={(e) => set("name", e.target.value)} />
+        </Field>
+        <div className="flex flex-col gap-1">
+          <span className="text-xs font-medium uppercase tracking-wide text-muted-foreground">
+            Color
+          </span>
+          <div className="flex flex-wrap gap-1.5">
+            {ROUTE_COLORS.map((c) => (
+              <button
+                key={c}
+                type="button"
+                onClick={() => set("color", c)}
+                className={
+                  "size-6 rounded-full " +
+                  (draft.color === c
+                    ? "ring-2 ring-ring ring-offset-2 ring-offset-background"
+                    : "")
+                }
+                style={{ background: c }}
+              />
+            ))}
+          </div>
+        </div>
+        <div className="mt-auto flex flex-col gap-2 pt-2">
+          <div className="flex gap-2">
+            <Button variant="secondary" className="flex-1" onClick={onRedraw}>
+              ↻ Redraw line
+            </Button>
+            <Button
+              className="flex-1"
+              onClick={onSave}
+              disabled={draft.points.length < 2 || saving}
+            >
+              Save route
+            </Button>
+          </div>
+          <Button variant="ghost" onClick={onCancel}>
+            Cancel
+          </Button>
+        </div>
+      </div>
+    );
+  }
 
   return (
     <div className="flex flex-1 flex-col gap-3 overflow-y-auto p-3">

@@ -3,7 +3,7 @@
 use sqlx::PgPool;
 
 use crate::errors::ApiError;
-use crate::models::{FcaBody, UpsertFcaRequest};
+use crate::models::{FcaBody, RouteBody, UpsertFcaRequest, UpsertRouteRequest};
 
 const FCA_SELECT: &str = "select f.id, f.name, f.color, f.artcc, f.points, f.dests, \
     f.origins, f.fixes, f.scope, f.min_fl, f.max_fl, f.dir, f.mode, f.rate, f.mit, \
@@ -95,6 +95,75 @@ pub async fn update_fca(
 
 pub async fn delete_fca(pool: &PgPool, id: &str) -> Result<bool, ApiError> {
     let result = sqlx::query("delete from flow.fca where id = $1")
+        .bind(id)
+        .execute(pool)
+        .await
+        .map_err(|_| ApiError::Internal)?;
+    Ok(result.rows_affected() > 0)
+}
+
+// --- flow map routes (shared named polylines) ---
+
+const ROUTE_SELECT: &str = "select r.id, r.name, r.color, r.points, r.updated_at, \
+    u.display_name as updated_by \
+    from flow.route r left join identity.users u on u.id = r.updated_by";
+
+pub async fn list_routes(pool: &PgPool) -> Result<Vec<RouteBody>, ApiError> {
+    sqlx::query_as::<_, RouteBody>(&format!("{ROUTE_SELECT} order by r.name"))
+        .fetch_all(pool)
+        .await
+        .map_err(|_| ApiError::Internal)
+}
+
+pub async fn get_route(pool: &PgPool, id: &str) -> Result<Option<RouteBody>, ApiError> {
+    sqlx::query_as::<_, RouteBody>(&format!("{ROUTE_SELECT} where r.id = $1"))
+        .bind(id)
+        .fetch_optional(pool)
+        .await
+        .map_err(|_| ApiError::Internal)
+}
+
+pub async fn create_route(
+    pool: &PgPool,
+    req: &UpsertRouteRequest,
+    actor: &str,
+) -> Result<String, ApiError> {
+    sqlx::query_scalar::<_, String>(
+        "insert into flow.route (name, color, points, updated_by, created_by) \
+         values ($1, $2, $3, $4, $4) returning id",
+    )
+    .bind(req.name.trim())
+    .bind(req.color.as_deref().unwrap_or("#38bdf8"))
+    .bind(sqlx::types::Json(&req.points))
+    .bind(actor)
+    .fetch_one(pool)
+    .await
+    .map_err(|_| ApiError::Internal)
+}
+
+pub async fn update_route(
+    pool: &PgPool,
+    id: &str,
+    req: &UpsertRouteRequest,
+    actor: &str,
+) -> Result<bool, ApiError> {
+    let result = sqlx::query(
+        "update flow.route set name = $1, color = $2, points = $3, updated_by = $4 \
+         where id = $5",
+    )
+    .bind(req.name.trim())
+    .bind(req.color.as_deref().unwrap_or("#38bdf8"))
+    .bind(sqlx::types::Json(&req.points))
+    .bind(actor)
+    .bind(id)
+    .execute(pool)
+    .await
+    .map_err(|_| ApiError::Internal)?;
+    Ok(result.rows_affected() > 0)
+}
+
+pub async fn delete_route(pool: &PgPool, id: &str) -> Result<bool, ApiError> {
+    let result = sqlx::query("delete from flow.route where id = $1")
         .bind(id)
         .execute(pool)
         .await
