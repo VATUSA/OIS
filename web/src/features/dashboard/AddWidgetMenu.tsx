@@ -102,6 +102,27 @@ export function AddWidgetMenu({ onAdd }: { onAdd: (widget: Widget) => void }) {
         <DropdownMenuItem onSelect={() => onAdd({ id: newId(), kind: "map" })}>
           Flow map
         </DropdownMenuItem>
+        <DropdownMenuSeparator />
+        <DropdownMenuLabel>Layout</DropdownMenuLabel>
+        <DropdownMenuItem
+          onSelect={() =>
+            onAdd({ id: newId(), kind: "text", content: "New heading", size: "lg", align: "left" })
+          }
+        >
+          Text / heading
+        </DropdownMenuItem>
+        <DropdownMenuItem
+          onSelect={() => onAdd({ id: newId(), kind: "divider", orientation: "horizontal" })}
+        >
+          Divider
+          <span className="ml-auto text-xs text-muted-foreground">horizontal</span>
+        </DropdownMenuItem>
+        <DropdownMenuItem
+          onSelect={() => onAdd({ id: newId(), kind: "divider", orientation: "vertical" })}
+        >
+          Divider
+          <span className="ml-auto text-xs text-muted-foreground">vertical</span>
+        </DropdownMenuItem>
       </DropdownMenuContent>
     </DropdownMenu>
   );

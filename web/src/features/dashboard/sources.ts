@@ -27,6 +27,32 @@ export interface RowsResult {
   rows: Row[];
   isLoading: boolean;
   isError: boolean;
+  /** A background refetch is in flight (initial load or a manual/interval refresh). */
+  isFetching: boolean;
+  /** ms epoch of the most recent successful load, or 0 if never. */
+  dataUpdatedAt: number;
+  /** Force an immediate refetch of this source's underlying query/queries. */
+  refetch: () => void;
+}
+
+/** Fold an array of React Query results (multi-airport sources) into RowsResult status fields. */
+function multiStatus<T extends { isFetching: boolean; dataUpdatedAt: number; refetch: () => void }>(
+  qs: T[],
+): Pick<RowsResult, "isFetching" | "dataUpdatedAt" | "refetch"> {
+  return {
+    isFetching: qs.some((q) => q.isFetching),
+    dataUpdatedAt: qs.reduce((m, q) => Math.max(m, q.dataUpdatedAt), 0),
+    refetch: () => qs.forEach((q) => void q.refetch()),
+  };
+}
+
+/** Status fields for a single-query (global) source. */
+function singleStatus(q: {
+  isFetching: boolean;
+  dataUpdatedAt: number;
+  refetch: () => void;
+}): Pick<RowsResult, "isFetching" | "dataUpdatedAt" | "refetch"> {
+  return { isFetching: q.isFetching, dataUpdatedAt: q.dataUpdatedAt, refetch: () => void q.refetch() };
 }
 
 export interface SourceParams {
@@ -79,6 +105,7 @@ export const DATA_SOURCES: DataSource[] = [
         rows,
         isLoading: qs.some((q) => q.isLoading),
         isError: qs.length > 0 && qs.every((q) => q.isError),
+        ...multiStatus(qs),
       };
     },
   },
@@ -109,6 +136,7 @@ export const DATA_SOURCES: DataSource[] = [
         rows,
         isLoading: qs.some((q) => q.isLoading),
         isError: qs.length > 0 && qs.every((q) => q.isError),
+        ...multiStatus(qs),
       };
     },
   },
@@ -134,6 +162,7 @@ export const DATA_SOURCES: DataSource[] = [
         rows,
         isLoading: qs.some((q) => q.isLoading),
         isError: qs.length > 0 && qs.every((q) => q.isError),
+        ...multiStatus(qs),
       };
     },
   },
@@ -153,7 +182,7 @@ export const DATA_SOURCES: DataSource[] = [
     ],
     useRows: () => {
       const q = usePrograms();
-      return { rows: (q.data ?? []) as Row[], isLoading: q.isLoading, isError: q.isError };
+      return { rows: (q.data ?? []) as Row[], isLoading: q.isLoading, isError: q.isError, ...singleStatus(q) };
     },
   },
   {
@@ -172,7 +201,7 @@ export const DATA_SOURCES: DataSource[] = [
     ],
     useRows: () => {
       const q = useTmis();
-      return { rows: (q.data ?? []) as Row[], isLoading: q.isLoading, isError: q.isError };
+      return { rows: (q.data ?? []) as Row[], isLoading: q.isLoading, isError: q.isError, ...singleStatus(q) };
     },
   },
   {
@@ -193,7 +222,7 @@ export const DATA_SOURCES: DataSource[] = [
     ],
     useRows: () => {
       const q = useFcas();
-      return { rows: (q.data ?? []) as Row[], isLoading: q.isLoading, isError: q.isError };
+      return { rows: (q.data ?? []) as Row[], isLoading: q.isLoading, isError: q.isError, ...singleStatus(q) };
     },
   },
   {
@@ -212,7 +241,7 @@ export const DATA_SOURCES: DataSource[] = [
     ],
     useRows: () => {
       const q = useTraffic();
-      return { rows: (q.data ?? []) as Row[], isLoading: q.isLoading, isError: q.isError };
+      return { rows: (q.data ?? []) as Row[], isLoading: q.isLoading, isError: q.isError, ...singleStatus(q) };
     },
   },
 ];

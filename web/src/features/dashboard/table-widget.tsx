@@ -20,6 +20,7 @@ import {hhmmZulu} from "@/lib/time";
 
 import {type DataSource, DATA_SOURCES_BY_ID, type FieldType, type Row} from "./sources";
 import type {TableWidget as TableWidgetT} from "./types";
+import {useReportWidgetStatus} from "./widget-status";
 
 function Cell({ value, type }: { value: unknown; type: FieldType }) {
   if (value == null || value === "") return <span className="text-muted-foreground">—</span>;
@@ -86,7 +87,10 @@ function TableInner({
   editing: boolean;
   onChange: (id: string, patch: Record<string, unknown>) => void;
 }) {
-  const { rows, isLoading, isError } = source.useRows(widget.params ?? {});
+  const { rows, isLoading, isError, isFetching, dataUpdatedAt, refetch } = source.useRows(
+    widget.params ?? {},
+  );
+  useReportWidgetStatus(isFetching, dataUpdatedAt, refetch);
   const visible = widget.columns ?? source.fields.map((fd) => fd.key);
   const typeByKey = useMemo(
     () => Object.fromEntries(source.fields.map((fd) => [fd.key, fd.type])) as Record<string, FieldType>,
