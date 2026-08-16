@@ -4,8 +4,11 @@
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
     <title>OIS</title>
-    <!-- Runtime API base (window.__OIS_API_URL__). Empty in dev; injected in prod images. -->
-    <script src="/config.js"></script>
+    <!-- Runtime config (window.__OIS_API_URL__ / __OIS_DOCS_URL__). Empty in dev; injected into
+         config.js in prod images. The ?v query is a distinct cache key so a CDN can't pin a stale
+         copy against the bare /config.js path; the file itself is served no-store. Bump on the
+         rare occasion a CDN has poisoned the current key. -->
+    <script src="/config.js?v=2"></script>
   </head>
   <body>
     <div id="root"></div>
