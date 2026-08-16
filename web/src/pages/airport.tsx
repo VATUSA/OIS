@@ -150,7 +150,7 @@ function Metric({ label, value, cls }: { label: string; value: number; cls: stri
   );
 }
 
-function SummaryView({ flow }: { flow: Flow }) {
+export function SummaryView({ flow }: { flow: Flow }) {
   return (
     <Card>
       <CardContent className="flex flex-col gap-6 pt-6">
@@ -307,7 +307,7 @@ function CfrCell({ f, now }: { f: FlowFlight; now: number }) {
   );
 }
 
-function AircraftView({ flow }: { flow: Flow }) {
+export function AircraftView({ flow }: { flow: Flow }) {
   const [sortKey, setSortKey] = useState<ColKey>("seq");
   const [dir, setDir] = useState<1 | -1>(1);
   const now = Date.now();
@@ -422,7 +422,7 @@ function AircraftView({ flow }: { flow: Flow }) {
 
 // --- Arrival ladder ---
 
-function LadderView({ flow }: { flow: Flow }) {
+export function LadderView({ flow }: { flow: Flow }) {
   const [win, setWin] = useState(60);
   const now = Date.now();
 
@@ -572,7 +572,7 @@ function LadderView({ flow }: { flow: Flow }) {
 
 // --- Demand vs AAR ---
 
-function DemandView({ flow }: { flow: Flow }) {
+export function DemandView({ flow }: { flow: Flow }) {
   const now = Date.now();
   const BIN = 15;
   const BINS = 8;
