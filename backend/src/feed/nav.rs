@@ -205,7 +205,7 @@ impl NavData {
             preferred,
             proc_by_prefix,
             nav_magvar,
-            bbox: meta.bbox.unwrap_or([23.5, -130.0, 51.5, -63.0]),
+            bbox: meta.bbox.unwrap_or([-90.0, -180.0, 90.0, 180.0]),
             cycle: meta.nasr_cycle_date.unwrap_or_default(),
             source: meta.source.unwrap_or_default(),
         }
@@ -337,18 +337,23 @@ impl NavData {
                 kind: Kind::Apt,
             });
         }
-        if let Some(cands) = self.navaids.get(&id) {
+        // A navaid *name* can collide with a distant same-named fix (e.g. the "PARIS" VORTAC
+        // in Texas vs the PARIS fix in Hawaii). Pool navaid + fix candidates and pick the one
+        // nearest the route, rather than letting the navaid-before-fix priority pick a far match.
+        let nav = self.navaids.get(&id);
+        let fix = self.fixes.get(&id);
+        if nav.is_some() || fix.is_some() {
+            let mut cands: Vec<Ll> = Vec::new();
+            if let Some(c) = nav {
+                cands.extend_from_slice(c);
+            }
+            if let Some(c) = fix {
+                cands.extend_from_slice(c);
+            }
             return Some(Anchor {
                 name: id,
-                ll: nearest(cands, ref_ll),
-                kind: Kind::Nav,
-            });
-        }
-        if let Some(cands) = self.fixes.get(&id) {
-            return Some(Anchor {
-                name: id,
-                ll: nearest(cands, ref_ll),
-                kind: Kind::Fix,
+                ll: nearest(&cands, ref_ll),
+                kind: if nav.is_some() { Kind::Nav } else { Kind::Fix },
             });
         }
         if let Some((first, kind)) = self
@@ -884,6 +889,25 @@ fn proc_prefix(id: &str) -> Option<String> {
 mod tests {
     use super::*;
     use std::collections::HashMap;
+
+    #[tokio::test]
+    #[ignore = "network: fetches live NASR and resolves Hawaii route tokens (worldwide coverage)"]
+    async fn resolves_hawaii_route_tokens() {
+        let nav = crate::feed::nav_source::fetch_latest()
+            .await
+            .expect("fetch_latest");
+        let ap: AirportDb = HashMap::new();
+        let hilo = Some([19.72, -155.05]); // reference so duplicate names disambiguate to Hawaii
+        for tok in ["KOA031037", "KENNZ", "MKK257006", "PARIS", "LYCHI1"] {
+            let ll = nav.resolve(tok, &ap, hilo);
+            assert!(ll.is_some(), "{tok} should resolve now");
+            let [lat, lon] = ll.unwrap();
+            assert!(
+                (17.0..24.0).contains(&lat) && (-162.0..-153.0).contains(&lon),
+                "{tok} resolved outside Hawaii: {lat},{lon}"
+            );
+        }
+    }
 
     #[test]
     fn airway_and_proc_token_classification() {
