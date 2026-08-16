@@ -31,6 +31,26 @@ const AGGREGATES: { id: ChartAggregate; label: string }[] = [
 const TOP_OPTIONS = [0, 5, 10, 15, 20, 30];
 const COUNT_KEY = "__count";
 
+/** Categorical series palette, tuned for the dark card background. */
+const PALETTE = [
+  "#60a5fa",
+  "#34d399",
+  "#f59e0b",
+  "#f472b6",
+  "#a78bfa",
+  "#f87171",
+  "#22d3ee",
+  "#a3e635",
+];
+const colorAt = (i: number) => PALETTE[i % PALETTE.length];
+
+const compactFmt = new Intl.NumberFormat("en", { notation: "compact", maximumFractionDigits: 1 });
+/** Compact axis numbers: 40000 → "40K", 1_500_000 → "1.5M", small values as-is. */
+function fmtNumber(v: number): string {
+  if (!Number.isFinite(v)) return "";
+  return Math.abs(v) >= 1000 ? compactFmt.format(v) : String(Math.round(v * 100) / 100);
+}
+
 interface Series {
   key: string;
   label: string;
@@ -160,23 +180,29 @@ function buildDefinition(
   data: Row[],
   chartType: ChartType,
   xKey: string,
+  xLabel: string,
   categorical: boolean,
   series: Series[],
 ) {
   const x = xAccessor(xKey);
-  const multi = series.length > 1;
-  const marks = series.map((s) => {
-    const opts = {
-      x,
-      y: yAccessor(s.key),
-      ...(multi ? { color: () => s.label } : {}),
-    };
-    if (chartType === "line") return lineY(data, opts);
-    if (chartType === "area") return areaY(data, opts);
-    return barY(data, opts);
+  const marks = series.map((s, i) => {
+    const y = yAccessor(s.key);
+    const color = colorAt(i);
+    if (chartType === "line") return lineY(data, { x, y, stroke: color });
+    if (chartType === "area") return areaY(data, { x, y, fill: color });
+    return barY(data, { x, y, fill: color });
   });
   const xScale = categorical ? (chartType === "bar" ? scaleBand : scalePoint) : scaleLinear;
-  return defineChart({ marks, x: { scale: xScale }, y: { scale: scaleLinear } });
+  // A single-series chart labels its y axis with that series; multi-series relies on the legend.
+  const yLabel = series.length === 1 ? series[0].label : undefined;
+  return defineChart({
+    marks,
+    x: { scale: xScale, axis: { label: xLabel } },
+    y: {
+      scale: scaleLinear,
+      axis: { label: yLabel, ticks: { format: (v) => fmtNumber(Number(v)) } },
+    },
+  });
 }
 
 function Picker({ label, children }: { label: string; children: React.ReactNode }) {
@@ -324,13 +350,23 @@ function ChartInner({
     () => shapeChartData(rows, source, widget.x, widget.y, aggregate, widget.chartType, widget.topN),
     [rows, source, widget.x, widget.y, aggregate, widget.chartType, widget.topN],
   );
+  const xLabel = labelOf(source, widget.x);
   const definition = useMemo(
-    () => buildDefinition(shaped.data, widget.chartType, widget.x, shaped.categorical, shaped.series),
-    [shaped, widget.chartType, widget.x],
+    () =>
+      buildDefinition(
+        shaped.data,
+        widget.chartType,
+        widget.x,
+        xLabel,
+        shaped.categorical,
+        shaped.series,
+      ),
+    [shaped, widget.chartType, widget.x, xLabel],
   );
 
   const ready = widget.x && (aggregate === "count" || widget.y.length > 0);
   const empty = shaped.data.length === 0;
+  const showChart = ready && !isError && !empty;
 
   return (
     <div className="flex h-full flex-col gap-2 p-2">
@@ -355,6 +391,23 @@ function ChartInner({
           />
         ) : null}
       </div>
+      {showChart && shaped.series.length > 1 && <Legend series={shaped.series} />}
+    </div>
+  );
+}
+
+function Legend({ series }: { series: Series[] }) {
+  return (
+    <div className="flex flex-wrap items-center gap-x-4 gap-y-1 px-1 text-xs text-muted-foreground">
+      {series.map((s, i) => (
+        <span key={s.key} className="inline-flex items-center gap-1.5">
+          <span
+            className="inline-block size-2.5 rounded-sm"
+            style={{ background: colorAt(i) }}
+          />
+          {s.label}
+        </span>
+      ))}
     </div>
   );
 }
