@@ -10,9 +10,7 @@ import {AirportPage} from "@/pages/airport";
 import {FcaPage} from "@/pages/fca";
 import {RunwayPage} from "@/pages/runway";
 import {DashboardPage} from "@/pages/dashboard";
-import {DeparturesPage} from "@/pages/departures";
 import {MyDashboardPage} from "@/pages/my-dashboard";
-import {TaxiMonitorPage} from "@/pages/taxi";
 import {TmuPage} from "@/pages/tmu";
 import {PlanningEventsPage} from "@/pages/planning/events";
 import {EventPlanningPage} from "@/pages/planning/event";
@@ -72,18 +70,6 @@ const airportRoute = createRoute({
   getParentRoute: () => opsRoute,
   path: "airport",
   component: AirportPage,
-});
-
-const departuresRoute = createRoute({
-  getParentRoute: () => opsRoute,
-  path: "departures",
-  component: DeparturesPage,
-});
-
-const taxiRoute = createRoute({
-  getParentRoute: () => opsRoute,
-  path: "taxi",
-  component: TaxiMonitorPage,
 });
 
 const tmuRoute = createRoute({
@@ -211,8 +197,11 @@ const adminServiceAccountsRoute = createRoute({
 const legacyRedirects = (
   [
     ["/airport", "/ops/airport"],
-    ["/departures", "/ops/departures"],
-    ["/taxi", "/ops/taxi"],
+    // Departures + Taxi were merged into the Airport page (tabs).
+    ["/departures", "/ops/airport"],
+    ["/taxi", "/ops/airport"],
+    ["/ops/departures", "/ops/airport"],
+    ["/ops/taxi", "/ops/airport"],
     ["/tmu", "/ops/tmu"],
     ["/my", "/ops/my"],
   ] as const
@@ -231,8 +220,6 @@ const routeTree = rootRoute.addChildren([
   opsRoute.addChildren([
     opsIndexRoute,
     airportRoute,
-    departuresRoute,
-    taxiRoute,
     tmuRoute,
     myDashboardRoute,
     fcaRoute,
