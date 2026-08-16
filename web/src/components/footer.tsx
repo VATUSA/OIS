@@ -25,7 +25,7 @@ export function Footer() {
         <div className="flex items-center gap-2">
           <Radar className="size-4 text-primary" />
           <span className="font-medium text-foreground">OIS</span>
-          <span className="hidden sm:inline">· VATUSA Operational Information System</span>
+          <span className="hidden sm:inline">· VATUSA Events · Operational Information System</span>
         </div>
 
         <nav className="flex flex-wrap items-center gap-x-4 gap-y-2 sm:ml-auto">
