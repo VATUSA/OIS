@@ -6,17 +6,25 @@ default:
     @just --list
 
 # --- local infra ---
-# Start Postgres (and other deps) for local development
+# Start Postgres only (for hot-reload dev: `just backend` / `just web` run natively)
 up:
     docker compose up -d postgres
 
-# Stop local infra
+# Stop the stack
 down:
     docker compose down
 
-# Wipe local infra + volumes (fresh DB)
+# Wipe infra + volumes (fresh DB)
 reset:
     docker compose down -v && docker compose up -d postgres
+
+# Full stack in containers, built locally (mirrors prod; same compose, dev .env values)
+stack:
+    docker compose up --build -d
+
+# Pull the CI-built images and run them (prod-style: needs prod values in .env)
+deploy:
+    docker compose pull && docker compose up -d
 
 # --- rust (backend, discord, crates) ---
 check:
