@@ -15,5 +15,5 @@ pub async fn health(State(state): State<AppState>) -> Json<Value> {
         Some(pool) => sqlx::query("select 1").execute(pool).await.is_ok(),
         None => false,
     };
-    Json(json!({ "status": "ok", "database": db_ok }))
+    Json(json!({ "status": "ok", "database": db_ok, "version": crate::VERSION }))
 }

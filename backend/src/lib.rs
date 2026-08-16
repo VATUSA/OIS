@@ -16,6 +16,13 @@ use std::net::SocketAddr;
 
 use tracing_subscriber::{EnvFilter, fmt};
 
+/// Full build version, e.g. "1.0.1-a1b2c3d". Set by build.rs (from the root VERSION file + commit,
+/// or the OIS_VERSION env passed by CI); falls back to the crate version if unset.
+pub const VERSION: &str = match option_env!("OIS_VERSION") {
+    Some(v) => v,
+    None => env!("CARGO_PKG_VERSION"),
+};
+
 pub async fn run() -> Result<(), Box<dyn std::error::Error>> {
     dotenvy::dotenv().ok();
     init_tracing();
@@ -46,7 +53,7 @@ pub async fn run() -> Result<(), Box<dyn std::error::Error>> {
         .unwrap_or_else(|_| "127.0.0.1:3000".to_string())
         .parse()?;
 
-    tracing::info!(%addr, "starting ois backend");
+    tracing::info!(%addr, version = VERSION, "starting ois backend");
 
     let listener = tokio::net::TcpListener::bind(addr).await?;
     axum::serve(listener, app).await?;

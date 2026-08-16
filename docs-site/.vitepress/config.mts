@@ -1,4 +1,17 @@
+import {readFileSync} from "node:fs";
+
 import {defineConfig} from "vitepress";
+
+// Full version shown in the nav, e.g. "1.0.1-a1b2c3d". CI passes the finished string as OIS_VERSION;
+// locally we read the repo-root VERSION file (the single programmer-controlled base).
+function version(): string {
+  if (process.env.OIS_VERSION) return process.env.OIS_VERSION;
+  try {
+    return readFileSync(new URL("../../VERSION", import.meta.url), "utf8").trim();
+  } catch {
+    return "dev";
+  }
+}
 
 // https://vitepress.dev/reference/site-config
 export default defineConfig({
@@ -17,6 +30,7 @@ export default defineConfig({
       { text: "Guide", link: "/introduction/what-is-ois" },
       { text: "Traffic Management", link: "/tmu/fcas" },
       { text: "Pilots", link: "/advisories/board" },
+      { text: `v${version()}`, link: "https://github.com/VATUSA/OIS" },
     ],
     sidebar: [
       {

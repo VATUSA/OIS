@@ -8,6 +8,9 @@ RUN corepack enable
 WORKDIR /app
 COPY . .
 RUN pnpm install --frozen-lockfile
+# Full version (1.0.1-<sha>) surfaced in the docs nav; CI sets it, else the config reads VERSION.
+ARG OIS_VERSION=""
+ENV OIS_VERSION=$OIS_VERSION
 RUN pnpm --filter docs-site build
 
 FROM nginx:1-alpine AS runtime

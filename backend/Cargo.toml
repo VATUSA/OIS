@@ -1,6 +1,7 @@
 [package]
 name = "ois-backend"
-version = "0.1.0"
+# Local/fallback base only; the deployed build version comes from the root VERSION file via build.rs.
+version = "1.0.1"
 edition.workspace = true
 license.workspace = true
 
