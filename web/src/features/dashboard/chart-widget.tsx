@@ -55,7 +55,15 @@ function useSize() {
   useEffect(() => {
     const el = ref.current;
     if (!el) return;
-    const measure = () => setSize({ w: el.clientWidth, h: el.clientHeight });
+    // Keep the SAME object when the box hasn't actually changed, so a spurious ResizeObserver
+    // notification (the chart drawing into its own container can trigger one) doesn't force a
+    // re-render → redraw → observe → … loop.
+    const measure = () =>
+      setSize((prev) =>
+        prev.w === el.clientWidth && prev.h === el.clientHeight
+          ? prev
+          : { w: el.clientWidth, h: el.clientHeight },
+      );
     const ro = new ResizeObserver(measure);
     ro.observe(el);
     measure();

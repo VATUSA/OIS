@@ -15,6 +15,18 @@ function normalize(raw: unknown): DashboardState {
   return s;
 }
 
+/** True if two layouts place every cell identically (position + size). Ignores minW/minH, which the
+ * grid re-derives and which never move a widget. Used to drop no-op onLayoutChange events. */
+function sameGeometry(a: GridCell[], b: GridCell[]): boolean {
+  if (a.length !== b.length) return false;
+  const prev = new Map(a.map((c) => [c.i, c]));
+  for (const c of b) {
+    const p = prev.get(c.i);
+    if (!p || p.x !== c.x || p.y !== c.y || p.w !== c.w || p.h !== c.h) return false;
+  }
+  return true;
+}
+
 /**
  * Loads one board's DashboardState from the server, holds it as local state, and persists changes
  * (debounced PUT). Returns the state plus mutations; every write goes through `update`.
@@ -120,9 +132,14 @@ export function useBoardState(boardId: string) {
 
   const setLayout = useCallback(
     (cells: GridCell[]) => {
-      update((s) => ({
-        ...s,
-        layout: cells.map((c) => ({
+      // react-grid-layout calls onLayoutChange on every internal reflow (mount, width changes,
+      // re-render), not just real drags/resizes. If we blindly produced a new state each time, that
+      // state → new layout prop → RGL reflow → onLayoutChange → … loops forever and freezes the tab
+      // once there are enough widgets to keep the geometry churning. So bail when nothing actually
+      // moved: returning the SAME state reference makes React skip the re-render, ending the cycle.
+      setState((prev) => {
+        if (!prev) return prev;
+        const nextLayout: GridCell[] = cells.map((c) => ({
           i: c.i,
           x: c.x,
           y: c.y,
@@ -130,10 +147,14 @@ export function useBoardState(boardId: string) {
           h: c.h,
           minW: c.minW,
           minH: c.minH,
-        })),
-      }));
+        }));
+        if (sameGeometry(prev.layout, nextLayout)) return prev;
+        const next = { ...prev, layout: nextLayout };
+        persist(next);
+        return next;
+      });
     },
-    [update],
+    [persist],
   );
 
   return {
