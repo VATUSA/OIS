@@ -23,7 +23,6 @@ import {
   Plane,
   PlaneTakeoff,
   Radar,
-  Route,
   ShieldCheck,
   Split,
   User as UserIcon,
@@ -218,22 +217,6 @@ function MobileMenu({
                 </Link>
               </DropdownMenuItem>
             )}
-            {canPrograms && (
-              <DropdownMenuItem asChild>
-                <Link to="/ops/departures">
-                  <PlaneTakeoff />
-                  Departures
-                </Link>
-              </DropdownMenuItem>
-            )}
-            {canPrograms && (
-              <DropdownMenuItem asChild>
-                <Link to="/ops/taxi">
-                  <Route />
-                  Taxi
-                </Link>
-              </DropdownMenuItem>
-            )}
             <DropdownMenuItem asChild>
               <Link to="/ops/tmu">
                 <Gauge />
@@ -356,22 +339,6 @@ export function Navbar() {
                   <Link to="/ops/airport">
                     <Plane />
                     Airport
-                  </Link>
-                </DropdownMenuItem>
-              )}
-              {canPrograms && (
-                <DropdownMenuItem asChild>
-                  <Link to="/ops/departures">
-                    <PlaneTakeoff />
-                    Departures
-                  </Link>
-                </DropdownMenuItem>
-              )}
-              {canPrograms && (
-                <DropdownMenuItem asChild>
-                  <Link to="/ops/taxi">
-                    <Route />
-                    Taxi
                   </Link>
                 </DropdownMenuItem>
               )}

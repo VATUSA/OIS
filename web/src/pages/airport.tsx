@@ -4,8 +4,10 @@ import {Lock} from "lucide-react";
 
 import {type Flow, type FlowFlight, useAirportFlow} from "@/lib/feed";
 import {hhmmZulu} from "@/lib/time";
+import {DeparturesView} from "@/pages/departures";
+import {TaxiView} from "@/pages/taxi";
 
-type Sub = "summary" | "aircraft" | "ladder" | "demand";
+type Sub = "summary" | "aircraft" | "ladder" | "demand" | "departures" | "taxi";
 
 const STATUS_STYLE: Record<
   string,
@@ -643,6 +645,8 @@ const SUBS: { id: Sub; label: string }[] = [
   { id: "aircraft", label: "Aircraft list" },
   { id: "ladder", label: "Arrival ladder" },
   { id: "demand", label: "Demand vs AAR" },
+  { id: "departures", label: "Departures" },
+  { id: "taxi", label: "Taxi" },
 ];
 
 export function AirportPage() {
@@ -661,7 +665,8 @@ export function AirportPage() {
       <div>
         <h1 className="text-2xl font-semibold tracking-tight">Airport dashboard</h1>
         <p className="text-muted-foreground">
-          Live arrival picture for any airport — demand, aircraft, and sequence.
+          The whole picture for any airport — arrival demand and sequence, departures and
+          CFRs, and live taxi-out times.
         </p>
       </div>
 
@@ -728,6 +733,8 @@ export function AirportPage() {
           {sub === "aircraft" && <AircraftView flow={flow.data} />}
           {sub === "ladder" && <LadderView flow={flow.data} />}
           {sub === "demand" && <DemandView flow={flow.data} />}
+          {sub === "departures" && <DeparturesView icao={icao} />}
+          {sub === "taxi" && <TaxiView icao={icao} />}
         </>
       )}
     </div>

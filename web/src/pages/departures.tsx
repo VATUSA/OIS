@@ -154,145 +154,106 @@ function Stat({ label, value }: { label: string; value: number }) {
   );
 }
 
-export function DeparturesPage() {
+/**
+ * Departures out of a single airport — a tab on the Airport page. The airport picker + header
+ * live on that page, so this view just takes the loaded ICAO and renders the picture.
+ */
+export function DeparturesView({ icao }: { icao: string }) {
   const { data: me } = useMe();
-  const [query, setQuery] = useState("");
-  const [field, setField] = useState("");
-  const departures = useDepartures(field);
+  const departures = useDepartures(icao);
   const canIssue = hasPermission(me, "tmu.cfr.assign");
 
-  function load() {
-    const clean = query.replace(/[^a-zA-Z0-9]/g, "").toUpperCase();
-    if (clean.length >= 3) setField(clean);
+  if (departures.isError) {
+    return (
+      <Card>
+        <CardContent className="py-12 text-center text-sm text-muted-foreground">
+          Couldn&apos;t load departures for {icao}.
+        </CardContent>
+      </Card>
+    );
+  }
+  if (!departures.data) {
+    return (
+      <Card>
+        <CardContent className="py-12 text-center text-sm text-muted-foreground">
+          Loading departures…
+        </CardContent>
+      </Card>
+    );
   }
 
   return (
     <div className="flex flex-col gap-6">
-      <div>
-        <h1 className="text-2xl font-semibold tracking-tight">
-          {field ? `${field} departures` : "Departures"}
-        </h1>
-        <p className="text-muted-foreground">
-          Every pending departure out of a field — an airport, an approach (e.g. N90), or
-          a center (e.g. ZNY). Ones bound for a metered destination get a Call-For-Release
-          (CFR); the rest release at will.
-        </p>
-      </div>
-
       <Card>
-        <CardContent className="flex flex-wrap items-end gap-3 pt-6">
-          <label className="flex flex-col gap-1 text-xs font-medium uppercase tracking-wide text-muted-foreground">
-            Field
-            <Input
-              className="w-32 font-mono uppercase"
-              maxLength={4}
-              placeholder="KBOS / N90 / ZNY"
-              value={query}
-              onChange={(e) => setQuery(e.target.value)}
-              onKeyDown={(e) => e.key === "Enter" && load()}
-            />
-          </label>
-          <Button onClick={load}>Load</Button>
-          {field && departures.data && (
-            <span className="ml-auto text-xs text-muted-foreground">
-              {departures.isFetching ? "refreshing…" : "live · updates every 20s"}
-            </span>
+        <CardContent className="flex flex-col gap-4 pt-6">
+          {departures.data.facility_kind && (
+            <p className="text-sm text-muted-foreground">
+              <span className="font-medium capitalize text-foreground">
+                {departures.data.facility_kind}
+              </span>{" "}
+              facility ·{" "}
+              <span className="font-mono text-foreground">
+                {departures.data.airports.join(" ")}
+              </span>
+            </p>
           )}
+          <div className="flex flex-wrap gap-10">
+            <Stat label="Total" value={departures.data.total} />
+            <Stat label="To metered fields" value={departures.data.to_metered} />
+            <Stat label="Holding on CFR" value={departures.data.holding_on_cfr} />
+          </div>
+          <p className="text-sm text-muted-foreground">
+            Destinations with a TMU program:{" "}
+            {departures.data.program_destinations.length ? (
+              <span className="font-mono text-foreground">
+                {departures.data.program_destinations.join(", ")}
+              </span>
+            ) : (
+              "none"
+            )}
+          </p>
         </CardContent>
       </Card>
 
-      {!field ? (
-        <Card>
-          <CardContent className="py-12 text-center text-sm text-muted-foreground">
-            Enter a departure field to see its departures.
-          </CardContent>
-        </Card>
-      ) : departures.isError ? (
-        <Card>
-          <CardContent className="py-12 text-center text-sm text-muted-foreground">
-            Couldn&apos;t load departures for {field}.
-          </CardContent>
-        </Card>
-      ) : !departures.data ? (
-        <Card>
-          <CardContent className="py-12 text-center text-sm text-muted-foreground">
-            Loading {field}…
-          </CardContent>
-        </Card>
-      ) : (
-        <>
-          <Card>
-            <CardContent className="flex flex-col gap-4 pt-6">
-              {departures.data.facility_kind && (
-                <p className="text-sm text-muted-foreground">
-                  <span className="font-medium capitalize text-foreground">
-                    {departures.data.facility_kind}
-                  </span>{" "}
-                  facility ·{" "}
-                  <span className="font-mono text-foreground">
-                    {departures.data.airports.join(" ")}
-                  </span>
-                </p>
-              )}
-              <div className="flex flex-wrap gap-10">
-                <Stat label="Total" value={departures.data.total} />
-                <Stat label="To metered fields" value={departures.data.to_metered} />
-                <Stat label="Holding on CFR" value={departures.data.holding_on_cfr} />
-              </div>
-              <p className="text-sm text-muted-foreground">
-                Destinations with a TMU program:{" "}
-                {departures.data.program_destinations.length ? (
-                  <span className="font-mono text-foreground">
-                    {departures.data.program_destinations.join(", ")}
-                  </span>
-                ) : (
-                  "none"
-                )}
-              </p>
-            </CardContent>
-          </Card>
-
-          <Card>
-            <CardContent className="pt-6">
-              {departures.data.departures.length === 0 ? (
-                <p className="py-8 text-center text-sm text-muted-foreground">
-                  No pending departures out of {field}.
-                </p>
-              ) : (
-                <div className="overflow-x-auto">
-                  <table className="w-full text-sm">
-                    <thead>
-                      <tr className="text-left text-xs uppercase tracking-wide text-muted-foreground">
-                        <th className="pb-2 pr-3 font-medium">From</th>
-                        <th className="pb-2 pr-3 font-medium">Callsign</th>
-                        <th className="pb-2 pr-3 font-medium">To</th>
-                        <th className="pb-2 pr-3 font-medium">Type</th>
-                        <th className="pb-2 pr-3 font-medium">Gate</th>
-                        <th className="pb-2 pr-3 font-medium">ETA</th>
-                        <th className="pb-2 pr-3 text-right font-medium">Delay</th>
-                        <th className="pb-2 pr-3 text-right font-medium">CFR</th>
-                        <th className="pb-2 pr-3 font-medium">Ready</th>
-                        <th className="pb-2 pr-3 font-medium" />
-                        <th className="pb-2" />
-                      </tr>
-                    </thead>
-                    <tbody>
-                      {departures.data.departures.map((d) => (
-                        <DepartureRow
-                          key={d.callsign}
-                          d={d}
-                          canIssue={canIssue}
-                          leading={<span className="font-mono text-xs">{d.dep}</span>}
-                        />
-                      ))}
-                    </tbody>
-                  </table>
-                </div>
-              )}
-            </CardContent>
-          </Card>
-        </>
-      )}
+      <Card>
+        <CardContent className="pt-6">
+          {departures.data.departures.length === 0 ? (
+            <p className="py-8 text-center text-sm text-muted-foreground">
+              No pending departures out of {icao}.
+            </p>
+          ) : (
+            <div className="overflow-x-auto">
+              <table className="w-full text-sm">
+                <thead>
+                  <tr className="text-left text-xs uppercase tracking-wide text-muted-foreground">
+                    <th className="pb-2 pr-3 font-medium">From</th>
+                    <th className="pb-2 pr-3 font-medium">Callsign</th>
+                    <th className="pb-2 pr-3 font-medium">To</th>
+                    <th className="pb-2 pr-3 font-medium">Type</th>
+                    <th className="pb-2 pr-3 font-medium">Gate</th>
+                    <th className="pb-2 pr-3 font-medium">ETA</th>
+                    <th className="pb-2 pr-3 text-right font-medium">Delay</th>
+                    <th className="pb-2 pr-3 text-right font-medium">CFR</th>
+                    <th className="pb-2 pr-3 font-medium">Ready</th>
+                    <th className="pb-2 pr-3 font-medium" />
+                    <th className="pb-2" />
+                  </tr>
+                </thead>
+                <tbody>
+                  {departures.data.departures.map((d) => (
+                    <DepartureRow
+                      key={d.callsign}
+                      d={d}
+                      canIssue={canIssue}
+                      leading={<span className="font-mono text-xs">{d.dep}</span>}
+                    />
+                  ))}
+                </tbody>
+              </table>
+            </div>
+          )}
+        </CardContent>
+      </Card>
     </div>
   );
 }
