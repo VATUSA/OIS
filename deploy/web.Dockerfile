@@ -27,6 +27,8 @@ COPY --from=builder /app/web/dist /usr/share/nginx/html
 # The API base the SPA calls. Set to the API's public origin for a cross-origin deploy
 # (e.g. https://api-ois.vzdc.org), or leave empty for same-origin (SPA uses /api on its host).
 ENV OIS_API_URL=""
+# Public URL of the docs site (e.g. https://docs.ois.vzdc.org). Empty hides the nav docs link.
+ENV DOCS_URL=""
 # Where nginx forwards same-origin /api traffic (used only when OIS_API_URL is empty).
 ENV BACKEND_URL=http://backend:3000
 EXPOSE 80

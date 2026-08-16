@@ -61,6 +61,8 @@ services:
     environment:
       # The API origin the SPA calls (injected into /config.js at container start).
       OIS_API_URL: ${API_ORIGIN}
+      # Public docs URL for the nav "Docs" link (blank hides it).
+      DOCS_URL: ${DOCS_ORIGIN:-}
     ports:
       - "${BIND_HOST:-127.0.0.1}:${WEB_PORT:-8080}:80"
     restart: unless-stopped
