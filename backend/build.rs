@@ -17,7 +17,11 @@ fn main() {
     println!("cargo:rerun-if-changed={}", version_file.display());
 
     // A non-empty OIS_VERSION from the environment is authoritative — `env!` reads it directly.
-    if std::env::var("OIS_VERSION").ok().filter(|s| !s.trim().is_empty()).is_some() {
+    if std::env::var("OIS_VERSION")
+        .ok()
+        .filter(|s| !s.trim().is_empty())
+        .is_some()
+    {
         return;
     }
 
