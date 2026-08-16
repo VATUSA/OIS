@@ -58,6 +58,9 @@ jobs:
           context: .
           file: ${{ matrix.dockerfile }}
           push: true
+          # Only web's Dockerfile declares this ARG (footer build stamp); harmless for the others.
+          build-args: |
+            OIS_GIT_SHA=${{ github.sha }}
           tags: ${{ steps.meta.outputs.tags }}
           labels: ${{ steps.meta.outputs.labels }}
           cache-from: type=gha,scope=${{ matrix.name }}
