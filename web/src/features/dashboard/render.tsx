@@ -1,3 +1,4 @@
+import {MapWidgetView} from "./map-widget";
 import {STAT_METRICS, StatWidgetView} from "./stat-widgets";
 import {VIEW_OPTIONS, ViewWidgetView} from "./view-widgets";
 import type {Widget} from "./types";
@@ -9,6 +10,8 @@ export function WidgetBody({ widget }: { widget: Widget }) {
       return <StatWidgetView metric={widget.metric} />;
     case "view":
       return <ViewWidgetView view={widget.view} icao={widget.icao} />;
+    case "map":
+      return <MapWidgetView initialFlight={widget.initialFlight} />;
     default:
       return (
         <div className="p-4 text-sm text-muted-foreground">

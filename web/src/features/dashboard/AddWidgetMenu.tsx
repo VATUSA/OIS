@@ -56,6 +56,11 @@ export function AddWidgetMenu({ onAdd }: { onAdd: (widget: Widget) => void }) {
             {v.label}
           </DropdownMenuItem>
         ))}
+        <DropdownMenuSeparator />
+        <DropdownMenuLabel>Map</DropdownMenuLabel>
+        <DropdownMenuItem onSelect={() => onAdd({ id: newId(), kind: "map" })}>
+          Flow map
+        </DropdownMenuItem>
       </DropdownMenuContent>
     </DropdownMenu>
   );
