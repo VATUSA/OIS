@@ -1,4 +1,4 @@
-import {useQuery} from "@tanstack/react-query";
+import {useQueries, useQuery} from "@tanstack/react-query";
 import type {components} from "@ois/api-client";
 
 import {ois} from "./api";
@@ -38,18 +38,31 @@ export function useFeedStatus() {
   });
 }
 
+async function fetchFlow(icao: string) {
+  const { data, error } = await ois.GET("/api/v1/tmu/flow/{icao}", {
+    params: { path: { icao } },
+  });
+  if (error || !data) throw new Error("failed to load flow");
+  return data;
+}
+
 /** Live arrival flow for one airport, refreshed every 20s. */
 export function useAirportFlow(icao: string) {
   return useQuery({
     queryKey: ["flow", icao],
-    queryFn: async () => {
-      const { data, error } = await ois.GET("/api/v1/tmu/flow/{icao}", {
-        params: { path: { icao } },
-      });
-      if (error || !data) throw new Error("failed to load flow");
-      return data;
-    },
+    queryFn: () => fetchFlow(icao),
     enabled: !!icao,
     refetchInterval: 20_000,
+  });
+}
+
+/** Arrival flow for several airports at once (for comparison charts). */
+export function useMultiAirportFlow(icaos: string[]) {
+  return useQueries({
+    queries: icaos.map((icao) => ({
+      queryKey: ["flow", icao],
+      queryFn: () => fetchFlow(icao),
+      refetchInterval: 20_000,
+    })),
   });
 }

@@ -7,13 +7,14 @@ import {
   DropdownMenuLabel,
   DropdownMenuSeparator,
   DropdownMenuTrigger,
+  usePrompt,
 } from "@ois/ui";
 import {areaY, barY, type ChartValue, defineChart, lineY} from "@tanstack/charts";
 import {Chart} from "@tanstack/react-charts";
 import {scaleBand, scaleLinear, scalePoint} from "d3-scale";
-import {Check} from "lucide-react";
+import {Check, Plus, X} from "lucide-react";
 
-import {type DataSource, DATA_SOURCES_BY_ID, type Row} from "./sources";
+import {AIRPORT_KEY, type DataSource, DATA_SOURCES_BY_ID, type Row} from "./sources";
 import type {ChartAggregate, ChartWidget as ChartWidgetT} from "./types";
 
 const CHART_TYPES = ["line", "area", "bar"] as const;
@@ -65,7 +66,11 @@ export function defaultChartConfig(source: DataSource): {
   topN: number;
 } {
   const nums = source.fields.filter((f) => f.type === "number");
-  const cat = source.fields.find((f) => f.type === "string" || f.type === "time");
+  // Prefer a low-cardinality categorical field for x over unique ids like callsign.
+  const preferred = ["status", "phase", "gate", "mode", "artcc", "dep", "arrival", "arr", "icao"];
+  const cat =
+    source.fields.find((f) => preferred.includes(f.key)) ??
+    source.fields.find((f) => f.type === "string" || f.type === "time");
   return {
     chartType: "line",
     x: (cat ?? source.fields[0])?.key ?? "",
@@ -118,12 +123,21 @@ function reduce(agg: ChartAggregate, vals: number[]): number {
 }
 
 const labelOf = (source: DataSource, key: string) =>
-  source.fields.find((f) => f.key === key)?.label ?? key;
+  key === AIRPORT_KEY ? "Airport" : source.fields.find((f) => f.key === key)?.label ?? key;
+
+interface Shaped {
+  data: Row[];
+  series: Series[];
+  categorical: boolean;
+}
 
 /**
- * Shape rows for the chart. "none" plots the raw rows; any other aggregate groups by x and either
- * counts rows or reduces each y series. Aggregated data is trimmed to the top-N groups by value
- * (bars stay value-ranked; lines/areas re-sort by x so the trend reads left-to-right).
+ * Shape rows for the chart:
+ *  - "none": raw rows, series = the chosen y fields.
+ *  - splitKey set (multi-airport, x is a real field): pivot — one series per airport, each x group
+ *    aggregating the single y metric (or count). This is the "compare airports" mode.
+ *  - otherwise: group by x, series = the y fields (or a single Count series).
+ * Aggregated data keeps the top-N groups by value; bars stay value-ranked, lines/areas sort by x.
  */
 function shapeChartData(
   rows: Row[],
@@ -133,13 +147,62 @@ function shapeChartData(
   aggregate: ChartAggregate,
   chartType: ChartType,
   topN: number | undefined,
-): { data: Row[]; series: Series[]; categorical: boolean } {
+  splitKey: string | undefined,
+): Shaped {
   if (aggregate === "none") {
     const series = yKeys.map((k) => ({ key: k, label: labelOf(source, k) }));
     const xType = source.fields.find((f) => f.key === xKey)?.type;
     return { data: rows, series, categorical: xType !== "number" };
   }
 
+  const orderXThenTrim = (data: Row[], keys: string[]): Row[] => {
+    const total = (r: Row) => keys.reduce((s, k) => s + (Number(r[k]) || 0), 0);
+    data.sort((a, b) => total(b) - total(a));
+    let trimmed = topN && topN > 0 ? data.slice(0, topN) : data;
+    if (chartType !== "bar") {
+      trimmed = [...trimmed].sort((a, b) =>
+        String(a[xKey]).localeCompare(String(b[xKey]), undefined, { numeric: true }),
+      );
+    }
+    return trimmed;
+  };
+
+  // Compare-airports pivot: series = airports.
+  if (splitKey && splitKey !== xKey) {
+    const yKey = aggregate === "count" ? null : yKeys[0];
+    const splitVals: string[] = [];
+    const seen = new Set<string>();
+    const xMap = new Map<string, Map<string, Row[]>>();
+    for (const r of rows) {
+      const xv = String(r[xKey] ?? "");
+      const sv = String(r[splitKey] ?? "");
+      if (!seen.has(sv)) {
+        seen.add(sv);
+        splitVals.push(sv);
+      }
+      let m = xMap.get(xv);
+      if (!m) xMap.set(xv, (m = new Map()));
+      let arr = m.get(sv);
+      if (!arr) m.set(sv, (arr = []));
+      arr.push(r);
+    }
+    const series = splitVals.map((s) => ({ key: s, label: s }));
+    const data: Row[] = [];
+    for (const [xv, m] of xMap) {
+      const row: Row = { [xKey]: xv };
+      for (const s of splitVals) {
+        const rs = m.get(s) ?? [];
+        row[s] =
+          yKey == null
+            ? rs.length
+            : reduce(aggregate, rs.map((r) => Number(r[yKey])).filter((v) => Number.isFinite(v)));
+      }
+      data.push(row);
+    }
+    return { data: orderXThenTrim(data, splitVals), series, categorical: true };
+  }
+
+  // Single-dimension: group by x, series = y fields (or Count).
   const groups = new Map<string, Row[]>();
   for (const r of rows) {
     const k = String(r[xKey] ?? "");
@@ -147,9 +210,8 @@ function shapeChartData(
     if (!arr) groups.set(k, (arr = []));
     arr.push(r);
   }
-
   let series: Series[];
-  let data: Row[] = [];
+  const data: Row[] = [];
   if (aggregate === "count") {
     series = [{ key: COUNT_KEY, label: "Count" }];
     for (const [k, rs] of groups) data.push({ [xKey]: k, [COUNT_KEY]: rs.length });
@@ -164,16 +226,7 @@ function shapeChartData(
       data.push(row);
     }
   }
-
-  const sortKey = series[0]?.key ?? COUNT_KEY;
-  data.sort((a, b) => Number(b[sortKey]) - Number(a[sortKey]));
-  if (topN && topN > 0) data = data.slice(0, topN);
-  if (chartType !== "bar") {
-    data.sort((a, b) =>
-      String(a[xKey]).localeCompare(String(b[xKey]), undefined, { numeric: true }),
-    );
-  }
-  return { data, series, categorical: true };
+  return { data: orderXThenTrim(data, series.map((s) => s.key)), series, categorical: true };
 }
 
 function buildDefinition(
@@ -183,17 +236,17 @@ function buildDefinition(
   xLabel: string,
   categorical: boolean,
   series: Series[],
+  colorFor: (key: string, i: number) => string,
 ) {
   const x = xAccessor(xKey);
   const marks = series.map((s, i) => {
     const y = yAccessor(s.key);
-    const color = colorAt(i);
+    const color = colorFor(s.key, i);
     if (chartType === "line") return lineY(data, { x, y, stroke: color });
     if (chartType === "area") return areaY(data, { x, y, fill: color });
     return barY(data, { x, y, fill: color });
   });
   const xScale = categorical ? (chartType === "bar" ? scaleBand : scalePoint) : scaleLinear;
-  // A single-series chart labels its y axis with that series; multi-series relies on the legend.
   const yLabel = series.length === 1 ? series[0].label : undefined;
   return defineChart({
     marks,
@@ -213,7 +266,7 @@ function Picker({ label, children }: { label: string; children: React.ReactNode 
           {label}
         </Button>
       </DropdownMenuTrigger>
-      <DropdownMenuContent align="start" className="max-h-[50vh] w-44 overflow-y-auto">
+      <DropdownMenuContent align="start" className="max-h-[50vh] w-48 overflow-y-auto">
         {children}
       </DropdownMenuContent>
     </DropdownMenu>
@@ -244,20 +297,69 @@ function CheckItem({
   );
 }
 
+function AirportsPicker({
+  icaos,
+  onChange,
+}: {
+  icaos: string[];
+  onChange: (next: string[]) => void;
+}) {
+  const prompt = usePrompt();
+  const add = async () => {
+    const raw = await prompt({ title: "Add airport", label: "ICAO", placeholder: "KBOS" });
+    if (!raw) return;
+    const ic = raw.replace(/[^a-zA-Z0-9]/g, "").toUpperCase();
+    if (ic.length >= 3 && !icaos.includes(ic)) onChange([...icaos, ic]);
+  };
+  return (
+    <Picker label={`Airports · ${icaos.join(", ") || "none"}`}>
+      <DropdownMenuLabel>Airports</DropdownMenuLabel>
+      {icaos.map((ic) => (
+        <DropdownMenuItem
+          key={ic}
+          onSelect={(e) => {
+            e.preventDefault();
+            if (icaos.length > 1) onChange(icaos.filter((x) => x !== ic));
+          }}
+        >
+          <X className="size-3.5" />
+          {ic}
+        </DropdownMenuItem>
+      ))}
+      <DropdownMenuSeparator />
+      <DropdownMenuItem onSelect={() => void add()}>
+        <Plus className="size-3.5" />
+        Add airport…
+      </DropdownMenuItem>
+    </Picker>
+  );
+}
+
 function ConfigBar({
   source,
   widget,
+  icaos,
+  multiAirport,
   onChange,
 }: {
   source: DataSource;
   widget: ChartWidgetT;
+  icaos: string[];
+  multiAirport: boolean;
   onChange: (id: string, patch: Record<string, unknown>) => void;
 }) {
   const set = (patch: Record<string, unknown>) => onChange(widget.id, patch);
   const nums = source.fields.filter((f) => f.type === "number");
   const aggregate = widget.aggregate ?? "none";
   const aggLabel = AGGREGATES.find((a) => a.id === aggregate)?.label ?? "Count";
-  const xLabel = source.fields.find((f) => f.key === widget.x)?.label ?? "X";
+  const xLabel = labelOf(source, widget.x);
+  const splitMode = multiAirport && widget.x !== AIRPORT_KEY;
+
+  // Group-by options: real fields, plus "Airport" when comparing airports.
+  const xOptions = [
+    ...source.fields.map((f) => ({ key: f.key, label: f.label })),
+    ...(multiAirport ? [{ key: AIRPORT_KEY, label: "Airport" }] : []),
+  ];
 
   const ySet = new Set(widget.y);
   const toggleY = (key: string) => {
@@ -277,14 +379,20 @@ function ConfigBar({
           />
         ))}
       </Picker>
+      {source.needsIcao && (
+        <AirportsPicker
+          icaos={icaos}
+          onChange={(next) => set({ params: { ...widget.params, icaos: next } })}
+        />
+      )}
       <Picker label={`Group by · ${xLabel}`}>
         <DropdownMenuLabel>X axis / group</DropdownMenuLabel>
-        {source.fields.map((f) => (
+        {xOptions.map((o) => (
           <CheckItem
-            key={f.key}
-            checked={widget.x === f.key}
-            label={f.label}
-            onSelect={() => set({ x: f.key })}
+            key={o.key}
+            checked={widget.x === o.key}
+            label={o.label}
+            onSelect={() => set({ x: o.key })}
           />
         ))}
       </Picker>
@@ -300,16 +408,17 @@ function ConfigBar({
         ))}
       </Picker>
       {aggregate !== "count" && (
-        <Picker label={`Y · ${widget.y.length}`}>
-          <DropdownMenuLabel>Y series (numeric)</DropdownMenuLabel>
+        <Picker label={splitMode ? `Metric · ${widget.y.length ? labelOf(source, widget.y[0]) : "—"}` : `Y · ${widget.y.length}`}>
+          <DropdownMenuLabel>{splitMode ? "Metric (numeric)" : "Y series (numeric)"}</DropdownMenuLabel>
           <DropdownMenuSeparator />
           {nums.map((f) => (
             <CheckItem
               key={f.key}
               checked={ySet.has(f.key)}
               label={f.label}
-              onSelect={() => toggleY(f.key)}
-              keepOpen
+              // In split (compare-airports) mode a single metric drives all airport series.
+              onSelect={() => (splitMode ? set({ y: [f.key] }) : toggleY(f.key))}
+              keepOpen={!splitMode}
             />
           ))}
         </Picker>
@@ -331,6 +440,45 @@ function ConfigBar({
   );
 }
 
+function Legend({
+  series,
+  colorFor,
+  editable,
+  onColor,
+}: {
+  series: Series[];
+  colorFor: (key: string, i: number) => string;
+  editable: boolean;
+  onColor: (key: string, hex: string) => void;
+}) {
+  return (
+    <div className="flex flex-wrap items-center gap-x-4 gap-y-1 px-1 text-xs text-muted-foreground">
+      {series.map((s, i) => {
+        const color = colorFor(s.key, i);
+        return (
+          <span key={s.key} className="inline-flex items-center gap-1.5">
+            <span
+              className="relative inline-block size-2.5 rounded-sm"
+              style={{ background: color }}
+            >
+              {editable && (
+                <input
+                  type="color"
+                  value={color}
+                  title={`Colour for ${s.label}`}
+                  onChange={(e) => onColor(s.key, e.target.value)}
+                  className="absolute inset-0 size-full cursor-pointer opacity-0"
+                />
+              )}
+            </span>
+            {s.label}
+          </span>
+        );
+      })}
+    </div>
+  );
+}
+
 function ChartInner({
   source,
   widget,
@@ -342,14 +490,29 @@ function ChartInner({
   editing: boolean;
   onChange: (id: string, patch: Record<string, unknown>) => void;
 }) {
-  const { rows, isLoading, isError } = source.useRows(widget.params ?? {});
+  const icaos = widget.params?.icaos?.length
+    ? widget.params.icaos
+    : widget.params?.icao
+      ? [widget.params.icao]
+      : [];
+  const { rows, isLoading, isError } = source.useRows({ icaos });
   const [ref, size] = useSize();
+
   const aggregate = widget.aggregate ?? "none";
+  const multiAirport = source.needsIcao && icaos.length > 1;
+  const splitKey = multiAirport && widget.x !== AIRPORT_KEY ? AIRPORT_KEY : undefined;
 
   const shaped = useMemo(
-    () => shapeChartData(rows, source, widget.x, widget.y, aggregate, widget.chartType, widget.topN),
-    [rows, source, widget.x, widget.y, aggregate, widget.chartType, widget.topN],
+    () =>
+      shapeChartData(rows, source, widget.x, widget.y, aggregate, widget.chartType, widget.topN, splitKey),
+    [rows, source, widget.x, widget.y, aggregate, widget.chartType, widget.topN, splitKey],
   );
+
+  const colors = widget.colors ?? {};
+  const colorFor = (key: string, i: number) => colors[key] ?? colorAt(i);
+  const setColor = (key: string, hex: string) =>
+    onChange(widget.id, { colors: { ...colors, [key]: hex } });
+
   const xLabel = labelOf(source, widget.x);
   const definition = useMemo(
     () =>
@@ -360,8 +523,11 @@ function ChartInner({
         xLabel,
         shaped.categorical,
         shaped.series,
+        colorFor,
       ),
-    [shaped, widget.chartType, widget.x, xLabel],
+    // colorFor closes over `colors`; recompute when colors change.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+    [shaped, widget.chartType, widget.x, xLabel, colors],
   );
 
   const ready = widget.x && (aggregate === "count" || widget.y.length > 0);
@@ -370,44 +536,33 @@ function ChartInner({
 
   return (
     <div className="flex h-full flex-col gap-2 p-2">
-      {editing && <ConfigBar source={source} widget={widget} onChange={onChange} />}
+      {editing && (
+        <ConfigBar
+          source={source}
+          widget={widget}
+          icaos={icaos}
+          multiAirport={multiAirport}
+          onChange={onChange}
+        />
+      )}
       <div ref={ref} className="min-h-0 flex-1">
         {isError ? (
           <p className="pt-6 text-center text-sm text-muted-foreground">Couldn&apos;t load data.</p>
         ) : !ready ? (
           <p className="pt-6 text-center text-sm text-muted-foreground">
-            Pick a group-by field, and a Y series unless counting.
+            Pick a group-by field, and a metric unless counting.
           </p>
         ) : isLoading && empty ? (
           <p className="pt-6 text-center text-sm text-muted-foreground">Loading…</p>
         ) : empty ? (
           <p className="pt-6 text-center text-sm text-muted-foreground">No data.</p>
         ) : size.w > 0 && size.h > 0 ? (
-          <Chart
-            definition={definition}
-            ariaLabel={source.label}
-            width={size.w}
-            height={size.h}
-          />
+          <Chart definition={definition} ariaLabel={source.label} width={size.w} height={size.h} />
         ) : null}
       </div>
-      {showChart && shaped.series.length > 1 && <Legend series={shaped.series} />}
-    </div>
-  );
-}
-
-function Legend({ series }: { series: Series[] }) {
-  return (
-    <div className="flex flex-wrap items-center gap-x-4 gap-y-1 px-1 text-xs text-muted-foreground">
-      {series.map((s, i) => (
-        <span key={s.key} className="inline-flex items-center gap-1.5">
-          <span
-            className="inline-block size-2.5 rounded-sm"
-            style={{ background: colorAt(i) }}
-          />
-          {s.label}
-        </span>
-      ))}
+      {showChart && shaped.series.length > 1 && (
+        <Legend series={shaped.series} colorFor={colorFor} editable={editing} onColor={setColor} />
+      )}
     </div>
   );
 }
