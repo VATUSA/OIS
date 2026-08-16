@@ -4,6 +4,8 @@ declare global {
   interface Window {
     /** Injected at container start from OIS_API_URL (see deploy/40-ois-config.sh). */
     __OIS_API_URL__?: string;
+    /** Injected at container start from DOCS_URL (see deploy/40-ois-config.sh). */
+    __OIS_DOCS_URL__?: string;
   }
 }
 
@@ -21,3 +23,11 @@ export const API_BASE =
 
 /** The shared, typed OIS API client (session cookie sent via credentials: include). */
 export const ois = createOisClient(API_BASE);
+
+// Docs site URL (external, its own subdomain per environment), resolved like API_BASE:
+//   window.__OIS_DOCS_URL__ (container start) → VITE_OIS_DOCS_URL (dev) → "" (no link shown).
+const docsRuntime =
+  typeof window !== "undefined" ? window.__OIS_DOCS_URL__ : undefined;
+export const DOCS_URL =
+  (typeof docsRuntime === "string" ? docsRuntime : import.meta.env.VITE_OIS_DOCS_URL) ??
+  "";

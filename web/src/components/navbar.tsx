@@ -12,6 +12,7 @@ import {
   ThemeToggle,
 } from "@ois/ui";
 import {
+  BookOpen,
   CalendarClock,
   ChevronDown,
   Gauge,
@@ -30,6 +31,7 @@ import {
 } from "lucide-react";
 
 import {ZuluClock} from "@/components/zulu-clock";
+import {DOCS_URL} from "@/lib/api";
 import {login, useLogout, useMe} from "@/lib/auth";
 import {useFeedStatus} from "@/lib/feed";
 import {hasPermission, isAdmin} from "@/lib/permissions";
@@ -277,6 +279,18 @@ function MobileMenu({
             </DropdownMenuItem>
           </>
         )}
+
+        {DOCS_URL && (
+          <>
+            <DropdownMenuSeparator />
+            <DropdownMenuItem asChild>
+              <a href={DOCS_URL} target="_blank" rel="noreferrer">
+                <BookOpen />
+                Docs
+              </a>
+            </DropdownMenuItem>
+          </>
+        )}
       </DropdownMenuContent>
     </DropdownMenu>
   );
@@ -405,6 +419,18 @@ export function Navbar() {
                 </Link>
               </DropdownMenuItem>
             </NavGroup>
+          )}
+
+          {/* Docs live on their own subdomain (per-environment), wired via DOCS_URL. */}
+          {DOCS_URL && (
+            <a
+              href={DOCS_URL}
+              target="_blank"
+              rel="noreferrer"
+              className={linkClass}
+            >
+              Docs
+            </a>
           )}
         </nav>
         <div className="ml-auto flex items-center gap-2">
