@@ -10,7 +10,8 @@ import {
   usePrompt,
 } from "@ois/ui";
 import {areaY, barY, type ChartValue, defineChart, lineY} from "@tanstack/charts";
-import {Chart} from "@tanstack/react-charts";
+// The /tooltip entry is the same Chart with the built-in hover tooltip enabled.
+import {Chart} from "@tanstack/react-charts/tooltip";
 import {scaleBand, scaleLinear, scalePoint} from "d3-scale";
 import {Check, Plus, X} from "lucide-react";
 
@@ -131,6 +132,24 @@ interface Shaped {
   categorical: boolean;
 }
 
+/** Rescale each series to 0–100% of its own max, so mixed-scale series compare on one axis. */
+function normalizeShaped(s: Shaped): Shaped {
+  const data = s.data.map((r) => ({ ...r }));
+  for (const ser of s.series) {
+    let max = 0;
+    for (const r of data) {
+      const v = Math.abs(Number(r[ser.key]) || 0);
+      if (v > max) max = v;
+    }
+    if (max > 0) {
+      for (const r of data) {
+        r[ser.key] = Math.round(((Number(r[ser.key]) || 0) / max) * 1000) / 10;
+      }
+    }
+  }
+  return { ...s, data };
+}
+
 /**
  * Shape rows for the chart:
  *  - "none": raw rows, series = the chosen y fields.
@@ -148,11 +167,14 @@ function shapeChartData(
   chartType: ChartType,
   topN: number | undefined,
   splitKey: string | undefined,
+  normalize: boolean,
 ): Shaped {
+  const finish = (s: Shaped): Shaped => (normalize ? normalizeShaped(s) : s);
+
   if (aggregate === "none") {
     const series = yKeys.map((k) => ({ key: k, label: labelOf(source, k) }));
     const xType = source.fields.find((f) => f.key === xKey)?.type;
-    return { data: rows, series, categorical: xType !== "number" };
+    return finish({ data: rows, series, categorical: xType !== "number" });
   }
 
   const orderXThenTrim = (data: Row[], keys: string[]): Row[] => {
@@ -199,7 +221,7 @@ function shapeChartData(
       }
       data.push(row);
     }
-    return { data: orderXThenTrim(data, splitVals), series, categorical: true };
+    return finish({ data: orderXThenTrim(data, splitVals), series, categorical: true });
   }
 
   // Single-dimension: group by x, series = y fields (or Count).
@@ -226,7 +248,7 @@ function shapeChartData(
       data.push(row);
     }
   }
-  return { data: orderXThenTrim(data, series.map((s) => s.key)), series, categorical: true };
+  return finish({ data: orderXThenTrim(data, series.map((s) => s.key)), series, categorical: true });
 }
 
 function buildDefinition(
@@ -237,6 +259,7 @@ function buildDefinition(
   categorical: boolean,
   series: Series[],
   colorFor: (key: string, i: number) => string,
+  normalized: boolean,
 ) {
   const x = xAccessor(xKey);
   const marks = series.map((s, i) => {
@@ -247,14 +270,14 @@ function buildDefinition(
     return barY(data, { x, y, fill: color });
   });
   const xScale = categorical ? (chartType === "bar" ? scaleBand : scalePoint) : scaleLinear;
-  const yLabel = series.length === 1 ? series[0].label : undefined;
+  const yLabel = normalized ? "% of max" : series.length === 1 ? series[0].label : undefined;
+  const yFormat = normalized
+    ? (v: ChartValue) => `${Math.round(Number(v))}%`
+    : (v: ChartValue) => fmtNumber(Number(v));
   return defineChart({
     marks,
     x: { scale: xScale, axis: { label: xLabel } },
-    y: {
-      scale: scaleLinear,
-      axis: { label: yLabel, ticks: { format: (v) => fmtNumber(Number(v)) } },
-    },
+    y: { scale: scaleLinear, axis: { label: yLabel, ticks: { format: yFormat } } },
   });
 }
 
@@ -436,6 +459,19 @@ function ConfigBar({
           ))}
         </Picker>
       )}
+      <Picker label={`Scale · ${widget.normalize ? "%" : "actual"}`}>
+        <DropdownMenuLabel>Y scaling</DropdownMenuLabel>
+        <CheckItem
+          checked={!widget.normalize}
+          label="Actual values"
+          onSelect={() => set({ normalize: false })}
+        />
+        <CheckItem
+          checked={!!widget.normalize}
+          label="Normalize % (compare shapes)"
+          onSelect={() => set({ normalize: true })}
+        />
+      </Picker>
     </div>
   );
 }
@@ -501,11 +537,22 @@ function ChartInner({
   const aggregate = widget.aggregate ?? "none";
   const multiAirport = source.needsIcao && icaos.length > 1;
   const splitKey = multiAirport && widget.x !== AIRPORT_KEY ? AIRPORT_KEY : undefined;
+  const normalize = !!widget.normalize;
 
   const shaped = useMemo(
     () =>
-      shapeChartData(rows, source, widget.x, widget.y, aggregate, widget.chartType, widget.topN, splitKey),
-    [rows, source, widget.x, widget.y, aggregate, widget.chartType, widget.topN, splitKey],
+      shapeChartData(
+        rows,
+        source,
+        widget.x,
+        widget.y,
+        aggregate,
+        widget.chartType,
+        widget.topN,
+        splitKey,
+        normalize,
+      ),
+    [rows, source, widget.x, widget.y, aggregate, widget.chartType, widget.topN, splitKey, normalize],
   );
 
   const colors = widget.colors ?? {};
@@ -524,10 +571,11 @@ function ChartInner({
         shaped.categorical,
         shaped.series,
         colorFor,
+        normalize,
       ),
     // colorFor closes over `colors`; recompute when colors change.
     // eslint-disable-next-line react-hooks/exhaustive-deps
-    [shaped, widget.chartType, widget.x, xLabel, colors],
+    [shaped, widget.chartType, widget.x, xLabel, colors, normalize],
   );
 
   const ready = widget.x && (aggregate === "count" || widget.y.length > 0);
@@ -557,7 +605,38 @@ function ChartInner({
         ) : empty ? (
           <p className="pt-6 text-center text-sm text-muted-foreground">No data.</p>
         ) : size.w > 0 && size.h > 0 ? (
-          <Chart definition={definition} ariaLabel={source.label} width={size.w} height={size.h} />
+          <Chart
+            definition={definition}
+            ariaLabel={source.label}
+            width={size.w}
+            height={size.h}
+            renderTooltipBody={(ctx) => {
+              const pts = ctx.points;
+              if (!pts.length) return null;
+              return (
+                <div className="pointer-events-none rounded-md border bg-popover px-2.5 py-1.5 text-xs shadow-lg">
+                  <div className="mb-1 font-medium text-foreground">{String(pts[0].xValue)}</div>
+                  <div className="flex flex-col gap-0.5">
+                    {pts.map((p, i) => (
+                      <div key={i} className="flex items-center gap-2">
+                        <span
+                          className="inline-block size-2 rounded-sm"
+                          style={{ background: p.color }}
+                        />
+                        {p.groupLabel && (
+                          <span className="text-muted-foreground">{p.groupLabel}</span>
+                        )}
+                        <span className="ml-auto tabular-nums text-foreground">
+                          {fmtNumber(Number(p.yValue))}
+                          {normalize ? "%" : ""}
+                        </span>
+                      </div>
+                    ))}
+                  </div>
+                </div>
+              );
+            }}
+          />
         ) : null}
       </div>
       {showChart && shaped.series.length > 1 && (

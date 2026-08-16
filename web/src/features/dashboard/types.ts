@@ -81,6 +81,8 @@ export interface ChartWidget {
   topN?: number;
   /** Per-series color overrides, keyed by series key (field key or airport icao). */
   colors?: Record<string, string>;
+  /** Rescale each series to 0–100% of its own max, so mixed-scale series compare on one axis. */
+  normalize?: boolean;
 }
 
 export type Widget = ViewWidget | StatWidget | MapWidget | TableWidget | ChartWidget;
