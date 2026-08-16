@@ -65,9 +65,10 @@ export interface ChartWidget {
   title?: string;
   /** DataSource id from the registry (features/dashboard/sources). */
   source: string;
-  params?: { icao?: string };
+  /** icaos powers multi-airport comparison; icao kept for back-compat / single-airport. */
+  params?: { icao?: string; icaos?: string[] };
   chartType: "bar" | "line" | "area";
-  /** Field key for the x axis (category/time). */
+  /** Field key for the x axis (category/time), or "__airport" to compare airports directly. */
   x: string;
   /** One or more numeric field keys plotted as series. */
   y: string[];
@@ -78,6 +79,8 @@ export interface ChartWidget {
   aggregate?: ChartAggregate;
   /** Keep only the top N groups by value (0/undefined = all). Applied when aggregated. */
   topN?: number;
+  /** Per-series color overrides, keyed by series key (field key or airport icao). */
+  colors?: Record<string, string>;
 }
 
 export type Widget = ViewWidget | StatWidget | MapWidget | TableWidget | ChartWidget;

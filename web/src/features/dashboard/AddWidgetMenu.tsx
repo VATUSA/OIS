@@ -47,11 +47,11 @@ export function AddWidgetMenu({ onAdd }: { onAdd: (widget: Widget) => void }) {
     const source = DATA_SOURCES_BY_ID[sourceId];
     if (!source) return;
     const cfg = defaultChartConfig(source);
-    let params: { icao?: string } | undefined;
+    let params: { icaos?: string[] } | undefined;
     if (needsIcao) {
       const icao = await askIcao(prompt);
       if (!icao) return;
-      params = { icao };
+      params = { icaos: [icao] };
     }
     onAdd({ id: newId(), kind: "chart", source: sourceId, params, ...cfg });
   }

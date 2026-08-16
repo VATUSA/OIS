@@ -4,11 +4,14 @@
 // one source for its lifetime, so calling `source.useRows(...)` unconditionally is hooks-safe
 // (the TableWidget also keys its inner component by source id, remounting on any change).
 
-import {useDepartures} from "@/lib/departures";
+import {useMultiDepartures} from "@/lib/departures";
 import {useFcas, useTraffic} from "@/lib/fca";
-import {useAirportFlow} from "@/lib/feed";
+import {useMultiAirportFlow} from "@/lib/feed";
 import {usePrograms, useTmis} from "@/lib/tmu";
-import {useTaxiStats} from "@/lib/taxi";
+import {useMultiTaxiStats} from "@/lib/taxi";
+
+/** Row field that tags which airport a row came from, for multi-airport comparison charts. */
+export const AIRPORT_KEY = "__airport";
 
 export type FieldType = "string" | "number" | "time" | "bool";
 
@@ -26,17 +29,26 @@ export interface RowsResult {
   isError: boolean;
 }
 
+export interface SourceParams {
+  icao?: string;
+  /** One or more airports; airport sources tag each row with AIRPORT_KEY for comparison. */
+  icaos?: string[];
+}
+
 export interface DataSource {
   id: string;
   label: string;
   category: "airport" | "global";
-  /** True → the widget must be bound to an airport (params.icao). */
+  /** True → the widget must be bound to at least one airport. */
   needsIcao: boolean;
   fields: FieldDef[];
-  useRows: (params: { icao?: string }) => RowsResult;
+  useRows: (params: SourceParams) => RowsResult;
 }
 
 const f = (key: string, label: string, type: FieldType = "string"): FieldDef => ({ key, label, type });
+
+/** Normalize params to a concrete airport list (icaos preferred, else the single icao). */
+const airports = (p: SourceParams): string[] => (p.icaos?.length ? p.icaos : p.icao ? [p.icao] : []);
 
 export const DATA_SOURCES: DataSource[] = [
   {
@@ -57,9 +69,17 @@ export const DATA_SOURCES: DataSource[] = [
       f("groundspeed", "GS", "number"),
       f("aircraft_type", "Type"),
     ],
-    useRows: ({ icao }) => {
-      const q = useAirportFlow(icao ?? "");
-      return { rows: (q.data?.flights ?? []) as Row[], isLoading: q.isLoading, isError: q.isError };
+    useRows: (p) => {
+      const list = airports(p);
+      const qs = useMultiAirportFlow(list);
+      const rows = list.flatMap((ic, i) =>
+        (qs[i]?.data?.flights ?? []).map((r) => ({ ...r, [AIRPORT_KEY]: ic })),
+      ) as Row[];
+      return {
+        rows,
+        isLoading: qs.some((q) => q.isLoading),
+        isError: qs.length > 0 && qs.every((q) => q.isError),
+      };
     },
   },
   {
@@ -79,12 +99,16 @@ export const DATA_SOURCES: DataSource[] = [
       f("eta", "ETA", "time"),
       f("has_program", "Metered", "bool"),
     ],
-    useRows: ({ icao }) => {
-      const q = useDepartures(icao ?? "");
+    useRows: (p) => {
+      const list = airports(p);
+      const qs = useMultiDepartures(list);
+      const rows = list.flatMap((ic, i) =>
+        (qs[i]?.data?.departures ?? []).map((r) => ({ ...r, [AIRPORT_KEY]: ic })),
+      ) as Row[];
       return {
-        rows: (q.data?.departures ?? []) as Row[],
-        isLoading: q.isLoading,
-        isError: q.isError,
+        rows,
+        isLoading: qs.some((q) => q.isLoading),
+        isError: qs.length > 0 && qs.every((q) => q.isError),
       };
     },
   },
@@ -100,9 +124,17 @@ export const DATA_SOURCES: DataSource[] = [
       f("gs", "GS", "number"),
       f("alt", "Alt", "number"),
     ],
-    useRows: ({ icao }) => {
-      const q = useTaxiStats(icao ?? "");
-      return { rows: (q.data?.active ?? []) as Row[], isLoading: q.isLoading, isError: q.isError };
+    useRows: (p) => {
+      const list = airports(p);
+      const qs = useMultiTaxiStats(list);
+      const rows = list.flatMap((ic, i) =>
+        (qs[i]?.data?.active ?? []).map((r) => ({ ...r, [AIRPORT_KEY]: ic })),
+      ) as Row[];
+      return {
+        rows,
+        isLoading: qs.some((q) => q.isLoading),
+        isError: qs.length > 0 && qs.every((q) => q.isError),
+      };
     },
   },
   {
