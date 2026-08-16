@@ -9,3 +9,7 @@ api-ois.vzdc.org {
 ois.vzdc.org {
 	reverse_proxy 127.0.0.1:8080
 }
+
+docs.ois.vzdc.org {
+	reverse_proxy 127.0.0.1:8081
+}

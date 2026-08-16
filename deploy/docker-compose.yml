@@ -65,5 +65,12 @@ services:
       - "${BIND_HOST:-127.0.0.1}:${WEB_PORT:-8080}:80"
     restart: unless-stopped
 
+  # Static VitePress docs site (front with Caddy at e.g. docs.ois.vzdc.org).
+  docs:
+    image: ${REGISTRY:-ghcr.io}/${IMAGE_REPO:?set IMAGE_REPO, e.g. vzdc/ois}-docs:${IMAGE_TAG:-latest}
+    ports:
+      - "${BIND_HOST:-127.0.0.1}:${DOCS_PORT:-8081}:80"
+    restart: unless-stopped
+
 volumes:
   ois_pg:

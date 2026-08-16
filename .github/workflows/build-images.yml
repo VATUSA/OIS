@@ -26,6 +26,8 @@ jobs:
             dockerfile: deploy/backend.Dockerfile
           - name: web
             dockerfile: deploy/web.Dockerfile
+          - name: docs
+            dockerfile: deploy/docs.Dockerfile
     steps:
       - uses: actions/checkout@v4
 
