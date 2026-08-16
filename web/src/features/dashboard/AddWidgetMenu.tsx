@@ -10,7 +10,8 @@ import {
 } from "@ois/ui";
 import {Plus} from "lucide-react";
 
-import {DATA_SOURCES} from "./sources";
+import {defaultChartConfig} from "./chart-widget";
+import {DATA_SOURCES, DATA_SOURCES_BY_ID} from "./sources";
 import {STAT_METRICS} from "./stat-widgets";
 import type {ViewId, Widget} from "./types";
 import {VIEW_OPTIONS} from "./view-widgets";
@@ -42,6 +43,19 @@ export function AddWidgetMenu({ onAdd }: { onAdd: (widget: Widget) => void }) {
     }
   }
 
+  async function addChart(sourceId: string, needsIcao: boolean) {
+    const source = DATA_SOURCES_BY_ID[sourceId];
+    if (!source) return;
+    const cfg = defaultChartConfig(source);
+    let params: { icao?: string } | undefined;
+    if (needsIcao) {
+      const icao = await askIcao(prompt);
+      if (!icao) return;
+      params = { icao };
+    }
+    onAdd({ id: newId(), kind: "chart", source: sourceId, params, ...cfg });
+  }
+
   return (
     <DropdownMenu>
       <DropdownMenuTrigger asChild>
@@ -71,6 +85,14 @@ export function AddWidgetMenu({ onAdd }: { onAdd: (widget: Widget) => void }) {
         <DropdownMenuLabel>Tables</DropdownMenuLabel>
         {DATA_SOURCES.map((s) => (
           <DropdownMenuItem key={s.id} onSelect={() => void addTable(s.id, s.needsIcao)}>
+            {s.label}
+            {s.needsIcao && <span className="ml-auto text-xs text-muted-foreground">airport</span>}
+          </DropdownMenuItem>
+        ))}
+        <DropdownMenuSeparator />
+        <DropdownMenuLabel>Charts</DropdownMenuLabel>
+        {DATA_SOURCES.filter((s) => s.fields.some((f) => f.type === "number")).map((s) => (
+          <DropdownMenuItem key={s.id} onSelect={() => void addChart(s.id, s.needsIcao)}>
             {s.label}
             {s.needsIcao && <span className="ml-auto text-xs text-muted-foreground">airport</span>}
           </DropdownMenuItem>

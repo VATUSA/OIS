@@ -1,3 +1,4 @@
+import {ChartWidget} from "./chart-widget";
 import {MapWidgetView} from "./map-widget";
 import {DATA_SOURCES_BY_ID} from "./sources";
 import {STAT_METRICS, StatWidgetView} from "./stat-widgets";
@@ -24,6 +25,8 @@ export function WidgetBody({
       return <MapWidgetView initialFlight={widget.initialFlight} />;
     case "table":
       return <TableWidget widget={widget} editing={editing} onChange={onUpdate} />;
+    case "chart":
+      return <ChartWidget widget={widget} editing={editing} onChange={onUpdate} />;
     default:
       return (
         <div className="p-4 text-sm text-muted-foreground">
@@ -47,6 +50,10 @@ export function widgetTitle(widget: Widget): string {
       return "Map";
     case "table": {
       const label = DATA_SOURCES_BY_ID[widget.source]?.label ?? "Table";
+      return widget.params?.icao ? `${widget.params.icao} · ${label}` : label;
+    }
+    case "chart": {
+      const label = DATA_SOURCES_BY_ID[widget.source]?.label ?? "Chart";
       return widget.params?.icao ? `${widget.params.icao} · ${label}` : label;
     }
     default:

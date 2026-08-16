@@ -57,7 +57,30 @@ export interface TableWidget {
   sort?: { id: string; desc: boolean }[];
 }
 
-export type Widget = ViewWidget | StatWidget | MapWidget | TableWidget;
+export type ChartAggregate = "none" | "count" | "sum" | "avg" | "min" | "max";
+
+export interface ChartWidget {
+  id: string;
+  kind: "chart";
+  title?: string;
+  /** DataSource id from the registry (features/dashboard/sources). */
+  source: string;
+  params?: { icao?: string };
+  chartType: "bar" | "line" | "area";
+  /** Field key for the x axis (category/time). */
+  x: string;
+  /** One or more numeric field keys plotted as series. */
+  y: string[];
+  /**
+   * How to shape the data. "none" plots raw rows; otherwise rows are grouped by x and the y
+   * series are aggregated ("count" ignores y and counts rows per x group).
+   */
+  aggregate?: ChartAggregate;
+  /** Keep only the top N groups by value (0/undefined = all). Applied when aggregated. */
+  topN?: number;
+}
+
+export type Widget = ViewWidget | StatWidget | MapWidget | TableWidget | ChartWidget;
 export type WidgetKind = Widget["kind"];
 
 /** react-grid-layout cell geometry (grid units). `i` matches the widget id. */
@@ -95,6 +118,8 @@ export function defaultCell(kind: WidgetKind): { w: number; h: number; minW: num
       return { w: 6, h: 5, minW: 4, minH: 3 };
     case "table":
       return { w: 6, h: 4, minW: 3, minH: 3 };
+    case "chart":
+      return { w: 5, h: 4, minW: 3, minH: 3 };
     case "view":
     default:
       return { w: 6, h: 5, minW: 3, minH: 3 };
