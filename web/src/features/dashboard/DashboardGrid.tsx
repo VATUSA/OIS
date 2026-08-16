@@ -58,7 +58,7 @@ export function DashboardGrid({
               <WidgetFrame
                 title={widgetTitle(w)}
                 editing={editing}
-                flush={w.kind === "map"}
+                flush={w.kind === "map" || w.kind === "chart"}
                 onRemove={() => onRemove(w.id)}
               >
                 <WidgetBody widget={w} editing={editing} onUpdate={onUpdate} />
