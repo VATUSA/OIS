@@ -6,10 +6,13 @@ import {DOCS_URL} from "@/lib/api";
 const GITHUB_URL = "https://github.com/VATUSA/OIS";
 const LICENSE_URL = `${GITHUB_URL}/blob/main/LICENSE`;
 
+// Full version like "1.0.1-a1b2c3d". The trailing segment is the build commit when it looks like a
+// short SHA — link the stamp straight to that commit, else fall back to the repo.
 const VERSION = __APP_VERSION__;
-const SHA = __APP_SHA__;
-// Link the build stamp to its exact commit when we have a SHA, otherwise the repo.
-const VERSION_HREF = SHA ? `${GITHUB_URL}/commit/${SHA}` : GITHUB_URL;
+const COMMIT = /^[0-9a-f]{7,40}$/.test(VERSION.split("-").pop() ?? "")
+  ? VERSION.split("-").pop()!
+  : "";
+const VERSION_HREF = COMMIT ? `${GITHUB_URL}/commit/${COMMIT}` : GITHUB_URL;
 
 const linkClass = "transition-colors hover:text-foreground";
 
@@ -57,10 +60,9 @@ export function Footer() {
             target="_blank"
             rel="noreferrer"
             className={"font-mono text-xs " + linkClass}
-            title={SHA ? `Build ${SHA}` : "Source on GitHub"}
+            title={COMMIT ? `Build commit ${COMMIT}` : "Source on GitHub"}
           >
             v{VERSION}
-            {SHA && ` · ${SHA}`}
           </a>
         </nav>
       </div>

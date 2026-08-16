@@ -7,6 +7,5 @@ interface ImportMeta {
   readonly env: ImportMetaEnv;
 }
 
-/** App version (web/package.json) and short build commit — injected by Vite `define`. */
+/** Full app version, e.g. "1.0.1-a1b2c3d" (base VERSION + commit) — injected by Vite `define`. */
 declare const __APP_VERSION__: string;
-declare const __APP_SHA__: string;

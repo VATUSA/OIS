@@ -19,6 +19,11 @@ COPY --from=planner /app/recipe.json recipe.json
 RUN cargo chef cook --release --recipe-path recipe.json
 # Then the workspace itself.
 COPY . .
+# Full version (1.0.1-<sha>) baked into the binary via option_env!("OIS_VERSION"). Set *after* the
+# dependency cook so a new commit doesn't invalidate that cache layer — only the final crate rebuilds
+# (which happens on any source change anyway).
+ARG OIS_VERSION=""
+ENV OIS_VERSION=$OIS_VERSION
 RUN cargo build --release --bin ois-backend
 
 FROM debian:bookworm-slim AS runtime
