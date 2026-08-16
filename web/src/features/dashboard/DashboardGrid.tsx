@@ -18,11 +18,13 @@ export function DashboardGrid({
   editing,
   onLayoutChange,
   onRemove,
+  onUpdate,
 }: {
   state: DashboardState;
   editing: boolean;
   onLayoutChange: (layout: GridCell[]) => void;
   onRemove: (id: string) => void;
+  onUpdate: (id: string, patch: Record<string, unknown>) => void;
 }) {
   const { width, containerRef } = useContainerWidth();
 
@@ -59,7 +61,7 @@ export function DashboardGrid({
                 flush={w.kind === "map"}
                 onRemove={() => onRemove(w.id)}
               >
-                <WidgetBody widget={w} />
+                <WidgetBody widget={w} editing={editing} onUpdate={onUpdate} />
               </WidgetFrame>
             </div>
           ))}

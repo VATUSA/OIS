@@ -25,7 +25,8 @@ function EmptyState({ editing, onStart }: { editing: boolean; onStart: () => voi
 }
 
 export function Dashboard() {
-  const { state, loading, saving, addWidget, removeWidget, setLayout } = useDashboardState();
+  const { state, loading, saving, addWidget, removeWidget, updateWidget, setLayout } =
+    useDashboardState();
   const [editing, setEditing] = useState(false);
 
   return (
@@ -69,6 +70,7 @@ export function Dashboard() {
           editing={editing}
           onLayoutChange={setLayout}
           onRemove={removeWidget}
+          onUpdate={updateWidget}
         />
       )}
     </div>

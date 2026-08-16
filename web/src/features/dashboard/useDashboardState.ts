@@ -96,6 +96,17 @@ export function useDashboardState() {
     [update],
   );
 
+  /** Patch one widget's config (e.g. a table's columns/sort). Patch is widget-shape-specific. */
+  const updateWidget = useCallback(
+    (id: string, patch: Record<string, unknown>) => {
+      update((s) => ({
+        ...s,
+        widgets: s.widgets.map((w) => (w.id === id ? ({ ...w, ...patch } as Widget) : w)),
+      }));
+    },
+    [update],
+  );
+
   const setLayout = useCallback(
     (cells: GridCell[]) => {
       update((s) => ({
@@ -120,6 +131,7 @@ export function useDashboardState() {
     saving: save.isPending,
     addWidget,
     removeWidget,
+    updateWidget,
     setLayout,
   };
 }
