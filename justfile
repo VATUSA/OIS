@@ -46,6 +46,15 @@ web:
 test-js:
     pnpm test
 
+# --- docs (VitePress user docs) ---
+# Run the docs site dev server (live reload)
+docs:
+    pnpm --filter docs-site dev
+
+# Build the static docs site
+docs-build:
+    pnpm --filter docs-site build
+
 # --- everything ---
 # Full local stack: infra + backend + web + bot
 dev: up
