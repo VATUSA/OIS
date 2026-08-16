@@ -56,6 +56,13 @@ export function Dashboard({ boardId }: { boardId: string }) {
         </div>
       </div>
 
+      {editing && (
+        <p className="rounded-md border border-dashed px-3 py-2 text-xs text-muted-foreground sm:hidden">
+          Widgets stack in one column on a phone. You can add, remove, and edit them here — drag
+          &amp; resize to rearrange the layout on a larger screen.
+        </p>
+      )}
+
       {loading || !state ? (
         <p className="py-16 text-center text-sm text-muted-foreground">Loading your dashboard…</p>
       ) : state.widgets.length === 0 ? (

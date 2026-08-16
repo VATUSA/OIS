@@ -53,9 +53,15 @@ export function SharedBoardPage() {
   return (
     <div className="flex flex-col gap-4">
       <div className="flex flex-wrap items-center gap-2">
-        <h1 className="truncate text-xl font-semibold tracking-tight">{query.data.name}</h1>
-        <span className="text-sm text-muted-foreground">shared by {query.data.owner}</span>
-        <Button className="ml-auto" onClick={saveCopy} disabled={copy.isPending}>
+        <h1 className="min-w-0 flex-1 truncate text-xl font-semibold tracking-tight">
+          {query.data.name}
+        </h1>
+        <span className="shrink-0 text-sm text-muted-foreground">shared by {query.data.owner}</span>
+        <Button
+          className="w-full shrink-0 sm:ml-auto sm:w-auto"
+          onClick={saveCopy}
+          disabled={copy.isPending}
+        >
           <Copy />
           Save a copy
         </Button>
