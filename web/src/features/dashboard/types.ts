@@ -59,6 +59,12 @@ export interface TableWidget {
 
 export type ChartAggregate = "none" | "count" | "sum" | "avg" | "min" | "max";
 
+/** A horizontal reference line drawn at `value`, in the chart's actual units. */
+export interface ChartThreshold {
+  value: number;
+  color: string;
+}
+
 export interface ChartWidget {
   id: string;
   kind: "chart";
@@ -83,6 +89,8 @@ export interface ChartWidget {
   colors?: Record<string, string>;
   /** Rescale each series to 0–100% of its own max, so mixed-scale series compare on one axis. */
   normalize?: boolean;
+  /** Horizontal reference lines (ignored while normalized, since units differ). */
+  thresholds?: ChartThreshold[];
 }
 
 export type Widget = ViewWidget | StatWidget | MapWidget | TableWidget | ChartWidget;
