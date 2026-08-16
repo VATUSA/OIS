@@ -58,31 +58,32 @@ function BoardCard({
   onMove: (collectionId: string) => void;
 }) {
   return (
-    <Card className="group relative transition-colors hover:border-primary/50">
-      <CardContent className="flex flex-col gap-2 pt-5">
+    <Card className="group relative min-w-0 transition-colors hover:border-primary/50">
+      <CardContent className="flex min-w-0 flex-col gap-2 pt-5">
         <Link
           to="/ops/my/$boardId"
           params={{ boardId: board.id }}
-          className="flex items-center gap-2 font-medium"
+          className="flex min-w-0 items-center gap-2 font-medium"
         >
-          <LayoutDashboard className="size-4 text-muted-foreground" />
+          <LayoutDashboard className="size-4 shrink-0 text-muted-foreground" />
           <span className="truncate">{board.name}</span>
           {board.share_slug && (
-            <Badge variant="secondary" className="ml-auto gap-1 text-xs">
+            <Badge variant="secondary" className="ml-auto shrink-0 gap-1 text-xs">
               <Share2 className="size-3" />
               Shared
             </Badge>
           )}
         </Link>
         <div className="flex items-center gap-1 text-xs text-muted-foreground">
-          <span>Updated {relativeTime(board.updated_at)}</span>
-          <div className="ml-auto flex items-center gap-1 opacity-0 transition-opacity group-hover:opacity-100">
-            <Button size="sm" variant="ghost" className="h-6 px-2" onClick={onRename}>
+          <span className="min-w-0 truncate">Updated {relativeTime(board.updated_at)}</span>
+          {/* Always visible on touch (no hover); hover-reveal on pointer-fine screens. */}
+          <div className="ml-auto flex shrink-0 items-center gap-1 opacity-100 transition-opacity sm:opacity-0 sm:group-hover:opacity-100">
+            <Button size="sm" variant="ghost" className="h-7 px-2" onClick={onRename}>
               Rename
             </Button>
             <DropdownMenu>
               <DropdownMenuTrigger asChild>
-                <Button size="sm" variant="ghost" className="h-6 px-2">
+                <Button size="sm" variant="ghost" className="h-7 px-2">
                   Move
                 </Button>
               </DropdownMenuTrigger>
@@ -100,7 +101,7 @@ function BoardCard({
             <ConfirmButton
               size="icon"
               variant="ghost"
-              className="size-6 text-muted-foreground hover:text-destructive"
+              className="size-7 text-muted-foreground hover:text-destructive"
               warn={`Delete "${board.name}"?`}
               onConfirm={onDelete}
             >
@@ -200,14 +201,14 @@ export function BoardLibraryPage() {
           <h1 className="text-2xl font-semibold tracking-tight">Dashboards</h1>
           <p className="text-muted-foreground">Your saved boards.</p>
         </div>
-        <div className="ml-auto flex items-center gap-2">
-          <Button variant="secondary" onClick={newCollection}>
+        <div className="flex w-full items-center gap-2 sm:ml-auto sm:w-auto">
+          <Button variant="secondary" className="flex-1 sm:flex-none" onClick={newCollection}>
             <FolderPlus />
             New collection
           </Button>
           <DropdownMenu>
             <DropdownMenuTrigger asChild>
-              <Button>
+              <Button className="flex-1 sm:flex-none">
                 <Plus />
                 New board
                 <ChevronDown className="size-3.5" />
@@ -253,14 +254,14 @@ export function BoardLibraryPage() {
             return (
               <section key={c.id} className="flex flex-col gap-2">
                 <div className="flex items-center gap-2 border-b pb-1">
-                  <Folder className="size-4 text-muted-foreground" />
-                  <h2 className="text-sm font-semibold">{c.name}</h2>
-                  <span className="text-xs text-muted-foreground">{items.length}</span>
-                  <div className="ml-auto flex items-center gap-1">
+                  <Folder className="size-4 shrink-0 text-muted-foreground" />
+                  <h2 className="min-w-0 truncate text-sm font-semibold">{c.name}</h2>
+                  <span className="shrink-0 text-xs text-muted-foreground">{items.length}</span>
+                  <div className="ml-auto flex shrink-0 items-center gap-1">
                     <Button
                       size="sm"
                       variant="ghost"
-                      className="h-6 px-2 text-xs"
+                      className="h-7 px-2 text-xs"
                       onClick={() => void renameCol(c)}
                     >
                       Rename
@@ -268,7 +269,7 @@ export function BoardLibraryPage() {
                     <ConfirmButton
                       size="icon"
                       variant="ghost"
-                      className="size-6 text-muted-foreground hover:text-destructive"
+                      className="size-7 text-muted-foreground hover:text-destructive"
                       warn={`Delete collection "${c.name}"? Boards move to Ungrouped.`}
                       onConfirm={() => deleteCollection.mutate(c.id)}
                     >

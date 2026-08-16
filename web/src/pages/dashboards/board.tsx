@@ -48,18 +48,26 @@ export function BoardViewPage() {
   return (
     <div className="flex flex-col gap-4">
       <div className="flex flex-wrap items-center gap-2">
-        <Button variant="ghost" size="sm" onClick={() => navigate({ to: "/ops/my" })}>
+        <Button
+          variant="ghost"
+          size="sm"
+          className="shrink-0"
+          onClick={() => navigate({ to: "/ops/my" })}
+        >
           <ChevronLeft />
           Boards
         </Button>
-        <h1 className="truncate text-xl font-semibold tracking-tight">{board?.name ?? "…"}</h1>
+        <h1 className="min-w-0 flex-1 truncate text-xl font-semibold tracking-tight">
+          {board?.name ?? "…"}
+        </h1>
         {board?.share_slug && (
-          <Badge variant="secondary" className="gap-1">
+          <Badge variant="secondary" className="shrink-0 gap-1">
             <Share2 className="size-3" />
             Shared
           </Badge>
         )}
-        <div className="ml-auto flex items-center gap-2">
+        {/* Full-width action row on phones, inline on ≥sm. */}
+        <div className="flex w-full items-center gap-2 sm:w-auto">
           <Button variant="secondary" size="sm" onClick={doRename}>
             Rename
           </Button>
@@ -75,7 +83,7 @@ export function BoardViewPage() {
           <ConfirmButton
             size="icon"
             variant="ghost"
-            className="text-muted-foreground hover:text-destructive"
+            className="ml-auto shrink-0 text-muted-foreground hover:text-destructive sm:ml-0"
             warn="Delete this board?"
             onConfirm={doDelete}
           >
