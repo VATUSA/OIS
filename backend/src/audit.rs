@@ -16,7 +16,7 @@ use crate::{auth::context::CurrentUser, repos::audit as audit_repo, state::AppSt
 /// Action verbs that show up as a trailing static path segment (e.g. `.../{id}/publish`).
 const KNOWN_VERBS: &[&str] = &[
     "publish", "cancel", "activate", "compress", "rotate", "disable", "refresh", "reorder",
-    "release",
+    "release", "share", "copy",
 ];
 
 /// resource_types whose handlers already write their own richer audit entry (so the generic

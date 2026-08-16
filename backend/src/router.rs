@@ -7,8 +7,8 @@ use crate::{
     auth::middleware::resolve_current_user,
     config::build_cors_layer,
     handlers::{
-        access, atc, audit, auth, docs, events, facilities, feed, flow, gdp, health, preferences,
-        public, runway, service_accounts, tmu, users, webhooks,
+        access, atc, audit, auth, dashboards, docs, events, facilities, feed, flow, gdp, health,
+        preferences, public, runway, service_accounts, tmu, users, webhooks,
     },
     state::AppState,
 };
@@ -24,6 +24,37 @@ pub fn build_router(state: AppState) -> Router {
         .route(
             "/api/v1/me/preferences/{namespace}",
             get(preferences::get_preferences).put(preferences::put_preferences),
+        )
+        // Dashboards — multiple named boards per user, collections, share-by-slug.
+        .route(
+            "/api/v1/dashboards",
+            get(dashboards::list_dashboards).post(dashboards::create_dashboard),
+        )
+        .route(
+            "/api/v1/dashboards/{id}",
+            get(dashboards::get_dashboard)
+                .put(dashboards::update_dashboard)
+                .delete(dashboards::delete_dashboard),
+        )
+        .route(
+            "/api/v1/dashboards/{id}/share",
+            post(dashboards::share_dashboard).delete(dashboards::unshare_dashboard),
+        )
+        .route(
+            "/api/v1/dashboards/shared/{slug}",
+            get(dashboards::get_shared_dashboard),
+        )
+        .route(
+            "/api/v1/dashboards/shared/{slug}/copy",
+            post(dashboards::copy_shared_dashboard),
+        )
+        .route(
+            "/api/v1/dashboard-collections",
+            post(dashboards::create_collection),
+        )
+        .route(
+            "/api/v1/dashboard-collections/{id}",
+            put(dashboards::rename_collection).delete(dashboards::delete_collection),
         )
         // User directory search
         .route("/api/v1/users", get(users::search_users))

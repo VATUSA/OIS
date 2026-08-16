@@ -2,6 +2,7 @@ pub mod access;
 pub mod atc;
 pub mod audit;
 pub mod auth;
+pub mod dashboards;
 pub mod docs;
 pub mod events;
 pub mod facilities;

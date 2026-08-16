@@ -1028,3 +1028,84 @@ pub struct PublicBoard {
 
 // (The public FCA overview reuses the shared FCA map + the now-public
 // GET /api/v1/flow/fcas, so no separate lean FCA projection is needed.)
+
+// --- Dashboards (multiple named boards per user; see migration 0035) ---
+
+/// A dashboard in the caller's library (list item — no data blob).
+#[derive(Debug, Serialize, ToSchema, sqlx::FromRow)]
+pub struct DashboardSummary {
+    pub id: String,
+    pub name: String,
+    pub collection_id: Option<String>,
+    pub share_slug: Option<String>,
+    pub updated_at: DateTime<Utc>,
+}
+
+/// A full dashboard, including its opaque client-owned DashboardState `data`.
+#[derive(Debug, Serialize, ToSchema, sqlx::FromRow)]
+pub struct DashboardBody {
+    pub id: String,
+    pub name: String,
+    pub collection_id: Option<String>,
+    pub share_slug: Option<String>,
+    #[schema(value_type = Object)]
+    pub data: sqlx::types::Json<Value>,
+    pub updated_at: DateTime<Utc>,
+}
+
+/// A shared dashboard as any signed-in viewer sees it (read-only, no ids).
+#[derive(Debug, Serialize, ToSchema, sqlx::FromRow)]
+pub struct SharedDashboardBody {
+    pub name: String,
+    pub owner: String,
+    #[schema(value_type = Object)]
+    pub data: sqlx::types::Json<Value>,
+}
+
+/// A dashboard collection (folder).
+#[derive(Debug, Serialize, ToSchema, sqlx::FromRow)]
+pub struct DashboardCollection {
+    pub id: String,
+    pub name: String,
+}
+
+/// The dashboards library: the caller's boards + collections.
+#[derive(Debug, Serialize, ToSchema)]
+pub struct DashboardLibrary {
+    pub dashboards: Vec<DashboardSummary>,
+    pub collections: Vec<DashboardCollection>,
+}
+
+#[derive(Debug, Deserialize, ToSchema)]
+pub struct CreateDashboardRequest {
+    pub name: String,
+    #[schema(value_type = Object)]
+    pub data: Option<Value>,
+    pub collection_id: Option<String>,
+}
+
+#[derive(Debug, Deserialize, ToSchema)]
+pub struct UpdateDashboardRequest {
+    pub name: Option<String>,
+    #[schema(value_type = Object)]
+    pub data: Option<Value>,
+    pub collection_id: Option<String>,
+}
+
+/// A minimal `{ name }` body for creating/renaming collections + share responses.
+#[derive(Debug, Deserialize, ToSchema)]
+pub struct NameRequest {
+    pub name: String,
+}
+
+/// The slug returned when a board is shared.
+#[derive(Debug, Serialize, ToSchema)]
+pub struct ShareResponse {
+    pub share_slug: String,
+}
+
+/// The new board id returned when copying a shared board.
+#[derive(Debug, Serialize, ToSchema)]
+pub struct CopyResponse {
+    pub id: String,
+}
