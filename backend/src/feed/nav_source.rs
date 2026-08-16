@@ -19,8 +19,10 @@ use super::nav::{CoordList, NavData};
 
 type Fetched<T> = Result<T, Box<dyn std::error::Error + Send + Sync>>;
 
-/// CONUS + near-border coverage box: `[minLat, minLon, maxLat, maxLon]`.
-const CONUS: [f64; 4] = [23.5, -130.0, 51.5, -63.0];
+/// Geographic coverage box `[minLat, minLon, maxLat, maxLon]`. Unbounded (whole globe) so we
+/// keep every point the sources provide — FAA NASR covers the entire US NAS (incl. Hawaii,
+/// Alaska, Puerto Rico, Guam), not just CONUS. Narrow this to re-scope.
+const COVERAGE: [f64; 4] = [-90.0, -180.0, 90.0, 180.0];
 
 /// First NASR effective date we anchor the 28-day cycle math on (a known boundary).
 const CYCLE_ANCHOR: (i32, u32, u32) = (2026, 7, 9);
@@ -108,7 +110,7 @@ pub async fn fetch_latest() -> Fetched<NavData> {
     let meta_json = serde_json::to_string(&OutMeta {
         nasr_cycle_date: cycle,
         source: format!("runtime fetch ({source})"),
-        bbox: CONUS,
+        bbox: COVERAGE,
     })?;
 
     Ok(NavData::from_json(
@@ -220,7 +222,7 @@ async fn fetch_squawk_enroute(
             let (Some(lat), Some(lon)) = (wp.lat, wp.lon) else {
                 continue;
             };
-            if !in_conus(lat, lon) {
+            if !in_coverage(lat, lon) {
                 continue;
             }
             let id = wp
@@ -525,17 +527,17 @@ fn read_zip_member(bytes: &[u8], names: &[&str]) -> Fetched<String> {
     Err(format!("zip has none of {names:?}").into())
 }
 
-fn in_conus(lat: f64, lon: f64) -> bool {
-    (CONUS[0]..=CONUS[2]).contains(&lat) && (CONUS[1]..=CONUS[3]).contains(&lon)
+fn in_coverage(lat: f64, lon: f64) -> bool {
+    (COVERAGE[0]..=COVERAGE[2]).contains(&lat) && (COVERAGE[1]..=COVERAGE[3]).contains(&lon)
 }
 
 fn round5(n: f64) -> f64 {
     (n * 1e5).round() / 1e5
 }
 
-/// Append a `(lat, lon)` candidate for `id`, in-CONUS and de-duplicated.
+/// Append a `(lat, lon)` candidate for `id`, in-COVERAGE and de-duplicated.
 fn add_candidate(map: &mut HashMap<String, CoordList>, id: &str, lat: f64, lon: f64) {
-    if id.is_empty() || !lat.is_finite() || !lon.is_finite() || !in_conus(lat, lon) {
+    if id.is_empty() || !lat.is_finite() || !lon.is_finite() || !in_coverage(lat, lon) {
         return;
     }
     let pt = [round5(lat), round5(lon)];
@@ -553,7 +555,7 @@ fn push_leg(
     let (Some(lat), Some(lon)) = (leg.lat, leg.lon) else {
         return;
     };
-    if !in_conus(lat, lon) {
+    if !in_coverage(lat, lon) {
         return;
     }
     let fix = leg.fix_identifier.as_deref().unwrap_or("").to_uppercase();
@@ -691,10 +693,12 @@ mod tests {
     fn builds_fixes_from_nasr_csv() {
         let csv = "\"FIX_ID\",\"LAT_DECIMAL\",\"LONG_DECIMAL\"\n\
                    \"RBV\",40.2,-74.5\n\
-                   \"OCEAN\",5.0,20.0\n"; // out of CONUS → dropped
+                   \"OCEAN\",5.0,20.0\n\
+                   \"BADLL\",95.0,-74.5\n"; // latitude out of range → dropped
         let fixes = build_fixes(csv);
         assert_eq!(fixes.get("RBV"), Some(&vec![[40.2, -74.5]]));
-        assert!(!fixes.contains_key("OCEAN"));
+        assert!(fixes.contains_key("OCEAN")); // no geographic limit now — kept worldwide
+        assert!(!fixes.contains_key("BADLL")); // invalid coordinate still rejected
     }
 
     #[test]
