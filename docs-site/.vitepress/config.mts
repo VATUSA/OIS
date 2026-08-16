@@ -6,7 +6,8 @@ export default defineConfig({
   description: "Operational Information System — the VATUSA traffic-management platform.",
   lang: "en-US",
   cleanUrls: true,
-  lastUpdated: true,
+  // Note: no `lastUpdated` — it shells out to `git`, which isn't present in the Docker build
+  // (and `.git` is excluded from the build context), so it would fail CI.
   head: [["link", { rel: "icon", href: "/favicon.svg" }]],
   themeConfig: {
     logo: "/favicon.svg",
