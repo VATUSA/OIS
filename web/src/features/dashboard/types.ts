@@ -73,7 +73,7 @@ export interface ChartWidget {
   source: string;
   /** icaos powers multi-airport comparison; icao kept for back-compat / single-airport. */
   params?: { icao?: string; icaos?: string[] };
-  chartType: "bar" | "line" | "area";
+  chartType: "bar" | "line" | "area" | "scatter" | "pie";
   /** Field key for the x axis (category/time), or "__airport" to compare airports directly. */
   x: string;
   /** One or more numeric field keys plotted as series. */
@@ -93,7 +93,33 @@ export interface ChartWidget {
   thresholds?: ChartThreshold[];
 }
 
-export type Widget = ViewWidget | StatWidget | MapWidget | TableWidget | ChartWidget;
+/** A free-text / heading block for titling and annotating a board (Grafana "text panel"). */
+export interface TextWidget {
+  id: string;
+  kind: "text";
+  content: string;
+  /** Font scale. */
+  size?: "sm" | "md" | "lg" | "xl";
+  align?: "left" | "center" | "right";
+}
+
+/** A section divider — a thin rule spanning its cell, optionally labelled. */
+export interface DividerWidget {
+  id: string;
+  kind: "divider";
+  orientation: "horizontal" | "vertical";
+  /** Optional caption shown on a horizontal divider. */
+  label?: string;
+}
+
+export type Widget =
+  | ViewWidget
+  | StatWidget
+  | MapWidget
+  | TableWidget
+  | ChartWidget
+  | TextWidget
+  | DividerWidget;
 export type WidgetKind = Widget["kind"];
 
 /** react-grid-layout cell geometry (grid units). `i` matches the widget id. */
@@ -122,9 +148,9 @@ export const EMPTY_DASHBOARD: DashboardState = {
 /** Grid columns at the widest breakpoint — the geometry all defaults are expressed in. */
 export const GRID_COLS = 12;
 
-/** Sensible default cell size per kind, in grid units (w of 12, h in rowHeight steps). */
-export function defaultCell(kind: WidgetKind): { w: number; h: number; minW: number; minH: number } {
-  switch (kind) {
+/** Sensible default cell size per widget, in grid units (w of 12, h in rowHeight steps). */
+export function defaultCell(w: Widget): { w: number; h: number; minW: number; minH: number } {
+  switch (w.kind) {
     case "stat":
       return { w: 3, h: 2, minW: 2, minH: 2 };
     case "map":
@@ -133,6 +159,12 @@ export function defaultCell(kind: WidgetKind): { w: number; h: number; minW: num
       return { w: 6, h: 4, minW: 3, minH: 3 };
     case "chart":
       return { w: 5, h: 4, minW: 3, minH: 3 };
+    case "text":
+      return { w: 4, h: 1, minW: 2, minH: 1 };
+    case "divider":
+      return w.orientation === "vertical"
+        ? { w: 1, h: 4, minW: 1, minH: 2 }
+        : { w: 12, h: 1, minW: 2, minH: 1 };
     case "view":
     default:
       return { w: 6, h: 5, minW: 3, minH: 3 };

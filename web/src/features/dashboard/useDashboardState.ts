@@ -88,7 +88,7 @@ export function useBoardState(boardId: string) {
     (widget: Widget) => {
       update((s) => {
         const maxY = s.layout.reduce((m, c) => Math.max(m, c.y + c.h), 0);
-        const size = defaultCell(widget.kind);
+        const size = defaultCell(widget);
         const cell: GridCell = { i: widget.id, x: 0, y: maxY, ...size };
         return { ...s, widgets: [...s.widgets, widget], layout: [...s.layout, cell] };
       });

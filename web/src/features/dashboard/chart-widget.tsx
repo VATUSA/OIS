@@ -1,6 +1,6 @@
 import {useEffect, useMemo, useRef, useState} from "react";
 import {Button} from "@ois/ui";
-import {areaY, barY, type ChartValue, defineChart, lineY, ruleY} from "@tanstack/charts";
+import {areaY, barY, type ChartValue, defineChart, dot, lineY, ruleY} from "@tanstack/charts";
 // The /tooltip entry is the same Chart with the built-in hover crosshair/focus enabled.
 import {Chart} from "@tanstack/react-charts/tooltip";
 import {scaleBand, scaleLinear, scalePoint} from "d3-scale";
@@ -16,6 +16,7 @@ import {
 } from "./chart-shared";
 import {AIRPORT_KEY, type DataSource, DATA_SOURCES_BY_ID, type Row} from "./sources";
 import type {ChartAggregate, ChartThreshold, ChartWidget as ChartWidgetT} from "./types";
+import {useReportWidgetStatus} from "./widget-status";
 
 const COUNT_KEY = "__count";
 
@@ -224,6 +225,8 @@ function buildDefinition(
     const color = colorFor(s.key, i);
     if (chartType === "line") return lineY(data, { x, y, stroke: color });
     if (chartType === "area") return areaY(data, { x, y, fill: color });
+    if (chartType === "scatter")
+      return dot(data, { x, y, fill: color, stroke: color, r: 3.5 });
     return barY(data, { x, y, fill: color });
   });
   const thresholdMarks =
@@ -291,6 +294,102 @@ function Legend({
   );
 }
 
+/** SVG path for a pie wedge from `a0`→`a1` (radians, 0 = 12 o'clock, clockwise). */
+function wedgePath(cx: number, cy: number, r: number, a0: number, a1: number): string {
+  const p = (a: number) => [cx + r * Math.sin(a), cy - r * Math.cos(a)];
+  const [x0, y0] = p(a0);
+  const [x1, y1] = p(a1);
+  const large = a1 - a0 > Math.PI ? 1 : 0;
+  return `M${cx} ${cy} L${x0} ${y0} A${r} ${r} 0 ${large} 1 ${x1} ${y1} Z`;
+}
+
+/**
+ * Hand-rendered pie/share chart. The grammar-of-graphics `pie()` is a polar transform needing polar
+ * coordinate + arc marks the alpha lib doesn't ergonomically expose, so we draw wedges directly from
+ * the already-shaped category→value rows. Slices = x groups; value = the first series.
+ */
+function PieChart({
+  data,
+  xKey,
+  valueKey,
+  size,
+  colorFor,
+  editable,
+  onColor,
+}: {
+  data: Row[];
+  xKey: string;
+  valueKey: string;
+  size: { w: number; h: number };
+  colorFor: (key: string, i: number) => string;
+  editable: boolean;
+  onColor: (key: string, hex: string) => void;
+}) {
+  const slices = data
+    .map((r) => ({ label: String(r[xKey] ?? ""), value: Math.max(0, Number(r[valueKey]) || 0) }))
+    .filter((s) => s.value > 0);
+  const total = slices.reduce((a, s) => a + s.value, 0);
+  if (total <= 0) return <p className="pt-6 text-center text-sm text-muted-foreground">No data.</p>;
+
+  const d = Math.max(60, Math.min(size.h, size.w * 0.62));
+  const r = d / 2 - 2;
+  const cx = d / 2;
+  const cy = d / 2;
+
+  let a0 = 0;
+  const arcs = slices.map((s, i) => {
+    const frac = s.value / total;
+    const a1 = a0 + frac * 2 * Math.PI;
+    const arc = { label: s.label, value: s.value, frac, color: colorFor(s.label, i), start: a0, end: a1 };
+    a0 = a1;
+    return arc;
+  });
+
+  return (
+    <div className="flex h-full items-center gap-3 p-2">
+      <svg width={d} height={d} viewBox={`0 0 ${d} ${d}`} className="shrink-0" role="img">
+        {arcs.length === 1 ? (
+          <circle cx={cx} cy={cy} r={r} fill={arcs[0].color} />
+        ) : (
+          arcs.map((a) => (
+            <path
+              key={a.label}
+              d={wedgePath(cx, cy, r, a.start, a.end)}
+              fill={a.color}
+              stroke="var(--card, #fff)"
+              strokeWidth={1}
+            />
+          ))
+        )}
+      </svg>
+      <div className="flex max-h-full min-w-0 flex-col gap-1 overflow-auto text-xs">
+        {arcs.map((a) => (
+          <span key={a.label} className="inline-flex items-center gap-1.5">
+            <span
+              className="relative inline-block size-2.5 shrink-0 rounded-sm"
+              style={{ background: a.color }}
+            >
+              {editable && (
+                <input
+                  type="color"
+                  value={a.color}
+                  title={`Colour for ${a.label}`}
+                  onChange={(e) => onColor(a.label, e.target.value)}
+                  className="absolute inset-0 size-full cursor-pointer opacity-0"
+                />
+              )}
+            </span>
+            <span className="truncate text-foreground">{a.label || "—"}</span>
+            <span className="ml-auto shrink-0 tabular-nums text-muted-foreground">
+              {Math.round(a.frac * 100)}%
+            </span>
+          </span>
+        ))}
+      </div>
+    </div>
+  );
+}
+
 function ChartInner({
   source,
   widget,
@@ -307,10 +406,12 @@ function ChartInner({
     : widget.params?.icao
       ? [widget.params.icao]
       : [];
-  const { rows, isLoading, isError } = source.useRows({ icaos });
+  const { rows, isLoading, isError, isFetching, dataUpdatedAt, refetch } = source.useRows({ icaos });
+  useReportWidgetStatus(isFetching, dataUpdatedAt, refetch);
   const [ref, size] = useSize();
   const [configuring, setConfiguring] = useState(false);
 
+  const isPie = widget.chartType === "pie";
   const aggregate = widget.aggregate ?? "none";
   const multiAirport = source.needsIcao && icaos.length > 1;
   const splitKey = multiAirport && widget.x !== AIRPORT_KEY ? AIRPORT_KEY : undefined;
@@ -382,7 +483,17 @@ function ChartInner({
           <p className="pt-6 text-center text-sm text-muted-foreground">Loading…</p>
         ) : empty ? (
           <p className="pt-6 text-center text-sm text-muted-foreground">No data.</p>
-        ) : size.w > 0 && size.h > 0 ? (
+        ) : size.w <= 0 || size.h <= 0 ? null : isPie ? (
+          <PieChart
+            data={shaped.data}
+            xKey={widget.x}
+            valueKey={shaped.series[0]?.key ?? ""}
+            size={size}
+            colorFor={colorFor}
+            editable={editing}
+            onColor={setColor}
+          />
+        ) : (
           <Chart
             definition={definition}
             ariaLabel={source.label}
@@ -415,9 +526,9 @@ function ChartInner({
               );
             }}
           />
-        ) : null}
+        )}
       </div>
-      {showChart && shaped.series.length > 1 && (
+      {showChart && !isPie && shaped.series.length > 1 && (
         <Legend series={shaped.series} colorFor={colorFor} editable={editing} onColor={setColor} />
       )}
       {configuring && (

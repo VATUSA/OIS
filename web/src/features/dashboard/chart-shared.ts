@@ -3,7 +3,7 @@
 import {AIRPORT_KEY, type DataSource} from "./sources";
 import type {ChartAggregate} from "./types";
 
-export const CHART_TYPES = ["line", "area", "bar"] as const;
+export const CHART_TYPES = ["line", "area", "bar", "scatter", "pie"] as const;
 export type ChartType = (typeof CHART_TYPES)[number];
 
 export const AGGREGATES: { id: ChartAggregate; label: string }[] = [
