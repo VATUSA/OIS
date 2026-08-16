@@ -1,6 +1,7 @@
 pub mod access;
 pub mod audit;
 pub mod auth;
+pub mod dashboards;
 pub mod events;
 pub mod flow;
 pub mod gdp;

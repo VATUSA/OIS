@@ -4,7 +4,7 @@ import {Check, LayoutDashboard, Pencil} from "lucide-react";
 
 import {AddWidgetMenu} from "./AddWidgetMenu";
 import {DashboardGrid} from "./DashboardGrid";
-import {useDashboardState} from "./useDashboardState";
+import {useBoardState} from "./useDashboardState";
 
 function EmptyState({ editing, onStart }: { editing: boolean; onStart: () => void }) {
   return (
@@ -24,20 +24,16 @@ function EmptyState({ editing, onStart }: { editing: boolean; onStart: () => voi
   );
 }
 
-export function Dashboard() {
+/** The editable widget grid for one board. The board name/actions live in BoardViewPage above. */
+export function Dashboard({ boardId }: { boardId: string }) {
   const { state, loading, saving, addWidget, removeWidget, updateWidget, setLayout } =
-    useDashboardState();
+    useBoardState(boardId);
   const [editing, setEditing] = useState(false);
 
   return (
     <div className="flex flex-col gap-4">
-      <div className="flex items-center gap-3">
-        <div>
-          <h1 className="text-2xl font-semibold tracking-tight">My dashboard</h1>
-          <p className="text-muted-foreground">
-            Your personal, customizable view.{saving ? " · saving…" : ""}
-          </p>
-        </div>
+      <div className="flex items-center gap-2">
+        {saving && <span className="text-xs text-muted-foreground">saving…</span>}
         <div className="ml-auto flex items-center gap-2">
           {editing && <AddWidgetMenu onAdd={addWidget} />}
           <Button

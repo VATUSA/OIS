@@ -10,7 +10,9 @@ import {AirportPage} from "@/pages/airport";
 import {FcaPage} from "@/pages/fca";
 import {RunwayPage} from "@/pages/runway";
 import {DashboardPage} from "@/pages/dashboard";
-import {MyDashboardPage} from "@/pages/my-dashboard";
+import {BoardViewPage} from "@/pages/dashboards/board";
+import {BoardLibraryPage} from "@/pages/dashboards/library";
+import {SharedBoardPage} from "@/pages/dashboards/shared";
 import {TmuPage} from "@/pages/tmu";
 import {PlanningEventsPage} from "@/pages/planning/events";
 import {EventPlanningPage} from "@/pages/planning/event";
@@ -78,10 +80,27 @@ const tmuRoute = createRoute({
   component: TmuPage,
 });
 
-const myDashboardRoute = createRoute({
+// Dashboards: a library at /ops/my, a board at /ops/my/$boardId, a shared read-only view at
+// /ops/my/shared/$slug. Static "shared" wins over "$boardId" in TanStack's match ordering.
+const myRoute = createRoute({
   getParentRoute: () => opsRoute,
   path: "my",
-  component: MyDashboardPage,
+  component: Outlet,
+});
+const myIndexRoute = createRoute({
+  getParentRoute: () => myRoute,
+  path: "/",
+  component: BoardLibraryPage,
+});
+const sharedBoardRoute = createRoute({
+  getParentRoute: () => myRoute,
+  path: "shared/$slug",
+  component: SharedBoardPage,
+});
+const boardRoute = createRoute({
+  getParentRoute: () => myRoute,
+  path: "$boardId",
+  component: BoardViewPage,
 });
 
 const fcaRoute = createRoute({
@@ -221,7 +240,7 @@ const routeTree = rootRoute.addChildren([
     opsIndexRoute,
     airportRoute,
     tmuRoute,
-    myDashboardRoute,
+    myRoute.addChildren([myIndexRoute, sharedBoardRoute, boardRoute]),
     fcaRoute,
     runwayRoute,
   ]),

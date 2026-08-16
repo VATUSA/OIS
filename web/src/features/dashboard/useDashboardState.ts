@@ -1,41 +1,49 @@
 import {useCallback, useEffect, useRef, useState} from "react";
 
-import {usePreferences, useSavePreferences} from "@/lib/preferences";
+import {useDashboard, useUpdateDashboard} from "@/lib/dashboards";
 
 import {defaultCell, EMPTY_DASHBOARD, type DashboardState, type GridCell, type Widget} from "./types";
 
-const NS = "dashboard";
 const SAVE_DEBOUNCE_MS = 800;
 
 /** Coerce whatever the server returned into a valid DashboardState. */
-function normalize(raw: DashboardState | null | undefined): DashboardState {
-  if (!raw || raw.version !== 1 || !Array.isArray(raw.widgets) || !Array.isArray(raw.layout)) {
+function normalize(raw: unknown): DashboardState {
+  const s = raw as DashboardState | null | undefined;
+  if (!s || s.version !== 1 || !Array.isArray(s.widgets) || !Array.isArray(s.layout)) {
     return EMPTY_DASHBOARD;
   }
-  return raw;
+  return s;
 }
 
 /**
- * Loads the user's dashboard from server prefs, holds it as local state, and persists changes
- * (debounced). Returns the state plus mutations; all writes go through `update` so every change
- * is saved consistently.
+ * Loads one board's DashboardState from the server, holds it as local state, and persists changes
+ * (debounced PUT). Returns the state plus mutations; every write goes through `update`.
  */
-export function useDashboardState() {
-  const query = usePreferences<DashboardState>(NS);
-  const save = useSavePreferences<DashboardState>(NS);
+export function useBoardState(boardId: string) {
+  const query = useDashboard(boardId);
+  const save = useUpdateDashboard();
   const [state, setState] = useState<DashboardState | null>(null);
 
-  // Seed local state once the server value (or null) first arrives.
+  // Seed local state once the board first arrives. Reset when the board id changes.
   useEffect(() => {
-    if (query.isLoading) return;
-    setState((prev) => prev ?? normalize(query.data));
+    setState(null);
+  }, [boardId]);
+  useEffect(() => {
+    if (query.isLoading || !query.data) return;
+    setState((prev) => prev ?? normalize(query.data.data));
   }, [query.isLoading, query.data]);
 
   // Debounced persist; keep the latest pending value so we can flush on unmount.
   const saveRef = useRef(save);
   saveRef.current = save;
+  const idRef = useRef(boardId);
+  idRef.current = boardId;
   const timer = useRef<number | undefined>(undefined);
   const pending = useRef<DashboardState | null>(null);
+
+  const doSave = useCallback((next: DashboardState) => {
+    saveRef.current.mutate({ id: idRef.current, data: next });
+  }, []);
 
   const flush = useCallback(() => {
     if (timer.current !== undefined) {
@@ -43,22 +51,25 @@ export function useDashboardState() {
       timer.current = undefined;
     }
     if (pending.current) {
-      saveRef.current.mutate(pending.current);
+      doSave(pending.current);
       pending.current = null;
     }
-  }, []);
+  }, [doSave]);
 
-  const persist = useCallback((next: DashboardState) => {
-    pending.current = next;
-    if (timer.current !== undefined) window.clearTimeout(timer.current);
-    timer.current = window.setTimeout(() => {
-      timer.current = undefined;
-      if (pending.current) {
-        saveRef.current.mutate(pending.current);
-        pending.current = null;
-      }
-    }, SAVE_DEBOUNCE_MS);
-  }, []);
+  const persist = useCallback(
+    (next: DashboardState) => {
+      pending.current = next;
+      if (timer.current !== undefined) window.clearTimeout(timer.current);
+      timer.current = window.setTimeout(() => {
+        timer.current = undefined;
+        if (pending.current) {
+          doSave(pending.current);
+          pending.current = null;
+        }
+      }, SAVE_DEBOUNCE_MS);
+    },
+    [doSave],
+  );
 
   useEffect(() => flush, [flush]); // flush any pending save when the page unmounts
 
