@@ -44,7 +44,20 @@ export interface MapWidget {
   initialFlight?: string;
 }
 
-export type Widget = ViewWidget | StatWidget | MapWidget;
+export interface TableWidget {
+  id: string;
+  kind: "table";
+  title?: string;
+  /** DataSource id from the registry (features/dashboard/sources). */
+  source: string;
+  params?: { icao?: string };
+  /** Visible column keys (field keys), in order. Undefined = all of the source's fields. */
+  columns?: string[];
+  /** TanStack Table sorting state, persisted. */
+  sort?: { id: string; desc: boolean }[];
+}
+
+export type Widget = ViewWidget | StatWidget | MapWidget | TableWidget;
 export type WidgetKind = Widget["kind"];
 
 /** react-grid-layout cell geometry (grid units). `i` matches the widget id. */
@@ -80,6 +93,8 @@ export function defaultCell(kind: WidgetKind): { w: number; h: number; minW: num
       return { w: 3, h: 2, minW: 2, minH: 2 };
     case "map":
       return { w: 6, h: 5, minW: 4, minH: 3 };
+    case "table":
+      return { w: 6, h: 4, minW: 3, minH: 3 };
     case "view":
     default:
       return { w: 6, h: 5, minW: 3, minH: 3 };

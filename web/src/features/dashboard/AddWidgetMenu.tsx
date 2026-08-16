@@ -10,25 +10,36 @@ import {
 } from "@ois/ui";
 import {Plus} from "lucide-react";
 
+import {DATA_SOURCES} from "./sources";
 import {STAT_METRICS} from "./stat-widgets";
 import type {ViewId, Widget} from "./types";
 import {VIEW_OPTIONS} from "./view-widgets";
 
 const newId = () => crypto.randomUUID();
 
+async function askIcao(prompt: ReturnType<typeof usePrompt>): Promise<string | null> {
+  const raw = await prompt({ title: "Airport", label: "Airport (ICAO)", placeholder: "KJFK" });
+  if (!raw) return null;
+  const icao = raw.replace(/[^a-zA-Z0-9]/g, "").toUpperCase();
+  return icao.length >= 3 ? icao : null;
+}
+
 export function AddWidgetMenu({ onAdd }: { onAdd: (widget: Widget) => void }) {
   const prompt = usePrompt();
 
   async function addView(view: ViewId) {
-    const raw = await prompt({
-      title: "Add airport view",
-      label: "Airport (ICAO)",
-      placeholder: "KJFK",
-    });
-    if (!raw) return;
-    const icao = raw.replace(/[^a-zA-Z0-9]/g, "").toUpperCase();
-    if (icao.length < 3) return;
-    onAdd({ id: newId(), kind: "view", view, icao });
+    const icao = await askIcao(prompt);
+    if (icao) onAdd({ id: newId(), kind: "view", view, icao });
+  }
+
+  async function addTable(source: string, needsIcao: boolean) {
+    if (needsIcao) {
+      const icao = await askIcao(prompt);
+      if (!icao) return;
+      onAdd({ id: newId(), kind: "table", source, params: { icao } });
+    } else {
+      onAdd({ id: newId(), kind: "table", source });
+    }
   }
 
   return (
@@ -54,6 +65,14 @@ export function AddWidgetMenu({ onAdd }: { onAdd: (widget: Widget) => void }) {
         {VIEW_OPTIONS.map((v) => (
           <DropdownMenuItem key={v.id} onSelect={() => void addView(v.id)}>
             {v.label}
+          </DropdownMenuItem>
+        ))}
+        <DropdownMenuSeparator />
+        <DropdownMenuLabel>Tables</DropdownMenuLabel>
+        {DATA_SOURCES.map((s) => (
+          <DropdownMenuItem key={s.id} onSelect={() => void addTable(s.id, s.needsIcao)}>
+            {s.label}
+            {s.needsIcao && <span className="ml-auto text-xs text-muted-foreground">airport</span>}
           </DropdownMenuItem>
         ))}
         <DropdownMenuSeparator />

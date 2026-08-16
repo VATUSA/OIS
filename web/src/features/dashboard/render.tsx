@@ -1,10 +1,20 @@
 import {MapWidgetView} from "./map-widget";
+import {DATA_SOURCES_BY_ID} from "./sources";
 import {STAT_METRICS, StatWidgetView} from "./stat-widgets";
-import {VIEW_OPTIONS, ViewWidgetView} from "./view-widgets";
+import {TableWidget} from "./table-widget";
 import type {Widget} from "./types";
+import {VIEW_OPTIONS, ViewWidgetView} from "./view-widgets";
 
 /** Renders a widget's body (no chrome — that's WidgetFrame). */
-export function WidgetBody({ widget }: { widget: Widget }) {
+export function WidgetBody({
+  widget,
+  editing,
+  onUpdate,
+}: {
+  widget: Widget;
+  editing: boolean;
+  onUpdate: (id: string, patch: Record<string, unknown>) => void;
+}) {
   switch (widget.kind) {
     case "stat":
       return <StatWidgetView metric={widget.metric} />;
@@ -12,6 +22,8 @@ export function WidgetBody({ widget }: { widget: Widget }) {
       return <ViewWidgetView view={widget.view} icao={widget.icao} />;
     case "map":
       return <MapWidgetView initialFlight={widget.initialFlight} />;
+    case "table":
+      return <TableWidget widget={widget} editing={editing} onChange={onUpdate} />;
     default:
       return (
         <div className="p-4 text-sm text-muted-foreground">
@@ -33,6 +45,10 @@ export function widgetTitle(widget: Widget): string {
     }
     case "map":
       return "Map";
+    case "table": {
+      const label = DATA_SOURCES_BY_ID[widget.source]?.label ?? "Table";
+      return widget.params?.icao ? `${widget.params.icao} · ${label}` : label;
+    }
     default:
       return "Widget";
   }
