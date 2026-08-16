@@ -242,6 +242,12 @@ function buildDefinition(
   const yFormat = normalized
     ? (v: ChartValue) => `${Math.round(Number(v))}%`
     : (v: ChartValue) => fmtNumber(Number(v));
+  // NOTE: we intentionally do NOT enable the definition-level `tooltip` option. Doing so needs a
+  // DOM tooltip *host* extension (core reads `extension.__chartTooltipHost`) that the alpha
+  // @tanstack/react-charts/tooltip build doesn't expose or inject — enabling it crashes at hover
+  // with "reading '__chartTooltipHost'". The /tooltip Chart still gives the crosshair/focus
+  // highlight; the value box is left for when the lib's DOM tooltip host is available. See
+  // renderTooltipBody in ChartInner (ready to render once the tooltip fires).
   return defineChart({
     marks: [...seriesMarks, ...thresholdMarks],
     x: { scale: xScale, axis: { label: xLabel } },
