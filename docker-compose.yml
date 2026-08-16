@@ -1,19 +1,77 @@
+# One stack for every environment (dev / staging / prod). The same file and the same .env schema
+# run everywhere — only the values in .env differ. See .env.example for the full list.
+#
+# This base file is IMAGE-ONLY (it pulls the CI-built GHCR images) so it deploys cleanly on a
+# server / Portainer without building anything on the box. Local builds live in
+# docker-compose.override.yml, which `docker compose` auto-merges for you on this machine.
+#
+#   Dev, hot reload:      docker compose up -d postgres    then  just backend / just web
+#   Dev, full container:  docker compose up --build        (uses the override to build locally)
+#   Prod / Portainer:     docker compose pull && docker compose up -d   (pull only, no build)
+#
+# Front the published ports with your own reverse proxy (Caddy / nginx / Cloudflare):
+#   api.<domain>  -> 127.0.0.1:${API_PORT}     <domain>      -> 127.0.0.1:${WEB_PORT}
+#   docs.<domain> -> 127.0.0.1:${DOCS_PORT}
+#
+# BIND_HOST=127.0.0.1 keeps the ports host-local (proxy in front). Set 0.0.0.0 to reach them on
+# the host's LAN IP directly.
+
 services:
   postgres:
     image: postgres:17
     environment:
-      POSTGRES_USER: ois
-      POSTGRES_PASSWORD: ois
-      POSTGRES_DB: ois
+      POSTGRES_USER: ${POSTGRES_USER:-ois}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-ois}
+      POSTGRES_DB: ${POSTGRES_DB:-ois}
     ports:
-      - "5432:5432"
+      - "${BIND_HOST:-127.0.0.1}:${DB_PORT:-5432}:5432"
     volumes:
       - ois_pg:/var/lib/postgresql/data
     healthcheck:
-      test: [ "CMD-SHELL", "pg_isready -U ois" ]
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-ois}"]
       interval: 5s
       timeout: 5s
       retries: 10
+    restart: unless-stopped
+
+  backend:
+    image: ${REGISTRY:-ghcr.io}/${IMAGE_REPO:-vatusa/ois}-backend:${IMAGE_TAG:-latest}
+    depends_on:
+      postgres:
+        condition: service_healthy
+    # The whole env file is the backend's config (same vars a native `cargo run` reads via
+    # dotenvy). Load whichever exists — `.env` for local CLI, `stack.env` for Portainer (which
+    # writes its stack env-vars there) — neither required, so it never errors on the missing one.
+    env_file:
+      - path: .env
+        required: false
+      - path: stack.env
+        required: false
+    environment:
+      # The only two vars that must differ from a native run: reach postgres over the compose
+      # network, and bind all interfaces inside the container (host exposure is set by `ports`).
+      DATABASE_URL: postgres://${POSTGRES_USER:-ois}:${POSTGRES_PASSWORD:-ois}@postgres:5432/${POSTGRES_DB:-ois}
+      BIND_ADDR: 0.0.0.0:3000
+    ports:
+      - "${BIND_HOST:-127.0.0.1}:${API_PORT:-3000}:3000"
+    restart: unless-stopped
+
+  web:
+    image: ${REGISTRY:-ghcr.io}/${IMAGE_REPO:-vatusa/ois}-web:${IMAGE_TAG:-latest}
+    environment:
+      # Injected into /config.js at container start (see deploy/40-ois-config.sh). The API + docs
+      # origins the SPA calls — cross-origin. Empty API = same-origin; empty docs = no nav link.
+      OIS_API_URL: ${OIS_API_URL:-}
+      DOCS_URL: ${DOCS_URL:-}
+    ports:
+      - "${BIND_HOST:-127.0.0.1}:${WEB_PORT:-8080}:80"
+    restart: unless-stopped
+
+  docs:
+    image: ${REGISTRY:-ghcr.io}/${IMAGE_REPO:-vatusa/ois}-docs:${IMAGE_TAG:-latest}
+    ports:
+      - "${BIND_HOST:-127.0.0.1}:${DOCS_PORT:-8081}:80"
+    restart: unless-stopped
 
 volumes:
   ois_pg:

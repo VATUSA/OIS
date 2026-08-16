@@ -1,0 +1,20 @@
+# Local build override — `docker compose` auto-merges this on your machine, so
+# `docker compose up --build` (just stack) builds the images from source. It is NOT used on the
+# server / Portainer (which deploys the base docker-compose.yml alone and pulls prebuilt images),
+# so a remote box never tries to build. Add the same `image:` tags as the base so a local build
+# tags the image the base expects.
+services:
+  backend:
+    build:
+      context: .
+      dockerfile: deploy/backend.Dockerfile
+
+  web:
+    build:
+      context: .
+      dockerfile: deploy/web.Dockerfile
+
+  docs:
+    build:
+      context: .
+      dockerfile: deploy/docs.Dockerfile
