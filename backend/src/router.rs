@@ -7,8 +7,8 @@ use crate::{
     auth::middleware::resolve_current_user,
     config::build_cors_layer,
     handlers::{
-        access, atc, audit, auth, docs, events, facilities, feed, flow, gdp, health, public,
-        runway, service_accounts, tmu, users, webhooks,
+        access, atc, audit, auth, docs, events, facilities, feed, flow, gdp, health, preferences,
+        public, runway, service_accounts, tmu, users, webhooks,
     },
     state::AppState,
 };
@@ -21,6 +21,10 @@ pub fn build_router(state: AppState) -> Router {
         .route("/api/v1/auth/vatsim/callback", get(auth::vatsim_callback))
         .route("/api/v1/auth/logout", post(auth::logout))
         .route("/api/v1/me", get(auth::me))
+        .route(
+            "/api/v1/me/preferences/{namespace}",
+            get(preferences::get_preferences).put(preferences::put_preferences),
+        )
         // User directory search
         .route("/api/v1/users", get(users::search_users))
         // Facilities (ARTCC directory) — public reference data
