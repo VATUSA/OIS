@@ -13,6 +13,10 @@ RUN pnpm install --frozen-lockfile
 # Relative API base (see header). @ois/ui and @ois/api-client are consumed as source, so only
 # the web package needs building.
 ENV VITE_OIS_API_URL=""
+# Commit for the footer build stamp. `.git` is dockerignored, so vite.config reads it from this arg
+# (passed as github.sha in CI). Empty locally → the footer shows the version without a SHA.
+ARG OIS_GIT_SHA=""
+ENV OIS_GIT_SHA=$OIS_GIT_SHA
 RUN pnpm --filter web build
 
 FROM nginx:1-alpine AS runtime

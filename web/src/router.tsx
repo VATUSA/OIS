@@ -1,10 +1,12 @@
 import {createRootRoute, createRoute, createRouter, Outlet, redirect, useRouterState,} from "@tanstack/react-router";
 
 import {FeedWatcher} from "@/components/feed-watcher";
+import {Footer} from "@/components/footer";
 import {Navbar} from "@/components/navbar";
 import {AdvisoriesPage} from "@/pages/advisories";
 import {AdvisoriesFcaPage} from "@/pages/advisories/fcas";
 import {PilotPage} from "@/pages/pilot";
+import {PrivacyPage} from "@/pages/privacy";
 import {ProfilePage} from "@/pages/profile";
 import {AirportPage} from "@/pages/airport";
 import {FcaPage} from "@/pages/fca";
@@ -30,15 +32,18 @@ function RootLayout() {
     pathname.startsWith("/ops/runway") ||
     pathname.startsWith("/advisories/fcas");
   return (
-    <div className="min-h-screen bg-background text-foreground">
+    <div className="flex min-h-screen flex-col bg-background text-foreground">
       <FeedWatcher />
       <Navbar />
       {fullBleed ? (
         <Outlet />
       ) : (
-        <main className="mx-auto w-full max-w-7xl px-4 py-8">
-          <Outlet />
-        </main>
+        <>
+          <main className="mx-auto w-full max-w-7xl flex-1 px-4 py-8">
+            <Outlet />
+          </main>
+          <Footer />
+        </>
       )}
     </div>
   );
@@ -151,6 +156,13 @@ const profileRoute = createRoute({
   component: ProfilePage,
 });
 
+// Public legal/info pages (linked from the footer).
+const privacyRoute = createRoute({
+  getParentRoute: () => rootRoute,
+  path: "privacy",
+  component: PrivacyPage,
+});
+
 // --- Planning (pre-event) ---
 
 const planningRoute = createRoute({
@@ -247,6 +259,7 @@ const routeTree = rootRoute.addChildren([
   advisoriesRoute.addChildren([advisoriesIndexRoute, advisoriesFcaRoute]),
   pilotRoute,
   profileRoute,
+  privacyRoute,
   planningRoute.addChildren([
     planningIndexRoute,
     planningEventsRoute,
