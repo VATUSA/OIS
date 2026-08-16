@@ -10,11 +10,14 @@ export function WidgetFrame({
   title,
   editing,
   onRemove,
+  flush = false,
   children,
 }: {
   title: string;
   editing: boolean;
   onRemove: () => void;
+  /** Render the body edge-to-edge with no padding/scroll (for the map). */
+  flush?: boolean;
   children: React.ReactNode;
 }) {
   return (
@@ -41,7 +44,9 @@ export function WidgetFrame({
           </ConfirmButton>
         )}
       </div>
-      <div className="min-h-0 flex-1 overflow-auto p-3">{children}</div>
+      <div className={"min-h-0 flex-1 " + (flush ? "overflow-hidden" : "overflow-auto p-3")}>
+        {children}
+      </div>
     </div>
   );
 }

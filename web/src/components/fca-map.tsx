@@ -434,10 +434,13 @@ function ringsCentroid(rings: number[][][]): [number, number] | null {
 export function FcaMap({
   readOnly = false,
   initialFlight,
+  embedded = false,
 }: {
   readOnly?: boolean;
   /** Callsign to auto-locate + plot once, when linked in from the pilot page. */
   initialFlight?: string;
+  /** Map-only mode for embedding as a dashboard widget: fills its container, no sidebar. */
+  embedded?: boolean;
 }) {
   const { data: me } = useMe();
   const toast = useToast();
@@ -1253,22 +1256,29 @@ export function FcaMap({
 
   if (!canRead) {
     return (
-      <div className="flex h-[calc(100vh-3.5rem)] items-center justify-center text-sm text-muted-foreground">
+      <div
+        className={`flex items-center justify-center text-sm text-muted-foreground ${
+          embedded ? "h-full" : "h-[calc(100vh-3.5rem)]"
+        }`}
+      >
         You don&apos;t have flow access.
       </div>
     );
   }
 
   return (
-    <div className="relative flex h-[calc(100vh-3.5rem)]">
+    <div
+      className={`relative flex ${embedded ? "h-full" : "h-[calc(100vh-3.5rem)]"}`}
+    >
       {/* Backdrop behind the mobile drawer. */}
-      {mobileList && (
+      {!embedded && mobileList && (
         <div
           className="absolute inset-0 z-[650] bg-black/40 md:hidden"
           onClick={() => setMobileList(false)}
         />
       )}
-      {/* Sidebar — static column on desktop, slide-in drawer on mobile. */}
+      {/* Sidebar — static column on desktop, slide-in drawer on mobile. Hidden when embedded. */}
+      {!embedded && (
       <aside
         className={
           "flex w-80 shrink-0 flex-col border-r bg-background max-md:absolute max-md:inset-y-0 max-md:left-0 max-md:z-[700] max-md:w-[85%] max-md:max-w-xs max-md:shadow-2xl max-md:transition-transform " +
@@ -1583,6 +1593,7 @@ export function FcaMap({
         </div>
         <CoveragePanel />
       </aside>
+      )}
 
       {/* Map — `isolate` traps Leaflet z-indexes below the navbar dropdowns. */}
       <div className="relative isolate flex-1">
