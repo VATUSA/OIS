@@ -13,6 +13,8 @@ use utoipa::OpenApi;
     paths(
         crate::handlers::health::health,
         crate::handlers::auth::me,
+        crate::handlers::preferences::get_preferences,
+        crate::handlers::preferences::put_preferences,
         crate::handlers::auth::vatsim_login,
         crate::handlers::auth::vatsim_callback,
         crate::handlers::auth::logout,

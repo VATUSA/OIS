@@ -5,6 +5,7 @@ pub mod events;
 pub mod flow;
 pub mod gdp;
 pub mod org;
+pub mod preferences;
 pub mod public;
 pub mod runway;
 pub mod service_accounts;
