@@ -580,6 +580,68 @@ pub struct AddPackageItemRequest {
     pub payload: Value,
 }
 
+// --- per-event stats capture + generated stats ---
+
+/// An event's stats-capture config plus the current capture status.
+#[derive(Debug, Serialize, ToSchema)]
+pub struct EventCaptureBody {
+    /// Whether automatic capture is enabled for this event.
+    pub enabled: bool,
+    /// Minutes before the event start / after the event end to include in the capture window.
+    pub pre_minutes: i32,
+    pub post_minutes: i32,
+    pub updated_at: Option<DateTime<Utc>>,
+    pub updated_by: Option<String>,
+    /// Current capture state for the event: `open` (recording), `saved` (kept), or null (none yet).
+    pub capture_status: Option<String>,
+    pub capture_start: Option<DateTime<Utc>>,
+    pub capture_end: Option<DateTime<Utc>>,
+    /// Whether the requesting user may change the capture config.
+    pub can_edit: bool,
+}
+
+#[derive(Debug, Deserialize, ToSchema)]
+pub struct UpdateEventCaptureRequest {
+    pub enabled: bool,
+    #[serde(default)]
+    pub pre_minutes: Option<i32>,
+    #[serde(default)]
+    pub post_minutes: Option<i32>,
+}
+
+/// Arrivals/departures at one configured event airport over the capture window.
+#[derive(Debug, Serialize, ToSchema)]
+pub struct AirportMovementBody {
+    pub icao: String,
+    pub arrivals: i64,
+    pub departures: i64,
+}
+
+#[derive(Debug, Serialize, ToSchema)]
+pub struct KeyCountBody {
+    pub key: Option<String>,
+    pub count: i64,
+}
+
+/// Stats generated from an event's capture window. `captured` is false when no capture exists yet.
+#[derive(Debug, Serialize, ToSchema)]
+pub struct EventStatsBody {
+    pub captured: bool,
+    /// `open` (still recording) or `saved`.
+    pub status: Option<String>,
+    pub window_start: Option<DateTime<Utc>>,
+    pub window_end: Option<DateTime<Utc>>,
+    pub unique_pilots: i64,
+    pub peak_pilots: Option<i32>,
+    pub total_arrivals: i64,
+    pub total_departures: i64,
+    pub airports: Vec<AirportMovementBody>,
+    pub top_aircraft: Vec<KeyCountBody>,
+    pub unique_controllers: i64,
+    pub controller_positions: i64,
+    pub controller_hours: f64,
+}
+
 // --- flow constrained areas (FCAs) ---
 
 /// A Flow Constrained Area — a drawn polyline the metering engine sequences traffic against.

@@ -482,6 +482,251 @@ pub async fn prune_positions(pool: &PgPool, before: DateTime<Utc>) -> Result<u64
     Ok(res.rows_affected())
 }
 
+/// The most recent capture (open or saved) tied to an event — the window stats are generated over.
+pub async fn latest_capture_for_event(
+    pool: &PgPool,
+    event_id: i64,
+) -> Result<Option<CaptureRow>, ApiError> {
+    sqlx::query_as::<_, CaptureRow>(&format!(
+        "{CAPTURE_SELECT} where event_id = $1 and status <> 'discarded' \
+         order by start_time desc limit 1"
+    ))
+    .bind(event_id)
+    .fetch_optional(pool)
+    .await
+    .map_err(db)
+}
+
+/// Close every open capture for an event (mark `saved` with the given end time). Returns count.
+pub async fn close_open_event_captures(
+    pool: &PgPool,
+    event_id: i64,
+    end_time: DateTime<Utc>,
+) -> Result<u64, ApiError> {
+    let res = sqlx::query(
+        "update stats.capture set end_time = $2, status = 'saved' \
+         where event_id = $1 and status = 'open'",
+    )
+    .bind(event_id)
+    .bind(end_time)
+    .execute(pool)
+    .await
+    .map_err(db)?;
+    Ok(res.rows_affected())
+}
+
+// --- per-event capture config ------------------------------------------------------------------
+
+#[derive(Debug, Clone, sqlx::FromRow)]
+pub struct EventCaptureRow {
+    pub event_id: i64,
+    pub enabled: bool,
+    pub pre_minutes: i32,
+    pub post_minutes: i32,
+    pub updated_at: DateTime<Utc>,
+    pub updated_by: Option<String>,
+}
+
+pub async fn get_event_capture(
+    pool: &PgPool,
+    event_id: i64,
+) -> Result<Option<EventCaptureRow>, ApiError> {
+    sqlx::query_as::<_, EventCaptureRow>(
+        "select ec.event_id, ec.enabled, ec.pre_minutes, ec.post_minutes, ec.updated_at, \
+            u.display_name as updated_by \
+         from stats.event_capture ec left join identity.users u on u.id = ec.updated_by \
+         where ec.event_id = $1",
+    )
+    .bind(event_id)
+    .fetch_optional(pool)
+    .await
+    .map_err(db)
+}
+
+pub async fn upsert_event_capture(
+    pool: &PgPool,
+    event_id: i64,
+    enabled: bool,
+    pre_minutes: i32,
+    post_minutes: i32,
+    actor: &str,
+) -> Result<(), ApiError> {
+    sqlx::query(
+        "insert into stats.event_capture (event_id, enabled, pre_minutes, post_minutes, updated_by)
+         values ($1, $2, $3, $4, $5)
+         on conflict (event_id) do update set
+             enabled = excluded.enabled,
+             pre_minutes = excluded.pre_minutes,
+             post_minutes = excluded.post_minutes,
+             updated_by = excluded.updated_by",
+    )
+    .bind(event_id)
+    .bind(enabled)
+    .bind(pre_minutes)
+    .bind(post_minutes)
+    .bind(actor)
+    .execute(pool)
+    .await
+    .map_err(db)?;
+    Ok(())
+}
+
+/// Enabled event captures joined with their event window + whether a capture is currently open.
+/// Drives the scheduler (`jobs::spawn_capture_scheduler`).
+#[derive(Debug, sqlx::FromRow)]
+pub struct ScheduleRow {
+    pub event_id: i64,
+    pub title: String,
+    pub start_time: DateTime<Utc>,
+    pub end_time: DateTime<Utc>,
+    pub pre_minutes: i32,
+    pub post_minutes: i32,
+    pub open_capture_id: Option<String>,
+}
+
+pub async fn list_capture_schedule(pool: &PgPool) -> Result<Vec<ScheduleRow>, ApiError> {
+    sqlx::query_as::<_, ScheduleRow>(
+        "select e.id as event_id, e.title, e.start_time, e.end_time, \
+            ec.pre_minutes, ec.post_minutes, \
+            (select c.id from stats.capture c where c.event_id = e.id and c.status = 'open' limit 1) \
+                as open_capture_id \
+         from stats.event_capture ec join events.event e on e.id = ec.event_id \
+         where ec.enabled",
+    )
+    .fetch_all(pool)
+    .await
+    .map_err(db)
+}
+
+// --- event stats generation (over a capture window) --------------------------------------------
+
+/// A `stats.flight` "overlaps" the window when `first_seen <= to and last_seen >= from`.
+const FLIGHT_OVERLAP: &str = "status <> 'prefiled' and first_seen <= $2 and last_seen >= $1";
+
+#[derive(Debug, sqlx::FromRow)]
+pub struct AirportMovement {
+    pub icao: String,
+    pub arrivals: i64,
+    pub departures: i64,
+}
+
+/// Arrivals/departures for each configured event airport during the window.
+pub async fn event_airport_movements(
+    pool: &PgPool,
+    icaos: &[String],
+    from: DateTime<Utc>,
+    to: DateTime<Utc>,
+) -> Result<Vec<AirportMovement>, ApiError> {
+    sqlx::query_as::<_, AirportMovement>(
+        "select icao,
+                count(*) filter (where kind = 'arr') as arrivals,
+                count(*) filter (where kind = 'dep') as departures
+         from (
+            select arrival as icao, 'arr' as kind from stats.flight
+              where arrival = any($3) and status <> 'prefiled' and first_seen <= $2 and last_seen >= $1
+            union all
+            select departure as icao, 'dep' as kind from stats.flight
+              where departure = any($3) and status <> 'prefiled' and first_seen <= $2 and last_seen >= $1
+         ) t
+         group by icao order by (count(*)) desc",
+    )
+    .bind(from)
+    .bind(to)
+    .bind(icaos)
+    .fetch_all(pool)
+    .await
+    .map_err(db)
+}
+
+/// Distinct pilots active during the window.
+pub async fn event_unique_pilots(
+    pool: &PgPool,
+    from: DateTime<Utc>,
+    to: DateTime<Utc>,
+) -> Result<i64, ApiError> {
+    sqlx::query_scalar::<_, i64>(&format!(
+        "select count(distinct cid) from stats.flight where {FLIGHT_OVERLAP}"
+    ))
+    .bind(from)
+    .bind(to)
+    .fetch_one(pool)
+    .await
+    .map_err(db)
+}
+
+/// Peak concurrent pilots (from the per-tick network snapshot) during the window.
+pub async fn event_peak_pilots(
+    pool: &PgPool,
+    from: DateTime<Utc>,
+    to: DateTime<Utc>,
+) -> Result<Option<i32>, ApiError> {
+    sqlx::query_scalar::<_, Option<i32>>(
+        "select max(pilots) from stats.snapshot where ts >= $1 and ts <= $2",
+    )
+    .bind(from)
+    .bind(to)
+    .fetch_one(pool)
+    .await
+    .map_err(db)
+}
+
+#[derive(Debug, sqlx::FromRow)]
+pub struct KeyCount {
+    pub key: Option<String>,
+    pub count: i64,
+}
+
+/// Top aircraft types across flights to/from the configured event airports during the window.
+pub async fn event_top_aircraft(
+    pool: &PgPool,
+    icaos: &[String],
+    from: DateTime<Utc>,
+    to: DateTime<Utc>,
+) -> Result<Vec<KeyCount>, ApiError> {
+    sqlx::query_as::<_, KeyCount>(
+        "select aircraft_short as key, count(*) as count from stats.flight
+         where (departure = any($3) or arrival = any($3))
+           and status <> 'prefiled' and aircraft_short is not null
+           and first_seen <= $2 and last_seen >= $1
+         group by 1 order by 2 desc limit 10",
+    )
+    .bind(from)
+    .bind(to)
+    .bind(icaos)
+    .fetch_all(pool)
+    .await
+    .map_err(db)
+}
+
+#[derive(Debug, sqlx::FromRow)]
+pub struct ControllerCoverage {
+    pub unique_controllers: i64,
+    pub positions: i64,
+    pub hours: f64,
+}
+
+/// Controller coverage during the window: unique controllers, position sessions, and clipped
+/// position-hours (overlap of each session with the window).
+pub async fn event_controller_coverage(
+    pool: &PgPool,
+    from: DateTime<Utc>,
+    to: DateTime<Utc>,
+) -> Result<ControllerCoverage, ApiError> {
+    sqlx::query_as::<_, ControllerCoverage>(
+        "select
+            count(distinct cid) as unique_controllers,
+            count(*) as positions,
+            coalesce(sum(extract(epoch from (least(last_seen, $2) - greatest(first_seen, $1)))) / 3600.0, 0)::float8 as hours
+         from stats.controller_session
+         where first_seen <= $2 and last_seen >= $1",
+    )
+    .bind(from)
+    .bind(to)
+    .fetch_one(pool)
+    .await
+    .map_err(db)
+}
+
 fn db(e: sqlx::Error) -> ApiError {
     tracing::warn!(error = %e, "stats db error");
     ApiError::Internal

@@ -25,6 +25,9 @@ const STATS_PRUNE_AFTER_DAYS: i64 = 14;
 /// Keep every Nth 15s sample in the downsample band (4 → ~1-minute resolution).
 const STATS_KEEP_EVERY: i64 = 4;
 
+/// How often to open/close event stat-capture windows.
+const CAPTURE_SCHEDULER_INTERVAL: Duration = Duration::from_secs(60);
+
 /// How often to check the FAA/@squawk sources for a newer NASR cycle.
 const NAV_REFRESH_INTERVAL: Duration = Duration::from_secs(24 * 60 * 60);
 
@@ -153,6 +156,67 @@ pub fn spawn_stats_compaction(pool: PgPool) {
                 Ok(n) if n > 0 => tracing::info!(deleted = n, "stats: pruned old positions"),
                 Ok(_) => {}
                 Err(_) => tracing::warn!("stats: prune pass failed"),
+            }
+        }
+    });
+}
+
+/// Drive per-event stat capture: for each event with capture enabled, open a `stats.capture`
+/// window once the event is inside `[start - pre, end + post]`, and close+save it once that window
+/// has passed. Runs every minute. Idempotent — it keys off whether an open capture already exists.
+pub fn spawn_capture_scheduler(pool: PgPool) {
+    tokio::spawn(async move {
+        let mut ticker = tokio::time::interval(CAPTURE_SCHEDULER_INTERVAL);
+        loop {
+            ticker.tick().await;
+            let rows = match stats_repo::list_capture_schedule(&pool).await {
+                Ok(r) => r,
+                Err(_) => {
+                    tracing::warn!("stats: capture schedule query failed");
+                    continue;
+                }
+            };
+            let now = Utc::now();
+            for r in rows {
+                let window_start = r.start_time - chrono::Duration::minutes(r.pre_minutes as i64);
+                let window_end = r.end_time + chrono::Duration::minutes(r.post_minutes as i64);
+                let in_window = now >= window_start && now <= window_end;
+
+                match (in_window, r.open_capture_id.as_deref()) {
+                    // Inside the window with no capture yet → open one covering the whole window.
+                    (true, None) => {
+                        match stats_repo::create_capture(
+                            &pool,
+                            Some(r.event_id),
+                            &r.title,
+                            window_start,
+                            None,
+                        )
+                        .await
+                        {
+                            Ok(id) => tracing::info!(
+                                event = r.event_id,
+                                capture = %id,
+                                "stats: opened event capture"
+                            ),
+                            Err(_) => {
+                                tracing::warn!(event = r.event_id, "stats: open capture failed")
+                            }
+                        }
+                    }
+                    // Past the window with an open capture → close + save it.
+                    (false, Some(_)) if now > window_end => {
+                        match stats_repo::close_open_event_captures(&pool, r.event_id, window_end)
+                            .await
+                        {
+                            Ok(n) if n > 0 => {
+                                tracing::info!(event = r.event_id, "stats: saved event capture")
+                            }
+                            _ => {}
+                        }
+                    }
+                    _ => {}
+                }
             }
         }
     });

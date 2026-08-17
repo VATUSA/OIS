@@ -45,6 +45,7 @@ pub async fn run() -> Result<(), Box<dyn std::error::Error>> {
         // Persistent stats collection off the shared feed snapshot + its retention compaction.
         feed::stats::spawn_collector(pool.clone(), state.feed.clone(), state.airspace.clone());
         jobs::spawn_stats_compaction(pool.clone());
+        jobs::spawn_capture_scheduler(pool.clone());
         // VATUSA member sync: register the roster-change webhook and periodically reconcile.
         feed::vatusa::spawn_register_webhooks(pool.clone());
         feed::vatusa::spawn_reconcile(pool);
