@@ -21,6 +21,7 @@ import {EventPlanningPage} from "@/pages/planning/event";
 import {AirportConfigsPage} from "@/pages/planning/airport-configs";
 import {StatsPage} from "@/pages/stats";
 import {StatsFlightPage} from "@/pages/stats/flight";
+import {CaptureReplayPage} from "@/pages/stats/replay";
 import {AdminLayout} from "@/pages/admin/layout";
 import {AdminOverview} from "@/pages/admin/overview";
 import {AdminAccessControl} from "@/pages/admin/access-control";
@@ -220,6 +221,12 @@ const statsFlightRoute = createRoute({
   component: StatsFlightPage,
 });
 
+const statsReplayRoute = createRoute({
+  getParentRoute: () => statsRoute,
+  path: "captures/$captureId/replay",
+  component: CaptureReplayPage,
+});
+
 // --- Admin ---
 
 const adminRoute = createRoute({
@@ -295,7 +302,7 @@ const routeTree = rootRoute.addChildren([
     planningAirportConfigsRoute,
     planningEventRoute,
   ]),
-  statsRoute.addChildren([statsIndexRoute, statsFlightRoute]),
+  statsRoute.addChildren([statsIndexRoute, statsFlightRoute, statsReplayRoute]),
   adminRoute.addChildren([
     adminIndexRoute,
     adminAccessRoute,

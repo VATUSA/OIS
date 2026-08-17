@@ -8,6 +8,9 @@ export type KeyCount = components["schemas"]["KeyCountBody"];
 export type StatsAirport = components["schemas"]["StatsAirportBody"];
 export type StatsFlightSummary = components["schemas"]["StatsFlightSummary"];
 export type StatsFlightDetail = components["schemas"]["StatsFlightDetail"];
+export type CaptureSummary = components["schemas"]["CaptureSummaryBody"];
+export type Replay = components["schemas"]["ReplayBody"];
+export type ReplayFlight = components["schemas"]["ReplayFlightBody"];
 
 /** Hourly network totals over [from, to] (ISO strings; backend defaults to last 7d). */
 export function useNetworkHistory(from: string, to: string) {
@@ -45,6 +48,34 @@ export function useAirportStats(icao: string | null) {
         params: { path: { icao: icao! } },
       });
       if (error || !data) throw new Error("failed to load airport stats");
+      return data;
+    },
+  });
+}
+
+/** Replayable capture windows (saved or open). */
+export function useCaptures() {
+  return useQuery({
+    queryKey: ["stats-captures"],
+    queryFn: async (): Promise<CaptureSummary[]> => {
+      const { data, error } = await ois.GET("/api/v1/stats/captures");
+      if (error || !data) throw new Error("failed to load captures");
+      return data;
+    },
+  });
+}
+
+/** Per-flight tracks for replaying a capture window (fetched once, cached). */
+export function useCaptureReplay(captureId: string | null, step = 30) {
+  return useQuery({
+    queryKey: ["stats-replay", captureId, step],
+    enabled: !!captureId,
+    staleTime: Infinity,
+    queryFn: async (): Promise<Replay> => {
+      const { data, error } = await ois.GET("/api/v1/stats/captures/{id}/replay", {
+        params: { path: { id: captureId! }, query: { step } },
+      });
+      if (error || !data) throw new Error("failed to load replay");
       return data;
     },
   });

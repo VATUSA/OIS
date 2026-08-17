@@ -1,6 +1,7 @@
 import {useEffect, useState} from "react";
-import {Badge, Card, CardContent, Input} from "@ois/ui";
-import {BarChart3, Circle, Plane, Radio, Users} from "lucide-react";
+import {Badge, buttonVariants, Card, CardContent, Input} from "@ois/ui";
+import {Link} from "@tanstack/react-router";
+import {BarChart3, Circle, Film, Plane, Radio, Users} from "lucide-react";
 
 import {type EventCapture, useEventCapture, useEventStats, useUpdateEventCapture,} from "@/lib/event-stats";
 import {formatZuluFull} from "@/lib/time";
@@ -102,10 +103,22 @@ function CaptureConfig({ eventId }: { eventId: number }) {
         </div>
 
         {cap.capture_start && (
-          <p className="text-xs text-muted-foreground">
-            Window {formatZuluFull(cap.capture_start)} –{" "}
-            {cap.capture_end ? formatZuluFull(cap.capture_end) : "now (recording)"}
-          </p>
+          <div className="flex flex-wrap items-center justify-between gap-2">
+            <p className="text-xs text-muted-foreground">
+              Window {formatZuluFull(cap.capture_start)} –{" "}
+              {cap.capture_end ? formatZuluFull(cap.capture_end) : "now (recording)"}
+            </p>
+            {cap.capture_id && (
+              <Link
+                to="/stats/captures/$captureId/replay"
+                params={{ captureId: cap.capture_id }}
+                className={buttonVariants({ variant: "outline", size: "sm" }) + " gap-1"}
+              >
+                <Film className="size-3.5" />
+                Replay on map
+              </Link>
+            )}
+          </div>
         )}
       </CardContent>
     </Card>
