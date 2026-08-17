@@ -26,6 +26,7 @@ import {
   ShieldCheck,
   Split,
   User as UserIcon,
+  TrendingUp,
   Waypoints,
   Wind,
 } from "lucide-react";
@@ -142,12 +143,14 @@ function MobileMenu({
   canFca,
   canRunway,
   canPlan,
+  canStats,
 }: {
   canOps: boolean;
   canPrograms: boolean;
   canFca: boolean;
   canRunway: boolean;
   canPlan: boolean;
+  canStats: boolean;
 }) {
   return (
     <DropdownMenu>
@@ -247,6 +250,19 @@ function MobileMenu({
           </>
         )}
 
+        {canStats && (
+          <>
+            <DropdownMenuSeparator />
+            <DropdownMenuLabel>Stats</DropdownMenuLabel>
+            <DropdownMenuItem asChild>
+              <Link to="/stats">
+                <TrendingUp />
+                Network stats
+              </Link>
+            </DropdownMenuItem>
+          </>
+        )}
+
         {DOCS_URL && (
           <>
             <DropdownMenuSeparator />
@@ -274,6 +290,7 @@ export function Navbar() {
   const canRunway = hasPermission(me, "flow.runway.read");
   const canOps = canPrograms || canTmiRead || canFca || canRunway;
   const canPlan = hasPermission(me, "events.plan.read");
+  const canStats = hasPermission(me, "stats.data.read");
 
   return (
     <header className="sticky top-0 z-40 border-b bg-background/80 backdrop-blur">
@@ -284,6 +301,7 @@ export function Navbar() {
           canFca={canFca}
           canRunway={canRunway}
           canPlan={canPlan}
+          canStats={canStats}
         />
         <Link to="/" className="flex items-center gap-2 font-semibold">
           <Radar className="size-5 text-primary" />
@@ -376,6 +394,12 @@ export function Navbar() {
                 </Link>
               </DropdownMenuItem>
             </NavGroup>
+          )}
+
+          {canStats && (
+            <Link to="/stats" className={linkClass}>
+              Stats
+            </Link>
           )}
 
           {/* Docs live on their own subdomain (per-environment), wired via DOCS_URL. */}

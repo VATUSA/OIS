@@ -115,7 +115,7 @@ pub fn draft_new_permission_names() -> Vec<&'static str> {
         "flow.runway.read",
         "flow.runway.update",
         // --- stats: persistent network statistics + saved capture windows ---
-        "stats.read",
+        "stats.data.read",
         "stats.capture.update",
         // --- discord config ---
         "discord.config.read",

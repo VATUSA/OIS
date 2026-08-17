@@ -8,6 +8,7 @@ use serde_json::Value;
 use sqlx::{PgPool, Postgres, QueryBuilder, Transaction};
 
 use crate::errors::ApiError;
+use crate::models::{KeyCountBody, NetworkPointBody, StatsFlightDetail, StatsFlightSummary};
 
 // --- decoupled row inputs (the collector fills these from feed structs) ---------------------
 
@@ -725,6 +726,190 @@ pub async fn event_controller_coverage(
     .fetch_one(pool)
     .await
     .map_err(db)
+}
+
+// --- stats read API queries --------------------------------------------------------------------
+
+/// Hourly network totals from `stats.snapshot` (computed on read — no continuous aggregate).
+pub async fn network_history(
+    pool: &PgPool,
+    from: DateTime<Utc>,
+    to: DateTime<Utc>,
+) -> Result<Vec<NetworkPointBody>, ApiError> {
+    sqlx::query_as::<_, NetworkPointBody>(
+        "select date_trunc('hour', ts) as hour,
+                avg(pilots)::int as avg_pilots,
+                max(pilots) as peak_pilots,
+                avg(controllers)::int as avg_controllers,
+                max(connected_clients) as peak_clients
+         from stats.snapshot where ts between $1 and $2
+         group by 1 order by 1",
+    )
+    .bind(from)
+    .bind(to)
+    .fetch_all(pool)
+    .await
+    .map_err(db)
+}
+
+/// Busiest airports by departures + arrivals (completed/active flights).
+pub async fn airports_top(pool: &PgPool, limit: i64) -> Result<Vec<KeyCountBody>, ApiError> {
+    sqlx::query_as::<_, KeyCountBody>(
+        "select ap as key, count(*) as count from (
+            select departure as ap from stats.flight where status <> 'prefiled' and departure is not null
+            union all
+            select arrival as ap from stats.flight where status <> 'prefiled' and arrival is not null
+         ) t group by ap order by count desc limit $1",
+    )
+    .bind(limit)
+    .fetch_all(pool)
+    .await
+    .map_err(db)
+}
+
+/// Departure + arrival counts for an airport.
+pub async fn airport_counts(pool: &PgPool, icao: &str) -> Result<(i64, i64), ApiError> {
+    let dep = sqlx::query_scalar::<_, i64>(
+        "select count(*) from stats.flight where departure = $1 and status <> 'prefiled'",
+    )
+    .bind(icao)
+    .fetch_one(pool)
+    .await
+    .map_err(db)?;
+    let arr = sqlx::query_scalar::<_, i64>(
+        "select count(*) from stats.flight where arrival = $1 and status <> 'prefiled'",
+    )
+    .bind(icao)
+    .fetch_one(pool)
+    .await
+    .map_err(db)?;
+    Ok((dep, arr))
+}
+
+/// Top aircraft to/from an airport.
+pub async fn airport_top_aircraft(
+    pool: &PgPool,
+    icao: &str,
+) -> Result<Vec<KeyCountBody>, ApiError> {
+    sqlx::query_as::<_, KeyCountBody>(
+        "select aircraft_short as key, count(*) as count from stats.flight
+         where (departure = $1 or arrival = $1) and status <> 'prefiled' and aircraft_short is not null
+         group by 1 order by 2 desc limit 10",
+    )
+    .bind(icao)
+    .fetch_all(pool)
+    .await
+    .map_err(db)
+}
+
+/// Top destinations from an airport (departures) or origins into it (arrivals).
+pub async fn airport_top_endpoints(
+    pool: &PgPool,
+    icao: &str,
+    origins: bool,
+) -> Result<Vec<KeyCountBody>, ApiError> {
+    // `match_col`/`group_col` are fixed internal literals, never user input.
+    let (match_col, group_col) = if origins {
+        ("arrival", "departure") // origins into this airport
+    } else {
+        ("departure", "arrival") // destinations from this airport
+    };
+    let sql = format!(
+        "select {group_col} as key, count(*) as count from stats.flight
+         where {match_col} = $1 and status <> 'prefiled' and {group_col} is not null
+         group by 1 order by 2 desc limit 10"
+    );
+    sqlx::query_as::<_, KeyCountBody>(&sql)
+        .bind(icao)
+        .fetch_all(pool)
+        .await
+        .map_err(db)
+}
+
+const FLIGHT_SUMMARY_SELECT: &str = "select session_id, callsign, status, logon_time, departure, \
+    arrival, aircraft_short, duration_s, distance_nm from stats.flight";
+
+/// Recent departures (`departure`) or arrivals (`arrival`) at an airport.
+pub async fn airport_movements(
+    pool: &PgPool,
+    icao: &str,
+    arrivals: bool,
+    limit: i64,
+) -> Result<Vec<StatsFlightSummary>, ApiError> {
+    let col = if arrivals { "arrival" } else { "departure" };
+    let sql = format!(
+        "{FLIGHT_SUMMARY_SELECT} where {col} = $1 and status <> 'prefiled' \
+         order by logon_time desc limit $2"
+    );
+    sqlx::query_as::<_, StatsFlightSummary>(&sql)
+        .bind(icao)
+        .bind(limit)
+        .fetch_all(pool)
+        .await
+        .map_err(db)
+}
+
+/// A member's recent flights.
+pub async fn member_flights(
+    pool: &PgPool,
+    cid: i32,
+    limit: i64,
+) -> Result<Vec<StatsFlightSummary>, ApiError> {
+    sqlx::query_as::<_, StatsFlightSummary>(&format!(
+        "{FLIGHT_SUMMARY_SELECT} where cid = $1 and status <> 'prefiled' \
+         order by logon_time desc limit $2"
+    ))
+    .bind(cid)
+    .bind(limit)
+    .fetch_all(pool)
+    .await
+    .map_err(db)
+}
+
+pub async fn flight_detail(
+    pool: &PgPool,
+    session_id: i64,
+) -> Result<Option<StatsFlightDetail>, ApiError> {
+    sqlx::query_as::<_, StatsFlightDetail>(
+        "select session_id, cid, callsign, server, status, logon_time, first_seen, last_seen,
+                departure, arrival, alternate, aircraft_short, cruise_alt, route,
+                duration_s, distance_nm, max_altitude, max_groundspeed
+         from stats.flight where session_id = $1",
+    )
+    .bind(session_id)
+    .fetch_optional(pool)
+    .await
+    .map_err(db)
+}
+
+/// Raw 15s track (ts, lat, lon, altitude, groundspeed, heading) for a flight, oldest first.
+pub async fn flight_track_raw(
+    pool: &PgPool,
+    session_id: i64,
+) -> Result<Vec<(DateTime<Utc>, f32, f32, i32, i16, i16)>, ApiError> {
+    sqlx::query_as::<_, (DateTime<Utc>, f32, f32, i32, i16, i16)>(
+        "select ts, lat, lon, altitude, groundspeed, heading from stats.position
+         where session_id = $1 order by ts",
+    )
+    .bind(session_id)
+    .fetch_all(pool)
+    .await
+    .map_err(db)
+}
+
+/// The stored simplified path for a flight (Tier-1), if any.
+pub async fn flight_path_simplified(
+    pool: &PgPool,
+    session_id: i64,
+) -> Result<Option<Value>, ApiError> {
+    let row = sqlx::query_scalar::<_, Option<Value>>(
+        "select path_simplified from stats.flight where session_id = $1",
+    )
+    .bind(session_id)
+    .fetch_optional(pool)
+    .await
+    .map_err(db)?;
+    Ok(row.flatten())
 }
 
 fn db(e: sqlx::Error) -> ApiError {
