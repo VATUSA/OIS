@@ -394,7 +394,11 @@ pub struct UpdateDccRequest {
     pub notes: Option<String>,
 }
 
-/// One facility's support level for an event.
+/// One facility's involvement in an event — its support level plus why it was surfaced.
+///
+/// The list is *derived*: a facility appears because it hosts the event, owns a configured airport,
+/// or has an ACE staffing request — or because a support row was saved for it. `stored` is false for
+/// a purely-derived suggestion the planner hasn't confirmed yet.
 #[derive(Debug, Serialize, ToSchema, sqlx::FromRow)]
 pub struct FacilitySupportBody {
     /// ARTCC/TRACON id (e.g. ZTL, N90).
@@ -402,8 +406,24 @@ pub struct FacilitySupportBody {
     /// required | preferred | not_required
     pub level: String,
     pub notes: String,
-    pub updated_at: DateTime<Utc>,
+    /// When the support row was last saved; null for an unconfirmed (derived-only) suggestion.
+    pub updated_at: Option<DateTime<Utc>>,
     pub updated_by: Option<String>,
+    /// This facility hosts the event (`event.facility`).
+    #[sqlx(default)]
+    pub is_host: bool,
+    /// ICAOs of the event's configured airports that this facility owns.
+    #[sqlx(default)]
+    pub airports: Vec<String>,
+    /// This facility has an ACE staffing request on the event.
+    #[sqlx(default)]
+    pub has_staffing: bool,
+    /// A support row exists (the planner has confirmed a level), vs. a derived-only suggestion.
+    #[sqlx(default)]
+    pub stored: bool,
+    /// Whether the requesting user may edit this facility's support (per their ARTCC scope).
+    #[sqlx(default)]
+    pub editable: bool,
 }
 
 #[derive(Debug, Deserialize, ToSchema)]

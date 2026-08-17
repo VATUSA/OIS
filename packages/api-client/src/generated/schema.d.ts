@@ -1760,15 +1760,34 @@ export interface components {
             name: string;
             region?: string | null;
         };
-        /** @description One facility's support level for an event. */
+        /**
+         * @description One facility's involvement in an event — its support level plus why it was surfaced.
+         *
+         *     The list is *derived*: a facility appears because it hosts the event, owns a configured airport,
+         *     or has an ACE staffing request — or because a support row was saved for it. `stored` is false for
+         *     a purely-derived suggestion the planner hasn't confirmed yet.
+         */
         FacilitySupportBody: {
+            /** @description ICAOs of the event's configured airports that this facility owns. */
+            airports: string[];
+            /** @description Whether the requesting user may edit this facility's support (per their ARTCC scope). */
+            editable: boolean;
             /** @description ARTCC/TRACON id (e.g. ZTL, N90). */
             facility: string;
+            /** @description This facility has an ACE staffing request on the event. */
+            has_staffing: boolean;
+            /** @description This facility hosts the event (`event.facility`). */
+            is_host: boolean;
             /** @description required | preferred | not_required */
             level: string;
             notes: string;
-            /** Format: date-time */
-            updated_at: string;
+            /** @description A support row exists (the planner has confirmed a level), vs. a derived-only suggestion. */
+            stored: boolean;
+            /**
+             * Format: date-time
+             * @description When the support row was last saved; null for an unconfirmed (derived-only) suggestion.
+             */
+            updated_at?: string | null;
             updated_by?: string | null;
         };
         /** @description A Flow Constrained Area — a drawn polyline the metering engine sequences traffic against. */
@@ -3967,6 +3986,12 @@ export interface operations {
                 };
             };
             401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            404: {
                 headers: {
                     [name: string]: unknown;
                 };
