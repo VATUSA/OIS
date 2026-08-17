@@ -142,7 +142,7 @@ pub async fn list_events(
     _permission: RequirePermission<EventsPlanRead>,
 ) -> Result<Json<Vec<EventBody>>, ApiError> {
     let pool = state.db.as_ref().ok_or(ApiError::ServiceUnavailable)?;
-    Ok(Json(events_repo::list_upcoming(pool).await?))
+    Ok(Json(events_repo::list_all(pool).await?))
 }
 
 #[utoipa::path(

@@ -1,16 +1,95 @@
-import {Badge, Card, CardContent} from "@ois/ui";
+import {useState} from "react";
+import {Badge, Button, buttonVariants, Card, CardContent} from "@ois/ui";
 import {Link, useParams} from "@tanstack/react-router";
-import {ArrowLeft, CalendarClock} from "lucide-react";
+import {ArrowLeft, BarChart3, CalendarClock, ExternalLink, Radio, Users} from "lucide-react";
 
+import {Modal} from "@/components/modal";
 import {useMe} from "@/lib/auth";
-import {eventBodyText, useEvent} from "@/lib/events";
+import {eventBodyText, useDcc, useEvent, useStaffing, vatusaEditUrl} from "@/lib/events";
 import {hasPermission} from "@/lib/permissions";
-import {formatZulu} from "@/lib/time";
+import {formatZuluFull} from "@/lib/time";
 import {DccSection} from "@/pages/planning/dcc";
 import {FacilitySupportSection} from "@/pages/planning/facility-support";
 import {AirportRatesSection} from "@/pages/planning/airport-rates";
 import {AceSection} from "@/pages/planning/ace";
 import {TmiPackagesSection} from "@/pages/planning/tmi-packages";
+
+type TabId = "airports" | "facility" | "tmi";
+const TABS: { id: TabId; label: string }[] = [
+  { id: "airports", label: "Airports & rates" },
+  { id: "facility", label: "Facility support" },
+  { id: "tmi", label: "TMI packages" },
+];
+
+function dccVariant(status: string): "secondary" | "success" | "outline" {
+  if (status === "confirmed") return "success";
+  if (status === "requested") return "secondary";
+  return "outline";
+}
+
+/** Top action bar: Edit-on-VATUSA link + DCC / ACE dialog buttons + a Debrief placeholder. */
+function ActionBar({
+  eventId,
+  editUrl,
+}: {
+  eventId: number;
+  editUrl: string | null;
+}) {
+  const [dialog, setDialog] = useState<null | "dcc" | "ace">(null);
+  const dcc = useDcc(eventId);
+  const staffing = useStaffing(eventId);
+  const openAce = (staffing.data ?? []).filter((s) => s.status === "open").length;
+  const dccStatus = dcc.data?.status;
+
+  return (
+    <div className="flex flex-wrap items-center gap-2">
+      <Button variant="secondary" size="sm" onClick={() => setDialog("dcc")}>
+        <Radio className="size-3.5" />
+        DCC support
+        {dccStatus && dccStatus !== "not_needed" && (
+          <Badge variant={dccVariant(dccStatus)} className="ml-1">
+            {dccStatus}
+          </Badge>
+        )}
+      </Button>
+
+      <Button variant="secondary" size="sm" onClick={() => setDialog("ace")}>
+        <Users className="size-3.5" />
+        ACE requests
+        {openAce > 0 && (
+          <Badge variant="secondary" className="ml-1">
+            {openAce} open
+          </Badge>
+        )}
+      </Button>
+
+      <Button variant="secondary" size="sm" disabled title="Post-event debrief — coming soon">
+        <BarChart3 className="size-3.5" />
+        Debrief
+        <span className="ml-1 text-xs text-muted-foreground">soon</span>
+      </Button>
+
+      {editUrl && (
+        <a
+          href={editUrl}
+          target="_blank"
+          rel="noreferrer"
+          className={buttonVariants({ variant: "outline", size: "sm" }) + " ml-auto"}
+        >
+          <ExternalLink className="size-3.5" />
+          Edit on VATUSA
+        </a>
+      )}
+
+      <Modal open={dialog === "dcc"} onClose={() => setDialog(null)} title="DCC support">
+        <DccSection eventId={eventId} bare />
+      </Modal>
+      <Modal open={dialog === "ace"} onClose={() => setDialog(null)} title="ACE requests" size="lg">
+        <AceSection eventId={eventId} bare />
+      </Modal>
+    </div>
+  );
+}
 
 export function EventPlanningPage() {
   const { eventId } = useParams({ from: "/planning/events/$eventId" });
@@ -18,6 +97,7 @@ export function EventPlanningPage() {
   const canPlan = hasPermission(me, "events.plan.read");
   const id = Number(eventId);
   const event = useEvent(id);
+  const [tab, setTab] = useState<TabId>("airports");
 
   const backLink = (
     <Link
@@ -28,44 +108,19 @@ export function EventPlanningPage() {
     </Link>
   );
 
-  if (!canPlan) {
-    return (
-      <div className="flex flex-col gap-6">
-        {backLink}
-        <Card>
-          <CardContent className="py-16 text-center text-sm text-muted-foreground">
-            You don&apos;t have event planning access yet.
-          </CardContent>
-        </Card>
-      </div>
-    );
-  }
+  const shell = (msg: string) => (
+    <div className="flex flex-col gap-6">
+      {backLink}
+      <Card>
+        <CardContent className="py-16 text-center text-sm text-muted-foreground">{msg}</CardContent>
+      </Card>
+    </div>
+  );
 
-  if (event.isError || (!event.isLoading && !event.data)) {
-    return (
-      <div className="flex flex-col gap-6">
-        {backLink}
-        <Card>
-          <CardContent className="py-16 text-center text-sm text-muted-foreground">
-            That event isn&apos;t on the calendar (it may have ended or been removed).
-          </CardContent>
-        </Card>
-      </div>
-    );
-  }
-
-  if (!event.data) {
-    return (
-      <div className="flex flex-col gap-6">
-        {backLink}
-        <Card>
-          <CardContent className="py-16 text-center text-sm text-muted-foreground">
-            Loading event…
-          </CardContent>
-        </Card>
-      </div>
-    );
-  }
+  if (!canPlan) return shell("You don't have event planning access yet.");
+  if (event.isError || (!event.isLoading && !event.data))
+    return shell("That event isn't on the calendar (it may have ended or been removed).");
+  if (!event.data) return shell("Loading event…");
 
   const e = event.data;
   const blurb = eventBodyText(e.body);
@@ -81,14 +136,10 @@ export function EventPlanningPage() {
             <div className="flex flex-col gap-1">
               <h1 className="text-2xl font-semibold tracking-tight">{e.title}</h1>
               <div className="flex flex-wrap items-center gap-x-3 gap-y-1 text-sm text-muted-foreground">
-                {e.facility && (
-                  <span className="font-mono font-medium text-foreground">
-                    {e.facility}
-                  </span>
-                )}
+                {e.facility && <span className="font-mono font-medium text-foreground">{e.facility}</span>}
                 <span className="flex items-center gap-1.5">
                   <CalendarClock className="size-3.5" />
-                  {formatZulu(e.start_time)} – {formatZulu(e.end_time)}
+                  {formatZuluFull(e.start_time)} – {formatZuluFull(e.end_time)}
                 </span>
               </div>
             </div>
@@ -100,31 +151,41 @@ export function EventPlanningPage() {
           </div>
 
           {e.banner_image_url && (
-            <img
-              src={e.banner_image_url}
-              alt=""
-              className="max-h-56 w-full rounded-md object-cover"
-            />
+            <img src={e.banner_image_url} alt="" className="max-h-56 w-full rounded-md object-cover" />
           )}
 
           {blurb && (
-            <p className="max-w-3xl whitespace-pre-line text-sm text-muted-foreground">
-              {blurb}
-            </p>
+            <p className="max-w-3xl whitespace-pre-line text-sm text-muted-foreground">{blurb}</p>
           )}
         </CardContent>
       </Card>
 
-      {/* Planning modules */}
+      {/* Action bar */}
+      <ActionBar eventId={id} editUrl={vatusaEditUrl(e)} />
+
+      {/* Tabbed planning area */}
       <div className="flex flex-col gap-4">
-        <h2 className="text-sm font-medium uppercase tracking-wide text-muted-foreground">
-          Planning
-        </h2>
-        <DccSection eventId={id} />
-        <FacilitySupportSection eventId={id} />
-        <AirportRatesSection eventId={id} />
-        <AceSection eventId={id} />
-        <TmiPackagesSection eventId={id} />
+        <div className="flex flex-wrap gap-1 border-b">
+          {TABS.map((t) => (
+            <button
+              key={t.id}
+              type="button"
+              onClick={() => setTab(t.id)}
+              className={
+                "-mb-px border-b-2 px-3 py-2 text-sm transition-colors " +
+                (tab === t.id
+                  ? "border-primary font-medium text-foreground"
+                  : "border-transparent text-muted-foreground hover:text-foreground")
+              }
+            >
+              {t.label}
+            </button>
+          ))}
+        </div>
+
+        {tab === "airports" && <AirportRatesSection eventId={id} />}
+        {tab === "facility" && <FacilitySupportSection eventId={id} />}
+        {tab === "tmi" && <TmiPackagesSection eventId={id} />}
       </div>
     </div>
   );

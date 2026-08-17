@@ -158,7 +158,7 @@ function StaffingRow({
   );
 }
 
-export function AceSection({ eventId }: { eventId: number }) {
+export function AceSection({ eventId, bare = false }: { eventId: number; bare?: boolean }) {
   const { data: me } = useMe();
   const canEdit = hasPermission(me, "events.staffing_requests.create");
   const staffing = useStaffing(eventId);
@@ -172,21 +172,8 @@ export function AceSection({ eventId }: { eventId: number }) {
 
   const rows = staffing.data ?? [];
 
-  return (
-    <Card>
-      <CardContent className="flex flex-col gap-4 pt-6">
-        <div className="flex items-center gap-2">
-          <span className="flex size-8 items-center justify-center rounded-md bg-primary/10 text-primary">
-            <Users className="size-4" />
-          </span>
-          <div className="flex flex-col">
-            <span className="font-semibold">ACE request</span>
-            <span className="text-xs text-muted-foreground">
-              Positions each facility is hoping for vs signed up (filled / wanted).
-            </span>
-          </div>
-        </div>
-
+  const body = (
+    <>
         {canEdit && (
           <ArtccCombobox
             exclude={rows.map((r) => r.facility)}
@@ -236,6 +223,26 @@ export function AceSection({ eventId }: { eventId: number }) {
             </table>
           </div>
         )}
+    </>
+  );
+
+  if (bare) return <div className="flex flex-col gap-4">{body}</div>;
+
+  return (
+    <Card>
+      <CardContent className="flex flex-col gap-4 pt-6">
+        <div className="flex items-center gap-2">
+          <span className="flex size-8 items-center justify-center rounded-md bg-primary/10 text-primary">
+            <Users className="size-4" />
+          </span>
+          <div className="flex flex-col">
+            <span className="font-semibold">ACE request</span>
+            <span className="text-xs text-muted-foreground">
+              Positions each facility is hoping for vs signed up (filled / wanted).
+            </span>
+          </div>
+        </div>
+        {body}
       </CardContent>
     </Card>
   );

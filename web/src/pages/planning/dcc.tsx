@@ -25,7 +25,7 @@ function statusLabel(status: string): string {
   return OPTIONS.find((o) => o.value === status)?.label ?? status;
 }
 
-export function DccSection({ eventId }: { eventId: number }) {
+export function DccSection({ eventId, bare = false }: { eventId: number; bare?: boolean }) {
   const { data: me } = useMe();
   const canEdit = hasPermission(me, "events.plan.update");
   const dcc = useDcc(eventId);
@@ -68,62 +68,60 @@ export function DccSection({ eventId }: { eventId: number }) {
     );
   }
 
+  const body = !dcc.data ? (
+    <p className="py-2 text-sm text-muted-foreground">Loading…</p>
+  ) : !canEdit ? (
+    <div className="flex flex-col gap-2 text-sm">
+      {dcc.data.notes ? (
+        <p className="whitespace-pre-line text-muted-foreground">{dcc.data.notes}</p>
+      ) : (
+        <p className="text-muted-foreground">No notes.</p>
+      )}
+    </div>
+  ) : (
+    <div className="flex flex-col gap-3">
+      <div className="flex flex-wrap gap-1">
+        {OPTIONS.map((o) => (
+          <Button
+            key={o.value}
+            type="button"
+            size="sm"
+            variant={status === o.value ? "default" : "secondary"}
+            onClick={() => setStatus(o.value)}
+          >
+            {o.label}
+          </Button>
+        ))}
+      </div>
+
+      <textarea
+        className="min-h-20 w-full rounded-md border border-input bg-background px-3 py-2 text-sm shadow-sm transition-colors placeholder:text-muted-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
+        placeholder="Notes — who's coordinating, what's requested, etc."
+        value={notes}
+        onChange={(e) => setNotes(e.target.value)}
+      />
+
+      <div className="flex items-center gap-3">
+        <Button onClick={() => save.mutate({ status, notes })} disabled={!dirty || save.isPending}>
+          Save
+        </Button>
+        {dcc.data.updated_at && (
+          <span className="text-xs text-muted-foreground">
+            Last set {formatZulu(dcc.data.updated_at)}
+            {dcc.data.updated_by ? ` by ${dcc.data.updated_by}` : ""}
+          </span>
+        )}
+      </div>
+    </div>
+  );
+
+  if (bare) return <div className="flex flex-col gap-4">{body}</div>;
+
   return (
     <Card>
       <CardContent className="flex flex-col gap-4 pt-6">
         <Header />
-
-        {!dcc.data ? (
-          <p className="py-2 text-sm text-muted-foreground">Loading…</p>
-        ) : !canEdit ? (
-          <div className="flex flex-col gap-2 text-sm">
-            {dcc.data.notes ? (
-              <p className="whitespace-pre-line text-muted-foreground">
-                {dcc.data.notes}
-              </p>
-            ) : (
-              <p className="text-muted-foreground">No notes.</p>
-            )}
-          </div>
-        ) : (
-          <div className="flex flex-col gap-3">
-            <div className="flex flex-wrap gap-1">
-              {OPTIONS.map((o) => (
-                <Button
-                  key={o.value}
-                  type="button"
-                  size="sm"
-                  variant={status === o.value ? "default" : "secondary"}
-                  onClick={() => setStatus(o.value)}
-                >
-                  {o.label}
-                </Button>
-              ))}
-            </div>
-
-            <textarea
-              className="min-h-20 w-full rounded-md border border-input bg-background px-3 py-2 text-sm shadow-sm transition-colors placeholder:text-muted-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
-              placeholder="Notes — who's coordinating, what's requested, etc."
-              value={notes}
-              onChange={(e) => setNotes(e.target.value)}
-            />
-
-            <div className="flex items-center gap-3">
-              <Button
-                onClick={() => save.mutate({ status, notes })}
-                disabled={!dirty || save.isPending}
-              >
-                Save
-              </Button>
-              {dcc.data.updated_at && (
-                <span className="text-xs text-muted-foreground">
-                  Last set {formatZulu(dcc.data.updated_at)}
-                  {dcc.data.updated_by ? ` by ${dcc.data.updated_by}` : ""}
-                </span>
-              )}
-            </div>
-          </div>
-        )}
+        {body}
       </CardContent>
     </Card>
   );
