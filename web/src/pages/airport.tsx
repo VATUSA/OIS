@@ -2,6 +2,7 @@ import {useMemo, useState} from "react";
 import {Button, Card, CardContent, Input} from "@ois/ui";
 import {Lock} from "lucide-react";
 
+import type {LadderFilters} from "@/features/dashboard/types";
 import {type Flow, type FlowFlight, useAirportFlow} from "@/lib/feed";
 import {hhmmZulu} from "@/lib/time";
 import {DeparturesView} from "@/pages/departures";
@@ -37,7 +38,7 @@ const GATE_PALETTE = [
 ];
 
 /** Drop the STAR revision digit so OZZZI1 / OZZZI2 group as OZZZI. */
-function summaryGateName(gate: string | null | undefined): string | null {
+export function summaryGateName(gate: string | null | undefined): string | null {
   if (!gate) return null;
   const m = gate.toUpperCase().match(/^([A-Z]{3,5})\d[A-Z]?$/);
   return m ? m[1] : gate.toUpperCase();
@@ -422,7 +423,22 @@ export function AircraftView({ flow }: { flow: Flow }) {
 
 // --- Arrival ladder ---
 
-export function LadderView({ flow }: { flow: Flow }) {
+/** True if a flight passes the ladder's include-filters (each empty list = no constraint). */
+function passesLadderFilters(f: FlowFlight, filters: LadderFilters | undefined): boolean {
+  if (!filters) return true;
+  if (filters.statuses?.length && !filters.statuses.includes(f.status)) return false;
+  if (filters.gates?.length) {
+    const g = summaryGateName(f.gate);
+    if (!g || !filters.gates.includes(g)) return false;
+  }
+  if (filters.origins?.length && !filters.origins.some((o) => f.dep.toUpperCase().startsWith(o)))
+    return false;
+  if (filters.types?.length && !filters.types.some((t) => f.aircraft_type.toUpperCase().startsWith(t)))
+    return false;
+  return true;
+}
+
+export function LadderView({ flow, filters }: { flow: Flow; filters?: LadderFilters }) {
   const [win, setWin] = useState(60);
   const now = Date.now();
 
@@ -439,7 +455,7 @@ export function LadderView({ flow }: { flow: Flow }) {
   const timeOf = (f: FlowFlight) => f.sta ?? f.eta;
   // Flights in window, earliest (nearest NOW) first — bottom to top.
   const items = flow.flights
-    .filter((f) => f.status !== "arrived" && !f.excluded && timeOf(f))
+    .filter((f) => f.status !== "arrived" && !f.excluded && timeOf(f) && passesLadderFilters(f, filters))
     .map((f) => ({ f, min: minutesUntil(timeOf(f), now)! }))
     .filter((x) => x.min >= -1 && x.min <= win)
     .sort((a, b) => a.min - b.min);
@@ -527,7 +543,13 @@ export function LadderView({ flow }: { flow: Flow }) {
 
             {placed.length === 0 && (
               <div className="absolute inset-x-0 top-1/2 text-center text-sm text-muted-foreground">
-                No ETAs in window
+                {filters &&
+                (filters.gates?.length ||
+                  filters.statuses?.length ||
+                  filters.origins?.length ||
+                  filters.types?.length)
+                  ? "No matching arrivals"
+                  : "No ETAs in window"}
               </div>
             )}
 
