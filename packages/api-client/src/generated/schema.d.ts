@@ -1022,6 +1022,118 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/v1/stats/airports/top": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get: operations["airports_top"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/stats/airports/{icao}": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get: operations["airport_stats"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/stats/airports/{icao}/movements": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get: operations["airport_movements"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/stats/flights/{id}": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get: operations["flight_detail"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/stats/flights/{id}/track": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get: operations["flight_track"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/stats/members/{cid}/flights": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get: operations["member_flights"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/stats/network/history": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get: operations["network_history"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/v1/tmu/cfr": {
         parameters: {
             query?: never;
@@ -2351,6 +2463,19 @@ export interface components {
         NameRequest: {
             name: string;
         };
+        /** @description One hour of network totals (from `stats.snapshot`). */
+        NetworkPointBody: {
+            /** Format: int32 */
+            avg_controllers?: number | null;
+            /** Format: int32 */
+            avg_pilots?: number | null;
+            /** Format: date-time */
+            hour: string;
+            /** Format: int32 */
+            peak_clients?: number | null;
+            /** Format: int32 */
+            peak_pilots?: number | null;
+        };
         /** @description An airport rate program (vatflow "TMU tab"). Keyed by ICAO. */
         ProgramBody: {
             /** Format: int32 */
@@ -2718,6 +2843,68 @@ export interface components {
             /** Format: date-time */
             updated_at: string;
             updated_by?: string | null;
+        };
+        /** @description Airport activity: dep/arr counts + top aircraft / destinations / origins. */
+        StatsAirportBody: {
+            /** Format: int64 */
+            arrivals: number;
+            /** Format: int64 */
+            departures: number;
+            icao: string;
+            top_aircraft: components["schemas"]["KeyCountBody"][];
+            top_destinations: components["schemas"]["KeyCountBody"][];
+            top_origins: components["schemas"]["KeyCountBody"][];
+        };
+        /** @description Full flight metadata + summary. */
+        StatsFlightDetail: {
+            aircraft_short?: string | null;
+            alternate?: string | null;
+            arrival?: string | null;
+            callsign: string;
+            /** Format: int32 */
+            cid: number;
+            /** Format: int32 */
+            cruise_alt?: number | null;
+            departure?: string | null;
+            /** Format: float */
+            distance_nm?: number | null;
+            /** Format: int32 */
+            duration_s?: number | null;
+            /** Format: date-time */
+            first_seen: string;
+            /** Format: date-time */
+            last_seen: string;
+            /** Format: date-time */
+            logon_time: string;
+            /** Format: int32 */
+            max_altitude?: number | null;
+            /** Format: int32 */
+            max_groundspeed?: number | null;
+            route?: string | null;
+            server?: string | null;
+            session_id: string;
+            status: string;
+        };
+        /** @description A compact flight row for lists (airport movements, member history). */
+        StatsFlightSummary: {
+            aircraft_short?: string | null;
+            arrival?: string | null;
+            callsign: string;
+            departure?: string | null;
+            /** Format: float */
+            distance_nm?: number | null;
+            /** Format: int32 */
+            duration_s?: number | null;
+            /** Format: date-time */
+            logon_time: string;
+            session_id: string;
+            status: string;
+        };
+        /** @description A flight's track: full 15s `positions` if still recent, else the stored simplified path. */
+        StatsTrackBody: {
+            points: Record<string, never>;
+            /** @description `full` | `simplified` | `none` */
+            resolution: string;
         };
         /** @description A departure currently being timed at a field. */
         TaxiActive: {
@@ -5847,6 +6034,236 @@ export interface operations {
                 content: {
                     "application/json": components["schemas"]["FlightAdvisory"];
                 };
+            };
+        };
+    };
+    airports_top: {
+        parameters: {
+            query?: {
+                /** @description Max airports (default 20) */
+                limit?: number;
+            };
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["KeyCountBody"][];
+                };
+            };
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+        };
+    };
+    airport_stats: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /** @description Airport ICAO */
+                icao: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["StatsAirportBody"];
+                };
+            };
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+        };
+    };
+    airport_movements: {
+        parameters: {
+            query?: {
+                /** @description arr | dep (default dep) */
+                dir?: string;
+                /** @description Max rows (default 50) */
+                limit?: number;
+            };
+            header?: never;
+            path: {
+                /** @description Airport ICAO */
+                icao: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["StatsFlightSummary"][];
+                };
+            };
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+        };
+    };
+    flight_detail: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /** @description Flight session id */
+                id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["StatsFlightDetail"];
+                };
+            };
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+        };
+    };
+    flight_track: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /** @description Flight session id */
+                id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["StatsTrackBody"];
+                };
+            };
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+        };
+    };
+    member_flights: {
+        parameters: {
+            query?: {
+                /** @description Max rows (default 50) */
+                limit?: number;
+            };
+            header?: never;
+            path: {
+                /** @description VATSIM CID */
+                cid: number;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["StatsFlightSummary"][];
+                };
+            };
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+        };
+    };
+    network_history: {
+        parameters: {
+            query?: {
+                /** @description RFC3339 start (default 7d ago) */
+                from?: string;
+                /** @description RFC3339 end (default now) */
+                to?: string;
+            };
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["NetworkPointBody"][];
+                };
+            };
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
             };
         };
     };

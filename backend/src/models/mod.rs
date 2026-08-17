@@ -617,10 +617,92 @@ pub struct AirportMovementBody {
     pub departures: i64,
 }
 
-#[derive(Debug, Serialize, ToSchema)]
+#[derive(Debug, Serialize, ToSchema, sqlx::FromRow)]
 pub struct KeyCountBody {
     pub key: Option<String>,
     pub count: i64,
+}
+
+// --- stats read API (/api/v1/stats/*) ---
+
+/// Serialize an i64 session id as a JSON string — the hashed ids exceed JS's safe-integer range,
+/// so a number would lose precision in the browser and break flight links.
+pub(crate) mod id_str {
+    use serde::Serializer;
+    pub fn serialize<S: Serializer>(v: &i64, s: S) -> Result<S::Ok, S::Error> {
+        s.serialize_str(&v.to_string())
+    }
+}
+
+/// One hour of network totals (from `stats.snapshot`).
+#[derive(Debug, Serialize, ToSchema, sqlx::FromRow)]
+pub struct NetworkPointBody {
+    pub hour: DateTime<Utc>,
+    pub avg_pilots: Option<i32>,
+    pub peak_pilots: Option<i32>,
+    pub avg_controllers: Option<i32>,
+    pub peak_clients: Option<i32>,
+}
+
+/// A compact flight row for lists (airport movements, member history).
+#[derive(Debug, Serialize, ToSchema, sqlx::FromRow)]
+pub struct StatsFlightSummary {
+    #[serde(serialize_with = "id_str::serialize")]
+    #[schema(value_type = String)]
+    pub session_id: i64,
+    pub callsign: String,
+    pub status: String,
+    pub logon_time: DateTime<Utc>,
+    pub departure: Option<String>,
+    pub arrival: Option<String>,
+    pub aircraft_short: Option<String>,
+    pub duration_s: Option<i32>,
+    pub distance_nm: Option<f32>,
+}
+
+/// Full flight metadata + summary.
+#[derive(Debug, Serialize, ToSchema, sqlx::FromRow)]
+pub struct StatsFlightDetail {
+    #[serde(serialize_with = "id_str::serialize")]
+    #[schema(value_type = String)]
+    pub session_id: i64,
+    pub cid: i32,
+    pub callsign: String,
+    pub server: Option<String>,
+    pub status: String,
+    pub logon_time: DateTime<Utc>,
+    pub first_seen: DateTime<Utc>,
+    pub last_seen: DateTime<Utc>,
+    pub departure: Option<String>,
+    pub arrival: Option<String>,
+    pub alternate: Option<String>,
+    pub aircraft_short: Option<String>,
+    pub cruise_alt: Option<i32>,
+    pub route: Option<String>,
+    pub duration_s: Option<i32>,
+    pub distance_nm: Option<f32>,
+    pub max_altitude: Option<i32>,
+    pub max_groundspeed: Option<i32>,
+}
+
+/// Airport activity: dep/arr counts + top aircraft / destinations / origins.
+#[derive(Debug, Serialize, ToSchema)]
+pub struct StatsAirportBody {
+    pub icao: String,
+    pub departures: i64,
+    pub arrivals: i64,
+    pub top_aircraft: Vec<KeyCountBody>,
+    pub top_destinations: Vec<KeyCountBody>,
+    pub top_origins: Vec<KeyCountBody>,
+}
+
+/// A flight's track: full 15s `positions` if still recent, else the stored simplified path.
+#[derive(Debug, Serialize, ToSchema)]
+pub struct StatsTrackBody {
+    /// `full` | `simplified` | `none`
+    pub resolution: String,
+    #[schema(value_type = Object)]
+    pub points: Value,
 }
 
 /// Stats generated from an event's capture window. `captured` is false when no capture exists yet.

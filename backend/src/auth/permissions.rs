@@ -73,5 +73,5 @@ permission!(FlowRunwayRead, ["flow", "runway"], Read);
 permission!(FlowRunwayUpdate, ["flow", "runway"], Update);
 
 // stats — persistent network statistics + saved capture windows
-permission!(StatsRead, ["stats"], Read);
+permission!(StatsRead, ["stats", "data"], Read);
 permission!(StatsCaptureUpdate, ["stats", "capture"], Update);

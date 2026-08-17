@@ -8,7 +8,8 @@ use crate::{
     config::build_cors_layer,
     handlers::{
         access, airport_configs, atc, audit, auth, dashboards, docs, events, facilities, feed,
-        flow, gdp, health, preferences, public, runway, service_accounts, tmu, users, webhooks,
+        flow, gdp, health, preferences, public, runway, service_accounts, stats, tmu, users,
+        webhooks,
     },
     state::AppState,
 };
@@ -200,6 +201,20 @@ pub fn build_router(state: AppState) -> Router {
             "/api/v1/forecast/{icao}",
             get(airport_configs::forecast_wind),
         )
+        // Persisted VATSIM stats (historical read API)
+        .route("/api/v1/stats/network/history", get(stats::network_history))
+        .route("/api/v1/stats/airports/top", get(stats::airports_top))
+        .route("/api/v1/stats/airports/{icao}", get(stats::airport_stats))
+        .route(
+            "/api/v1/stats/airports/{icao}/movements",
+            get(stats::airport_movements),
+        )
+        .route(
+            "/api/v1/stats/members/{cid}/flights",
+            get(stats::member_flights),
+        )
+        .route("/api/v1/stats/flights/{id}", get(stats::flight_detail))
+        .route("/api/v1/stats/flights/{id}/track", get(stats::flight_track))
         // Flow constrained areas (FCAs) + live map traffic
         .route(
             "/api/v1/flow/fcas",

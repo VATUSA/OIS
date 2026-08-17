@@ -19,6 +19,8 @@ import {TmuPage} from "@/pages/tmu";
 import {PlanningEventsPage} from "@/pages/planning/events";
 import {EventPlanningPage} from "@/pages/planning/event";
 import {AirportConfigsPage} from "@/pages/planning/airport-configs";
+import {StatsPage} from "@/pages/stats";
+import {StatsFlightPage} from "@/pages/stats/flight";
 import {AdminLayout} from "@/pages/admin/layout";
 import {AdminOverview} from "@/pages/admin/overview";
 import {AdminAccessControl} from "@/pages/admin/access-control";
@@ -198,6 +200,26 @@ const planningEventRoute = createRoute({
   component: EventPlanningPage,
 });
 
+// --- Stats (persisted network statistics) ---
+
+const statsRoute = createRoute({
+  getParentRoute: () => rootRoute,
+  path: "stats",
+  component: Outlet,
+});
+
+const statsIndexRoute = createRoute({
+  getParentRoute: () => statsRoute,
+  path: "/",
+  component: StatsPage,
+});
+
+const statsFlightRoute = createRoute({
+  getParentRoute: () => statsRoute,
+  path: "flights/$flightId",
+  component: StatsFlightPage,
+});
+
 // --- Admin ---
 
 const adminRoute = createRoute({
@@ -273,6 +295,7 @@ const routeTree = rootRoute.addChildren([
     planningAirportConfigsRoute,
     planningEventRoute,
   ]),
+  statsRoute.addChildren([statsIndexRoute, statsFlightRoute]),
   adminRoute.addChildren([
     adminIndexRoute,
     adminAccessRoute,
