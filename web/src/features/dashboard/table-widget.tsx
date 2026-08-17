@@ -22,6 +22,9 @@ import {type DataSource, DATA_SOURCES_BY_ID, type FieldType, type Row} from "./s
 import type {TableWidget as TableWidgetT} from "./types";
 import {useReportWidgetStatus} from "./widget-status";
 
+/** Shared stable reference for the unsorted state (see the note where it's used). */
+const EMPTY_SORTING: SortingState = [];
+
 function Cell({ value, type }: { value: unknown; type: FieldType }) {
   if (value == null || value === "") return <span className="text-muted-foreground">—</span>;
   if (type === "time") return <>{hhmmZulu(String(value))}</>;
@@ -111,7 +114,8 @@ function TableInner({
     [source, visible.join(",")],
   );
 
-  const sorting = (widget.sort ?? []) as SortingState;
+  // Stable empty reference when unsorted — a fresh `[]` each render would churn the table state.
+  const sorting = (widget.sort ?? EMPTY_SORTING) as SortingState;
   const table = useReactTable({
     data: rows,
     columns,
@@ -122,6 +126,9 @@ function TableInner({
     },
     getCoreRowModel: getCoreRowModel(),
     getSortedRowModel: getSortedRowModel(),
+    // We don't paginate/expand; disabling auto-reset avoids a data-change → reset → re-render loop.
+    autoResetPageIndex: false,
+    autoResetExpanded: false,
   });
 
   return (

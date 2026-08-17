@@ -4,6 +4,8 @@
 // one source for its lifetime, so calling `source.useRows(...)` unconditionally is hooks-safe
 // (the TableWidget also keys its inner component by source id, remounting on any change).
 
+import {useMemo} from "react";
+
 import {useMultiDepartures} from "@/lib/departures";
 import {useFcas, useTraffic} from "@/lib/fca";
 import {useMultiAirportFlow} from "@/lib/feed";
@@ -76,6 +78,31 @@ const f = (key: string, label: string, type: FieldType = "string"): FieldDef => 
 /** Normalize params to a concrete airport list (icaos preferred, else the single icao). */
 const airports = (p: SourceParams): string[] => (p.icaos?.length ? p.icaos : p.icao ? [p.icao] : []);
 
+/**
+ * Flatten a multi-airport query result into tagged rows, memoized so the array keeps the SAME
+ * reference between data updates. This is load-bearing: the rows feed a table widget's
+ * `useReactTable({ data })`, and handing it a fresh array every render sends TanStack Table into a
+ * re-render loop (it rebuilds its row model, re-renders, gets a new array, repeats) that pegs the
+ * main thread and freezes the tab. We key the memo on the airport list + each query's
+ * `dataUpdatedAt`, so rows only rebuild when the underlying data actually changes.
+ */
+function useTaggedRows<T>(
+  list: string[],
+  qs: { data?: T; dataUpdatedAt: number }[],
+  pick: (data: T) => readonly unknown[],
+): Row[] {
+  const sig = `${list.join(",")}|${qs.map((q) => q?.dataUpdatedAt ?? 0).join(",")}`;
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  return useMemo(
+    () =>
+      list.flatMap((ic, i) => {
+        const d = qs[i]?.data;
+        return (d ? pick(d) : []).map((r) => ({ ...(r as object), [AIRPORT_KEY]: ic }) as Row);
+      }),
+    [sig],
+  );
+}
+
 export const DATA_SOURCES: DataSource[] = [
   {
     id: "airport-flow",
@@ -98,9 +125,7 @@ export const DATA_SOURCES: DataSource[] = [
     useRows: (p) => {
       const list = airports(p);
       const qs = useMultiAirportFlow(list);
-      const rows = list.flatMap((ic, i) =>
-        (qs[i]?.data?.flights ?? []).map((r) => ({ ...r, [AIRPORT_KEY]: ic })),
-      ) as Row[];
+      const rows = useTaggedRows(list, qs, (d) => d.flights ?? []);
       return {
         rows,
         isLoading: qs.some((q) => q.isLoading),
@@ -129,9 +154,7 @@ export const DATA_SOURCES: DataSource[] = [
     useRows: (p) => {
       const list = airports(p);
       const qs = useMultiDepartures(list);
-      const rows = list.flatMap((ic, i) =>
-        (qs[i]?.data?.departures ?? []).map((r) => ({ ...r, [AIRPORT_KEY]: ic })),
-      ) as Row[];
+      const rows = useTaggedRows(list, qs, (d) => d.departures ?? []);
       return {
         rows,
         isLoading: qs.some((q) => q.isLoading),
@@ -155,9 +178,7 @@ export const DATA_SOURCES: DataSource[] = [
     useRows: (p) => {
       const list = airports(p);
       const qs = useMultiTaxiStats(list);
-      const rows = list.flatMap((ic, i) =>
-        (qs[i]?.data?.active ?? []).map((r) => ({ ...r, [AIRPORT_KEY]: ic })),
-      ) as Row[];
+      const rows = useTaggedRows(list, qs, (d) => d.active ?? []);
       return {
         rows,
         isLoading: qs.some((q) => q.isLoading),
