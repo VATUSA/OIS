@@ -104,7 +104,6 @@ function useEventColumns(): ColumnDef<EventSummary>[] {
 }
 
 function EventsTable({ events }: { events: EventSummary[] }) {
-  const navigate = useNavigate();
   const columns = useEventColumns();
   const [sorting, setSorting] = useState<SortingState>([{ id: "start_time", desc: false }]);
   const table = useReactTable({
@@ -155,13 +154,7 @@ function EventsTable({ events }: { events: EventSummary[] }) {
         </thead>
         <tbody>
           {table.getRowModel().rows.map((r) => (
-            <tr
-              key={r.id}
-              className="cursor-pointer border-t transition-colors hover:bg-accent/50"
-              onClick={() =>
-                navigate({ to: "/planning/events/$eventId", params: { eventId: String(r.original.id) } })
-              }
-            >
+            <tr key={r.id} className="border-t transition-colors hover:bg-accent/30">
               {r.getVisibleCells().map((cell) => (
                 <td key={cell.id} className="py-2 pr-3">
                   {flexRender(cell.column.columnDef.cell, cell.getContext())}
