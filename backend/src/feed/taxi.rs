@@ -332,6 +332,7 @@ mod tests {
                     arrival: "KBBB".into(),
                     ..Default::default()
                 }),
+                ..Default::default()
             }],
             ..Default::default()
         }

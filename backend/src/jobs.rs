@@ -12,9 +12,18 @@ use crate::feed::FeedState;
 use crate::feed::nav::NavData;
 use crate::feed::nav_source;
 use crate::feed::winds::{self, Winds};
+use crate::repos::stats as stats_repo;
 use crate::repos::tmu as tmu_repo;
 
 const CLEANUP_INTERVAL: Duration = Duration::from_secs(15 * 60);
+
+/// How often to age the stats position table.
+const STATS_COMPACTION_INTERVAL: Duration = Duration::from_secs(60 * 60);
+/// Positions this old are downsampled (keep 1-of-N); older than the prune horizon they're dropped.
+const STATS_DOWNSAMPLE_AFTER_DAYS: i64 = 2;
+const STATS_PRUNE_AFTER_DAYS: i64 = 14;
+/// Keep every Nth 15s sample in the downsample band (4 → ~1-minute resolution).
+const STATS_KEEP_EVERY: i64 = 4;
 
 /// How often to check the FAA/@squawk sources for a newer NASR cycle.
 const NAV_REFRESH_INTERVAL: Duration = Duration::from_secs(24 * 60 * 60);
@@ -109,6 +118,41 @@ pub fn spawn_winds_refresh(feed: FeedState, winds: Arc<ArcSwap<Winds>>, refreshe
                     }
                     tokio::time::sleep(WINDS_REFRESH_INTERVAL).await;
                 }
+            }
+        }
+    });
+}
+
+/// Age the stats position time-series: downsample the 2–14 day band to ~1-minute resolution and
+/// drop raw positions past the 14-day horizon (Tier-1 simplified tracks on `stats.flight` survive).
+/// Rows inside an open/saved `stats.capture` window are skipped (retained at full fidelity). Runs
+/// hourly; a slow, batched, saved-window-aware alternative to TimescaleDB retention.
+pub fn spawn_stats_compaction(pool: PgPool) {
+    tokio::spawn(async move {
+        let mut ticker = tokio::time::interval(STATS_COMPACTION_INTERVAL);
+        loop {
+            ticker.tick().await;
+            let now = Utc::now();
+            let downsample_before = now - chrono::Duration::days(STATS_DOWNSAMPLE_AFTER_DAYS);
+            let prune_before = now - chrono::Duration::days(STATS_PRUNE_AFTER_DAYS);
+
+            match stats_repo::downsample_positions(
+                &pool,
+                prune_before,
+                downsample_before,
+                STATS_KEEP_EVERY,
+            )
+            .await
+            {
+                Ok(n) if n > 0 => tracing::info!(deleted = n, "stats: downsampled positions"),
+                Ok(_) => {}
+                Err(_) => tracing::warn!("stats: downsample pass failed"),
+            }
+
+            match stats_repo::prune_positions(&pool, prune_before).await {
+                Ok(n) if n > 0 => tracing::info!(deleted = n, "stats: pruned old positions"),
+                Ok(_) => {}
+                Err(_) => tracing::warn!("stats: prune pass failed"),
             }
         }
     });

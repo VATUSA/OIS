@@ -34,7 +34,7 @@ fn facility_kind(facility: i32) -> Option<&'static str> {
 /// radio prefix (`BOS`, `NY`, `DC`, `LAX`) rather than the `Zxx` id our boundaries use;
 /// a bare `Zxx` id (e.g. `ZLA_CTR`) is accepted directly. Prefixes are from VATSpy `[FIRs]`.
 /// Non-US centers return `None` (we have no boundary geometry to shade for them).
-fn center_artcc(prefix: &str) -> Option<String> {
+pub(crate) fn center_artcc(prefix: &str) -> Option<String> {
     if prefix.len() == 3
         && prefix.starts_with('Z')
         && prefix.bytes().all(|b| b.is_ascii_alphanumeric())
