@@ -30,6 +30,19 @@ pub struct Controller {
     pub facility: i32,
     #[serde(default)]
     pub rating: i32,
+    // --- stats collection (session persistence) ---
+    #[serde(default)]
+    pub cid: i32,
+    #[serde(default)]
+    pub name: String,
+    #[serde(default)]
+    pub server: Option<String>,
+    #[serde(default)]
+    pub visual_range: Option<i32>,
+    #[serde(default)]
+    pub logon_time: String,
+    #[serde(default)]
+    pub last_updated: String,
 }
 
 /// An online ATIS (its own datafeed array). `atis_code` is the broadcast letter.
@@ -42,15 +55,36 @@ pub struct Atis {
     pub atis_code: Option<String>,
     #[serde(default)]
     pub text_atis: Option<Vec<String>>,
+    // --- stats collection (session persistence) ---
+    #[serde(default)]
+    pub cid: i32,
+    #[serde(default)]
+    pub name: String,
+    #[serde(default)]
+    pub facility: i32,
+    #[serde(default)]
+    pub rating: i32,
+    #[serde(default)]
+    pub server: Option<String>,
+    #[serde(default)]
+    pub visual_range: Option<i32>,
+    #[serde(default)]
+    pub logon_time: String,
+    #[serde(default)]
+    pub last_updated: String,
 }
 
 #[derive(Debug, Default, Deserialize)]
 pub struct General {
     #[serde(default)]
     pub update_timestamp: String,
+    #[serde(default)]
+    pub connected_clients: i32,
+    #[serde(default)]
+    pub unique_users: i32,
 }
 
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Default, Deserialize)]
 pub struct Pilot {
     pub callsign: String,
     #[serde(default)]
@@ -65,13 +99,37 @@ pub struct Pilot {
     pub heading: i64,
     #[serde(default)]
     pub flight_plan: Option<FlightPlan>,
+    // --- stats collection (session persistence) ---
+    #[serde(default)]
+    pub cid: i32,
+    #[serde(default)]
+    pub name: String,
+    #[serde(default)]
+    pub server: Option<String>,
+    #[serde(default)]
+    pub transponder: Option<String>,
+    #[serde(default)]
+    pub qnh_mb: Option<i32>,
+    /// Stable for the life of a connection — half of the session key.
+    #[serde(default)]
+    pub logon_time: String,
+    /// Advances only when this pilot's data actually changes (skip unchanged positions).
+    #[serde(default)]
+    pub last_updated: String,
 }
 
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Default, Deserialize)]
 pub struct Prefile {
     pub callsign: String,
     #[serde(default)]
     pub flight_plan: Option<FlightPlan>,
+    // --- stats collection (session persistence) ---
+    #[serde(default)]
+    pub cid: i32,
+    #[serde(default)]
+    pub name: String,
+    #[serde(default)]
+    pub last_updated: String,
 }
 
 #[derive(Debug, Clone, Default, Deserialize)]
@@ -98,6 +156,15 @@ pub struct FlightPlan {
     pub altitude: String,
     #[serde(default)]
     pub deptime: String,
+    // --- stats collection (session persistence) ---
+    #[serde(default)]
+    pub alternate: String,
+    #[serde(default)]
+    pub enroute_time: String,
+    #[serde(default)]
+    pub remarks: String,
+    #[serde(default)]
+    pub revision_id: Option<i32>,
 }
 
 impl FlightPlan {

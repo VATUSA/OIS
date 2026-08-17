@@ -35,6 +35,14 @@ impl Boundaries {
             .get(&code.to_ascii_uppercase())
             .is_some_and(|rings| rings.iter().any(|r| point_in_ring(r, lat, lon)))
     }
+
+    /// Whether `(lat, lon)` lies inside **any** loaded US ARTCC — a cheap "over US airspace" test
+    /// for scoping stats collection to US-relevant traffic.
+    pub fn any_contains(&self, lat: f64, lon: f64) -> bool {
+        self.polys
+            .values()
+            .any(|rings| rings.iter().any(|r| point_in_ring(r, lat, lon)))
+    }
 }
 
 #[derive(Deserialize)]

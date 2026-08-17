@@ -11,6 +11,7 @@ pub mod preferences;
 pub mod public;
 pub mod runway;
 pub mod service_accounts;
+pub mod stats;
 pub mod tmu;
 pub mod users;
 pub mod vatusa;

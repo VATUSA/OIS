@@ -748,6 +748,7 @@ mod tests {
             groundspeed: gs,
             heading: 0,
             flight_plan: Some(plan),
+            ..Default::default()
         }
     }
 
@@ -931,6 +932,7 @@ mod tests {
             prefiles: vec![Prefile {
                 callsign: "PRE1".into(),
                 flight_plan: Some(fp("KBOS", "KJFK", "DCT LENDY KJFK")),
+                ..Default::default()
             }],
             ..Default::default()
         };
@@ -973,6 +975,7 @@ mod tests {
             prefiles: vec![Prefile {
                 callsign: "P1".into(),
                 flight_plan: Some(fp("KBOS", "KMIA", "DCT")),
+                ..Default::default()
             }],
             ..Default::default()
         };

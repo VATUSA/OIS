@@ -71,3 +71,7 @@ permission!(FlowRouteUpdate, ["flow", "route"], Update);
 permission!(FlowRouteDelete, ["flow", "route"], Delete);
 permission!(FlowRunwayRead, ["flow", "runway"], Read);
 permission!(FlowRunwayUpdate, ["flow", "runway"], Update);
+
+// stats — persistent network statistics + saved capture windows
+permission!(StatsRead, ["stats"], Read);
+permission!(StatsCaptureUpdate, ["stats", "capture"], Update);

@@ -16,6 +16,7 @@ pub mod nav;
 pub mod nav_source;
 pub mod runway;
 pub mod runway_db;
+pub mod stats;
 pub mod taxi;
 pub mod tracon;
 pub mod trajectory;
