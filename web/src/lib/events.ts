@@ -116,10 +116,11 @@ export function useUpsertFacilitySupport(eventId: number) {
       facility: string;
       body: UpsertFacilitySupport;
     }) => {
-      const { data, error } = await ois.PUT(
+      const { data, error, response } = await ois.PUT(
         "/api/v1/events/{id}/facilities/{facility}",
         { params: { path: { id: eventId, facility } }, body },
       );
+      if (response?.status === 403) throw new Error("forbidden");
       if (error || !data) throw new Error("save failed");
       return data;
     },
@@ -128,7 +129,12 @@ export function useUpsertFacilitySupport(eventId: number) {
         queryKey: ["event-facilities", eventId],
       });
     },
-    onError: () => toast.error("Couldn’t save the facility"),
+    onError: (e) =>
+      toast.error(
+        e.message === "forbidden"
+          ? "You can only edit your own facility’s support"
+          : "Couldn’t save the facility",
+      ),
   });
 }
 
@@ -137,19 +143,25 @@ export function useRemoveFacilitySupport(eventId: number) {
   const toast = useToast();
   return useMutation({
     mutationFn: async (facility: string) => {
-      const { error } = await ois.DELETE(
+      const { error, response } = await ois.DELETE(
         "/api/v1/events/{id}/facilities/{facility}",
         { params: { path: { id: eventId, facility } } },
       );
+      if (response?.status === 403) throw new Error("forbidden");
       if (error) throw new Error("remove failed");
     },
     onSuccess: () => {
       queryClient.invalidateQueries({
         queryKey: ["event-facilities", eventId],
       });
-      toast.success("Facility removed");
+      toast.success("Facility support cleared");
     },
-    onError: () => toast.error("Couldn’t remove the facility"),
+    onError: (e) =>
+      toast.error(
+        e.message === "forbidden"
+          ? "You can only edit your own facility’s support"
+          : "Couldn’t clear the facility",
+      ),
   });
 }
 

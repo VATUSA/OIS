@@ -66,6 +66,7 @@ pub fn draft_new_permission_names() -> Vec<&'static str> {
         "events.plan.update",              // edit DCC / facility support / TMI packages
         "events.rate.update",              // set an event's airport AAR/ADR (facility-scoped)
         "events.config.update", // manage an airport's default runway configs (facility-scoped)
+        "events.support.update", // set a facility's event support level (facility-scoped)
         "events.staffing_requests.create", // CC an ARTCC / request staffing
         "events.staffing_requests.read",
         "events.staffing_requests.decide", // acknowledge/decline a staffing request

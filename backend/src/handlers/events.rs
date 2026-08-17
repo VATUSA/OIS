@@ -11,7 +11,10 @@ use serde_json::Value;
 use crate::{
     auth::{
         context::CurrentUser,
-        permissions::{EventsPlanRead, EventsPlanUpdate, EventsRateUpdate, EventsStaffingCreate},
+        permissions::{
+            EventsPlanRead, EventsPlanUpdate, EventsRateUpdate, EventsStaffingCreate,
+            EventsSupportUpdate,
+        },
         require_permission::RequirePermission,
     },
     errors::ApiError,
@@ -105,6 +108,7 @@ const DCC_STATUSES: [&str; 3] = ["not_needed", "requested", "confirmed"];
 const SUPPORT_LEVELS: [&str; 3] = ["required", "preferred", "not_required"];
 const STAFFING_STATUSES: [&str; 3] = ["open", "met", "closed"];
 const RATE_PERMISSION: &str = "events.rate.update";
+const SUPPORT_PERMISSION: &str = "events.support.update";
 
 fn normalize_facility(raw: &str) -> Option<String> {
     let f = raw.trim().to_ascii_uppercase();
@@ -223,15 +227,111 @@ pub async fn update_event_dcc(
     path = "/api/v1/events/{id}/facilities",
     tag = "events",
     params(("id" = i64, Path, description = "VATUSA event id")),
-    responses((status = 200, body = Vec<FacilitySupportBody>), (status = 401))
+    responses((status = 200, body = Vec<FacilitySupportBody>), (status = 401), (status = 404))
 )]
 pub async fn list_event_facilities(
     State(state): State<AppState>,
     _permission: RequirePermission<EventsPlanRead>,
+    Extension(current_user): Extension<Option<CurrentUser>>,
     Path(id): Path<i64>,
 ) -> Result<Json<Vec<FacilitySupportBody>>, ApiError> {
     let pool = state.db.as_ref().ok_or(ApiError::ServiceUnavailable)?;
-    Ok(Json(events_repo::list_facility_support(pool, id).await?))
+    let event = events_repo::get(pool, id)
+        .await?
+        .ok_or(ApiError::NotFound)?;
+
+    // Derive the involved facilities from data we already have, unioned with any saved rows:
+    //   host ARTCC (event.facility) · owning ARTCCs of configured airports · ACE staffing requests.
+    let stored: std::collections::HashMap<String, FacilitySupportBody> =
+        events_repo::list_facility_support(pool, id)
+            .await?
+            .into_iter()
+            .map(|r| (r.facility.clone(), r))
+            .collect();
+
+    // ARTCC -> its configured airports on this event.
+    let mut airports_by_facility: std::collections::HashMap<String, Vec<String>> =
+        std::collections::HashMap::new();
+    for r in events_repo::list_airport_rates(pool, id).await? {
+        if !r.artcc.is_empty() {
+            airports_by_facility
+                .entry(r.artcc)
+                .or_default()
+                .push(r.icao);
+        }
+    }
+
+    let staffing: std::collections::HashSet<String> = events_repo::list_staffing(pool, id)
+        .await?
+        .into_iter()
+        .map(|s| s.facility)
+        .collect();
+
+    let host = normalize_facility(&event.facility);
+
+    // Union of every facility id that any signal (or a saved row) surfaced.
+    let mut ids: std::collections::BTreeSet<String> = std::collections::BTreeSet::new();
+    ids.extend(stored.keys().cloned());
+    ids.extend(airports_by_facility.keys().cloned());
+    ids.extend(staffing.iter().cloned());
+    if let Some(h) = host.as_ref() {
+        ids.insert(h.clone());
+    }
+
+    // Editability is facility-scoped on events.support.update.
+    let scope = match current_user.as_ref() {
+        Some(user) => {
+            Some(access_repo::permission_scope(pool, &user.id, SUPPORT_PERMISSION).await?)
+        }
+        None => None,
+    };
+
+    let rows: Vec<FacilitySupportBody> = ids
+        .into_iter()
+        .map(|facility| {
+            let is_host = host.as_deref() == Some(facility.as_str());
+            let mut airports = airports_by_facility
+                .get(&facility)
+                .cloned()
+                .unwrap_or_default();
+            airports.sort();
+            let has_staffing = staffing.contains(&facility);
+            let editable = scope
+                .as_ref()
+                .map(|s| s.allows(Some(facility.as_str())))
+                .unwrap_or(false);
+
+            match stored.get(&facility) {
+                Some(row) => FacilitySupportBody {
+                    facility: facility.clone(),
+                    level: row.level.clone(),
+                    notes: row.notes.clone(),
+                    updated_at: row.updated_at,
+                    updated_by: row.updated_by.clone(),
+                    is_host,
+                    airports,
+                    has_staffing,
+                    stored: true,
+                    editable,
+                },
+                // Derived-only suggestion: default host to required, everything else to preferred.
+                None => FacilitySupportBody {
+                    facility,
+                    level: if is_host { "required" } else { "preferred" }.to_string(),
+                    notes: String::new(),
+                    updated_at: None,
+                    updated_by: None,
+                    is_host,
+                    airports,
+                    has_staffing,
+                    stored: false,
+                    editable,
+                },
+            }
+        })
+        .collect();
+
+    Ok(Json(rows))
 }
 
 #[utoipa::path(
@@ -247,7 +347,7 @@ pub async fn list_event_facilities(
 )]
 pub async fn upsert_event_facility(
     State(state): State<AppState>,
-    _permission: RequirePermission<EventsPlanUpdate>,
+    _permission: RequirePermission<EventsSupportUpdate>,
     Extension(current_user): Extension<Option<CurrentUser>>,
     Path((id, facility)): Path<(i64, String)>,
     Json(payload): Json<UpsertFacilitySupportRequest>,
@@ -263,6 +363,12 @@ pub async fn upsert_event_facility(
         return Err(ApiError::NotFound);
     }
 
+    // Facility scope: the caller must hold events.support.update nationally or for this facility.
+    let scope = access_repo::permission_scope(pool, &user.id, SUPPORT_PERMISSION).await?;
+    if !scope.allows(Some(facility.as_str())) {
+        return Err(ApiError::Forbidden);
+    }
+
     let notes = payload.notes.unwrap_or_default();
     events_repo::upsert_facility_support(
         pool,
@@ -273,10 +379,12 @@ pub async fn upsert_event_facility(
         &user.id,
     )
     .await?;
-    events_repo::get_facility_support(pool, id, &facility)
+    let mut row = events_repo::get_facility_support(pool, id, &facility)
         .await?
-        .map(Json)
-        .ok_or(ApiError::Internal)
+        .ok_or(ApiError::Internal)?;
+    row.stored = true;
+    row.editable = true;
+    Ok(Json(row))
 }
 
 #[utoipa::path(
@@ -291,11 +399,20 @@ pub async fn upsert_event_facility(
 )]
 pub async fn delete_event_facility(
     State(state): State<AppState>,
-    _permission: RequirePermission<EventsPlanUpdate>,
+    _permission: RequirePermission<EventsSupportUpdate>,
+    Extension(current_user): Extension<Option<CurrentUser>>,
     Path((id, facility)): Path<(i64, String)>,
 ) -> Result<axum::http::StatusCode, ApiError> {
+    let user = current_user.as_ref().ok_or(ApiError::Unauthorized)?;
     let pool = state.db.as_ref().ok_or(ApiError::ServiceUnavailable)?;
     let facility = normalize_facility(&facility).ok_or(ApiError::BadRequest)?;
+
+    // Facility scope: the caller must hold events.support.update nationally or for this facility.
+    let scope = access_repo::permission_scope(pool, &user.id, SUPPORT_PERMISSION).await?;
+    if !scope.allows(Some(facility.as_str())) {
+        return Err(ApiError::Forbidden);
+    }
+
     if events_repo::delete_facility_support(pool, id, &facility).await? {
         Ok(axum::http::StatusCode::NO_CONTENT)
     } else {

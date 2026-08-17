@@ -1,6 +1,6 @@
 import {useEffect, useMemo, useState} from "react";
 import {Badge, Button, Card, CardContent, ConfirmButton, Input} from "@ois/ui";
-import {Waypoints, X} from "lucide-react";
+import {Plane, Users, Waypoints, X} from "lucide-react";
 
 import {useMe} from "@/lib/auth";
 import {useFacilities} from "@/lib/admin";
@@ -31,16 +31,46 @@ function levelLabel(level: string): string {
   return LEVELS.find((l) => l.value === level)?.label ?? level;
 }
 
+/** Badges explaining why a facility surfaced in the list. */
+function WhyCell({ row }: { row: FacilitySupport }) {
+  const parts: React.ReactNode[] = [];
+  if (row.is_host)
+    parts.push(
+      <Badge key="host" variant="default">
+        Host
+      </Badge>,
+    );
+  if (row.airports.length > 0)
+    parts.push(
+      <Badge key="apts" variant="secondary" className="gap-1 font-mono">
+        <Plane className="size-3" />
+        {row.airports.join(", ")}
+      </Badge>,
+    );
+  if (row.has_staffing)
+    parts.push(
+      <Badge key="ace" variant="secondary" className="gap-1">
+        <Users className="size-3" />
+        ACE
+      </Badge>,
+    );
+  if (parts.length === 0)
+    parts.push(
+      <span key="added" className="text-xs text-muted-foreground">
+        added manually
+      </span>,
+    );
+  return <div className="flex flex-wrap items-center gap-1">{parts}</div>;
+}
+
 function FacilityRow({
   eventId,
   row,
   name,
-  canEdit,
 }: {
   eventId: number;
   row: FacilitySupport;
   name?: string;
-  canEdit: boolean;
 }) {
   const upsert = useUpsertFacilitySupport(eventId);
   const remove = useRemoveFacilitySupport(eventId);
@@ -49,27 +79,39 @@ function FacilityRow({
   useEffect(() => setNotes(row.notes), [row.notes]);
 
   const FacilityCell = (
-    <td className="py-2 pr-3">
+    <td className="py-2 pr-3 align-top">
       <span className="font-mono font-medium">{row.facility}</span>
       {name && <span className="ml-2 text-xs text-muted-foreground">{name}</span>}
+      {!row.stored && (
+        <span className="ml-2 text-[10px] uppercase tracking-wide text-muted-foreground">
+          suggested
+        </span>
+      )}
     </td>
   );
 
-  if (!canEdit) {
+  if (!row.editable) {
     return (
       <tr className="border-t">
         {FacilityCell}
-        <td className="py-2 pr-3">
+        <td className="py-2 pr-3 align-top">
+          <WhyCell row={row} />
+        </td>
+        <td className="py-2 pr-3 align-top">
           <Badge variant={levelVariant(row.level)}>{levelLabel(row.level)}</Badge>
         </td>
-        <td className="py-2 text-muted-foreground">{row.notes || "—"}</td>
+        <td className="py-2 align-top text-muted-foreground">{row.notes || "—"}</td>
+        <td className="py-2" />
       </tr>
     );
   }
 
   return (
-    <tr className="border-t">
+    <tr className={"border-t align-top" + (row.stored ? "" : " text-muted-foreground")}>
       {FacilityCell}
+      <td className="py-2 pr-3">
+        <WhyCell row={row} />
+      </td>
       <td className="py-2 pr-3">
         <div className="flex flex-wrap gap-1">
           {LEVELS.map((l) => (
@@ -77,12 +119,9 @@ function FacilityRow({
               key={l.value}
               type="button"
               size="sm"
-              variant={row.level === l.value ? "default" : "secondary"}
+              variant={row.level === l.value && row.stored ? "default" : "secondary"}
               onClick={() =>
-                upsert.mutate({
-                  facility: row.facility,
-                  body: { level: l.value, notes },
-                })
+                upsert.mutate({ facility: row.facility, body: { level: l.value, notes } })
               }
             >
               {l.label}
@@ -98,24 +137,23 @@ function FacilityRow({
           onChange={(e) => setNotes(e.target.value)}
           onBlur={() => {
             if (notes !== row.notes) {
-              upsert.mutate({
-                facility: row.facility,
-                body: { level: row.level, notes },
-              });
+              upsert.mutate({ facility: row.facility, body: { level: row.level, notes } });
             }
           }}
         />
       </td>
       <td className="py-2 text-right">
-        <ConfirmButton
-          size="icon"
-          title={`Remove ${row.facility}`}
-          aria-label={`Remove ${row.facility}`}
-          onConfirm={() => remove.mutate(row.facility)}
-          warn={`Remove ${row.facility} from support?`}
-        >
-          <X className="size-4" />
-        </ConfirmButton>
+        {row.stored && (
+          <ConfirmButton
+            size="icon"
+            title={`Clear ${row.facility}`}
+            aria-label={`Clear ${row.facility}`}
+            onConfirm={() => remove.mutate(row.facility)}
+            warn={`Clear the saved support level for ${row.facility}?`}
+          >
+            <X className="size-4" />
+          </ConfirmButton>
+        )}
       </td>
     </tr>
   );
@@ -123,7 +161,7 @@ function FacilityRow({
 
 export function FacilitySupportSection({ eventId }: { eventId: number }) {
   const { data: me } = useMe();
-  const canEdit = hasPermission(me, "events.plan.update");
+  const canAdd = hasPermission(me, "events.support.update");
   const support = useFacilitySupport(eventId);
   const upsert = useUpsertFacilitySupport(eventId);
   const facilities = useFacilities();
@@ -145,17 +183,16 @@ export function FacilitySupportSection({ eventId }: { eventId: number }) {
           <div className="flex flex-col">
             <span className="font-semibold">Facility support</span>
             <span className="text-xs text-muted-foreground">
-              Which ARTCCs the event needs, and how badly.
+              Auto-derived from the host, configured airports, and ACE requests. Confirm a level or
+              adjust; facility staff edit only their own row.
             </span>
           </div>
         </div>
 
-        {canEdit && (
+        {canAdd && (
           <ArtccCombobox
             exclude={rows.map((r) => r.facility)}
-            onSelect={(id) =>
-              upsert.mutate({ facility: id, body: { level: "required" } })
-            }
+            onSelect={(id) => upsert.mutate({ facility: id, body: { level: "required" } })}
           />
         )}
 
@@ -163,7 +200,7 @@ export function FacilitySupportSection({ eventId }: { eventId: number }) {
           <p className="py-2 text-sm text-muted-foreground">Loading…</p>
         ) : rows.length === 0 ? (
           <p className="py-2 text-sm text-muted-foreground">
-            No ARTCCs added yet.
+            No facilities involved yet — add airports or ACE requests, or add one below.
           </p>
         ) : (
           <div className="overflow-x-auto">
@@ -171,9 +208,10 @@ export function FacilitySupportSection({ eventId }: { eventId: number }) {
               <thead>
                 <tr className="text-left text-xs uppercase tracking-wide text-muted-foreground">
                   <th className="pb-2 pr-3 font-medium">Facility</th>
+                  <th className="pb-2 pr-3 font-medium">Involvement</th>
                   <th className="pb-2 pr-3 font-medium">Level</th>
                   <th className="pb-2 pr-3 font-medium">Notes</th>
-                  {canEdit && <th className="pb-2" />}
+                  <th className="pb-2" />
                 </tr>
               </thead>
               <tbody>
@@ -183,7 +221,6 @@ export function FacilitySupportSection({ eventId }: { eventId: number }) {
                     eventId={eventId}
                     row={row}
                     name={nameById.get(row.facility)}
-                    canEdit={canEdit}
                   />
                 ))}
               </tbody>
