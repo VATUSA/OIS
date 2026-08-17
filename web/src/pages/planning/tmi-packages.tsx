@@ -1,20 +1,32 @@
 import {useState} from "react";
 import {Badge, Button, Card, CardContent, ConfirmButton, Input, useConfirm} from "@ois/ui";
-import {Layers, Play, Plus, X} from "lucide-react";
+import {Archive, Gauge, Layers, Play, Plus, X} from "lucide-react";
 
 import {useMe} from "@/lib/auth";
 import {
+  type AirportRate,
   type TmiPackage,
   type TmiPackageItem,
   useActivatePackage,
   useAddPackageItem,
+  useAirportRates,
   useCreatePackage,
+  useDeactivatePackage,
   useDeletePackage,
   useDeletePackageItem,
   usePackages,
 } from "@/lib/events";
 import {hasPermission} from "@/lib/permissions";
 import {formatZulu, parseZulu} from "@/lib/time";
+
+/** ICAOs already covered by a program item in a package. */
+function programIcaos(pkg: TmiPackage): Set<string> {
+  return new Set(
+    pkg.items
+      .filter((i) => i.kind === "program")
+      .map((i) => String((i.payload as Record<string, unknown>).icao ?? "").toUpperCase()),
+  );
+}
 
 type Kind = "program" | "restriction" | "ground_stop";
 
@@ -53,6 +65,7 @@ function AddItemForm({
   packageId: string;
 }) {
   const add = useAddPackageItem(eventId);
+  const rates = useAirportRates(eventId);
   const [kind, setKind] = useState<Kind>("program");
   const [f, setF] = useState<Record<string, string>>({});
   const set = (k: string, v: string) => setF((prev) => ({ ...prev, [k]: v }));
@@ -118,6 +131,25 @@ function AddItemForm({
           </Button>
         ))}
       </div>
+      {kind === "program" && (rates.data?.length ?? 0) > 0 && (
+        <div className="flex flex-wrap items-center gap-1">
+          <span className="text-xs text-muted-foreground">From rates:</span>
+          {rates.data!.map((r) => (
+            <Button
+              key={r.icao}
+              type="button"
+              size="sm"
+              variant="outline"
+              className="h-7 gap-1 font-mono"
+              title={`Pre-fill ${r.icao} · AAR ${r.aar}`}
+              onClick={() => setF({ icao: r.icao, aar: String(r.aar) })}
+            >
+              <Gauge className="size-3" />
+              {r.icao} {r.aar}
+            </Button>
+          ))}
+        </div>
+      )}
       <div className="flex flex-wrap items-center gap-2">
         {kind === "program" && (
           <>
@@ -163,25 +195,65 @@ function PackageCard({
 }) {
   const del = useDeletePackage(eventId);
   const removeItem = useDeletePackageItem(eventId);
+  const addItem = useAddPackageItem(eventId);
   const activate = useActivatePackage(eventId);
+  const deactivate = useDeactivatePackage(eventId);
+  const rates = useAirportRates(eventId);
   const confirm = useConfirm();
   const draft = pkg.status === "draft";
+  const activated = pkg.status === "activated";
   const editable = canEdit && draft;
+
+  const badgeVariant = draft ? "secondary" : activated ? "success" : "outline";
+
+  // Bulk-add a program per configured airport rate that isn't already covered.
+  async function programsFromRates() {
+    const have = programIcaos(pkg);
+    const missing = (rates.data ?? []).filter((r) => !have.has(r.icao.toUpperCase()));
+    for (const r of missing) {
+      await addItem.mutateAsync({
+        packageId: pkg.id,
+        kind: "program",
+        payload: { icao: r.icao, aar: r.aar, trail: 0, mit: 0 },
+      });
+    }
+  }
+
+  const missingRateCount = (rates.data ?? []).filter(
+    (r: AirportRate) => !programIcaos(pkg).has(r.icao.toUpperCase()),
+  ).length;
 
   return (
     <div className="rounded-lg border">
       <div className="flex items-center justify-between gap-2 border-b px-4 py-2.5">
         <div className="flex items-center gap-2">
           <span className="font-semibold">{pkg.name}</span>
-          <Badge variant={draft ? "secondary" : "success"}>{pkg.status}</Badge>
-          {!draft && pkg.activated_at && (
+          <Badge variant={badgeVariant}>{pkg.status}</Badge>
+          {activated && pkg.activated_at && (
             <span className="text-xs text-muted-foreground">
               activated {formatZulu(pkg.activated_at)}
+            </span>
+          )}
+          {pkg.status === "archived" && pkg.archived_at && (
+            <span className="text-xs text-muted-foreground">
+              archived {formatZulu(pkg.archived_at)}
             </span>
           )}
         </div>
         {canEdit && (
           <div className="flex items-center gap-2">
+            {draft && missingRateCount > 0 && (
+              <Button
+                size="sm"
+                variant="outline"
+                onClick={programsFromRates}
+                disabled={addItem.isPending}
+                title="Add a program for each configured airport, pre-filled with its planned AAR"
+              >
+                <Gauge />
+                Programs from rates
+              </Button>
+            )}
             {draft && (
               <Button
                 size="sm"
@@ -200,15 +272,36 @@ function PackageCard({
                 Activate
               </Button>
             )}
-            <ConfirmButton
-              size="icon"
-              title="Delete package"
-              aria-label="Delete package"
-              onConfirm={() => del.mutate(pkg.id)}
-              warn={`Delete the “${pkg.name}” package?`}
-            >
-              <X className="size-4" />
-            </ConfirmButton>
+            {activated && (
+              <Button
+                size="sm"
+                variant="secondary"
+                onClick={async () => {
+                  const ok = await confirm({
+                    title: `Deactivate “${pkg.name}”?`,
+                    description:
+                      "This cancels the live TMIs this package created and archives it as a record.",
+                    confirmText: "Deactivate",
+                  });
+                  if (ok) deactivate.mutate(pkg.id);
+                }}
+                disabled={deactivate.isPending}
+              >
+                <Archive />
+                Deactivate
+              </Button>
+            )}
+            {!activated && (
+              <ConfirmButton
+                size="icon"
+                title="Delete package"
+                aria-label="Delete package"
+                onConfirm={() => del.mutate(pkg.id)}
+                warn={`Delete the “${pkg.name}” package?`}
+              >
+                <X className="size-4" />
+              </ConfirmButton>
+            )}
           </div>
         )}
       </div>

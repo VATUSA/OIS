@@ -452,6 +452,22 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/v1/events/{id}/packages/{package_id}/deactivate": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        post: operations["deactivate_event_package"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/v1/events/{id}/packages/{package_id}/items": {
         parameters: {
             query?: never;
@@ -2661,10 +2677,15 @@ export interface components {
         TmiPackageBody: {
             /** Format: date-time */
             activated_at?: string | null;
+            /**
+             * Format: date-time
+             * @description When the package was deactivated (its live rows cancelled); null unless archived.
+             */
+            archived_at?: string | null;
             id: string;
             items: components["schemas"]["TmiPackageItemBody"][];
             name: string;
-            /** @description draft | activated */
+            /** @description draft | activated | archived */
             status: string;
             /** Format: date-time */
             updated_at: string;
@@ -4188,6 +4209,48 @@ export interface operations {
         };
     };
     activate_event_package: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /** @description VATUSA event id */
+                id: number;
+                /** @description Package id */
+                package_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["TmiPackageBody"][];
+                };
+            };
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            409: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+        };
+    };
+    deactivate_event_package: {
         parameters: {
             query?: never;
             header?: never;

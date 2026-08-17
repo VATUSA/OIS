@@ -72,6 +72,7 @@ use utoipa::OpenApi;
         crate::handlers::events::add_event_package_item,
         crate::handlers::events::delete_event_package_item,
         crate::handlers::events::activate_event_package,
+        crate::handlers::events::deactivate_event_package,
         crate::handlers::airport_configs::list_airport_configs,
         crate::handlers::airport_configs::create_airport_config,
         crate::handlers::airport_configs::update_airport_config,

@@ -176,6 +176,10 @@ pub fn build_router(state: AppState) -> Router {
             "/api/v1/events/{id}/packages/{package_id}/activate",
             post(events::activate_event_package),
         )
+        .route(
+            "/api/v1/events/{id}/packages/{package_id}/deactivate",
+            post(events::deactivate_event_package),
+        )
         // Reusable per-airport runway configs (default AAR/ADR + wind rule) for event planning
         .route(
             "/api/v1/airport-configs/{icao}",
