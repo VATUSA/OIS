@@ -1,6 +1,8 @@
 //! Read API over the persisted VATSIM stats (`/api/v1/stats/*`). Ported from the standalone stats
 //! system's API, gated on `stats.read`. Historical lookups only — "now" is served by the live feed.
 
+use std::collections::HashMap;
+
 use axum::{
     Json,
     extract::{Path, Query, State},
@@ -13,7 +15,8 @@ use crate::{
     auth::{permissions::StatsRead, require_permission::RequirePermission},
     errors::ApiError,
     models::{
-        NetworkPointBody, StatsAirportBody, StatsFlightDetail, StatsFlightSummary, StatsTrackBody,
+        CaptureSummaryBody, NetworkPointBody, ReplayBody, ReplayFlightBody, StatsAirportBody,
+        StatsFlightDetail, StatsFlightSummary, StatsTrackBody,
     },
     repos::stats as stats_repo,
     state::AppState,
@@ -22,6 +25,9 @@ use crate::{
 fn pool(state: &AppState) -> Result<&sqlx::PgPool, ApiError> {
     state.db.as_ref().ok_or(ApiError::ServiceUnavailable)
 }
+
+/// (callsign, departure, arrival, aircraft) for a replay flight.
+type FlightMeta = (String, Option<String>, Option<String>, Option<String>);
 
 fn norm_icao(raw: &str) -> String {
     raw.trim().to_ascii_uppercase()
@@ -220,4 +226,104 @@ pub async fn flight_track(
             }))
         }
     }
+}
+
+#[utoipa::path(
+    get,
+    path = "/api/v1/stats/captures",
+    tag = "stats",
+    responses((status = 200, body = Vec<CaptureSummaryBody>), (status = 401))
+)]
+pub async fn list_captures(
+    State(state): State<AppState>,
+    _permission: RequirePermission<StatsRead>,
+) -> Result<Json<Vec<CaptureSummaryBody>>, ApiError> {
+    Ok(Json(
+        stats_repo::list_replayable_captures(pool(&state)?).await?,
+    ))
+}
+
+#[derive(Deserialize)]
+pub struct ReplayQuery {
+    /// Sample spacing in seconds (default 30, clamped 15–300).
+    step: Option<i64>,
+}
+
+#[utoipa::path(
+    get,
+    path = "/api/v1/stats/captures/{id}/replay",
+    tag = "stats",
+    params(
+        ("id" = String, Path, description = "Capture id"),
+        ("step" = Option<i64>, Query, description = "Sample spacing seconds (default 30)")
+    ),
+    responses((status = 200, body = ReplayBody), (status = 401), (status = 404))
+)]
+pub async fn capture_replay(
+    State(state): State<AppState>,
+    _permission: RequirePermission<StatsRead>,
+    Path(id): Path<String>,
+    Query(q): Query<ReplayQuery>,
+) -> Result<Json<ReplayBody>, ApiError> {
+    let p = pool(&state)?;
+    let cap = stats_repo::capture_get(p, &id)
+        .await?
+        .ok_or(ApiError::NotFound)?;
+    let from = cap.start_time;
+    let to = cap.end_time.unwrap_or_else(Utc::now);
+    let step = q.step.unwrap_or(30).clamp(15, 300);
+
+    let samples = stats_repo::replay_positions(p, from, to, step).await?;
+
+    // Group consecutive samples (already ordered by session_id, then time) into per-flight tracks.
+    let mut flights: Vec<ReplayFlightBody> = Vec::new();
+    let mut ids: Vec<i64> = Vec::new();
+    let mut i = 0;
+    while i < samples.len() {
+        let sid = samples[i].session_id;
+        let mut track: Vec<[f64; 5]> = Vec::new();
+        while i < samples.len() && samples[i].session_id == sid {
+            let s = &samples[i];
+            track.push([
+                s.t,
+                s.lat as f64,
+                s.lon as f64,
+                s.alt as f64,
+                s.heading as f64,
+            ]);
+            i += 1;
+        }
+        ids.push(sid);
+        flights.push(ReplayFlightBody {
+            session_id: sid,
+            callsign: String::new(),
+            departure: None,
+            arrival: None,
+            aircraft: None,
+            samples: track,
+        });
+    }
+
+    // Attach callsign + plan basics.
+    let meta: HashMap<i64, FlightMeta> = stats_repo::flights_meta(p, &ids)
+        .await?
+        .into_iter()
+        .map(|(sid, cs, dep, arr, ac)| (sid, (cs, dep, arr, ac)))
+        .collect();
+    for f in flights.iter_mut() {
+        if let Some((cs, dep, arr, ac)) = meta.get(&f.session_id) {
+            f.callsign = cs.clone();
+            f.departure = dep.clone();
+            f.arrival = arr.clone();
+            f.aircraft = ac.clone();
+        }
+    }
+
+    Ok(Json(ReplayBody {
+        capture_id: cap.id,
+        window_start: from,
+        window_end: to,
+        step_s: step,
+        flights,
+    }))
 }

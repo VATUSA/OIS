@@ -1,7 +1,7 @@
 import {useMemo, useState} from "react";
-import {Badge, Button, Card, CardContent, Input} from "@ois/ui";
+import {Badge, Button, buttonVariants, Card, CardContent, Input} from "@ois/ui";
 import {Link} from "@tanstack/react-router";
-import {ArrowDownToLine, ArrowUpFromLine, Plane, TrendingUp} from "lucide-react";
+import {ArrowDownToLine, ArrowUpFromLine, Film, Plane, TrendingUp} from "lucide-react";
 
 import {useMe} from "@/lib/auth";
 import {hasPermission} from "@/lib/permissions";
@@ -10,9 +10,10 @@ import {
   useAirportMovements,
   useAirportsTop,
   useAirportStats,
+  useCaptures,
   useNetworkHistory,
 } from "@/lib/stats";
-import {formatZulu} from "@/lib/time";
+import {formatZulu, formatZuluFull} from "@/lib/time";
 
 const RANGES = [
   { id: "24h", label: "24h", days: 1 },
@@ -355,6 +356,74 @@ export function StatsPage() {
 
         <AirportLookup icao={icao} onPick={setIcao} />
       </div>
+
+      <SavedCaptures />
     </div>
+  );
+}
+
+function SavedCaptures() {
+  const captures = useCaptures();
+  const rows = captures.data ?? [];
+  if (captures.data && rows.length === 0) return null;
+
+  return (
+    <Card>
+      <CardContent className="flex flex-col gap-3 pt-6">
+        <div className="flex items-center gap-2">
+          <span className="flex size-8 items-center justify-center rounded-md bg-primary/10 text-primary">
+            <Film className="size-4" />
+          </span>
+          <div className="flex flex-col">
+            <span className="font-semibold">Saved captures</span>
+            <span className="text-xs text-muted-foreground">
+              Replay a recorded event or window on the map.
+            </span>
+          </div>
+        </div>
+        {!captures.data ? (
+          <p className="text-sm text-muted-foreground">Loading…</p>
+        ) : (
+          <div className="overflow-x-auto">
+            <table className="w-full text-sm">
+              <thead>
+                <tr className="text-left text-xs uppercase tracking-wide text-muted-foreground">
+                  <th className="pb-2 pr-3 font-medium">Capture</th>
+                  <th className="pb-2 pr-3 font-medium">Window</th>
+                  <th className="pb-2 pr-3 font-medium">Status</th>
+                  <th className="pb-2" />
+                </tr>
+              </thead>
+              <tbody>
+                {rows.map((c) => (
+                  <tr key={c.id} className="border-t">
+                    <td className="py-2 pr-3">{c.event_title || c.label || "Capture"}</td>
+                    <td className="py-2 pr-3 text-muted-foreground">
+                      {formatZuluFull(c.start_time)}
+                      {c.end_time ? ` – ${formatZulu(c.end_time)}` : " – live"}
+                    </td>
+                    <td className="py-2 pr-3">
+                      <Badge variant={c.status === "open" ? "success" : "secondary"}>
+                        {c.status === "open" ? "recording" : "saved"}
+                      </Badge>
+                    </td>
+                    <td className="py-2 text-right">
+                      <Link
+                        to="/stats/captures/$captureId/replay"
+                        params={{ captureId: c.id }}
+                        className={buttonVariants({ variant: "outline", size: "sm" }) + " gap-1"}
+                      >
+                        <Film className="size-3.5" />
+                        Replay
+                      </Link>
+                    </td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+        )}
+      </CardContent>
+    </Card>
   );
 }

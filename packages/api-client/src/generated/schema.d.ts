@@ -1070,6 +1070,38 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/v1/stats/captures": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get: operations["list_captures"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/stats/captures/{id}/replay": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get: operations["capture_replay"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/v1/stats/flights/{id}": {
         parameters: {
             query?: never;
@@ -1736,6 +1768,20 @@ export interface components {
             /** Format: int64 */
             total: number;
         };
+        /** @description A saved/open capture window (for the replay picker). */
+        CaptureSummaryBody: {
+            /** Format: date-time */
+            end_time?: string | null;
+            /** Format: int64 */
+            event_id?: number | null;
+            event_title?: string | null;
+            id: string;
+            label: string;
+            /** Format: date-time */
+            start_time: string;
+            /** @description `open` (recording) or `saved`. */
+            status: string;
+        };
         /** @description The new board id returned when copying a shared board. */
         CopyResponse: {
             id: string;
@@ -1927,6 +1973,8 @@ export interface components {
             can_edit: boolean;
             /** Format: date-time */
             capture_end?: string | null;
+            /** @description The capture's id (for map replay), when one exists. */
+            capture_id?: string | null;
             /** Format: date-time */
             capture_start?: string | null;
             /** @description Current capture state for the event: `open` (recording), `saved` (kept), or null (none yet). */
@@ -2625,6 +2673,30 @@ export interface components {
         /** @description Replace an FCA's manual crossing order (callsigns, in sequence). */
         ReorderRequest: {
             order: string[];
+        };
+        /** @description Everything needed to replay a capture window on a map. */
+        ReplayBody: {
+            capture_id: string;
+            flights: components["schemas"]["ReplayFlightBody"][];
+            /**
+             * Format: int64
+             * @description Sample spacing (seconds) the tracks were thinned to.
+             */
+            step_s: number;
+            /** Format: date-time */
+            window_end: string;
+            /** Format: date-time */
+            window_start: string;
+        };
+        /** @description One flight's downsampled track within a replay window. */
+        ReplayFlightBody: {
+            aircraft?: string | null;
+            arrival?: string | null;
+            callsign: string;
+            departure?: string | null;
+            /** @description Compact samples: `[t_seconds_from_start, lat, lon, altitude_ft, heading_deg]`. */
+            samples: number[][];
+            session_id: string;
         };
         /**
          * @description A named reference route on the flow map, defined by a filed-route string and resolved to a
@@ -6119,6 +6191,68 @@ export interface operations {
                 };
             };
             401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+        };
+    };
+    list_captures: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["CaptureSummaryBody"][];
+                };
+            };
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+        };
+    };
+    capture_replay: {
+        parameters: {
+            query?: {
+                /** @description Sample spacing seconds (default 30) */
+                step?: number;
+            };
+            header?: never;
+            path: {
+                /** @description Capture id */
+                id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ReplayBody"];
+                };
+            };
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            404: {
                 headers: {
                     [name: string]: unknown;
                 };

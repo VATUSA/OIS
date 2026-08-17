@@ -923,6 +923,7 @@ async fn capture_body(
         updated_at: cfg.as_ref().map(|c| c.updated_at),
         updated_by: cfg.and_then(|c| c.updated_by),
         capture_status: cap.as_ref().map(|c| c.status.clone()),
+        capture_id: cap.as_ref().map(|c| c.id.clone()),
         capture_start: cap.as_ref().map(|c| c.start_time),
         capture_end: cap.and_then(|c| c.end_time),
         can_edit,

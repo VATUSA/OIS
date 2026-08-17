@@ -912,6 +912,88 @@ pub async fn flight_path_simplified(
     Ok(row.flatten())
 }
 
+// --- capture replay ----------------------------------------------------------------------------
+
+use crate::models::CaptureSummaryBody;
+
+/// Replayable captures (open or saved), newest first, with the tied event's title.
+pub async fn list_replayable_captures(pool: &PgPool) -> Result<Vec<CaptureSummaryBody>, ApiError> {
+    sqlx::query_as::<_, CaptureSummaryBody>(
+        "select c.id, c.event_id, e.title as event_title, c.label, c.start_time, c.end_time, c.status
+         from stats.capture c left join events.event e on e.id = c.event_id
+         where c.status in ('open', 'saved')
+         order by c.start_time desc",
+    )
+    .fetch_all(pool)
+    .await
+    .map_err(db)
+}
+
+/// A single capture by id.
+pub async fn capture_get(pool: &PgPool, id: &str) -> Result<Option<CaptureRow>, ApiError> {
+    sqlx::query_as::<_, CaptureRow>(&format!("{CAPTURE_SELECT} where id = $1"))
+        .bind(id)
+        .fetch_optional(pool)
+        .await
+        .map_err(db)
+}
+
+/// One thinned position sample for replay (`t` = seconds from the window start).
+#[derive(sqlx::FromRow)]
+pub struct ReplaySample {
+    pub session_id: i64,
+    pub t: f64,
+    pub lat: f32,
+    pub lon: f32,
+    pub alt: i32,
+    pub heading: i16,
+}
+
+/// Every flight's positions in `[from, to]`, thinned to one sample per `step_s`-second bucket per
+/// flight (keeps replay payloads bounded even for full-network event captures). Ordered by flight
+/// then time so the handler can group into per-flight tracks in one pass.
+pub async fn replay_positions(
+    pool: &PgPool,
+    from: DateTime<Utc>,
+    to: DateTime<Utc>,
+    step_s: i64,
+) -> Result<Vec<ReplaySample>, ApiError> {
+    sqlx::query_as::<_, ReplaySample>(
+        "select session_id,
+                extract(epoch from (ts - $1))::float8 as t,
+                lat, lon, altitude as alt, heading
+         from (
+            select distinct on (session_id, floor(extract(epoch from ts) / $3)::bigint)
+                   session_id, ts, lat, lon, altitude, heading
+            from stats.position
+            where ts >= $1 and ts <= $2
+            order by session_id, floor(extract(epoch from ts) / $3)::bigint, ts
+         ) s
+         order by session_id, ts",
+    )
+    .bind(from)
+    .bind(to)
+    .bind(step_s)
+    .fetch_all(pool)
+    .await
+    .map_err(db)
+}
+
+/// Callsign + plan basics for a set of flights (for replay labels).
+pub async fn flights_meta(
+    pool: &PgPool,
+    ids: &[i64],
+) -> Result<Vec<(i64, String, Option<String>, Option<String>, Option<String>)>, ApiError> {
+    sqlx::query_as::<_, (i64, String, Option<String>, Option<String>, Option<String>)>(
+        "select session_id, callsign, departure, arrival, aircraft_short
+         from stats.flight where session_id = any($1)",
+    )
+    .bind(ids)
+    .fetch_all(pool)
+    .await
+    .map_err(db)
+}
+
 fn db(e: sqlx::Error) -> ApiError {
     tracing::warn!(error = %e, "stats db error");
     ApiError::Internal

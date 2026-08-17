@@ -126,6 +126,6 @@ create index if not exists stats_capture_open_idx   on stats.capture (status) wh
 create index if not exists stats_capture_event_idx  on stats.capture (event_id);
 
 insert into access.permissions (name, description) values
-    ('stats.data.read',      'View collected network / airport / event statistics'),
+    ('stats.read',           'View collected network / airport / event statistics'),
     ('stats.capture.update', 'Create and manage saved stat-capture windows (and event capture)')
 on conflict (name) do nothing;

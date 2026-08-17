@@ -594,6 +594,8 @@ pub struct EventCaptureBody {
     pub updated_by: Option<String>,
     /// Current capture state for the event: `open` (recording), `saved` (kept), or null (none yet).
     pub capture_status: Option<String>,
+    /// The capture's id (for map replay), when one exists.
+    pub capture_id: Option<String>,
     pub capture_start: Option<DateTime<Utc>>,
     pub capture_end: Option<DateTime<Utc>>,
     /// Whether the requesting user may change the capture config.
@@ -703,6 +705,45 @@ pub struct StatsTrackBody {
     pub resolution: String,
     #[schema(value_type = Object)]
     pub points: Value,
+}
+
+/// A saved/open capture window (for the replay picker).
+#[derive(Debug, Serialize, ToSchema, sqlx::FromRow)]
+pub struct CaptureSummaryBody {
+    pub id: String,
+    pub event_id: Option<i64>,
+    pub event_title: Option<String>,
+    pub label: String,
+    pub start_time: DateTime<Utc>,
+    pub end_time: Option<DateTime<Utc>>,
+    /// `open` (recording) or `saved`.
+    pub status: String,
+}
+
+/// One flight's downsampled track within a replay window.
+#[derive(Debug, Serialize, ToSchema)]
+pub struct ReplayFlightBody {
+    #[serde(serialize_with = "id_str::serialize")]
+    #[schema(value_type = String)]
+    pub session_id: i64,
+    pub callsign: String,
+    pub departure: Option<String>,
+    pub arrival: Option<String>,
+    pub aircraft: Option<String>,
+    /// Compact samples: `[t_seconds_from_start, lat, lon, altitude_ft, heading_deg]`.
+    #[schema(value_type = Vec<Vec<f64>>)]
+    pub samples: Vec<[f64; 5]>,
+}
+
+/// Everything needed to replay a capture window on a map.
+#[derive(Debug, Serialize, ToSchema)]
+pub struct ReplayBody {
+    pub capture_id: String,
+    pub window_start: DateTime<Utc>,
+    pub window_end: DateTime<Utc>,
+    /// Sample spacing (seconds) the tracks were thinned to.
+    pub step_s: i64,
+    pub flights: Vec<ReplayFlightBody>,
 }
 
 /// Stats generated from an event's capture window. `captured` is false when no capture exists yet.
