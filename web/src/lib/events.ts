@@ -18,6 +18,16 @@ export type UpsertStaffing = components["schemas"]["UpsertStaffingRequest"];
 export type TmiPackage = components["schemas"]["TmiPackageBody"];
 export type TmiPackageItem = components["schemas"]["TmiPackageItemBody"];
 
+/**
+ * The VATUSA website URL for editing an event. VATUSA gives us no URL — only the numeric id and the
+ * facility (3-letter ARTCC) — so we construct it: /staff/facility/{facility}/events/{id}/edit.
+ * Returns null when the event has no facility (can't build the staff path).
+ */
+export function vatusaEditUrl(event: Pick<EventSummary, "id" | "facility">): string | null {
+  if (!event.facility) return null;
+  return `https://vatusa.net/staff/facility/${event.facility}/events/${event.id}/edit`;
+}
+
 /** Upcoming (and in-progress) VATUSA events, soonest first. */
 export function useUpcomingEvents() {
   return useQuery({

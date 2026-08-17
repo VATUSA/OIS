@@ -9,6 +9,19 @@ export function formatZulu(iso: string | null | undefined): string {
   return `${dd}/${hh}${mm}z`;
 }
 
+/** Format an ISO timestamp with the full date: "MM/DD/YY HHMMz" (Zulu). */
+export function formatZuluFull(iso: string | null | undefined): string {
+  if (!iso) return "—";
+  const d = new Date(iso);
+  if (Number.isNaN(d.getTime())) return "—";
+  const MM = String(d.getUTCMonth() + 1).padStart(2, "0");
+  const DD = String(d.getUTCDate()).padStart(2, "0");
+  const YY = String(d.getUTCFullYear()).slice(-2);
+  const hh = String(d.getUTCHours()).padStart(2, "0");
+  const mm = String(d.getUTCMinutes()).padStart(2, "0");
+  return `${MM}/${DD}/${YY} ${hh}${mm}z`;
+}
+
 /** Format an ISO timestamp as a bare Zulu time "HHMMz". */
 export function hhmmZulu(iso: string | null | undefined): string {
   if (!iso) return "—";

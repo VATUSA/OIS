@@ -15,14 +15,14 @@ use crate::models::{
 const EVENT_SELECT: &str = "select id, title, body, banner_image_url, facility, \
     start_time, end_time, review_status from events.event";
 
-/// Upcoming (and in-progress) events, soonest first.
-pub async fn list_upcoming(pool: &PgPool) -> Result<Vec<EventBody>, ApiError> {
-    sqlx::query_as::<_, EventBody>(&format!(
-        "{EVENT_SELECT} where end_time >= now() order by start_time"
-    ))
-    .fetch_all(pool)
-    .await
-    .map_err(|_| ApiError::Internal)
+/// All cached events (upcoming, in-progress, and recently-ended within the sync's retention window),
+/// soonest first. The client splits these into upcoming/past; the cache is already bounded by the
+/// sync's prune, so this stays small.
+pub async fn list_all(pool: &PgPool) -> Result<Vec<EventBody>, ApiError> {
+    sqlx::query_as::<_, EventBody>(&format!("{EVENT_SELECT} order by start_time"))
+        .fetch_all(pool)
+        .await
+        .map_err(|_| ApiError::Internal)
 }
 
 pub async fn get(pool: &PgPool, id: i64) -> Result<Option<EventBody>, ApiError> {
