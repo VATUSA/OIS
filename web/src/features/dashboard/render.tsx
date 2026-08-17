@@ -21,7 +21,7 @@ export function WidgetBody({
     case "stat":
       return <StatWidgetView metric={widget.metric} />;
     case "view":
-      return <ViewWidgetView view={widget.view} icao={widget.icao} />;
+      return <ViewWidgetView widget={widget} editing={editing} onChange={onUpdate} />;
     case "map":
       return <MapWidgetView initialFlight={widget.initialFlight} />;
     case "table":

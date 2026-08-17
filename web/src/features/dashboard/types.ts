@@ -21,6 +21,18 @@ export type StatMetricId =
   | "gdps"
   | "fcas";
 
+/** Include-filters for the arrival-ladder widget. Each list is an allow-list; empty/undefined = all. */
+export interface LadderFilters {
+  /** Arrival gates (STAR group names, e.g. "ROBUC") to keep. */
+  gates?: string[];
+  /** Flight statuses to keep: "airborne" | "ground" | "proposed". */
+  statuses?: string[];
+  /** Departure-airport prefixes (uppercased) to keep, matched against each flight's origin. */
+  origins?: string[];
+  /** Aircraft-type prefixes (uppercased) to keep — e.g. ["B73","A32"] for a jets-only view. */
+  types?: string[];
+}
+
 export interface ViewWidget {
   id: string;
   kind: "view";
@@ -28,6 +40,8 @@ export interface ViewWidget {
   view: ViewId;
   /** The airport this view is bound to (all Phase-1 views are per-airport). */
   icao: string;
+  /** Arrival-ladder filters (only meaningful when `view` is "airport-ladder"). */
+  filters?: LadderFilters;
 }
 
 export interface StatWidget {
