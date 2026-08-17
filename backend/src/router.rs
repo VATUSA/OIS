@@ -7,8 +7,8 @@ use crate::{
     auth::middleware::resolve_current_user,
     config::build_cors_layer,
     handlers::{
-        access, atc, audit, auth, dashboards, docs, events, facilities, feed, flow, gdp, health,
-        preferences, public, runway, service_accounts, tmu, users, webhooks,
+        access, airport_configs, atc, audit, auth, dashboards, docs, events, facilities, feed,
+        flow, gdp, health, preferences, public, runway, service_accounts, tmu, users, webhooks,
     },
     state::AppState,
 };
@@ -175,6 +175,21 @@ pub fn build_router(state: AppState) -> Router {
         .route(
             "/api/v1/events/{id}/packages/{package_id}/activate",
             post(events::activate_event_package),
+        )
+        // Reusable per-airport runway configs (default AAR/ADR + wind rule) for event planning
+        .route(
+            "/api/v1/airport-configs/{icao}",
+            get(airport_configs::list_airport_configs).post(airport_configs::create_airport_config),
+        )
+        .route(
+            "/api/v1/airport-configs/{icao}/{id}",
+            put(airport_configs::update_airport_config)
+                .delete(airport_configs::delete_airport_config),
+        )
+        // Airport wind forecast (Open-Meteo) for event-day ops prediction
+        .route(
+            "/api/v1/forecast/{icao}",
+            get(airport_configs::forecast_wind),
         )
         // Flow constrained areas (FCAs) + live map traffic
         .route(

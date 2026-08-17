@@ -192,8 +192,8 @@ pub async fn delete_facility_support(
 
 // --- airport rates (AAR/ADR) ---
 
-const RATE_SELECT: &str = "select r.icao, r.aar, r.adr, r.artcc, r.updated_at, \
-    u.display_name as updated_by \
+const RATE_SELECT: &str = "select r.icao, r.aar, r.adr, r.artcc, r.config_id, r.source, \
+    r.updated_at, u.display_name as updated_by \
     from events.airport_rate r left join identity.users u on u.id = r.updated_by";
 
 pub async fn list_airport_rates(
@@ -224,6 +224,7 @@ pub async fn get_airport_rate(
     .map_err(|_| ApiError::Internal)
 }
 
+#[allow(clippy::too_many_arguments)]
 pub async fn upsert_airport_rate(
     pool: &PgPool,
     event_id: i64,
@@ -231,15 +232,19 @@ pub async fn upsert_airport_rate(
     aar: i32,
     adr: i32,
     artcc: &str,
+    config_id: Option<&str>,
+    source: &str,
     actor: &str,
 ) -> Result<(), ApiError> {
     sqlx::query(
-        "insert into events.airport_rate (event_id, icao, aar, adr, artcc, updated_by)
-         values ($1, $2, $3, $4, $5, $6)
+        "insert into events.airport_rate (event_id, icao, aar, adr, artcc, config_id, source, updated_by)
+         values ($1, $2, $3, $4, $5, $6, $7, $8)
          on conflict (event_id, icao) do update set
              aar = excluded.aar,
              adr = excluded.adr,
              artcc = excluded.artcc,
+             config_id = excluded.config_id,
+             source = excluded.source,
              updated_by = excluded.updated_by",
     )
     .bind(event_id)
@@ -247,6 +252,8 @@ pub async fn upsert_airport_rate(
     .bind(aar)
     .bind(adr)
     .bind(artcc)
+    .bind(config_id)
+    .bind(source)
     .bind(actor)
     .execute(pool)
     .await

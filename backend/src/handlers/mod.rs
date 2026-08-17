@@ -1,4 +1,5 @@
 pub mod access;
+pub mod airport_configs;
 pub mod atc;
 pub mod audit;
 pub mod auth;

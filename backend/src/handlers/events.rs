@@ -111,13 +111,13 @@ fn normalize_facility(raw: &str) -> Option<String> {
     (!f.is_empty() && f.len() <= 8 && f.chars().all(|c| c.is_ascii_alphanumeric())).then_some(f)
 }
 
-fn normalize_icao(raw: &str) -> Option<String> {
+pub(crate) fn normalize_icao(raw: &str) -> Option<String> {
     let s = raw.trim().to_ascii_uppercase();
     (s.len() >= 3 && s.len() <= 4 && s.chars().all(|c| c.is_ascii_alphanumeric())).then_some(s)
 }
 
 /// The ARTCC that owns `icao`, from the live facility map (None if unknown).
-async fn owning_artcc(state: &AppState, icao: &str) -> Option<String> {
+pub(crate) async fn owning_artcc(state: &AppState, icao: &str) -> Option<String> {
     let map = state.facilities.read().await;
     feed::facilities::artcc_for_airport(&map, icao)
 }
@@ -367,6 +367,10 @@ pub async fn upsert_event_rate(
         return Err(ApiError::Forbidden);
     }
 
+    let source = match payload.source.as_deref() {
+        Some("predicted") => "predicted",
+        _ => "override",
+    };
     events_repo::upsert_airport_rate(
         pool,
         id,
@@ -374,6 +378,8 @@ pub async fn upsert_event_rate(
         payload.aar,
         payload.adr,
         artcc.as_deref().unwrap_or(""),
+        payload.config_id.as_deref(),
+        source,
         &user.id,
     )
     .await?;

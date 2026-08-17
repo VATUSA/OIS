@@ -53,6 +53,7 @@ permission!(TmuCfrAssign, ["tmu", "cfr"], Assign);
 permission!(EventsPlanRead, ["events", "plan"], Read);
 permission!(EventsPlanUpdate, ["events", "plan"], Update);
 permission!(EventsRateUpdate, ["events", "rate"], Update);
+permission!(EventsConfigUpdate, ["events", "config"], Update);
 permission!(
     EventsStaffingCreate,
     ["events", "staffing_requests"],

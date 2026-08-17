@@ -18,6 +18,7 @@ import {SharedBoardPage} from "@/pages/dashboards/shared";
 import {TmuPage} from "@/pages/tmu";
 import {PlanningEventsPage} from "@/pages/planning/events";
 import {EventPlanningPage} from "@/pages/planning/event";
+import {AirportConfigsPage} from "@/pages/planning/airport-configs";
 import {AdminLayout} from "@/pages/admin/layout";
 import {AdminOverview} from "@/pages/admin/overview";
 import {AdminAccessControl} from "@/pages/admin/access-control";
@@ -185,6 +186,12 @@ const planningEventsRoute = createRoute({
   component: PlanningEventsPage,
 });
 
+const planningAirportConfigsRoute = createRoute({
+  getParentRoute: () => planningRoute,
+  path: "airport-configs",
+  component: AirportConfigsPage,
+});
+
 const planningEventRoute = createRoute({
   getParentRoute: () => planningRoute,
   path: "events/$eventId",
@@ -263,6 +270,7 @@ const routeTree = rootRoute.addChildren([
   planningRoute.addChildren([
     planningIndexRoute,
     planningEventsRoute,
+    planningAirportConfigsRoute,
     planningEventRoute,
   ]),
   adminRoute.addChildren([
