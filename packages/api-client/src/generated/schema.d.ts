@@ -132,6 +132,38 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/v1/airport-configs/{icao}": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get: operations["list_airport_configs"];
+        put?: never;
+        post: operations["create_airport_config"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/airport-configs/{icao}/{id}": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put: operations["update_airport_config"];
+        post?: never;
+        delete: operations["delete_airport_config"];
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/v1/auth/logout": {
         parameters: {
             query?: never;
@@ -857,6 +889,22 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/v1/forecast/{icao}": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get: operations["forecast_wind"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/v1/me": {
         parameters: {
             query?: never;
@@ -1374,6 +1422,53 @@ export interface components {
             /** @description Named anchors along the full filed route, for on-map labels. */
             waypoints: components["schemas"]["RouteWaypoint"][];
         };
+        /** @description A reusable per-airport runway configuration (named, with a favored-wind rule + AAR/ADR). */
+        AirportConfigBody: {
+            /** Format: int32 */
+            aar: number;
+            /** Format: int32 */
+            adr: number;
+            artcc: string;
+            /** @description Used when the wind is light/variable or nothing matches (at most one per airport). */
+            calm_default: boolean;
+            /** @description Whether the requesting user may edit this airport's configs (per their ARTCC scope). */
+            editable: boolean;
+            icao: string;
+            id: string;
+            landing_runways: string[];
+            name: string;
+            /** Format: date-time */
+            updated_at: string;
+            updated_by?: string | null;
+            /**
+             * Format: int32
+             * @description Favored-wind rule: applies when the surface wind direction is within [from, to] (wrap-around
+             *     allowed). Ignored when `calm_default`.
+             */
+            wind_from_deg: number;
+            /** Format: int32 */
+            wind_to_deg: number;
+        };
+        /** @description The forecast wind at an airport for a given time (Open-Meteo, or live METAR fallback). */
+        AirportForecastBody: {
+            /** Format: int32 */
+            gust_kt?: number | null;
+            icao: string;
+            /** @description `forecast` (Open-Meteo) or `metar` (live fallback) or `none`. */
+            source: string;
+            /**
+             * Format: date-time
+             * @description ISO time of the forecast hour returned.
+             */
+            time: string;
+            /**
+             * Format: int32
+             * @description Surface wind direction (degrees true), or null if calm/variable.
+             */
+            wind_dir?: number | null;
+            /** Format: int32 */
+            wind_kt: number;
+        };
         /** @description A planned per-airport arrival/departure rate for an event. */
         AirportRateBody: {
             /**
@@ -1388,9 +1483,13 @@ export interface components {
             adr: number;
             /** @description Owning ARTCC resolved when set; empty if unknown. */
             artcc: string;
+            /** @description The airport config this rate came from (if chosen from the airport's configs); null = manual. */
+            config_id?: string | null;
             /** @description Whether the requesting user may edit this airport's rate (per their ARTCC scope). */
             editable: boolean;
             icao: string;
+            /** @description `predicted` (from the forecast wind) or `override` (manually set). */
+            source: string;
             /** Format: date-time */
             updated_at: string;
             updated_by?: string | null;
@@ -2628,11 +2727,28 @@ export interface components {
             reason: string;
             scopes: components["schemas"]["ScopeUpdate"][];
         };
+        UpsertAirportConfigRequest: {
+            /** Format: int32 */
+            aar: number;
+            /** Format: int32 */
+            adr: number;
+            calm_default?: boolean;
+            landing_runways?: string[];
+            name: string;
+            /** Format: int32 */
+            wind_from_deg: number;
+            /** Format: int32 */
+            wind_to_deg: number;
+        };
         UpsertAirportRateRequest: {
             /** Format: int32 */
             aar: number;
             /** Format: int32 */
             adr: number;
+            /** @description Optional: the airport config this rate was chosen from. */
+            config_id?: string | null;
+            /** @description `predicted` or `override`; defaults to `override` when omitted. */
+            source?: string | null;
         };
         UpsertFacilitySupportRequest: {
             /** @description required | preferred | not_required */
@@ -3055,6 +3171,164 @@ export interface operations {
                 };
             };
             400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+        };
+    };
+    list_airport_configs: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                icao: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["AirportConfigBody"][];
+                };
+            };
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+        };
+    };
+    create_airport_config: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                icao: string;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["UpsertAirportConfigRequest"];
+            };
+        };
+        responses: {
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["AirportConfigBody"];
+                };
+            };
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+        };
+    };
+    update_airport_config: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                icao: string;
+                id: string;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["UpsertAirportConfigRequest"];
+            };
+        };
+        responses: {
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["AirportConfigBody"];
+                };
+            };
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+        };
+    };
+    delete_airport_config: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                icao: string;
+                id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            204: {
                 headers: {
                     [name: string]: unknown;
                 };
@@ -5104,6 +5378,35 @@ export interface operations {
                 };
                 content: {
                     "application/json": components["schemas"]["TrafficAircraft"][];
+                };
+            };
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+        };
+    };
+    forecast_wind: {
+        parameters: {
+            query?: {
+                at?: number;
+            };
+            header?: never;
+            path: {
+                icao: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["AirportForecastBody"];
                 };
             };
             401: {

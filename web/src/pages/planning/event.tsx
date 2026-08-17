@@ -183,7 +183,9 @@ export function EventPlanningPage() {
           ))}
         </div>
 
-        {tab === "airports" && <AirportRatesSection eventId={id} />}
+        {tab === "airports" && (
+          <AirportRatesSection eventId={id} eventStart={e.start_time} />
+        )}
         {tab === "facility" && <FacilitySupportSection eventId={id} />}
         {tab === "tmi" && <TmiPackagesSection eventId={id} />}
       </div>

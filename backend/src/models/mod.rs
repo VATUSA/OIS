@@ -424,6 +424,11 @@ pub struct AirportRateBody {
     pub adr: i32,
     /// Owning ARTCC resolved when set; empty if unknown.
     pub artcc: String,
+    /// The airport config this rate came from (if chosen from the airport's configs); null = manual.
+    pub config_id: Option<String>,
+    /// `predicted` (from the forecast wind) or `override` (manually set).
+    #[sqlx(default)]
+    pub source: String,
     pub updated_at: DateTime<Utc>,
     pub updated_by: Option<String>,
     /// Whether the requesting user may edit this airport's rate (per their ARTCC scope).
@@ -435,6 +440,62 @@ pub struct AirportRateBody {
 pub struct UpsertAirportRateRequest {
     pub aar: i32,
     pub adr: i32,
+    /// Optional: the airport config this rate was chosen from.
+    #[serde(default)]
+    pub config_id: Option<String>,
+    /// `predicted` or `override`; defaults to `override` when omitted.
+    #[serde(default)]
+    pub source: Option<String>,
+}
+
+/// A reusable per-airport runway configuration (named, with a favored-wind rule + AAR/ADR).
+#[derive(Debug, Serialize, ToSchema, sqlx::FromRow)]
+pub struct AirportConfigBody {
+    pub id: String,
+    pub icao: String,
+    pub name: String,
+    pub aar: i32,
+    pub adr: i32,
+    pub landing_runways: Vec<String>,
+    /// Favored-wind rule: applies when the surface wind direction is within [from, to] (wrap-around
+    /// allowed). Ignored when `calm_default`.
+    pub wind_from_deg: i32,
+    pub wind_to_deg: i32,
+    /// Used when the wind is light/variable or nothing matches (at most one per airport).
+    pub calm_default: bool,
+    pub artcc: String,
+    pub updated_at: DateTime<Utc>,
+    pub updated_by: Option<String>,
+    /// Whether the requesting user may edit this airport's configs (per their ARTCC scope).
+    #[sqlx(default)]
+    pub editable: bool,
+}
+
+#[derive(Debug, Deserialize, ToSchema)]
+pub struct UpsertAirportConfigRequest {
+    pub name: String,
+    pub aar: i32,
+    pub adr: i32,
+    #[serde(default)]
+    pub landing_runways: Vec<String>,
+    pub wind_from_deg: i32,
+    pub wind_to_deg: i32,
+    #[serde(default)]
+    pub calm_default: bool,
+}
+
+/// The forecast wind at an airport for a given time (Open-Meteo, or live METAR fallback).
+#[derive(Debug, Serialize, ToSchema)]
+pub struct AirportForecastBody {
+    pub icao: String,
+    /// ISO time of the forecast hour returned.
+    pub time: DateTime<Utc>,
+    /// Surface wind direction (degrees true), or null if calm/variable.
+    pub wind_dir: Option<i32>,
+    pub wind_kt: i32,
+    pub gust_kt: Option<i32>,
+    /// `forecast` (Open-Meteo) or `metar` (live fallback) or `none`.
+    pub source: String,
 }
 
 /// One facility's ACE staffing request for an event (positions wanted vs signed up).

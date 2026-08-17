@@ -9,6 +9,7 @@ pub mod events;
 pub mod facilities;
 pub mod fca;
 pub mod flow;
+pub mod forecast;
 pub mod gdp;
 pub mod metar;
 pub mod nav;

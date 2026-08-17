@@ -27,6 +27,7 @@ import {
   Split,
   User as UserIcon,
   Waypoints,
+  Wind,
 } from "lucide-react";
 
 import {ZuluClock} from "@/components/zulu-clock";
@@ -237,6 +238,12 @@ function MobileMenu({
                 Events
               </Link>
             </DropdownMenuItem>
+            <DropdownMenuItem asChild>
+              <Link to="/planning/airport-configs">
+                <Wind />
+                Airport configs
+              </Link>
+            </DropdownMenuItem>
           </>
         )}
 
@@ -360,6 +367,12 @@ export function Navbar() {
                 <Link to="/planning/events">
                   <CalendarClock />
                   Events
+                </Link>
+              </DropdownMenuItem>
+              <DropdownMenuItem asChild>
+                <Link to="/planning/airport-configs">
+                  <Wind />
+                  Airport configs
                 </Link>
               </DropdownMenuItem>
             </NavGroup>
