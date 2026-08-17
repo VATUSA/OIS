@@ -13,19 +13,23 @@ use crate::{
         context::CurrentUser,
         permissions::{
             EventsPlanRead, EventsPlanUpdate, EventsRateUpdate, EventsStaffingCreate,
-            EventsSupportUpdate,
+            EventsSupportUpdate, StatsCaptureUpdate,
         },
         require_permission::RequirePermission,
     },
     errors::ApiError,
     feed,
     models::{
-        AddPackageItemRequest, AirportRateBody, CreateGroundStopRequest, CreatePackageRequest,
-        CreateTmiRequest, DccRequestBody, EventBody, FacilitySupportBody, StaffingRequestBody,
-        TmiPackageBody, UpdateDccRequest, UpsertAirportRateRequest, UpsertFacilitySupportRequest,
-        UpsertProgramRequest, UpsertStaffingRequest,
+        AddPackageItemRequest, AirportMovementBody, AirportRateBody, CreateGroundStopRequest,
+        CreatePackageRequest, CreateTmiRequest, DccRequestBody, EventBody, EventCaptureBody,
+        EventStatsBody, FacilitySupportBody, KeyCountBody, StaffingRequestBody, TmiPackageBody,
+        UpdateDccRequest, UpdateEventCaptureRequest, UpsertAirportRateRequest,
+        UpsertFacilitySupportRequest, UpsertProgramRequest, UpsertStaffingRequest,
     },
-    repos::{access as access_repo, events as events_repo, tmu as tmu_repo},
+    repos::{
+        access as access_repo, access::PermissionScope, events as events_repo, stats as stats_repo,
+        tmu as tmu_repo,
+    },
     state::AppState,
 };
 
@@ -898,4 +902,175 @@ pub async fn deactivate_event_package(
 
     events_repo::mark_package_archived(pool, &package_id, &user.id).await?;
     Ok(Json(events_repo::list_packages(pool, id).await?))
+}
+
+// --- per-event stats capture + generated stats ---------------------------------------------------
+
+const CAPTURE_PERMISSION: &str = "stats.capture.update";
+
+/// Build the capture-config body (config defaults + current capture status).
+async fn capture_body(
+    pool: &sqlx::PgPool,
+    event_id: i64,
+    can_edit: bool,
+) -> Result<EventCaptureBody, ApiError> {
+    let cfg = stats_repo::get_event_capture(pool, event_id).await?;
+    let cap = stats_repo::latest_capture_for_event(pool, event_id).await?;
+    Ok(EventCaptureBody {
+        enabled: cfg.as_ref().is_some_and(|c| c.enabled),
+        pre_minutes: cfg.as_ref().map_or(30, |c| c.pre_minutes),
+        post_minutes: cfg.as_ref().map_or(30, |c| c.post_minutes),
+        updated_at: cfg.as_ref().map(|c| c.updated_at),
+        updated_by: cfg.and_then(|c| c.updated_by),
+        capture_status: cap.as_ref().map(|c| c.status.clone()),
+        capture_start: cap.as_ref().map(|c| c.start_time),
+        capture_end: cap.and_then(|c| c.end_time),
+        can_edit,
+    })
+}
+
+#[utoipa::path(
+    get,
+    path = "/api/v1/events/{id}/capture",
+    tag = "events",
+    params(("id" = i64, Path, description = "VATUSA event id")),
+    responses((status = 200, body = EventCaptureBody), (status = 401), (status = 404))
+)]
+pub async fn get_event_capture(
+    State(state): State<AppState>,
+    _permission: RequirePermission<EventsPlanRead>,
+    Extension(current_user): Extension<Option<CurrentUser>>,
+    Path(id): Path<i64>,
+) -> Result<Json<EventCaptureBody>, ApiError> {
+    let pool = state.db.as_ref().ok_or(ApiError::ServiceUnavailable)?;
+    if events_repo::get(pool, id).await?.is_none() {
+        return Err(ApiError::NotFound);
+    }
+    let can_edit = match current_user.as_ref() {
+        Some(user) => {
+            match access_repo::permission_scope(pool, &user.id, CAPTURE_PERMISSION).await? {
+                PermissionScope::National => true,
+                PermissionScope::Facilities(set) => !set.is_empty(),
+            }
+        }
+        None => false,
+    };
+    Ok(Json(capture_body(pool, id, can_edit).await?))
+}
+
+#[utoipa::path(
+    put,
+    path = "/api/v1/events/{id}/capture",
+    tag = "events",
+    params(("id" = i64, Path, description = "VATUSA event id")),
+    request_body = UpdateEventCaptureRequest,
+    responses((status = 200, body = EventCaptureBody), (status = 400), (status = 401), (status = 404))
+)]
+pub async fn update_event_capture(
+    State(state): State<AppState>,
+    _permission: RequirePermission<StatsCaptureUpdate>,
+    Extension(current_user): Extension<Option<CurrentUser>>,
+    Path(id): Path<i64>,
+    Json(payload): Json<UpdateEventCaptureRequest>,
+) -> Result<Json<EventCaptureBody>, ApiError> {
+    let user = current_user.as_ref().ok_or(ApiError::Unauthorized)?;
+    let pool = state.db.as_ref().ok_or(ApiError::ServiceUnavailable)?;
+    if events_repo::get(pool, id).await?.is_none() {
+        return Err(ApiError::NotFound);
+    }
+    let pre = payload.pre_minutes.unwrap_or(30).clamp(0, 720);
+    let post = payload.post_minutes.unwrap_or(30).clamp(0, 720);
+    stats_repo::upsert_event_capture(pool, id, payload.enabled, pre, post, &user.id).await?;
+    Ok(Json(capture_body(pool, id, true).await?))
+}
+
+#[utoipa::path(
+    get,
+    path = "/api/v1/events/{id}/stats",
+    tag = "events",
+    params(("id" = i64, Path, description = "VATUSA event id")),
+    responses((status = 200, body = EventStatsBody), (status = 401), (status = 404))
+)]
+pub async fn get_event_stats(
+    State(state): State<AppState>,
+    _permission: RequirePermission<EventsPlanRead>,
+    Path(id): Path<i64>,
+) -> Result<Json<EventStatsBody>, ApiError> {
+    let pool = state.db.as_ref().ok_or(ApiError::ServiceUnavailable)?;
+    if events_repo::get(pool, id).await?.is_none() {
+        return Err(ApiError::NotFound);
+    }
+
+    let Some(cap) = stats_repo::latest_capture_for_event(pool, id).await? else {
+        return Ok(Json(EventStatsBody {
+            captured: false,
+            status: None,
+            window_start: None,
+            window_end: None,
+            unique_pilots: 0,
+            peak_pilots: None,
+            total_arrivals: 0,
+            total_departures: 0,
+            airports: Vec::new(),
+            top_aircraft: Vec::new(),
+            unique_controllers: 0,
+            controller_positions: 0,
+            controller_hours: 0.0,
+        }));
+    };
+
+    let from = cap.start_time;
+    let to = cap.end_time.unwrap_or_else(Utc::now);
+
+    let icaos: Vec<String> = events_repo::list_airport_rates(pool, id)
+        .await?
+        .into_iter()
+        .map(|r| r.icao)
+        .collect();
+
+    let movements = if icaos.is_empty() {
+        Vec::new()
+    } else {
+        stats_repo::event_airport_movements(pool, &icaos, from, to).await?
+    };
+    let total_arrivals: i64 = movements.iter().map(|m| m.arrivals).sum();
+    let total_departures: i64 = movements.iter().map(|m| m.departures).sum();
+
+    let unique_pilots = stats_repo::event_unique_pilots(pool, from, to).await?;
+    let peak_pilots = stats_repo::event_peak_pilots(pool, from, to).await?;
+    let top_aircraft = if icaos.is_empty() {
+        Vec::new()
+    } else {
+        stats_repo::event_top_aircraft(pool, &icaos, from, to).await?
+    };
+    let cov = stats_repo::event_controller_coverage(pool, from, to).await?;
+
+    Ok(Json(EventStatsBody {
+        captured: true,
+        status: Some(cap.status),
+        window_start: Some(from),
+        window_end: Some(to),
+        unique_pilots,
+        peak_pilots,
+        total_arrivals,
+        total_departures,
+        airports: movements
+            .into_iter()
+            .map(|m| AirportMovementBody {
+                icao: m.icao,
+                arrivals: m.arrivals,
+                departures: m.departures,
+            })
+            .collect(),
+        top_aircraft: top_aircraft
+            .into_iter()
+            .map(|k| KeyCountBody {
+                key: k.key,
+                count: k.count,
+            })
+            .collect(),
+        unique_controllers: cov.unique_controllers,
+        controller_positions: cov.positions,
+        controller_hours: cov.hours,
+    }))
 }

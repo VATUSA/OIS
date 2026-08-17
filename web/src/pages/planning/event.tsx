@@ -13,12 +13,14 @@ import {FacilitySupportSection} from "@/pages/planning/facility-support";
 import {AirportRatesSection} from "@/pages/planning/airport-rates";
 import {AceSection} from "@/pages/planning/ace";
 import {TmiPackagesSection} from "@/pages/planning/tmi-packages";
+import {EventStatsSection} from "@/pages/planning/event-stats";
 
-type TabId = "airports" | "facility" | "tmi";
+type TabId = "airports" | "facility" | "tmi" | "stats";
 const TABS: { id: TabId; label: string }[] = [
   { id: "airports", label: "Airports & rates" },
   { id: "facility", label: "Facility support" },
   { id: "tmi", label: "TMI packages" },
+  { id: "stats", label: "Stats & debrief" },
 ];
 
 function dccVariant(status: string): "secondary" | "success" | "outline" {
@@ -31,9 +33,11 @@ function dccVariant(status: string): "secondary" | "success" | "outline" {
 function ActionBar({
   eventId,
   editUrl,
+  onDebrief,
 }: {
   eventId: number;
   editUrl: string | null;
+  onDebrief: () => void;
 }) {
   const [dialog, setDialog] = useState<null | "dcc" | "ace">(null);
   const dcc = useDcc(eventId);
@@ -63,10 +67,9 @@ function ActionBar({
         )}
       </Button>
 
-      <Button variant="secondary" size="sm" disabled title="Post-event debrief — coming soon">
+      <Button variant="secondary" size="sm" onClick={onDebrief} title="Stats & post-event debrief">
         <BarChart3 className="size-3.5" />
         Debrief
-        <span className="ml-1 text-xs text-muted-foreground">soon</span>
       </Button>
 
       {editUrl && (
@@ -161,7 +164,7 @@ export function EventPlanningPage() {
       </Card>
 
       {/* Action bar */}
-      <ActionBar eventId={id} editUrl={vatusaEditUrl(e)} />
+      <ActionBar eventId={id} editUrl={vatusaEditUrl(e)} onDebrief={() => setTab("stats")} />
 
       {/* Tabbed planning area */}
       <div className="flex flex-col gap-4">
@@ -188,6 +191,7 @@ export function EventPlanningPage() {
         )}
         {tab === "facility" && <FacilitySupportSection eventId={id} />}
         {tab === "tmi" && <TmiPackagesSection eventId={id} />}
+        {tab === "stats" && <EventStatsSection eventId={id} />}
       </div>
     </div>
   );

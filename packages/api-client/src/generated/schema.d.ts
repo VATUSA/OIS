@@ -356,6 +356,22 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/v1/events/{id}/capture": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get: operations["get_event_capture"];
+        put: operations["update_event_capture"];
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/v1/events/{id}/dcc": {
         parameters: {
             query?: never;
@@ -559,6 +575,22 @@ export interface paths {
         put: operations["upsert_event_staffing"];
         post?: never;
         delete: operations["delete_event_staffing"];
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/events/{id}/stats": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get: operations["get_event_stats"];
+        put?: never;
+        post?: never;
+        delete?: never;
         options?: never;
         head?: never;
         patch?: never;
@@ -1485,6 +1517,14 @@ export interface components {
             /** Format: int32 */
             wind_kt: number;
         };
+        /** @description Arrivals/departures at one configured event airport over the capture window. */
+        AirportMovementBody: {
+            /** Format: int64 */
+            arrivals: number;
+            /** Format: int64 */
+            departures: number;
+            icao: string;
+        };
         /** @description A planned per-airport arrival/departure rate for an event. */
         AirportRateBody: {
             /**
@@ -1768,6 +1808,55 @@ export interface components {
             /** Format: date-time */
             start_time: string;
             title: string;
+        };
+        /** @description An event's stats-capture config plus the current capture status. */
+        EventCaptureBody: {
+            /** @description Whether the requesting user may change the capture config. */
+            can_edit: boolean;
+            /** Format: date-time */
+            capture_end?: string | null;
+            /** Format: date-time */
+            capture_start?: string | null;
+            /** @description Current capture state for the event: `open` (recording), `saved` (kept), or null (none yet). */
+            capture_status?: string | null;
+            /** @description Whether automatic capture is enabled for this event. */
+            enabled: boolean;
+            /** Format: int32 */
+            post_minutes: number;
+            /**
+             * Format: int32
+             * @description Minutes before the event start / after the event end to include in the capture window.
+             */
+            pre_minutes: number;
+            /** Format: date-time */
+            updated_at?: string | null;
+            updated_by?: string | null;
+        };
+        /** @description Stats generated from an event's capture window. `captured` is false when no capture exists yet. */
+        EventStatsBody: {
+            airports: components["schemas"]["AirportMovementBody"][];
+            captured: boolean;
+            /** Format: double */
+            controller_hours: number;
+            /** Format: int64 */
+            controller_positions: number;
+            /** Format: int32 */
+            peak_pilots?: number | null;
+            /** @description `open` (still recording) or `saved`. */
+            status?: string | null;
+            top_aircraft: components["schemas"]["KeyCountBody"][];
+            /** Format: int64 */
+            total_arrivals: number;
+            /** Format: int64 */
+            total_departures: number;
+            /** Format: int64 */
+            unique_controllers: number;
+            /** Format: int64 */
+            unique_pilots: number;
+            /** Format: date-time */
+            window_end?: string | null;
+            /** Format: date-time */
+            window_start?: string | null;
         };
         /** @description A VATUSA facility (ARTCC). `artcc_id` scope values reference `id`. */
         FacilityBody: {
@@ -2238,6 +2327,11 @@ export interface components {
             issued_by?: string | null;
             /** Format: date-time */
             wheels_up: string;
+        };
+        KeyCountBody: {
+            /** Format: int64 */
+            count: number;
+            key?: string | null;
         };
         /** @description The `/me` response for an authenticated session. */
         MeBody: {
@@ -2728,6 +2822,13 @@ export interface components {
             notes?: string | null;
             /** @description not_needed | requested | confirmed */
             status: string;
+        };
+        UpdateEventCaptureRequest: {
+            enabled: boolean;
+            /** Format: int32 */
+            post_minutes?: number | null;
+            /** Format: int32 */
+            pre_minutes?: number | null;
         };
         /**
          * @description Revise a GDP — a full replace of its mutable fields (the airport can't change).
@@ -3914,6 +4015,84 @@ export interface operations {
             };
         };
     };
+    get_event_capture: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /** @description VATUSA event id */
+                id: number;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["EventCaptureBody"];
+                };
+            };
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+        };
+    };
+    update_event_capture: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /** @description VATUSA event id */
+                id: number;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["UpdateEventCaptureRequest"];
+            };
+        };
+        responses: {
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["EventCaptureBody"];
+                };
+            };
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+        };
+    };
     get_event_dcc: {
         parameters: {
             query?: never;
@@ -4595,6 +4774,40 @@ export interface operations {
                     [name: string]: unknown;
                 };
                 content?: never;
+            };
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+        };
+    };
+    get_event_stats: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /** @description VATUSA event id */
+                id: number;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["EventStatsBody"];
+                };
             };
             401: {
                 headers: {
