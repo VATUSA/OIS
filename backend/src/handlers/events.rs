@@ -791,10 +791,11 @@ pub async fn activate_event_package(
         .ok_or(ApiError::NotFound)?;
     let items = events_repo::list_package_items(pool, &package_id).await?;
 
-    // Materialize each draft item into the live TMU tables.
+    // Materialize each draft item into the live TMU tables, recording a `live_ref` so the package
+    // can later be deactivated (cancelling exactly what it created).
     for item in &items {
         let payload = item.payload.0.clone();
-        match item.kind.as_str() {
+        let live_ref = match item.kind.as_str() {
             "program" => {
                 let p: ProgramItem =
                     serde_json::from_value(payload).map_err(|_| ApiError::Internal)?;
@@ -810,6 +811,8 @@ pub async fn activate_event_package(
                     active_until: Some(event.end_time),
                 };
                 tmu_repo::upsert_program(pool, &p.icao, &req, &[], &user.id).await?;
+                // Programs are keyed by ICAO; that's the handle for later cleanup.
+                p.icao
             }
             "restriction" => {
                 let r: RestrictionItem =
@@ -824,6 +827,7 @@ pub async fn activate_event_package(
                 // Activation goes live: create then publish so the restriction is active.
                 let tmi_id = tmu_repo::create_tmi(pool, &req, &user.id).await?;
                 tmu_repo::publish_tmi(pool, &tmi_id, &user.id).await?;
+                tmi_id
             }
             "ground_stop" => {
                 let g: GroundStopItem =
@@ -838,11 +842,60 @@ pub async fn activate_event_package(
                     tmu_repo::create_ground_stop(pool, &req, &scope, g.until.as_deref(), &user.id)
                         .await?;
                 tmu_repo::publish_ground_stop(pool, &gs_id, &user.id).await?;
+                gs_id
+            }
+            _ => continue,
+        };
+        events_repo::set_item_live_ref(pool, &item.id, &live_ref).await?;
+    }
+
+    events_repo::mark_package_activated(pool, &package_id, &user.id).await?;
+    Ok(Json(events_repo::list_packages(pool, id).await?))
+}
+
+#[utoipa::path(
+    post,
+    path = "/api/v1/events/{id}/packages/{package_id}/deactivate",
+    tag = "events",
+    params(
+        ("id" = i64, Path, description = "VATUSA event id"),
+        ("package_id" = String, Path, description = "Package id")
+    ),
+    responses((status = 200, body = Vec<TmiPackageBody>), (status = 401), (status = 404), (status = 409))
+)]
+pub async fn deactivate_event_package(
+    State(state): State<AppState>,
+    _permission: RequirePermission<EventsPlanUpdate>,
+    Extension(current_user): Extension<Option<CurrentUser>>,
+    Path((id, package_id)): Path<(i64, String)>,
+) -> Result<Json<Vec<TmiPackageBody>>, ApiError> {
+    let user = current_user.as_ref().ok_or(ApiError::Unauthorized)?;
+    let pool = state.db.as_ref().ok_or(ApiError::ServiceUnavailable)?;
+
+    if package_status(pool, id, &package_id).await? != "activated" {
+        return Err(ApiError::Conflict); // only an activated package can be deactivated
+    }
+
+    // Cancel exactly the live rows this package created (best-effort — a row already cleared
+    // manually or auto-expired just returns false), then archive the package.
+    for item in events_repo::list_package_item_refs(pool, &package_id).await? {
+        let Some(reference) = item.live_ref.as_deref() else {
+            continue;
+        };
+        match item.kind.as_str() {
+            "program" => {
+                tmu_repo::delete_program(pool, reference).await?;
+            }
+            "restriction" => {
+                tmu_repo::cancel_tmi(pool, reference).await?;
+            }
+            "ground_stop" => {
+                tmu_repo::cancel_ground_stop(pool, reference).await?;
             }
             _ => {}
         }
     }
 
-    events_repo::mark_package_activated(pool, &package_id, &user.id).await?;
+    events_repo::mark_package_archived(pool, &package_id, &user.id).await?;
     Ok(Json(events_repo::list_packages(pool, id).await?))
 }

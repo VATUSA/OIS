@@ -430,6 +430,30 @@ export function useActivatePackage(eventId: number) {
   });
 }
 
+export function useDeactivatePackage(eventId: number) {
+  const queryClient = useQueryClient();
+  const toast = useToast();
+  return useMutation({
+    mutationFn: async (packageId: string) => {
+      const { data, error } = await ois.POST(
+        "/api/v1/events/{id}/packages/{package_id}/deactivate",
+        { params: { path: { id: eventId, package_id: packageId } } },
+      );
+      if (error || !data) throw new Error("deactivate failed");
+      return data;
+    },
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ["event-packages", eventId] });
+      // live TMU rows were cancelled
+      queryClient.invalidateQueries({ queryKey: ["tmu-programs"] });
+      queryClient.invalidateQueries({ queryKey: ["tmis"] });
+      queryClient.invalidateQueries({ queryKey: ["ground-stops"] });
+      toast.success("Package deactivated — live TMIs cancelled");
+    },
+    onError: () => toast.error("Couldn’t deactivate the package"),
+  });
+}
+
 /** VATUSA's HTML/BBCode event blurb → plain text (safe to render, no markup). */
 export function eventBodyText(body: string): string {
   return body

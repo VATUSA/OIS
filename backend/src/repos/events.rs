@@ -368,13 +368,23 @@ struct PackageRow {
     name: String,
     status: String,
     activated_at: Option<DateTime<Utc>>,
+    archived_at: Option<DateTime<Utc>>,
     updated_at: DateTime<Utc>,
     updated_by: Option<String>,
 }
 
-const PACKAGE_SELECT: &str = "select p.id, p.name, p.status, p.activated_at, p.updated_at, \
+const PACKAGE_SELECT: &str = "select p.id, p.name, p.status, p.activated_at, p.archived_at, p.updated_at, \
     u.display_name as updated_by \
     from events.tmi_package p left join identity.users u on u.id = p.updated_by";
+
+/// A package item plus the live-row reference recorded at activation (for deactivation cleanup).
+#[derive(sqlx::FromRow)]
+pub struct PackageItemRef {
+    pub kind: String,
+    #[sqlx(rename = "payload")]
+    pub payload: sqlx::types::Json<Value>,
+    pub live_ref: Option<String>,
+}
 
 pub async fn list_package_items(
     pool: &PgPool,
@@ -407,6 +417,7 @@ pub async fn list_packages(pool: &PgPool, event_id: i64) -> Result<Vec<TmiPackag
             name: r.name,
             status: r.status,
             activated_at: r.activated_at,
+            archived_at: r.archived_at,
             updated_at: r.updated_at,
             updated_by: r.updated_by,
             items,
@@ -503,5 +514,61 @@ pub async fn mark_package_activated(
     .execute(pool)
     .await
     .map_err(|_| ApiError::Internal)?;
+    Ok(())
+}
+
+/// Record the live row an item materialized to (its tmu id, or ICAO for programs) so a later
+/// deactivation can cancel exactly what was created.
+pub async fn set_item_live_ref(
+    pool: &PgPool,
+    item_id: &str,
+    live_ref: &str,
+) -> Result<(), ApiError> {
+    sqlx::query("update events.tmi_package_item set live_ref = $2 where id = $1")
+        .bind(item_id)
+        .bind(live_ref)
+        .execute(pool)
+        .await
+        .map_err(|_| ApiError::Internal)?;
+    Ok(())
+}
+
+/// The items of a package with their live-row refs (for deactivation cleanup).
+pub async fn list_package_item_refs(
+    pool: &PgPool,
+    package_id: &str,
+) -> Result<Vec<PackageItemRef>, ApiError> {
+    sqlx::query_as::<_, PackageItemRef>(
+        "select kind, payload, live_ref from events.tmi_package_item \
+         where package_id = $1 order by created_at",
+    )
+    .bind(package_id)
+    .fetch_all(pool)
+    .await
+    .map_err(|_| ApiError::Internal)
+}
+
+/// Archive a package after its live rows were cancelled; clears the now-stale live refs.
+pub async fn mark_package_archived(
+    pool: &PgPool,
+    package_id: &str,
+    actor: &str,
+) -> Result<(), ApiError> {
+    let mut tx = pool.begin().await.map_err(|_| ApiError::Internal)?;
+    sqlx::query(
+        "update events.tmi_package set status = 'archived', archived_at = now(), \
+         updated_by = $2 where id = $1",
+    )
+    .bind(package_id)
+    .bind(actor)
+    .execute(&mut *tx)
+    .await
+    .map_err(|_| ApiError::Internal)?;
+    sqlx::query("update events.tmi_package_item set live_ref = null where package_id = $1")
+        .bind(package_id)
+        .execute(&mut *tx)
+        .await
+        .map_err(|_| ApiError::Internal)?;
+    tx.commit().await.map_err(|_| ApiError::Internal)?;
     Ok(())
 }

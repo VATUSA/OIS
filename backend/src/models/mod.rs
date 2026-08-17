@@ -557,9 +557,11 @@ pub struct TmiPackageItemBody {
 pub struct TmiPackageBody {
     pub id: String,
     pub name: String,
-    /// draft | activated
+    /// draft | activated | archived
     pub status: String,
     pub activated_at: Option<DateTime<Utc>>,
+    /// When the package was deactivated (its live rows cancelled); null unless archived.
+    pub archived_at: Option<DateTime<Utc>>,
     pub updated_at: DateTime<Utc>,
     pub updated_by: Option<String>,
     pub items: Vec<TmiPackageItemBody>,
