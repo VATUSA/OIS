@@ -71,13 +71,22 @@ export function useRefreshData() {
 
 /** All FCAs (shared across controllers). */
 export function useFcas() {
+  const at = useHistoricalAt();
   return useQuery({
-    queryKey: ["fcas"],
+    queryKey: at == null ? ["fcas"] : ["hist-fcas", at],
     queryFn: async () => {
+      if (at != null) {
+        const { data, error } = await ois.GET("/api/v1/stats/hist/fcas", {
+          params: { query: { at } },
+        });
+        if (error || !data) throw new Error("failed to load historical FCAs");
+        return data;
+      }
       const { data, error } = await ois.GET("/api/v1/flow/fcas");
       if (error || !data) throw new Error("failed to load FCAs");
       return data;
     },
+    staleTime: at == null ? undefined : Infinity,
   });
 }
 

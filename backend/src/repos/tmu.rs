@@ -37,6 +37,21 @@ pub async fn get_tmi(pool: &PgPool, id: &str) -> Result<Option<TmiBody>, ApiErro
         .map_err(|_| ApiError::Internal)
 }
 
+/// TMIs that were live at instant `at` (for historical replay): published by then, not past their
+/// window, and not cancelled before then. Never-published drafts are excluded.
+pub async fn list_tmis_at(pool: &PgPool, at: DateTime<Utc>) -> Result<Vec<TmiBody>, ApiError> {
+    sqlx::query_as::<_, TmiBody>(&format!(
+        "{SELECT} where t.published_at is not null and t.published_at <= $1 \
+           and (t.stop_time is null or t.stop_time > $1) \
+           and (t.ended_at is null or t.ended_at > $1) \
+         order by t.created_at desc"
+    ))
+    .bind(at)
+    .fetch_all(pool)
+    .await
+    .map_err(|_| ApiError::Internal)
+}
+
 pub async fn create_tmi(
     pool: &PgPool,
     req: &CreateTmiRequest,
@@ -96,10 +111,11 @@ pub async fn publish_tmi(pool: &PgPool, id: &str, published_by: &str) -> Result<
     Ok(result.rows_affected() > 0)
 }
 
-/// Cancels a draft or published TMI. Returns false if it's already terminal.
+/// Cancels a draft or published TMI. Returns false if it's already terminal. `ended_at` records the
+/// early close so replay stops showing it at the cancellation time.
 pub async fn cancel_tmi(pool: &PgPool, id: &str) -> Result<bool, ApiError> {
     let result = sqlx::query(
-        "update tmu.tmis set status = 'cancelled' \
+        "update tmu.tmis set status = 'cancelled', ended_at = coalesce(ended_at, now()) \
          where id = $1 and status in ('draft', 'published')",
     )
     .bind(id)
@@ -110,12 +126,41 @@ pub async fn cancel_tmi(pool: &PgPool, id: &str) -> Result<bool, ApiError> {
 }
 
 pub async fn delete_tmi(pool: &PgPool, id: &str) -> Result<bool, ApiError> {
-    let result = sqlx::query("delete from tmu.tmis where id = $1")
-        .bind(id)
-        .execute(pool)
-        .await
-        .map_err(|_| ApiError::Internal)?;
-    Ok(result.rows_affected() > 0)
+    delete_or_retain(pool, "tmu.tmis", id).await
+}
+
+/// Delete for the published-history entities (TMIs / ground stops / GDPs): a row that was NEVER
+/// published (a draft dropped without going live) is hard-deleted and never appears in replay; a
+/// row that was ever published is KEPT — cancelled (with `ended_at` stamped if still active) so the
+/// historical dashboard can still show it during the window it was live. `table` is a trusted
+/// internal literal, never user input. Returns whether a row with that id existed.
+pub(crate) async fn delete_or_retain(
+    pool: &PgPool,
+    table: &str,
+    id: &str,
+) -> Result<bool, ApiError> {
+    let hard = sqlx::query(&format!(
+        "delete from {table} where id = $1 and published_at is null"
+    ))
+    .bind(id)
+    .execute(pool)
+    .await
+    .map_err(|_| ApiError::Internal)?;
+    if hard.rows_affected() > 0 {
+        return Ok(true);
+    }
+    let soft = sqlx::query(&format!(
+        "update {table} set \
+            status = case when status in ('draft', 'published') then 'cancelled' else status end, \
+            ended_at = case when status in ('draft', 'published') then coalesce(ended_at, now()) \
+                            else ended_at end \
+         where id = $1"
+    ))
+    .bind(id)
+    .execute(pool)
+    .await
+    .map_err(|_| ApiError::Internal)?;
+    Ok(soft.rows_affected() > 0)
 }
 
 // --- rate programs ---
@@ -196,6 +241,24 @@ pub async fn list_ground_stops(pool: &PgPool) -> Result<Vec<GroundStopBody>, Api
         .map_err(|_| ApiError::Internal)
 }
 
+/// Ground stops that were live at instant `at` (for historical replay).
+pub async fn list_ground_stops_at(
+    pool: &PgPool,
+    at: DateTime<Utc>,
+) -> Result<Vec<GroundStopBody>, ApiError> {
+    sqlx::query_as::<_, GroundStopBody>(&format!(
+        "{GS_SELECT} where g.published_at is not null and g.published_at <= $1 \
+           and (tmu.ground_stop_until_ts(g.created_at, g.until) is null \
+                or tmu.ground_stop_until_ts(g.created_at, g.until) > $1) \
+           and (g.ended_at is null or g.ended_at > $1) \
+         order by g.updated_at desc"
+    ))
+    .bind(at)
+    .fetch_all(pool)
+    .await
+    .map_err(|_| ApiError::Internal)
+}
+
 pub async fn get_ground_stop(pool: &PgPool, id: &str) -> Result<Option<GroundStopBody>, ApiError> {
     sqlx::query_as::<_, GroundStopBody>(&format!("{GS_SELECT} where g.id = $1"))
         .bind(id)
@@ -245,7 +308,7 @@ pub async fn publish_ground_stop(
 /// Cancels a draft or published ground stop. Returns false if it's already terminal.
 pub async fn cancel_ground_stop(pool: &PgPool, id: &str) -> Result<bool, ApiError> {
     let result = sqlx::query(
-        "update tmu.ground_stops set status = 'cancelled' \
+        "update tmu.ground_stops set status = 'cancelled', ended_at = coalesce(ended_at, now()) \
          where id = $1 and status in ('draft', 'published')",
     )
     .bind(id)
@@ -256,12 +319,7 @@ pub async fn cancel_ground_stop(pool: &PgPool, id: &str) -> Result<bool, ApiErro
 }
 
 pub async fn delete_ground_stop(pool: &PgPool, id: &str) -> Result<bool, ApiError> {
-    let result = sqlx::query("delete from tmu.ground_stops where id = $1")
-        .bind(id)
-        .execute(pool)
-        .await
-        .map_err(|_| ApiError::Internal)?;
-    Ok(result.rows_affected() > 0)
+    delete_or_retain(pool, "tmu.ground_stops", id).await
 }
 
 // --- issued CFRs ---
@@ -384,11 +442,14 @@ pub async fn run_cleanup(pool: &PgPool) -> Result<CleanupStats, ApiError> {
     .await
     .map_err(internal)?;
 
-    // 2. Delete records whose end (or cancellation) was more than an hour ago.
+    // 2. Delete records whose end (or cancellation) was more than an hour ago — but ONLY those that
+    // were never published. Anything that was published is kept (the historical dashboard replays
+    // it); published rows are pruned later, on the stats retention window, by `prune_history`.
     let d_tmi = sqlx::query(
         "delete from tmu.tmis \
-         where (stop_time is not null and stop_time < now() - interval '1 hour') \
-            or (status in ('cancelled', 'expired') and updated_at < now() - interval '1 hour')",
+         where published_at is null \
+           and ((stop_time is not null and stop_time < now() - interval '1 hour') \
+             or (status in ('cancelled', 'expired') and updated_at < now() - interval '1 hour'))",
     )
     .execute(pool)
     .await
@@ -396,9 +457,10 @@ pub async fn run_cleanup(pool: &PgPool) -> Result<CleanupStats, ApiError> {
 
     let d_gs = sqlx::query(
         "delete from tmu.ground_stops \
-         where (tmu.ground_stop_until_ts(created_at, until) is not null \
-                and tmu.ground_stop_until_ts(created_at, until) < now() - interval '1 hour') \
-            or (status in ('cancelled', 'expired') and updated_at < now() - interval '1 hour')",
+         where published_at is null \
+           and ((tmu.ground_stop_until_ts(created_at, until) is not null \
+                 and tmu.ground_stop_until_ts(created_at, until) < now() - interval '1 hour') \
+             or (status in ('cancelled', 'expired') and updated_at < now() - interval '1 hour'))",
     )
     .execute(pool)
     .await
@@ -427,8 +489,9 @@ pub async fn run_cleanup(pool: &PgPool) -> Result<CleanupStats, ApiError> {
 
     let d_gdp = sqlx::query(&format!(
         "delete from tmu.gdp \
-         where ({GDP_END} is not null and {GDP_END} < now() - interval '1 hour') \
-            or (status in ('cancelled', 'expired') and updated_at < now() - interval '1 hour')"
+         where published_at is null \
+           and (({GDP_END} is not null and {GDP_END} < now() - interval '1 hour') \
+             or (status in ('cancelled', 'expired') and updated_at < now() - interval '1 hour'))"
     ))
     .execute(pool)
     .await
@@ -441,4 +504,24 @@ pub async fn run_cleanup(pool: &PgPool) -> Result<CleanupStats, ApiError> {
             + d_pgm.rows_affected()
             + d_gdp.rows_affected(),
     })
+}
+
+/// Prune published-then-finished traffic-management history past the retention window `before`
+/// (kept only so the historical dashboard can replay it). Active (still-published) rows are never
+/// pruned. Called from the stats compaction job on the same horizon as the position time-series.
+pub async fn prune_history(pool: &PgPool, before: DateTime<Utc>) -> Result<u64, ApiError> {
+    let mut total = 0u64;
+    for table in ["tmu.tmis", "tmu.ground_stops", "tmu.gdp"] {
+        let res = sqlx::query(&format!(
+            "delete from {table} where published_at is not null \
+               and status in ('expired', 'cancelled') \
+               and coalesce(ended_at, updated_at) < $1"
+        ))
+        .bind(before)
+        .execute(pool)
+        .await
+        .map_err(|_| ApiError::Internal)?;
+        total += res.rows_affected();
+    }
+    Ok(total)
 }

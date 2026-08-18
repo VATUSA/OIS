@@ -3,6 +3,7 @@ import type {components} from "@ois/api-client";
 import {useToast} from "@ois/ui";
 
 import {ois} from "./api";
+import {useHistoricalAt} from "./historical-context";
 
 export type Gdp = components["schemas"]["GdpBody"];
 export type CreateGdp = components["schemas"]["CreateGdpRequest"];
@@ -14,13 +15,22 @@ export type GdpDemand = components["schemas"]["GdpDemand"];
 
 /** All Ground Delay Programs. */
 export function useGdps() {
+  const at = useHistoricalAt();
   return useQuery({
-    queryKey: ["gdps"],
+    queryKey: at == null ? ["gdps"] : ["hist-gdps", at],
     queryFn: async () => {
+      if (at != null) {
+        const { data, error } = await ois.GET("/api/v1/stats/hist/gdps", {
+          params: { query: { at } },
+        });
+        if (error || !data) throw new Error("failed to load historical GDPs");
+        return data;
+      }
       const { data, error } = await ois.GET("/api/v1/tmu/gdp");
       if (error || !data) throw new Error("failed to load GDPs");
       return data;
     },
+    staleTime: at == null ? undefined : Infinity,
   });
 }
 

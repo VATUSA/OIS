@@ -4,6 +4,8 @@
 
 use std::collections::HashMap;
 
+use serde::{Deserialize, Serialize};
+
 use super::airports::AirportDb;
 
 const R_NM: f64 = 3440.065;
@@ -13,12 +15,13 @@ const REGIONS: [&str; 6] = ["bos", "mia", "chi", "dfw", "slc", "sfo"];
 const MAX_STATION_NM: f64 = 600.0;
 
 /// Wind at one forecast level: direction (deg true, None when calm) and speed (kt).
-#[derive(Clone, Copy)]
+#[derive(Clone, Copy, Serialize, Deserialize)]
 pub struct WindLevel {
     pub dir: Option<f64>,
     pub spd: f64,
 }
 
+#[derive(Serialize, Deserialize)]
 struct Station {
     lat: f64,
     lon: f64,
@@ -26,7 +29,9 @@ struct Station {
     levels: Vec<(i32, WindLevel)>,
 }
 
-#[derive(Default)]
+/// The winds-aloft picture. Serializable so the stats collector can snapshot it for historical
+/// replay (`stats.winds`) and the reconstruction can load a past snapshot back.
+#[derive(Default, Serialize, Deserialize)]
 pub struct Winds {
     stations: Vec<Station>,
 }

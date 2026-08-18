@@ -1,5 +1,6 @@
 //! Flow Constrained Area (FCA) storage. Shared, server-side — one FCA set for everyone.
 
+use chrono::{DateTime, Utc};
 use sqlx::PgPool;
 
 use crate::errors::ApiError;
@@ -11,10 +12,25 @@ const FCA_SELECT: &str = "select f.id, f.name, f.color, f.artcc, f.points, f.des
     from flow.fca f left join identity.users u on u.id = f.updated_by";
 
 pub async fn list_fcas(pool: &PgPool) -> Result<Vec<FcaBody>, ApiError> {
-    sqlx::query_as::<_, FcaBody>(&format!("{FCA_SELECT} order by f.name"))
-        .fetch_all(pool)
-        .await
-        .map_err(|_| ApiError::Internal)
+    sqlx::query_as::<_, FcaBody>(&format!(
+        "{FCA_SELECT} where f.deleted_at is null order by f.name"
+    ))
+    .fetch_all(pool)
+    .await
+    .map_err(|_| ApiError::Internal)
+}
+
+/// FCAs that existed and were enabled at instant `at` (for historical replay). Enable/disable isn't
+/// historized, so the current `enabled` flag is used — an FCA toggled off since then is excluded.
+pub async fn list_fcas_at(pool: &PgPool, at: DateTime<Utc>) -> Result<Vec<FcaBody>, ApiError> {
+    sqlx::query_as::<_, FcaBody>(&format!(
+        "{FCA_SELECT} where f.enabled and f.created_at <= $1 \
+           and (f.deleted_at is null or f.deleted_at > $1) order by f.name"
+    ))
+    .bind(at)
+    .fetch_all(pool)
+    .await
+    .map_err(|_| ApiError::Internal)
 }
 
 pub async fn get_fca(pool: &PgPool, id: &str) -> Result<Option<FcaBody>, ApiError> {
@@ -94,11 +110,13 @@ pub async fn update_fca(
 }
 
 pub async fn delete_fca(pool: &PgPool, id: &str) -> Result<bool, ApiError> {
-    let result = sqlx::query("delete from flow.fca where id = $1")
-        .bind(id)
-        .execute(pool)
-        .await
-        .map_err(|_| ApiError::Internal)?;
+    // Soft-delete so the historical dashboard can still show the FCA during the window it existed.
+    let result =
+        sqlx::query("update flow.fca set deleted_at = now() where id = $1 and deleted_at is null")
+            .bind(id)
+            .execute(pool)
+            .await
+            .map_err(|_| ApiError::Internal)?;
     Ok(result.rows_affected() > 0)
 }
 

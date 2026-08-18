@@ -230,9 +230,9 @@ export const DATA_SOURCES: DataSource[] = [
       f("author", "By"),
     ],
     useRows: () => {
-      const at = useHistoricalAt();
+      // TMIs are historized — useTmis is mode-aware, so this replays at the scrubber instant.
       const q = useTmis();
-      return { rows: histBlank(at, q.data), isLoading: at == null && q.isLoading, isError: at == null && q.isError, ...singleStatus(q) };
+      return { rows: (q.data ?? []) as Row[], isLoading: q.isLoading, isError: q.isError, ...singleStatus(q) };
     },
   },
   {
@@ -252,9 +252,9 @@ export const DATA_SOURCES: DataSource[] = [
       f("enabled", "Enabled", "bool"),
     ],
     useRows: () => {
-      const at = useHistoricalAt();
+      // FCAs are historized — useFcas is mode-aware, so this replays at the scrubber instant.
       const q = useFcas();
-      return { rows: histBlank(at, q.data), isLoading: at == null && q.isLoading, isError: at == null && q.isError, ...singleStatus(q) };
+      return { rows: (q.data ?? []) as Row[], isLoading: q.isLoading, isError: q.isError, ...singleStatus(q) };
     },
   },
   {

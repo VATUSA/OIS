@@ -349,6 +349,15 @@ fn parse_at(q: &AtQuery) -> Result<DateTime<Utc>, ApiError> {
     DateTime::from_timestamp(q.at, 0).ok_or(ApiError::BadRequest)
 }
 
+/// The winds snapshot to meter a past flow/runway against — the nearest one at or before `at`,
+/// falling back to still air when nothing was captured that far back.
+async fn winds_for(
+    pool: &sqlx::PgPool,
+    at: DateTime<Utc>,
+) -> Result<crate::feed::winds::Winds, ApiError> {
+    Ok(stats_repo::winds_at(pool, at).await?.unwrap_or_default())
+}
+
 #[utoipa::path(
     get,
     path = "/api/v1/stats/hist/flow/{icao}",
@@ -369,8 +378,9 @@ pub async fn hist_flow(
     let at = parse_at(&q)?;
     let icao = norm_icao(&icao);
     let data = reconstruct_at(p, at).await?;
+    let winds = winds_for(p, at).await?;
     Ok(Json(
-        feed_handlers::flow_from_data(&state, p, &icao, &data, at).await?,
+        feed_handlers::flow_from_data(&state, p, &icao, &data, &winds, at).await?,
     ))
 }
 
@@ -394,8 +404,9 @@ pub async fn hist_departures(
     let at = parse_at(&q)?;
     let dep = norm_icao(&dep);
     let data = reconstruct_at(p, at).await?;
+    let winds = winds_for(p, at).await?;
     Ok(Json(
-        feed_handlers::departures_response(&state, p, &dep, &data, at).await?,
+        feed_handlers::departures_response(&state, p, &dep, &data, &winds, at).await?,
     ))
 }
 
@@ -460,8 +471,9 @@ pub async fn hist_runway(
     let at = parse_at(&q)?;
     let icao = norm_icao(&icao);
     let data = reconstruct_at(p, at).await?;
+    let winds = winds_for(p, at).await?;
     Ok(Json(
-        runway_handlers::build_board_from(&state, &icao, &data, at).await?,
+        runway_handlers::build_board_from(&state, &icao, &data, &winds, at).await?,
     ))
 }
 
@@ -489,5 +501,79 @@ pub async fn hist_taxi(
     let airports = state.feed.read().await.airports.clone();
     Ok(Json(
         crate::feed::stats::reconstruct::taxi_field_at(p, airports.as_ref(), &icao, at).await?,
+    ))
+}
+
+// --- historical traffic-management entities (active at instant T) ------------------------------
+
+#[utoipa::path(
+    get,
+    path = "/api/v1/stats/hist/fcas",
+    tag = "stats",
+    params(("at" = i64, Query, description = "Reconstruct instant (Unix epoch seconds)")),
+    responses((status = 200, body = Vec<crate::models::FcaBody>), (status = 400), (status = 401), (status = 503))
+)]
+pub async fn hist_fcas(
+    State(state): State<AppState>,
+    _permission: RequirePermission<StatsRead>,
+    Query(q): Query<AtQuery>,
+) -> Result<Json<Vec<crate::models::FcaBody>>, ApiError> {
+    let p = pool(&state)?;
+    Ok(Json(
+        crate::repos::flow::list_fcas_at(p, parse_at(&q)?).await?,
+    ))
+}
+
+#[utoipa::path(
+    get,
+    path = "/api/v1/stats/hist/tmis",
+    tag = "stats",
+    params(("at" = i64, Query, description = "Reconstruct instant (Unix epoch seconds)")),
+    responses((status = 200, body = Vec<crate::models::TmiBody>), (status = 400), (status = 401), (status = 503))
+)]
+pub async fn hist_tmis(
+    State(state): State<AppState>,
+    _permission: RequirePermission<StatsRead>,
+    Query(q): Query<AtQuery>,
+) -> Result<Json<Vec<crate::models::TmiBody>>, ApiError> {
+    let p = pool(&state)?;
+    Ok(Json(
+        crate::repos::tmu::list_tmis_at(p, parse_at(&q)?).await?,
+    ))
+}
+
+#[utoipa::path(
+    get,
+    path = "/api/v1/stats/hist/gdps",
+    tag = "stats",
+    params(("at" = i64, Query, description = "Reconstruct instant (Unix epoch seconds)")),
+    responses((status = 200, body = Vec<crate::models::GdpBody>), (status = 400), (status = 401), (status = 503))
+)]
+pub async fn hist_gdps(
+    State(state): State<AppState>,
+    _permission: RequirePermission<StatsRead>,
+    Query(q): Query<AtQuery>,
+) -> Result<Json<Vec<crate::models::GdpBody>>, ApiError> {
+    let p = pool(&state)?;
+    Ok(Json(
+        crate::repos::gdp::list_gdps_at(p, parse_at(&q)?).await?,
+    ))
+}
+
+#[utoipa::path(
+    get,
+    path = "/api/v1/stats/hist/ground-stops",
+    tag = "stats",
+    params(("at" = i64, Query, description = "Reconstruct instant (Unix epoch seconds)")),
+    responses((status = 200, body = Vec<crate::models::GroundStopBody>), (status = 400), (status = 401), (status = 503))
+)]
+pub async fn hist_ground_stops(
+    State(state): State<AppState>,
+    _permission: RequirePermission<StatsRead>,
+    Query(q): Query<AtQuery>,
+) -> Result<Json<Vec<crate::models::GroundStopBody>>, ApiError> {
+    let p = pool(&state)?;
+    Ok(Json(
+        crate::repos::tmu::list_ground_stops_at(p, parse_at(&q)?).await?,
     ))
 }

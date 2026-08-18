@@ -3,6 +3,7 @@ import type {components} from "@ois/api-client";
 import {useToast} from "@ois/ui";
 
 import {ois} from "./api";
+import {useHistoricalAt} from "./historical-context";
 
 export type Tmi = components["schemas"]["TmiBody"];
 export type CreateTmi = components["schemas"]["CreateTmiRequest"];
@@ -13,13 +14,22 @@ export type GroundStop = components["schemas"]["GroundStopBody"];
 export type CreateGroundStop = components["schemas"]["CreateGroundStopRequest"];
 
 export function useTmis() {
+  const at = useHistoricalAt();
   return useQuery({
-    queryKey: ["tmis"],
+    queryKey: at == null ? ["tmis"] : ["hist-tmis", at],
     queryFn: async () => {
+      if (at != null) {
+        const { data, error } = await ois.GET("/api/v1/stats/hist/tmis", {
+          params: { query: { at } },
+        });
+        if (error || !data) throw new Error("failed to load historical TMIs");
+        return data;
+      }
       const { data, error } = await ois.GET("/api/v1/tmu/tmis");
       if (error || !data) throw new Error("failed to load TMIs");
       return data;
     },
+    staleTime: at == null ? undefined : Infinity,
   });
 }
 
@@ -138,13 +148,22 @@ export function useDeleteProgram() {
 // --- ground stops ---
 
 export function useGroundStops() {
+  const at = useHistoricalAt();
   return useQuery({
-    queryKey: ["ground-stops"],
+    queryKey: at == null ? ["ground-stops"] : ["hist-ground-stops", at],
     queryFn: async () => {
+      if (at != null) {
+        const { data, error } = await ois.GET("/api/v1/stats/hist/ground-stops", {
+          params: { query: { at } },
+        });
+        if (error || !data) throw new Error("failed to load historical ground stops");
+        return data;
+      }
       const { data, error } = await ois.GET("/api/v1/tmu/ground-stops");
       if (error || !data) throw new Error("failed to load ground stops");
       return data;
     },
+    staleTime: at == null ? undefined : Infinity,
   });
 }
 

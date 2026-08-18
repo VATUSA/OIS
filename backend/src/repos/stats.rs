@@ -8,6 +8,7 @@ use serde_json::Value;
 use sqlx::{PgPool, Postgres, QueryBuilder, Transaction};
 
 use crate::errors::ApiError;
+use crate::feed::winds::Winds;
 use crate::models::{KeyCountBody, NetworkPointBody, StatsFlightDetail, StatsFlightSummary};
 
 // --- decoupled row inputs (the collector fills these from feed structs) ---------------------
@@ -993,6 +994,46 @@ pub async fn flights_meta(
     .fetch_all(pool)
     .await
     .map_err(db)
+}
+
+// --- winds-aloft snapshots (historical ETA accuracy) ------------------------------------------
+
+/// Persist one winds snapshot at `ts` (idempotent per timestamp).
+pub async fn upsert_winds(pool: &PgPool, ts: DateTime<Utc>, winds: &Winds) -> Result<(), ApiError> {
+    sqlx::query("insert into stats.winds (ts, data) values ($1, $2) on conflict (ts) do nothing")
+        .bind(ts)
+        .bind(sqlx::types::Json(winds))
+        .execute(pool)
+        .await
+        .map_err(db)?;
+    Ok(())
+}
+
+/// The most recent winds snapshot at or before `at` (None when nothing was captured yet — the
+/// caller falls back to still air).
+pub async fn winds_at(pool: &PgPool, at: DateTime<Utc>) -> Result<Option<Winds>, ApiError> {
+    let row = sqlx::query_scalar::<_, sqlx::types::Json<Winds>>(
+        "select data from stats.winds where ts <= $1 order by ts desc limit 1",
+    )
+    .bind(at)
+    .fetch_optional(pool)
+    .await
+    .map_err(db)?;
+    Ok(row.map(|j| j.0))
+}
+
+/// Drop winds snapshots older than `before`, except any inside an open/saved capture window.
+pub async fn prune_winds(pool: &PgPool, before: DateTime<Utc>) -> Result<u64, ApiError> {
+    let res = sqlx::query(
+        "delete from stats.winds w where w.ts < $1 and not exists (\
+            select 1 from stats.capture c where c.status in ('open', 'saved') \
+            and w.ts >= c.start_time and w.ts < coalesce(c.end_time, now()))",
+    )
+    .bind(before)
+    .execute(pool)
+    .await
+    .map_err(db)?;
+    Ok(res.rows_affected())
 }
 
 fn db(e: sqlx::Error) -> ApiError {
