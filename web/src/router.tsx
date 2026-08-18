@@ -1,4 +1,4 @@
-import {createRootRoute, createRoute, createRouter, Outlet, redirect, useRouterState,} from "@tanstack/react-router";
+import {createRootRoute, createRoute, createRouter, lazyRouteComponent, Outlet, redirect, useRouterState,} from "@tanstack/react-router";
 
 import {FeedWatcher} from "@/components/feed-watcher";
 import {Footer} from "@/components/footer";
@@ -21,7 +21,8 @@ import {EventPlanningPage} from "@/pages/planning/event";
 import {AirportConfigsPage} from "@/pages/planning/airport-configs";
 import {StatsPage} from "@/pages/stats";
 import {StatsFlightPage} from "@/pages/stats/flight";
-import {CaptureReplayPage} from "@/pages/stats/replay";
+// Replay pulls in deck.gl + MapLibre — code-split so it only loads on its route.
+const CaptureReplayPage = lazyRouteComponent(() => import("@/pages/stats/replay"), "CaptureReplayPage");
 import {AdminLayout} from "@/pages/admin/layout";
 import {AdminOverview} from "@/pages/admin/overview";
 import {AdminAccessControl} from "@/pages/admin/access-control";
