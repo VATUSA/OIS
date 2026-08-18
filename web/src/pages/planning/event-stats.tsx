@@ -110,8 +110,8 @@ function CaptureConfig({ eventId }: { eventId: number }) {
             </p>
             {cap.capture_id && (
               <Link
-                to="/stats/captures/$captureId/replay"
-                params={{ captureId: cap.capture_id }}
+                to="/historical/replay"
+                search={{ capture: cap.capture_id }}
                 className={buttonVariants({ variant: "outline", size: "sm" }) + " gap-1"}
               >
                 <Film className="size-3.5" />

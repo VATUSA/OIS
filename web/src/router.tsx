@@ -206,11 +206,11 @@ const planningEventRoute = createRoute({
   component: EventPlanningPage,
 });
 
-// --- Stats (persisted network statistics) ---
+// --- Historical (persisted network statistics, replay + dashboard) ---
 
 const statsRoute = createRoute({
   getParentRoute: () => rootRoute,
-  path: "stats",
+  path: "historical",
   component: Outlet,
 });
 
@@ -226,10 +226,23 @@ const statsFlightRoute = createRoute({
   component: StatsFlightPage,
 });
 
+// Standalone replay map: pick a saved capture OR a custom [from, to] window, then scrub. The old
+// per-capture deep link is preserved as `?capture=<id>`.
 const statsReplayRoute = createRoute({
   getParentRoute: () => statsRoute,
-  path: "captures/$captureId/replay",
+  path: "replay",
   component: CaptureReplayPage,
+  validateSearch: (
+    search: Record<string, unknown>,
+  ): { capture?: string; from?: number; to?: number; step?: number } => {
+    const num = (v: unknown) => (v != null && Number.isFinite(Number(v)) ? Number(v) : undefined);
+    return {
+      capture: typeof search.capture === "string" ? search.capture : undefined,
+      from: num(search.from),
+      to: num(search.to),
+      step: num(search.step),
+    };
+  },
 });
 
 const statsDashboardRoute = createRoute({

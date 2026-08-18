@@ -15,6 +15,7 @@ import {
   BookOpen,
   CalendarClock,
   ChevronDown,
+  Film,
   Gauge,
   LayoutDashboard,
   LogOut,
@@ -253,17 +254,23 @@ function MobileMenu({
         {canStats && (
           <>
             <DropdownMenuSeparator />
-            <DropdownMenuLabel>Stats</DropdownMenuLabel>
+            <DropdownMenuLabel>Historical</DropdownMenuLabel>
             <DropdownMenuItem asChild>
-              <Link to="/stats">
+              <Link to="/historical">
                 <TrendingUp />
                 Network stats
               </Link>
             </DropdownMenuItem>
             <DropdownMenuItem asChild>
-              <Link to="/stats/dashboard">
+              <Link to="/historical/dashboard">
                 <LayoutDashboard />
-                Historical dashboard
+                Dashboard replay
+              </Link>
+            </DropdownMenuItem>
+            <DropdownMenuItem asChild>
+              <Link to="/historical/replay">
+                <Film />
+                Replay map
               </Link>
             </DropdownMenuItem>
           </>
@@ -403,17 +410,23 @@ export function Navbar() {
           )}
 
           {canStats && (
-            <NavGroup label="Stats" activePrefix="/stats">
+            <NavGroup label="Historical" activePrefix="/historical">
               <DropdownMenuItem asChild>
-                <Link to="/stats">
+                <Link to="/historical">
                   <TrendingUp />
                   Network stats
                 </Link>
               </DropdownMenuItem>
               <DropdownMenuItem asChild>
-                <Link to="/stats/dashboard">
+                <Link to="/historical/dashboard">
                   <LayoutDashboard />
-                  Historical dashboard
+                  Dashboard replay
+                </Link>
+              </DropdownMenuItem>
+              <DropdownMenuItem asChild>
+                <Link to="/historical/replay">
+                  <Film />
+                  Replay map
                 </Link>
               </DropdownMenuItem>
             </NavGroup>

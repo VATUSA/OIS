@@ -5,13 +5,14 @@ import type {PickingInfo} from "@deck.gl/core";
 import {Map as MapLibre} from "react-map-gl/maplibre";
 import "maplibre-gl/dist/maplibre-gl.css";
 import {Button, useTheme} from "@ois/ui";
-import {Link, useParams} from "@tanstack/react-router";
+import {Link, useNavigate, useSearch} from "@tanstack/react-router";
 import {ArrowLeft, Pause, Play, SkipBack, X} from "lucide-react";
 
 import {useMe} from "@/lib/auth";
 import {hasPermission} from "@/lib/permissions";
-import {type Replay, useCaptureReplay} from "@/lib/stats";
+import {type Replay, useCaptureReplay, useCaptures, useWindowReplay} from "@/lib/stats";
 import {aircraftIconUrl} from "@/lib/aircraft-icons";
+import {formatZuluFull} from "@/lib/time";
 import boundariesGeo from "@/assets/artcc-boundaries.json";
 
 // Free CARTO vector basemap styles (no access token needed).
@@ -528,29 +529,86 @@ function ReplayMap({ replay }: { replay: Replay }) {
   );
 }
 
+interface ReplaySearch {
+  capture?: string;
+  from?: number;
+  to?: number;
+}
+
+interface Win {
+  from: number;
+  to: number;
+}
+
+/** <input type="datetime-local"> value ↔ unix seconds (UTC/Zulu). */
+const toLocalInput = (unixS: number) => {
+  const d = new Date(unixS * 1000);
+  const pad = (n: number) => String(n).padStart(2, "0");
+  return `${d.getUTCFullYear()}-${pad(d.getUTCMonth() + 1)}-${pad(d.getUTCDate())}T${pad(d.getUTCHours())}:${pad(d.getUTCMinutes())}`;
+};
+const fromLocalInput = (v: string): number | null => {
+  const ms = Date.parse(v + "Z");
+  return Number.isFinite(ms) ? Math.floor(ms / 1000) : null;
+};
+const defaultWindow = (): Win => {
+  const now = Math.floor(Date.now() / 1000);
+  return { from: now - 3 * 3600, to: now };
+};
+
+/**
+ * The historical replay map: pick a saved capture OR a custom time window, then play the recorded
+ * traffic back and scrub through it. The selection lives in the URL (`?capture=` or `?from&to`) so a
+ * replay is shareable. The heavy deck.gl `ReplayMap` is keyed on the selection so a new pick starts
+ * the player fresh.
+ */
 export function CaptureReplayPage() {
-  const { captureId } = useParams({ from: "/stats/captures/$captureId/replay" });
   const { data: me } = useMe();
   const canRead = hasPermission(me, "stats.data.read");
-  const replay = useCaptureReplay(canRead ? captureId : null);
+
+  const search = useSearch({ strict: false }) as ReplaySearch;
+  const navigate = useNavigate();
+  const patch = (p: Partial<ReplaySearch>) =>
+    void navigate({
+      to: "/historical/replay",
+      search: (prev) => ({ ...prev, ...p }),
+      replace: true,
+      resetScroll: false,
+    });
+
+  const captures = useCaptures();
+  const [captureId, setCaptureId] = useState<string>(() => search.capture ?? "");
+  const [win, setWin] = useState<Win>(() =>
+    search.from != null && search.to != null && search.to > search.from
+      ? { from: search.from, to: search.to }
+      : defaultWindow(),
+  );
+
+  const usingCapture = !!captureId;
+  const cap = useCaptureReplay(canRead && usingCapture ? captureId : null);
+  const window = useWindowReplay(
+    canRead && !usingCapture ? win.from : null,
+    canRead && !usingCapture ? win.to : null,
+  );
+  const replay = usingCapture ? cap : window;
+  const selectionKey = usingCapture ? captureId : `${win.from}-${win.to}`;
 
   return (
     <div className="mx-auto flex w-full max-w-6xl flex-col gap-4">
       <Link
-        to="/stats"
+        to="/historical"
         className="flex w-fit items-center gap-1 text-sm text-muted-foreground transition-colors hover:text-foreground"
       >
         <ArrowLeft className="size-4" /> Network statistics
       </Link>
       <div>
-        <h1 className="text-2xl font-semibold tracking-tight">Capture replay</h1>
+        <h1 className="text-2xl font-semibold tracking-tight">Replay map</h1>
         <p className="text-muted-foreground">
           {replay.data
             ? `${replay.data.flights.length} flights · ${zulu(replay.data.window_start, 0)} – ${zulu(
                 replay.data.window_end,
                 0,
               )}`
-            : "Play back the recorded traffic on the map."}
+            : "Pick a saved capture or a time window, then play back the recorded traffic on the map."}
         </p>
       </div>
 
@@ -558,14 +616,84 @@ export function CaptureReplayPage() {
         <p className="py-16 text-center text-sm text-muted-foreground">
           You don&apos;t have access to network statistics.
         </p>
-      ) : replay.isError ? (
-        <p className="py-16 text-center text-sm text-muted-foreground">
-          That capture isn&apos;t available.
-        </p>
-      ) : !replay.data ? (
-        <p className="py-16 text-center text-sm text-muted-foreground">Loading replay…</p>
       ) : (
-        <ReplayMap replay={replay.data} />
+        <>
+          <div className="flex flex-col gap-3 rounded-lg border bg-muted/20 p-4">
+            <div className="grid gap-3 md:grid-cols-2">
+              <label className="flex flex-col gap-1 text-sm">
+                <span className="text-muted-foreground">Capture</span>
+                <select
+                  className="h-9 rounded-md border bg-background px-2"
+                  value={captureId}
+                  onChange={(e) => {
+                    const v = e.target.value;
+                    setCaptureId(v);
+                    if (v) patch({ capture: v, from: undefined, to: undefined });
+                    else {
+                      const w = defaultWindow();
+                      setWin(w);
+                      patch({ capture: undefined, from: w.from, to: w.to });
+                    }
+                  }}
+                >
+                  <option value="">— custom time window —</option>
+                  {(captures.data ?? []).map((c) => (
+                    <option key={c.id} value={c.id}>
+                      {(c.event_title || c.label || "Capture") +
+                        ` · ${formatZuluFull(c.start_time)}` +
+                        (c.status === "open" ? " (recording)" : "")}
+                    </option>
+                  ))}
+                </select>
+              </label>
+
+              {!usingCapture && (
+                <div className="flex items-end gap-3">
+                  <label className="flex flex-col gap-1 text-xs">
+                    <span className="text-muted-foreground">From (Zulu)</span>
+                    <input
+                      type="datetime-local"
+                      className="h-9 rounded-md border bg-background px-2 text-sm"
+                      value={toLocalInput(win.from)}
+                      onChange={(e) => {
+                        const from = fromLocalInput(e.target.value);
+                        if (from != null) {
+                          setWin((w) => ({ from, to: w.to }));
+                          patch({ from, to: win.to, capture: undefined });
+                        }
+                      }}
+                    />
+                  </label>
+                  <label className="flex flex-col gap-1 text-xs">
+                    <span className="text-muted-foreground">To (Zulu)</span>
+                    <input
+                      type="datetime-local"
+                      className="h-9 rounded-md border bg-background px-2 text-sm"
+                      value={toLocalInput(win.to)}
+                      onChange={(e) => {
+                        const to = fromLocalInput(e.target.value);
+                        if (to != null) {
+                          setWin((w) => ({ from: w.from, to }));
+                          patch({ from: win.from, to, capture: undefined });
+                        }
+                      }}
+                    />
+                  </label>
+                </div>
+              )}
+            </div>
+          </div>
+
+          {replay.isError ? (
+            <p className="py-16 text-center text-sm text-muted-foreground">
+              That replay isn&apos;t available.
+            </p>
+          ) : !replay.data ? (
+            <p className="py-16 text-center text-sm text-muted-foreground">Loading replay…</p>
+          ) : (
+            <ReplayMap key={selectionKey} replay={replay.data} />
+          )}
+        </>
       )}
     </div>
   );

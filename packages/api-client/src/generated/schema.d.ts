@@ -1326,6 +1326,26 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/v1/stats/replay": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * Replay an arbitrary `[from, to]` window on the map (not tied to a saved capture) — same
+         *     per-flight thinned tracks the capture replay returns, so the deck.gl player is identical.
+         */
+        get: operations["window_replay"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/v1/tmu/cfr": {
         parameters: {
             query?: never;
@@ -6964,6 +6984,44 @@ export interface operations {
                 content: {
                     "application/json": components["schemas"]["NetworkPointBody"][];
                 };
+            };
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+        };
+    };
+    window_replay: {
+        parameters: {
+            query: {
+                /** @description Window start (Unix epoch seconds) */
+                from: number;
+                /** @description Window end (Unix epoch seconds) */
+                to: number;
+                /** @description Sample spacing seconds (default 30) */
+                step?: number;
+            };
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ReplayBody"];
+                };
+            };
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
             };
             401: {
                 headers: {
