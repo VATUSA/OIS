@@ -6,7 +6,7 @@ import {Map as MapLibre} from "react-map-gl/maplibre";
 import "maplibre-gl/dist/maplibre-gl.css";
 import {Button, useTheme} from "@ois/ui";
 import {Link, useNavigate, useSearch} from "@tanstack/react-router";
-import {ArrowLeft, Pause, Play, SkipBack, TriangleAlert, X} from "lucide-react";
+import {ArrowLeft, Pause, Play, SkipBack, SlidersHorizontal, TriangleAlert, X} from "lucide-react";
 
 import {useMe} from "@/lib/auth";
 import {hasPermission} from "@/lib/permissions";
@@ -179,6 +179,9 @@ function ReplayMap({ replay }: { replay: Replay }) {
   const { resolvedTheme } = useTheme();
   // deck.gl needs WebGL2; iOS Lockdown Mode disables it (black map). Checked once on mount.
   const [mapAvailable] = useState(webgl2Available);
+  // The options panel overlays the map, so on small screens it's hidden behind a toggle button.
+  // On md+ it's always shown via CSS (`md:flex`), so this state only drives the mobile toggle.
+  const [controlsOpen, setControlsOpen] = useState(false);
 
   const duration = useMemo(
     () => Math.max(1, (Date.parse(replay.window_end) - Date.parse(replay.window_start)) / 1000),
@@ -646,112 +649,126 @@ function ReplayMap({ replay }: { replay: Replay }) {
           <span className="ml-2 text-muted-foreground">{shown.length} aircraft</span>
         </div>
 
-        <div className="absolute right-3 top-3 z-10 flex max-h-[calc(70vh-1.5rem)] w-56 flex-col gap-1.5 overflow-auto rounded-md border bg-background/85 px-3 py-2.5 shadow backdrop-blur">
-          <Toggle checked={hideGround} onChange={setHideGround}>
-            Hide aircraft on ground
-          </Toggle>
-          <Toggle checked={showTrails} onChange={setShowTrails}>
-            Show history trails
-          </Toggle>
-          {showTrails && (
-            <label className="ml-5 flex cursor-pointer items-center gap-2 text-sm text-muted-foreground">
-              <input
-                type="checkbox"
-                checked={showDisconnected}
-                onChange={(e) => setShowDisconnected(e.target.checked)}
-              />
-              Include disconnected
-            </label>
-          )}
-          <Toggle checked={showRoutes} onChange={setShowRoutes}>
-            Show all routes
-          </Toggle>
-          <div className="my-0.5 h-px bg-border" />
+        <div className="absolute right-3 top-3 z-10 flex flex-col items-end gap-2">
+          <button
+            type="button"
+            onClick={() => setControlsOpen((o) => !o)}
+            className="flex items-center gap-1.5 rounded-md border bg-background/85 px-2.5 py-1.5 text-sm shadow backdrop-blur transition-colors hover:bg-accent md:hidden"
+            aria-expanded={controlsOpen}
+            aria-label="Map options"
+          >
+            <SlidersHorizontal className="size-4" />
+            Options
+          </button>
+          <div
+            className={`${controlsOpen ? "flex" : "hidden"} max-h-[calc(70vh-4rem)] w-56 max-w-[calc(100vw-1.5rem)] flex-col gap-1.5 overflow-auto rounded-md border bg-background/85 px-3 py-2.5 shadow backdrop-blur md:flex md:max-h-[calc(70vh-1.5rem)]`}
+          >
+            <Toggle checked={hideGround} onChange={setHideGround}>
+              Hide aircraft on ground
+            </Toggle>
+            <Toggle checked={showTrails} onChange={setShowTrails}>
+              Show history trails
+            </Toggle>
+            {showTrails && (
+              <label className="ml-5 flex cursor-pointer items-center gap-2 text-sm text-muted-foreground">
+                <input
+                  type="checkbox"
+                  checked={showDisconnected}
+                  onChange={(e) => setShowDisconnected(e.target.checked)}
+                />
+                Include disconnected
+              </label>
+            )}
+            <Toggle checked={showRoutes} onChange={setShowRoutes}>
+              Show all routes
+            </Toggle>
+            <div className="my-0.5 h-px bg-border" />
 
-          <Toggle checked={rings} onChange={setRings}>
-            Range rings
-          </Toggle>
-          {rings && (
-            <label className="ml-5 flex items-center gap-2 text-sm text-muted-foreground">
-              <input
-                type="number"
-                min={1}
-                max={500}
-                value={ringNm}
-                onChange={(e) => setRingNm(Math.max(1, Math.min(500, Number(e.target.value) || 0)))}
-                className="h-7 w-16 rounded border bg-background px-1.5 text-right tabular-nums"
-              />
-              NM radius
-            </label>
-          )}
-          <div className="my-0.5 h-px bg-border" />
-          <span className="text-xs font-medium text-muted-foreground">Labels</span>
-          <Toggle checked={labels.callsign} onChange={(v) => setLabels((l) => ({ ...l, callsign: v }))}>
-            Callsign
-          </Toggle>
-          <Toggle checked={labels.type} onChange={(v) => setLabels((l) => ({ ...l, type: v }))}>
-            Aircraft type
-          </Toggle>
-          <Toggle checked={labels.alt} onChange={(v) => setLabels((l) => ({ ...l, alt: v }))}>
-            Altitude
-          </Toggle>
-          <Toggle checked={labels.speed} onChange={(v) => setLabels((l) => ({ ...l, speed: v }))}>
-            Groundspeed
-          </Toggle>
+            <Toggle checked={rings} onChange={setRings}>
+              Range rings
+            </Toggle>
+            {rings && (
+              <label className="ml-5 flex items-center gap-2 text-sm text-muted-foreground">
+                <input
+                  type="number"
+                  min={1}
+                  max={500}
+                  value={ringNm}
+                  onChange={(e) => setRingNm(Math.max(1, Math.min(500, Number(e.target.value) || 0)))}
+                  className="h-7 w-16 rounded border bg-background px-1.5 text-right tabular-nums"
+                />
+                NM radius
+              </label>
+            )}
+            <div className="my-0.5 h-px bg-border" />
+            <span className="text-xs font-medium text-muted-foreground">Labels</span>
+            <Toggle checked={labels.callsign} onChange={(v) => setLabels((l) => ({ ...l, callsign: v }))}>
+              Callsign
+            </Toggle>
+            <Toggle checked={labels.type} onChange={(v) => setLabels((l) => ({ ...l, type: v }))}>
+              Aircraft type
+            </Toggle>
+            <Toggle checked={labels.alt} onChange={(v) => setLabels((l) => ({ ...l, alt: v }))}>
+              Altitude
+            </Toggle>
+            <Toggle checked={labels.speed} onChange={(v) => setLabels((l) => ({ ...l, speed: v }))}>
+              Groundspeed
+            </Toggle>
 
-          <div className="my-0.5 h-px bg-border" />
-          <span className="text-xs font-medium text-muted-foreground">
-            Filter dep → arr <span className="font-normal">(* = any)</span>
-          </span>
-          <div className="flex items-center gap-1">
-            <input
-              value={depDraft}
-              onChange={(e) => setDepDraft(e.target.value)}
-              onKeyDown={(e) => e.key === "Enter" && addFilter()}
-              placeholder="dep"
-              className="h-7 w-full min-w-0 rounded border bg-background px-1.5 font-mono text-xs uppercase"
-            />
-            <span className="text-muted-foreground">→</span>
-            <input
-              value={arrDraft}
-              onChange={(e) => setArrDraft(e.target.value)}
-              onKeyDown={(e) => e.key === "Enter" && addFilter()}
-              placeholder="arr"
-              className="h-7 w-full min-w-0 rounded border bg-background px-1.5 font-mono text-xs uppercase"
-            />
-            <button
-              type="button"
-              onClick={addFilter}
-              className="rounded border px-2 py-1 text-xs hover:bg-accent"
-              aria-label="Add filter"
-            >
-              +
-            </button>
-          </div>
-          {filters.length > 0 && (
-            <div className="flex flex-wrap gap-1">
-              {filters.map((f, i) => (
-                <span
-                  key={`${f.dep}-${f.arr}-${i}`}
-                  className="flex items-center gap-1 rounded border bg-muted/40 px-1.5 py-0.5 font-mono text-xs"
-                >
-                  {f.dep} → {f.arr}
-                  <button
-                    type="button"
-                    onClick={() => setFilters((prev) => prev.filter((_, j) => j !== i))}
-                    className="text-muted-foreground hover:text-foreground"
-                    aria-label="Remove filter"
-                  >
-                    <X className="size-3" />
-                  </button>
-                </span>
-              ))}
+            <div className="my-0.5 h-px bg-border" />
+            <span className="text-xs font-medium text-muted-foreground">
+              Filter dep → arr <span className="font-normal">(* = any)</span>
+            </span>
+            <div className="flex items-center gap-1">
+              <input
+                value={depDraft}
+                onChange={(e) => setDepDraft(e.target.value)}
+                onKeyDown={(e) => e.key === "Enter" && addFilter()}
+                placeholder="dep"
+                className="h-7 w-full min-w-0 rounded border bg-background px-1.5 font-mono text-xs uppercase"
+              />
+              <span className="text-muted-foreground">→</span>
+              <input
+                value={arrDraft}
+                onChange={(e) => setArrDraft(e.target.value)}
+                onKeyDown={(e) => e.key === "Enter" && addFilter()}
+                placeholder="arr"
+                className="h-7 w-full min-w-0 rounded border bg-background px-1.5 font-mono text-xs uppercase"
+              />
+              <button
+                type="button"
+                onClick={addFilter}
+                className="rounded border px-2 py-1 text-xs hover:bg-accent"
+                aria-label="Add filter"
+              >
+                +
+              </button>
             </div>
-          )}
+            {filters.length > 0 && (
+              <div className="flex flex-wrap gap-1">
+                {filters.map((f, i) => (
+                  <span
+                    key={`${f.dep}-${f.arr}-${i}`}
+                    className="flex items-center gap-1 rounded border bg-muted/40 px-1.5 py-0.5 font-mono text-xs"
+                  >
+                    {f.dep} → {f.arr}
+                    <button
+                      type="button"
+                      onClick={() => setFilters((prev) => prev.filter((_, j) => j !== i))}
+                      className="text-muted-foreground hover:text-foreground"
+                      aria-label="Remove filter"
+                    >
+                      <X className="size-3" />
+                    </button>
+                  </span>
+                ))}
+              </div>
+            )}
+          </div>
         </div>
 
         {selectedTrack && (
-          <div className="absolute bottom-3 left-3 z-10 flex max-h-[46%] w-80 flex-col overflow-hidden rounded-md border bg-background/90 shadow backdrop-blur">
+          <div className="absolute bottom-3 left-3 right-3 z-10 flex max-h-[46%] flex-col overflow-hidden rounded-md border bg-background/90 shadow backdrop-blur sm:right-auto sm:w-80">
             <div className="flex items-center justify-between gap-2 border-b px-3 py-2">
               <div className="flex flex-col">
                 <span className="font-mono font-semibold" style={{ color: "rgb(56,189,248)" }}>
@@ -960,12 +977,12 @@ export function CaptureReplayPage() {
               </label>
 
               {!usingCapture && (
-                <div className="flex items-end gap-3">
-                  <label className="flex flex-col gap-1 text-xs">
+                <div className="flex flex-col gap-3 sm:flex-row sm:items-end">
+                  <label className="flex flex-1 flex-col gap-1 text-xs">
                     <span className="text-muted-foreground">From (Zulu)</span>
                     <input
                       type="datetime-local"
-                      className="h-9 rounded-md border bg-background px-2 text-sm"
+                      className="h-9 w-full rounded-md border bg-background px-2 text-sm"
                       value={toLocalInput(win.from)}
                       onChange={(e) => {
                         const from = fromLocalInput(e.target.value);
@@ -976,11 +993,11 @@ export function CaptureReplayPage() {
                       }}
                     />
                   </label>
-                  <label className="flex flex-col gap-1 text-xs">
+                  <label className="flex flex-1 flex-col gap-1 text-xs">
                     <span className="text-muted-foreground">To (Zulu)</span>
                     <input
                       type="datetime-local"
-                      className="h-9 rounded-md border bg-background px-2 text-sm"
+                      className="h-9 w-full rounded-md border bg-background px-2 text-sm"
                       value={toLocalInput(win.to)}
                       onChange={(e) => {
                         const to = fromLocalInput(e.target.value);
