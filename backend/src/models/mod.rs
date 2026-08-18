@@ -730,9 +730,9 @@ pub struct ReplayFlightBody {
     pub departure: Option<String>,
     pub arrival: Option<String>,
     pub aircraft: Option<String>,
-    /// Compact samples: `[t_seconds_from_start, lat, lon, altitude_ft, heading_deg]`.
+    /// Compact samples: `[t_seconds_from_start, lat, lon, altitude_ft, heading_deg, groundspeed_kt]`.
     #[schema(value_type = Vec<Vec<f64>>)]
-    pub samples: Vec<[f64; 5]>,
+    pub samples: Vec<[f64; 6]>,
 }
 
 /// Everything needed to replay a capture window on a map.

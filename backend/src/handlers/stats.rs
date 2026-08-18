@@ -281,7 +281,7 @@ pub async fn capture_replay(
     let mut i = 0;
     while i < samples.len() {
         let sid = samples[i].session_id;
-        let mut track: Vec<[f64; 5]> = Vec::new();
+        let mut track: Vec<[f64; 6]> = Vec::new();
         while i < samples.len() && samples[i].session_id == sid {
             let s = &samples[i];
             track.push([
@@ -290,6 +290,7 @@ pub async fn capture_replay(
                 s.lon as f64,
                 s.alt as f64,
                 s.heading as f64,
+                s.gs as f64,
             ]);
             i += 1;
         }

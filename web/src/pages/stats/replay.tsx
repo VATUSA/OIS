@@ -1,6 +1,7 @@
 import {useEffect, useMemo, useRef, useState} from "react";
 import DeckGL from "@deck.gl/react";
-import {IconLayer} from "@deck.gl/layers";
+import {GeoJsonLayer, IconLayer, TextLayer} from "@deck.gl/layers";
+import type {PickingInfo} from "@deck.gl/core";
 import {Map as MapLibre} from "react-map-gl/maplibre";
 import "maplibre-gl/dist/maplibre-gl.css";
 import {Button, useTheme} from "@ois/ui";
@@ -11,6 +12,7 @@ import {useMe} from "@/lib/auth";
 import {hasPermission} from "@/lib/permissions";
 import {type Replay, useCaptureReplay} from "@/lib/stats";
 import {aircraftIconUrl} from "@/lib/aircraft-icons";
+import boundariesGeo from "@/assets/artcc-boundaries.json";
 
 // Free CARTO vector basemap styles (no access token needed).
 const CARTO_STYLE = {
@@ -19,24 +21,48 @@ const CARTO_STYLE = {
 } as const;
 const INITIAL_VIEW = { longitude: -98.35, latitude: 39.5, zoom: 3.4 };
 const SPEEDS = [1, 2, 4, 8, 16, 32, 64];
+/** Below this groundspeed an aircraft is treated as on the ground (taxi/parked). */
+const GROUND_KT = 30;
 
 /** One aircraft rendered at the current replay clock. */
 type Live = {
   callsign: string;
   actype: string;
+  dep: string;
+  arr: string;
   lon: number;
   lat: number;
   alt: number;
+  gs: number;
   heading: number;
 };
 
-/** A flight's samples as a sorted array of [t, lat, lon, alt, hdg]. */
-type Track = { callsign: string; actype: string; s: number[][] };
+/** A flight's samples as a sorted array of [t, lat, lon, alt, hdg, gs]. */
+type Track = { callsign: string; actype: string; dep: string; arr: string; s: number[][] };
 
 function zulu(base: string, offsetS: number): string {
   const d = new Date(Date.parse(base) + offsetS * 1000);
   const p = (n: number) => String(n).padStart(2, "0");
   return `${p(d.getUTCDate())}/${p(d.getUTCHours())}${p(d.getUTCMinutes())}${p(d.getUTCSeconds())}z`;
+}
+
+type Labels = { callsign: boolean; type: boolean; alt: boolean; speed: boolean };
+
+function Toggle({
+  checked,
+  onChange,
+  children,
+}: {
+  checked: boolean;
+  onChange: (v: boolean) => void;
+  children: React.ReactNode;
+}) {
+  return (
+    <label className="flex cursor-pointer items-center gap-2 text-sm">
+      <input type="checkbox" checked={checked} onChange={(e) => onChange(e.target.checked)} />
+      {children}
+    </label>
+  );
 }
 
 function ReplayMap({ replay }: { replay: Replay }) {
@@ -52,12 +78,13 @@ function ReplayMap({ replay }: { replay: Replay }) {
       replay.flights.map((f) => ({
         callsign: f.callsign,
         actype: f.aircraft ?? "",
+        dep: f.departure ?? "",
+        arr: f.arrival ?? "",
         s: f.samples as number[][],
       })),
     [replay],
   );
 
-  // The animation loop reads refs; UI state mirrors them.
   const clockRef = useRef(0);
   const playingRef = useRef(false);
   const speedRef = useRef(1);
@@ -66,7 +93,10 @@ function ReplayMap({ replay }: { replay: Replay }) {
   const [speed, setSpeed] = useState(1);
   const [aircraft, setAircraft] = useState<Live[]>([]);
 
-  // Interpolate every flight's position at time `t` (seconds from window start).
+  // Display toggles.
+  const [hideGround, setHideGround] = useState(true);
+  const [labels, setLabels] = useState<Labels>({ callsign: true, type: false, alt: false, speed: false });
+
   function frameAt(t: number): Live[] {
     const out: Live[] = [];
     for (const f of tracks) {
@@ -86,10 +116,13 @@ function ReplayMap({ replay }: { replay: Replay }) {
       out.push({
         callsign: f.callsign,
         actype: f.actype,
+        dep: f.dep,
+        arr: f.arr,
         lat: a[1] + (b[1] - a[1]) * k,
         lon: a[2] + (b[2] - a[2]) * k,
         alt: Math.round(a[3] + (b[3] - a[3]) * k),
         heading: a[4],
+        gs: Math.round(a[5] + (b[5] - a[5]) * k),
       });
     }
     return out;
@@ -100,21 +133,18 @@ function ReplayMap({ replay }: { replay: Replay }) {
     setClock(t);
   };
 
-  // Reset to the start when a new capture loads.
   useEffect(() => {
     clockRef.current = 0;
     render(0);
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [tracks]);
 
-  // Nudge deck.gl to re-measure once layout has settled — its container can be 0-sized at first
-  // paint (route transition / off-screen mount), which otherwise leaves the canvas blank.
+  // Nudge deck.gl to re-measure once layout has settled (0-sized-at-mount safety).
   useEffect(() => {
     const t = setTimeout(() => window.dispatchEvent(new Event("resize")), 150);
     return () => clearTimeout(t);
   }, []);
 
-  // rAF loop: advance the clock while playing; re-render at ~30 fps (GPU draws the icons).
   useEffect(() => {
     let raf = 0;
     let last = performance.now();
@@ -140,12 +170,34 @@ function ReplayMap({ replay }: { replay: Replay }) {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [duration]);
 
+  // Ground filter applied once; both the icon + label layers share the result.
+  const shown = useMemo(
+    () => (hideGround ? aircraft.filter((a) => a.gs >= GROUND_KT) : aircraft),
+    [aircraft, hideGround],
+  );
+
   const iconColor: [number, number, number] = resolvedTheme === "dark" ? [255, 190, 70] : [40, 60, 90];
+  const boundaryColor: [number, number, number, number] =
+    resolvedTheme === "dark" ? [130, 140, 160, 110] : [90, 100, 120, 120];
+  const labelColor: [number, number, number] = resolvedTheme === "dark" ? [230, 235, 245] : [20, 25, 35];
+
+  const anyLabel = labels.callsign || labels.type || labels.alt || labels.speed;
 
   const layers = [
+    new GeoJsonLayer({
+      id: "artcc-boundaries",
+      data: boundariesGeo as GeoJSON.FeatureCollection,
+      stroked: true,
+      filled: false,
+      getLineColor: boundaryColor,
+      getLineWidth: 1,
+      lineWidthUnits: "pixels",
+      lineWidthMinPixels: 1,
+    }),
     new IconLayer<Live>({
       id: "aircraft",
-      data: aircraft,
+      data: shown,
+      pickable: true,
       getIcon: (d) => {
         const url = aircraftIconUrl(d.actype);
         return { id: url, url, width: 48, height: 48, mask: true };
@@ -156,8 +208,32 @@ function ReplayMap({ replay }: { replay: Replay }) {
       getSize: 26,
       sizeUnits: "pixels",
       billboard: false,
-      // The whole set is replaced each tick; recolor on theme change.
       updateTriggers: { getColor: [resolvedTheme] },
+    }),
+    new TextLayer<Live>({
+      id: "labels",
+      data: anyLabel ? shown : [],
+      getPosition: (d) => [d.lon, d.lat],
+      getText: (d) => {
+        const lines: string[] = [];
+        if (labels.callsign) lines.push(d.callsign);
+        if (labels.type && d.actype) lines.push(d.actype);
+        if (labels.alt) lines.push(`${d.alt}ft`);
+        if (labels.speed) lines.push(`${d.gs}kt`);
+        return lines.join("\n");
+      },
+      getColor: labelColor,
+      getSize: 11,
+      getPixelOffset: [0, 16],
+      getTextAnchor: "middle",
+      getAlignmentBaseline: "top",
+      background: true,
+      getBackgroundColor: resolvedTheme === "dark" ? [10, 12, 16, 180] : [255, 255, 255, 190],
+      backgroundPadding: [3, 1],
+      updateTriggers: {
+        getText: [labels.callsign, labels.type, labels.alt, labels.speed],
+        getColor: [resolvedTheme],
+      },
     }),
   ];
 
@@ -179,6 +255,25 @@ function ReplayMap({ replay }: { replay: Replay }) {
     setSpeed(v);
   };
 
+  const tooltip = (info: PickingInfo<Live>) => {
+    const d = info.object;
+    if (!d) return null;
+    return {
+      html:
+        `<div style="font-weight:600">${d.callsign}</div>` +
+        `<div>${d.dep || "????"} → ${d.arr || "????"}</div>` +
+        `<div>${d.actype || "—"} · ${d.alt}ft · ${d.gs}kt</div>`,
+      style: {
+        background: resolvedTheme === "dark" ? "#111418" : "#ffffff",
+        color: resolvedTheme === "dark" ? "#e6edf3" : "#1b1f24",
+        fontSize: "12px",
+        padding: "6px 8px",
+        borderRadius: "6px",
+        boxShadow: "0 2px 8px rgba(0,0,0,.3)",
+      },
+    };
+  };
+
   return (
     <div className="flex flex-col gap-3">
       <div
@@ -189,13 +284,35 @@ function ReplayMap({ replay }: { replay: Replay }) {
           initialViewState={INITIAL_VIEW}
           controller
           layers={layers}
+          getTooltip={tooltip}
           style={{ position: "absolute", top: "0", left: "0", width: "100%", height: "100%" }}
         >
           <MapLibre mapStyle={CARTO_STYLE[resolvedTheme]} attributionControl={false} />
         </DeckGL>
+
         <div className="pointer-events-none absolute left-3 top-3 z-10 rounded-md bg-background/80 px-3 py-1.5 text-sm shadow backdrop-blur">
           <span className="font-mono font-medium">{zulu(replay.window_start, clock)}</span>
-          <span className="ml-2 text-muted-foreground">{aircraft.length} aircraft</span>
+          <span className="ml-2 text-muted-foreground">{shown.length} aircraft</span>
+        </div>
+
+        <div className="absolute right-3 top-3 z-10 flex flex-col gap-1.5 rounded-md border bg-background/85 px-3 py-2.5 shadow backdrop-blur">
+          <Toggle checked={hideGround} onChange={setHideGround}>
+            Hide aircraft on ground
+          </Toggle>
+          <div className="my-0.5 h-px bg-border" />
+          <span className="text-xs font-medium text-muted-foreground">Labels</span>
+          <Toggle checked={labels.callsign} onChange={(v) => setLabels((l) => ({ ...l, callsign: v }))}>
+            Callsign
+          </Toggle>
+          <Toggle checked={labels.type} onChange={(v) => setLabels((l) => ({ ...l, type: v }))}>
+            Aircraft type
+          </Toggle>
+          <Toggle checked={labels.alt} onChange={(v) => setLabels((l) => ({ ...l, alt: v }))}>
+            Altitude
+          </Toggle>
+          <Toggle checked={labels.speed} onChange={(v) => setLabels((l) => ({ ...l, speed: v }))}>
+            Groundspeed
+          </Toggle>
         </div>
       </div>
 
