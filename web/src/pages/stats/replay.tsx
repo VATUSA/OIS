@@ -6,12 +6,13 @@ import {Map as MapLibre} from "react-map-gl/maplibre";
 import "maplibre-gl/dist/maplibre-gl.css";
 import {Button, useTheme} from "@ois/ui";
 import {Link, useNavigate, useSearch} from "@tanstack/react-router";
-import {ArrowLeft, Pause, Play, SkipBack, X} from "lucide-react";
+import {ArrowLeft, Pause, Play, SkipBack, TriangleAlert, X} from "lucide-react";
 
 import {useMe} from "@/lib/auth";
 import {hasPermission} from "@/lib/permissions";
 import {type Replay, resolveRoutes, useCaptureReplay, useCaptures, useWindowReplay} from "@/lib/stats";
 import {aircraftIconUrl} from "@/lib/aircraft-icons";
+import {webgl2Available} from "@/lib/webgl";
 import {formatZuluFull} from "@/lib/time";
 import boundariesGeo from "@/assets/artcc-boundaries.json";
 
@@ -176,6 +177,8 @@ function Toggle({
 
 function ReplayMap({ replay }: { replay: Replay }) {
   const { resolvedTheme } = useTheme();
+  // deck.gl needs WebGL2; iOS Lockdown Mode disables it (black map). Checked once on mount.
+  const [mapAvailable] = useState(webgl2Available);
 
   const duration = useMemo(
     () => Math.max(1, (Date.parse(replay.window_end) - Date.parse(replay.window_start)) / 1000),
@@ -591,6 +594,29 @@ function ReplayMap({ replay }: { replay: Replay }) {
       },
     };
   };
+
+  if (!mapAvailable) {
+    return (
+      <div
+        className="flex w-full flex-col items-center justify-center gap-3 rounded-lg border px-6 py-16 text-center"
+        style={{ minHeight: "50vh" }}
+      >
+        <TriangleAlert className="h-8 w-8 text-muted-foreground" />
+        <div className="text-lg font-semibold">Map can&apos;t be drawn here</div>
+        <p className="max-w-md text-sm text-muted-foreground">
+          The replay map needs WebGL, which this browser has disabled. On iPhone and iPad this is
+          almost always <span className="font-medium text-foreground">Lockdown Mode</span> — it turns
+          WebGL off, so the map paints black.
+        </p>
+        <p className="max-w-md text-sm text-muted-foreground">
+          To view it, turn Lockdown Mode off for this site: tap{" "}
+          <span className="font-medium text-foreground">ᴀA</span> in Safari&apos;s address bar →{" "}
+          <span className="font-medium text-foreground">Website Settings</span> →{" "}
+          <span className="font-medium text-foreground">Lockdown Mode → Off</span>, then reload.
+        </p>
+      </div>
+    );
+  }
 
   return (
     <div className="flex flex-col gap-3">
