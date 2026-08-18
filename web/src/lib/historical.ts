@@ -10,6 +10,7 @@ import {useQueries, useQuery} from "@tanstack/react-query";
 import {ois} from "./api";
 import {fetchDepartures, fetchHistDepartures} from "./departures";
 import {fetchFlow, fetchHistFlow} from "./feed";
+import {fetchHistTaxi, fetchTaxi} from "./taxi";
 
 async function fetchLiveTraffic() {
   const { data, error } = await ois.GET("/api/v1/flow/traffic");
@@ -49,6 +50,21 @@ export function useModeDepartures(fields: string[], at: number | null) {
         : {
             queryKey: ["hist-departures", dep, at],
             queryFn: () => fetchHistDepartures(dep, at),
+            staleTime: Infinity,
+          },
+    ),
+  });
+}
+
+/** Taxi monitor per airport — live (poll) or replayed at `at`. */
+export function useModeTaxi(icaos: string[], at: number | null) {
+  return useQueries({
+    queries: icaos.map((icao) =>
+      at == null
+        ? { queryKey: ["taxi", icao], queryFn: () => fetchTaxi(icao), refetchInterval: 15_000 }
+        : {
+            queryKey: ["hist-taxi", icao, at],
+            queryFn: () => fetchHistTaxi(icao, at),
             staleTime: Infinity,
           },
     ),

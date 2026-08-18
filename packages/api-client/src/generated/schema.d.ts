@@ -1198,6 +1198,22 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/v1/stats/hist/taxi/{icao}": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get: operations["hist_taxi"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/v1/stats/hist/traffic": {
         parameters: {
             query?: never;
@@ -6567,6 +6583,49 @@ export interface operations {
                 };
                 content: {
                     "application/json": components["schemas"]["RunwayBoard"];
+                };
+            };
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            503: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+        };
+    };
+    hist_taxi: {
+        parameters: {
+            query: {
+                /** @description Reconstruct instant (Unix epoch seconds) */
+                at: number;
+            };
+            header?: never;
+            path: {
+                /** @description Airport ICAO */
+                icao: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["TaxiField"];
                 };
             };
             400: {

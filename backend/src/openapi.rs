@@ -90,6 +90,7 @@ use utoipa::OpenApi;
         crate::handlers::stats::hist_atc,
         crate::handlers::stats::hist_traffic,
         crate::handlers::stats::hist_runway,
+        crate::handlers::stats::hist_taxi,
         crate::handlers::airport_configs::list_airport_configs,
         crate::handlers::airport_configs::create_airport_config,
         crate::handlers::airport_configs::update_airport_config,

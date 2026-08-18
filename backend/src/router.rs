@@ -229,6 +229,7 @@ pub fn build_router(state: AppState) -> Router {
         .route("/api/v1/stats/hist/atc", get(stats::hist_atc))
         .route("/api/v1/stats/hist/traffic", get(stats::hist_traffic))
         .route("/api/v1/stats/hist/runway/{icao}", get(stats::hist_runway))
+        .route("/api/v1/stats/hist/taxi/{icao}", get(stats::hist_taxi))
         // Flow constrained areas (FCAs) + live map traffic
         .route(
             "/api/v1/flow/fcas",

@@ -464,3 +464,30 @@ pub async fn hist_runway(
         runway_handlers::build_board_from(&state, &icao, &data, at).await?,
     ))
 }
+
+#[utoipa::path(
+    get,
+    path = "/api/v1/stats/hist/taxi/{icao}",
+    tag = "stats",
+    params(
+        ("icao" = String, Path, description = "Airport ICAO"),
+        ("at" = i64, Query, description = "Reconstruct instant (Unix epoch seconds)")
+    ),
+    responses((status = 200, body = crate::feed::taxi::TaxiField), (status = 400), (status = 401), (status = 503))
+)]
+pub async fn hist_taxi(
+    State(state): State<AppState>,
+    _permission: RequirePermission<StatsRead>,
+    Path(icao): Path<String>,
+    Query(q): Query<AtQuery>,
+) -> Result<Json<crate::feed::taxi::TaxiField>, ApiError> {
+    let p = pool(&state)?;
+    let at = parse_at(&q)?;
+    let icao = norm_icao(&icao);
+    // Taxi timing is replayed by feeding the stored position stream back through the live taxi
+    // state machine (see reconstruct::taxi_field_at); needs the airport coordinate database.
+    let airports = state.feed.read().await.airports.clone();
+    Ok(Json(
+        crate::feed::stats::reconstruct::taxi_field_at(p, airports.as_ref(), &icao, at).await?,
+    ))
+}
