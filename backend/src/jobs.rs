@@ -101,8 +101,15 @@ pub fn spawn_nav_refresh(nav: Arc<ArcSwap<NavData>>, refreshed: Arc<AtomicI64>) 
 }
 
 /// Keep winds aloft current for ETA prediction: once the airport database is loaded, fetch
-/// the AWC FB tables and hot-swap them in, then refresh hourly. Fails safe.
-pub fn spawn_winds_refresh(feed: FeedState, winds: Arc<ArcSwap<Winds>>, refreshed: Arc<AtomicI64>) {
+/// the AWC FB tables and hot-swap them in, then refresh hourly. Fails safe. When a DB pool is
+/// present, each successful refresh also snapshots the winds to `stats.winds` so historical replay
+/// can reconstruct past ETAs.
+pub fn spawn_winds_refresh(
+    feed: FeedState,
+    winds: Arc<ArcSwap<Winds>>,
+    refreshed: Arc<AtomicI64>,
+    pool: Option<sqlx::PgPool>,
+) {
     tokio::spawn(async move {
         let client = reqwest::Client::builder()
             .user_agent("ois-winds/1.0 (+https://vatusa.net)")
@@ -116,6 +123,14 @@ pub fn spawn_winds_refresh(feed: FeedState, winds: Arc<ArcSwap<Winds>>, refreshe
                 Some(n) => {
                     if n > 0 {
                         tracing::info!(stations = n, "winds aloft refreshed");
+                        if let Some(pool) = &pool {
+                            let snap = winds.load_full();
+                            if let Err(e) =
+                                crate::repos::stats::upsert_winds(pool, Utc::now(), &snap).await
+                            {
+                                tracing::warn!(error = ?e, "winds snapshot store failed");
+                            }
+                        }
                     } else {
                         tracing::warn!("winds refresh returned no stations; keeping current");
                     }
@@ -156,6 +171,20 @@ pub fn spawn_stats_compaction(pool: PgPool) {
                 Ok(n) if n > 0 => tracing::info!(deleted = n, "stats: pruned old positions"),
                 Ok(_) => {}
                 Err(_) => tracing::warn!("stats: prune pass failed"),
+            }
+
+            match stats_repo::prune_winds(&pool, prune_before).await {
+                Ok(n) if n > 0 => tracing::info!(deleted = n, "stats: pruned old winds"),
+                Ok(_) => {}
+                Err(_) => tracing::warn!("stats: winds prune pass failed"),
+            }
+
+            // Retain traffic-management history (published TMIs/GDPs/ground stops kept for replay)
+            // for the same window; hard-drop only rows that ran past the horizon.
+            match crate::repos::tmu::prune_history(&pool, prune_before).await {
+                Ok(n) if n > 0 => tracing::info!(deleted = n, "stats: pruned old TM history"),
+                Ok(_) => {}
+                Err(_) => tracing::warn!("stats: TM history prune pass failed"),
             }
         }
     });

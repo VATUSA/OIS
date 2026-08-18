@@ -115,7 +115,7 @@ pub async fn publish_gdp(pool: &PgPool, id: &str, published_by: &str) -> Result<
 /// Cancel a draft or published GDP. Returns false if it's already terminal.
 pub async fn cancel_gdp(pool: &PgPool, id: &str) -> Result<bool, ApiError> {
     let result = sqlx::query(
-        "update tmu.gdp set status = 'cancelled' \
+        "update tmu.gdp set status = 'cancelled', ended_at = coalesce(ended_at, now()) \
          where id = $1 and status in ('draft', 'published')",
     )
     .bind(id)
@@ -126,12 +126,24 @@ pub async fn cancel_gdp(pool: &PgPool, id: &str) -> Result<bool, ApiError> {
 }
 
 pub async fn delete_gdp(pool: &PgPool, id: &str) -> Result<bool, ApiError> {
-    let result = sqlx::query("delete from tmu.gdp where id = $1")
-        .bind(id)
-        .execute(pool)
-        .await
-        .map_err(|_| ApiError::Internal)?;
-    Ok(result.rows_affected() > 0)
+    // Never-published drafts vanish (slots cascade); published GDPs are kept for replay.
+    crate::repos::tmu::delete_or_retain(pool, "tmu.gdp", id).await
+}
+
+/// GDPs that were live at instant `at` (for historical replay).
+pub async fn list_gdps_at(pool: &PgPool, at: DateTime<Utc>) -> Result<Vec<GdpBody>, ApiError> {
+    const GDP_END: &str =
+        "tmu.gdp_end_ts(coalesce(g.published_at, g.created_at), g.start_time, g.end_time)";
+    sqlx::query_as::<_, GdpBody>(&format!(
+        "{GDP_SELECT} where g.published_at is not null and g.published_at <= $1 \
+           and ({GDP_END} is null or {GDP_END} > $1) \
+           and (g.ended_at is null or g.ended_at > $1) \
+         order by g.updated_at desc"
+    ))
+    .bind(at)
+    .fetch_all(pool)
+    .await
+    .map_err(|_| ApiError::Internal)
 }
 
 // --- frozen control-time slots ---

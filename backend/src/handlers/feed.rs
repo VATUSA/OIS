@@ -100,6 +100,7 @@ pub(crate) async fn flow_from_data(
     pool: &PgPool,
     icao: &str,
     data: &crate::feed::vatsim::VatsimData,
+    winds: &crate::feed::winds::Winds,
     now: DateTime<Utc>,
 ) -> Result<flow::Flow, ApiError> {
     let program = program_inputs(pool, icao).await?;
@@ -110,7 +111,7 @@ pub(crate) async fn flow_from_data(
         program.as_ref(),
         data,
         airports.as_ref(),
-        state.winds.load_full().as_ref(),
+        winds,
         &issued,
         now,
     ))
@@ -125,7 +126,10 @@ pub(crate) async fn flow_for(
     // Clone the snapshot + airport handles and drop the feed lock before metering.
     let snapshot = state.feed.read().await.snapshot.clone();
     match &snapshot {
-        Some(snap) => flow_from_data(state, pool, icao, &snap.data, Utc::now()).await,
+        Some(snap) => {
+            let winds = state.winds.load_full();
+            flow_from_data(state, pool, icao, &snap.data, winds.as_ref(), Utc::now()).await
+        }
         None => Ok(flow::Flow {
             icao: icao.to_string(),
             aar: program_inputs(pool, icao).await?.map(|p| p.aar),
@@ -201,8 +205,9 @@ pub async fn list_departures(
     let snapshot = state.feed.read().await.snapshot.clone();
     let empty = crate::feed::vatsim::VatsimData::default();
     let data = snapshot.as_ref().map(|s| &s.data).unwrap_or(&empty);
+    let winds = state.winds.load_full();
     Ok(Json(
-        departures_response(&state, pool, &dep, data, Utc::now()).await?,
+        departures_response(&state, pool, &dep, data, winds.as_ref(), Utc::now()).await?,
     ))
 }
 
@@ -213,6 +218,7 @@ pub(crate) async fn departures_response(
     pool: &PgPool,
     dep: &str,
     data: &crate::feed::vatsim::VatsimData,
+    winds: &crate::feed::winds::Winds,
     now: DateTime<Utc>,
 ) -> Result<DeparturesResponse, ApiError> {
     // Resolve the field: an airport is just itself; a TRACON/ARTCC spans many airports.
@@ -240,7 +246,7 @@ pub(crate) async fn departures_response(
         .collect();
     let mut meta: HashMap<String, MeteredCfr> = HashMap::new();
     for dest in &dests {
-        let flow = flow_from_data(state, pool, dest, data, now).await?;
+        let flow = flow_from_data(state, pool, dest, data, winds, now).await?;
         for f in flow.flights {
             meta.insert(
                 f.callsign,

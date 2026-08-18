@@ -260,6 +260,12 @@ function MobileMenu({
                 Network stats
               </Link>
             </DropdownMenuItem>
+            <DropdownMenuItem asChild>
+              <Link to="/stats/dashboard">
+                <LayoutDashboard />
+                Historical dashboard
+              </Link>
+            </DropdownMenuItem>
           </>
         )}
 
@@ -397,9 +403,20 @@ export function Navbar() {
           )}
 
           {canStats && (
-            <Link to="/stats" className={linkClass}>
-              Stats
-            </Link>
+            <NavGroup label="Stats" activePrefix="/stats">
+              <DropdownMenuItem asChild>
+                <Link to="/stats">
+                  <TrendingUp />
+                  Network stats
+                </Link>
+              </DropdownMenuItem>
+              <DropdownMenuItem asChild>
+                <Link to="/stats/dashboard">
+                  <LayoutDashboard />
+                  Historical dashboard
+                </Link>
+              </DropdownMenuItem>
+            </NavGroup>
           )}
 
           {/* Docs live on their own subdomain (per-environment), wired via DOCS_URL. */}

@@ -38,6 +38,7 @@ pub async fn run() -> Result<(), Box<dyn std::error::Error>> {
         state.feed.clone(),
         state.winds.clone(),
         state.winds_refreshed.clone(),
+        state.db.clone(),
     );
     if let Some(pool) = state.db.clone() {
         jobs::spawn_cleanup(pool.clone());
