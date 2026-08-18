@@ -191,6 +191,11 @@ async fn tick(
         if c.cid == 0 || c.logon_time.is_empty() {
             continue;
         }
+        // Observers (facility 0) aren't providing ATC — they're just watching (often pilots in
+        // observer mode). Don't record them as controller sessions.
+        if c.facility == 0 {
+            continue;
+        }
         if !relax && !is_us_controller(&c.callsign, &iata, &airports) {
             continue;
         }
@@ -222,7 +227,8 @@ async fn tick(
         connected_clients: data.general.connected_clients,
         unique_users: data.general.unique_users,
         pilots: seen_pilots.len() as i32,
-        controllers: data.controllers.len() as i32,
+        // Actual controllers only — exclude observers (facility 0).
+        controllers: data.controllers.iter().filter(|c| c.facility != 0).count() as i32,
         atis: data.atis.len() as i32,
         prefiles: seen_prefiles.len() as i32,
     };
