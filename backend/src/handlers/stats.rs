@@ -29,8 +29,14 @@ fn pool(state: &AppState) -> Result<&sqlx::PgPool, ApiError> {
     state.db.as_ref().ok_or(ApiError::ServiceUnavailable)
 }
 
-/// (callsign, departure, arrival, aircraft) for a replay flight.
-type FlightMeta = (String, Option<String>, Option<String>, Option<String>);
+/// (callsign, departure, arrival, aircraft, route) for a replay flight.
+type FlightMeta = (
+    String,
+    Option<String>,
+    Option<String>,
+    Option<String>,
+    Option<String>,
+);
 
 fn norm_icao(raw: &str) -> String {
     raw.trim().to_ascii_uppercase()
@@ -353,6 +359,7 @@ async fn build_replay(
             departure: None,
             arrival: None,
             aircraft: None,
+            route: None,
             samples: track,
         });
     }
@@ -361,14 +368,15 @@ async fn build_replay(
     let meta: HashMap<i64, FlightMeta> = stats_repo::flights_meta(p, &ids)
         .await?
         .into_iter()
-        .map(|(sid, cs, dep, arr, ac)| (sid, (cs, dep, arr, ac)))
+        .map(|(sid, cs, dep, arr, ac, route)| (sid, (cs, dep, arr, ac, route)))
         .collect();
     for f in flights.iter_mut() {
-        if let Some((cs, dep, arr, ac)) = meta.get(&f.session_id) {
+        if let Some((cs, dep, arr, ac, route)) = meta.get(&f.session_id) {
             f.callsign = cs.clone();
             f.departure = dep.clone();
             f.arrival = arr.clone();
             f.aircraft = ac.clone();
+            f.route = route.clone();
         }
     }
 

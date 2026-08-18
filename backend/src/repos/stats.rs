@@ -992,12 +992,23 @@ pub async fn replay_positions(
 }
 
 /// Callsign + plan basics for a set of flights (for replay labels).
+#[allow(clippy::type_complexity)]
 pub async fn flights_meta(
     pool: &PgPool,
     ids: &[i64],
-) -> Result<Vec<(i64, String, Option<String>, Option<String>, Option<String>)>, ApiError> {
-    sqlx::query_as::<_, (i64, String, Option<String>, Option<String>, Option<String>)>(
-        "select session_id, callsign, departure, arrival, aircraft_short
+) -> Result<
+    Vec<(
+        i64,
+        String,
+        Option<String>,
+        Option<String>,
+        Option<String>,
+        Option<String>,
+    )>,
+    ApiError,
+> {
+    sqlx::query_as(
+        "select session_id, callsign, departure, arrival, aircraft_short, route
          from stats.flight where session_id = any($1)",
     )
     .bind(ids)

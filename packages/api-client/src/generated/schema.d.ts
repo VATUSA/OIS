@@ -809,6 +809,27 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/v1/flow/resolve-routes": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Resolve a batch of filed routes to drawable polylines (for the replay map's route overlay).
+         *     Read-only nav resolution; excluded from audit despite being a POST (the body is just a list of
+         *     flights to resolve, not a mutation).
+         */
+        post: operations["resolve_routes"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/v1/flow/route-coverage": {
         parameters: {
             query?: never;
@@ -2892,9 +2913,27 @@ export interface components {
             arrival?: string | null;
             callsign: string;
             departure?: string | null;
+            /** @description Filed route string, for plotting the planned route on the replay map. */
+            route?: string | null;
             /** @description Compact samples: `[t_seconds_from_start, lat, lon, altitude_ft, heading_deg, groundspeed_kt]`. */
             samples: number[][];
             session_id: string;
+        };
+        /** @description One flight to resolve a filed route for (batch route resolution for the replay map). */
+        ResolveRouteRequest: {
+            arr?: string;
+            callsign: string;
+            dep?: string;
+            route?: string;
+        };
+        /** @description A filed route resolved to a drawable polyline. */
+        ResolvedRoute: {
+            callsign: string;
+            /** @description Route polyline as `[lat, lon]` pairs. */
+            points: number[][];
+            /** @description Filed-route tokens the nav engine couldn't resolve. */
+            unresolved: string[];
+            waypoints: components["schemas"]["RouteWaypoint"][];
         };
         /**
          * @description A named reference route on the flow map, defined by a filed-route string and resolved to a
@@ -5763,6 +5802,35 @@ export interface operations {
                 content?: never;
             };
             404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+        };
+    };
+    resolve_routes: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["ResolveRouteRequest"][];
+            };
+        };
+        responses: {
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ResolvedRoute"][];
+                };
+            };
+            401: {
                 headers: {
                     [name: string]: unknown;
                 };

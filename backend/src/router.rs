@@ -267,6 +267,7 @@ pub fn build_router(state: AppState) -> Router {
             "/api/v1/flow/aircraft/{callsign}/route",
             get(flow::aircraft_route),
         )
+        .route("/api/v1/flow/resolve-routes", post(flow::resolve_routes))
         .route("/api/v1/flow/traffic", get(flow::list_traffic))
         .route("/api/v1/flow/atc", get(atc::list_atc))
         .route("/api/v1/flow/data-status", get(flow::data_status))
