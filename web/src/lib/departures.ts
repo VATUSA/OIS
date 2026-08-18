@@ -1,4 +1,4 @@
-import {useMutation, useQueries, useQuery, useQueryClient,} from "@tanstack/react-query";
+import {keepPreviousData, useMutation, useQueries, useQuery, useQueryClient,} from "@tanstack/react-query";
 import type {components} from "@ois/api-client";
 import {useToast} from "@ois/ui";
 
@@ -35,6 +35,7 @@ export function useDepartures(dep: string) {
     enabled: !!dep,
     refetchInterval: at == null ? 20_000 : false,
     staleTime: at == null ? 0 : Infinity,
+    placeholderData: at == null ? undefined : keepPreviousData,
   });
 }
 

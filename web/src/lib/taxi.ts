@@ -1,4 +1,4 @@
-import {useQuery} from "@tanstack/react-query";
+import {keepPreviousData, useQuery} from "@tanstack/react-query";
 import type {components} from "@ois/api-client";
 
 import {ois} from "./api";
@@ -33,5 +33,6 @@ export function useTaxiStats(icao: string) {
     enabled: !!icao,
     refetchInterval: at == null ? 15_000 : false,
     staleTime: at == null ? 0 : Infinity,
+    placeholderData: at == null ? undefined : keepPreviousData,
   });
 }
