@@ -54,6 +54,31 @@ function zulu(base: string, offsetS: number): string {
   return `${p(d.getUTCDate())}/${p(d.getUTCHours())}${p(d.getUTCMinutes())}${p(d.getUTCSeconds())}z`;
 }
 
+/** The `[lon,lat]` path a flight has flown up to `clock` — never its future path — extended to its
+ * current interpolated position so the line reaches the aircraft. Samples are `[t,lat,lon,...]`. */
+function flownPath(s: number[][], clock: number): [number, number][] {
+  const pts: [number, number][] = [];
+  if (s.length === 0) return pts;
+  for (const p of s) {
+    if (p[0] <= clock) pts.push([p[2], p[1]]);
+    else break;
+  }
+  if (clock > s[0][0] && clock <= s[s.length - 1][0]) {
+    let lo = 0;
+    let hi = s.length - 1;
+    while (hi - lo > 1) {
+      const m = (lo + hi) >> 1;
+      if (s[m][0] <= clock) lo = m;
+      else hi = m;
+    }
+    const a = s[lo];
+    const b = s[hi];
+    const k = (clock - a[0]) / (b[0] - a[0] || 1);
+    pts.push([a[2] + (b[2] - a[2]) * k, a[1] + (b[1] - a[1]) * k]);
+  }
+  return pts;
+}
+
 type Labels = { callsign: boolean; type: boolean; alt: boolean; speed: boolean };
 
 function Toggle({
@@ -106,11 +131,43 @@ function ReplayMap({ replay }: { replay: Replay }) {
   const [hideGround, setHideGround] = useState(true);
   const [labels, setLabels] = useState<Labels>({ callsign: true, type: false, alt: false, speed: false });
 
-  // Clicked flight — draws its track and opens the log panel.
+  // Clicked flight — draws its flown-so-far track and opens the log panel.
   const [selectedId, setSelectedId] = useState<string | null>(null);
   const selectedTrack = useMemo(
     () => tracks.find((t) => t.id === selectedId) ?? null,
     [tracks, selectedId],
+  );
+
+  // Show flown-so-far trails behind every visible aircraft.
+  const [showTrails, setShowTrails] = useState(false);
+
+  // The selected flight's history trail (only what it has flown at the current clock).
+  const trackPath = useMemo(() => {
+    if (!selectedTrack) return [];
+    const pts = flownPath(selectedTrack.s, clock);
+    return pts.length >= 2 ? [{ path: pts }] : [];
+  }, [selectedTrack, clock]);
+
+  // A trail for every currently-shown aircraft (when enabled). Keyed off the interpolated frame so
+  // it respects the ground filter and only trails aircraft active at the current clock.
+  const allTrails = useMemo(() => {
+    if (!showTrails) return [];
+    const activeGs = new Map(aircraft.map((a) => [a.id, a.gs]));
+    const out: { path: [number, number][] }[] = [];
+    for (const t of tracks) {
+      const gs = activeGs.get(t.id);
+      if (gs === undefined) continue; // not active at this clock
+      if (hideGround && gs < GROUND_KT) continue;
+      const pts = flownPath(t.s, clock);
+      if (pts.length >= 2) out.push({ path: pts });
+    }
+    return out;
+  }, [showTrails, tracks, clock, aircraft, hideGround]);
+
+  // Log rows: samples flown so far (the history).
+  const flownRows = useMemo(
+    () => (selectedTrack ? selectedTrack.s.filter((p) => p[0] <= clock) : []),
+    [selectedTrack, clock],
   );
 
   function frameAt(t: number): Live[] {
@@ -212,10 +269,20 @@ function ReplayMap({ replay }: { replay: Replay }) {
       lineWidthUnits: "pixels",
       lineWidthMinPixels: 1,
     }),
-    new PathLayer<Track>({
+    new PathLayer<{ path: [number, number][] }>({
+      id: "all-trails",
+      data: allTrails,
+      getPath: (d) => d.path,
+      getColor: [...iconColor, 80] as [number, number, number, number],
+      getWidth: 1.4,
+      widthUnits: "pixels",
+      widthMinPixels: 1,
+      updateTriggers: { getColor: [resolvedTheme] },
+    }),
+    new PathLayer<{ path: [number, number][] }>({
       id: "selected-track",
-      data: selectedTrack ? [selectedTrack] : [],
-      getPath: (t) => t.s.map((p) => [p[2], p[1]] as [number, number]),
+      data: trackPath,
+      getPath: (d) => d.path,
       getColor: [...HL, 220] as [number, number, number, number],
       getWidth: 2,
       widthUnits: "pixels",
@@ -335,6 +402,9 @@ function ReplayMap({ replay }: { replay: Replay }) {
           <Toggle checked={hideGround} onChange={setHideGround}>
             Hide aircraft on ground
           </Toggle>
+          <Toggle checked={showTrails} onChange={setShowTrails}>
+            Show history trails
+          </Toggle>
           <div className="my-0.5 h-px bg-border" />
           <span className="text-xs font-medium text-muted-foreground">Labels</span>
           <Toggle checked={labels.callsign} onChange={(v) => setLabels((l) => ({ ...l, callsign: v }))}>
@@ -360,7 +430,7 @@ function ReplayMap({ replay }: { replay: Replay }) {
                 </span>
                 <span className="text-xs text-muted-foreground">
                   {selectedTrack.dep || "????"} → {selectedTrack.arr || "????"} ·{" "}
-                  {selectedTrack.actype || "—"} · {selectedTrack.s.length} pts
+                  {selectedTrack.actype || "—"} · {flownRows.length}/{selectedTrack.s.length} pts
                 </span>
               </div>
               <button
@@ -383,16 +453,24 @@ function ReplayMap({ replay }: { replay: Replay }) {
                   </tr>
                 </thead>
                 <tbody className="font-mono">
-                  {selectedTrack.s.map((p, i) => (
-                    <tr key={i} className="border-t border-border/50">
-                      <td className="px-3 py-0.5">{zulu(replay.window_start, p[0])}</td>
-                      <td className="py-0.5 pr-2 tabular-nums">{p[3]}</td>
-                      <td className="py-0.5 pr-2 tabular-nums">{p[5]}</td>
-                      <td className="py-0.5 pr-3 tabular-nums text-muted-foreground">
-                        {p[1].toFixed(2)}, {p[2].toFixed(2)}
+                  {flownRows.length === 0 ? (
+                    <tr>
+                      <td colSpan={4} className="px-3 py-2 text-muted-foreground">
+                        No history yet at this time — press play or scrub forward.
                       </td>
                     </tr>
-                  ))}
+                  ) : (
+                    flownRows.map((p, i) => (
+                      <tr key={i} className="border-t border-border/50">
+                        <td className="px-3 py-0.5">{zulu(replay.window_start, p[0])}</td>
+                        <td className="py-0.5 pr-2 tabular-nums">{p[3]}</td>
+                        <td className="py-0.5 pr-2 tabular-nums">{p[5]}</td>
+                        <td className="py-0.5 pr-3 tabular-nums text-muted-foreground">
+                          {p[1].toFixed(2)}, {p[2].toFixed(2)}
+                        </td>
+                      </tr>
+                    ))
+                  )}
                 </tbody>
               </table>
             </div>
