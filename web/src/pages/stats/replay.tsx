@@ -1,12 +1,12 @@
 import {useEffect, useMemo, useRef, useState} from "react";
 import DeckGL from "@deck.gl/react";
-import {GeoJsonLayer, IconLayer, TextLayer} from "@deck.gl/layers";
+import {GeoJsonLayer, IconLayer, PathLayer, TextLayer} from "@deck.gl/layers";
 import type {PickingInfo} from "@deck.gl/core";
 import {Map as MapLibre} from "react-map-gl/maplibre";
 import "maplibre-gl/dist/maplibre-gl.css";
 import {Button, useTheme} from "@ois/ui";
 import {Link, useParams} from "@tanstack/react-router";
-import {ArrowLeft, Pause, Play, SkipBack} from "lucide-react";
+import {ArrowLeft, Pause, Play, SkipBack, X} from "lucide-react";
 
 import {useMe} from "@/lib/auth";
 import {hasPermission} from "@/lib/permissions";
@@ -26,6 +26,7 @@ const GROUND_KT = 30;
 
 /** One aircraft rendered at the current replay clock. */
 type Live = {
+  id: string;
   callsign: string;
   actype: string;
   dep: string;
@@ -38,7 +39,14 @@ type Live = {
 };
 
 /** A flight's samples as a sorted array of [t, lat, lon, alt, hdg, gs]. */
-type Track = { callsign: string; actype: string; dep: string; arr: string; s: number[][] };
+type Track = {
+  id: string;
+  callsign: string;
+  actype: string;
+  dep: string;
+  arr: string;
+  s: number[][];
+};
 
 function zulu(base: string, offsetS: number): string {
   const d = new Date(Date.parse(base) + offsetS * 1000);
@@ -76,6 +84,7 @@ function ReplayMap({ replay }: { replay: Replay }) {
   const tracks = useMemo<Track[]>(
     () =>
       replay.flights.map((f) => ({
+        id: f.session_id,
         callsign: f.callsign,
         actype: f.aircraft ?? "",
         dep: f.departure ?? "",
@@ -97,6 +106,13 @@ function ReplayMap({ replay }: { replay: Replay }) {
   const [hideGround, setHideGround] = useState(true);
   const [labels, setLabels] = useState<Labels>({ callsign: true, type: false, alt: false, speed: false });
 
+  // Clicked flight — draws its track and opens the log panel.
+  const [selectedId, setSelectedId] = useState<string | null>(null);
+  const selectedTrack = useMemo(
+    () => tracks.find((t) => t.id === selectedId) ?? null,
+    [tracks, selectedId],
+  );
+
   function frameAt(t: number): Live[] {
     const out: Live[] = [];
     for (const f of tracks) {
@@ -114,6 +130,7 @@ function ReplayMap({ replay }: { replay: Replay }) {
       const span = b[0] - a[0] || 1;
       const k = (t - a[0]) / span;
       out.push({
+        id: f.id,
         callsign: f.callsign,
         actype: f.actype,
         dep: f.dep,
@@ -177,6 +194,7 @@ function ReplayMap({ replay }: { replay: Replay }) {
   );
 
   const iconColor: [number, number, number] = resolvedTheme === "dark" ? [255, 190, 70] : [40, 60, 90];
+  const HL: [number, number, number] = [56, 189, 248]; // selected flight highlight
   const boundaryColor: [number, number, number, number] =
     resolvedTheme === "dark" ? [130, 140, 160, 110] : [90, 100, 120, 120];
   const labelColor: [number, number, number] = resolvedTheme === "dark" ? [230, 235, 245] : [20, 25, 35];
@@ -194,6 +212,17 @@ function ReplayMap({ replay }: { replay: Replay }) {
       lineWidthUnits: "pixels",
       lineWidthMinPixels: 1,
     }),
+    new PathLayer<Track>({
+      id: "selected-track",
+      data: selectedTrack ? [selectedTrack] : [],
+      getPath: (t) => t.s.map((p) => [p[2], p[1]] as [number, number]),
+      getColor: [...HL, 220] as [number, number, number, number],
+      getWidth: 2,
+      widthUnits: "pixels",
+      widthMinPixels: 2,
+      capRounded: true,
+      jointRounded: true,
+    }),
     new IconLayer<Live>({
       id: "aircraft",
       data: shown,
@@ -204,11 +233,11 @@ function ReplayMap({ replay }: { replay: Replay }) {
       },
       getPosition: (d) => [d.lon, d.lat],
       getAngle: (d) => 360 - d.heading,
-      getColor: iconColor,
-      getSize: 26,
+      getColor: (d) => (d.id === selectedId ? HL : iconColor),
+      getSize: (d) => (d.id === selectedId ? 34 : 26),
       sizeUnits: "pixels",
       billboard: false,
-      updateTriggers: { getColor: [resolvedTheme] },
+      updateTriggers: { getColor: [resolvedTheme, selectedId], getSize: [selectedId] },
     }),
     new TextLayer<Live>({
       id: "labels",
@@ -255,6 +284,11 @@ function ReplayMap({ replay }: { replay: Replay }) {
     setSpeed(v);
   };
 
+  const handleClick = (info: PickingInfo) => {
+    const id = info.layer?.id === "aircraft" ? ((info.object as Live | undefined)?.id ?? null) : null;
+    setSelectedId((prev) => (prev === id ? null : id));
+  };
+
   const tooltip = (info: PickingInfo<Live>) => {
     const d = info.object;
     if (!d) return null;
@@ -285,6 +319,8 @@ function ReplayMap({ replay }: { replay: Replay }) {
           controller
           layers={layers}
           getTooltip={tooltip}
+          onClick={handleClick}
+          getCursor={({ isHovering }) => (isHovering ? "pointer" : "grab")}
           style={{ position: "absolute", top: "0", left: "0", width: "100%", height: "100%" }}
         >
           <MapLibre mapStyle={CARTO_STYLE[resolvedTheme]} attributionControl={false} />
@@ -314,6 +350,54 @@ function ReplayMap({ replay }: { replay: Replay }) {
             Groundspeed
           </Toggle>
         </div>
+
+        {selectedTrack && (
+          <div className="absolute bottom-3 left-3 z-10 flex max-h-[46%] w-80 flex-col overflow-hidden rounded-md border bg-background/90 shadow backdrop-blur">
+            <div className="flex items-center justify-between gap-2 border-b px-3 py-2">
+              <div className="flex flex-col">
+                <span className="font-mono font-semibold" style={{ color: "rgb(56,189,248)" }}>
+                  {selectedTrack.callsign}
+                </span>
+                <span className="text-xs text-muted-foreground">
+                  {selectedTrack.dep || "????"} → {selectedTrack.arr || "????"} ·{" "}
+                  {selectedTrack.actype || "—"} · {selectedTrack.s.length} pts
+                </span>
+              </div>
+              <button
+                type="button"
+                onClick={() => setSelectedId(null)}
+                className="text-muted-foreground transition-colors hover:text-foreground"
+                aria-label="Close track log"
+              >
+                <X className="size-4" />
+              </button>
+            </div>
+            <div className="overflow-auto">
+              <table className="w-full text-xs">
+                <thead className="sticky top-0 bg-background/95 text-left text-muted-foreground">
+                  <tr>
+                    <th className="px-3 py-1 font-medium">Time</th>
+                    <th className="py-1 pr-2 font-medium">Alt</th>
+                    <th className="py-1 pr-2 font-medium">GS</th>
+                    <th className="py-1 pr-3 font-medium">Position</th>
+                  </tr>
+                </thead>
+                <tbody className="font-mono">
+                  {selectedTrack.s.map((p, i) => (
+                    <tr key={i} className="border-t border-border/50">
+                      <td className="px-3 py-0.5">{zulu(replay.window_start, p[0])}</td>
+                      <td className="py-0.5 pr-2 tabular-nums">{p[3]}</td>
+                      <td className="py-0.5 pr-2 tabular-nums">{p[5]}</td>
+                      <td className="py-0.5 pr-3 tabular-nums text-muted-foreground">
+                        {p[1].toFixed(2)}, {p[2].toFixed(2)}
+                      </td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+          </div>
+        )}
       </div>
 
       <div className="flex flex-wrap items-center gap-3">
