@@ -747,6 +747,8 @@ pub struct ReplayFlightBody {
     pub departure: Option<String>,
     pub arrival: Option<String>,
     pub aircraft: Option<String>,
+    /// Filed route string, for plotting the planned route on the replay map.
+    pub route: Option<String>,
     /// Compact samples: `[t_seconds_from_start, lat, lon, altitude_ft, heading_deg, groundspeed_kt]`.
     #[schema(value_type = Vec<Vec<f64>>)]
     pub samples: Vec<[f64; 6]>,
@@ -959,6 +961,29 @@ pub struct RouteWaypoint {
     pub name: String,
     pub lat: f64,
     pub lon: f64,
+}
+
+/// One flight to resolve a filed route for (batch route resolution for the replay map).
+#[derive(Debug, Deserialize, ToSchema)]
+pub struct ResolveRouteRequest {
+    pub callsign: String,
+    #[serde(default)]
+    pub dep: String,
+    #[serde(default)]
+    pub arr: String,
+    #[serde(default)]
+    pub route: String,
+}
+
+/// A filed route resolved to a drawable polyline.
+#[derive(Debug, Serialize, ToSchema)]
+pub struct ResolvedRoute {
+    pub callsign: String,
+    /// Route polyline as `[lat, lon]` pairs.
+    pub points: Vec<[f64; 2]>,
+    pub waypoints: Vec<RouteWaypoint>,
+    /// Filed-route tokens the nav engine couldn't resolve.
+    pub unresolved: Vec<String>,
 }
 
 /// Health of the runtime nav + winds data backing route/ETA prediction.

@@ -1,6 +1,6 @@
 import {useEffect, useMemo, useRef, useState} from "react";
 import DeckGL from "@deck.gl/react";
-import {GeoJsonLayer, IconLayer, PathLayer, TextLayer} from "@deck.gl/layers";
+import {GeoJsonLayer, IconLayer, PathLayer, ScatterplotLayer, TextLayer} from "@deck.gl/layers";
 import type {PickingInfo} from "@deck.gl/core";
 import {Map as MapLibre} from "react-map-gl/maplibre";
 import "maplibre-gl/dist/maplibre-gl.css";
@@ -10,7 +10,7 @@ import {ArrowLeft, Pause, Play, SkipBack, X} from "lucide-react";
 
 import {useMe} from "@/lib/auth";
 import {hasPermission} from "@/lib/permissions";
-import {type Replay, useCaptureReplay, useCaptures, useWindowReplay} from "@/lib/stats";
+import {type Replay, resolveRoutes, useCaptureReplay, useCaptures, useWindowReplay} from "@/lib/stats";
 import {aircraftIconUrl} from "@/lib/aircraft-icons";
 import {formatZuluFull} from "@/lib/time";
 import boundariesGeo from "@/assets/artcc-boundaries.json";
@@ -105,8 +105,24 @@ type Track = {
   actype: string;
   dep: string;
   arr: string;
+  route: string;
   s: number[][];
 };
+
+/** A departure/arrival filter chip; `*` (or blank) matches any airport. */
+type ApFilter = { dep: string; arr: string };
+
+/** A resolved filed route: polyline in [lon,lat] (deck order) + named waypoints. */
+type RouteGeom = { path: [number, number][]; waypoints: { name: string; lat: number; lon: number }[] };
+
+/** Airport-code match tolerant of a leading `K` (KJFK ~ JFK); `*`/blank = any. Mirrors the
+ * backend's `airport_match`. */
+function matchAirport(pattern: string, code: string): boolean {
+  const f = pattern.trim().toUpperCase();
+  if (f === "" || f === "*") return true;
+  const c = (code ?? "").toUpperCase();
+  return f === c || (c.startsWith("K") && c.slice(1) === f) || (f.startsWith("K") && f.slice(1) === c);
+}
 
 function zulu(base: string, offsetS: number): string {
   const d = new Date(Date.parse(base) + offsetS * 1000);
@@ -174,6 +190,7 @@ function ReplayMap({ replay }: { replay: Replay }) {
         actype: f.aircraft ?? "",
         dep: f.departure ?? "",
         arr: f.arrival ?? "",
+        route: f.route ?? "",
         s: f.samples as number[][],
       })),
     [replay],
@@ -190,6 +207,26 @@ function ReplayMap({ replay }: { replay: Replay }) {
   // Display toggles.
   const [hideGround, setHideGround] = useState(true);
   const [labels, setLabels] = useState<Labels>({ callsign: true, type: false, alt: false, speed: false });
+
+  // Range rings around each shown aircraft (radius in NM).
+  const [rings, setRings] = useState(false);
+  const [ringNm, setRingNm] = useState(20);
+
+  // Departure/arrival filter chips (OR across chips; empty = show all).
+  const [filters, setFilters] = useState<ApFilter[]>([]);
+  const [depDraft, setDepDraft] = useState("");
+  const [arrDraft, setArrDraft] = useState("");
+  const passesFilters = useMemo(() => {
+    if (filters.length === 0) return (_dep: string, _arr: string) => true;
+    return (dep: string, arr: string) =>
+      filters.some((f) => matchAirport(f.dep, dep) && matchAirport(f.arr, arr));
+  }, [filters]);
+
+  // Filed-route overlay: resolve on-screen flights' routes (cached by callsign) + a toggle to draw
+  // them all; a clicked flight always shows its route (alongside its flown trail).
+  const [showRoutes, setShowRoutes] = useState(false);
+  const [routeCache, setRouteCache] = useState<Record<string, RouteGeom>>({});
+  const pendingRoutes = useRef<Set<string>>(new Set());
 
   // Clicked flight — draws its flown-so-far track and opens the log panel.
   const [selectedId, setSelectedId] = useState<string | null>(null);
@@ -218,6 +255,7 @@ function ReplayMap({ replay }: { replay: Replay }) {
     const out: { path: [number, number][] }[] = [];
     for (const t of tracks) {
       if (t.s.length === 0 || t.s[0][0] > clock) continue; // hasn't started yet
+      if (!passesFilters(t.dep, t.arr)) continue;
       const gs = activeGs.get(t.id);
       if (gs === undefined) {
         if (!showDisconnected) continue; // disconnected — only when opted in
@@ -228,7 +266,7 @@ function ReplayMap({ replay }: { replay: Replay }) {
       if (pts.length >= 2) out.push({ path: pts });
     }
     return out;
-  }, [showTrails, showDisconnected, tracks, clock, aircraft, hideGround]);
+  }, [showTrails, showDisconnected, tracks, clock, aircraft, hideGround, passesFilters]);
 
   // Log rows: samples flown so far (the history).
   const flownRows = useMemo(
@@ -310,14 +348,69 @@ function ReplayMap({ replay }: { replay: Replay }) {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [duration]);
 
-  // Ground filter applied once; both the icon + label layers share the result.
+  // Ground + dep/arr filters applied once; icons, labels, rings + routes all share the result.
   const shown = useMemo(
-    () => (hideGround ? aircraft.filter((a) => a.gs >= GROUND_KT) : aircraft),
-    [aircraft, hideGround],
+    () =>
+      aircraft.filter((a) => (!hideGround || a.gs >= GROUND_KT) && passesFilters(a.dep, a.arr)),
+    [aircraft, hideGround, passesFilters],
   );
 
+  // Resolve filed routes for the on-screen flights (when the toggle is on) + the selected flight.
+  // Cached by callsign (routes are static), so scrubbing/playback only fetches newly-appeared
+  // flights.
+  useEffect(() => {
+    const wanted = new Set<string>();
+    if (showRoutes) for (const a of shown) wanted.add(a.id);
+    if (selectedTrack) wanted.add(selectedTrack.id);
+    const need: Track[] = [];
+    for (const id of wanted) {
+      const t = tracks.find((x) => x.id === id);
+      if (!t || !t.route) continue;
+      if (routeCache[t.callsign] || pendingRoutes.current.has(t.callsign)) continue;
+      need.push(t);
+    }
+    if (need.length === 0) return;
+    need.forEach((t) => pendingRoutes.current.add(t.callsign));
+    let cancelled = false;
+    resolveRoutes(need.map((t) => ({ callsign: t.callsign, dep: t.dep, arr: t.arr, route: t.route })))
+      .then((res) => {
+        if (cancelled) return;
+        setRouteCache((prev) => {
+          const next = { ...prev };
+          for (const r of res) {
+            next[r.callsign] = {
+              path: (r.points as [number, number][]).map(([lat, lon]) => [lon, lat]),
+              waypoints: r.waypoints,
+            };
+          }
+          return next;
+        });
+      })
+      .catch(() => {})
+      .finally(() => need.forEach((t) => pendingRoutes.current.delete(t.callsign)));
+    return () => {
+      cancelled = true;
+    };
+  }, [showRoutes, shown, selectedTrack, tracks, routeCache]);
+
+  // Filed-route polylines for every shown flight (when the toggle is on).
+  const allRoutePaths = useMemo(() => {
+    if (!showRoutes) return [];
+    const out: { path: [number, number][] }[] = [];
+    for (const a of shown) {
+      const g = routeCache[a.callsign];
+      if (g && g.path.length >= 2) out.push({ path: g.path });
+    }
+    return out;
+  }, [showRoutes, shown, routeCache]);
+
+  const selectedRoute = selectedTrack ? routeCache[selectedTrack.callsign] : undefined;
+  const selectedRoutePath =
+    selectedRoute && selectedRoute.path.length >= 2 ? [{ path: selectedRoute.path }] : [];
+
   const iconColor: [number, number, number] = resolvedTheme === "dark" ? [255, 190, 70] : [40, 60, 90];
-  const HL: [number, number, number] = [56, 189, 248]; // selected flight highlight
+  const HL: [number, number, number] = [56, 189, 248]; // selected flight highlight (flown trail)
+  const ROUTE: [number, number, number] = [167, 139, 250]; // filed-route violet (distinct from flown)
   const boundaryColor: [number, number, number, number] =
     resolvedTheme === "dark" ? [130, 140, 160, 110] : [90, 100, 120, 120];
   const labelColor: [number, number, number] = resolvedTheme === "dark" ? [230, 235, 245] : [20, 25, 35];
@@ -346,10 +439,44 @@ function ReplayMap({ replay }: { replay: Replay }) {
       updateTriggers: { getColor: [resolvedTheme] },
     }),
     new PathLayer<{ path: [number, number][] }>({
+      id: "routes-all",
+      data: allRoutePaths,
+      getPath: (d) => d.path,
+      getColor: [...ROUTE, 90] as [number, number, number, number],
+      getWidth: 1.2,
+      widthUnits: "pixels",
+      widthMinPixels: 1,
+    }),
+    new ScatterplotLayer<Live>({
+      id: "range-rings",
+      data: rings ? shown : [],
+      getPosition: (d) => [d.lon, d.lat],
+      getRadius: ringNm * 1852, // NM → metres
+      radiusUnits: "meters",
+      stroked: true,
+      filled: false,
+      getLineColor: [...iconColor, 150] as [number, number, number, number],
+      lineWidthUnits: "pixels",
+      getLineWidth: 1.1,
+      lineWidthMinPixels: 1,
+      updateTriggers: { getRadius: [ringNm], getLineColor: [resolvedTheme] },
+    }),
+    new PathLayer<{ path: [number, number][] }>({
       id: "selected-track",
       data: trackPath,
       getPath: (d) => d.path,
       getColor: [...HL, 220] as [number, number, number, number],
+      getWidth: 2,
+      widthUnits: "pixels",
+      widthMinPixels: 2,
+      capRounded: true,
+      jointRounded: true,
+    }),
+    new PathLayer<{ path: [number, number][] }>({
+      id: "selected-route",
+      data: selectedRoutePath,
+      getPath: (d) => d.path,
+      getColor: [...ROUTE, 230] as [number, number, number, number],
       getWidth: 2,
       widthUnits: "pixels",
       widthMinPixels: 2,
@@ -397,6 +524,21 @@ function ReplayMap({ replay }: { replay: Replay }) {
         getColor: [resolvedTheme],
       },
     }),
+    new TextLayer<{ name: string; lat: number; lon: number }>({
+      id: "selected-route-waypoints",
+      data: selectedRoute?.waypoints ?? [],
+      getPosition: (d) => [d.lon, d.lat],
+      getText: (d) => d.name,
+      getColor: [...ROUTE, 255] as [number, number, number, number],
+      getSize: 10,
+      getPixelOffset: [0, -10],
+      getTextAnchor: "middle",
+      getAlignmentBaseline: "bottom",
+      background: true,
+      getBackgroundColor: resolvedTheme === "dark" ? [10, 12, 16, 200] : [255, 255, 255, 210],
+      backgroundPadding: [2, 1],
+      updateTriggers: { getColor: [resolvedTheme] },
+    }),
   ];
 
   const toggle = () => {
@@ -420,6 +562,15 @@ function ReplayMap({ replay }: { replay: Replay }) {
   const handleClick = (info: PickingInfo) => {
     const id = info.layer?.id === "aircraft" ? ((info.object as Live | undefined)?.id ?? null) : null;
     setSelectedId((prev) => (prev === id ? null : id));
+  };
+
+  const addFilter = () => {
+    const dep = depDraft.trim().toUpperCase() || "*";
+    const arr = arrDraft.trim().toUpperCase() || "*";
+    if (dep === "*" && arr === "*") return; // a chip that matches everything is a no-op
+    setFilters((prev) => [...prev, { dep, arr }]);
+    setDepDraft("");
+    setArrDraft("");
   };
 
   const tooltip = (info: PickingInfo<Live>) => {
@@ -469,7 +620,7 @@ function ReplayMap({ replay }: { replay: Replay }) {
           <span className="ml-2 text-muted-foreground">{shown.length} aircraft</span>
         </div>
 
-        <div className="absolute right-3 top-3 z-10 flex flex-col gap-1.5 rounded-md border bg-background/85 px-3 py-2.5 shadow backdrop-blur">
+        <div className="absolute right-3 top-3 z-10 flex max-h-[calc(70vh-1.5rem)] w-56 flex-col gap-1.5 overflow-auto rounded-md border bg-background/85 px-3 py-2.5 shadow backdrop-blur">
           <Toggle checked={hideGround} onChange={setHideGround}>
             Hide aircraft on ground
           </Toggle>
@@ -486,6 +637,27 @@ function ReplayMap({ replay }: { replay: Replay }) {
               Include disconnected
             </label>
           )}
+          <Toggle checked={showRoutes} onChange={setShowRoutes}>
+            Show all routes
+          </Toggle>
+          <div className="my-0.5 h-px bg-border" />
+
+          <Toggle checked={rings} onChange={setRings}>
+            Range rings
+          </Toggle>
+          {rings && (
+            <label className="ml-5 flex items-center gap-2 text-sm text-muted-foreground">
+              <input
+                type="number"
+                min={1}
+                max={500}
+                value={ringNm}
+                onChange={(e) => setRingNm(Math.max(1, Math.min(500, Number(e.target.value) || 0)))}
+                className="h-7 w-16 rounded border bg-background px-1.5 text-right tabular-nums"
+              />
+              NM radius
+            </label>
+          )}
           <div className="my-0.5 h-px bg-border" />
           <span className="text-xs font-medium text-muted-foreground">Labels</span>
           <Toggle checked={labels.callsign} onChange={(v) => setLabels((l) => ({ ...l, callsign: v }))}>
@@ -500,6 +672,56 @@ function ReplayMap({ replay }: { replay: Replay }) {
           <Toggle checked={labels.speed} onChange={(v) => setLabels((l) => ({ ...l, speed: v }))}>
             Groundspeed
           </Toggle>
+
+          <div className="my-0.5 h-px bg-border" />
+          <span className="text-xs font-medium text-muted-foreground">
+            Filter dep → arr <span className="font-normal">(* = any)</span>
+          </span>
+          <div className="flex items-center gap-1">
+            <input
+              value={depDraft}
+              onChange={(e) => setDepDraft(e.target.value)}
+              onKeyDown={(e) => e.key === "Enter" && addFilter()}
+              placeholder="dep"
+              className="h-7 w-full min-w-0 rounded border bg-background px-1.5 font-mono text-xs uppercase"
+            />
+            <span className="text-muted-foreground">→</span>
+            <input
+              value={arrDraft}
+              onChange={(e) => setArrDraft(e.target.value)}
+              onKeyDown={(e) => e.key === "Enter" && addFilter()}
+              placeholder="arr"
+              className="h-7 w-full min-w-0 rounded border bg-background px-1.5 font-mono text-xs uppercase"
+            />
+            <button
+              type="button"
+              onClick={addFilter}
+              className="rounded border px-2 py-1 text-xs hover:bg-accent"
+              aria-label="Add filter"
+            >
+              +
+            </button>
+          </div>
+          {filters.length > 0 && (
+            <div className="flex flex-wrap gap-1">
+              {filters.map((f, i) => (
+                <span
+                  key={`${f.dep}-${f.arr}-${i}`}
+                  className="flex items-center gap-1 rounded border bg-muted/40 px-1.5 py-0.5 font-mono text-xs"
+                >
+                  {f.dep} → {f.arr}
+                  <button
+                    type="button"
+                    onClick={() => setFilters((prev) => prev.filter((_, j) => j !== i))}
+                    className="text-muted-foreground hover:text-foreground"
+                    aria-label="Remove filter"
+                  >
+                    <X className="size-3" />
+                  </button>
+                </span>
+              ))}
+            </div>
+          )}
         </div>
 
         {selectedTrack && (

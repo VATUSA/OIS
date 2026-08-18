@@ -23,7 +23,8 @@ const KNOWN_VERBS: &[&str] = &[
 /// middleware entry would just be a duplicate). Everything else is logged. `admin.users` is the
 /// access editor (`PUT /admin/users/{id}/access`), which records its own before/after entry.
 fn is_excluded(resource_type: &str) -> bool {
-    resource_type == "admin.users"
+    // `flow.resolve-routes` is a read (POST only because it takes a list body), not a mutation.
+    matches!(resource_type, "admin.users" | "flow.resolve-routes")
 }
 
 /// Fallback action for a bare create/update/delete with no verb segment.

@@ -14,7 +14,7 @@ use chrono::{DateTime, Duration, Utc};
 use crate::{
     auth::{
         context::CurrentUser,
-        permissions::{FlowFcaDelete, FlowFcaUpdate, FlowRouteDelete, FlowRouteUpdate},
+        permissions::{FlowFcaDelete, FlowFcaUpdate, FlowRouteDelete, FlowRouteUpdate, StatsRead},
         require_permission::RequirePermission,
     },
     errors::ApiError,
@@ -25,8 +25,9 @@ use crate::{
     jobs,
     models::{
         AircraftRoute, DataStatus, FcaBody, FcaFlight, FlightAdvisory, FlightFcaCrossing,
-        FlightGdp, FlightGroundStop, FlightProgram, ReleaseRequest, ReorderRequest, RouteBody,
-        RouteWaypoint, TrafficAircraft, UpsertFcaRequest, UpsertRouteRequest,
+        FlightGdp, FlightGroundStop, FlightProgram, ReleaseRequest, ReorderRequest,
+        ResolveRouteRequest, ResolvedRoute, RouteBody, RouteWaypoint, TrafficAircraft,
+        UpsertFcaRequest, UpsertRouteRequest,
     },
     repos::{flow as flow_repo, public as public_repo},
     state::AppState,
@@ -503,6 +504,42 @@ pub async fn aircraft_route(
     }
 
     Err(ApiError::NotFound)
+}
+
+/// Resolve a batch of filed routes to drawable polylines (for the replay map's route overlay).
+/// Read-only nav resolution; excluded from audit despite being a POST (the body is just a list of
+/// flights to resolve, not a mutation).
+#[utoipa::path(
+    post,
+    path = "/api/v1/flow/resolve-routes",
+    tag = "flow",
+    request_body = Vec<ResolveRouteRequest>,
+    responses((status = 200, body = Vec<ResolvedRoute>), (status = 401))
+)]
+pub async fn resolve_routes(
+    State(state): State<AppState>,
+    _permission: RequirePermission<StatsRead>,
+    Json(reqs): Json<Vec<ResolveRouteRequest>>,
+) -> Json<Vec<ResolvedRoute>> {
+    let (_, airports) = feed_view(&state).await;
+    let nav_db = state.nav.load_full();
+    let nav = nav_db.as_ref();
+    let airports = airports.as_ref();
+    let out = reqs
+        .into_iter()
+        .map(|r| {
+            let (named, unresolved) =
+                fca::full_route_named(nav, airports, &r.dep, &r.arr, &r.route);
+            let points = named.iter().map(|(_, lat, lon)| [*lat, *lon]).collect();
+            ResolvedRoute {
+                callsign: r.callsign,
+                points,
+                waypoints: to_waypoints(named),
+                unresolved,
+            }
+        })
+        .collect();
+    Json(out)
 }
 
 fn build_data_status(state: &AppState) -> DataStatus {

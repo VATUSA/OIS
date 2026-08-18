@@ -11,6 +11,17 @@ export type StatsFlightDetail = components["schemas"]["StatsFlightDetail"];
 export type CaptureSummary = components["schemas"]["CaptureSummaryBody"];
 export type Replay = components["schemas"]["ReplayBody"];
 export type ReplayFlight = components["schemas"]["ReplayFlightBody"];
+export type ResolvedRoute = components["schemas"]["ResolvedRoute"];
+
+/** Resolve a batch of filed routes to drawable polylines (for the replay map's route overlay). */
+export async function resolveRoutes(
+  entries: { callsign: string; dep: string; arr: string; route: string }[],
+): Promise<ResolvedRoute[]> {
+  if (entries.length === 0) return [];
+  const { data, error } = await ois.POST("/api/v1/flow/resolve-routes", { body: entries });
+  if (error || !data) throw new Error("failed to resolve routes");
+  return data;
+}
 
 /** Hourly network totals over [from, to] (ISO strings; backend defaults to last 7d). */
 export function useNetworkHistory(from: string, to: string) {
