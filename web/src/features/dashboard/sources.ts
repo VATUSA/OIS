@@ -7,9 +7,8 @@
 import {useMemo} from "react";
 
 import {useFcas} from "@/lib/fca";
-import {useModeAirportFlow, useModeDepartures, useModeTraffic} from "@/lib/historical";
+import {useModeAirportFlow, useModeDepartures, useModeTaxi, useModeTraffic} from "@/lib/historical";
 import {usePrograms, useTmis} from "@/lib/tmu";
-import {useMultiTaxiStats} from "@/lib/taxi";
 
 import {useHistoricalAt} from "./historical";
 
@@ -186,14 +185,12 @@ export const DATA_SOURCES: DataSource[] = [
     useRows: (p) => {
       const at = useHistoricalAt();
       const list = airports(p);
-      const qs = useMultiTaxiStats(list);
+      const qs = useModeTaxi(list, at);
       const rows = useTaggedRows(list, qs, (d) => d.active ?? []);
-      // Taxi timing is a rolling state machine, not reconstructable from one snapshot — not
-      // available in historical mode (see the historical dashboard plan, phase 3).
       return {
-        rows: at == null ? rows : [],
-        isLoading: at == null && qs.some((q) => q.isLoading),
-        isError: at == null && qs.length > 0 && qs.every((q) => q.isError),
+        rows,
+        isLoading: qs.some((q) => q.isLoading),
+        isError: qs.length > 0 && qs.every((q) => q.isError),
         ...multiStatus(qs),
       };
     },

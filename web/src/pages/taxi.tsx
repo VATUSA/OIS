@@ -77,19 +77,11 @@ function TaxiRow({ row, now }: { row: Row; now: number }) {
  * roll ({">"}7 kt) to wheels-up (60 kt or a climb).
  */
 export function TaxiView({ icao }: { icao: string }) {
-  const now = useNow();
+  const liveNow = useNow();
+  const at = useHistoricalAt();
+  // In replay the rolling timer must tick against the scrubber instant, not the wall clock.
+  const now = at != null ? at * 1000 : liveNow;
   const stats = useTaxiStats(icao);
-  // Taxi timing is a rolling in-memory state machine, not reconstructable from a past snapshot.
-  const historical = useHistoricalAt() != null;
-  if (historical) {
-    return (
-      <Card>
-        <CardContent className="py-8 text-center text-sm text-muted-foreground">
-          Taxi timing isn&apos;t available in historical replay.
-        </CardContent>
-      </Card>
-    );
-  }
 
   const rows: Row[] = (stats.data?.active ?? []).map((a) => ({ ...a, field: icao }));
   const summary = {
@@ -119,7 +111,7 @@ export function TaxiView({ icao }: { icao: string }) {
           />
           <Stat label="Samples" value={String(summary.samples)} />
           <span className="ml-auto text-xs text-muted-foreground">
-            live · updates every 15s
+            {at != null ? "replay" : "live · updates every 15s"}
           </span>
         </div>
 

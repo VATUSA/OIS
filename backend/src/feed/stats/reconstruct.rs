@@ -10,10 +10,14 @@
 //! *current* runtime data (not persisted per-tick), so reconstructed ETAs aren't bit-exact to what
 //! was shown live — acceptable for a debrief view.
 
-use chrono::{DateTime, Utc};
+use std::collections::HashMap;
+
+use chrono::{DateTime, Duration, Utc};
 use sqlx::PgPool;
 
 use crate::errors::ApiError;
+use crate::feed::airports::AirportDb;
+use crate::feed::taxi::{self, TaxiField, TaxiSample, TaxiSession};
 use crate::feed::vatsim::{Atis, Controller, FlightPlan, Pilot, Prefile, VatsimData};
 
 #[derive(sqlx::FromRow)]
@@ -158,6 +162,96 @@ pub async fn reconstruct_at(pool: &PgPool, at: DateTime<Utc>) -> Result<VatsimDa
         controllers,
         atis,
     })
+}
+
+/// How far back to replay the taxi machine — covers the full sample-retention window
+/// (`SAMPLE_MAX_AGE_MS` = 3h in `taxi.rs`) so the reconstructed averages/trend match live.
+const TAXI_LOOKBACK_H: i64 = 3;
+
+#[derive(sqlx::FromRow)]
+struct TaxiPosRow {
+    callsign: String,
+    arrival: Option<String>,
+    ts: DateTime<Utc>,
+    lat: f32,
+    lon: f32,
+    altitude: i32,
+    groundspeed: i16,
+}
+
+/// Reconstruct the Taxi Monitor view for `icao` at instant `at` by replaying the stored position
+/// stream of that field's departures through the SAME `taxi::process` state machine the live feed
+/// drives — so the averages/trend/active list are computed by the canonical code, not a
+/// reimplementation. `icao` must be uppercase.
+///
+/// The stream is grouped into per-tick snapshots (positions sharing a `ts`) and fed in time order.
+/// For the recent hour the collector's 15s samples are full-resolution, so the live view is
+/// reproduced faithfully; older samples may be thinned by compaction (they only affect the trend and
+/// total count, not the last-hour average/volume).
+pub async fn taxi_field_at(
+    pool: &PgPool,
+    airports: &AirportDb,
+    icao: &str,
+    at: DateTime<Utc>,
+) -> Result<TaxiField, ApiError> {
+    let from = at - Duration::hours(TAXI_LOOKBACK_H);
+    let rows = sqlx::query_as::<_, TaxiPosRow>(
+        "select f.callsign, f.arrival, p.ts, p.lat, p.lon, p.altitude, p.groundspeed
+         from stats.position p
+         join stats.flight f on f.session_id = p.session_id
+         where upper(f.departure) = $1 and f.status <> 'prefiled'
+           and p.ts >= $2 and p.ts <= $3
+         order by p.ts, f.callsign",
+    )
+    .bind(icao)
+    .bind(from)
+    .bind(at)
+    .fetch_all(pool)
+    .await
+    .map_err(db)?;
+
+    let mut sessions: HashMap<String, TaxiSession> = HashMap::new();
+    let mut samples: HashMap<String, Vec<TaxiSample>> = HashMap::new();
+    let mut last_data = VatsimData::default();
+
+    // Group consecutive rows into ticks (same `ts`) and advance the machine one tick at a time.
+    let mut i = 0;
+    while i < rows.len() {
+        let ts = rows[i].ts;
+        let mut pilots: Vec<Pilot> = Vec::new();
+        while i < rows.len() && rows[i].ts == ts {
+            let r = &rows[i];
+            pilots.push(Pilot {
+                callsign: r.callsign.clone(),
+                latitude: r.lat as f64,
+                longitude: r.lon as f64,
+                altitude: r.altitude as i64,
+                groundspeed: r.groundspeed as i64,
+                heading: 0,
+                flight_plan: Some(FlightPlan {
+                    departure: icao.to_string(),
+                    arrival: r.arrival.clone().unwrap_or_default(),
+                    ..Default::default()
+                }),
+                ..Default::default()
+            });
+            i += 1;
+        }
+        let data = VatsimData {
+            pilots,
+            ..Default::default()
+        };
+        taxi::process(&mut sessions, &mut samples, airports, &data, ts);
+        last_data = data;
+    }
+
+    Ok(taxi::field(
+        &sessions,
+        samples.get(icao),
+        &last_data,
+        icao,
+        at,
+    ))
 }
 
 fn db(e: sqlx::Error) -> ApiError {
