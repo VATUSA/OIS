@@ -138,8 +138,9 @@ function ReplayMap({ replay }: { replay: Replay }) {
     [tracks, selectedId],
   );
 
-  // Show flown-so-far trails behind every visible aircraft.
+  // Show flown-so-far trails behind every visible aircraft (+ optionally disconnected ones).
   const [showTrails, setShowTrails] = useState(false);
+  const [showDisconnected, setShowDisconnected] = useState(false);
 
   // The selected flight's history trail (only what it has flown at the current clock).
   const trackPath = useMemo(() => {
@@ -148,21 +149,26 @@ function ReplayMap({ replay }: { replay: Replay }) {
     return pts.length >= 2 ? [{ path: pts }] : [];
   }, [selectedTrack, clock]);
 
-  // A trail for every currently-shown aircraft (when enabled). Keyed off the interpolated frame so
-  // it respects the ground filter and only trails aircraft active at the current clock.
+  // A trail for every currently-shown aircraft (when enabled). Currently-active aircraft respect the
+  // ground filter; `showDisconnected` also keeps trails for flights that have flown but are no longer
+  // active at the clock (landed / left the window).
   const allTrails = useMemo(() => {
     if (!showTrails) return [];
     const activeGs = new Map(aircraft.map((a) => [a.id, a.gs]));
     const out: { path: [number, number][] }[] = [];
     for (const t of tracks) {
+      if (t.s.length === 0 || t.s[0][0] > clock) continue; // hasn't started yet
       const gs = activeGs.get(t.id);
-      if (gs === undefined) continue; // not active at this clock
-      if (hideGround && gs < GROUND_KT) continue;
+      if (gs === undefined) {
+        if (!showDisconnected) continue; // disconnected — only when opted in
+      } else if (hideGround && gs < GROUND_KT) {
+        continue;
+      }
       const pts = flownPath(t.s, clock);
       if (pts.length >= 2) out.push({ path: pts });
     }
     return out;
-  }, [showTrails, tracks, clock, aircraft, hideGround]);
+  }, [showTrails, showDisconnected, tracks, clock, aircraft, hideGround]);
 
   // Log rows: samples flown so far (the history).
   const flownRows = useMemo(
@@ -405,6 +411,16 @@ function ReplayMap({ replay }: { replay: Replay }) {
           <Toggle checked={showTrails} onChange={setShowTrails}>
             Show history trails
           </Toggle>
+          {showTrails && (
+            <label className="ml-5 flex cursor-pointer items-center gap-2 text-sm text-muted-foreground">
+              <input
+                type="checkbox"
+                checked={showDisconnected}
+                onChange={(e) => setShowDisconnected(e.target.checked)}
+              />
+              Include disconnected
+            </label>
+          )}
           <div className="my-0.5 h-px bg-border" />
           <span className="text-xs font-medium text-muted-foreground">Labels</span>
           <Toggle checked={labels.callsign} onChange={(v) => setLabels((l) => ({ ...l, callsign: v }))}>
