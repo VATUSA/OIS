@@ -3,6 +3,7 @@ import type {components} from "@ois/api-client";
 import {useToast} from "@ois/ui";
 
 import {ois} from "./api";
+import {useHistoricalAt} from "./historical-context";
 import {hhmmZulu} from "./time";
 
 export async function fetchDepartures(dep: string) {
@@ -13,16 +14,27 @@ export async function fetchDepartures(dep: string) {
   return data;
 }
 
+export async function fetchHistDepartures(dep: string, at: number) {
+  const { data, error } = await ois.GET("/api/v1/stats/hist/departures/{dep}", {
+    params: { path: { dep }, query: { at } },
+  });
+  if (error || !data) throw new Error("failed to load historical departures");
+  return data;
+}
+
 export type Departure = components["schemas"]["DepartureFlight"];
 export type DeparturesResponse = components["schemas"]["DeparturesResponse"];
 
-/** Pending departures out of a field into any metered destination, refreshed every 20s. */
+/** Pending departures out of a field. Live (20s poll) by default; inside a `HistoricalProvider` it
+ * reconstructs the field at the scrubber instant instead. */
 export function useDepartures(dep: string) {
+  const at = useHistoricalAt();
   return useQuery({
-    queryKey: ["departures", dep],
-    queryFn: () => fetchDepartures(dep),
+    queryKey: at == null ? ["departures", dep] : ["hist-departures", dep, at],
+    queryFn: () => (at == null ? fetchDepartures(dep) : fetchHistDepartures(dep, at!)),
     enabled: !!dep,
-    refetchInterval: 20_000,
+    refetchInterval: at == null ? 20_000 : false,
+    staleTime: at == null ? 0 : Infinity,
   });
 }
 
