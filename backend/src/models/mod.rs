@@ -611,12 +611,29 @@ pub struct UpdateEventCaptureRequest {
     pub post_minutes: Option<i32>,
 }
 
-/// Arrivals/departures at one configured event airport over the capture window.
+/// Debrief stats for one featured (configured) event airport over the capture window.
 #[derive(Debug, Serialize, ToSchema)]
-pub struct AirportMovementBody {
+pub struct AirportStatBody {
     pub icao: String,
     pub arrivals: i64,
     pub departures: i64,
+    /// arrivals + departures.
+    pub movements: i64,
+    /// Distinct pilots (CIDs) that arrived at or departed from this airport.
+    pub unique_pilots: i64,
+    /// Top aircraft types to/from this airport.
+    pub top_aircraft: Vec<KeyCountBody>,
+}
+
+/// The featured airports combined: arrivals/departures summed across airports; pilots deduped
+/// (a pilot flying between two featured airports counts once); top aircraft across them all.
+#[derive(Debug, Serialize, ToSchema)]
+pub struct CombinedStatBody {
+    pub arrivals: i64,
+    pub departures: i64,
+    pub movements: i64,
+    pub unique_pilots: i64,
+    pub top_aircraft: Vec<KeyCountBody>,
 }
 
 #[derive(Debug, Serialize, ToSchema, sqlx::FromRow)]
@@ -746,7 +763,8 @@ pub struct ReplayBody {
     pub flights: Vec<ReplayFlightBody>,
 }
 
-/// Stats generated from an event's capture window. `captured` is false when no capture exists yet.
+/// Event debrief: per-featured-airport stats plus their combined total, over the capture window.
+/// `captured` is false when no capture exists yet.
 #[derive(Debug, Serialize, ToSchema)]
 pub struct EventStatsBody {
     pub captured: bool,
@@ -754,15 +772,10 @@ pub struct EventStatsBody {
     pub status: Option<String>,
     pub window_start: Option<DateTime<Utc>>,
     pub window_end: Option<DateTime<Utc>>,
-    pub unique_pilots: i64,
-    pub peak_pilots: Option<i32>,
-    pub total_arrivals: i64,
-    pub total_departures: i64,
-    pub airports: Vec<AirportMovementBody>,
-    pub top_aircraft: Vec<KeyCountBody>,
-    pub unique_controllers: i64,
-    pub controller_positions: i64,
-    pub controller_hours: f64,
+    /// One entry per featured (configured) airport, busiest first.
+    pub airports: Vec<AirportStatBody>,
+    /// All featured airports combined.
+    pub combined: CombinedStatBody,
 }
 
 // --- flow constrained areas (FCAs) ---

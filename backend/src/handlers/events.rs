@@ -20,10 +20,10 @@ use crate::{
     errors::ApiError,
     feed,
     models::{
-        AddPackageItemRequest, AirportMovementBody, AirportRateBody, CreateGroundStopRequest,
-        CreatePackageRequest, CreateTmiRequest, DccRequestBody, EventBody, EventCaptureBody,
-        EventStatsBody, FacilitySupportBody, KeyCountBody, StaffingRequestBody, TmiPackageBody,
-        UpdateDccRequest, UpdateEventCaptureRequest, UpsertAirportRateRequest,
+        AddPackageItemRequest, AirportRateBody, AirportStatBody, CombinedStatBody,
+        CreateGroundStopRequest, CreatePackageRequest, CreateTmiRequest, DccRequestBody, EventBody,
+        EventCaptureBody, EventStatsBody, FacilitySupportBody, KeyCountBody, StaffingRequestBody,
+        TmiPackageBody, UpdateDccRequest, UpdateEventCaptureRequest, UpsertAirportRateRequest,
         UpsertFacilitySupportRequest, UpsertProgramRequest, UpsertStaffingRequest,
     },
     repos::{
@@ -1002,76 +1002,95 @@ pub async fn get_event_stats(
         return Err(ApiError::NotFound);
     }
 
+    let empty_combined = || CombinedStatBody {
+        arrivals: 0,
+        departures: 0,
+        movements: 0,
+        unique_pilots: 0,
+        top_aircraft: Vec::new(),
+    };
+
     let Some(cap) = stats_repo::latest_capture_for_event(pool, id).await? else {
         return Ok(Json(EventStatsBody {
             captured: false,
             status: None,
             window_start: None,
             window_end: None,
-            unique_pilots: 0,
-            peak_pilots: None,
-            total_arrivals: 0,
-            total_departures: 0,
             airports: Vec::new(),
-            top_aircraft: Vec::new(),
-            unique_controllers: 0,
-            controller_positions: 0,
-            controller_hours: 0.0,
+            combined: empty_combined(),
         }));
     };
 
     let from = cap.start_time;
     let to = cap.end_time.unwrap_or_else(Utc::now);
 
+    // Featured airports = the event's configured (rated) airports.
     let icaos: Vec<String> = events_repo::list_airport_rates(pool, id)
         .await?
         .into_iter()
         .map(|r| r.icao)
         .collect();
 
-    let movements = if icaos.is_empty() {
-        Vec::new()
-    } else {
-        stats_repo::event_airport_movements(pool, &icaos, from, to).await?
-    };
-    let total_arrivals: i64 = movements.iter().map(|m| m.arrivals).sum();
-    let total_departures: i64 = movements.iter().map(|m| m.departures).sum();
+    if icaos.is_empty() {
+        return Ok(Json(EventStatsBody {
+            captured: true,
+            status: Some(cap.status),
+            window_start: Some(from),
+            window_end: Some(to),
+            airports: Vec::new(),
+            combined: empty_combined(),
+        }));
+    }
 
-    let unique_pilots = stats_repo::event_unique_pilots(pool, from, to).await?;
-    let peak_pilots = stats_repo::event_peak_pilots(pool, from, to).await?;
-    let top_aircraft = if icaos.is_empty() {
-        Vec::new()
-    } else {
-        stats_repo::event_top_aircraft(pool, &icaos, from, to).await?
+    let key_count = |k: stats_repo::KeyCount| KeyCountBody {
+        key: k.key,
+        count: k.count,
     };
-    let cov = stats_repo::event_controller_coverage(pool, from, to).await?;
+
+    // Per-airport breakdown + top aircraft (grouped by ICAO).
+    let breakdown = stats_repo::event_airport_breakdown(pool, &icaos, from, to).await?;
+    let mut top_by_icao: std::collections::HashMap<String, Vec<KeyCountBody>> =
+        std::collections::HashMap::new();
+    for r in stats_repo::event_airport_top_aircraft(pool, &icaos, from, to, 4).await? {
+        top_by_icao.entry(r.icao).or_default().push(KeyCountBody {
+            key: r.key,
+            count: r.count,
+        });
+    }
+
+    let airports: Vec<AirportStatBody> = breakdown
+        .into_iter()
+        .map(|b| AirportStatBody {
+            movements: b.arrivals + b.departures,
+            top_aircraft: top_by_icao.remove(&b.icao).unwrap_or_default(),
+            icao: b.icao,
+            arrivals: b.arrivals,
+            departures: b.departures,
+            unique_pilots: b.unique_pilots,
+        })
+        .collect();
+
+    // Combined: movements sum across airports; pilots deduped; top aircraft across all.
+    let arrivals: i64 = airports.iter().map(|a| a.arrivals).sum();
+    let departures: i64 = airports.iter().map(|a| a.departures).sum();
+    let combined = CombinedStatBody {
+        arrivals,
+        departures,
+        movements: arrivals + departures,
+        unique_pilots: stats_repo::event_combined_unique_pilots(pool, &icaos, from, to).await?,
+        top_aircraft: stats_repo::event_combined_top_aircraft(pool, &icaos, from, to)
+            .await?
+            .into_iter()
+            .map(key_count)
+            .collect(),
+    };
 
     Ok(Json(EventStatsBody {
         captured: true,
         status: Some(cap.status),
         window_start: Some(from),
         window_end: Some(to),
-        unique_pilots,
-        peak_pilots,
-        total_arrivals,
-        total_departures,
-        airports: movements
-            .into_iter()
-            .map(|m| AirportMovementBody {
-                icao: m.icao,
-                arrivals: m.arrivals,
-                departures: m.departures,
-            })
-            .collect(),
-        top_aircraft: top_aircraft
-            .into_iter()
-            .map(|k| KeyCountBody {
-                key: k.key,
-                count: k.count,
-            })
-            .collect(),
-        unique_controllers: cov.unique_controllers,
-        controller_positions: cov.positions,
-        controller_hours: cov.hours,
+        airports,
+        combined,
     }))
 }

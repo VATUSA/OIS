@@ -1,9 +1,9 @@
 import {useEffect, useState} from "react";
 import {Badge, buttonVariants, Card, CardContent, Input} from "@ois/ui";
 import {Link} from "@tanstack/react-router";
-import {BarChart3, Circle, Film, Plane, Radio, Users} from "lucide-react";
+import {BarChart3, Circle, Film, Plane} from "lucide-react";
 
-import {type EventCapture, useEventCapture, useEventStats, useUpdateEventCapture,} from "@/lib/event-stats";
+import {type EventCapture, type EventStats, useEventCapture, useEventStats, useUpdateEventCapture,} from "@/lib/event-stats";
 import {formatZuluFull} from "@/lib/time";
 
 const clampMin = (n: number) => Math.max(0, Math.min(720, Math.round(n)));
@@ -125,6 +125,10 @@ function CaptureConfig({ eventId }: { eventId: number }) {
   );
 }
 
+type AirportStat = EventStats["airports"][number];
+type CombinedStat = EventStats["combined"];
+
+/** A headline number + label (used for the combined totals). */
 function Tile({ label, value, icon }: { label: string; value: string; icon?: React.ReactNode }) {
   return (
     <div className="flex flex-col gap-1 rounded-md border bg-muted/20 p-3">
@@ -132,7 +136,76 @@ function Tile({ label, value, icon }: { label: string; value: string; icon?: Rea
         {icon}
         {label}
       </span>
+      <span className="text-2xl font-semibold tabular-nums">{value}</span>
+    </div>
+  );
+}
+
+function AircraftBadges({ items }: { items: { key?: string | null; count: number }[] }) {
+  if (items.length === 0) return <span className="text-xs text-muted-foreground/70">No data</span>;
+  return (
+    <div className="flex flex-wrap gap-1.5">
+      {items.map((a) => (
+        <Badge key={a.key ?? "?"} variant="secondary" className="gap-1 font-mono text-xs">
+          {a.key ?? "?"}
+          <span className="text-muted-foreground">{a.count}</span>
+        </Badge>
+      ))}
+    </div>
+  );
+}
+
+/** A compact stat used inside an airport card. */
+function MiniStat({ label, value }: { label: string; value: number }) {
+  return (
+    <div className="flex flex-col">
       <span className="text-xl font-semibold tabular-nums">{value}</span>
+      <span className="text-[10px] uppercase tracking-wide text-muted-foreground">{label}</span>
+    </div>
+  );
+}
+
+/** One featured airport's debrief card. */
+function AirportCard({ a }: { a: AirportStat }) {
+  return (
+    <div className="flex flex-col gap-3 rounded-lg border bg-muted/20 p-4">
+      <div className="flex items-baseline justify-between gap-2">
+        <span className="font-mono text-base font-semibold">{a.icao}</span>
+        <span className="text-xs text-muted-foreground">
+          {a.movements} movement{a.movements === 1 ? "" : "s"}
+        </span>
+      </div>
+      <div className="grid grid-cols-3 gap-2">
+        <MiniStat label="Arrivals" value={a.arrivals} />
+        <MiniStat label="Departures" value={a.departures} />
+        <MiniStat label="Pilots" value={a.unique_pilots} />
+      </div>
+      <div>
+        <div className="mb-1 text-[10px] uppercase tracking-wide text-muted-foreground">
+          Top aircraft
+        </div>
+        <AircraftBadges items={a.top_aircraft} />
+      </div>
+    </div>
+  );
+}
+
+/** The featured airports combined into one totals block. */
+function CombinedBlock({ c }: { c: CombinedStat }) {
+  return (
+    <div className="flex flex-col gap-3">
+      <div className="grid grid-cols-2 gap-3 sm:grid-cols-4">
+        <Tile label="Movements" value={String(c.movements)} icon={<Plane className="size-3" />} />
+        <Tile label="Arrivals" value={String(c.arrivals)} />
+        <Tile label="Departures" value={String(c.departures)} />
+        <Tile label="Unique pilots" value={String(c.unique_pilots)} />
+      </div>
+      <div>
+        <div className="mb-1 text-[10px] uppercase tracking-wide text-muted-foreground">
+          Top aircraft
+        </div>
+        <AircraftBadges items={c.top_aircraft} />
+      </div>
     </div>
   );
 }
@@ -187,63 +260,33 @@ function Debrief({ eventId }: { eventId: number }) {
             </span>
           )}
         </div>
-        <div className="grid grid-cols-2 gap-3 sm:grid-cols-4">
-          <Tile label="Unique pilots" value={String(s.unique_pilots)} icon={<Plane className="size-3" />} />
-          <Tile label="Peak pilots" value={s.peak_pilots == null ? "—" : String(s.peak_pilots)} />
-          <Tile label="Arrivals" value={String(s.total_arrivals)} />
-          <Tile label="Departures" value={String(s.total_departures)} />
-          <Tile
-            label="Controllers"
-            value={String(s.unique_controllers)}
-            icon={<Radio className="size-3" />}
-          />
-          <Tile label="Positions" value={String(s.controller_positions)} />
-          <Tile label="Controller hours" value={s.controller_hours.toFixed(1)} icon={<Users className="size-3" />} />
-        </div>
 
-        <div className="grid gap-5 md:grid-cols-2">
-          <div>
-            <h3 className="mb-2 text-sm font-medium">Airport movements</h3>
-            {s.airports.length === 0 ? (
-              <p className="text-sm text-muted-foreground">No configured airports.</p>
-            ) : (
-              <table className="w-full text-sm">
-                <thead>
-                  <tr className="text-left text-xs uppercase tracking-wide text-muted-foreground">
-                    <th className="pb-1 pr-3 font-medium">Airport</th>
-                    <th className="pb-1 pr-3 font-medium">Arr</th>
-                    <th className="pb-1 font-medium">Dep</th>
-                  </tr>
-                </thead>
-                <tbody>
-                  {s.airports.map((a) => (
-                    <tr key={a.icao} className="border-t">
-                      <td className="py-1.5 pr-3 font-mono">{a.icao}</td>
-                      <td className="py-1.5 pr-3 tabular-nums">{a.arrivals}</td>
-                      <td className="py-1.5 tabular-nums">{a.departures}</td>
-                    </tr>
-                  ))}
-                </tbody>
-              </table>
-            )}
-          </div>
+        {s.airports.length === 0 ? (
+          <p className="py-4 text-sm text-muted-foreground">
+            No featured airports configured for this event — add airport rates to see a debrief.
+          </p>
+        ) : (
+          <>
+            <section className="flex flex-col gap-2">
+              <h3 className="text-sm font-medium">
+                All featured airports
+                <span className="ml-2 font-normal text-muted-foreground">
+                  {s.airports.map((a) => a.icao).join(" · ")}
+                </span>
+              </h3>
+              <CombinedBlock c={s.combined} />
+            </section>
 
-          <div>
-            <h3 className="mb-2 text-sm font-medium">Top aircraft</h3>
-            {s.top_aircraft.length === 0 ? (
-              <p className="text-sm text-muted-foreground">No data yet.</p>
-            ) : (
-              <div className="flex flex-wrap gap-1.5">
-                {s.top_aircraft.map((a) => (
-                  <Badge key={a.key ?? "?"} variant="secondary" className="gap-1 font-mono">
-                    {a.key ?? "?"}
-                    <span className="text-muted-foreground">{a.count}</span>
-                  </Badge>
+            <section className="flex flex-col gap-2">
+              <h3 className="text-sm font-medium">By airport</h3>
+              <div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-3">
+                {s.airports.map((a) => (
+                  <AirportCard key={a.icao} a={a} />
                 ))}
               </div>
-            )}
-          </div>
-        </div>
+            </section>
+          </>
+        )}
       </CardContent>
     </Card>
   );

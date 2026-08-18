@@ -600,34 +600,44 @@ pub async fn list_capture_schedule(pool: &PgPool) -> Result<Vec<ScheduleRow>, Ap
     .map_err(db)
 }
 
-// --- event stats generation (over a capture window) --------------------------------------------
-
-/// A `stats.flight` "overlaps" the window when `first_seen <= to and last_seen >= from`.
-const FLIGHT_OVERLAP: &str = "status <> 'prefiled' and first_seen <= $2 and last_seen >= $1";
+// --- event debrief stats (per featured airport + combined, over a capture window) --------------
+//
+// A `stats.flight` "overlaps" the window when `first_seen <= to and last_seen >= from`. The window
+// bounds are always bound as `$1` (from) / `$2` (to), the featured ICAOs as `$3`.
 
 #[derive(Debug, sqlx::FromRow)]
-pub struct AirportMovement {
+pub struct KeyCount {
+    pub key: Option<String>,
+    pub count: i64,
+}
+
+#[derive(Debug, sqlx::FromRow)]
+pub struct AirportBreakdown {
     pub icao: String,
     pub arrivals: i64,
     pub departures: i64,
+    pub unique_pilots: i64,
 }
 
-/// Arrivals/departures for each configured event airport during the window.
-pub async fn event_airport_movements(
+/// Arrivals, departures, and distinct pilots for each featured airport during the window. A pilot
+/// that both arrived at and departed from the same field (turnaround) is one unique pilot but two
+/// movements.
+pub async fn event_airport_breakdown(
     pool: &PgPool,
     icaos: &[String],
     from: DateTime<Utc>,
     to: DateTime<Utc>,
-) -> Result<Vec<AirportMovement>, ApiError> {
-    sqlx::query_as::<_, AirportMovement>(
+) -> Result<Vec<AirportBreakdown>, ApiError> {
+    sqlx::query_as::<_, AirportBreakdown>(
         "select icao,
                 count(*) filter (where kind = 'arr') as arrivals,
-                count(*) filter (where kind = 'dep') as departures
+                count(*) filter (where kind = 'dep') as departures,
+                count(distinct cid) as unique_pilots
          from (
-            select arrival as icao, 'arr' as kind from stats.flight
+            select arrival as icao, cid, 'arr' as kind from stats.flight
               where arrival = any($3) and status <> 'prefiled' and first_seen <= $2 and last_seen >= $1
             union all
-            select departure as icao, 'dep' as kind from stats.flight
+            select departure as icao, cid, 'dep' as kind from stats.flight
               where departure = any($3) and status <> 'prefiled' and first_seen <= $2 and last_seen >= $1
          ) t
          group by icao order by (count(*)) desc",
@@ -640,91 +650,90 @@ pub async fn event_airport_movements(
     .map_err(db)
 }
 
-/// Distinct pilots active during the window.
-pub async fn event_unique_pilots(
-    pool: &PgPool,
-    from: DateTime<Utc>,
-    to: DateTime<Utc>,
-) -> Result<i64, ApiError> {
-    sqlx::query_scalar::<_, i64>(&format!(
-        "select count(distinct cid) from stats.flight where {FLIGHT_OVERLAP}"
-    ))
-    .bind(from)
-    .bind(to)
-    .fetch_one(pool)
-    .await
-    .map_err(db)
-}
-
-/// Peak concurrent pilots (from the per-tick network snapshot) during the window.
-pub async fn event_peak_pilots(
-    pool: &PgPool,
-    from: DateTime<Utc>,
-    to: DateTime<Utc>,
-) -> Result<Option<i32>, ApiError> {
-    sqlx::query_scalar::<_, Option<i32>>(
-        "select max(pilots) from stats.snapshot where ts >= $1 and ts <= $2",
-    )
-    .bind(from)
-    .bind(to)
-    .fetch_one(pool)
-    .await
-    .map_err(db)
-}
-
 #[derive(Debug, sqlx::FromRow)]
-pub struct KeyCount {
+pub struct AirportKeyCount {
+    pub icao: String,
     pub key: Option<String>,
     pub count: i64,
 }
 
-/// Top aircraft types across flights to/from the configured event airports during the window.
-pub async fn event_top_aircraft(
+/// Top aircraft types by operations (arrivals + departures) at each featured airport — up to
+/// `per_airport` per field, ordered busiest first.
+pub async fn event_airport_top_aircraft(
+    pool: &PgPool,
+    icaos: &[String],
+    from: DateTime<Utc>,
+    to: DateTime<Utc>,
+    per_airport: i64,
+) -> Result<Vec<AirportKeyCount>, ApiError> {
+    sqlx::query_as::<_, AirportKeyCount>(
+        "select icao, key, count from (
+            select icao, aircraft_short as key, count(*) as count,
+                   row_number() over (partition by icao order by count(*) desc, aircraft_short) as rn
+            from (
+               select arrival as icao, aircraft_short from stats.flight
+                 where arrival = any($3) and status <> 'prefiled' and aircraft_short is not null
+                   and first_seen <= $2 and last_seen >= $1
+               union all
+               select departure as icao, aircraft_short from stats.flight
+                 where departure = any($3) and status <> 'prefiled' and aircraft_short is not null
+                   and first_seen <= $2 and last_seen >= $1
+            ) f
+            group by icao, aircraft_short
+         ) r where rn <= $4 order by icao, count desc",
+    )
+    .bind(from)
+    .bind(to)
+    .bind(icaos)
+    .bind(per_airport)
+    .fetch_all(pool)
+    .await
+    .map_err(db)
+}
+
+/// Distinct pilots (CIDs) across all featured airports combined — a pilot flying between two
+/// featured fields counts once.
+pub async fn event_combined_unique_pilots(
+    pool: &PgPool,
+    icaos: &[String],
+    from: DateTime<Utc>,
+    to: DateTime<Utc>,
+) -> Result<i64, ApiError> {
+    sqlx::query_scalar::<_, i64>(
+        "select count(distinct cid) from stats.flight
+         where (departure = any($3) or arrival = any($3))
+           and status <> 'prefiled' and first_seen <= $2 and last_seen >= $1",
+    )
+    .bind(from)
+    .bind(to)
+    .bind(icaos)
+    .fetch_one(pool)
+    .await
+    .map_err(db)
+}
+
+/// Top aircraft types by operations across all featured airports combined.
+pub async fn event_combined_top_aircraft(
     pool: &PgPool,
     icaos: &[String],
     from: DateTime<Utc>,
     to: DateTime<Utc>,
 ) -> Result<Vec<KeyCount>, ApiError> {
     sqlx::query_as::<_, KeyCount>(
-        "select aircraft_short as key, count(*) as count from stats.flight
-         where (departure = any($3) or arrival = any($3))
-           and status <> 'prefiled' and aircraft_short is not null
-           and first_seen <= $2 and last_seen >= $1
-         group by 1 order by 2 desc limit 10",
+        "select key, count(*) as count from (
+            select aircraft_short as key from stats.flight
+              where arrival = any($3) and status <> 'prefiled' and aircraft_short is not null
+                and first_seen <= $2 and last_seen >= $1
+            union all
+            select aircraft_short as key from stats.flight
+              where departure = any($3) and status <> 'prefiled' and aircraft_short is not null
+                and first_seen <= $2 and last_seen >= $1
+         ) t group by key order by count(*) desc limit 8",
     )
     .bind(from)
     .bind(to)
     .bind(icaos)
     .fetch_all(pool)
-    .await
-    .map_err(db)
-}
-
-#[derive(Debug, sqlx::FromRow)]
-pub struct ControllerCoverage {
-    pub unique_controllers: i64,
-    pub positions: i64,
-    pub hours: f64,
-}
-
-/// Controller coverage during the window: unique controllers, position sessions, and clipped
-/// position-hours (overlap of each session with the window).
-pub async fn event_controller_coverage(
-    pool: &PgPool,
-    from: DateTime<Utc>,
-    to: DateTime<Utc>,
-) -> Result<ControllerCoverage, ApiError> {
-    sqlx::query_as::<_, ControllerCoverage>(
-        "select
-            count(distinct cid) as unique_controllers,
-            count(*) as positions,
-            coalesce(sum(extract(epoch from (least(last_seen, $2) - greatest(first_seen, $1)))) / 3600.0, 0)::float8 as hours
-         from stats.controller_session
-         where first_seen <= $2 and last_seen >= $1",
-    )
-    .bind(from)
-    .bind(to)
-    .fetch_one(pool)
     .await
     .map_err(db)
 }

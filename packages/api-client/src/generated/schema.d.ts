@@ -1841,14 +1841,6 @@ export interface components {
             /** Format: int32 */
             wind_kt: number;
         };
-        /** @description Arrivals/departures at one configured event airport over the capture window. */
-        AirportMovementBody: {
-            /** Format: int64 */
-            arrivals: number;
-            /** Format: int64 */
-            departures: number;
-            icao: string;
-        };
         /** @description A planned per-airport arrival/departure rate for an event. */
         AirportRateBody: {
             /**
@@ -1873,6 +1865,26 @@ export interface components {
             /** Format: date-time */
             updated_at: string;
             updated_by?: string | null;
+        };
+        /** @description Debrief stats for one featured (configured) event airport over the capture window. */
+        AirportStatBody: {
+            /** Format: int64 */
+            arrivals: number;
+            /** Format: int64 */
+            departures: number;
+            icao: string;
+            /**
+             * Format: int64
+             * @description arrivals + departures.
+             */
+            movements: number;
+            /** @description Top aircraft types to/from this airport. */
+            top_aircraft: components["schemas"]["KeyCountBody"][];
+            /**
+             * Format: int64
+             * @description Distinct pilots (CIDs) that arrived at or departed from this airport.
+             */
+            unique_pilots: number;
         };
         /** @description One staffed airport and its ground-level positions (DEL/GND/TWR/ATIS), for the badge stack. */
         AtcAirport: {
@@ -1961,6 +1973,21 @@ export interface components {
             start_time: string;
             /** @description `open` (recording) or `saved`. */
             status: string;
+        };
+        /**
+         * @description The featured airports combined: arrivals/departures summed across airports; pilots deduped
+         *     (a pilot flying between two featured airports counts once); top aircraft across them all.
+         */
+        CombinedStatBody: {
+            /** Format: int64 */
+            arrivals: number;
+            /** Format: int64 */
+            departures: number;
+            /** Format: int64 */
+            movements: number;
+            top_aircraft: components["schemas"]["KeyCountBody"][];
+            /** Format: int64 */
+            unique_pilots: number;
         };
         /** @description The new board id returned when copying a shared board. */
         CopyResponse: {
@@ -2172,27 +2199,18 @@ export interface components {
             updated_at?: string | null;
             updated_by?: string | null;
         };
-        /** @description Stats generated from an event's capture window. `captured` is false when no capture exists yet. */
+        /**
+         * @description Event debrief: per-featured-airport stats plus their combined total, over the capture window.
+         *     `captured` is false when no capture exists yet.
+         */
         EventStatsBody: {
-            airports: components["schemas"]["AirportMovementBody"][];
+            /** @description One entry per featured (configured) airport, busiest first. */
+            airports: components["schemas"]["AirportStatBody"][];
             captured: boolean;
-            /** Format: double */
-            controller_hours: number;
-            /** Format: int64 */
-            controller_positions: number;
-            /** Format: int32 */
-            peak_pilots?: number | null;
+            /** @description All featured airports combined. */
+            combined: components["schemas"]["CombinedStatBody"];
             /** @description `open` (still recording) or `saved`. */
             status?: string | null;
-            top_aircraft: components["schemas"]["KeyCountBody"][];
-            /** Format: int64 */
-            total_arrivals: number;
-            /** Format: int64 */
-            total_departures: number;
-            /** Format: int64 */
-            unique_controllers: number;
-            /** Format: int64 */
-            unique_pilots: number;
             /** Format: date-time */
             window_end?: string | null;
             /** Format: date-time */
