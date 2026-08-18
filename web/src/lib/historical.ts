@@ -18,7 +18,7 @@ async function fetchLiveTraffic() {
   return data;
 }
 
-async function fetchHistTraffic(at: number) {
+export async function fetchHistTraffic(at: number) {
   const { data, error } = await ois.GET("/api/v1/stats/hist/traffic", {
     params: { query: { at } },
   });

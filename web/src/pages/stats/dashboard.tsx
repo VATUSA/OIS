@@ -1,6 +1,7 @@
-import {useEffect, useMemo, useRef, useState} from "react";
-import {Badge, Button, Card, CardContent} from "@ois/ui";
-import {Pause, Play, Rewind} from "lucide-react";
+import {useCallback, useEffect, useMemo, useRef, useState} from "react";
+import {Badge, Button, Card, CardContent, useToast} from "@ois/ui";
+import {useNavigate, useSearch} from "@tanstack/react-router";
+import {Link2, Pause, Play, Rewind} from "lucide-react";
 
 import {DashboardGrid} from "@/features/dashboard/DashboardGrid";
 import {HistoricalProvider} from "@/features/dashboard/historical";
@@ -10,6 +11,15 @@ import {useDashboard, useDashboards} from "@/lib/dashboards";
 import {hasPermission} from "@/lib/permissions";
 import {useCaptures} from "@/lib/stats";
 import {formatZuluFull} from "@/lib/time";
+
+/** Deep-link search params for a shareable replay (validated on the route). */
+interface DashboardSearch {
+  capture?: string;
+  from?: number;
+  to?: number;
+  board?: string;
+  t?: number;
+}
 
 /** Committed scrubber instants snap to this many seconds — fewer distinct `at` values means the
  * per-instant reconstructions cache and revisiting a time is instant. */
@@ -46,18 +56,59 @@ interface Win {
   to: number;
 }
 
-/** The scrubber + read-only board render for a chosen [from, to] window. */
-function Replay({ win, state }: { win: Win; state: DashboardState }) {
+/** Copies the current URL (kept in sync with the pickers + scrubber) so a replay can be shared. */
+function CopyLink() {
+  const toast = useToast();
+  return (
+    <Button
+      size="sm"
+      variant="ghost"
+      title="Copy a link to this replay"
+      onClick={() => {
+        void navigator.clipboard?.writeText(window.location.href).then(
+          () => toast.success("Link copied"),
+          () => toast.error("Couldn’t copy the link"),
+        );
+      }}
+    >
+      <Link2 className="size-4" />
+      Share
+    </Button>
+  );
+}
+
+/** The scrubber + read-only board render for a chosen [from, to] window. `initialT` seeds the
+ * scrubber from a shared link; `onCommit` reports the (snapped, debounced) instant back so the page
+ * can keep it in the URL. */
+function Replay({
+  win,
+  state,
+  initialT,
+  onCommit,
+}: {
+  win: Win;
+  state: DashboardState;
+  initialT?: number;
+  onCommit?: (t: number) => void;
+}) {
   const span = Math.max(1, win.to - win.from);
-  const [scrub, setScrub] = useState(win.from + Math.floor(span / 2));
+  const mid = win.from + Math.floor(span / 2);
+  const [scrub, setScrub] = useState(() =>
+    initialT != null && initialT >= win.from && initialT <= win.to ? initialT : mid,
+  );
   const [playing, setPlaying] = useState(false);
   const [speed, setSpeed] = useState<number>(4);
 
-  // Reset to the middle whenever the window changes.
+  // Reset to the middle when the window actually changes — but not on first mount, so a deep link's
+  // `initialT` survives.
+  const winKey = `${win.from}-${win.to}`;
+  const prevWinKey = useRef(winKey);
   useEffect(() => {
+    if (prevWinKey.current === winKey) return;
+    prevWinKey.current = winKey;
     setScrub(win.from + Math.floor(span / 2));
     setPlaying(false);
-  }, [win.from, win.to, span]);
+  }, [winKey, win.from, span]);
 
   // Playback: advance the scrubber in real time; stop at the end.
   const scrubRef = useRef(scrub);
@@ -83,6 +134,14 @@ function Replay({ win, state }: { win: Win; state: DashboardState }) {
     const id = window.setTimeout(() => setCommitted(snapped), 120);
     return () => window.clearTimeout(id);
   }, [snapped]);
+
+  // Report the committed instant up (for the shareable URL) via a ref so a changing `onCommit`
+  // identity doesn't re-fire the effect.
+  const onCommitRef = useRef(onCommit);
+  onCommitRef.current = onCommit;
+  useEffect(() => {
+    onCommitRef.current?.(committed);
+  }, [committed]);
 
   const pct = ((scrub - win.from) / span) * 100;
 
@@ -123,7 +182,10 @@ function Replay({ win, state }: { win: Win; state: DashboardState }) {
                 </Button>
               ))}
             </div>
-            <span className="ml-auto font-mono text-lg tabular-nums">{zulu(scrub)}</span>
+            <div className="ml-auto flex items-center gap-3">
+              <CopyLink />
+              <span className="font-mono text-lg tabular-nums">{zulu(scrub)}</span>
+            </div>
           </div>
           <input
             type="range"
@@ -174,15 +236,34 @@ export function HistoricalDashboardPage() {
   const captures = useCaptures();
   const boards = useDashboards();
 
-  const [captureId, setCaptureId] = useState<string>("");
+  // The current selection lives in the URL, so a replay is a shareable link (validated on the
+  // route). State is seeded from the URL once; the handlers below keep both in sync.
+  const search = useSearch({ strict: false }) as DashboardSearch;
+  const navigate = useNavigate();
+  const patchSearch = useCallback(
+    (patch: Partial<DashboardSearch>) => {
+      void navigate({
+        to: "/stats/dashboard",
+        search: (prev) => ({ ...prev, ...patch }),
+        replace: true,
+      });
+    },
+    [navigate],
+  );
+
+  const [captureId, setCaptureId] = useState<string>(() => search.capture ?? "");
   // Default custom window = the last 3 hours, active immediately (so the board renders without
   // forcing an edit first). Selecting a capture takes over; switching back restores a default.
   const defaultWindow = (): Win => {
     const now = Math.floor(Date.now() / 1000);
     return { from: now - 3 * 3600, to: now };
   };
-  const [custom, setCustom] = useState<Win>(defaultWindow);
-  const [boardId, setBoardId] = useState<string>("");
+  const [custom, setCustom] = useState<Win>(() =>
+    search.from != null && search.to != null && search.to > search.from
+      ? { from: search.from, to: search.to }
+      : defaultWindow(),
+  );
+  const [boardId, setBoardId] = useState<string>(() => search.board ?? "");
 
   const board = useDashboard(boardId || null);
   const state = useMemo(
@@ -233,8 +314,15 @@ export function HistoricalDashboardPage() {
                 className="h-9 rounded-md border bg-background px-2"
                 value={captureId}
                 onChange={(e) => {
-                  setCaptureId(e.target.value);
-                  if (!e.target.value) setCustom(defaultWindow());
+                  const v = e.target.value;
+                  setCaptureId(v);
+                  if (v) {
+                    patchSearch({ capture: v, from: undefined, to: undefined, t: undefined });
+                  } else {
+                    const w = defaultWindow();
+                    setCustom(w);
+                    patchSearch({ capture: undefined, from: w.from, to: w.to, t: undefined });
+                  }
                 }}
               >
                 <option value="">— custom time window —</option>
@@ -253,7 +341,10 @@ export function HistoricalDashboardPage() {
               <select
                 className="h-9 rounded-md border bg-background px-2"
                 value={boardId}
-                onChange={(e) => setBoardId(e.target.value)}
+                onChange={(e) => {
+                  setBoardId(e.target.value);
+                  patchSearch({ board: e.target.value || undefined });
+                }}
               >
                 <option value="">— select a board —</option>
                 {boardList.map((b) => (
@@ -275,7 +366,10 @@ export function HistoricalDashboardPage() {
                   value={toLocalInput(custom.from)}
                   onChange={(e) => {
                     const from = fromLocalInput(e.target.value);
-                    if (from != null) setCustom((c) => ({ from, to: c.to }));
+                    if (from != null) {
+                      setCustom((c) => ({ from, to: c.to }));
+                      patchSearch({ from, to: custom.to, capture: undefined, t: undefined });
+                    }
                   }}
                 />
               </label>
@@ -287,7 +381,10 @@ export function HistoricalDashboardPage() {
                   value={toLocalInput(custom.to)}
                   onChange={(e) => {
                     const to = fromLocalInput(e.target.value);
-                    if (to != null) setCustom((c) => ({ from: c.from, to }));
+                    if (to != null) {
+                      setCustom((c) => ({ from: c.from, to }));
+                      patchSearch({ from: custom.from, to, capture: undefined, t: undefined });
+                    }
                   }}
                 />
               </label>
@@ -312,7 +409,12 @@ export function HistoricalDashboardPage() {
       ) : !state ? (
         <p className="py-12 text-center text-sm text-muted-foreground">Loading board…</p>
       ) : (
-        <Replay win={win} state={state} />
+        <Replay
+          win={win}
+          state={state}
+          initialT={search.t}
+          onCommit={(t) => patchSearch({ t })}
+        />
       )}
     </div>
   );
