@@ -947,6 +947,7 @@ pub struct ReplaySample {
     pub lon: f32,
     pub alt: i32,
     pub heading: i16,
+    pub gs: i16,
 }
 
 /// Every flight's positions in `[from, to]`, thinned to one sample per `step_s`-second bucket per
@@ -961,10 +962,10 @@ pub async fn replay_positions(
     sqlx::query_as::<_, ReplaySample>(
         "select session_id,
                 extract(epoch from (ts - $1))::float8 as t,
-                lat, lon, altitude as alt, heading
+                lat, lon, altitude as alt, heading, groundspeed as gs
          from (
             select distinct on (session_id, floor(extract(epoch from ts) / $3)::bigint)
-                   session_id, ts, lat, lon, altitude, heading
+                   session_id, ts, lat, lon, altitude, heading, groundspeed
             from stats.position
             where ts >= $1 and ts <= $2
             order by session_id, floor(extract(epoch from ts) / $3)::bigint, ts

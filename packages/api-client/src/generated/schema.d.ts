@@ -2694,7 +2694,7 @@ export interface components {
             arrival?: string | null;
             callsign: string;
             departure?: string | null;
-            /** @description Compact samples: `[t_seconds_from_start, lat, lon, altitude_ft, heading_deg]`. */
+            /** @description Compact samples: `[t_seconds_from_start, lat, lon, altitude_ft, heading_deg, groundspeed_kt]`. */
             samples: number[][];
             session_id: string;
         };
