@@ -137,18 +137,40 @@ function Tile({ label, value, icon }: { label: string; value: string; icon?: Rea
   );
 }
 
-function StatsReadout({ eventId }: { eventId: number }) {
+/** Message shown while there's no debrief yet (before the capture is saved). */
+function DebriefPending({ cap }: { cap?: EventCapture }) {
+  const msg =
+    cap?.capture_status === "open"
+      ? "Capture is recording. The debrief is generated once the event ends and its capture is saved."
+      : cap?.enabled
+        ? "Stats capture is scheduled. The debrief will be generated automatically after the event ends."
+        : "Enable stats capture above, and the debrief will be generated automatically after the event.";
+  return (
+    <Card>
+      <CardContent className="flex flex-col items-center gap-1 py-12 text-center">
+        <span className="flex size-9 items-center justify-center rounded-md bg-muted text-muted-foreground">
+          <BarChart3 className="size-4" />
+        </span>
+        <span className="mt-1 font-medium">Debrief pending</span>
+        <span className="max-w-md text-sm text-muted-foreground">{msg}</span>
+      </CardContent>
+    </Card>
+  );
+}
+
+function Debrief({ eventId }: { eventId: number }) {
   const capture = useEventCapture(eventId);
-  const live = capture.data?.capture_status === "open";
-  const stats = useEventStats(eventId, live);
+  const saved = capture.data?.capture_status === "saved";
+  const stats = useEventStats(eventId, saved);
   const s = stats.data;
 
-  if (!s) return null;
-  if (!s.captured) {
+  // The debrief only exists once the event has ended and its capture was saved.
+  if (!saved) return <DebriefPending cap={capture.data} />;
+  if (!s || !s.captured) {
     return (
       <Card>
-        <CardContent className="py-10 text-center text-sm text-muted-foreground">
-          No stats captured yet. Enable capture above — figures appear once the event window opens.
+        <CardContent className="py-12 text-center text-sm text-muted-foreground">
+          Generating debrief…
         </CardContent>
       </Card>
     );
@@ -157,6 +179,14 @@ function StatsReadout({ eventId }: { eventId: number }) {
   return (
     <Card>
       <CardContent className="flex flex-col gap-5 pt-6">
+        <div className="flex items-center justify-between gap-2">
+          <span className="font-semibold">Event debrief</span>
+          {s.window_start && s.window_end && (
+            <span className="text-xs text-muted-foreground">
+              {formatZuluFull(s.window_start)} – {formatZuluFull(s.window_end)}
+            </span>
+          )}
+        </div>
         <div className="grid grid-cols-2 gap-3 sm:grid-cols-4">
           <Tile label="Unique pilots" value={String(s.unique_pilots)} icon={<Plane className="size-3" />} />
           <Tile label="Peak pilots" value={s.peak_pilots == null ? "—" : String(s.peak_pilots)} />
@@ -223,7 +253,7 @@ export function EventStatsSection({ eventId }: { eventId: number }) {
   return (
     <div className="flex flex-col gap-4">
       <CaptureConfig eventId={eventId} />
-      <StatsReadout eventId={eventId} />
+      <Debrief eventId={eventId} />
     </div>
   );
 }

@@ -49,12 +49,12 @@ export function useUpdateEventCapture(eventId: number) {
   });
 }
 
-/** Generated stats over an event's capture window (refetches while a capture is open). */
-export function useEventStats(eventId: number, live: boolean) {
+/** Generated debrief stats over an event's saved capture window. Only fetched when `enabled` (the
+ * capture has been saved) — the debrief is a post-event artifact, not a live readout. */
+export function useEventStats(eventId: number, enabled: boolean) {
   return useQuery({
     queryKey: ["event-stats", eventId],
-    enabled: Number.isFinite(eventId),
-    refetchInterval: live ? 30_000 : false,
+    enabled: enabled && Number.isFinite(eventId),
     queryFn: async (): Promise<EventStats> => {
       const { data, error } = await ois.GET("/api/v1/events/{id}/stats", {
         params: { path: { id: eventId } },
