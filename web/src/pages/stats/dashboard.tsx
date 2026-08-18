@@ -246,6 +246,8 @@ export function HistoricalDashboardPage() {
         to: "/stats/dashboard",
         search: (prev) => ({ ...prev, ...patch }),
         replace: true,
+        // Keep the URL in sync as the scrubber advances without yanking the page back to the top.
+        resetScroll: false,
       });
     },
     [navigate],

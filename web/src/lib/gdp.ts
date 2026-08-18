@@ -1,4 +1,4 @@
-import {useMutation, useQuery, useQueryClient} from "@tanstack/react-query";
+import {keepPreviousData, useMutation, useQuery, useQueryClient} from "@tanstack/react-query";
 import type {components} from "@ois/api-client";
 import {useToast} from "@ois/ui";
 
@@ -31,6 +31,7 @@ export function useGdps() {
       return data;
     },
     staleTime: at == null ? undefined : Infinity,
+    placeholderData: at == null ? undefined : keepPreviousData,
   });
 }
 

@@ -5,7 +5,7 @@
 // inside a single `useQueries`/`useQuery` call keeps the hook count stable (Rules of Hooks safe),
 // which is why the dashboard data-source `useRows` functions can swap live↔historical freely.
 
-import {useQueries, useQuery} from "@tanstack/react-query";
+import {keepPreviousData, useQueries, useQuery} from "@tanstack/react-query";
 
 import {ois} from "./api";
 import {fetchDepartures, fetchHistDepartures} from "./departures";
@@ -26,6 +26,11 @@ export async function fetchHistTraffic(at: number) {
   return data;
 }
 
+// While replaying, every scrubber tick changes the query key (`…, at`). `keepPreviousData` keeps the
+// last frame on screen while the next reconstructs, so the widgets update in place — no loading
+// flash, no layout collapse. Combined with `staleTime: Infinity`, a second pass over the window is
+// served entirely from cache and plays back instantly.
+
 /** Arrival flow per airport — live (poll) or reconstructed at `at`. */
 export function useModeAirportFlow(icaos: string[], at: number | null) {
   return useQueries({
@@ -36,6 +41,7 @@ export function useModeAirportFlow(icaos: string[], at: number | null) {
             queryKey: ["hist-flow", icao, at],
             queryFn: () => fetchHistFlow(icao, at),
             staleTime: Infinity,
+            placeholderData: keepPreviousData,
           },
     ),
   });
@@ -51,6 +57,7 @@ export function useModeDepartures(fields: string[], at: number | null) {
             queryKey: ["hist-departures", dep, at],
             queryFn: () => fetchHistDepartures(dep, at),
             staleTime: Infinity,
+            placeholderData: keepPreviousData,
           },
     ),
   });
@@ -66,6 +73,7 @@ export function useModeTaxi(icaos: string[], at: number | null) {
             queryKey: ["hist-taxi", icao, at],
             queryFn: () => fetchHistTaxi(icao, at),
             staleTime: Infinity,
+            placeholderData: keepPreviousData,
           },
     ),
   });
@@ -78,6 +86,7 @@ export function useModeTraffic(at: number | null) {
     queryFn: () => (at == null ? fetchLiveTraffic() : fetchHistTraffic(at)),
     refetchInterval: at == null ? 15_000 : false,
     staleTime: at == null ? 0 : Infinity,
+    placeholderData: at == null ? undefined : keepPreviousData,
   });
 }
 
@@ -88,6 +97,7 @@ export function useHistPilotCount(at: number | null) {
     queryKey: ["hist-traffic", at],
     enabled: at != null,
     staleTime: Infinity,
+    placeholderData: keepPreviousData,
     queryFn: () => fetchHistTraffic(at!),
     select: (d) => d.length,
   });

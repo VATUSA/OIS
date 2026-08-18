@@ -1,4 +1,4 @@
-import {useQueries, useQuery} from "@tanstack/react-query";
+import {keepPreviousData, useQueries, useQuery} from "@tanstack/react-query";
 import type {components} from "@ois/api-client";
 
 import {ois} from "./api";
@@ -65,6 +65,8 @@ export function useAirportFlow(icao: string) {
     enabled: !!icao,
     refetchInterval: at == null ? 20_000 : false,
     staleTime: at == null ? 0 : Infinity,
+    // Replay: keep the last frame on screen while the next `at` reconstructs (no loading flash).
+    placeholderData: at == null ? undefined : keepPreviousData,
   });
 }
 

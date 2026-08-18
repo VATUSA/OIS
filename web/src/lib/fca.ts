@@ -1,4 +1,4 @@
-import {useMutation, useQuery, useQueryClient} from "@tanstack/react-query";
+import {keepPreviousData, useMutation, useQuery, useQueryClient} from "@tanstack/react-query";
 import type {components} from "@ois/api-client";
 import {useToast} from "@ois/ui";
 
@@ -87,6 +87,7 @@ export function useFcas() {
       return data;
     },
     staleTime: at == null ? undefined : Infinity,
+    placeholderData: at == null ? undefined : keepPreviousData,
   });
 }
 
@@ -188,6 +189,7 @@ export function useTraffic() {
     },
     refetchInterval: at == null ? 15_000 : false,
     staleTime: at == null ? 0 : Infinity,
+    placeholderData: at == null ? undefined : keepPreviousData,
   });
 }
 
@@ -215,6 +217,7 @@ export function useAtc(enabled: boolean) {
     enabled,
     refetchInterval: at == null ? 30_000 : false,
     staleTime: at == null ? 0 : Infinity,
+    placeholderData: at == null ? undefined : keepPreviousData,
   });
 }
 
