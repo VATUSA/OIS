@@ -799,29 +799,32 @@ pub async fn list_traffic(State(state): State<AppState>) -> Json<Vec<TrafficAirc
     let snapshot = state.feed.read().await.snapshot.clone();
     let aircraft = snapshot
         .as_ref()
-        .map(|snap| {
-            snap.data
-                .pilots
-                .iter()
-                .filter(|p| p.latitude != 0.0 || p.longitude != 0.0)
-                .map(|p| {
-                    let fp = p.flight_plan.as_ref();
-                    TrafficAircraft {
-                        callsign: p.callsign.clone(),
-                        lat: p.latitude,
-                        lon: p.longitude,
-                        heading: p.heading,
-                        gs: p.groundspeed,
-                        alt: p.altitude,
-                        dep: fp.map(|f| f.departure.clone()).unwrap_or_default(),
-                        arr: fp.map(|f| f.arrival.clone()).unwrap_or_default(),
-                        actype: fp.map(|f| f.aircraft_short.clone()).unwrap_or_default(),
-                    }
-                })
-                .collect()
-        })
+        .map(|snap| traffic_from(&snap.data))
         .unwrap_or_default();
     Json(aircraft)
+}
+
+/// Map a snapshot's pilots to the lightweight map-traffic shape (drops position-less aircraft).
+/// Pure of the live feed so the historical replay can reuse it against a reconstructed snapshot.
+pub(crate) fn traffic_from(data: &VatsimData) -> Vec<TrafficAircraft> {
+    data.pilots
+        .iter()
+        .filter(|p| p.latitude != 0.0 || p.longitude != 0.0)
+        .map(|p| {
+            let fp = p.flight_plan.as_ref();
+            TrafficAircraft {
+                callsign: p.callsign.clone(),
+                lat: p.latitude,
+                lon: p.longitude,
+                heading: p.heading,
+                gs: p.groundspeed,
+                alt: p.altitude,
+                dep: fp.map(|f| f.departure.clone()).unwrap_or_default(),
+                arr: fp.map(|f| f.arrival.clone()).unwrap_or_default(),
+                actype: fp.map(|f| f.aircraft_short.clone()).unwrap_or_default(),
+            }
+        })
+        .collect()
 }
 
 /// Parse an "HHMM"/"HHMMz" Zulu clock into an epoch-ms near `now` (±12h).

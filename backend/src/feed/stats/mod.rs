@@ -8,6 +8,7 @@
 //! run against plain Postgres. See `~/Programing/stats/DESIGN.md`.
 
 mod geo;
+pub mod reconstruct;
 mod session;
 
 use std::collections::{HashMap, HashSet};
