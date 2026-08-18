@@ -1,6 +1,7 @@
 import {useEffect, useState} from "react";
 import {Card, CardContent} from "@ois/ui";
 
+import {useHistoricalAt} from "@/lib/historical-context";
 import {type TaxiActive, useTaxiStats} from "@/lib/taxi";
 
 /** A clock that ticks every second, so rolling timers advance between polls. */
@@ -78,6 +79,17 @@ function TaxiRow({ row, now }: { row: Row; now: number }) {
 export function TaxiView({ icao }: { icao: string }) {
   const now = useNow();
   const stats = useTaxiStats(icao);
+  // Taxi timing is a rolling in-memory state machine, not reconstructable from a past snapshot.
+  const historical = useHistoricalAt() != null;
+  if (historical) {
+    return (
+      <Card>
+        <CardContent className="py-8 text-center text-sm text-muted-foreground">
+          Taxi timing isn&apos;t available in historical replay.
+        </CardContent>
+      </Card>
+    );
+  }
 
   const rows: Row[] = (stats.data?.active ?? []).map((a) => ({ ...a, field: icao }));
   const summary = {

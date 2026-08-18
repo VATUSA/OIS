@@ -2,6 +2,7 @@ import {useQueries, useQuery} from "@tanstack/react-query";
 import type {components} from "@ois/api-client";
 
 import {ois} from "./api";
+import {useHistoricalAt} from "./historical-context";
 
 export type Flow = components["schemas"]["Flow"];
 export type FlowFlight = components["schemas"]["FlowFlight"];
@@ -46,13 +47,24 @@ export async function fetchFlow(icao: string) {
   return data;
 }
 
-/** Live arrival flow for one airport, refreshed every 20s. */
+export async function fetchHistFlow(icao: string, at: number) {
+  const { data, error } = await ois.GET("/api/v1/stats/hist/flow/{icao}", {
+    params: { path: { icao }, query: { at } },
+  });
+  if (error || !data) throw new Error("failed to load historical flow");
+  return data;
+}
+
+/** Arrival flow for one airport. Live (20s poll) by default; inside a `HistoricalProvider` it
+ * reconstructs the flow at the scrubber instant instead (so airport-view widgets replay). */
 export function useAirportFlow(icao: string) {
+  const at = useHistoricalAt();
   return useQuery({
-    queryKey: ["flow", icao],
-    queryFn: () => fetchFlow(icao),
+    queryKey: at == null ? ["flow", icao] : ["hist-flow", icao, at],
+    queryFn: () => (at == null ? fetchFlow(icao) : fetchHistFlow(icao, at!)),
     enabled: !!icao,
-    refetchInterval: 20_000,
+    refetchInterval: at == null ? 20_000 : false,
+    staleTime: at == null ? 0 : Infinity,
   });
 }
 

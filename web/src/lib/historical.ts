@@ -8,24 +8,8 @@
 import {useQueries, useQuery} from "@tanstack/react-query";
 
 import {ois} from "./api";
-import {fetchDepartures} from "./departures";
-import {fetchFlow} from "./feed";
-
-async function fetchHistFlow(icao: string, at: number) {
-  const { data, error } = await ois.GET("/api/v1/stats/hist/flow/{icao}", {
-    params: { path: { icao }, query: { at } },
-  });
-  if (error || !data) throw new Error("failed to load historical flow");
-  return data;
-}
-
-async function fetchHistDepartures(dep: string, at: number) {
-  const { data, error } = await ois.GET("/api/v1/stats/hist/departures/{dep}", {
-    params: { path: { dep }, query: { at } },
-  });
-  if (error || !data) throw new Error("failed to load historical departures");
-  return data;
-}
+import {fetchDepartures, fetchHistDepartures} from "./departures";
+import {fetchFlow, fetchHistFlow} from "./feed";
 
 async function fetchLiveTraffic() {
   const { data, error } = await ois.GET("/api/v1/flow/traffic");
@@ -78,5 +62,17 @@ export function useModeTraffic(at: number | null) {
     queryFn: () => (at == null ? fetchLiveTraffic() : fetchHistTraffic(at)),
     refetchInterval: at == null ? 15_000 : false,
     staleTime: at == null ? 0 : Infinity,
+  });
+}
+
+/** Reconstructed pilot count at `at` for the "Pilots online" stat tile. Disabled (no fetch) when
+ * live; shares the `["hist-traffic", at]` cache with a traffic widget on the same board. */
+export function useHistPilotCount(at: number | null) {
+  return useQuery({
+    queryKey: ["hist-traffic", at],
+    enabled: at != null,
+    staleTime: Infinity,
+    queryFn: () => fetchHistTraffic(at!),
+    select: (d) => d.length,
   });
 }

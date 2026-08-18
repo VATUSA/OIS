@@ -3,6 +3,7 @@ import {Badge, Button, Card, CardContent, Input} from "@ois/ui";
 
 import {useMe} from "@/lib/auth";
 import {type Departure, useDepartures, useIssueCfr, useReleaseCfr,} from "@/lib/departures";
+import {useHistoricalAt} from "@/lib/historical-context";
 import {hasPermission} from "@/lib/permissions";
 import {hhmmZulu, parseHhmm} from "@/lib/time";
 
@@ -14,13 +15,15 @@ function delayClass(min: number): string {
 
 export function DepartureRow({
   d,
-  canIssue,
+  canIssue: canIssueProp,
   leading,
 }: {
   d: Departure;
   canIssue: boolean;
   leading: React.ReactNode;
 }) {
+  // In historical replay the board is read-only — CFR actions would hit the live feed.
+  const canIssue = canIssueProp && useHistoricalAt() == null;
   const issue = useIssueCfr();
   const release = useReleaseCfr();
   const [ready, setReady] = useState("");
