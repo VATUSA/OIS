@@ -275,7 +275,56 @@ pub async fn capture_replay(
     let from = cap.start_time;
     let to = cap.end_time.unwrap_or_else(Utc::now);
     let step = q.step.unwrap_or(30).clamp(15, 300);
+    Ok(Json(build_replay(p, cap.id, from, to, step).await?))
+}
 
+#[derive(Deserialize)]
+pub struct WindowReplayQuery {
+    /// Window start (Unix epoch seconds).
+    from: i64,
+    /// Window end (Unix epoch seconds).
+    to: i64,
+    /// Sample spacing in seconds (default 30, clamped 15–300).
+    step: Option<i64>,
+}
+
+/// Replay an arbitrary `[from, to]` window on the map (not tied to a saved capture) — same
+/// per-flight thinned tracks the capture replay returns, so the deck.gl player is identical.
+#[utoipa::path(
+    get,
+    path = "/api/v1/stats/replay",
+    tag = "stats",
+    params(
+        ("from" = i64, Query, description = "Window start (Unix epoch seconds)"),
+        ("to" = i64, Query, description = "Window end (Unix epoch seconds)"),
+        ("step" = Option<i64>, Query, description = "Sample spacing seconds (default 30)")
+    ),
+    responses((status = 200, body = ReplayBody), (status = 400), (status = 401))
+)]
+pub async fn window_replay(
+    State(state): State<AppState>,
+    _permission: RequirePermission<StatsRead>,
+    Query(q): Query<WindowReplayQuery>,
+) -> Result<Json<ReplayBody>, ApiError> {
+    let p = pool(&state)?;
+    let from = DateTime::from_timestamp(q.from, 0).ok_or(ApiError::BadRequest)?;
+    let to = DateTime::from_timestamp(q.to, 0).ok_or(ApiError::BadRequest)?;
+    if to <= from {
+        return Err(ApiError::BadRequest);
+    }
+    let step = q.step.unwrap_or(30).clamp(15, 300);
+    Ok(Json(build_replay(p, String::new(), from, to, step).await?))
+}
+
+/// Build the map-replay payload over `[from, to]`: every flight's positions thinned to one sample
+/// per `step`-second bucket, grouped into per-flight tracks with callsign/plan basics attached.
+async fn build_replay(
+    p: &sqlx::PgPool,
+    capture_id: String,
+    from: DateTime<Utc>,
+    to: DateTime<Utc>,
+    step: i64,
+) -> Result<ReplayBody, ApiError> {
     let samples = stats_repo::replay_positions(p, from, to, step).await?;
 
     // Group consecutive samples (already ordered by session_id, then time) into per-flight tracks.
@@ -323,13 +372,13 @@ pub async fn capture_replay(
         }
     }
 
-    Ok(Json(ReplayBody {
-        capture_id: cap.id,
+    Ok(ReplayBody {
+        capture_id,
         window_start: from,
         window_end: to,
         step_s: step,
         flights,
-    }))
+    })
 }
 
 // --- historical ("time-machine") dashboard: live feed compute functions replayed at instant T ---

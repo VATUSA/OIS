@@ -85,6 +85,7 @@ use utoipa::OpenApi;
         crate::handlers::stats::flight_track,
         crate::handlers::stats::list_captures,
         crate::handlers::stats::capture_replay,
+        crate::handlers::stats::window_replay,
         crate::handlers::stats::hist_flow,
         crate::handlers::stats::hist_departures,
         crate::handlers::stats::hist_atc,

@@ -81,6 +81,23 @@ export function useCaptureReplay(captureId: string | null, step = 30) {
   });
 }
 
+/** Per-flight tracks for replaying an arbitrary [from, to] window (Unix seconds), not tied to a
+ * saved capture. Fetched once, cached. */
+export function useWindowReplay(from: number | null, to: number | null, step = 30) {
+  return useQuery({
+    queryKey: ["stats-window-replay", from, to, step],
+    enabled: from != null && to != null && to > from,
+    staleTime: Infinity,
+    queryFn: async (): Promise<Replay> => {
+      const { data, error } = await ois.GET("/api/v1/stats/replay", {
+        params: { query: { from: from!, to: to!, step } },
+      });
+      if (error || !data) throw new Error("failed to load replay");
+      return data;
+    },
+  });
+}
+
 export function useFlightDetail(sessionId: string) {
   return useQuery({
     queryKey: ["stats-flight", sessionId],

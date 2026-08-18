@@ -76,14 +76,14 @@ function Detail({ f }: { f: StatsFlightDetail }) {
 }
 
 export function StatsFlightPage() {
-  const { flightId } = useParams({ from: "/stats/flights/$flightId" });
+  const { flightId } = useParams({ from: "/historical/flights/$flightId" });
   const { data: me } = useMe();
   const canRead = hasPermission(me, "stats.data.read");
   const flight = useFlightDetail(flightId);
 
   const back = (
     <Link
-      to="/stats"
+      to="/historical"
       className="flex w-fit items-center gap-1 text-sm text-muted-foreground transition-colors hover:text-foreground"
     >
       <ArrowLeft className="size-4" /> Network statistics

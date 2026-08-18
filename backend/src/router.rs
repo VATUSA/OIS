@@ -220,6 +220,7 @@ pub fn build_router(state: AppState) -> Router {
             "/api/v1/stats/captures/{id}/replay",
             get(stats::capture_replay),
         )
+        .route("/api/v1/stats/replay", get(stats::window_replay))
         // Historical ("time-machine") dashboard: feed compute functions replayed at instant T
         .route("/api/v1/stats/hist/flow/{icao}", get(stats::hist_flow))
         .route(
