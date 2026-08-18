@@ -21,6 +21,65 @@ const CARTO_STYLE = {
   light: "https://basemaps.cartocdn.com/gl/positron-gl-style/style.json",
 } as const;
 const INITIAL_VIEW = { longitude: -98.35, latitude: 39.5, zoom: 3.4 };
+
+// Per-theme colors for the airport-layout overlay: apron/surface fill, taxiway lines, runway lines.
+const AEROWAY_COLORS = {
+  dark: { fill: "#20242e", taxiway: "#4a5162", runway: "#8a93a6" },
+  light: { fill: "#e3e7ee", taxiway: "#c4cad4", runway: "#98a1b2" },
+} as const;
+
+/** Minimal MapLibre surface we touch — avoids depending on maplibre-gl's exported types. */
+interface StyleMap {
+  getSource(id: string): unknown;
+  getLayer(id: string): unknown;
+  addLayer(layer: Record<string, unknown>): void;
+}
+
+/**
+ * Draw airport layouts (runways, taxiways, aprons) straight from the OSM `aeroway` data already in
+ * the CARTO vector tiles — the base style renders it in near-black (invisible), so we add our own
+ * visible layers instead. Free, no extra requests, appears once you zoom into a field (z≥10).
+ * Idempotent: safe to call on every `styledata` (re-added after a theme swap wipes the style).
+ */
+function ensureAeroway(map: StyleMap, theme: "dark" | "light"): void {
+  try {
+    if (!map.getSource("carto") || map.getLayer("ois-aeroway-fill")) return;
+    const c = AEROWAY_COLORS[theme];
+    const base = { source: "carto", "source-layer": "aeroway" } as const;
+    map.addLayer({
+      ...base,
+      id: "ois-aeroway-fill",
+      type: "fill",
+      minzoom: 10,
+      filter: ["==", ["geometry-type"], "Polygon"],
+      paint: { "fill-color": c.fill, "fill-opacity": 0.6 },
+    });
+    map.addLayer({
+      ...base,
+      id: "ois-aeroway-taxiway",
+      type: "line",
+      minzoom: 12,
+      filter: ["all", ["==", ["geometry-type"], "LineString"], ["==", ["get", "class"], "taxiway"]],
+      paint: {
+        "line-color": c.taxiway,
+        "line-width": ["interpolate", ["linear"], ["zoom"], 12, 0.6, 14, 1.5, 16, 4],
+      },
+    });
+    map.addLayer({
+      ...base,
+      id: "ois-aeroway-runway",
+      type: "line",
+      minzoom: 10,
+      filter: ["all", ["==", ["geometry-type"], "LineString"], ["==", ["get", "class"], "runway"]],
+      paint: {
+        "line-color": c.runway,
+        "line-width": ["interpolate", ["linear"], ["zoom"], 10, 1.2, 13, 4, 15, 9, 16, 13],
+      },
+    });
+  } catch {
+    // Style not fully ready yet — a later `styledata` event retries.
+  }
+}
 const SPEEDS = [1, 2, 4, 8, 16, 32, 64];
 /** Below this groundspeed an aircraft is treated as on the ground (taxi/parked). */
 const GROUND_KT = 30;
@@ -397,7 +456,12 @@ function ReplayMap({ replay }: { replay: Replay }) {
           getCursor={({ isHovering }) => (isHovering ? "pointer" : "grab")}
           style={{ position: "absolute", top: "0", left: "0", width: "100%", height: "100%" }}
         >
-          <MapLibre mapStyle={CARTO_STYLE[resolvedTheme]} attributionControl={false} />
+          <MapLibre
+            mapStyle={CARTO_STYLE[resolvedTheme]}
+            attributionControl={false}
+            onLoad={(e) => ensureAeroway(e.target as unknown as StyleMap, resolvedTheme)}
+            onStyleData={(e) => ensureAeroway(e.target as unknown as StyleMap, resolvedTheme)}
+          />
         </DeckGL>
 
         <div className="pointer-events-none absolute left-3 top-3 z-10 rounded-md bg-background/80 px-3 py-1.5 text-sm shadow backdrop-blur">

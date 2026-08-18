@@ -969,18 +969,19 @@ pub async fn replay_positions(
     to: DateTime<Utc>,
     step_s: i64,
 ) -> Result<Vec<ReplaySample>, ApiError> {
+    // One sample per (session, step-second bucket): DISTINCT ON keeps the earliest row in each
+    // bucket. Its ORDER BY already emits rows grouped by session and ascending in ts (the bucket is
+    // monotonic in ts), which is exactly what the handler needs to fold into per-flight tracks — so
+    // there's no outer sort. (Two sorts of a full-network capture window is what tripped the slow-
+    // query alert; this does one.)
     sqlx::query_as::<_, ReplaySample>(
-        "select session_id,
+        "select distinct on (session_id, floor(extract(epoch from ts) / $3)::bigint)
+                session_id,
                 extract(epoch from (ts - $1))::float8 as t,
                 lat, lon, altitude as alt, heading, groundspeed as gs
-         from (
-            select distinct on (session_id, floor(extract(epoch from ts) / $3)::bigint)
-                   session_id, ts, lat, lon, altitude, heading, groundspeed
-            from stats.position
-            where ts >= $1 and ts <= $2
-            order by session_id, floor(extract(epoch from ts) / $3)::bigint, ts
-         ) s
-         order by session_id, ts",
+         from stats.position
+         where ts >= $1 and ts <= $2
+         order by session_id, floor(extract(epoch from ts) / $3)::bigint, ts",
     )
     .bind(from)
     .bind(to)
