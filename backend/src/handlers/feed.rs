@@ -66,7 +66,10 @@ pub async fn feed_status(
 }
 
 /// Build a program's metering inputs from its stored row.
-async fn program_inputs(pool: &PgPool, icao: &str) -> Result<Option<ProgramInputs>, ApiError> {
+pub(crate) async fn program_inputs(
+    pool: &PgPool,
+    icao: &str,
+) -> Result<Option<ProgramInputs>, ApiError> {
     Ok(tmu_repo::get_program(pool, icao)
         .await?
         .map(|p| ProgramInputs {
@@ -89,32 +92,43 @@ async fn program_inputs(pool: &PgPool, icao: &str) -> Result<Option<ProgramInput
         }))
 }
 
+/// Compute the metered flow for one arrival airport against a given snapshot at `now` (loads the
+/// program + issued CFRs from the DB). Shared by the live handler and the historical replay — the
+/// only difference is which `VatsimData` and instant are passed in.
+pub(crate) async fn flow_from_data(
+    state: &AppState,
+    pool: &PgPool,
+    icao: &str,
+    data: &crate::feed::vatsim::VatsimData,
+    now: DateTime<Utc>,
+) -> Result<flow::Flow, ApiError> {
+    let program = program_inputs(pool, icao).await?;
+    let issued = tmu_repo::issued_cfr_map(pool, icao).await?;
+    let airports = state.feed.read().await.airports.clone();
+    Ok(flow::compute(
+        icao,
+        program.as_ref(),
+        data,
+        airports.as_ref(),
+        state.winds.load_full().as_ref(),
+        &issued,
+        now,
+    ))
+}
+
 /// Compute the live, metered flow for one arrival airport (loads program + issued CFRs).
 pub(crate) async fn flow_for(
     state: &AppState,
     pool: &PgPool,
     icao: &str,
 ) -> Result<flow::Flow, ApiError> {
-    let program = program_inputs(pool, icao).await?;
-    let issued = tmu_repo::issued_cfr_map(pool, icao).await?;
     // Clone the snapshot + airport handles and drop the feed lock before metering.
-    let (snapshot, airports) = {
-        let guard = state.feed.read().await;
-        (guard.snapshot.clone(), guard.airports.clone())
-    };
-    let flow = match &snapshot {
-        Some(snap) => flow::compute(
-            icao,
-            program.as_ref(),
-            &snap.data,
-            airports.as_ref(),
-            state.winds.load_full().as_ref(),
-            &issued,
-            Utc::now(),
-        ),
-        None => flow::Flow {
+    let snapshot = state.feed.read().await.snapshot.clone();
+    match &snapshot {
+        Some(snap) => flow_from_data(state, pool, icao, &snap.data, Utc::now()).await,
+        None => Ok(flow::Flow {
             icao: icao.to_string(),
-            aar: program.map(|p| p.aar),
+            aar: program_inputs(pool, icao).await?.map(|p| p.aar),
             inbound: 0,
             airborne: 0,
             ground: 0,
@@ -122,9 +136,8 @@ pub(crate) async fn flow_for(
             demand_60min: 0,
             over_capacity: None,
             flights: Vec::new(),
-        },
-    };
-    Ok(flow)
+        }),
+    }
 }
 
 #[utoipa::path(
@@ -184,12 +197,29 @@ pub async fn list_departures(
 ) -> Result<Json<DeparturesResponse>, ApiError> {
     let pool = state.db.as_ref().ok_or(ApiError::ServiceUnavailable)?;
     let dep = dep.trim().to_ascii_uppercase();
+    // Read the live snapshot, then release the lock before computing per-destination flows.
+    let snapshot = state.feed.read().await.snapshot.clone();
+    let empty = crate::feed::vatsim::VatsimData::default();
+    let data = snapshot.as_ref().map(|s| &s.data).unwrap_or(&empty);
+    Ok(Json(
+        departures_response(&state, pool, &dep, data, Utc::now()).await?,
+    ))
+}
 
+/// Build the departure-field CFR view for `dep` against a given snapshot at `now`. Shared by the
+/// live handler and the historical replay.
+pub(crate) async fn departures_response(
+    state: &AppState,
+    pool: &PgPool,
+    dep: &str,
+    data: &crate::feed::vatsim::VatsimData,
+    now: DateTime<Utc>,
+) -> Result<DeparturesResponse, ApiError> {
     // Resolve the field: an airport is just itself; a TRACON/ARTCC spans many airports.
     let (facility_kind, mut airports) = {
         let map = state.facilities.read().await;
-        let kind = map.get(&dep).map(|f| f.kind.clone());
-        (kind, facilities::member_airports(&map, &dep))
+        let kind = map.get(dep).map(|f| f.kind.clone());
+        (kind, facilities::member_airports(&map, dep))
     };
     airports.sort();
     let member_set: HashSet<String> = airports.iter().cloned().collect();
@@ -200,15 +230,7 @@ pub async fn list_departures(
         .map(|p| p.icao)
         .collect();
 
-    // Every pending departure out of the resolved airports (read the snapshot, then release
-    // the lock before computing per-destination flows).
-    let pending = {
-        let guard = state.feed.read().await;
-        match &guard.snapshot {
-            Some(snap) => flow::pending_departures(&member_set, &snap.data),
-            None => Vec::new(),
-        }
-    };
+    let pending = flow::pending_departures(&member_set, data);
 
     // Metering data (by callsign) for destinations that have a program.
     let dests: HashSet<String> = pending
@@ -218,7 +240,7 @@ pub async fn list_departures(
         .collect();
     let mut meta: HashMap<String, MeteredCfr> = HashMap::new();
     for dest in &dests {
-        let flow = flow_for(&state, pool, dest).await?;
+        let flow = flow_from_data(state, pool, dest, data, now).await?;
         for f in flow.flights {
             meta.insert(
                 f.callsign,
@@ -268,7 +290,7 @@ pub async fn list_departures(
     let mut program_destinations: Vec<String> = dests.into_iter().collect();
     program_destinations.sort();
 
-    Ok(Json(DeparturesResponse {
+    Ok(DeparturesResponse {
         facility_kind,
         airports,
         total,
@@ -276,7 +298,7 @@ pub async fn list_departures(
         holding_on_cfr,
         program_destinations,
         departures,
-    }))
+    })
 }
 
 /// Per-callsign metering outputs pulled from a destination's computed flow.

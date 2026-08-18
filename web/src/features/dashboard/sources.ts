@@ -6,11 +6,12 @@
 
 import {useMemo} from "react";
 
-import {useMultiDepartures} from "@/lib/departures";
-import {useFcas, useTraffic} from "@/lib/fca";
-import {useMultiAirportFlow} from "@/lib/feed";
+import {useFcas} from "@/lib/fca";
+import {useModeAirportFlow, useModeDepartures, useModeTraffic} from "@/lib/historical";
 import {usePrograms, useTmis} from "@/lib/tmu";
 import {useMultiTaxiStats} from "@/lib/taxi";
+
+import {useHistoricalAt} from "./historical";
 
 /** Row field that tags which airport a row came from, for multi-airport comparison charts. */
 export const AIRPORT_KEY = "__airport";
@@ -75,6 +76,11 @@ export interface DataSource {
 
 const f = (key: string, label: string, type: FieldType = "string"): FieldDef => ({ key, label, type });
 
+/** Config/global sources with no historical form show nothing in historical mode (`at` set),
+ * rather than mixing current config into a past view. Live (`at == null`) passes rows through. */
+const histBlank = (at: number | null, data: unknown): Row[] =>
+  at == null ? ((data ?? []) as Row[]) : [];
+
 /** Normalize params to a concrete airport list (icaos preferred, else the single icao). */
 const airports = (p: SourceParams): string[] => (p.icaos?.length ? p.icaos : p.icao ? [p.icao] : []);
 
@@ -123,8 +129,9 @@ export const DATA_SOURCES: DataSource[] = [
       f("aircraft_type", "Type"),
     ],
     useRows: (p) => {
+      const at = useHistoricalAt();
       const list = airports(p);
-      const qs = useMultiAirportFlow(list);
+      const qs = useModeAirportFlow(list, at);
       const rows = useTaggedRows(list, qs, (d) => d.flights ?? []);
       return {
         rows,
@@ -152,8 +159,9 @@ export const DATA_SOURCES: DataSource[] = [
       f("has_program", "Metered", "bool"),
     ],
     useRows: (p) => {
+      const at = useHistoricalAt();
       const list = airports(p);
-      const qs = useMultiDepartures(list);
+      const qs = useModeDepartures(list, at);
       const rows = useTaggedRows(list, qs, (d) => d.departures ?? []);
       return {
         rows,
@@ -176,13 +184,16 @@ export const DATA_SOURCES: DataSource[] = [
       f("alt", "Alt", "number"),
     ],
     useRows: (p) => {
+      const at = useHistoricalAt();
       const list = airports(p);
       const qs = useMultiTaxiStats(list);
       const rows = useTaggedRows(list, qs, (d) => d.active ?? []);
+      // Taxi timing is a rolling state machine, not reconstructable from one snapshot — not
+      // available in historical mode (see the historical dashboard plan, phase 3).
       return {
-        rows,
-        isLoading: qs.some((q) => q.isLoading),
-        isError: qs.length > 0 && qs.every((q) => q.isError),
+        rows: at == null ? rows : [],
+        isLoading: at == null && qs.some((q) => q.isLoading),
+        isError: at == null && qs.length > 0 && qs.every((q) => q.isError),
         ...multiStatus(qs),
       };
     },
@@ -202,8 +213,9 @@ export const DATA_SOURCES: DataSource[] = [
       f("updated_by", "By"),
     ],
     useRows: () => {
+      const at = useHistoricalAt();
       const q = usePrograms();
-      return { rows: (q.data ?? []) as Row[], isLoading: q.isLoading, isError: q.isError, ...singleStatus(q) };
+      return { rows: histBlank(at, q.data), isLoading: at == null && q.isLoading, isError: at == null && q.isError, ...singleStatus(q) };
     },
   },
   {
@@ -221,8 +233,9 @@ export const DATA_SOURCES: DataSource[] = [
       f("author", "By"),
     ],
     useRows: () => {
+      const at = useHistoricalAt();
       const q = useTmis();
-      return { rows: (q.data ?? []) as Row[], isLoading: q.isLoading, isError: q.isError, ...singleStatus(q) };
+      return { rows: histBlank(at, q.data), isLoading: at == null && q.isLoading, isError: at == null && q.isError, ...singleStatus(q) };
     },
   },
   {
@@ -242,8 +255,9 @@ export const DATA_SOURCES: DataSource[] = [
       f("enabled", "Enabled", "bool"),
     ],
     useRows: () => {
+      const at = useHistoricalAt();
       const q = useFcas();
-      return { rows: (q.data ?? []) as Row[], isLoading: q.isLoading, isError: q.isError, ...singleStatus(q) };
+      return { rows: histBlank(at, q.data), isLoading: at == null && q.isLoading, isError: at == null && q.isError, ...singleStatus(q) };
     },
   },
   {
@@ -261,7 +275,8 @@ export const DATA_SOURCES: DataSource[] = [
       f("heading", "Hdg", "number"),
     ],
     useRows: () => {
-      const q = useTraffic();
+      const at = useHistoricalAt();
+      const q = useModeTraffic(at);
       return { rows: (q.data ?? []) as Row[], isLoading: q.isLoading, isError: q.isError, ...singleStatus(q) };
     },
   },

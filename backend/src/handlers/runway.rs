@@ -59,9 +59,22 @@ async fn metar_for(state: &AppState, icao: &str) -> Option<crate::feed::metar::M
     }
 }
 
-/// Assemble the full board for `icao`: stored config + runway ends + live arrivals assigned
-/// to runways + demand bins.
+/// Assemble the full board for `icao` off the live feed snapshot.
 async fn build_board(state: &AppState, icao: &str) -> Result<RunwayBoard, ApiError> {
+    let snapshot = state.feed.read().await.snapshot.clone();
+    let empty = crate::feed::vatsim::VatsimData::default();
+    let data = snapshot.as_ref().map(|s| &s.data).unwrap_or(&empty);
+    build_board_from(state, icao, data, Utc::now()).await
+}
+
+/// Assemble the full board for `icao`: stored config + runway ends + arrivals (from `data`)
+/// assigned to runways + demand bins. Shared by the live handler and the historical replay.
+pub(crate) async fn build_board_from(
+    state: &AppState,
+    icao: &str,
+    data: &crate::feed::vatsim::VatsimData,
+    now: DateTime<Utc>,
+) -> Result<RunwayBoard, ApiError> {
     let icao = icao.to_ascii_uppercase();
 
     // Stored config (shared), or defaults when the airport has never been configured.
@@ -123,23 +136,16 @@ async fn build_board(state: &AppState, icao: &str) -> Result<RunwayBoard, ApiErr
         .map(|e| e.id.clone())
         .collect();
 
-    // Live arrivals — clone the snapshot + airports and drop the feed lock before the CPU.
-    let (snapshot, airports) = {
-        let guard = state.feed.read().await;
-        (guard.snapshot.clone(), guard.airports.clone())
-    };
-    let now = Utc::now();
-    let arrivals = match &snapshot {
-        Some(snap) => runway::collect_arrivals(
-            &icao,
-            &snap.data,
-            airports.as_ref(),
-            state.winds.load_full().as_ref(),
-            now,
-            window_min,
-        ),
-        None => Vec::new(),
-    };
+    // Arrivals from the given snapshot — clone the airport handle and drop the feed lock first.
+    let airports = state.feed.read().await.airports.clone();
+    let arrivals = runway::collect_arrivals(
+        &icao,
+        data,
+        airports.as_ref(),
+        state.winds.load_full().as_ref(),
+        now,
+        window_min,
+    );
 
     // Assign each arrival a runway (override → STAR rule → AUTO).
     let assigned = runway::assign(&arrivals, &active_ids, &star_rules, &overrides);

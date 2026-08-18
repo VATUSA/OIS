@@ -8,6 +8,9 @@ use axum::{Json, extract::State};
 use chrono::Utc;
 
 use crate::{
+    feed::airports::{AirportDb, IataMap},
+    feed::tracon::TraconData,
+    feed::vatsim::VatsimData,
     models::{AtcAirport, AtcArea, AtcBoard, AtcCenter, AtcPosition},
     state::AppState,
 };
@@ -98,15 +101,31 @@ pub async fn list_atc(State(state): State<AppState>) -> Json<AtcBoard> {
         )
     };
     let tracons = state.tracons.load();
+    let Some(snap) = snapshot else {
+        return Json(AtcBoard {
+            airports: Vec::new(),
+            tracons: Vec::new(),
+            centers: Vec::new(),
+            as_of: Utc::now(),
+        });
+    };
+    Json(board_from(&snap.data, &airports, &iata, &tracons))
+}
 
+/// Classify a network snapshot's `controllers`/`atis` into airport ground stations (badges),
+/// TRACON/approach areas (matched to SimAware polygons), and center positions. Pure of the live
+/// feed so the historical endpoint can replay it against a reconstructed snapshot.
+pub fn board_from(
+    data: &VatsimData,
+    airports: &AirportDb,
+    iata: &IataMap,
+    tracons: &TraconData,
+) -> AtcBoard {
     let mut board = AtcBoard {
         airports: Vec::new(),
         tracons: Vec::new(),
         centers: Vec::new(),
         as_of: Utc::now(),
-    };
-    let Some(snap) = snapshot else {
-        return Json(board);
     };
 
     // Resolve a callsign prefix to (ICAO, lat, lon): direct ICAO, IATA (SFO→KSFO), or the
@@ -147,7 +166,7 @@ pub async fn list_atc(State(state): State<AppState>) -> Json<AtcBoard> {
         }
     };
 
-    for c in &snap.data.controllers {
+    for c in &data.controllers {
         if !in_atc_band(&c.frequency) {
             continue;
         }
@@ -217,7 +236,7 @@ pub async fn list_atc(State(state): State<AppState>) -> Json<AtcBoard> {
     }
 
     // ATIS is its own datafeed array; render it as an airport badge with the broadcast letter.
-    for a in &snap.data.atis {
+    for a in &data.atis {
         if !in_atc_band(&a.frequency) {
             continue;
         }
@@ -252,5 +271,5 @@ pub async fn list_atc(State(state): State<AppState>) -> Json<AtcBoard> {
         c.positions.sort_by(|x, y| x.callsign.cmp(&y.callsign));
     }
 
-    Json(board)
+    board
 }

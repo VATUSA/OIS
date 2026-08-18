@@ -14,9 +14,12 @@ use serde_json::{Value, json};
 use crate::{
     auth::{permissions::StatsRead, require_permission::RequirePermission},
     errors::ApiError,
+    feed::stats::reconstruct::reconstruct_at,
+    handlers::{atc, feed as feed_handlers, flow as flow_handlers, runway as runway_handlers},
     models::{
-        CaptureSummaryBody, NetworkPointBody, ReplayBody, ReplayFlightBody, StatsAirportBody,
-        StatsFlightDetail, StatsFlightSummary, StatsTrackBody,
+        AtcBoard, CaptureSummaryBody, DeparturesResponse, NetworkPointBody, ReplayBody,
+        ReplayFlightBody, StatsAirportBody, StatsFlightDetail, StatsFlightSummary, StatsTrackBody,
+        TrafficAircraft,
     },
     repos::stats as stats_repo,
     state::AppState,
@@ -327,4 +330,137 @@ pub async fn capture_replay(
         step_s: step,
         flights,
     }))
+}
+
+// --- historical ("time-machine") dashboard: live feed compute functions replayed at instant T ---
+//
+// Each endpoint reconstructs the network snapshot at `?at=<unix seconds>` from the stats tables and
+// runs the SAME pure compute function the live feed endpoint uses, returning the same body type.
+// The frontend dashboard's data-source widgets branch to these when in historical mode.
+
+#[derive(Deserialize)]
+pub struct AtQuery {
+    /// Instant to reconstruct, as Unix epoch seconds.
+    at: i64,
+}
+
+/// Resolve the `?at=` epoch to a UTC instant (400 if out of range).
+fn parse_at(q: &AtQuery) -> Result<DateTime<Utc>, ApiError> {
+    DateTime::from_timestamp(q.at, 0).ok_or(ApiError::BadRequest)
+}
+
+#[utoipa::path(
+    get,
+    path = "/api/v1/stats/hist/flow/{icao}",
+    tag = "stats",
+    params(
+        ("icao" = String, Path, description = "Arrival airport ICAO"),
+        ("at" = i64, Query, description = "Reconstruct instant (Unix epoch seconds)")
+    ),
+    responses((status = 200, body = crate::feed::flow::Flow), (status = 400), (status = 401), (status = 503))
+)]
+pub async fn hist_flow(
+    State(state): State<AppState>,
+    _permission: RequirePermission<StatsRead>,
+    Path(icao): Path<String>,
+    Query(q): Query<AtQuery>,
+) -> Result<Json<crate::feed::flow::Flow>, ApiError> {
+    let p = pool(&state)?;
+    let at = parse_at(&q)?;
+    let icao = norm_icao(&icao);
+    let data = reconstruct_at(p, at).await?;
+    Ok(Json(
+        feed_handlers::flow_from_data(&state, p, &icao, &data, at).await?,
+    ))
+}
+
+#[utoipa::path(
+    get,
+    path = "/api/v1/stats/hist/departures/{dep}",
+    tag = "stats",
+    params(
+        ("dep" = String, Path, description = "Departure field: airport, TRACON, or ARTCC"),
+        ("at" = i64, Query, description = "Reconstruct instant (Unix epoch seconds)")
+    ),
+    responses((status = 200, body = DeparturesResponse), (status = 400), (status = 401), (status = 503))
+)]
+pub async fn hist_departures(
+    State(state): State<AppState>,
+    _permission: RequirePermission<StatsRead>,
+    Path(dep): Path<String>,
+    Query(q): Query<AtQuery>,
+) -> Result<Json<DeparturesResponse>, ApiError> {
+    let p = pool(&state)?;
+    let at = parse_at(&q)?;
+    let dep = norm_icao(&dep);
+    let data = reconstruct_at(p, at).await?;
+    Ok(Json(
+        feed_handlers::departures_response(&state, p, &dep, &data, at).await?,
+    ))
+}
+
+#[utoipa::path(
+    get,
+    path = "/api/v1/stats/hist/atc",
+    tag = "stats",
+    params(("at" = i64, Query, description = "Reconstruct instant (Unix epoch seconds)")),
+    responses((status = 200, body = AtcBoard), (status = 400), (status = 401), (status = 503))
+)]
+pub async fn hist_atc(
+    State(state): State<AppState>,
+    _permission: RequirePermission<StatsRead>,
+    Query(q): Query<AtQuery>,
+) -> Result<Json<AtcBoard>, ApiError> {
+    let p = pool(&state)?;
+    let at = parse_at(&q)?;
+    let data = reconstruct_at(p, at).await?;
+    let (airports, iata) = {
+        let guard = state.feed.read().await;
+        (guard.airports.clone(), guard.iata.clone())
+    };
+    let tracons = state.tracons.load();
+    Ok(Json(atc::board_from(&data, &airports, &iata, &tracons)))
+}
+
+#[utoipa::path(
+    get,
+    path = "/api/v1/stats/hist/traffic",
+    tag = "stats",
+    params(("at" = i64, Query, description = "Reconstruct instant (Unix epoch seconds)")),
+    responses((status = 200, body = Vec<TrafficAircraft>), (status = 400), (status = 401), (status = 503))
+)]
+pub async fn hist_traffic(
+    State(state): State<AppState>,
+    _permission: RequirePermission<StatsRead>,
+    Query(q): Query<AtQuery>,
+) -> Result<Json<Vec<TrafficAircraft>>, ApiError> {
+    let p = pool(&state)?;
+    let at = parse_at(&q)?;
+    let data = reconstruct_at(p, at).await?;
+    Ok(Json(flow_handlers::traffic_from(&data)))
+}
+
+#[utoipa::path(
+    get,
+    path = "/api/v1/stats/hist/runway/{icao}",
+    tag = "stats",
+    params(
+        ("icao" = String, Path, description = "Airport ICAO"),
+        ("at" = i64, Query, description = "Reconstruct instant (Unix epoch seconds)")
+    ),
+    responses((status = 200, body = crate::feed::runway::RunwayBoard), (status = 400), (status = 401), (status = 503))
+)]
+pub async fn hist_runway(
+    State(state): State<AppState>,
+    _permission: RequirePermission<StatsRead>,
+    Path(icao): Path<String>,
+    Query(q): Query<AtQuery>,
+) -> Result<Json<crate::feed::runway::RunwayBoard>, ApiError> {
+    let p = pool(&state)?;
+    let at = parse_at(&q)?;
+    let icao = norm_icao(&icao);
+    let data = reconstruct_at(p, at).await?;
+    Ok(Json(
+        runway_handlers::build_board_from(&state, &icao, &data, at).await?,
+    ))
 }

@@ -1,7 +1,7 @@
 import {useMemo, useState} from "react";
 import {Badge, Button, buttonVariants, Card, CardContent, Input} from "@ois/ui";
 import {Link} from "@tanstack/react-router";
-import {ArrowDownToLine, ArrowUpFromLine, Film, Plane, TrendingUp} from "lucide-react";
+import {ArrowDownToLine, ArrowUpFromLine, Film, LayoutDashboard, Plane, TrendingUp} from "lucide-react";
 
 import {useMe} from "@/lib/auth";
 import {hasPermission} from "@/lib/permissions";
@@ -285,12 +285,21 @@ export function StatsPage() {
 
   return (
     <div className="mx-auto flex w-full max-w-5xl flex-col gap-6">
-      <div>
-        <h1 className="text-2xl font-semibold tracking-tight">Network statistics</h1>
-        <p className="text-muted-foreground">
-          Historical VATSIM activity collected from the live feed (US-relevant traffic + saved event
-          captures).
-        </p>
+      <div className="flex flex-wrap items-start justify-between gap-3">
+        <div>
+          <h1 className="text-2xl font-semibold tracking-tight">Network statistics</h1>
+          <p className="text-muted-foreground">
+            Historical VATSIM activity collected from the live feed (US-relevant traffic + saved
+            event captures).
+          </p>
+        </div>
+        <Link
+          to="/stats/dashboard"
+          className={buttonVariants({ variant: "outline", size: "sm" }) + " gap-1"}
+        >
+          <LayoutDashboard className="size-3.5" />
+          Historical dashboard
+        </Link>
       </div>
 
       <Card>

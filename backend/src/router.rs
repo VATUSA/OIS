@@ -220,6 +220,15 @@ pub fn build_router(state: AppState) -> Router {
             "/api/v1/stats/captures/{id}/replay",
             get(stats::capture_replay),
         )
+        // Historical ("time-machine") dashboard: feed compute functions replayed at instant T
+        .route("/api/v1/stats/hist/flow/{icao}", get(stats::hist_flow))
+        .route(
+            "/api/v1/stats/hist/departures/{dep}",
+            get(stats::hist_departures),
+        )
+        .route("/api/v1/stats/hist/atc", get(stats::hist_atc))
+        .route("/api/v1/stats/hist/traffic", get(stats::hist_traffic))
+        .route("/api/v1/stats/hist/runway/{icao}", get(stats::hist_runway))
         // Flow constrained areas (FCAs) + live map traffic
         .route(
             "/api/v1/flow/fcas",

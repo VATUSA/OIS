@@ -38,7 +38,7 @@ export function useFeedStatus() {
   });
 }
 
-async function fetchFlow(icao: string) {
+export async function fetchFlow(icao: string) {
   const { data, error } = await ois.GET("/api/v1/tmu/flow/{icao}", {
     params: { path: { icao } },
   });

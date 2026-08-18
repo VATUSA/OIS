@@ -5,7 +5,7 @@ import {useToast} from "@ois/ui";
 import {ois} from "./api";
 import {hhmmZulu} from "./time";
 
-async function fetchDepartures(dep: string) {
+export async function fetchDepartures(dep: string) {
   const { data, error } = await ois.GET("/api/v1/tmu/departures/{dep}", {
     params: { path: { dep } },
   });

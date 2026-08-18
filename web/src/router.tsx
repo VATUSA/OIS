@@ -23,6 +23,10 @@ import {StatsPage} from "@/pages/stats";
 import {StatsFlightPage} from "@/pages/stats/flight";
 // Replay pulls in deck.gl + MapLibre — code-split so it only loads on its route.
 const CaptureReplayPage = lazyRouteComponent(() => import("@/pages/stats/replay"), "CaptureReplayPage");
+const HistoricalDashboardPage = lazyRouteComponent(
+  () => import("@/pages/stats/dashboard"),
+  "HistoricalDashboardPage",
+);
 import {AdminLayout} from "@/pages/admin/layout";
 import {AdminOverview} from "@/pages/admin/overview";
 import {AdminAccessControl} from "@/pages/admin/access-control";
@@ -228,6 +232,12 @@ const statsReplayRoute = createRoute({
   component: CaptureReplayPage,
 });
 
+const statsDashboardRoute = createRoute({
+  getParentRoute: () => statsRoute,
+  path: "dashboard",
+  component: HistoricalDashboardPage,
+});
+
 // --- Admin ---
 
 const adminRoute = createRoute({
@@ -303,7 +313,7 @@ const routeTree = rootRoute.addChildren([
     planningAirportConfigsRoute,
     planningEventRoute,
   ]),
-  statsRoute.addChildren([statsIndexRoute, statsFlightRoute, statsReplayRoute]),
+  statsRoute.addChildren([statsIndexRoute, statsFlightRoute, statsReplayRoute, statsDashboardRoute]),
   adminRoute.addChildren([
     adminIndexRoute,
     adminAccessRoute,
