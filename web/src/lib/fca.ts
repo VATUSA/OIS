@@ -3,6 +3,8 @@ import type {components} from "@ois/api-client";
 import {useToast} from "@ois/ui";
 
 import {ois} from "./api";
+import {useHistoricalAt} from "./historical-context";
+import {fetchHistTraffic} from "./historical";
 
 export type Fca = components["schemas"]["FcaBody"];
 export type UpsertFca = components["schemas"]["UpsertFcaRequest"];
@@ -163,31 +165,47 @@ export function useFcaCounts() {
   });
 }
 
-/** Live VATSIM traffic for the map, refreshed every 15s. */
+/** VATSIM traffic for the map. Live (15s poll) by default; inside a `HistoricalProvider` it
+ * reconstructs the network at the scrubber instant, so the embedded map widget replays. */
 export function useTraffic() {
+  const at = useHistoricalAt();
   return useQuery({
-    queryKey: ["flow-traffic"],
+    queryKey: at == null ? ["flow-traffic"] : ["hist-traffic", at],
     queryFn: async () => {
+      if (at != null) return fetchHistTraffic(at);
       const { data, error } = await ois.GET("/api/v1/flow/traffic");
       if (error || !data) throw new Error("failed to load traffic");
       return data;
     },
-    refetchInterval: 15_000,
+    refetchInterval: at == null ? 15_000 : false,
+    staleTime: at == null ? 0 : Infinity,
   });
 }
 
-/** Online ATC (badges + TRACON areas + centers) for the map ATC layer. Only polls while
- * the layer is enabled; the geometry is heavier than traffic so it refreshes every 30s. */
+async function fetchHistAtc(at: number) {
+  const { data, error } = await ois.GET("/api/v1/stats/hist/atc", {
+    params: { query: { at } },
+  });
+  if (error || !data) throw new Error("failed to load historical ATC");
+  return data;
+}
+
+/** Online ATC (badges + TRACON areas + centers) for the map ATC layer. Only polls while the layer
+ * is enabled; the geometry is heavier than traffic so it refreshes every 30s. Inside a
+ * `HistoricalProvider` it reconstructs the online ATC at the scrubber instant. */
 export function useAtc(enabled: boolean) {
+  const at = useHistoricalAt();
   return useQuery({
-    queryKey: ["flow-atc"],
+    queryKey: at == null ? ["flow-atc"] : ["hist-atc", at],
     queryFn: async () => {
+      if (at != null) return fetchHistAtc(at);
       const { data, error } = await ois.GET("/api/v1/flow/atc");
       if (error || !data) throw new Error("failed to load ATC");
       return data;
     },
     enabled,
-    refetchInterval: 30_000,
+    refetchInterval: at == null ? 30_000 : false,
+    staleTime: at == null ? 0 : Infinity,
   });
 }
 

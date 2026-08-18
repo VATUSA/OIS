@@ -236,6 +236,19 @@ const statsDashboardRoute = createRoute({
   getParentRoute: () => statsRoute,
   path: "dashboard",
   component: HistoricalDashboardPage,
+  // Deep-link a replay: a capture (or a custom from/to window), a board, and the scrubber instant.
+  validateSearch: (
+    search: Record<string, unknown>,
+  ): { capture?: string; from?: number; to?: number; board?: string; t?: number } => {
+    const num = (v: unknown) => (v != null && Number.isFinite(Number(v)) ? Number(v) : undefined);
+    return {
+      capture: typeof search.capture === "string" ? search.capture : undefined,
+      from: num(search.from),
+      to: num(search.to),
+      board: typeof search.board === "string" ? search.board : undefined,
+      t: num(search.t),
+    };
+  },
 });
 
 // --- Admin ---
