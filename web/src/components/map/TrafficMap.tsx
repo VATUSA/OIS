@@ -5,6 +5,7 @@ import {useTheme} from "@ois/ui";
 import {MapCanvas} from "./MapCanvas";
 import {buildBoundaryLayer} from "./layers/boundaries";
 import {buildAircraftLayer, buildLabelLayer, type LabelFlags} from "./layers/aircraft";
+import {buildFcaLayers, type MapFca} from "./layers/fca";
 import {
   buildRingLayer,
   buildRouteOverlayLayer,
@@ -13,11 +14,14 @@ import {
   buildTrailLayer,
   buildWaypointLayer,
 } from "./layers/replay";
+import type {MapCamera} from "./hooks/useMapCamera";
 import {aircraftTooltip} from "./lib/tooltip";
 import type {NormAircraft, PathDatum, RGB, RouteGeom} from "./lib/types";
 
 export interface TrafficMapProps {
   initialViewState?: MapViewState;
+  /** Controlled camera (enables flyTo/fitBounds/home). When omitted, deck manages the camera. */
+  camera?: MapCamera;
 
   // Aircraft (the one required data input; everything else is optional overlay).
   aircraft: NormAircraft[];
@@ -33,12 +37,17 @@ export interface TrafficMapProps {
   rings?: { data: NormAircraft[]; nm: number } | null;
   selectedTrack?: PathDatum[];
   filedRoute?: RouteGeom | null;
+  fcas?: MapFca[];
+  selectedFcaId?: string | null;
 
   // Interactions.
   onAircraftClick?: (id: string) => void;
+  onFcaClick?: (id: string) => void;
 
   // Chrome.
   className?: string;
+  /** react-map-gl <Marker> overlays (rich HTML labels) rendered inside the map. */
+  mapChildren?: React.ReactNode;
   children?: React.ReactNode;
 }
 
@@ -50,6 +59,7 @@ export interface TrafficMapProps {
  */
 export function TrafficMap({
   initialViewState,
+  camera,
   aircraft,
   getAircraftColor,
   getAircraftSize,
@@ -61,8 +71,12 @@ export function TrafficMap({
   rings,
   selectedTrack,
   filedRoute,
+  fcas,
+  selectedFcaId,
   onAircraftClick,
+  onFcaClick,
   className,
+  mapChildren,
   children,
 }: TrafficMapProps) {
   const { resolvedTheme } = useTheme();
@@ -80,6 +94,7 @@ export function TrafficMap({
   if (trails?.length) layers.push(buildTrailLayer(trails, resolvedTheme));
   if (routeOverlays?.length) layers.push(buildRouteOverlayLayer(routeOverlays));
   if (rings?.data.length) layers.push(buildRingLayer(rings.data, rings.nm, resolvedTheme));
+  if (fcas?.length) layers.push(...buildFcaLayers(fcas, selectedFcaId));
   if (selectedTrack?.length) layers.push(buildSelectedTrackLayer(selectedTrack));
   if (selectedRoutePath.length) layers.push(buildSelectedRouteLayer(selectedRoutePath));
   layers.push(
@@ -98,6 +113,9 @@ export function TrafficMap({
     if (info.layer?.id === "aircraft") {
       const id = (info.object as NormAircraft | undefined)?.id;
       if (id) onAircraftClick?.(id);
+    } else if (info.layer?.id === "fca-lines") {
+      const id = (info.object as { id: string } | undefined)?.id;
+      if (id) onFcaClick?.(id);
     }
   };
 
@@ -105,10 +123,14 @@ export function TrafficMap({
     <MapCanvas
       className={className}
       initialViewState={initialViewState}
+      viewState={camera?.viewState}
+      onViewStateChange={camera?.onViewStateChange}
+      onResize={camera?.onResize}
       layers={layers}
       getTooltip={aircraftTooltip(resolvedTheme)}
       onClick={handleClick}
       getCursor={({ isHovering }) => (isHovering ? "pointer" : "grab")}
+      mapChildren={mapChildren}
     >
       {children}
     </MapCanvas>

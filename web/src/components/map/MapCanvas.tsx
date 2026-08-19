@@ -31,6 +31,7 @@ interface MapCanvasProps {
   onDragStart?: EventHandler;
   onDrag?: EventHandler;
   onDragEnd?: EventHandler;
+  onResize?: (size: { width: number; height: number }) => void;
   getCursor?: (state: { isDragging: boolean; isHovering: boolean }) => string;
   /** react-map-gl <Marker> overlays rendered inside the MapLibre map. */
   mapChildren?: React.ReactNode;
@@ -76,6 +77,7 @@ export function MapCanvas({
   onDragStart,
   onDrag,
   onDragEnd,
+  onResize,
   getCursor,
   mapChildren,
   children,
@@ -111,6 +113,7 @@ export function MapCanvas({
         onDragStart={onDragStart as never}
         onDrag={onDrag as never}
         onDragEnd={onDragEnd as never}
+        onResize={onResize}
         getCursor={getCursor}
         style={{ position: "absolute", top: "0", left: "0", width: "100%", height: "100%" }}
       >
