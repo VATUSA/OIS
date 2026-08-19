@@ -1,13 +1,14 @@
-import {PathLayer, ScatterplotLayer} from "@deck.gl/layers";
+import {PathLayer, ScatterplotLayer, TextLayer} from "@deck.gl/layers";
 import {PathStyleExtension} from "@deck.gl/extensions";
 
 import {hexToRgb} from "../lib/colors";
-import {toDeckPath, type LatLng} from "../lib/geo";
+import {midpointOf, toDeckPath, type LatLng} from "../lib/geo";
 import type {RGBA} from "../lib/types";
 
 /** The subset of an FCA the map needs to render its line (open dashed polyline, selectable). */
 export interface MapFca {
   id: string;
+  name: string;
   color: string;
   enabled: boolean;
   points: LatLng[]; // [lat, lon] pairs
@@ -67,5 +68,27 @@ export function buildFcaLayers(fcas: MapFca[], selectedId: string | null | undef
     updateTriggers: { getFillColor: [selectedId] },
   });
 
-  return [line, endpoints];
+  const labels = new TextLayer<{ pos: [number, number]; name: string; color: RGBA }>({
+    id: "fca-labels",
+    data: fcas
+      .filter((f) => f.points.length >= 2)
+      .map((f) => {
+        const [lat, lon] = midpointOf(f.points);
+        const [r, g, b] = hexToRgb(f.color);
+        return { pos: [lon, lat] as [number, number], name: f.name, color: [r, g, b, 255] as RGBA };
+      }),
+    getPosition: (d) => d.pos,
+    getText: (d) => d.name,
+    getColor: (d) => d.color,
+    getSize: 12,
+    getPixelOffset: [0, -12],
+    getTextAnchor: "middle",
+    getAlignmentBaseline: "bottom",
+    fontWeight: 700,
+    outlineWidth: 2,
+    outlineColor: [0, 0, 0, 230],
+    fontSettings: { sdf: true },
+  });
+
+  return [line, endpoints, labels];
 }
