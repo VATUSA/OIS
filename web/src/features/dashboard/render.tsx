@@ -23,7 +23,7 @@ export function WidgetBody({
     case "view":
       return <ViewWidgetView widget={widget} editing={editing} onChange={onUpdate} />;
     case "map":
-      return <MapWidgetView initialFlight={widget.initialFlight} />;
+      return <MapWidgetView initialFlight={widget.initialFlight} widgetId={widget.id} />;
     case "table":
       return <TableWidget widget={widget} editing={editing} onChange={onUpdate} />;
     case "chart":

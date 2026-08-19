@@ -8,6 +8,7 @@ import {AdvisoriesFcaPage} from "@/pages/advisories/fcas";
 import {PilotPage} from "@/pages/pilot";
 import {PrivacyPage} from "@/pages/privacy";
 import {ProfilePage} from "@/pages/profile";
+import {SettingsPage} from "@/pages/settings";
 import {AirportPage} from "@/pages/airport";
 import {FcaPage} from "@/pages/fca";
 import {RunwayPage} from "@/pages/runway";
@@ -163,6 +164,12 @@ const profileRoute = createRoute({
   getParentRoute: () => rootRoute,
   path: "profile",
   component: ProfilePage,
+});
+
+const settingsRoute = createRoute({
+  getParentRoute: () => rootRoute,
+  path: "settings",
+  component: SettingsPage,
 });
 
 // Public legal/info pages (linked from the footer).
@@ -332,6 +339,7 @@ const routeTree = rootRoute.addChildren([
   advisoriesRoute.addChildren([advisoriesIndexRoute, advisoriesFcaRoute]),
   pilotRoute,
   profileRoute,
+  settingsRoute,
   privacyRoute,
   planningRoute.addChildren([
     planningIndexRoute,

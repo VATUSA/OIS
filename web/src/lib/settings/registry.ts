@@ -1,0 +1,52 @@
+/**
+ * The user-settings registry — the single place to define a setting. Add an entry here and it shows up
+ * on the /settings page automatically; read it anywhere with `useSetting(key, default)`.
+ *
+ * Values are stored server-side (per user) as one opaque jsonb blob under the "settings" preferences
+ * namespace, so adding a setting needs no migration.
+ */
+
+/** A boolean on/off setting rendered as a toggle switch. */
+export interface ToggleControl {
+  kind: "toggle";
+  default: boolean;
+}
+/** A one-of setting rendered as a dropdown. */
+export interface SelectControl {
+  kind: "select";
+  default: string;
+  options: { value: string; label: string }[];
+}
+
+export interface SettingDef {
+  /** Stable storage key, dotted by area, e.g. "map.persistView". */
+  key: string;
+  /** Section heading it appears under on the settings page. */
+  group: string;
+  label: string;
+  description?: string;
+  control: ToggleControl | SelectControl;
+}
+
+/** The opaque per-user jsonb blob shape (key → value) stored under the "settings" namespace. */
+export type SettingsBlob = Record<string, unknown>;
+
+/** Settings namespace for the preferences API (`/api/v1/me/preferences/settings`). */
+export const SETTINGS_NAMESPACE = "settings";
+
+/** Every setting, in display order. Groups render in first-seen order. */
+export const SETTINGS: SettingDef[] = [
+  {
+    key: "map.persistView",
+    group: "Map",
+    label: "Remember map position",
+    description:
+      "Keep the last pan and zoom on the FCA map and dashboard maps across page refreshes and new tabs.",
+    control: { kind: "toggle", default: true },
+  },
+];
+
+/** The default value for a setting key (used before the server value loads, or when signed out). */
+export function settingDefault(key: string): unknown {
+  return SETTINGS.find((s) => s.key === key)?.control.default;
+}
