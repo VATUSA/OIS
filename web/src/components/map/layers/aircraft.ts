@@ -3,6 +3,7 @@ import {IconLayer, TextLayer} from "@deck.gl/layers";
 import {aircraftIconUrl} from "@/lib/aircraft-icons";
 import type {Theme} from "../lib/constants";
 import {aircraftColor, labelBackground, labelColor} from "../lib/colors";
+import {TRIANGLE_ICON} from "../lib/icons";
 import type {NormAircraft, RGB} from "../lib/types";
 
 export interface AircraftLayerOptions {
@@ -11,6 +12,8 @@ export interface AircraftLayerOptions {
   getColor?: (a: NormAircraft) => RGB;
   /** Per-aircraft glyph size in pixels (default 26). */
   getSize?: (a: NormAircraft) => number;
+  /** Glyph style: type silhouettes or plain triangles. */
+  style?: "silhouette" | "triangle";
   /** Bumps updateTriggers when selection/highlight changes color/size. */
   highlightKey?: unknown;
 }
@@ -18,11 +21,13 @@ export interface AircraftLayerOptions {
 /** Heading-rotated aircraft glyphs (VATSIM-Radar type silhouettes, masked so they take `getColor`). */
 export function buildAircraftLayer(data: NormAircraft[], opts: AircraftLayerOptions) {
   const base = aircraftColor(opts.theme);
+  const triangle = opts.style === "triangle";
   return new IconLayer<NormAircraft>({
     id: "aircraft",
     data,
     pickable: true,
     getIcon: (d) => {
+      if (triangle) return { id: "tri", url: TRIANGLE_ICON, width: 24, height: 24, mask: true };
       const url = aircraftIconUrl(d.actype);
       return { id: url, url, width: 48, height: 48, mask: true };
     },
@@ -35,6 +40,7 @@ export function buildAircraftLayer(data: NormAircraft[], opts: AircraftLayerOpti
     updateTriggers: {
       getColor: [opts.theme, opts.highlightKey],
       getSize: [opts.highlightKey],
+      getIcon: [triangle],
     },
   });
 }
