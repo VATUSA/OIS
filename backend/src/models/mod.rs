@@ -1050,6 +1050,8 @@ pub struct AtcPosition {
     pub name: String,
     /// The controller's VATSIM rating id (0 when unknown).
     pub rating: i32,
+    /// When the controller logged on (RFC3339; empty when unknown / ATIS).
+    pub logon_time: String,
     /// ATIS broadcast letter, only for `kind == "ATIS"`.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub atis_code: Option<String>,

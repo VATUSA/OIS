@@ -23,6 +23,7 @@ export interface AtcPositionLite {
   kind: string;
   name: string;
   rating: number;
+  logon_time: string;
   atis_code?: string | null;
 }
 

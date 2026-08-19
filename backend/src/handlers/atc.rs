@@ -185,6 +185,7 @@ pub fn board_from(
             frequency: c.frequency.clone(),
             name: c.name.clone(),
             rating: c.rating,
+            logon_time: c.logon_time.clone(),
             atis_code: None,
         };
         match kind {
@@ -256,6 +257,7 @@ pub fn board_from(
                 frequency: a.frequency.clone(),
                 name: String::new(),
                 rating: 0,
+                logon_time: String::new(),
                 atis_code: a.atis_code.clone(),
             },
         );
