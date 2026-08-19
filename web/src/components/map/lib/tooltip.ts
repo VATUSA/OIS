@@ -16,6 +16,18 @@ const esc = (s: string) =>
 const posName = (p: AtcPositionLite) =>
   p.kind === "ATIS" ? `ATIS${p.atis_code ? " " + p.atis_code : ""}` : p.callsign;
 
+/** How long the controller has been on position, e.g. "2h14m" (blank if unknown). */
+function onlineFor(iso: string): string {
+  if (!iso) return "";
+  const t = Date.parse(iso);
+  if (!Number.isFinite(t)) return "";
+  const mins = Math.floor((Date.now() - t) / 60000);
+  if (mins < 0) return "";
+  const h = Math.floor(mins / 60);
+  const m = mins % 60;
+  return h > 0 ? `${h}h${m}m` : `${m}m`;
+}
+
 /** ATC hover card: header + each position's name, frequency, and controller. */
 function atcHtml(a: AtcAnchor, theme: Theme): string {
   const muted = theme === "dark" ? "#94a3b8" : "#64748b";
@@ -23,8 +35,9 @@ function atcHtml(a: AtcAnchor, theme: Theme): string {
     .map((p) => {
       const badge = `<span style="background:${ATC_COLORS[p.kind] ?? "#94a3b8"};color:#0a0a0a;border-radius:3px;padding:0 3px;font:700 10px ui-monospace,monospace">${esc(p.kind)}</span>`;
       const rating = RATINGS[p.rating];
+      const online = onlineFor(p.logon_time);
       const ctrl = p.name
-        ? `<div style="color:${muted};margin-top:1px">${esc(p.name)}${rating ? ` · ${rating}` : ""}</div>`
+        ? `<div style="color:${muted};margin-top:1px">${esc(p.name)}${rating ? ` · ${rating}` : ""}${online ? ` · ${online}` : ""}</div>`
         : "";
       return `<div style="margin-top:4px"><span style="font-family:ui-monospace,monospace">${badge} <span style="font-weight:600">${esc(posName(p))}</span> <span style="color:${muted}">${esc(p.frequency)}</span></span>${ctrl}</div>`;
     })

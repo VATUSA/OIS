@@ -1954,6 +1954,8 @@ export interface components {
             callsign: string;
             frequency: string;
             kind: string;
+            /** @description When the controller logged on (RFC3339; empty when unknown / ATIS). */
+            logon_time: string;
             /** @description The controller's name (empty for ATIS / when unknown). */
             name: string;
             /**
