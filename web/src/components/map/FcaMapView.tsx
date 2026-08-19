@@ -391,112 +391,208 @@ export function FcaMapView({
             </button>
           </div>
 
-          <div className="flex flex-col gap-2 border-b p-3">
-            <select
-              value={artccFilter}
-              onChange={(e) => setArtccFilter(e.target.value)}
-              className="h-9 w-full rounded-md border border-input bg-background px-2 text-sm outline-none focus-visible:ring-2 focus-visible:ring-ring"
-            >
-              <option value="">ALL ARTCCs</option>
-              {artccOptions.map((a) => (
-                <option key={a} value={a}>
-                  {a}
-                </option>
-              ))}
-            </select>
-            <Input placeholder="filter — name or fix…" value={filter} onChange={(e) => setFilter(e.target.value)} />
-          </div>
+          {editing && draft ? (
+            <DraftEditor
+              draft={draft}
+              onChange={setDraft}
+              onSave={save}
+              onRedraw={() => {
+                setDraft((d) => (d ? { ...d, points: [] } : d));
+                setPhase("draw");
+              }}
+              onCancel={cancel}
+              saving={createFca.isPending || updateFca.isPending}
+            />
+          ) : (
+            <>
+              {canEdit && (
+                <div className="border-b p-3">
+                  {drawing ? (
+                    <Button variant="secondary" className="w-full" onClick={cancel}>
+                      Cancel drawing
+                    </Button>
+                  ) : (
+                    <Button className="w-full" onClick={startNew}>
+                      <Plus />
+                      New FCA
+                    </Button>
+                  )}
+                </div>
+              )}
+              <div className="flex flex-col gap-2 border-b p-3">
+                <select
+                  value={artccFilter}
+                  onChange={(e) => setArtccFilter(e.target.value)}
+                  className="h-9 w-full rounded-md border border-input bg-background px-2 text-sm outline-none focus-visible:ring-2 focus-visible:ring-ring"
+                >
+                  <option value="">ALL ARTCCs</option>
+                  {artccOptions.map((a) => (
+                    <option key={a} value={a}>
+                      {a}
+                    </option>
+                  ))}
+                </select>
+                <Input placeholder="filter — name or fix…" value={filter} onChange={(e) => setFilter(e.target.value)} />
+              </div>
 
-          <div className="flex-1 overflow-y-auto">
-            {!fcas.data ? (
-              <p className="p-4 text-sm text-muted-foreground">Loading…</p>
-            ) : shown.length === 0 ? (
-              <p className="p-4 text-sm text-muted-foreground">No FCAs.</p>
-            ) : (
-              <ul>
-                {shown.map((fca) => (
-                  <li
-                    key={fca.id}
-                    className={
-                      "flex items-center gap-2 border-b px-3 py-2 text-sm " +
-                      (fca.id === selectedId ? "bg-accent/40" : "")
-                    }
-                  >
-                    <span
-                      className="size-3 shrink-0 rounded-full"
-                      style={{ background: fca.enabled ? fca.color : "transparent", border: `2px solid ${fca.color}` }}
-                    />
-                    <button
-                      type="button"
-                      onClick={() => selectFca(fca.id)}
-                      className="flex-1 truncate text-left font-mono"
-                    >
-                      {fca.name}
-                      {fca.artcc && <span className="ml-1.5 text-xs text-muted-foreground">{fca.artcc}</span>}
-                    </button>
-                    <span
-                      className={
-                        "shrink-0 rounded px-1.5 text-xs font-medium tabular-nums " +
-                        ((counts.data?.[fca.id] ?? 0) > 0 ? "bg-primary/15 text-primary" : "text-muted-foreground/50")
-                      }
-                    >
-                      {counts.data?.[fca.id] ?? 0}
-                    </span>
-                  </li>
-                ))}
-              </ul>
-            )}
-          </div>
-
-          <div className="flex flex-col border-t">
-            <div className="flex items-center justify-between px-3 pt-3">
-              <span className="text-xs font-semibold uppercase tracking-wide text-muted-foreground">Routes</span>
-            </div>
-            {routes.data && routes.data.length > 0 ? (
-              <ul className="max-h-48 overflow-y-auto p-1">
-                {routes.data.map((r) => (
-                  <li
-                    key={r.id}
-                    className={
-                      "flex items-center gap-2 rounded px-2 py-1.5 text-sm " +
-                      (r.id === selectedRouteId ? "bg-accent/40" : "")
-                    }
-                  >
-                    <span
-                      className="size-3 shrink-0 rounded-full"
-                      style={{ background: r.color, border: `2px solid ${r.color}` }}
-                    />
-                    <button
-                      type="button"
-                      title={r.route}
-                      onClick={() => setSelectedRouteId((cur) => (cur === r.id ? null : r.id))}
-                      className="flex-1 truncate text-left font-mono"
-                    >
-                      {r.name}
-                      {r.unresolved.length > 0 && (
-                        <span className="ml-1.5 text-xs text-amber-500" title={`Unresolved: ${r.unresolved.join(" ")}`}>
-                          ⚠{r.unresolved.length}
+              <div className="flex-1 overflow-y-auto">
+                {!fcas.data ? (
+                  <p className="p-4 text-sm text-muted-foreground">Loading…</p>
+                ) : shown.length === 0 ? (
+                  <p className="p-4 text-sm text-muted-foreground">
+                    No FCAs.{canEdit && " Draw one with “New FCA”."}
+                  </p>
+                ) : (
+                  <ul>
+                    {shown.map((fca) => (
+                      <li
+                        key={fca.id}
+                        className={
+                          "flex items-center gap-2 border-b px-3 py-2 text-sm " +
+                          (fca.id === selectedId ? "bg-accent/40" : "")
+                        }
+                      >
+                        <button
+                          type="button"
+                          title={fca.enabled ? "Enabled" : "Disabled"}
+                          onClick={() => canEdit && toggleEnabled(fca)}
+                          className="size-3 shrink-0 rounded-full"
+                          style={{ background: fca.enabled ? fca.color : "transparent", border: `2px solid ${fca.color}` }}
+                        />
+                        <button type="button" onClick={() => selectFca(fca.id)} className="flex-1 truncate text-left font-mono">
+                          {fca.name}
+                          {fca.artcc && <span className="ml-1.5 text-xs text-muted-foreground">{fca.artcc}</span>}
+                        </button>
+                        <span
+                          className={
+                            "shrink-0 rounded px-1.5 text-xs font-medium tabular-nums " +
+                            ((counts.data?.[fca.id] ?? 0) > 0 ? "bg-primary/15 text-primary" : "text-muted-foreground/50")
+                          }
+                        >
+                          {counts.data?.[fca.id] ?? 0}
                         </span>
+                        {canEdit && (
+                          <button
+                            type="button"
+                            title="Edit"
+                            onClick={() => startEdit(fca)}
+                            className="text-muted-foreground hover:text-foreground"
+                          >
+                            <Pencil className="size-3.5" />
+                          </button>
+                        )}
+                        {canDelete && (
+                          <ConfirmButton
+                            size="icon"
+                            className="size-7"
+                            title="Delete"
+                            aria-label="Delete FCA"
+                            onConfirm={() => deleteFca.mutate(fca.id)}
+                            warn={`Delete the “${fca.name}” FCA?`}
+                          >
+                            <Trash2 className="size-3.5" />
+                          </ConfirmButton>
+                        )}
+                      </li>
+                    ))}
+                  </ul>
+                )}
+              </div>
+
+              <div className="flex flex-col border-t">
+                {routeForm ? (
+                  <RouteEditor
+                    form={routeForm}
+                    onChange={setRouteForm}
+                    onSave={saveRoute}
+                    onCancel={() => setRouteForm(null)}
+                    saving={createRoute.isPending || updateRoute.isPending}
+                  />
+                ) : (
+                  <>
+                    <div className="flex items-center justify-between px-3 pt-3">
+                      <span className="text-xs font-semibold uppercase tracking-wide text-muted-foreground">Routes</span>
+                      {canEditRoute && (
+                        <button
+                          type="button"
+                          onClick={startNewRoute}
+                          className="flex items-center gap-1 text-xs text-primary hover:underline"
+                        >
+                          <Plus className="size-3.5" />
+                          New route
+                        </button>
                       )}
-                    </button>
-                    <button
-                      type="button"
-                      title={labeledRoutes.has(r.id) ? "Hide fix names" : "Show fix names"}
-                      onClick={() => toggleFixes(r.id)}
-                      className={
-                        "transition-colors " +
-                        (labeledRoutes.has(r.id) ? "text-primary" : "text-muted-foreground hover:text-foreground")
-                      }
-                    >
-                      <Tag className="size-3.5" />
-                    </button>
-                  </li>
-                ))}
-              </ul>
-            ) : (
-              <p className="px-3 py-3 text-xs text-muted-foreground">No routes yet.</p>
-            )}
-          </div>
+                    </div>
+                    {routes.data && routes.data.length > 0 ? (
+                      <ul className="max-h-48 overflow-y-auto p-1">
+                        {routes.data.map((r) => (
+                          <li
+                            key={r.id}
+                            className={
+                              "flex items-center gap-2 rounded px-2 py-1.5 text-sm " +
+                              (r.id === selectedRouteId ? "bg-accent/40" : "")
+                            }
+                          >
+                            <span className="size-3 shrink-0 rounded-full" style={{ background: r.color, border: `2px solid ${r.color}` }} />
+                            <button
+                              type="button"
+                              title={r.route}
+                              onClick={() => setSelectedRouteId((cur) => (cur === r.id ? null : r.id))}
+                              className="flex-1 truncate text-left font-mono"
+                            >
+                              {r.name}
+                              {r.unresolved.length > 0 && (
+                                <span className="ml-1.5 text-xs text-amber-500" title={`Unresolved: ${r.unresolved.join(" ")}`}>
+                                  ⚠{r.unresolved.length}
+                                </span>
+                              )}
+                            </button>
+                            <button
+                              type="button"
+                              title={labeledRoutes.has(r.id) ? "Hide fix names" : "Show fix names"}
+                              onClick={() => toggleFixes(r.id)}
+                              className={
+                                "transition-colors " +
+                                (labeledRoutes.has(r.id) ? "text-primary" : "text-muted-foreground hover:text-foreground")
+                              }
+                            >
+                              <Tag className="size-3.5" />
+                            </button>
+                            {canEditRoute && (
+                              <button
+                                type="button"
+                                title="Edit"
+                                onClick={() => startEditRoute(r)}
+                                className="text-muted-foreground hover:text-foreground"
+                              >
+                                <Pencil className="size-3.5" />
+                              </button>
+                            )}
+                            {canDeleteRoute && (
+                              <ConfirmButton
+                                size="icon"
+                                className="size-7"
+                                title="Delete"
+                                aria-label="Delete route"
+                                onConfirm={() => deleteRoute.mutate(r.id)}
+                                warn={`Delete the “${r.name}” route?`}
+                              >
+                                <Trash2 className="size-3.5" />
+                              </ConfirmButton>
+                            )}
+                          </li>
+                        ))}
+                      </ul>
+                    ) : (
+                      <p className="px-3 py-3 text-xs text-muted-foreground">
+                        No routes yet.{canEditRoute && " Add one with “New route”."}
+                      </p>
+                    )}
+                  </>
+                )}
+              </div>
+            </>
+          )}
 
           <div className="border-t px-4 py-2 text-xs">
             {dataStatus.data ? (
@@ -537,6 +633,11 @@ export function FcaMapView({
         selectedRouteId={selectedRouteId}
         labeledRouteIds={labeledRoutes}
         filedRoute={filedRoute}
+        draft={draftLine}
+        drawMode={draft ? phase : null}
+        onAddVertex={addVertex}
+        onMoveVertex={moveVertex}
+        onFinishDraft={finishLine}
         onAircraftClick={(cs) => setRouteCallsign((cur) => (cur === cs ? null : cs))}
         onMatchedClick={(cs) => setRouteCallsign((cur) => (cur === cs ? null : cs))}
         onFcaClick={selectFca}
@@ -602,6 +703,25 @@ export function FcaMapView({
           </div>
         )}
 
+        {drawing && draft && (
+          <div className="pointer-events-none absolute inset-x-0 bottom-6 z-[500] flex justify-center">
+            <div className="pointer-events-auto flex items-center gap-2.5 rounded-lg border border-primary/60 bg-background/95 px-5 py-3 text-sm shadow-lg backdrop-blur">
+              <span className="font-medium">Click to add points</span>
+              <Kbd>⌫</Kbd>
+              <span className="text-muted-foreground">undo</span>
+              <Kbd>dbl-click</Kbd>
+              <span className="text-muted-foreground">or</span>
+              <Kbd>↵</Kbd>
+              <span className="text-muted-foreground">finish</span>
+              <Kbd>esc</Kbd>
+              <span className="text-muted-foreground">cancel</span>
+              <span className="ml-1 border-l pl-3 font-mono text-xs text-muted-foreground">
+                {draft.points.length} pts
+              </span>
+            </div>
+          </div>
+        )}
+
         {routeCallsign && aircraftRoute.data && (
           <RoutePopup
             route={aircraftRoute.data}
@@ -612,8 +732,8 @@ export function FcaMapView({
         )}
       </TrafficMap>
 
-      {selectedFca && (
-        <FcaDetail fca={selectedFca} flights={fcaTraffic.data} canEdit={false} onClose={() => setSelectedId(null)} />
+      {selectedFca && !draft && (
+        <FcaDetail fca={selectedFca} flights={fcaTraffic.data} canEdit={canEdit} onClose={() => setSelectedId(null)} />
       )}
     </div>
   );
