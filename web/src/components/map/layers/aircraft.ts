@@ -34,12 +34,13 @@ export function buildAircraftLayer(data: NormAircraft[], opts: AircraftLayerOpti
     getPosition: (d) => [d.lon, d.lat],
     getAngle: (d) => 360 - d.heading,
     getColor: (d) => opts.getColor?.(d) ?? base,
-    getSize: (d) => opts.getSize?.(d) ?? 26,
+    // Triangles fill their icon box (silhouettes have padding), so they read larger — render smaller.
+    getSize: (d) => opts.getSize?.(d) ?? (triangle ? 15 : 26),
     sizeUnits: "pixels",
     billboard: false,
     updateTriggers: {
       getColor: [opts.theme, opts.highlightKey],
-      getSize: [opts.highlightKey],
+      getSize: [opts.highlightKey, triangle],
       getIcon: [triangle],
     },
   });

@@ -118,6 +118,10 @@ export function MapCanvas({
         style={{ position: "absolute", top: "0", left: "0", width: "100%", height: "100%" }}
       >
         <MapLibre
+          // Remount on theme change: react-map-gl's style diff doesn't reliably swap between the two
+          // vendored basemaps once our aeroway layers are added, so force a fresh basemap. deck owns
+          // the camera, so MapLibre re-syncs to the current view with no reset.
+          key={resolvedTheme}
           mapStyle={CARTO_STYLE[resolvedTheme]}
           attributionControl={false}
           onLoad={(e) => ensureAeroway(e.target as unknown as StyleMap, resolvedTheme)}

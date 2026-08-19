@@ -77,7 +77,7 @@ export function buildMatchedLayers(
     getPosition: (f) => [f.lon, f.lat],
     getAngle: (f) => 360 - f.heading,
     getColor: tint,
-    getSize: 22,
+    getSize: style === "triangle" ? 14 : 22,
     sizeUnits: "pixels",
     billboard: false,
     updateTriggers: { getColor: [colorHex], getIcon: [style] },
