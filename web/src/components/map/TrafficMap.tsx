@@ -67,6 +67,8 @@ export interface TrafficMapProps {
 
   // Chrome.
   className?: string;
+  /** Cursor over empty map (not hovering a pickable object, not drawing). Default "grab". */
+  baseCursor?: string;
   /** react-map-gl <Marker> overlays (rich HTML labels) rendered inside the map. */
   mapChildren?: React.ReactNode;
   children?: React.ReactNode;
@@ -110,6 +112,7 @@ export function TrafficMap({
   onFcaClick,
   onMatchedClick,
   className,
+  baseCursor = "grab",
   mapChildren,
   children,
 }: TrafficMapProps) {
@@ -220,7 +223,7 @@ export function TrafficMap({
       onDragStart={handleDragStart}
       onDrag={handleDrag}
       onDragEnd={handleDragEnd}
-      getCursor={({ isHovering }) => (drawMode === "draw" ? "crosshair" : isHovering ? "pointer" : "grab")}
+      getCursor={({ isHovering }) => (drawMode === "draw" ? "crosshair" : isHovering ? "pointer" : baseCursor)}
       mapChildren={
         <>
           {atc && boundaries && <AtcMarkers atc={atc} boundaries={boundaries} />}
