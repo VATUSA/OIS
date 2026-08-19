@@ -20,6 +20,7 @@ import {
   type UpsertFca,
 } from "@/lib/fca";
 import {useCreateRoute, useDeleteRoute, useRoutes, useUpdateRoute, type MapRoute, type UpsertRoute} from "@/lib/route";
+import {useSetting} from "@/lib/settings";
 import {FlightSearch} from "@/components/flight-search";
 import {FcaDetail} from "@/pages/fca/detail";
 import boundariesGeo from "@/assets/artcc-boundaries.json";
@@ -70,10 +71,13 @@ export function FcaMapView({
   readOnly = false,
   initialFlight,
   embedded = false,
+  persistKey,
 }: {
   readOnly?: boolean;
   initialFlight?: string;
   embedded?: boolean;
+  /** Stable key for remembering this map instance's pan/zoom (gated by the map.persistView setting). */
+  persistKey?: string;
 }) {
   const { data: me } = useMe();
   const toast = useToast();
@@ -144,7 +148,8 @@ export function FcaMapView({
   const cycleAge = dataStatus.data ? cycleAgeDays(dataStatus.data.nav_cycle) : null;
   const navStale = cycleAge != null && cycleAge > 35;
 
-  const camera = useMapCamera(FCA_INITIAL);
+  const { value: persistView } = useSetting("map.persistView", true);
+  const camera = useMapCamera(FCA_INITIAL, { persistKey, persist: persistView && !!persistKey });
 
   const selectedFca = useMemo(
     () => fcas.data?.find((f) => f.id === selectedId) ?? null,

@@ -1,8 +1,15 @@
-import {useCallback, useRef, useState} from "react";
+import {useCallback, useEffect, useRef, useState} from "react";
 import {FlyToInterpolator, WebMercatorViewport} from "@deck.gl/core";
 import type {MapViewState} from "@deck.gl/core";
 
 import {US_HOME} from "../lib/constants";
+import {loadView, saveView} from "../lib/view-storage";
+
+/** Persist the camera across reloads/tabs in localStorage under `persistKey`, when `persist` is on. */
+export interface CameraPersistOptions {
+  persistKey?: string;
+  persist?: boolean;
+}
 
 export interface MapCamera {
   viewState: MapViewState;
@@ -27,12 +34,53 @@ const TRANSITION = {
  * transitioning `viewState` with a FlyToInterpolator (fitBounds solves the target with
  * WebMercatorViewport.fitBounds against the live canvas size).
  */
-export function useMapCamera(initial: MapViewState = US_HOME): MapCamera {
-  const [viewState, setViewState] = useState<MapViewState>(initial);
+export function useMapCamera(
+  initial: MapViewState = US_HOME,
+  opts?: CameraPersistOptions,
+): MapCamera {
+  // Restore the saved view once, at mount, when persistence is on.
+  const [viewState, setViewState] = useState<MapViewState>(() => {
+    if (opts?.persist && opts.persistKey) {
+      const saved = loadView(opts.persistKey);
+      if (saved) return { ...initial, ...saved };
+    }
+    return initial;
+  });
   const size = useRef({ width: 800, height: 600 });
+
+  // Keep the latest persist config in a ref so the (stable) onViewStateChange sees toggles live.
+  const persistRef = useRef(opts);
+  persistRef.current = opts;
+  const saveTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const latest = useRef<MapViewState>(viewState);
+  useEffect(
+    () => () => {
+      if (saveTimer.current != null) clearTimeout(saveTimer.current);
+    },
+    [],
+  );
 
   const onViewStateChange = useCallback((e: { viewState: MapViewState }) => {
     setViewState(e.viewState);
+    latest.current = e.viewState;
+    const p = persistRef.current;
+    if (p?.persist && p.persistKey) {
+      // Debounced write (~500ms after movement stops) — no per-frame localStorage work.
+      if (saveTimer.current != null) clearTimeout(saveTimer.current);
+      const key = p.persistKey;
+      saveTimer.current = setTimeout(() => {
+        const v = latest.current;
+        if (v.longitude != null && v.latitude != null && v.zoom != null) {
+          saveView(key, {
+            longitude: v.longitude,
+            latitude: v.latitude,
+            zoom: v.zoom,
+            pitch: v.pitch,
+            bearing: v.bearing,
+          });
+        }
+      }, 500);
+    }
   }, []);
 
   const onResize = useCallback((s: { width: number; height: number }) => {

@@ -24,6 +24,7 @@ import {
   Plane,
   PlaneTakeoff,
   Radar,
+  Settings as SettingsIcon,
   ShieldCheck,
   Split,
   User as UserIcon,
@@ -111,6 +112,12 @@ function UserMenu() {
           <Link to="/profile">
             <UserIcon />
             Profile
+          </Link>
+        </DropdownMenuItem>
+        <DropdownMenuItem asChild>
+          <Link to="/settings">
+            <SettingsIcon />
+            Settings
           </Link>
         </DropdownMenuItem>
         <DropdownMenuSeparator />

@@ -8,6 +8,13 @@ import {FcaMapView} from "@/components/map/FcaMapView";
  * (useTraffic / useAtc are mode-aware), so the widget replays the network at T. FCA overlays remain
  * current config (config history is out of scope).
  */
-export function MapWidgetView({ initialFlight }: { initialFlight?: string }) {
-  return <FcaMapView readOnly embedded initialFlight={initialFlight} />;
+export function MapWidgetView({ initialFlight, widgetId }: { initialFlight?: string; widgetId?: string }) {
+  return (
+    <FcaMapView
+      readOnly
+      embedded
+      initialFlight={initialFlight}
+      persistKey={widgetId ? `dash-${widgetId}` : undefined}
+    />
+  );
 }
