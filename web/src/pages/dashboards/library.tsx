@@ -1,3 +1,4 @@
+import {useState} from "react";
 import {Link, useNavigate} from "@tanstack/react-router";
 import {
   Badge,
@@ -15,6 +16,7 @@ import {
 } from "@ois/ui";
 import {ChevronDown, Folder, FolderPlus, LayoutDashboard, Plus, Share2, Trash2} from "lucide-react";
 
+import {FacilityCombobox, type FacilityPick} from "@/components/facility-combobox";
 import {type Template, TEMPLATES} from "@/features/dashboard/templates";
 import {
   type DashboardCollection,
@@ -127,6 +129,8 @@ export function BoardLibraryPage() {
 
   const boards = data?.dashboards ?? [];
   const collections = data?.collections ?? [];
+  // A facility-scoped template waiting for the user to pick its facility.
+  const [facTemplate, setFacTemplate] = useState<Template | null>(null);
 
   async function createBlank() {
     const name = (
@@ -143,6 +147,10 @@ export function BoardLibraryPage() {
   }
 
   async function createFromTemplate(t: Template) {
+    if (t.airports === "facility") {
+      setFacTemplate(t); // opens the facility picker; completed in onFacilityTemplate
+      return;
+    }
     let icaos: string[] = [];
     if (t.airports !== "none") {
       const raw = await prompt({
@@ -156,7 +164,18 @@ export function BoardLibraryPage() {
       if (icaos.length === 0) return;
     }
     const name = t.airports === "none" ? t.name : `${icaos.join("/")} · ${t.name}`;
-    const b = await create.mutateAsync({ name, data: t.build(icaos) });
+    const b = await create.mutateAsync({ name, data: t.build({ icaos }) });
+    navigate({ to: "/ops/my/$boardId", params: { boardId: b.id } });
+  }
+
+  async function onFacilityTemplate(pick: FacilityPick) {
+    const t = facTemplate;
+    setFacTemplate(null);
+    if (!t) return;
+    const b = await create.mutateAsync({
+      name: `${pick.id} · ${t.name}`,
+      data: t.build({ icaos: [], facility: pick }),
+    });
     navigate({ to: "/ops/my/$boardId", params: { boardId: b.id } });
   }
 
@@ -300,6 +319,19 @@ export function BoardLibraryPage() {
               </div>
             </section>
           )}
+        </div>
+      )}
+
+      {facTemplate && (
+        <div
+          className="fixed inset-0 z-[900] flex items-start justify-center bg-black/40 pt-32"
+          onClick={() => setFacTemplate(null)}
+        >
+          <div className="w-80 rounded-lg border bg-background p-4 shadow-2xl" onClick={(e) => e.stopPropagation()}>
+            <div className="mb-1 text-sm font-semibold">{facTemplate.name}</div>
+            <p className="mb-3 text-xs text-muted-foreground">Pick an ARTCC or TRACON.</p>
+            <FacilityCombobox autoFocus onSelect={onFacilityTemplate} />
+          </div>
         </div>
       )}
     </div>

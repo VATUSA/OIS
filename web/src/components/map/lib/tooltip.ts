@@ -1,32 +1,16 @@
 import type {PickingInfo} from "@deck.gl/core";
 
+import {RATINGS, onlineFor} from "@/lib/atc-format";
 import {ATC_COLORS} from "./colors";
 import type {Theme} from "./constants";
 import type {NormAircraft} from "./types";
 import {anchorHeader, type AtcAnchor, type AtcPositionLite} from "../layers/atc";
-
-/** VATSIM controller rating id → label. */
-const RATINGS: Record<number, string> = {
-  2: "S1", 3: "S2", 4: "S3", 5: "C1", 6: "C2", 7: "C3", 8: "I1", 9: "I2", 10: "I3", 11: "SUP", 12: "ADM",
-};
 
 const esc = (s: string) =>
   s.replace(/[&<>"]/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" })[c] ?? c);
 
 const posName = (p: AtcPositionLite) =>
   p.kind === "ATIS" ? `ATIS${p.atis_code ? " " + p.atis_code : ""}` : p.callsign;
-
-/** How long the controller has been on position, e.g. "2h14m" (blank if unknown). */
-function onlineFor(iso: string): string {
-  if (!iso) return "";
-  const t = Date.parse(iso);
-  if (!Number.isFinite(t)) return "";
-  const mins = Math.floor((Date.now() - t) / 60000);
-  if (mins < 0) return "";
-  const h = Math.floor(mins / 60);
-  const m = mins % 60;
-  return h > 0 ? `${h}h${m}m` : `${m}m`;
-}
 
 /** ATC hover card: header + each position's name, frequency, and controller. */
 function atcHtml(a: AtcAnchor, theme: Theme): string {

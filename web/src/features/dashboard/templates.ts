@@ -2,7 +2,14 @@
 // from the airport(s) the user supplies — reusing the same widget kinds the editor produces, so a
 // templated board is a fully editable normal board afterwards.
 
-import type {DashboardState, GridCell, Widget} from "./types";
+import {AIRPORT_KEY} from "./sources";
+import type {DashboardState, FacilityRef, GridCell, Widget} from "./types";
+
+/** What a template's `build` receives: the chosen airports and/or a facility scope. */
+export interface TemplateContext {
+  icaos: string[];
+  facility?: FacilityRef;
+}
 
 /** Distributive Omit so a widget spec can drop only `id` while keeping its kind-specific fields. */
 type NoId<T> = T extends unknown ? Omit<T, "id"> : never;
@@ -30,9 +37,9 @@ export interface Template {
   id: string;
   name: string;
   description: string;
-  /** How many airports the template needs before it can build. */
-  airports: "none" | "one" | "many";
-  build: (icaos: string[]) => DashboardState;
+  /** What the template needs before it can build. */
+  airports: "none" | "one" | "many" | "facility";
+  build: (ctx: TemplateContext) => DashboardState;
 }
 
 export const TEMPLATES: Template[] = [
@@ -41,7 +48,7 @@ export const TEMPLATES: Template[] = [
     name: "Airport overview",
     description: "Arrivals, departures, taxi and the live map for one airport.",
     airports: "one",
-    build: ([icao]) =>
+    build: ({ icaos: [icao] }) =>
       board([
         { widget: { kind: "stat", metric: "pilots" }, x: 0, y: 0, w: 3, h: 2 },
         { widget: { kind: "stat", metric: "programs" }, x: 3, y: 0, w: 3, h: 2 },
@@ -58,7 +65,7 @@ export const TEMPLATES: Template[] = [
     name: "Airport comparison",
     description: "Compare several airports side by side — inbound counts and arrival tables.",
     airports: "many",
-    build: (icaos) => {
+    build: ({ icaos }) => {
       const items: Placed[] = [
         {
           widget: {
@@ -138,5 +145,35 @@ export const TEMPLATES: Template[] = [
         },
         { widget: { kind: "map" }, x: 0, y: 7, w: 12, h: 6 },
       ]),
+  },
+  {
+    id: "facility-overview",
+    name: "Facility overview",
+    description: "Live ATC, aggregated departures & taxi, and a per-airport comparison for one ARTCC or TRACON.",
+    airports: "facility",
+    build: ({ facility }) => {
+      if (!facility) return board([]);
+      return board([
+        { widget: { kind: "atc", facility }, x: 0, y: 0, w: 4, h: 6 },
+        { widget: { kind: "table", source: "departures", params: { facility } }, x: 4, y: 0, w: 8, h: 6 },
+        { widget: { kind: "table", source: "taxi", params: { facility } }, x: 0, y: 6, w: 6, h: 5 },
+        {
+          widget: {
+            kind: "chart",
+            source: "departures",
+            params: { facility },
+            chartType: "bar",
+            x: AIRPORT_KEY,
+            y: [],
+            aggregate: "count",
+            topN: 0,
+          },
+          x: 6,
+          y: 6,
+          w: 6,
+          h: 5,
+        },
+      ]);
+    },
   },
 ];

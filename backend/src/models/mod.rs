@@ -1020,6 +1020,20 @@ pub struct TrafficAircraft {
 
 // --- Online ATC (the map "ATC" layer) ---
 
+/// An ATC facility (ARTCC/center or TRACON/approach) and the airports it covers — the dashboard's
+/// facility directory. Derived from VATSpy + the SimAware TRACON project (see `feed/facilities.rs`).
+#[derive(Debug, Serialize, ToSchema)]
+pub struct FlowFacility {
+    pub id: String,
+    /// "artcc" (center) | "tracon" (approach).
+    pub kind: String,
+    /// Display name, when known (null for now).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub name: Option<String>,
+    /// Member airport ICAOs.
+    pub airports: Vec<String>,
+}
+
 /// Everything the ATC layer needs: airport ground stations (badges), TRACON areas, and
 /// center positions. TRACON polygons are inlined (only the active ones); centers reference
 /// an ARTCC id the client already has boundary geometry for.
