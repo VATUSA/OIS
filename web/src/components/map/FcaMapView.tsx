@@ -620,6 +620,7 @@ export function FcaMapView({
 
       <TrafficMap
         className="relative isolate flex-1 overflow-hidden"
+        baseCursor="crosshair"
         camera={camera}
         aircraft={aircraft}
         aircraftStyle={planeIcons ? "silhouette" : "triangle"}
