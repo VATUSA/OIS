@@ -1954,6 +1954,13 @@ export interface components {
             callsign: string;
             frequency: string;
             kind: string;
+            /** @description The controller's name (empty for ATIS / when unknown). */
+            name: string;
+            /**
+             * Format: int32
+             * @description The controller's VATSIM rating id (0 when unknown).
+             */
+            rating: number;
         };
         /** @description One audit-log entry (the "recorded on this controller's log" trail). */
         AuditLogEntry: {

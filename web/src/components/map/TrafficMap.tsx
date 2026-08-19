@@ -6,7 +6,7 @@ import {MapCanvas} from "./MapCanvas";
 import {buildBoundaryLayer} from "./layers/boundaries";
 import {buildAircraftLayer, buildLabelLayer, type LabelFlags} from "./layers/aircraft";
 import {buildFcaLayers, type MapFca} from "./layers/fca";
-import {buildAtcLayers, type AtcData} from "./layers/atc";
+import {buildAtcHoverLayer, buildAtcLayers, computeAtcAnchors, type AtcData} from "./layers/atc";
 import {buildMatchedLayers, type MatchedFlight} from "./layers/matched";
 import {buildNamedRouteLayers, type NamedRoute} from "./layers/routes";
 import {buildDraftLayers, type DraftLine} from "./layers/draft";
@@ -20,7 +20,7 @@ import {
 } from "./layers/replay";
 import {AtcMarkers} from "./markers/AtcMarkers";
 import type {MapCamera} from "./hooks/useMapCamera";
-import {aircraftTooltip} from "./lib/tooltip";
+import {mapTooltip} from "./lib/tooltip";
 import type {NormAircraft, PathDatum, RGB, RouteGeom} from "./lib/types";
 
 export interface TrafficMapProps {
@@ -124,6 +124,11 @@ export function TrafficMap({
   const anyLabel =
     !!labels && (labels.callsign || labels.type || labels.alt || labels.speed);
 
+  const atcAnchors = useMemo(
+    () => (atc && boundaries ? computeAtcAnchors(atc, boundaries) : []),
+    [atc, boundaries],
+  );
+
   const selectedRoutePath = useMemo<PathDatum[]>(
     () => (filedRoute && filedRoute.path.length >= 2 ? [{ path: filedRoute.path }] : []),
     [filedRoute],
@@ -132,6 +137,7 @@ export function TrafficMap({
   const layers: Layer[] = [];
   if (boundaries) layers.push(buildBoundaryLayer(boundaries, resolvedTheme));
   if (atc && boundaries) layers.push(...buildAtcLayers(atc, boundaries));
+  if (atcAnchors.length) layers.push(buildAtcHoverLayer(atcAnchors));
   if (trails?.length) layers.push(buildTrailLayer(trails, resolvedTheme));
   if (routeOverlays?.length) layers.push(buildRouteOverlayLayer(routeOverlays));
   if (namedRoutes?.length)
@@ -218,7 +224,7 @@ export function TrafficMap({
       onResize={camera?.onResize}
       controller={controller}
       layers={layers}
-      getTooltip={aircraftTooltip(resolvedTheme)}
+      getTooltip={mapTooltip(resolvedTheme)}
       onClick={handleClick}
       onDragStart={handleDragStart}
       onDrag={handleDrag}
@@ -226,7 +232,7 @@ export function TrafficMap({
       getCursor={({ isHovering }) => (drawMode === "draw" ? "crosshair" : isHovering ? "pointer" : baseCursor)}
       mapChildren={
         <>
-          {atc && boundaries && <AtcMarkers atc={atc} boundaries={boundaries} />}
+          {atcAnchors.length > 0 && <AtcMarkers anchors={atcAnchors} />}
           {mapChildren}
         </>
       }

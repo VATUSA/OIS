@@ -21,6 +21,8 @@ export interface AtcPositionLite {
   callsign: string;
   frequency: string;
   kind: string;
+  name: string;
+  rating: number;
   atis_code?: string | null;
 }
 
@@ -101,4 +103,97 @@ export function buildAtcLayers(atc: AtcData, boundaries: GeoJSON.FeatureCollecti
   }
 
   return layers;
+}
+
+// --- Shared anchors (used by both the HTML pill markers and the pickable hover targets) ---
+
+/** A placed ATC label: an airport badge stack, or a center/TRACON id pill. */
+export type AtcAnchor =
+  | { type: "airport"; lat: number; lon: number; icao: string; positions: AtcPositionLite[] }
+  | {
+      type: "area";
+      lat: number;
+      lon: number;
+      id: string;
+      name?: string | null;
+      color: string;
+      positions: AtcPositionLite[];
+    };
+
+function ringsCentroid(rings: number[][][]): [number, number] | null {
+  const outer = rings[0];
+  if (!outer || outer.length === 0) return null;
+  let slat = 0;
+  let slon = 0;
+  for (const [lat, lon] of outer) {
+    slat += lat;
+    slon += lon;
+  }
+  return [slat / outer.length, slon / outer.length];
+}
+
+/** Centroid [lat, lon] of a boundary feature's outer ring (GeoJSON coords are [lon, lat]). */
+function featureCentroid(feat: GeoJSON.Feature): [number, number] | null {
+  const geom = feat.geometry;
+  const outer =
+    geom.type === "Polygon"
+      ? geom.coordinates[0]
+      : geom.type === "MultiPolygon"
+        ? geom.coordinates[0]?.[0]
+        : null;
+  if (!outer || outer.length === 0) return null;
+  let sx = 0;
+  let sy = 0;
+  for (const [lon, lat] of outer as number[][]) {
+    sx += lon;
+    sy += lat;
+  }
+  return [sy / outer.length, sx / outer.length];
+}
+
+/** Compute the on-map anchor for every ATC label (airport badge, center pill, TRACON pill). */
+export function computeAtcAnchors(atc: AtcData, boundaries: GeoJSON.FeatureCollection): AtcAnchor[] {
+  const anchors: AtcAnchor[] = [];
+  for (const ap of atc.airports) {
+    anchors.push({ type: "airport", lat: ap.lat, lon: ap.lon, icao: ap.icao, positions: ap.positions });
+  }
+  const byId = new Map<string, GeoJSON.Feature>();
+  for (const f of boundaries.features) {
+    const id = String(f.properties?.id ?? "").toUpperCase();
+    if (id) byId.set(id, f);
+  }
+  for (const c of atc.centers) {
+    const feat = byId.get(c.id.toUpperCase());
+    const at = feat ? featureCentroid(feat) : null;
+    if (at) anchors.push({ type: "area", lat: at[0], lon: at[1], id: c.id, color: ATC_COLORS.CTR, positions: c.positions });
+  }
+  for (const t of atc.tracons) {
+    const at =
+      (t.label as [number, number] | null | undefined) ??
+      (t.circle as [number, number] | null | undefined) ??
+      ringsCentroid(t.rings);
+    if (at) {
+      anchors.push({ type: "area", lat: at[0], lon: at[1], id: t.id, name: t.name, color: ATC_COLORS.APP, positions: t.positions });
+    }
+  }
+  return anchors;
+}
+
+/** The header line for an anchor's hover card (ICAO, or `ID · Name`). */
+export const anchorHeader = (a: AtcAnchor) =>
+  a.type === "airport" ? a.icao : `${a.id}${a.name ? " · " + a.name : ""}`;
+
+/** An invisible pickable circle at each anchor so deck's getTooltip can fire on hover (DOM markers
+ * sit under deck's event layer and can't be hovered directly). */
+export function buildAtcHoverLayer(anchors: AtcAnchor[]) {
+  return new ScatterplotLayer<AtcAnchor>({
+    id: "atc-hover",
+    data: anchors,
+    pickable: true,
+    getPosition: (a) => [a.lon, a.lat],
+    getRadius: 13,
+    radiusUnits: "pixels",
+    radiusMinPixels: 13,
+    getFillColor: [0, 0, 0, 0], // invisible, but still pickable
+  });
 }
