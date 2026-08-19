@@ -1,9 +1,4 @@
 import {useEffect, useMemo, useRef, useState} from "react";
-import DeckGL from "@deck.gl/react";
-import {GeoJsonLayer, IconLayer, PathLayer, ScatterplotLayer, TextLayer} from "@deck.gl/layers";
-import type {PickingInfo} from "@deck.gl/core";
-import {Map as MapLibre} from "react-map-gl/maplibre";
-import "maplibre-gl/dist/maplibre-gl.css";
 import {Button, useTheme} from "@ois/ui";
 import {Link, useNavigate, useSearch} from "@tanstack/react-router";
 import {ArrowLeft, Pause, Play, SkipBack, SlidersHorizontal, TriangleAlert, X} from "lucide-react";
@@ -11,76 +6,13 @@ import {ArrowLeft, Pause, Play, SkipBack, SlidersHorizontal, TriangleAlert, X} f
 import {useMe} from "@/lib/auth";
 import {hasPermission} from "@/lib/permissions";
 import {type Replay, resolveRoutes, useCaptureReplay, useCaptures, useWindowReplay} from "@/lib/stats";
-import {aircraftIconUrl} from "@/lib/aircraft-icons";
 import {webgl2Available} from "@/lib/webgl";
 import {formatZuluFull} from "@/lib/time";
 import boundariesGeo from "@/assets/artcc-boundaries.json";
+import {TrafficMap} from "@/components/map/TrafficMap";
+import {US_HOME} from "@/components/map/lib/constants";
+import {aircraftColor, HIGHLIGHT} from "@/components/map/lib/colors";
 
-// Free CARTO vector basemap styles (no access token needed).
-const CARTO_STYLE = {
-  dark: "https://basemaps.cartocdn.com/gl/dark-matter-gl-style/style.json",
-  light: "https://basemaps.cartocdn.com/gl/positron-gl-style/style.json",
-} as const;
-const INITIAL_VIEW = { longitude: -98.35, latitude: 39.5, zoom: 3.4 };
-
-// Per-theme colors for the airport-layout overlay: apron/surface fill, taxiway lines, runway lines.
-const AEROWAY_COLORS = {
-  dark: { fill: "#20242e", taxiway: "#4a5162", runway: "#8a93a6" },
-  light: { fill: "#e3e7ee", taxiway: "#c4cad4", runway: "#98a1b2" },
-} as const;
-
-/** Minimal MapLibre surface we touch — avoids depending on maplibre-gl's exported types. */
-interface StyleMap {
-  getSource(id: string): unknown;
-  getLayer(id: string): unknown;
-  addLayer(layer: Record<string, unknown>): void;
-}
-
-/**
- * Draw airport layouts (runways, taxiways, aprons) straight from the OSM `aeroway` data already in
- * the CARTO vector tiles — the base style renders it in near-black (invisible), so we add our own
- * visible layers instead. Free, no extra requests, appears once you zoom into a field (z≥10).
- * Idempotent: safe to call on every `styledata` (re-added after a theme swap wipes the style).
- */
-function ensureAeroway(map: StyleMap, theme: "dark" | "light"): void {
-  try {
-    if (!map.getSource("carto") || map.getLayer("ois-aeroway-fill")) return;
-    const c = AEROWAY_COLORS[theme];
-    const base = { source: "carto", "source-layer": "aeroway" } as const;
-    map.addLayer({
-      ...base,
-      id: "ois-aeroway-fill",
-      type: "fill",
-      minzoom: 10,
-      filter: ["==", ["geometry-type"], "Polygon"],
-      paint: { "fill-color": c.fill, "fill-opacity": 0.6 },
-    });
-    map.addLayer({
-      ...base,
-      id: "ois-aeroway-taxiway",
-      type: "line",
-      minzoom: 12,
-      filter: ["all", ["==", ["geometry-type"], "LineString"], ["==", ["get", "class"], "taxiway"]],
-      paint: {
-        "line-color": c.taxiway,
-        "line-width": ["interpolate", ["linear"], ["zoom"], 12, 0.6, 14, 1.5, 16, 4],
-      },
-    });
-    map.addLayer({
-      ...base,
-      id: "ois-aeroway-runway",
-      type: "line",
-      minzoom: 10,
-      filter: ["all", ["==", ["geometry-type"], "LineString"], ["==", ["get", "class"], "runway"]],
-      paint: {
-        "line-color": c.runway,
-        "line-width": ["interpolate", ["linear"], ["zoom"], 10, 1.2, 13, 4, 15, 9, 16, 13],
-      },
-    });
-  } catch {
-    // Style not fully ready yet — a later `styledata` event retries.
-  }
-}
 const SPEEDS = [1, 2, 4, 8, 16, 32, 64];
 /** Below this groundspeed an aircraft is treated as on the ground (taxi/parked). */
 const GROUND_KT = 30;
@@ -411,141 +343,6 @@ function ReplayMap({ replay }: { replay: Replay }) {
   }, [showRoutes, shown, routeCache]);
 
   const selectedRoute = selectedTrack ? routeCache[selectedTrack.callsign] : undefined;
-  const selectedRoutePath =
-    selectedRoute && selectedRoute.path.length >= 2 ? [{ path: selectedRoute.path }] : [];
-
-  const iconColor: [number, number, number] = resolvedTheme === "dark" ? [255, 190, 70] : [40, 60, 90];
-  const HL: [number, number, number] = [56, 189, 248]; // selected flight highlight (flown trail)
-  const ROUTE: [number, number, number] = [167, 139, 250]; // filed-route violet (distinct from flown)
-  const boundaryColor: [number, number, number, number] =
-    resolvedTheme === "dark" ? [130, 140, 160, 110] : [90, 100, 120, 120];
-  const labelColor: [number, number, number] = resolvedTheme === "dark" ? [230, 235, 245] : [20, 25, 35];
-
-  const anyLabel = labels.callsign || labels.type || labels.alt || labels.speed;
-
-  const layers = [
-    new GeoJsonLayer({
-      id: "artcc-boundaries",
-      data: boundariesGeo as GeoJSON.FeatureCollection,
-      stroked: true,
-      filled: false,
-      getLineColor: boundaryColor,
-      getLineWidth: 1,
-      lineWidthUnits: "pixels",
-      lineWidthMinPixels: 1,
-    }),
-    new PathLayer<{ path: [number, number][] }>({
-      id: "all-trails",
-      data: allTrails,
-      getPath: (d) => d.path,
-      getColor: [...iconColor, 80] as [number, number, number, number],
-      getWidth: 1.4,
-      widthUnits: "pixels",
-      widthMinPixels: 1,
-      updateTriggers: { getColor: [resolvedTheme] },
-    }),
-    new PathLayer<{ path: [number, number][] }>({
-      id: "routes-all",
-      data: allRoutePaths,
-      getPath: (d) => d.path,
-      getColor: [...ROUTE, 90] as [number, number, number, number],
-      getWidth: 1.2,
-      widthUnits: "pixels",
-      widthMinPixels: 1,
-    }),
-    new ScatterplotLayer<Live>({
-      id: "range-rings",
-      data: rings ? shown : [],
-      getPosition: (d) => [d.lon, d.lat],
-      getRadius: ringNm * 1852, // NM → metres
-      radiusUnits: "meters",
-      stroked: true,
-      filled: false,
-      getLineColor: [...iconColor, 150] as [number, number, number, number],
-      lineWidthUnits: "pixels",
-      getLineWidth: 1.1,
-      lineWidthMinPixels: 1,
-      updateTriggers: { getRadius: [ringNm], getLineColor: [resolvedTheme] },
-    }),
-    new PathLayer<{ path: [number, number][] }>({
-      id: "selected-track",
-      data: trackPath,
-      getPath: (d) => d.path,
-      getColor: [...HL, 220] as [number, number, number, number],
-      getWidth: 2,
-      widthUnits: "pixels",
-      widthMinPixels: 2,
-      capRounded: true,
-      jointRounded: true,
-    }),
-    new PathLayer<{ path: [number, number][] }>({
-      id: "selected-route",
-      data: selectedRoutePath,
-      getPath: (d) => d.path,
-      getColor: [...ROUTE, 230] as [number, number, number, number],
-      getWidth: 2,
-      widthUnits: "pixels",
-      widthMinPixels: 2,
-      capRounded: true,
-      jointRounded: true,
-    }),
-    new IconLayer<Live>({
-      id: "aircraft",
-      data: shown,
-      pickable: true,
-      getIcon: (d) => {
-        const url = aircraftIconUrl(d.actype);
-        return { id: url, url, width: 48, height: 48, mask: true };
-      },
-      getPosition: (d) => [d.lon, d.lat],
-      getAngle: (d) => 360 - d.heading,
-      getColor: (d) => (d.id === selectedId ? HL : iconColor),
-      getSize: (d) => (d.id === selectedId ? 34 : 26),
-      sizeUnits: "pixels",
-      billboard: false,
-      updateTriggers: { getColor: [resolvedTheme, selectedId], getSize: [selectedId] },
-    }),
-    new TextLayer<Live>({
-      id: "labels",
-      data: anyLabel ? shown : [],
-      getPosition: (d) => [d.lon, d.lat],
-      getText: (d) => {
-        const lines: string[] = [];
-        if (labels.callsign) lines.push(d.callsign);
-        if (labels.type && d.actype) lines.push(d.actype);
-        if (labels.alt) lines.push(`${d.alt}ft`);
-        if (labels.speed) lines.push(`${d.gs}kt`);
-        return lines.join("\n");
-      },
-      getColor: labelColor,
-      getSize: 11,
-      getPixelOffset: [0, 16],
-      getTextAnchor: "middle",
-      getAlignmentBaseline: "top",
-      background: true,
-      getBackgroundColor: resolvedTheme === "dark" ? [10, 12, 16, 180] : [255, 255, 255, 190],
-      backgroundPadding: [3, 1],
-      updateTriggers: {
-        getText: [labels.callsign, labels.type, labels.alt, labels.speed],
-        getColor: [resolvedTheme],
-      },
-    }),
-    new TextLayer<{ name: string; lat: number; lon: number }>({
-      id: "selected-route-waypoints",
-      data: selectedRoute?.waypoints ?? [],
-      getPosition: (d) => [d.lon, d.lat],
-      getText: (d) => d.name,
-      getColor: [...ROUTE, 255] as [number, number, number, number],
-      getSize: 10,
-      getPixelOffset: [0, -10],
-      getTextAnchor: "middle",
-      getAlignmentBaseline: "bottom",
-      background: true,
-      getBackgroundColor: resolvedTheme === "dark" ? [10, 12, 16, 200] : [255, 255, 255, 210],
-      backgroundPadding: [2, 1],
-      updateTriggers: { getColor: [resolvedTheme] },
-    }),
-  ];
 
   const toggle = () => {
     const next = !playingRef.current;
@@ -565,11 +362,6 @@ function ReplayMap({ replay }: { replay: Replay }) {
     setSpeed(v);
   };
 
-  const handleClick = (info: PickingInfo) => {
-    const id = info.layer?.id === "aircraft" ? ((info.object as Live | undefined)?.id ?? null) : null;
-    setSelectedId((prev) => (prev === id ? null : id));
-  };
-
   const addFilter = () => {
     const dep = depDraft.trim().toUpperCase() || "*";
     const arr = arrDraft.trim().toUpperCase() || "*";
@@ -577,25 +369,6 @@ function ReplayMap({ replay }: { replay: Replay }) {
     setFilters((prev) => [...prev, { dep, arr }]);
     setDepDraft("");
     setArrDraft("");
-  };
-
-  const tooltip = (info: PickingInfo<Live>) => {
-    const d = info.object;
-    if (!d) return null;
-    return {
-      html:
-        `<div style="font-weight:600">${d.callsign}</div>` +
-        `<div>${d.dep || "????"} → ${d.arr || "????"}</div>` +
-        `<div>${d.actype || "—"} · ${d.alt}ft · ${d.gs}kt</div>`,
-      style: {
-        background: resolvedTheme === "dark" ? "#111418" : "#ffffff",
-        color: resolvedTheme === "dark" ? "#e6edf3" : "#1b1f24",
-        fontSize: "12px",
-        padding: "6px 8px",
-        borderRadius: "6px",
-        boxShadow: "0 2px 8px rgba(0,0,0,.3)",
-      },
-    };
   };
 
   if (!mapAvailable) {
@@ -623,27 +396,22 @@ function ReplayMap({ replay }: { replay: Replay }) {
 
   return (
     <div className="flex flex-col gap-3">
-      <div
-        className="relative w-full overflow-hidden rounded-lg border"
-        style={{ height: "70vh" }}
+      <TrafficMap
+        className="relative h-[70vh] w-full overflow-hidden rounded-lg border"
+        initialViewState={US_HOME}
+        aircraft={shown}
+        getAircraftColor={(d) => (d.id === selectedId ? HIGHLIGHT : aircraftColor(resolvedTheme))}
+        getAircraftSize={(d) => (d.id === selectedId ? 34 : 26)}
+        selectedAircraftId={selectedId}
+        labels={labels}
+        boundaries={boundariesGeo as GeoJSON.FeatureCollection}
+        trails={allTrails}
+        routeOverlays={allRoutePaths}
+        rings={rings ? { data: shown, nm: ringNm } : null}
+        selectedTrack={trackPath}
+        filedRoute={selectedRoute ?? null}
+        onAircraftClick={(id) => setSelectedId((prev) => (prev === id ? null : id))}
       >
-        <DeckGL
-          initialViewState={INITIAL_VIEW}
-          controller
-          layers={layers}
-          getTooltip={tooltip}
-          onClick={handleClick}
-          getCursor={({ isHovering }) => (isHovering ? "pointer" : "grab")}
-          style={{ position: "absolute", top: "0", left: "0", width: "100%", height: "100%" }}
-        >
-          <MapLibre
-            mapStyle={CARTO_STYLE[resolvedTheme]}
-            attributionControl={false}
-            onLoad={(e) => ensureAeroway(e.target as unknown as StyleMap, resolvedTheme)}
-            onStyleData={(e) => ensureAeroway(e.target as unknown as StyleMap, resolvedTheme)}
-          />
-        </DeckGL>
-
         <div className="pointer-events-none absolute left-3 top-3 z-10 rounded-md bg-background/80 px-3 py-1.5 text-sm shadow backdrop-blur">
           <span className="font-mono font-medium">{zulu(replay.window_start, clock)}</span>
           <span className="ml-2 text-muted-foreground">{shown.length} aircraft</span>
@@ -822,7 +590,7 @@ function ReplayMap({ replay }: { replay: Replay }) {
             </div>
           </div>
         )}
-      </div>
+      </TrafficMap>
 
       <div className="flex flex-wrap items-center gap-3">
         <Button size="icon" variant="secondary" title="Restart" onClick={() => scrub(0)}>

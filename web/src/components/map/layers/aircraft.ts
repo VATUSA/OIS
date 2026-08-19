@@ -1,0 +1,77 @@
+import {IconLayer, TextLayer} from "@deck.gl/layers";
+
+import {aircraftIconUrl} from "@/lib/aircraft-icons";
+import type {Theme} from "../lib/constants";
+import {aircraftColor, labelBackground, labelColor} from "../lib/colors";
+import type {NormAircraft, RGB} from "../lib/types";
+
+export interface AircraftLayerOptions {
+  theme: Theme;
+  /** Per-aircraft glyph color (defaults to the theme aircraft color). */
+  getColor?: (a: NormAircraft) => RGB;
+  /** Per-aircraft glyph size in pixels (default 26). */
+  getSize?: (a: NormAircraft) => number;
+  /** Bumps updateTriggers when selection/highlight changes color/size. */
+  highlightKey?: unknown;
+}
+
+/** Heading-rotated aircraft glyphs (VATSIM-Radar type silhouettes, masked so they take `getColor`). */
+export function buildAircraftLayer(data: NormAircraft[], opts: AircraftLayerOptions) {
+  const base = aircraftColor(opts.theme);
+  return new IconLayer<NormAircraft>({
+    id: "aircraft",
+    data,
+    pickable: true,
+    getIcon: (d) => {
+      const url = aircraftIconUrl(d.actype);
+      return { id: url, url, width: 48, height: 48, mask: true };
+    },
+    getPosition: (d) => [d.lon, d.lat],
+    getAngle: (d) => 360 - d.heading,
+    getColor: (d) => opts.getColor?.(d) ?? base,
+    getSize: (d) => opts.getSize?.(d) ?? 26,
+    sizeUnits: "pixels",
+    billboard: false,
+    updateTriggers: {
+      getColor: [opts.theme, opts.highlightKey],
+      getSize: [opts.highlightKey],
+    },
+  });
+}
+
+export interface LabelFlags {
+  callsign: boolean;
+  type: boolean;
+  alt: boolean;
+  speed: boolean;
+}
+
+/** Aircraft text labels (callsign/type/alt/gs), stacked under each glyph. */
+export function buildLabelLayer(data: NormAircraft[], labels: LabelFlags, theme: Theme) {
+  return new TextLayer<NormAircraft>({
+    id: "labels",
+    data,
+    getPosition: (d) => [d.lon, d.lat],
+    getText: (d) => {
+      const lines: string[] = [];
+      if (labels.callsign) lines.push(d.callsign);
+      if (labels.type && d.actype) lines.push(d.actype);
+      if (labels.alt) lines.push(`${d.alt}ft`);
+      if (labels.speed) lines.push(`${d.gs}kt`);
+      return lines.join("\n");
+    },
+    getColor: labelColor(theme),
+    getSize: 11,
+    getPixelOffset: [0, 16],
+    getTextAnchor: "middle",
+    getAlignmentBaseline: "top",
+    background: true,
+    getBackgroundColor: labelBackground(theme),
+    backgroundPadding: [3, 1],
+    updateTriggers: {
+      getText: [labels.callsign, labels.type, labels.alt, labels.speed],
+      getColor: [theme],
+      getBackgroundColor: [theme],
+    },
+  });
+}
