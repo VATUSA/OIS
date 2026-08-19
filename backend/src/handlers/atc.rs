@@ -183,6 +183,8 @@ pub fn board_from(
             kind: kind.to_string(),
             callsign: c.callsign.clone(),
             frequency: c.frequency.clone(),
+            name: c.name.clone(),
+            rating: c.rating,
             atis_code: None,
         };
         match kind {
@@ -252,6 +254,8 @@ pub fn board_from(
                 kind: "ATIS".to_string(),
                 callsign: a.callsign.clone(),
                 frequency: a.frequency.clone(),
+                name: String::new(),
+                rating: 0,
                 atis_code: a.atis_code.clone(),
             },
         );
