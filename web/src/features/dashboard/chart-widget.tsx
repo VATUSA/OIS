@@ -14,6 +14,7 @@ import {
   labelOf,
   type Series,
 } from "./chart-shared";
+import {facilityAirports, useFacilityDirectory} from "@/lib/facilities";
 import {AIRPORT_KEY, type DataSource, DATA_SOURCES_BY_ID, type Row} from "./sources";
 import type {ChartAggregate, ChartThreshold, ChartWidget as ChartWidgetT} from "./types";
 import {useReportWidgetStatus} from "./widget-status";
@@ -409,11 +410,15 @@ function ChartInner({
   editing: boolean;
   onChange: (id: string, patch: Record<string, unknown>) => void;
 }) {
-  const icaos = widget.params?.icaos?.length
-    ? widget.params.icaos
-    : widget.params?.icao
-      ? [widget.params.icao]
-      : [];
+  // A facility scope expands to its member airports at render (membership stays current).
+  const dir = useFacilityDirectory();
+  const icaos = widget.params?.facility
+    ? facilityAirports(dir.data, widget.params.facility.id)
+    : widget.params?.icaos?.length
+      ? widget.params.icaos
+      : widget.params?.icao
+        ? [widget.params.icao]
+        : [];
   const { rows, isLoading, isError, isFetching, dataUpdatedAt, refetch } = source.useRows({ icaos });
   useReportWidgetStatus(isFetching, dataUpdatedAt, refetch);
   const [ref, size] = useSize();

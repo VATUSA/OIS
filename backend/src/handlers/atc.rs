@@ -11,9 +11,32 @@ use crate::{
     feed::airports::{AirportDb, IataMap},
     feed::tracon::TraconData,
     feed::vatsim::VatsimData,
-    models::{AtcAirport, AtcArea, AtcBoard, AtcCenter, AtcPosition},
+    models::{AtcAirport, AtcArea, AtcBoard, AtcCenter, AtcPosition, FlowFacility},
     state::AppState,
 };
+
+/// The facility directory (ARTCCs + TRACONs and their member airports) for scoping dashboard widgets
+/// to a whole facility. Public read; served from the daily-refreshed `feed/facilities.rs` map.
+#[utoipa::path(
+    get,
+    path = "/api/v1/flow/facilities",
+    tag = "flow",
+    responses((status = 200, body = Vec<FlowFacility>))
+)]
+pub async fn list_flow_facilities(State(state): State<AppState>) -> Json<Vec<FlowFacility>> {
+    let map = state.facilities.read().await;
+    let mut out: Vec<FlowFacility> = map
+        .iter()
+        .map(|(id, f)| FlowFacility {
+            id: id.clone(),
+            kind: f.kind.clone(),
+            name: None,
+            airports: f.airports.clone(),
+        })
+        .collect();
+    out.sort_by(|a, b| a.id.cmp(&b.id));
+    Json(out)
+}
 
 /// VATSIM voice band — drops observers/relief loggers parked on out-of-band frequencies.
 fn in_atc_band(freq: &str) -> bool {

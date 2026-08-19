@@ -1,3 +1,4 @@
+import {AtcWidgetView} from "./atc-widget";
 import {ChartWidget} from "./chart-widget";
 import {DividerWidgetView, TextWidgetView} from "./layout-widgets";
 import {MapWidgetView} from "./map-widget";
@@ -28,6 +29,8 @@ export function WidgetBody({
       return <TableWidget widget={widget} editing={editing} onChange={onUpdate} />;
     case "chart":
       return <ChartWidget widget={widget} editing={editing} onChange={onUpdate} />;
+    case "atc":
+      return <AtcWidgetView widget={widget} />;
     case "text":
       return <TextWidgetView widget={widget} editing={editing} onChange={onUpdate} />;
     case "divider":
@@ -55,12 +58,16 @@ export function widgetTitle(widget: Widget): string {
       return "Map";
     case "table": {
       const label = DATA_SOURCES_BY_ID[widget.source]?.label ?? "Table";
+      if (widget.params?.facility) return `${widget.params.facility.id} · ${label}`;
       return widget.params?.icao ? `${widget.params.icao} · ${label}` : label;
     }
     case "chart": {
       const label = DATA_SOURCES_BY_ID[widget.source]?.label ?? "Chart";
+      if (widget.params?.facility) return `${widget.params.facility.id} · ${label}`;
       return widget.params?.icao ? `${widget.params.icao} · ${label}` : label;
     }
+    case "atc":
+      return `${widget.facility.id} · ATC`;
     case "text":
     case "divider":
       return ""; // bare widgets render no header

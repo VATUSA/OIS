@@ -58,13 +58,20 @@ export interface MapWidget {
   initialFlight?: string;
 }
 
+/** A dashboard scope of "a whole ATC facility" — an ARTCC (center) or TRACON (approach). Resolved to
+ * its member airports at render (see `lib/facilities`), so membership stays current. */
+export interface FacilityRef {
+  kind: "artcc" | "tracon";
+  id: string;
+}
+
 export interface TableWidget {
   id: string;
   kind: "table";
   title?: string;
   /** DataSource id from the registry (features/dashboard/sources). */
   source: string;
-  params?: { icao?: string };
+  params?: { icao?: string; facility?: FacilityRef };
   /** Visible column keys (field keys), in order. Undefined = all of the source's fields. */
   columns?: string[];
   /** TanStack Table sorting state, persisted. */
@@ -85,8 +92,9 @@ export interface ChartWidget {
   title?: string;
   /** DataSource id from the registry (features/dashboard/sources). */
   source: string;
-  /** icaos powers multi-airport comparison; icao kept for back-compat / single-airport. */
-  params?: { icao?: string; icaos?: string[] };
+  /** icaos powers multi-airport comparison; icao kept for back-compat / single-airport;
+   * facility expands to its member airports at render. */
+  params?: { icao?: string; icaos?: string[]; facility?: FacilityRef };
   chartType: "bar" | "line" | "area" | "scatter" | "pie";
   /** Field key for the x axis (category/time), or "__airport" to compare airports directly. */
   x: string;
@@ -126,12 +134,21 @@ export interface DividerWidget {
   label?: string;
 }
 
+/** Online ATC positions for a whole facility (its center/approach positions + its airports' towers). */
+export interface AtcWidget {
+  id: string;
+  kind: "atc";
+  title?: string;
+  facility: FacilityRef;
+}
+
 export type Widget =
   | ViewWidget
   | StatWidget
   | MapWidget
   | TableWidget
   | ChartWidget
+  | AtcWidget
   | TextWidget
   | DividerWidget;
 export type WidgetKind = Widget["kind"];
@@ -173,6 +190,8 @@ export function defaultCell(w: Widget): { w: number; h: number; minW: number; mi
       return { w: 6, h: 4, minW: 3, minH: 3 };
     case "chart":
       return { w: 5, h: 4, minW: 3, minH: 3 };
+    case "atc":
+      return { w: 4, h: 6, minW: 3, minH: 3 };
     case "text":
       return { w: 4, h: 1, minW: 2, minH: 1 };
     case "divider":

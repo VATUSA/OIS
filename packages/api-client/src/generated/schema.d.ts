@@ -729,6 +729,26 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/v1/flow/facilities": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * The facility directory (ARTCCs + TRACONs and their member airports) for scoping dashboard widgets
+         *     to a whole facility. Public read; served from the daily-refreshed `feed/facilities.rs` map.
+         */
+        get: operations["list_flow_facilities"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/v1/flow/fcas": {
         parameters: {
             query?: never;
@@ -2495,6 +2515,19 @@ export interface components {
             /** @description `demand_60min > aar` when a program exists, else null. */
             over_capacity?: boolean | null;
             proposed: number;
+        };
+        /**
+         * @description An ATC facility (ARTCC/center or TRACON/approach) and the airports it covers — the dashboard's
+         *     facility directory. Derived from VATSpy + the SimAware TRACON project (see `feed/facilities.rs`).
+         */
+        FlowFacility: {
+            /** @description Member airport ICAOs. */
+            airports: string[];
+            id: string;
+            /** @description "artcc" (center) | "tracon" (approach). */
+            kind: string;
+            /** @description Display name, when known (null for now). */
+            name?: string | null;
         };
         FlowFlight: {
             aircraft_type: string;
@@ -5527,6 +5560,25 @@ export interface operations {
                     [name: string]: unknown;
                 };
                 content?: never;
+            };
+        };
+    };
+    list_flow_facilities: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["FlowFacility"][];
+                };
             };
         };
     };

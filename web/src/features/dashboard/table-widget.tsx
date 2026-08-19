@@ -18,6 +18,7 @@ import {ArrowDown, ArrowUp, Check, ChevronsUpDown, Columns3} from "lucide-react"
 
 import {hhmmZulu} from "@/lib/time";
 
+import {facilityAirports, useFacilityDirectory} from "@/lib/facilities";
 import {type DataSource, DATA_SOURCES_BY_ID, type FieldType, type Row} from "./sources";
 import type {TableWidget as TableWidgetT} from "./types";
 import {useReportWidgetStatus} from "./widget-status";
@@ -90,9 +91,12 @@ function TableInner({
   editing: boolean;
   onChange: (id: string, patch: Record<string, unknown>) => void;
 }) {
-  const { rows, isLoading, isError, isFetching, dataUpdatedAt, refetch } = source.useRows(
-    widget.params ?? {},
-  );
+  // A facility scope expands to its member airports at render (membership stays current).
+  const dir = useFacilityDirectory();
+  const params = widget.params?.facility
+    ? { ...widget.params, icaos: facilityAirports(dir.data, widget.params.facility.id) }
+    : (widget.params ?? {});
+  const { rows, isLoading, isError, isFetching, dataUpdatedAt, refetch } = source.useRows(params);
   useReportWidgetStatus(isFetching, dataUpdatedAt, refetch);
   const visible = widget.columns ?? source.fields.map((fd) => fd.key);
   const typeByKey = useMemo(
