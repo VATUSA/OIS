@@ -37,7 +37,7 @@ function Stat({
 
 export function AdminOverview() {
   const facilities = useFacilities();
-  const audit = useAuditLog(8);
+  const audit = useAuditLog(1, 8);
   const serviceAccounts = useServiceAccounts();
 
   return (
