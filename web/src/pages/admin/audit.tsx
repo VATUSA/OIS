@@ -1,7 +1,7 @@
 import {useState} from "react";
 import {Card, CardContent} from "@ois/ui";
 
-import {ActivityList} from "@/components/admin/activity";
+import {AuditTable} from "@/components/admin/audit-table";
 import {Pagination} from "@/components/pagination";
 import {useAuditLog} from "@/lib/admin";
 
@@ -23,7 +23,7 @@ export function AdminAudit() {
         <CardContent className="flex flex-col gap-4 pt-6">
           {audit.data ? (
             <>
-              <ActivityList items={audit.data.items} />
+              <AuditTable items={audit.data.items} />
               <Pagination
                 page={audit.data.page}
                 pageSize={audit.data.page_size}
