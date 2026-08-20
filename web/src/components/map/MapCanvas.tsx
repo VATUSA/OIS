@@ -15,6 +15,9 @@ import {useWebglAvailable} from "./hooks/useWebglAvailable";
  * Leaflet longitude-offset machinery. */
 const MAP_VIEW = new MapView({ repeat: true });
 
+/** deck.gl calls props.onResize directly, so an explicit `undefined` (no camera) crashes it. */
+const NOOP = () => {};
+
 type TooltipFn = (info: PickingInfo) => { html: string; style?: Record<string, string> } | null;
 type EventHandler = (info: PickingInfo, event: unknown) => void;
 
@@ -113,7 +116,7 @@ export function MapCanvas({
         onDragStart={onDragStart as never}
         onDrag={onDrag as never}
         onDragEnd={onDragEnd as never}
-        onResize={onResize}
+        onResize={onResize ?? NOOP}
         getCursor={getCursor}
         style={{ position: "absolute", top: "0", left: "0", width: "100%", height: "100%" }}
       >
