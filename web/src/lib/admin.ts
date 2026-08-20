@@ -1,17 +1,19 @@
-import {useQuery} from "@tanstack/react-query";
+import {keepPreviousData, useQuery} from "@tanstack/react-query";
 
 import {ois} from "./api";
 
-export function useAuditLog(pageSize = 8) {
+export function useAuditLog(page = 1, pageSize = 50) {
   return useQuery({
-    queryKey: ["audit", pageSize],
+    queryKey: ["audit", page, pageSize],
     queryFn: async () => {
       const { data, error } = await ois.GET("/api/v1/admin/audit", {
-        params: { query: { page_size: pageSize } },
+        params: { query: { page, page_size: pageSize } },
       });
       if (error || !data) throw new Error("failed to load audit log");
       return data;
     },
+    // Keep the current page on screen while the next one loads (no flash to "Loading…").
+    placeholderData: keepPreviousData,
   });
 }
 

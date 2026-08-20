@@ -1,10 +1,15 @@
+import {useState} from "react";
 import {Card, CardContent} from "@ois/ui";
 
 import {ActivityList} from "@/components/admin/activity";
+import {Pagination} from "@/components/pagination";
 import {useAuditLog} from "@/lib/admin";
 
+const PAGE_SIZE = 50;
+
 export function AdminAudit() {
-  const audit = useAuditLog(50);
+  const [page, setPage] = useState(1);
+  const audit = useAuditLog(page, PAGE_SIZE);
 
   return (
     <div className="flex flex-col gap-6">
@@ -15,17 +20,23 @@ export function AdminAudit() {
         </p>
       </div>
       <Card>
-        <CardContent className="pt-6">
-          {audit.isError ? (
+        <CardContent className="flex flex-col gap-4 pt-6">
+          {audit.data ? (
+            <>
+              <ActivityList items={audit.data.items} />
+              <Pagination
+                page={audit.data.page}
+                pageSize={audit.data.page_size}
+                total={audit.data.total}
+                onPageChange={setPage}
+              />
+            </>
+          ) : audit.isError ? (
             <p className="py-6 text-center text-sm text-muted-foreground">
               Couldn&apos;t load the audit log.
             </p>
-          ) : audit.data ? (
-            <ActivityList items={audit.data.items} />
           ) : (
-            <p className="py-6 text-center text-sm text-muted-foreground">
-              Loading…
-            </p>
+            <p className="py-6 text-center text-sm text-muted-foreground">Loading…</p>
           )}
         </CardContent>
       </Card>
