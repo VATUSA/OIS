@@ -44,6 +44,14 @@ export const SETTINGS: SettingDef[] = [
       "Keep the last pan and zoom on the FCA map and dashboard maps across page refreshes and new tabs.",
     control: { kind: "toggle", default: true },
   },
+  {
+    key: "map.dynamicAircraftScale",
+    group: "Map",
+    label: "Scale aircraft with zoom",
+    description:
+      "Grow aircraft icons as you zoom in and shrink them when zoomed out, instead of a fixed size. Off keeps every icon a constant size.",
+    control: { kind: "toggle", default: true },
+  },
 ];
 
 /** The default value for a setting key (used before the server value loads, or when signed out). */

@@ -1,8 +1,11 @@
-import {useMemo, useRef, useState} from "react";
+import {useCallback, useMemo, useRef, useState} from "react";
 import type {Layer, MapViewState, PickingInfo} from "@deck.gl/core";
 import {useTheme} from "@ois/ui";
 
+import {useSetting} from "@/lib/settings";
 import {MapCanvas} from "./MapCanvas";
+import {US_HOME} from "./lib/constants";
+import {zoomAircraftScale} from "./lib/aircraft-scale";
 import {buildBoundaryLayer} from "./layers/boundaries";
 import {buildAircraftLayer, buildLabelLayer, type LabelFlags} from "./layers/aircraft";
 import {buildFcaLayers, type MapFca} from "./layers/fca";
@@ -121,6 +124,23 @@ export function TrafficMap({
   const [draggingVertex, setDraggingVertex] = useState(false);
   const lastClickT = useRef(0);
 
+  // Track the current zoom so aircraft glyphs can scale with it (VATSIM-Radar style). Rounded to a
+  // step so panning-induced micro-zooms don't re-render the layers every frame. Controlled maps also
+  // re-render via the camera, but tracking it here keeps the one code path for both.
+  const dynamicScale = useSetting("map.dynamicAircraftScale", true).value;
+  const [zoom, setZoom] = useState(
+    () => initialViewState?.zoom ?? camera?.viewState.zoom ?? US_HOME.zoom,
+  );
+  const handleViewStateChange = useCallback(
+    (e: { viewState: MapViewState }) => {
+      camera?.onViewStateChange?.(e);
+      const z = e.viewState.zoom;
+      setZoom((prev) => (Math.abs(prev - z) >= ZOOM_STEP ? z : prev));
+    },
+    [camera],
+  );
+  const sizeScale = dynamicScale ? zoomAircraftScale(zoom) : 1;
+
   const anyLabel =
     !!labels && (labels.callsign || labels.type || labels.alt || labels.speed);
 
@@ -145,7 +165,7 @@ export function TrafficMap({
   if (rings?.data.length) layers.push(buildRingLayer(rings.data, rings.nm, resolvedTheme));
   if (fcas?.length) layers.push(...buildFcaLayers(fcas, selectedFcaId));
   if (matched?.length && matchedColor)
-    layers.push(...buildMatchedLayers(matched, matchedColor, aircraftStyle ?? "silhouette"));
+    layers.push(...buildMatchedLayers(matched, matchedColor, aircraftStyle ?? "silhouette", sizeScale));
   if (selectedTrack?.length) layers.push(buildSelectedTrackLayer(selectedTrack));
   if (selectedRoutePath.length) layers.push(buildSelectedRouteLayer(selectedRoutePath));
   layers.push(
@@ -154,6 +174,7 @@ export function TrafficMap({
       style: aircraftStyle,
       getColor: getAircraftColor,
       getSize: getAircraftSize,
+      sizeScale,
       highlightKey: selectedAircraftId,
     }),
   );
@@ -220,7 +241,7 @@ export function TrafficMap({
       className={className}
       initialViewState={initialViewState}
       viewState={camera?.viewState}
-      onViewStateChange={camera?.onViewStateChange}
+      onViewStateChange={handleViewStateChange}
       onResize={camera?.onResize}
       controller={controller}
       layers={layers}
@@ -243,3 +264,6 @@ export function TrafficMap({
 }
 
 const EMPTY_SET: Set<string> = new Set();
+
+/** Re-scale glyphs only when zoom moves at least this much, so panning doesn't churn the layers. */
+const ZOOM_STEP = 0.1;
