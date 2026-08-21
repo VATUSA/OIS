@@ -114,6 +114,7 @@ pub fn draft_new_permission_names() -> Vec<&'static str> {
         "flow.route.delete",
         "flow.runway.read",
         "flow.runway.update",
+        "flow.facility_map.update", // edit a facility map's aircraft color rules (facility-scoped)
         // --- stats: persistent network statistics + saved capture windows ---
         "stats.data.read",
         "stats.capture.update",

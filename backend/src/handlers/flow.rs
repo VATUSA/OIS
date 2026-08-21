@@ -849,6 +849,19 @@ pub(crate) fn traffic_from(data: &VatsimData) -> Vec<TrafficAircraft> {
         .filter(|p| p.latitude != 0.0 || p.longitude != 0.0)
         .map(|p| {
             let fp = p.flight_plan.as_ref();
+            let arr = fp.map(|f| f.arrival.clone()).unwrap_or_default();
+            // Enrich for the facility map's client-side color rules: STAR/gate (base name), wake,
+            // flight rules, and filed cruise altitude. Cheap per-pilot string parsing.
+            let (star, wake, flight_rules, filed_alt) = match fp {
+                Some(f) => (
+                    crate::feed::flow::arrival_gate(&f.route, &arr)
+                        .map(|g| crate::feed::runway::star_base(&g)),
+                    f.aircraft_type_wake().1,
+                    f.flight_rules.clone(),
+                    trajectory::parse_alt_ft(&f.altitude) as i32,
+                ),
+                None => (None, String::new(), String::new(), 0),
+            };
             TrafficAircraft {
                 callsign: p.callsign.clone(),
                 lat: p.latitude,
@@ -857,8 +870,12 @@ pub(crate) fn traffic_from(data: &VatsimData) -> Vec<TrafficAircraft> {
                 gs: p.groundspeed,
                 alt: p.altitude,
                 dep: fp.map(|f| f.departure.clone()).unwrap_or_default(),
-                arr: fp.map(|f| f.arrival.clone()).unwrap_or_default(),
+                arr,
                 actype: fp.map(|f| f.aircraft_short.clone()).unwrap_or_default(),
+                star,
+                wake,
+                flight_rules,
+                filed_alt,
             }
         })
         .collect()

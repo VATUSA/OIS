@@ -41,6 +41,8 @@ export interface TrafficMapProps {
 
   // Overlays.
   boundaries?: GeoJSON.FeatureCollection;
+  /** Draw the boundary bolder + lightly filled (facility map's single-facility focus). */
+  boundaryEmphasis?: boolean;
   trails?: PathDatum[];
   routeOverlays?: PathDatum[];
   rings?: { data: NormAircraft[]; nm: number } | null;
@@ -93,6 +95,7 @@ export function TrafficMap({
   selectedAircraftId,
   labels,
   boundaries,
+  boundaryEmphasis,
   trails,
   routeOverlays,
   rings,
@@ -155,7 +158,7 @@ export function TrafficMap({
   );
 
   const layers: Layer[] = [];
-  if (boundaries) layers.push(buildBoundaryLayer(boundaries, resolvedTheme));
+  if (boundaries) layers.push(buildBoundaryLayer(boundaries, resolvedTheme, boundaryEmphasis));
   if (atc && boundaries) layers.push(...buildAtcLayers(atc, boundaries));
   if (atcAnchors.length) layers.push(buildAtcHoverLayer(atcAnchors));
   if (trails?.length) layers.push(buildTrailLayer(trails, resolvedTheme));

@@ -1004,7 +1004,9 @@ pub struct DataStatus {
     pub winds_refreshed: Option<DateTime<Utc>>,
 }
 
-/// A lightweight live-traffic record for plotting on the FCA map.
+/// A lightweight live-traffic record for plotting on the FCA + facility maps. Carries just enough of
+/// the flight plan for the facility map's client-side color rules (arrival gate/STAR, wake, rules,
+/// filed altitude) without shipping the full route.
 #[derive(Debug, Serialize, ToSchema)]
 pub struct TrafficAircraft {
     pub callsign: String,
@@ -1016,6 +1018,60 @@ pub struct TrafficAircraft {
     pub dep: String,
     pub arr: String,
     pub actype: String,
+    /// Arrival gate / STAR (base name, revision stripped) derived from the filed route; null if none.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub star: Option<String>,
+    /// Wake category (`L`/`M`/`H`/`J`), empty if unfiled.
+    pub wake: String,
+    /// Flight rules as filed (`I`/`V`/…), empty if no flight plan.
+    pub flight_rules: String,
+    /// Filed cruise altitude in feet (0 if unfiled/unparseable).
+    pub filed_alt: i32,
+}
+
+// --- Facility map (per-facility TMU map color rules) ---
+
+/// One aircraft-coloring condition. `field` names the flight attribute, `op` the comparison, and
+/// `values` its operand(s). Conditions within a rule are ANDed. Semantics live in the client rule
+/// engine; the backend stores this opaquely.
+#[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
+pub struct RuleCondition {
+    /// `arr` | `dep` | `star` | `type` | `wake` | `rules` | `alt`.
+    pub field: String,
+    /// `eq` | `in` | `prefix` | `lt` | `gt` | `range`.
+    pub op: String,
+    pub values: Vec<String>,
+}
+
+/// One color rule: aircraft matching all `conditions` are painted `color`. Rules are evaluated in
+/// order; the first enabled match wins.
+#[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
+pub struct ColorRule {
+    pub id: String,
+    pub label: String,
+    /// Hex color (`#rrggbb`) from the shared palette.
+    pub color: String,
+    pub enabled: bool,
+    pub conditions: Vec<RuleCondition>,
+}
+
+/// A facility's map color-rule configuration (one per ARTCC).
+#[derive(Debug, Serialize, ToSchema)]
+pub struct FacilityMapConfigBody {
+    pub facility_id: String,
+    pub rules: Vec<ColorRule>,
+    /// Hex color for aircraft matching no rule; empty = the map's theme default.
+    pub default_color: String,
+    /// Whether the current caller may edit this facility's rules (scope-resolved; false when signed out).
+    pub editable: bool,
+}
+
+/// Upsert body for a facility's map color rules.
+#[derive(Debug, Deserialize, ToSchema)]
+pub struct UpsertFacilityMapConfigRequest {
+    pub rules: Vec<ColorRule>,
+    #[serde(default)]
+    pub default_color: String,
 }
 
 // --- Online ATC (the map "ATC" layer) ---

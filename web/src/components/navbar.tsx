@@ -188,6 +188,12 @@ function MobileMenu({
           </Link>
         </DropdownMenuItem>
         <DropdownMenuItem asChild>
+          <Link to="/facility-map">
+            <Radar />
+            Facility map
+          </Link>
+        </DropdownMenuItem>
+        <DropdownMenuItem asChild>
           <Link to="/pilot">
             <PlaneTakeoff />
             My flight
@@ -344,6 +350,12 @@ export function Navbar() {
               <Link to="/advisories/fcas">
                 <Waypoints />
                 FCA overview
+              </Link>
+            </DropdownMenuItem>
+            <DropdownMenuItem asChild>
+              <Link to="/facility-map">
+                <Radar />
+                Facility map
               </Link>
             </DropdownMenuItem>
             <DropdownMenuItem asChild>

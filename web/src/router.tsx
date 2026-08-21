@@ -11,6 +11,7 @@ import {ProfilePage} from "@/pages/profile";
 import {SettingsPage} from "@/pages/settings";
 import {AirportPage} from "@/pages/airport";
 import {FcaPage} from "@/pages/fca";
+import {FacilityMapIndexPage, FacilityMapPage} from "@/pages/facility-map";
 import {RunwayPage} from "@/pages/runway";
 import {DashboardPage} from "@/pages/dashboard";
 import {BoardViewPage} from "@/pages/dashboards/board";
@@ -40,7 +41,8 @@ function RootLayout() {
   const fullBleed =
     pathname.startsWith("/ops/fca") ||
     pathname.startsWith("/ops/runway") ||
-    pathname.startsWith("/advisories/fcas");
+    pathname.startsWith("/advisories/fcas") ||
+    pathname.startsWith("/facility-map");
   return (
     <div className="flex min-h-screen flex-col bg-background text-foreground">
       <FeedWatcher />
@@ -151,6 +153,23 @@ const advisoriesFcaRoute = createRoute({
   validateSearch: (search: Record<string, unknown>): { flight?: string } => ({
     flight: typeof search.flight === "string" ? search.flight : undefined,
   }),
+});
+
+// Facility map — public per-facility TMU map. Landing (picker) + full-bleed `$facilityId` map.
+const facilityMapRoute = createRoute({
+  getParentRoute: () => rootRoute,
+  path: "facility-map",
+  component: Outlet,
+});
+const facilityMapIndexRoute = createRoute({
+  getParentRoute: () => facilityMapRoute,
+  path: "/",
+  component: FacilityMapIndexPage,
+});
+const facilityMapDetailRoute = createRoute({
+  getParentRoute: () => facilityMapRoute,
+  path: "$facilityId",
+  component: FacilityMapPage,
 });
 
 // Pilot "my flight" lookup — public, its own top-level route.
@@ -337,6 +356,7 @@ const routeTree = rootRoute.addChildren([
     runwayRoute,
   ]),
   advisoriesRoute.addChildren([advisoriesIndexRoute, advisoriesFcaRoute]),
+  facilityMapRoute.addChildren([facilityMapIndexRoute, facilityMapDetailRoute]),
   pilotRoute,
   profileRoute,
   settingsRoute,

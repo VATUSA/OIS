@@ -628,6 +628,22 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/v1/facility-map/{id}/config": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get: operations["get_config"];
+        put: operations["put_config"];
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/v1/feed/status": {
         parameters: {
             query?: never;
@@ -2025,6 +2041,18 @@ export interface components {
             status: string;
         };
         /**
+         * @description One color rule: aircraft matching all `conditions` are painted `color`. Rules are evaluated in
+         *     order; the first enabled match wins.
+         */
+        ColorRule: {
+            /** @description Hex color (`#rrggbb`) from the shared palette. */
+            color: string;
+            conditions: components["schemas"]["RuleCondition"][];
+            enabled: boolean;
+            id: string;
+            label: string;
+        };
+        /**
          * @description The featured airports combined: arrivals/departures summed across airports; pilots deduped
          *     (a pilot flying between two featured airports counts once); top aircraft across them all.
          */
@@ -2272,6 +2300,15 @@ export interface components {
             id: string;
             name: string;
             region?: string | null;
+        };
+        /** @description A facility's map color-rule configuration (one per ARTCC). */
+        FacilityMapConfigBody: {
+            /** @description Hex color for aircraft matching no rule; empty = the map's theme default. */
+            default_color: string;
+            /** @description Whether the current caller may edit this facility's rules (scope-resolved; false when signed out). */
+            editable: boolean;
+            facility_id: string;
+            rules: components["schemas"]["ColorRule"][];
         };
         /**
          * @description One facility's involvement in an event — its support level plus why it was surfaced.
@@ -3009,6 +3046,18 @@ export interface components {
             lon: number;
             name: string;
         };
+        /**
+         * @description One aircraft-coloring condition. `field` names the flight attribute, `op` the comparison, and
+         *     `values` its operand(s). Conditions within a rule are ANDed. Semantics live in the client rule
+         *     engine; the backend stores this opaquely.
+         */
+        RuleCondition: {
+            /** @description `arr` | `dep` | `star` | `type` | `wake` | `rules` | `alt`. */
+            field: string;
+            /** @description `eq` | `in` | `prefix` | `lt` | `gt` | `range`. */
+            op: string;
+            values: string[];
+        };
         /** @description One inbound arrival with its assigned runway. */
         RunwayArrival: {
             actype: string;
@@ -3330,7 +3379,11 @@ export interface components {
             kind: string;
             payload: Record<string, never>;
         };
-        /** @description A lightweight live-traffic record for plotting on the FCA map. */
+        /**
+         * @description A lightweight live-traffic record for plotting on the FCA + facility maps. Carries just enough of
+         *     the flight plan for the facility map's client-side color rules (arrival gate/STAR, wake, rules,
+         *     filed altitude) without shipping the full route.
+         */
         TrafficAircraft: {
             actype: string;
             /** Format: int64 */
@@ -3338,6 +3391,13 @@ export interface components {
             arr: string;
             callsign: string;
             dep: string;
+            /**
+             * Format: int32
+             * @description Filed cruise altitude in feet (0 if unfiled/unparseable).
+             */
+            filed_alt: number;
+            /** @description Flight rules as filed (`I`/`V`/…), empty if no flight plan. */
+            flight_rules: string;
             /** Format: int64 */
             gs: number;
             /** Format: int64 */
@@ -3346,6 +3406,10 @@ export interface components {
             lat: number;
             /** Format: double */
             lon: number;
+            /** @description Arrival gate / STAR (base name, revision stripped) derived from the filed route; null if none. */
+            star?: string | null;
+            /** @description Wake category (`L`/`M`/`H`/`J`), empty if unfiled. */
+            wake: string;
         };
         UnresolvedToken: {
             count: number;
@@ -3428,6 +3492,11 @@ export interface components {
             config_id?: string | null;
             /** @description `predicted` or `override`; defaults to `override` when omitted. */
             source?: string | null;
+        };
+        /** @description Upsert body for a facility's map color rules. */
+        UpsertFacilityMapConfigRequest: {
+            default_color?: string;
+            rules: components["schemas"]["ColorRule"][];
         };
         UpsertFacilitySupportRequest: {
             /** @description required | preferred | not_required */
@@ -5401,6 +5470,76 @@ export interface operations {
                 };
             };
             404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+        };
+    };
+    get_config: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["FacilityMapConfigBody"];
+                };
+            };
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+        };
+    };
+    put_config: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                id: string;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["UpsertFacilityMapConfigRequest"];
+            };
+        };
+        responses: {
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["FacilityMapConfigBody"];
+                };
+            };
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            403: {
                 headers: {
                     [name: string]: unknown;
                 };
