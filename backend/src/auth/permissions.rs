@@ -71,6 +71,8 @@ permission!(FlowRouteUpdate, ["flow", "route"], Update);
 permission!(FlowRouteDelete, ["flow", "route"], Delete);
 permission!(FlowRunwayRead, ["flow", "runway"], Read);
 permission!(FlowRunwayUpdate, ["flow", "runway"], Update);
+// Facility map — per-facility aircraft color rules (view is public; editing is facility-scoped).
+permission!(FlowFacilityMapUpdate, ["flow", "facility_map"], Update);
 
 // stats — persistent network statistics + saved capture windows
 permission!(StatsRead, ["stats", "data"], Read);

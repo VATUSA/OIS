@@ -12,6 +12,12 @@ export interface NormAircraft {
   alt: number;
   gs: number;
   heading: number;
+  // Optional flight-plan attributes for facility-map color rules (present on the live feed, absent in
+  // replay). See TrafficAircraft on the backend.
+  star?: string | null;
+  wake?: string;
+  flightRules?: string;
+  filedAlt?: number;
 }
 
 /** A polyline in deck order ([lon, lat] pairs). */

@@ -317,6 +317,10 @@ export function FcaMapView({
           alt: a.alt,
           gs: a.gs,
           heading: a.heading,
+          star: a.star,
+          wake: a.wake,
+          flightRules: a.flight_rules,
+          filedAlt: a.filed_alt,
         })),
     [traffic.data, matchedCallsigns],
   );

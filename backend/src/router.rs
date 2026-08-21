@@ -7,9 +7,9 @@ use crate::{
     auth::middleware::resolve_current_user,
     config::build_cors_layer,
     handlers::{
-        access, airport_configs, atc, audit, auth, dashboards, docs, events, facilities, feed,
-        flow, gdp, health, preferences, public, runway, service_accounts, stats, tmu, users,
-        webhooks,
+        access, airport_configs, atc, audit, auth, dashboards, docs, events, facilities,
+        facility_map, feed, flow, gdp, health, preferences, public, runway, service_accounts,
+        stats, tmu, users, webhooks,
     },
     state::AppState,
 };
@@ -271,6 +271,11 @@ pub fn build_router(state: AppState) -> Router {
         .route("/api/v1/flow/traffic", get(flow::list_traffic))
         .route("/api/v1/flow/atc", get(atc::list_atc))
         .route("/api/v1/flow/facilities", get(atc::list_flow_facilities))
+        // Facility map color rules — public read, facility-scoped write.
+        .route(
+            "/api/v1/facility-map/{id}/config",
+            get(facility_map::get_config).put(facility_map::put_config),
+        )
         .route("/api/v1/flow/data-status", get(flow::data_status))
         .route("/api/v1/flow/data-refresh", post(flow::data_refresh))
         .route("/api/v1/flow/route-coverage", get(flow::route_coverage))
