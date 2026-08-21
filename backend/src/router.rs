@@ -77,6 +77,7 @@ pub fn build_router(state: AppState) -> Router {
         // Access editor
         .route("/api/v1/access/catalog", get(access::get_access_catalog))
         .route("/api/v1/access/self", get(access::get_self_access))
+        .route("/api/v1/admin/users", get(access::list_users))
         .route(
             "/api/v1/admin/users/{cid}/access",
             get(access::get_user_access).post(access::update_user_access),

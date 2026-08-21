@@ -116,6 +116,22 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/v1/admin/users": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get: operations["list_users"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/v1/admin/users/{cid}/access": {
         parameters: {
             query?: never;
@@ -1829,6 +1845,27 @@ export interface components {
             /** @description program | restriction | ground_stop */
             kind: string;
             payload: Record<string, never>;
+        };
+        /** @description A page of the access-admin user browser. */
+        AdminUserPage: {
+            items: components["schemas"]["AdminUserRow"][];
+            /** Format: int64 */
+            page: number;
+            /** Format: int64 */
+            page_size: number;
+            /** Format: int64 */
+            total: number;
+        };
+        /**
+         * @description One row of the access-admin "all users" browser: identity plus the distinct role names the user
+         *     holds across any scope (for at-a-glance badges).
+         */
+        AdminUserRow: {
+            /** Format: int64 */
+            cid: number;
+            display_name: string;
+            rating?: string | null;
+            roles: string[];
         };
         /** @description An aircraft's filed route resolved to lat/lon anchors, for plotting + a detail popup. */
         AircraftRoute: {
@@ -3853,6 +3890,38 @@ export interface operations {
                 content?: never;
             };
             404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+        };
+    };
+    list_users: {
+        parameters: {
+            query?: {
+                /** @description Name substring or CID prefix */
+                q?: string;
+                /** @description 1-based page (default 1) */
+                page?: number;
+                /** @description Rows per page (default 25, max 100) */
+                page_size?: number;
+            };
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["AdminUserPage"];
+                };
+            };
+            401: {
                 headers: {
                     [name: string]: unknown;
                 };

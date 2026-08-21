@@ -48,6 +48,25 @@ pub struct UserSummary {
     pub rating: Option<String>,
 }
 
+/// One row of the access-admin "all users" browser: identity plus the distinct role names the user
+/// holds across any scope (for at-a-glance badges).
+#[derive(Debug, Serialize, ToSchema, sqlx::FromRow)]
+pub struct AdminUserRow {
+    pub cid: i64,
+    pub display_name: String,
+    pub rating: Option<String>,
+    pub roles: Vec<String>,
+}
+
+/// A page of the access-admin user browser.
+#[derive(Debug, Serialize, ToSchema)]
+pub struct AdminUserPage {
+    pub items: Vec<AdminUserRow>,
+    pub total: i64,
+    pub page: i64,
+    pub page_size: i64,
+}
+
 /// A VATUSA facility (ARTCC). `artcc_id` scope values reference `id`.
 #[derive(Debug, Serialize, ToSchema, sqlx::FromRow)]
 pub struct FacilityBody {
