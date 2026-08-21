@@ -24,7 +24,7 @@ use crate::{
     feed::flow::{self, ProgramInputs},
     feed::taxi,
     models::{DepartureFlight, DeparturesResponse, IssueCfrRequest, IssuedCfrBody},
-    repos::tmu as tmu_repo,
+    repos::{flow as flow_repo, tmu as tmu_repo},
     state::AppState,
 };
 
@@ -238,6 +238,11 @@ pub(crate) async fn departures_response(
 
     let pending = flow::pending_departures(&member_set, data);
 
+    // FCA-issued releases (RDY/RLSD) for these departures — so a release set on the FCA page also
+    // shows here, even when the destination has no GDP program (KSAN metered by an FCA, not a GDP).
+    let pending_callsigns: Vec<String> = pending.iter().map(|d| d.callsign.clone()).collect();
+    let fca_releases = flow_repo::releases_for_callsigns(pool, &pending_callsigns).await?;
+
     // Metering data (by callsign) for destinations that have a program.
     let dests: HashSet<String> = pending
         .iter()
@@ -265,8 +270,14 @@ pub(crate) async fn departures_response(
     let mut departures: Vec<DepartureFlight> = pending
         .into_iter()
         .map(|d| {
-            let has_program = metered.contains(&d.arrival);
             let m = meta.remove(&d.callsign).unwrap_or_default();
+            // An FCA release counts as a (frozen) CFR too. Prefer the GDP-program CFR when present;
+            // otherwise fall back to the FCA's release time and mark the flight metered.
+            let fca_cfr = fca_releases
+                .get(&d.callsign)
+                .and_then(|ms| DateTime::from_timestamp_millis(*ms));
+            let cfr = m.cfr.or(fca_cfr);
+            let has_program = metered.contains(&d.arrival) || fca_cfr.is_some();
             DepartureFlight {
                 callsign: d.callsign,
                 dep: d.dep,
@@ -278,8 +289,8 @@ pub(crate) async fn departures_response(
                 eta: m.eta,
                 sta: m.sta,
                 delay_min: m.delay_min,
-                cfr: m.cfr,
-                cfr_issued: m.cfr_issued,
+                cfr,
+                cfr_issued: m.cfr_issued || fca_cfr.is_some(),
                 seq: m.seq,
             }
         })

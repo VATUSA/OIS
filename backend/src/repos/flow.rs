@@ -1,5 +1,7 @@
 //! Flow Constrained Area (FCA) storage. Shared, server-side — one FCA set for everyone.
 
+use std::collections::HashMap;
+
 use chrono::{DateTime, Utc};
 use sqlx::PgPool;
 
@@ -241,6 +243,29 @@ pub async fn list_releases(
     .fetch_all(pool)
     .await
     .map_err(|_| ApiError::Internal)
+}
+
+/// Earliest frozen FCA release (EDCT, epoch-ms) per callsign for the given callsigns, across
+/// *enabled* FCAs only. Lets the departure-field view surface FCA-issued release times, so an FCA's
+/// RDY/RLSD flows to the airport departures list — not just the FCA page.
+pub async fn releases_for_callsigns(
+    pool: &PgPool,
+    callsigns: &[String],
+) -> Result<HashMap<String, i64>, ApiError> {
+    if callsigns.is_empty() {
+        return Ok(HashMap::new());
+    }
+    let rows = sqlx::query_as::<_, (String, i64)>(
+        "select r.callsign, min(r.edct_ms) as edct \
+         from flow.fca_release r join flow.fca f on f.id = r.fca_id \
+         where f.enabled and r.callsign = any($1) \
+         group by r.callsign",
+    )
+    .bind(callsigns)
+    .fetch_all(pool)
+    .await
+    .map_err(|_| ApiError::Internal)?;
+    Ok(rows.into_iter().collect())
 }
 
 pub async fn upsert_release(

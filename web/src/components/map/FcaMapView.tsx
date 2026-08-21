@@ -1,5 +1,5 @@
 import {useEffect, useMemo, useRef, useState} from "react";
-import {Button, ConfirmButton, Input, useToast} from "@ois/ui";
+import {Button, ConfirmButton, Input, Switch, useToast} from "@ois/ui";
 import {Home, Menu, Pencil, Plane, Plus, RadioTower, Tag, Trash2, X} from "lucide-react";
 
 import {useMe} from "@/lib/auth";
@@ -458,17 +458,20 @@ export function FcaMapView({
                         key={fca.id}
                         className={
                           "flex items-center gap-2 border-b px-3 py-2 text-sm " +
-                          (fca.id === selectedId ? "bg-accent/40" : "")
+                          (fca.id === selectedId ? "bg-accent/40 " : "") +
+                          (fca.enabled ? "" : "opacity-55")
                         }
                       >
+                        <span
+                          className="size-3 shrink-0 rounded-full"
+                          style={{ background: fca.color }}
+                          title={fca.enabled ? "Enabled" : "Disabled"}
+                        />
                         <button
                           type="button"
-                          title={fca.enabled ? "Enabled" : "Disabled"}
-                          onClick={() => canEdit && toggleEnabled(fca)}
-                          className="size-3 shrink-0 rounded-full"
-                          style={{ background: fca.enabled ? fca.color : "transparent", border: `2px solid ${fca.color}` }}
-                        />
-                        <button type="button" onClick={() => selectFca(fca.id)} className="flex-1 truncate text-left font-mono">
+                          onClick={() => selectFca(fca.id)}
+                          className="flex-1 truncate text-left font-mono"
+                        >
                           {fca.name}
                           {fca.artcc && <span className="ml-1.5 text-xs text-muted-foreground">{fca.artcc}</span>}
                         </button>
@@ -480,6 +483,19 @@ export function FcaMapView({
                         >
                           {counts.data?.[fca.id] ?? 0}
                         </span>
+                        {canEdit && (
+                          <span
+                            className="flex shrink-0 items-center"
+                            title={fca.enabled ? "Enabled — click to disable" : "Disabled — click to enable"}
+                          >
+                            <Switch
+                              checked={fca.enabled}
+                              onCheckedChange={() => toggleEnabled(fca)}
+                              aria-label={`${fca.enabled ? "Disable" : "Enable"} the ${fca.name} FCA`}
+                              className="scale-[0.68]"
+                            />
+                          </span>
+                        )}
                         {canEdit && (
                           <button
                             type="button"
