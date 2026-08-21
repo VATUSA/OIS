@@ -284,7 +284,7 @@ export function StatsPage() {
   }
 
   return (
-    <div className="mx-auto flex w-full max-w-5xl flex-col gap-6">
+    <div className="flex w-full flex-col gap-6">
       <div>
         <h1 className="text-2xl font-semibold tracking-tight">Network statistics</h1>
         <p className="text-muted-foreground">

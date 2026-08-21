@@ -36,22 +36,34 @@ import {AdminAudit} from "@/pages/admin/audit";
 import {AdminServiceAccounts} from "@/pages/admin/service-accounts";
 
 function RootLayout() {
-  // Full-bleed routes (the FCA map) escape the centered, padded main wrapper.
-  const pathname = useRouterState({ select: (s) => s.location.pathname });
-  const fullBleed =
-    pathname.startsWith("/ops/fca") ||
-    pathname.startsWith("/ops/runway") ||
-    pathname.startsWith("/advisories/fcas") ||
-    pathname.startsWith("/facility-map");
+  // A route can declare a width tier via `staticData.layout` (see the route definitions):
+  //   "full" — no wrapper, owns the viewport (the maps);
+  //   "wide" — full monitor width with padding, for data-dense pages (dashboards, replay, tables)
+  //            so ultrawide displays aren't boxed into a narrow column;
+  //   default — a readable centered column (forms, prose, detail views).
+  // Read the deepest match that sets a layout so a group parent can set it for all its children.
+  const layout = useRouterState({
+    select: (s) => {
+      for (let i = s.matches.length - 1; i >= 0; i--) {
+        const l = s.matches[i].staticData?.layout;
+        if (l) return l;
+      }
+      return undefined;
+    },
+  });
+  const mainClass =
+    layout === "wide"
+      ? "w-full flex-1 px-4 py-8 sm:px-6 2xl:px-10"
+      : "mx-auto w-full max-w-7xl flex-1 px-4 py-8";
   return (
     <div className="flex min-h-screen flex-col bg-background text-foreground">
       <FeedWatcher />
       <Navbar />
-      {fullBleed ? (
+      {layout === "full" ? (
         <Outlet />
       ) : (
         <>
-          <main className="mx-auto w-full max-w-7xl flex-1 px-4 py-8">
+          <main className={mainClass}>
             <Outlet />
           </main>
           <Footer />
@@ -89,12 +101,14 @@ const airportRoute = createRoute({
   getParentRoute: () => opsRoute,
   path: "airport",
   component: AirportPage,
+  staticData: { layout: "wide" },
 });
 
 const tmuRoute = createRoute({
   getParentRoute: () => opsRoute,
   path: "tmu",
   component: TmuPage,
+  staticData: { layout: "wide" },
 });
 
 // Dashboards: a library at /ops/my, a board at /ops/my/$boardId, a shared read-only view at
@@ -103,6 +117,7 @@ const myRoute = createRoute({
   getParentRoute: () => opsRoute,
   path: "my",
   component: Outlet,
+  staticData: { layout: "wide" },
 });
 const myIndexRoute = createRoute({
   getParentRoute: () => myRoute,
@@ -124,12 +139,14 @@ const fcaRoute = createRoute({
   getParentRoute: () => opsRoute,
   path: "fca",
   component: FcaPage,
+  staticData: { layout: "full" },
 });
 
 const runwayRoute = createRoute({
   getParentRoute: () => opsRoute,
   path: "runway",
   component: RunwayPage,
+  staticData: { layout: "full" },
 });
 
 // --- Advisories (public, read-only) ---
@@ -150,6 +167,7 @@ const advisoriesFcaRoute = createRoute({
   getParentRoute: () => advisoriesRoute,
   path: "fcas",
   component: AdvisoriesFcaPage,
+  staticData: { layout: "full" },
   validateSearch: (search: Record<string, unknown>): { flight?: string } => ({
     flight: typeof search.flight === "string" ? search.flight : undefined,
   }),
@@ -160,6 +178,7 @@ const facilityMapRoute = createRoute({
   getParentRoute: () => rootRoute,
   path: "facility-map",
   component: Outlet,
+  staticData: { layout: "full" },
 });
 const facilityMapIndexRoute = createRoute({
   getParentRoute: () => facilityMapRoute,
@@ -204,6 +223,7 @@ const planningRoute = createRoute({
   getParentRoute: () => rootRoute,
   path: "planning",
   component: Outlet,
+  staticData: { layout: "wide" },
 });
 
 const planningIndexRoute = createRoute({
@@ -238,6 +258,7 @@ const statsRoute = createRoute({
   getParentRoute: () => rootRoute,
   path: "historical",
   component: Outlet,
+  staticData: { layout: "wide" },
 });
 
 const statsIndexRoute = createRoute({
@@ -296,6 +317,7 @@ const adminRoute = createRoute({
   getParentRoute: () => rootRoute,
   path: "/admin",
   component: AdminLayout,
+  staticData: { layout: "wide" },
 });
 
 const adminIndexRoute = createRoute({
@@ -382,5 +404,9 @@ export const router = createRouter({ routeTree });
 declare module "@tanstack/react-router" {
   interface Register {
     router: typeof router;
+  }
+  /** Per-route width tier read by RootLayout. Omit for the default readable column. */
+  interface StaticDataRouteOption {
+    layout?: "full" | "wide";
   }
 }
