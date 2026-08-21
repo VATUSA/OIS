@@ -26,14 +26,16 @@ interface FcaDatum {
  * endpoint dots. The midpoint name label is an HTML marker (see FcaLabelMarker), not drawn here.
  */
 export function buildFcaLayers(fcas: MapFca[], selectedId: string | null | undefined) {
-  const data: FcaDatum[] = fcas
-    .filter((f) => f.points.length >= 2)
-    .map((f) => {
-      const [r, g, b] = hexToRgb(f.color);
-      const selected = f.id === selectedId;
-      const a = selected ? 255 : f.enabled ? 220 : 110;
-      return { id: f.id, path: toDeckPath(f.points), color: [r, g, b, a] as RGBA, selected };
-    });
+  // Disabled FCAs are hidden on the map (they stay in the list) — except the selected one, so it can
+  // still be inspected, edited, and re-enabled.
+  const visible = fcas.filter((f) => f.points.length >= 2 && (f.enabled || f.id === selectedId));
+
+  const data: FcaDatum[] = visible.map((f) => {
+    const [r, g, b] = hexToRgb(f.color);
+    const selected = f.id === selectedId;
+    const a = selected ? 255 : 220;
+    return { id: f.id, path: toDeckPath(f.points), color: [r, g, b, a] as RGBA, selected };
+  });
 
   // PathStyleExtension adds getDashArray/dashJustified, which aren't in the base PathLayer prop type;
   // spread them (a spread bypasses the excess-property check, unlike an inline literal).
@@ -70,13 +72,11 @@ export function buildFcaLayers(fcas: MapFca[], selectedId: string | null | undef
 
   const labels = new TextLayer<{ pos: [number, number]; name: string; color: RGBA }>({
     id: "fca-labels",
-    data: fcas
-      .filter((f) => f.points.length >= 2)
-      .map((f) => {
-        const [lat, lon] = midpointOf(f.points);
-        const [r, g, b] = hexToRgb(f.color);
-        return { pos: [lon, lat] as [number, number], name: f.name, color: [r, g, b, 255] as RGBA };
-      }),
+    data: visible.map((f) => {
+      const [lat, lon] = midpointOf(f.points);
+      const [r, g, b] = hexToRgb(f.color);
+      return { pos: [lon, lat] as [number, number], name: f.name, color: [r, g, b, 255] as RGBA };
+    }),
     getPosition: (d) => d.pos,
     getText: (d) => d.name,
     getColor: (d) => d.color,
