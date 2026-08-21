@@ -1,6 +1,7 @@
 import {IconLayer, TextLayer} from "@deck.gl/layers";
 
 import {aircraftIconUrl} from "@/lib/aircraft-icons";
+import {aircraftTypeScale} from "@/lib/aircraft-icon-size";
 import type {Theme} from "../lib/constants";
 import {aircraftColor, labelBackground, labelColor} from "../lib/colors";
 import {TRIANGLE_ICON} from "../lib/icons";
@@ -43,7 +44,11 @@ export function buildAircraftLayer(data: NormAircraft[], opts: AircraftLayerOpti
     getAngle: (d) => 360 - d.heading,
     getColor: (d) => opts.getColor?.(d) ?? base,
     // Triangles fill their icon box (silhouettes have padding), so they read larger — render smaller.
-    getSize: (d) => clampGlyphSize((opts.getSize?.(d) ?? (triangle ? 15 : 26)) * scale),
+    // Silhouettes also scale per type so an A380 reads larger than a C172; triangles stay uniform.
+    getSize: (d) =>
+      clampGlyphSize(
+        (opts.getSize?.(d) ?? (triangle ? 15 : 26)) * scale * (triangle ? 1 : aircraftTypeScale(d.actype)),
+      ),
     sizeUnits: "pixels",
     billboard: false,
     updateTriggers: {

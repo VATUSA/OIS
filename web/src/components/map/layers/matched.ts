@@ -2,6 +2,7 @@ import {IconLayer, PathLayer, ScatterplotLayer, TextLayer} from "@deck.gl/layers
 import type {Layer} from "@deck.gl/core";
 
 import {aircraftIconUrl} from "@/lib/aircraft-icons";
+import {aircraftTypeScale} from "@/lib/aircraft-icon-size";
 import {clampGlyphSize} from "./aircraft";
 import {hexToRgb} from "../lib/colors";
 import {TRIANGLE_ICON} from "../lib/icons";
@@ -79,7 +80,10 @@ export function buildMatchedLayers(
     getPosition: (f) => [f.lon, f.lat],
     getAngle: (f) => 360 - f.heading,
     getColor: tint,
-    getSize: clampGlyphSize((style === "triangle" ? 14 : 22) * sizeScale),
+    getSize: (f) =>
+      clampGlyphSize(
+        (style === "triangle" ? 14 : 22) * sizeScale * (style === "triangle" ? 1 : aircraftTypeScale(f.aircraft_type)),
+      ),
     sizeUnits: "pixels",
     billboard: false,
     updateTriggers: { getColor: [colorHex], getIcon: [style], getSize: [style, sizeScale] },

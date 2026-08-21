@@ -117,16 +117,15 @@ for (const [target, sources] of ALIAS_GROUPS) {
   for (const s of sources) ALIAS[s] = target;
 }
 
-const iconCache = new Map<string, string>();
+const keyCache = new Map<string, string>();
 
 /**
- * Resolve a flight-plan aircraft type (e.g. "B738/L", "A320", "C172") to a
- * silhouette icon URL. Mirrors VATSIM Radar's precedence: PA-28 prefix →
- * explicit alias → exact type file → A320 fallback.
+ * Resolve a flight-plan aircraft type (e.g. "B738/L", "A320", "C172") to a silhouette icon key.
+ * Mirrors VATSIM Radar's precedence: PA-28 prefix → explicit alias → exact type file → A320 fallback.
  */
-export function aircraftIconUrl(actype: string | null | undefined): string {
+export function resolveIconKey(actype: string | null | undefined): string {
   const key = (actype ?? "").toUpperCase().split("/")[0].trim();
-  const cached = iconCache.get(key);
+  const cached = keyCache.get(key);
   if (cached) return cached;
 
   let iconKey: string;
@@ -135,7 +134,12 @@ export function aircraftIconUrl(actype: string | null | undefined): string {
   else if (ICON_URL[key.toLowerCase()]) iconKey = key.toLowerCase();
   else iconKey = FALLBACK;
 
-  const url = ICON_URL[iconKey] ?? ICON_URL[FALLBACK];
-  iconCache.set(key, url);
-  return url;
+  keyCache.set(key, iconKey);
+  return iconKey;
+}
+
+/** Resolve a flight-plan aircraft type to its served silhouette icon URL. */
+export function aircraftIconUrl(actype: string | null | undefined): string {
+  const iconKey = resolveIconKey(actype);
+  return ICON_URL[iconKey] ?? ICON_URL[FALLBACK];
 }
