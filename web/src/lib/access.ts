@@ -7,6 +7,22 @@ import {ois} from "./api";
 export type PermTree = { [key: string]: PermTree | string[] };
 export type UpdateBody = components["schemas"]["UpdateUserAccessRequest"];
 export type UserMatch = components["schemas"]["UserSummary"];
+export type AdminUserRow = components["schemas"]["AdminUserRow"];
+
+/** A page of all OIS users (name/CID/rating + role names), filtered by `q`. Access-admin only. */
+export function useAllUsers(page: number, pageSize: number, q: string) {
+  return useQuery({
+    queryKey: ["admin-users", page, pageSize, q],
+    placeholderData: (prev) => prev,
+    queryFn: async () => {
+      const { data, error } = await ois.GET("/api/v1/admin/users", {
+        params: { query: { q, page, page_size: pageSize } },
+      });
+      if (error || !data) throw new Error("failed to load users");
+      return data;
+    },
+  });
+}
 
 /** Fuzzy user search by name or CID (enabled once the term is non-empty). */
 export function useUserSearch(term: string) {

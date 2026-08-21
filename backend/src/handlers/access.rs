@@ -7,9 +7,10 @@ use std::collections::{BTreeMap, BTreeSet};
 
 use axum::{
     Json,
-    extract::{Extension, Path, State},
+    extract::{Extension, Path, Query, State},
     http::HeaderMap,
 };
+use serde::Deserialize;
 
 use crate::{
     auth::{
@@ -23,11 +24,52 @@ use crate::{
     },
     errors::ApiError,
     models::{
-        AccessCatalogBody, ScopeAccess, SelfAccessBody, UpdateUserAccessRequest, UserAccessBody,
+        AccessCatalogBody, AdminUserPage, ScopeAccess, SelfAccessBody, UpdateUserAccessRequest,
+        UserAccessBody,
     },
-    repos::{access as access_repo, audit as audit_repo, org as org_repo},
+    repos::{access as access_repo, audit as audit_repo, org as org_repo, users as user_repo},
     state::AppState,
 };
+
+#[derive(Deserialize)]
+pub struct UserListQuery {
+    /// Name substring or CID prefix; empty lists everyone.
+    q: Option<String>,
+    page: Option<i64>,
+    page_size: Option<i64>,
+}
+
+#[utoipa::path(
+    get,
+    path = "/api/v1/admin/users",
+    tag = "access",
+    params(
+        ("q" = Option<String>, Query, description = "Name substring or CID prefix"),
+        ("page" = Option<i64>, Query, description = "1-based page (default 1)"),
+        ("page_size" = Option<i64>, Query, description = "Rows per page (default 25, max 100)")
+    ),
+    responses((status = 200, body = AdminUserPage), (status = 401))
+)]
+pub async fn list_users(
+    State(state): State<AppState>,
+    _permission: RequirePermission<AccessUsersRead>,
+    Query(query): Query<UserListQuery>,
+) -> Result<Json<AdminUserPage>, ApiError> {
+    let pool = state.db.as_ref().ok_or(ApiError::ServiceUnavailable)?;
+    let q = query.q.unwrap_or_default().trim().to_string();
+    let page = query.page.unwrap_or(1).max(1);
+    let page_size = query.page_size.unwrap_or(25).clamp(1, 100);
+    let offset = (page - 1) * page_size;
+
+    let items = user_repo::list_users(pool, &q, page_size, offset).await?;
+    let total = user_repo::count_users(pool, &q).await?;
+    Ok(Json(AdminUserPage {
+        items,
+        total,
+        page,
+        page_size,
+    }))
+}
 
 #[utoipa::path(
     get,

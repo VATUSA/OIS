@@ -2,7 +2,55 @@
 
 use sqlx::{PgPool, Postgres, Transaction};
 
-use crate::{errors::ApiError, models::UserSummary};
+use crate::{
+    errors::ApiError,
+    models::{AdminUserRow, UserSummary},
+};
+
+/// Match clause shared by the admin user browser's list + count queries. `$1` is the (trimmed) search
+/// term; an empty term matches everyone.
+const USER_FILTER: &str = "u.cid is not null and ( \
+    $1 = '' \
+    or u.display_name ilike '%' || $1 || '%' \
+    or u.full_name ilike '%' || $1 || '%' \
+    or cast(u.cid as text) like $1 || '%' )";
+
+/// One page of all OIS users (optionally filtered by `q`), each with the distinct role names they
+/// hold across any scope. Ordered by name.
+pub async fn list_users(
+    pool: &PgPool,
+    q: &str,
+    limit: i64,
+    offset: i64,
+) -> Result<Vec<AdminUserRow>, ApiError> {
+    sqlx::query_as::<_, AdminUserRow>(&format!(
+        "select u.cid, u.display_name, u.rating, \
+            coalesce(array_agg(distinct ur.role_name) filter (where ur.role_name is not null), '{{}}') as roles \
+         from identity.users u \
+         left join access.user_roles ur on ur.user_id = u.id \
+         where {USER_FILTER} \
+         group by u.cid, u.display_name, u.rating \
+         order by u.display_name asc \
+         limit $2 offset $3"
+    ))
+    .bind(q)
+    .bind(limit)
+    .bind(offset)
+    .fetch_all(pool)
+    .await
+    .map_err(|_| ApiError::Internal)
+}
+
+/// Total users matching `q` (for pagination).
+pub async fn count_users(pool: &PgPool, q: &str) -> Result<i64, ApiError> {
+    sqlx::query_scalar::<_, i64>(&format!(
+        "select count(*) from identity.users u where {USER_FILTER}"
+    ))
+    .bind(q)
+    .fetch_one(pool)
+    .await
+    .map_err(|_| ApiError::Internal)
+}
 
 pub struct LoginUser {
     pub id: String,
