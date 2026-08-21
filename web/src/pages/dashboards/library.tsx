@@ -214,7 +214,7 @@ export function BoardLibraryPage() {
   const ungrouped = boards.filter((b) => !b.collection_id);
 
   return (
-    <div className="mx-auto flex w-full max-w-5xl flex-col gap-6">
+    <div className="flex w-full flex-col gap-6">
       <div className="flex flex-wrap items-center gap-3">
         <div>
           <h1 className="text-2xl font-semibold tracking-tight">Dashboards</h1>
@@ -301,7 +301,7 @@ export function BoardLibraryPage() {
                     Empty — use a board’s “Move” menu to add one.
                   </p>
                 ) : (
-                  <div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-3">{items.map(cardOf)}</div>
+                  <div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4 2xl:grid-cols-5">{items.map(cardOf)}</div>
                 )}
               </section>
             );
@@ -314,7 +314,7 @@ export function BoardLibraryPage() {
                   Ungrouped
                 </h2>
               )}
-              <div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-3">
+              <div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4 2xl:grid-cols-5">
                 {ungrouped.map(cardOf)}
               </div>
             </section>

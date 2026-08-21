@@ -690,7 +690,8 @@ export function CaptureReplayPage() {
   const selectionKey = usingCapture ? captureId : `${win.from}-${win.to}`;
 
   return (
-    <div className="mx-auto flex w-full max-w-6xl flex-col gap-4">
+    // Full-width so the map uses the whole (ultrawide) container; the header + picker stay readable.
+    <div className="flex w-full flex-col gap-4">
       <Link
         to="/historical"
         className="flex w-fit items-center gap-1 text-sm text-muted-foreground transition-colors hover:text-foreground"
@@ -715,7 +716,7 @@ export function CaptureReplayPage() {
         </p>
       ) : (
         <>
-          <div className="flex flex-col gap-3 rounded-lg border bg-muted/20 p-4">
+          <div className="flex max-w-5xl flex-col gap-3 rounded-lg border bg-muted/20 p-4">
             <div className="grid gap-3 md:grid-cols-2">
               <label className="flex flex-col gap-1 text-sm">
                 <span className="text-muted-foreground">Capture</span>
