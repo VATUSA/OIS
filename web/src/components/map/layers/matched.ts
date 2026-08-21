@@ -2,6 +2,7 @@ import {IconLayer, PathLayer, ScatterplotLayer, TextLayer} from "@deck.gl/layers
 import type {Layer} from "@deck.gl/core";
 
 import {aircraftIconUrl} from "@/lib/aircraft-icons";
+import {clampGlyphSize} from "./aircraft";
 import {hexToRgb} from "../lib/colors";
 import {TRIANGLE_ICON} from "../lib/icons";
 import type {RGBA} from "../lib/types";
@@ -33,6 +34,7 @@ export function buildMatchedLayers(
   matched: MatchedFlight[],
   colorHex: string,
   style: "silhouette" | "triangle",
+  sizeScale = 1,
 ): Layer[] {
   const [r, g, b] = hexToRgb(colorHex);
   const tint: RGBA = [r, g, b, 255];
@@ -77,10 +79,10 @@ export function buildMatchedLayers(
     getPosition: (f) => [f.lon, f.lat],
     getAngle: (f) => 360 - f.heading,
     getColor: tint,
-    getSize: style === "triangle" ? 14 : 22,
+    getSize: clampGlyphSize((style === "triangle" ? 14 : 22) * sizeScale),
     sizeUnits: "pixels",
     billboard: false,
-    updateTriggers: { getColor: [colorHex], getIcon: [style] },
+    updateTriggers: { getColor: [colorHex], getIcon: [style], getSize: [style, sizeScale] },
   });
 
   const badges = new TextLayer<MatchedFlight>({

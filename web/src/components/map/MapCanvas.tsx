@@ -107,8 +107,11 @@ export function MapCanvas({
       <DeckGL
         views={MAP_VIEW}
         {...(controlled
-          ? { viewState, onViewStateChange: onViewStateChange as never }
+          ? { viewState }
           : { initialViewState: initialViewState ?? US_HOME })}
+        // Always forward view changes: controlled maps feed viewState back through it, and uncontrolled
+        // maps (the replay player) still need it so the caller can track zoom for icon scaling.
+        onViewStateChange={(onViewStateChange ?? NOOP) as never}
         controller={controller}
         layers={layers}
         getTooltip={getTooltip as never}

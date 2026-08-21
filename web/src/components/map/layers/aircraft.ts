@@ -14,14 +14,22 @@ export interface AircraftLayerOptions {
   getSize?: (a: NormAircraft) => number;
   /** Glyph style: type silhouettes or plain triangles. */
   style?: "silhouette" | "triangle";
+  /** Zoom-driven multiplier applied to the base pixel size (default 1 = constant size). */
+  sizeScale?: number;
   /** Bumps updateTriggers when selection/highlight changes color/size. */
   highlightKey?: unknown;
+}
+
+/** Keep zoom-scaled glyphs legible without letting them balloon at extreme zoom. */
+export function clampGlyphSize(px: number): number {
+  return Math.max(9, Math.min(px, 56));
 }
 
 /** Heading-rotated aircraft glyphs (VATSIM-Radar type silhouettes, masked so they take `getColor`). */
 export function buildAircraftLayer(data: NormAircraft[], opts: AircraftLayerOptions) {
   const base = aircraftColor(opts.theme);
   const triangle = opts.style === "triangle";
+  const scale = opts.sizeScale ?? 1;
   return new IconLayer<NormAircraft>({
     id: "aircraft",
     data,
@@ -35,12 +43,12 @@ export function buildAircraftLayer(data: NormAircraft[], opts: AircraftLayerOpti
     getAngle: (d) => 360 - d.heading,
     getColor: (d) => opts.getColor?.(d) ?? base,
     // Triangles fill their icon box (silhouettes have padding), so they read larger — render smaller.
-    getSize: (d) => opts.getSize?.(d) ?? (triangle ? 15 : 26),
+    getSize: (d) => clampGlyphSize((opts.getSize?.(d) ?? (triangle ? 15 : 26)) * scale),
     sizeUnits: "pixels",
     billboard: false,
     updateTriggers: {
       getColor: [opts.theme, opts.highlightKey],
-      getSize: [opts.highlightKey, triangle],
+      getSize: [opts.highlightKey, triangle, scale],
       getIcon: [triangle],
     },
   });
