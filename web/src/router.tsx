@@ -13,6 +13,7 @@ import {ApiKeysPage} from "@/pages/api-keys";
 import {AirportPage} from "@/pages/airport";
 import {FcaPage} from "@/pages/fca";
 import {IdstPage} from "@/pages/idst";
+import {AceSupportPage} from "@/pages/ace";
 import {FacilityMapIndexPage, FacilityMapPage} from "@/pages/facility-map";
 import {RunwayPage} from "@/pages/runway";
 import {DashboardPage} from "@/pages/dashboard";
@@ -157,6 +158,12 @@ const idstRoute = createRoute({
   path: "idst",
   component: IdstPage,
   staticData: { layout: "wide" },
+});
+
+const aceRoute = createRoute({
+  getParentRoute: () => opsRoute,
+  path: "ace",
+  component: AceSupportPage,
 });
 
 // --- Advisories (public, read-only) ---
@@ -400,6 +407,7 @@ const routeTree = rootRoute.addChildren([
     fcaRoute,
     runwayRoute,
     idstRoute,
+    aceRoute,
   ]),
   advisoriesRoute.addChildren([advisoriesIndexRoute, advisoriesFcaRoute]),
   facilityMapRoute.addChildren([facilityMapIndexRoute, facilityMapDetailRoute]),

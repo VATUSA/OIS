@@ -851,6 +851,123 @@ pub struct UpdateEventDebriefRequest {
     pub notes: String,
 }
 
+// --- ACE support ---
+
+/// One ACE support request in the queue. Actor ids are resolved to CID + display name.
+#[derive(Debug, Serialize, ToSchema, sqlx::FromRow)]
+pub struct AceRequestBody {
+    pub id: String,
+    pub requested_by_cid: Option<i64>,
+    pub requested_by_name: Option<String>,
+    pub artcc_id: Option<String>,
+    pub position: Option<String>,
+    pub requested_for: Option<DateTime<Utc>>,
+    pub details: String,
+    /// `open` | `claimed` | `completed` | `cancelled`.
+    pub status: String,
+    pub claimed_by_name: Option<String>,
+    pub claimed_at: Option<DateTime<Utc>>,
+    pub decided_by_name: Option<String>,
+    pub decided_at: Option<DateTime<Utc>>,
+    pub created_at: DateTime<Utc>,
+}
+
+#[derive(Debug, Deserialize, ToSchema)]
+pub struct CreateAceRequestRequest {
+    #[serde(default)]
+    pub artcc_id: Option<String>,
+    #[serde(default)]
+    pub position: Option<String>,
+    #[serde(default)]
+    pub requested_for: Option<DateTime<Utc>>,
+    pub details: String,
+}
+
+#[derive(Debug, Deserialize, ToSchema)]
+pub struct DecideAceRequestRequest {
+    /// `completed` or `cancelled`.
+    pub outcome: String,
+}
+
+#[derive(Debug, Serialize, ToSchema, sqlx::FromRow)]
+pub struct AceTeamMemberBody {
+    pub id: String,
+    pub cid: i64,
+    pub display_name: String,
+    pub role: Option<String>,
+    pub artcc_id: Option<String>,
+    pub active: bool,
+}
+
+#[derive(Debug, Deserialize, ToSchema)]
+pub struct UpsertAceTeamMemberRequest {
+    pub cid: i64,
+    #[serde(default)]
+    pub role: Option<String>,
+    #[serde(default)]
+    pub artcc_id: Option<String>,
+    #[serde(default)]
+    pub active: Option<bool>,
+}
+
+// --- integration / Discord ---
+
+/// One outbound job handed to the bot on lease. `payload` carries everything the handler needs.
+#[derive(Debug, Serialize, ToSchema)]
+pub struct OutboundJobBody {
+    pub id: String,
+    pub job_type: String,
+    #[schema(value_type = Object)]
+    pub payload: Value,
+    pub subject_type: Option<String>,
+    pub subject_id: Option<String>,
+    pub attempt_count: i32,
+    pub created_at: DateTime<Utc>,
+}
+
+/// The bot's acknowledgement of a leased job. `result` records ids the backend must remember
+/// (message/thread id); `error` explains a failure (triggers backoff + retry).
+#[derive(Debug, Deserialize, ToSchema)]
+pub struct AckJobRequest {
+    pub success: bool,
+    #[serde(default)]
+    #[schema(value_type = Option<Object>)]
+    pub result: Option<Value>,
+    #[serde(default)]
+    pub error: Option<String>,
+}
+
+/// A logical-name → Discord snowflake entry (channel/role/category).
+#[derive(Debug, Serialize, Deserialize, Clone, ToSchema, sqlx::FromRow)]
+pub struct DiscordMapEntry {
+    pub name: String,
+    pub id: String,
+}
+
+/// The Discord guild config + its logical-name maps.
+#[derive(Debug, Serialize, ToSchema)]
+pub struct DiscordConfigBody {
+    /// Null until a config has been saved.
+    pub id: Option<String>,
+    pub name: String,
+    pub guild_id: String,
+    pub channels: Vec<DiscordMapEntry>,
+    pub roles: Vec<DiscordMapEntry>,
+    pub categories: Vec<DiscordMapEntry>,
+}
+
+#[derive(Debug, Deserialize, ToSchema)]
+pub struct UpsertDiscordConfigRequest {
+    pub name: String,
+    pub guild_id: String,
+    #[serde(default)]
+    pub channels: Vec<DiscordMapEntry>,
+    #[serde(default)]
+    pub roles: Vec<DiscordMapEntry>,
+    #[serde(default)]
+    pub categories: Vec<DiscordMapEntry>,
+}
+
 // --- flow constrained areas (FCAs) ---
 
 /// A Flow Constrained Area — a drawn polyline the metering engine sequences traffic against.

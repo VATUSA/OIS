@@ -7,9 +7,9 @@ use crate::{
     auth::middleware::resolve_current_user,
     config::build_cors_layer,
     handlers::{
-        access, airport_configs, api_keys, atc, audit, auth, dashboards, docs, events, facilities,
-        facility_map, feed, flow, gdp, health, preferences, public, runway, service_accounts,
-        stats, tmu, users, webhooks,
+        access, ace, airport_configs, api_keys, atc, audit, auth, dashboards, docs, events,
+        facilities, facility_map, feed, flow, gdp, health, integration, preferences, public,
+        runway, service_accounts, stats, tmu, users, webhooks,
     },
     realtime,
     state::AppState,
@@ -308,6 +308,35 @@ pub fn build_router(state: AppState) -> Router {
         .route("/api/v1/tmu/taxi/{icao}", get(feed::taxi_stats))
         .route("/api/v1/tmu/cfr", post(feed::issue_cfr))
         .route("/api/v1/tmu/cfr/{callsign}", delete(feed::release_cfr))
+        // Discord integration — outbound-job queue (bot) + guild config
+        .route(
+            "/api/v1/integration/jobs/lease",
+            post(integration::lease_jobs),
+        )
+        .route(
+            "/api/v1/integration/jobs/{id}/ack",
+            post(integration::ack_job),
+        )
+        .route(
+            "/api/v1/integration/discord",
+            get(integration::get_discord_config).put(integration::put_discord_config),
+        )
+        // ACE support — request queue + team roster
+        .route(
+            "/api/v1/ace/requests",
+            get(ace::list_requests).post(ace::create_request),
+        )
+        .route("/api/v1/ace/requests/{id}", get(ace::get_request))
+        .route("/api/v1/ace/requests/{id}/claim", post(ace::claim_request))
+        .route(
+            "/api/v1/ace/requests/{id}/decide",
+            post(ace::decide_request),
+        )
+        .route(
+            "/api/v1/ace/team",
+            get(ace::list_team).put(ace::upsert_team_member),
+        )
+        .route("/api/v1/ace/team/{cid}", delete(ace::remove_team_member))
         // API keys (user-owned personal access tokens) — self-service
         .route(
             "/api/v1/api-keys",

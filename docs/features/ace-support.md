@@ -1,5 +1,13 @@
 # ACE support requests
 
+> **Status: v1 built (2026-08-22).** The `ace.requests` + `ace.team_members` tables (migration 0047),
+> the six `ace.*` permissions with USER/ACE role grants, the request lifecycle
+> (`open → claimed → completed/cancelled`, state-guarded in-transaction), the roster endpoints, and
+> the national ACE page at `/ops/ace` are implemented. **Deferred (needs the unbuilt Discord bot):**
+> the `#aceteam-requests` embed + CLAIM button, the `ace_request_notify` EC ping, and the Discord
+> slash-command — the `discord_message_id` column is reserved for them. Also deferred: ARTCC-scoped
+> claim/decide and booking/scheduling. The sections below are the original spec.
+
 ## Problem
 
 The ACE Team provides live controller coverage/support; controllers ask for that support today through off-site channels

@@ -62,6 +62,19 @@ permission!(EventsRateUpdate, ["events", "rate"], Update);
 permission!(EventsConfigUpdate, ["events", "config"], Update);
 permission!(EventsSupportUpdate, ["events", "support"], Update);
 permission!(EventsDebriefCreate, ["events", "debrief"], Create);
+
+// ace — support-request queue + team roster
+permission!(AceRequestsRead, ["ace", "requests"], Read);
+permission!(AceRequestsCreate, ["ace", "requests"], Create);
+permission!(AceRequestsClaim, ["ace", "requests"], Claim);
+permission!(AceRequestsDecide, ["ace", "requests"], Decide);
+permission!(AceTeamRead, ["ace", "team"], Read);
+permission!(AceTeamUpdate, ["ace", "team"], Update);
+
+// discord / integration — the outbound-job queue (bot) + guild config mapping
+permission!(IntegrationJobsUpdate, ["integration", "jobs"], Update);
+permission!(DiscordConfigRead, ["discord", "config"], Read);
+permission!(DiscordConfigUpdate, ["discord", "config"], Update);
 permission!(
     EventsStaffingCreate,
     ["events", "staffing_requests"],
