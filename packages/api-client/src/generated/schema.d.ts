@@ -1330,6 +1330,22 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/v1/integration/discord/ace/{id}/claim": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        post: operations["discord_ace_claim"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/v1/integration/jobs/lease": {
         parameters: {
             query?: never;
@@ -1373,6 +1389,22 @@ export interface paths {
         put?: never;
         post?: never;
         delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/me/discord": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get: operations["get_my_discord"];
+        put?: never;
+        post?: never;
+        delete: operations["unlink_discord"];
         options?: never;
         head?: never;
         patch?: never;
@@ -2729,6 +2761,13 @@ export interface components {
             to_metered: number;
             total: number;
         };
+        /**
+         * @description Bot interaction callback: a Discord user clicked "claim" on an ACE request. The backend resolves
+         *     the Discord id to the linked OIS user and claims on their behalf.
+         */
+        DiscordAceClaimRequest: {
+            discord_user_id: string;
+        };
         /** @description The Discord guild config + its logical-name maps. */
         DiscordConfigBody: {
             categories: components["schemas"]["DiscordMapEntry"][];
@@ -2738,6 +2777,14 @@ export interface components {
             id?: string | null;
             name: string;
             roles: components["schemas"]["DiscordMapEntry"][];
+        };
+        /** @description The current user's Discord account link. */
+        DiscordLinkBody: {
+            /** @description The linked Discord user id (snowflake), when `linked`. */
+            discord_id?: string | null;
+            linked: boolean;
+            /** @description The linked Discord username/handle, when known. */
+            username?: string | null;
         };
         /** @description A logical-name → Discord snowflake entry (channel/role/category). */
         DiscordMapEntry: {
@@ -7975,6 +8022,56 @@ export interface operations {
             };
         };
     };
+    discord_ace_claim: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                id: string;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["DiscordAceClaimRequest"];
+            };
+        };
+        responses: {
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["AceRequestBody"];
+                };
+            };
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description Discord account not linked to an OIS user */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            409: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+        };
+    };
     lease_jobs: {
         parameters: {
             query?: {
@@ -8056,6 +8153,60 @@ export interface operations {
                 };
             };
             401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+        };
+    };
+    get_my_discord: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["DiscordLinkBody"];
+                };
+            };
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+        };
+    };
+    unlink_discord: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            204: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            404: {
                 headers: {
                     [name: string]: unknown;
                 };

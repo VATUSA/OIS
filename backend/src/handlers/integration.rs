@@ -14,8 +14,11 @@ use crate::{
         require_permission::RequirePermission,
     },
     errors::ApiError,
-    models::{AckJobRequest, DiscordConfigBody, OutboundJobBody, UpsertDiscordConfigRequest},
-    repos::integration as integration_repo,
+    models::{
+        AceRequestBody, AckJobRequest, DiscordAceClaimRequest, DiscordConfigBody, OutboundJobBody,
+        UpsertDiscordConfigRequest,
+    },
+    repos::{ace as ace_repo, integration as integration_repo},
     state::AppState,
 };
 
@@ -69,6 +72,37 @@ pub async fn ack_job(
     } else {
         Err(ApiError::NotFound)
     }
+}
+
+// --- interaction callbacks (bot acts on behalf of the linked user) ---
+
+#[utoipa::path(
+    post, path = "/api/v1/integration/discord/ace/{id}/claim", tag = "integration",
+    params(("id" = String, Path)), request_body = DiscordAceClaimRequest,
+    responses(
+        (status = 200, body = AceRequestBody), (status = 401),
+        (status = 403, description = "Discord account not linked to an OIS user"),
+        (status = 404), (status = 409)
+    )
+)]
+pub async fn discord_ace_claim(
+    State(state): State<AppState>,
+    _permission: RequirePermission<IntegrationJobsUpdate>,
+    Path(id): Path<String>,
+    Json(payload): Json<DiscordAceClaimRequest>,
+) -> Result<Json<AceRequestBody>, ApiError> {
+    let p = pool(&state)?;
+    // The clicking Discord user must have linked their OIS account — that's who the claim belongs to.
+    let user_id = integration_repo::find_user_by_discord_id(p, &payload.discord_user_id)
+        .await?
+        .ok_or(ApiError::Forbidden)?;
+    let mut tx = p.begin().await.map_err(|_| ApiError::Internal)?;
+    ace_repo::claim_request(&mut tx, &id, &user_id).await?;
+    tx.commit().await.map_err(|_| ApiError::Internal)?;
+    ace_repo::get_request(p, &id)
+        .await?
+        .map(Json)
+        .ok_or(ApiError::NotFound)
 }
 
 // --- guild config ---

@@ -156,6 +156,89 @@ pub async fn succeeded_job_result(
     Ok(text.flatten().and_then(|t| serde_json::from_str(&t).ok()))
 }
 
+// --- account linking (external_sync_mappings) ----------------------------------------------------
+
+/// The Discord account linked to an OIS user: `(discord_user_id, metadata)`, or `None`.
+pub async fn get_discord_link(
+    pool: &PgPool,
+    user_id: &str,
+) -> Result<Option<(String, Value)>, ApiError> {
+    let row = sqlx::query_as::<_, (String, Value)>(
+        "select external_id, coalesce(metadata, '{}'::jsonb) from integration.external_sync_mappings \
+         where system_code = 'discord' and entity_type = 'user' and local_id = $1",
+    )
+    .bind(user_id)
+    .fetch_optional(pool)
+    .await
+    .map_err(|_| ApiError::Internal)?;
+    Ok(row)
+}
+
+/// Link (or re-link) an OIS user to a Discord account. Enforces one OIS user per Discord id by
+/// clearing any other user's claim on that Discord id first, in one tx.
+pub async fn upsert_discord_link(
+    pool: &PgPool,
+    user_id: &str,
+    discord_id: &str,
+    metadata: &Value,
+) -> Result<(), ApiError> {
+    let metadata = serde_json::to_string(metadata).unwrap_or_else(|_| "{}".to_string());
+    let mut tx = pool.begin().await.map_err(|_| ApiError::Internal)?;
+    sqlx::query(
+        "delete from integration.external_sync_mappings \
+         where system_code = 'discord' and entity_type = 'user' and external_id = $1 and local_id <> $2",
+    )
+    .bind(discord_id)
+    .bind(user_id)
+    .execute(&mut *tx)
+    .await
+    .map_err(|_| ApiError::Internal)?;
+    sqlx::query(
+        "insert into integration.external_sync_mappings \
+             (system_code, entity_type, local_id, external_id, metadata) \
+         values ('discord', 'user', $1, $2, $3::jsonb) \
+         on conflict (system_code, entity_type, local_id) \
+         do update set external_id = excluded.external_id, metadata = excluded.metadata",
+    )
+    .bind(user_id)
+    .bind(discord_id)
+    .bind(metadata)
+    .execute(&mut *tx)
+    .await
+    .map_err(|_| ApiError::Internal)?;
+    tx.commit().await.map_err(|_| ApiError::Internal)?;
+    Ok(())
+}
+
+/// Remove an OIS user's Discord link. Returns false if there wasn't one.
+pub async fn delete_discord_link(pool: &PgPool, user_id: &str) -> Result<bool, ApiError> {
+    let res = sqlx::query(
+        "delete from integration.external_sync_mappings \
+         where system_code = 'discord' and entity_type = 'user' and local_id = $1",
+    )
+    .bind(user_id)
+    .execute(pool)
+    .await
+    .map_err(|_| ApiError::Internal)?;
+    Ok(res.rows_affected() > 0)
+}
+
+/// The OIS user id linked to a Discord account, or `None` — used by the bot's interaction callbacks
+/// to act on behalf of the clicking user.
+pub async fn find_user_by_discord_id(
+    pool: &PgPool,
+    discord_id: &str,
+) -> Result<Option<String>, ApiError> {
+    sqlx::query_scalar::<_, String>(
+        "select local_id from integration.external_sync_mappings \
+         where system_code = 'discord' and entity_type = 'user' and external_id = $1",
+    )
+    .bind(discord_id)
+    .fetch_optional(pool)
+    .await
+    .map_err(|_| ApiError::Internal)
+}
+
 // --- config (single guild for the first cut) -----------------------------------------------------
 
 async fn map_entries(

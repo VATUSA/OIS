@@ -1,5 +1,5 @@
 import {Link} from "@tanstack/react-router";
-import {KeyRound, LayoutDashboard, type LucideIcon, ScrollText, ShieldCheck,} from "lucide-react";
+import {KeyRound, LayoutDashboard, type LucideIcon, MessageSquare, ScrollText, ShieldCheck,} from "lucide-react";
 
 import {useMe} from "@/lib/auth";
 import {hasPermission} from "@/lib/permissions";
@@ -37,6 +37,12 @@ const NAV: Item[] = [
     to: "/admin/api-keys",
     icon: KeyRound,
     permission: "api_keys.key.read",
+  },
+  {
+    label: "Discord",
+    to: "/admin/discord",
+    icon: MessageSquare,
+    permission: "discord.config.read",
   },
 ];
 

@@ -26,6 +26,7 @@ export const ADMIN_PERMISSIONS = [
   "audit.logs.read",
   "service_accounts.read",
   "api_keys.key.read",
+  "discord.config.read",
 ];
 
 /** Whether the user should see the admin portal at all. */
