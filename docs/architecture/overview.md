@@ -8,9 +8,9 @@ This is the map. Deeper detail lives in the sibling docs:
 
 ## Services
 
-- **backend** (`backend/`) — a single Axum (Rust 2024) binary over Postgres. Per-domain schemas (`identity`, `access`,
-  `org`, `events`, `tmu`, `ace`, `flow`, `integration`,
-  `media`, `stats`, `email`, `platform`, `web`). sqlx with migrations embedded in the binary and applied on startup.
+- **backend** (`backend/`) — a single Axum (Rust 2024) binary over Postgres. Per-domain schemas (`platform`, `identity`,
+  `access`, `org`, `events`, `tmu`, `ace`, `flow`, `integration`,
+  `stats`, `media`, `web`). sqlx with migrations embedded in the binary and applied on startup.
   Versioned REST under `/api/v1`, self-served OpenAPI + docs. Background workers in `src/jobs`.
 - **discord** (`discord/`) — a serenity/poise bot. Owns no data: it drains
   `integration.outbound_jobs` from the backend and calls back via REST as a service account for interactions (claim
@@ -28,7 +28,11 @@ backend/src/
   repos/      SQL query layer — all SQL lives here, handlers stay thin
   models/     request/response + row types
   jobs/       background workers (roster sync, event lifecycle, outbound queue drain…)
+  feed/       live VATSIM-feed subsystem (facilities, nav, tracon, winds, runway db…)
   docs/       markdown + generated OpenAPI, served by the app
+  state.rs    AppState (DB pool, feed, nav DB, realtime hub)
+  realtime.rs in-process broadcast hub behind GET /api/v1/ws
+  audit.rs    middleware that logs every successful mutation
 ```
 
 ## Contract flow
@@ -46,6 +50,16 @@ Backend emits OpenAPI (utoipa) at `/docs/api/v1/openapi.json`. Types are generat
   mount + auth glue stay in the consuming app.
 
 The Discord bot does not use this — it uses the Rust `crates/ois-client` instead.
+
+## Realtime
+
+`backend/src/realtime.rs` + `backend/src/state.rs` add an in-process `tokio::sync::broadcast`
+hub (`AppState.events`, published via `AppState::publish`). Mutation handlers fan out small topic
+nudges — `flow.release`, `flow.fca`, `flow.cfr`, `tmu.gdp`, `tmu.tmi`, `tmu.groundstop`,
+`tmu.program` — to every client connected to `GET /api/v1/ws`, which then refetches the matching
+data via REST. REST stays the single source of truth; the socket carries only a "something changed"
+signal (no payloads), and if it drops the app degrades cleanly back to polling. The frontend
+topic → React-Query invalidation map lives in `web/src/lib/realtime.ts`.
 
 ## Integration pattern (backend ↔ bot)
 

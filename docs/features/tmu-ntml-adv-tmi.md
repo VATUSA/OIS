@@ -1,182 +1,182 @@
-# TMU — NTML / ADV / TMI
+# TMU — traffic management
+
+> **Realigned to the shipped implementation.** The original spec described an
+> NTML / advisory (ADV) / TMI tool with a plain-language parser and a public API. What
+> actually shipped in the `tmu` domain is a **vatflow-style metering toolset**: TMIs
+> (reshaped to the NTML restriction row), airport **rate programs**, **ground stops**,
+> **issued CFRs**, and **Ground Delay Programs (GDP)** — plus the live-feed flow / taxi /
+> departures views those drive. The NTML-entry and advisory tables and their
+> `tmu.ntml.*` / `tmu.adv.*` permissions were **never implemented** (the perms are seeded
+> in the catalog but no handler references them). This doc describes what exists in code.
+> The GDP feature (create/publish/freeze, board, compress, lock/unlock, revise/extend) is
+> feature-complete; this is the domain-level spec.
 
 ## Problem
 
-The National Traffic Management Log (NTML), advisories (ADV), and Traffic Management Initiatives (TMI) live on a legacy
-tool today, reachable from OIS only as an external link. Staff manage them off-site, consumers scrape or eyeball them,
-and there is no API. This feature brings NTML/ADV/TMI fully onto the OIS site with a versioned REST API:
-
-- **NTML/ADV** are authored and managed in OIS (no more legacy tool), then parsed into a plain-language TMU section that
-  is readable by non-specialists.
-- **TMU staff generate and publish TMIs** through the site.
-- Published TMIs and ADVs are exposed via the public API so downstream tools (client add-ons, dashboards, other virtual
-  orgs) can consume them.
-- An **average-delay page** shows gate-out→wheels-up and entry→landing timings with color-coded thresholds, filterable
-  by facility/airport. It depends on the traffic/timing data feed owned by [flow.md](flow.md) (ingested from the VATSIM
-  data feed) — treated here as a dependency, not built in this feature.
-- On TMI/ADV publish, post a Discord embed to the configured channel.
+VATUSA's traffic-management tooling (restrictions, rate programs, ground stops, ground
+delay programs) lives in an external tool with no shared identity, permissions, or API.
+OIS brings it in-house in the `tmu` domain, sharing the platform's auth and the same
+ingested VATSIM feed / nav / winds model the `flow` domain uses.
 
 ## Scope
 
-### First cut
+**Built**
 
-- NTML entry CRUD, with parse-on-write into a plain-language rendering.
-- Advisory (ADV) CRUD with an effective window and a `draft → published → expired` lifecycle.
-- TMI authoring (`draft`) and **publish** by TMU staff, with plain-language rendering.
-- Public read endpoints for the plain-language TMU section, published ADVs, and published TMIs (site + external API
-  consumers).
-- Gated create/update/publish/delete for staff.
-- Discord embed on TMI publish and ADV publish.
+- **TMIs** — logged restrictions in the NTML row shape (requesting ↔ providing facility,
+  a restriction string, a start/stop window) with a `draft → published → expired /
+  cancelled` lifecycle.
+- **Rate programs** — one per airport: AAR + spacing (minutes/miles-in-trail), per-gate
+  restrictions, aircraft exclusions. Live operational config (no publish lifecycle).
+- **Ground stops** — hold ground departures into a field, scoped to ARTCC/FIR(s).
+- **Issued CFRs** — controller-locked wheels-up (EDCT) for a ground departure into a
+  metered field, so a release stops drifting as demand recomputes.
+- **Ground Delay Programs (GDP)** — meter inbound demand to an arrival airport down to
+  its AAR via Ration-By-Schedule, freezing control times (CTA) + EDCTs at publish.
+- **Live views** — per-airport metered arrival flow, taxi stats, and the departure-field
+  CFR view, all computed live off the feed.
 
-### Later
+**Not built (from the original spec)**
 
-- **Average-delay page**: gate-out→wheels-up and entry→landing timings, color threshold bands, filterable by
-  facility/airport/time window. Depends on the traffic data feed (see [flow.md](flow.md), ingested from the VATSIM data
-  feed); `tmu.delay_samples` below is the read model this feature would query, populated by that feed's ingestion job.
-- Linking a TMI to a flow program (`flow.programs`) if the "one publish vs. linked" question in flow.md resolves to
-  linked.
-- Amendment/supersede chains for ADVs and TMIs (revision history beyond a simple status flip).
+- NTML **entry** CRUD and advisories (ADV) as separate authored/parsed records.
+- Plain-language parse-on-write rendering.
+- A public/versioned read API for advisories/TMIs (only the public "board"
+  `GET /api/v1/public/board` and per-flight `GET /api/v1/public/flight/{callsign}`
+  advisory exist).
+- The average-delay page (`tmu.delays.read` is seeded but unused).
 
 ## Data model
 
-Schema `tmu` (per-domain schema, sqlx migrations). All tables carry `created_at`/`updated_at`; author/publisher columns
-reference the platform user id. `artcc_id` is nullable — null means a national-scope row.
+Schema `tmu` (sqlx migrations `0008`–`0015`, `0026`–`0027`, `0030`–`0032`). All tables
+carry `created_at`/`updated_at`; author/publisher columns reference `identity.users(id)`.
 
-### `tmu.ntml_entries`
+### `tmu.tmis` — Traffic Management Initiatives *(0008, reshaped 0009)*
 
-| Column | Notes |
+Migration 0009 dropped the original `kind`/`element`/`reason`/`artcc_id` columns for the
+NTML row controllers actually log:
+
+| column | notes |
 | --- | --- |
-| `id` | PK |
-| `artcc_id` | nullable; owning ARTCC, null = national |
-| `element` | affected element (airport / fix / sector / airway), free-form for first cut |
-| `raw_payload` | JSON of the source fields as authored/imported (the NTML "row") |
-| `plain_language` | rendered plain-language text (parse-on-write output) |
-| `event_time` | when the logged event applies |
-| `created_by` / `updated_by` | authoring staff |
-
-No status enum — NTML entries are log records (create/edit/delete), not a publish workflow.
-
-### `tmu.advisories`
-
-| Column | Notes |
-| --- | --- |
-| `id` | PK |
-| `artcc_id` | nullable scope |
-| `adv_type` | advisory category (e.g. GDP, GS, reroute, information) — enum TBD, see Open questions |
-| `title` | short headline |
-| `body` | full advisory text |
-| `plain_language` | rendered plain-language summary |
-| `effective_start` / `effective_end` | effective window (nullable end = until cancelled) |
-| `status` | `draft → published → expired` (also `cancelled`) |
+| `id` | pk |
+| `requesting` / `providing` | requesting ↔ providing facility |
+| `restriction` | the restriction text |
+| `start_time` / `stop_time` | active window (renamed from `effective_start/end`) |
+| `status` | `draft` → `published` → `expired` \| `cancelled` |
 | `published_by` / `published_at` | set on publish |
 
-### `tmu.tmis`
+### `tmu.programs` — airport rate programs *(0010)*
 
-| Column | Notes |
-| --- | --- |
-| `id` | PK |
-| `artcc_id` | nullable scope |
-| `kind` | TMI kind (e.g. MIT, MINIT, ground stop, ground delay, reroute) — enum TBD |
-| `params` | JSON of the initiative parameters (rate, distance, altitude, scope, etc.) |
-| `plain_language` | rendered plain-language description |
-| `effective_start` / `effective_end` | active window |
-| `status` | `draft → published → expired` (also `cancelled`) |
-| `published_by` / `published_at` | set on publish |
+pk `icao`. `aar` (1–200), airport-wide spacing (`trail` minutes-in-trail, or `mit`
+miles-in-trail when > 0), `gates` jsonb (`[{name, trail, mit}]`, ≤ 10), aircraft
+exclusions (`exclude_wake`, `exclude_types`, `jets_only`). Edited in place — no
+draft/publish lifecycle.
 
-### `tmu.delay_samples` *(Later — read model for the average-delay page)*
+### `tmu.ground_stops` — ground stops *(0011, status 0012)*
 
-| Column | Notes |
-| --- | --- |
-| `id` | PK |
-| `airport` | ICAO |
-| `artcc_id` | nullable facility scope |
-| `phase` | which timing this row measures: `gate_to_wheels` or `entry_to_landing` |
-| `sample_time` | when the movement occurred |
-| `duration_seconds` | measured elapsed time for the phase |
+`airport`, `scope` (space-separated ARTCC/FIR codes; `''` = field-wide), `until` (HHMM
+Zulu; null = until further notice).
 
-Populated by the traffic-feed ingestion job (a backend job under `backend/src/jobs`, per [flow.md](flow.md)), **not** by
-user writes. The average-delay page aggregates these into rolling averages per airport/phase and applies color bands.
+### `tmu.issued_cfrs` — issued CFRs *(0013)*
+
+pk `callsign` (one active CFR per flight): `airport` (metered field), `wheels_up`
+(locked release time), `issued_by`/`issued_at`.
+
+### `tmu.gdp` + `tmu.gdp_slot` — Ground Delay Programs *(0026, scope 0027)*
+
+`tmu.gdp`: `airport`, `aar`, HHMM `start_time`/`end_time`, `max_enroute_min` (scope
+tier), `exempt_airborne`, `scope` (departure ARTCCs; `''` = all), `status`
+`draft → published → expired/cancelled`. `tmu.gdp_slot` (pk `gdp_id, callsign`, cascade):
+frozen `original_eta`, `cta`, `edct`, `delay_min` assigned by Ration-By-Schedule at
+publish.
 
 ## Permissions
 
-Path-based `segments.action`, enforced with `RequirePermission<P>`. Per-ARTCC scope via nullable `artcc_id`; a national
-grant covers all ARTCCs. Held by `NTMO` (national scope) and ARTCC-scoped TMU staff (scoped to their ARTCC).
+Path-based `segments.action`, enforced with `RequirePermission<P>`; per-ARTCC scope via
+nullable `artcc_id` on the grant. The permissions the handlers **actually gate on** (each
+seeded by the migration that adds its table):
 
-| Permission | Action | Notes |
+| permission | action | gated handler(s) |
 | --- | --- | --- |
-| `tmu.ntml.read` | read | **public** — powers the plain-language section and external consumers |
-| `tmu.ntml.create` | create | staff |
-| `tmu.ntml.update` | update | staff |
-| `tmu.ntml.delete` | delete | staff |
-| `tmu.adv.read` | read | **public** — published advisories only for unauthenticated callers |
-| `tmu.adv.create` | create | staff |
-| `tmu.adv.update` | update | staff |
-| `tmu.adv.publish` | publish | staff; flips `draft → published`, triggers Discord |
-| `tmu.tmi.read` | read | **public** — published TMIs only for unauthenticated callers |
-| `tmu.tmi.create` | create | staff author a draft |
-| `tmu.tmi.update` | update | staff edit a draft |
-| `tmu.tmi.publish` | publish | staff; flips `draft → published`, triggers Discord (matches `tmu.tmi.publish` referenced in discord-integration.md) |
-| `tmu.tmi.delete` | delete | staff |
-| `tmu.delays.read` | read | **public** *(Later)* — average-delay page and API |
+| `tmu.tmi.read` | read | list TMIs |
+| `tmu.tmi.create` | create | create TMI |
+| `tmu.tmi.update` | update | edit TMI |
+| `tmu.tmi.publish` | publish | publish / cancel TMI |
+| `tmu.tmi.delete` | delete | delete TMI |
+| `tmu.program.read` | read | list programs, flow / taxi / departures views |
+| `tmu.program.update` | update | upsert a rate program |
+| `tmu.program.delete` | delete | delete a rate program |
+| `tmu.groundstop.read` | read | list ground stops |
+| `tmu.groundstop.create` | create | issue a ground stop |
+| `tmu.groundstop.publish` | publish | publish / cancel a ground stop |
+| `tmu.groundstop.delete` | delete | delete a ground stop |
+| `tmu.cfr.assign` | assign | issue / release a CFR |
+| `tmu.gdp.read` | read | list GDPs, GDP board |
+| `tmu.gdp.create` | create | create / revise a GDP |
+| `tmu.gdp.publish` | publish | publish / cancel / compress / lock / unlock |
+| `tmu.gdp.delete` | delete | delete a GDP |
 
-Reads marked public are anonymous-accessible; for ADV and TMI, anonymous/public reads return only `published` rows,
-while staff with the relevant `read` permission also see drafts. Every create/update/publish/delete is gated.
+**Unused catalog entries.** `tmu.ntml.{read,create,update,delete}`, `tmu.adv.*`, and
+`tmu.delays.read` are seeded (migration 0008 and `catalog.rs`) from the original spec but
+**no handler references them** — they correspond to the NTML/ADV/delay features that were
+not built.
 
 ## API
 
-Versioned under `/api/v1`, thin handlers over the repo layer. Read endpoints are public where marked (site + external
-API consumers); create/update/publish/delete require the matching permission above. Publish endpoints also enforce a
-data-dependent precondition (row must be in `draft`) on top of the permission gate.
+Versioned REST under `/api/v1`. TMI / program / ground-stop handlers in
+`backend/src/handlers/tmu.rs`; GDP in `handlers/gdp.rs`; the live-feed views and CFRs in
+`handlers/feed.rs`.
 
-| Method + path | Who | Notes |
-| --- | --- | --- |
-| `GET /api/v1/tmu/ntml` | public | list NTML entries; supports `artcc_id`, time-window filters |
-| `POST /api/v1/tmu/ntml` | `tmu.ntml.create` | create entry; parse-on-write fills `plain_language` |
-| `PATCH /api/v1/tmu/ntml/{id}` | `tmu.ntml.update` | edit; re-runs parse |
-| `DELETE /api/v1/tmu/ntml/{id}` | `tmu.ntml.delete` | remove entry |
-| `GET /api/v1/tmu/advisories` | public | published only for anonymous; `?status=` for staff |
-| `POST /api/v1/tmu/advisories` | `tmu.adv.create` | create draft |
-| `PATCH /api/v1/tmu/advisories/{id}` | `tmu.adv.update` | edit draft/details |
-| `POST /api/v1/tmu/advisories/{id}/publish` | `tmu.adv.publish` | `draft → published`; enqueues `adv_publish` job |
-| `GET /api/v1/tmu/tmis` | public | published only for anonymous; `?status=` for staff |
-| `POST /api/v1/tmu/tmis` | `tmu.tmi.create` | create draft |
-| `PATCH /api/v1/tmu/tmis/{id}` | `tmu.tmi.update` | edit draft |
-| `POST /api/v1/tmu/tmis/{id}/publish` | `tmu.tmi.publish` | `draft → published`; enqueues `tmi_publish` job |
-| `DELETE /api/v1/tmu/tmis/{id}` | `tmu.tmi.delete` | remove TMI |
-| `GET /api/v1/tmu/delays` | public *(Later)* | aggregated averages; filters `airport`, `artcc_id`, `phase`, window |
+### TMIs
 
-**External exposure**: the public `GET` endpoints for advisories and TMIs are the stable, versioned surface downstream
-tools consume. They return the structured record plus the `plain_language` rendering so consumers can display either the
-parsed data or the human summary without re-implementing the parse.
+| method + path | permission |
+| --- | --- |
+| `GET /tmu/tmis` | `tmu.tmi.read` |
+| `POST /tmu/tmis` | `tmu.tmi.create` |
+| `PATCH /tmu/tmis/{id}` | `tmu.tmi.update` |
+| `DELETE /tmu/tmis/{id}` | `tmu.tmi.delete` |
+| `POST /tmu/tmis/{id}/publish` | `tmu.tmi.publish` |
+| `POST /tmu/tmis/{id}/cancel` | `tmu.tmi.publish` |
 
-## Discord
+### Rate programs, ground stops, CFRs, live views
 
-Locked outbound-queue architecture (see [discord-integration.md](discord-integration.md)): the backend inserts a row
-into `integration.outbound_jobs`; the Rust bot drains it, posts the embed, and acks back as a service account. The bot
-never touches Postgres.
+| method + path | permission |
+| --- | --- |
+| `GET /tmu/programs` | `tmu.program.read` |
+| `PUT /tmu/programs/{icao}` | `tmu.program.update` |
+| `DELETE /tmu/programs/{icao}` | `tmu.program.delete` |
+| `GET /tmu/ground-stops` | `tmu.groundstop.read` |
+| `POST /tmu/ground-stops` | `tmu.groundstop.create` |
+| `POST /tmu/ground-stops/{id}/publish` | `tmu.groundstop.publish` |
+| `POST /tmu/ground-stops/{id}/cancel` | `tmu.groundstop.publish` |
+| `DELETE /tmu/ground-stops/{id}` | `tmu.groundstop.delete` |
+| `GET /tmu/flow/{icao}` | `tmu.program.read` |
+| `GET /tmu/departures/{dep}` | `tmu.program.read` |
+| `GET /tmu/taxi/{icao}` | `tmu.program.read` |
+| `POST /tmu/cfr` | `tmu.cfr.assign` |
+| `DELETE /tmu/cfr/{callsign}` | `tmu.cfr.assign` |
 
-- **TMI publish** → enqueue `tmi_publish` with a payload of `{ tmi_id, kind, plain_language, effective window, artcc }`.
-  Bot posts an embed to the configured TMU channel.
-- **ADV publish** → enqueue `adv_publish` with `{ advisory_id, adv_type, title, plain_language, effective window,
-  artcc }`. Bot posts an embed to the configured channel.
+### Ground Delay Programs
 
-Channel/role mapping lives in `integration` config, edited via `discord.config.{read,update}` (not owned by this
-feature). Only the `published` transition enqueues a job; edits and deletes do not (see Open questions on
-edit/cancel notifications).
+| method + path | permission |
+| --- | --- |
+| `GET /tmu/gdp` | `tmu.gdp.read` |
+| `POST /tmu/gdp` | `tmu.gdp.create` |
+| `PUT /tmu/gdp/{id}` | `tmu.gdp.create` (revise) |
+| `DELETE /tmu/gdp/{id}` | `tmu.gdp.delete` |
+| `GET /tmu/gdp/{id}/board` | `tmu.gdp.read` |
+| `POST /tmu/gdp/{id}/publish` | `tmu.gdp.publish` |
+| `POST /tmu/gdp/{id}/cancel` | `tmu.gdp.publish` |
+| `POST /tmu/gdp/{id}/compress` | `tmu.gdp.publish` |
+| `POST /tmu/gdp/{id}/slots/{callsign}` | `tmu.gdp.publish` (lock) |
+| `DELETE /tmu/gdp/{id}/slots/{callsign}` | `tmu.gdp.publish` (unlock) |
 
-## Open questions
+The departures view (`/tmu/departures/{dep}`) also surfaces **FCA releases** from the
+`flow` domain as frozen CFRs — see [flow.md](flow.md#fca-releases-in-the-departures-view).
+Mutations publish the `tmu`/`flow.cfr` realtime topics so open boards nudge-and-refetch.
 
-- **NTML source formats to parse**: what exact fields/formats the legacy NTML rows use (and whether we import history or
-  start fresh), so `raw_payload` and the parser can be bounded.
-- **Plain-language rules**: the mapping from raw NTML/ADV/TMI parameters to plain-language text — templated per
-  `kind`/`adv_type`, or a single generic renderer? Where the rules live (code vs. data) and who maintains them.
-- **Enum inventories**: the concrete `adv_type` and TMI `kind` value sets, and whether `params` is validated per kind.
-- **Delay thresholds / color bands**: the numeric cutoffs for green/yellow/red on each phase (gate-out→wheels-up and
-  entry→landing), and whether they are per-airport or global.
-- **Timing ingestion cadence**: the gate-out / wheels-up / entry / landing timestamps are derived from the **VATSIM data
-  feed** by [flow.md](flow.md); open here is only the poll cadence/derivation detail. This feature just reads
-  `tmu.delay_samples`.
-- **Edit/cancel Discord behavior**: should editing or cancelling a published TMI/ADV edit or delete the existing embed
-  (as ACE does on claim), or post nothing?
-- **TMI ↔ flow program relationship**: whether a TMI is authored independently or generated from a `flow.programs`
-  publish (open in flow.md).
+## Not built
+
+- NTML entries and advisories as first-class records, the plain-language parser, and the
+  public advisory/TMI API from the original spec.
+- The average-delay page (`tmu.delays.read`).
+- Discord embeds on publish (the outbound-queue plumbing is the `integration` domain's,
+  and no `tmu` handler enqueues today).

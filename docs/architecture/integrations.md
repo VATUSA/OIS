@@ -22,7 +22,10 @@ VATUSA is the authority for who is on which ARTCC's roster and at what rating. O
 mirrors that data rather than owning it.
 
 - A background sync job reconciles the roster/facilities from the VATUSA API
-  (`org` domain). *(Planned — Phase 0 remainder.)*
+  (`org` domain), backed by migration `0033_vatusa_sync.sql`. *(Implemented.)*
+- The inbound roster-change webhook `POST /api/v1/webhooks/vatusa/{facility}` is live;
+  it carries no session or bearer and is authenticated by **HMAC signature verification**
+  over the request body.
 - Needs `VATUSA_API_BASE` + `VATUSA_API_KEY`.
 - ARTCC records from VATUSA are what the per-ARTCC permission scope (`artcc_id`)
   points at.
@@ -58,4 +61,6 @@ Machine clients (the bot, external tooling) authenticate with a **hashed bearer
 token** (`access.service_accounts` + `service_account_credentials`). A service account
 holds roles/permissions like a user and is subject to the same `RequirePermission<P>`
 checks, so the bot's callbacks are authorized by the same access model as everything
-else. Management endpoints are planned; the schema + bearer resolution already exist.
+else. Management endpoints are implemented:
+`GET`/`POST /api/v1/admin/service-accounts` and
+`.../{id}/rotate` | `.../{id}/disable` | `.../{id}/roles`.

@@ -8,7 +8,9 @@ The **advisories board** is the public, no-sign-in view of everything affecting 
 - **Per-airport demand** vs. capacity for metered fields.
 - A read-only **FCA overview** on the shared map.
 
-It's live: as controllers publish or cancel initiatives, the board updates.
+It's live: as controllers publish or cancel initiatives, the board refreshes on a short interval.
+
+For a live traffic picture centered on a single ARTCC, see the public [facility map](/map/facility-map).
 
 ## Getting there
 

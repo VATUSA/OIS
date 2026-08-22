@@ -15,9 +15,9 @@ hero:
 
 features:
   - title: See the whole picture
-    details: A live national map of VATSIM traffic with ARTCC and TRACON boundaries, online ATC, and per-airport demand.
+    details: A live national map of VATSIM traffic with ARTCC and TRACON boundaries, online ATC, and per-airport demand — plus a public facility map for any ARTCC.
   - title: Meter the flow
-    details: Build Flow Constrained Areas, run Ground Delay Programs with frozen EDCTs, and balance arrivals across runways.
+    details: Build Flow Constrained Areas, run Ground Delay Programs with frozen EDCTs, schedule departures in IDST, and balance arrivals across runways.
   - title: Keep everyone in sync
-    details: Release times, advisories, and restrictions are shared in real time so every controller and pilot works from the same data.
+    details: Release times, advisories, and restrictions update live across every open board, so every controller and pilot works from the same data.
 ---

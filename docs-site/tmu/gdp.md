@@ -23,7 +23,7 @@ While a program is a **draft**, its control times are advisory and recompute liv
 
 - **Lock / unlock** a slot to pin or release an individual flight.
 - **Compress** the program to pull frozen times **earlier** into slots vacated by cancellations or pop-ups — releases only ever move earlier under compression, never later.
-- **Revise** the AAR, window, or steps; **extend** the window; or let it **auto-expire** at the end.
+- **Revise** the AAR, window, or steps — extending the window is a revision — or let it **auto-expire** at the end.
 
 ::: tip Frozen means frozen
 A published EDCT never drifts on its own. It changes only when *you* revise, compress, or cancel the program — so controllers aren't surprised by a moving release time.

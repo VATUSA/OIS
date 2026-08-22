@@ -11,12 +11,12 @@ tables. Migrations are embedded in the backend binary and applied on startup (sq
 | `identity` | users, sessions |
 | `access` | roles, permissions, grants, service accounts, actors, audit log |
 | `org` | facilities (ARTCCs), roster/membership *(planned)* |
-| `events` | operational coordination: event record, hosts, positions, slots, staffing requests, debrief *(planned; posting/review stays in the current VATUSA site)* |
-| `tmu` | NTML entries, advisories, TMIs, delay samples *(planned)* |
+| `events` | operational coordination: event record, hosts, positions, slots, staffing requests, debrief *(built; posting/review stays in the current VATUSA site)* |
+| `tmu` | NTML entries, advisories, TMIs, ground stops, rate programs, GDPs *(built)* |
 | `ace` | support requests, ACE team roster *(planned)* |
-| `flow` | flow programs, traffic data *(planned)* |
+| `flow` | FCAs, routes, runway configs, facility-map config, traffic data *(built)* |
 | `integration` | Discord config, the outbound-job queue *(planned)* |
-| `stats` | connection/traffic statistics *(planned)* |
+| `stats` | connection/traffic statistics, flights, positions, captures *(built)* |
 | `media` | files + metadata *(planned)* |
 | `web` | site content (broadcasts, pages) *(planned)* |
 
@@ -51,6 +51,31 @@ role-derived ∪ SERVER_ADMIN (all permissions) ∪ direct grants, minus explici
 be, say, an EC scoped to ZDC without being a national EC. The schema carries the scope
 now; per-domain enforcement (and a facility-scoped access editor) roll out as each
 domain is built. `org.facilities` will be the referenced ARTCC catalog.
+
+## Operational domains
+
+The built domains now carry real tables (see the migrations for full columns):
+
+- **`tmu`** — TMIs, ground stops, rate programs, and GDPs (with scope + AAR steps).
+- **`flow`** — `flow.fca`, `flow.route`, `flow.runway_config`, `flow.runway_saved_config`,
+  plus the tables below.
+- **`stats`** — member, flight, position, controller_session, snapshot, capture, winds,
+  plus `stats.flight_plan` below.
+- **`events`** — event record, DCC, facility support, airport rates, staffing, TMI packages.
+
+Tables worth calling out:
+
+- `flow.fca_release` (migration 0023) — frozen CFR releases per FCA: the metered crossing
+  time (`cta_ms`) and release/wheels-up time (`edct_ms`) are pinned when a controller issues
+  a release, and the metering engine treats a released aircraft as a fixed constraint. Manual
+  drag-to-reorder sequence lives on `flow.fca` (`manual_order` text[], `manual_seq` bool).
+- `flow.facility_map_config` (migration 0043) — per-ARTCC color-rule config for the public
+  facility map: `facility_id` PK (the owning ARTCC), `rules jsonb` (ordered color rules),
+  `default_color`, `updated_by` / `updated_at`.
+- `stats.flight_plan` (migration 0044) — flight-plan revision history for temporally-faithful
+  replay. `(session_id, effective_from)` PK, one row per distinct plan revision. `stats.flight`
+  keeps only the latest plan (overwritten each tick), so this table lets replay show the plan
+  in force at each instant instead of retroactively rewriting the whole track.
 
 ## Conventions
 
