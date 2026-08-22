@@ -1,33 +1,36 @@
 //! Flow handlers — FCA CRUD + a lightweight live-traffic feed for the FCA map.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 use std::sync::atomic::Ordering;
 
 use axum::{
     Json,
-    extract::{Extension, Path, State},
+    extract::{Extension, Path, Query, State},
     http::StatusCode,
 };
 use chrono::{DateTime, Duration, Utc};
+use serde::Deserialize;
 
 use crate::{
     auth::{
         context::CurrentUser,
-        permissions::{FlowFcaDelete, FlowFcaUpdate, FlowRouteDelete, FlowRouteUpdate, StatsRead},
+        permissions::{
+            FlowFcaDelete, FlowFcaRead, FlowFcaUpdate, FlowRouteDelete, FlowRouteUpdate, StatsRead,
+        },
         require_permission::RequirePermission,
     },
     errors::ApiError,
     feed::{
-        airports::AirportDb, airspace::Boundaries, fca, nav::NavData, trajectory,
+        airports::AirportDb, airspace::Boundaries, facilities, fca, nav::NavData, trajectory,
         vatsim::FlightPlan, vatsim::VatsimData, winds::Winds,
     },
     jobs,
     models::{
         AircraftRoute, DataStatus, FcaBody, FcaFlight, FlightAdvisory, FlightFcaCrossing,
-        FlightGdp, FlightGroundStop, FlightProgram, ReleaseRequest, ReorderRequest,
-        ResolveRouteRequest, ResolvedRoute, RouteBody, RouteWaypoint, TrafficAircraft,
-        UpsertFcaRequest, UpsertRouteRequest,
+        FlightGdp, FlightGroundStop, FlightProgram, IdstFlight, IdstResponse, ReleaseRequest,
+        ReorderRequest, ResolveRouteRequest, ResolvedRoute, RouteBody, RouteWaypoint,
+        TrafficAircraft, UpsertFcaRequest, UpsertRouteRequest,
     },
     repos::{flow as flow_repo, public as public_repo},
     state::AppState,
@@ -1151,6 +1154,135 @@ pub async fn fca_traffic(
         return Ok(Json(Vec::new()));
     };
     Ok(Json(finalize(&fca, flights, &metas)))
+}
+
+/// Scope for the IDST board — comma-separated airport, TRACON, and ARTCC codes.
+#[derive(Deserialize)]
+pub struct IdstQuery {
+    airports: Option<String>,
+    tracons: Option<String>,
+    artccs: Option<String>,
+}
+
+fn split_codes(s: &Option<String>) -> Vec<String> {
+    s.as_deref()
+        .unwrap_or("")
+        .split(',')
+        .map(|c| c.trim().to_ascii_uppercase())
+        .filter(|c| !c.is_empty())
+        .collect()
+}
+
+#[utoipa::path(
+    get,
+    path = "/api/v1/flow/idst",
+    tag = "flow",
+    params(
+        ("airports" = Option<String>, Query, description = "Comma-separated airport ICAOs"),
+        ("tracons" = Option<String>, Query, description = "Comma-separated TRACON ids"),
+        ("artccs" = Option<String>, Query, description = "Comma-separated ARTCC ids")
+    ),
+    responses((status = 200, body = IdstResponse), (status = 401))
+)]
+pub async fn list_idst(
+    State(state): State<AppState>,
+    _permission: RequirePermission<FlowFcaRead>,
+    Query(q): Query<IdstQuery>,
+) -> Result<Json<IdstResponse>, ApiError> {
+    let pool = state.db.as_ref().ok_or(ApiError::ServiceUnavailable)?;
+    let now = Utc::now();
+    let empty = |now| {
+        Json(IdstResponse {
+            unscheduled: Vec::new(),
+            released: Vec::new(),
+            metered_count: 0,
+            as_of: now,
+        })
+    };
+
+    // Resolve the scope (airports/TRACONs/ARTCCs) to the union of member airport ICAOs.
+    let codes: Vec<String> = split_codes(&q.airports)
+        .into_iter()
+        .chain(split_codes(&q.tracons))
+        .chain(split_codes(&q.artccs))
+        .collect();
+    let airports: HashSet<String> = {
+        let map = state.facilities.read().await;
+        codes
+            .iter()
+            .flat_map(|c| facilities::member_airports(&map, c))
+            .map(|a| a.to_ascii_uppercase())
+            .collect()
+    };
+    if airports.is_empty() {
+        return Ok(empty(now));
+    }
+
+    let fcas = flow_repo::list_fcas(pool).await?;
+    let (snapshot, ap) = feed_view(&state).await;
+    let Some(snap) = snapshot else {
+        return Ok(empty(now));
+    };
+    let nav = state.nav.load_full();
+    let winds = state.winds.load_full();
+
+    let mut unscheduled: Vec<IdstFlight> = Vec::new();
+    let mut released: Vec<IdstFlight> = Vec::new();
+    // One row per (metering FCA, ground departure in scope).
+    for fca in fcas.iter().filter(|f| f.enabled && f.points.0.len() >= 2) {
+        let releases = load_releases(pool, &fca.id).await?;
+        let (flights, metas) = build_candidates(
+            fca,
+            &snap.data,
+            ap.as_ref(),
+            nav.as_ref(),
+            state.airspace.as_ref(),
+            winds.as_ref(),
+            &releases,
+            now,
+        );
+        for f in finalize(fca, flights, &metas) {
+            if (f.status != "ground" && f.status != "proposed")
+                || !airports.contains(&f.dep.to_ascii_uppercase())
+            {
+                continue;
+            }
+            let item = IdstFlight {
+                callsign: f.callsign,
+                dep: f.dep,
+                arr: f.arr,
+                aircraft_type: f.aircraft_type,
+                status: f.status,
+                fca_id: fca.id.clone(),
+                fca_name: fca.name.clone(),
+                seq: f.seq,
+                delay_min: f.delay_min,
+                cross_time: f.cross_time,
+                edct: f.edct,
+                released: f.released,
+            };
+            if item.released {
+                released.push(item);
+            } else {
+                unscheduled.push(item);
+            }
+        }
+    }
+    // Unscheduled by metered crossing (soonest first); released by frozen wheels-up.
+    unscheduled.sort_by_key(|f| {
+        f.cross_time
+            .map(|t| t.timestamp_millis())
+            .unwrap_or(i64::MAX)
+    });
+    released.sort_by_key(|f| f.edct.map(|t| t.timestamp_millis()).unwrap_or(i64::MAX));
+
+    let metered_count = (unscheduled.len() + released.len()) as i64;
+    Ok(Json(IdstResponse {
+        unscheduled,
+        released,
+        metered_count,
+        as_of: now,
+    }))
 }
 
 #[utoipa::path(

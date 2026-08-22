@@ -952,6 +952,40 @@ pub struct ReorderRequest {
     pub order: Vec<String>,
 }
 
+// --- IDST (Integrated Departure Scheduling): FCA-metered ground departures across a scope ---
+
+/// One FCA-metered ground departure in the IDST console. One row per metering FCA — a flight metered
+/// by several FCAs appears once per FCA, each with its own release.
+#[derive(Debug, Serialize, ToSchema)]
+pub struct IdstFlight {
+    pub callsign: String,
+    pub dep: String,
+    pub arr: String,
+    pub aircraft_type: String,
+    /// `ground` | `proposed`.
+    pub status: String,
+    /// The FCA metering this flight (the "program").
+    pub fca_id: String,
+    pub fca_name: String,
+    /// 1-based sequence in that FCA's metered order.
+    pub seq: i64,
+    pub delay_min: i64,
+    /// Metered crossing time (CTA) at the FCA line.
+    pub cross_time: Option<DateTime<Utc>>,
+    /// Frozen wheels-up (EDCT) once released; null while unscheduled.
+    pub edct: Option<DateTime<Utc>>,
+    pub released: bool,
+}
+
+/// The IDST board: FCA-metered ground departures in scope, split by release state.
+#[derive(Debug, Serialize, ToSchema)]
+pub struct IdstResponse {
+    pub unscheduled: Vec<IdstFlight>,
+    pub released: Vec<IdstFlight>,
+    pub metered_count: i64,
+    pub as_of: DateTime<Utc>,
+}
+
 /// An aircraft's filed route resolved to lat/lon anchors, for plotting + a detail popup.
 #[derive(Debug, Serialize, ToSchema)]
 pub struct AircraftRoute {

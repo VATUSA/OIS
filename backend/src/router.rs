@@ -270,6 +270,7 @@ pub fn build_router(state: AppState) -> Router {
         )
         .route("/api/v1/flow/resolve-routes", post(flow::resolve_routes))
         .route("/api/v1/flow/traffic", get(flow::list_traffic))
+        .route("/api/v1/flow/idst", get(flow::list_idst))
         .route("/api/v1/flow/atc", get(atc::list_atc))
         .route("/api/v1/flow/facilities", get(atc::list_flow_facilities))
         // Facility map color rules — public read, facility-scoped write.

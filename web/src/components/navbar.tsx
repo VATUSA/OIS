@@ -27,6 +27,7 @@ import {
   Settings as SettingsIcon,
   ShieldCheck,
   Split,
+  Timer,
   User as UserIcon,
   TrendingUp,
   Waypoints,
@@ -234,6 +235,14 @@ function MobileMenu({
                 </Link>
               </DropdownMenuItem>
             )}
+            {canFca && (
+              <DropdownMenuItem asChild>
+                <Link to="/ops/idst">
+                  <Timer />
+                  IDST
+                </Link>
+              </DropdownMenuItem>
+            )}
             {canRunway && (
               <DropdownMenuItem asChild>
                 <Link to="/ops/runway">
@@ -397,6 +406,14 @@ export function Navbar() {
                   <Link to="/ops/fca">
                     <Waypoints />
                     FCA flow
+                  </Link>
+                </DropdownMenuItem>
+              )}
+              {canFca && (
+                <DropdownMenuItem asChild>
+                  <Link to="/ops/idst">
+                    <Timer />
+                    IDST
                   </Link>
                 </DropdownMenuItem>
               )}

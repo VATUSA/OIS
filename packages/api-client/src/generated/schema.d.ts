@@ -861,6 +861,22 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/v1/flow/idst": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get: operations["list_idst"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/v1/flow/resolve-routes": {
         parameters: {
             query?: never;
@@ -2802,6 +2818,48 @@ export interface components {
             updated_at: string;
             /** @description Display name of whoever last touched the stop. */
             updated_by?: string | null;
+        };
+        /**
+         * @description One FCA-metered ground departure in the IDST console. One row per metering FCA — a flight metered
+         *     by several FCAs appears once per FCA, each with its own release.
+         */
+        IdstFlight: {
+            aircraft_type: string;
+            arr: string;
+            callsign: string;
+            /**
+             * Format: date-time
+             * @description Metered crossing time (CTA) at the FCA line.
+             */
+            cross_time?: string | null;
+            /** Format: int64 */
+            delay_min: number;
+            dep: string;
+            /**
+             * Format: date-time
+             * @description Frozen wheels-up (EDCT) once released; null while unscheduled.
+             */
+            edct?: string | null;
+            /** @description The FCA metering this flight (the "program"). */
+            fca_id: string;
+            fca_name: string;
+            released: boolean;
+            /**
+             * Format: int64
+             * @description 1-based sequence in that FCA's metered order.
+             */
+            seq: number;
+            /** @description `ground` | `proposed`. */
+            status: string;
+        };
+        /** @description The IDST board: FCA-metered ground departures in scope, split by release state. */
+        IdstResponse: {
+            /** Format: date-time */
+            as_of: string;
+            /** Format: int64 */
+            metered_count: number;
+            released: components["schemas"]["IdstFlight"][];
+            unscheduled: components["schemas"]["IdstFlight"][];
         };
         IssueCfrRequest: {
             /** @description The metered arrival airport this departure is bound for. */
@@ -6071,6 +6129,38 @@ export interface operations {
                 content?: never;
             };
             404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+        };
+    };
+    list_idst: {
+        parameters: {
+            query?: {
+                /** @description Comma-separated airport ICAOs */
+                airports?: string;
+                /** @description Comma-separated TRACON ids */
+                tracons?: string;
+                /** @description Comma-separated ARTCC ids */
+                artccs?: string;
+            };
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["IdstResponse"];
+                };
+            };
+            401: {
                 headers: {
                     [name: string]: unknown;
                 };

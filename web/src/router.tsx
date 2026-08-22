@@ -11,6 +11,7 @@ import {ProfilePage} from "@/pages/profile";
 import {SettingsPage} from "@/pages/settings";
 import {AirportPage} from "@/pages/airport";
 import {FcaPage} from "@/pages/fca";
+import {IdstPage} from "@/pages/idst";
 import {FacilityMapIndexPage, FacilityMapPage} from "@/pages/facility-map";
 import {RunwayPage} from "@/pages/runway";
 import {DashboardPage} from "@/pages/dashboard";
@@ -147,6 +148,13 @@ const runwayRoute = createRoute({
   path: "runway",
   component: RunwayPage,
   staticData: { layout: "full" },
+});
+
+const idstRoute = createRoute({
+  getParentRoute: () => opsRoute,
+  path: "idst",
+  component: IdstPage,
+  staticData: { layout: "wide" },
 });
 
 // --- Advisories (public, read-only) ---
@@ -376,6 +384,7 @@ const routeTree = rootRoute.addChildren([
     myRoute.addChildren([myIndexRoute, sharedBoardRoute, boardRoute]),
     fcaRoute,
     runwayRoute,
+    idstRoute,
   ]),
   advisoriesRoute.addChildren([advisoriesIndexRoute, advisoriesFcaRoute]),
   facilityMapRoute.addChildren([facilityMapIndexRoute, facilityMapDetailRoute]),
