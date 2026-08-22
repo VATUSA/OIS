@@ -3,7 +3,7 @@
 //! the coarse `RequirePermission` gate authorizes the caller; the state check lives here.
 
 use chrono::{DateTime, Utc};
-use sqlx::PgPool;
+use sqlx::{PgPool, Postgres, Transaction};
 
 use crate::{
     errors::ApiError,
@@ -47,10 +47,11 @@ pub async fn get_request(pool: &PgPool, id: &str) -> Result<Option<AceRequestBod
         .map_err(|_| ApiError::Internal)
 }
 
-/// Open a new request. Returns the new id.
+/// Open a new request **in the caller's transaction** (so a Discord post-job can be enqueued
+/// atomically alongside it). Returns the new id.
 #[allow(clippy::too_many_arguments)]
 pub async fn create_request(
-    pool: &PgPool,
+    tx: &mut Transaction<'_, Postgres>,
     requested_by: &str,
     artcc_id: Option<&str>,
     position: Option<&str>,
@@ -66,36 +67,41 @@ pub async fn create_request(
     .bind(position)
     .bind(requested_for)
     .bind(details)
-    .fetch_one(pool)
+    .fetch_one(&mut **tx)
     .await
     .map_err(|_| ApiError::Internal)
 }
 
-/// Claim an `open` request. `NotFound` if absent, `Conflict` if not open (data-dependent, in-tx).
-pub async fn claim_request(pool: &PgPool, id: &str, claimer: &str) -> Result<(), ApiError> {
-    let mut tx = pool.begin().await.map_err(|_| ApiError::Internal)?;
-    let status =
-        sqlx::query_scalar::<_, String>("select status from ace.requests where id = $1 for update")
-            .bind(id)
-            .fetch_optional(&mut *tx)
-            .await
-            .map_err(|_| ApiError::Internal)?;
-    match status.as_deref() {
+/// Claim an `open` request **in the caller's transaction** (so a notify-job can be enqueued
+/// atomically). Returns the request's `artcc_id` for that job. `NotFound` if absent, `Conflict` if
+/// not open (data-dependent, guarded by `select … for update`).
+pub async fn claim_request(
+    tx: &mut Transaction<'_, Postgres>,
+    id: &str,
+    claimer: &str,
+) -> Result<Option<String>, ApiError> {
+    let row = sqlx::query_as::<_, (String, Option<String>)>(
+        "select status, artcc_id from ace.requests where id = $1 for update",
+    )
+    .bind(id)
+    .fetch_optional(&mut **tx)
+    .await
+    .map_err(|_| ApiError::Internal)?;
+    let artcc_id = match row {
         None => return Err(ApiError::NotFound),
-        Some("open") => {}
-        Some(_) => return Err(ApiError::Conflict),
-    }
+        Some((status, _)) if status != "open" => return Err(ApiError::Conflict),
+        Some((_, artcc)) => artcc,
+    };
     sqlx::query(
         "update ace.requests set status = 'claimed', claimed_by = $2, claimed_at = now() \
          where id = $1",
     )
     .bind(id)
     .bind(claimer)
-    .execute(&mut *tx)
+    .execute(&mut **tx)
     .await
     .map_err(|_| ApiError::Internal)?;
-    tx.commit().await.map_err(|_| ApiError::Internal)?;
-    Ok(())
+    Ok(artcc_id)
 }
 
 /// Complete or cancel a request. `NotFound` if absent, `Conflict` if already terminal. `outcome`

@@ -28,7 +28,10 @@ use crate::{
         UpdateEventDebriefRequest, UpsertAirportRateRequest, UpsertFacilitySupportRequest,
         UpsertProgramRequest, UpsertStaffingRequest,
     },
-    repos::{access as access_repo, events as events_repo, stats as stats_repo, tmu as tmu_repo},
+    repos::{
+        access as access_repo, events as events_repo, integration as integration_repo,
+        stats as stats_repo, tmu as tmu_repo,
+    },
     state::AppState,
 };
 
@@ -803,6 +806,9 @@ pub async fn activate_event_package(
         .ok_or(ApiError::NotFound)?;
     let items = events_repo::list_package_items(pool, &package_id).await?;
 
+    // A published restriction posts to Discord like any other; resolve the channel once (None ⇒ skip).
+    let tmu_channel = integration_repo::channel_id(pool, crate::handlers::tmu::TMU_CHANNEL).await?;
+
     // Materialize each draft item into the live TMU tables, recording a `live_ref` so the package
     // can later be deactivated (cancelling exactly what it created).
     for item in &items {
@@ -838,7 +844,28 @@ pub async fn activate_event_package(
                 };
                 // Activation goes live: create then publish so the restriction is active.
                 let tmi_id = tmu_repo::create_tmi(pool, &req, &user.id).await?;
-                tmu_repo::publish_tmi(pool, &tmi_id, &user.id).await?;
+                let mut tx = pool.begin().await.map_err(|_| ApiError::Internal)?;
+                let tmi = tmu_repo::publish_tmi(&mut tx, &tmi_id, &user.id).await?;
+                if let (Some(tmi), Some(channel_id)) = (tmi, tmu_channel.clone()) {
+                    let job = serde_json::json!({
+                        "channel_id": channel_id,
+                        "tmi_id": tmi.id,
+                        "requesting": tmi.requesting,
+                        "providing": tmi.providing,
+                        "restriction": tmi.restriction,
+                        "start_time": tmi.start_time,
+                        "stop_time": tmi.stop_time,
+                    });
+                    integration_repo::enqueue_job(
+                        &mut tx,
+                        "tmi_publish",
+                        &job,
+                        Some("tmi"),
+                        Some(tmi.id.as_str()),
+                    )
+                    .await?;
+                }
+                tx.commit().await.map_err(|_| ApiError::Internal)?;
                 tmi_id
             }
             "ground_stop" => {
