@@ -164,6 +164,7 @@ pub async fn create_fca(
     let pool = state.db.as_ref().ok_or(ApiError::ServiceUnavailable)?;
     validate_fca(&payload)?;
     let id = flow_repo::create_fca(pool, &payload, &user.id).await?;
+    state.publish(crate::realtime::topic::FCA);
     flow_repo::get_fca(pool, &id)
         .await?
         .map(Json)
@@ -191,6 +192,7 @@ pub async fn update_fca(
     if !flow_repo::update_fca(pool, &id, &payload, &user.id).await? {
         return Err(ApiError::NotFound);
     }
+    state.publish(crate::realtime::topic::FCA);
     flow_repo::get_fca(pool, &id)
         .await?
         .map(Json)
@@ -211,6 +213,7 @@ pub async fn delete_fca(
 ) -> Result<StatusCode, ApiError> {
     let pool = state.db.as_ref().ok_or(ApiError::ServiceUnavailable)?;
     if flow_repo::delete_fca(pool, &id).await? {
+        state.publish(crate::realtime::topic::FCA);
         Ok(StatusCode::NO_CONTENT)
     } else {
         Err(ApiError::NotFound)
@@ -1377,6 +1380,7 @@ pub async fn mark_release(
     };
     let edct = cta - (eta_ms - now_ms);
     flow_repo::upsert_release(pool, &id, &callsign, cta, edct, &user.id).await?;
+    state.publish(crate::realtime::topic::RELEASE);
 
     // Reflect the new release and re-meter without another snapshot read.
     metas[ti].frozen_ms = Some(cta);
@@ -1405,6 +1409,7 @@ pub async fn clear_release(
         .await?
         .ok_or(ApiError::NotFound)?;
     flow_repo::delete_release(pool, &id, &callsign.to_ascii_uppercase()).await?;
+    state.publish(crate::realtime::topic::RELEASE);
     let releases = load_releases(pool, &id).await?;
     let now = Utc::now();
 
@@ -1451,5 +1456,6 @@ pub async fn reorder_fca(
     if !flow_repo::set_manual_order(pool, &id, &payload.order, manual, &user.id).await? {
         return Err(ApiError::NotFound);
     }
+    state.publish(crate::realtime::topic::FCA);
     Ok(StatusCode::NO_CONTENT)
 }

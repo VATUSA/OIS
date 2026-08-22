@@ -5,6 +5,7 @@ use std::sync::atomic::AtomicI64;
 
 use arc_swap::ArcSwap;
 use sqlx::{PgPool, postgres::PgPoolOptions};
+use tokio::sync::broadcast;
 
 use crate::feed::{
     self, FeedState, airspace::Boundaries, facilities::FacilityState, nav::NavData,
@@ -37,6 +38,18 @@ pub struct AppState {
     pub winds_refreshed: Arc<AtomicI64>,
     /// Per-airport METAR cache `(info, fetched_ms)` for the runway board (server-side fetch).
     pub metar_cache: Arc<Mutex<HashMap<String, (feed::metar::MetarInfo, i64)>>>,
+    /// Realtime push hub: mutation handlers publish a topic here; connected websockets fan it out to
+    /// clients, which then refetch via REST (see `crate::realtime`).
+    pub events: crate::realtime::Events,
+}
+
+impl AppState {
+    /// Publish a realtime nudge to every connected websocket. No-op error when nobody's listening.
+    pub fn publish(&self, topic: &str) {
+        let _ = self.events.send(crate::realtime::WsEvent {
+            topic: topic.to_string(),
+        });
+    }
 }
 
 impl AppState {
@@ -51,6 +64,7 @@ impl AppState {
         let nav_refreshed = Arc::new(AtomicI64::new(0));
         let winds_refreshed = Arc::new(AtomicI64::new(0));
         let metar_cache = Arc::new(Mutex::new(HashMap::new()));
+        let events = broadcast::channel(256).0;
         tracing::info!(
             nav_points = nav.load().len(),
             nav_cycle = nav.load().cycle(),
@@ -74,6 +88,7 @@ impl AppState {
                 nav_refreshed,
                 winds_refreshed,
                 metar_cache,
+                events,
             });
         }
 
@@ -89,6 +104,7 @@ impl AppState {
             nav_refreshed,
             winds_refreshed,
             metar_cache,
+            events,
         })
     }
 
@@ -105,6 +121,7 @@ impl AppState {
             nav_refreshed: Arc::new(AtomicI64::new(0)),
             winds_refreshed: Arc::new(AtomicI64::new(0)),
             metar_cache: Arc::new(Mutex::new(HashMap::new())),
+            events: broadcast::channel(256).0,
         }
     }
 }

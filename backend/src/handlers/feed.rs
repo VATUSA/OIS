@@ -388,6 +388,7 @@ pub async fn issue_cfr(
     };
 
     tmu_repo::upsert_issued_cfr(pool, &callsign, &airport, wheels_up, &user.id).await?;
+    state.publish(crate::realtime::topic::CFR);
     let _ = tmu_repo::prune_stale_cfrs(pool).await;
     let cfr = tmu_repo::get_issued_cfr(pool, &callsign)
         .await?
@@ -412,5 +413,6 @@ pub async fn release_cfr(
     if !tmu_repo::delete_issued_cfr(pool, &callsign).await? {
         return Err(ApiError::NotFound);
     }
+    state.publish(crate::realtime::topic::CFR);
     Ok(StatusCode::NO_CONTENT)
 }

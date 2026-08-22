@@ -101,6 +101,24 @@ fn derive(
     Some((action, resource_type, resource_id))
 }
 
+/// Realtime nudge topic for the broader TMU boards (GDP / TMI / ground stops / rate programs), keyed
+/// off the matched route. FCA releases, FCA edits, and CFRs publish precisely from their own handlers,
+/// so they're intentionally excluded here to avoid a double nudge.
+fn tmu_realtime_topic(path: &str) -> Option<&'static str> {
+    use crate::realtime::topic;
+    if path.starts_with("/api/v1/tmu/gdp") {
+        Some(topic::GDP)
+    } else if path.starts_with("/api/v1/tmu/tmis") {
+        Some(topic::TMI)
+    } else if path.starts_with("/api/v1/tmu/ground-stops") {
+        Some(topic::GROUND_STOP)
+    } else if path.starts_with("/api/v1/tmu/programs") {
+        Some(topic::PROGRAM)
+    } else {
+        None
+    }
+}
+
 /// Middleware: log a successful mutation to the audit trail.
 pub async fn audit_mutations(
     State(state): State<AppState>,
@@ -126,6 +144,9 @@ pub async fn audit_mutations(
     let response = next.run(request).await;
 
     if is_mutation && response.status().is_success() {
+        if let Some(topic) = tmu_realtime_topic(template.as_deref().unwrap_or(&actual)) {
+            state.publish(topic);
+        }
         record(&state, &method, template.as_deref(), &actual, user, ip).await;
     }
     response

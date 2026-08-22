@@ -5,6 +5,7 @@ import {RouterProvider} from "@tanstack/react-router";
 import {DialogProvider, ThemeProvider, ToastProvider} from "@ois/ui";
 
 import {router} from "./router";
+import {RealtimeProvider} from "./components/realtime-provider";
 import "./index.css";
 
 const queryClient = new QueryClient();
@@ -15,7 +16,9 @@ ReactDOM.createRoot(document.getElementById("root")!).render(
       <ToastProvider>
         <DialogProvider>
           <QueryClientProvider client={queryClient}>
-            <RouterProvider router={router} />
+            <RealtimeProvider>
+              <RouterProvider router={router} />
+            </RealtimeProvider>
           </QueryClientProvider>
         </DialogProvider>
       </ToastProvider>
