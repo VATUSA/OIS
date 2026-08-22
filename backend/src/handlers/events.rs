@@ -12,8 +12,8 @@ use crate::{
     auth::{
         context::{CurrentApiKey, CurrentUser},
         permissions::{
-            EventsPlanRead, EventsPlanUpdate, EventsRateUpdate, EventsStaffingCreate,
-            EventsSupportUpdate, StatsCaptureUpdate,
+            EventsDebriefCreate, EventsPlanRead, EventsPlanUpdate, EventsRateUpdate,
+            EventsStaffingCreate, EventsSupportUpdate, StatsCaptureUpdate,
         },
         principal::Principal,
         require_permission::RequirePermission,
@@ -23,11 +23,12 @@ use crate::{
     models::{
         AddPackageItemRequest, AirportRateBody, AirportStatBody, CombinedStatBody,
         CreateGroundStopRequest, CreatePackageRequest, CreateTmiRequest, DccRequestBody, EventBody,
-        EventCaptureBody, EventStatsBody, FacilitySupportBody, KeyCountBody, StaffingRequestBody,
-        TmiPackageBody, UpdateDccRequest, UpdateEventCaptureRequest, UpsertAirportRateRequest,
-        UpsertFacilitySupportRequest, UpsertProgramRequest, UpsertStaffingRequest,
+        EventCaptureBody, EventDebriefBody, EventStatsBody, FacilitySupportBody, KeyCountBody,
+        StaffingRequestBody, TmiPackageBody, UpdateDccRequest, UpdateEventCaptureRequest,
+        UpdateEventDebriefRequest, UpsertAirportRateRequest, UpsertFacilitySupportRequest,
+        UpsertProgramRequest, UpsertStaffingRequest,
     },
-    repos::{events as events_repo, stats as stats_repo, tmu as tmu_repo},
+    repos::{access as access_repo, events as events_repo, stats as stats_repo, tmu as tmu_repo},
     state::AppState,
 };
 
@@ -1098,5 +1099,74 @@ pub async fn get_event_stats(
         window_end: Some(to),
         airports,
         combined,
+    }))
+}
+
+#[utoipa::path(
+    get,
+    path = "/api/v1/events/{id}/debrief",
+    tag = "events",
+    params(("id" = i64, Path, description = "VATUSA event id")),
+    responses((status = 200, body = EventDebriefBody), (status = 401))
+)]
+pub async fn get_event_debrief(
+    State(state): State<AppState>,
+    _permission: RequirePermission<EventsPlanRead>,
+    Extension(current_user): Extension<Option<CurrentUser>>,
+    Path(id): Path<i64>,
+) -> Result<Json<EventDebriefBody>, ApiError> {
+    let pool = state.db.as_ref().ok_or(ApiError::ServiceUnavailable)?;
+    let editable = match current_user.as_ref() {
+        Some(u) => access_repo::fetch_user_permission_names(pool, &u.id)
+            .await?
+            .iter()
+            .any(|p| p == "events.debrief.create"),
+        None => false,
+    };
+    let (notes, updated_by, updated_at) = match events_repo::get_debrief(pool, id).await? {
+        Some((n, by, at)) => (n, by, Some(at)),
+        None => (String::new(), None, None),
+    };
+    Ok(Json(EventDebriefBody {
+        notes,
+        updated_by,
+        updated_at,
+        editable,
+    }))
+}
+
+#[utoipa::path(
+    put,
+    path = "/api/v1/events/{id}/debrief",
+    tag = "events",
+    params(("id" = i64, Path, description = "VATUSA event id")),
+    request_body = UpdateEventDebriefRequest,
+    responses((status = 200, body = EventDebriefBody), (status = 400), (status = 401), (status = 404))
+)]
+pub async fn update_event_debrief(
+    State(state): State<AppState>,
+    _permission: RequirePermission<EventsDebriefCreate>,
+    Extension(current_user): Extension<Option<CurrentUser>>,
+    Path(id): Path<i64>,
+    Json(payload): Json<UpdateEventDebriefRequest>,
+) -> Result<Json<EventDebriefBody>, ApiError> {
+    let user = current_user.as_ref().ok_or(ApiError::Unauthorized)?;
+    let pool = state.db.as_ref().ok_or(ApiError::ServiceUnavailable)?;
+    if payload.notes.len() > 20_000 {
+        return Err(ApiError::BadRequest);
+    }
+    if events_repo::get(pool, id).await?.is_none() {
+        return Err(ApiError::NotFound);
+    }
+    events_repo::upsert_debrief(pool, id, &payload.notes, &user.id).await?;
+    let (notes, updated_by, updated_at) = match events_repo::get_debrief(pool, id).await? {
+        Some((n, by, at)) => (n, by, Some(at)),
+        None => (payload.notes, None, None),
+    };
+    Ok(Json(EventDebriefBody {
+        notes,
+        updated_by,
+        updated_at,
+        editable: true,
     }))
 }

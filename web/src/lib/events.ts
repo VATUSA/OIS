@@ -470,3 +470,40 @@ export function eventBodyText(body: string): string {
     .replace(/\n{3,}/g, "\n\n")
     .trim();
 }
+
+export type EventDebrief = components["schemas"]["EventDebriefBody"];
+
+/** An event's free-text post-event debrief notes. */
+export function useEventDebrief(eventId: number) {
+  return useQuery({
+    queryKey: ["event-debrief", eventId],
+    queryFn: async () => {
+      const { data, error } = await ois.GET("/api/v1/events/{id}/debrief", {
+        params: { path: { id: eventId } },
+      });
+      if (error || !data) throw new Error("failed to load debrief");
+      return data;
+    },
+    enabled: Number.isFinite(eventId),
+  });
+}
+
+export function useUpdateEventDebrief(eventId: number) {
+  const queryClient = useQueryClient();
+  const toast = useToast();
+  return useMutation({
+    mutationFn: async (notes: string) => {
+      const { data, error } = await ois.PUT("/api/v1/events/{id}/debrief", {
+        params: { path: { id: eventId } },
+        body: { notes },
+      });
+      if (error || !data) throw new Error("save failed");
+      return data;
+    },
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ["event-debrief", eventId] });
+      toast.success("Debrief saved");
+    },
+    onError: () => toast.error("Couldn’t save the debrief"),
+  });
+}

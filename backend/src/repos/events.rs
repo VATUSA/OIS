@@ -572,3 +572,42 @@ pub async fn mark_package_archived(
     tx.commit().await.map_err(|_| ApiError::Internal)?;
     Ok(())
 }
+
+/// The event's debrief notes + who last edited them (display name), if written.
+pub async fn get_debrief(
+    pool: &PgPool,
+    event_id: i64,
+) -> Result<Option<(String, Option<String>, DateTime<Utc>)>, ApiError> {
+    sqlx::query_as::<_, (String, Option<String>, DateTime<Utc>)>(
+        "select d.notes, u.display_name, d.updated_at \
+         from events.event_debrief d \
+         left join identity.users u on u.id = d.updated_by \
+         where d.event_id = $1",
+    )
+    .bind(event_id)
+    .fetch_optional(pool)
+    .await
+    .map_err(|_| ApiError::Internal)
+}
+
+/// Insert or replace an event's debrief notes, stamping the editor + time.
+pub async fn upsert_debrief(
+    pool: &PgPool,
+    event_id: i64,
+    notes: &str,
+    user_id: &str,
+) -> Result<(), ApiError> {
+    sqlx::query(
+        "insert into events.event_debrief (event_id, notes, updated_by, updated_at) \
+         values ($1, $2, $3, now()) \
+         on conflict (event_id) do update \
+             set notes = excluded.notes, updated_by = excluded.updated_by, updated_at = now()",
+    )
+    .bind(event_id)
+    .bind(notes)
+    .bind(user_id)
+    .execute(pool)
+    .await
+    .map_err(|_| ApiError::Internal)?;
+    Ok(())
+}

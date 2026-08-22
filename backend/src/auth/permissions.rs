@@ -61,6 +61,7 @@ permission!(EventsPlanUpdate, ["events", "plan"], Update);
 permission!(EventsRateUpdate, ["events", "rate"], Update);
 permission!(EventsConfigUpdate, ["events", "config"], Update);
 permission!(EventsSupportUpdate, ["events", "support"], Update);
+permission!(EventsDebriefCreate, ["events", "debrief"], Create);
 permission!(
     EventsStaffingCreate,
     ["events", "staffing_requests"],

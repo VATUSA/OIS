@@ -835,6 +835,22 @@ pub struct EventStatsBody {
     pub combined: CombinedStatBody,
 }
 
+/// An event's free-text post-event debrief notes.
+#[derive(Debug, Serialize, ToSchema)]
+pub struct EventDebriefBody {
+    pub notes: String,
+    /// Display name of whoever last edited it.
+    pub updated_by: Option<String>,
+    pub updated_at: Option<DateTime<Utc>>,
+    /// Whether the caller may edit the notes (holds `events.debrief.create`).
+    pub editable: bool,
+}
+
+#[derive(Debug, Deserialize, ToSchema)]
+pub struct UpdateEventDebriefRequest {
+    pub notes: String,
+}
+
 // --- flow constrained areas (FCAs) ---
 
 /// A Flow Constrained Area — a drawn polyline the metering engine sequences traffic against.

@@ -1,10 +1,20 @@
 import {useEffect, useState} from "react";
-import {Badge, buttonVariants, Card, CardContent, Input} from "@ois/ui";
+import {Badge, Button, buttonVariants, Card, CardContent, Input} from "@ois/ui";
 import {Link} from "@tanstack/react-router";
 import {BarChart3, Circle, Film, Plane} from "lucide-react";
 
 import {type EventCapture, type EventStats, useEventCapture, useEventStats, useUpdateEventCapture,} from "@/lib/event-stats";
-import {formatZuluFull} from "@/lib/time";
+import {
+  type AirportRate,
+  type FacilitySupport,
+  type TmiPackage,
+  useAirportRates,
+  useEventDebrief,
+  useFacilitySupport,
+  usePackages,
+  useUpdateEventDebrief,
+} from "@/lib/events";
+import {formatZuluFull, timeAgo} from "@/lib/time";
 
 const clampMin = (n: number) => Math.max(0, Math.min(720, Math.round(n)));
 
@@ -231,10 +241,59 @@ function DebriefPending({ cap }: { cap?: EventCapture }) {
   );
 }
 
+/** Planned AAR/ADR (from the event's airport rates) beside what actually flew. */
+function PlannedVsActual({
+  rates,
+  airports,
+}: {
+  rates: AirportRate[];
+  airports: AirportStat[];
+}) {
+  const byIcao = new Map(airports.map((a) => [a.icao, a]));
+  const rows = rates.filter((r) => byIcao.has(r.icao));
+  if (rows.length === 0) return null;
+  return (
+    <section className="flex flex-col gap-2">
+      <h3 className="text-sm font-medium">Planned vs. actual</h3>
+      <div className="overflow-x-auto rounded-md border">
+        <table className="w-full text-sm">
+          <thead>
+            <tr className="border-b text-left text-xs text-muted-foreground">
+              <th className="px-3 py-2 font-medium">Airport</th>
+              <th className="px-3 py-2 text-right font-medium">Planned AAR</th>
+              <th className="px-3 py-2 text-right font-medium">Actual arrivals</th>
+              <th className="px-3 py-2 text-right font-medium">Planned ADR</th>
+              <th className="px-3 py-2 text-right font-medium">Actual departures</th>
+            </tr>
+          </thead>
+          <tbody>
+            {rows.map((r) => {
+              const a = byIcao.get(r.icao)!;
+              return (
+                <tr key={r.icao} className="border-b last:border-0">
+                  <td className="px-3 py-2 font-mono">{r.icao}</td>
+                  <td className="px-3 py-2 text-right tabular-nums text-muted-foreground">{r.aar}</td>
+                  <td className="px-3 py-2 text-right font-medium tabular-nums">{a.arrivals}</td>
+                  <td className="px-3 py-2 text-right tabular-nums text-muted-foreground">{r.adr}</td>
+                  <td className="px-3 py-2 text-right font-medium tabular-nums">{a.departures}</td>
+                </tr>
+              );
+            })}
+          </tbody>
+        </table>
+      </div>
+      <p className="text-xs text-muted-foreground">
+        Planned rates are per-hour; actuals are totals over the capture window.
+      </p>
+    </section>
+  );
+}
+
 function Debrief({ eventId }: { eventId: number }) {
   const capture = useEventCapture(eventId);
   const saved = capture.data?.capture_status === "saved";
   const stats = useEventStats(eventId, saved);
+  const rates = useAirportRates(eventId);
   const s = stats.data;
 
   // The debrief only exists once the event has ended and its capture was saved.
@@ -285,7 +344,167 @@ function Debrief({ eventId }: { eventId: number }) {
                 ))}
               </div>
             </section>
+
+            <PlannedVsActual rates={rates.data ?? []} airports={s.airports} />
           </>
+        )}
+      </CardContent>
+    </Card>
+  );
+}
+
+/** A recap of what was planned/coordinated for the event — the other half of the debrief. */
+function Coordination({ eventId }: { eventId: number }) {
+  const rates = useAirportRates(eventId);
+  const packages = usePackages(eventId);
+  const support = useFacilitySupport(eventId);
+
+  const airports: AirportRate[] = rates.data ?? [];
+  const activated: TmiPackage[] = (packages.data ?? []).filter(
+    (p) => p.status === "activated" || p.status === "archived",
+  );
+  const stored: FacilitySupport[] = (support.data ?? []).filter((f) => f.stored);
+
+  if (airports.length === 0 && activated.length === 0 && stored.length === 0) return null;
+
+  const none = <span className="text-xs text-muted-foreground/70">None</span>;
+  return (
+    <Card>
+      <CardContent className="flex flex-col gap-4 pt-6">
+        <span className="font-semibold">Coordination</span>
+        <div className="grid gap-4 sm:grid-cols-3">
+          <div>
+            <div className="mb-1 text-[10px] uppercase tracking-wide text-muted-foreground">
+              Featured airports
+            </div>
+            {airports.length === 0 ? (
+              none
+            ) : (
+              <div className="flex flex-wrap gap-1.5">
+                {airports.map((a) => (
+                  <Badge key={a.icao} variant="secondary" className="font-mono text-xs">
+                    {a.icao}
+                    <span className="ml-1 text-muted-foreground">
+                      {a.aar}/{a.adr}
+                    </span>
+                  </Badge>
+                ))}
+              </div>
+            )}
+          </div>
+          <div>
+            <div className="mb-1 text-[10px] uppercase tracking-wide text-muted-foreground">
+              TMI packages run
+            </div>
+            {activated.length === 0 ? (
+              none
+            ) : (
+              <ul className="flex flex-col gap-0.5 text-xs">
+                {activated.map((p) => (
+                  <li key={p.id}>
+                    <span className="font-medium">{p.name}</span>
+                    <span className="text-muted-foreground">
+                      {" "}
+                      · {p.items.length} item{p.items.length === 1 ? "" : "s"} · {p.status}
+                    </span>
+                  </li>
+                ))}
+              </ul>
+            )}
+          </div>
+          <div>
+            <div className="mb-1 text-[10px] uppercase tracking-wide text-muted-foreground">
+              Facilities
+            </div>
+            {stored.length === 0 ? (
+              none
+            ) : (
+              <ul className="flex flex-col gap-0.5 text-xs">
+                {stored.map((f) => (
+                  <li key={f.facility}>
+                    <span className="font-mono">{f.facility}</span>
+                    <span className="text-muted-foreground">
+                      {" "}
+                      · {f.level}
+                      {f.is_host ? " · host" : ""}
+                      {f.has_staffing ? " · staffing" : ""}
+                    </span>
+                  </li>
+                ))}
+              </ul>
+            )}
+          </div>
+        </div>
+      </CardContent>
+    </Card>
+  );
+}
+
+/** Free-text post-event debrief notes (editable with `events.debrief.create`). */
+function DebriefNotes({ eventId }: { eventId: number }) {
+  const debrief = useEventDebrief(eventId);
+  const update = useUpdateEventDebrief(eventId);
+  const d = debrief.data;
+  const [notes, setNotes] = useState("");
+  const [dirty, setDirty] = useState(false);
+
+  // Seed from the server whenever it changes and the user hasn't started editing.
+  useEffect(() => {
+    if (d && !dirty) setNotes(d.notes);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [d?.notes]);
+
+  if (!d) return null;
+
+  return (
+    <Card>
+      <CardContent className="flex flex-col gap-3 pt-6">
+        <div className="flex items-center justify-between gap-2">
+          <span className="font-semibold">Debrief notes</span>
+          {d.updated_at && (
+            <span className="text-xs text-muted-foreground">
+              {d.updated_by ? `${d.updated_by} · ` : ""}
+              {timeAgo(d.updated_at)}
+            </span>
+          )}
+        </div>
+        {d.editable ? (
+          <>
+            <textarea
+              className="min-h-[8rem] w-full rounded-md border bg-background p-2 text-sm outline-none focus-visible:ring-2 focus-visible:ring-ring"
+              value={notes}
+              onChange={(e) => {
+                setNotes(e.target.value);
+                setDirty(true);
+              }}
+              placeholder="What went well, what to change next time, notable issues…"
+            />
+            <div className="flex gap-2">
+              <Button
+                size="sm"
+                disabled={!dirty || update.isPending}
+                onClick={() => update.mutate(notes, { onSuccess: () => setDirty(false) })}
+              >
+                Save
+              </Button>
+              {dirty && (
+                <Button
+                  size="sm"
+                  variant="ghost"
+                  onClick={() => {
+                    setNotes(d.notes);
+                    setDirty(false);
+                  }}
+                >
+                  Reset
+                </Button>
+              )}
+            </div>
+          </>
+        ) : d.notes ? (
+          <p className="whitespace-pre-wrap text-sm">{d.notes}</p>
+        ) : (
+          <p className="text-sm text-muted-foreground">No debrief written yet.</p>
         )}
       </CardContent>
     </Card>
@@ -296,7 +515,9 @@ export function EventStatsSection({ eventId }: { eventId: number }) {
   return (
     <div className="flex flex-col gap-4">
       <CaptureConfig eventId={eventId} />
+      <Coordination eventId={eventId} />
       <Debrief eventId={eventId} />
+      <DebriefNotes eventId={eventId} />
     </div>
   );
 }

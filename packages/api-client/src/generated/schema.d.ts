@@ -564,6 +564,22 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/v1/events/{id}/debrief": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get: operations["get_event_debrief"];
+        put: operations["update_event_debrief"];
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/v1/events/{id}/facilities": {
         parameters: {
             query?: never;
@@ -2563,6 +2579,16 @@ export interface components {
             updated_at?: string | null;
             updated_by?: string | null;
         };
+        /** @description An event's free-text post-event debrief notes. */
+        EventDebriefBody: {
+            /** @description Whether the caller may edit the notes (holds `events.debrief.create`). */
+            editable: boolean;
+            notes: string;
+            /** Format: date-time */
+            updated_at?: string | null;
+            /** @description Display name of whoever last edited it. */
+            updated_by?: string | null;
+        };
         /**
          * @description Event debrief: per-featured-airport stats plus their combined total, over the capture window.
          *     `captured` is false when no capture exists yet.
@@ -3817,6 +3843,9 @@ export interface components {
             post_minutes?: number | null;
             /** Format: int32 */
             pre_minutes?: number | null;
+        };
+        UpdateEventDebriefRequest: {
+            notes: string;
         };
         /**
          * @description Revise a GDP — a full replace of its mutable fields (the airport can't change).
@@ -5572,6 +5601,78 @@ export interface operations {
                 };
                 content: {
                     "application/json": components["schemas"]["DccRequestBody"];
+                };
+            };
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+        };
+    };
+    get_event_debrief: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /** @description VATUSA event id */
+                id: number;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["EventDebriefBody"];
+                };
+            };
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+        };
+    };
+    update_event_debrief: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /** @description VATUSA event id */
+                id: number;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["UpdateEventDebriefRequest"];
+            };
+        };
+        responses: {
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["EventDebriefBody"];
                 };
             };
             400: {
