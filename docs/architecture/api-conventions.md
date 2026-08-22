@@ -16,10 +16,13 @@ every caller goes through the same authenticated, permission-checked surface.
 
 ## Auth
 
-Two credential types, resolved by one middleware into the request context:
+Three inbound credential paths, resolved into the request context:
 
 - **Session cookie** (`ois_session`) — human users, issued by VATSIM OAuth login.
 - **Bearer token** — service accounts (the bot, tooling); hashed at rest.
+- **HMAC signature** — the VATUSA roster-change webhook
+  (`POST /api/v1/webhooks/vatusa/{facility}`) carries no session or bearer; it is
+  authenticated by verifying an HMAC signature over the request body.
 
 ## Authorization
 
@@ -59,9 +62,17 @@ before/after snapshots.
 The backend emits an OpenAPI spec (utoipa) at `/docs/api/v1/openapi.json`. The web +
 desktop clients are **generated** from it (`openapi-typescript` → `openapi-fetch`), so
 the API contract is the single source of truth for types — no hand-written client
-models to drift. *(Spec mount is a Phase 0 remainder.)*
+models to drift. The spec is mounted (`router.rs` routes `/docs/api/v1/openapi.json`).
+
+## Realtime
+
+`GET /api/v1/ws` upgrades to a websocket that carries topic nudges only — additive over
+REST, never a replacement for it. The `ois_session` cookie rides the upgrade GET, so the
+socket is authenticated like any REST route (401 if unauthenticated). Clients refetch via
+REST on each nudge; see [overview.md](overview.md#realtime).
 
 ## Pagination
 
 List endpoints page with `page` / `page_size` and return the total count, so clients
-can render pagers without a second request. *(Standardized as list endpoints land.)*
+can render pagers without a second request. Implemented: `GET /api/v1/admin/users`
+returns `AdminUserPage { items, total, page, page_size }` (`page_size` default 25, max 100).

@@ -1,157 +1,145 @@
 # Event operations
 
+> **Realigned to the shipped implementation.** The original spec modelled an OIS
+> operational record with a positions/slots roster and `events.items.*` /
+> `events.positions.*` / `events.slots.*` permissions. What actually shipped is a
+> **VATUSA event cache** that anchors per-event planning: DCC coordination, facility
+> support levels, per-airport rates, staffing requests, TMI packages, and a
+> capture/stats window. The permissions are `events.plan.*`, `events.rate.update`,
+> `events.config.update`, `events.support.update`, and `events.staffing_requests.*` —
+> not the `events.items`/`positions`/`slots` set in the old spec. This doc describes what
+> exists in code.
+
 ## Problem
 
 Event **creation, review/approval, and public posting stay in the current VATUSA
-website** — OIS does not replace them. What's missing today is the operational layer
-*around* an event: the coordination just before it, during it, and just after. That
-window — pre-event planning, staffing coordination, controller sign-up, live Discord
-coordination, and post-event debrief — is what OIS owns.
-
-OIS references an event that already exists (posted and approved) in the current VATUSA
-site and provides the coordination surface for it.
-
-## Scope boundary
-
-| In OIS (operational: prior / during / post) | In the current VATUSA website (not OIS) |
-| --- | --- |
-| Coordination/ops plan for an event | Creating and editing the event posting |
-| Position roster + controller sign-up (slots) | Review/approval workflow before public |
-| Cross-ARTCC staffing requests (CC an ARTCC) + notifications | Minimum-lead-time enforcement |
-| Auto T1 staffing for FNOs (DP003) | Public event listing + featured facilities |
-| Discord coordination thread + staff ping | myVATSIM cross-posting |
-| Post-event debrief | Structured public event metadata / API |
+website** — OIS does not replace them. What OIS owns is the operational layer *around* an
+event: the coordination just before, during, and just after it. OIS syncs the canonical
+event from VATUSA into a local cache and hangs the planning modules off it.
 
 ## Scope
 
-**First cut**
-- **Reference the canonical event** — link/sync the event (id, title, start/end,
-  hosting ARTCC(s)) from the current VATUSA site into a lightweight OIS operational
-  record.
-- **Pre-event coordination** — a coordination/ops plan, a position roster, and
-  controller **sign-up (slots)**.
-- **Cross-ARTCC staffing** — CC an ARTCC on the operation, which fans out a
-  staffing-request notification to that ARTCC.
-- **During-event** — auto-create a Discord **coordination thread** and ping required
-  staff when the operation goes active.
-- **Post-event** — a **debrief** record (notes, issues, follow-ups).
+**Built**
 
-**Later**
-- Auto-trigger T1 staffing requests for FNOs per policy DP003.
-- Scheduling/booking niceties over slots.
+- **VATUSA event cache** — events are synced from VATUSA into `events.event` (id, title,
+  body/banner, host facility, start/end, review status). This is a read-through mirror,
+  not an authored record.
+- **DCC request** — per-event DCC coordination status + notes.
+- **Facility support** — per-facility support level (required/…) with notes; managed by
+  the facility's own staff (facility-scoped).
+- **Airport rates** — per-event, per-airport AAR/ADR for planning; facility-scoped.
+- **Staffing requests** — per-facility positions requested/filled with an
+  `open/met/closed` status.
+- **TMI packages** — named bundles of planned traffic-management items
+  (`program`/`restriction`/`ground_stop`) that can be **activated** / **deactivated** as
+  a unit, plus per-item CRUD.
+- **Capture + stats** — a saved capture window over the event, and computed event stats
+  (backed by the `stats` domain).
 
-## Data model  *(draft)*
+**Not built (from the original spec)**
 
-Postgres `events` schema. The OIS record is **operational**, keyed to the canonical
-event in the current VATUSA site — it does not carry a posting/approval lifecycle.
+- The `events.events` operational record with a `coordination_status` lifecycle.
+- The positions roster and controller **slots** sign-up/booking.
+- The Discord coordination-thread / staffing-notification outbound jobs.
 
-### `events.events` (operational record)
+## Data model
 
-| column | type | notes |
-| --- | --- | --- |
-| `id` | text pk | OIS id |
-| `source` | text | origin system, e.g. `vatusa_web` |
-| `source_ref` | text | id of the canonical event in the current VATUSA site |
-| `title` | text | mirrored for display |
-| `starts_at` / `ends_at` | timestamptz | mirrored |
-| `coordination_status` | text | `planning` → `active` → `complete` (operational, **not** review_status) |
-| `synced_at` | timestamptz null | last sync from the source |
+Schema `events` (sqlx migrations `0016`–`0021`, `0037`–`0038`); the capture window lives
+in `stats.event_capture` (`0040`). Rows reference `identity.users(id)` for editor
+columns; `event_id` is the VATUSA event id (bigint).
 
-Unique `(source, source_ref)`.
+### `events.event` — the VATUSA cache *(0016)*
 
-### `events.event_hosts`
+pk `id` (VATUSA event id). `title`, `body` (HTML/BBCode blurb), `banner_image_url`,
+`facility` (host ARTCC), `start_time`/`end_time`, `review_status`, `synced_at`.
 
-Hosting / participating ARTCCs — drives coordination and ARTCC scope
-(`event_id`, `artcc_id`, `role` = `host` \| `participating`).
+### `events.dcc_request` *(0017)*
 
-### `events.positions`
+pk `event_id` (cascade). `status` (default `not_needed`), `notes`.
 
-Position roster for the operation (`event_id`, `callsign`, `user_id?`, `status`
-`OPEN`→`REQUESTED`→`ASSIGNED`, `published`). Unique `(event_id, callsign)`.
+### `events.facility_support` *(0018, scope 0037)*
 
-### `events.slots`
+`(event_id, facility)`. `level` (default `required`), `notes`.
 
-Controller sign-up/booking over positions (`id`, `position_id`, `booked_by?`,
-`status` `open`→`requested`→`booked`→`cancelled`).
+### `events.airport_rate` *(0019)*
 
-### `events.staffing_requests`
+`(event_id, icao)`. `aar`/`adr` (0–200), `artcc` (owning ARTCC for the scope check).
 
-CC-an-ARTCC and (Later) DP003 T1 auto-trigger (`id`, `event_id`,
-`requested_artcc_id`, `origin` `cc`\|`t1_auto`, `status`
-`pending`→`acknowledged`/`declined`, `notification_state` `queued`→`sent`/`failed`).
+### `events.staffing_request` *(0020)*
 
-### `events.debrief`
+`(event_id, facility)`. `positions_requested`/`positions_filled` (0–999), `status`
+`open`/`met`/`closed`, `notes`.
 
-Post-event notes (`id`, `event_id`, `author_id`, `body`, `created_at`).
+### `events.tmi_package` + `events.tmi_package_item` *(0021, archive 0038)*
+
+`tmi_package`: `id`, `event_id` (cascade), `name`, `status` `draft`/`activated`,
+`activated_at`. `tmi_package_item`: `id`, `package_id` (cascade), `kind`
+(`program`/`restriction`/`ground_stop`), `payload` jsonb.
 
 ## Permissions
 
-Path-based `segments.action`, `RequirePermission<P>` + data-dependent ARTCC-scope
-checks. Facility grants carry a nullable `artcc_id` (NULL = national). **Nothing here
-grants event *posting/approval* — that lives in the current VATUSA site.**
+Path-based `segments.action` with `RequirePermission<P>`; several are **facility-scoped**
+via a per-permission scope check in the handler (`permission_scope(...).allows(artcc)`).
 
-| permission | purpose | holders |
+| permission | purpose | scope |
 | --- | --- | --- |
-| `events.items.read` | view the operational record | scoped staff |
-| `events.items.create` | attach/link an OIS operational record to a canonical event | `EC` (ARTCC-scoped); `EVENTS_TEAM` |
-| `events.items.update` | edit coordination fields (plan, status) | same |
-| `events.items.delete` | remove the operational record | `EC`; `EVENTS_TEAM` |
-| `events.positions.assign` | assign a controller to a position | `EC`, `EVENTS_TEAM` |
-| `events.positions.publish` | publish the position roster | `EC`, `EVENTS_TEAM` |
-| `events.positions.delete` | remove a position | `EC`, `EVENTS_TEAM` |
-| `events.positions.self.request` | request a position for yourself | any authenticated controller |
-| `events.slots.claim` | book an open slot | any authenticated controller |
-| `events.staffing_requests.create` | CC an ARTCC | `EC`; `EVENTS_TEAM` |
-| `events.staffing_requests.read` | see incoming requests for your ARTCC | same |
-| `events.staffing_requests.decide` | acknowledge/decline a request | `EC` |
-| `events.discord.publish` | open the coordination thread + ping staff | `EC`, `EVENTS_TEAM` |
-| `events.debrief.read` | read the debrief | scoped staff |
-| `events.debrief.create` | write a debrief entry | `EC`, `EVENTS_TEAM` |
+| `events.plan.read` | view an event + all planning modules | read |
+| `events.plan.update` | edit DCC, TMI packages (create/delete/activate) | national/staff |
+| `events.rate.update` | set an event's airport AAR/ADR | facility-scoped |
+| `events.config.update` | manage an airport's default runway configs | facility-scoped |
+| `events.support.update` | set a facility's event support level | facility-scoped |
+| `events.staffing_requests.read` | view staffing requests | read |
+| `events.staffing_requests.create` | create/update/delete staffing requests | staff |
+| `events.staffing_requests.decide` | acknowledge/decline a request | staff |
+
+The capture-window write reuses **`stats.capture.update`** (it writes `stats.event_capture`),
+and the wind forecast + airport-config reads use `events.plan.read`.
+
+**Not used.** `events.staffing_requests.decide` is seeded but not yet wired to a handler;
+the original spec's `events.items.*`, `events.positions.*`, `events.slots.claim`,
+`events.discord.publish`, and `events.debrief.*` permissions are **not** implemented.
 
 ## API
 
-Versioned REST at `/api/v1`. The OIS record references the canonical event; how it is
-linked/synced from the current VATUSA site is an open question (import job vs. webhook
-vs. manual link).
+Versioned REST under `/api/v1`, handlers in `backend/src/handlers/events.rs`
+(airport-config + forecast in `handlers/airport_configs.rs`).
 
-| method + path | purpose | who |
-| --- | --- | --- |
-| `GET /api/v1/events/{id}` | operational record + hosts + positions | scoped staff |
-| `POST /api/v1/events` | attach an operational record to a canonical event | `events.items.create` |
-| `PATCH /api/v1/events/{id}` | edit coordination fields | `events.items.update` |
-| `POST /api/v1/events/{id}/activate` | mark active (+ open Discord thread) | `events.discord.publish` |
-| `GET /api/v1/events/{id}/positions` | roster | scoped staff / controllers |
-| `POST /api/v1/events/{id}/positions` | request a position | `events.positions.self.request` |
-| `POST /api/v1/events/{id}/positions/{pid}/assign` | assign | `events.positions.assign` |
-| `POST /api/v1/events/{id}/slots/{sid}/claim` | book a slot | `events.slots.claim` |
-| `POST /api/v1/events/{id}/staffing-requests` | CC an ARTCC | `events.staffing_requests.create` |
-| `GET /api/v1/events/staffing-requests?artcc=` | incoming for an ARTCC | `events.staffing_requests.read` |
-| `POST /api/v1/events/staffing-requests/{id}/decide` | acknowledge/decline | `events.staffing_requests.decide` |
-| `POST /api/v1/events/{id}/debrief` | add a debrief entry | `events.debrief.create` |
+| method + path | permission |
+| --- | --- |
+| `GET /events` | `events.plan.read` |
+| `GET /events/{id}` | `events.plan.read` |
+| `GET /events/{id}/dcc` | `events.plan.read` |
+| `PUT /events/{id}/dcc` | `events.plan.update` |
+| `GET /events/{id}/facilities` | `events.plan.read` |
+| `PUT / DELETE /events/{id}/facilities/{facility}` | `events.support.update` (facility-scoped) |
+| `GET /events/{id}/rates` | `events.plan.read` |
+| `PUT / DELETE /events/{id}/rates/{icao}` | `events.rate.update` (facility-scoped) |
+| `GET /events/{id}/staffing` | `events.plan.read` |
+| `PUT / DELETE /events/{id}/staffing/{facility}` | `events.staffing_requests.create` |
+| `GET /events/{id}/packages` | `events.plan.read` |
+| `POST /events/{id}/packages` | `events.plan.update` |
+| `DELETE /events/{id}/packages/{package_id}` | `events.plan.update` |
+| `POST /events/{id}/packages/{package_id}/items` | `events.plan.update` |
+| `DELETE /events/{id}/packages/{package_id}/items/{item_id}` | `events.plan.update` |
+| `POST /events/{id}/packages/{package_id}/activate` | `events.plan.update` |
+| `POST /events/{id}/packages/{package_id}/deactivate` | `events.plan.update` |
+| `GET /events/{id}/capture` | `events.plan.read` |
+| `PUT /events/{id}/capture` | `stats.capture.update` |
+| `GET /events/{id}/stats` | `events.plan.read` |
 
-## Discord
+Reusable per-airport runway configs (used by the event-day planner) live under
+`airport-configs`:
 
-Follows the locked outbound pattern ([discord-integration.md](discord-integration.md)):
-the backend enqueues `integration.outbound_jobs`; the bot performs the action and calls
-back as a service account.
+| method + path | permission |
+| --- | --- |
+| `GET /airport-configs/{icao}` | `events.plan.read` |
+| `POST /airport-configs/{icao}` | `events.config.update` (facility-scoped) |
+| `PUT / DELETE /airport-configs/{icao}/{id}` | `events.config.update` (facility-scoped) |
+| `GET /forecast/{icao}` | `events.plan.read` (Open-Meteo wind forecast) |
 
-- On **activate**, enqueue `event_thread_create` to open a coordination thread/forum
-  post and ping the required staff roles.
-- A **CC-an-ARTCC** staffing request enqueues a notification to that ARTCC's configured
-  channel/role (`notification_state` tracks queued→sent/failed).
-- DP003 T1 auto-triggers *(Later)* create `staffing_requests` with `origin = t1_auto`
-  and fan out the same way.
+## Not built
 
-## Open questions
-
-- **Event linkage** — how OIS references the canonical event in the current VATUSA
-  site: a pull/import job, a webhook from the current backend (cobalt), a shared id, or
-  a manual link by staff? Does OIS ever write back?
-- **Positions ownership** — does OIS own the position roster, or read it from the
-  current site if that site already models positions?
-- **DP003 T1 criteria** — exact FNO criteria, timing relative to the event, and which
-  ARTCCs/roles get notified.
-- **Debrief structure** — free-form notes vs. structured fields (issues, metrics,
-  follow-ups) and who can read them.
-- **CC-an-ARTCC** — always creates a trackable `staffing_request`, or a
-  notification-only CC in some cases?
+- The operational-record lifecycle, positions roster, and controller slot booking.
+- Cross-ARTCC staffing **notifications** and the Discord coordination thread (the
+  `integration` outbound-queue plumbing exists, but no `events` handler enqueues today).
+- A post-event debrief record.

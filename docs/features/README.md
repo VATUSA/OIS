@@ -6,14 +6,18 @@ touchpoints.
 
 ## Index
 
-| Spec                                             | Domain(s)            | Status  |
-|--------------------------------------------------|----------------------|---------|
-| [access-control.md](access-control.md)           | access               | built   |
-| [events-workflow.md](events-workflow.md)         | events               | spec    |
-| [tmu-ntml-adv-tmi.md](tmu-ntml-adv-tmi.md)       | tmu                  | spec    |
-| [ace-support.md](ace-support.md)                 | ace, discord         | spec    |
-| [discord-integration.md](discord-integration.md) | discord, integration | spec    |
-| [flow.md](flow.md)                               | flow                 | spec    |
+| Spec                                             | Domain(s)            | Status                          |
+|--------------------------------------------------|----------------------|---------------------------------|
+| [access-control.md](access-control.md)           | access               | built                           |
+| [events-workflow.md](events-workflow.md)         | events               | partially built (diverged from spec) |
+| [tmu-ntml-adv-tmi.md](tmu-ntml-adv-tmi.md)       | tmu                  | partially built (diverged from spec) |
+| [ace-support.md](ace-support.md)                 | ace, discord         | spec                            |
+| [discord-integration.md](discord-integration.md) | discord, integration | spec                            |
+| [flow.md](flow.md)                               | flow                 | partially built (diverged from spec) |
+
+The three "partially built" specs have live migrations, handlers, and routes, but the
+shipped shape diverged from the original design — each doc carries a note at the top
+explaining the realignment. `ace` and `discord` remain genuine forward-looking specs.
 
 Event **posting, review, and approval remain in the current VATUSA website**; the
 events spec above covers only OIS's operational window (prior / during / post).

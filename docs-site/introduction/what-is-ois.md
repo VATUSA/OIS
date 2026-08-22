@@ -7,16 +7,17 @@ Where most tools focus on one ARTCC, OIS is **national**: any online aircraft, a
 ## What you can do with it
 
 - **See the live picture** — every online VATSIM flight on a map, with ARTCC and TRACON boundaries, online ATC positions, and inbound demand for each metered airport. See [The flow map](/map/overview).
+- **Browse a facility's traffic** — anyone can open the public [facility map](/map/facility-map) for an ARTCC to see live traffic centered on its airspace, colored by that facility's own rules.
 - **Constrain the flow** — draw [Flow Constrained Areas](/tmu/fcas) (FCAs) and meter the traffic crossing them.
 - **Run a Ground Delay Program** — issue a [GDP](/tmu/gdp) that rations arrivals to an airport's acceptance rate, with **frozen** EDCTs so release times don't move on their own.
 - **Balance the runways** — assign arrivals to runways and watch a 10-minute demand board with the [Runway Balancer](/tmu/runway-balancer).
-- **Issue release times** — hand tower controllers [CFR release times](/tmu/releases) that stay locked once issued.
+- **Schedule departures** — work FCA-metered ground departures and hand out [CFR release times](/tmu/releases) from the [IDST](/tmu/idst) console; issued times stay locked.
 - **Publish advisories** — pilots and other facilities see active traffic initiatives on the public [advisories board](/advisories/board).
 
 ## Who it's for
 
-- **Controllers & TMU staff** sign in with VATSIM and, depending on their [role](/reference/permissions), create and manage flow initiatives.
-- **Pilots** can use the public [advisories board](/advisories/board) and [flight lookup](/advisories/pilot) without signing in.
+- **Controllers & TMU staff** sign in with VATSIM and, depending on their [role](/reference/permissions), create and manage flow initiatives. Operational boards update **instantly across users** — you don't refresh to see another controller's releases or program changes.
+- **Pilots** can use the public [advisories board](/advisories/board), [flight lookup](/advisories/pilot), and [facility map](/map/facility-map) without signing in.
 
 ## Next steps
 

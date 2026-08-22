@@ -36,8 +36,13 @@ Ported from osmium, plus the `artcc_id` scope column:
 A DB view (osmium's `v_effective_user_permissions`) unions:
 role-derived ∪ SERVER_ADMIN (cross-join of *all* permissions) ∪ direct grants, then subtracts explicit denies. OIS adds
 the scope predicate: a grant with
-`artcc_id = NULL` is national; a scoped grant applies only to actions on resources in that ARTCC. Enforcement rolls out
-per-domain — the schema carries the scope from day one.
+`artcc_id = NULL` is national; a scoped grant applies only to actions on resources in that ARTCC.
+
+Per-domain scope enforcement has begun: handlers enforce ARTCC scope at runtime via
+`access_repo::permission_scope(...).allows(Some(facility_id))` — already wired for
+`flow.facility_map.update`, `events.rate.update`, `events.config.update`, and
+`events.support.update`. It rolls out domain by domain; the global effective-permissions
+view still does not pre-filter by scope, so scoped enforcement lives in the handlers.
 
 ## Enforcement
 

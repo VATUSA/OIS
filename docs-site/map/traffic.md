@@ -6,8 +6,8 @@ The map draws every online VATSIM aircraft, refreshed continuously. Each is a sm
 
 Use the **Aircraft icons / Triangles** button in the toolbar to switch between:
 
-- **Aircraft icons** — type-specific silhouettes (a heavy looks different from a light).
-- **Triangles** — a plain, uniform marker that reads well when the map is dense.
+- **Aircraft icons** — type-specific silhouettes. They also differ **in size**: an A380 renders noticeably larger than a narrowbody, and a Cessna smaller — and every silhouette **scales with zoom**, growing as you zoom in and shrinking as you zoom out.
+- **Triangles** — a plain, uniform marker that reads well when the map is dense. Triangles stay one size; the per-type and zoom scaling applies to silhouettes only.
 
 ## Hover & click
 

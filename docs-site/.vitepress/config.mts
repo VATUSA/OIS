@@ -46,6 +46,7 @@ export default defineConfig({
         items: [
           { text: "The flow map", link: "/map/overview" },
           { text: "Live traffic", link: "/map/traffic" },
+          { text: "The facility map", link: "/map/facility-map" },
           { text: "The ATC layer", link: "/map/atc" },
           { text: "Finding a flight", link: "/map/flight-search" },
         ],
@@ -57,6 +58,7 @@ export default defineConfig({
           { text: "Ground Delay Programs", link: "/tmu/gdp" },
           { text: "Runway Balancer", link: "/tmu/runway-balancer" },
           { text: "Release times (CFR)", link: "/tmu/releases" },
+          { text: "Departure scheduling (IDST)", link: "/tmu/idst" },
           { text: "Restrictions & programs", link: "/tmu/restrictions" },
         ],
       },

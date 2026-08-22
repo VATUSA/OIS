@@ -22,15 +22,19 @@ the current backend, website, and flow tool.
 Each states the problem, data model, exact permissions, API surface, and Discord touchpoints.
 
 - [access-control.md](features/access-control.md) — permissions + editor **(built)**
-- [events-workflow.md](features/events-workflow.md) — event operations: coordination, staffing, sign-up, debrief (posting stays in the current VATUSA site)
-- [tmu-ntml-adv-tmi.md](features/tmu-ntml-adv-tmi.md) — traffic management: NTML / ADV / TMI, delays
-- [ace-support.md](features/ace-support.md) — ACE support requests
-- [flow.md](features/flow.md) — traffic management: flow programs, live traffic, delay feed
-- [discord-integration.md](features/discord-integration.md) — the bot and the outbound-job queue
+- [events-workflow.md](features/events-workflow.md) — event operations: coordination, staffing, sign-up, debrief (posting stays in the current VATUSA site) **(built)**
+- [tmu-ntml-adv-tmi.md](features/tmu-ntml-adv-tmi.md) — traffic management: NTML / ADV / TMI, delays **(built)**
+- [ace-support.md](features/ace-support.md) — ACE support requests *(designed)*
+- [flow.md](features/flow.md) — traffic management: flow programs, live traffic, delay feed **(built)**
+- [discord-integration.md](features/discord-integration.md) — the bot and the outbound-job queue *(designed)*
 - [features/README.md](features/README.md) — index + the spec template
 
 ## Status at a glance
 
-Built and verified: VATSIM auth + sessions + `/me`, the permission model, and the
-access-editor API. Everything else is designed (these docs) and sequenced in
-[PLAN.md](PLAN.md).
+Built and running: VATSIM auth + sessions + `/me`; the permission model + access editor
+(with per-domain ARTCC scope enforcement started); TMU (TMIs, ground stops, rate programs,
+GDPs); flow (FCAs, routes, runway configs, facility map, IDST, live map traffic); the
+events cache + per-event planning; stats collection + replay; the live VATSIM feed; the
+audit log; service-account admin; user dashboards; and the additive realtime WS layer.
+Still designed-only: `ace` (support requests) and the `discord` bot. Everything is
+sequenced in [PLAN.md](PLAN.md).

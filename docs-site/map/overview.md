@@ -4,9 +4,9 @@ The map is the heart of OIS — a live view of VATSIM traffic across the Nationa
 
 ## What's on it
 
-- **Live traffic** — every online aircraft, drawn as a triangle or an aircraft-type silhouette. See [Live traffic](/map/traffic).
+- **Live traffic** — every online aircraft, drawn as a triangle or an aircraft-type silhouette (silhouettes are sized by type and scale with zoom). See [Live traffic](/map/traffic).
 - **ARTCC boundaries** — the center outlines, labelled by id.
-- **Flow Constrained Areas** — any active [FCAs](/tmu/fcas), tinted and numbered.
+- **Flow Constrained Areas** — any enabled [FCAs](/tmu/fcas), tinted and numbered. (Disabled FCAs are hidden from the map.)
 - **Online ATC** (toggle) — airport position badges, TRACON approach areas, and center shading. See [The ATC layer](/map/atc).
 
 ## Getting around

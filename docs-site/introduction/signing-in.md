@@ -16,7 +16,7 @@ At sign-in OIS receives your **CID, name, rating, and email** from VATSIM Connec
 
 ## Do I need to sign in?
 
-- **Pilots** — no. The [advisories board](/advisories/board) and [flight lookup](/advisories/pilot) are public.
+- **Pilots** — no. The [advisories board](/advisories/board), [flight lookup](/advisories/pilot), and [facility map](/map/facility-map) are public.
 - **Controllers / TMU** — yes. Creating or editing flow initiatives requires a signed-in account with the right [permissions](/reference/permissions).
 
 ## Trouble signing in?

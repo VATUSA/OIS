@@ -2,7 +2,15 @@
 
 ## Do I need an account to use OIS?
 
-Not for the public views — the [advisories board](/advisories/board) and [flight lookup](/advisories/pilot) are open. Controller tools require [signing in](/introduction/signing-in) with VATSIM.
+Not for the public views — the [advisories board](/advisories/board), [flight lookup](/advisories/pilot), and [facility map](/map/facility-map) are open. Controller tools require [signing in](/introduction/signing-in) with VATSIM.
+
+## Can pilots see a single facility's traffic?
+
+Yes — the [facility map](/map/facility-map) is public. Open it for any ARTCC to see live traffic centered on that airspace, colored by the facility's own rules.
+
+## Do I need to refresh to see the latest?
+
+For signed-in controllers, no — the operational boards (IDST, the FCA ladder, departures, and the TMU boards) update the moment another controller issues a release or changes a program. The public advisories board and flight lookup refresh themselves on a short interval instead.
 
 ## My VATUSA details are wrong or missing.
 
