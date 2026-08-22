@@ -2059,6 +2059,8 @@ export interface components {
             /** Format: int64 */
             actor_cid?: number | null;
             actor_display_name?: string | null;
+            /** @description `user`, `api_key`, `service_account`, or `system` — how the action was authenticated. */
+            actor_type?: string | null;
             after_state?: Record<string, never> | null;
             artcc_id?: string | null;
             before_state?: Record<string, never> | null;
@@ -3781,8 +3783,12 @@ export interface operations {
             query?: {
                 /** @description Filter by resource type */
                 resource_type?: string;
+                /** @description Filter by resource id (the acted-on target) */
+                resource_id?: string;
                 /** @description Filter by action */
                 action?: string;
+                /** @description Filter to one actor (per-actor dossier) */
+                actor_id?: string;
                 /** @description 1-based page (default 1) */
                 page?: number;
                 /** @description Page size (default 50, max 100) */
