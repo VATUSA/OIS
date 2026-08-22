@@ -77,6 +77,7 @@ use utoipa::OpenApi;
         crate::handlers::events::get_event_capture,
         crate::handlers::events::update_event_capture,
         crate::handlers::events::get_event_stats,
+        crate::handlers::events::publish_event_discord,
         crate::handlers::events::get_event_debrief,
         crate::handlers::events::update_event_debrief,
         crate::handlers::stats::network_history,

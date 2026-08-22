@@ -1,11 +1,11 @@
 import {useState} from "react";
 import {Badge, Button, buttonVariants, Card, CardContent} from "@ois/ui";
 import {Link, useParams} from "@tanstack/react-router";
-import {ArrowLeft, BarChart3, CalendarClock, ExternalLink, Radio, Users} from "lucide-react";
+import {ArrowLeft, BarChart3, CalendarClock, ExternalLink, MessageSquare, Radio, Users} from "lucide-react";
 
 import {Modal} from "@/components/modal";
 import {useMe} from "@/lib/auth";
-import {eventBodyText, useDcc, useEvent, useStaffing, vatusaEditUrl} from "@/lib/events";
+import {eventBodyText, useDcc, useEvent, usePublishEventDiscord, useStaffing, vatusaEditUrl} from "@/lib/events";
 import {hasPermission} from "@/lib/permissions";
 import {formatZuluFull} from "@/lib/time";
 import {DccSection} from "@/pages/planning/dcc";
@@ -40,10 +40,13 @@ function ActionBar({
   onDebrief: () => void;
 }) {
   const [dialog, setDialog] = useState<null | "dcc" | "ace">(null);
+  const { data: me } = useMe();
   const dcc = useDcc(eventId);
   const staffing = useStaffing(eventId);
   const openAce = (staffing.data ?? []).filter((s) => s.status === "open").length;
   const dccStatus = dcc.data?.status;
+  const canPostDiscord = hasPermission(me, "events.discord.publish");
+  const publishDiscord = usePublishEventDiscord(eventId);
 
   return (
     <div className="flex flex-wrap items-center gap-2">
@@ -71,6 +74,19 @@ function ActionBar({
         <BarChart3 className="size-3.5" />
         Debrief
       </Button>
+
+      {canPostDiscord && (
+        <Button
+          variant="secondary"
+          size="sm"
+          onClick={() => publishDiscord.mutate()}
+          disabled={publishDiscord.isPending}
+          title="Post a coordination thread to Discord"
+        >
+          <MessageSquare className="size-3.5" />
+          Post to Discord
+        </Button>
+      )}
 
       {editUrl && (
         <a

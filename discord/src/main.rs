@@ -15,9 +15,9 @@ use std::time::Duration;
 use ois_client::{OisClient, OutboundJob};
 use serde_json::{Value, json};
 use serenity::all::{
-    ButtonStyle, ChannelId, Colour, Context, CreateActionRow, CreateButton, CreateEmbed,
-    CreateInteractionResponse, CreateInteractionResponseMessage, CreateMessage, EditMessage,
-    EventHandler, GatewayIntents, Http, Interaction, MessageId, Ready,
+    ButtonStyle, ChannelId, ChannelType, Colour, Context, CreateActionRow, CreateButton,
+    CreateEmbed, CreateInteractionResponse, CreateInteractionResponseMessage, CreateMessage,
+    CreateThread, EditMessage, EventHandler, GatewayIntents, Http, Interaction, MessageId, Ready,
 };
 
 const ACE_CLAIM_PREFIX: &str = "ace_claim:";
@@ -178,6 +178,7 @@ async fn perform_job(http: &Arc<Http>, job: &OutboundJob) -> Result<Option<Value
         "ace_request_post" => post_ace_request(http, &job.payload).await,
         "ace_request_notify" => notify_ace_claim(http, &job.payload).await,
         "tmi_publish" => post_tmi(http, &job.payload).await,
+        "event_thread_create" => create_event_thread(http, &job.payload).await,
         other => Err(format!("unknown job type: {other}")),
     }
 }
@@ -259,6 +260,43 @@ async fn post_tmi(http: &Arc<Http>, p: &Value) -> Result<Option<Value>, String> 
     Ok(Some(json!({ "message_id": message.id.get().to_string() })))
 }
 
+async fn create_event_thread(http: &Arc<Http>, p: &Value) -> Result<Option<Value>, String> {
+    let channel = channel(p)?;
+    let title = str_field(p, "title").unwrap_or("Event coordination");
+    // A public thread off the configured events channel (no starting message required).
+    let thread = channel
+        .create_thread(
+            http,
+            CreateThread::new(truncate(title, 90)).kind(ChannelType::PublicThread),
+        )
+        .await
+        .map_err(|e| format!("create_thread failed: {e}"))?;
+
+    // Kick off the thread with an embed + an optional staff-role ping.
+    let mut embed = CreateEmbed::new()
+        .title(title)
+        .colour(Colour::new(0xEB459E));
+    if let Some(facility) = str_field(p, "facility") {
+        embed = embed.field("Host", facility, true);
+    }
+    if let Some(start) = str_field(p, "start_time") {
+        embed = embed.field("Start", start, true);
+    }
+    if let Some(end) = str_field(p, "end_time") {
+        embed = embed.field("End", end, true);
+    }
+    let mut message = CreateMessage::new().embed(embed);
+    if let Some(role) = str_field(p, "role_id") {
+        message = message.content(format!("<@&{role}>"));
+    }
+    thread
+        .id
+        .send_message(http, message)
+        .await
+        .map_err(|e| format!("thread send_message failed: {e}"))?;
+    Ok(Some(json!({ "thread_id": thread.id.get().to_string() })))
+}
+
 /// Resolve the `channel_id` snowflake from a job payload.
 fn channel(p: &Value) -> Result<ChannelId, String> {
     let id: u64 = str_field(p, "channel_id")
@@ -270,4 +308,12 @@ fn channel(p: &Value) -> Result<ChannelId, String> {
 
 fn str_field<'a>(p: &'a Value, key: &str) -> Option<&'a str> {
     p.get(key).and_then(Value::as_str).filter(|s| !s.is_empty())
+}
+
+/// Clamp to `max` characters (Discord thread names cap at 100), on a char boundary.
+fn truncate(s: &str, max: usize) -> String {
+    if s.chars().count() <= max {
+        return s.to_string();
+    }
+    s.chars().take(max).collect()
 }
