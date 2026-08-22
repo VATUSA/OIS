@@ -24,5 +24,5 @@ You don't need to do anything to keep it current.
 If your profile shows this message, OIS hasn't pulled your VATUSA record yet. It fills in after your next sign-in once VATUSA sync is enabled for the deployment. Your CID, name, and rating still show from VATSIM in the meantime.
 
 ::: tip Roles vs. access
-Your **VATUSA roles** (ATM, INS, …) describe your real-world facility position. Your **OIS access** is what you can *do in OIS*. They're related but not the same — see [Roles & permissions](/reference/permissions).
+Your **VATUSA roles** (ATM, INS, …) describe your VATSIM facility position. Your **OIS access** is what you can *do in OIS*. They're related but not the same — see [Roles & permissions](/reference/permissions).
 :::
