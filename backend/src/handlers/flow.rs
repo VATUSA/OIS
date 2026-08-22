@@ -72,9 +72,23 @@ fn passes_scope(fca: &FcaBody, airspace: &Boundaries, lat: f64, lon: f64) -> boo
     fca.scope.iter().any(|z| airspace.contains(z, lat, lon))
 }
 
-/// Membership filters (dest / origin / fix / altitude). Altitude is checked only for airborne
-/// aircraft (current alt). ARTCC scope is enforced separately by `passes_scope` on the crossing.
-fn passes_filters(fca: &FcaBody, fp: &FlightPlan, alt: i64, airborne: bool) -> bool {
+/// Filed cruise altitude in feet, or `None` when unfiled/unparseable — used for altitude membership
+/// so an aircraft whose plan omits an altitude isn't excluded on that basis. Values ≤ 600 are read as
+/// flight levels (×100), matching how pilots file `"350"` for FL350.
+fn filed_altitude_ft(filed: &str) -> Option<i64> {
+    let digits: String = filed.chars().filter(|c| c.is_ascii_digit()).collect();
+    let n: i64 = digits.parse().ok()?;
+    if n == 0 {
+        return None;
+    }
+    Some(if n <= 600 { n * 100 } else { n })
+}
+
+/// Membership filters (dest / origin / fix / altitude). Altitude is matched against the **filed**
+/// cruise altitude — a climbing or descending aircraft is included by the level it filed for, not
+/// where it currently is — and applies to ground and airborne alike. ARTCC scope is enforced
+/// separately by `passes_scope` on the crossing.
+fn passes_filters(fca: &FcaBody, fp: &FlightPlan) -> bool {
     if !fca.dests.is_empty() && !fca.dests.iter().any(|d| airport_match(d, &fp.arrival)) {
         return false;
     }
@@ -84,14 +98,16 @@ fn passes_filters(fca: &FcaBody, fp: &FlightPlan, alt: i64, airborne: bool) -> b
     if !fca.fixes.is_empty() && !fca.fixes.iter().any(|f| route_has_fix(&fp.route, f)) {
         return false;
     }
-    if airborne {
+    if (fca.min_fl.is_some() || fca.max_fl.is_some())
+        && let Some(filed_ft) = filed_altitude_ft(&fp.altitude)
+    {
         if let Some(min) = fca.min_fl
-            && alt < min as i64 * 100
+            && filed_ft < min as i64 * 100
         {
             return false;
         }
         if let Some(max) = fca.max_fl
-            && alt > max as i64 * 100
+            && filed_ft > max as i64 * 100
         {
             return false;
         }
@@ -380,7 +396,7 @@ pub async fn fca_counts(
     let airspace = state.airspace.as_ref();
 
     // Resolve each aircraft's route once, then test it against every active FCA.
-    let mut tally = |fp: &FlightPlan, lat: f64, lon: f64, hdg: i64, gs: i64, alt: i64| {
+    let mut tally = |fp: &FlightPlan, lat: f64, lon: f64, hdg: i64, gs: i64| {
         let airborne = gs >= 50;
         let Some(path) = fca::route_path(
             nav,
@@ -396,7 +412,7 @@ pub async fn fca_counts(
             return;
         };
         for f in &active {
-            if !passes_filters(f, fp, alt, airborne) {
+            if !passes_filters(f, fp) {
                 continue;
             }
             // Match the metering board: only count crossings within the FCA's ARTCC scope.
@@ -410,19 +426,12 @@ pub async fn fca_counts(
 
     for p in &snap.data.pilots {
         if let Some(fp) = &p.flight_plan {
-            tally(
-                fp,
-                p.latitude,
-                p.longitude,
-                p.heading,
-                p.groundspeed,
-                p.altitude,
-            );
+            tally(fp, p.latitude, p.longitude, p.heading, p.groundspeed);
         }
     }
     for pf in &snap.data.prefiles {
         if let Some(fp) = &pf.flight_plan {
-            tally(fp, 0.0, 0.0, 0, 0, 0);
+            tally(fp, 0.0, 0.0, 0, 0);
         }
     }
     Ok(Json(counts))
@@ -735,7 +744,7 @@ pub async fn flight_advisory(
             // crossing. If it doesn't cross, metering this FCA can't produce a slot for it.
             let crosses = match (&path, &fp) {
                 (Some(p), Some(plan)) => {
-                    passes_filters(fca, plan, altitude, airborne)
+                    passes_filters(fca, plan)
                         && fca::crosses(p, &fca.points.0, airborne, lat, lon, heading).is_some_and(
                             |c| passes_scope(fca, state.airspace.as_ref(), c.lat, c.lon),
                         )
@@ -971,7 +980,7 @@ fn build_candidates(
     for p in &data.pilots {
         let Some(fp) = &p.flight_plan else { continue };
         let airborne = p.groundspeed >= 50;
-        if !passes_filters(fca, fp, p.altitude, airborne) {
+        if !passes_filters(fca, fp) {
             continue;
         }
         let Some(path) = fca::route_path(
@@ -1031,7 +1040,7 @@ fn build_candidates(
 
     for pf in &data.prefiles {
         let Some(fp) = &pf.flight_plan else { continue };
-        if !passes_filters(fca, fp, 0, false) {
+        if !passes_filters(fca, fp) {
             continue;
         }
         let Some(path) = fca::route_path(
@@ -1458,4 +1467,25 @@ pub async fn reorder_fca(
     }
     state.publish(crate::realtime::topic::FCA);
     Ok(StatusCode::NO_CONTENT)
+}
+
+#[cfg(test)]
+mod filed_altitude_tests {
+    use super::filed_altitude_ft;
+
+    #[test]
+    fn parses_flight_levels_and_feet() {
+        assert_eq!(filed_altitude_ft("350"), Some(35000)); // bare FL
+        assert_eq!(filed_altitude_ft("FL350"), Some(35000));
+        assert_eq!(filed_altitude_ft("35000"), Some(35000)); // explicit feet
+        assert_eq!(filed_altitude_ft("5000"), Some(5000)); // low feet (> 600, not an FL)
+        assert_eq!(filed_altitude_ft("600"), Some(60000)); // <= 600 → FL600
+    }
+
+    #[test]
+    fn unfiled_is_none_so_it_is_not_excluded() {
+        assert_eq!(filed_altitude_ft(""), None);
+        assert_eq!(filed_altitude_ft("VFR"), None);
+        assert_eq!(filed_altitude_ft("0"), None);
+    }
 }
