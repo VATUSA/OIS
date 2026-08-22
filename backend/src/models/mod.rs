@@ -763,14 +763,25 @@ pub struct ReplayFlightBody {
     #[schema(value_type = String)]
     pub session_id: i64,
     pub callsign: String,
+    /// Flight-plan revisions over the window, ascending by `t`. The plan in effect at a given replay
+    /// clock is the last entry with `t <= clock`; a flight that never amended has a single entry. So a
+    /// mid-route amendment shows the old plan before its `t` and the new plan after.
+    pub plans: Vec<ReplayPlan>,
+    /// Compact samples: `[t_seconds_from_start, lat, lon, altitude_ft, heading_deg, groundspeed_kt]`.
+    #[schema(value_type = Vec<Vec<f64>>)]
+    pub samples: Vec<[f64; 6]>,
+}
+
+/// One flight-plan revision within a replay window.
+#[derive(Debug, Serialize, ToSchema)]
+pub struct ReplayPlan {
+    /// Seconds from the window start at which this revision took effect (0 = in force at window open).
+    pub t: f64,
     pub departure: Option<String>,
     pub arrival: Option<String>,
     pub aircraft: Option<String>,
     /// Filed route string, for plotting the planned route on the replay map.
     pub route: Option<String>,
-    /// Compact samples: `[t_seconds_from_start, lat, lon, altitude_ft, heading_deg, groundspeed_kt]`.
-    #[schema(value_type = Vec<Vec<f64>>)]
-    pub samples: Vec<[f64; 6]>,
 }
 
 /// Everything needed to replay a capture window on a map.

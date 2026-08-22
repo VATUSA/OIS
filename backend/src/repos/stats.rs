@@ -172,6 +172,61 @@ pub async fn upsert_flights(
     Ok(())
 }
 
+/// Record a flight-plan revision for any flight whose plan changed since its last recorded revision —
+/// keyed off VATSIM's `revision_id`, falling back to a route/dep/arr content compare when it's null.
+/// Set-based against the incoming tick batch (lateral-joined to each session's latest revision), so
+/// unchanged flights insert nothing (the common case). See migration 0044.
+pub async fn insert_flight_plan_revisions(
+    tx: &mut Transaction<'_, Postgres>,
+    rows: &[FlightRow],
+    now: DateTime<Utc>,
+) -> Result<(), ApiError> {
+    for chunk in rows.chunks(2000) {
+        let mut qb: QueryBuilder<Postgres> = QueryBuilder::new(
+            "insert into stats.flight_plan (session_id, effective_from, revision_id, flight_rules, \
+             departure, arrival, alternate, aircraft_short, aircraft_faa, cruise_alt, deptime, \
+             enroute_time, route, remarks) select v.session_id, ",
+        );
+        qb.push_bind(now);
+        qb.push(
+            ", v.revision_id, v.flight_rules, v.departure, v.arrival, v.alternate, v.aircraft_short, \
+             v.aircraft_faa, v.cruise_alt, v.deptime, v.enroute_time, v.route, v.remarks from (values ",
+        );
+        qb.push_values(chunk, |mut b, f| {
+            b.push_bind(f.session_id)
+                .push_bind(f.revision_id)
+                .push_bind(&f.flight_rules)
+                .push_bind(&f.departure)
+                .push_bind(&f.arrival)
+                .push_bind(&f.alternate)
+                .push_bind(&f.aircraft_short)
+                .push_bind(&f.aircraft_faa)
+                .push_bind(f.cruise_alt)
+                .push_bind(&f.deptime)
+                .push_bind(&f.enroute_time)
+                .push_bind(&f.route)
+                .push_bind(&f.remarks);
+        });
+        qb.push(
+            ") as v(session_id, revision_id, flight_rules, departure, arrival, alternate, \
+             aircraft_short, aircraft_faa, cruise_alt, deptime, enroute_time, route, remarks) \
+             left join lateral ( \
+                 select 1 as present, fp.revision_id, fp.route, fp.departure, fp.arrival \
+                 from stats.flight_plan fp \
+                 where fp.session_id = v.session_id \
+                 order by fp.effective_from desc limit 1 \
+             ) last on true \
+             where last.present is null \
+                or v.revision_id is distinct from last.revision_id \
+                or (v.revision_id is null and (v.route, v.departure, v.arrival) \
+                    is distinct from (last.route, last.departure, last.arrival)) \
+             on conflict (session_id, effective_from) do nothing",
+        );
+        qb.build().execute(&mut **tx).await.map_err(db)?;
+    }
+    Ok(())
+}
+
 /// Batched prefile upsert (provisional flights, no positions). 11 cols/row.
 pub async fn upsert_prefiles(
     tx: &mut Transaction<'_, Postgres>,
@@ -1012,6 +1067,49 @@ pub async fn flights_meta(
          from stats.flight where session_id = any($1)",
     )
     .bind(ids)
+    .fetch_all(pool)
+    .await
+    .map_err(db)
+}
+
+/// Flight-plan revisions relevant to a replay `[from, to]`: per session, the latest revision in force
+/// at/before `from` (the plan open with) plus every revision that took effect within the window.
+/// Ordered by session then effective time. Empty for sessions with no recorded revisions (pre-0044
+/// captures) — the caller falls back to `flights_meta`.
+#[allow(clippy::type_complexity)]
+pub async fn flight_plan_revisions(
+    pool: &PgPool,
+    ids: &[i64],
+    from: DateTime<Utc>,
+    to: DateTime<Utc>,
+) -> Result<
+    Vec<(
+        i64,
+        DateTime<Utc>,
+        Option<String>,
+        Option<String>,
+        Option<String>,
+        Option<String>,
+    )>,
+    ApiError,
+> {
+    sqlx::query_as(
+        "select session_id, effective_from, departure, arrival, aircraft_short, route from (
+             select distinct on (session_id)
+                 session_id, effective_from, departure, arrival, aircraft_short, route
+             from stats.flight_plan
+             where session_id = any($1) and effective_from <= $2
+             order by session_id, effective_from desc
+             union all
+             select session_id, effective_from, departure, arrival, aircraft_short, route
+             from stats.flight_plan
+             where session_id = any($1) and effective_from > $2 and effective_from <= $3
+         ) x
+         order by session_id, effective_from",
+    )
+    .bind(ids)
+    .bind(from)
+    .bind(to)
     .fetch_all(pool)
     .await
     .map_err(db)

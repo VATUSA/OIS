@@ -18,8 +18,8 @@ use crate::{
     handlers::{atc, feed as feed_handlers, flow as flow_handlers, runway as runway_handlers},
     models::{
         AtcBoard, CaptureSummaryBody, DeparturesResponse, NetworkPointBody, ReplayBody,
-        ReplayFlightBody, StatsAirportBody, StatsFlightDetail, StatsFlightSummary, StatsTrackBody,
-        TrafficAircraft,
+        ReplayFlightBody, ReplayPlan, StatsAirportBody, StatsFlightDetail, StatsFlightSummary,
+        StatsTrackBody, TrafficAircraft,
     },
     repos::stats as stats_repo,
     state::AppState,
@@ -356,27 +356,45 @@ async fn build_replay(
         flights.push(ReplayFlightBody {
             session_id: sid,
             callsign: String::new(),
-            departure: None,
-            arrival: None,
-            aircraft: None,
-            route: None,
+            plans: Vec::new(),
             samples: track,
         });
     }
 
-    // Attach callsign + plan basics.
+    // Attach the callsign + the flight-plan revisions in effect over the window (so a mid-route
+    // amendment shows the plan that was actually in force at each instant).
     let meta: HashMap<i64, FlightMeta> = stats_repo::flights_meta(p, &ids)
         .await?
         .into_iter()
         .map(|(sid, cs, dep, arr, ac, route)| (sid, (cs, dep, arr, ac, route)))
         .collect();
+    let mut plans_by_sid: HashMap<i64, Vec<ReplayPlan>> = HashMap::new();
+    for (sid, eff, dep, arr, ac, route) in
+        stats_repo::flight_plan_revisions(p, &ids, from, to).await?
+    {
+        plans_by_sid.entry(sid).or_default().push(ReplayPlan {
+            t: (eff - from).num_seconds().max(0) as f64,
+            departure: dep,
+            arrival: arr,
+            aircraft: ac,
+            route,
+        });
+    }
     for f in flights.iter_mut() {
         if let Some((cs, dep, arr, ac, route)) = meta.get(&f.session_id) {
             f.callsign = cs.clone();
-            f.departure = dep.clone();
-            f.arrival = arr.clone();
-            f.aircraft = ac.clone();
-            f.route = route.clone();
+            // Recorded revisions when we have them; otherwise a single plan (pre-0044 captures).
+            f.plans = plans_by_sid.remove(&f.session_id).unwrap_or_else(|| {
+                vec![ReplayPlan {
+                    t: 0.0,
+                    departure: dep.clone(),
+                    arrival: arr.clone(),
+                    aircraft: ac.clone(),
+                    route: route.clone(),
+                }]
+            });
+        } else if let Some(plans) = plans_by_sid.remove(&f.session_id) {
+            f.plans = plans;
         }
     }
 

@@ -237,6 +237,9 @@ async fn tick(
     // One transaction per tick.
     let mut tx = pool.begin().await.map_err(|_| ApiError::Internal)?;
     repo::upsert_flights(&mut tx, &flight_rows, now).await?;
+    // Record a plan revision for any flight whose plan changed this tick (for temporally-faithful
+    // replay). Independent of the stats.flight overwrite above; unchanged flights insert nothing.
+    repo::insert_flight_plan_revisions(&mut tx, &flight_rows, now).await?;
     if !position_rows.is_empty() {
         repo::insert_positions(&mut tx, &position_rows, now).await?;
     }
