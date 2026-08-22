@@ -1,5 +1,6 @@
 //! ACE support: controllers open coverage requests; the ACE team works the queue and keeps a roster.
-//! Discord posting/notify is deferred (no bot yet) — the request row reserves `discord_message_id`.
+//! Create/claim enqueue Discord jobs (`ace_request_post` / `ace_request_notify`) in the same tx as the
+//! state change; the bot performs them. Enqueue is skipped when no Discord channel is configured.
 
 use axum::{
     Json,
@@ -22,9 +23,13 @@ use crate::{
         AceRequestBody, AceTeamMemberBody, CreateAceRequestRequest, DecideAceRequestRequest,
         UpsertAceTeamMemberRequest,
     },
-    repos::{access as access_repo, ace as ace_repo},
+    repos::{access as access_repo, ace as ace_repo, integration as integration_repo},
     state::AppState,
 };
+use serde_json::json;
+
+/// Logical channel name (mapped to a snowflake in the Discord config) where ACE requests are posted.
+const ACE_CHANNEL: &str = "aceteam-requests";
 
 fn pool(state: &AppState) -> Result<&sqlx::PgPool, ApiError> {
     state.db.as_ref().ok_or(ApiError::ServiceUnavailable)
@@ -101,8 +106,12 @@ pub async fn create_request(
     }
     let artcc = clean(payload.artcc_id).map(|a| a.to_ascii_uppercase());
     let position = clean(payload.position);
+
+    // Resolve the target channel before the tx; a missing config just means "don't post" (skip).
+    let channel = integration_repo::channel_id(p, ACE_CHANNEL).await?;
+    let mut tx = p.begin().await.map_err(|_| ApiError::Internal)?;
     let id = ace_repo::create_request(
-        p,
+        &mut tx,
         &user.id,
         artcc.as_deref(),
         position.as_deref(),
@@ -110,6 +119,28 @@ pub async fn create_request(
         details,
     )
     .await?;
+    if let Some(channel_id) = channel {
+        // Enqueued in the same tx: no request without its post-job, no post-job without the request.
+        let job = json!({
+            "channel_id": channel_id,
+            "request_id": id,
+            "requested_by_cid": user.cid,
+            "requested_by_name": user.display_name,
+            "artcc_id": artcc,
+            "position": position,
+            "details": details,
+        });
+        integration_repo::enqueue_job(
+            &mut tx,
+            "ace_request_post",
+            &job,
+            Some("ace_request"),
+            Some(&id),
+        )
+        .await?;
+    }
+    tx.commit().await.map_err(|_| ApiError::Internal)?;
+
     ace_repo::get_request(p, &id)
         .await?
         .map(Json)
@@ -129,7 +160,41 @@ pub async fn claim_request(
 ) -> Result<Json<AceRequestBody>, ApiError> {
     let user = current_user.as_ref().ok_or(ApiError::Unauthorized)?;
     let p = pool(&state)?;
-    ace_repo::claim_request(p, &id, &user.id).await?;
+
+    // Recover the id of the message the bot posted for this request (if any) so the notify job can
+    // edit that embed. Read outside the tx — the value is immutable once the post-job succeeded.
+    let posted = integration_repo::succeeded_job_result(p, "ace_request", &id, "ace_request_post")
+        .await?
+        .and_then(|r| {
+            r.get("message_id")
+                .and_then(|v| v.as_str())
+                .map(str::to_owned)
+        });
+
+    let mut tx = p.begin().await.map_err(|_| ApiError::Internal)?;
+    let artcc = ace_repo::claim_request(&mut tx, &id, &user.id).await?;
+    if let (Some(message_id), Some(channel_id)) =
+        (posted, integration_repo::channel_id(p, ACE_CHANNEL).await?)
+    {
+        let job = json!({
+            "channel_id": channel_id,
+            "message_id": message_id,
+            "request_id": id,
+            "artcc_id": artcc,
+            "claimed_by_cid": user.cid,
+            "claimed_by_name": user.display_name,
+        });
+        integration_repo::enqueue_job(
+            &mut tx,
+            "ace_request_notify",
+            &job,
+            Some("ace_request"),
+            Some(&id),
+        )
+        .await?;
+    }
+    tx.commit().await.map_err(|_| ApiError::Internal)?;
+
     ace_repo::get_request(p, &id)
         .await?
         .map(Json)

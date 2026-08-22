@@ -1,6 +1,6 @@
 //! TMU persistence — Traffic Management Initiatives (TMIs).
 
-use sqlx::PgPool;
+use sqlx::{PgPool, Postgres, Transaction};
 
 use std::collections::HashMap;
 
@@ -98,17 +98,30 @@ pub async fn update_tmi(pool: &PgPool, id: &str, req: &UpdateTmiRequest) -> Resu
 }
 
 /// Publishes a draft. Returns false if the TMI isn't currently a draft.
-pub async fn publish_tmi(pool: &PgPool, id: &str, published_by: &str) -> Result<bool, ApiError> {
+/// Publish a draft TMI **in the caller's transaction** (so a Discord advisory job can be enqueued
+/// atomically). Returns the published row, or `None` if it wasn't a draft (or is absent).
+pub async fn publish_tmi(
+    tx: &mut Transaction<'_, Postgres>,
+    id: &str,
+    published_by: &str,
+) -> Result<Option<TmiBody>, ApiError> {
     let result = sqlx::query(
         "update tmu.tmis set status = 'published', published_by = $2, published_at = now() \
          where id = $1 and status = 'draft'",
     )
     .bind(id)
     .bind(published_by)
-    .execute(pool)
+    .execute(&mut **tx)
     .await
     .map_err(|_| ApiError::Internal)?;
-    Ok(result.rows_affected() > 0)
+    if result.rows_affected() == 0 {
+        return Ok(None);
+    }
+    sqlx::query_as::<_, TmiBody>(&format!("{SELECT} where t.id = $1"))
+        .bind(id)
+        .fetch_optional(&mut **tx)
+        .await
+        .map_err(|_| ApiError::Internal)
 }
 
 /// Cancels a draft or published TMI. Returns false if it's already terminal. `ended_at` records the

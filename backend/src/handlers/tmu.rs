@@ -22,9 +22,13 @@ use crate::{
         CreateGroundStopRequest, CreateTmiRequest, GateRule, GroundStopBody, ProgramBody, TmiBody,
         UpdateTmiRequest, UpsertProgramRequest,
     },
-    repos::tmu as tmu_repo,
+    repos::{integration as integration_repo, tmu as tmu_repo},
     state::AppState,
 };
+use serde_json::json;
+
+/// Logical channel name (mapped to a snowflake in the Discord config) where published TMIs are posted.
+pub(crate) const TMU_CHANNEL: &str = "tmu-advisories";
 
 #[derive(Deserialize)]
 pub struct TmiListQuery {
@@ -130,12 +134,29 @@ pub async fn publish_tmi(
 ) -> Result<Json<TmiBody>, ApiError> {
     let user = current_user.as_ref().ok_or(ApiError::Unauthorized)?;
     let pool = state.db.as_ref().ok_or(ApiError::ServiceUnavailable)?;
-    if !tmu_repo::publish_tmi(pool, &id, &user.id).await? {
-        return Err(ApiError::Conflict); // not a draft (or absent)
-    }
-    let tmi = tmu_repo::get_tmi(pool, &id)
+
+    // Resolve the target channel before the tx; no config just means "don't post" (skip enqueue).
+    let channel = integration_repo::channel_id(pool, TMU_CHANNEL).await?;
+    let mut tx = pool.begin().await.map_err(|_| ApiError::Internal)?;
+    let tmi = tmu_repo::publish_tmi(&mut tx, &id, &user.id)
         .await?
-        .ok_or(ApiError::NotFound)?;
+        .ok_or(ApiError::Conflict)?; // not a draft (or absent)
+    if let Some(channel_id) = channel {
+        // Enqueued in the same tx as the publish: the advisory can't post without the TMI going live.
+        let job = json!({
+            "channel_id": channel_id,
+            "tmi_id": tmi.id,
+            "requesting": tmi.requesting,
+            "providing": tmi.providing,
+            "restriction": tmi.restriction,
+            "start_time": tmi.start_time,
+            "stop_time": tmi.stop_time,
+        });
+        integration_repo::enqueue_job(&mut tx, "tmi_publish", &job, Some("tmi"), Some(&tmi.id))
+            .await?;
+    }
+    tx.commit().await.map_err(|_| ApiError::Internal)?;
+
     Ok(Json(tmi))
 }
 

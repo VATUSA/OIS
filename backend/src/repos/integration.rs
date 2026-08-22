@@ -120,6 +120,42 @@ pub async fn ack_job(
     Ok(res.rows_affected() > 0)
 }
 
+/// Resolve a logical channel name to its Discord snowflake for the configured guild (None if
+/// unmapped / no config). Callers skip enqueuing a Discord job when there's nowhere to post.
+pub async fn channel_id(pool: &PgPool, name: &str) -> Result<Option<String>, ApiError> {
+    sqlx::query_scalar::<_, String>(
+        "select ch.channel_id from integration.discord_channels ch \
+         join integration.discord_configs c on c.id = ch.config_id \
+         where ch.name = $1 order by c.created_at limit 1",
+    )
+    .bind(name)
+    .fetch_optional(pool)
+    .await
+    .map_err(|_| ApiError::Internal)
+}
+
+/// The `result` payload of the most recent succeeded job for a subject + type — used to recover ids
+/// the bot returned on ack (e.g. the posted message id, needed by a follow-up job).
+pub async fn succeeded_job_result(
+    pool: &PgPool,
+    subject_type: &str,
+    subject_id: &str,
+    job_type: &str,
+) -> Result<Option<Value>, ApiError> {
+    let text = sqlx::query_scalar::<_, Option<String>>(
+        "select result::text from integration.outbound_jobs \
+         where subject_type = $1 and subject_id = $2 and job_type = $3 and status = 'succeeded' \
+         order by created_at desc limit 1",
+    )
+    .bind(subject_type)
+    .bind(subject_id)
+    .bind(job_type)
+    .fetch_optional(pool)
+    .await
+    .map_err(|_| ApiError::Internal)?;
+    Ok(text.flatten().and_then(|t| serde_json::from_str(&t).ok()))
+}
+
 // --- config (single guild for the first cut) -----------------------------------------------------
 
 async fn map_entries(
