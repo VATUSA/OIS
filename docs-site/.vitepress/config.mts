@@ -63,6 +63,14 @@ export default defineConfig({
         ],
       },
       {
+        text: "Historical & replay",
+        items: [
+          { text: "Statistics & replay", link: "/historical/overview" },
+          { text: "Replay", link: "/historical/replay" },
+          { text: "Data & retention", link: "/historical/retention" },
+        ],
+      },
+      {
         text: "Advisories & pilots",
         items: [
           { text: "Advisories board", link: "/advisories/board" },
