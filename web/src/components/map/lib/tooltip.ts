@@ -4,6 +4,7 @@ import {RATINGS, onlineFor} from "@/lib/atc-format";
 import {ATC_COLORS} from "./colors";
 import type {Theme} from "./constants";
 import type {NormAircraft} from "./types";
+import type {MatchedFlight} from "../layers/matched";
 import {anchorHeader, type AtcAnchor, type AtcPositionLite} from "../layers/atc";
 
 const esc = (s: string) =>
@@ -43,13 +44,20 @@ export function mapTooltip(theme: Theme) {
   return (info: PickingInfo) => {
     const id = info.layer?.id;
     if (id === "aircraft" || id === "matched") {
-      const d = info.object as NormAircraft | undefined;
+      // The plain "aircraft" layer holds NormAircraft (actype/alt/gs); the "matched" (in-FCA) layer
+      // holds MatchedFlight (aircraft_type/altitude/groundspeed). Read whichever the object carries.
+      const d = info.object as (NormAircraft & Partial<MatchedFlight>) | undefined;
       if (!d) return null;
+      const actype = d.actype || d.aircraft_type || "";
+      const alt = d.alt ?? d.altitude;
+      const gs = d.gs ?? d.groundspeed;
+      const num = (v: number | undefined, unit: string) =>
+        v == null ? "—" : `${v}${unit}`;
       return {
         html:
           `<div style="font-weight:600">${esc(d.callsign)}</div>` +
           `<div>${esc(d.dep || "????")} → ${esc(d.arr || "????")}</div>` +
-          `<div>${esc(d.actype || "—")} · ${d.alt}ft · ${d.gs}kt</div>`,
+          `<div>${esc(actype || "—")} · ${num(alt, "ft")} · ${num(gs, "kt")}</div>`,
         style,
       };
     }
