@@ -1404,7 +1404,7 @@ export interface paths {
         get: operations["get_my_discord"];
         put?: never;
         post?: never;
-        delete: operations["unlink_discord"];
+        delete?: never;
         options?: never;
         head?: never;
         patch?: never;
@@ -8178,35 +8178,6 @@ export interface operations {
                 };
             };
             401: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content?: never;
-            };
-        };
-    };
-    unlink_discord: {
-        parameters: {
-            query?: never;
-            header?: never;
-            path?: never;
-            cookie?: never;
-        };
-        requestBody?: never;
-        responses: {
-            204: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content?: never;
-            };
-            401: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content?: never;
-            };
-            404: {
                 headers: {
                     [name: string]: unknown;
                 };

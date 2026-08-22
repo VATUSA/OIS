@@ -3,20 +3,21 @@
 
 use axum::{
     Json,
-    extract::{Path, Query, State},
+    extract::{Extension, Path, Query, State},
     http::StatusCode,
 };
 use serde::Deserialize;
 
 use crate::{
     auth::{
+        context::CurrentUser,
         permissions::{DiscordConfigRead, DiscordConfigUpdate, IntegrationJobsUpdate},
         require_permission::RequirePermission,
     },
     errors::ApiError,
     models::{
-        AceRequestBody, AckJobRequest, DiscordAceClaimRequest, DiscordConfigBody, OutboundJobBody,
-        UpsertDiscordConfigRequest,
+        AceRequestBody, AckJobRequest, DiscordAceClaimRequest, DiscordConfigBody, DiscordLinkBody,
+        OutboundJobBody, UpsertDiscordConfigRequest,
     },
     repos::{ace as ace_repo, integration as integration_repo},
     state::AppState,
@@ -72,6 +73,33 @@ pub async fn ack_job(
     } else {
         Err(ApiError::NotFound)
     }
+}
+
+// --- current user's Discord link (read-only; sourced from VATUSA) ---
+
+#[utoipa::path(
+    get, path = "/api/v1/me/discord", tag = "integration",
+    responses((status = 200, body = DiscordLinkBody), (status = 401))
+)]
+pub async fn get_my_discord(
+    State(state): State<AppState>,
+    Extension(current_user): Extension<Option<CurrentUser>>,
+) -> Result<Json<DiscordLinkBody>, ApiError> {
+    let user = current_user.as_ref().ok_or(ApiError::Unauthorized)?;
+    let link = integration_repo::get_discord_link(pool(&state)?, &user.id).await?;
+    Ok(Json(match link {
+        Some((discord_id, _meta)) => DiscordLinkBody {
+            linked: true,
+            discord_id: Some(discord_id),
+            // Username isn't provided by VATUSA — only the id.
+            username: None,
+        },
+        None => DiscordLinkBody {
+            linked: false,
+            discord_id: None,
+            username: None,
+        },
+    }))
 }
 
 // --- interaction callbacks (bot acts on behalf of the linked user) ---

@@ -45,9 +45,9 @@ export function useUpdateDiscordConfig() {
   });
 }
 
-// --- account linking (personal) ---
+// --- Discord link (read-only; sourced from VATUSA) ---
 
-/** The current user's Discord account link. */
+/** The current user's Discord link, as synced from their VATUSA profile. */
 export function useDiscordLink() {
   return useQuery({
     queryKey: LINK_KEY,
@@ -56,28 +56,5 @@ export function useDiscordLink() {
       if (error || !data) throw new Error("failed to load Discord link");
       return data;
     },
-  });
-}
-
-/** Redirect into the Discord OAuth flow; on return the browser lands back on this page. */
-export function startDiscordLink() {
-  const returnTo = `${window.location.origin}/profile`;
-  window.location.href = `/api/v1/me/discord/link/start?return_to=${encodeURIComponent(returnTo)}`;
-}
-
-/** Remove the current user's Discord link. */
-export function useUnlinkDiscord() {
-  const qc = useQueryClient();
-  const toast = useToast();
-  return useMutation({
-    mutationFn: async (): Promise<void> => {
-      const { error } = await ois.DELETE("/api/v1/me/discord");
-      if (error) throw new Error("unlink failed");
-    },
-    onSuccess: () => {
-      qc.invalidateQueries({ queryKey: LINK_KEY });
-      toast.success("Discord account unlinked");
-    },
-    onError: () => toast.error("Couldn’t unlink your Discord account"),
   });
 }

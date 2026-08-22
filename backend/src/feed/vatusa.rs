@@ -45,6 +45,10 @@ pub struct VatusaMember {
     pub flag_homecontroller: bool,
     #[serde(default)]
     pub facility_join: Option<String>,
+    /// The member's linked Discord user id (snowflake), as held by VATUSA. VATUSA is the authoritative
+    /// source of the OIS↔Discord mapping — OIS never runs its own link flow.
+    #[serde(default)]
+    pub discord_id: Option<String>,
     #[serde(default)]
     pub roles: Vec<VatusaRole>,
     #[serde(default)]

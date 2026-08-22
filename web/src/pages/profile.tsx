@@ -1,11 +1,11 @@
-import {useEffect, useMemo} from "react";
+import {useMemo} from "react";
 
-import {Avatar, AvatarFallback, Badge, Button, Card, CardContent, CardDescription, CardHeader, CardTitle, ConfirmButton, useToast,} from "@ois/ui";
+import {Avatar, AvatarFallback, Badge, Card, CardContent, CardDescription, CardHeader, CardTitle,} from "@ois/ui";
 import {Building2, CalendarDays, MessageSquare, RefreshCw} from "lucide-react";
 
 import {useMe} from "@/lib/auth";
 import {useFacilities} from "@/lib/admin";
-import {startDiscordLink, useDiscordLink, useUnlinkDiscord} from "@/lib/integration";
+import {useDiscordLink} from "@/lib/integration";
 
 function initials(name: string): string {
   return name
@@ -28,27 +28,9 @@ function fmtDate(iso: string | null | undefined): string {
       });
 }
 
-/** Discord account linking — link/unlink + status. Shows a toast when returning from OAuth. */
+/** Discord link status — read-only, synced from the member's VATUSA profile. */
 function DiscordCard() {
   const {data: link} = useDiscordLink();
-  const unlink = useUnlinkDiscord();
-  const toast = useToast();
-
-  useEffect(() => {
-    const params = new URLSearchParams(window.location.search);
-    const status = params.get("discord");
-    if (!status) return;
-    if (status === "linked") toast.success("Discord account linked");
-    else if (status === "error") toast.error("Discord linking failed — please try again");
-    // Strip the flag so a refresh doesn't re-toast.
-    params.delete("discord");
-    const qs = params.toString();
-    window.history.replaceState(
-      {},
-      "",
-      window.location.pathname + (qs ? `?${qs}` : ""),
-    );
-  }, [toast]);
 
   return (
     <Card>
@@ -58,35 +40,23 @@ function DiscordCard() {
           Discord
         </CardTitle>
         <CardDescription>
-          Link your Discord account so bot actions (like claiming ACE requests)
-          are attributed to you.
+          Synced from your VATUSA profile — it lets bot actions (like claiming
+          ACE requests) be attributed to you.
         </CardDescription>
       </CardHeader>
-      <CardContent className="flex items-center justify-between gap-4">
+      <CardContent>
         {link?.linked ? (
-          <>
-            <div className="min-w-0 text-sm">
-              <span className="text-muted-foreground">Linked as </span>
-              <span className="font-medium">{link.username ?? "Discord user"}</span>
-            </div>
-            <ConfirmButton
-              variant="outline"
-              size="sm"
-              onConfirm={() => unlink.mutate()}
-              disabled={unlink.isPending}
-            >
-              Unlink
-            </ConfirmButton>
-          </>
-        ) : (
-          <>
-            <span className="text-sm text-muted-foreground">
-              Not linked yet.
+          <div className="flex items-center gap-2 text-sm">
+            <Badge variant="success">Connected</Badge>
+            <span className="text-muted-foreground">
+              Linked via VATUSA.
             </span>
-            <Button size="sm" onClick={startDiscordLink}>
-              Link Discord
-            </Button>
-          </>
+          </div>
+        ) : (
+          <p className="text-sm text-muted-foreground">
+            No Discord on file. Add your Discord account to your VATUSA profile,
+            then sign in to OIS to sync it.
+          </p>
         )}
       </CardContent>
     </Card>

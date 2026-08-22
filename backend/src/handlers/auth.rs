@@ -328,7 +328,7 @@ async fn ensure_user_login_access(
 
 /// Validates a `return_to` target: absolute http(s) whose origin is in
 /// `CORS_ALLOWED_ORIGINS`. Prevents the login flow becoming an open redirect.
-pub(crate) fn validate_return_to(raw: &str) -> Result<String, ApiError> {
+fn validate_return_to(raw: &str) -> Result<String, ApiError> {
     let trimmed = raw.trim();
     if trimmed.is_empty() {
         return Err(ApiError::BadRequest);
