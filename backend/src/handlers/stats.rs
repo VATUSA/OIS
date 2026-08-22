@@ -18,8 +18,8 @@ use crate::{
     handlers::{atc, feed as feed_handlers, flow as flow_handlers, runway as runway_handlers},
     models::{
         AtcBoard, CaptureSummaryBody, DeparturesResponse, NetworkPointBody, ReplayBody,
-        ReplayFlightBody, ReplayPlan, StatsAirportBody, StatsFlightDetail, StatsFlightSummary,
-        StatsTrackBody, TrafficAircraft,
+        ReplayChunkBody, ReplayFlightBody, ReplayPlan, StatsAirportBody, StatsFlightDetail,
+        StatsFlightSummary, StatsTrackBody, TrafficAircraft,
     },
     repos::stats as stats_repo,
     state::AppState,
@@ -325,17 +325,15 @@ pub async fn window_replay(
     Ok(Json(build_replay(p, String::new(), from, to, step).await?))
 }
 
-/// Build the map-replay payload over `[from, to]`: every flight's positions thinned to one sample
-/// per `step`-second bucket, grouped into per-flight tracks with callsign/plan basics attached.
-async fn build_replay(
+/// Group ordered `(session, t)` samples into per-flight tracks and attach each flight's callsign +
+/// the flight-plan revisions in force over `[plan_from, plan_to]` (so a mid-route amendment shows the
+/// plan that was actually in effect at each instant). Shared by the whole-window and chunked paths.
+async fn assemble_flights(
     p: &sqlx::PgPool,
-    capture_id: String,
-    from: DateTime<Utc>,
-    to: DateTime<Utc>,
-    step: i64,
-) -> Result<ReplayBody, ApiError> {
-    let samples = stats_repo::replay_positions(p, from, to, step).await?;
-
+    samples: Vec<stats_repo::ReplaySample>,
+    plan_from: DateTime<Utc>,
+    plan_to: DateTime<Utc>,
+) -> Result<Vec<ReplayFlightBody>, ApiError> {
     // Group consecutive samples (already ordered by session_id, then time) into per-flight tracks.
     let mut flights: Vec<ReplayFlightBody> = Vec::new();
     let mut ids: Vec<i64> = Vec::new();
@@ -364,8 +362,6 @@ async fn build_replay(
         });
     }
 
-    // Attach the callsign + the flight-plan revisions in effect over the window (so a mid-route
-    // amendment shows the plan that was actually in force at each instant).
     let meta: HashMap<i64, FlightMeta> = stats_repo::flights_meta(p, &ids)
         .await?
         .into_iter()
@@ -373,10 +369,10 @@ async fn build_replay(
         .collect();
     let mut plans_by_sid: HashMap<i64, Vec<ReplayPlan>> = HashMap::new();
     for (sid, eff, dep, arr, ac, route) in
-        stats_repo::flight_plan_revisions(p, &ids, from, to).await?
+        stats_repo::flight_plan_revisions(p, &ids, plan_from, plan_to).await?
     {
         plans_by_sid.entry(sid).or_default().push(ReplayPlan {
-            t: (eff - from).num_seconds().max(0) as f64,
+            t: (eff - plan_from).num_seconds().max(0) as f64,
             departure: dep,
             arrival: arr,
             aircraft: ac,
@@ -400,7 +396,20 @@ async fn build_replay(
             f.plans = plans;
         }
     }
+    Ok(flights)
+}
 
+/// Build the whole-window replay payload in one shot (legacy endpoints). For long windows prefer the
+/// progressive `/stats/replay/positions` chunk endpoint, which only scans one chunk at a time.
+async fn build_replay(
+    p: &sqlx::PgPool,
+    capture_id: String,
+    from: DateTime<Utc>,
+    to: DateTime<Utc>,
+    step: i64,
+) -> Result<ReplayBody, ApiError> {
+    let samples = stats_repo::replay_positions(p, from, from, to, step).await?;
+    let flights = assemble_flights(p, samples, from, to).await?;
     Ok(ReplayBody {
         capture_id,
         window_start: from,
@@ -408,6 +417,73 @@ async fn build_replay(
         step_s: step,
         flights,
     })
+}
+
+/// Sample spacing chosen from the window length so a replay's total sample count stays bounded no
+/// matter how long the span is. The frontend mirrors this to size its chunks; the server clamps.
+pub fn adaptive_step(window_secs: i64) -> i64 {
+    match window_secs {
+        s if s <= 2 * 3600 => 15,
+        s if s <= 6 * 3600 => 30,
+        s if s <= 24 * 3600 => 60,
+        s if s <= 72 * 3600 => 120,
+        _ => 300,
+    }
+}
+
+#[derive(Deserialize)]
+pub struct ChunkQuery {
+    /// Window start (Unix seconds) — the origin `t` is measured from, and the lower bound for plans.
+    from: i64,
+    /// Window end (Unix seconds) — the upper bound for the plan-revision timeline.
+    to: i64,
+    /// This chunk's start (Unix seconds).
+    cfrom: i64,
+    /// This chunk's end (Unix seconds), exclusive.
+    cto: i64,
+    /// Sample spacing seconds; default is derived from the window length, clamped 15–300.
+    step: Option<i64>,
+}
+
+/// One chunk `[cfrom, cto)` of a progressive replay: per-flight samples (with `t` relative to the
+/// window start `from`, so chunks stitch together) plus the callsign and full-window plan timeline
+/// for the flights that appear in this chunk. The frontend fetches chunks as the clock advances.
+#[utoipa::path(
+    get,
+    path = "/api/v1/stats/replay/positions",
+    tag = "stats",
+    params(
+        ("from" = i64, Query, description = "Window start (Unix seconds)"),
+        ("to" = i64, Query, description = "Window end (Unix seconds)"),
+        ("cfrom" = i64, Query, description = "Chunk start (Unix seconds)"),
+        ("cto" = i64, Query, description = "Chunk end (Unix seconds, exclusive)"),
+        ("step" = Option<i64>, Query, description = "Sample spacing seconds (default: adaptive)")
+    ),
+    responses((status = 200, body = ReplayChunkBody), (status = 400), (status = 401))
+)]
+pub async fn replay_chunk(
+    State(state): State<AppState>,
+    _permission: RequirePermission<StatsRead>,
+    Query(q): Query<ChunkQuery>,
+) -> Result<Json<ReplayChunkBody>, ApiError> {
+    let p = pool(&state)?;
+    let from = DateTime::from_timestamp(q.from, 0).ok_or(ApiError::BadRequest)?;
+    let to = DateTime::from_timestamp(q.to, 0).ok_or(ApiError::BadRequest)?;
+    let cfrom = DateTime::from_timestamp(q.cfrom, 0).ok_or(ApiError::BadRequest)?;
+    let cto = DateTime::from_timestamp(q.cto, 0).ok_or(ApiError::BadRequest)?;
+    if to <= from || cto <= cfrom {
+        return Err(ApiError::BadRequest);
+    }
+    let step = q
+        .step
+        .unwrap_or_else(|| adaptive_step((to - from).num_seconds()))
+        .clamp(15, 300);
+    let samples = stats_repo::replay_positions(p, from, cfrom, cto, step).await?;
+    let flights = assemble_flights(p, samples, from, to).await?;
+    Ok(Json(ReplayChunkBody {
+        step_s: step,
+        flights,
+    }))
 }
 
 // --- historical ("time-machine") dashboard: live feed compute functions replayed at instant T ---

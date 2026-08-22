@@ -811,6 +811,15 @@ pub struct ReplayBody {
     pub flights: Vec<ReplayFlightBody>,
 }
 
+/// One chunk of a progressive replay: the flights (with `t` relative to the window start) that have
+/// samples in the requested sub-window, plus each one's callsign and full-window plan timeline.
+#[derive(Debug, Serialize, ToSchema)]
+pub struct ReplayChunkBody {
+    /// The sample spacing (seconds) actually used (the server's adaptive/clamped value).
+    pub step_s: i64,
+    pub flights: Vec<ReplayFlightBody>,
+}
+
 /// Event debrief: per-featured-airport stats plus their combined total, over the capture window.
 /// `captured` is false when no capture exists yet.
 #[derive(Debug, Serialize, ToSchema)]

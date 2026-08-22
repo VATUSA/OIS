@@ -1,3 +1,4 @@
+import {useCallback, useEffect, useMemo, useRef, useState} from "react";
 import {useQuery} from "@tanstack/react-query";
 import type {components} from "@ois/api-client";
 
@@ -12,6 +13,125 @@ export type CaptureSummary = components["schemas"]["CaptureSummaryBody"];
 export type Replay = components["schemas"]["ReplayBody"];
 export type ReplayFlight = components["schemas"]["ReplayFlightBody"];
 export type ResolvedRoute = components["schemas"]["ResolvedRoute"];
+
+/** Sample spacing for a window length — mirrors the backend so chunks fetch a stable step. */
+export function adaptiveStep(windowSecs: number): number {
+  if (windowSecs <= 2 * 3600) return 15;
+  if (windowSecs <= 6 * 3600) return 30;
+  if (windowSecs <= 24 * 3600) return 60;
+  if (windowSecs <= 72 * 3600) return 120;
+  return 300;
+}
+
+export type ProgressiveReplay = {
+  /** The replay assembled so far (grows as chunks arrive); undefined until the first chunk lands. */
+  data?: Replay;
+  isLoading: boolean;
+  isError: boolean;
+  /** Seconds from the window start that are loaded (contiguous from 0). */
+  loadedUntil: number;
+  /** A chunk fetch is in flight. */
+  loading: boolean;
+  /** Ask the loader to have data up to `untilSec` (from window start) available. Idempotent. */
+  ensureLoaded: (untilSec: number) => void;
+};
+
+/**
+ * Progressive replay loader: fetches positions in time chunks from `/stats/replay/positions`, so
+ * playback can start on the first chunk and the rest streams in as the clock advances (or on scrub).
+ * Only ever scans one chunk server-side, and picks an adaptive step so long windows stay bounded.
+ */
+export function useProgressiveReplay(from: number | null, to: number | null): ProgressiveReplay {
+  const windowSecs = from != null && to != null ? Math.max(1, to - from) : 0;
+  const step = useMemo(() => adaptiveStep(windowSecs), [windowSecs]);
+  // ~240 buckets/chunk, bounded so a chunk is neither tiny nor enormous.
+  const chunkSpan = useMemo(() => Math.min(24 * 3600, Math.max(15 * 60, step * 240)), [step]);
+
+  const [flights, setFlights] = useState<Map<string, ReplayFlight>>(() => new Map());
+  const [loadedUntil, setLoadedUntil] = useState(0);
+  const [loading, setLoading] = useState(false);
+  const [isError, setError] = useState(false);
+  const [firstDone, setFirstDone] = useState(false);
+
+  const busy = useRef(false);
+  const loadedRef = useRef(0); // seconds loaded (contiguous from window start)
+  const wantRef = useRef(0); // desired loaded-until (seconds)
+
+  const pump = useCallback(async () => {
+    if (from == null || to == null || busy.current) return;
+    if (loadedRef.current >= wantRef.current || from + loadedRef.current >= to) return;
+    busy.current = true;
+    setLoading(true);
+    const cfrom = from + loadedRef.current;
+    const cto = Math.min(to, cfrom + chunkSpan);
+    const { data, error } = await ois.GET("/api/v1/stats/replay/positions", {
+      params: { query: { from, to, cfrom, cto, step } },
+    });
+    busy.current = false;
+    if (error || !data) {
+      setError(true);
+      setLoading(false);
+      return;
+    }
+    setFlights((prev) => {
+      const next = new Map(prev);
+      for (const f of data.flights) {
+        const existing = next.get(f.session_id);
+        // Chunks are contiguous and half-open, so samples append in order without overlap.
+        if (existing) next.set(f.session_id, { ...existing, samples: existing.samples.concat(f.samples) });
+        else next.set(f.session_id, { ...f });
+      }
+      return next;
+    });
+    loadedRef.current = cto - from;
+    setLoadedUntil(cto - from);
+    setFirstDone(true);
+    setLoading(false);
+    // Keep going if more was requested (e.g. a scrub jumped ahead).
+    if (loadedRef.current < wantRef.current && from + loadedRef.current < to) void pump();
+  }, [from, to, step, chunkSpan]);
+
+  const ensureLoaded = useCallback(
+    (untilSec: number) => {
+      wantRef.current = Math.max(wantRef.current, untilSec);
+      void pump();
+    },
+    [pump],
+  );
+
+  // Reset and kick the first chunk whenever the window changes.
+  useEffect(() => {
+    setFlights(new Map());
+    loadedRef.current = 0;
+    wantRef.current = 0;
+    busy.current = false;
+    setLoadedUntil(0);
+    setFirstDone(false);
+    setError(false);
+    if (from != null && to != null) ensureLoaded(chunkSpan);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [from, to]);
+
+  const data = useMemo<Replay | undefined>(() => {
+    if (!firstDone || from == null || to == null) return undefined;
+    return {
+      capture_id: "",
+      window_start: new Date(from * 1000).toISOString(),
+      window_end: new Date(to * 1000).toISOString(),
+      step_s: step,
+      flights: Array.from(flights.values()),
+    };
+  }, [firstDone, flights, step, from, to]);
+
+  return {
+    data,
+    isLoading: from != null && to != null && !firstDone && !isError,
+    isError,
+    loadedUntil,
+    loading,
+    ensureLoaded,
+  };
+}
 
 /** Resolve a batch of filed routes to drawable polylines (for the replay map's route overlay). */
 export async function resolveRoutes(
