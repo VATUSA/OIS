@@ -721,6 +721,20 @@ pub struct StatsFlightDetail {
     pub distance_nm: Option<f32>,
     pub max_altitude: Option<i32>,
     pub max_groundspeed: Option<i32>,
+    /// Flight-plan revisions over the flight, oldest first (one entry = never amended). Populated
+    /// separately from `stats.flight_plan`, so it's skipped by the row mapping.
+    #[sqlx(skip)]
+    pub revisions: Vec<FlightPlanRevisionBody>,
+}
+
+/// One flight-plan revision, for the flight-detail amendment history.
+#[derive(Debug, Serialize, ToSchema, sqlx::FromRow)]
+pub struct FlightPlanRevisionBody {
+    pub effective_from: DateTime<Utc>,
+    pub departure: Option<String>,
+    pub arrival: Option<String>,
+    pub aircraft_short: Option<String>,
+    pub route: Option<String>,
 }
 
 /// Airport activity: dep/arr counts + top aircraft / destinations / origins.

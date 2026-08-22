@@ -186,10 +186,13 @@ pub async fn flight_detail(
     _permission: RequirePermission<StatsRead>,
     Path(id): Path<String>,
 ) -> Result<Json<StatsFlightDetail>, ApiError> {
-    stats_repo::flight_detail(pool(&state)?, parse_session_id(&id)?)
+    let p = pool(&state)?;
+    let sid = parse_session_id(&id)?;
+    let mut detail = stats_repo::flight_detail(p, sid)
         .await?
-        .map(Json)
-        .ok_or(ApiError::NotFound)
+        .ok_or(ApiError::NotFound)?;
+    detail.revisions = stats_repo::flight_plan_history(p, sid).await?;
+    Ok(Json(detail))
 }
 
 #[utoipa::path(

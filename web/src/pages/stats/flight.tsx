@@ -71,6 +71,32 @@ function Detail({ f }: { f: StatsFlightDetail }) {
           </CardContent>
         </Card>
       )}
+
+      {f.revisions.length > 1 && (
+        <Card>
+          <CardContent className="flex flex-col gap-2 pt-6">
+            <span className="text-xs text-muted-foreground">
+              Plan amendments ({f.revisions.length - 1})
+            </span>
+            <ul className="flex flex-col gap-1.5">
+              {f.revisions.map((r, i) => (
+                <li key={i} className="flex flex-wrap items-baseline gap-x-2 gap-y-0.5 text-sm">
+                  <span className="shrink-0 font-mono text-xs text-muted-foreground">
+                    {formatZuluFull(r.effective_from)}
+                  </span>
+                  <span className="font-mono">
+                    {r.departure ?? "????"} → {r.arrival ?? "????"}
+                  </span>
+                  {r.aircraft_short && (
+                    <span className="text-xs text-muted-foreground">{r.aircraft_short}</span>
+                  )}
+                  <span className="text-xs text-muted-foreground">{i === 0 ? "(filed)" : "(amended)"}</span>
+                </li>
+              ))}
+            </ul>
+          </CardContent>
+        </Card>
+      )}
     </div>
   );
 }
