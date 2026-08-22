@@ -12,6 +12,7 @@ Where most tools focus on one ARTCC, OIS is **national**: any online aircraft, a
 - **Run a Ground Delay Program** — issue a [GDP](/tmu/gdp) that rations arrivals to an airport's acceptance rate, with **frozen** EDCTs so release times don't move on their own.
 - **Balance the runways** — assign arrivals to runways and watch a 10-minute demand board with the [Runway Balancer](/tmu/runway-balancer).
 - **Schedule departures** — work FCA-metered ground departures and hand out [CFR release times](/tmu/releases) from the [IDST](/tmu/idst) console; issued times stay locked.
+- **Look back & replay** — review network statistics and [replay](/historical/replay) any past window as a time machine, with traffic, flow initiatives, and each flight's plan as they were.
 - **Publish advisories** — pilots and other facilities see active traffic initiatives on the public [advisories board](/advisories/board).
 
 ## Who it's for
