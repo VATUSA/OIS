@@ -251,9 +251,16 @@ fn parse_profile(raw: Value) -> Result<VatsimProfile, ApiError> {
     )
     .unwrap_or_else(|| format!("CID {cid}"));
 
+    // VATSIM Connect nests the ATC rating at `data.vatsim.rating.short` (e.g. "C1"), alongside the
+    // `data.personal.*` fields used for name/email above. The `vatsim_details.*` variants are kept
+    // as fallbacks for any proxy that reshapes the payload. `.short` is preferred over `.long`.
     let rating = find_string(
         &raw,
         &[
+            "data.vatsim.rating.short",
+            "vatsim.rating.short",
+            "data.vatsim.rating.long",
+            "vatsim.rating.long",
             "rating",
             "rating_short",
             "vatsim_details.rating",
@@ -394,5 +401,23 @@ mod tests {
 
         assert_eq!(profile.cid, 10000010);
         assert_eq!(profile.rating.as_deref(), Some("S3"));
+    }
+
+    #[test]
+    fn parses_rating_from_vatsim_connect_shape() {
+        // The real VATSIM Connect payload: name/email under data.personal, rating under data.vatsim.
+        let profile = parse_profile(json!({
+            "data": {
+                "cid": "1652726",
+                "personal": { "name_full": "Carson Berget", "email": "vatsim@carsonberget.com" },
+                "vatsim": { "rating": { "id": 5, "short": "C1", "long": "Controller 1" } }
+            }
+        }))
+        .unwrap();
+
+        assert_eq!(profile.cid, 1652726);
+        assert_eq!(profile.display_name, "Carson Berget");
+        assert_eq!(profile.email, "vatsim@carsonberget.com");
+        assert_eq!(profile.rating.as_deref(), Some("C1"));
     }
 }

@@ -94,13 +94,15 @@ pub async fn upsert_login_user(
 ) -> Result<LoginUser, ApiError> {
     let row = sqlx::query_as::<_, (String, bool)>(
         r#"
-        insert into identity.users (id, cid, email, full_name, display_name, rating)
+        insert into identity.users as u (id, cid, email, full_name, display_name, rating)
         values ($1, $2, $3, $4, $5, $6)
         on conflict (cid) do update
         set email = excluded.email,
             full_name = excluded.full_name,
             display_name = excluded.display_name,
-            rating = excluded.rating,
+            -- Don't let a login that couldn't read the rating (or a source that omits it) wipe a
+            -- rating the VATUSA sync already established; only overwrite with a non-null value.
+            rating = coalesce(excluded.rating, u.rating),
             updated_at = now()
         returning id, (xmax = 0) as was_new_user
         "#,
