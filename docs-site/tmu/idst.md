@@ -4,6 +4,8 @@
 
 It complements the FCA map — you *draw and meter* a flow there, and *schedule its departures* here. IDST lives at **`/ops/idst`**.
 
+![The IDST console: a working scope of KDCA / PCT / ZDC on the left, an Unscheduled flight metered by an FCA in the center, and the selected-flight panel on the right.](/screenshots/idst-board.png)
+
 ## Your scope
 
 The left panel is your **working scope**. Add the positions you're covering:

@@ -16,7 +16,7 @@ function version(): string {
 // https://vitepress.dev/reference/site-config
 export default defineConfig({
   title: "OIS Docs",
-  description: "Operational Information System — the VATUSA traffic-management platform.",
+  description: "Event Operational Information System — the VATUSA traffic-management platform.",
   lang: "en-US",
   cleanUrls: true,
   // Note: no `lastUpdated` — it shells out to `git`, which isn't present in the Docker build
