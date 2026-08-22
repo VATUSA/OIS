@@ -9,7 +9,7 @@ use sqlx::{PgPool, Postgres, Transaction};
 use crate::{
     auth::{
         acl::PermissionPath,
-        context::{CurrentServiceAccount, CurrentUser},
+        context::{CurrentApiKey, CurrentServiceAccount, CurrentUser},
     },
     errors::ApiError,
 };
@@ -92,6 +92,49 @@ pub async fn find_current_service_account_by_bearer_token(
     }
 
     Ok(account)
+}
+
+/// Resolve an `ois_pat_…` bearer token to its API key, if active/unrevoked/unexpired and the owner
+/// is still an active user. Updates `last_used_at`/`last_used_ip` on a hit. The key's *authority* is
+/// resolved separately and capped by the owner — see `repos::api_keys` and `auth::principal`.
+pub async fn find_current_api_key_by_bearer_token(
+    pool: &PgPool,
+    bearer_token: &str,
+    client_ip: Option<&str>,
+) -> Result<Option<CurrentApiKey>, ApiError> {
+    let token_hash = sha256_hex(bearer_token);
+
+    let key = sqlx::query_as::<_, CurrentApiKey>(
+        r#"
+        select k.id, k.owner_user_id, k.prefix, k.name
+        from access.api_keys k
+        join identity.users u on u.id = k.owner_user_id
+        where k.secret_hash = $1
+          and k.status = 'active'
+          and k.revoked_at is null
+          and (k.expires_at is null or k.expires_at > now())
+        limit 1
+        "#,
+    )
+    .bind(&token_hash)
+    .fetch_optional(pool)
+    .await
+    .map_err(|_| ApiError::Internal)?;
+
+    if let Some(key) = key.as_ref() {
+        // `last_used_ip` is inet; a malformed forwarded header simply leaves it null.
+        sqlx::query(
+            "update access.api_keys set last_used_at = now(), \
+             last_used_ip = coalesce($2::inet, last_used_ip) where id = $1",
+        )
+        .bind(&key.id)
+        .bind(client_ip)
+        .execute(pool)
+        .await
+        .map_err(|_| ApiError::Internal)?;
+    }
+
+    Ok(key)
 }
 
 pub async fn fetch_user_role_names(pool: &PgPool, user_id: &str) -> Result<Vec<String>, ApiError> {
@@ -365,6 +408,26 @@ impl PermissionScope {
             PermissionScope::Facilities(set) => artcc.is_some_and(|a| set.contains(a)),
         }
     }
+
+    /// Covers nothing — an empty facility set. `National` and any non-empty set cover something.
+    pub fn is_empty(&self) -> bool {
+        matches!(self, PermissionScope::Facilities(set) if set.is_empty())
+    }
+
+    /// The narrower of two scopes — used to cap an API key at its owner's authority.
+    /// `National` is the identity; two facility sets intersect to their common ARTCCs.
+    pub fn intersect(&self, other: &PermissionScope) -> PermissionScope {
+        match (self, other) {
+            (PermissionScope::National, PermissionScope::National) => PermissionScope::National,
+            (PermissionScope::National, PermissionScope::Facilities(set))
+            | (PermissionScope::Facilities(set), PermissionScope::National) => {
+                PermissionScope::Facilities(set.clone())
+            }
+            (PermissionScope::Facilities(a), PermissionScope::Facilities(b)) => {
+                PermissionScope::Facilities(a.intersection(b).cloned().collect())
+            }
+        }
+    }
 }
 
 /// Resolve which ARTCCs a user effectively holds `permission_name` in. Server admins and
@@ -496,4 +559,58 @@ pub async fn ensure_user_actor(
     .await
     .map_err(|_| ApiError::Internal)?;
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::PermissionScope;
+
+    fn facilities(ids: &[&str]) -> PermissionScope {
+        PermissionScope::Facilities(ids.iter().map(|s| s.to_string()).collect())
+    }
+
+    #[test]
+    fn is_empty_only_for_empty_facility_set() {
+        assert!(!PermissionScope::National.is_empty());
+        assert!(!facilities(&["ZDC"]).is_empty());
+        assert!(facilities(&[]).is_empty());
+    }
+
+    #[test]
+    fn intersect_national_is_identity() {
+        // National ∩ X = X (a key with a national grant is capped to the owner's scope, and vice versa).
+        assert!(matches!(
+            PermissionScope::National.intersect(&PermissionScope::National),
+            PermissionScope::National
+        ));
+        assert!(
+            PermissionScope::National
+                .intersect(&facilities(&["ZDC", "ZNY"]))
+                .allows(Some("ZDC"))
+        );
+        assert!(
+            facilities(&["ZDC"])
+                .intersect(&PermissionScope::National)
+                .allows(Some("ZDC"))
+        );
+    }
+
+    #[test]
+    fn intersect_facilities_is_the_common_set() {
+        let both =
+            facilities(&["ZDC", "ZNY", "ZBW"]).intersect(&facilities(&["ZNY", "ZBW", "ZOB"]));
+        assert!(both.allows(Some("ZNY")));
+        assert!(both.allows(Some("ZBW")));
+        assert!(!both.allows(Some("ZDC"))); // owner-only
+        assert!(!both.allows(Some("ZOB"))); // key-only
+    }
+
+    #[test]
+    fn intersect_disjoint_facilities_covers_nothing() {
+        // A key scoped to an ARTCC its owner can't reach ends up with no authority — fail closed.
+        let none = facilities(&["ZLA"]).intersect(&facilities(&["ZDC"]));
+        assert!(none.is_empty());
+        assert!(!none.allows(Some("ZLA")));
+        assert!(!none.allows(Some("ZDC")));
+    }
 }

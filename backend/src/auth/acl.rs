@@ -13,7 +13,10 @@ pub use ois_core::permissions::{
 
 use serde_json::Value;
 
-use crate::{errors::ApiError, repos::access as access_repo};
+use crate::{
+    errors::ApiError,
+    repos::{access as access_repo, api_keys as api_keys_repo},
+};
 
 pub fn is_server_admin(roles: &[String]) -> bool {
     roles.iter().any(|role| role == SERVER_ADMIN_ROLE)
@@ -55,4 +58,40 @@ pub async fn fetch_service_account_access(
     let permissions = access_repo::permission_names_to_permissions(permission_names)?;
 
     Ok((roles, permissions))
+}
+
+/// An API key's *capped* effective permissions: the key's granted set intersected with the owner's
+/// current effective access. A permission survives only if (a) the owner effectively holds it (the
+/// effective view honors explicit denies), (b) it isn't denylisted for keys, and (c) the intersection
+/// of the owner's scope and the key's granted scope for it is non-empty. Keys hold no roles.
+pub async fn fetch_api_key_access(
+    pool: Option<&PgPool>,
+    api_key: &crate::auth::context::CurrentApiKey,
+) -> Result<(Vec<String>, Vec<PermissionPath>), ApiError> {
+    let Some(pool) = pool else {
+        return Ok((Vec::new(), Vec::new()));
+    };
+
+    let owner_names: std::collections::HashSet<String> =
+        access_repo::fetch_user_permission_names(pool, &api_key.owner_user_id)
+            .await?
+            .into_iter()
+            .collect();
+    let key_names = api_keys_repo::fetch_key_permission_names(pool, &api_key.id).await?;
+
+    let mut effective = Vec::new();
+    for name in key_names {
+        if !owner_names.contains(&name) || api_keys_repo::is_forbidden_for_key(&name) {
+            continue;
+        }
+        let owner_scope =
+            access_repo::permission_scope(pool, &api_key.owner_user_id, &name).await?;
+        let key_scope = api_keys_repo::key_granted_scope(pool, &api_key.id, &name).await?;
+        if !owner_scope.intersect(&key_scope).is_empty() {
+            effective.push(name);
+        }
+    }
+
+    let permissions = access_repo::permission_names_to_permissions(effective)?;
+    Ok((Vec::new(), permissions))
 }

@@ -6,7 +6,7 @@ use http::request::Parts;
 use crate::{
     auth::{
         acl::PermissionPath,
-        context::{CurrentServiceAccount, CurrentUser},
+        context::{CurrentApiKey, CurrentServiceAccount, CurrentUser},
         middleware::ensure_permission,
     },
     errors::ApiError,
@@ -42,8 +42,19 @@ where
             .extensions
             .get::<Option<CurrentServiceAccount>>()
             .and_then(Option::as_ref);
+        let current_api_key = parts
+            .extensions
+            .get::<Option<CurrentApiKey>>()
+            .and_then(Option::as_ref);
 
-        ensure_permission(&app_state, current_user, current_service_account, P::path()).await?;
+        ensure_permission(
+            &app_state,
+            current_user,
+            current_service_account,
+            current_api_key,
+            P::path(),
+        )
+        .await?;
 
         Ok(Self(PhantomData))
     }

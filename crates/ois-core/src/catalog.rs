@@ -124,5 +124,9 @@ pub fn draft_new_permission_names() -> Vec<&'static str> {
         // --- facilities ---
         "facilities.directory.read",
         "facilities.directory.update",
+        // --- api keys: user-owned personal access tokens (bounded by the owner's live access) ---
+        "api_keys.key.create", // create and manage your OWN keys
+        "api_keys.key.read",   // view any user's keys (oversight)
+        "api_keys.key.delete", // revoke any user's keys (oversight)
     ]
 }

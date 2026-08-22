@@ -26,6 +26,12 @@ permission!(ServiceAccountsCreate, ["service_accounts"], Create);
 permission!(ServiceAccountsUpdate, ["service_accounts"], Update);
 permission!(ServiceAccountsDelete, ["service_accounts"], Delete);
 
+// api keys — user-owned personal access tokens. `create` gates the self-service surface (manage
+// your OWN keys); `read`/`delete` are oversight over ANY user's keys (held by SERVER_ADMIN implicitly).
+permission!(ApiKeysKeyCreate, ["api_keys", "key"], Create);
+permission!(ApiKeysKeyRead, ["api_keys", "key"], Read);
+permission!(ApiKeysKeyDelete, ["api_keys", "key"], Delete);
+
 // tmu — traffic management initiatives (TMIs)
 permission!(TmuTmiRead, ["tmu", "tmi"], Read);
 permission!(TmuTmiCreate, ["tmu", "tmi"], Create);
