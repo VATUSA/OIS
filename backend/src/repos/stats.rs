@@ -188,9 +188,11 @@ pub async fn insert_flight_plan_revisions(
              enroute_time, route, remarks) select v.session_id, ",
         );
         qb.push_bind(now);
+        // `push_values` emits the `VALUES` keyword itself, so open only the subquery paren here — a
+        // literal `values` before it would double the keyword (a syntax error).
         qb.push(
             ", v.revision_id, v.flight_rules, v.departure, v.arrival, v.alternate, v.aircraft_short, \
-             v.aircraft_faa, v.cruise_alt, v.deptime, v.enroute_time, v.route, v.remarks from (values ",
+             v.aircraft_faa, v.cruise_alt, v.deptime, v.enroute_time, v.route, v.remarks from (",
         );
         qb.push_values(chunk, |mut b, f| {
             b.push_bind(f.session_id)
@@ -1108,17 +1110,19 @@ pub async fn flight_plan_revisions(
     )>,
     ApiError,
 > {
+    // Each UNION arm is parenthesized: the first carries its own ORDER BY for `distinct on`, which
+    // Postgres only allows on a parenthesized union arm (a bare ORDER BY would bind to the whole union).
     sqlx::query_as(
         "select session_id, effective_from, departure, arrival, aircraft_short, route from (
-             select distinct on (session_id)
+             (select distinct on (session_id)
                  session_id, effective_from, departure, arrival, aircraft_short, route
              from stats.flight_plan
              where session_id = any($1) and effective_from <= $2
-             order by session_id, effective_from desc
+             order by session_id, effective_from desc)
              union all
-             select session_id, effective_from, departure, arrival, aircraft_short, route
+             (select session_id, effective_from, departure, arrival, aircraft_short, route
              from stats.flight_plan
-             where session_id = any($1) and effective_from > $2 and effective_from <= $3
+             where session_id = any($1) and effective_from > $2 and effective_from <= $3)
          ) x
          order by session_id, effective_from",
     )
