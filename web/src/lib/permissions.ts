@@ -25,6 +25,7 @@ export const ADMIN_PERMISSIONS = [
   "access.users.read",
   "audit.logs.read",
   "service_accounts.read",
+  "api_keys.key.read",
 ];
 
 /** Whether the user should see the admin portal at all. */

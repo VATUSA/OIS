@@ -17,6 +17,7 @@ import {
   ChevronDown,
   Film,
   Gauge,
+  KeyRound,
   LayoutDashboard,
   LogOut,
   Megaphone,
@@ -121,6 +122,14 @@ function UserMenu() {
             Settings
           </Link>
         </DropdownMenuItem>
+        {hasPermission(me, "api_keys.key.create") && (
+          <DropdownMenuItem asChild>
+            <Link to="/api-keys">
+              <KeyRound />
+              API keys
+            </Link>
+          </DropdownMenuItem>
+        )}
         <DropdownMenuSeparator />
         {isAdmin(me) && (
           <>

@@ -9,6 +9,7 @@ import {PilotPage} from "@/pages/pilot";
 import {PrivacyPage} from "@/pages/privacy";
 import {ProfilePage} from "@/pages/profile";
 import {SettingsPage} from "@/pages/settings";
+import {ApiKeysPage} from "@/pages/api-keys";
 import {AirportPage} from "@/pages/airport";
 import {FcaPage} from "@/pages/fca";
 import {IdstPage} from "@/pages/idst";
@@ -35,6 +36,7 @@ import {AdminOverview} from "@/pages/admin/overview";
 import {AdminAccessControl} from "@/pages/admin/access-control";
 import {AdminAudit} from "@/pages/admin/audit";
 import {AdminServiceAccounts} from "@/pages/admin/service-accounts";
+import {AdminApiKeys} from "@/pages/admin/api-keys";
 
 function RootLayout() {
   // A route can declare a width tier via `staticData.layout` (see the route definitions):
@@ -218,6 +220,13 @@ const settingsRoute = createRoute({
   component: SettingsPage,
 });
 
+// Self-service API keys (personal access tokens) — account-level, its own top-level route.
+const apiKeysRoute = createRoute({
+  getParentRoute: () => rootRoute,
+  path: "api-keys",
+  component: ApiKeysPage,
+});
+
 // Public legal/info pages (linked from the footer).
 const privacyRoute = createRoute({
   getParentRoute: () => rootRoute,
@@ -352,6 +361,12 @@ const adminServiceAccountsRoute = createRoute({
   component: AdminServiceAccounts,
 });
 
+const adminApiKeysRoute = createRoute({
+  getParentRoute: () => adminRoute,
+  path: "api-keys",
+  component: AdminApiKeys,
+});
+
 // --- Legacy path redirects (old flat routes → /ops/*) ---
 
 const legacyRedirects = (
@@ -391,6 +406,7 @@ const routeTree = rootRoute.addChildren([
   pilotRoute,
   profileRoute,
   settingsRoute,
+  apiKeysRoute,
   privacyRoute,
   planningRoute.addChildren([
     planningIndexRoute,
@@ -404,6 +420,7 @@ const routeTree = rootRoute.addChildren([
     adminAccessRoute,
     adminAuditRoute,
     adminServiceAccountsRoute,
+    adminApiKeysRoute,
   ]),
   ...legacyRedirects,
 ]);
