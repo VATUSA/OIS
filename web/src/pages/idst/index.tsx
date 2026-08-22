@@ -74,7 +74,12 @@ function ScopePanel({ scope, setScope }: { scope: IdstScope; setScope: (s: IdstS
 
       <div className="flex flex-col gap-1.5">
         <label className="text-xs font-medium text-muted-foreground">Facility · TRACON / ARTCC</label>
-        <FacilityCombobox onSelect={addFacility} placeholder="PCT, ZDC, N90…" />
+        <FacilityCombobox
+          onSelect={addFacility}
+          placeholder="PCT, ZDC, N90…"
+          className="w-full"
+          inputClassName="h-8"
+        />
         <div className="flex flex-wrap gap-1.5">
           {scope.tracons.map((t) => (
             <Chip key={t} label={t} color="border-emerald-500/40 text-emerald-600 dark:text-emerald-400" onRemove={() => remove("tracons", t)} />
