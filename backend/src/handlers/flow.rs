@@ -1247,6 +1247,17 @@ pub async fn list_idst(
             {
                 continue;
             }
+            // For released flights the frozen wheels-up; otherwise an *advisory* EDCT — the wheels-up
+            // that would hit the metered crossing, backing out the modeled transit (eta − now) from
+            // the metered CTA. Lets the controller see the proposed release before issuing.
+            let edct = if f.released {
+                f.edct
+            } else if let (Some(cta), Some(eta)) = (f.cross_time, f.eta) {
+                let transit_ms = eta.timestamp_millis() - now.timestamp_millis();
+                DateTime::from_timestamp_millis(cta.timestamp_millis() - transit_ms)
+            } else {
+                None
+            };
             let item = IdstFlight {
                 callsign: f.callsign,
                 dep: f.dep,
@@ -1258,7 +1269,7 @@ pub async fn list_idst(
                 seq: f.seq,
                 delay_min: f.delay_min,
                 cross_time: f.cross_time,
-                edct: f.edct,
+                edct,
                 released: f.released,
             };
             if item.released {
