@@ -5,7 +5,7 @@ import {ArrowLeft, Pause, Play, SkipBack, SlidersHorizontal, TriangleAlert, X} f
 
 import {useMe} from "@/lib/auth";
 import {hasPermission} from "@/lib/permissions";
-import {type Replay, resolveRoutes, useCaptureReplay, useCaptures, useWindowReplay} from "@/lib/stats";
+import {type Replay, resolveRoutes, useCaptures, useProgressiveReplay} from "@/lib/stats";
 import {webgl2Available} from "@/lib/webgl";
 import {formatZuluFull} from "@/lib/time";
 import boundariesGeo from "@/assets/artcc-boundaries.json";
@@ -123,7 +123,18 @@ function Toggle({
   );
 }
 
-function ReplayMap({ replay }: { replay: Replay }) {
+/** How far ahead of the clock (seconds of replay time) to keep positions preloaded. */
+const PREFETCH_LEAD = 1200;
+
+function ReplayMap({
+  replay,
+  loadedUntil,
+  ensureLoaded,
+}: {
+  replay: Replay;
+  loadedUntil: number;
+  ensureLoaded: (untilSec: number) => void;
+}) {
   const { resolvedTheme } = useTheme();
   // deck.gl needs WebGL2; iOS Lockdown Mode disables it (black map). Checked once on mount.
   const [mapAvailable] = useState(webgl2Available);
@@ -160,6 +171,10 @@ function ReplayMap({ replay }: { replay: Replay }) {
   const [playing, setPlaying] = useState(false);
   const [speed, setSpeed] = useState(1);
   const [aircraft, setAircraft] = useState<Live[]>([]);
+
+  // The rAF loop closes over refs, so keep the latest progressive-loader callback reachable.
+  const ensureRef = useRef(ensureLoaded);
+  ensureRef.current = ensureLoaded;
 
   // Display toggles.
   const [hideGround, setHideGround] = useState(true);
@@ -270,9 +285,16 @@ function ReplayMap({ replay }: { replay: Replay }) {
     setClock(t);
   };
 
+  // Start at t=0 when a replay mounts (a new selection remounts via `key`).
   useEffect(() => {
     clockRef.current = 0;
     render(0);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
+  // Refresh the current frame as more chunks stream in — without resetting the clock.
+  useEffect(() => {
+    render(clockRef.current);
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [tracks]);
 
@@ -291,6 +313,8 @@ function ReplayMap({ replay }: { replay: Replay }) {
       last = now;
       if (playingRef.current) {
         clockRef.current = Math.min(duration, clockRef.current + dt * speedRef.current);
+        // Keep the next stretch of positions loading ahead of the clock.
+        ensureRef.current(clockRef.current + PREFETCH_LEAD);
         if (clockRef.current >= duration) {
           playingRef.current = false;
           setPlaying(false);
@@ -382,6 +406,7 @@ function ReplayMap({ replay }: { replay: Replay }) {
   };
   const scrub = (v: number) => {
     clockRef.current = v;
+    ensureRef.current(v + PREFETCH_LEAD);
     render(v);
   };
   const setSpd = (v: number) => {
@@ -442,6 +467,9 @@ function ReplayMap({ replay }: { replay: Replay }) {
         <div className="pointer-events-none absolute left-3 top-3 z-10 rounded-md bg-background/80 px-3 py-1.5 text-sm shadow backdrop-blur">
           <span className="font-mono font-medium">{zulu(replay.window_start, clock)}</span>
           <span className="ml-2 text-muted-foreground">{shown.length} aircraft</span>
+          {clock > loadedUntil && (
+            <span className="ml-2 text-amber-500">· buffering…</span>
+          )}
         </div>
 
         <div className="absolute right-3 top-3 z-10 flex flex-col items-end gap-2">
@@ -728,12 +756,21 @@ export function CaptureReplayPage() {
   );
 
   const usingCapture = !!captureId;
-  const cap = useCaptureReplay(canRead && usingCapture ? captureId : null);
-  const window = useWindowReplay(
-    canRead && !usingCapture ? win.from : null,
-    canRead && !usingCapture ? win.to : null,
-  );
-  const replay = usingCapture ? cap : window;
+  // Resolve the selection to a [from, to] Unix window (a capture's own start/end, or the custom
+  // window), then stream it in progressively.
+  const resolved = useMemo<{ from: number; to: number } | null>(() => {
+    if (!canRead) return null;
+    if (usingCapture) {
+      const c = captures.data?.find((x) => x.id === captureId);
+      if (!c) return null;
+      const f = Math.floor(Date.parse(c.start_time) / 1000);
+      const t = c.end_time ? Math.floor(Date.parse(c.end_time) / 1000) : Math.floor(Date.now() / 1000);
+      return t > f ? { from: f, to: t } : null;
+    }
+    return { from: win.from, to: win.to };
+  }, [canRead, usingCapture, captureId, captures.data, win.from, win.to]);
+
+  const replay = useProgressiveReplay(resolved?.from ?? null, resolved?.to ?? null);
   const selectionKey = usingCapture ? captureId : `${win.from}-${win.to}`;
 
   return (
@@ -836,7 +873,12 @@ export function CaptureReplayPage() {
           ) : !replay.data ? (
             <p className="py-16 text-center text-sm text-muted-foreground">Loading replay…</p>
           ) : (
-            <ReplayMap key={selectionKey} replay={replay.data} />
+            <ReplayMap
+              key={selectionKey}
+              replay={replay.data}
+              loadedUntil={replay.loadedUntil}
+              ensureLoaded={replay.ensureLoaded}
+            />
           )}
         </>
       )}

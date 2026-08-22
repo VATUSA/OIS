@@ -1032,31 +1032,36 @@ pub struct ReplaySample {
     pub gs: i16,
 }
 
-/// Every flight's positions in `[from, to]`, thinned to one sample per `step_s`-second bucket per
-/// flight (keeps replay payloads bounded even for full-network event captures). Ordered by flight
-/// then time so the handler can group into per-flight tracks in one pass.
+/// Every flight's positions in the chunk `[chunk_from, chunk_to)`, thinned to one sample per
+/// `step_s`-second bucket per flight. `origin` is the window start, so `t` is seconds from the window
+/// start and stays consistent across chunks (the bucket key uses absolute epoch/step, so buckets
+/// align regardless of chunk boundaries). Ordered by flight then time for one-pass grouping.
+///
+/// Progressive replay fetches this per chunk, so the DB only ever scans the requested sub-window —
+/// not the whole (possibly multi-day) window at once.
 pub async fn replay_positions(
     pool: &PgPool,
-    from: DateTime<Utc>,
-    to: DateTime<Utc>,
+    origin: DateTime<Utc>,
+    chunk_from: DateTime<Utc>,
+    chunk_to: DateTime<Utc>,
     step_s: i64,
 ) -> Result<Vec<ReplaySample>, ApiError> {
     // One sample per (session, step-second bucket): DISTINCT ON keeps the earliest row in each
     // bucket. Its ORDER BY already emits rows grouped by session and ascending in ts (the bucket is
     // monotonic in ts), which is exactly what the handler needs to fold into per-flight tracks — so
-    // there's no outer sort. (Two sorts of a full-network capture window is what tripped the slow-
-    // query alert; this does one.)
+    // there's no outer sort. Half-open `[chunk_from, chunk_to)` so adjacent chunks never double-count.
     sqlx::query_as::<_, ReplaySample>(
-        "select distinct on (session_id, floor(extract(epoch from ts) / $3)::bigint)
+        "select distinct on (session_id, floor(extract(epoch from ts) / $4)::bigint)
                 session_id,
                 extract(epoch from (ts - $1))::float8 as t,
                 lat, lon, altitude as alt, heading, groundspeed as gs
          from stats.position
-         where ts >= $1 and ts <= $2
-         order by session_id, floor(extract(epoch from ts) / $3)::bigint, ts",
+         where ts >= $2 and ts < $3
+         order by session_id, floor(extract(epoch from ts) / $4)::bigint, ts",
     )
-    .bind(from)
-    .bind(to)
+    .bind(origin)
+    .bind(chunk_from)
+    .bind(chunk_to)
     .bind(step_s)
     .fetch_all(pool)
     .await

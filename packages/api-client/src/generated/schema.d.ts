@@ -1595,6 +1595,27 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/v1/stats/replay/positions": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * One chunk `[cfrom, cto)` of a progressive replay: per-flight samples (with `t` relative to the
+         *     window start `from`, so chunks stitch together) plus the callsign and full-window plan timeline
+         *     for the flights that appear in this chunk. The frontend fetches chunks as the clock advances.
+         */
+        get: operations["replay_chunk"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/v1/tmu/cfr": {
         parameters: {
             query?: never;
@@ -3311,6 +3332,18 @@ export interface components {
             window_end: string;
             /** Format: date-time */
             window_start: string;
+        };
+        /**
+         * @description One chunk of a progressive replay: the flights (with `t` relative to the window start) that have
+         *     samples in the requested sub-window, plus each one's callsign and full-window plan timeline.
+         */
+        ReplayChunkBody: {
+            flights: components["schemas"]["ReplayFlightBody"][];
+            /**
+             * Format: int64
+             * @description The sample spacing (seconds) actually used (the server's adaptive/clamped value).
+             */
+            step_s: number;
         };
         /** @description One flight's downsampled track within a replay window. */
         ReplayFlightBody: {
@@ -8122,6 +8155,48 @@ export interface operations {
                 };
                 content: {
                     "application/json": components["schemas"]["ReplayBody"];
+                };
+            };
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+        };
+    };
+    replay_chunk: {
+        parameters: {
+            query: {
+                /** @description Window start (Unix seconds) */
+                from: number;
+                /** @description Window end (Unix seconds) */
+                to: number;
+                /** @description Chunk start (Unix seconds) */
+                cfrom: number;
+                /** @description Chunk end (Unix seconds, exclusive) */
+                cto: number;
+                /** @description Sample spacing seconds (default: adaptive) */
+                step?: number;
+            };
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ReplayChunkBody"];
                 };
             };
             400: {
