@@ -38,6 +38,7 @@ import {AdminAccessControl} from "@/pages/admin/access-control";
 import {AdminAudit} from "@/pages/admin/audit";
 import {AdminServiceAccounts} from "@/pages/admin/service-accounts";
 import {AdminApiKeys} from "@/pages/admin/api-keys";
+import {AdminDiscord} from "@/pages/admin/discord";
 
 function RootLayout() {
   // A route can declare a width tier via `staticData.layout` (see the route definitions):
@@ -374,6 +375,12 @@ const adminApiKeysRoute = createRoute({
   component: AdminApiKeys,
 });
 
+const adminDiscordRoute = createRoute({
+  getParentRoute: () => adminRoute,
+  path: "discord",
+  component: AdminDiscord,
+});
+
 // --- Legacy path redirects (old flat routes → /ops/*) ---
 
 const legacyRedirects = (
@@ -429,6 +436,7 @@ const routeTree = rootRoute.addChildren([
     adminAuditRoute,
     adminServiceAccountsRoute,
     adminApiKeysRoute,
+    adminDiscordRoute,
   ]),
   ...legacyRedirects,
 ]);

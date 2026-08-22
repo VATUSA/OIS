@@ -968,6 +968,23 @@ pub struct UpsertDiscordConfigRequest {
     pub categories: Vec<DiscordMapEntry>,
 }
 
+/// The current user's Discord account link.
+#[derive(Debug, Serialize, ToSchema)]
+pub struct DiscordLinkBody {
+    pub linked: bool,
+    /// The linked Discord user id (snowflake), when `linked`.
+    pub discord_id: Option<String>,
+    /// The linked Discord username/handle, when known.
+    pub username: Option<String>,
+}
+
+/// Bot interaction callback: a Discord user clicked "claim" on an ACE request. The backend resolves
+/// the Discord id to the linked OIS user and claims on their behalf.
+#[derive(Debug, Deserialize, ToSchema)]
+pub struct DiscordAceClaimRequest {
+    pub discord_user_id: String,
+}
+
 // --- flow constrained areas (FCAs) ---
 
 /// A Flow Constrained Area — a drawn polyline the metering engine sequences traffic against.

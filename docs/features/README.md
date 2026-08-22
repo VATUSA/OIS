@@ -14,7 +14,7 @@ touchpoints.
 | [events-workflow.md](events-workflow.md)         | events               | partially built (diverged from spec) |
 | [tmu-ntml-adv-tmi.md](tmu-ntml-adv-tmi.md)       | tmu                  | partially built (diverged from spec) |
 | [ace-support.md](ace-support.md)                 | ace, discord         | built (v1; Discord deferred)    |
-| [discord-integration.md](discord-integration.md) | discord, integration | in progress (Phase 1: queue+config) |
+| [discord-integration.md](discord-integration.md) | discord, integration | built (bot + linking need Discord creds to run) |
 | [flow.md](flow.md)                               | flow                 | partially built (diverged from spec) |
 
 The three "partially built" specs have live migrations, handlers, and routes, but the
