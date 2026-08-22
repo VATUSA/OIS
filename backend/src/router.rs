@@ -152,6 +152,10 @@ pub fn build_router(state: AppState) -> Router {
         )
         .route("/api/v1/events/{id}/stats", get(events::get_event_stats))
         .route(
+            "/api/v1/events/{id}/discord/publish",
+            post(events::publish_event_discord),
+        )
+        .route(
             "/api/v1/events/{id}/debrief",
             get(events::get_event_debrief).put(events::update_event_debrief),
         )

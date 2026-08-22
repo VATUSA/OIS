@@ -21,6 +21,12 @@ import {
 const KNOWN_CHANNELS: { name: string; hint: string }[] = [
   { name: "aceteam-requests", hint: "ACE coverage requests post + claim notifications" },
   { name: "tmu-advisories", hint: "Published TMIs (traffic management advisories)" },
+  { name: "events", hint: "Event coordination threads (Post to Discord)" },
+];
+
+/** Logical role names the backend resolves. */
+const KNOWN_ROLES: { name: string; hint: string }[] = [
+  { name: "dcc", hint: "Pinged in event coordination threads (optional)" },
 ];
 
 type Kind = "channels" | "roles" | "categories";
@@ -229,6 +235,7 @@ export function AdminDiscord() {
                 idLabel="role ID"
                 entries={roles}
                 onChange={setRoles}
+                suggestions={KNOWN_ROLES}
               />
               <MapEditor
                 label="Categories"

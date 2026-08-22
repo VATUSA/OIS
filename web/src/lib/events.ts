@@ -90,6 +90,32 @@ export function useUpdateDcc(eventId: number) {
   });
 }
 
+/** Enqueue a Discord coordination thread for the event. Needs `events.discord.publish`. */
+export function usePublishEventDiscord(eventId: number) {
+  const toast = useToast();
+  return useMutation({
+    mutationFn: async (): Promise<void> => {
+      const { error, response } = await ois.POST(
+        "/api/v1/events/{id}/discord/publish",
+        { params: { path: { id: eventId } } },
+      );
+      if (response.status === 409) throw new Error("already");
+      if (response.status === 400) throw new Error("unconfigured");
+      if (error || !response.ok) throw new Error("failed");
+    },
+    onSuccess: () => toast.success("Event thread queued for Discord"),
+    onError: (e) => {
+      const msg =
+        e instanceof Error && e.message === "already"
+          ? "Already posted to Discord for this event."
+          : e instanceof Error && e.message === "unconfigured"
+            ? "Set an “events” channel in Admin → Discord first."
+            : "Couldn’t post to Discord.";
+      toast.error(msg);
+    },
+  });
+}
+
 /** Facility support matrix for one event. */
 export function useFacilitySupport(eventId: number) {
   return useQuery({

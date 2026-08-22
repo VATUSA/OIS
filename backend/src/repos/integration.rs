@@ -134,6 +134,19 @@ pub async fn channel_id(pool: &PgPool, name: &str) -> Result<Option<String>, Api
     .map_err(|_| ApiError::Internal)
 }
 
+/// Resolve a logical role name to its Discord snowflake for the configured guild (None if unmapped).
+pub async fn role_id(pool: &PgPool, name: &str) -> Result<Option<String>, ApiError> {
+    sqlx::query_scalar::<_, String>(
+        "select r.role_id from integration.discord_roles r \
+         join integration.discord_configs c on c.id = r.config_id \
+         where r.name = $1 order by c.created_at limit 1",
+    )
+    .bind(name)
+    .fetch_optional(pool)
+    .await
+    .map_err(|_| ApiError::Internal)
+}
+
 /// The `result` payload of the most recent succeeded job for a subject + type — used to recover ids
 /// the bot returned on ack (e.g. the posted message id, needed by a follow-up job).
 pub async fn succeeded_job_result(

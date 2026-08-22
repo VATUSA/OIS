@@ -62,6 +62,7 @@ permission!(EventsRateUpdate, ["events", "rate"], Update);
 permission!(EventsConfigUpdate, ["events", "config"], Update);
 permission!(EventsSupportUpdate, ["events", "support"], Update);
 permission!(EventsDebriefCreate, ["events", "debrief"], Create);
+permission!(EventsDiscordPublish, ["events", "discord"], Publish);
 
 // ace — support-request queue + team roster
 permission!(AceRequestsRead, ["ace", "requests"], Read);

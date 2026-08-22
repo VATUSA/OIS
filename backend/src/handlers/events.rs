@@ -3,6 +3,7 @@
 use axum::{
     Json,
     extract::{Extension, Path, State},
+    http::StatusCode,
 };
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
@@ -12,8 +13,8 @@ use crate::{
     auth::{
         context::{CurrentApiKey, CurrentUser},
         permissions::{
-            EventsDebriefCreate, EventsPlanRead, EventsPlanUpdate, EventsRateUpdate,
-            EventsStaffingCreate, EventsSupportUpdate, StatsCaptureUpdate,
+            EventsDebriefCreate, EventsDiscordPublish, EventsPlanRead, EventsPlanUpdate,
+            EventsRateUpdate, EventsStaffingCreate, EventsSupportUpdate, StatsCaptureUpdate,
         },
         principal::Principal,
         require_permission::RequirePermission,
@@ -1196,4 +1197,65 @@ pub async fn update_event_debrief(
         updated_at,
         editable: true,
     }))
+}
+
+/// Logical config names the event thread resolves: the channel to post under, and (optional) a role
+/// to ping. Kept in sync with the admin Discord config editor's suggestions.
+const EVENTS_CHANNEL: &str = "events";
+const DCC_ROLE: &str = "dcc";
+
+#[utoipa::path(
+    post, path = "/api/v1/events/{id}/discord/publish", tag = "events",
+    params(("id" = i64, Path)),
+    responses(
+        (status = 202, description = "Thread creation enqueued"),
+        (status = 400, description = "No Discord events channel configured"),
+        (status = 401), (status = 404),
+        (status = 409, description = "Already posted for this event")
+    )
+)]
+pub async fn publish_event_discord(
+    State(state): State<AppState>,
+    _permission: RequirePermission<EventsDiscordPublish>,
+    Path(id): Path<i64>,
+) -> Result<StatusCode, ApiError> {
+    let pool = state.db.as_ref().ok_or(ApiError::ServiceUnavailable)?;
+    let event = events_repo::get(pool, id)
+        .await?
+        .ok_or(ApiError::NotFound)?;
+
+    let subject_id = id.to_string();
+    // Don't create a second thread if one was already posted (the bot acked a create for this event).
+    if integration_repo::succeeded_job_result(pool, "event", &subject_id, "event_thread_create")
+        .await?
+        .is_some()
+    {
+        return Err(ApiError::Conflict);
+    }
+    // An explicit action needs somewhere to post — surface "not configured" rather than silently skip.
+    let channel = integration_repo::channel_id(pool, EVENTS_CHANNEL)
+        .await?
+        .ok_or(ApiError::BadRequest)?;
+    let role = integration_repo::role_id(pool, DCC_ROLE).await?;
+
+    let mut tx = pool.begin().await.map_err(|_| ApiError::Internal)?;
+    let payload = serde_json::json!({
+        "channel_id": channel,
+        "role_id": role,
+        "event_id": id,
+        "title": event.title,
+        "facility": event.facility,
+        "start_time": event.start_time,
+        "end_time": event.end_time,
+    });
+    integration_repo::enqueue_job(
+        &mut tx,
+        "event_thread_create",
+        &payload,
+        Some("event"),
+        Some(&subject_id),
+    )
+    .await?;
+    tx.commit().await.map_err(|_| ApiError::Internal)?;
+    Ok(StatusCode::ACCEPTED)
 }
