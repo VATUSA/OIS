@@ -1,5 +1,5 @@
 import {useMemo, useState} from "react";
-import {Input} from "@ois/ui";
+import {cn, Input} from "@ois/ui";
 
 import {facilityKindLabel, useFacilityDirectory, type FlowFacility} from "@/lib/facilities";
 
@@ -24,10 +24,16 @@ export function FacilityCombobox({
   onSelect,
   placeholder = "Facility — ZDC, PCT, ZNY…",
   autoFocus,
+  className,
+  inputClassName,
 }: {
   onSelect: (pick: FacilityPick) => void;
   placeholder?: string;
   autoFocus?: boolean;
+  /** Override the wrapper width (default `w-72`). */
+  className?: string;
+  /** Extra classes on the input (e.g. `h-8` to match a compact field). */
+  inputClassName?: string;
 }) {
   const dir = useFacilityDirectory();
   const [query, setQuery] = useState("");
@@ -60,11 +66,11 @@ export function FacilityCombobox({
   };
 
   return (
-    <div className="relative w-72">
+    <div className={cn("relative w-72", className)}>
       <Input
         // eslint-disable-next-line jsx-a11y/no-autofocus
         autoFocus={autoFocus}
-        className="font-mono uppercase"
+        className={cn("font-mono uppercase", inputClassName)}
         placeholder={placeholder}
         value={query}
         onChange={(e) => {
