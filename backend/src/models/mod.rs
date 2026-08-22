@@ -147,6 +147,8 @@ pub struct AuditLogEntry {
     pub resource_id: Option<String>,
     pub artcc_id: Option<String>,
     pub reason: Option<String>,
+    /// `user`, `api_key`, `service_account`, or `system` — how the action was authenticated.
+    pub actor_type: Option<String>,
     pub actor_cid: Option<i64>,
     pub actor_display_name: Option<String>,
     #[schema(value_type = Option<Object>)]

@@ -11,7 +11,11 @@ use axum::{
 };
 use http::Method;
 
-use crate::{auth::context::CurrentUser, repos::audit as audit_repo, state::AppState};
+use crate::{
+    auth::context::{CurrentApiKey, CurrentServiceAccount, CurrentUser},
+    repos::audit as audit_repo,
+    state::AppState,
+};
 
 /// Action verbs that show up as a trailing static path segment (e.g. `.../{id}/publish`).
 const KNOWN_VERBS: &[&str] = &[
@@ -139,6 +143,16 @@ pub async fn audit_mutations(
         .get::<Option<CurrentUser>>()
         .cloned()
         .flatten();
+    let api_key = request
+        .extensions()
+        .get::<Option<CurrentApiKey>>()
+        .cloned()
+        .flatten();
+    let service_account = request
+        .extensions()
+        .get::<Option<CurrentServiceAccount>>()
+        .cloned()
+        .flatten();
     let ip = audit_repo::client_ip(request.headers());
 
     let response = next.run(request).await;
@@ -147,9 +161,21 @@ pub async fn audit_mutations(
         if let Some(topic) = tmu_realtime_topic(template.as_deref().unwrap_or(&actual)) {
             state.publish(topic);
         }
-        record(&state, &method, template.as_deref(), &actual, user, ip).await;
+        let actor = Actor {
+            user,
+            api_key,
+            service_account,
+        };
+        record(&state, &method, template.as_deref(), &actual, actor, ip).await;
     }
     response
+}
+
+/// Whichever principal authenticated the request — a request carries at most one.
+struct Actor {
+    user: Option<CurrentUser>,
+    api_key: Option<CurrentApiKey>,
+    service_account: Option<CurrentServiceAccount>,
 }
 
 async fn record(
@@ -157,11 +183,11 @@ async fn record(
     method: &Method,
     template: Option<&str>,
     actual: &str,
-    user: Option<CurrentUser>,
+    actor: Actor,
     ip: Option<String>,
 ) {
-    let (Some(pool), Some(user)) = (state.db.as_ref(), user) else {
-        return; // no DB, or an unauthenticated mutation — nothing to attribute
+    let Some(pool) = state.db.as_ref() else {
+        return;
     };
     let Some((action, resource_type, resource_id)) =
         derive(method, template.unwrap_or(actual), actual)
@@ -171,12 +197,31 @@ async fn record(
     if is_excluded(&resource_type) {
         return;
     }
-    // Resolve (creating if needed) the actor; still log with a null actor if that fails, so
-    // the action is never silently dropped.
-    let actor_id = audit_repo::resolve_user_actor_id(pool, &user.id, &user.display_name)
+    // Resolve (creating if needed) the actor for whichever principal made the request — user,
+    // api key, or service account. An unauthenticated mutation has no actor and isn't logged.
+    // A resolution failure still logs with a null actor so the action is never silently dropped.
+    let actor_id = if let Some(user) = actor.user.as_ref() {
+        audit_repo::resolve_user_actor_id(pool, &user.id, &user.display_name)
+            .await
+            .ok()
+            .flatten()
+    } else if let Some(key) = actor.api_key.as_ref() {
+        audit_repo::resolve_api_key_actor_id(
+            pool,
+            &key.id,
+            &format!("{} ({})", key.name, key.prefix),
+        )
         .await
         .ok()
-        .flatten();
+        .flatten()
+    } else if let Some(sa) = actor.service_account.as_ref() {
+        audit_repo::resolve_service_account_actor_id(pool, &sa.id, &sa.name)
+            .await
+            .ok()
+            .flatten()
+    } else {
+        return; // unauthenticated mutation — nothing to attribute
+    };
     // Best-effort: never fail the user's request over an audit write.
     let _ = audit_repo::record_audit(
         pool,
