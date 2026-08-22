@@ -7,6 +7,7 @@ pub mod handlers;
 pub mod jobs;
 pub mod models;
 pub mod openapi;
+pub mod realtime;
 pub mod repos;
 pub mod reqlog;
 pub mod router;
