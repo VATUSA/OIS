@@ -3,7 +3,9 @@
 | Term | Meaning |
 | ---- | ------- |
 | **AAR** | Airport Acceptance Rate — arrivals per hour a field will accept. |
+| **API key** | A personal access token (`ois_pat_…`) for calling the OIS API as yourself, capped by your live permissions. See [API keys](/reference/api-keys). |
 | **ARTCC** | Air Route Traffic Control Center (e.g. ZDC). |
+| **Bearer token** | A credential sent as `Authorization: Bearer …` — either a user API key or a service account. |
 | **CFR** | Controlled Flight Rules release — an issued wheels-up time for a departure. |
 | **CTA** | Controlled Time of Arrival — the arrival slot a flight is metered into. |
 | **EDCT** | Expect Departure Clearance Time — a flight's controlled wheels-up time, produced by a GDP or a CFR release. |

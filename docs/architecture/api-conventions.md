@@ -19,7 +19,11 @@ every caller goes through the same authenticated, permission-checked surface.
 Three inbound credential paths, resolved into the request context:
 
 - **Session cookie** (`ois_session`) — human users, issued by VATSIM OAuth login.
-- **Bearer token** — service accounts (the bot, tooling); hashed at rest.
+- **Bearer token** — two kinds, told apart by prefix, both SHA-256-hashed at rest:
+  a user **API key** (`ois_pat_…`, owned by and capped to a person — see
+  [api-keys.md](../features/api-keys.md)) or a **service account** (`ois_sa_…`, a
+  machine client). An API key's effective authority is re-intersected with its owner's
+  live permissions on every request.
 - **HMAC signature** — the VATUSA roster-change webhook
   (`POST /api/v1/webhooks/vatusa/{facility}`) carries no session or bearer; it is
   authenticated by verifying an HMAC signature over the request body.

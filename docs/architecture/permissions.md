@@ -51,6 +51,12 @@ macro). Declaring it in a handler's argument list is the *only* way to satisfy i
 in the signature rather than a silent omission in the body. Data-dependent checks (owner-or-approver, self-vs- other,
 ARTCC scope) are still done explicitly in the handler in addition to the extractor.
 
+The extractor and the handler scope check both resolve the request's **principal** — a session user, or a
+user-owned **API key**. A key's effective permissions are re-computed on every request as its granted subset
+**intersected with its owner's current access** (permissions and ARTCC scope), so a key can never exceed the
+person who owns it, and the `api_keys` domain is denylisted on keys entirely. See
+[api-keys.md](../features/api-keys.md).
+
 ## Catalog
 
 Top-level domains (the collapsible groups in the access editor):

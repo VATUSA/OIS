@@ -8,6 +8,10 @@ Not for the public views — the [advisories board](/advisories/board), [flight 
 
 Yes — the [facility map](/map/facility-map) is public. Open it for any ARTCC to see live traffic centered on that airspace, colored by the facility's own rules.
 
+## Can I use the OIS API from my own tool?
+
+Yes — mint an [API key](/reference/api-keys) (you'll need the `api_keys.key.create` permission) and send it as a bearer token. The key acts as you and can never exceed your own access. The API is described at `/docs/api/v1/openapi.json`.
+
 ## Do I need to refresh to see the latest?
 
 For signed-in controllers, no — the operational boards (IDST, the FCA ladder, departures, and the TMU boards) update the moment another controller issues a release or changes a program. The public advisories board and flight lookup refresh themselves on a short interval instead.
