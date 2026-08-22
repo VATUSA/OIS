@@ -10,11 +10,12 @@ use serde_json::Value;
 
 use crate::{
     auth::{
-        context::CurrentUser,
+        context::{CurrentApiKey, CurrentUser},
         permissions::{
             EventsPlanRead, EventsPlanUpdate, EventsRateUpdate, EventsStaffingCreate,
             EventsSupportUpdate, StatsCaptureUpdate,
         },
+        principal::Principal,
         require_permission::RequirePermission,
     },
     errors::ApiError,
@@ -26,10 +27,7 @@ use crate::{
         TmiPackageBody, UpdateDccRequest, UpdateEventCaptureRequest, UpsertAirportRateRequest,
         UpsertFacilitySupportRequest, UpsertProgramRequest, UpsertStaffingRequest,
     },
-    repos::{
-        access as access_repo, access::PermissionScope, events as events_repo, stats as stats_repo,
-        tmu as tmu_repo,
-    },
+    repos::{events as events_repo, stats as stats_repo, tmu as tmu_repo},
     state::AppState,
 };
 
@@ -237,6 +235,7 @@ pub async fn list_event_facilities(
     State(state): State<AppState>,
     _permission: RequirePermission<EventsPlanRead>,
     Extension(current_user): Extension<Option<CurrentUser>>,
+    Extension(current_api_key): Extension<Option<CurrentApiKey>>,
     Path(id): Path<i64>,
 ) -> Result<Json<Vec<FacilitySupportBody>>, ApiError> {
     let pool = state.db.as_ref().ok_or(ApiError::ServiceUnavailable)?;
@@ -283,10 +282,9 @@ pub async fn list_event_facilities(
     }
 
     // Editability is facility-scoped on events.support.update.
-    let scope = match current_user.as_ref() {
-        Some(user) => {
-            Some(access_repo::permission_scope(pool, &user.id, SUPPORT_PERMISSION).await?)
-        }
+    let principal = Principal::optional(current_user.as_ref(), current_api_key.as_ref());
+    let scope = match principal.as_ref() {
+        Some(p) => Some(p.permission_scope(&state, SUPPORT_PERMISSION).await?),
         None => None,
     };
 
@@ -353,10 +351,11 @@ pub async fn upsert_event_facility(
     State(state): State<AppState>,
     _permission: RequirePermission<EventsSupportUpdate>,
     Extension(current_user): Extension<Option<CurrentUser>>,
+    Extension(current_api_key): Extension<Option<CurrentApiKey>>,
     Path((id, facility)): Path<(i64, String)>,
     Json(payload): Json<UpsertFacilitySupportRequest>,
 ) -> Result<Json<FacilitySupportBody>, ApiError> {
-    let user = current_user.as_ref().ok_or(ApiError::Unauthorized)?;
+    let principal = Principal::require(current_user.as_ref(), current_api_key.as_ref())?;
     let pool = state.db.as_ref().ok_or(ApiError::ServiceUnavailable)?;
 
     let facility = normalize_facility(&facility).ok_or(ApiError::BadRequest)?;
@@ -368,7 +367,9 @@ pub async fn upsert_event_facility(
     }
 
     // Facility scope: the caller must hold events.support.update nationally or for this facility.
-    let scope = access_repo::permission_scope(pool, &user.id, SUPPORT_PERMISSION).await?;
+    let scope = principal
+        .permission_scope(&state, SUPPORT_PERMISSION)
+        .await?;
     if !scope.allows(Some(facility.as_str())) {
         return Err(ApiError::Forbidden);
     }
@@ -380,7 +381,7 @@ pub async fn upsert_event_facility(
         &facility,
         &payload.level,
         notes.trim(),
-        &user.id,
+        principal.user_id(),
     )
     .await?;
     let mut row = events_repo::get_facility_support(pool, id, &facility)
@@ -405,14 +406,17 @@ pub async fn delete_event_facility(
     State(state): State<AppState>,
     _permission: RequirePermission<EventsSupportUpdate>,
     Extension(current_user): Extension<Option<CurrentUser>>,
+    Extension(current_api_key): Extension<Option<CurrentApiKey>>,
     Path((id, facility)): Path<(i64, String)>,
 ) -> Result<axum::http::StatusCode, ApiError> {
-    let user = current_user.as_ref().ok_or(ApiError::Unauthorized)?;
+    let principal = Principal::require(current_user.as_ref(), current_api_key.as_ref())?;
     let pool = state.db.as_ref().ok_or(ApiError::ServiceUnavailable)?;
     let facility = normalize_facility(&facility).ok_or(ApiError::BadRequest)?;
 
     // Facility scope: the caller must hold events.support.update nationally or for this facility.
-    let scope = access_repo::permission_scope(pool, &user.id, SUPPORT_PERMISSION).await?;
+    let scope = principal
+        .permission_scope(&state, SUPPORT_PERMISSION)
+        .await?;
     if !scope.allows(Some(facility.as_str())) {
         return Err(ApiError::Forbidden);
     }
@@ -435,14 +439,15 @@ pub async fn list_event_rates(
     State(state): State<AppState>,
     _permission: RequirePermission<EventsPlanRead>,
     Extension(current_user): Extension<Option<CurrentUser>>,
+    Extension(current_api_key): Extension<Option<CurrentApiKey>>,
     Path(id): Path<i64>,
 ) -> Result<Json<Vec<AirportRateBody>>, ApiError> {
     let pool = state.db.as_ref().ok_or(ApiError::ServiceUnavailable)?;
     let mut rates = events_repo::list_airport_rates(pool, id).await?;
 
     // Mark each row editable per the caller's ARTCC scope for events.rate.update.
-    if let Some(user) = current_user.as_ref() {
-        let scope = access_repo::permission_scope(pool, &user.id, RATE_PERMISSION).await?;
+    if let Some(principal) = Principal::optional(current_user.as_ref(), current_api_key.as_ref()) {
+        let scope = principal.permission_scope(&state, RATE_PERMISSION).await?;
         for r in rates.iter_mut() {
             let artcc = (!r.artcc.is_empty()).then_some(r.artcc.as_str());
             r.editable = scope.allows(artcc);
@@ -466,10 +471,11 @@ pub async fn upsert_event_rate(
     State(state): State<AppState>,
     _permission: RequirePermission<EventsRateUpdate>,
     Extension(current_user): Extension<Option<CurrentUser>>,
+    Extension(current_api_key): Extension<Option<CurrentApiKey>>,
     Path((id, icao)): Path<(i64, String)>,
     Json(payload): Json<UpsertAirportRateRequest>,
 ) -> Result<Json<AirportRateBody>, ApiError> {
-    let user = current_user.as_ref().ok_or(ApiError::Unauthorized)?;
+    let principal = Principal::require(current_user.as_ref(), current_api_key.as_ref())?;
     let pool = state.db.as_ref().ok_or(ApiError::ServiceUnavailable)?;
 
     let icao = normalize_icao(&icao).ok_or(ApiError::BadRequest)?;
@@ -483,7 +489,7 @@ pub async fn upsert_event_rate(
     // Facility scope: the caller must hold events.rate.update nationally or for the
     // airport's owning ARTCC.
     let artcc = owning_artcc(&state, &icao).await;
-    let scope = access_repo::permission_scope(pool, &user.id, RATE_PERMISSION).await?;
+    let scope = principal.permission_scope(&state, RATE_PERMISSION).await?;
     if !scope.allows(artcc.as_deref()) {
         return Err(ApiError::Forbidden);
     }
@@ -501,7 +507,7 @@ pub async fn upsert_event_rate(
         artcc.as_deref().unwrap_or(""),
         payload.config_id.as_deref(),
         source,
-        &user.id,
+        principal.user_id(),
     )
     .await?;
     let mut row = events_repo::get_airport_rate(pool, id, &icao)
@@ -525,9 +531,10 @@ pub async fn delete_event_rate(
     State(state): State<AppState>,
     _permission: RequirePermission<EventsRateUpdate>,
     Extension(current_user): Extension<Option<CurrentUser>>,
+    Extension(current_api_key): Extension<Option<CurrentApiKey>>,
     Path((id, icao)): Path<(i64, String)>,
 ) -> Result<axum::http::StatusCode, ApiError> {
-    let user = current_user.as_ref().ok_or(ApiError::Unauthorized)?;
+    let principal = Principal::require(current_user.as_ref(), current_api_key.as_ref())?;
     let pool = state.db.as_ref().ok_or(ApiError::ServiceUnavailable)?;
 
     let icao = normalize_icao(&icao).ok_or(ApiError::BadRequest)?;
@@ -537,7 +544,7 @@ pub async fn delete_event_rate(
 
     // Scope-check against the ARTCC recorded on the row.
     let artcc = (!existing.artcc.is_empty()).then_some(existing.artcc.as_str());
-    let scope = access_repo::permission_scope(pool, &user.id, RATE_PERMISSION).await?;
+    let scope = principal.permission_scope(&state, RATE_PERMISSION).await?;
     if !scope.allows(artcc) {
         return Err(ApiError::Forbidden);
     }
@@ -941,19 +948,18 @@ pub async fn get_event_capture(
     State(state): State<AppState>,
     _permission: RequirePermission<EventsPlanRead>,
     Extension(current_user): Extension<Option<CurrentUser>>,
+    Extension(current_api_key): Extension<Option<CurrentApiKey>>,
     Path(id): Path<i64>,
 ) -> Result<Json<EventCaptureBody>, ApiError> {
     let pool = state.db.as_ref().ok_or(ApiError::ServiceUnavailable)?;
     if events_repo::get(pool, id).await?.is_none() {
         return Err(ApiError::NotFound);
     }
-    let can_edit = match current_user.as_ref() {
-        Some(user) => {
-            match access_repo::permission_scope(pool, &user.id, CAPTURE_PERMISSION).await? {
-                PermissionScope::National => true,
-                PermissionScope::Facilities(set) => !set.is_empty(),
-            }
-        }
+    let can_edit = match Principal::optional(current_user.as_ref(), current_api_key.as_ref()) {
+        Some(principal) => !principal
+            .permission_scope(&state, CAPTURE_PERMISSION)
+            .await?
+            .is_empty(),
         None => false,
     };
     Ok(Json(capture_body(pool, id, can_edit).await?))

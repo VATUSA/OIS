@@ -19,6 +19,17 @@ pub struct CurrentServiceAccount {
     pub name: String,
 }
 
+/// A resolved user-owned API key (personal access token), populated from an
+/// `Authorization: Bearer ois_pat_…` header. Its authority is capped at request time by the
+/// owner's live permissions — see [`crate::auth::principal`].
+#[derive(Debug, Clone, Serialize, Deserialize, sqlx::FromRow)]
+pub struct CurrentApiKey {
+    pub id: String,
+    pub owner_user_id: String,
+    pub prefix: String,
+    pub name: String,
+}
+
 /// Newtype wrapper for the session cookie value so it can live in request extensions
 /// without colliding with the bearer token (both are `Option<String>`, and axum keys
 /// extensions by type).

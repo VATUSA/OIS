@@ -10,12 +10,14 @@ use axum::{
 
 use crate::{
     auth::{
-        context::CurrentUser, permissions::FlowFacilityMapUpdate,
+        context::{CurrentApiKey, CurrentUser},
+        permissions::FlowFacilityMapUpdate,
+        principal::Principal,
         require_permission::RequirePermission,
     },
     errors::ApiError,
     models::{FacilityMapConfigBody, UpsertFacilityMapConfigRequest},
-    repos::{access as access_repo, facility_map as config_repo},
+    repos::facility_map as config_repo,
     state::AppState,
 };
 
@@ -53,14 +55,16 @@ fn validate(req: &UpsertFacilityMapConfigRequest) -> Result<(), ApiError> {
 }
 
 /// Does the caller hold `flow.facility_map.update` nationally or for this facility's ARTCC?
+/// Works for a signed-in user or an API key (whose scope is capped by its owner).
 async fn can_edit(
     state: &AppState,
-    user: Option<&CurrentUser>,
+    principal: Option<&Principal>,
     facility_id: &str,
 ) -> Result<bool, ApiError> {
-    let Some(user) = user else { return Ok(false) };
-    let pool = state.db.as_ref().ok_or(ApiError::ServiceUnavailable)?;
-    let scope = access_repo::permission_scope(pool, &user.id, CONFIG_PERMISSION).await?;
+    let Some(principal) = principal else {
+        return Ok(false);
+    };
+    let scope = principal.permission_scope(state, CONFIG_PERMISSION).await?;
     Ok(scope.allows(Some(facility_id)))
 }
 
@@ -72,6 +76,7 @@ async fn can_edit(
 pub async fn get_config(
     State(state): State<AppState>,
     Extension(current_user): Extension<Option<CurrentUser>>,
+    Extension(current_api_key): Extension<Option<CurrentApiKey>>,
     Path(id): Path<String>,
 ) -> Result<Json<FacilityMapConfigBody>, ApiError> {
     let facility_id = normalize_facility(&id).ok_or(ApiError::BadRequest)?;
@@ -80,7 +85,8 @@ pub async fn get_config(
     let (rules, default_color) = config_repo::get(pool, &facility_id)
         .await?
         .unwrap_or_default();
-    let editable = can_edit(&state, current_user.as_ref(), &facility_id).await?;
+    let principal = Principal::optional(current_user.as_ref(), current_api_key.as_ref());
+    let editable = can_edit(&state, principal.as_ref(), &facility_id).await?;
     Ok(Json(FacilityMapConfigBody {
         facility_id,
         rules,
@@ -98,20 +104,23 @@ pub async fn put_config(
     State(state): State<AppState>,
     _permission: RequirePermission<FlowFacilityMapUpdate>,
     Extension(current_user): Extension<Option<CurrentUser>>,
+    Extension(current_api_key): Extension<Option<CurrentApiKey>>,
     Path(id): Path<String>,
     Json(req): Json<UpsertFacilityMapConfigRequest>,
 ) -> Result<Json<FacilityMapConfigBody>, ApiError> {
-    let user = current_user.as_ref().ok_or(ApiError::Unauthorized)?;
+    let principal = Principal::require(current_user.as_ref(), current_api_key.as_ref())?;
     let facility_id = normalize_facility(&id).ok_or(ApiError::BadRequest)?;
     let pool = state.db.as_ref().ok_or(ApiError::ServiceUnavailable)?;
     validate(&req)?;
 
-    let scope = access_repo::permission_scope(pool, &user.id, CONFIG_PERMISSION).await?;
+    let scope = principal
+        .permission_scope(&state, CONFIG_PERMISSION)
+        .await?;
     if !scope.allows(Some(&facility_id)) {
         return Err(ApiError::Forbidden);
     }
 
-    config_repo::upsert(pool, &facility_id, &req, &user.id).await?;
+    config_repo::upsert(pool, &facility_id, &req, principal.user_id()).await?;
     Ok(Json(FacilityMapConfigBody {
         facility_id,
         rules: req.rules,

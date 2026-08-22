@@ -12,15 +12,16 @@ use serde::Deserialize;
 
 use crate::{
     auth::{
-        context::CurrentUser,
+        context::{CurrentApiKey, CurrentUser},
         permissions::{EventsConfigUpdate, EventsPlanRead},
+        principal::Principal,
         require_permission::RequirePermission,
     },
     errors::ApiError,
     feed,
     handlers::events::{normalize_icao, owning_artcc},
     models::{AirportConfigBody, AirportForecastBody, UpsertAirportConfigRequest},
-    repos::{access as access_repo, airport_configs as config_repo},
+    repos::airport_configs as config_repo,
     state::AppState,
 };
 
@@ -82,10 +83,10 @@ fn validate(req: &UpsertAirportConfigRequest) -> Result<(), ApiError> {
 }
 
 /// Does the caller hold `events.config.update` nationally or for `icao`'s owning ARTCC?
-async fn can_edit(state: &AppState, user: &CurrentUser, icao: &str) -> Result<bool, ApiError> {
-    let pool = state.db.as_ref().ok_or(ApiError::ServiceUnavailable)?;
+/// Works for a signed-in user or an API key (whose scope is capped by its owner).
+async fn can_edit(state: &AppState, principal: &Principal, icao: &str) -> Result<bool, ApiError> {
     let artcc = owning_artcc(state, icao).await;
-    let scope = access_repo::permission_scope(pool, &user.id, CONFIG_PERMISSION).await?;
+    let scope = principal.permission_scope(state, CONFIG_PERMISSION).await?;
     Ok(scope.allows(artcc.as_deref()))
 }
 
@@ -98,13 +99,14 @@ pub async fn list_airport_configs(
     State(state): State<AppState>,
     _permission: RequirePermission<EventsPlanRead>,
     Extension(current_user): Extension<Option<CurrentUser>>,
+    Extension(current_api_key): Extension<Option<CurrentApiKey>>,
     Path(icao): Path<String>,
 ) -> Result<Json<Vec<AirportConfigBody>>, ApiError> {
-    let user = current_user.as_ref().ok_or(ApiError::Unauthorized)?;
+    let principal = Principal::require(current_user.as_ref(), current_api_key.as_ref())?;
     let pool = state.db.as_ref().ok_or(ApiError::ServiceUnavailable)?;
     let icao = normalize_icao(&icao).ok_or(ApiError::BadRequest)?;
 
-    let editable = can_edit(&state, user, &icao).await?;
+    let editable = can_edit(&state, &principal, &icao).await?;
     let mut rows = config_repo::list_by_icao(pool, &icao).await?;
     for r in &mut rows {
         r.editable = editable;
@@ -121,22 +123,31 @@ pub async fn create_airport_config(
     State(state): State<AppState>,
     _permission: RequirePermission<EventsConfigUpdate>,
     Extension(current_user): Extension<Option<CurrentUser>>,
+    Extension(current_api_key): Extension<Option<CurrentApiKey>>,
     Path(icao): Path<String>,
     Json(req): Json<UpsertAirportConfigRequest>,
 ) -> Result<Json<AirportConfigBody>, ApiError> {
-    let user = current_user.as_ref().ok_or(ApiError::Unauthorized)?;
+    let principal = Principal::require(current_user.as_ref(), current_api_key.as_ref())?;
     let pool = state.db.as_ref().ok_or(ApiError::ServiceUnavailable)?;
     let icao = normalize_icao(&icao).ok_or(ApiError::BadRequest)?;
     validate(&req)?;
 
     let artcc = owning_artcc(&state, &icao).await;
-    let scope = access_repo::permission_scope(pool, &user.id, CONFIG_PERMISSION).await?;
+    let scope = principal
+        .permission_scope(&state, CONFIG_PERMISSION)
+        .await?;
     if !scope.allows(artcc.as_deref()) {
         return Err(ApiError::Forbidden);
     }
 
-    let mut row =
-        config_repo::create(pool, &icao, &req, artcc.as_deref().unwrap_or(""), &user.id).await?;
+    let mut row = config_repo::create(
+        pool,
+        &icao,
+        &req,
+        artcc.as_deref().unwrap_or(""),
+        principal.user_id(),
+    )
+    .await?;
     row.editable = true;
     Ok(Json(row))
 }
@@ -150,21 +161,24 @@ pub async fn update_airport_config(
     State(state): State<AppState>,
     _permission: RequirePermission<EventsConfigUpdate>,
     Extension(current_user): Extension<Option<CurrentUser>>,
+    Extension(current_api_key): Extension<Option<CurrentApiKey>>,
     Path((icao, id)): Path<(String, String)>,
     Json(req): Json<UpsertAirportConfigRequest>,
 ) -> Result<Json<AirportConfigBody>, ApiError> {
-    let user = current_user.as_ref().ok_or(ApiError::Unauthorized)?;
+    let principal = Principal::require(current_user.as_ref(), current_api_key.as_ref())?;
     let pool = state.db.as_ref().ok_or(ApiError::ServiceUnavailable)?;
     let icao = normalize_icao(&icao).ok_or(ApiError::BadRequest)?;
     validate(&req)?;
 
     let artcc = owning_artcc(&state, &icao).await;
-    let scope = access_repo::permission_scope(pool, &user.id, CONFIG_PERMISSION).await?;
+    let scope = principal
+        .permission_scope(&state, CONFIG_PERMISSION)
+        .await?;
     if !scope.allows(artcc.as_deref()) {
         return Err(ApiError::Forbidden);
     }
 
-    let mut row = config_repo::update(pool, &id, &icao, &req, &user.id)
+    let mut row = config_repo::update(pool, &id, &icao, &req, principal.user_id())
         .await?
         .ok_or(ApiError::NotFound)?;
     row.editable = true;
@@ -180,14 +194,17 @@ pub async fn delete_airport_config(
     State(state): State<AppState>,
     _permission: RequirePermission<EventsConfigUpdate>,
     Extension(current_user): Extension<Option<CurrentUser>>,
+    Extension(current_api_key): Extension<Option<CurrentApiKey>>,
     Path((icao, id)): Path<(String, String)>,
 ) -> Result<StatusCode, ApiError> {
-    let user = current_user.as_ref().ok_or(ApiError::Unauthorized)?;
+    let principal = Principal::require(current_user.as_ref(), current_api_key.as_ref())?;
     let pool = state.db.as_ref().ok_or(ApiError::ServiceUnavailable)?;
     let icao = normalize_icao(&icao).ok_or(ApiError::BadRequest)?;
 
     let artcc = owning_artcc(&state, &icao).await;
-    let scope = access_repo::permission_scope(pool, &user.id, CONFIG_PERMISSION).await?;
+    let scope = principal
+        .permission_scope(&state, CONFIG_PERMISSION)
+        .await?;
     if !scope.allows(artcc.as_deref()) {
         return Err(ApiError::Forbidden);
     }

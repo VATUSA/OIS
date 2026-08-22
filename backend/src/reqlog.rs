@@ -14,7 +14,7 @@ use std::time::Instant;
 use axum::{extract::Request, middleware::Next, response::Response};
 use http::{HeaderValue, Method};
 
-use crate::auth::context::{CurrentServiceAccount, CurrentUser};
+use crate::auth::context::{CurrentApiKey, CurrentServiceAccount, CurrentUser};
 
 /// Monotonic per-process request counter — short and readable (`req-42`), no uuid dependency.
 static REQUEST_SEQ: AtomicU64 = AtomicU64::new(1);
@@ -34,6 +34,13 @@ fn actor_label(request: &Request) -> String {
         .and_then(Option::as_ref)
     {
         return format!("svc={}", svc.name);
+    }
+    if let Some(key) = request
+        .extensions()
+        .get::<Option<CurrentApiKey>>()
+        .and_then(Option::as_ref)
+    {
+        return format!("apikey={} ({})", key.prefix, key.name);
     }
     "anon".to_string()
 }
