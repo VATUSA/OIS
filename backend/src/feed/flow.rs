@@ -601,23 +601,30 @@ pub fn arrival_gate(route: &str, arr: &str) -> Option<String> {
     if route.trim().is_empty() {
         return None;
     }
+    // Split on whitespace *and* the procedure/field separators `.` and `/`, so dotted procedure
+    // notation (`EPH.GLASR3`, `GLASR3.HAWKZ`) and speed/level suffixes (`GLASR3/N0450F350`) still
+    // yield the bare STAR token instead of a stripped-together blob.
     let toks: Vec<String> = route
         .to_ascii_uppercase()
-        .split_whitespace()
+        .split([' ', '\t', '\n', '\r', '.', '/'])
         .map(|t| {
-            t.split('/')
-                .next()
-                .unwrap_or("")
-                .chars()
+            t.chars()
                 .filter(|c| c.is_ascii_alphanumeric())
                 .collect::<String>()
         })
+        .filter(|t| !t.is_empty())
         .collect();
+    // Prefer the named arrival procedure — a STAR is the actual arrival gate, so it wins over a
+    // trailing navaid (e.g. `GLASR3 SEA` should gate on GLASR3, not the Seattle VOR).
+    if let Some(star) = toks.iter().rev().find(|t| is_star(t)) {
+        return Some(star.clone());
+    }
+    // Otherwise fall back to the last enroute fix/navaid (routes that gate on a plain fix).
     for t in toks.iter().rev() {
-        if t.is_empty() || t == "DCT" || t == arr {
+        if t == "DCT" || t == arr {
             continue;
         }
-        if is_fix(t) || is_navaid(t) || is_star(t) {
+        if is_fix(t) || is_navaid(t) {
             return Some(t.clone());
         }
     }
@@ -804,6 +811,38 @@ mod tests {
         assert_eq!(arrival_gate("N0450F350 DCT", "KJFK"), None);
         assert_eq!(arrival_gate("", "KJFK"), None);
         assert_eq!(arrival_gate("DCT KJFK", "KJFK"), None); // only the destination
+    }
+
+    #[test]
+    fn arrival_gate_prefers_the_star() {
+        // Dotted procedure notation (transition.procedure / procedure.transition) must still resolve.
+        assert_eq!(
+            arrival_gate("EPH.GLASR3 KSEA", "KSEA").as_deref(),
+            Some("GLASR3")
+        );
+        assert_eq!(
+            arrival_gate("GLASR3.HAWKZ KSEA", "KSEA").as_deref(),
+            Some("GLASR3")
+        );
+        // A trailing navaid (the Seattle VOR) must not win over the STAR.
+        assert_eq!(
+            arrival_gate("MWH EPH GLASR3 SEA", "KSEA").as_deref(),
+            Some("GLASR3")
+        );
+        assert_eq!(
+            arrival_gate("KGEG MWH EPH GLASR3", "KSEA").as_deref(),
+            Some("GLASR3")
+        );
+        // Speed/level suffix on the STAR token.
+        assert_eq!(
+            arrival_gate("EPH GLASR3/N0450F350", "KSEA").as_deref(),
+            Some("GLASR3")
+        );
+        // No STAR filed → still falls back to the last plain fix.
+        assert_eq!(
+            arrival_gate("DCT CAMRN KJFK", "KJFK").as_deref(),
+            Some("CAMRN")
+        );
     }
 
     // ---- geometry / parsing ----
