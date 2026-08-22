@@ -2577,6 +2577,15 @@ export interface components {
             scope: string;
             until?: string | null;
         };
+        /** @description One flight-plan revision, for the flight-detail amendment history. */
+        FlightPlanRevisionBody: {
+            aircraft_short?: string | null;
+            arrival?: string | null;
+            departure?: string | null;
+            /** Format: date-time */
+            effective_from: string;
+            route?: string | null;
+        };
         /** @description A rate program metering a looked-up flight into its arrival airport. */
         FlightProgram: {
             /** Format: int32 */
@@ -3389,6 +3398,11 @@ export interface components {
             max_altitude?: number | null;
             /** Format: int32 */
             max_groundspeed?: number | null;
+            /**
+             * @description Flight-plan revisions over the flight, oldest first (one entry = never amended). Populated
+             *     separately from `stats.flight_plan`, so it's skipped by the row mapping.
+             */
+            revisions: components["schemas"]["FlightPlanRevisionBody"][];
             route?: string | null;
             server?: string | null;
             session_id: string;

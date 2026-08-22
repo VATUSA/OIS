@@ -583,6 +583,26 @@ function ReplayMap({ replay }: { replay: Replay }) {
                 <X className="size-4" />
               </button>
             </div>
+            {selectedTrack.plans.length > 1 && (
+              <div className="border-b px-3 py-1.5 text-xs">
+                <span className="text-muted-foreground">Plan amendments</span>
+                <div className="mt-0.5 flex flex-col gap-0.5">
+                  {selectedTrack.plans.map((pl, i) => (
+                    <div
+                      key={i}
+                      className={`flex items-baseline gap-2 ${pl === selPlan ? "text-foreground" : "text-muted-foreground/60"}`}
+                    >
+                      <span className="font-mono">{zulu(replay.window_start, pl.t)}</span>
+                      <span className="font-mono">
+                        {pl.dep || "????"}→{pl.arr || "????"}
+                      </span>
+                      <span className="opacity-70">{i === 0 ? "filed" : "amended"}</span>
+                      {pl === selPlan && <span className="ml-auto text-primary">● now</span>}
+                    </div>
+                  ))}
+                </div>
+              </div>
+            )}
             <div className="overflow-auto">
               <table className="w-full text-xs">
                 <thead className="sticky top-0 bg-background/95 text-left text-muted-foreground">

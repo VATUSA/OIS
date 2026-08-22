@@ -219,6 +219,7 @@ use utoipa::OpenApi;
         crate::models::NetworkPointBody,
         crate::models::StatsFlightSummary,
         crate::models::StatsFlightDetail,
+        crate::models::FlightPlanRevisionBody,
         crate::models::StatsAirportBody,
         crate::models::StatsTrackBody,
         crate::models::CaptureSummaryBody,

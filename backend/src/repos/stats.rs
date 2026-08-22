@@ -947,6 +947,21 @@ pub async fn flight_detail(
     .map_err(db)
 }
 
+/// The flight's plan revisions, oldest first (empty for pre-0044 flights; one entry = never amended).
+pub async fn flight_plan_history(
+    pool: &PgPool,
+    session_id: i64,
+) -> Result<Vec<crate::models::FlightPlanRevisionBody>, ApiError> {
+    sqlx::query_as(
+        "select effective_from, departure, arrival, aircraft_short, route
+         from stats.flight_plan where session_id = $1 order by effective_from",
+    )
+    .bind(session_id)
+    .fetch_all(pool)
+    .await
+    .map_err(db)
+}
+
 /// Raw 15s track (ts, lat, lon, altitude, groundspeed, heading) for a flight, oldest first.
 pub async fn flight_track_raw(
     pool: &PgPool,
