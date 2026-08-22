@@ -36,6 +36,102 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/v1/ace/requests": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get: operations["list_requests"];
+        put?: never;
+        post: operations["create_request"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/ace/requests/{id}": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get: operations["get_request"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/ace/requests/{id}/claim": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        post: operations["claim_request"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/ace/requests/{id}/decide": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        post: operations["decide_request"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/ace/team": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get: operations["list_team"];
+        put: operations["upsert_team_member"];
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/ace/team/{cid}": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        post?: never;
+        delete: operations["remove_team_member"];
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/v1/admin/api-keys": {
         parameters: {
             query?: never;
@@ -1218,6 +1314,54 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/v1/integration/discord": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get: operations["get_discord_config"];
+        put: operations["put_discord_config"];
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/integration/jobs/lease": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        post: operations["lease_jobs"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/integration/jobs/{id}/ack": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        post: operations["ack_job"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/v1/me": {
         parameters: {
             query?: never;
@@ -2054,6 +2198,46 @@ export interface components {
             permissions: Record<string, never>;
             roles: string[];
         };
+        /** @description One ACE support request in the queue. Actor ids are resolved to CID + display name. */
+        AceRequestBody: {
+            artcc_id?: string | null;
+            /** Format: date-time */
+            claimed_at?: string | null;
+            claimed_by_name?: string | null;
+            /** Format: date-time */
+            created_at: string;
+            /** Format: date-time */
+            decided_at?: string | null;
+            decided_by_name?: string | null;
+            details: string;
+            id: string;
+            position?: string | null;
+            /** Format: int64 */
+            requested_by_cid?: number | null;
+            requested_by_name?: string | null;
+            /** Format: date-time */
+            requested_for?: string | null;
+            /** @description `open` | `claimed` | `completed` | `cancelled`. */
+            status: string;
+        };
+        AceTeamMemberBody: {
+            active: boolean;
+            artcc_id?: string | null;
+            /** Format: int64 */
+            cid: number;
+            display_name: string;
+            id: string;
+            role?: string | null;
+        };
+        /**
+         * @description The bot's acknowledgement of a leased job. `result` records ids the backend must remember
+         *     (message/thread id); `error` explains a failure (triggers backoff + retry).
+         */
+        AckJobRequest: {
+            error?: string | null;
+            result?: Record<string, never> | null;
+            success: boolean;
+        };
         AddPackageItemRequest: {
             /** @description program | restriction | ground_stop */
             kind: string;
@@ -2378,6 +2562,13 @@ export interface components {
             /** @description Most common unresolved tokens, most-frequent first (capped). */
             top_unresolved: components["schemas"]["UnresolvedToken"][];
         };
+        CreateAceRequestRequest: {
+            artcc_id?: string | null;
+            details: string;
+            position?: string | null;
+            /** Format: date-time */
+            requested_for?: string | null;
+        };
         CreateApiKeyRequest: {
             description?: string | null;
             /** Format: date-time */
@@ -2495,6 +2686,10 @@ export interface components {
             /** @description Display name of whoever last set it. */
             updated_by?: string | null;
         };
+        DecideAceRequestRequest: {
+            /** @description `completed` or `cancelled`. */
+            outcome: string;
+        };
         /** @description A pending ground/proposed departure out of a field (for the Departures view). */
         DepartureFlight: {
             aircraft_type: string;
@@ -2533,6 +2728,21 @@ export interface components {
             /** @description How many departures are bound for a metered destination. */
             to_metered: number;
             total: number;
+        };
+        /** @description The Discord guild config + its logical-name maps. */
+        DiscordConfigBody: {
+            categories: components["schemas"]["DiscordMapEntry"][];
+            channels: components["schemas"]["DiscordMapEntry"][];
+            guild_id: string;
+            /** @description Null until a config has been saved. */
+            id?: string | null;
+            name: string;
+            roles: components["schemas"]["DiscordMapEntry"][];
+        };
+        /** @description A logical-name → Discord snowflake entry (channel/role/category). */
+        DiscordMapEntry: {
+            id: string;
+            name: string;
         };
         /** @description A VATUSA event, cached from the events API — the anchor for per-event planning. */
         EventBody: {
@@ -3194,6 +3404,18 @@ export interface components {
             peak_clients?: number | null;
             /** Format: int32 */
             peak_pilots?: number | null;
+        };
+        /** @description One outbound job handed to the bot on lease. `payload` carries everything the handler needs. */
+        OutboundJobBody: {
+            /** Format: int32 */
+            attempt_count: number;
+            /** Format: date-time */
+            created_at: string;
+            id: string;
+            job_type: string;
+            payload: Record<string, never>;
+            subject_id?: string | null;
+            subject_type?: string | null;
         };
         /** @description An airport rate program (vatflow "TMU tab"). Keyed by ICAO. */
         ProgramBody: {
@@ -3885,6 +4107,13 @@ export interface components {
             reason: string;
             scopes: components["schemas"]["ScopeUpdate"][];
         };
+        UpsertAceTeamMemberRequest: {
+            active?: boolean | null;
+            artcc_id?: string | null;
+            /** Format: int64 */
+            cid: number;
+            role?: string | null;
+        };
         UpsertAirportConfigRequest: {
             /** Format: int32 */
             aar: number;
@@ -3907,6 +4136,13 @@ export interface components {
             config_id?: string | null;
             /** @description `predicted` or `override`; defaults to `override` when omitted. */
             source?: string | null;
+        };
+        UpsertDiscordConfigRequest: {
+            categories?: components["schemas"]["DiscordMapEntry"][];
+            channels?: components["schemas"]["DiscordMapEntry"][];
+            guild_id: string;
+            name: string;
+            roles?: components["schemas"]["DiscordMapEntry"][];
         };
         /** @description Upsert body for a facility's map color rules. */
         UpsertFacilityMapConfigRequest: {
@@ -4061,6 +4297,287 @@ export interface operations {
                 };
             };
             401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+        };
+    };
+    list_requests: {
+        parameters: {
+            query?: {
+                /** @description Filter by status */
+                status?: string;
+                /** @description Filter by ARTCC */
+                artcc_id?: string;
+            };
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["AceRequestBody"][];
+                };
+            };
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+        };
+    };
+    create_request: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["CreateAceRequestRequest"];
+            };
+        };
+        responses: {
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["AceRequestBody"];
+                };
+            };
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+        };
+    };
+    get_request: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["AceRequestBody"];
+                };
+            };
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+        };
+    };
+    claim_request: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["AceRequestBody"];
+                };
+            };
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            409: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+        };
+    };
+    decide_request: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                id: string;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["DecideAceRequestRequest"];
+            };
+        };
+        responses: {
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["AceRequestBody"];
+                };
+            };
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            409: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+        };
+    };
+    list_team: {
+        parameters: {
+            query?: {
+                /** @description Include inactive members */
+                all?: boolean;
+            };
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["AceTeamMemberBody"][];
+                };
+            };
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+        };
+    };
+    upsert_team_member: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["UpsertAceTeamMemberRequest"];
+            };
+        };
+        responses: {
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["AceTeamMemberBody"][];
+                };
+            };
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+        };
+    };
+    remove_team_member: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /** @description Member's VATSIM CID */
+                cid: number;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            204: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            404: {
                 headers: {
                     [name: string]: unknown;
                 };
@@ -7391,6 +7908,129 @@ export interface operations {
                 };
             };
             401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+        };
+    };
+    get_discord_config: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["DiscordConfigBody"];
+                };
+            };
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+        };
+    };
+    put_discord_config: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["UpsertDiscordConfigRequest"];
+            };
+        };
+        responses: {
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["DiscordConfigBody"];
+                };
+            };
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+        };
+    };
+    lease_jobs: {
+        parameters: {
+            query?: {
+                /** @description Max jobs (default 10) */
+                limit?: number;
+            };
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["OutboundJobBody"][];
+                };
+            };
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+        };
+    };
+    ack_job: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                id: string;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["AckJobRequest"];
+            };
+        };
+        responses: {
+            204: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            404: {
                 headers: {
                     [name: string]: unknown;
                 };

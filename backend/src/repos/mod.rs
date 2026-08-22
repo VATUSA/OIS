@@ -1,4 +1,5 @@
 pub mod access;
+pub mod ace;
 pub mod airport_configs;
 pub mod api_keys;
 pub mod audit;
@@ -8,6 +9,7 @@ pub mod events;
 pub mod facility_map;
 pub mod flow;
 pub mod gdp;
+pub mod integration;
 pub mod org;
 pub mod preferences;
 pub mod public;
