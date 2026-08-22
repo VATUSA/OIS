@@ -100,6 +100,21 @@ async fn resolve_principal_actor_id(
         .map_err(|_| ApiError::Internal)
 }
 
+/// An API key's audit actor id if one exists (read-only; does not create). Returns None if the key
+/// has never acted — used to render a per-key activity dossier.
+pub async fn fetch_api_key_actor_id(
+    pool: &PgPool,
+    api_key_id: &str,
+) -> Result<Option<String>, ApiError> {
+    sqlx::query_scalar::<_, String>(
+        "select id from access.actors where actor_type = 'api_key' and api_key_id = $1 limit 1",
+    )
+    .bind(api_key_id)
+    .fetch_optional(pool)
+    .await
+    .map_err(|_| ApiError::Internal)
+}
+
 /// An API key's audit actor id, creating the actor row if needed. So every mutation a key makes is
 /// attributed to the key (identified by its `display_name` = name + prefix), not left unlogged.
 pub async fn resolve_api_key_actor_id(

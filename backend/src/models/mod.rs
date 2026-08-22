@@ -1323,6 +1323,87 @@ pub struct ServiceAccountTokenBody {
     pub token: String,
 }
 
+// --- api keys (user-owned personal access tokens) ---
+
+/// One requested `(permission, scope)` grant on a key. `artcc_id = null` means national — allowed
+/// only if the owner holds the permission nationally.
+#[derive(Debug, Deserialize, ToSchema)]
+pub struct ApiKeyPermissionInput {
+    pub permission: String,
+    #[serde(default)]
+    pub artcc_id: Option<String>,
+}
+
+#[derive(Debug, Deserialize, ToSchema)]
+pub struct CreateApiKeyRequest {
+    pub name: String,
+    #[serde(default)]
+    pub description: Option<String>,
+    #[serde(default)]
+    pub expires_at: Option<DateTime<Utc>>,
+    #[serde(default)]
+    pub permissions: Vec<ApiKeyPermissionInput>,
+    /// Optional free-text reason recorded to the audit log.
+    #[serde(default)]
+    pub reason: Option<String>,
+}
+
+#[derive(Debug, Deserialize, ToSchema)]
+pub struct SetApiKeyPermissionsRequest {
+    pub permissions: Vec<ApiKeyPermissionInput>,
+    #[serde(default)]
+    pub reason: Option<String>,
+}
+
+/// Optional audit reason on an admin revoke/disable/delete.
+#[derive(Debug, Deserialize, ToSchema)]
+pub struct RevokeApiKeyRequest {
+    #[serde(default)]
+    pub reason: Option<String>,
+}
+
+#[derive(Debug, Serialize, Clone, ToSchema)]
+pub struct ApiKeyPermissionBody {
+    pub permission: String,
+    pub artcc_id: Option<String>,
+}
+
+/// A key as listed (never the secret). `permissions` is the granted subset; effective authority at
+/// request time is this ∩ the owner's live access.
+#[derive(Debug, Serialize, ToSchema)]
+pub struct ApiKeyBody {
+    pub id: String,
+    pub name: String,
+    pub description: Option<String>,
+    pub prefix: String,
+    pub status: String,
+    pub owner_cid: Option<i64>,
+    pub owner_display_name: Option<String>,
+    pub permissions: Vec<ApiKeyPermissionBody>,
+    pub expires_at: Option<DateTime<Utc>>,
+    pub last_used_at: Option<DateTime<Utc>>,
+    pub last_used_ip: Option<String>,
+    pub revoked_at: Option<DateTime<Utc>>,
+    pub created_at: DateTime<Utc>,
+}
+
+/// Returned once on create/rotate — the plaintext `ois_pat_…` token is never stored or shown again.
+#[derive(Debug, Serialize, ToSchema)]
+pub struct ApiKeyTokenBody {
+    pub key: ApiKeyBody,
+    pub token: String,
+}
+
+/// One permission the current user may delegate to a key, with the scope they can grant it at.
+/// `national = true` means they can grant it nationally (and therefore at any ARTCC); otherwise
+/// `artccs` lists the specific ARTCCs they may grant.
+#[derive(Debug, Serialize, ToSchema)]
+pub struct GrantablePermissionBody {
+    pub permission: String,
+    pub national: bool,
+    pub artccs: Vec<String>,
+}
+
 // --- public advisories board (no-auth, read-only) ---
 //
 // Lean, pilot-facing projections of the active TMIs and FCAs. These intentionally

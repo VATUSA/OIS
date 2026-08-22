@@ -5,10 +5,12 @@
 
 use std::collections::HashSet;
 
+use chrono::{DateTime, Utc};
 use sqlx::PgPool;
 
 use crate::{
     errors::ApiError,
+    models::{ApiKeyBody, ApiKeyPermissionBody},
     repos::access::{self as access_repo, PermissionScope},
 };
 
@@ -112,5 +114,242 @@ pub async fn validate_subset(
             return Err(ApiError::Forbidden);
         }
     }
+    Ok(())
+}
+
+// --- CRUD ---
+
+#[derive(sqlx::FromRow)]
+struct ApiKeyRow {
+    id: String,
+    name: String,
+    description: Option<String>,
+    prefix: String,
+    status: String,
+    owner_cid: Option<i64>,
+    owner_display_name: Option<String>,
+    expires_at: Option<DateTime<Utc>>,
+    last_used_at: Option<DateTime<Utc>>,
+    last_used_ip: Option<String>,
+    revoked_at: Option<DateTime<Utc>>,
+    created_at: DateTime<Utc>,
+}
+
+const SELECT: &str = "select k.id, k.name, k.description, k.prefix, k.status, \
+    u.cid as owner_cid, u.display_name as owner_display_name, \
+    k.expires_at, k.last_used_at, k.last_used_ip::text as last_used_ip, k.revoked_at, k.created_at \
+    from access.api_keys k join identity.users u on u.id = k.owner_user_id";
+
+async fn row_into_body(pool: &PgPool, row: ApiKeyRow) -> Result<ApiKeyBody, ApiError> {
+    let permissions = get_key_permissions(pool, &row.id).await?;
+    Ok(ApiKeyBody {
+        id: row.id,
+        name: row.name,
+        description: row.description,
+        prefix: row.prefix,
+        status: row.status,
+        owner_cid: row.owner_cid,
+        owner_display_name: row.owner_display_name,
+        permissions,
+        expires_at: row.expires_at,
+        last_used_at: row.last_used_at,
+        last_used_ip: row.last_used_ip,
+        revoked_at: row.revoked_at,
+        created_at: row.created_at,
+    })
+}
+
+async fn rows_into_bodies(
+    pool: &PgPool,
+    rows: Vec<ApiKeyRow>,
+) -> Result<Vec<ApiKeyBody>, ApiError> {
+    let mut out = Vec::with_capacity(rows.len());
+    for row in rows {
+        out.push(row_into_body(pool, row).await?);
+    }
+    Ok(out)
+}
+
+/// The granted `(permission, artcc)` subset of a key, as body rows (national = `artcc_id` null).
+pub async fn get_key_permissions(
+    pool: &PgPool,
+    api_key_id: &str,
+) -> Result<Vec<ApiKeyPermissionBody>, ApiError> {
+    let rows = sqlx::query_as::<_, (String, Option<String>)>(
+        "select permission_name, artcc_id from access.api_key_permissions \
+         where api_key_id = $1 order by permission_name, artcc_id nulls first",
+    )
+    .bind(api_key_id)
+    .fetch_all(pool)
+    .await
+    .map_err(|_| ApiError::Internal)?;
+    Ok(rows
+        .into_iter()
+        .map(|(permission, artcc_id)| ApiKeyPermissionBody {
+            permission,
+            artcc_id,
+        })
+        .collect())
+}
+
+/// The owner user id of a key (for ownership checks), or None if the key doesn't exist.
+pub async fn fetch_key_owner(pool: &PgPool, api_key_id: &str) -> Result<Option<String>, ApiError> {
+    sqlx::query_scalar::<_, String>("select owner_user_id from access.api_keys where id = $1")
+        .bind(api_key_id)
+        .fetch_optional(pool)
+        .await
+        .map_err(|_| ApiError::Internal)
+}
+
+pub async fn list_keys_for_owner(
+    pool: &PgPool,
+    owner_user_id: &str,
+) -> Result<Vec<ApiKeyBody>, ApiError> {
+    let rows = sqlx::query_as::<_, ApiKeyRow>(&format!(
+        "{SELECT} where k.owner_user_id = $1 order by k.created_at desc"
+    ))
+    .bind(owner_user_id)
+    .fetch_all(pool)
+    .await
+    .map_err(|_| ApiError::Internal)?;
+    rows_into_bodies(pool, rows).await
+}
+
+/// All keys (admin), optionally filtered to one owner CID.
+pub async fn list_all_keys(
+    pool: &PgPool,
+    owner_cid: Option<i64>,
+) -> Result<Vec<ApiKeyBody>, ApiError> {
+    let rows = sqlx::query_as::<_, ApiKeyRow>(&format!(
+        "{SELECT} where ($1::bigint is null or u.cid = $1) order by k.created_at desc"
+    ))
+    .bind(owner_cid)
+    .fetch_all(pool)
+    .await
+    .map_err(|_| ApiError::Internal)?;
+    rows_into_bodies(pool, rows).await
+}
+
+pub async fn get_key(pool: &PgPool, id: &str) -> Result<Option<ApiKeyBody>, ApiError> {
+    let row = sqlx::query_as::<_, ApiKeyRow>(&format!("{SELECT} where k.id = $1"))
+        .bind(id)
+        .fetch_optional(pool)
+        .await
+        .map_err(|_| ApiError::Internal)?;
+    match row {
+        Some(row) => Ok(Some(row_into_body(pool, row).await?)),
+        None => Ok(None),
+    }
+}
+
+async fn insert_permissions(
+    tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+    api_key_id: &str,
+    permissions: &[(String, Option<String>)],
+) -> Result<(), ApiError> {
+    for (permission_name, artcc_id) in permissions {
+        sqlx::query(
+            "insert into access.api_key_permissions (api_key_id, permission_name, artcc_id) \
+             values ($1, $2, $3) \
+             on conflict (api_key_id, permission_name, coalesce(artcc_id, '')) do nothing",
+        )
+        .bind(api_key_id)
+        .bind(permission_name)
+        .bind(artcc_id)
+        .execute(&mut **tx)
+        .await
+        .map_err(|_| ApiError::Internal)?;
+    }
+    Ok(())
+}
+
+/// Create a key and its permission grants in one transaction. Returns the new key id.
+#[allow(clippy::too_many_arguments)]
+pub async fn create_api_key(
+    pool: &PgPool,
+    owner_user_id: &str,
+    name: &str,
+    description: Option<&str>,
+    prefix: &str,
+    secret_hash: &str,
+    expires_at: Option<DateTime<Utc>>,
+    permissions: &[(String, Option<String>)],
+) -> Result<String, ApiError> {
+    let mut tx = pool.begin().await.map_err(|_| ApiError::Internal)?;
+    let id = sqlx::query_scalar::<_, String>(
+        "insert into access.api_keys \
+             (owner_user_id, name, description, prefix, secret_hash, expires_at) \
+         values ($1, $2, $3, $4, $5, $6) returning id",
+    )
+    .bind(owner_user_id)
+    .bind(name)
+    .bind(description)
+    .bind(prefix)
+    .bind(secret_hash)
+    .bind(expires_at)
+    .fetch_one(&mut *tx)
+    .await
+    .map_err(|_| ApiError::Internal)?;
+
+    insert_permissions(&mut tx, &id, permissions).await?;
+    tx.commit().await.map_err(|_| ApiError::Internal)?;
+    Ok(id)
+}
+
+/// Replace a key's secret (rotate). Returns false if the key doesn't exist.
+pub async fn rotate_key(
+    pool: &PgPool,
+    id: &str,
+    prefix: &str,
+    secret_hash: &str,
+) -> Result<bool, ApiError> {
+    let result =
+        sqlx::query("update access.api_keys set prefix = $2, secret_hash = $3 where id = $1")
+            .bind(id)
+            .bind(prefix)
+            .bind(secret_hash)
+            .execute(pool)
+            .await
+            .map_err(|_| ApiError::Internal)?;
+    Ok(result.rows_affected() > 0)
+}
+
+/// Disable a key (revoke it without deleting the record). Returns false if absent.
+pub async fn disable_key(pool: &PgPool, id: &str) -> Result<bool, ApiError> {
+    let result = sqlx::query(
+        "update access.api_keys set status = 'disabled', revoked_at = now() \
+         where id = $1 and status <> 'disabled'",
+    )
+    .bind(id)
+    .execute(pool)
+    .await
+    .map_err(|_| ApiError::Internal)?;
+    Ok(result.rows_affected() > 0)
+}
+
+/// Permanently delete a key (its permission grants cascade). Returns false if absent.
+pub async fn delete_key(pool: &PgPool, id: &str) -> Result<bool, ApiError> {
+    let result = sqlx::query("delete from access.api_keys where id = $1")
+        .bind(id)
+        .execute(pool)
+        .await
+        .map_err(|_| ApiError::Internal)?;
+    Ok(result.rows_affected() > 0)
+}
+
+/// Replace a key's permission grants with `permissions`.
+pub async fn replace_key_permissions(
+    pool: &PgPool,
+    id: &str,
+    permissions: &[(String, Option<String>)],
+) -> Result<(), ApiError> {
+    let mut tx = pool.begin().await.map_err(|_| ApiError::Internal)?;
+    sqlx::query("delete from access.api_key_permissions where api_key_id = $1")
+        .bind(id)
+        .execute(&mut *tx)
+        .await
+        .map_err(|_| ApiError::Internal)?;
+    insert_permissions(&mut tx, id, permissions).await?;
+    tx.commit().await.map_err(|_| ApiError::Internal)?;
     Ok(())
 }

@@ -153,6 +153,18 @@ use utoipa::OpenApi;
         crate::handlers::service_accounts::rotate_service_account,
         crate::handlers::service_accounts::disable_service_account,
         crate::handlers::service_accounts::set_service_account_roles,
+        crate::handlers::api_keys::list_my_keys,
+        crate::handlers::api_keys::grantable_permissions,
+        crate::handlers::api_keys::create_key,
+        crate::handlers::api_keys::get_my_key,
+        crate::handlers::api_keys::rotate_key,
+        crate::handlers::api_keys::set_key_permissions,
+        crate::handlers::api_keys::disable_my_key,
+        crate::handlers::api_keys::delete_my_key,
+        crate::handlers::api_keys::key_audit,
+        crate::handlers::api_keys::admin_list_keys,
+        crate::handlers::api_keys::admin_disable_key,
+        crate::handlers::api_keys::admin_delete_key,
     ),
     components(schemas(
         crate::models::MeBody,
@@ -277,6 +289,14 @@ use utoipa::OpenApi;
         crate::models::SetServiceAccountRolesRequest,
         crate::models::ServiceAccountBody,
         crate::models::ServiceAccountTokenBody,
+        crate::models::ApiKeyPermissionInput,
+        crate::models::ApiKeyPermissionBody,
+        crate::models::ApiKeyBody,
+        crate::models::ApiKeyTokenBody,
+        crate::models::CreateApiKeyRequest,
+        crate::models::SetApiKeyPermissionsRequest,
+        crate::models::RevokeApiKeyRequest,
+        crate::models::GrantablePermissionBody,
         crate::models::PublicBoard,
         crate::models::PublicRestriction,
         crate::models::PublicGroundStop,
@@ -301,7 +321,8 @@ use utoipa::OpenApi;
         (name = "flow", description = "Flow constrained areas (FCAs)"),
         (name = "feed", description = "Live VATSIM traffic feed"),
         (name = "audit", description = "Audit log"),
-        (name = "service-accounts", description = "Machine client credentials")
+        (name = "service-accounts", description = "Machine client credentials"),
+        (name = "api-keys", description = "User-owned API keys (personal access tokens)")
     )
 )]
 pub struct ApiDoc;
