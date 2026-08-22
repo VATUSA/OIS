@@ -28,7 +28,11 @@ const KNOWN_VERBS: &[&str] = &[
 /// access editor (`PUT /admin/users/{id}/access`), which records its own before/after entry.
 fn is_excluded(resource_type: &str) -> bool {
     // `flow.resolve-routes` is a read (POST only because it takes a list body), not a mutation.
-    matches!(resource_type, "admin.users" | "flow.resolve-routes")
+    // `api-keys` / `admin.api-keys` handlers write their own richer before/after audit entries.
+    matches!(
+        resource_type,
+        "admin.users" | "flow.resolve-routes" | "api-keys" | "admin.api-keys"
+    )
 }
 
 /// Fallback action for a bare create/update/delete with no verb segment.
@@ -323,5 +327,8 @@ mod tests {
         );
         assert!(is_excluded("admin.users"));
         assert!(!is_excluded("tmu.programs"));
+        // API-key routes write their own richer entries, so the generic middleware skips them.
+        assert!(is_excluded("api-keys"));
+        assert!(is_excluded("admin.api-keys"));
     }
 }

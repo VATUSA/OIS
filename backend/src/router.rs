@@ -7,7 +7,7 @@ use crate::{
     auth::middleware::resolve_current_user,
     config::build_cors_layer,
     handlers::{
-        access, airport_configs, atc, audit, auth, dashboards, docs, events, facilities,
+        access, airport_configs, api_keys, atc, audit, auth, dashboards, docs, events, facilities,
         facility_map, feed, flow, gdp, health, preferences, public, runway, service_accounts,
         stats, tmu, users, webhooks,
     },
@@ -303,6 +303,39 @@ pub fn build_router(state: AppState) -> Router {
         .route("/api/v1/tmu/taxi/{icao}", get(feed::taxi_stats))
         .route("/api/v1/tmu/cfr", post(feed::issue_cfr))
         .route("/api/v1/tmu/cfr/{callsign}", delete(feed::release_cfr))
+        // API keys (user-owned personal access tokens) — self-service
+        .route(
+            "/api/v1/api-keys",
+            get(api_keys::list_my_keys).post(api_keys::create_key),
+        )
+        .route(
+            "/api/v1/api-keys/grantable-permissions",
+            get(api_keys::grantable_permissions),
+        )
+        .route(
+            "/api/v1/api-keys/{id}",
+            get(api_keys::get_my_key).delete(api_keys::delete_my_key),
+        )
+        .route("/api/v1/api-keys/{id}/rotate", post(api_keys::rotate_key))
+        .route(
+            "/api/v1/api-keys/{id}/disable",
+            post(api_keys::disable_my_key),
+        )
+        .route(
+            "/api/v1/api-keys/{id}/permissions",
+            put(api_keys::set_key_permissions),
+        )
+        .route("/api/v1/api-keys/{id}/audit", get(api_keys::key_audit))
+        // API keys — admin oversight (any user's keys)
+        .route("/api/v1/admin/api-keys", get(api_keys::admin_list_keys))
+        .route(
+            "/api/v1/admin/api-keys/{id}/disable",
+            post(api_keys::admin_disable_key),
+        )
+        .route(
+            "/api/v1/admin/api-keys/{id}",
+            delete(api_keys::admin_delete_key),
+        )
         // Audit log
         .route("/api/v1/admin/audit", get(audit::list_audit_logs))
         // Service accounts (bot credentials)
