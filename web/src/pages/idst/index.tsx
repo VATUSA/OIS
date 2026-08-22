@@ -123,7 +123,8 @@ function FlightRow({
           <span className="text-emerald-600 dark:text-emerald-400">RLSD {hhmmZ(f.edct)}</span>
         ) : (
           <span className="text-muted-foreground">
-            {f.delay_min > 0 ? `+${f.delay_min}m` : "rdy"} · {hhmmZ(f.cross_time)}
+            EDCT {hhmmZ(f.edct)}
+            {f.delay_min > 0 ? ` · +${f.delay_min}m` : ""}
           </span>
         )}
       </span>
@@ -200,12 +201,16 @@ function SelectedPanel({ selected, canEdit }: { selected: IdstFlight | null; can
               <span className="text-muted-foreground">CTA (crossing)</span>
               <span className="font-mono">{hhmmZ(selected.cross_time)}</span>
             </div>
-            {selected.released && (
-              <div className="flex justify-between">
-                <span className="text-muted-foreground">EDCT (wheels-up)</span>
-                <span className="font-mono text-emerald-600 dark:text-emerald-400">{hhmmZ(selected.edct)}</span>
-              </div>
-            )}
+            <div className="flex justify-between">
+              <span className="text-muted-foreground">
+                {selected.released ? "EDCT (wheels-up)" : "Proposed EDCT"}
+              </span>
+              <span
+                className={`font-mono ${selected.released ? "text-emerald-600 dark:text-emerald-400" : ""}`}
+              >
+                {hhmmZ(selected.edct)}
+              </span>
+            </div>
           </div>
 
           {canEdit ? (
