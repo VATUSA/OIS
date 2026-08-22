@@ -32,6 +32,12 @@ const NAV: Item[] = [
     icon: KeyRound,
     permission: "service_accounts.read",
   },
+  {
+    label: "API Keys",
+    to: "/admin/api-keys",
+    icon: KeyRound,
+    permission: "api_keys.key.read",
+  },
 ];
 
 export function AdminSidebar() {
