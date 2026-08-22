@@ -3,7 +3,7 @@ layout: home
 
 hero:
   name: OIS
-  text: Operational Information System
+  text: Event Operational Information System
   tagline: The VATUSA traffic-management platform — flow constrained areas, ground delay programs, runway balancing, and a live national picture.
   actions:
     - theme: brand

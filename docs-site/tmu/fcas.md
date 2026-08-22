@@ -2,6 +2,8 @@
 
 A **Flow Constrained Area** (FCA) is a **line you draw across a flow** to identify and meter the traffic crossing it — the building block for most flow initiatives in OIS. Aircraft are metered as their filed route **crosses the line**, so an FCA is an open boundary, not a closed area.
 
+![The FCA map: two FCAs in the list with their enable toggles and live crossing counts, and FCA 1 drawn as a dashed line across the flow.](/screenshots/fca-map.png)
+
 ## Building an FCA
 
 1. Open the FCA map and start a new area.

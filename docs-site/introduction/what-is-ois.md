@@ -1,6 +1,6 @@
 # What is OIS
 
-**OIS** (Operational Information System) is the VATUSA-wide traffic-management platform. It gives Traffic Management Units (TMUs), controllers, and pilots a single, shared picture of the National Airspace System on VATSIM.
+**OIS** (Event Operational Information System) is the VATUSA-wide traffic-management platform. It gives Traffic Management Units (TMUs), controllers, and pilots a single, shared picture of the National Airspace System on VATSIM.
 
 Where most tools focus on one ARTCC, OIS is **national**: any online aircraft, any facility, one map.
 
