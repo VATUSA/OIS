@@ -258,6 +258,10 @@ export function useMarkRelease(fcaId: string) {
     },
     onSuccess: (data) => {
       queryClient.setQueryData(["fca-traffic", fcaId], data);
+      // A release also shows in the IDST board + airport departures — refresh them in this session
+      // instead of waiting for their next poll.
+      queryClient.invalidateQueries({ queryKey: ["idst"] });
+      queryClient.invalidateQueries({ queryKey: ["departures"] });
     },
     onError: () => toast.error("Couldn’t issue the release"),
   });
@@ -277,6 +281,8 @@ export function useClearRelease(fcaId: string) {
     },
     onSuccess: (data) => {
       queryClient.setQueryData(["fca-traffic", fcaId], data);
+      queryClient.invalidateQueries({ queryKey: ["idst"] });
+      queryClient.invalidateQueries({ queryKey: ["departures"] });
     },
     onError: () => toast.error("Couldn’t clear the release"),
   });
