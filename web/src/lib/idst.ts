@@ -28,7 +28,9 @@ export function useIdst(scope: IdstScope) {
   return useQuery({
     queryKey: ["idst", scope],
     enabled: !scopeIsEmpty(scope),
-    refetchInterval: 15_000,
+    // Release/FCA changes arrive instantly via the websocket; the poll only refreshes the drifting
+    // advisory EDCTs and is the fallback when the socket is down.
+    refetchInterval: 30_000,
     queryFn: async (): Promise<IdstResponse> => {
       const { data, error } = await ois.GET("/api/v1/flow/idst", {
         params: {

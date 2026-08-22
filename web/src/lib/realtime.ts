@@ -18,6 +18,16 @@ const TOPIC_KEYS: Record<string, string[][]> = {
   "flow.cfr": [["departures"], ["flow"]],
 };
 
+/** Every distinct key across all topics — refetched once on (re)connect to catch up on anything that
+ *  changed while the socket was down. */
+const ALL_KEYS: string[][] = [
+  ...new Set(
+    Object.values(TOPIC_KEYS)
+      .flat()
+      .map((k) => JSON.stringify(k)),
+  ),
+].map((s) => JSON.parse(s) as string[]);
+
 function wsUrl(): string {
   // API_BASE is a full http(s) URL, or "" for a same-origin deployment.
   const base = API_BASE || (typeof window !== "undefined" ? window.location.origin : "");
@@ -56,6 +66,8 @@ export function connectRealtime(qc: QueryClient): () => void {
     }
     ws.onopen = () => {
       retry = 0;
+      // Catch up on anything that changed while we were (re)connecting.
+      ALL_KEYS.forEach((queryKey) => qc.invalidateQueries({ queryKey }));
     };
     ws.onmessage = (e) => {
       try {

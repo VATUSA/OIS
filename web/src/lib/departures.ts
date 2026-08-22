@@ -33,7 +33,9 @@ export function useDepartures(dep: string) {
     queryKey: at == null ? ["departures", dep] : ["hist-departures", dep, at],
     queryFn: () => (at == null ? fetchDepartures(dep) : fetchHistDepartures(dep, at!)),
     enabled: !!dep,
-    refetchInterval: at == null ? 20_000 : false,
+    // CFR/release/GDP changes push over the websocket; departures is mostly discrete, so a slow poll
+    // is a sufficient fallback + status refresh.
+    refetchInterval: at == null ? 60_000 : false,
     staleTime: at == null ? 0 : Infinity,
     placeholderData: at == null ? undefined : keepPreviousData,
   });
@@ -45,7 +47,7 @@ export function useMultiDepartures(fields: string[]) {
     queries: fields.map((dep) => ({
       queryKey: ["departures", dep],
       queryFn: () => fetchDepartures(dep),
-      refetchInterval: 20_000,
+      refetchInterval: 60_000,
     })),
   });
 }

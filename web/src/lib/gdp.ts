@@ -47,7 +47,9 @@ export function useGdpBoard(id: string | null) {
       return data;
     },
     enabled: !!id,
-    refetchInterval: 15_000,
+    // GDP lifecycle changes push over the websocket; the poll refreshes live metered ETAs + is the
+    // fallback.
+    refetchInterval: 30_000,
   });
 }
 

@@ -52,7 +52,7 @@ export function useModeDepartures(fields: string[], at: number | null) {
   return useQueries({
     queries: fields.map((dep) =>
       at == null
-        ? { queryKey: ["departures", dep], queryFn: () => fetchDepartures(dep), refetchInterval: 20_000 }
+        ? { queryKey: ["departures", dep], queryFn: () => fetchDepartures(dep), refetchInterval: 60_000 }
         : {
             queryKey: ["hist-departures", dep, at],
             queryFn: () => fetchHistDepartures(dep, at),
