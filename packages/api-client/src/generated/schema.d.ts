@@ -3083,15 +3083,29 @@ export interface components {
         };
         /** @description One flight's downsampled track within a replay window. */
         ReplayFlightBody: {
-            aircraft?: string | null;
-            arrival?: string | null;
             callsign: string;
-            departure?: string | null;
-            /** @description Filed route string, for plotting the planned route on the replay map. */
-            route?: string | null;
+            /**
+             * @description Flight-plan revisions over the window, ascending by `t`. The plan in effect at a given replay
+             *     clock is the last entry with `t <= clock`; a flight that never amended has a single entry. So a
+             *     mid-route amendment shows the old plan before its `t` and the new plan after.
+             */
+            plans: components["schemas"]["ReplayPlan"][];
             /** @description Compact samples: `[t_seconds_from_start, lat, lon, altitude_ft, heading_deg, groundspeed_kt]`. */
             samples: number[][];
             session_id: string;
+        };
+        /** @description One flight-plan revision within a replay window. */
+        ReplayPlan: {
+            aircraft?: string | null;
+            arrival?: string | null;
+            departure?: string | null;
+            /** @description Filed route string, for plotting the planned route on the replay map. */
+            route?: string | null;
+            /**
+             * Format: double
+             * @description Seconds from the window start at which this revision took effect (0 = in force at window open).
+             */
+            t: number;
         };
         /** @description One flight to resolve a filed route for (batch route resolution for the replay map). */
         ResolveRouteRequest: {

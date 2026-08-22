@@ -223,6 +223,7 @@ use utoipa::OpenApi;
         crate::models::StatsTrackBody,
         crate::models::CaptureSummaryBody,
         crate::models::ReplayFlightBody,
+        crate::models::ReplayPlan,
         crate::models::ReplayBody,
         crate::models::FcaBody,
         crate::models::UpsertFcaRequest,

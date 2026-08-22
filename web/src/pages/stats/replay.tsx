@@ -31,16 +31,32 @@ type Live = {
   heading: number;
 };
 
-/** A flight's samples as a sorted array of [t, lat, lon, alt, hdg, gs]. */
+/** A flight plan revision in effect from `t` seconds into the window. */
+export type Plan = { t: number; actype: string; dep: string; arr: string; route: string };
+
+/** A flight: its plan revisions + samples as a sorted array of [t, lat, lon, alt, hdg, gs]. */
 type Track = {
   id: string;
   callsign: string;
-  actype: string;
-  dep: string;
-  arr: string;
-  route: string;
+  plans: Plan[];
   s: number[][];
 };
+
+const BLANK_PLAN: Plan = { t: 0, actype: "", dep: "", arr: "", route: "" };
+
+/** The plan revision in effect at replay clock `t` — the last one with `t <= clock`. */
+export function planAt(plans: Plan[], t: number): Plan {
+  if (plans.length === 0) return BLANK_PLAN;
+  let p = plans[0];
+  for (const q of plans) {
+    if (q.t <= t) p = q;
+    else break;
+  }
+  return p;
+}
+
+/** Cache key for a resolved filed route (its geometry depends only on dep/arr/route). */
+const routeKey = (p: Plan): string => `${p.dep}»${p.arr}»${p.route}`;
 
 /** A departure/arrival filter chip; `*` (or blank) matches any airport. */
 type ApFilter = { dep: string; arr: string };
@@ -125,10 +141,13 @@ function ReplayMap({ replay }: { replay: Replay }) {
       replay.flights.map((f) => ({
         id: f.session_id,
         callsign: f.callsign,
-        actype: f.aircraft ?? "",
-        dep: f.departure ?? "",
-        arr: f.arrival ?? "",
-        route: f.route ?? "",
+        plans: (f.plans ?? []).map((pl) => ({
+          t: pl.t,
+          actype: pl.aircraft ?? "",
+          dep: pl.departure ?? "",
+          arr: pl.arrival ?? "",
+          route: pl.route ?? "",
+        })),
         s: f.samples as number[][],
       })),
     [replay],
@@ -193,7 +212,8 @@ function ReplayMap({ replay }: { replay: Replay }) {
     const out: { path: [number, number][] }[] = [];
     for (const t of tracks) {
       if (t.s.length === 0 || t.s[0][0] > clock) continue; // hasn't started yet
-      if (!passesFilters(t.dep, t.arr)) continue;
+      const tp = planAt(t.plans, clock);
+      if (!passesFilters(tp.dep, tp.arr)) continue;
       const gs = activeGs.get(t.id);
       if (gs === undefined) {
         if (!showDisconnected) continue; // disconnected — only when opted in
@@ -228,12 +248,13 @@ function ReplayMap({ replay }: { replay: Replay }) {
       const b = s[hi];
       const span = b[0] - a[0] || 1;
       const k = (t - a[0]) / span;
+      const p = planAt(f.plans, t);
       out.push({
         id: f.id,
         callsign: f.callsign,
-        actype: f.actype,
-        dep: f.dep,
-        arr: f.arr,
+        actype: p.actype,
+        dep: p.dep,
+        arr: p.arr,
         lat: a[1] + (b[1] - a[1]) * k,
         lon: a[2] + (b[2] - a[2]) * k,
         alt: Math.round(a[3] + (b[3] - a[3]) * k),
@@ -293,24 +314,27 @@ function ReplayMap({ replay }: { replay: Replay }) {
     [aircraft, hideGround, passesFilters],
   );
 
-  // Resolve filed routes for the on-screen flights (when the toggle is on) + the selected flight.
-  // Cached by callsign (routes are static), so scrubbing/playback only fetches newly-appeared
-  // flights.
+  // Resolve filed routes for the on-screen flights (when the toggle is on) + the selected flight,
+  // using each flight's plan *at the current clock* — so an amended route re-resolves across the
+  // amendment instant. Cached by route content, so identical routes are fetched once.
   useEffect(() => {
     const wanted = new Set<string>();
     if (showRoutes) for (const a of shown) wanted.add(a.id);
     if (selectedTrack) wanted.add(selectedTrack.id);
-    const need: Track[] = [];
+    const need: { callsign: string; dep: string; arr: string; route: string }[] = [];
     for (const id of wanted) {
-      const t = tracks.find((x) => x.id === id);
-      if (!t || !t.route) continue;
-      if (routeCache[t.callsign] || pendingRoutes.current.has(t.callsign)) continue;
-      need.push(t);
+      const trk = tracks.find((x) => x.id === id);
+      if (!trk) continue;
+      const p = planAt(trk.plans, clock);
+      if (!p.route) continue;
+      const key = routeKey(p);
+      if (routeCache[key] || pendingRoutes.current.has(key)) continue;
+      pendingRoutes.current.add(key);
+      need.push({ callsign: key, dep: p.dep, arr: p.arr, route: p.route });
     }
     if (need.length === 0) return;
-    need.forEach((t) => pendingRoutes.current.add(t.callsign));
     let cancelled = false;
-    resolveRoutes(need.map((t) => ({ callsign: t.callsign, dep: t.dep, arr: t.arr, route: t.route })))
+    resolveRoutes(need)
       .then((res) => {
         if (cancelled) return;
         setRouteCache((prev) => {
@@ -325,24 +349,27 @@ function ReplayMap({ replay }: { replay: Replay }) {
         });
       })
       .catch(() => {})
-      .finally(() => need.forEach((t) => pendingRoutes.current.delete(t.callsign)));
+      .finally(() => need.forEach((n) => pendingRoutes.current.delete(n.callsign)));
     return () => {
       cancelled = true;
     };
-  }, [showRoutes, shown, selectedTrack, tracks, routeCache]);
+  }, [showRoutes, shown, selectedTrack, tracks, routeCache, clock]);
 
-  // Filed-route polylines for every shown flight (when the toggle is on).
+  // Filed-route polylines for every shown flight (when the toggle is on), at the current clock.
   const allRoutePaths = useMemo(() => {
     if (!showRoutes) return [];
     const out: { path: [number, number][] }[] = [];
     for (const a of shown) {
-      const g = routeCache[a.callsign];
+      const trk = tracks.find((x) => x.id === a.id);
+      if (!trk) continue;
+      const g = routeCache[routeKey(planAt(trk.plans, clock))];
       if (g && g.path.length >= 2) out.push({ path: g.path });
     }
     return out;
-  }, [showRoutes, shown, routeCache]);
+  }, [showRoutes, shown, routeCache, tracks, clock]);
 
-  const selectedRoute = selectedTrack ? routeCache[selectedTrack.callsign] : undefined;
+  const selPlan = selectedTrack ? planAt(selectedTrack.plans, clock) : null;
+  const selectedRoute = selPlan ? routeCache[routeKey(selPlan)] : undefined;
 
   const toggle = () => {
     const next = !playingRef.current;
@@ -543,8 +570,8 @@ function ReplayMap({ replay }: { replay: Replay }) {
                   {selectedTrack.callsign}
                 </span>
                 <span className="text-xs text-muted-foreground">
-                  {selectedTrack.dep || "????"} → {selectedTrack.arr || "????"} ·{" "}
-                  {selectedTrack.actype || "—"} · {flownRows.length}/{selectedTrack.s.length} pts
+                  {selPlan?.dep || "????"} → {selPlan?.arr || "????"} ·{" "}
+                  {selPlan?.actype || "—"} · {flownRows.length}/{selectedTrack.s.length} pts
                 </span>
               </div>
               <button
