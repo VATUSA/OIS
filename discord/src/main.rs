@@ -78,7 +78,9 @@ impl EventHandler for Handler {
             Ok(_) => "✅ Claimed — thanks for covering this.".to_string(),
             Err(e) => match e.status() {
                 Some(403) => {
-                    "Link your OIS account first: Profile → Discord → Link Discord.".to_string()
+                    "No OIS account is linked to your Discord. Add your Discord to your VATUSA \
+                     profile, then sign in to OIS to sync it."
+                        .to_string()
                 }
                 Some(409) => "Someone already claimed this request.".to_string(),
                 Some(404) => "That request no longer exists.".to_string(),

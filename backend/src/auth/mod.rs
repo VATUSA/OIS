@@ -1,6 +1,5 @@
 pub mod acl;
 pub mod context;
-pub mod discord;
 pub mod middleware;
 pub mod permissions;
 pub mod principal;

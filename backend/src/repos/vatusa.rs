@@ -141,6 +141,58 @@ pub async fn upsert_member(pool: &PgPool, m: &VatusaMember) -> Result<(), ApiErr
         .map_err(|_| ApiError::Internal)?;
     }
 
+    // VATUSA is authoritative for the Discord link — mirror it into external_sync_mappings (which the
+    // bot resolves) whenever we have the OIS user row. Absent/blank ⇒ clear any stale mapping.
+    let user_id = sqlx::query_scalar::<_, String>("select id from identity.users where cid = $1")
+        .bind(m.cid)
+        .fetch_optional(&mut *tx)
+        .await
+        .map_err(|_| ApiError::Internal)?;
+    if let Some(user_id) = user_id {
+        let discord_id = m
+            .discord_id
+            .as_deref()
+            .map(str::trim)
+            .filter(|s| !s.is_empty());
+        match discord_id {
+            Some(did) => {
+                // One OIS user per Discord id: drop any other user's stale claim on it first.
+                sqlx::query(
+                    "delete from integration.external_sync_mappings \
+                     where system_code = 'discord' and entity_type = 'user' \
+                       and external_id = $1 and local_id <> $2",
+                )
+                .bind(did)
+                .bind(&user_id)
+                .execute(&mut *tx)
+                .await
+                .map_err(|_| ApiError::Internal)?;
+                sqlx::query(
+                    "insert into integration.external_sync_mappings \
+                         (system_code, entity_type, local_id, external_id, metadata) \
+                     values ('discord', 'user', $1, $2, '{\"source\":\"vatusa\"}'::jsonb) \
+                     on conflict (system_code, entity_type, local_id) \
+                     do update set external_id = excluded.external_id",
+                )
+                .bind(&user_id)
+                .bind(did)
+                .execute(&mut *tx)
+                .await
+                .map_err(|_| ApiError::Internal)?;
+            }
+            None => {
+                sqlx::query(
+                    "delete from integration.external_sync_mappings \
+                     where system_code = 'discord' and entity_type = 'user' and local_id = $1",
+                )
+                .bind(&user_id)
+                .execute(&mut *tx)
+                .await
+                .map_err(|_| ApiError::Internal)?;
+            }
+        }
+    }
+
     tx.commit().await.map_err(|_| ApiError::Internal)
 }
 

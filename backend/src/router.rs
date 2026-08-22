@@ -7,9 +7,9 @@ use crate::{
     auth::middleware::resolve_current_user,
     config::build_cors_layer,
     handlers::{
-        access, ace, airport_configs, api_keys, atc, audit, auth, dashboards, discord_link, docs,
-        events, facilities, facility_map, feed, flow, gdp, health, integration, preferences,
-        public, runway, service_accounts, stats, tmu, users, webhooks,
+        access, ace, airport_configs, api_keys, atc, audit, auth, dashboards, docs, events,
+        facilities, facility_map, feed, flow, gdp, health, integration, preferences, public,
+        runway, service_accounts, stats, tmu, users, webhooks,
     },
     realtime,
     state::AppState,
@@ -325,19 +325,8 @@ pub fn build_router(state: AppState) -> Router {
             "/api/v1/integration/discord/ace/{id}/claim",
             post(integration::discord_ace_claim),
         )
-        // Discord account linking (OAuth) — runs inside the user's session
-        .route(
-            "/api/v1/me/discord",
-            get(discord_link::get_my_discord).delete(discord_link::unlink_discord),
-        )
-        .route(
-            "/api/v1/me/discord/link/start",
-            get(discord_link::start_discord_link),
-        )
-        .route(
-            "/api/v1/auth/discord/callback",
-            get(discord_link::discord_link_callback),
-        )
+        // The current user's Discord link (read-only; sourced from VATUSA)
+        .route("/api/v1/me/discord", get(integration::get_my_discord))
         // ACE support — request queue + team roster
         .route(
             "/api/v1/ace/requests",
