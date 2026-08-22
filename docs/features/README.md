@@ -9,6 +9,7 @@ touchpoints.
 | Spec                                             | Domain(s)            | Status                          |
 |--------------------------------------------------|----------------------|---------------------------------|
 | [access-control.md](access-control.md)           | access               | built                           |
+| [api-keys.md](api-keys.md)                        | access (api_keys)    | built                           |
 | [events-workflow.md](events-workflow.md)         | events               | partially built (diverged from spec) |
 | [tmu-ntml-adv-tmi.md](tmu-ntml-adv-tmi.md)       | tmu                  | partially built (diverged from spec) |
 | [ace-support.md](ace-support.md)                 | ace, discord         | spec                            |

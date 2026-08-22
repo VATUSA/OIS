@@ -39,8 +39,14 @@ Explicit, path-based permissions — nothing is implied by role name. See
 - `access.user_permissions (user_id, permission_name, granted, artcc_id?)` — a direct
   grant; `granted = false` is an explicit **deny** that beats any allow.
 - `access.service_accounts` + `service_account_credentials` (hashed) + `service_account_roles` — machine clients.
+- `access.api_keys` + `access.api_key_permissions` (migration 0045) — user-owned personal
+  access tokens (`ois_pat_…`, SHA-256-hashed). `api_key_permissions (permission_name, artcc_id?)`
+  is the key's granted subset; a key's effective authority is that ∩ the owner's live access,
+  computed per request (see [api-keys.md](../features/api-keys.md)). `owner_user_id` cascades, so
+  deleting a user drops their keys.
 - `access.actors` + `access.audit_logs` — who did what, with the required `reason` and
-  before/after snapshots (the access editor's "recorded on this controller's log").
+  before/after snapshots (the access editor's "recorded on this controller's log"). `actors`
+  now includes an `api_key` actor type, so a mutation made via a key is attributed to it.
 
 Effective permissions are computed by the `v_effective_user_permissions` view:
 role-derived ∪ SERVER_ADMIN (all permissions) ∪ direct grants, minus explicit denies.

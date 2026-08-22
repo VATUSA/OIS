@@ -88,6 +88,9 @@ backend.
 - **Service-account management** — `/api/v1/admin/service-accounts` (list/create) plus
   `/{id}/rotate`, `/{id}/disable`, and `/{id}/roles` (`handlers/service_accounts.rs`)
   for bot/service credentials.
+- **User API keys** — user-owned personal access tokens whose authority is capped by the
+  owner's live permissions on every request, with lifecycle + usage auditing. Own domain;
+  see [api-keys.md](api-keys.md).
 
 ## Not yet
 
