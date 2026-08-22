@@ -233,7 +233,9 @@ export function useFcaTraffic(id: string | null) {
       return data;
     },
     enabled: !!id,
-    refetchInterval: 15_000,
+    // Releases sync instantly over the websocket; the poll refreshes live crossing ETAs (and is the
+    // fallback if the socket drops).
+    refetchInterval: 30_000,
   });
 }
 
