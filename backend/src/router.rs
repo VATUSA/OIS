@@ -151,6 +151,10 @@ pub fn build_router(state: AppState) -> Router {
             get(events::get_event_capture).put(events::update_event_capture),
         )
         .route("/api/v1/events/{id}/stats", get(events::get_event_stats))
+        .route(
+            "/api/v1/events/{id}/debrief",
+            get(events::get_event_debrief).put(events::update_event_debrief),
+        )
         .route("/api/v1/events/{id}/rates", get(events::list_event_rates))
         .route(
             "/api/v1/events/{id}/rates/{icao}",
