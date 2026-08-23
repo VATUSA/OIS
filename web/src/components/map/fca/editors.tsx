@@ -1,5 +1,7 @@
+import {useEffect, useState} from "react";
 import {Button, Input} from "@ois/ui";
 
+import {useValidateFixes} from "@/lib/fca";
 import type {Fca} from "@/lib/fca";
 import type {MapRoute} from "@/lib/route";
 import {lineNm, type LatLng} from "@/components/map/lib/geo";
@@ -103,6 +105,27 @@ function Field({ label, help, children }: { label: string; help?: string; childr
   );
 }
 
+/** Route-fixes input that flags entries which aren't real nav fixes (typos silently exclude traffic). */
+function FixesField({ value, onChange }: { value: string; onChange: (v: string) => void }) {
+  const [debounced, setDebounced] = useState(value);
+  useEffect(() => {
+    const t = setTimeout(() => setDebounced(value), 400);
+    return () => clearTimeout(t);
+  }, [value]);
+  const unknown = useValidateFixes(debounced).data?.unknown ?? [];
+
+  return (
+    <Field label="Route fixes" help="Only meter aircraft with these fixes in their FILED route. Blank = any route.">
+      <Input className="font-mono uppercase" placeholder="LAIRI · blank = all" value={value} onChange={(e) => onChange(e.target.value)} />
+      {unknown.length > 0 && (
+        <span className="text-[11px] leading-snug text-destructive">
+          Not a known fix: {unknown.join(", ")} — check for a typo; it won&apos;t match any traffic.
+        </span>
+      )}
+    </Field>
+  );
+}
+
 export function RouteEditor({
   form,
   onChange,
@@ -198,9 +221,8 @@ export function DraftEditor({
       <Field label="Departure airports" help="Only meter flights departing these fields. Blank = any departure.">
         <Input className="font-mono uppercase" placeholder="KMCO · blank = all" value={draft.origins} onChange={(e) => set("origins", e.target.value)} />
       </Field>
-      <Field label="Route fixes" help="Only meter aircraft with these fixes in their FILED route. Blank = any route.">
-        <Input className="font-mono uppercase" placeholder="LAIRI · blank = all" value={draft.fixes} onChange={(e) => set("fixes", e.target.value)} />
-      </Field>
+      <FixesField value={draft.fixes} onChange={(v) => set("fixes", v)} />
+
 
       <div className="grid grid-cols-2 gap-3">
         <Field label="ARTCC tag" help="Owning facility — used by the list filter.">

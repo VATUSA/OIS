@@ -1138,6 +1138,13 @@ pub struct ReorderRequest {
     pub order: Vec<String>,
 }
 
+/// Route-fix tokens that don't resolve to a known nav fix/navaid/airway/procedure — likely typos in
+/// an FCA's route-fix filter.
+#[derive(Debug, Serialize, ToSchema)]
+pub struct FixValidationBody {
+    pub unknown: Vec<String>,
+}
+
 // --- IDST (Integrated Departure Scheduling): FCA-metered ground departures across a scope ---
 
 /// One FCA-metered ground departure in the IDST console. One row per metering FCA — a flight metered

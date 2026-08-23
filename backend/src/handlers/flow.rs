@@ -27,10 +27,10 @@ use crate::{
     },
     jobs,
     models::{
-        AircraftRoute, DataStatus, FcaBody, FcaFlight, FlightAdvisory, FlightFcaCrossing,
-        FlightGdp, FlightGroundStop, FlightProgram, IdstFlight, IdstResponse, ReleaseRequest,
-        ReorderRequest, ResolveRouteRequest, ResolvedRoute, RouteBody, RouteWaypoint,
-        TrafficAircraft, UpsertFcaRequest, UpsertRouteRequest,
+        AircraftRoute, DataStatus, FcaBody, FcaFlight, FixValidationBody, FlightAdvisory,
+        FlightFcaCrossing, FlightGdp, FlightGroundStop, FlightProgram, IdstFlight, IdstResponse,
+        ReleaseRequest, ReorderRequest, ResolveRouteRequest, ResolvedRoute, RouteBody,
+        RouteWaypoint, TrafficAircraft, UpsertFcaRequest, UpsertRouteRequest,
     },
     repos::{flow as flow_repo, public as public_repo},
     state::AppState,
@@ -811,6 +811,43 @@ pub async fn route_coverage(
         airports.as_ref(),
         &snap.data,
     )))
+}
+
+#[derive(Deserialize)]
+pub struct ValidateFixesQuery {
+    /// Space/comma-separated fix tokens to check against the nav database.
+    fixes: Option<String>,
+}
+
+/// Report which of the submitted route-fix tokens aren't real nav fixes — so the FCA editor can flag
+/// typos (e.g. `MLLETT` for `MLLET`) that would silently exclude matching traffic.
+#[utoipa::path(
+    get, path = "/api/v1/flow/validate-fixes", tag = "flow",
+    params(("fixes" = Option<String>, Query, description = "Space/comma-separated fix tokens")),
+    responses((status = 200, body = FixValidationBody), (status = 401))
+)]
+pub async fn validate_fixes(
+    State(state): State<AppState>,
+    _permission: RequirePermission<FlowFcaRead>,
+    Query(q): Query<ValidateFixesQuery>,
+) -> Json<FixValidationBody> {
+    let nav = state.nav.load_full();
+    // Without nav data loaded we can't judge anything — flag nothing rather than everything.
+    if nav.fix_count() == 0 {
+        return Json(FixValidationBody {
+            unknown: Vec::new(),
+        });
+    }
+    let mut seen = HashSet::new();
+    let unknown = q
+        .fixes
+        .unwrap_or_default()
+        .split(|c: char| c.is_whitespace() || c == ',')
+        .map(|t| t.trim().to_ascii_uppercase())
+        .filter(|t| !t.is_empty() && seen.insert(t.clone()))
+        .filter(|t| !nav.knows(t))
+        .collect();
+    Json(FixValidationBody { unknown })
 }
 
 /// Force an immediate nav + winds refresh, then return the updated status. Failures are
