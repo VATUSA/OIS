@@ -15,14 +15,15 @@ use std::time::Duration;
 use ois_client::{OisClient, OutboundJob};
 use serde_json::{Value, json};
 use serenity::all::{
-    ButtonStyle, ChannelId, ChannelType, Colour, ComponentInteractionDataKind, Context,
-    CreateActionRow, CreateButton, CreateEmbed, CreateInteractionResponse,
-    CreateInteractionResponseMessage, CreateMessage, CreateSelectMenu, CreateSelectMenuKind,
-    CreateSelectMenuOption, CreateThread, EditMessage, EventHandler, GatewayIntents, Http,
-    Interaction, MessageId, Ready,
+    ActionRowComponent, ButtonStyle, ChannelId, ChannelType, Colour, ComponentInteractionDataKind,
+    Context, CreateActionRow, CreateButton, CreateEmbed, CreateInputText,
+    CreateInteractionResponse, CreateInteractionResponseMessage, CreateMessage, CreateModal,
+    CreateSelectMenu, CreateSelectMenuKind, CreateSelectMenuOption, CreateThread, EditMessage,
+    EventHandler, GatewayIntents, Http, InputTextStyle, Interaction, MessageId, Ready,
 };
 
 const ACE_CLAIM_PREFIX: &str = "ace_claim:";
+const ACE_NOTES_PREFIX: &str = "aceN:";
 
 struct Config {
     discord_token: String,
@@ -65,6 +66,58 @@ impl EventHandler for Handler {
     }
 
     async fn interaction_create(&self, ctx: Context, interaction: Interaction) {
+        // Notes modal submit → claim with the times carried in the modal id + the typed notes.
+        if let Interaction::Modal(ms) = &interaction {
+            let Some(rest) = ms.data.custom_id.strip_prefix(ACE_NOTES_PREFIX) else {
+                return;
+            };
+            let parts: Vec<&str> = rest.splitn(3, ':').collect();
+            if parts.len() != 3 {
+                return;
+            }
+            let (request_id, start, end) = (parts[0], parts[1], parts[2]);
+            let mut notes = None;
+            for row in &ms.data.components {
+                for comp in &row.components {
+                    if let ActionRowComponent::InputText(it) = comp
+                        && it.custom_id == "notes"
+                    {
+                        notes = it
+                            .value
+                            .as_deref()
+                            .map(str::trim)
+                            .filter(|s| !s.is_empty())
+                            .map(str::to_owned);
+                    }
+                }
+            }
+            let discord_user = ms.user.id.get().to_string();
+            let content = match self
+                .api
+                .claim_ace_via_discord(
+                    request_id,
+                    &discord_user,
+                    notes.as_deref(),
+                    Some(start),
+                    Some(end),
+                )
+                .await
+            {
+                Ok(_) => format!("✅ Claimed {start}–{end}z — thanks for covering this."),
+                Err(e) => claim_error(&e),
+            };
+            // The modal came from the ephemeral picker → collapse it into the result.
+            let resp = CreateInteractionResponse::UpdateMessage(
+                CreateInteractionResponseMessage::new()
+                    .content(content)
+                    .components(vec![]),
+            );
+            if let Err(e) = ms.create_response(&ctx.http, resp).await {
+                tracing::error!(error = %e, "failed to finalize claim from modal");
+            }
+            return;
+        }
+
         let Interaction::Component(mc) = interaction else {
             return;
         };
@@ -132,7 +185,7 @@ impl EventHandler for Handler {
             return;
         }
 
-        // 3) "Claim slot" confirm button → perform the claim with the selected times.
+        // 3) "Claim slot" confirm button → pop a modal for optional notes; the submit does the claim.
         if let Some(rest) = cid.strip_prefix("aceG:") {
             let parts: Vec<&str> = rest.splitn(3, ':').collect();
             let (request_id, start, end) = (parts[0], parts[1], parts[2]);
@@ -145,23 +198,19 @@ impl EventHandler for Handler {
                     .await;
                 return;
             }
-            let discord_user = mc.user.id.get().to_string();
-            let content = match self
-                .api
-                .claim_ace_via_discord(request_id, &discord_user, None, Some(start), Some(end))
+            let modal = CreateModal::new(
+                format!("{ACE_NOTES_PREFIX}{request_id}:{start}:{end}"),
+                format!("Claim {start}–{end}z"),
+            )
+            .components(vec![CreateActionRow::InputText(
+                CreateInputText::new(InputTextStyle::Paragraph, "Notes (optional)", "notes")
+                    .required(false),
+            )]);
+            if let Err(e) = mc
+                .create_response(&ctx.http, CreateInteractionResponse::Modal(modal))
                 .await
             {
-                Ok(_) => format!("✅ Claimed {start}–{end}z — thanks for covering this."),
-                Err(e) => claim_error(&e),
-            };
-            // Collapse the picker into the result.
-            let resp = CreateInteractionResponse::UpdateMessage(
-                CreateInteractionResponseMessage::new()
-                    .content(content)
-                    .components(vec![]),
-            );
-            if let Err(e) = mc.create_response(&ctx.http, resp).await {
-                tracing::error!(error = %e, "failed to finalize claim");
+                tracing::error!(error = %e, "failed to open notes modal");
             }
         }
     }
