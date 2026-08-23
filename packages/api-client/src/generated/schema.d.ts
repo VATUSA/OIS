@@ -2998,6 +2998,17 @@ export interface components {
             cross_time?: string | null;
             /** Format: int64 */
             delay_min: number;
+            /**
+             * Format: int64
+             * @description The delay expressed as extra track distance (nm) at the predicted crossing speed — how much
+             *     further back in the flow this aircraft must effectively be to hold separation.
+             */
+            delay_nm: number;
+            /**
+             * Format: int64
+             * @description Metered delay in seconds (metered crossing − raw ETA), for a precise `+MM:SS` readout.
+             */
+            delay_sec: number;
             dep: string;
             /**
              * Format: int64

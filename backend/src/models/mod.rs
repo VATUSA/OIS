@@ -1113,6 +1113,11 @@ pub struct FcaFlight {
     /// Metered crossing time (after sequencing).
     pub cross_time: Option<DateTime<Utc>>,
     pub delay_min: i64,
+    /// Metered delay in seconds (metered crossing − raw ETA), for a precise `+MM:SS` readout.
+    pub delay_sec: i64,
+    /// The delay expressed as extra track distance (nm) at the predicted crossing speed — how much
+    /// further back in the flow this aircraft must effectively be to hold separation.
+    pub delay_nm: i64,
     /// 1-based sequence in the metered order.
     pub seq: i64,
     /// Release / wheels-up time when a CFR has been issued.
