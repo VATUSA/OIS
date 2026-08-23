@@ -218,8 +218,9 @@ pub fn crossing_for(
 pub struct MeterInput {
     /// Unmetered ETA to the crossing, epoch millis.
     pub eta_ms: i64,
-    /// In AUTO mode airborne aircraft are fixed constraints (never delayed) and ground floats into
-    /// gaps; in MANUAL mode the controller's order rules and airborne crossings are chained too.
+    /// Airborne aircraft sort ahead of advisory ground (they keep priority), but are still separated
+    /// from one another — an airborne crossing is pushed later only when it would conflict with an
+    /// earlier committed crossing, so two aircraft never share a slot.
     pub airborne: bool,
     /// Predicted crossing groundspeed (kt) — used for MIT spacing.
     pub cross_speed: f64,
@@ -296,7 +297,11 @@ pub fn meter(
             seq_of[i] = rank as i64 + 1;
         }
     } else {
-        // Auto: pinned (airborne + frozen) first, then advisory ground floats.
+        // Auto: pinned (airborne + issued CFR) sort ahead of advisory ground so they keep priority;
+        // then every crossing is separated in that order. Each aircraft takes the earliest slot at or
+        // after its ETA that is clear of the already-committed crossings — so it's pushed later ONLY
+        // when it would actually conflict (two well-spaced aircraft both stay "on time"). An issued
+        // CFR keeps its frozen time (it was spaced from the others when it was released).
         let pinned = |c: &MeterInput| c.airborne || c.frozen_ms.is_some();
         let mut o: Vec<usize> = (0..n).collect();
         o.sort_by(|&a, &b| {
@@ -307,11 +312,10 @@ pub fn meter(
         let mut committed: Vec<i64> = Vec::new();
         for &i in &o {
             let c = &cands[i];
-            sched[i] = if c.airborne {
-                c.eta_ms
-            } else if let Some(f) = c.frozen_ms {
+            sched[i] = if let Some(f) = c.frozen_ms {
                 f
             } else {
+                // Airborne and ground alike: no two crossings may share a slot.
                 earliest_slot(c.eta_ms, &committed, sep_ms(c))
             };
             committed.push(sched[i]);
@@ -595,6 +599,49 @@ mod tests {
         let out = meter(&cands, "rate", 30, 15, None);
         assert_eq!(out[1].sched_ms, 100_000); // frozen stays put
         assert_eq!(out[0].sched_ms, 220_000); // advisory floats 120s after it
+    }
+
+    #[test]
+    fn auto_separates_conflicting_airborne_crossings() {
+        // Two airborne aircraft would cross within the separation → the later one is pushed back so
+        // they never share a slot (the real bug: pinned crossings weren't separated). A third, well
+        // clear, stays on time.
+        let cands = vec![
+            MeterInput {
+                eta_ms: 0,
+                airborne: true,
+                cross_speed: 400.0,
+                frozen_ms: None,
+            },
+            MeterInput {
+                eta_ms: 30_000, // within the 120s separation of #0
+                airborne: true,
+                cross_speed: 400.0,
+                frozen_ms: None,
+            },
+            MeterInput {
+                eta_ms: 400_000, // well clear
+                airborne: true,
+                cross_speed: 400.0,
+                frozen_ms: None,
+            },
+        ];
+        let out = meter(&cands, "rate", 30, 15, None); // 120s separation
+        assert_eq!(out[0].sched_ms, 0);
+        assert_eq!(
+            out[1].sched_ms, 120_000,
+            "second airborne bumped clear of the first"
+        );
+        assert_eq!(out[1].delay_sec, 90); // 120_000 − 30_000
+        assert_ne!(
+            out[0].sched_ms, out[1].sched_ms,
+            "no two crossings share a slot"
+        );
+        assert_eq!(
+            out[2].sched_ms, 400_000,
+            "well-clear airborne stays on time"
+        );
+        assert_eq!(out[2].delay_sec, 0);
     }
 
     #[test]
