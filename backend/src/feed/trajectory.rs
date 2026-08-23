@@ -13,6 +13,11 @@ pub const CLIMB_FPM_LOW: f64 = 2000.0;
 pub const CLIMB_FPM_HIGH: f64 = 1500.0;
 /// Fallback groundspeed when nothing better is known (kt).
 pub const DEFAULT_GROUND_GS: f64 = 250.0;
+/// Upper bound on a *believable* filed cruise TAS (kt). Pilots sometimes file garbage (e.g. `4800`),
+/// and since the ETA clamps groundspeed only *relative* to TAS, an absurd value would collapse the
+/// transit time and shoot the aircraft to the front of the sequence. Anything above this is treated
+/// as unfiled and replaced with the altitude-based default. Comfortably above any real airliner.
+pub const MAX_PLAUSIBLE_TAS: f64 = 700.0;
 
 /// Parse a filed cruise-altitude string (`"350"`, `"FL350"`, `"35000"`) to feet. Values
 /// ≤ 600 are treated as flight levels (×100); junk falls back to 35,000 ft.
@@ -28,9 +33,10 @@ pub fn parse_alt_ft(s: &str) -> f64 {
     if n < 1000.0 { 35000.0 } else { n }
 }
 
-/// Filed TAS (kt) with a sane fallback estimated from cruise altitude.
+/// Filed TAS (kt) with a sane fallback estimated from cruise altitude. A filed value outside the
+/// believable band (too slow, or garbage like `4800`) is discarded for the altitude-based default.
 pub fn tas_or_default(tas: f64, cruise_alt_ft: f64) -> f64 {
-    if tas >= 60.0 {
+    if (60.0..=MAX_PLAUSIBLE_TAS).contains(&tas) {
         return tas;
     }
     if cruise_alt_ft >= 28000.0 {
@@ -129,6 +135,10 @@ mod tests {
         assert_eq!(tas_or_default(0.0, 35000.0), 440.0);
         assert_eq!(tas_or_default(0.0, 16000.0), 300.0);
         assert_eq!(tas_or_default(0.0, 5000.0), 170.0);
+        // Garbage filed TAS (e.g. 4800) is rejected for the altitude default — the real-world bug
+        // where a mis-filed cruise speed shot an aircraft to the front of the metering sequence.
+        assert_eq!(tas_or_default(4800.0, 32000.0), 440.0);
+        assert_eq!(tas_or_default(700.0, 32000.0), 700.0); // the cap itself is still believable
     }
 
     #[test]
