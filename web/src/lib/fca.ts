@@ -316,6 +316,7 @@ export function useClearRelease(fcaId: string) {
 export function useReorderFca(fcaId: string) {
   const queryClient = useQueryClient();
   const toast = useToast();
+  const key = ["fca-traffic", fcaId] as const;
   return useMutation({
     mutationFn: async (order: string[]) => {
       const { error } = await ois.PUT("/api/v1/flow/fcas/{id}/order", {
@@ -324,11 +325,32 @@ export function useReorderFca(fcaId: string) {
       });
       if (error) throw new Error("reorder failed");
     },
-    onSuccess: () => {
-      queryClient.invalidateQueries({ queryKey: ["fca-traffic", fcaId] });
+    // Optimistically apply the new order so the dropped row stays put instead of snapping back
+    // while the server round-trips; reconciled by the invalidate in onSettled.
+    onMutate: async (order: string[]) => {
+      await queryClient.cancelQueries({ queryKey: key });
+      const prev = queryClient.getQueryData<FcaFlight[]>(key);
+      if (prev) {
+        const rank = new Map(order.map((cs, i) => [cs, i]));
+        const next = [...prev]
+          .sort(
+            (a, b) =>
+              (rank.get(a.callsign) ?? Number.MAX_SAFE_INTEGER) -
+              (rank.get(b.callsign) ?? Number.MAX_SAFE_INTEGER),
+          )
+          .map((f, i) => ({ ...f, seq: i + 1 }));
+        queryClient.setQueryData(key, next);
+      }
+      return { prev };
+    },
+    onError: (_e, _order, ctx) => {
+      if (ctx?.prev) queryClient.setQueryData(key, ctx.prev);
+      toast.error("Couldn’t reorder");
+    },
+    onSettled: () => {
+      queryClient.invalidateQueries({ queryKey: key });
       queryClient.invalidateQueries({ queryKey: ["fcas"] });
     },
-    onError: () => toast.error("Couldn’t reorder"),
   });
 }
 
