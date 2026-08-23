@@ -100,7 +100,12 @@ pub(crate) fn event_time_options(
     let fmt = |d: DateTime<Utc>| d.format("%H%M").to_string();
     let label = format!("{}–{}z", fmt(start), fmt(end));
     let total_min = (end - start).num_minutes().max(0);
-    let step = if total_min / 30 + 1 > 25 { 60 } else { 30 };
+    // Prefer 15-min slots; coarsen if the window would exceed Discord's 25-option select cap.
+    // ≤25 options means total_min/step + 1 ≤ 25, i.e. total_min/step < 25.
+    let step = [15, 30, 60]
+        .into_iter()
+        .find(|s| total_min / s < 25)
+        .unwrap_or(60);
     let mut opts = Vec::new();
     let mut t = start;
     while t <= end && opts.len() < 25 {
