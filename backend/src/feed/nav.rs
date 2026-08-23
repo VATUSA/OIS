@@ -245,6 +245,25 @@ impl NavData {
         self.procedures.len()
     }
 
+    /// Whether `token` names a known nav element (fix, navaid, airway, or procedure). Used to flag
+    /// typos in an FCA's route-fix filter. Mirrors the trailing-digit stripping that `route_has_fix`
+    /// applies to filed tokens, so a SID/STAR name like `MLLET5` is recognized via its fix `MLLET`.
+    pub fn knows(&self, token: &str) -> bool {
+        let t = token.split('/').next().unwrap_or("").to_ascii_uppercase();
+        if t.is_empty() {
+            return false;
+        }
+        if self.fixes.contains_key(&t)
+            || self.navaids.contains_key(&t)
+            || self.airways.contains_key(&t)
+            || self.procedures.contains_key(&t)
+        {
+            return true;
+        }
+        let stripped = t.trim_end_matches(|c: char| c.is_ascii_digit());
+        stripped != t && (self.fixes.contains_key(stripped) || self.navaids.contains_key(stripped))
+    }
+
     /// Split a filed route into cleaned tokens (uppercased; `DCT` and flight-rule noise
     /// like `VFR`/`IFR` removed).
     pub fn parse_tokens(route: &str) -> Vec<String> {
@@ -907,6 +926,25 @@ mod tests {
                 "{tok} resolved outside Hawaii: {lat},{lon}"
             );
         }
+    }
+
+    #[test]
+    fn knows_flags_unknown_route_fixes() {
+        let navaids = r#"{"RDU":[[35.9,-78.8]]}"#;
+        let fixes = r#"{"MLLET":[[35.0,-80.0]],"STOCR":[[34.0,-81.0]]}"#;
+        let nav = NavData::from_json(navaids, fixes, "{}", "{}", "{}", "{}", "{}");
+
+        assert!(nav.knows("MLLET"), "real fix");
+        assert!(nav.knows("mllet"), "case-insensitive");
+        assert!(
+            nav.knows("MLLET5"),
+            "STAR name maps to its fix via digit strip"
+        );
+        assert!(nav.knows("STOCR"));
+        assert!(nav.knows("RDU"), "navaid");
+        assert!(!nav.knows("MLLETT"), "the typo from the bug report");
+        assert!(!nav.knows("ZZZZZ"), "not a fix");
+        assert!(!nav.knows(""), "empty");
     }
 
     #[test]

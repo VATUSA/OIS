@@ -2,6 +2,8 @@ use axum::{
     Router, middleware,
     routing::{delete, get, patch, post, put},
 };
+use utoipa::OpenApi;
+use utoipa_swagger_ui::SwaggerUi;
 
 use crate::{
     auth::middleware::resolve_current_user,
@@ -11,6 +13,7 @@ use crate::{
         facilities, facility_map, feed, flow, gdp, health, integration, preferences, public,
         runway, service_accounts, stats, tmu, users, webhooks,
     },
+    openapi::ApiDoc,
     realtime,
     state::AppState,
 };
@@ -19,6 +22,9 @@ pub fn build_router(state: AppState) -> Router {
     Router::new()
         .route("/health", get(health::health))
         .route("/docs/api/v1/openapi.json", get(docs::openapi_json))
+        // Interactive API docs (Swagger UI), served from the same generated spec. Try-it-out calls
+        // hit the real endpoints and obey their auth (session cookie or bearer token).
+        .merge(SwaggerUi::new("/docs/swagger").url("/docs/swagger/openapi.json", ApiDoc::openapi()))
         .route("/api/v1/auth/vatsim/login", get(auth::vatsim_login))
         .route("/api/v1/auth/vatsim/callback", get(auth::vatsim_callback))
         .route("/api/v1/auth/logout", post(auth::logout))
@@ -293,6 +299,7 @@ pub fn build_router(state: AppState) -> Router {
         .route("/api/v1/flow/data-status", get(flow::data_status))
         .route("/api/v1/flow/data-refresh", post(flow::data_refresh))
         .route("/api/v1/flow/route-coverage", get(flow::route_coverage))
+        .route("/api/v1/flow/validate-fixes", get(flow::validate_fixes))
         .route(
             "/api/v1/flow/runway/{icao}",
             get(runway::get_runway).put(runway::put_runway),

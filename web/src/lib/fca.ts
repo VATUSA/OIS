@@ -15,6 +15,28 @@ export type AtcArea = components["schemas"]["AtcArea"];
 export type AtcCenter = components["schemas"]["AtcCenter"];
 export type AtcPosition = components["schemas"]["AtcPosition"];
 export type FcaFlight = components["schemas"]["FcaFlight"];
+export type FixValidation = components["schemas"]["FixValidationBody"];
+
+/**
+ * Which of the given route-fix tokens aren't real nav fixes (typos that would silently exclude
+ * traffic). Debounce `fixes` before passing it in. Needs `flow.fca.read`.
+ */
+export function useValidateFixes(fixes: string) {
+  const trimmed = fixes.trim();
+  return useQuery({
+    queryKey: ["validate-fixes", trimmed],
+    enabled: trimmed.length > 0,
+    queryFn: async (): Promise<FixValidation> => {
+      const { data, error } = await ois.GET("/api/v1/flow/validate-fixes", {
+        params: { query: { fixes: trimmed } },
+      });
+      if (error || !data) throw new Error("validate failed");
+      return data;
+    },
+    staleTime: 60_000,
+    retry: false,
+  });
+}
 export type AircraftRoute = components["schemas"]["AircraftRoute"];
 export type DataStatus = components["schemas"]["DataStatus"];
 export type CoverageReport = components["schemas"]["CoverageReport"];

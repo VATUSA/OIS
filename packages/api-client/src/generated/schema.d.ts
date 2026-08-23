@@ -1314,6 +1314,26 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/v1/flow/validate-fixes": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * Report which of the submitted route-fix tokens aren't real nav fixes — so the FCA editor can flag
+         *     typos (e.g. `MLLETT` for `MLLET`) that would silently exclude matching traffic.
+         */
+        get: operations["validate_fixes"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/v1/forecast/{icao}": {
         parameters: {
             query?: never;
@@ -3031,6 +3051,13 @@ export interface components {
             prefiles: number;
             /** @description The feed's own `update_timestamp` from VATSIM. */
             source_timestamp?: string | null;
+        };
+        /**
+         * @description Route-fix tokens that don't resolve to a known nav fix/navaid/airway/procedure — likely typos in
+         *     an FCA's route-fix filter.
+         */
+        FixValidationBody: {
+            unknown: string[];
         };
         /**
          * @description Everything currently affecting one flight (by callsign), for the public "my
@@ -7985,6 +8012,34 @@ export interface operations {
                 };
                 content: {
                     "application/json": components["schemas"]["TrafficAircraft"][];
+                };
+            };
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+        };
+    };
+    validate_fixes: {
+        parameters: {
+            query?: {
+                /** @description Space/comma-separated fix tokens */
+                fixes?: string;
+            };
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["FixValidationBody"];
                 };
             };
             401: {
