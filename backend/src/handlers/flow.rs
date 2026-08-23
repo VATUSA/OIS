@@ -84,11 +84,13 @@ fn filed_altitude_ft(filed: &str) -> Option<i64> {
     Some(if n <= 600 { n * 100 } else { n })
 }
 
-/// Membership filters (dest / origin / fix / altitude). Altitude is matched against the **filed**
-/// cruise altitude — a climbing or descending aircraft is included by the level it filed for, not
-/// where it currently is — and applies to ground and airborne alike. ARTCC scope is enforced
-/// separately by `passes_scope` on the crossing.
-fn passes_filters(fca: &FcaBody, fp: &FlightPlan) -> bool {
+/// Membership filters (dest / origin / fix / altitude). `cur_alt_ft` is the aircraft's live altitude
+/// (`None` for a prefile with no position). Altitude membership matches if **either** the filed cruise
+/// **or** the current altitude falls in the FCA's band: a climbing aircraft is caught by its filed
+/// cruise, and one that filed a bogus-low altitude but is actually cruising in-band is caught by its
+/// current altitude. Unknown-on-both ⇒ not excluded. ARTCC scope is enforced separately by
+/// `passes_scope` on the crossing.
+fn passes_filters(fca: &FcaBody, fp: &FlightPlan, cur_alt_ft: Option<i64>) -> bool {
     if !fca.dests.is_empty() && !fca.dests.iter().any(|d| airport_match(d, &fp.arrival)) {
         return false;
     }
@@ -98,21 +100,39 @@ fn passes_filters(fca: &FcaBody, fp: &FlightPlan) -> bool {
     if !fca.fixes.is_empty() && !fca.fixes.iter().any(|f| route_has_fix(&fp.route, f)) {
         return false;
     }
-    if (fca.min_fl.is_some() || fca.max_fl.is_some())
-        && let Some(filed_ft) = filed_altitude_ft(&fp.altitude)
-    {
-        if let Some(min) = fca.min_fl
-            && filed_ft < min as i64 * 100
-        {
-            return false;
-        }
-        if let Some(max) = fca.max_fl
-            && filed_ft > max as i64 * 100
-        {
-            return false;
-        }
+    altitude_matches(
+        filed_altitude_ft(&fp.altitude),
+        cur_alt_ft.filter(|a| *a > 0),
+        fca.min_fl,
+        fca.max_fl,
+    )
+}
+
+/// Whether an aircraft's altitude qualifies for an FCA band. Matches if **either** the filed cruise
+/// or the current altitude sits within `[min_fl, max_fl]` (either bound may be open). When neither
+/// altitude is known, it isn't excluded on altitude. No band at all ⇒ always matches.
+fn altitude_matches(
+    filed_ft: Option<i64>,
+    cur_alt_ft: Option<i64>,
+    min_fl: Option<i32>,
+    max_fl: Option<i32>,
+) -> bool {
+    if min_fl.is_none() && max_fl.is_none() {
+        return true;
     }
-    true
+    let lo = min_fl.map(|m| m as i64 * 100);
+    let hi = max_fl.map(|m| m as i64 * 100);
+    let in_band = |alt: i64| lo.is_none_or(|l| alt >= l) && hi.is_none_or(|h| alt <= h);
+    let filed_ok = filed_ft.map(in_band);
+    let current_ok = cur_alt_ft.map(in_band);
+    match (filed_ok, current_ok) {
+        // Known on at least one → must be in band on at least one.
+        (Some(a), Some(b)) => a || b,
+        (Some(a), None) => a,
+        (None, Some(b)) => b,
+        // Unknown on both → don't exclude.
+        (None, None) => true,
+    }
 }
 
 /// Taxi + spool-up allowance added to a ground aircraft's flight time (the profile model
@@ -396,7 +416,7 @@ pub async fn fca_counts(
     let airspace = state.airspace.as_ref();
 
     // Resolve each aircraft's route once, then test it against every active FCA.
-    let mut tally = |fp: &FlightPlan, lat: f64, lon: f64, hdg: i64, gs: i64| {
+    let mut tally = |fp: &FlightPlan, lat: f64, lon: f64, hdg: i64, gs: i64, alt: i64| {
         let airborne = gs >= 50;
         let Some(path) = fca::route_path(
             nav,
@@ -412,7 +432,7 @@ pub async fn fca_counts(
             return;
         };
         for f in &active {
-            if !passes_filters(f, fp) {
+            if !passes_filters(f, fp, Some(alt)) {
                 continue;
             }
             // Match the metering board: only count crossings within the FCA's ARTCC scope.
@@ -426,12 +446,19 @@ pub async fn fca_counts(
 
     for p in &snap.data.pilots {
         if let Some(fp) = &p.flight_plan {
-            tally(fp, p.latitude, p.longitude, p.heading, p.groundspeed);
+            tally(
+                fp,
+                p.latitude,
+                p.longitude,
+                p.heading,
+                p.groundspeed,
+                p.altitude,
+            );
         }
     }
     for pf in &snap.data.prefiles {
         if let Some(fp) = &pf.flight_plan {
-            tally(fp, 0.0, 0.0, 0, 0);
+            tally(fp, 0.0, 0.0, 0, 0, 0);
         }
     }
     Ok(Json(counts))
@@ -744,7 +771,7 @@ pub async fn flight_advisory(
             // crossing. If it doesn't cross, metering this FCA can't produce a slot for it.
             let crosses = match (&path, &fp) {
                 (Some(p), Some(plan)) => {
-                    passes_filters(fca, plan)
+                    passes_filters(fca, plan, Some(altitude))
                         && fca::crosses(p, &fca.points.0, airborne, lat, lon, heading).is_some_and(
                             |c| passes_scope(fca, state.airspace.as_ref(), c.lat, c.lon),
                         )
@@ -1019,7 +1046,7 @@ fn build_candidates(
     for p in &data.pilots {
         let Some(fp) = &p.flight_plan else { continue };
         let airborne = p.groundspeed >= 50;
-        if !passes_filters(fca, fp) {
+        if !passes_filters(fca, fp, Some(p.altitude)) {
             continue;
         }
         let Some(path) = fca::route_path(
@@ -1079,7 +1106,7 @@ fn build_candidates(
 
     for pf in &data.prefiles {
         let Some(fp) = &pf.flight_plan else { continue };
-        if !passes_filters(fca, fp) {
+        if !passes_filters(fca, fp, None) {
             continue;
         }
         let Some(path) = fca::route_path(
@@ -1514,7 +1541,32 @@ pub async fn reorder_fca(
 
 #[cfg(test)]
 mod filed_altitude_tests {
-    use super::filed_altitude_ft;
+    use super::{altitude_matches, filed_altitude_ft};
+
+    #[test]
+    fn altitude_band_matches_filed_or_current() {
+        // Band FL240–600.
+        let band = (Some(240), Some(600));
+        // UAL3430: filed FL130 (out) but cruising FL255 (in) → matches on current.
+        assert!(altitude_matches(Some(13000), Some(25588), band.0, band.1));
+        // Original climber: filed FL350 (in) but currently FL180 (out) → matches on filed.
+        assert!(altitude_matches(Some(35000), Some(18000), band.0, band.1));
+        // Genuinely out of band on both (low GA): excluded.
+        assert!(!altitude_matches(Some(8000), Some(8000), band.0, band.1));
+        // Overflight above the band on both: excluded.
+        assert!(!altitude_matches(
+            Some(45000),
+            Some(45000),
+            Some(200),
+            Some(300)
+        ));
+        // Prefile with only a filed altitude in band: matches.
+        assert!(altitude_matches(Some(35000), None, band.0, band.1));
+        // Nothing known → not excluded.
+        assert!(altitude_matches(None, None, band.0, band.1));
+        // No band at all → always matches.
+        assert!(altitude_matches(Some(8000), Some(8000), None, None));
+    }
 
     #[test]
     fn parses_flight_levels_and_feet() {
