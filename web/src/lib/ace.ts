@@ -5,75 +5,130 @@ import {useToast} from "@ois/ui";
 import {ois} from "./api";
 
 export type AceRequest = components["schemas"]["AceRequestBody"];
+export type AceClaim = components["schemas"]["AceClaimBody"];
 export type AceTeamMember = components["schemas"]["AceTeamMemberBody"];
 export type CreateAceRequest = components["schemas"]["CreateAceRequestRequest"];
+export type ClaimAceRequest = components["schemas"]["ClaimAceRequest"];
 export type UpsertAceTeamMember = components["schemas"]["UpsertAceTeamMemberRequest"];
 
-const REQUESTS = ["ace-requests"] as const;
 const TEAM = ["ace-team"] as const;
 
-/** The ACE support request queue (optionally filtered by status). Needs `ace.requests.read`. */
-export function useAceRequests(status?: string) {
+/** The ACE support requests for one event (optionally filtered by status). Needs `ace.requests.read`. */
+export function useEventAce(eventId: number, status?: string) {
   return useQuery({
-    queryKey: [...REQUESTS, status ?? "all"],
+    queryKey: ["event-ace", eventId, status ?? "all"],
     queryFn: async (): Promise<AceRequest[]> => {
-      const { data, error } = await ois.GET("/api/v1/ace/requests", {
-        params: { query: status ? { status } : {} },
+      const { data, error } = await ois.GET("/api/v1/events/{id}/ace", {
+        params: {
+          path: { id: eventId },
+          query: status ? { status } : {},
+        },
       });
       if (error || !data) throw new Error("failed to load ACE requests");
       return data;
     },
+    enabled: Number.isFinite(eventId),
     refetchInterval: 30_000,
   });
 }
 
-/** Open an ACE support request. Needs `ace.requests.create`. */
-export function useCreateAceRequest() {
+/** Open an ACE support request on an event. Needs `ace.requests.create`. */
+export function useCreateEventAce(eventId: number) {
   const qc = useQueryClient();
   const toast = useToast();
   return useMutation({
     mutationFn: async (body: CreateAceRequest): Promise<AceRequest> => {
-      const { data, error } = await ois.POST("/api/v1/ace/requests", { body });
+      const { data, error } = await ois.POST("/api/v1/events/{id}/ace", {
+        params: { path: { id: eventId } },
+        body,
+      });
       if (error || !data) throw new Error("create failed");
       return data;
     },
     onSuccess: () => {
-      qc.invalidateQueries({ queryKey: REQUESTS });
+      qc.invalidateQueries({ queryKey: ["event-ace", eventId] });
       toast.success("ACE support requested");
     },
     onError: () => toast.error("Couldn’t submit the request"),
   });
 }
 
-/** Claim an open request. Needs `ace.requests.claim`. */
-export function useClaimAceRequest() {
+/** Delete an ACE request. Needs `ace.requests.decide`. */
+export function useDeleteEventAce(eventId: number) {
   const qc = useQueryClient();
   const toast = useToast();
   return useMutation({
-    mutationFn: async (id: string): Promise<void> => {
-      const { error } = await ois.POST("/api/v1/ace/requests/{id}/claim", {
-        params: { path: { id } },
+    mutationFn: async (req: string): Promise<void> => {
+      const { error } = await ois.DELETE("/api/v1/events/{id}/ace/{req}", {
+        params: { path: { id: eventId, req } },
       });
-      if (error) throw new Error("claim failed");
+      if (error) throw new Error("delete failed");
     },
-    onSuccess: () => qc.invalidateQueries({ queryKey: REQUESTS }),
+    onSuccess: () => {
+      qc.invalidateQueries({ queryKey: ["event-ace", eventId] });
+      toast.success("Request removed");
+    },
+    onError: () => toast.error("Couldn’t remove the request"),
+  });
+}
+
+/** Claim a slot on an open request. Needs `ace.requests.claim`. */
+export function useClaimEventAce(eventId: number) {
+  const qc = useQueryClient();
+  const toast = useToast();
+  return useMutation({
+    mutationFn: async (args: { req: string; body: ClaimAceRequest }): Promise<AceRequest> => {
+      const { data, error } = await ois.POST("/api/v1/events/{id}/ace/{req}/claim", {
+        params: { path: { id: eventId, req: args.req } },
+        body: args.body,
+      });
+      if (error || !data) throw new Error("claim failed");
+      return data;
+    },
+    onSuccess: () => {
+      qc.invalidateQueries({ queryKey: ["event-ace", eventId] });
+      toast.success("Slot claimed");
+    },
     onError: () => toast.error("Couldn’t claim — someone may have beaten you to it"),
   });
 }
 
-/** Complete or cancel a request. Needs `ace.requests.decide`. */
-export function useDecideAceRequest() {
+/** Release your own claim on a request. Needs `ace.requests.claim`. */
+export function useReleaseEventAce(eventId: number) {
   const qc = useQueryClient();
   const toast = useToast();
   return useMutation({
-    mutationFn: async (args: { id: string; outcome: "completed" | "cancelled" }): Promise<void> => {
-      const { error } = await ois.POST("/api/v1/ace/requests/{id}/decide", {
-        params: { path: { id: args.id } },
+    mutationFn: async (req: string): Promise<AceRequest> => {
+      const { data, error } = await ois.DELETE("/api/v1/events/{id}/ace/{req}/claim", {
+        params: { path: { id: eventId, req } },
+      });
+      if (error || !data) throw new Error("release failed");
+      return data;
+    },
+    onSuccess: () => {
+      qc.invalidateQueries({ queryKey: ["event-ace", eventId] });
+      toast.success("Claim released");
+    },
+    onError: () => toast.error("Couldn’t release the claim"),
+  });
+}
+
+/** Complete or cancel a request. Needs `ace.requests.decide`. */
+export function useDecideEventAce(eventId: number) {
+  const qc = useQueryClient();
+  const toast = useToast();
+  return useMutation({
+    mutationFn: async (args: { req: string; outcome: string }): Promise<AceRequest> => {
+      const { data, error } = await ois.POST("/api/v1/events/{id}/ace/{req}/decide", {
+        params: { path: { id: eventId, req: args.req } },
         body: { outcome: args.outcome },
       });
-      if (error) throw new Error("decide failed");
+      if (error || !data) throw new Error("decide failed");
+      return data;
     },
-    onSuccess: () => qc.invalidateQueries({ queryKey: REQUESTS }),
+    onSuccess: () => {
+      qc.invalidateQueries({ queryKey: ["event-ace", eventId] });
+    },
     onError: () => toast.error("Couldn’t update the request"),
   });
 }

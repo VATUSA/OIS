@@ -15,12 +15,14 @@ use std::time::Duration;
 use ois_client::{OisClient, OutboundJob};
 use serde_json::{Value, json};
 use serenity::all::{
-    ButtonStyle, ChannelId, ChannelType, Colour, Context, CreateActionRow, CreateButton,
-    CreateEmbed, CreateInteractionResponse, CreateInteractionResponseMessage, CreateMessage,
-    CreateThread, EditMessage, EventHandler, GatewayIntents, Http, Interaction, MessageId, Ready,
+    ActionRowComponent, ButtonStyle, ChannelId, ChannelType, Colour, Context, CreateActionRow,
+    CreateButton, CreateEmbed, CreateInputText, CreateInteractionResponse,
+    CreateInteractionResponseMessage, CreateMessage, CreateModal, CreateThread, EditMessage,
+    EventHandler, GatewayIntents, Http, InputTextStyle, Interaction, MessageId, Ready,
 };
 
 const ACE_CLAIM_PREFIX: &str = "ace_claim:";
+const ACE_MODAL_PREFIX: &str = "ace_modal:";
 
 struct Config {
     discord_token: String,
@@ -63,40 +65,103 @@ impl EventHandler for Handler {
     }
 
     async fn interaction_create(&self, ctx: Context, interaction: Interaction) {
-        let Interaction::Component(mc) = interaction else {
-            return;
-        };
-        let Some(request_id) = mc.data.custom_id.strip_prefix(ACE_CLAIM_PREFIX) else {
-            return;
-        };
-        let discord_user = mc.user.id.get().to_string();
-        let content = match self
-            .api
-            .claim_ace_via_discord(request_id, &discord_user)
-            .await
-        {
-            Ok(_) => "✅ Claimed — thanks for covering this.".to_string(),
-            Err(e) => match e.status() {
-                Some(403) => {
-                    "No OIS account is linked to your Discord. Add your Discord to your VATUSA \
-                     profile, then sign in to OIS to sync it."
-                        .to_string()
+        match interaction {
+            // Claim button → pop a modal to collect notes + availability window (Zulu HHMM).
+            Interaction::Component(mc) => {
+                let Some(request_id) = mc.data.custom_id.strip_prefix(ACE_CLAIM_PREFIX) else {
+                    return;
+                };
+                let modal = CreateModal::new(
+                    format!("{ACE_MODAL_PREFIX}{request_id}"),
+                    "Claim an ACE slot",
+                )
+                .components(vec![
+                    CreateActionRow::InputText(
+                        CreateInputText::new(InputTextStyle::Paragraph, "Notes", "notes")
+                            .required(false),
+                    ),
+                    CreateActionRow::InputText(
+                        CreateInputText::new(InputTextStyle::Short, "Start (Zulu HHMM)", "start")
+                            .placeholder("2330")
+                            .required(false),
+                    ),
+                    CreateActionRow::InputText(
+                        CreateInputText::new(InputTextStyle::Short, "End (Zulu HHMM)", "end")
+                            .placeholder("0130")
+                            .required(false),
+                    ),
+                ]);
+                if let Err(e) = mc
+                    .create_response(&ctx.http, CreateInteractionResponse::Modal(modal))
+                    .await
+                {
+                    tracing::error!(error = %e, "failed to open claim modal");
                 }
-                Some(409) => "Someone already claimed this request.".to_string(),
-                Some(404) => "That request no longer exists.".to_string(),
-                _ => {
-                    tracing::error!(error = %e, request_id, "ace claim callback failed");
-                    "Couldn’t claim right now — please try again.".to_string()
+            }
+            // Modal submit → perform the claim on behalf of the linked user.
+            Interaction::Modal(ms) => {
+                let Some(request_id) = ms.data.custom_id.strip_prefix(ACE_MODAL_PREFIX) else {
+                    return;
+                };
+                let (mut notes, mut start, mut end) = (None, None, None);
+                for row in &ms.data.components {
+                    for comp in &row.components {
+                        if let ActionRowComponent::InputText(it) = comp {
+                            let val = it
+                                .value
+                                .as_deref()
+                                .map(str::trim)
+                                .filter(|s| !s.is_empty())
+                                .map(str::to_owned);
+                            match it.custom_id.as_str() {
+                                "notes" => notes = val,
+                                "start" => start = val,
+                                "end" => end = val,
+                                _ => {}
+                            }
+                        }
+                    }
                 }
-            },
-        };
-        let response = CreateInteractionResponse::Message(
-            CreateInteractionResponseMessage::new()
-                .content(content)
-                .ephemeral(true),
-        );
-        if let Err(e) = mc.create_response(&ctx.http, response).await {
-            tracing::error!(error = %e, "failed to respond to claim interaction");
+                let discord_user = ms.user.id.get().to_string();
+                let content = match self
+                    .api
+                    .claim_ace_via_discord(
+                        request_id,
+                        &discord_user,
+                        notes.as_deref(),
+                        start.as_deref(),
+                        end.as_deref(),
+                    )
+                    .await
+                {
+                    Ok(_) => "✅ Claimed — thanks for covering this.".to_string(),
+                    Err(e) => match e.status() {
+                        Some(403) => "No OIS account is linked to your Discord. Add your Discord \
+                                      to your VATUSA profile, then sign in to OIS to sync it."
+                            .to_string(),
+                        Some(409) => {
+                            "This request is full, or you've already claimed a slot.".to_string()
+                        }
+                        Some(404) => "That request no longer exists.".to_string(),
+                        Some(400) => {
+                            "Those times aren't within the event window — try again.".to_string()
+                        }
+                        _ => {
+                            tracing::error!(error = %e, request_id, "ace claim callback failed");
+                            "Couldn't claim right now — please try again.".to_string()
+                        }
+                    },
+                };
+                let response = CreateInteractionResponse::Message(
+                    CreateInteractionResponseMessage::new()
+                        .content(content)
+                        .ephemeral(true),
+                );
+                if let Err(e) = ms.create_response(&ctx.http, response).await {
+                    tracing::error!(error = %e, "failed to respond to claim modal");
+                }
+            }
+            _ => {}
         }
     }
 }
@@ -183,23 +248,64 @@ async fn perform_job(http: &Arc<Http>, job: &OutboundJob) -> Result<Option<Value
     }
 }
 
-async fn post_ace_request(http: &Arc<Http>, p: &Value) -> Result<Option<Value>, String> {
-    let channel = channel(p)?;
+/// Extract "HHMM" from an ISO-8601 timestamp (e.g. `2026-08-23T23:30:00+00:00` → `2330`).
+fn hhmm(iso: &str) -> String {
+    iso.split('T')
+        .nth(1)
+        .map(|t| t.chars().take(5).filter(char::is_ascii_digit).collect())
+        .unwrap_or_default()
+}
+
+/// The ACE request embed: details + an "X/N claimed" slot meter + the claimer lines. Shared by the
+/// initial post (0/N) and the claim/release notify (edits the same message).
+fn ace_embed(p: &Value, claims_count: i64, filled: bool) -> CreateEmbed {
+    let slots = p.get("slots").and_then(Value::as_i64).unwrap_or(1);
     let mut embed = CreateEmbed::new()
         .title("ACE coverage request")
-        .colour(Colour::new(0x5865F2));
+        .colour(Colour::new(if filled { 0x57F287 } else { 0x5865F2 }));
+    if let Some(event) = str_field(p, "event_title") {
+        embed = embed.field("Event", event, false);
+    }
     if let Some(artcc) = str_field(p, "artcc_id") {
         embed = embed.field("ARTCC", artcc, true);
     }
     if let Some(position) = str_field(p, "position") {
         embed = embed.field("Position", position, true);
     }
-    if let Some(by) = str_field(p, "requested_by_name") {
-        embed = embed.field("Requested by", by, true);
-    }
+    embed = embed.field("Slots", format!("{claims_count}/{slots} claimed"), true);
     if let Some(details) = str_field(p, "details") {
         embed = embed.description(details);
     }
+    if let Some(claimers) = p.get("claimers").and_then(Value::as_array)
+        && !claimers.is_empty()
+    {
+        let lines: Vec<String> = claimers
+            .iter()
+            .map(|c| {
+                let name = c.get("name").and_then(Value::as_str).unwrap_or("?");
+                let window = match (
+                    c.get("start_time").and_then(Value::as_str),
+                    c.get("end_time").and_then(Value::as_str),
+                ) {
+                    (Some(s), Some(e)) => format!(" · {}–{}z", hhmm(s), hhmm(e)),
+                    _ => String::new(),
+                };
+                let notes = c
+                    .get("notes")
+                    .and_then(Value::as_str)
+                    .filter(|n| !n.is_empty())
+                    .map(|n| format!(" — {n}"))
+                    .unwrap_or_default();
+                format!("• **{name}**{window}{notes}")
+            })
+            .collect();
+        embed = embed.field("Claimed by", lines.join("\n"), false);
+    }
+    embed
+}
+
+async fn post_ace_request(http: &Arc<Http>, p: &Value) -> Result<Option<Value>, String> {
+    let channel = channel(p)?;
     let request_id = str_field(p, "request_id").ok_or("missing request_id")?;
     let button = CreateButton::new(format!("{ACE_CLAIM_PREFIX}{request_id}"))
         .label("Claim")
@@ -208,7 +314,7 @@ async fn post_ace_request(http: &Arc<Http>, p: &Value) -> Result<Option<Value>, 
         .send_message(
             http,
             CreateMessage::new()
-                .embed(embed)
+                .embed(ace_embed(p, 0, false))
                 .components(vec![CreateActionRow::Buttons(vec![button])]),
         )
         .await
@@ -222,17 +328,26 @@ async fn notify_ace_claim(http: &Arc<Http>, p: &Value) -> Result<Option<Value>, 
         .ok_or("missing message_id")?
         .parse()
         .map_err(|_| "message_id not a snowflake".to_string())?;
-    let claimed_by = str_field(p, "claimed_by_name").unwrap_or("a controller");
-    let embed = CreateEmbed::new()
-        .title("ACE coverage request — claimed")
-        .colour(Colour::new(0x57F287))
-        .field("Claimed by", claimed_by, true);
-    // Drop the button now that it's claimed.
+    let claims_count = p.get("claims_count").and_then(Value::as_i64).unwrap_or(0);
+    let filled = p.get("filled").and_then(Value::as_bool).unwrap_or(false);
+    let request_id = str_field(p, "request_id").ok_or("missing request_id")?;
+
+    // Keep the Claim button while slots remain; drop it once full.
+    let components = if filled {
+        vec![]
+    } else {
+        let button = CreateButton::new(format!("{ACE_CLAIM_PREFIX}{request_id}"))
+            .label("Claim")
+            .style(ButtonStyle::Primary);
+        vec![CreateActionRow::Buttons(vec![button])]
+    };
     channel
         .edit_message(
             http,
             MessageId::new(message_id),
-            EditMessage::new().embed(embed).components(vec![]),
+            EditMessage::new()
+                .embed(ace_embed(p, claims_count, filled))
+                .components(components),
         )
         .await
         .map_err(|e| format!("edit_message failed: {e}"))?;

@@ -19,7 +19,7 @@ use crate::{
         AceRequestBody, AckJobRequest, DiscordAceClaimRequest, DiscordConfigBody, DiscordLinkBody,
         OutboundJobBody, UpsertDiscordConfigRequest,
     },
-    repos::{ace as ace_repo, integration as integration_repo},
+    repos::{ace as ace_repo, events as events_repo, integration as integration_repo},
     state::AppState,
 };
 
@@ -124,9 +124,32 @@ pub async fn discord_ace_claim(
     let user_id = integration_repo::find_user_by_discord_id(p, &payload.discord_user_id)
         .await?
         .ok_or(ApiError::Forbidden)?;
+
+    // Parse the modal's Zulu HHMM against the request's event window (the bot has no per-message state).
+    let request = ace_repo::get_request(p, &id)
+        .await?
+        .ok_or(ApiError::NotFound)?;
+    let event = events_repo::get(p, request.event_id)
+        .await?
+        .ok_or(ApiError::NotFound)?;
+    let start = crate::handlers::ace::parse_hhmm_in_window(
+        payload.start_hhmm.as_deref(),
+        event.start_time,
+        event.end_time,
+    );
+    let end = crate::handlers::ace::parse_hhmm_in_window(
+        payload.end_hhmm.as_deref(),
+        event.start_time,
+        event.end_time,
+    );
+    let notes = payload.notes.as_deref().unwrap_or("").trim().to_string();
+
     let mut tx = p.begin().await.map_err(|_| ApiError::Internal)?;
-    ace_repo::claim_request(&mut tx, &id, &user_id).await?;
+    let (slots, count) =
+        ace_repo::claim_request(&mut tx, &id, &user_id, &notes, start, end).await?;
+    crate::handlers::ace::enqueue_notify(&mut tx, p, &id, slots, count).await?;
     tx.commit().await.map_err(|_| ApiError::Internal)?;
+
     ace_repo::get_request(p, &id)
         .await?
         .map(Json)

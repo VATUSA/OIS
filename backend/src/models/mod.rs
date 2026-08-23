@@ -539,30 +539,6 @@ pub struct AirportForecastBody {
     pub source: String,
 }
 
-/// One facility's ACE staffing request for an event (positions wanted vs signed up).
-#[derive(Debug, Serialize, ToSchema, sqlx::FromRow)]
-pub struct StaffingRequestBody {
-    /// ARTCC id (e.g. ZTL).
-    pub facility: String,
-    pub positions_requested: i32,
-    pub positions_filled: i32,
-    /// open | met | closed
-    pub status: String,
-    pub notes: String,
-    pub updated_at: DateTime<Utc>,
-    pub updated_by: Option<String>,
-}
-
-#[derive(Debug, Deserialize, ToSchema)]
-pub struct UpsertStaffingRequest {
-    pub positions_requested: i32,
-    pub positions_filled: i32,
-    /// open | met | closed
-    pub status: String,
-    #[serde(default)]
-    pub notes: Option<String>,
-}
-
 /// One draft TMI inside a package (kind + the create-shape payload for that kind).
 #[derive(Debug, Serialize, ToSchema, sqlx::FromRow)]
 pub struct TmiPackageItemBody {
@@ -853,23 +829,42 @@ pub struct UpdateEventDebriefRequest {
 
 // --- ACE support ---
 
-/// One ACE support request in the queue. Actor ids are resolved to CID + display name.
+/// One claim on an ACE request — who took a slot, with their notes + availability window (within the
+/// event). Aggregated onto the request via `json_agg`.
+#[derive(Debug, Serialize, Deserialize, ToSchema, sqlx::FromRow)]
+pub struct AceClaimBody {
+    pub cid: i64,
+    pub display_name: String,
+    pub notes: String,
+    pub start_time: Option<DateTime<Utc>>,
+    pub end_time: Option<DateTime<Utc>>,
+    pub claimed_at: DateTime<Utc>,
+}
+
+/// One ACE support request for an event. `slots` positions are claimed one-per-person; "filled" is
+/// derived client-side from `claims_count >= slots`.
 #[derive(Debug, Serialize, ToSchema, sqlx::FromRow)]
 pub struct AceRequestBody {
     pub id: String,
+    pub event_id: i64,
     pub requested_by_cid: Option<i64>,
     pub requested_by_name: Option<String>,
     pub artcc_id: Option<String>,
     pub position: Option<String>,
-    pub requested_for: Option<DateTime<Utc>>,
+    pub slots: i32,
     pub details: String,
-    /// `open` | `claimed` | `completed` | `cancelled`.
+    /// `open` | `completed` | `cancelled`.
     pub status: String,
-    pub claimed_by_name: Option<String>,
-    pub claimed_at: Option<DateTime<Utc>>,
+    #[schema(value_type = Vec<AceClaimBody>)]
+    pub claims: sqlx::types::Json<Vec<AceClaimBody>>,
+    pub claims_count: i64,
     pub decided_by_name: Option<String>,
     pub decided_at: Option<DateTime<Utc>>,
     pub created_at: DateTime<Utc>,
+}
+
+fn default_ace_slots() -> i32 {
+    1
 }
 
 #[derive(Debug, Deserialize, ToSchema)]
@@ -878,9 +873,20 @@ pub struct CreateAceRequestRequest {
     pub artcc_id: Option<String>,
     #[serde(default)]
     pub position: Option<String>,
-    #[serde(default)]
-    pub requested_for: Option<DateTime<Utc>>,
+    #[serde(default = "default_ace_slots")]
+    pub slots: i32,
     pub details: String,
+}
+
+/// Claim a slot on an ACE request, with the claimer's notes + availability window.
+#[derive(Debug, Deserialize, ToSchema)]
+pub struct ClaimAceRequest {
+    #[serde(default)]
+    pub notes: Option<String>,
+    #[serde(default)]
+    pub start_time: Option<DateTime<Utc>>,
+    #[serde(default)]
+    pub end_time: Option<DateTime<Utc>>,
 }
 
 #[derive(Debug, Deserialize, ToSchema)]
@@ -978,11 +984,19 @@ pub struct DiscordLinkBody {
     pub username: Option<String>,
 }
 
-/// Bot interaction callback: a Discord user clicked "claim" on an ACE request. The backend resolves
-/// the Discord id to the linked OIS user and claims on their behalf.
+/// Bot interaction callback: a Discord user submitted the claim modal on an ACE request. The backend
+/// resolves the Discord id to the linked OIS user and claims a slot on their behalf. `start_hhmm` /
+/// `end_hhmm` are the modal's raw Zulu times (e.g. "2330"); the backend parses them against the
+/// event window (the bot has no per-message window state).
 #[derive(Debug, Deserialize, ToSchema)]
 pub struct DiscordAceClaimRequest {
     pub discord_user_id: String,
+    #[serde(default)]
+    pub notes: Option<String>,
+    #[serde(default)]
+    pub start_hhmm: Option<String>,
+    #[serde(default)]
+    pub end_hhmm: Option<String>,
 }
 
 // --- flow constrained areas (FCAs) ---

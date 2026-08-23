@@ -13,7 +13,6 @@ import {ApiKeysPage} from "@/pages/api-keys";
 import {AirportPage} from "@/pages/airport";
 import {FcaPage} from "@/pages/fca";
 import {IdstPage} from "@/pages/idst";
-import {AceSupportPage} from "@/pages/ace";
 import {FacilityMapIndexPage, FacilityMapPage} from "@/pages/facility-map";
 import {RunwayPage} from "@/pages/runway";
 import {DashboardPage} from "@/pages/dashboard";
@@ -39,6 +38,7 @@ import {AdminAudit} from "@/pages/admin/audit";
 import {AdminServiceAccounts} from "@/pages/admin/service-accounts";
 import {AdminApiKeys} from "@/pages/admin/api-keys";
 import {AdminDiscord} from "@/pages/admin/discord";
+import {AdminAceTeam} from "@/pages/admin/ace-team";
 
 function RootLayout() {
   // A route can declare a width tier via `staticData.layout` (see the route definitions):
@@ -159,12 +159,6 @@ const idstRoute = createRoute({
   path: "idst",
   component: IdstPage,
   staticData: { layout: "wide" },
-});
-
-const aceRoute = createRoute({
-  getParentRoute: () => opsRoute,
-  path: "ace",
-  component: AceSupportPage,
 });
 
 // --- Advisories (public, read-only) ---
@@ -381,6 +375,12 @@ const adminDiscordRoute = createRoute({
   component: AdminDiscord,
 });
 
+const adminAceTeamRoute = createRoute({
+  getParentRoute: () => adminRoute,
+  path: "ace-team",
+  component: AdminAceTeam,
+});
+
 // --- Legacy path redirects (old flat routes → /ops/*) ---
 
 const legacyRedirects = (
@@ -414,7 +414,6 @@ const routeTree = rootRoute.addChildren([
     fcaRoute,
     runwayRoute,
     idstRoute,
-    aceRoute,
   ]),
   advisoriesRoute.addChildren([advisoriesIndexRoute, advisoriesFcaRoute]),
   facilityMapRoute.addChildren([facilityMapIndexRoute, facilityMapDetailRoute]),
@@ -437,6 +436,7 @@ const routeTree = rootRoute.addChildren([
     adminServiceAccountsRoute,
     adminApiKeysRoute,
     adminDiscordRoute,
+    adminAceTeamRoute,
   ]),
   ...legacyRedirects,
 ]);

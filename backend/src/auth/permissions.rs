@@ -76,11 +76,6 @@ permission!(AceTeamUpdate, ["ace", "team"], Update);
 permission!(IntegrationJobsUpdate, ["integration", "jobs"], Update);
 permission!(DiscordConfigRead, ["discord", "config"], Read);
 permission!(DiscordConfigUpdate, ["discord", "config"], Update);
-permission!(
-    EventsStaffingCreate,
-    ["events", "staffing_requests"],
-    Create
-);
 
 // flow — flow constrained areas (FCAs)
 permission!(FlowFcaRead, ["flow", "fca"], Read);

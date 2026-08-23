@@ -13,8 +13,6 @@ export type UpsertFacilitySupport =
 export type AirportRate = components["schemas"]["AirportRateBody"];
 export type UpsertAirportRate =
   components["schemas"]["UpsertAirportRateRequest"];
-export type StaffingRequest = components["schemas"]["StaffingRequestBody"];
-export type UpsertStaffing = components["schemas"]["UpsertStaffingRequest"];
 export type TmiPackage = components["schemas"]["TmiPackageBody"];
 export type TmiPackageItem = components["schemas"]["TmiPackageItemBody"];
 
@@ -259,65 +257,6 @@ export function useRemoveAirportRate(eventId: number) {
           ? "You can only remove your own facility’s airports"
           : "Couldn’t remove the airport",
       ),
-  });
-}
-
-/** ACE staffing requests for one event (positions wanted vs signed up, per facility). */
-export function useStaffing(eventId: number) {
-  return useQuery({
-    queryKey: ["event-staffing", eventId],
-    queryFn: async () => {
-      const { data, error } = await ois.GET("/api/v1/events/{id}/staffing", {
-        params: { path: { id: eventId } },
-      });
-      if (error || !data) throw new Error("failed to load staffing requests");
-      return data;
-    },
-    enabled: Number.isFinite(eventId),
-  });
-}
-
-export function useUpsertStaffing(eventId: number) {
-  const queryClient = useQueryClient();
-  const toast = useToast();
-  return useMutation({
-    mutationFn: async ({
-      facility,
-      body,
-    }: {
-      facility: string;
-      body: UpsertStaffing;
-    }) => {
-      const { data, error } = await ois.PUT(
-        "/api/v1/events/{id}/staffing/{facility}",
-        { params: { path: { id: eventId, facility } }, body },
-      );
-      if (error || !data) throw new Error("save failed");
-      return data;
-    },
-    onSuccess: () => {
-      queryClient.invalidateQueries({ queryKey: ["event-staffing", eventId] });
-    },
-    onError: () => toast.error("Couldn’t save the staffing request"),
-  });
-}
-
-export function useRemoveStaffing(eventId: number) {
-  const queryClient = useQueryClient();
-  const toast = useToast();
-  return useMutation({
-    mutationFn: async (facility: string) => {
-      const { error } = await ois.DELETE(
-        "/api/v1/events/{id}/staffing/{facility}",
-        { params: { path: { id: eventId, facility } } },
-      );
-      if (error) throw new Error("remove failed");
-    },
-    onSuccess: () => {
-      queryClient.invalidateQueries({ queryKey: ["event-staffing", eventId] });
-      toast.success("Staffing request removed");
-    },
-    onError: () => toast.error("Couldn’t remove the staffing request"),
   });
 }
 

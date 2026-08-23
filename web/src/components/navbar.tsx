@@ -19,7 +19,6 @@ import {
   Gauge,
   KeyRound,
   LayoutDashboard,
-  LifeBuoy,
   LogOut,
   Megaphone,
   Menu,
@@ -161,7 +160,6 @@ function MobileMenu({
   canPrograms,
   canFca,
   canRunway,
-  canAce,
   canPlan,
   canStats,
 }: {
@@ -169,7 +167,6 @@ function MobileMenu({
   canPrograms: boolean;
   canFca: boolean;
   canRunway: boolean;
-  canAce: boolean;
   canPlan: boolean;
   canStats: boolean;
 }) {
@@ -263,14 +260,6 @@ function MobileMenu({
                 </Link>
               </DropdownMenuItem>
             )}
-            {canAce && (
-              <DropdownMenuItem asChild>
-                <Link to="/ops/ace">
-                  <LifeBuoy />
-                  ACE support
-                </Link>
-              </DropdownMenuItem>
-            )}
           </>
         )}
 
@@ -343,11 +332,7 @@ export function Navbar() {
   const canTmiRead = hasPermission(me, "tmu.tmi.read");
   const canFca = hasPermission(me, "flow.fca.read");
   const canRunway = hasPermission(me, "flow.runway.read");
-  const canAce =
-    hasPermission(me, "ace.requests.create") ||
-    hasPermission(me, "ace.requests.read") ||
-    hasPermission(me, "ace.team.read");
-  const canOps = canPrograms || canTmiRead || canFca || canRunway || canAce;
+  const canOps = canPrograms || canTmiRead || canFca || canRunway;
   const canPlan = hasPermission(me, "events.plan.read");
   const canStats = hasPermission(me, "stats.data.read");
 
@@ -359,7 +344,6 @@ export function Navbar() {
           canPrograms={canPrograms}
           canFca={canFca}
           canRunway={canRunway}
-          canAce={canAce}
           canPlan={canPlan}
           canStats={canStats}
         />
@@ -447,14 +431,6 @@ export function Navbar() {
                   <Link to="/ops/runway">
                     <Split />
                     Runway balancer
-                  </Link>
-                </DropdownMenuItem>
-              )}
-              {canAce && (
-                <DropdownMenuItem asChild>
-                  <Link to="/ops/ace">
-                    <LifeBuoy />
-                    ACE support
                   </Link>
                 </DropdownMenuItem>
               )}

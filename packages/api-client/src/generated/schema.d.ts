@@ -36,70 +36,6 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
-    "/api/v1/ace/requests": {
-        parameters: {
-            query?: never;
-            header?: never;
-            path?: never;
-            cookie?: never;
-        };
-        get: operations["list_requests"];
-        put?: never;
-        post: operations["create_request"];
-        delete?: never;
-        options?: never;
-        head?: never;
-        patch?: never;
-        trace?: never;
-    };
-    "/api/v1/ace/requests/{id}": {
-        parameters: {
-            query?: never;
-            header?: never;
-            path?: never;
-            cookie?: never;
-        };
-        get: operations["get_request"];
-        put?: never;
-        post?: never;
-        delete?: never;
-        options?: never;
-        head?: never;
-        patch?: never;
-        trace?: never;
-    };
-    "/api/v1/ace/requests/{id}/claim": {
-        parameters: {
-            query?: never;
-            header?: never;
-            path?: never;
-            cookie?: never;
-        };
-        get?: never;
-        put?: never;
-        post: operations["claim_request"];
-        delete?: never;
-        options?: never;
-        head?: never;
-        patch?: never;
-        trace?: never;
-    };
-    "/api/v1/ace/requests/{id}/decide": {
-        parameters: {
-            query?: never;
-            header?: never;
-            path?: never;
-            cookie?: never;
-        };
-        get?: never;
-        put?: never;
-        post: operations["decide_request"];
-        delete?: never;
-        options?: never;
-        head?: never;
-        patch?: never;
-        trace?: never;
-    };
     "/api/v1/ace/team": {
         parameters: {
             query?: never;
@@ -628,6 +564,70 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/v1/events/{id}/ace": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get: operations["list_requests"];
+        put?: never;
+        post: operations["create_request"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/events/{id}/ace/{req}": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        post?: never;
+        delete: operations["delete_request"];
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/events/{id}/ace/{req}/claim": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        post: operations["claim_request"];
+        delete: operations["release_claim"];
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/events/{id}/ace/{req}/decide": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        post: operations["decide_request"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/v1/events/{id}/capture": {
         parameters: {
             query?: never;
@@ -847,38 +847,6 @@ export interface paths {
         put: operations["upsert_event_rate"];
         post?: never;
         delete: operations["delete_event_rate"];
-        options?: never;
-        head?: never;
-        patch?: never;
-        trace?: never;
-    };
-    "/api/v1/events/{id}/staffing": {
-        parameters: {
-            query?: never;
-            header?: never;
-            path?: never;
-            cookie?: never;
-        };
-        get: operations["list_event_staffing"];
-        put?: never;
-        post?: never;
-        delete?: never;
-        options?: never;
-        head?: never;
-        patch?: never;
-        trace?: never;
-    };
-    "/api/v1/events/{id}/staffing/{facility}": {
-        parameters: {
-            query?: never;
-            header?: never;
-            path?: never;
-            cookie?: never;
-        };
-        get?: never;
-        put: operations["upsert_event_staffing"];
-        post?: never;
-        delete: operations["delete_event_staffing"];
         options?: never;
         head?: never;
         patch?: never;
@@ -2266,26 +2234,47 @@ export interface components {
             permissions: Record<string, never>;
             roles: string[];
         };
-        /** @description One ACE support request in the queue. Actor ids are resolved to CID + display name. */
+        /**
+         * @description One claim on an ACE request — who took a slot, with their notes + availability window (within the
+         *     event). Aggregated onto the request via `json_agg`.
+         */
+        AceClaimBody: {
+            /** Format: int64 */
+            cid: number;
+            /** Format: date-time */
+            claimed_at: string;
+            display_name: string;
+            /** Format: date-time */
+            end_time?: string | null;
+            notes: string;
+            /** Format: date-time */
+            start_time?: string | null;
+        };
+        /**
+         * @description One ACE support request for an event. `slots` positions are claimed one-per-person; "filled" is
+         *     derived client-side from `claims_count >= slots`.
+         */
         AceRequestBody: {
             artcc_id?: string | null;
-            /** Format: date-time */
-            claimed_at?: string | null;
-            claimed_by_name?: string | null;
+            claims: components["schemas"]["AceClaimBody"][];
+            /** Format: int64 */
+            claims_count: number;
             /** Format: date-time */
             created_at: string;
             /** Format: date-time */
             decided_at?: string | null;
             decided_by_name?: string | null;
             details: string;
+            /** Format: int64 */
+            event_id: number;
             id: string;
             position?: string | null;
             /** Format: int64 */
             requested_by_cid?: number | null;
             requested_by_name?: string | null;
-            /** Format: date-time */
-            requested_for?: string | null;
-            /** @description `open` | `claimed` | `completed` | `cancelled`. */
+            /** Format: int32 */
+            slots: number;
+            /** @description `open` | `completed` | `cancelled`. */
             status: string;
         };
         AceTeamMemberBody: {
@@ -2585,6 +2574,14 @@ export interface components {
             /** @description `open` (recording) or `saved`. */
             status: string;
         };
+        /** @description Claim a slot on an ACE request, with the claimer's notes + availability window. */
+        ClaimAceRequest: {
+            /** Format: date-time */
+            end_time?: string | null;
+            notes?: string | null;
+            /** Format: date-time */
+            start_time?: string | null;
+        };
         /**
          * @description One color rule: aircraft matching all `conditions` are painted `color`. Rules are evaluated in
          *     order; the first enabled match wins.
@@ -2634,8 +2631,8 @@ export interface components {
             artcc_id?: string | null;
             details: string;
             position?: string | null;
-            /** Format: date-time */
-            requested_for?: string | null;
+            /** Format: int32 */
+            slots?: number;
         };
         CreateApiKeyRequest: {
             description?: string | null;
@@ -2798,11 +2795,16 @@ export interface components {
             total: number;
         };
         /**
-         * @description Bot interaction callback: a Discord user clicked "claim" on an ACE request. The backend resolves
-         *     the Discord id to the linked OIS user and claims on their behalf.
+         * @description Bot interaction callback: a Discord user submitted the claim modal on an ACE request. The backend
+         *     resolves the Discord id to the linked OIS user and claims a slot on their behalf. `start_hhmm` /
+         *     `end_hhmm` are the modal's raw Zulu times (e.g. "2330"); the backend parses them against the
+         *     event window (the bot has no per-message window state).
          */
         DiscordAceClaimRequest: {
             discord_user_id: string;
+            end_hhmm?: string | null;
+            notes?: string | null;
+            start_hhmm?: string | null;
         };
         /** @description The Discord guild config + its logical-name maps. */
         DiscordConfigBody: {
@@ -3959,21 +3961,6 @@ export interface components {
             name: string;
             owner: string;
         };
-        /** @description One facility's ACE staffing request for an event (positions wanted vs signed up). */
-        StaffingRequestBody: {
-            /** @description ARTCC id (e.g. ZTL). */
-            facility: string;
-            notes: string;
-            /** Format: int32 */
-            positions_filled: number;
-            /** Format: int32 */
-            positions_requested: number;
-            /** @description open | met | closed */
-            status: string;
-            /** Format: date-time */
-            updated_at: string;
-            updated_by?: string | null;
-        };
         /** @description Airport activity: dep/arr counts + top aircraft / destinations / origins. */
         StatsAirportBody: {
             /** Format: int64 */
@@ -4300,15 +4287,6 @@ export interface components {
             /** @description The filed-route string to resolve, e.g. `RBV Q430 BYRDD J48 MOL FLASK OZZZI2`. */
             route: string;
         };
-        UpsertStaffingRequest: {
-            notes?: string | null;
-            /** Format: int32 */
-            positions_filled: number;
-            /** Format: int32 */
-            positions_requested: number;
-            /** @description open | met | closed */
-            status: string;
-        };
         /**
          * @description A target user's editable access: direct permission grants + role assignments,
          *     grouped by scope (national first, then each ARTCC the user has grants/roles in).
@@ -4398,192 +4376,6 @@ export interface operations {
                 };
             };
             401: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content?: never;
-            };
-        };
-    };
-    list_requests: {
-        parameters: {
-            query?: {
-                /** @description Filter by status */
-                status?: string;
-                /** @description Filter by ARTCC */
-                artcc_id?: string;
-            };
-            header?: never;
-            path?: never;
-            cookie?: never;
-        };
-        requestBody?: never;
-        responses: {
-            200: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": components["schemas"]["AceRequestBody"][];
-                };
-            };
-            401: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content?: never;
-            };
-        };
-    };
-    create_request: {
-        parameters: {
-            query?: never;
-            header?: never;
-            path?: never;
-            cookie?: never;
-        };
-        requestBody: {
-            content: {
-                "application/json": components["schemas"]["CreateAceRequestRequest"];
-            };
-        };
-        responses: {
-            200: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": components["schemas"]["AceRequestBody"];
-                };
-            };
-            400: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content?: never;
-            };
-            401: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content?: never;
-            };
-        };
-    };
-    get_request: {
-        parameters: {
-            query?: never;
-            header?: never;
-            path: {
-                id: string;
-            };
-            cookie?: never;
-        };
-        requestBody?: never;
-        responses: {
-            200: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": components["schemas"]["AceRequestBody"];
-                };
-            };
-            401: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content?: never;
-            };
-            404: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content?: never;
-            };
-        };
-    };
-    claim_request: {
-        parameters: {
-            query?: never;
-            header?: never;
-            path: {
-                id: string;
-            };
-            cookie?: never;
-        };
-        requestBody?: never;
-        responses: {
-            200: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": components["schemas"]["AceRequestBody"];
-                };
-            };
-            401: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content?: never;
-            };
-            404: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content?: never;
-            };
-            409: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content?: never;
-            };
-        };
-    };
-    decide_request: {
-        parameters: {
-            query?: never;
-            header?: never;
-            path: {
-                id: string;
-            };
-            cookie?: never;
-        };
-        requestBody: {
-            content: {
-                "application/json": components["schemas"]["DecideAceRequestRequest"];
-            };
-        };
-        responses: {
-            200: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": components["schemas"]["AceRequestBody"];
-                };
-            };
-            400: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content?: never;
-            };
-            401: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content?: never;
-            };
-            404: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content?: never;
-            };
-            409: {
                 headers: {
                     [name: string]: unknown;
                 };
@@ -6091,6 +5883,245 @@ export interface operations {
             };
         };
     };
+    list_requests: {
+        parameters: {
+            query?: {
+                /** @description Filter by status */
+                status?: string;
+            };
+            header?: never;
+            path: {
+                id: number;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["AceRequestBody"][];
+                };
+            };
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+        };
+    };
+    create_request: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                id: number;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["CreateAceRequestRequest"];
+            };
+        };
+        responses: {
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["AceRequestBody"];
+                };
+            };
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+        };
+    };
+    delete_request: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                id: number;
+                req: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            204: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+        };
+    };
+    claim_request: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                id: number;
+                req: string;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["ClaimAceRequest"];
+            };
+        };
+        responses: {
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["AceRequestBody"];
+                };
+            };
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            409: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+        };
+    };
+    release_claim: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                id: number;
+                req: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["AceRequestBody"];
+                };
+            };
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+        };
+    };
+    decide_request: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                id: number;
+                req: string;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["DecideAceRequestRequest"];
+            };
+        };
+        responses: {
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["AceRequestBody"];
+                };
+            };
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            409: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+        };
+    };
     get_event_capture: {
         parameters: {
             query?: never;
@@ -6862,114 +6893,6 @@ export interface operations {
                 content?: never;
             };
             403: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content?: never;
-            };
-            404: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content?: never;
-            };
-        };
-    };
-    list_event_staffing: {
-        parameters: {
-            query?: never;
-            header?: never;
-            path: {
-                /** @description VATUSA event id */
-                id: number;
-            };
-            cookie?: never;
-        };
-        requestBody?: never;
-        responses: {
-            200: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": components["schemas"]["StaffingRequestBody"][];
-                };
-            };
-            401: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content?: never;
-            };
-        };
-    };
-    upsert_event_staffing: {
-        parameters: {
-            query?: never;
-            header?: never;
-            path: {
-                /** @description VATUSA event id */
-                id: number;
-                /** @description ARTCC id */
-                facility: string;
-            };
-            cookie?: never;
-        };
-        requestBody: {
-            content: {
-                "application/json": components["schemas"]["UpsertStaffingRequest"];
-            };
-        };
-        responses: {
-            200: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": components["schemas"]["StaffingRequestBody"];
-                };
-            };
-            400: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content?: never;
-            };
-            401: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content?: never;
-            };
-            404: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content?: never;
-            };
-        };
-    };
-    delete_event_staffing: {
-        parameters: {
-            query?: never;
-            header?: never;
-            path: {
-                /** @description VATUSA event id */
-                id: number;
-                /** @description ARTCC id */
-                facility: string;
-            };
-            cookie?: never;
-        };
-        requestBody?: never;
-        responses: {
-            204: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content?: never;
-            };
-            401: {
                 headers: {
                     [name: string]: unknown;
                 };

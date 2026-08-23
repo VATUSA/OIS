@@ -1,11 +1,11 @@
 import {useState} from "react";
 import {Badge, Button, buttonVariants, Card, CardContent} from "@ois/ui";
 import {Link, useParams} from "@tanstack/react-router";
-import {ArrowLeft, BarChart3, CalendarClock, ExternalLink, MessageSquare, Radio, Users} from "lucide-react";
+import {ArrowLeft, BarChart3, CalendarClock, ExternalLink, MessageSquare, Radio} from "lucide-react";
 
 import {Modal} from "@/components/modal";
 import {useMe} from "@/lib/auth";
-import {eventBodyText, useDcc, useEvent, usePublishEventDiscord, useStaffing, vatusaEditUrl} from "@/lib/events";
+import {eventBodyText, useDcc, useEvent, usePublishEventDiscord, vatusaEditUrl} from "@/lib/events";
 import {hasPermission} from "@/lib/permissions";
 import {formatZuluFull} from "@/lib/time";
 import {DccSection} from "@/pages/planning/dcc";
@@ -15,11 +15,12 @@ import {AceSection} from "@/pages/planning/ace";
 import {TmiPackagesSection} from "@/pages/planning/tmi-packages";
 import {EventStatsSection} from "@/pages/planning/event-stats";
 
-type TabId = "airports" | "facility" | "tmi" | "stats";
+type TabId = "airports" | "facility" | "tmi" | "ace" | "stats";
 const TABS: { id: TabId; label: string }[] = [
   { id: "airports", label: "Airports & rates" },
   { id: "facility", label: "Facility support" },
   { id: "tmi", label: "TMI packages" },
+  { id: "ace", label: "ACE" },
   { id: "stats", label: "Stats & debrief" },
 ];
 
@@ -39,11 +40,9 @@ function ActionBar({
   editUrl: string | null;
   onDebrief: () => void;
 }) {
-  const [dialog, setDialog] = useState<null | "dcc" | "ace">(null);
+  const [dialog, setDialog] = useState<null | "dcc">(null);
   const { data: me } = useMe();
   const dcc = useDcc(eventId);
-  const staffing = useStaffing(eventId);
-  const openAce = (staffing.data ?? []).filter((s) => s.status === "open").length;
   const dccStatus = dcc.data?.status;
   const canPostDiscord = hasPermission(me, "events.discord.publish");
   const publishDiscord = usePublishEventDiscord(eventId);
@@ -56,16 +55,6 @@ function ActionBar({
         {dccStatus && dccStatus !== "not_needed" && (
           <Badge variant={dccVariant(dccStatus)} className="ml-1">
             {dccStatus}
-          </Badge>
-        )}
-      </Button>
-
-      <Button variant="secondary" size="sm" onClick={() => setDialog("ace")}>
-        <Users className="size-3.5" />
-        ACE requests
-        {openAce > 0 && (
-          <Badge variant="secondary" className="ml-1">
-            {openAce} open
           </Badge>
         )}
       </Button>
@@ -102,9 +91,6 @@ function ActionBar({
 
       <Modal open={dialog === "dcc"} onClose={() => setDialog(null)} title="DCC support">
         <DccSection eventId={eventId} bare />
-      </Modal>
-      <Modal open={dialog === "ace"} onClose={() => setDialog(null)} title="ACE requests" size="lg">
-        <AceSection eventId={eventId} bare />
       </Modal>
     </div>
   );
@@ -207,6 +193,9 @@ export function EventPlanningPage() {
         )}
         {tab === "facility" && <FacilitySupportSection eventId={id} />}
         {tab === "tmi" && <TmiPackagesSection eventId={id} />}
+        {tab === "ace" && (
+          <AceSection eventId={id} eventStart={e.start_time} eventEnd={e.end_time} />
+        )}
         {tab === "stats" && <EventStatsSection eventId={id} />}
       </div>
     </div>

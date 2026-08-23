@@ -49,6 +49,12 @@ struct AckBody<'a> {
 #[derive(Debug, Serialize)]
 struct DiscordAceClaimBody<'a> {
     discord_user_id: &'a str,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    notes: Option<&'a str>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    start_hhmm: Option<&'a str>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    end_hhmm: Option<&'a str>,
 }
 
 /// Handle to the OIS API, authenticated with a service-account bearer token.
@@ -126,10 +132,14 @@ impl OisClient {
 
     /// Claim an ACE request on behalf of a Discord user (resolved to the linked OIS user server-side).
     /// A `403` means that Discord account isn't linked; a `409` means it was already claimed.
+    #[allow(clippy::too_many_arguments)]
     pub async fn claim_ace_via_discord(
         &self,
         request_id: &str,
         discord_user_id: &str,
+        notes: Option<&str>,
+        start_hhmm: Option<&str>,
+        end_hhmm: Option<&str>,
     ) -> Result<Value, ClientError> {
         let resp = self
             .http
@@ -137,7 +147,12 @@ impl OisClient {
                 "/api/v1/integration/discord/ace/{request_id}/claim"
             )))
             .bearer_auth(&self.token)
-            .json(&DiscordAceClaimBody { discord_user_id })
+            .json(&DiscordAceClaimBody {
+                discord_user_id,
+                notes,
+                start_hhmm,
+                end_hhmm,
+            })
             .send()
             .await?;
         if !resp.status().is_success() {
