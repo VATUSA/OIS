@@ -33,6 +33,22 @@ function fmtDelay(min: number): string {
   return h > 0 ? `${h}:${String(m).padStart(2, "0")}` : `${m}m`;
 }
 
+/** A metered delay of ~1 min or more is worth flagging (below that is rounding noise). */
+const DELAY_THRESHOLD_SEC = 30;
+
+/** Delay as `M:SS` (e.g. 1268 → "21:08"). */
+function fmtDelaySec(sec: number): string {
+  const m = Math.floor(sec / 60);
+  const s = sec % 60;
+  return `${m}:${String(s).padStart(2, "0")}`;
+}
+
+/** Short tag for who's being delayed: a released CFR, an airborne (needs vectors/speed), or ground. */
+function delayTag(f: FcaFlight): string {
+  if (f.released) return "CFR";
+  return f.status === "airborne" ? "air" : "gnd";
+}
+
 /** Metering ladder — plots each flight by its metered crossing time (now at bottom). */
 function Ladder({ flights, now }: { flights: FcaFlight[]; now: number }) {
   const WIN = 60;
@@ -146,10 +162,14 @@ function Strip({
   const st = statusOf(f.status);
   const canCfr = canEdit && f.status !== "airborne";
 
+  const delayed = f.delay_sec >= DELAY_THRESHOLD_SEC;
   const style = {
     transform: CSS.Transform.toString(transform),
     transition,
     opacity: isDragging ? 0.5 : 1,
+    borderLeftWidth: 3,
+    borderLeftStyle: "solid" as const,
+    borderLeftColor: delayed ? "#ef4444" : st.color,
   };
 
   return (
@@ -178,11 +198,15 @@ function Strip({
           <span className="font-mono font-semibold">{f.callsign}</span>
           <span className="text-xs text-muted-foreground">{f.aircraft_type}</span>
         </span>
-        <span className="text-right font-mono">
-          <span className={st.text}>{hhmmZulu(f.cross_time)}</span>
-          {f.delay_min > 0 && (
-            <span className="ml-1.5 text-xs text-destructive">+{f.delay_min}m</span>
-          )}
+        <span className="text-right font-mono leading-tight">
+          <span className={delayed ? "text-foreground" : st.text}>
+            {hhmmZulu(f.cross_time)}
+          </span>
+          <span
+            className={`block text-xs ${delayed ? "text-destructive" : "text-emerald-500"}`}
+          >
+            {delayed ? `${delayTag(f)} +${fmtDelaySec(f.delay_sec)}` : "on time"}
+          </span>
         </span>
       </div>
 
@@ -192,6 +216,9 @@ function Strip({
         </span>
         <span>{Math.round(f.distance_nm)}nm to line</span>
         {f.altitude > 0 && <span>FL{Math.round(f.altitude / 100)}</span>}
+        {delayed && f.delay_nm > 0 && (
+          <span className="text-destructive">+{f.delay_nm}nm</span>
+        )}
       </div>
 
       {canCfr && (

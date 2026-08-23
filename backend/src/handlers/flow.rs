@@ -989,6 +989,8 @@ fn fca_flight(
         eta,
         cross_time: None,
         delay_min: 0,
+        delay_sec: 0,
+        delay_nm: 0,
         seq: 0,
         edct: rel.and_then(|(_, e)| DateTime::from_timestamp_millis(*e)),
         released: rel.is_some(),
@@ -1146,9 +1148,13 @@ fn finalize(
             .collect()
     });
     let metered = fca::meter(metas, &fca.mode, fca.rate, fca.mit, order.as_deref());
-    for (f, m) in flights.iter_mut().zip(&metered) {
+    for ((f, m), input) in flights.iter_mut().zip(&metered).zip(metas) {
         f.cross_time = DateTime::from_timestamp_millis(m.sched_ms);
         f.delay_min = (m.delay_sec + 30) / 60;
+        f.delay_sec = m.delay_sec;
+        // Delay as extra track miles at the predicted crossing speed (matches the flow the
+        // controller sees): how much further back this aircraft must sit to hold separation.
+        f.delay_nm = (m.delay_sec as f64 / 3600.0 * input.cross_speed).round() as i64;
         f.seq = m.seq;
     }
     flights.sort_by_key(|f| f.seq);

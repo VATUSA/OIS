@@ -218,7 +218,8 @@ pub fn crossing_for(
 pub struct MeterInput {
     /// Unmetered ETA to the crossing, epoch millis.
     pub eta_ms: i64,
-    /// Airborne aircraft are fixed constraints (never delayed); ground floats into gaps.
+    /// In AUTO mode airborne aircraft are fixed constraints (never delayed) and ground floats into
+    /// gaps; in MANUAL mode the controller's order rules and airborne crossings are chained too.
     pub airborne: bool,
     /// Predicted crossing groundspeed (kt) — used for MIT spacing.
     pub cross_speed: f64,
@@ -272,12 +273,12 @@ pub fn meter(
         let mut prev: Option<i64> = None;
         for &i in &ordered {
             let c = &cands[i];
-            // Airborne + frozen (issued-CFR) crossings are fixed constraints even in manual
-            // mode — they are never delayed; only unreleased ground aircraft are chained
-            // behind the previous crossing by the separation.
-            sched[i] = if c.airborne {
-                c.eta_ms
-            } else if let Some(f) = c.frozen_ms {
+            // In manual mode the controller's order is authoritative, so every crossing — airborne
+            // included — is chained behind the previous one by the required separation. Moving an
+            // aircraft up therefore pushes the ones now behind it later: the delay a controller would
+            // have to create with vectors/speed control. An issued CFR is the only hard, un-moveable
+            // commitment; it keeps its frozen time (and still spaces those chained behind it).
+            sched[i] = if let Some(f) = c.frozen_ms {
                 f
             } else {
                 match prev {
@@ -597,9 +598,9 @@ mod tests {
     }
 
     #[test]
-    fn manual_order_pins_airborne_and_frozen() {
-        // Controller ordered a ground aircraft ahead of an airborne one and a frozen CFR.
-        // The airborne and frozen crossings must keep their fixed times (never delayed).
+    fn manual_order_chains_airborne_and_pins_frozen() {
+        // In manual mode the controller's order is authoritative: airborne crossings ARE chained
+        // (they can be shown as needing delay), while an issued CFR keeps its frozen time.
         let cands = vec![
             MeterInput {
                 eta_ms: 0,
@@ -620,10 +621,48 @@ mod tests {
                 frozen_ms: Some(50_000),
             },
         ];
+        // rate 30 → 120s separation.
         let out = meter(&cands, "rate", 30, 15, Some(&[0, 1, 2]));
-        assert_eq!(out[1].sched_ms, 30_000, "airborne must not be delayed");
-        assert_eq!(out[1].delay_sec, 0);
+        assert_eq!(out[0].sched_ms, 0); // first keeps its ETA
+        // Airborne is chained behind #0 by 120s and thus delayed (this is the reorder behavior).
+        assert_eq!(
+            out[1].sched_ms, 120_000,
+            "airborne chains behind the previous crossing"
+        );
+        assert_eq!(out[1].delay_sec, 90); // 120_000 − 30_000
         assert_eq!(out[2].sched_ms, 50_000, "frozen CFR must stay pinned");
+        // Sequence follows the controller's order, not the times.
+        assert_eq!((out[0].seq, out[1].seq, out[2].seq), (1, 2, 3));
+    }
+
+    #[test]
+    fn reorder_up_delays_everyone_behind_the_new_slot() {
+        // Mirrors the vatflow case: a far aircraft (D, ETA 900s) dragged ahead of three nearer
+        // ones pushes those three behind it, each chained by the 120s separation.
+        let mk = |eta: i64| MeterInput {
+            eta_ms: eta,
+            airborne: true,
+            cross_speed: 400.0,
+            frozen_ms: None,
+        };
+        // Natural ETAs: A=200 B=400 C=600 D=900 (all airborne).
+        let cands = vec![mk(200_000), mk(400_000), mk(600_000), mk(900_000)];
+        // Controller drags D to the front: order [D, A, B, C] = indices [3, 0, 1, 2].
+        let out = meter(&cands, "rate", 30, 15, Some(&[3, 0, 1, 2]));
+        assert_eq!(
+            out[3].sched_ms, 900_000,
+            "the moved aircraft keeps its own ETA"
+        );
+        assert_eq!(out[3].delay_sec, 0);
+        // A/B/C are now chained behind D at 120s spacing, so all are delayed.
+        assert_eq!(out[0].sched_ms, 1_020_000); // 900k + 120k
+        assert_eq!(out[1].sched_ms, 1_140_000);
+        assert_eq!(out[2].sched_ms, 1_260_000);
+        assert!(out[0].delay_sec > 0 && out[1].delay_sec > 0 && out[2].delay_sec > 0);
+        assert_eq!(
+            (out[3].seq, out[0].seq, out[1].seq, out[2].seq),
+            (1, 2, 3, 4)
+        );
     }
 
     #[test]
@@ -648,7 +687,8 @@ mod tests {
     fn manual_order_seq_follows_controller_not_eta() {
         // Regression: the controller drags a ground aircraft (later ETA) ahead of an airborne one
         // (earlier ETA). A by-time ranking would snap the airborne crossing back to seq 1; the
-        // manual order must win so the dragged aircraft keeps the slot it was moved to.
+        // manual order must win so the dragged aircraft keeps the slot it was moved to. The airborne
+        // aircraft, now sequenced behind, is chained (delayed) rather than crossing at its raw ETA.
         let cands = vec![
             MeterInput {
                 eta_ms: 100_000, // ground, later
@@ -657,7 +697,7 @@ mod tests {
                 frozen_ms: None,
             },
             MeterInput {
-                eta_ms: 50_000, // airborne, earlier — pinned, never delayed
+                eta_ms: 50_000, // airborne, earlier
                 airborne: true,
                 cross_speed: 450.0,
                 frozen_ms: None,
@@ -670,9 +710,10 @@ mod tests {
             "the airborne aircraft stays where it was dragged"
         );
         assert_eq!(
-            out[1].sched_ms, 50_000,
-            "airborne still crosses at its true ETA"
+            out[1].sched_ms, 220_000,
+            "airborne is chained 120s behind the ground crossing (100k), so it's delayed"
         );
+        assert!(out[1].delay_sec > 0);
     }
 
     #[test]
