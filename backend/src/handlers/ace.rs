@@ -91,6 +91,28 @@ pub(crate) fn parse_hhmm_in_window(
     (cand >= event_start && cand <= event_end).then_some(cand)
 }
 
+/// Zulu HHMM slots across the event window (30-min steps, ≤25 options), plus a `2300–0300z` label —
+/// used to build the Discord claim time-selectors so users pick instead of typing.
+pub(crate) fn event_time_options(
+    start: DateTime<Utc>,
+    end: DateTime<Utc>,
+) -> (String, Vec<String>) {
+    let fmt = |d: DateTime<Utc>| d.format("%H%M").to_string();
+    let label = format!("{}–{}z", fmt(start), fmt(end));
+    let total_min = (end - start).num_minutes().max(0);
+    let step = if total_min / 30 + 1 > 25 { 60 } else { 30 };
+    let mut opts = Vec::new();
+    let mut t = start;
+    while t <= end && opts.len() < 25 {
+        opts.push(fmt(t));
+        t += chrono::Duration::minutes(step);
+    }
+    if opts.last().map(String::as_str) != Some(fmt(end).as_str()) && opts.len() < 25 {
+        opts.push(fmt(end));
+    }
+    (label, opts)
+}
+
 /// Build + enqueue an `ace_request_notify` job in `tx` reflecting the request's current claims, so the
 /// bot re-renders the embed ("X/N claimed" + claimers; keeps the button while slots remain). No-op if
 /// nothing was posted to Discord (no message id) or no channel is configured.

@@ -46,6 +46,16 @@ struct AckBody<'a> {
     error: Option<&'a str>,
 }
 
+/// What the bot needs to render the claim time-selectors for a request.
+#[derive(Debug, Clone, Deserialize)]
+pub struct AceInfo {
+    pub event_title: String,
+    pub window_label: String,
+    pub slots: i32,
+    pub claims_count: i64,
+    pub time_options: Vec<String>,
+}
+
 #[derive(Debug, Serialize)]
 struct DiscordAceClaimBody<'a> {
     discord_user_id: &'a str,
@@ -132,6 +142,20 @@ impl OisClient {
 
     /// Claim an ACE request on behalf of a Discord user (resolved to the linked OIS user server-side).
     /// A `403` means that Discord account isn't linked; a `409` means it was already claimed.
+    /// The event window + pre-computed HHMM slot options for a request's claim selectors.
+    pub async fn ace_info(&self, request_id: &str) -> Result<AceInfo, ClientError> {
+        let resp = self
+            .http
+            .get(self.url(&format!("/api/v1/integration/discord/ace/{request_id}")))
+            .bearer_auth(&self.token)
+            .send()
+            .await?;
+        if !resp.status().is_success() {
+            return Err(ClientError::Status(resp.status().as_u16()));
+        }
+        Ok(resp.json::<AceInfo>().await?)
+    }
+
     #[allow(clippy::too_many_arguments)]
     pub async fn claim_ace_via_discord(
         &self,
