@@ -43,6 +43,9 @@ function Ladder({ flights, now }: { flights: FcaFlight[]; now: number }) {
   const yOf = (min: number) => H - (Math.max(0, Math.min(min, WIN)) / WIN) * H;
 
   const items = flights
+    // Proposed (prefiled, not yet connected) flights have no real crossing time — keep them off the
+    // metering ladder; they show in the list below without a time until the pilot connects.
+    .filter((f) => f.status !== "proposed")
     .map((f) => ({ f, min: minutesUntil(f.cross_time, now) }))
     .filter((x): x is { f: FcaFlight; min: number } => x.min != null)
     .filter((x) => x.min >= -1 && x.min <= WIN)
@@ -179,9 +182,16 @@ function Strip({
           <span className="text-xs text-muted-foreground">{f.aircraft_type}</span>
         </span>
         <span className="text-right font-mono">
-          <span className={st.text}>{hhmmZulu(f.cross_time)}</span>
-          {f.delay_min > 0 && (
-            <span className="ml-1.5 text-xs text-destructive">+{f.delay_min}m</span>
+          {f.status === "proposed" ? (
+            // No crossing time until the pilot connects to the network.
+            <span className="text-muted-foreground">—</span>
+          ) : (
+            <>
+              <span className={st.text}>{hhmmZulu(f.cross_time)}</span>
+              {f.delay_min > 0 && (
+                <span className="ml-1.5 text-xs text-destructive">+{f.delay_min}m</span>
+              )}
+            </>
           )}
         </span>
       </div>
