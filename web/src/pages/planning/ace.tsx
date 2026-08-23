@@ -1,228 +1,344 @@
-import {useEffect, useMemo, useState} from "react";
+import {useState} from "react";
 import {Badge, Button, Card, CardContent, ConfirmButton, Input} from "@ois/ui";
-import {Users, X} from "lucide-react";
+import {LifeBuoy, Plus, Users} from "lucide-react";
 
 import {useMe} from "@/lib/auth";
-import {useFacilities} from "@/lib/admin";
-import {ArtccCombobox} from "@/components/artcc-combobox";
-import {type StaffingRequest, useRemoveStaffing, useStaffing, useUpsertStaffing,} from "@/lib/events";
 import {hasPermission} from "@/lib/permissions";
+import {hhmmZulu, timeAgo} from "@/lib/time";
+import {
+  type AceRequest,
+  useClaimEventAce,
+  useCreateEventAce,
+  useDecideEventAce,
+  useDeleteEventAce,
+  useEventAce,
+  useReleaseEventAce,
+} from "@/lib/ace";
 
-type Status = "open" | "met" | "closed";
+/** Local `<input type="datetime-local">` value ↔ ISO UTC string, treating the picker as Zulu. */
+const toLocalInput = (iso: string): string => {
+  const d = new Date(iso);
+  const pad = (n: number) => String(n).padStart(2, "0");
+  return `${d.getUTCFullYear()}-${pad(d.getUTCMonth() + 1)}-${pad(d.getUTCDate())}T${pad(d.getUTCHours())}:${pad(d.getUTCMinutes())}`;
+};
+const fromLocalInput = (v: string): string | null => {
+  const ms = Date.parse(v + "Z");
+  return Number.isFinite(ms) ? new Date(ms).toISOString() : null;
+};
 
-const STATUSES: { value: Status; label: string }[] = [
-  { value: "open", label: "Open" },
-  { value: "met", label: "Met" },
-  { value: "closed", label: "Closed" },
-];
-
-const clampPos = (n: number) => Math.max(0, Math.min(999, Math.round(n)));
-
-function statusVariant(status: string): "secondary" | "success" | "outline" {
-  if (status === "met") return "success";
-  if (status === "closed") return "outline";
+function statusVariant(s: string): "secondary" | "success" | "outline" | "destructive" {
+  if (s === "completed") return "outline";
+  if (s === "cancelled") return "destructive";
   return "secondary";
 }
 
-function StaffingRow({
-  eventId,
-  row,
-  name,
-  canEdit,
-}: {
-  eventId: number;
-  row: StaffingRequest;
-  name?: string;
-  canEdit: boolean;
-}) {
-  const upsert = useUpsertStaffing(eventId);
-  const remove = useRemoveStaffing(eventId);
-  const [req, setReq] = useState(String(row.positions_requested));
-  const [fil, setFil] = useState(String(row.positions_filled));
-  const [notes, setNotes] = useState(row.notes);
+function CreateForm({ eventId }: { eventId: number }) {
+  const create = useCreateEventAce(eventId);
+  const [slots, setSlots] = useState("1");
+  const [position, setPosition] = useState("");
+  const [details, setDetails] = useState("");
 
-  useEffect(() => {
-    setReq(String(row.positions_requested));
-    setFil(String(row.positions_filled));
-    setNotes(row.notes);
-  }, [row.positions_requested, row.positions_filled, row.notes]);
-
-  const FacilityCell = (
-    <td className="py-2 pr-3">
-      <span className="font-mono font-medium">{row.facility}</span>
-      {name && <span className="ml-2 text-xs text-muted-foreground">{name}</span>}
-    </td>
-  );
-
-  if (!canEdit) {
-    return (
-      <tr className="border-t">
-        {FacilityCell}
-        <td className="py-2 pr-3 tabular-nums">
-          {row.positions_filled}/{row.positions_requested}
-        </td>
-        <td className="py-2 pr-3">
-          <Badge variant={statusVariant(row.status)}>{row.status}</Badge>
-        </td>
-        <td className="py-2 text-muted-foreground">{row.notes || "—"}</td>
-      </tr>
-    );
-  }
-
-  const save = (status: Status = row.status as Status) => {
-    upsert.mutate({
-      facility: row.facility,
-      body: {
-        positions_requested: clampPos(Number(req) || 0),
-        positions_filled: clampPos(Number(fil) || 0),
-        status,
-        notes,
+  const submit = () => {
+    const n = Math.max(1, Math.min(99, Math.round(Number(slots) || 1)));
+    create.mutate(
+      {
+        slots: n,
+        position: position.trim() || undefined,
+        details: details.trim(),
       },
-    });
-  };
-
-  const saveFieldsIfChanged = () => {
-    const r = clampPos(Number(req) || 0);
-    const f = clampPos(Number(fil) || 0);
-    if (
-      r !== row.positions_requested ||
-      f !== row.positions_filled ||
-      notes !== row.notes
-    ) {
-      save();
-    }
+      {
+        onSuccess: () => {
+          setSlots("1");
+          setPosition("");
+          setDetails("");
+        },
+      },
+    );
   };
 
   return (
-    <tr className="border-t">
-      {FacilityCell}
-      <td className="py-2 pr-3">
-        <div className="flex items-center gap-1.5 text-muted-foreground">
+    <div className="flex flex-col gap-3 rounded-lg border bg-muted/20 p-4">
+      <div className="flex items-center gap-2">
+        <LifeBuoy className="size-4 text-primary" />
+        <span className="font-semibold">Request ACE support</span>
+      </div>
+      <div className="grid gap-3 sm:grid-cols-3">
+        <div className="flex flex-col gap-1">
+          <label className="text-xs font-medium text-muted-foreground">Slots</label>
           <Input
-            className="h-8 w-14 tabular-nums"
             type="number"
-            min={0}
-            max={999}
-            value={fil}
-            onChange={(e) => setFil(e.target.value)}
-            onBlur={saveFieldsIfChanged}
-          />
-          <span>/</span>
-          <Input
-            className="h-8 w-14 tabular-nums"
-            type="number"
-            min={0}
-            max={999}
-            value={req}
-            onChange={(e) => setReq(e.target.value)}
-            onBlur={saveFieldsIfChanged}
+            min={1}
+            max={99}
+            value={slots}
+            onChange={(e) => setSlots(e.target.value)}
+            className="tabular-nums"
           />
         </div>
-      </td>
-      <td className="py-2 pr-3">
-        <div className="flex flex-wrap gap-1">
-          {STATUSES.map((s) => (
-            <Button
-              key={s.value}
-              type="button"
-              size="sm"
-              variant={row.status === s.value ? "default" : "secondary"}
-              onClick={() => save(s.value)}
-            >
-              {s.label}
-            </Button>
-          ))}
+        <div className="flex flex-col gap-1 sm:col-span-2">
+          <label className="text-xs font-medium text-muted-foreground">Position (optional)</label>
+          <Input value={position} onChange={(e) => setPosition(e.target.value)} placeholder="DCA_APP" />
         </div>
-      </td>
-      <td className="py-2 pr-3">
-        <Input
-          className="h-8"
-          placeholder="notes"
-          value={notes}
-          onChange={(e) => setNotes(e.target.value)}
-          onBlur={saveFieldsIfChanged}
+      </div>
+      <div className="flex flex-col gap-1">
+        <label className="text-xs font-medium text-muted-foreground">Details</label>
+        <textarea
+          className="min-h-20 w-full rounded-md border border-input bg-background px-3 py-2 text-sm shadow-sm transition-colors placeholder:text-muted-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
+          value={details}
+          onChange={(e) => setDetails(e.target.value)}
+          placeholder="What coverage do you need, and when?"
         />
-      </td>
-      <td className="py-2 text-right">
-        <ConfirmButton
-          size="icon"
-          title={`Remove ${row.facility}`}
-          aria-label={`Remove ${row.facility}`}
-          onConfirm={() => remove.mutate(row.facility)}
-          warn={`Remove ${row.facility} from the ACE team?`}
-        >
-          <X className="size-4" />
-        </ConfirmButton>
-      </td>
-    </tr>
+      </div>
+      <div>
+        <Button disabled={details.trim().length === 0 || create.isPending} onClick={submit}>
+          <Plus className="mr-1 size-4" /> Submit request
+        </Button>
+      </div>
+    </div>
   );
 }
 
-export function AceSection({ eventId, bare = false }: { eventId: number; bare?: boolean }) {
-  const { data: me } = useMe();
-  const canEdit = hasPermission(me, "events.staffing_requests.create");
-  const staffing = useStaffing(eventId);
-  const upsert = useUpsertStaffing(eventId);
-  const facilities = useFacilities();
+function ClaimForm({
+  eventId,
+  req,
+  eventStart,
+  eventEnd,
+}: {
+  eventId: number;
+  req: string;
+  eventStart: string;
+  eventEnd: string;
+}) {
+  const claim = useClaimEventAce(eventId);
+  const [notes, setNotes] = useState("");
+  const [start, setStart] = useState("");
+  const [end, setEnd] = useState("");
 
-  const nameById = useMemo(
-    () => new Map((facilities.data ?? []).map((f) => [f.id, f.name])),
-    [facilities.data],
+  const minLocal = toLocalInput(eventStart);
+  const maxLocal = toLocalInput(eventEnd);
+
+  const submit = () => {
+    claim.mutate(
+      {
+        req,
+        body: {
+          notes: notes.trim() || null,
+          start_time: start ? fromLocalInput(start) : null,
+          end_time: end ? fromLocalInput(end) : null,
+        },
+      },
+      {
+        onSuccess: () => {
+          setNotes("");
+          setStart("");
+          setEnd("");
+        },
+      },
+    );
+  };
+
+  return (
+    <div className="flex flex-col gap-2 rounded-md border border-dashed p-3">
+      <div className="flex flex-col gap-1">
+        <label className="text-xs font-medium text-muted-foreground">Notes (optional)</label>
+        <Input
+          className="h-8"
+          value={notes}
+          onChange={(e) => setNotes(e.target.value)}
+          placeholder="e.g. can also cover approach"
+        />
+      </div>
+      <div className="grid gap-2 sm:grid-cols-2">
+        <div className="flex flex-col gap-1">
+          <label className="text-xs font-medium text-muted-foreground">Available from (Zulu)</label>
+          <Input
+            className="h-8"
+            type="datetime-local"
+            min={minLocal}
+            max={maxLocal}
+            value={start}
+            onChange={(e) => setStart(e.target.value)}
+          />
+        </div>
+        <div className="flex flex-col gap-1">
+          <label className="text-xs font-medium text-muted-foreground">Available to (Zulu)</label>
+          <Input
+            className="h-8"
+            type="datetime-local"
+            min={minLocal}
+            max={maxLocal}
+            value={end}
+            onChange={(e) => setEnd(e.target.value)}
+          />
+        </div>
+      </div>
+      <div>
+        <Button size="sm" onClick={submit} disabled={claim.isPending}>
+          Claim a slot
+        </Button>
+      </div>
+    </div>
   );
+}
 
-  const rows = staffing.data ?? [];
+function RequestCard({
+  eventId,
+  r,
+  eventStart,
+  eventEnd,
+  canClaim,
+  canDecide,
+  myCid,
+}: {
+  eventId: number;
+  r: AceRequest;
+  eventStart: string;
+  eventEnd: string;
+  canClaim: boolean;
+  canDecide: boolean;
+  myCid: number | undefined;
+}) {
+  const decide = useDecideEventAce(eventId);
+  const release = useReleaseEventAce(eventId);
+  const remove = useDeleteEventAce(eventId);
+
+  const filled = r.claims_count >= r.slots;
+  const iClaimed = myCid != null && r.claims.some((c) => c.cid === myCid);
+
+  return (
+    <div className="flex flex-col gap-2 rounded-lg border bg-muted/20 p-4">
+      <div className="flex flex-wrap items-center justify-between gap-2">
+        <div className="flex items-center gap-2">
+          <span className="font-mono font-semibold">{r.position || "—"}</span>
+          <Badge variant={statusVariant(r.status)}>{r.status}</Badge>
+          <Badge variant={filled ? "success" : "secondary"}>
+            {r.claims_count} / {r.slots} claimed
+          </Badge>
+        </div>
+        <span className="text-xs text-muted-foreground">{timeAgo(r.created_at)}</span>
+      </div>
+
+      <p className="whitespace-pre-wrap text-sm">{r.details}</p>
+
+      <div className="flex flex-wrap gap-x-4 gap-y-1 text-xs text-muted-foreground">
+        <span>
+          by {r.requested_by_name ?? "?"}
+          {r.requested_by_cid ? ` (${r.requested_by_cid})` : ""}
+        </span>
+        {r.decided_by_name && <span>closed by {r.decided_by_name}</span>}
+      </div>
+
+      {r.claims.length > 0 && (
+        <ul className="flex flex-col gap-1 border-t pt-2 text-sm">
+          {r.claims.map((c) => (
+            <li key={c.cid} className="flex flex-wrap items-baseline gap-x-2">
+              <span className="font-medium">{c.display_name}</span>
+              {(c.start_time || c.end_time) && (
+                <span className="font-mono text-xs text-muted-foreground">
+                  {hhmmZulu(c.start_time)}–{hhmmZulu(c.end_time)}
+                </span>
+              )}
+              {c.notes && <span className="text-xs text-muted-foreground">{c.notes}</span>}
+            </li>
+          ))}
+        </ul>
+      )}
+
+      {canClaim && r.status === "open" && !iClaimed && !filled && (
+        <ClaimForm eventId={eventId} req={r.id} eventStart={eventStart} eventEnd={eventEnd} />
+      )}
+
+      {canClaim && iClaimed && (
+        <div>
+          <Button
+            size="sm"
+            variant="outline"
+            onClick={() => release.mutate(r.id)}
+            disabled={release.isPending}
+          >
+            Release my claim
+          </Button>
+        </div>
+      )}
+
+      {canDecide && (
+        <div className="flex flex-wrap gap-1.5 border-t pt-2">
+          {r.status === "open" && (
+            <>
+              <ConfirmButton
+                size="sm"
+                variant="outline"
+                warn="Mark this request completed?"
+                onConfirm={() => decide.mutate({ req: r.id, outcome: "completed" })}
+              >
+                Complete
+              </ConfirmButton>
+              <ConfirmButton
+                size="sm"
+                variant="outline"
+                warn="Cancel this request?"
+                onConfirm={() => decide.mutate({ req: r.id, outcome: "cancelled" })}
+              >
+                Cancel
+              </ConfirmButton>
+            </>
+          )}
+          <ConfirmButton
+            size="sm"
+            variant="ghost"
+            warn="Delete this request permanently?"
+            onConfirm={() => remove.mutate(r.id)}
+          >
+            Delete
+          </ConfirmButton>
+        </div>
+      )}
+    </div>
+  );
+}
+
+export function AceSection({
+  eventId,
+  eventStart,
+  eventEnd,
+  bare = false,
+}: {
+  eventId: number;
+  eventStart: string;
+  eventEnd: string;
+  bare?: boolean;
+}) {
+  const { data: me } = useMe();
+  const canCreate = hasPermission(me, "ace.requests.create");
+  const canClaim = hasPermission(me, "ace.requests.claim");
+  const canDecide = hasPermission(me, "ace.requests.decide");
+  const requests = useEventAce(eventId);
 
   const body = (
     <>
-        {canEdit && (
-          <ArtccCombobox
-            exclude={rows.map((r) => r.facility)}
-            placeholder="Request ACE at ARTCC…"
-            onSelect={(id) =>
-              upsert.mutate({
-                facility: id,
-                body: {
-                  positions_requested: 0,
-                  positions_filled: 0,
-                  status: "open",
-                },
-              })
-            }
-          />
-        )}
+      {canCreate && <CreateForm eventId={eventId} />}
 
-        {!staffing.data ? (
-          <p className="py-2 text-sm text-muted-foreground">Loading…</p>
-        ) : rows.length === 0 ? (
-          <p className="py-2 text-sm text-muted-foreground">
-            No ACE requests yet.
-          </p>
-        ) : (
-          <div className="overflow-x-auto">
-            <table className="w-full text-sm">
-              <thead>
-                <tr className="text-left text-xs uppercase tracking-wide text-muted-foreground">
-                  <th className="pb-2 pr-3 font-medium">Facility</th>
-                  <th className="pb-2 pr-3 font-medium">Filled / wanted</th>
-                  <th className="pb-2 pr-3 font-medium">Status</th>
-                  <th className="pb-2 pr-3 font-medium">Notes</th>
-                  {canEdit && <th className="pb-2" />}
-                </tr>
-              </thead>
-              <tbody>
-                {rows.map((row) => (
-                  <StaffingRow
-                    key={row.facility}
-                    eventId={eventId}
-                    row={row}
-                    name={nameById.get(row.facility)}
-                    canEdit={canEdit}
-                  />
-                ))}
-              </tbody>
-            </table>
-          </div>
-        )}
+      {requests.isError ? (
+        <p className="py-6 text-center text-sm text-muted-foreground">Couldn’t load the requests.</p>
+      ) : !requests.data ? (
+        <p className="py-6 text-center text-sm text-muted-foreground">Loading…</p>
+      ) : requests.data.length === 0 ? (
+        <p className="py-6 text-center text-sm text-muted-foreground">No ACE requests yet.</p>
+      ) : (
+        <div className="flex flex-col gap-2">
+          {requests.data.map((r) => (
+            <RequestCard
+              key={r.id}
+              eventId={eventId}
+              r={r}
+              eventStart={eventStart}
+              eventEnd={eventEnd}
+              canClaim={canClaim}
+              canDecide={canDecide}
+              myCid={me?.cid}
+            />
+          ))}
+        </div>
+      )}
     </>
   );
 
@@ -236,9 +352,9 @@ export function AceSection({ eventId, bare = false }: { eventId: number; bare?: 
             <Users className="size-4" />
           </span>
           <div className="flex flex-col">
-            <span className="font-semibold">ACE request</span>
+            <span className="font-semibold">ACE support</span>
             <span className="text-xs text-muted-foreground">
-              Positions each facility is hoping for vs signed up (filled / wanted).
+              Request live coverage; the ACE team claims slots with their availability.
             </span>
           </div>
         </div>

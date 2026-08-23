@@ -170,13 +170,19 @@ pub fn build_router(state: AppState) -> Router {
             "/api/v1/events/{id}/rates/{icao}",
             put(events::upsert_event_rate).delete(events::delete_event_rate),
         )
+        // ACE support — event-scoped requests + per-person slot claims (notes + times)
         .route(
-            "/api/v1/events/{id}/staffing",
-            get(events::list_event_staffing),
+            "/api/v1/events/{id}/ace",
+            get(ace::list_requests).post(ace::create_request),
+        )
+        .route("/api/v1/events/{id}/ace/{req}", delete(ace::delete_request))
+        .route(
+            "/api/v1/events/{id}/ace/{req}/claim",
+            post(ace::claim_request).delete(ace::release_claim),
         )
         .route(
-            "/api/v1/events/{id}/staffing/{facility}",
-            put(events::upsert_event_staffing).delete(events::delete_event_staffing),
+            "/api/v1/events/{id}/ace/{req}/decide",
+            post(ace::decide_request),
         )
         .route(
             "/api/v1/events/{id}/packages",
@@ -338,17 +344,7 @@ pub fn build_router(state: AppState) -> Router {
         )
         // The current user's Discord link (read-only; sourced from VATUSA)
         .route("/api/v1/me/discord", get(integration::get_my_discord))
-        // ACE support — request queue + team roster
-        .route(
-            "/api/v1/ace/requests",
-            get(ace::list_requests).post(ace::create_request),
-        )
-        .route("/api/v1/ace/requests/{id}", get(ace::get_request))
-        .route("/api/v1/ace/requests/{id}/claim", post(ace::claim_request))
-        .route(
-            "/api/v1/ace/requests/{id}/decide",
-            post(ace::decide_request),
-        )
+        // ACE team roster — national; managed from the admin area. (Requests are event-scoped above.)
         .route(
             "/api/v1/ace/team",
             get(ace::list_team).put(ace::upsert_team_member),
