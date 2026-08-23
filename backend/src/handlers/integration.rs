@@ -16,8 +16,8 @@ use crate::{
     },
     errors::ApiError,
     models::{
-        AceRequestBody, AckJobRequest, DiscordAceClaimRequest, DiscordConfigBody, DiscordLinkBody,
-        OutboundJobBody, UpsertDiscordConfigRequest,
+        AceRequestBody, AckJobRequest, DiscordAceClaimRequest, DiscordAceInfoBody,
+        DiscordConfigBody, DiscordLinkBody, OutboundJobBody, UpsertDiscordConfigRequest,
     },
     repos::{ace as ace_repo, events as events_repo, integration as integration_repo},
     state::AppState,
@@ -103,6 +103,34 @@ pub async fn get_my_discord(
 }
 
 // --- interaction callbacks (bot acts on behalf of the linked user) ---
+
+#[utoipa::path(
+    get, path = "/api/v1/integration/discord/ace/{id}", tag = "integration",
+    params(("id" = String, Path)),
+    responses((status = 200, body = DiscordAceInfoBody), (status = 401), (status = 404))
+)]
+pub async fn discord_ace_info(
+    State(state): State<AppState>,
+    _permission: RequirePermission<IntegrationJobsUpdate>,
+    Path(id): Path<String>,
+) -> Result<Json<DiscordAceInfoBody>, ApiError> {
+    let p = pool(&state)?;
+    let request = ace_repo::get_request(p, &id)
+        .await?
+        .ok_or(ApiError::NotFound)?;
+    let event = events_repo::get(p, request.event_id)
+        .await?
+        .ok_or(ApiError::NotFound)?;
+    let (window_label, time_options) =
+        crate::handlers::ace::event_time_options(event.start_time, event.end_time);
+    Ok(Json(DiscordAceInfoBody {
+        event_title: event.title,
+        window_label,
+        slots: request.slots,
+        claims_count: request.claims_count,
+        time_options,
+    }))
+}
 
 #[utoipa::path(
     post, path = "/api/v1/integration/discord/ace/{id}/claim", tag = "integration",

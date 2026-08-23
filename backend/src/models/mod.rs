@@ -984,6 +984,19 @@ pub struct DiscordLinkBody {
     pub username: Option<String>,
 }
 
+/// What the bot needs to render the Discord claim time-selectors for a request: the event window +
+/// pre-computed Zulu HHMM slot options, and the current slot fill.
+#[derive(Debug, Serialize, ToSchema)]
+pub struct DiscordAceInfoBody {
+    pub event_title: String,
+    /// A human window label, e.g. `2300–0300z`.
+    pub window_label: String,
+    pub slots: i32,
+    pub claims_count: i64,
+    /// Zulu HHMM options spanning the event window (for the start/end dropdowns).
+    pub time_options: Vec<String>,
+}
+
 /// Bot interaction callback: a Discord user submitted the claim modal on an ACE request. The backend
 /// resolves the Discord id to the linked OIS user and claims a slot on their behalf. `start_hhmm` /
 /// `end_hhmm` are the modal's raw Zulu times (e.g. "2330"); the backend parses them against the

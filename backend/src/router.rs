@@ -342,6 +342,10 @@ pub fn build_router(state: AppState) -> Router {
             "/api/v1/integration/discord/ace/{id}/claim",
             post(integration::discord_ace_claim),
         )
+        .route(
+            "/api/v1/integration/discord/ace/{id}",
+            get(integration::discord_ace_info),
+        )
         // The current user's Discord link (read-only; sourced from VATUSA)
         .route("/api/v1/me/discord", get(integration::get_my_discord))
         // ACE team roster — national; managed from the admin area. (Requests are event-scoped above.)

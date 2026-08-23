@@ -1334,6 +1334,22 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/v1/integration/discord/ace/{id}": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get: operations["discord_ace_info"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/v1/integration/discord/ace/{id}/claim": {
         parameters: {
             query?: never;
@@ -2805,6 +2821,21 @@ export interface components {
             end_hhmm?: string | null;
             notes?: string | null;
             start_hhmm?: string | null;
+        };
+        /**
+         * @description What the bot needs to render the Discord claim time-selectors for a request: the event window +
+         *     pre-computed Zulu HHMM slot options, and the current slot fill.
+         */
+        DiscordAceInfoBody: {
+            /** Format: int64 */
+            claims_count: number;
+            event_title: string;
+            /** Format: int32 */
+            slots: number;
+            /** @description Zulu HHMM options spanning the event window (for the start/end dropdowns). */
+            time_options: string[];
+            /** @description A human window label, e.g. `2300–0300z`. */
+            window_label: string;
         };
         /** @description The Discord guild config + its logical-name maps. */
         DiscordConfigBody: {
@@ -8066,6 +8097,39 @@ export interface operations {
                 content?: never;
             };
             401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+        };
+    };
+    discord_ace_info: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["DiscordAceInfoBody"];
+                };
+            };
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            404: {
                 headers: {
                     [name: string]: unknown;
                 };

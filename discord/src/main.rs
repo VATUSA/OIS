@@ -15,14 +15,14 @@ use std::time::Duration;
 use ois_client::{OisClient, OutboundJob};
 use serde_json::{Value, json};
 use serenity::all::{
-    ActionRowComponent, ButtonStyle, ChannelId, ChannelType, Colour, Context, CreateActionRow,
-    CreateButton, CreateEmbed, CreateInputText, CreateInteractionResponse,
-    CreateInteractionResponseMessage, CreateMessage, CreateModal, CreateThread, EditMessage,
-    EventHandler, GatewayIntents, Http, InputTextStyle, Interaction, MessageId, Ready,
+    ButtonStyle, ChannelId, ChannelType, Colour, ComponentInteractionDataKind, Context,
+    CreateActionRow, CreateButton, CreateEmbed, CreateInteractionResponse,
+    CreateInteractionResponseMessage, CreateMessage, CreateSelectMenu, CreateSelectMenuKind,
+    CreateSelectMenuOption, CreateThread, EditMessage, EventHandler, GatewayIntents, Http,
+    Interaction, MessageId, Ready,
 };
 
 const ACE_CLAIM_PREFIX: &str = "ace_claim:";
-const ACE_MODAL_PREFIX: &str = "ace_modal:";
 
 struct Config {
     discord_token: String,
@@ -65,105 +65,168 @@ impl EventHandler for Handler {
     }
 
     async fn interaction_create(&self, ctx: Context, interaction: Interaction) {
-        match interaction {
-            // Claim button → pop a modal to collect notes + availability window (Zulu HHMM).
-            Interaction::Component(mc) => {
-                let Some(request_id) = mc.data.custom_id.strip_prefix(ACE_CLAIM_PREFIX) else {
+        let Interaction::Component(mc) = interaction else {
+            return;
+        };
+        let cid = mc.data.custom_id.clone();
+
+        // 1) Original "Claim" button on the request embed → open the ephemeral time-picker.
+        if let Some(request_id) = cid.strip_prefix(ACE_CLAIM_PREFIX) {
+            let info = match self.api.ace_info(request_id).await {
+                Ok(i) => i,
+                Err(e) => {
+                    let _ = mc
+                        .create_response(&ctx.http, ephemeral(&claim_error(&e)))
+                        .await;
                     return;
-                };
-                let modal = CreateModal::new(
-                    format!("{ACE_MODAL_PREFIX}{request_id}"),
-                    "Claim an ACE slot",
-                )
-                .components(vec![
-                    CreateActionRow::InputText(
-                        CreateInputText::new(InputTextStyle::Paragraph, "Notes", "notes")
-                            .required(false),
-                    ),
-                    CreateActionRow::InputText(
-                        CreateInputText::new(InputTextStyle::Short, "Start (Zulu HHMM)", "start")
-                            .placeholder("2330")
-                            .required(false),
-                    ),
-                    CreateActionRow::InputText(
-                        CreateInputText::new(InputTextStyle::Short, "End (Zulu HHMM)", "end")
-                            .placeholder("0130")
-                            .required(false),
-                    ),
-                ]);
-                if let Err(e) = mc
-                    .create_response(&ctx.http, CreateInteractionResponse::Modal(modal))
-                    .await
-                {
-                    tracing::error!(error = %e, "failed to open claim modal");
+                }
+            };
+            let content = format!(
+                "**{}** · {} — {}/{} claimed. Pick when you can start and end, then Claim:",
+                info.event_title, info.window_label, info.claims_count, info.slots
+            );
+            let resp = CreateInteractionResponse::Message(
+                CreateInteractionResponseMessage::new()
+                    .content(content)
+                    .components(claim_components(request_id, &info.time_options, "-", "-"))
+                    .ephemeral(true),
+            );
+            if let Err(e) = mc.create_response(&ctx.http, resp).await {
+                tracing::error!(error = %e, "failed to open claim picker");
+            }
+            return;
+        }
+
+        // 2) Start/End dropdown → carry the new selection in the re-rendered custom_ids.
+        if cid.starts_with("aceS:") || cid.starts_with("aceE:") {
+            let parts: Vec<&str> = cid.splitn(4, ':').collect();
+            let (tag, request_id, mut start, mut end) = (
+                parts[0],
+                parts[1].to_string(),
+                parts[2].to_string(),
+                parts[3].to_string(),
+            );
+            if let ComponentInteractionDataKind::StringSelect { values } = &mc.data.kind
+                && let Some(v) = values.first()
+            {
+                if tag == "aceS" {
+                    start = v.clone();
+                } else {
+                    end = v.clone();
                 }
             }
-            // Modal submit → perform the claim on behalf of the linked user.
-            Interaction::Modal(ms) => {
-                let Some(request_id) = ms.data.custom_id.strip_prefix(ACE_MODAL_PREFIX) else {
-                    return;
-                };
-                let (mut notes, mut start, mut end) = (None, None, None);
-                for row in &ms.data.components {
-                    for comp in &row.components {
-                        if let ActionRowComponent::InputText(it) = comp {
-                            let val = it
-                                .value
-                                .as_deref()
-                                .map(str::trim)
-                                .filter(|s| !s.is_empty())
-                                .map(str::to_owned);
-                            match it.custom_id.as_str() {
-                                "notes" => notes = val,
-                                "start" => start = val,
-                                "end" => end = val,
-                                _ => {}
-                            }
-                        }
-                    }
-                }
-                let discord_user = ms.user.id.get().to_string();
-                let content = match self
-                    .api
-                    .claim_ace_via_discord(
-                        request_id,
-                        &discord_user,
-                        notes.as_deref(),
-                        start.as_deref(),
-                        end.as_deref(),
+            let Ok(info) = self.api.ace_info(&request_id).await else {
+                return;
+            };
+            let resp = CreateInteractionResponse::UpdateMessage(
+                CreateInteractionResponseMessage::new().components(claim_components(
+                    &request_id,
+                    &info.time_options,
+                    &start,
+                    &end,
+                )),
+            );
+            if let Err(e) = mc.create_response(&ctx.http, resp).await {
+                tracing::error!(error = %e, "failed to update claim picker");
+            }
+            return;
+        }
+
+        // 3) "Claim slot" confirm button → perform the claim with the selected times.
+        if let Some(rest) = cid.strip_prefix("aceG:") {
+            let parts: Vec<&str> = rest.splitn(3, ':').collect();
+            let (request_id, start, end) = (parts[0], parts[1], parts[2]);
+            if start == "-" || end == "-" {
+                let _ = mc
+                    .create_response(
+                        &ctx.http,
+                        ephemeral("Pick both a start and end time first."),
                     )
-                    .await
-                {
-                    Ok(_) => "✅ Claimed — thanks for covering this.".to_string(),
-                    Err(e) => match e.status() {
-                        Some(403) => "No OIS account is linked to your Discord. Add your Discord \
-                                      to your VATUSA profile, then sign in to OIS to sync it."
-                            .to_string(),
-                        Some(409) => {
-                            "This request is full, or you've already claimed a slot.".to_string()
-                        }
-                        Some(404) => "That request no longer exists.".to_string(),
-                        Some(400) => {
-                            "Those times aren't within the event window — try again.".to_string()
-                        }
-                        _ => {
-                            tracing::error!(error = %e, request_id, "ace claim callback failed");
-                            "Couldn't claim right now — please try again.".to_string()
-                        }
-                    },
-                };
-                let response = CreateInteractionResponse::Message(
-                    CreateInteractionResponseMessage::new()
-                        .content(content)
-                        .ephemeral(true),
-                );
-                if let Err(e) = ms.create_response(&ctx.http, response).await {
-                    tracing::error!(error = %e, "failed to respond to claim modal");
-                }
+                    .await;
+                return;
             }
-            _ => {}
+            let discord_user = mc.user.id.get().to_string();
+            let content = match self
+                .api
+                .claim_ace_via_discord(request_id, &discord_user, None, Some(start), Some(end))
+                .await
+            {
+                Ok(_) => format!("✅ Claimed {start}–{end}z — thanks for covering this."),
+                Err(e) => claim_error(&e),
+            };
+            // Collapse the picker into the result.
+            let resp = CreateInteractionResponse::UpdateMessage(
+                CreateInteractionResponseMessage::new()
+                    .content(content)
+                    .components(vec![]),
+            );
+            if let Err(e) = mc.create_response(&ctx.http, resp).await {
+                tracing::error!(error = %e, "failed to finalize claim");
+            }
         }
     }
+}
+
+/// An ephemeral text-only response.
+fn ephemeral(content: &str) -> CreateInteractionResponse {
+    CreateInteractionResponse::Message(
+        CreateInteractionResponseMessage::new()
+            .content(content)
+            .ephemeral(true),
+    )
+}
+
+/// Map a claim client-error to a user-facing message.
+fn claim_error(e: &ois_client::ClientError) -> String {
+    match e.status() {
+        Some(403) => "No OIS account is linked to your Discord. Add your Discord to your VATUSA \
+                      profile, then sign in to OIS to sync it."
+            .to_string(),
+        Some(409) => "This request is full, or you've already claimed a slot.".to_string(),
+        Some(404) => "That request no longer exists.".to_string(),
+        Some(400) => "That window isn't valid for the event — try again.".to_string(),
+        _ => {
+            tracing::error!(error = %e, "ace claim/info call failed");
+            "Couldn't do that right now — please try again.".to_string()
+        }
+    }
+}
+
+/// The claim picker: Start + End dropdowns (Zulu HHMM) and a Claim button. All three custom_ids carry
+/// the current `(start, end)` so any change re-renders with the state intact; the button enables once
+/// both are chosen.
+fn claim_components(
+    request_id: &str,
+    options: &[String],
+    start: &str,
+    end: &str,
+) -> Vec<CreateActionRow> {
+    let menu = |tag: char, placeholder: &str, chosen: &str| {
+        let opts: Vec<CreateSelectMenuOption> = options
+            .iter()
+            .map(|o| {
+                CreateSelectMenuOption::new(format!("{o}z"), o.clone())
+                    .default_selection(o == chosen)
+            })
+            .collect();
+        CreateActionRow::SelectMenu(
+            CreateSelectMenu::new(
+                format!("ace{tag}:{request_id}:{start}:{end}"),
+                CreateSelectMenuKind::String { options: opts },
+            )
+            .placeholder(placeholder),
+        )
+    };
+    let ready = start != "-" && end != "-";
+    let confirm = CreateButton::new(format!("aceG:{request_id}:{start}:{end}"))
+        .label("Claim slot")
+        .style(ButtonStyle::Success)
+        .disabled(!ready);
+    vec![
+        menu('S', "Start time (Zulu)", start),
+        menu('E', "End time (Zulu)", end),
+        CreateActionRow::Buttons(vec![confirm]),
+    ]
 }
 
 #[tokio::main]
