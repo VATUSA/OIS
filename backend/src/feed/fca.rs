@@ -260,6 +260,7 @@ pub fn meter(
 
     let n = cands.len();
     let mut sched = vec![0i64; n];
+    let mut seq_of = vec![0i64; n];
 
     if let Some(seq) = order {
         // Manual: honour the controller's order; splice newcomers by ETA at the end.
@@ -286,6 +287,13 @@ pub fn meter(
             };
             prev = Some(sched[i]);
         }
+        // Manual: the crossing sequence IS the controller's order — assigned directly, not derived
+        // from scheduled time. That keeps a dragged aircraft in the slot it was moved to even though
+        // airborne/frozen crossings keep their true (un-delayed) times, which would otherwise re-sort
+        // it away under a by-time ranking.
+        for (rank, &i) in ordered.iter().enumerate() {
+            seq_of[i] = rank as i64 + 1;
+        }
     } else {
         // Auto: pinned (airborne + frozen) first, then advisory ground floats.
         let pinned = |c: &MeterInput| c.airborne || c.frozen_ms.is_some();
@@ -307,13 +315,12 @@ pub fn meter(
             };
             committed.push(sched[i]);
         }
-    }
-
-    let mut by_time: Vec<usize> = (0..cands.len()).collect();
-    by_time.sort_by_key(|&i| sched[i]);
-    let mut seq_of = vec![0i64; cands.len()];
-    for (rank, &i) in by_time.iter().enumerate() {
-        seq_of[i] = rank as i64 + 1;
+        // Auto: sequence by scheduled crossing time.
+        let mut by_time: Vec<usize> = (0..n).collect();
+        by_time.sort_by_key(|&i| sched[i]);
+        for (rank, &i) in by_time.iter().enumerate() {
+            seq_of[i] = rank as i64 + 1;
+        }
     }
 
     (0..cands.len())
@@ -635,6 +642,37 @@ mod tests {
         assert_eq!(out[1].sched_ms, 120_000);
         assert_eq!(out[0].sched_ms, 240_000);
         assert_eq!((out[2].seq, out[1].seq, out[0].seq), (1, 2, 3));
+    }
+
+    #[test]
+    fn manual_order_seq_follows_controller_not_eta() {
+        // Regression: the controller drags a ground aircraft (later ETA) ahead of an airborne one
+        // (earlier ETA). A by-time ranking would snap the airborne crossing back to seq 1; the
+        // manual order must win so the dragged aircraft keeps the slot it was moved to.
+        let cands = vec![
+            MeterInput {
+                eta_ms: 100_000, // ground, later
+                airborne: false,
+                cross_speed: 400.0,
+                frozen_ms: None,
+            },
+            MeterInput {
+                eta_ms: 50_000, // airborne, earlier — pinned, never delayed
+                airborne: true,
+                cross_speed: 450.0,
+                frozen_ms: None,
+            },
+        ];
+        let out = meter(&cands, "rate", 30, 15, Some(&[0, 1]));
+        assert_eq!(out[0].seq, 1, "the dragged ground aircraft keeps seq 1");
+        assert_eq!(
+            out[1].seq, 2,
+            "the airborne aircraft stays where it was dragged"
+        );
+        assert_eq!(
+            out[1].sched_ms, 50_000,
+            "airborne still crosses at its true ETA"
+        );
     }
 
     #[test]
