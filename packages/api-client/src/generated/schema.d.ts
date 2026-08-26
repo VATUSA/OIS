@@ -36,38 +36,6 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
-    "/api/v1/ace/team": {
-        parameters: {
-            query?: never;
-            header?: never;
-            path?: never;
-            cookie?: never;
-        };
-        get: operations["list_team"];
-        put: operations["upsert_team_member"];
-        post?: never;
-        delete?: never;
-        options?: never;
-        head?: never;
-        patch?: never;
-        trace?: never;
-    };
-    "/api/v1/ace/team/{cid}": {
-        parameters: {
-            query?: never;
-            header?: never;
-            path?: never;
-            cookie?: never;
-        };
-        get?: never;
-        put?: never;
-        post?: never;
-        delete: operations["remove_team_member"];
-        options?: never;
-        head?: never;
-        patch?: never;
-        trace?: never;
-    };
     "/api/v1/admin/api-keys": {
         parameters: {
             query?: never;
@@ -2293,15 +2261,6 @@ export interface components {
             /** @description `open` | `completed` | `cancelled`. */
             status: string;
         };
-        AceTeamMemberBody: {
-            active: boolean;
-            artcc_id?: string | null;
-            /** Format: int64 */
-            cid: number;
-            display_name: string;
-            id: string;
-            role?: string | null;
-        };
         /**
          * @description The bot's acknowledgement of a leased job. `result` records ids the backend must remember
          *     (message/thread id); `error` explains a failure (triggers backoff + retry).
@@ -4226,13 +4185,6 @@ export interface components {
             reason: string;
             scopes: components["schemas"]["ScopeUpdate"][];
         };
-        UpsertAceTeamMemberRequest: {
-            active?: boolean | null;
-            artcc_id?: string | null;
-            /** Format: int64 */
-            cid: number;
-            role?: string | null;
-        };
         UpsertAirportConfigRequest: {
             /** Format: int32 */
             aar: number;
@@ -4407,101 +4359,6 @@ export interface operations {
                 };
             };
             401: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content?: never;
-            };
-        };
-    };
-    list_team: {
-        parameters: {
-            query?: {
-                /** @description Include inactive members */
-                all?: boolean;
-            };
-            header?: never;
-            path?: never;
-            cookie?: never;
-        };
-        requestBody?: never;
-        responses: {
-            200: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": components["schemas"]["AceTeamMemberBody"][];
-                };
-            };
-            401: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content?: never;
-            };
-        };
-    };
-    upsert_team_member: {
-        parameters: {
-            query?: never;
-            header?: never;
-            path?: never;
-            cookie?: never;
-        };
-        requestBody: {
-            content: {
-                "application/json": components["schemas"]["UpsertAceTeamMemberRequest"];
-            };
-        };
-        responses: {
-            200: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": components["schemas"]["AceTeamMemberBody"][];
-                };
-            };
-            400: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content?: never;
-            };
-            401: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content?: never;
-            };
-        };
-    };
-    remove_team_member: {
-        parameters: {
-            query?: never;
-            header?: never;
-            path: {
-                /** @description Member's VATSIM CID */
-                cid: number;
-            };
-            cookie?: never;
-        };
-        requestBody?: never;
-        responses: {
-            204: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content?: never;
-            };
-            401: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content?: never;
-            };
-            404: {
                 headers: {
                     [name: string]: unknown;
                 };
@@ -6393,7 +6250,7 @@ export interface operations {
                 };
                 content?: never;
             };
-            /** @description No Discord events channel configured */
+            /** @description No Discord channel configured for this region */
             400: {
                 headers: {
                     [name: string]: unknown;

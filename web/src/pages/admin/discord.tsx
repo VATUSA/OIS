@@ -21,12 +21,18 @@ import {
 const KNOWN_CHANNELS: { name: string; hint: string }[] = [
   { name: "aceteam-requests", hint: "ACE coverage requests post + claim notifications" },
   { name: "tmu-advisories", hint: "Published TMIs (traffic management advisories)" },
-  { name: "events", hint: "Event coordination threads (Post to Discord)" },
+  { name: "region-northeast", hint: "DCC threads for North East hosts (ZBW/ZDC/ZNY/ZOB)" },
+  { name: "region-southeast", hint: "DCC threads for South East hosts (ZID/ZJX/ZMA/ZTL)" },
+  { name: "region-southcentral", hint: "DCC threads for South Central hosts (ZAB/ZFW/ZHU/ZME)" },
+  { name: "region-midwest", hint: "DCC threads for Midwest hosts (ZAU/ZDV/ZKC/ZMP)" },
+  { name: "region-west", hint: "DCC threads for West hosts (ZAN/HCF/ZLA/ZLC/ZOA/ZSE)" },
+  { name: "events", hint: "Fallback DCC-thread channel when a region has none" },
 ];
 
 /** Logical role names the backend resolves. */
 const KNOWN_ROLES: { name: string; hint: string }[] = [
-  { name: "dcc", hint: "Pinged in event coordination threads (optional)" },
+  { name: "ntmo", hint: "Pinged in DCC threads for NOM availability" },
+  { name: "dcc-trainee", hint: "Pinged in DCC threads to shadow the event" },
 ];
 
 type Kind = "channels" | "roles" | "categories";

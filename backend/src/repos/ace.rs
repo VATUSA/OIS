@@ -1,4 +1,4 @@
-//! ACE support: the shared request queue (open → claimed → completed/cancelled) and the team roster.
+//! ACE support: the event-scoped request queue (open → completed/cancelled) + per-person slot claims.
 //! State transitions are guarded inside a transaction (`select … for update`), per OIS convention —
 //! the coarse `RequirePermission` gate authorizes the caller; the state check lives here.
 
@@ -7,7 +7,7 @@ use sqlx::{PgPool, Postgres, Transaction};
 
 use crate::{
     errors::ApiError,
-    models::{AceClaimBody, AceRequestBody, AceTeamMemberBody},
+    models::{AceClaimBody, AceRequestBody},
 };
 
 /// The request row + its aggregated claims (json_agg) + a live claim count. `slots` and the count
@@ -225,57 +225,4 @@ pub async fn decide_request(
     .map_err(|_| ApiError::Internal)?;
     tx.commit().await.map_err(|_| ApiError::Internal)?;
     Ok(())
-}
-
-// --- team roster ---
-
-/// The ACE roster (active first, then by name). `active_only` hides soft-removed members.
-pub async fn list_team(
-    pool: &PgPool,
-    active_only: bool,
-) -> Result<Vec<AceTeamMemberBody>, ApiError> {
-    let sql = format!(
-        "select t.id, u.cid, u.display_name, t.role, t.artcc_id, t.active \
-         from ace.team_members t join identity.users u on u.id = t.user_id \
-         {} order by t.active desc, u.display_name",
-        if active_only { "where t.active" } else { "" }
-    );
-    sqlx::query_as::<_, AceTeamMemberBody>(&sql)
-        .fetch_all(pool)
-        .await
-        .map_err(|_| ApiError::Internal)
-}
-
-/// Add or update a roster member (keyed on user), returning its id.
-pub async fn upsert_team_member(
-    pool: &PgPool,
-    user_id: &str,
-    role: Option<&str>,
-    artcc_id: Option<&str>,
-    active: bool,
-) -> Result<(), ApiError> {
-    sqlx::query(
-        "insert into ace.team_members (user_id, role, artcc_id, active) \
-         values ($1, $2, $3, $4) \
-         on conflict (user_id) do update \
-             set role = excluded.role, artcc_id = excluded.artcc_id, active = excluded.active",
-    )
-    .bind(user_id)
-    .bind(role)
-    .bind(artcc_id)
-    .bind(active)
-    .execute(pool)
-    .await
-    .map_err(|_| ApiError::Internal)?;
-    Ok(())
-}
-
-/// Permanently remove a roster member. Returns false if absent.
-pub async fn remove_team_member(pool: &PgPool, user_id: &str) -> Result<bool, ApiError> {
-    let res = sqlx::query("delete from ace.team_members where user_id = $1")
-        .bind(user_id)
-        .execute(pool)
-        .await
-        .map_err(|_| ApiError::Internal)?;
-    Ok(res.rows_affected() > 0)
 }

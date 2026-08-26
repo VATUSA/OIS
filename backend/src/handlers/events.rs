@@ -1108,17 +1108,28 @@ pub async fn update_event_debrief(
     }))
 }
 
-/// Logical config names the event thread resolves: the channel to post under, and (optional) a role
-/// to ping. Kept in sync with the admin Discord config editor's suggestions.
+/// Fallback channel (a config logical name) when the host has no region / no region channel is mapped.
 const EVENTS_CHANNEL: &str = "events";
-const DCC_ROLE: &str = "dcc";
+
+/// Host ARTCC → DCC region id (from the VATUSA portal's event-region grouping, trimmed to the real
+/// facility set). The region id is the suffix of the `region-{id}` channel logical name.
+fn dcc_region(facility: &str) -> Option<&'static str> {
+    match facility.to_ascii_uppercase().as_str() {
+        "ZBW" | "ZDC" | "ZNY" | "ZOB" => Some("northeast"),
+        "ZID" | "ZJX" | "ZMA" | "ZTL" => Some("southeast"),
+        "ZAB" | "ZFW" | "ZHU" | "ZME" => Some("southcentral"),
+        "ZAU" | "ZDV" | "ZKC" | "ZMP" => Some("midwest"),
+        "ZAN" | "HCF" | "ZLA" | "ZLC" | "ZOA" | "ZSE" => Some("west"),
+        _ => None,
+    }
+}
 
 #[utoipa::path(
     post, path = "/api/v1/events/{id}/discord/publish", tag = "events",
     params(("id" = i64, Path)),
     responses(
         (status = 202, description = "Thread creation enqueued"),
-        (status = 400, description = "No Discord events channel configured"),
+        (status = 400, description = "No Discord channel configured for this region"),
         (status = 401), (status = 404),
         (status = 409, description = "Already posted for this event")
     )
@@ -1141,21 +1152,48 @@ pub async fn publish_event_discord(
     {
         return Err(ApiError::Conflict);
     }
-    // An explicit action needs somewhere to post — surface "not configured" rather than silently skip.
-    let channel = integration_repo::channel_id(pool, EVENTS_CHANNEL)
+
+    // Route by the host's DCC region; fall back to the generic `events` channel if unmapped/unconfigured.
+    let mut channel = None;
+    if let Some(region) = dcc_region(&event.facility) {
+        channel = integration_repo::channel_id(pool, &format!("region-{region}")).await?;
+    }
+    if channel.is_none() {
+        channel = integration_repo::channel_id(pool, EVENTS_CHANNEL).await?;
+    }
+    let channel = channel.ok_or(ApiError::BadRequest)?;
+
+    // Involved facilities = Required/Preferred support rows; each pings the facility's EC(s) — the OIS
+    // users holding the `EC` role scoped to that ARTCC (set in Access Control), by their linked Discord.
+    let mut facilities = Vec::new();
+    for f in events_repo::list_facility_support(pool, id)
         .await?
-        .ok_or(ApiError::BadRequest)?;
-    let role = integration_repo::role_id(pool, DCC_ROLE).await?;
+        .into_iter()
+        .filter(|f| matches!(f.level.as_str(), "required" | "preferred"))
+    {
+        let ec_user_ids = integration_repo::ec_discord_ids(pool, &f.facility).await?;
+        facilities.push(serde_json::json!({ "id": f.facility, "ec_user_ids": ec_user_ids }));
+    }
+    let ntmo_role_id = integration_repo::role_id(pool, "ntmo").await?;
+    let dcc_trainee_role_id = integration_repo::role_id(pool, "dcc-trainee").await?;
+
+    let thread_name = format!("{} {}", event.start_time.format("%Y%m%d"), event.title);
+    let date_line = format!(
+        "{} · {}z",
+        event.start_time.format("%a, %b %-d"),
+        event.start_time.format("%H%M")
+    );
 
     let mut tx = pool.begin().await.map_err(|_| ApiError::Internal)?;
     let payload = serde_json::json!({
         "channel_id": channel,
-        "role_id": role,
+        "thread_name": thread_name,
+        "event_title": event.title,
+        "date_line": date_line,
+        "facilities": facilities,
+        "ntmo_role_id": ntmo_role_id,
+        "dcc_trainee_role_id": dcc_trainee_role_id,
         "event_id": id,
-        "title": event.title,
-        "facility": event.facility,
-        "start_time": event.start_time,
-        "end_time": event.end_time,
     });
     integration_repo::enqueue_job(
         &mut tx,

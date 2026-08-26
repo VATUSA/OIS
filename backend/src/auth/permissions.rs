@@ -64,13 +64,11 @@ permission!(EventsSupportUpdate, ["events", "support"], Update);
 permission!(EventsDebriefCreate, ["events", "debrief"], Create);
 permission!(EventsDiscordPublish, ["events", "discord"], Publish);
 
-// ace — support-request queue + team roster
+// ace — event-scoped support-request queue
 permission!(AceRequestsRead, ["ace", "requests"], Read);
 permission!(AceRequestsCreate, ["ace", "requests"], Create);
 permission!(AceRequestsClaim, ["ace", "requests"], Claim);
 permission!(AceRequestsDecide, ["ace", "requests"], Decide);
-permission!(AceTeamRead, ["ace", "team"], Read);
-permission!(AceTeamUpdate, ["ace", "team"], Update);
 
 // discord / integration — the outbound-job queue (bot) + guild config mapping
 permission!(IntegrationJobsUpdate, ["integration", "jobs"], Update);

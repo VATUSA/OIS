@@ -895,27 +895,6 @@ pub struct DecideAceRequestRequest {
     pub outcome: String,
 }
 
-#[derive(Debug, Serialize, ToSchema, sqlx::FromRow)]
-pub struct AceTeamMemberBody {
-    pub id: String,
-    pub cid: i64,
-    pub display_name: String,
-    pub role: Option<String>,
-    pub artcc_id: Option<String>,
-    pub active: bool,
-}
-
-#[derive(Debug, Deserialize, ToSchema)]
-pub struct UpsertAceTeamMemberRequest {
-    pub cid: i64,
-    #[serde(default)]
-    pub role: Option<String>,
-    #[serde(default)]
-    pub artcc_id: Option<String>,
-    #[serde(default)]
-    pub active: Option<bool>,
-}
-
 // --- integration / Discord ---
 
 /// One outbound job handed to the bot on lease. `payload` carries everything the handler needs.

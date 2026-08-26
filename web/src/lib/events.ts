@@ -101,14 +101,14 @@ export function usePublishEventDiscord(eventId: number) {
       if (response.status === 400) throw new Error("unconfigured");
       if (error || !response.ok) throw new Error("failed");
     },
-    onSuccess: () => toast.success("Event thread queued for Discord"),
+    onSuccess: () => toast.success("DCC thread queued for Discord"),
     onError: (e) => {
       const msg =
         e instanceof Error && e.message === "already"
-          ? "Already posted to Discord for this event."
+          ? "A DCC thread was already created for this event."
           : e instanceof Error && e.message === "unconfigured"
-            ? "Set an “events” channel in Admin → Discord first."
-            : "Couldn’t post to Discord.";
+            ? "No Discord channel is set for this region — configure it in Admin → Discord."
+            : "Couldn’t create the DCC thread.";
       toast.error(msg);
     },
   });

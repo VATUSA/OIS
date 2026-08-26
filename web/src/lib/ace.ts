@@ -6,12 +6,8 @@ import {ois} from "./api";
 
 export type AceRequest = components["schemas"]["AceRequestBody"];
 export type AceClaim = components["schemas"]["AceClaimBody"];
-export type AceTeamMember = components["schemas"]["AceTeamMemberBody"];
 export type CreateAceRequest = components["schemas"]["CreateAceRequestRequest"];
 export type ClaimAceRequest = components["schemas"]["ClaimAceRequest"];
-export type UpsertAceTeamMember = components["schemas"]["UpsertAceTeamMemberRequest"];
-
-const TEAM = ["ace-team"] as const;
 
 /** The ACE support requests for one event (optionally filtered by status). Needs `ace.requests.read`. */
 export function useEventAce(eventId: number, status?: string) {
@@ -130,53 +126,5 @@ export function useDecideEventAce(eventId: number) {
       qc.invalidateQueries({ queryKey: ["event-ace", eventId] });
     },
     onError: () => toast.error("Couldn’t update the request"),
-  });
-}
-
-/** The ACE team roster. Needs `ace.team.read`. */
-export function useAceTeam(all = false) {
-  return useQuery({
-    queryKey: [...TEAM, all],
-    queryFn: async (): Promise<AceTeamMember[]> => {
-      const { data, error } = await ois.GET("/api/v1/ace/team", {
-        params: { query: all ? { all: true } : {} },
-      });
-      if (error || !data) throw new Error("failed to load ACE team");
-      return data;
-    },
-  });
-}
-
-/** Add or update a roster member (by CID). Needs `ace.team.update`. */
-export function useUpsertAceTeamMember() {
-  const qc = useQueryClient();
-  const toast = useToast();
-  return useMutation({
-    mutationFn: async (body: UpsertAceTeamMember): Promise<AceTeamMember[]> => {
-      const { data, error } = await ois.PUT("/api/v1/ace/team", { body });
-      if (error || !data) throw new Error("save failed");
-      return data;
-    },
-    onSuccess: () => {
-      qc.invalidateQueries({ queryKey: TEAM });
-      toast.success("Roster updated");
-    },
-    onError: () => toast.error("Couldn’t update the roster (is the CID a known OIS user?)"),
-  });
-}
-
-/** Remove a roster member (by CID). Needs `ace.team.update`. */
-export function useRemoveAceTeamMember() {
-  const qc = useQueryClient();
-  const toast = useToast();
-  return useMutation({
-    mutationFn: async (cid: number): Promise<void> => {
-      const { error } = await ois.DELETE("/api/v1/ace/team/{cid}", {
-        params: { path: { cid } },
-      });
-      if (error) throw new Error("remove failed");
-    },
-    onSuccess: () => qc.invalidateQueries({ queryKey: TEAM }),
-    onError: () => toast.error("Couldn’t remove the member"),
   });
 }
