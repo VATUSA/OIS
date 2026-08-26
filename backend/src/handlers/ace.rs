@@ -14,21 +14,12 @@ use serde::Deserialize;
 use crate::{
     auth::{
         context::CurrentUser,
-        permissions::{
-            AceRequestsClaim, AceRequestsCreate, AceRequestsDecide, AceTeamRead, AceTeamUpdate,
-            EventsPlanRead,
-        },
+        permissions::{AceRequestsClaim, AceRequestsCreate, AceRequestsDecide, EventsPlanRead},
         require_permission::RequirePermission,
     },
     errors::ApiError,
-    models::{
-        AceRequestBody, AceTeamMemberBody, ClaimAceRequest, CreateAceRequestRequest,
-        DecideAceRequestRequest, UpsertAceTeamMemberRequest,
-    },
-    repos::{
-        access as access_repo, ace as ace_repo, events as events_repo,
-        integration as integration_repo,
-    },
+    models::{AceRequestBody, ClaimAceRequest, CreateAceRequestRequest, DecideAceRequestRequest},
+    repos::{ace as ace_repo, events as events_repo, integration as integration_repo},
     state::AppState,
 };
 use serde_json::json;
@@ -394,75 +385,4 @@ pub async fn decide_request(
         .await?
         .map(Json)
         .ok_or(ApiError::NotFound)
-}
-
-// --- team roster (national; managed from the admin area) ---
-
-#[derive(Deserialize)]
-pub struct TeamQuery {
-    /// Include soft-removed (inactive) members.
-    all: Option<bool>,
-}
-
-#[utoipa::path(
-    get, path = "/api/v1/ace/team", tag = "ace",
-    params(("all" = Option<bool>, Query, description = "Include inactive members")),
-    responses((status = 200, body = Vec<AceTeamMemberBody>), (status = 401))
-)]
-pub async fn list_team(
-    State(state): State<AppState>,
-    _permission: RequirePermission<AceTeamRead>,
-    Query(q): Query<TeamQuery>,
-) -> Result<Json<Vec<AceTeamMemberBody>>, ApiError> {
-    Ok(Json(
-        ace_repo::list_team(pool(&state)?, !q.all.unwrap_or(false)).await?,
-    ))
-}
-
-#[utoipa::path(
-    put, path = "/api/v1/ace/team", tag = "ace",
-    request_body = UpsertAceTeamMemberRequest,
-    responses((status = 200, body = Vec<AceTeamMemberBody>), (status = 400), (status = 401))
-)]
-pub async fn upsert_team_member(
-    State(state): State<AppState>,
-    _permission: RequirePermission<AceTeamUpdate>,
-    Json(payload): Json<UpsertAceTeamMemberRequest>,
-) -> Result<Json<Vec<AceTeamMemberBody>>, ApiError> {
-    let p = pool(&state)?;
-    let user_id = access_repo::find_user_id_by_cid(p, payload.cid)
-        .await?
-        .ok_or(ApiError::BadRequest)?; // the CID must be a known OIS user
-    let role = clean(payload.role);
-    let artcc = clean(payload.artcc_id).map(|a| a.to_ascii_uppercase());
-    ace_repo::upsert_team_member(
-        p,
-        &user_id,
-        role.as_deref(),
-        artcc.as_deref(),
-        payload.active.unwrap_or(true),
-    )
-    .await?;
-    Ok(Json(ace_repo::list_team(p, false).await?))
-}
-
-#[utoipa::path(
-    delete, path = "/api/v1/ace/team/{cid}", tag = "ace",
-    params(("cid" = i64, Path, description = "Member's VATSIM CID")),
-    responses((status = 204), (status = 401), (status = 404))
-)]
-pub async fn remove_team_member(
-    State(state): State<AppState>,
-    _permission: RequirePermission<AceTeamUpdate>,
-    Path(cid): Path<i64>,
-) -> Result<StatusCode, ApiError> {
-    let p = pool(&state)?;
-    let user_id = access_repo::find_user_id_by_cid(p, cid)
-        .await?
-        .ok_or(ApiError::NotFound)?;
-    if ace_repo::remove_team_member(p, &user_id).await? {
-        Ok(StatusCode::NO_CONTENT)
-    } else {
-        Err(ApiError::NotFound)
-    }
 }

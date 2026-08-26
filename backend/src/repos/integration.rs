@@ -147,6 +147,22 @@ pub async fn role_id(pool: &PgPool, name: &str) -> Result<Option<String>, ApiErr
     .map_err(|_| ApiError::Internal)
 }
 
+/// Discord user ids of a facility's EC(s): OIS users holding the `EC` role scoped to that ARTCC (set
+/// via Access Control) who have a VATUSA-linked Discord. Empty if none assigned or none linked.
+pub async fn ec_discord_ids(pool: &PgPool, facility: &str) -> Result<Vec<String>, ApiError> {
+    sqlx::query_scalar::<_, String>(
+        "select m.external_id \
+         from access.user_roles ur \
+         join integration.external_sync_mappings m \
+           on m.system_code = 'discord' and m.entity_type = 'user' and m.local_id = ur.user_id \
+         where ur.role_name = 'EC' and ur.artcc_id = $1",
+    )
+    .bind(facility)
+    .fetch_all(pool)
+    .await
+    .map_err(|_| ApiError::Internal)
+}
+
 /// The `result` payload of the most recent succeeded job for a subject + type — used to recover ids
 /// the bot returned on ack (e.g. the posted message id, needed by a follow-up job).
 pub async fn succeeded_job_result(

@@ -70,10 +70,10 @@ function ActionBar({
           size="sm"
           onClick={() => publishDiscord.mutate()}
           disabled={publishDiscord.isPending}
-          title="Post a coordination thread to Discord"
+          title="Create the DCC planning thread in Discord (routed by the host's region)"
         >
           <MessageSquare className="size-3.5" />
-          Post to Discord
+          Create DCC thread
         </Button>
       )}
 

@@ -348,12 +348,6 @@ pub fn build_router(state: AppState) -> Router {
         )
         // The current user's Discord link (read-only; sourced from VATUSA)
         .route("/api/v1/me/discord", get(integration::get_my_discord))
-        // ACE team roster — national; managed from the admin area. (Requests are event-scoped above.)
-        .route(
-            "/api/v1/ace/team",
-            get(ace::list_team).put(ace::upsert_team_member),
-        )
-        .route("/api/v1/ace/team/{cid}", delete(ace::remove_team_member))
         // API keys (user-owned personal access tokens) — self-service
         .route(
             "/api/v1/api-keys",
