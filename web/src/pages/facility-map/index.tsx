@@ -289,7 +289,7 @@ export function FacilityMapView({
         atc={showAtc ? ((atc.data as AtcData | undefined) ?? null) : null}
         namedRoutes={showRoutes ? (routes.data as NamedRoute[] | undefined) : undefined}
         labeledRouteIds={labeledRouteIds}
-        baseCursor="grab"
+        baseCursor="crosshair"
       >
         {/* Controls (hidden in embed mode — layers come from the URL there). */}
         {!embed && (
