@@ -1,4 +1,4 @@
-import {useEffect, useRef, useState} from "react";
+import {useLayoutEffect, useRef, useState} from "react";
 import {Maximize2, Minus, X} from "lucide-react";
 
 import type {AircraftRoute, Fca, FcaFlight} from "@/lib/fca";
@@ -27,6 +27,7 @@ export function RoutePopup({
   const [pos, setPos] = useState({ x: 12, y: 12 });
   const [minimized, setMinimized] = useState(false);
   const rootRef = useRef<HTMLDivElement>(null);
+  const placed = useRef(false);
   const drag = useRef<{ px: number; py: number; ox: number; oy: number } | null>(null);
   const clampPos = (x: number, y: number) => {
     const el = rootRef.current;
@@ -52,11 +53,26 @@ export function RoutePopup({
   };
   const stopPointer = (e: React.PointerEvent) => e.stopPropagation();
 
-  useEffect(() => {
-    const reclamp = () => setPos((p) => clampPos(p.x, p.y));
-    reclamp();
-    window.addEventListener("resize", reclamp);
-    return () => window.removeEventListener("resize", reclamp);
+  // Anchor to the bottom-right corner on first layout (measured, so it works at any map size); after
+  // that just re-clamp on resize so a dragged position stays on-screen.
+  useLayoutEffect(() => {
+    const place = () => {
+      const el = rootRef.current;
+      const parent = el?.offsetParent as HTMLElement | null;
+      if (!el || !parent) return;
+      if (!placed.current) {
+        placed.current = true;
+        setPos({
+          x: Math.max(0, parent.clientWidth - el.offsetWidth - 12),
+          y: Math.max(0, parent.clientHeight - el.offsetHeight - 12),
+        });
+      } else {
+        setPos((p) => clampPos(p.x, p.y));
+      }
+    };
+    place();
+    window.addEventListener("resize", place);
+    return () => window.removeEventListener("resize", place);
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [minimized]);
 
