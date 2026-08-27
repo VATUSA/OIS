@@ -98,7 +98,9 @@ export function FacilityMapPage() {
   return (
     <FacilityMapView
       id={facilityId.toUpperCase()}
-      embed={embed}
+      // `?embed=1` → fill the iframe with minimal chrome; otherwise the full standalone page.
+      fill={embed}
+      controls={!embed}
       initialAtc={atc}
       initialRoutes={routes}
       initialFixes={fixes}
@@ -108,20 +110,26 @@ export function FacilityMapPage() {
 }
 
 /**
- * The map body, shared by the standalone page and the dashboard "facility map" widget. `embed` gives
- * the minimal chrome (map + aircraft + legend only) used by both external iframes and the widget.
+ * The map body, shared by the standalone page, the external iframe embed, and the dashboard widget.
+ * `fill` is layout (fill the container vs the standalone page height); `controls` is chrome (show the
+ * toolbar vs minimal map + aircraft + legend). They're independent: the widget fills AND shows controls,
+ * the iframe embed fills but hides them.
  */
 export function FacilityMapView({
   id,
-  embed = false,
+  fill = false,
+  controls = true,
   initialAtc = false,
   initialRoutes = false,
   initialFixes = false,
   forceTheme,
 }: {
   id: string | null;
-  /** Embed mode: minimal chrome (map + aircraft + legend only); layers driven by props, not toggles. */
-  embed?: boolean;
+  /** Fill the container height (widget / iframe) instead of the standalone page height. */
+  fill?: boolean;
+  /** Show the toolbar (picker / layer toggles / edit routes / edit rules / embed). Off = minimal chrome:
+   *  just the map, aircraft, and legend, with layers fixed by the `initial*` props. */
+  controls?: boolean;
   initialAtc?: boolean;
   initialRoutes?: boolean;
   initialFixes?: boolean;
@@ -131,10 +139,10 @@ export function FacilityMapView({
   const navigate = useNavigate();
   const toast = useToast();
 
-  // Embeds may pin the host page's theme via `?theme=`.
+  // Iframe embeds may pin the host page's theme via `?theme=`.
   useEffect(() => {
-    if (embed && forceTheme) setTheme(forceTheme);
-  }, [embed, forceTheme, setTheme]);
+    if (forceTheme) setTheme(forceTheme);
+  }, [forceTheme, setTheme]);
 
   // Start the camera already framed on the facility (or CONUS) so the map renders in place without a
   // post-mount transition. Computed once at mount from the id; facility switches re-fit via the effect.
@@ -148,39 +156,39 @@ export function FacilityMapView({
   const config = useFacilityMapConfig(id);
   const facilities = useFacilities();
 
-  // Overlay layers. Normal mode: user-toggled, default on ("the map has everything"), remembered per
-  // browser. Embed mode: fixed by the URL params, and we never touch the viewer's saved prefs.
+  // Overlay layers. With controls: user-toggled, default on ("the map has everything"), remembered per
+  // browser. Without controls (minimal): fixed by the `initial*` props, and we never touch saved prefs.
   const [atcPref, setAtcPref] = useState(() => storedBool("facilityMap.atc", true));
   const [routesPref, setRoutesPref] = useState(() => storedBool("facilityMap.routes", true));
   // Fix-name labels are dense, so default off (like the flow map's per-route toggle).
   const [fixesPref, setFixesPref] = useState(() => storedBool("facilityMap.fixes", false));
-  const showAtc = embed ? initialAtc : atcPref;
-  const showRoutes = embed ? initialRoutes : routesPref;
-  const showFixes = embed ? initialFixes : fixesPref;
+  const showAtc = controls ? atcPref : initialAtc;
+  const showRoutes = controls ? routesPref : initialRoutes;
+  const showFixes = controls ? fixesPref : initialFixes;
   useEffect(() => {
-    if (embed) return;
+    if (!controls) return;
     try {
       localStorage.setItem("facilityMap.atc", atcPref ? "1" : "0");
     } catch {
       /* non-fatal */
     }
-  }, [atcPref, embed]);
+  }, [atcPref, controls]);
   useEffect(() => {
-    if (embed) return;
+    if (!controls) return;
     try {
       localStorage.setItem("facilityMap.routes", routesPref ? "1" : "0");
     } catch {
       /* non-fatal */
     }
-  }, [routesPref, embed]);
+  }, [routesPref, controls]);
   useEffect(() => {
-    if (embed) return;
+    if (!controls) return;
     try {
       localStorage.setItem("facilityMap.fixes", fixesPref ? "1" : "0");
     } catch {
       /* non-fatal */
     }
-  }, [fixesPref, embed]);
+  }, [fixesPref, controls]);
   const atc = useAtc(showAtc);
   const routes = useRoutes(id ?? undefined);
 
@@ -208,7 +216,7 @@ export function FacilityMapView({
   );
 
   const { data: me } = useMe();
-  const canEditRoutes = !embed && hasPermission(me, "flow.route.update");
+  const canEditRoutes = controls && hasPermission(me, "flow.route.update");
   const [editingRoutes, setEditingRoutes] = useState(false);
 
   const [editing, setEditing] = useState(false);
@@ -299,7 +307,7 @@ export function FacilityMapView({
   return (
     // `isolate` contains the map's high internal z-indexes so they don't paint over app chrome (nav
     // dropdowns, toasts, dialogs), which portal to the body and should sit above the map.
-    <div className={`relative isolate w-full ${embed ? "h-full" : "h-[calc(100vh-3.5rem)]"}`}>
+    <div className={`relative isolate w-full ${fill ? "h-full" : "h-[calc(100vh-3.5rem)]"}`}>
       <TrafficMap
         className="absolute inset-0"
         camera={camera}
@@ -314,9 +322,11 @@ export function FacilityMapView({
         onAircraftClick={(cs) => setRouteCallsign((cur) => (cur === cs ? null : cs))}
         baseCursor="crosshair"
       >
-        {/* Controls (hidden in embed mode — layers come from the URL there). */}
-        {!embed && (
+        {/* Toolbar (hidden in minimal chrome — layers come from the `initial*` props there). */}
+        {controls && (
         <div className="absolute left-3 top-3 z-[500] flex flex-wrap items-center gap-2">
+          {/* Facility picker navigates the whole page, so only on the standalone page (not embedded). */}
+          {!fill && (
           <select
             value={id ?? ""}
             onChange={(e) =>
@@ -335,6 +345,7 @@ export function FacilityMapView({
               </option>
             ))}
           </select>
+          )}
           <button
             type="button"
             onClick={() =>
@@ -442,8 +453,8 @@ export function FacilityMapView({
           </div>
         )}
 
-        {/* Unknown facility id in the URL (the hint points at the picker, so skip it in embed) */}
-        {id && !feature && !embed && (
+        {/* Unknown facility id in the URL (the hint points at the picker, so skip it when there's none) */}
+        {id && !feature && !fill && (
           <div className="pointer-events-none absolute inset-x-0 top-20 z-[400] flex justify-center">
             <div className="rounded-lg border bg-background/95 px-4 py-2 text-sm shadow-lg backdrop-blur">
               No boundary on file for <span className="font-semibold">{id}</span> — pick a facility above.
@@ -470,8 +481,8 @@ export function FacilityMapView({
         )}
 
         {/* Clicked-aircraft route details (the track itself always draws; the popup is chrome, so
-            it's skipped in embed). */}
-        {!embed && routeCallsign && aircraftRoute.data && (
+            it's skipped in minimal mode). */}
+        {controls && routeCallsign && aircraftRoute.data && (
           <RoutePopup
             route={aircraftRoute.data}
             fca={null}
