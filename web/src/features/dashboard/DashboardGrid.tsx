@@ -13,7 +13,7 @@ const MOBILE_BREAKPOINT = 640;
 /** Presentational widgets render without the standard header chrome. */
 const isBare = (k: Widget["kind"]) => k === "text" || k === "divider";
 /** Map/chart bodies fill their cell edge-to-edge. */
-const isFlush = (k: Widget["kind"]) => k === "map" || k === "chart";
+const isFlush = (k: Widget["kind"]) => k === "map" || k === "facility_map" || k === "chart";
 
 /**
  * The react-grid-layout surface. We use a single breakpoint (always "lg") so there is exactly one

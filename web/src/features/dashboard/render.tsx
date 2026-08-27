@@ -1,5 +1,6 @@
 import {AtcWidgetView} from "./atc-widget";
 import {ChartWidget} from "./chart-widget";
+import {FacilityMapWidgetView} from "./facility-map-widget";
 import {DividerWidgetView, TextWidgetView} from "./layout-widgets";
 import {MapWidgetView} from "./map-widget";
 import {DATA_SOURCES_BY_ID} from "./sources";
@@ -25,6 +26,8 @@ export function WidgetBody({
       return <ViewWidgetView widget={widget} editing={editing} onChange={onUpdate} />;
     case "map":
       return <MapWidgetView initialFlight={widget.initialFlight} widgetId={widget.id} />;
+    case "facility_map":
+      return <FacilityMapWidgetView widget={widget} />;
     case "table":
       return <TableWidget widget={widget} editing={editing} onChange={onUpdate} />;
     case "chart":
@@ -56,6 +59,8 @@ export function widgetTitle(widget: Widget): string {
     }
     case "map":
       return "Map";
+    case "facility_map":
+      return `${widget.facilityId} · Facility map`;
     case "table": {
       const label = DATA_SOURCES_BY_ID[widget.source]?.label ?? "Table";
       if (widget.params?.facility) return `${widget.params.facility.id} · ${label}`;

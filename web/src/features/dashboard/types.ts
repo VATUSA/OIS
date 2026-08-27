@@ -58,6 +58,18 @@ export interface MapWidget {
   initialFlight?: string;
 }
 
+/** A per-facility TMU map (color-coded aircraft by that facility's rules), optionally with the ATC
+ * and routes overlays. Renders the shared `FacilityMapView` in its minimal (embed) chrome. */
+export interface FacilityMapWidget {
+  id: string;
+  kind: "facility_map";
+  title?: string;
+  /** ARTCC id whose color rules + airspace frame the map (e.g. "ZDC"). */
+  facilityId: string;
+  atc?: boolean;
+  routes?: boolean;
+}
+
 /** A dashboard scope of "a whole ATC facility" — an ARTCC (center) or TRACON (approach). Resolved to
  * its member airports at render (see `lib/facilities`), so membership stays current. */
 export interface FacilityRef {
@@ -146,6 +158,7 @@ export type Widget =
   | ViewWidget
   | StatWidget
   | MapWidget
+  | FacilityMapWidget
   | TableWidget
   | ChartWidget
   | AtcWidget
@@ -186,6 +199,8 @@ export function defaultCell(w: Widget): { w: number; h: number; minW: number; mi
       return { w: 3, h: 2, minW: 2, minH: 2 };
     case "map":
       return { w: 6, h: 5, minW: 4, minH: 3 };
+    case "facility_map":
+      return { w: 6, h: 5, minW: 3, minH: 3 };
     case "table":
       return { w: 6, h: 4, minW: 3, minH: 3 };
     case "chart":
@@ -199,6 +214,10 @@ export function defaultCell(w: Widget): { w: number; h: number; minW: number; mi
         ? { w: 1, h: 4, minW: 1, minH: 2 }
         : { w: 12, h: 1, minW: 2, minH: 1 };
     case "view":
+      // The arrival ladder is a narrow strip of text — let it shrink far tighter than a table view.
+      return w.view === "airport-ladder"
+        ? { w: 4, h: 5, minW: 2, minH: 3 }
+        : { w: 6, h: 5, minW: 3, minH: 3 };
     default:
       return { w: 6, h: 5, minW: 3, minH: 3 };
   }
