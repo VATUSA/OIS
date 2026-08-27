@@ -22,6 +22,14 @@ export interface AccessPreset {
  *  integration/users/auth) is admin/bot/self and excluded from the facility + DCC presets. */
 const OPERATIONAL_DOMAINS = ["tmu", "flow", "events", "ace", "stats"] as const;
 
+/**
+ * The baseline every signed-in user holds via the `USER` role. Presets grant these at NATIONAL scope
+ * so the result matches a normal user's defaults — this matters for the facility-EC preset (whose other
+ * grants are facility-scoped) and for API keys (which get no roles at all, so no baseline otherwise).
+ * Mirror of the `USER` role's `role_permissions`; keep in sync if that role's grants change.
+ */
+export const BASE_PERMISSIONS = ["ace.requests.create"] as const;
+
 export const ACCESS_PRESETS: readonly AccessPreset[] = [
   {
     id: "vatusa_admin",
