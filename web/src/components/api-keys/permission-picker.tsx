@@ -1,8 +1,9 @@
 import {useMemo, useState} from "react";
-import {Badge, Input, cn} from "@ois/ui";
-import {ChevronDown, ChevronRight} from "lucide-react";
+import {Badge, ConfirmButton, Input, cn} from "@ois/ui";
+import {ChevronDown, ChevronRight, Wand2} from "lucide-react";
 
 import type {ApiKeyPermission, ApiKeyPermissionInput, GrantablePermission} from "@/lib/api-keys";
+import {type AccessPreset, ACCESS_PRESETS, presetPermissions} from "@/lib/presets";
 
 /** Per-permission scope choice: grant nationally, or to the listed ARTCCs. */
 export type ScopeSel = { national: boolean; artccs: string[] };
@@ -124,6 +125,41 @@ export function PermissionPicker({
 }) {
   const [q, setQ] = useState("");
   const [open, setOpen] = useState<Set<string>>(() => new Set());
+  const [presetFacility, setPresetFacility] = useState(""); // for facility presets
+
+  // --- Presets: bundle the caller's grantable permissions. Keys hold no roles, so preset.roles is
+  // ignored; a preset can never exceed what the caller can delegate (it's drawn from `grantable`).
+  const grantableByName = useMemo(
+    () => new Map(grantable.map((g) => [g.permission, g] as const)),
+    [grantable],
+  );
+  const grantableNames = useMemo(() => grantable.map((g) => g.permission), [grantable]);
+  const isPresetApplied = (preset: AccessPreset) => {
+    const perms = presetPermissions(preset, grantableNames);
+    return perms.length > 0 && perms.every((p) => selection.has(p));
+  };
+  const togglePreset = (preset: AccessPreset) => {
+    const perms = presetPermissions(preset, grantableNames);
+    const next = new Map(selection);
+    if (isPresetApplied(preset)) {
+      for (const p of perms) next.delete(p);
+    } else {
+      for (const p of perms) {
+        const g = grantableByName.get(p);
+        if (!g) continue;
+        if (preset.scope === "facility") {
+          // Scope to the chosen facility, only where the caller can actually delegate it.
+          if (presetFacility && (g.national || g.artccs.includes(presetFacility))) {
+            next.set(p, { national: false, artccs: [presetFacility] });
+          }
+        } else {
+          // National preset: national where the caller holds it nationally, else all their ARTCCs.
+          next.set(p, g.national ? { national: true, artccs: [] } : { national: false, artccs: [...g.artccs] });
+        }
+      }
+    }
+    onChange(next);
+  };
 
   const groups = useMemo(() => {
     const needle = q.trim().toLowerCase();
@@ -167,6 +203,60 @@ export function PermissionPicker({
 
   return (
     <div className="flex flex-col gap-2">
+      {/* Presets — bundle grantable permissions (no roles on keys). */}
+      <div className="flex flex-col gap-1.5 rounded-md border bg-muted/20 p-2">
+        <div className="flex flex-wrap items-center gap-2">
+          <span className="flex items-center gap-1 text-xs font-medium text-muted-foreground">
+            <Wand2 className="size-3.5 text-primary" /> Presets
+          </span>
+          {ACCESS_PRESETS.map((preset) => {
+            const needsFacility = preset.scope === "facility" && !presetFacility;
+            const applied = isPresetApplied(preset);
+            return (
+              <button
+                key={preset.id}
+                type="button"
+                disabled={needsFacility}
+                onClick={() => togglePreset(preset)}
+                title={needsFacility ? "Pick a facility first" : preset.description}
+                className={cn(
+                  "rounded-md border px-2.5 py-1 text-xs font-medium transition-colors",
+                  applied
+                    ? "border-primary/60 bg-primary/15 text-primary"
+                    : "bg-background hover:bg-accent",
+                  needsFacility && "cursor-not-allowed opacity-50",
+                )}
+              >
+                {preset.label}
+                {preset.scope === "facility" && presetFacility ? ` · ${presetFacility}` : ""}
+              </button>
+            );
+          })}
+          <select
+            value={presetFacility}
+            onChange={(e) => setPresetFacility(e.target.value)}
+            title="Facility for the EC preset"
+            className="h-7 rounded-md border border-input bg-background px-2 text-xs"
+          >
+            <option value="">Facility…</option>
+            {facilities.map((f) => (
+              <option key={f.id} value={f.id}>
+                {f.id}
+              </option>
+            ))}
+          </select>
+          <span className="mx-0.5 h-5 w-px bg-border" />
+          <ConfirmButton
+            size="sm"
+            variant="ghost"
+            warn="Clear every permission on this key?"
+            onConfirm={() => onChange(new Map())}
+          >
+            Remove all
+          </ConfirmButton>
+        </div>
+      </div>
+
       <Input
         value={q}
         onChange={(e) => setQ(e.target.value)}
