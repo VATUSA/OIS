@@ -31,7 +31,10 @@ async function askIcao(prompt: ReturnType<typeof usePrompt>): Promise<string | n
 }
 
 /** Pending facility action — set when a facility menu item is picked, cleared on facility select/cancel. */
-type FacAction = { type: "table" | "chart"; source: string } | { type: "atc" };
+type FacAction =
+  | { type: "table" | "chart"; source: string }
+  | { type: "atc" }
+  | { type: "facility_map" };
 
 export function AddWidgetMenu({ onAdd }: { onAdd: (widget: Widget) => void }) {
   const prompt = usePrompt();
@@ -72,6 +75,11 @@ export function AddWidgetMenu({ onAdd }: { onAdd: (widget: Widget) => void }) {
     if (!a) return;
     if (a.type === "atc") {
       onAdd({ id: newId(), kind: "atc", facility: pick });
+      return;
+    }
+    if (a.type === "facility_map") {
+      // Color-coded aircraft + ATC + routes, on by default (matches the standalone map).
+      onAdd({ id: newId(), kind: "facility_map", facilityId: pick.id, atc: true, routes: true });
       return;
     }
     const source = DATA_SOURCES_BY_ID[a.source];
@@ -157,6 +165,10 @@ export function AddWidgetMenu({ onAdd }: { onAdd: (widget: Widget) => void }) {
         <DropdownMenuLabel>Map</DropdownMenuLabel>
         <DropdownMenuItem onSelect={() => onAdd({ id: newId(), kind: "map" })}>
           Flow map
+        </DropdownMenuItem>
+        <DropdownMenuItem onSelect={() => setFacAction({ type: "facility_map" })}>
+          Facility map
+          <span className="ml-auto text-xs text-muted-foreground">ARTCC</span>
         </DropdownMenuItem>
         <DropdownMenuSeparator />
         <DropdownMenuLabel>Layout</DropdownMenuLabel>

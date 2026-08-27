@@ -109,7 +109,10 @@ export function useMapCamera(
       return;
     }
     try {
-      const vp = new WebMercatorViewport({ ...viewState, ...size.current });
+      // Seed from the live viewState ref (not the render-captured value) and the current canvas size,
+      // so this callback stays stable — callers that capture it once (e.g. a mount-time auto-fit
+      // effect) still solve against the up-to-date size instead of a stale 800×600 default.
+      const vp = new WebMercatorViewport({ ...latest.current, ...size.current });
       const { longitude, latitude, zoom } = vp.fitBounds(
         [
           [minLon, minLat],
@@ -127,7 +130,8 @@ export function useMapCamera(
     } catch {
       // Bounds off the mercator-projectable range — ignore.
     }
-  }, [flyTo, viewState]);
+    // `latest`/`size` are refs, so this stays stable across camera moves.
+  }, [flyTo]);
 
   const home = useCallback(() => setViewState({ ...US_HOME, ...TRANSITION }), []);
 

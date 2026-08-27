@@ -55,15 +55,32 @@ function RootLayout() {
       return undefined;
     },
   });
+  // `?embed=1` on any route strips the whole app shell (no nav, footer, or feed watcher) so the page
+  // fills an external `<iframe>`. The page itself reads the same param to show a minimal chrome.
+  const embed = useRouterState({
+    select: (s) => {
+      const v = (s.location.search as Record<string, unknown> | undefined)?.embed;
+      return v === true || v === 1 || v === "1" || v === "true";
+    },
+  });
   const mainClass =
     layout === "wide"
       ? "w-full flex-1 px-4 py-8 sm:px-6 2xl:px-10"
       : "mx-auto w-full max-w-7xl flex-1 px-4 py-8";
+  // Keep `<Outlet>` at a stable child position across the embed/normal split — `embed` can flip from
+  // false→true on the first render (search resolves a tick late), and if the Outlet moved between
+  // branches React would remount the whole page (discarding e.g. a map's auto-fit).
   return (
-    <div className="flex min-h-screen flex-col bg-background text-foreground">
-      <FeedWatcher />
-      <Navbar />
-      {layout === "full" ? (
+    <div
+      className={
+        embed
+          ? "h-[100dvh] w-full bg-background text-foreground"
+          : "flex min-h-screen flex-col bg-background text-foreground"
+      }
+    >
+      {embed ? null : <FeedWatcher />}
+      {embed ? null : <Navbar />}
+      {embed || layout === "full" ? (
         <Outlet />
       ) : (
         <>
@@ -200,6 +217,20 @@ const facilityMapDetailRoute = createRoute({
   getParentRoute: () => facilityMapRoute,
   path: "$facilityId",
   component: FacilityMapPage,
+  // Embed controls: `?embed=1` → minimal chrome (map + aircraft + legend only); `atc`/`routes` turn
+  // those layers on; `theme` forces light/dark for the host page.
+  validateSearch: (
+    search: Record<string, unknown>,
+  ): { embed?: boolean; atc?: boolean; routes?: boolean; theme?: "light" | "dark" } => {
+    const bool = (v: unknown) => v === true || v === 1 || v === "1" || v === "true";
+    const theme = search.theme === "light" || search.theme === "dark" ? search.theme : undefined;
+    return {
+      embed: bool(search.embed) || undefined,
+      atc: bool(search.atc) || undefined,
+      routes: bool(search.routes) || undefined,
+      theme,
+    };
+  },
 });
 
 // Pilot "my flight" lookup — public, its own top-level route.

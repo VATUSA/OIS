@@ -444,7 +444,7 @@ export function LadderView({ flow, filters }: { flow: Flow; filters?: LadderFilt
 
   const PX = 7; // px per minute
   const ROW = 26; // min vertical spacing between adjacent tags
-  const GUTTER = 62; // left column for the time axis
+  const GUTTER = 46; // left column for the time axis (fits "1941z")
   const PAD = 12;
   const H = win * PX;
   const yOf = (min: number) => H - (Math.max(0, Math.min(min, win)) / win) * H;
@@ -471,6 +471,19 @@ export function LadderView({ flow, filters }: { flow: Flow; filters?: LadderFilt
   const topY = placed.length ? placed[placed.length - 1].y : H;
   const shift = topY < PAD ? PAD - topY : 0;
   const contentH = H + shift + PAD;
+
+  // Size the scroll area to the widest strip (callsign + time + optional gate) so the ladder can get
+  // as narrow as its own text instead of being pinned to a fixed width. Slightly over-estimate the
+  // monospace text so nothing clips (which would otherwise force a scrollbar).
+  const CH = 7.5; // ≈ px per monospace char at text-xs
+  const stripW = (f: FlowFlight) => {
+    const gate = f.gate ? String(f.gate) : "";
+    const chars = f.callsign.length + 5 /* HHMMz */ + gate.length;
+    const gaps = (gate ? 2 : 1) * 8; // gap-2 between the mono spans
+    return 12 /* connector tick */ + 24 /* pill padding + border */ + gaps + chars * CH;
+  };
+  const widest = placed.reduce((m, { f }) => Math.max(m, stripW(f)), 0);
+  const minContent = Math.max(GUTTER + Math.ceil(widest), GUTTER + 96);
 
   const gridlines = [];
   for (let k = 0; k <= win / step; k++) {
@@ -520,7 +533,7 @@ export function LadderView({ flow, filters }: { flow: Flow; filters?: LadderFilt
           </div>
         </div>
         <div className="overflow-x-auto">
-          <div className="relative" style={{ height: contentH, minWidth: 360 }}>
+          <div className="relative" style={{ height: contentH, minWidth: minContent }}>
             {/* vertical time axis */}
             <div
               className="absolute top-0 bottom-0 border-l border-border/60"
