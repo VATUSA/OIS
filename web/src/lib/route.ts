@@ -8,11 +8,16 @@ export type MapRoute = components["schemas"]["RouteBody"];
 export type UpsertRoute = components["schemas"]["UpsertRouteRequest"];
 
 /** All shared map routes (visible to anyone who can view the flow map). */
-export function useRoutes() {
+/** Shared map routes. With `artcc`, only that ARTCC's routes plus the global ones (the facility-map
+ * scope); without it, every route (the national flow-map view). Mutations invalidate all `["routes"]`
+ * keys, so a create/edit refreshes both scopes. */
+export function useRoutes(artcc?: string) {
   return useQuery({
-    queryKey: ["routes"],
+    queryKey: ["routes", artcc ?? null],
     queryFn: async () => {
-      const { data, error } = await ois.GET("/api/v1/flow/routes");
+      const { data, error } = await ois.GET("/api/v1/flow/routes", {
+        params: { query: artcc ? { artcc } : {} },
+      });
       if (error || !data) throw new Error("failed to load routes");
       return data;
     },

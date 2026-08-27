@@ -14,10 +14,11 @@ use serde::Deserialize;
 
 use crate::{
     auth::{
-        context::CurrentUser,
+        context::{CurrentApiKey, CurrentUser},
         permissions::{
             FlowFcaDelete, FlowFcaRead, FlowFcaUpdate, FlowRouteDelete, FlowRouteUpdate, StatsRead,
         },
+        principal::Principal,
         require_permission::RequirePermission,
     },
     errors::ApiError,
@@ -273,6 +274,7 @@ fn resolve_route_body(nav: &NavData, airports: &AirportDb, row: flow_repo::Route
         id: row.id,
         name: row.name,
         color: row.color,
+        artcc: row.artcc,
         route: row.route,
         dep: row.dep,
         arr: row.arr,
@@ -284,17 +286,32 @@ fn resolve_route_body(nav: &NavData, airports: &AirportDb, row: flow_repo::Route
     }
 }
 
-/// All shared map routes, each resolved to a track. Visible to anyone who can view the flow
-/// map (FlowFcaRead).
+/// Permission names for route edit/delete scope checks (the caller must hold these for the route's ARTCC).
+const ROUTE_UPDATE_PERM: &str = "flow.route.update";
+const ROUTE_DELETE_PERM: &str = "flow.route.delete";
+
+#[derive(Deserialize)]
+pub struct RoutesQuery {
+    /// Scope to one ARTCC's routes (plus the global ones). Omit for every route (the national view).
+    artcc: Option<String>,
+}
+
+/// Shared map routes, each resolved to a track. With `?artcc=ZDC`, only that ARTCC's routes plus the
+/// global (unassigned) ones — how the facility map scopes them. Public (anyone who can view the map).
 #[utoipa::path(
     get,
     path = "/api/v1/flow/routes",
     tag = "flow",
+    params(("artcc" = Option<String>, Query, description = "Scope to one ARTCC (+ global routes)")),
     responses((status = 200, body = Vec<RouteBody>), (status = 401))
 )]
-pub async fn list_routes(State(state): State<AppState>) -> Result<Json<Vec<RouteBody>>, ApiError> {
+pub async fn list_routes(
+    State(state): State<AppState>,
+    Query(q): Query<RoutesQuery>,
+) -> Result<Json<Vec<RouteBody>>, ApiError> {
     let pool = state.db.as_ref().ok_or(ApiError::ServiceUnavailable)?;
-    let rows = flow_repo::list_routes(pool).await?;
+    let artcc = flow_repo::norm_artcc(q.artcc.as_deref());
+    let rows = flow_repo::list_routes(pool, artcc.as_deref()).await?;
     let (_, airports) = feed_view(&state).await;
     let nav_db = state.nav.load_full();
     let nav = nav_db.as_ref();
@@ -331,12 +348,22 @@ pub async fn create_route(
     State(state): State<AppState>,
     _permission: RequirePermission<FlowRouteUpdate>,
     Extension(current_user): Extension<Option<CurrentUser>>,
+    Extension(current_api_key): Extension<Option<CurrentApiKey>>,
     Json(payload): Json<UpsertRouteRequest>,
 ) -> Result<Json<RouteBody>, ApiError> {
-    let user = current_user.as_ref().ok_or(ApiError::Unauthorized)?;
+    let principal = Principal::require(current_user.as_ref(), current_api_key.as_ref())?;
     let pool = state.db.as_ref().ok_or(ApiError::ServiceUnavailable)?;
     validate_route(&payload)?;
-    let id = flow_repo::create_route(pool, &payload, &user.id).await?;
+    // Facility scope: the caller must hold flow.route.update for the route's ARTCC (or nationally —
+    // which is also what a global, null-ARTCC route requires).
+    let artcc = flow_repo::norm_artcc(payload.artcc.as_deref());
+    let scope = principal
+        .permission_scope(&state, ROUTE_UPDATE_PERM)
+        .await?;
+    if !scope.allows(artcc.as_deref()) {
+        return Err(ApiError::Forbidden);
+    }
+    let id = flow_repo::create_route(pool, &payload, principal.user_id()).await?;
     route_response(&state, &id).await
 }
 
@@ -352,13 +379,26 @@ pub async fn update_route(
     State(state): State<AppState>,
     _permission: RequirePermission<FlowRouteUpdate>,
     Extension(current_user): Extension<Option<CurrentUser>>,
+    Extension(current_api_key): Extension<Option<CurrentApiKey>>,
     Path(id): Path<String>,
     Json(payload): Json<UpsertRouteRequest>,
 ) -> Result<Json<RouteBody>, ApiError> {
-    let user = current_user.as_ref().ok_or(ApiError::Unauthorized)?;
+    let principal = Principal::require(current_user.as_ref(), current_api_key.as_ref())?;
     let pool = state.db.as_ref().ok_or(ApiError::ServiceUnavailable)?;
     validate_route(&payload)?;
-    if !flow_repo::update_route(pool, &id, &payload, &user.id).await? {
+    let existing = flow_repo::get_route(pool, &id)
+        .await?
+        .ok_or(ApiError::NotFound)?;
+    // Facility scope: the caller must control the route as it is AND where it's headed — so a ZDC
+    // editor can't hijack a ZLA route, nor reassign a route into an ARTCC they don't hold.
+    let new_artcc = flow_repo::norm_artcc(payload.artcc.as_deref());
+    let scope = principal
+        .permission_scope(&state, ROUTE_UPDATE_PERM)
+        .await?;
+    if !scope.allows(existing.artcc.as_deref()) || !scope.allows(new_artcc.as_deref()) {
+        return Err(ApiError::Forbidden);
+    }
+    if !flow_repo::update_route(pool, &id, &payload, principal.user_id()).await? {
         return Err(ApiError::NotFound);
     }
     route_response(&state, &id).await
@@ -374,9 +414,22 @@ pub async fn update_route(
 pub async fn delete_route(
     State(state): State<AppState>,
     _permission: RequirePermission<FlowRouteDelete>,
+    Extension(current_user): Extension<Option<CurrentUser>>,
+    Extension(current_api_key): Extension<Option<CurrentApiKey>>,
     Path(id): Path<String>,
 ) -> Result<StatusCode, ApiError> {
+    let principal = Principal::require(current_user.as_ref(), current_api_key.as_ref())?;
     let pool = state.db.as_ref().ok_or(ApiError::ServiceUnavailable)?;
+    let existing = flow_repo::get_route(pool, &id)
+        .await?
+        .ok_or(ApiError::NotFound)?;
+    // Facility scope: only someone holding flow.route.delete for the route's ARTCC (or nationally).
+    let scope = principal
+        .permission_scope(&state, ROUTE_DELETE_PERM)
+        .await?;
+    if !scope.allows(existing.artcc.as_deref()) {
+        return Err(ApiError::Forbidden);
+    }
     if flow_repo::delete_route(pool, &id).await? {
         Ok(StatusCode::NO_CONTENT)
     } else {

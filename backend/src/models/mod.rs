@@ -1105,6 +1105,8 @@ pub struct RouteBody {
     pub id: String,
     pub name: String,
     pub color: String,
+    /// Owning ARTCC (e.g. `ZDC`), or null for a global route shown on every facility map.
+    pub artcc: Option<String>,
     /// The filed-route string, e.g. `RBV Q430 BYRDD J48 MOL FLASK OZZZI2`.
     pub route: String,
     /// Optional departure airport ICAO (helps SID / preferred-route resolution).
@@ -1127,6 +1129,9 @@ pub struct UpsertRouteRequest {
     pub name: String,
     #[serde(default)]
     pub color: Option<String>,
+    /// Owning ARTCC (e.g. `ZDC`); null/blank = a global route. The server facility-scopes editing to it.
+    #[serde(default)]
+    pub artcc: Option<String>,
     /// The filed-route string to resolve, e.g. `RBV Q430 BYRDD J48 MOL FLASK OZZZI2`.
     pub route: String,
     #[serde(default)]
