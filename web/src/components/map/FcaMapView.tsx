@@ -376,7 +376,9 @@ export function FcaMapView({
   }
 
   return (
-    <div className={`relative flex ${embedded ? "h-full" : "h-[calc(100vh-3.5rem)]"}`}>
+    // `isolate` keeps the map's high internal z-indexes in their own stacking context so they don't
+    // paint over app chrome (nav dropdowns, toasts, dialogs), which portal to the body above it.
+    <div className={`relative isolate flex ${embedded ? "h-full" : "h-[calc(100vh-3.5rem)]"}`}>
       {!embedded && mobileList && (
         <div className="absolute inset-0 z-[650] bg-black/40 md:hidden" onClick={() => setMobileList(false)} />
       )}
