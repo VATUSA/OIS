@@ -133,19 +133,26 @@ pub struct RouteRow {
     pub route: String,
     pub dep: String,
     pub arr: String,
+    pub artcc: Option<String>,
     pub updated_at: chrono::DateTime<chrono::Utc>,
     pub updated_by: Option<String>,
 }
 
-const ROUTE_SELECT: &str = "select r.id, r.name, r.color, r.route, r.dep, r.arr, \
+const ROUTE_SELECT: &str = "select r.id, r.name, r.color, r.route, r.dep, r.arr, r.artcc, \
     r.updated_at, u.display_name as updated_by \
     from flow.route r left join identity.users u on u.id = r.updated_by";
 
-pub async fn list_routes(pool: &PgPool) -> Result<Vec<RouteRow>, ApiError> {
-    sqlx::query_as::<_, RouteRow>(&format!("{ROUTE_SELECT} order by r.name"))
-        .fetch_all(pool)
-        .await
-        .map_err(|_| ApiError::Internal)
+/// All routes, or — when `artcc` is given — that ARTCC's routes plus the global (NULL) ones.
+pub async fn list_routes(pool: &PgPool, artcc: Option<&str>) -> Result<Vec<RouteRow>, ApiError> {
+    let sql = match artcc {
+        Some(_) => format!("{ROUTE_SELECT} where r.artcc = $1 or r.artcc is null order by r.name"),
+        None => format!("{ROUTE_SELECT} order by r.name"),
+    };
+    let mut q = sqlx::query_as::<_, RouteRow>(&sql);
+    if let Some(a) = artcc {
+        q = q.bind(a);
+    }
+    q.fetch_all(pool).await.map_err(|_| ApiError::Internal)
 }
 
 pub async fn get_route(pool: &PgPool, id: &str) -> Result<Option<RouteRow>, ApiError> {
@@ -162,14 +169,15 @@ pub async fn create_route(
     actor: &str,
 ) -> Result<String, ApiError> {
     sqlx::query_scalar::<_, String>(
-        "insert into flow.route (name, color, route, dep, arr, updated_by, created_by) \
-         values ($1, $2, $3, $4, $5, $6, $6) returning id",
+        "insert into flow.route (name, color, route, dep, arr, artcc, updated_by, created_by) \
+         values ($1, $2, $3, $4, $5, $6, $7, $7) returning id",
     )
     .bind(req.name.trim())
     .bind(req.color.as_deref().unwrap_or("#38bdf8"))
     .bind(req.route.trim())
     .bind(req.dep.as_deref().unwrap_or("").trim().to_ascii_uppercase())
     .bind(req.arr.as_deref().unwrap_or("").trim().to_ascii_uppercase())
+    .bind(norm_artcc(req.artcc.as_deref()))
     .bind(actor)
     .fetch_one(pool)
     .await
@@ -184,19 +192,26 @@ pub async fn update_route(
 ) -> Result<bool, ApiError> {
     let result = sqlx::query(
         "update flow.route set name = $1, color = $2, route = $3, dep = $4, arr = $5, \
-         updated_by = $6 where id = $7",
+         artcc = $6, updated_by = $7 where id = $8",
     )
     .bind(req.name.trim())
     .bind(req.color.as_deref().unwrap_or("#38bdf8"))
     .bind(req.route.trim())
     .bind(req.dep.as_deref().unwrap_or("").trim().to_ascii_uppercase())
     .bind(req.arr.as_deref().unwrap_or("").trim().to_ascii_uppercase())
+    .bind(norm_artcc(req.artcc.as_deref()))
     .bind(actor)
     .bind(id)
     .execute(pool)
     .await
     .map_err(|_| ApiError::Internal)?;
     Ok(result.rows_affected() > 0)
+}
+
+/// Normalize an ARTCC id: trimmed + uppercased, or `None` for blank (a global route).
+pub fn norm_artcc(raw: Option<&str>) -> Option<String> {
+    raw.map(|a| a.trim().to_ascii_uppercase())
+        .filter(|a| !a.is_empty())
 }
 
 pub async fn delete_route(pool: &PgPool, id: &str) -> Result<bool, ApiError> {

@@ -1187,8 +1187,8 @@ export interface paths {
             cookie?: never;
         };
         /**
-         * All shared map routes, each resolved to a track. Visible to anyone who can view the flow
-         *     map (FlowFcaRead).
+         * Shared map routes, each resolved to a track. With `?artcc=ZDC`, only that ARTCC's routes plus the
+         *     global (unassigned) ones — how the facility map scopes them. Public (anyone who can view the map).
          */
         get: operations["list_routes"];
         put?: never;
@@ -3832,6 +3832,8 @@ export interface components {
         RouteBody: {
             /** @description Optional arrival airport ICAO (helps STAR resolution). */
             arr: string;
+            /** @description Owning ARTCC (e.g. `ZDC`), or null for a global route shown on every facility map. */
+            artcc?: string | null;
             color: string;
             /** @description Optional departure airport ICAO (helps SID / preferred-route resolution). */
             dep: string;
@@ -4365,6 +4367,8 @@ export interface components {
         };
         UpsertRouteRequest: {
             arr?: string | null;
+            /** @description Owning ARTCC (e.g. `ZDC`); null/blank = a global route. The server facility-scopes editing to it. */
+            artcc?: string | null;
             color?: string | null;
             dep?: string | null;
             name: string;
@@ -7671,7 +7675,10 @@ export interface operations {
     };
     list_routes: {
         parameters: {
-            query?: never;
+            query?: {
+                /** @description Scope to one ARTCC (+ global routes) */
+                artcc?: string;
+            };
             header?: never;
             path?: never;
             cookie?: never;

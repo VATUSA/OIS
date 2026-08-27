@@ -5,12 +5,15 @@ import {useTheme, useToast} from "@ois/ui";
 import {Code2, Maximize2, Pencil, RadioTower, Route} from "lucide-react";
 
 import {useFacilities} from "@/lib/admin";
+import {useMe} from "@/lib/auth";
+import {hasPermission} from "@/lib/permissions";
 import {useAtc, useTraffic} from "@/lib/fca";
 import {useRoutes} from "@/lib/route";
 import {useFacilityMapConfig, type UpsertFacilityMapConfig} from "@/lib/facility-map";
 import {buildColorFn} from "@/lib/facility-map/rules";
 import {colorLabel} from "@/lib/facility-map/palette";
 import {RuleEditor} from "@/components/facility-map/RuleEditor";
+import {FacilityRoutesPanel} from "@/components/facility-map/RoutesPanel";
 import {
   ALL_BOUNDARIES,
   BOUNDARY_IDS,
@@ -163,7 +166,11 @@ export function FacilityMapView({
     }
   }, [routesPref, embed]);
   const atc = useAtc(showAtc);
-  const routes = useRoutes();
+  const routes = useRoutes(id ?? undefined);
+
+  const { data: me } = useMe();
+  const canEditRoutes = !embed && hasPermission(me, "flow.route.update");
+  const [editingRoutes, setEditingRoutes] = useState(false);
 
   const [editing, setEditing] = useState(false);
   const [preview, setPreview] = useState<UpsertFacilityMapConfig | null>(null);
@@ -177,6 +184,7 @@ export function FacilityMapView({
   useEffect(() => {
     setEditing(false);
     setPreview(null);
+    setEditingRoutes(false);
   }, [id]);
 
   // While editing, color from the unsaved draft (live preview); otherwise the saved config.
@@ -317,6 +325,17 @@ export function FacilityMapView({
             <Route className={`size-3.5 ${showRoutes ? "text-primary" : "text-muted-foreground"}`} />
             Routes
           </button>
+          {canEditRoutes && feature && !editingRoutes && (
+            <button
+              type="button"
+              onClick={() => setEditingRoutes(true)}
+              title="Add or edit this facility's routes"
+              className="flex items-center gap-1.5 rounded-lg border bg-background/95 px-2.5 py-1.5 text-xs font-medium shadow-lg backdrop-blur transition-colors hover:bg-muted"
+            >
+              <Pencil className="size-3.5 text-muted-foreground" />
+              Edit routes
+            </button>
+          )}
           {canEdit && !editing && (
             <button
               type="button"
@@ -381,6 +400,11 @@ export function FacilityMapView({
               setPreview(null);
             }}
           />
+        )}
+
+        {/* Routes editor (facility-scoped flow.route.update) */}
+        {editingRoutes && id && feature && (
+          <FacilityRoutesPanel facilityId={id} onClose={() => setEditingRoutes(false)} />
         )}
       </TrafficMap>
     </div>
