@@ -8,7 +8,7 @@ use axum::{
     extract::{Extension, Path, Query, State},
     http::StatusCode,
 };
-use chrono::{DateTime, Utc};
+use chrono::{DateTime, Datelike, Utc, Weekday};
 use serde::Deserialize;
 
 use crate::{
@@ -18,11 +18,17 @@ use crate::{
         require_permission::RequirePermission,
     },
     errors::ApiError,
-    models::{AceRequestBody, ClaimAceRequest, CreateAceRequestRequest, DecideAceRequestRequest},
-    repos::{ace as ace_repo, events as events_repo, integration as integration_repo},
+    models::{
+        AceRequestBody, ClaimAceRequest, CreateAceRequestRequest, DecideAceRequestRequest,
+        EventBody, Tier1GenerateResult,
+    },
+    repos::{
+        ace as ace_repo, events as events_repo, integration as integration_repo, org as org_repo,
+    },
     state::AppState,
 };
 use serde_json::json;
+use std::collections::HashSet;
 
 /// Logical channel name (mapped to a snowflake in the Discord config) where ACE requests are posted.
 const ACE_CHANNEL: &str = "aceteam-requests";
@@ -230,44 +236,139 @@ pub async fn create_request(
 
     let channel = integration_repo::channel_id(p, ACE_CHANNEL).await?;
     let mut tx = p.begin().await.map_err(|_| ApiError::Internal)?;
-    let id = ace_repo::create_request(
+    let id = create_one(
         &mut tx,
-        event_id,
+        &event,
+        channel.as_deref(),
         &user.id,
+        &user.display_name,
         artcc.as_deref(),
         position.as_deref(),
         payload.slots,
         details,
     )
     .await?;
-    if let Some(channel_id) = channel {
-        let job = json!({
-            "channel_id": channel_id,
-            "request_id": id,
-            "requested_by_name": user.display_name,
-            "artcc_id": artcc,
-            "position": position,
-            "slots": payload.slots,
-            "details": details,
-            "event_title": event.title,
-            "event_start": event.start_time,
-            "event_end": event.end_time,
-        });
-        integration_repo::enqueue_job(
-            &mut tx,
-            "ace_request_post",
-            &job,
-            Some("ace_request"),
-            Some(&id),
-        )
-        .await?;
-    }
     tx.commit().await.map_err(|_| ApiError::Internal)?;
 
     ace_repo::get_request(p, &id)
         .await?
         .map(Json)
         .ok_or(ApiError::Internal)
+}
+
+/// Insert one ACE request in the caller's tx and enqueue its `ace_request_post` Discord job (when a
+/// channel is configured). Returns the new request id. Shared by the single-create handler and the
+/// Tier-1 generator so auto-generated requests behave exactly like hand-created ones.
+#[allow(clippy::too_many_arguments)]
+async fn create_one(
+    tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+    event: &EventBody,
+    channel: Option<&str>,
+    requester_id: &str,
+    requester_name: &str,
+    artcc: Option<&str>,
+    position: Option<&str>,
+    slots: i32,
+    details: &str,
+) -> Result<String, ApiError> {
+    let id = ace_repo::create_request(tx, event.id, requester_id, artcc, position, slots, details)
+        .await?;
+    if let Some(channel_id) = channel {
+        let job = json!({
+            "channel_id": channel_id,
+            "request_id": id,
+            "requested_by_name": requester_name,
+            "artcc_id": artcc,
+            "position": position,
+            "slots": slots,
+            "details": details,
+            "event_title": event.title,
+            "event_start": event.start_time,
+            "event_end": event.end_time,
+        });
+        integration_repo::enqueue_job(tx, "ace_request_post", &job, Some("ace_request"), Some(&id))
+            .await?;
+    }
+    Ok(id)
+}
+
+/// Fan out ACE support requests to the host ARTCC's **Tier-1 neighbours** — the auto-request half of
+/// FNO planning. Only valid for a Friday (UTC) event (the FNO definition). Idempotent: neighbours that
+/// already have an open request on the event are skipped, so re-running never double-posts.
+#[utoipa::path(
+    post,
+    path = "/api/v1/events/{id}/ace/tier1",
+    tag = "ace",
+    params(("id" = i64, Path, description = "VATUSA event id")),
+    responses(
+        (status = 200, body = Tier1GenerateResult),
+        (status = 400, description = "Event is not a Friday (not an FNO)"),
+        (status = 401), (status = 404)
+    )
+)]
+pub async fn generate_tier1(
+    State(state): State<AppState>,
+    _permission: RequirePermission<AceRequestsCreate>,
+    Extension(current_user): Extension<Option<CurrentUser>>,
+    Path(event_id): Path<i64>,
+) -> Result<Json<Tier1GenerateResult>, ApiError> {
+    let user = current_user.as_ref().ok_or(ApiError::Unauthorized)?;
+    let p = pool(&state)?;
+    let event = events_repo::get(p, event_id)
+        .await?
+        .ok_or(ApiError::NotFound)?;
+
+    // FNO = the event starts on a Friday in UTC.
+    if event.start_time.weekday() != Weekday::Fri {
+        return Err(ApiError::BadRequest);
+    }
+
+    // Known OIS facilities (active) — the filter that drops non-OIS (Canadian/oceanic) neighbours.
+    let known: HashSet<String> = org_repo::list_facilities(p)
+        .await?
+        .into_iter()
+        .map(|f| f.id)
+        .collect();
+    let neighbours = crate::feed::neighbors::tier1(&event.facility, &known);
+
+    // Skip neighbours that already have an open request on this event (idempotent re-runs).
+    let existing: HashSet<String> = ace_repo::open_request_artccs(p, event_id)
+        .await?
+        .into_iter()
+        .collect();
+
+    let channel = integration_repo::channel_id(p, ACE_CHANNEL).await?;
+    let date = event.start_time.format("%a, %b %-d").to_string();
+
+    let mut created = Vec::new();
+    let mut skipped = Vec::new();
+    let mut tx = p.begin().await.map_err(|_| ApiError::Internal)?;
+    for n in neighbours {
+        if existing.contains(&n) {
+            skipped.push(n);
+            continue;
+        }
+        let details = format!(
+            "Tier-1 support for {}'s Friday Night Operation on {date}. Requesting ACE coverage from {n}.",
+            event.facility
+        );
+        create_one(
+            &mut tx,
+            &event,
+            channel.as_deref(),
+            &user.id,
+            &user.display_name,
+            Some(&n),
+            None,
+            1,
+            &details,
+        )
+        .await?;
+        created.push(n);
+    }
+    tx.commit().await.map_err(|_| ApiError::Internal)?;
+
+    Ok(Json(Tier1GenerateResult { created, skipped }))
 }
 
 #[utoipa::path(

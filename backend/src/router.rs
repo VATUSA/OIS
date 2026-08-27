@@ -179,6 +179,8 @@ pub fn build_router(state: AppState) -> Router {
             "/api/v1/events/{id}/ace",
             get(ace::list_requests).post(ace::create_request),
         )
+        // Fan out Tier-1 neighbour requests for an FNO (must precede the `{req}` route).
+        .route("/api/v1/events/{id}/ace/tier1", post(ace::generate_tier1))
         .route("/api/v1/events/{id}/ace/{req}", delete(ace::delete_request))
         .route(
             "/api/v1/events/{id}/ace/{req}/claim",

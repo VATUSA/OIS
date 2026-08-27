@@ -95,3 +95,10 @@ export function timeAgo(iso: string): string {
   if (days < 30) return `${days}d ago`;
   return new Date(iso).toLocaleDateString();
 }
+
+/** Whether an ISO timestamp falls on a Friday in UTC — the FNO (Friday Night Ops) test. */
+export function isFridayUtc(iso: string | null | undefined): boolean {
+  if (!iso) return false;
+  const d = new Date(iso);
+  return !Number.isNaN(d.getTime()) && d.getUTCDay() === 5;
+}

@@ -548,6 +548,27 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/v1/events/{id}/ace/tier1": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Fan out ACE support requests to the host ARTCC's **Tier-1 neighbours** — the auto-request half of
+         *     FNO planning. Only valid for a Friday (UTC) event (the FNO definition). Idempotent: neighbours that
+         *     already have an open request on the event are skipped, so re-running never double-posts.
+         */
+        post: operations["generate_tier1"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/v1/events/{id}/ace/{req}": {
         parameters: {
             query?: never;
@@ -4118,6 +4139,14 @@ export interface components {
             trend: string;
             volume: number;
         };
+        /**
+         * @description Outcome of generating Tier-1 support requests for an FNO: the neighbouring ARTCCs a request was
+         *     opened for, and those skipped because they already had an open request on the event.
+         */
+        Tier1GenerateResult: {
+            created: string[];
+            skipped: string[];
+        };
         /** @description A Traffic Management Initiative. */
         TmiBody: {
             /** @description Author display name (from the creating user). */
@@ -5896,6 +5925,47 @@ export interface operations {
                     "application/json": components["schemas"]["AceRequestBody"];
                 };
             };
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+        };
+    };
+    generate_tier1: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /** @description VATUSA event id */
+                id: number;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Tier1GenerateResult"];
+                };
+            };
+            /** @description Event is not a Friday (not an FNO) */
             400: {
                 headers: {
                     [name: string]: unknown;

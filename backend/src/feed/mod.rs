@@ -14,6 +14,7 @@ pub mod gdp;
 pub mod metar;
 pub mod nav;
 pub mod nav_source;
+pub mod neighbors;
 pub mod runway;
 pub mod runway_db;
 pub mod stats;

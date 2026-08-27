@@ -1,0 +1,188 @@
+{
+  "ZAB": [
+    "ZDV",
+    "ZFW",
+    "ZHU",
+    "ZKC",
+    "ZLA"
+  ],
+  "ZAK": [
+    "ZLA",
+    "ZOA",
+    "ZSE"
+  ],
+  "ZAN": [
+    "ZSE"
+  ],
+  "ZAU": [
+    "ZID",
+    "ZKC",
+    "ZMP",
+    "ZOB"
+  ],
+  "ZBW": [
+    "ZDC",
+    "ZNY",
+    "ZOB",
+    "ZQM",
+    "ZUL"
+  ],
+  "ZDC": [
+    "ZBW",
+    "ZID",
+    "ZJX",
+    "ZNY",
+    "ZOB",
+    "ZTL",
+    "ZWY"
+  ],
+  "ZDV": [
+    "ZAB",
+    "ZKC",
+    "ZLA",
+    "ZLC",
+    "ZMP"
+  ],
+  "ZEG": [
+    "ZLC",
+    "ZSE"
+  ],
+  "ZFW": [
+    "ZAB",
+    "ZHU",
+    "ZKC",
+    "ZME"
+  ],
+  "ZHN": [],
+  "ZHU": [
+    "ZAB",
+    "ZFW",
+    "ZJX",
+    "ZMA",
+    "ZME",
+    "ZTL"
+  ],
+  "ZID": [
+    "ZAU",
+    "ZDC",
+    "ZKC",
+    "ZME",
+    "ZOB",
+    "ZTL"
+  ],
+  "ZJX": [
+    "ZDC",
+    "ZHU",
+    "ZMA",
+    "ZTL",
+    "ZWY"
+  ],
+  "ZKC": [
+    "ZAB",
+    "ZAU",
+    "ZDV",
+    "ZFW",
+    "ZID",
+    "ZME",
+    "ZMP"
+  ],
+  "ZLA": [
+    "ZAB",
+    "ZAK",
+    "ZDV",
+    "ZLC",
+    "ZOA"
+  ],
+  "ZLC": [
+    "ZDV",
+    "ZEG",
+    "ZLA",
+    "ZMP",
+    "ZOA",
+    "ZSE",
+    "ZWG"
+  ],
+  "ZMA": [
+    "ZHU",
+    "ZJX",
+    "ZUA",
+    "ZWY"
+  ],
+  "ZME": [
+    "ZFW",
+    "ZHU",
+    "ZID",
+    "ZKC",
+    "ZTL"
+  ],
+  "ZMP": [
+    "ZAU",
+    "ZDV",
+    "ZKC",
+    "ZLC",
+    "ZOB",
+    "ZWG",
+    "ZYZ"
+  ],
+  "ZNY": [
+    "ZBW",
+    "ZDC",
+    "ZOB",
+    "ZWY"
+  ],
+  "ZOA": [
+    "ZAK",
+    "ZLA",
+    "ZLC",
+    "ZSE"
+  ],
+  "ZOB": [
+    "ZAU",
+    "ZBW",
+    "ZDC",
+    "ZID",
+    "ZMP",
+    "ZNY",
+    "ZUL",
+    "ZYZ"
+  ],
+  "ZQM": [
+    "ZBW"
+  ],
+  "ZSE": [
+    "ZAK",
+    "ZAN",
+    "ZEG",
+    "ZLC",
+    "ZOA",
+    "ZVR"
+  ],
+  "ZTL": [
+    "ZDC",
+    "ZHU",
+    "ZID",
+    "ZJX",
+    "ZME"
+  ],
+  "ZUL": [
+    "ZBW",
+    "ZOB"
+  ],
+  "ZVR": [
+    "ZSE"
+  ],
+  "ZWG": [
+    "ZLC",
+    "ZMP"
+  ],
+  "ZWY": [
+    "ZDC",
+    "ZJX",
+    "ZMA",
+    "ZNY"
+  ],
+  "ZYZ": [
+    "ZMP",
+    "ZOB"
+  ]
+}
