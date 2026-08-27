@@ -27,7 +27,7 @@ export function WidgetBody({
     case "map":
       return <MapWidgetView initialFlight={widget.initialFlight} widgetId={widget.id} />;
     case "facility_map":
-      return <FacilityMapWidgetView widget={widget} />;
+      return <FacilityMapWidgetView widget={widget} editing={editing} onChange={onUpdate} />;
     case "table":
       return <TableWidget widget={widget} editing={editing} onChange={onUpdate} />;
     case "chart":

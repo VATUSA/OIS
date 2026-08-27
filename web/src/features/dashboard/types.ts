@@ -68,6 +68,8 @@ export interface FacilityMapWidget {
   facilityId: string;
   atc?: boolean;
   routes?: boolean;
+  /** Hide the map toolbar (Recenter / layer toggles / edit routes / edit rules / embed). Default: show. */
+  hideControls?: boolean;
 }
 
 /** A dashboard scope of "a whole ATC facility" — an ARTCC (center) or TRACON (approach). Resolved to
