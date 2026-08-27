@@ -1,6 +1,6 @@
 import {useEffect, useMemo, useState} from "react";
-import {Badge, Button, Card, CardContent, cn, Input} from "@ois/ui";
-import {ChevronRight, Save, Search} from "lucide-react";
+import {Badge, Button, Card, CardContent, cn, ConfirmButton, Input} from "@ois/ui";
+import {ChevronRight, Save, Search, Wand2} from "lucide-react";
 
 import {
   type AdminUserRow,
@@ -13,6 +13,7 @@ import {
   useSaveUserAccess,
   useUserAccess,
 } from "@/lib/access";
+import {type AccessPreset, ACCESS_PRESETS, presetPermissions} from "@/lib/presets";
 import {Pagination} from "@/components/pagination";
 
 type ScopeState = { roles: string[]; perms: string[] };
@@ -124,6 +125,55 @@ export function AdminAccessControl() {
       const next = new Set(s);
       if (next.has(domain)) next.delete(domain);
       else next.add(domain);
+      return next;
+    });
+  }
+
+  // --- Presets: one-click bundles applied at a scope, toggled on/off. National presets target the
+  // national scope; facility presets target the facility chosen in the Scope selector above.
+  function presetTarget(preset: AccessPreset): string | null {
+    if (preset.scope === "national") return "";
+    return scope === "" ? null : scope; // facility preset needs a facility selected
+  }
+  function isPresetApplied(preset: AccessPreset): boolean {
+    const target = presetTarget(preset);
+    if (target == null) return false;
+    const s = working[target];
+    if (!s) return false;
+    const perms = presetPermissions(preset, allPerms);
+    return perms.every((p) => s.perms.includes(p)) && preset.roles.every((r) => s.roles.includes(r));
+  }
+  function togglePreset(preset: AccessPreset) {
+    const target = presetTarget(preset);
+    if (target == null) return;
+    const perms = presetPermissions(preset, allPerms);
+    const applied = isPresetApplied(preset);
+    setWorking((w) => {
+      const cur = w[target] ?? { roles: [], perms: [] };
+      if (applied) {
+        const drop = new Set(perms);
+        return {
+          ...w,
+          [target]: {
+            perms: cur.perms.filter((p) => !drop.has(p)),
+            roles: cur.roles.filter((r) => !preset.roles.includes(r)),
+          },
+        };
+      }
+      return {
+        ...w,
+        [target]: {
+          perms: [...new Set([...cur.perms, ...perms])],
+          roles: [...new Set([...cur.roles, ...preset.roles])],
+        },
+      };
+    });
+  }
+  function removeAll() {
+    setWorking((w) => {
+      const next: Record<string, ScopeState> = {};
+      for (const key of Object.keys(w)) next[key] = { roles: [], perms: [] };
+      next[""] ??= { roles: [], perms: [] };
       return next;
     });
   }
@@ -294,6 +344,57 @@ export function AdminAccessControl() {
                 </select>
               </div>
             </div>
+
+            {/* Presets — one-click permission bundles, toggled on/off. */}
+            <section className="flex flex-col gap-2">
+              <div className="flex items-center gap-1.5">
+                <Wand2 className="size-4 text-primary" />
+                <h3 className="text-sm font-semibold">Presets</h3>
+              </div>
+              <div className="flex flex-wrap items-center gap-2">
+                {ACCESS_PRESETS.map((preset) => {
+                  const needsFacility = preset.scope === "facility" && scope === "";
+                  const applied = isPresetApplied(preset);
+                  return (
+                    <button
+                      key={preset.id}
+                      type="button"
+                      disabled={needsFacility}
+                      onClick={() => togglePreset(preset)}
+                      title={
+                        needsFacility
+                          ? "Pick a facility in the Scope selector above first"
+                          : preset.description
+                      }
+                      className={cn(
+                        "rounded-md border px-3 py-1.5 text-sm font-medium transition-colors",
+                        applied
+                          ? "border-primary/60 bg-primary/15 text-primary"
+                          : "bg-background hover:bg-accent",
+                        needsFacility && "cursor-not-allowed opacity-50",
+                      )}
+                    >
+                      {preset.label}
+                      {preset.scope === "facility" && scope !== "" ? ` · ${scope}` : ""}
+                    </button>
+                  );
+                })}
+                <span className="mx-1 h-6 w-px bg-border" />
+                <ConfirmButton
+                  size="sm"
+                  variant="ghost"
+                  warn="Clear every role and permission for this user (all scopes)?"
+                  onConfirm={removeAll}
+                >
+                  Remove all
+                </ConfirmButton>
+              </div>
+              <p className="text-xs text-muted-foreground">
+                Click to add the bundle (and its role) at the selected scope; click again to remove it.
+                “Facility EC” uses the Scope selector above. You can fine-tune below — nothing is saved
+                until you enter a reason and hit Save.
+              </p>
+            </section>
 
             {permsReadOnly && (
               <div className="rounded-md border border-primary/30 bg-primary/5 px-3 py-2 text-sm text-muted-foreground">
