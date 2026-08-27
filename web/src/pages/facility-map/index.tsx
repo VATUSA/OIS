@@ -1,4 +1,4 @@
-import {useCallback, useEffect, useMemo, useState} from "react";
+import {useCallback, useEffect, useMemo, useRef, useState} from "react";
 import {WebMercatorViewport, type MapViewState} from "@deck.gl/core";
 import {useNavigate, useParams, useSearch} from "@tanstack/react-router";
 import {useTheme, useToast} from "@ois/ui";
@@ -7,7 +7,7 @@ import {Code2, Maximize2, Pencil, RadioTower, Route, Tag} from "lucide-react";
 import {useFacilities} from "@/lib/admin";
 import {useMe} from "@/lib/auth";
 import {hasPermission} from "@/lib/permissions";
-import {useAtc, useTraffic} from "@/lib/fca";
+import {useAircraftRoute, useAtc, useTraffic} from "@/lib/fca";
 import {useRoutes} from "@/lib/route";
 import {useFacilityMapConfig, type UpsertFacilityMapConfig} from "@/lib/facility-map";
 import {buildColorFn} from "@/lib/facility-map/rules";
@@ -22,6 +22,8 @@ import {
   facilityPoints,
 } from "@/lib/facility-map/boundary";
 import {TrafficMap} from "@/components/map/TrafficMap";
+import {RoutePopup} from "@/components/map/fca/RoutePopup";
+import {toDeckPath, type LatLng} from "@/components/map/lib/geo";
 import type {AtcData} from "@/components/map/layers/atc";
 import type {NamedRoute} from "@/components/map/layers/routes";
 import {useMapCamera} from "@/components/map/hooks/useMapCamera";
@@ -182,6 +184,20 @@ export function FacilityMapView({
   const atc = useAtc(showAtc);
   const routes = useRoutes(id ?? undefined);
 
+  // Click a plane → plot its filed track (same as the flow map); click again to clear.
+  const [routeCallsign, setRouteCallsign] = useState<string | null>(null);
+  const aircraftRoute = useAircraftRoute(routeCallsign);
+  const filedRoute = useMemo(
+    () =>
+      aircraftRoute.data
+        ? {
+            path: toDeckPath(aircraftRoute.data.points as LatLng[]),
+            waypoints: aircraftRoute.data.waypoints,
+          }
+        : null,
+    [aircraftRoute.data],
+  );
+
   // Fix labels apply to every shown route (a single toggle, vs the flow map's per-route control).
   const labeledRouteIds = useMemo(
     () =>
@@ -203,25 +219,28 @@ export function FacilityMapView({
   // A single facility's outline (emphasized) when selected; otherwise every ARTCC, faint.
   const boundaries = feature ? facilityCollection(feature) : ALL_BOUNDARIES;
 
-  // Leave edit mode when switching facilities.
+  // Leave edit mode + clear any plotted track when switching facilities.
   useEffect(() => {
     setEditing(false);
     setPreview(null);
     setEditingRoutes(false);
+    setRouteCallsign(null);
   }, [id]);
 
   // While editing, color from the unsaved draft (live preview); otherwise the saved config.
   const activeConfig = editing && preview ? preview : config.data;
 
-  // Auto-center: frame the selected facility, or the whole CONUS on the national overview. Fit on
-  // facility change, and once more after the canvas settles — in the full-height embed the map mounts
-  // before layout finishes, so the first fit can solve against a stale size.
+  // Auto-center on facility CHANGE (the picker). The initial mount is already framed by `initialView`,
+  // so only fit when `id` actually changes from what we last framed — a mount-time `fitBounds` leaves a
+  // FlyTo transition in the controlled viewState that re-triggers on later re-renders (traffic poll),
+  // drifting the camera out. Keying on the last-fitted id (seeded to the mount id) is StrictMode-safe:
+  // re-running the effect with the same id is a no-op.
+  const fittedId = useRef(id);
   useEffect(() => {
+    if (fittedId.current === id) return;
+    fittedId.current = id;
     const pts = feature ? facilityPoints(feature) : CONUS_BOUNDS;
-    const opts = { padding: 40, maxZoom: feature ? 8 : 6 };
-    camera.fitBounds(pts, opts);
-    const t = setTimeout(() => camera.fitBounds(pts, opts), 400);
-    return () => clearTimeout(t);
+    camera.fitBounds(pts, { padding: 40, maxZoom: feature ? 8 : 6 });
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [id, feature]);
 
@@ -289,6 +308,8 @@ export function FacilityMapView({
         atc={showAtc ? ((atc.data as AtcData | undefined) ?? null) : null}
         namedRoutes={showRoutes ? (routes.data as NamedRoute[] | undefined) : undefined}
         labeledRouteIds={labeledRouteIds}
+        filedRoute={filedRoute}
+        onAircraftClick={(cs) => setRouteCallsign((cur) => (cur === cs ? null : cs))}
         baseCursor="crosshair"
       >
         {/* Controls (hidden in embed mode — layers come from the URL there). */}
@@ -444,6 +465,17 @@ export function FacilityMapView({
         {/* Routes editor (facility-scoped flow.route.update) */}
         {editingRoutes && id && feature && (
           <FacilityRoutesPanel facilityId={id} onClose={() => setEditingRoutes(false)} />
+        )}
+
+        {/* Clicked-aircraft route details (the track itself always draws; the popup is chrome, so
+            it's skipped in embed). */}
+        {!embed && routeCallsign && aircraftRoute.data && (
+          <RoutePopup
+            route={aircraftRoute.data}
+            fca={null}
+            match={undefined}
+            onClose={() => setRouteCallsign(null)}
+          />
         )}
       </TrafficMap>
     </div>
