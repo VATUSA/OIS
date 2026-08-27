@@ -13,7 +13,7 @@ import {
   useSaveUserAccess,
   useUserAccess,
 } from "@/lib/access";
-import {type AccessPreset, ACCESS_PRESETS, presetPermissions} from "@/lib/presets";
+import {type AccessPreset, ACCESS_PRESETS, BASE_PERMISSIONS, presetPermissions} from "@/lib/presets";
 import {Pagination} from "@/components/pagination";
 
 type ScopeState = { roles: string[]; perms: string[] };
@@ -130,43 +130,63 @@ export function AdminAccessControl() {
   }
 
   // --- Presets: one-click bundles applied at a scope, toggled on/off. National presets target the
-  // national scope; facility presets target the facility chosen in the Scope selector above.
+  // national scope; facility presets target the facility chosen in the Scope selector above. Every
+  // preset also grants the sign-in baseline (BASE_PERMISSIONS) at NATIONAL scope.
   function presetTarget(preset: AccessPreset): string | null {
     if (preset.scope === "national") return "";
     return scope === "" ? null : scope; // facility preset needs a facility selected
   }
+  /** The per-scope contributions of a preset: domain perms + role at the target, baseline at national. */
+  function presetScopes(
+    preset: AccessPreset,
+    target: string,
+  ): { scope: string; perms: string[]; roles: string[] }[] {
+    const domain = presetPermissions(preset, allPerms);
+    const base = [...BASE_PERMISSIONS];
+    if (target === "") {
+      return [{ scope: "", perms: [...new Set([...domain, ...base])], roles: preset.roles }];
+    }
+    return [
+      { scope: target, perms: domain, roles: preset.roles },
+      { scope: "", perms: base, roles: [] },
+    ];
+  }
   function isPresetApplied(preset: AccessPreset): boolean {
     const target = presetTarget(preset);
     if (target == null) return false;
-    const s = working[target];
-    if (!s) return false;
-    const perms = presetPermissions(preset, allPerms);
-    return perms.every((p) => s.perms.includes(p)) && preset.roles.every((r) => s.roles.includes(r));
+    return presetScopes(preset, target).every(({ scope: key, perms, roles }) => {
+      const s = working[key];
+      return (
+        !!s &&
+        perms.every((p) => s.perms.includes(p)) &&
+        roles.every((r) => s.roles.includes(r))
+      );
+    });
   }
   function togglePreset(preset: AccessPreset) {
     const target = presetTarget(preset);
     if (target == null) return;
-    const perms = presetPermissions(preset, allPerms);
     const applied = isPresetApplied(preset);
+    const parts = presetScopes(preset, target);
     setWorking((w) => {
-      const cur = w[target] ?? { roles: [], perms: [] };
-      if (applied) {
-        const drop = new Set(perms);
-        return {
-          ...w,
-          [target]: {
-            perms: cur.perms.filter((p) => !drop.has(p)),
-            roles: cur.roles.filter((r) => !preset.roles.includes(r)),
-          },
-        };
+      const next = { ...w };
+      for (const { scope: key, perms, roles } of parts) {
+        const cur = next[key] ?? { roles: [], perms: [] };
+        if (applied) {
+          const dropPerms = new Set(perms);
+          const dropRoles = new Set(roles);
+          next[key] = {
+            perms: cur.perms.filter((p) => !dropPerms.has(p)),
+            roles: cur.roles.filter((r) => !dropRoles.has(r)),
+          };
+        } else {
+          next[key] = {
+            perms: [...new Set([...cur.perms, ...perms])],
+            roles: [...new Set([...cur.roles, ...roles])],
+          };
+        }
       }
-      return {
-        ...w,
-        [target]: {
-          perms: [...new Set([...cur.perms, ...perms])],
-          roles: [...new Set([...cur.roles, ...preset.roles])],
-        },
-      };
+      return next;
     });
   }
   function removeAll() {
@@ -390,9 +410,9 @@ export function AdminAccessControl() {
                 </ConfirmButton>
               </div>
               <p className="text-xs text-muted-foreground">
-                Click to add the bundle (and its role) at the selected scope; click again to remove it.
-                “Facility EC” uses the Scope selector above. You can fine-tune below — nothing is saved
-                until you enter a reason and hit Save.
+                Click to add the bundle (its role, and the default sign-in permissions nationally) at
+                the selected scope; click again to remove it. “Facility EC” uses the Scope selector
+                above. You can fine-tune below — nothing is saved until you enter a reason and hit Save.
               </p>
             </section>
 

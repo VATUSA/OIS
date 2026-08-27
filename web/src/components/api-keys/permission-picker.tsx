@@ -3,7 +3,7 @@ import {Badge, ConfirmButton, Input, cn} from "@ois/ui";
 import {ChevronDown, ChevronRight, Wand2} from "lucide-react";
 
 import type {ApiKeyPermission, ApiKeyPermissionInput, GrantablePermission} from "@/lib/api-keys";
-import {type AccessPreset, ACCESS_PRESETS, presetPermissions} from "@/lib/presets";
+import {type AccessPreset, ACCESS_PRESETS, BASE_PERMISSIONS, presetPermissions} from "@/lib/presets";
 
 /** Per-permission scope choice: grant nationally, or to the listed ARTCCs. */
 export type ScopeSel = { national: boolean; artccs: string[] };
@@ -134,17 +134,25 @@ export function PermissionPicker({
     [grantable],
   );
   const grantableNames = useMemo(() => grantable.map((g) => g.permission), [grantable]);
+  // The sign-in baseline (BASE_PERMISSIONS) — always national — plus the preset's domain perms at its
+  // scope. Keys hold no roles, so this is the only way a preset key gets the defaults a user has.
+  const baseNames = useMemo(
+    () => BASE_PERMISSIONS.filter((p) => grantableByName.has(p)),
+    [grantableByName],
+  );
+  const nationalScope = (g: GrantablePermission): ScopeSel =>
+    g.national ? { national: true, artccs: [] } : { national: false, artccs: [...g.artccs] };
   const isPresetApplied = (preset: AccessPreset) => {
-    const perms = presetPermissions(preset, grantableNames);
+    const perms = [...presetPermissions(preset, grantableNames), ...baseNames];
     return perms.length > 0 && perms.every((p) => selection.has(p));
   };
   const togglePreset = (preset: AccessPreset) => {
-    const perms = presetPermissions(preset, grantableNames);
+    const domain = presetPermissions(preset, grantableNames);
     const next = new Map(selection);
     if (isPresetApplied(preset)) {
-      for (const p of perms) next.delete(p);
+      for (const p of [...domain, ...baseNames]) next.delete(p);
     } else {
-      for (const p of perms) {
+      for (const p of domain) {
         const g = grantableByName.get(p);
         if (!g) continue;
         if (preset.scope === "facility") {
@@ -153,10 +161,11 @@ export function PermissionPicker({
             next.set(p, { national: false, artccs: [presetFacility] });
           }
         } else {
-          // National preset: national where the caller holds it nationally, else all their ARTCCs.
-          next.set(p, g.national ? { national: true, artccs: [] } : { national: false, artccs: [...g.artccs] });
+          next.set(p, nationalScope(g)); // national where held nationally, else all their ARTCCs
         }
       }
+      // Baseline is always national (applied after domain so it wins for any overlap — national ⊇ facility).
+      for (const p of baseNames) next.set(p, nationalScope(grantableByName.get(p)!));
     }
     onChange(next);
   };
