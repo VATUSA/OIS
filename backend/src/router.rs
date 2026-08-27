@@ -158,6 +158,10 @@ pub fn build_router(state: AppState) -> Router {
         )
         .route("/api/v1/events/{id}/stats", get(events::get_event_stats))
         .route(
+            "/api/v1/events/{id}/availability",
+            get(events::get_event_availability),
+        )
+        .route(
             "/api/v1/events/{id}/discord/publish",
             post(events::publish_event_discord),
         )
@@ -345,6 +349,10 @@ pub fn build_router(state: AppState) -> Router {
         .route(
             "/api/v1/integration/discord/ace/{id}",
             get(integration::discord_ace_info),
+        )
+        .route(
+            "/api/v1/integration/discord/availability/{id}",
+            post(integration::discord_availability),
         )
         // The current user's Discord link (read-only; sourced from VATUSA)
         .route("/api/v1/me/discord", get(integration::get_my_discord))

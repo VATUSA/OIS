@@ -67,6 +67,22 @@ struct DiscordAceClaimBody<'a> {
     end_hhmm: Option<&'a str>,
 }
 
+#[derive(Debug, Serialize)]
+struct AvailabilityBody<'a> {
+    discord_user_id: &'a str,
+    status: &'a str,
+}
+
+/// Outcome of an availability button press. `ok=false` is a soft refusal — `reason` is
+/// `unlinked` | `forbidden` | `invalid` — so the bot can tell the user why.
+#[derive(Debug, Clone, Deserialize)]
+pub struct AvailabilityResult {
+    pub ok: bool,
+    pub reason: Option<String>,
+    pub display_name: Option<String>,
+    pub status: Option<String>,
+}
+
 /// Handle to the OIS API, authenticated with a service-account bearer token.
 #[derive(Clone)]
 pub struct OisClient {
@@ -183,5 +199,31 @@ impl OisClient {
             return Err(ClientError::Status(resp.status().as_u16()));
         }
         Ok(resp.json::<Value>().await?)
+    }
+
+    /// Relay an availability button press (🟢/🟡/🔴) from a DCC event thread. The backend resolves the
+    /// Discord user, checks they may respond, and records it — returning a soft `ok`/`reason` result.
+    pub async fn set_availability(
+        &self,
+        event_id: &str,
+        discord_user_id: &str,
+        status: &str,
+    ) -> Result<AvailabilityResult, ClientError> {
+        let resp = self
+            .http
+            .post(self.url(&format!(
+                "/api/v1/integration/discord/availability/{event_id}"
+            )))
+            .bearer_auth(&self.token)
+            .json(&AvailabilityBody {
+                discord_user_id,
+                status,
+            })
+            .send()
+            .await?;
+        if !resp.status().is_success() {
+            return Err(ClientError::Status(resp.status().as_u16()));
+        }
+        Ok(resp.json::<AvailabilityResult>().await?)
     }
 }

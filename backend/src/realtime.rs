@@ -36,6 +36,7 @@ pub mod topic {
     pub const GROUND_STOP: &str = "tmu.groundstop";
     pub const PROGRAM: &str = "tmu.program";
     pub const CFR: &str = "flow.cfr";
+    pub const EVENT_AVAILABILITY: &str = "events.availability";
 }
 
 /// `GET /api/v1/ws` — upgrade to a websocket that streams realtime nudges. Requires an authenticated

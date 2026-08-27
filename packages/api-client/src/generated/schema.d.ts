@@ -596,6 +596,22 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/v1/events/{id}/availability": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get: operations["get_event_availability"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/v1/events/{id}/capture": {
         parameters: {
             query?: never;
@@ -1328,6 +1344,28 @@ export interface paths {
         get?: never;
         put?: never;
         post: operations["discord_ace_claim"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/integration/discord/availability/{id}": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Availability button (🟢/🟡/🔴) on a DCC event thread. The bot relays the click; we resolve the
+         *     Discord user to their linked OIS account and record the response — but only if they actually hold
+         *     `events.availability.update` (NTMOs / DCC staff). Refusals come back as `ok=false` (never an error
+         *     status) so the bot can explain why to the user.
+         */
+        post: operations["discord_availability"];
         delete?: never;
         options?: never;
         head?: never;
@@ -2796,6 +2834,26 @@ export interface components {
             /** @description A human window label, e.g. `2300–0300z`. */
             window_label: string;
         };
+        /**
+         * @description The bot relays an availability button press: which Discord user pressed which colour. The event
+         *     id travels in the path.
+         */
+        DiscordAvailabilityRequest: {
+            discord_user_id: string;
+            /** @description `available` | `partial` | `unavailable`. */
+            status: string;
+        };
+        /**
+         * @description Outcome of an availability press, shaped for the bot's ephemeral reply. `ok=false` is a soft
+         *     refusal — `reason` is `unlinked` | `forbidden` | `invalid` (never a hard error, so the bot can
+         *     tell the user why).
+         */
+        DiscordAvailabilityResult: {
+            display_name?: string | null;
+            ok: boolean;
+            reason?: string | null;
+            status?: string | null;
+        };
         /** @description The Discord guild config + its logical-name maps. */
         DiscordConfigBody: {
             categories: components["schemas"]["DiscordMapEntry"][];
@@ -2818,6 +2876,20 @@ export interface components {
         DiscordMapEntry: {
             id: string;
             name: string;
+        };
+        /**
+         * @description One person's availability response for an event (from the DCC thread 🟢/🟡/🔴 buttons). `roles`
+         *     carries the responder's assignable roles (e.g. `NTMO`) so the planner can read NOM vs shadow intent.
+         */
+        EventAvailabilityBody: {
+            /** Format: int64 */
+            cid: number;
+            display_name: string;
+            roles: string[];
+            /** @description `available` | `partial` | `unavailable`. */
+            status: string;
+            /** Format: date-time */
+            updated_at: string;
         };
         /** @description A VATUSA event, cached from the events API — the anchor for per-event planning. */
         EventBody: {
@@ -6010,6 +6082,34 @@ export interface operations {
             };
         };
     };
+    get_event_availability: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /** @description VATUSA event id */
+                id: number;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["EventAvailabilityBody"][];
+                };
+            };
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+        };
+    };
     get_event_capture: {
         parameters: {
             query?: never;
@@ -8037,6 +8137,43 @@ export interface operations {
                 content?: never;
             };
             409: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+        };
+    };
+    discord_availability: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                id: number;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["DiscordAvailabilityRequest"];
+            };
+        };
+        responses: {
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["DiscordAvailabilityResult"];
+                };
+            };
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            404: {
                 headers: {
                     [name: string]: unknown;
                 };

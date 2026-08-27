@@ -23,14 +23,16 @@ use crate::{
     feed,
     models::{
         AddPackageItemRequest, AirportRateBody, AirportStatBody, CombinedStatBody,
-        CreateGroundStopRequest, CreatePackageRequest, CreateTmiRequest, DccRequestBody, EventBody,
-        EventCaptureBody, EventDebriefBody, EventStatsBody, FacilitySupportBody, KeyCountBody,
-        TmiPackageBody, UpdateDccRequest, UpdateEventCaptureRequest, UpdateEventDebriefRequest,
-        UpsertAirportRateRequest, UpsertFacilitySupportRequest, UpsertProgramRequest,
+        CreateGroundStopRequest, CreatePackageRequest, CreateTmiRequest, DccRequestBody,
+        EventAvailabilityBody, EventBody, EventCaptureBody, EventDebriefBody, EventStatsBody,
+        FacilitySupportBody, KeyCountBody, TmiPackageBody, UpdateDccRequest,
+        UpdateEventCaptureRequest, UpdateEventDebriefRequest, UpsertAirportRateRequest,
+        UpsertFacilitySupportRequest, UpsertProgramRequest,
     },
     repos::{
-        access as access_repo, ace as ace_repo, events as events_repo,
-        integration as integration_repo, stats as stats_repo, tmu as tmu_repo,
+        access as access_repo, ace as ace_repo, availability as availability_repo,
+        events as events_repo, integration as integration_repo, stats as stats_repo,
+        tmu as tmu_repo,
     },
     state::AppState,
 };
@@ -927,6 +929,22 @@ pub async fn update_event_capture(
     let post = payload.post_minutes.unwrap_or(30).clamp(0, 720);
     stats_repo::upsert_event_capture(pool, id, payload.enabled, pre, post, &user.id).await?;
     Ok(Json(capture_body(pool, id, true).await?))
+}
+
+#[utoipa::path(
+    get,
+    path = "/api/v1/events/{id}/availability",
+    tag = "events",
+    params(("id" = i64, Path, description = "VATUSA event id")),
+    responses((status = 200, body = Vec<EventAvailabilityBody>), (status = 401))
+)]
+pub async fn get_event_availability(
+    State(state): State<AppState>,
+    _permission: RequirePermission<EventsPlanRead>,
+    Path(id): Path<i64>,
+) -> Result<Json<Vec<EventAvailabilityBody>>, ApiError> {
+    let pool = state.db.as_ref().ok_or(ApiError::ServiceUnavailable)?;
+    availability_repo::list_for_event(pool, id).await.map(Json)
 }
 
 #[utoipa::path(

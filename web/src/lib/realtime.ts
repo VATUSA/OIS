@@ -16,6 +16,7 @@ const TOPIC_KEYS: Record<string, string[][]> = {
   "tmu.groundstop": [["ground-stops"], ["departures"]],
   "tmu.program": [["tmu-programs"], ["departures"], ["flow"]],
   "flow.cfr": [["departures"], ["flow"]],
+  "events.availability": [["event-availability"]],
 };
 
 /** Every distinct key across all topics — refetched once on (re)connect to catch up on anything that

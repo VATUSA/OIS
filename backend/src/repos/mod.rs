@@ -4,6 +4,7 @@ pub mod airport_configs;
 pub mod api_keys;
 pub mod audit;
 pub mod auth;
+pub mod availability;
 pub mod dashboards;
 pub mod events;
 pub mod facility_map;

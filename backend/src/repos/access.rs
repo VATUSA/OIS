@@ -217,6 +217,14 @@ pub async fn find_user_id_by_cid(pool: &PgPool, cid: i64) -> Result<Option<Strin
         .map_err(|_| ApiError::Internal)
 }
 
+pub async fn user_display_name(pool: &PgPool, user_id: &str) -> Result<Option<String>, ApiError> {
+    sqlx::query_scalar::<_, String>("select display_name from identity.users where id = $1")
+        .bind(user_id)
+        .fetch_optional(pool)
+        .await
+        .map_err(|_| ApiError::Internal)
+}
+
 pub async fn find_current_user_by_cid(
     pool: &PgPool,
     cid: i64,

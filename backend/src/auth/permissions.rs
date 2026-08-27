@@ -63,6 +63,7 @@ permission!(EventsConfigUpdate, ["events", "config"], Update);
 permission!(EventsSupportUpdate, ["events", "support"], Update);
 permission!(EventsDebriefCreate, ["events", "debrief"], Create);
 permission!(EventsDiscordPublish, ["events", "discord"], Publish);
+permission!(EventsAvailabilityUpdate, ["events", "availability"], Update);
 
 // ace — event-scoped support-request queue
 permission!(AceRequestsRead, ["ace", "requests"], Read);
