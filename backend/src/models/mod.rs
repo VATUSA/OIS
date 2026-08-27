@@ -895,6 +895,14 @@ pub struct DecideAceRequestRequest {
     pub outcome: String,
 }
 
+/// Outcome of generating Tier-1 support requests for an FNO: the neighbouring ARTCCs a request was
+/// opened for, and those skipped because they already had an open request on the event.
+#[derive(Debug, Serialize, ToSchema)]
+pub struct Tier1GenerateResult {
+    pub created: Vec<String>,
+    pub skipped: Vec<String>,
+}
+
 /// One person's availability response for an event (from the DCC thread 🟢/🟡/🔴 buttons). `roles`
 /// carries the responder's assignable roles (e.g. `NTMO`) so the planner can read NOM vs shadow intent.
 #[derive(Debug, Serialize, ToSchema, sqlx::FromRow)]

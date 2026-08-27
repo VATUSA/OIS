@@ -109,6 +109,37 @@ export function useReleaseEventAce(eventId: number) {
   });
 }
 
+export type Tier1Result = components["schemas"]["Tier1GenerateResult"];
+
+/** Fan out ACE requests to the host ARTCC's Tier-1 neighbours (FNO events). Needs `ace.requests.create`. */
+export function useGenerateTier1(eventId: number) {
+  const qc = useQueryClient();
+  const toast = useToast();
+  return useMutation({
+    mutationFn: async (): Promise<Tier1Result> => {
+      const { data, error } = await ois.POST("/api/v1/events/{id}/ace/tier1", {
+        params: { path: { id: eventId } },
+      });
+      if (error || !data) throw new Error("generate failed");
+      return data;
+    },
+    onSuccess: (r) => {
+      qc.invalidateQueries({ queryKey: ["event-ace", eventId] });
+      const made = r.created.length;
+      const skipped = r.skipped.length;
+      if (made === 0 && skipped === 0) {
+        toast.success("No Tier-1 neighbours to request");
+      } else {
+        toast.success(
+          `Created ${made} request${made === 1 ? "" : "s"}` +
+            (skipped > 0 ? ` (skipped ${skipped} already open)` : ""),
+        );
+      }
+    },
+    onError: () => toast.error("Couldn’t generate Tier-1 requests"),
+  });
+}
+
 /** Complete or cancel a request. Needs `ace.requests.decide`. */
 export function useDecideEventAce(eventId: number) {
   const qc = useQueryClient();
