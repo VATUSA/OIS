@@ -124,14 +124,49 @@ impl EventHandler for Handler {
         };
         let cid = mc.data.custom_id.clone();
 
-        // Event-thread availability buttons (🟢🟡🔴) — functionality TBD; ack so the click doesn't error.
-        if cid.starts_with("evtavail:") {
-            let _ = mc
-                .create_response(
-                    &ctx.http,
-                    ephemeral("Availability tracking is coming soon."),
-                )
-                .await;
+        // Event-thread availability buttons (🟢🟡🔴): record the presser's availability for the event.
+        // custom_id = evtavail:{green|yellow|red}:{event_id}
+        if let Some(rest) = cid.strip_prefix("evtavail:") {
+            let mut parts = rest.splitn(2, ':');
+            let color = parts.next().unwrap_or("");
+            let event_id = parts.next().unwrap_or("");
+            let status = match color {
+                "green" => "available",
+                "yellow" => "partial",
+                "red" => "unavailable",
+                _ => "",
+            };
+            let content = if status.is_empty() || event_id.is_empty() {
+                "Unknown availability option.".to_string()
+            } else {
+                let discord_user = mc.user.id.get().to_string();
+                match self
+                    .api
+                    .set_availability(event_id, &discord_user, status)
+                    .await
+                {
+                    Ok(r) if r.ok => format!(
+                        "✅ Recorded your availability: {}",
+                        availability_label(status)
+                    ),
+                    Ok(r) => match r.reason.as_deref() {
+                        Some("unlinked") => {
+                            "Your Discord isn't linked to OIS yet — link it via VATUSA to respond."
+                                .to_string()
+                        }
+                        Some("forbidden") => {
+                            "Only NTMOs (or authorized DCC staff) can indicate availability here."
+                                .to_string()
+                        }
+                        _ => "Couldn't record that response.".to_string(),
+                    },
+                    Err(_) => {
+                        "Something went wrong recording your availability. Try again shortly."
+                            .to_string()
+                    }
+                }
+            };
+            let _ = mc.create_response(&ctx.http, ephemeral(&content)).await;
             return;
         }
 
@@ -225,6 +260,16 @@ impl EventHandler for Handler {
                 tracing::error!(error = %e, "failed to open notes modal");
             }
         }
+    }
+}
+
+/// Human label for an availability status (matches the button legend).
+fn availability_label(status: &str) -> &'static str {
+    match status {
+        "available" => "🟢 Available",
+        "partial" => "🟡 Partially available",
+        "unavailable" => "🔴 Unavailable",
+        _ => "recorded",
     }
 }
 

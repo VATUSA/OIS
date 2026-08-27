@@ -17,9 +17,13 @@ use crate::{
     errors::ApiError,
     models::{
         AceRequestBody, AckJobRequest, DiscordAceClaimRequest, DiscordAceInfoBody,
-        DiscordConfigBody, DiscordLinkBody, OutboundJobBody, UpsertDiscordConfigRequest,
+        DiscordAvailabilityRequest, DiscordAvailabilityResult, DiscordConfigBody, DiscordLinkBody,
+        OutboundJobBody, UpsertDiscordConfigRequest,
     },
-    repos::{ace as ace_repo, events as events_repo, integration as integration_repo},
+    repos::{
+        access as access_repo, ace as ace_repo, availability as availability_repo,
+        events as events_repo, integration as integration_repo,
+    },
     state::AppState,
 };
 
@@ -182,6 +186,70 @@ pub async fn discord_ace_claim(
         .await?
         .map(Json)
         .ok_or(ApiError::NotFound)
+}
+
+/// Availability button (🟢/🟡/🔴) on a DCC event thread. The bot relays the click; we resolve the
+/// Discord user to their linked OIS account and record the response — but only if they actually hold
+/// `events.availability.update` (NTMOs / DCC staff). Refusals come back as `ok=false` (never an error
+/// status) so the bot can explain why to the user.
+#[utoipa::path(
+    post, path = "/api/v1/integration/discord/availability/{id}", tag = "integration",
+    params(("id" = i64, Path)), request_body = DiscordAvailabilityRequest,
+    responses((status = 200, body = DiscordAvailabilityResult), (status = 401), (status = 404))
+)]
+pub async fn discord_availability(
+    State(state): State<AppState>,
+    _permission: RequirePermission<IntegrationJobsUpdate>,
+    Path(id): Path<i64>,
+    Json(payload): Json<DiscordAvailabilityRequest>,
+) -> Result<Json<DiscordAvailabilityResult>, ApiError> {
+    let p = pool(&state)?;
+
+    let refuse = |reason: &str| {
+        Ok(Json(DiscordAvailabilityResult {
+            ok: false,
+            reason: Some(reason.to_string()),
+            display_name: None,
+            status: None,
+        }))
+    };
+
+    // Only the three known button values are accepted.
+    if !matches!(
+        payload.status.as_str(),
+        "available" | "partial" | "unavailable"
+    ) {
+        return refuse("invalid");
+    }
+
+    // The event must still exist (threads can outlive pruned events).
+    events_repo::get(p, id).await?.ok_or(ApiError::NotFound)?;
+
+    // Resolve the presser to an OIS user (VATUSA-linked Discord); unlinked users can't respond.
+    let Some(user_id) =
+        integration_repo::find_user_by_discord_id(p, &payload.discord_user_id).await?
+    else {
+        return refuse("unlinked");
+    };
+
+    // Gate on the resolved user's effective permissions — NTMO / DCC staff by default.
+    let perms = access_repo::fetch_user_permission_names(p, &user_id).await?;
+    if !perms
+        .iter()
+        .any(|perm| perm == "events.availability.update")
+    {
+        return refuse("forbidden");
+    }
+
+    availability_repo::set_availability(p, id, &user_id, &payload.status).await?;
+    state.publish(crate::realtime::topic::EVENT_AVAILABILITY);
+    let display_name = access_repo::user_display_name(p, &user_id).await?;
+    Ok(Json(DiscordAvailabilityResult {
+        ok: true,
+        reason: None,
+        display_name,
+        status: Some(payload.status),
+    }))
 }
 
 // --- guild config ---

@@ -12,15 +12,17 @@ import {DccSection} from "@/pages/planning/dcc";
 import {FacilitySupportSection} from "@/pages/planning/facility-support";
 import {AirportRatesSection} from "@/pages/planning/airport-rates";
 import {AceSection} from "@/pages/planning/ace";
+import {AvailabilitySection} from "@/pages/planning/availability";
 import {TmiPackagesSection} from "@/pages/planning/tmi-packages";
 import {EventStatsSection} from "@/pages/planning/event-stats";
 
-type TabId = "airports" | "facility" | "tmi" | "ace" | "stats";
+type TabId = "airports" | "facility" | "tmi" | "ace" | "availability" | "stats";
 const TABS: { id: TabId; label: string }[] = [
   { id: "airports", label: "Airports & rates" },
   { id: "facility", label: "Facility support" },
   { id: "tmi", label: "TMI packages" },
   { id: "ace", label: "ACE" },
+  { id: "availability", label: "Availability" },
   { id: "stats", label: "Stats & debrief" },
 ];
 
@@ -196,6 +198,7 @@ export function EventPlanningPage() {
         {tab === "ace" && (
           <AceSection eventId={id} eventStart={e.start_time} eventEnd={e.end_time} />
         )}
+        {tab === "availability" && <AvailabilitySection eventId={id} />}
         {tab === "stats" && <EventStatsSection eventId={id} />}
       </div>
     </div>

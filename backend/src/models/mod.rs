@@ -895,7 +895,40 @@ pub struct DecideAceRequestRequest {
     pub outcome: String,
 }
 
+/// One person's availability response for an event (from the DCC thread 🟢/🟡/🔴 buttons). `roles`
+/// carries the responder's assignable roles (e.g. `NTMO`) so the planner can read NOM vs shadow intent.
+#[derive(Debug, Serialize, ToSchema, sqlx::FromRow)]
+pub struct EventAvailabilityBody {
+    pub cid: i64,
+    pub display_name: String,
+    /// `available` | `partial` | `unavailable`.
+    pub status: String,
+    #[schema(value_type = Vec<String>)]
+    pub roles: sqlx::types::Json<Vec<String>>,
+    pub updated_at: DateTime<Utc>,
+}
+
 // --- integration / Discord ---
+
+/// The bot relays an availability button press: which Discord user pressed which colour. The event
+/// id travels in the path.
+#[derive(Debug, Deserialize, ToSchema)]
+pub struct DiscordAvailabilityRequest {
+    pub discord_user_id: String,
+    /// `available` | `partial` | `unavailable`.
+    pub status: String,
+}
+
+/// Outcome of an availability press, shaped for the bot's ephemeral reply. `ok=false` is a soft
+/// refusal — `reason` is `unlinked` | `forbidden` | `invalid` (never a hard error, so the bot can
+/// tell the user why).
+#[derive(Debug, Serialize, ToSchema)]
+pub struct DiscordAvailabilityResult {
+    pub ok: bool,
+    pub reason: Option<String>,
+    pub display_name: Option<String>,
+    pub status: Option<String>,
+}
 
 /// One outbound job handed to the bot on lease. `payload` carries everything the handler needs.
 #[derive(Debug, Serialize, ToSchema)]
