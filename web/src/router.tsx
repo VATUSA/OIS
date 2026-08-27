@@ -221,13 +221,20 @@ const facilityMapDetailRoute = createRoute({
   // those layers on; `theme` forces light/dark for the host page.
   validateSearch: (
     search: Record<string, unknown>,
-  ): { embed?: boolean; atc?: boolean; routes?: boolean; theme?: "light" | "dark" } => {
+  ): {
+    embed?: boolean;
+    atc?: boolean;
+    routes?: boolean;
+    fixes?: boolean;
+    theme?: "light" | "dark";
+  } => {
     const bool = (v: unknown) => v === true || v === 1 || v === "1" || v === "true";
     const theme = search.theme === "light" || search.theme === "dark" ? search.theme : undefined;
     return {
       embed: bool(search.embed) || undefined,
       atc: bool(search.atc) || undefined,
       routes: bool(search.routes) || undefined,
+      fixes: bool(search.fixes) || undefined,
       theme,
     };
   },

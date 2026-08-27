@@ -2,7 +2,7 @@ import {useCallback, useEffect, useMemo, useState} from "react";
 import {WebMercatorViewport, type MapViewState} from "@deck.gl/core";
 import {useNavigate, useParams, useSearch} from "@tanstack/react-router";
 import {useTheme, useToast} from "@ois/ui";
-import {Code2, Maximize2, Pencil, RadioTower, Route} from "lucide-react";
+import {Code2, Maximize2, Pencil, RadioTower, Route, Tag} from "lucide-react";
 
 import {useFacilities} from "@/lib/admin";
 import {useMe} from "@/lib/auth";
@@ -92,13 +92,14 @@ export function FacilityMapIndexPage() {
  */
 export function FacilityMapPage() {
   const { facilityId } = useParams({ from: "/facility-map/$facilityId" });
-  const { embed, atc, routes, theme } = useSearch({ from: "/facility-map/$facilityId" });
+  const { embed, atc, routes, fixes, theme } = useSearch({ from: "/facility-map/$facilityId" });
   return (
     <FacilityMapView
       id={facilityId.toUpperCase()}
       embed={embed}
       initialAtc={atc}
       initialRoutes={routes}
+      initialFixes={fixes}
       forceTheme={theme}
     />
   );
@@ -113,6 +114,7 @@ export function FacilityMapView({
   embed = false,
   initialAtc = false,
   initialRoutes = false,
+  initialFixes = false,
   forceTheme,
 }: {
   id: string | null;
@@ -120,6 +122,7 @@ export function FacilityMapView({
   embed?: boolean;
   initialAtc?: boolean;
   initialRoutes?: boolean;
+  initialFixes?: boolean;
   forceTheme?: "light" | "dark";
 }) {
   const { resolvedTheme, setTheme } = useTheme();
@@ -147,8 +150,11 @@ export function FacilityMapView({
   // browser. Embed mode: fixed by the URL params, and we never touch the viewer's saved prefs.
   const [atcPref, setAtcPref] = useState(() => storedBool("facilityMap.atc", true));
   const [routesPref, setRoutesPref] = useState(() => storedBool("facilityMap.routes", true));
+  // Fix-name labels are dense, so default off (like the flow map's per-route toggle).
+  const [fixesPref, setFixesPref] = useState(() => storedBool("facilityMap.fixes", false));
   const showAtc = embed ? initialAtc : atcPref;
   const showRoutes = embed ? initialRoutes : routesPref;
+  const showFixes = embed ? initialFixes : fixesPref;
   useEffect(() => {
     if (embed) return;
     try {
@@ -165,8 +171,25 @@ export function FacilityMapView({
       /* non-fatal */
     }
   }, [routesPref, embed]);
+  useEffect(() => {
+    if (embed) return;
+    try {
+      localStorage.setItem("facilityMap.fixes", fixesPref ? "1" : "0");
+    } catch {
+      /* non-fatal */
+    }
+  }, [fixesPref, embed]);
   const atc = useAtc(showAtc);
   const routes = useRoutes(id ?? undefined);
+
+  // Fix labels apply to every shown route (a single toggle, vs the flow map's per-route control).
+  const labeledRouteIds = useMemo(
+    () =>
+      showFixes && showRoutes
+        ? new Set((routes.data ?? []).map((r) => r.id))
+        : undefined,
+    [showFixes, showRoutes, routes.data],
+  );
 
   const { data: me } = useMe();
   const canEditRoutes = !embed && hasPermission(me, "flow.route.update");
@@ -245,6 +268,7 @@ export function FacilityMapView({
     const params = new URLSearchParams({ embed: "1" });
     if (showAtc) params.set("atc", "1");
     if (showRoutes) params.set("routes", "1");
+    if (showFixes && showRoutes) params.set("fixes", "1");
     const url = `${window.location.origin}/facility-map/${id}?${params.toString()}`;
     const snippet = `<iframe src="${url}" width="800" height="500" style="border:0" title="${id} traffic map" loading="lazy"></iframe>`;
     navigator.clipboard
@@ -264,6 +288,7 @@ export function FacilityMapView({
         getAircraftColor={getAircraftColor}
         atc={showAtc ? ((atc.data as AtcData | undefined) ?? null) : null}
         namedRoutes={showRoutes ? (routes.data as NamedRoute[] | undefined) : undefined}
+        labeledRouteIds={labeledRouteIds}
         baseCursor="grab"
       >
         {/* Controls (hidden in embed mode — layers come from the URL there). */}
@@ -325,6 +350,20 @@ export function FacilityMapView({
             <Route className={`size-3.5 ${showRoutes ? "text-primary" : "text-muted-foreground"}`} />
             Routes
           </button>
+          {showRoutes && (
+            <button
+              type="button"
+              onClick={() => setFixesPref((v) => !v)}
+              title="Toggle fix names along routes"
+              aria-pressed={showFixes}
+              className={`flex items-center gap-1.5 rounded-lg border px-2.5 py-1.5 text-xs font-medium shadow-lg backdrop-blur transition-colors ${
+                showFixes ? "border-primary/60 bg-primary/15 text-primary" : "bg-background/95 hover:bg-muted"
+              }`}
+            >
+              <Tag className={`size-3.5 ${showFixes ? "text-primary" : "text-muted-foreground"}`} />
+              Fixes
+            </button>
+          )}
           {canEditRoutes && feature && !editingRoutes && (
             <button
               type="button"
