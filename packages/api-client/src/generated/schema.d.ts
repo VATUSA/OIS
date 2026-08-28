@@ -1393,6 +1393,46 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/v1/integration/discord/guilds/snapshot": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * The bot pushes the guilds it's in (channels + roles) so the editor can offer dropdowns. Gated by
+         *     the bot's `integration.jobs.update` (a human admin never calls this).
+         */
+        post: operations["push_guild_snapshot"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/integration/discord/refresh": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Ask the bot to re-pull the guild snapshot (the admin's "Refresh from Discord" button). Enqueues a
+         *     `guild_snapshot` job the bot handles by pushing a fresh snapshot. Gated by `discord.config.update`.
+         */
+        post: operations["refresh_guild_snapshot"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/v1/integration/jobs/lease": {
         parameters: {
             query?: never;
@@ -2875,15 +2915,53 @@ export interface components {
             reason?: string | null;
             status?: string | null;
         };
-        /** @description The Discord guild config + its logical-name maps. */
+        /**
+         * @description The whole Discord config: the configured guilds, plus a snapshot of the guilds the bot is in
+         *     (channels + roles) so the editor can offer dropdowns instead of hand-typed snowflakes.
+         */
         DiscordConfigBody: {
-            categories: components["schemas"]["DiscordMapEntry"][];
+            available: components["schemas"]["DiscordGuildSnapshotBody"][];
+            guilds: components["schemas"]["DiscordGuildConfigBody"][];
+        };
+        /** @description One channel in a guild snapshot (the real channels the bot sees). */
+        DiscordGuildChannel: {
+            id: string;
+            /** @description `text` | `voice` | `category` | `forum` | `announcement` | `stage` | … */
+            kind: string;
+            name: string;
+            parent_id?: string | null;
+            /** Format: int32 */
+            position?: number;
+        };
+        /** @description One configured guild (DCC / VATUSA / …) + its logical-name maps. */
+        DiscordGuildConfigBody: {
             channels: components["schemas"]["DiscordMapEntry"][];
             guild_id: string;
-            /** @description Null until a config has been saved. */
+            /** @description Null until this guild's config row has been saved. */
             id?: string | null;
             name: string;
             roles: components["schemas"]["DiscordMapEntry"][];
+        };
+        DiscordGuildConfigInput: {
+            channels?: components["schemas"]["DiscordMapEntry"][];
+            guild_id: string;
+            name: string;
+            roles?: components["schemas"]["DiscordMapEntry"][];
+        };
+        /** @description One role in a guild snapshot. */
+        DiscordGuildRole: {
+            id: string;
+            managed?: boolean;
+            name: string;
+            /** Format: int32 */
+            position?: number;
+        };
+        /** @description A snapshot of one guild the bot is in — used for the config dropdowns + the guild picker. */
+        DiscordGuildSnapshotBody: {
+            channels: components["schemas"]["DiscordGuildChannel"][];
+            guild_id: string;
+            name: string;
+            roles: components["schemas"]["DiscordGuildRole"][];
         };
         /** @description The current user's Discord account link. */
         DiscordLinkBody: {
@@ -2893,7 +2971,7 @@ export interface components {
             /** @description The linked Discord username/handle, when known. */
             username?: string | null;
         };
-        /** @description A logical-name → Discord snowflake entry (channel/role/category). */
+        /** @description A logical-name → Discord snowflake entry (channel or role). */
         DiscordMapEntry: {
             id: string;
             name: string;
@@ -3742,6 +3820,10 @@ export interface components {
              */
             stop_time?: string | null;
         };
+        /** @description The bot's push of every guild it's in (full replace of the snapshot). */
+        PushGuildSnapshotRequest: {
+            guilds: components["schemas"]["DiscordGuildSnapshotBody"][];
+        };
         /**
          * @description Issue a CFR release for a crossing aircraft. `ready` (HHMMz) pins a wheels-up time;
          *     omitted = release at the earliest metered slot.
@@ -4312,11 +4394,7 @@ export interface components {
             source?: string | null;
         };
         UpsertDiscordConfigRequest: {
-            categories?: components["schemas"]["DiscordMapEntry"][];
-            channels?: components["schemas"]["DiscordMapEntry"][];
-            guild_id: string;
-            name: string;
-            roles?: components["schemas"]["DiscordMapEntry"][];
+            guilds: components["schemas"]["DiscordGuildConfigInput"][];
         };
         /** @description Upsert body for a facility's map color rules. */
         UpsertFacilityMapConfigRequest: {
@@ -8251,6 +8329,56 @@ export interface operations {
                 content?: never;
             };
             404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+        };
+    };
+    push_guild_snapshot: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["PushGuildSnapshotRequest"];
+            };
+        };
+        responses: {
+            204: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+        };
+    };
+    refresh_guild_snapshot: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            202: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            401: {
                 headers: {
                     [name: string]: unknown;
                 };

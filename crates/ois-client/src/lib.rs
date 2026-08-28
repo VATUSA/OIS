@@ -73,6 +73,39 @@ struct AvailabilityBody<'a> {
     status: &'a str,
 }
 
+/// One channel in a guild snapshot the bot pushes to the backend.
+#[derive(Debug, Serialize)]
+pub struct GuildChannelSnap {
+    pub id: String,
+    pub name: String,
+    pub kind: String,
+    pub parent_id: Option<String>,
+    pub position: i32,
+}
+
+/// One role in a guild snapshot.
+#[derive(Debug, Serialize)]
+pub struct GuildRoleSnap {
+    pub id: String,
+    pub name: String,
+    pub managed: bool,
+    pub position: i32,
+}
+
+/// A snapshot of one guild the bot is in (its real channels + roles), for the config dropdowns.
+#[derive(Debug, Serialize)]
+pub struct GuildSnap {
+    pub guild_id: String,
+    pub name: String,
+    pub channels: Vec<GuildChannelSnap>,
+    pub roles: Vec<GuildRoleSnap>,
+}
+
+#[derive(Debug, Serialize)]
+struct GuildSnapshotBody {
+    guilds: Vec<GuildSnap>,
+}
+
 /// Outcome of an availability button press. `ok=false` is a soft refusal — `reason` is
 /// `unlinked` | `forbidden` | `invalid` — so the bot can tell the user why.
 #[derive(Debug, Clone, Deserialize)]
@@ -225,5 +258,21 @@ impl OisClient {
             return Err(ClientError::Status(resp.status().as_u16()));
         }
         Ok(resp.json::<AvailabilityResult>().await?)
+    }
+
+    /// Push the guilds the bot is in (channels + roles) so the admin config offers dropdowns. Full
+    /// replace of the backend's guild snapshot. Needs `integration.jobs.update` (the BOT role).
+    pub async fn push_guild_snapshot(&self, guilds: Vec<GuildSnap>) -> Result<(), ClientError> {
+        let resp = self
+            .http
+            .post(self.url("/api/v1/integration/discord/guilds/snapshot"))
+            .bearer_auth(&self.token)
+            .json(&GuildSnapshotBody { guilds })
+            .send()
+            .await?;
+        if !resp.status().is_success() {
+            return Err(ClientError::Status(resp.status().as_u16()));
+        }
+        Ok(())
     }
 }

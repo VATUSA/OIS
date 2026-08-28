@@ -345,6 +345,14 @@ pub fn build_router(state: AppState) -> Router {
             get(integration::get_discord_config).put(integration::put_discord_config),
         )
         .route(
+            "/api/v1/integration/discord/guilds/snapshot",
+            post(integration::push_guild_snapshot),
+        )
+        .route(
+            "/api/v1/integration/discord/refresh",
+            post(integration::refresh_guild_snapshot),
+        )
+        .route(
             "/api/v1/integration/discord/ace/{id}/claim",
             post(integration::discord_ace_claim),
         )

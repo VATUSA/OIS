@@ -963,35 +963,83 @@ pub struct AckJobRequest {
     pub error: Option<String>,
 }
 
-/// A logical-name → Discord snowflake entry (channel/role/category).
+/// A logical-name → Discord snowflake entry (channel or role).
 #[derive(Debug, Serialize, Deserialize, Clone, ToSchema, sqlx::FromRow)]
 pub struct DiscordMapEntry {
     pub name: String,
     pub id: String,
 }
 
-/// The Discord guild config + its logical-name maps.
+/// One configured guild (DCC / VATUSA / …) + its logical-name maps.
 #[derive(Debug, Serialize, ToSchema)]
-pub struct DiscordConfigBody {
-    /// Null until a config has been saved.
+pub struct DiscordGuildConfigBody {
+    /// Null until this guild's config row has been saved.
     pub id: Option<String>,
     pub name: String,
     pub guild_id: String,
     pub channels: Vec<DiscordMapEntry>,
     pub roles: Vec<DiscordMapEntry>,
-    pub categories: Vec<DiscordMapEntry>,
+}
+
+/// The whole Discord config: the configured guilds, plus a snapshot of the guilds the bot is in
+/// (channels + roles) so the editor can offer dropdowns instead of hand-typed snowflakes.
+#[derive(Debug, Serialize, ToSchema)]
+pub struct DiscordConfigBody {
+    pub guilds: Vec<DiscordGuildConfigBody>,
+    pub available: Vec<DiscordGuildSnapshotBody>,
 }
 
 #[derive(Debug, Deserialize, ToSchema)]
 pub struct UpsertDiscordConfigRequest {
+    pub guilds: Vec<DiscordGuildConfigInput>,
+}
+
+#[derive(Debug, Deserialize, ToSchema)]
+pub struct DiscordGuildConfigInput {
     pub name: String,
     pub guild_id: String,
     #[serde(default)]
     pub channels: Vec<DiscordMapEntry>,
     #[serde(default)]
     pub roles: Vec<DiscordMapEntry>,
+}
+
+/// One channel in a guild snapshot (the real channels the bot sees).
+#[derive(Debug, Serialize, Deserialize, Clone, ToSchema, sqlx::FromRow)]
+pub struct DiscordGuildChannel {
+    pub id: String,
+    pub name: String,
+    /// `text` | `voice` | `category` | `forum` | `announcement` | `stage` | …
+    pub kind: String,
+    pub parent_id: Option<String>,
     #[serde(default)]
-    pub categories: Vec<DiscordMapEntry>,
+    pub position: i32,
+}
+
+/// One role in a guild snapshot.
+#[derive(Debug, Serialize, Deserialize, Clone, ToSchema, sqlx::FromRow)]
+pub struct DiscordGuildRole {
+    pub id: String,
+    pub name: String,
+    #[serde(default)]
+    pub managed: bool,
+    #[serde(default)]
+    pub position: i32,
+}
+
+/// A snapshot of one guild the bot is in — used for the config dropdowns + the guild picker.
+#[derive(Debug, Serialize, Deserialize, Clone, ToSchema)]
+pub struct DiscordGuildSnapshotBody {
+    pub guild_id: String,
+    pub name: String,
+    pub channels: Vec<DiscordGuildChannel>,
+    pub roles: Vec<DiscordGuildRole>,
+}
+
+/// The bot's push of every guild it's in (full replace of the snapshot).
+#[derive(Debug, Deserialize, ToSchema)]
+pub struct PushGuildSnapshotRequest {
+    pub guilds: Vec<DiscordGuildSnapshotBody>,
 }
 
 /// The current user's Discord account link.

@@ -18,7 +18,7 @@ use crate::{
     models::{
         AceRequestBody, AckJobRequest, DiscordAceClaimRequest, DiscordAceInfoBody,
         DiscordAvailabilityRequest, DiscordAvailabilityResult, DiscordConfigBody, DiscordLinkBody,
-        OutboundJobBody, UpsertDiscordConfigRequest,
+        OutboundJobBody, PushGuildSnapshotRequest, UpsertDiscordConfigRequest,
     },
     repos::{
         access as access_repo, ace as ace_repo, availability as availability_repo,
@@ -254,18 +254,6 @@ pub async fn discord_availability(
 
 // --- guild config ---
 
-/// Empty config shown before anything's been saved.
-fn empty_config() -> DiscordConfigBody {
-    DiscordConfigBody {
-        id: None,
-        name: String::new(),
-        guild_id: String::new(),
-        channels: Vec::new(),
-        roles: Vec::new(),
-        categories: Vec::new(),
-    }
-}
-
 #[utoipa::path(
     get, path = "/api/v1/integration/discord", tag = "integration",
     responses((status = 200, body = DiscordConfigBody), (status = 401))
@@ -274,11 +262,7 @@ pub async fn get_discord_config(
     State(state): State<AppState>,
     _permission: RequirePermission<DiscordConfigRead>,
 ) -> Result<Json<DiscordConfigBody>, ApiError> {
-    Ok(Json(
-        integration_repo::get_config(pool(&state)?)
-            .await?
-            .unwrap_or_else(empty_config),
-    ))
+    Ok(Json(integration_repo::get_config(pool(&state)?).await?))
 }
 
 #[utoipa::path(
@@ -292,13 +276,51 @@ pub async fn put_discord_config(
     Json(payload): Json<UpsertDiscordConfigRequest>,
 ) -> Result<Json<DiscordConfigBody>, ApiError> {
     let p = pool(&state)?;
-    if payload.name.trim().is_empty() || payload.guild_id.trim().is_empty() {
-        return Err(ApiError::BadRequest);
+    for g in &payload.guilds {
+        if g.name.trim().is_empty() || g.guild_id.trim().is_empty() {
+            return Err(ApiError::BadRequest);
+        }
     }
     integration_repo::upsert_config(p, &payload).await?;
-    Ok(Json(
-        integration_repo::get_config(p)
-            .await?
-            .unwrap_or_else(empty_config),
-    ))
+    Ok(Json(integration_repo::get_config(p).await?))
+}
+
+/// The bot pushes the guilds it's in (channels + roles) so the editor can offer dropdowns. Gated by
+/// the bot's `integration.jobs.update` (a human admin never calls this).
+#[utoipa::path(
+    post, path = "/api/v1/integration/discord/guilds/snapshot", tag = "integration",
+    request_body = PushGuildSnapshotRequest,
+    responses((status = 204), (status = 401))
+)]
+pub async fn push_guild_snapshot(
+    State(state): State<AppState>,
+    _permission: RequirePermission<IntegrationJobsUpdate>,
+    Json(payload): Json<PushGuildSnapshotRequest>,
+) -> Result<StatusCode, ApiError> {
+    integration_repo::replace_guild_snapshots(pool(&state)?, &payload.guilds).await?;
+    Ok(StatusCode::NO_CONTENT)
+}
+
+/// Ask the bot to re-pull the guild snapshot (the admin's "Refresh from Discord" button). Enqueues a
+/// `guild_snapshot` job the bot handles by pushing a fresh snapshot. Gated by `discord.config.update`.
+#[utoipa::path(
+    post, path = "/api/v1/integration/discord/refresh", tag = "integration",
+    responses((status = 202), (status = 401))
+)]
+pub async fn refresh_guild_snapshot(
+    State(state): State<AppState>,
+    _permission: RequirePermission<DiscordConfigUpdate>,
+) -> Result<StatusCode, ApiError> {
+    let p = pool(&state)?;
+    let mut tx = p.begin().await.map_err(|_| ApiError::Internal)?;
+    integration_repo::enqueue_job(
+        &mut tx,
+        "guild_snapshot",
+        &serde_json::json!({}),
+        None,
+        None,
+    )
+    .await?;
+    tx.commit().await.map_err(|_| ApiError::Internal)?;
+    Ok(StatusCode::ACCEPTED)
 }

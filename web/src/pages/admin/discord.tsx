@@ -1,5 +1,5 @@
 import {useEffect, useState} from "react";
-import {Plus, Trash2} from "lucide-react";
+import {Plus, RefreshCw, Trash2} from "lucide-react";
 import {
   Button,
   Card,
@@ -11,8 +11,10 @@ import {
 } from "@ois/ui";
 
 import {
+  type DiscordGuildSnapshot,
   type DiscordMapEntry,
   useDiscordConfig,
+  useRefreshDiscord,
   useUpdateDiscordConfig,
 } from "@/lib/integration";
 
@@ -35,35 +37,54 @@ const KNOWN_ROLES: { name: string; hint: string }[] = [
   { name: "dcc-trainee", hint: "Pinged in DCC threads to shadow the event" },
 ];
 
-type Kind = "channels" | "roles" | "categories";
+type DraftGuild = {
+  name: string;
+  guild_id: string;
+  channels: DiscordMapEntry[];
+  roles: DiscordMapEntry[];
+};
 
-/** An editable list of logical-name → snowflake rows. */
+type Opt = { id: string; label: string };
+
+/** Channel snapshot → dropdown options (skip categories + threads, which aren't postable targets). */
+function channelOptions(snap: DiscordGuildSnapshot | undefined): Opt[] {
+  return (snap?.channels ?? [])
+    .filter((c) => c.kind !== "category" && c.kind !== "thread")
+    .map((c) => ({ id: c.id, label: (c.kind === "voice" ? "🔊 " : "#") + c.name }));
+}
+
+/** Role snapshot → dropdown options (skip @everyone, whose id equals the guild id). */
+function roleOptions(snap: DiscordGuildSnapshot | undefined): Opt[] {
+  return (snap?.roles ?? [])
+    .filter((r) => r.id !== snap?.guild_id)
+    .map((r) => ({ id: r.id, label: "@" + r.name }));
+}
+
+/** An editable list of logical-name → real-channel/role rows. The snowflake is chosen from a dropdown
+ *  of the guild's actual channels/roles (from the bot snapshot) rather than typed by hand. */
 function MapEditor({
   label,
-  idLabel,
   entries,
+  options,
   onChange,
   suggestions,
 }: {
   label: string;
-  idLabel: string;
   entries: DiscordMapEntry[];
+  options: Opt[];
   onChange: (next: DiscordMapEntry[]) => void;
-  suggestions?: { name: string; hint: string }[];
+  suggestions: { name: string; hint: string }[];
 }) {
   const update = (i: number, patch: Partial<DiscordMapEntry>) =>
     onChange(entries.map((e, idx) => (idx === i ? { ...e, ...patch } : e)));
   const remove = (i: number) => onChange(entries.filter((_, idx) => idx !== i));
   const add = (name = "") => onChange([...entries, { name, id: "" }]);
-
-  const missing = (suggestions ?? []).filter(
-    (s) => !entries.some((e) => e.name.trim() === s.name),
-  );
+  const missing = suggestions.filter((s) => !entries.some((e) => e.name.trim() === s.name));
 
   return (
-    <div className="flex flex-col gap-3">
+    <div className="flex flex-col gap-2.5">
       <div className="flex items-center justify-between">
-        <h3 className="text-sm font-semibold">{label}</h3>
+        <h4 className="text-sm font-semibold">{label}</h4>
         <Button type="button" variant="outline" size="sm" onClick={() => add()}>
           <Plus className="size-4" /> Add
         </Button>
@@ -76,20 +97,29 @@ function MapEditor({
           {entries.map((e, i) => (
             <div key={i} className="flex items-center gap-2">
               <Input
-                aria-label={`${label} name`}
+                aria-label={`${label} logical name`}
                 placeholder="logical-name"
                 value={e.name}
                 onChange={(ev) => update(i, { name: ev.target.value })}
-                className="flex-1"
-              />
-              <Input
-                aria-label={idLabel}
-                placeholder={idLabel}
-                value={e.id}
-                inputMode="numeric"
-                onChange={(ev) => update(i, { id: ev.target.value })}
                 className="flex-1 font-mono"
               />
+              <span className="text-muted-foreground">→</span>
+              <select
+                aria-label={`${label} target`}
+                value={e.id}
+                onChange={(ev) => update(i, { id: ev.target.value })}
+                className="h-9 flex-1 rounded-md border border-input bg-background px-2 text-sm"
+              >
+                <option value="">— pick —</option>
+                {options.map((o) => (
+                  <option key={o.id} value={o.id}>
+                    {o.label}
+                  </option>
+                ))}
+                {e.id && !options.some((o) => o.id === e.id) && (
+                  <option value={e.id}>{e.id} (not in server)</option>
+                )}
+              </select>
               <Button
                 type="button"
                 variant="ghost"
@@ -104,8 +134,14 @@ function MapEditor({
         </div>
       )}
 
+      {options.length === 0 && (
+        <p className="text-xs text-muted-foreground">
+          No {label.toLowerCase()} yet — set this server above and click “Refresh from Discord”.
+        </p>
+      )}
+
       {missing.length > 0 && (
-        <div className="rounded-md border border-dashed p-3 text-xs text-muted-foreground">
+        <div className="rounded-md border border-dashed p-2.5 text-xs text-muted-foreground">
           <p className="mb-1 font-medium">Used by features but not mapped yet:</p>
           <ul className="flex flex-col gap-1">
             {missing.map((s) => (
@@ -127,53 +163,172 @@ function MapEditor({
   );
 }
 
+function GuildCard({
+  guild,
+  snapshot,
+  botGuilds,
+  onChange,
+  onRemove,
+}: {
+  guild: DraftGuild;
+  snapshot: DiscordGuildSnapshot | undefined;
+  botGuilds: DiscordGuildSnapshot[];
+  onChange: (next: DraftGuild) => void;
+  onRemove: () => void;
+}) {
+  const set = (patch: Partial<DraftGuild>) => onChange({ ...guild, ...patch });
+  const chOpts = channelOptions(snapshot);
+  const roleOpts = roleOptions(snapshot);
+
+  return (
+    <Card>
+      <CardHeader className="flex-row items-start justify-between gap-3 space-y-0">
+        <div className="flex flex-col gap-1">
+          <CardTitle>{guild.name.trim() || "New server"}</CardTitle>
+          <CardDescription>
+            The Discord server this maps to. Pick it from the bot’s servers, then map channels + roles.
+          </CardDescription>
+        </div>
+        <Button type="button" variant="ghost" size="sm" onClick={onRemove}>
+          <Trash2 className="size-4" /> Remove
+        </Button>
+      </CardHeader>
+      <CardContent className="flex flex-col gap-6">
+        <div className="grid gap-4 sm:grid-cols-2">
+          <label className="flex flex-col gap-1.5 text-sm">
+            <span className="font-medium">Label</span>
+            <Input
+              placeholder="DCC"
+              value={guild.name}
+              onChange={(e) => set({ name: e.target.value })}
+            />
+          </label>
+          <label className="flex flex-col gap-1.5 text-sm">
+            <span className="font-medium">Server</span>
+            {botGuilds.length > 0 ? (
+              <select
+                value={guild.guild_id}
+                onChange={(e) => {
+                  const gid = e.target.value;
+                  const g = botGuilds.find((b) => b.guild_id === gid);
+                  set({ guild_id: gid, name: guild.name.trim() || (g?.name ?? "") });
+                }}
+                className="h-9 rounded-md border border-input bg-background px-2 text-sm"
+              >
+                <option value="">— pick a server —</option>
+                {botGuilds.map((g) => (
+                  <option key={g.guild_id} value={g.guild_id}>
+                    {g.name}
+                  </option>
+                ))}
+                {guild.guild_id && !botGuilds.some((g) => g.guild_id === guild.guild_id) && (
+                  <option value={guild.guild_id}>{guild.guild_id} (bot not in server)</option>
+                )}
+              </select>
+            ) : (
+              <Input
+                placeholder="123456789012345678"
+                value={guild.guild_id}
+                inputMode="numeric"
+                className="font-mono"
+                onChange={(e) => set({ guild_id: e.target.value })}
+              />
+            )}
+          </label>
+        </div>
+
+        {guild.guild_id && !snapshot && (
+          <p className="rounded-md border border-amber-500/40 bg-amber-500/5 px-3 py-2 text-xs text-muted-foreground">
+            The bot hasn’t reported this server’s channels/roles yet. Make sure the bot is in it, then
+            click “Refresh from Discord”.
+          </p>
+        )}
+
+        <MapEditor
+          label="Channels"
+          entries={guild.channels}
+          options={chOpts}
+          onChange={(channels) => set({ channels })}
+          suggestions={KNOWN_CHANNELS}
+        />
+        <MapEditor
+          label="Roles"
+          entries={guild.roles}
+          options={roleOpts}
+          onChange={(roles) => set({ roles })}
+          suggestions={KNOWN_ROLES}
+        />
+      </CardContent>
+    </Card>
+  );
+}
+
 export function AdminDiscord() {
   const query = useDiscordConfig();
   const save = useUpdateDiscordConfig();
+  const refresh = useRefreshDiscord();
 
-  const [name, setName] = useState("");
-  const [guildId, setGuildId] = useState("");
-  const [channels, setChannels] = useState<DiscordMapEntry[]>([]);
-  const [roles, setRoles] = useState<DiscordMapEntry[]>([]);
-  const [categories, setCategories] = useState<DiscordMapEntry[]>([]);
+  const [guilds, setGuilds] = useState<DraftGuild[]>([]);
 
-  // Seed the form once the saved config loads (or resets after a save returns the canonical shape).
+  // Seed the form once the config loads (or resets after a save returns the canonical shape).
   const loaded = query.data;
   useEffect(() => {
     if (!loaded) return;
-    setName(loaded.name ?? "");
-    setGuildId(loaded.guild_id ?? "");
-    setChannels(loaded.channels ?? []);
-    setRoles(loaded.roles ?? []);
-    setCategories(loaded.categories ?? []);
+    setGuilds(
+      loaded.guilds.map((g) => ({
+        name: g.name,
+        guild_id: g.guild_id,
+        channels: g.channels,
+        roles: g.roles,
+      })),
+    );
   }, [loaded]);
+
+  const botGuilds = loaded?.available ?? [];
+  const snapshotFor = (gid: string) => botGuilds.find((b) => b.guild_id === gid);
 
   const clean = (entries: DiscordMapEntry[]) =>
     entries
       .map((e) => ({ name: e.name.trim(), id: e.id.trim() }))
       .filter((e) => e.name && e.id);
 
-  const canSave = name.trim().length > 0 && guildId.trim().length > 0;
+  const canSave = guilds.every((g) => g.name.trim() && g.guild_id.trim());
 
   const onSave = () =>
     save.mutate({
-      name: name.trim(),
-      guild_id: guildId.trim(),
-      channels: clean(channels),
-      roles: clean(roles),
-      categories: clean(categories),
+      guilds: guilds.map((g) => ({
+        name: g.name.trim(),
+        guild_id: g.guild_id.trim(),
+        channels: clean(g.channels),
+        roles: clean(g.roles),
+      })),
     });
+
+  const addGuild = () =>
+    setGuilds((gs) => [...gs, { name: "", guild_id: "", channels: [], roles: [] }]);
+  const updateGuild = (i: number, next: DraftGuild) =>
+    setGuilds((gs) => gs.map((g, idx) => (idx === i ? next : g)));
+  const removeGuild = (i: number) => setGuilds((gs) => gs.filter((_, idx) => idx !== i));
 
   return (
     <div className="flex flex-col gap-6">
-      <div>
-        <h1 className="text-2xl font-semibold tracking-tight">
-          Discord Integration
-        </h1>
-        <p className="text-muted-foreground">
-          Map logical names to Discord IDs. The backend enqueues jobs using these
-          names; the bot resolves them to post in the right places.
-        </p>
+      <div className="flex flex-wrap items-start justify-between gap-3">
+        <div>
+          <h1 className="text-2xl font-semibold tracking-tight">Discord Integration</h1>
+          <p className="text-muted-foreground">
+            Map logical names to real channels/roles per server. Add both the DCC and VATUSA servers;
+            each feature posts to whichever server has its channel mapped.
+          </p>
+        </div>
+        <Button
+          type="button"
+          variant="outline"
+          onClick={() => refresh.mutate()}
+          disabled={refresh.isPending}
+        >
+          <RefreshCw className={`size-4 ${refresh.isPending ? "animate-spin" : ""}`} />
+          Refresh from Discord
+        </Button>
       </div>
 
       {query.isError ? (
@@ -182,7 +337,7 @@ export function AdminDiscord() {
             Couldn&apos;t load the Discord configuration.
           </CardContent>
         </Card>
-      ) : !query.data ? (
+      ) : !loaded ? (
         <Card>
           <CardContent className="py-10 text-center text-sm text-muted-foreground">
             Loading…
@@ -190,77 +345,39 @@ export function AdminDiscord() {
         </Card>
       ) : (
         <>
-          <Card>
-            <CardHeader>
-              <CardTitle>Guild</CardTitle>
-              <CardDescription>
-                The server this integration posts to. Enable Developer Mode in
-                Discord to copy IDs (right-click → Copy ID).
-              </CardDescription>
-            </CardHeader>
-            <CardContent className="grid gap-4 sm:grid-cols-2">
-              <label className="flex flex-col gap-1.5 text-sm">
-                <span className="font-medium">Name</span>
-                <Input
-                  placeholder="VATUSA"
-                  value={name}
-                  onChange={(e) => setName(e.target.value)}
-                />
-              </label>
-              <label className="flex flex-col gap-1.5 text-sm">
-                <span className="font-medium">Guild ID</span>
-                <Input
-                  placeholder="123456789012345678"
-                  value={guildId}
-                  inputMode="numeric"
-                  className="font-mono"
-                  onChange={(e) => setGuildId(e.target.value)}
-                />
-              </label>
-            </CardContent>
-          </Card>
+          {guilds.length === 0 && (
+            <Card>
+              <CardContent className="py-10 text-center text-sm text-muted-foreground">
+                No servers configured yet. Add one to get started.
+              </CardContent>
+            </Card>
+          )}
 
-          <Card>
-            <CardHeader>
-              <CardTitle>Mappings</CardTitle>
-              <CardDescription>
-                Logical name on the left, Discord ID on the right. Features
-                reference channels by these names.
-              </CardDescription>
-            </CardHeader>
-            <CardContent className="flex flex-col gap-8">
-              <MapEditor
-                label="Channels"
-                idLabel="channel ID"
-                entries={channels}
-                onChange={setChannels}
-                suggestions={KNOWN_CHANNELS}
-              />
-              <MapEditor
-                label="Roles"
-                idLabel="role ID"
-                entries={roles}
-                onChange={setRoles}
-                suggestions={KNOWN_ROLES}
-              />
-              <MapEditor
-                label="Categories"
-                idLabel="category ID"
-                entries={categories}
-                onChange={setCategories}
-              />
-            </CardContent>
-          </Card>
+          {guilds.map((g, i) => (
+            <GuildCard
+              key={i}
+              guild={g}
+              snapshot={g.guild_id ? snapshotFor(g.guild_id) : undefined}
+              botGuilds={botGuilds}
+              onChange={(next) => updateGuild(i, next)}
+              onRemove={() => removeGuild(i)}
+            />
+          ))}
 
-          <div className="flex items-center justify-end gap-3">
-            {!canSave && (
-              <span className="text-xs text-muted-foreground">
-                Name and Guild ID are required.
-              </span>
-            )}
-            <Button onClick={onSave} disabled={!canSave || save.isPending}>
-              {save.isPending ? "Saving…" : "Save configuration"}
+          <div className="flex items-center justify-between gap-3">
+            <Button type="button" variant="outline" onClick={addGuild}>
+              <Plus className="size-4" /> Add server
             </Button>
+            <div className="flex items-center gap-3">
+              {!canSave && (
+                <span className="text-xs text-muted-foreground">
+                  Every server needs a label and a selected server.
+                </span>
+              )}
+              <Button onClick={onSave} disabled={!canSave || save.isPending}>
+                {save.isPending ? "Saving…" : "Save configuration"}
+              </Button>
+            </div>
           </div>
         </>
       )}

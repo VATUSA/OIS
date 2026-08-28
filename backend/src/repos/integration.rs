@@ -7,7 +7,10 @@ use sqlx::{PgPool, Postgres, Transaction};
 
 use crate::{
     errors::ApiError,
-    models::{DiscordConfigBody, DiscordMapEntry, OutboundJobBody, UpsertDiscordConfigRequest},
+    models::{
+        DiscordConfigBody, DiscordGuildChannel, DiscordGuildConfigBody, DiscordGuildRole,
+        DiscordGuildSnapshotBody, DiscordMapEntry, OutboundJobBody, UpsertDiscordConfigRequest,
+    },
 };
 
 /// Retry backoff cap and the max attempts before a job is parked as `failed`.
@@ -239,80 +242,157 @@ async fn map_entries(
         .map_err(|_| ApiError::Internal)
 }
 
-/// The saved Discord config with its maps, or `None` if never configured.
-pub async fn get_config(pool: &PgPool) -> Result<Option<DiscordConfigBody>, ApiError> {
-    let row = sqlx::query_as::<_, (String, String, String)>(
-        "select id, name, guild_id from integration.discord_configs order by created_at limit 1",
+/// The full Discord config: every configured guild + its maps, plus the bot's guild snapshot for
+/// the editor's dropdowns. Empty `guilds` when nothing's been configured yet.
+pub async fn get_config(pool: &PgPool) -> Result<DiscordConfigBody, ApiError> {
+    let rows = sqlx::query_as::<_, (String, String, String)>(
+        "select id, name, guild_id from integration.discord_configs order by created_at",
     )
-    .fetch_optional(pool)
+    .fetch_all(pool)
     .await
     .map_err(|_| ApiError::Internal)?;
-    let Some((id, name, guild_id)) = row else {
-        return Ok(None);
-    };
-    Ok(Some(DiscordConfigBody {
-        channels: map_entries(pool, "discord_channels", "channel_id", &id).await?,
-        roles: map_entries(pool, "discord_roles", "role_id", &id).await?,
-        categories: map_entries(pool, "discord_categories", "category_id", &id).await?,
-        id: Some(id),
-        name,
-        guild_id,
-    }))
+    let mut guilds = Vec::with_capacity(rows.len());
+    for (id, name, guild_id) in rows {
+        guilds.push(DiscordGuildConfigBody {
+            channels: map_entries(pool, "discord_channels", "channel_id", &id).await?,
+            roles: map_entries(pool, "discord_roles", "role_id", &id).await?,
+            id: Some(id),
+            name,
+            guild_id,
+        });
+    }
+    Ok(DiscordConfigBody {
+        guilds,
+        available: get_guild_snapshots(pool).await?,
+    })
 }
 
-/// Upsert the (single) Discord config and fully replace its logical-name maps, in one transaction.
+/// Fully replace the configured guilds + their maps, in one transaction. Config-row ids are not
+/// stable across saves (nothing references them but their own cascade-deleted maps).
 pub async fn upsert_config(
     pool: &PgPool,
     req: &UpsertDiscordConfigRequest,
 ) -> Result<(), ApiError> {
     let mut tx = pool.begin().await.map_err(|_| ApiError::Internal)?;
-    let existing = sqlx::query_scalar::<_, String>(
-        "select id from integration.discord_configs order by created_at limit 1",
-    )
-    .fetch_optional(&mut *tx)
-    .await
-    .map_err(|_| ApiError::Internal)?;
-
-    let config_id = if let Some(id) = existing {
-        sqlx::query(
-            "update integration.discord_configs set name = $2, guild_id = $3 where id = $1",
-        )
-        .bind(&id)
-        .bind(&req.name)
-        .bind(&req.guild_id)
+    sqlx::query("delete from integration.discord_configs")
         .execute(&mut *tx)
         .await
         .map_err(|_| ApiError::Internal)?;
-        id
-    } else {
-        sqlx::query_scalar::<_, String>(
+    for g in &req.guilds {
+        if g.guild_id.trim().is_empty() {
+            continue;
+        }
+        let config_id = sqlx::query_scalar::<_, String>(
             "insert into integration.discord_configs (name, guild_id) values ($1, $2) returning id",
         )
-        .bind(&req.name)
-        .bind(&req.guild_id)
+        .bind(g.name.trim())
+        .bind(g.guild_id.trim())
         .fetch_one(&mut *tx)
         .await
-        .map_err(|_| ApiError::Internal)?
-    };
+        .map_err(|_| ApiError::Internal)?;
+        replace_map(
+            &mut tx,
+            "discord_channels",
+            "channel_id",
+            &config_id,
+            &g.channels,
+        )
+        .await?;
+        replace_map(&mut tx, "discord_roles", "role_id", &config_id, &g.roles).await?;
+    }
+    tx.commit().await.map_err(|_| ApiError::Internal)?;
+    Ok(())
+}
 
-    replace_map(
-        &mut tx,
-        "discord_channels",
-        "channel_id",
-        &config_id,
-        &req.channels,
-    )
-    .await?;
-    replace_map(&mut tx, "discord_roles", "role_id", &config_id, &req.roles).await?;
-    replace_map(
-        &mut tx,
-        "discord_categories",
-        "category_id",
-        &config_id,
-        &req.categories,
-    )
-    .await?;
+// --- guild snapshot (channels + roles the bot sees; drives the config dropdowns) ------------------
 
+/// Every guild the bot is in, with its channels + roles.
+pub async fn get_guild_snapshots(pool: &PgPool) -> Result<Vec<DiscordGuildSnapshotBody>, ApiError> {
+    let guilds = sqlx::query_as::<_, (String, String)>(
+        "select guild_id, name from integration.discord_guilds order by name",
+    )
+    .fetch_all(pool)
+    .await
+    .map_err(|_| ApiError::Internal)?;
+    let mut out = Vec::with_capacity(guilds.len());
+    for (guild_id, name) in guilds {
+        let channels = sqlx::query_as::<_, DiscordGuildChannel>(
+            "select channel_id as id, name, kind, parent_id, position \
+             from integration.discord_guild_channels where guild_id = $1 order by position, name",
+        )
+        .bind(&guild_id)
+        .fetch_all(pool)
+        .await
+        .map_err(|_| ApiError::Internal)?;
+        let roles = sqlx::query_as::<_, DiscordGuildRole>(
+            "select role_id as id, name, managed, position \
+             from integration.discord_guild_roles where guild_id = $1 order by position desc, name",
+        )
+        .bind(&guild_id)
+        .fetch_all(pool)
+        .await
+        .map_err(|_| ApiError::Internal)?;
+        out.push(DiscordGuildSnapshotBody {
+            guild_id,
+            name,
+            channels,
+            roles,
+        });
+    }
+    Ok(out)
+}
+
+/// Replace the whole guild snapshot with what the bot just pushed (full replace across all guilds).
+pub async fn replace_guild_snapshots(
+    pool: &PgPool,
+    guilds: &[DiscordGuildSnapshotBody],
+) -> Result<(), ApiError> {
+    let mut tx = pool.begin().await.map_err(|_| ApiError::Internal)?;
+    // Cascade clears channels/roles.
+    sqlx::query("delete from integration.discord_guilds")
+        .execute(&mut *tx)
+        .await
+        .map_err(|_| ApiError::Internal)?;
+    for g in guilds {
+        sqlx::query(
+            "insert into integration.discord_guilds (guild_id, name, synced_at) values ($1, $2, now())",
+        )
+        .bind(&g.guild_id)
+        .bind(&g.name)
+        .execute(&mut *tx)
+        .await
+        .map_err(|_| ApiError::Internal)?;
+        for ch in &g.channels {
+            sqlx::query(
+                "insert into integration.discord_guild_channels \
+                 (guild_id, channel_id, name, kind, parent_id, position) \
+                 values ($1, $2, $3, $4, $5, $6)",
+            )
+            .bind(&g.guild_id)
+            .bind(&ch.id)
+            .bind(&ch.name)
+            .bind(&ch.kind)
+            .bind(&ch.parent_id)
+            .bind(ch.position)
+            .execute(&mut *tx)
+            .await
+            .map_err(|_| ApiError::Internal)?;
+        }
+        for r in &g.roles {
+            sqlx::query(
+                "insert into integration.discord_guild_roles \
+                 (guild_id, role_id, name, managed, position) values ($1, $2, $3, $4, $5)",
+            )
+            .bind(&g.guild_id)
+            .bind(&r.id)
+            .bind(&r.name)
+            .bind(r.managed)
+            .bind(r.position)
+            .execute(&mut *tx)
+            .await
+            .map_err(|_| ApiError::Internal)?;
+        }
+    }
     tx.commit().await.map_err(|_| ApiError::Internal)?;
     Ok(())
 }
