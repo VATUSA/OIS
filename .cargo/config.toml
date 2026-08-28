@@ -1,0 +1,17 @@
+# Compile-speed config. Requires the nightly toolchain pinned in rust-toolchain.toml.
+#
+# `-Zthreads` turns on rustc's parallel front-end (multiple codegen/analysis threads per crate). It's
+# nightly-only and compile-speed only — it changes nothing about the built artifacts.
+#
+# NOTE: a `[target.*] rustflags` block fully OVERRIDES `[build] rustflags` (they do not merge), so the
+# Linux block below repeats `-Zthreads` alongside its linker flag.
+
+[build]
+rustflags = ["-Zthreads=8"]
+
+# Linux (CI + Linux devs): link with mold, which is dramatically faster than the default bfd/gold.
+# Needs `clang` + `mold` on PATH (CI installs them; see .github/workflows/ci.yml). macOS is left on
+# its default linker (Apple's `ld` on Apple Silicon is already fast), so no dev needs an extra tool.
+[target.x86_64-unknown-linux-gnu]
+linker = "clang"
+rustflags = ["-Zthreads=8", "-Clink-arg=-fuse-ld=mold"]

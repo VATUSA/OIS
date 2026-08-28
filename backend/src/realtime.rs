@@ -57,6 +57,9 @@ pub async fn ws(
 
 /// Forward broadcast events to the client, answer pings, and send a keepalive ping so idle
 /// connections survive proxy idle-timeouts. Exits when the client closes or errors.
+// The Ping arm's `if send(Pong(p)).await.is_err()` can't collapse into a match guard — guards can't
+// `await`, and it would move `p` out of the pattern.
+#[allow(clippy::collapsible_match)]
 async fn pump(mut socket: WebSocket, mut rx: broadcast::Receiver<WsEvent>) {
     let mut keepalive = tokio::time::interval(Duration::from_secs(30));
     loop {

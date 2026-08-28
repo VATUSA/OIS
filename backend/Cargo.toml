@@ -29,6 +29,7 @@ hex.workspace = true
 time = "0.3"
 
 thiserror.workspace = true
+color-eyre.workspace = true
 tracing.workspace = true
 tracing-subscriber.workspace = true
 

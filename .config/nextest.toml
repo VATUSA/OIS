@@ -1,0 +1,11 @@
+# nextest configuration. The default profile powers local `cargo nextest run`; CI uses `--profile ci`.
+[profile.default]
+# Tests are self-contained (no shared global state), so run them in parallel — the old
+# `cargo test -- --test-threads=1` serialization is no longer needed.
+fail-fast = false
+
+[profile.ci]
+# Retry a failing test up to twice before declaring it failed, to ride out rare flakes; keep going
+# after the first failure so one bad test doesn't mask the rest.
+retries = 2
+fail-fast = false

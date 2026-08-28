@@ -29,7 +29,6 @@ serde = { version = "1.0.228", features = ["derive"] }
 serde_json = "1.0.145"
 sqlx = { version = "0.8.6", features = ["postgres", "runtime-tokio-native-tls", "macros", "migrate", "chrono", "uuid"] }
 chrono = { version = "0.4.44", features = ["serde"] }
-chrono-tz = "0.10.4"
 uuid = { version = "1.23.1", features = ["v4", "serde"] }
 
 # --- crypto ---
@@ -39,6 +38,7 @@ hex = "0.4.3"
 
 # --- errors / logging ---
 thiserror = "2.0.17"
+color-eyre = "0.6.5"
 tracing = "0.1.41"
 tracing-subscriber = { version = "0.3.20", features = ["env-filter", "fmt"] }
 
@@ -51,7 +51,6 @@ dotenvy = "0.15.7"
 
 # --- discord bot ---
 serenity = { version = "0.12", default-features = false, features = ["client", "gateway", "rustls_backend", "model"] }
-poise = "0.6"
 
 # --- internal crates ---
 ois-core = { path = "crates/ois-core" }

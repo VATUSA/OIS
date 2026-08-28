@@ -283,8 +283,8 @@ async fn build_board(
             exempt.push(view);
         }
     }
-    flights.sort_by(|a, b| a.cta.cmp(&b.cta));
-    exempt.sort_by(|a, b| a.eta.cmp(&b.eta));
+    flights.sort_by_key(|f| f.cta);
+    exempt.sort_by_key(|e| e.eta);
 
     Ok(GdpBoard {
         id: gdp.id.clone(),
