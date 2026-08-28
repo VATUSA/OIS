@@ -284,6 +284,11 @@ function ReplayMap({
     setAircraft(frameAt(t));
     setClock(t);
   };
+  // The rAF loop's effect only re-runs on `duration`, so it would otherwise close over a stale
+  // `frameAt` (the first chunk only) and drop every aircraft once the clock passes it. Keep the latest
+  // render reachable through a ref so playback always samples the tracks loaded so far.
+  const renderRef = useRef(render);
+  renderRef.current = render;
 
   // Start at t=0 when a replay mounts (a new selection remounts via `key`).
   useEffect(() => {
@@ -322,7 +327,7 @@ function ReplayMap({
       }
       if (playingRef.current && now - lastRender >= 33) {
         lastRender = now;
-        render(clockRef.current);
+        renderRef.current(clockRef.current);
       }
       raf = requestAnimationFrame(loop);
     };
