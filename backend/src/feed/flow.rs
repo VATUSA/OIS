@@ -421,21 +421,10 @@ fn apply_metering(
     for &i in &ground {
         let eta = eta_ms(&flights[i], now_ms) as f64;
         let gate = flights[i].gate.clone();
-        let mut cand = eta;
-        let mut moved = true;
-        while moved {
-            moved = false;
-            for (t, sg) in &assigned {
-                let req = match &gate {
-                    Some(g) if !sg.is_empty() && g == sg => gate_spacing_ms(pg, runway, g),
-                    _ => runway,
-                };
-                if (cand - t).abs() < req {
-                    cand = t + req;
-                    moved = true;
-                }
-            }
-        }
+        let cand = earliest_clear_slot(eta, &assigned, |sg| match &gate {
+            Some(g) if !sg.is_empty() && g == sg => gate_spacing_ms(pg, runway, g),
+            _ => runway,
+        });
         write_meter(&mut flights[i], cand, eta, etd_ms[i]);
         assigned.push((cand, gate.unwrap_or_default()));
     }
@@ -456,6 +445,27 @@ fn apply_metering(
     for (n, &i) in order.iter().enumerate() {
         flights[i].seq = Some(n as i64 + 1);
     }
+}
+
+/// Push `start` (epoch-ms) forward to the earliest instant clear of every occupied slot in
+/// `slots` (`(time_ms, gate)`), where each slot demands `sep(gate)` ms of separation on either
+/// side. One ascending pass is sufficient *and* necessary: `cand` only ever moves forward, so
+/// once it clears an earlier slot it stays clear — while the `while moved { for slot … }`
+/// fixpoint this replaces could **fail to terminate**. At epoch-ms magnitudes (t ≈ 1.7e12) a
+/// non-integer `sep` (AAR that doesn't divide 3,600,000) makes `t + req` round to a value still
+/// `< req` from `t`; the conflict never clears, so the fixpoint spins a worker at 100% CPU
+/// forever (the "stuck on Loading…" outage).
+fn earliest_clear_slot(start: f64, slots: &[(f64, String)], sep: impl Fn(&str) -> f64) -> f64 {
+    let mut ordered: Vec<&(f64, String)> = slots.iter().collect();
+    ordered.sort_by(|a, b| a.0.total_cmp(&b.0));
+    let mut cand = start;
+    for (t, gate) in ordered {
+        let req = sep(gate);
+        if (cand - t).abs() < req {
+            cand = t + req;
+        }
+    }
+    cand
 }
 
 /// Write the metering outputs onto a flight: STA, delay, and (for ground/proposed) the
@@ -512,21 +522,10 @@ pub fn ready_time_slot(
     // Slot the flight's arrival from (ready + enroute) forward past any conflicts. Never
     // earlier than now — a release can't be issued in the past.
     let base_ms = ready.timestamp_millis().max(now.timestamp_millis());
-    let mut cand = (base_ms + flight_ms) as f64;
-    let mut moved = true;
-    while moved {
-        moved = false;
-        for (t, sg) in &assigned {
-            let req = match &gate {
-                Some(g) if !sg.is_empty() && g == sg => gate_spacing_ms(program, runway, g),
-                _ => runway,
-            };
-            if (cand - t).abs() < req {
-                cand = t + req;
-                moved = true;
-            }
-        }
-    }
+    let cand = earliest_clear_slot((base_ms + flight_ms) as f64, &assigned, |sg| match &gate {
+        Some(g) if !sg.is_empty() && g == sg => gate_spacing_ms(program, runway, g),
+        _ => runway,
+    });
     DateTime::from_timestamp_millis(cand as i64 - flight_ms)
 }
 
@@ -713,6 +712,30 @@ mod tests {
     // A fixed reference time so ETA/STA arithmetic is deterministic.
     fn t0() -> DateTime<Utc> {
         DateTime::from_timestamp(1_700_000_000, 0).unwrap()
+    }
+
+    // The slot sweep must terminate and return a slot clear of every occupant, even with a
+    // non-integer separation (AAR that doesn't divide 3.6e6) at real epoch-ms magnitudes — the
+    // exact shape that made the old `while moved` fixpoint spin a worker at 100% CPU forever.
+    #[test]
+    fn earliest_clear_slot_terminates_on_fractional_separation() {
+        let req = 3_600_000.0 / 7.0; // AAR 7 → 514285.714… ms, non-integer
+        let base = 1_700_000_000_000.0; // ~epoch-ms now
+        // A dense wall of occupied slots one `req` apart, forcing many forward pushes.
+        let slots: Vec<(f64, String)> = (0..50)
+            .map(|k| (base + k as f64 * req, String::new()))
+            .collect();
+        let got = earliest_clear_slot(base, &slots, |_| req);
+        // Clear of every occupant by at least `req` (allowing a 1ms float slop).
+        for (t, _) in &slots {
+            assert!(
+                (got - t).abs() >= req - 1.0,
+                "slot at {t} is within {req} of result {got}"
+            );
+        }
+        // And it landed just past the last occupant, not somewhere absurd.
+        let last = base + 49.0 * req;
+        assert!(got >= last && got <= last + 2.0 * req, "unexpected slot {got}");
     }
 
     fn base_program() -> ProgramInputs {
