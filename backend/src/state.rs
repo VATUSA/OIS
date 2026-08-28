@@ -72,8 +72,19 @@ impl AppState {
             "nav database loaded"
         );
         if let Ok(database_url) = std::env::var("DATABASE_URL") {
+            // `max_connections` is configurable so a busier deployment can be given headroom without a
+            // rebuild. `acquire_timeout` is the important one: without it a checkout on an exhausted
+            // pool waits forever, so a single leaked connection silently wedges *every* request
+            // (health included) into an apparent hang. With it, exhaustion surfaces as a fast 5xx that
+            // shows up in logs instead of a stuck backend.
+            let max_connections = std::env::var("DATABASE_MAX_CONNECTIONS")
+                .ok()
+                .and_then(|v| v.trim().parse::<u32>().ok())
+                .filter(|v| *v > 0)
+                .unwrap_or(20);
             let pool = PgPoolOptions::new()
-                .max_connections(10)
+                .max_connections(max_connections)
+                .acquire_timeout(std::time::Duration::from_secs(10))
                 .connect(&database_url)
                 .await?;
             return Ok(Self {

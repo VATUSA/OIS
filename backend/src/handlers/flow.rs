@@ -448,72 +448,81 @@ pub async fn fca_counts(
 ) -> Result<Json<HashMap<String, i64>>, ApiError> {
     let pool = state.db.as_ref().ok_or(ApiError::ServiceUnavailable)?;
     let fcas = flow_repo::list_fcas(pool).await?;
-    let mut counts: HashMap<String, i64> = fcas.iter().map(|f| (f.id.clone(), 0)).collect();
-    let active: Vec<&FcaBody> = fcas
-        .iter()
-        .filter(|f| f.enabled && f.points.0.len() >= 2)
-        .collect();
-    if active.is_empty() {
-        return Ok(Json(counts));
-    }
 
-    // Clone the snapshot + airport handles and release the feed lock before the heavy
-    // per-aircraft route resolution, so the poller's writes never queue behind this CPU.
+    // Clone the snapshot + shared handles and release the feed lock; the per-aircraft route resolution
+    // (every pilot × every active FCA) is heavy CPU, so run it on a blocking thread rather than inline
+    // on the async workers where a burst of pollers could starve the whole runtime.
     let (snapshot, airports) = feed_view(&state).await;
     let Some(snap) = snapshot else {
-        return Ok(Json(counts));
+        return Ok(Json(fcas.iter().map(|f| (f.id.clone(), 0)).collect()));
     };
-    let airports = airports.as_ref();
-    let nav_db = state.nav.load_full();
-    let nav = nav_db.as_ref();
-    let airspace = state.airspace.as_ref();
+    let nav = state.nav.load_full();
+    let airspace = state.airspace.clone();
 
-    // Resolve each aircraft's route once, then test it against every active FCA.
-    let mut tally = |fp: &FlightPlan, lat: f64, lon: f64, hdg: i64, gs: i64, alt: i64| {
-        let airborne = gs >= 50;
-        let Some(path) = fca::route_path(
-            nav,
-            airports,
-            &fp.departure,
-            &fp.arrival,
-            &fp.route,
-            lat,
-            lon,
-            hdg,
-            gs,
-        ) else {
-            return;
+    let counts = tokio::task::spawn_blocking(move || {
+        let mut counts: HashMap<String, i64> = fcas.iter().map(|f| (f.id.clone(), 0)).collect();
+        let active: Vec<&FcaBody> = fcas
+            .iter()
+            .filter(|f| f.enabled && f.points.0.len() >= 2)
+            .collect();
+        if active.is_empty() {
+            return counts;
+        }
+        let airports = airports.as_ref();
+        let nav = nav.as_ref();
+        let airspace = airspace.as_ref();
+
+        // Resolve each aircraft's route once, then test it against every active FCA.
+        let mut tally = |fp: &FlightPlan, lat: f64, lon: f64, hdg: i64, gs: i64, alt: i64| {
+            let airborne = gs >= 50;
+            let Some(path) = fca::route_path(
+                nav,
+                airports,
+                &fp.departure,
+                &fp.arrival,
+                &fp.route,
+                lat,
+                lon,
+                hdg,
+                gs,
+            ) else {
+                return;
+            };
+            for f in &active {
+                if !passes_filters(f, fp, Some(alt)) {
+                    continue;
+                }
+                // Match the metering board: only count crossings within the FCA's ARTCC scope.
+                if let Some(cross) = fca::crosses(&path, &f.points.0, airborne, lat, lon, hdg)
+                    && passes_scope(f, airspace, cross.lat, cross.lon)
+                    && let Some(c) = counts.get_mut(&f.id)
+                {
+                    *c += 1;
+                }
+            }
         };
-        for f in &active {
-            if !passes_filters(f, fp, Some(alt)) {
-                continue;
-            }
-            // Match the metering board: only count crossings within the FCA's ARTCC scope.
-            if let Some(cross) = fca::crosses(&path, &f.points.0, airborne, lat, lon, hdg)
-                && passes_scope(f, airspace, cross.lat, cross.lon)
-            {
-                *counts.get_mut(&f.id).unwrap() += 1;
-            }
-        }
-    };
 
-    for p in &snap.data.pilots {
-        if let Some(fp) = &p.flight_plan {
-            tally(
-                fp,
-                p.latitude,
-                p.longitude,
-                p.heading,
-                p.groundspeed,
-                p.altitude,
-            );
+        for p in &snap.data.pilots {
+            if let Some(fp) = &p.flight_plan {
+                tally(
+                    fp,
+                    p.latitude,
+                    p.longitude,
+                    p.heading,
+                    p.groundspeed,
+                    p.altitude,
+                );
+            }
         }
-    }
-    for pf in &snap.data.prefiles {
-        if let Some(fp) = &pf.flight_plan {
-            tally(fp, 0.0, 0.0, 0, 0, 0);
+        for pf in &snap.data.prefiles {
+            if let Some(fp) = &pf.flight_plan {
+                tally(fp, 0.0, 0.0, 0, 0, 0);
+            }
         }
-    }
+        counts
+    })
+    .await
+    .map_err(|_| ApiError::Internal)?;
     Ok(Json(counts))
 }
 
@@ -795,9 +804,8 @@ pub async fn flight_advisory(
     }
 
     // FCA crossings — meter only the enabled FCAs this flight actually crosses.
-    if let Some(snap) = snapshot.as_ref() {
+    if snapshot.is_some() {
         let nav = state.nav.load_full();
-        let winds = state.winds.load_full();
         let now = Utc::now();
         // Resolve this flight's route once for the cheap crossing pre-filter, so we don't run
         // the full per-FCA metering (which resolves every matching pilot's route) for FCAs it
@@ -817,16 +825,16 @@ pub async fn flight_advisory(
         });
         for fca in flow_repo::list_fcas(pool)
             .await?
-            .iter()
+            .into_iter()
             .filter(|f| f.enabled && f.points.0.len() >= 2)
         {
             // Same predicate build_candidates uses to include this flight: filters + a scoped
             // crossing. If it doesn't cross, metering this FCA can't produce a slot for it.
             let crosses = match (&path, &fp) {
                 (Some(p), Some(plan)) => {
-                    passes_filters(fca, plan, Some(altitude))
+                    passes_filters(&fca, plan, Some(altitude))
                         && fca::crosses(p, &fca.points.0, airborne, lat, lon, heading).is_some_and(
-                            |c| passes_scope(fca, state.airspace.as_ref(), c.lat, c.lon),
+                            |c| passes_scope(&fca, state.airspace.as_ref(), c.lat, c.lon),
                         )
                 }
                 _ => false,
@@ -835,17 +843,10 @@ pub async fn flight_advisory(
                 continue;
             }
             let releases = load_releases(pool, &fca.id).await?;
-            let (flights, metas) = build_candidates(
-                fca,
-                &snap.data,
-                airports.as_ref(),
-                nav.as_ref(),
-                state.airspace.as_ref(),
-                winds.as_ref(),
-                &releases,
-                now,
-            );
-            if let Some(f) = finalize(fca, flights, &metas)
+            let (fca_id, fca_name, fca_color) =
+                (fca.id.clone(), fca.name.clone(), fca.color.clone());
+            let metered = metered_flights(&state, fca, releases, now).await?;
+            if let Some(f) = metered
                 .into_iter()
                 .find(|f| f.callsign.eq_ignore_ascii_case(&cs))
             {
@@ -856,9 +857,9 @@ pub async fn flight_advisory(
                     edcts.push(e);
                 }
                 adv.fcas.push(FlightFcaCrossing {
-                    fca_id: fca.id.clone(),
-                    fca_name: fca.name.clone(),
-                    color: fca.color.clone(),
+                    fca_id,
+                    fca_name,
+                    color: fca_color,
                     cross_time: f.cross_time,
                     delay_min: f.delay_min,
                     edct: f.edct,
@@ -1249,6 +1250,45 @@ async fn load_releases(pool: &sqlx::PgPool, id: &str) -> Result<ReleaseMap, ApiE
         .collect())
 }
 
+/// Build the metered crossing list for one FCA, running the CPU-heavy route resolution + sequencing
+/// on a **blocking thread**. `build_candidates` resolves every matching aircraft's route against the
+/// FCA — pure CPU with no `.await` — so running it inline on the async workers lets a burst of polling
+/// clients starve the whole runtime (health check + websocket keepalive included) and the process
+/// appears hung. `spawn_blocking` keeps it off the async threads. All shared state is `Arc`, so the
+/// closure owns cheap clones.
+async fn metered_flights(
+    state: &AppState,
+    fca: FcaBody,
+    releases: ReleaseMap,
+    now: DateTime<Utc>,
+) -> Result<Vec<FcaFlight>, ApiError> {
+    if fca.points.0.len() < 2 {
+        return Ok(Vec::new());
+    }
+    let (snapshot, airports) = feed_view(state).await;
+    let Some(snap) = snapshot else {
+        return Ok(Vec::new());
+    };
+    let nav = state.nav.load_full();
+    let winds = state.winds.load_full();
+    let airspace = state.airspace.clone();
+    tokio::task::spawn_blocking(move || {
+        let (flights, metas) = build_candidates(
+            &fca,
+            &snap.data,
+            airports.as_ref(),
+            nav.as_ref(),
+            airspace.as_ref(),
+            winds.as_ref(),
+            &releases,
+            now,
+        );
+        finalize(&fca, flights, &metas)
+    })
+    .await
+    .map_err(|_| ApiError::Internal)
+}
+
 #[utoipa::path(
     get,
     path = "/api/v1/flow/fcas/{id}/traffic",
@@ -1264,31 +1304,9 @@ pub async fn fca_traffic(
     let fca = flow_repo::get_fca(pool, &id)
         .await?
         .ok_or(ApiError::NotFound)?;
-    if fca.points.0.len() < 2 {
-        return Ok(Json(Vec::new()));
-    }
     let releases = load_releases(pool, &id).await?;
     let now = Utc::now();
-
-    // Release the feed lock before the metering CPU (build_candidates resolves every
-    // matching route) by cloning the snapshot + airport handles.
-    let (snapshot, airports) = feed_view(&state).await;
-    let built = snapshot.as_ref().map(|snap| {
-        build_candidates(
-            &fca,
-            &snap.data,
-            airports.as_ref(),
-            state.nav.load_full().as_ref(),
-            state.airspace.as_ref(),
-            state.winds.load_full().as_ref(),
-            &releases,
-            now,
-        )
-    });
-    let Some((flights, metas)) = built else {
-        return Ok(Json(Vec::new()));
-    };
-    Ok(Json(finalize(&fca, flights, &metas)))
+    Ok(Json(metered_flights(&state, fca, releases, now).await?))
 }
 
 /// Scope for the IDST board — comma-separated airport, TRACON, and ARTCC codes.
@@ -1353,67 +1371,83 @@ pub async fn list_idst(
         return Ok(empty(now));
     }
 
-    let fcas = flow_repo::list_fcas(pool).await?;
+    // Gather each enabled FCA with its releases (async DB) first, then hand the whole per-FCA metering
+    // loop to a blocking thread — it resolves every ground departure's route for every FCA, which is
+    // heavy CPU that must stay off the async workers (see `metered_flights`).
+    let mut fca_releases: Vec<(FcaBody, ReleaseMap)> = Vec::new();
+    for fca in flow_repo::list_fcas(pool)
+        .await?
+        .into_iter()
+        .filter(|f| f.enabled && f.points.0.len() >= 2)
+    {
+        let releases = load_releases(pool, &fca.id).await?;
+        fca_releases.push((fca, releases));
+    }
     let (snapshot, ap) = feed_view(&state).await;
     let Some(snap) = snapshot else {
         return Ok(empty(now));
     };
     let nav = state.nav.load_full();
     let winds = state.winds.load_full();
+    let airspace = state.airspace.clone();
 
-    let mut unscheduled: Vec<IdstFlight> = Vec::new();
-    let mut released: Vec<IdstFlight> = Vec::new();
-    // One row per (metering FCA, ground departure in scope).
-    for fca in fcas.iter().filter(|f| f.enabled && f.points.0.len() >= 2) {
-        let releases = load_releases(pool, &fca.id).await?;
-        let (flights, metas) = build_candidates(
-            fca,
-            &snap.data,
-            ap.as_ref(),
-            nav.as_ref(),
-            state.airspace.as_ref(),
-            winds.as_ref(),
-            &releases,
-            now,
-        );
-        for f in finalize(fca, flights, &metas) {
-            if (f.status != "ground" && f.status != "proposed")
-                || !airports.contains(&f.dep.to_ascii_uppercase())
-            {
-                continue;
-            }
-            // For released flights the frozen wheels-up; otherwise an *advisory* EDCT — the wheels-up
-            // that would hit the metered crossing, backing out the modeled transit (eta − now) from
-            // the metered CTA. Lets the controller see the proposed release before issuing.
-            let edct = if f.released {
-                f.edct
-            } else if let (Some(cta), Some(eta)) = (f.cross_time, f.eta) {
-                let transit_ms = eta.timestamp_millis() - now.timestamp_millis();
-                DateTime::from_timestamp_millis(cta.timestamp_millis() - transit_ms)
-            } else {
-                None
-            };
-            let item = IdstFlight {
-                callsign: f.callsign,
-                dep: f.dep,
-                arr: f.arr,
-                aircraft_type: f.aircraft_type,
-                status: f.status,
-                fca_id: fca.id.clone(),
-                fca_name: fca.name.clone(),
-                seq: f.seq,
-                delay_min: f.delay_min,
-                cross_time: f.cross_time,
-                edct,
-                released: f.released,
-            };
-            if item.released {
-                released.push(item);
-            } else {
-                unscheduled.push(item);
+    let (mut unscheduled, mut released) = tokio::task::spawn_blocking(move || {
+        let mut unscheduled: Vec<IdstFlight> = Vec::new();
+        let mut released: Vec<IdstFlight> = Vec::new();
+        // One row per (metering FCA, ground departure in scope).
+        for (fca, releases) in &fca_releases {
+            let (flights, metas) = build_candidates(
+                fca,
+                &snap.data,
+                ap.as_ref(),
+                nav.as_ref(),
+                airspace.as_ref(),
+                winds.as_ref(),
+                releases,
+                now,
+            );
+            for f in finalize(fca, flights, &metas) {
+                if (f.status != "ground" && f.status != "proposed")
+                    || !airports.contains(&f.dep.to_ascii_uppercase())
+                {
+                    continue;
+                }
+                // For released flights the frozen wheels-up; otherwise an *advisory* EDCT — the
+                // wheels-up that would hit the metered crossing, backing out the modeled transit
+                // (eta − now) from the metered CTA. Lets the controller see the proposed release.
+                let edct = if f.released {
+                    f.edct
+                } else if let (Some(cta), Some(eta)) = (f.cross_time, f.eta) {
+                    let transit_ms = eta.timestamp_millis() - now.timestamp_millis();
+                    DateTime::from_timestamp_millis(cta.timestamp_millis() - transit_ms)
+                } else {
+                    None
+                };
+                let item = IdstFlight {
+                    callsign: f.callsign,
+                    dep: f.dep,
+                    arr: f.arr,
+                    aircraft_type: f.aircraft_type,
+                    status: f.status,
+                    fca_id: fca.id.clone(),
+                    fca_name: fca.name.clone(),
+                    seq: f.seq,
+                    delay_min: f.delay_min,
+                    cross_time: f.cross_time,
+                    edct,
+                    released: f.released,
+                };
+                if item.released {
+                    released.push(item);
+                } else {
+                    unscheduled.push(item);
+                }
             }
         }
-    }
+        (unscheduled, released)
+    })
+    .await
+    .map_err(|_| ApiError::Internal)?;
     // Unscheduled by metered crossing (soonest first); released by frozen wheels-up.
     unscheduled.sort_by_key(|f| {
         f.cross_time

@@ -3,6 +3,7 @@ import {createRootRoute, createRoute, createRouter, lazyRouteComponent, Outlet, 
 import {FeedWatcher} from "@/components/feed-watcher";
 import {Footer} from "@/components/footer";
 import {Navbar} from "@/components/navbar";
+import {useMe} from "@/lib/auth";
 import {AdvisoriesPage} from "@/pages/advisories";
 import {AdvisoriesFcaPage} from "@/pages/advisories/fcas";
 import {PilotPage} from "@/pages/pilot";
@@ -63,6 +64,29 @@ function RootLayout() {
       return v === true || v === 1 || v === "1" || v === "true";
     },
   });
+  // `useMe` errors only when the backend is unreachable (a 401 resolves to `null`, not an error). In
+  // that case every data-gated page would otherwise sit on "Loading…" forever, so show a clear
+  // retrying state instead — the query keeps probing and recovers on its own when the API returns.
+  const me = useMe();
+  if (me.isError) {
+    return (
+      <div className="flex min-h-screen flex-col items-center justify-center gap-4 bg-background px-6 text-center text-foreground">
+        <p className="text-lg font-semibold">Can’t reach OIS</p>
+        <p className="max-w-md text-sm text-muted-foreground">
+          The server isn’t responding right now. This page keeps trying and will reconnect
+          automatically.
+        </p>
+        <button
+          type="button"
+          onClick={() => me.refetch()}
+          className="rounded-md border px-4 py-2 text-sm transition-colors hover:bg-accent"
+        >
+          Retry now
+        </button>
+      </div>
+    );
+  }
+
   const mainClass =
     layout === "wide"
       ? "w-full flex-1 px-4 py-8 sm:px-6 2xl:px-10"
