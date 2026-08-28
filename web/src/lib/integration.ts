@@ -5,7 +5,12 @@ import {useToast} from "@ois/ui";
 import {ois} from "./api";
 
 export type DiscordConfig = components["schemas"]["DiscordConfigBody"];
+export type DiscordGuildConfig = components["schemas"]["DiscordGuildConfigBody"];
+export type DiscordGuildConfigInput = components["schemas"]["DiscordGuildConfigInput"];
 export type DiscordMapEntry = components["schemas"]["DiscordMapEntry"];
+export type DiscordGuildSnapshot = components["schemas"]["DiscordGuildSnapshotBody"];
+export type DiscordGuildChannel = components["schemas"]["DiscordGuildChannel"];
+export type DiscordGuildRole = components["schemas"]["DiscordGuildRole"];
 export type UpsertDiscordConfig =
   components["schemas"]["UpsertDiscordConfigRequest"];
 export type DiscordLink = components["schemas"]["DiscordLinkBody"];
@@ -13,7 +18,8 @@ export type DiscordLink = components["schemas"]["DiscordLinkBody"];
 const KEY = ["discord-config"] as const;
 const LINK_KEY = ["discord-link"] as const;
 
-/** The saved Discord guild config (channel/role/category maps). Needs `discord.config.read`. */
+/** The Discord config: configured guilds + the bot's guild snapshot (for dropdowns). Needs
+ *  `discord.config.read`. */
 export function useDiscordConfig() {
   return useQuery({
     queryKey: KEY,
@@ -25,7 +31,7 @@ export function useDiscordConfig() {
   });
 }
 
-/** Replace the Discord config and its logical-name maps. Needs `discord.config.update`. */
+/** Replace the configured guilds + their logical-name maps. Needs `discord.config.update`. */
 export function useUpdateDiscordConfig() {
   const qc = useQueryClient();
   const toast = useToast();
@@ -42,6 +48,24 @@ export function useUpdateDiscordConfig() {
       toast.success("Discord configuration saved");
     },
     onError: () => toast.error("Couldn’t save the Discord configuration"),
+  });
+}
+
+/** Ask the bot to re-pull its guild channels/roles (the "Refresh from Discord" button). The snapshot
+ *  updates a moment later once the bot handles the job; refetch the config to see it. */
+export function useRefreshDiscord() {
+  const qc = useQueryClient();
+  const toast = useToast();
+  return useMutation({
+    mutationFn: async (): Promise<void> => {
+      const { error } = await ois.POST("/api/v1/integration/discord/refresh");
+      if (error) throw new Error("refresh failed");
+    },
+    onSuccess: () => {
+      toast.success("Refreshing from Discord — channels/roles update shortly");
+      setTimeout(() => qc.invalidateQueries({ queryKey: KEY }), 2500);
+    },
+    onError: () => toast.error("Couldn’t reach the bot to refresh"),
   });
 }
 

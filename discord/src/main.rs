@@ -12,7 +12,7 @@
 use std::sync::Arc;
 use std::time::Duration;
 
-use ois_client::{OisClient, OutboundJob};
+use ois_client::{GuildChannelSnap, GuildRoleSnap, GuildSnap, OisClient, OutboundJob};
 use serde_json::{Value, json};
 use serenity::all::{
     ActionRowComponent, ButtonStyle, ChannelId, ChannelType, Colour, ComponentInteractionDataKind,
@@ -62,8 +62,16 @@ struct Handler {
 
 #[serenity::async_trait]
 impl EventHandler for Handler {
-    async fn ready(&self, _ctx: Context, ready: Ready) {
-        tracing::info!(bot = %ready.user.name, "discord bot connected");
+    async fn ready(&self, ctx: Context, ready: Ready) {
+        tracing::info!(bot = %ready.user.name, guilds = ready.guilds.len(), "discord bot connected");
+        // Push the guild snapshot so the admin config can offer channel/role dropdowns.
+        let api = self.api.clone();
+        let http = ctx.http.clone();
+        tokio::spawn(async move {
+            if let Err(e) = snapshot_and_push(&http, &api).await {
+                tracing::warn!(reason = %e, "initial guild snapshot failed");
+            }
+        });
     }
 
     async fn interaction_create(&self, ctx: Context, interaction: Interaction) {
@@ -384,7 +392,7 @@ async fn job_loop(api: OisClient, http: Arc<Http>, poll: Duration) {
             Ok(jobs) => {
                 for job in jobs {
                     let id = job.id.clone();
-                    match perform_job(&http, &job).await {
+                    match perform_job(&api, &http, &job).await {
                         Ok(result) => {
                             if let Err(e) = api.ack_job(&id, true, result, None).await {
                                 tracing::error!(error = %e, job = %id, "ack(success) failed");
@@ -407,14 +415,86 @@ async fn job_loop(api: OisClient, http: Arc<Http>, poll: Duration) {
 
 /// Dispatch a single job by type. `Ok(Some(result))` records ids back on the job (e.g. the posted
 /// message id); `Err(msg)` nacks it for retry/park.
-async fn perform_job(http: &Arc<Http>, job: &OutboundJob) -> Result<Option<Value>, String> {
+async fn perform_job(
+    api: &OisClient,
+    http: &Arc<Http>,
+    job: &OutboundJob,
+) -> Result<Option<Value>, String> {
     match job.job_type.as_str() {
         "ace_request_post" => post_ace_request(http, &job.payload).await,
         "ace_request_notify" => notify_ace_claim(http, &job.payload).await,
         "tmi_publish" => post_tmi(http, &job.payload).await,
         "event_thread_create" => create_event_thread(http, &job.payload).await,
+        // The admin's "Refresh from Discord" button — re-pull + push the guild snapshot.
+        "guild_snapshot" => snapshot_and_push(http, api).await.map(|()| None),
         other => Err(format!("unknown job type: {other}")),
     }
+}
+
+/// Convert a serenity `ChannelType` to the short kind string stored in the snapshot.
+fn channel_kind(k: ChannelType) -> &'static str {
+    match k {
+        ChannelType::Text => "text",
+        ChannelType::Voice => "voice",
+        ChannelType::Category => "category",
+        ChannelType::News => "announcement",
+        ChannelType::Forum => "forum",
+        ChannelType::Stage => "stage",
+        ChannelType::NewsThread | ChannelType::PublicThread | ChannelType::PrivateThread => {
+            "thread"
+        }
+        _ => "other",
+    }
+}
+
+/// Pull every guild the bot is in (its channels + roles) via REST and push the full snapshot to the
+/// backend, so the admin config can offer dropdowns.
+async fn snapshot_and_push(http: &Arc<Http>, api: &OisClient) -> Result<(), String> {
+    let guilds = http
+        .get_guilds(None, None)
+        .await
+        .map_err(|e| format!("get_guilds: {e}"))?;
+    let mut out = Vec::with_capacity(guilds.len());
+    for gi in guilds {
+        let gid = gi.id;
+        let channels = gid
+            .channels(http)
+            .await
+            .map_err(|e| format!("channels({gid}): {e}"))?;
+        let roles = gid
+            .roles(http)
+            .await
+            .map_err(|e| format!("roles({gid}): {e}"))?;
+        out.push(GuildSnap {
+            guild_id: gid.get().to_string(),
+            name: gi.name.clone(),
+            channels: channels
+                .values()
+                .map(|c| GuildChannelSnap {
+                    id: c.id.get().to_string(),
+                    name: c.name.clone(),
+                    kind: channel_kind(c.kind).to_string(),
+                    parent_id: c.parent_id.map(|p| p.get().to_string()),
+                    position: c.position as i32,
+                })
+                .collect(),
+            roles: roles
+                .values()
+                .map(|r| GuildRoleSnap {
+                    id: r.id.get().to_string(),
+                    name: r.name.clone(),
+                    managed: r.managed,
+                    position: r.position as i32,
+                })
+                .collect(),
+        });
+    }
+    let count = out.len();
+    api.push_guild_snapshot(out)
+        .await
+        .map_err(|e| format!("push: {e}"))?;
+    tracing::info!(guilds = count, "pushed guild snapshot");
+    Ok(())
 }
 
 /// Extract "HHMM" from an ISO-8601 timestamp (e.g. `2026-08-23T23:30:00+00:00` → `2330`).
