@@ -508,7 +508,7 @@ mod tests {
     fn demand_bins_flag_over_capacity() {
         // AAR 4 → cap 1 per 15-min bin. Three flights in the first bin → red.
         let inbounds = vec![
-            ground("A", 1 * MIN, 0),
+            ground("A", MIN, 0),
             ground("B", 2 * MIN, 0),
             ground("C", 3 * MIN, 0),
         ];

@@ -24,7 +24,7 @@ pub const VERSION: &str = match option_env!("OIS_VERSION") {
     None => env!("CARGO_PKG_VERSION"),
 };
 
-pub async fn run() -> Result<(), Box<dyn std::error::Error>> {
+pub async fn run() -> color_eyre::Result<()> {
     dotenvy::dotenv().ok();
     init_tracing();
 

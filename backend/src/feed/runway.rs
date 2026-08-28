@@ -410,7 +410,7 @@ pub fn recommendations(
                 .filter(|(_, src, _)| src != "man")
                 .map(|(cs, _, eta)| (cs.clone(), *eta))
                 .collect();
-            movable.sort_by(|a, c| c.1.cmp(&a.1));
+            movable.sort_by_key(|m| std::cmp::Reverse(m.1));
 
             for (cs, _) in movable {
                 if bin_level(counts[e][b]) == "green" {

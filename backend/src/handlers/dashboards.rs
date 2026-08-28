@@ -36,10 +36,10 @@ fn ctx<'a>(
 }
 
 fn check_size(data: &Option<serde_json::Value>) -> Result<(), ApiError> {
-    if let Some(v) = data {
-        if serde_json::to_vec(v).map_err(|_| ApiError::Internal)?.len() > MAX_DASHBOARD_BYTES {
-            return Err(ApiError::BadRequest);
-        }
+    if let Some(v) = data
+        && serde_json::to_vec(v).map_err(|_| ApiError::Internal)?.len() > MAX_DASHBOARD_BYTES
+    {
+        return Err(ApiError::BadRequest);
     }
     Ok(())
 }
@@ -55,22 +55,22 @@ pub async fn list_dashboards(
 ) -> Result<Json<DashboardLibrary>, ApiError> {
     let (pool, user) = ctx(&state, &user)?;
     // Lazy one-time migration: seed a board from the legacy single-dashboard prefs blob.
-    if repos::dashboards::count_dashboards(pool, &user.id).await? == 0 {
-        if let Some(legacy) = repos::preferences::get_pref(pool, &user.id, "dashboard").await? {
-            let has_widgets = legacy
-                .get("widgets")
-                .and_then(|w| w.as_array())
-                .map_or(false, |a| !a.is_empty());
-            if has_widgets {
-                repos::dashboards::create_dashboard(
-                    pool,
-                    &user.id,
-                    "My dashboard",
-                    Some(&legacy),
-                    None,
-                )
-                .await?;
-            }
+    if repos::dashboards::count_dashboards(pool, &user.id).await? == 0
+        && let Some(legacy) = repos::preferences::get_pref(pool, &user.id, "dashboard").await?
+    {
+        let has_widgets = legacy
+            .get("widgets")
+            .and_then(|w| w.as_array())
+            .is_some_and(|a| !a.is_empty());
+        if has_widgets {
+            repos::dashboards::create_dashboard(
+                pool,
+                &user.id,
+                "My dashboard",
+                Some(&legacy),
+                None,
+            )
+            .await?;
         }
     }
     let dashboards = repos::dashboards::list_dashboards(pool, &user.id).await?;

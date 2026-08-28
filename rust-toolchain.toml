@@ -1,0 +1,7 @@
+# The workspace builds on rolling nightly — for the parallel compiler front-end (`-Zthreads`) and a
+# faster edit/build loop. We DON'T use nightly-only language features, so `stable` remains a valid
+# fallback: if a nightly regression bites, temporarily set `channel = "stable"` (MSRV is 1.85, see the
+# workspace `rust-version`) until the next nightly fixes it.
+[toolchain]
+channel = "nightly"
+components = ["rustfmt", "clippy"]

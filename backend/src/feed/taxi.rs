@@ -203,7 +203,7 @@ pub fn stats(icao: &str, samples: Option<&Vec<TaxiSample>>, now: DateTime<Utc>) 
 
     // Newest first.
     let mut sorted: Vec<TaxiSample> = all.clone();
-    sorted.sort_by(|a, b| b.end_ms.cmp(&a.end_ms));
+    sorted.sort_by_key(|s| std::cmp::Reverse(s.end_ms));
 
     let hour: Vec<&TaxiSample> = sorted
         .iter()
