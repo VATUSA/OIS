@@ -24,6 +24,8 @@ import {useCreateRoute, useDeleteRoute, useRoutes, useUpdateRoute, type MapRoute
 import {useSetting} from "@/lib/settings";
 import {FlightSearch} from "@/components/flight-search";
 import {FcaDetail} from "@/pages/fca/detail";
+import {FcaOverviewPanel, type OverviewGroup} from "@/pages/fca/overview-panel";
+import {facilityFeature, facilityPoints} from "@/lib/facility-map/boundary";
 import boundariesGeo from "@/assets/artcc-boundaries.json";
 
 import {TrafficMap} from "./TrafficMap";
@@ -184,14 +186,20 @@ export function FcaMapView({
   }, [initialFlight, traffic.data]);
 
   const selectFca = (id: string) => {
-    const next = selectedId === id ? null : id;
-    setSelectedId(next);
     setMobileList(false);
-    if (next) {
-      const fca = fcas.data?.find((f) => f.id === id);
+    const fca = fcas.data?.find((f) => f.id === id);
+    // Overview drives the right panel off the ARTCC selection — a sidebar click just re-centers the
+    // map on that FCA, it doesn't open a single-FCA detail.
+    if (overview) {
       if (fca && fca.points.length >= 2) {
         camera.fitBounds(toDeckPath(fca.points as LatLng[]), { padding: 80, maxZoom: 9 });
       }
+      return;
+    }
+    const next = selectedId === id ? null : id;
+    setSelectedId(next);
+    if (next && fca && fca.points.length >= 2) {
+      camera.fitBounds(toDeckPath(fca.points as LatLng[]), { padding: 80, maxZoom: 9 });
     }
   };
 
@@ -301,7 +309,8 @@ export function FcaMapView({
     [draft],
   );
 
-  // ARTCC overview: every enabled FCA in the chosen ARTCC, all their matched traffic drawn at once.
+  // ARTCC overview: every enabled FCA in the SELECTED ARTCC. All their matched traffic draws on the
+  // map at once, and the right panel stacks their strips. Requires a specific ARTCC (not "ALL").
   const overviewFcas = useMemo(
     () =>
       overview && artccFilter
@@ -309,6 +318,7 @@ export function FcaMapView({
         : [],
     [overview, artccFilter, fcas.data],
   );
+  const overviewActive = overview && !!artccFilter;
   const overviewTraffic = useFcaTrafficMany(overviewFcas.map((f) => f.id));
   // A primitive signature so the group/callsign memos recompute only when the data (or set) changes.
   const overviewSig = overviewTraffic
@@ -322,6 +332,12 @@ export function FcaMapView({
         flights: (overviewTraffic[i]?.data ?? []) as MatchedFlight[],
       })),
     // overviewSig captures the ids, colors, and per-FCA data freshness that actually affect the output.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+    [overviewSig],
+  );
+  // Same data, keyed by FCA, for the right-hand strips panel (needs the full FcaFlight rows).
+  const overviewGroups = useMemo<OverviewGroup[]>(
+    () => overviewFcas.map((f, i) => ({ fca: f, flights: overviewTraffic[i]?.data })),
     // eslint-disable-next-line react-hooks/exhaustive-deps
     [overviewSig],
   );
@@ -401,6 +417,14 @@ export function FcaMapView({
   useEffect(() => {
     if (overview && !artccFilter && artccOptions.length) setArtccFilter(artccOptions[0]);
   }, [overview, artccFilter, artccOptions]);
+  // On selecting an ARTCC in overview mode, zoom the map out to that ARTCC's extent.
+  useEffect(() => {
+    if (!overview || !artccFilter) return;
+    const feature = facilityFeature(artccFilter);
+    const pts = feature ? facilityPoints(feature) : [];
+    if (pts.length) camera.fitBounds(pts, { padding: 40, maxZoom: 7 });
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [overview, artccFilter]);
 
   if (!canRead) {
     return (
@@ -710,51 +734,6 @@ export function FcaMapView({
         onMatchedClick={(cs) => setRouteCallsign((cur) => (cur === cs ? null : cs))}
         onFcaClick={selectFca}
       >
-        {overview && (
-          <div className="pointer-events-auto absolute left-3 right-3 top-16 z-[520] flex flex-wrap items-center gap-2 md:left-1/2 md:right-auto md:top-3 md:-translate-x-1/2">
-            <div className="flex items-center gap-2 rounded-lg border bg-background/95 px-2.5 py-1.5 shadow-lg backdrop-blur">
-              <span className="text-xs font-semibold uppercase tracking-wide text-muted-foreground">ARTCC</span>
-              <select
-                value={artccFilter}
-                onChange={(e) => {
-                  setArtccFilter(e.target.value);
-                  setSelectedId(null);
-                }}
-                className="rounded-md border bg-background px-2 py-1 text-xs font-medium"
-              >
-                {artccOptions.length === 0 && <option value="">—</option>}
-                {artccOptions.map((a) => (
-                  <option key={a} value={a}>
-                    {a}
-                  </option>
-                ))}
-              </select>
-              <span className="text-xs text-muted-foreground">
-                Active <span className="font-semibold text-foreground">{overviewFcas.length}</span>
-              </span>
-            </div>
-            {overviewFcas.length > 0 && (
-              <div className="flex flex-wrap items-center gap-1.5">
-                {overviewFcas.map((f) => (
-                  <button
-                    key={f.id}
-                    type="button"
-                    onClick={() => selectFca(f.id)}
-                    title={`Open ${f.name}`}
-                    className="rounded-md border px-2 py-1 text-xs font-medium shadow-sm backdrop-blur transition-colors"
-                    style={{
-                      color: f.color,
-                      borderColor: `${f.color}66`,
-                      background: selectedId === f.id ? `${f.color}33` : `${f.color}18`,
-                    }}
-                  >
-                    {f.name}
-                  </button>
-                ))}
-              </div>
-            )}
-          </div>
-        )}
         {/* Map controls */}
         <div className="absolute left-3 top-3 z-[500] flex max-w-[calc(100%-1.5rem)] flex-wrap items-center gap-2">
           {!embedded && (
@@ -845,8 +824,18 @@ export function FcaMapView({
         )}
       </TrafficMap>
 
-      {selectedFca && !draft && (
-        <FcaDetail fca={selectedFca} flights={fcaTraffic.data} canEdit={canEdit} onClose={() => setSelectedId(null)} />
+      {overviewActive && !draft ? (
+        <FcaOverviewPanel
+          artcc={artccFilter}
+          groups={overviewGroups}
+          onFocusFlight={focusFlight}
+          onClose={() => setArtccFilter("")}
+        />
+      ) : (
+        selectedFca &&
+        !draft && (
+          <FcaDetail fca={selectedFca} flights={fcaTraffic.data} canEdit={canEdit} onClose={() => setSelectedId(null)} />
+        )
       )}
     </div>
   );
