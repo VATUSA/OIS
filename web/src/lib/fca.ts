@@ -1,4 +1,4 @@
-import {keepPreviousData, useMutation, useQuery, useQueryClient} from "@tanstack/react-query";
+import {keepPreviousData, useMutation, useQueries, useQuery, useQueryClient} from "@tanstack/react-query";
 import type {components} from "@ois/api-client";
 import {useToast} from "@ois/ui";
 
@@ -258,6 +258,24 @@ export function useFcaTraffic(id: string | null) {
     // Releases sync instantly over the websocket; the poll refreshes live crossing ETAs (and is the
     // fallback if the socket drops).
     refetchInterval: 30_000,
+  });
+}
+
+/** Matched/sequenced traffic for several FCAs at once (the ARTCC overview). Each query shares its
+ *  cache key with {@link useFcaTraffic}, so opening one FCA's detail reuses the fetched data. */
+export function useFcaTrafficMany(ids: string[]) {
+  return useQueries({
+    queries: ids.map((id) => ({
+      queryKey: ["fca-traffic", id],
+      queryFn: async () => {
+        const { data, error } = await ois.GET("/api/v1/flow/fcas/{id}/traffic", {
+          params: { path: { id } },
+        });
+        if (error || !data) throw new Error("failed to load FCA traffic");
+        return data;
+      },
+      refetchInterval: 30_000,
+    })),
   });
 }
 

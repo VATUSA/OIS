@@ -36,13 +36,16 @@ export function buildMatchedLayers(
   colorHex: string,
   style: "silhouette" | "triangle",
   sizeScale = 1,
+  // Suffix appended to every layer id so several FCAs' matched traffic can coexist (overview mode).
+  // The pickable glyph layer's id always starts with "matched" (see the click handler in TrafficMap).
+  keySuffix = "",
 ): Layer[] {
   const [r, g, b] = hexToRgb(colorHex);
   const tint: RGBA = [r, g, b, 255];
   const withPos = matched.filter((f) => f.lat !== 0 || f.lon !== 0);
 
   const trails = new PathLayer<MatchedFlight>({
-    id: "matched-trails",
+    id: `matched-trails${keySuffix}`,
     data: withPos,
     getPath: (f): [number, number][] =>
       f.path && f.path.length >= 2
@@ -59,7 +62,7 @@ export function buildMatchedLayers(
   });
 
   const crossDots = new ScatterplotLayer<MatchedFlight>({
-    id: "matched-cross",
+    id: `matched-cross${keySuffix}`,
     data: matched,
     getPosition: (f) => [f.cross_lon, f.cross_lat],
     getFillColor: [255, 255, 255, 230],
@@ -69,7 +72,7 @@ export function buildMatchedLayers(
   });
 
   const glyphs = new IconLayer<MatchedFlight>({
-    id: "matched",
+    id: `matched${keySuffix}`,
     data: withPos,
     pickable: true,
     getIcon: (f) => {
@@ -90,7 +93,7 @@ export function buildMatchedLayers(
   });
 
   const badges = new TextLayer<MatchedFlight>({
-    id: "matched-seq",
+    id: `matched-seq${keySuffix}`,
     data: withPos,
     getPosition: (f) => [f.lon, f.lat],
     getText: (f) => String(f.seq),
