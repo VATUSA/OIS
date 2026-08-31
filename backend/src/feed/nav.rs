@@ -418,10 +418,9 @@ impl NavData {
         let base = &id[..letters];
         let (ll, magvar) = if let Some(cands) = self.navaids.get(base) {
             (nearest(cands, ref_ll), self.nav_magvar.get(base).copied())
-        } else if let Some(cands) = self.fixes.get(base) {
-            (nearest(cands, ref_ll), None)
         } else {
-            return None;
+            let cands = self.fixes.get(base)?;
+            (nearest(cands, ref_ll), None)
         };
         // Radials are magnetic; true = radial + declination (East positive).
         let true_brg = radial + magvar.unwrap_or(0.0);
