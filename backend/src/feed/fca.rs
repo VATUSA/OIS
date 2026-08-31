@@ -8,8 +8,6 @@ use super::nav::NavData;
 
 const NM_PER_DEG: f64 = 60.0;
 const DENSIFY_STEP_NM: f64 = 40.0;
-/// A crossing must lie within this bearing (deg) of an airborne aircraft's heading.
-const AHEAD_TOL_DEG: f64 = 100.0;
 
 /// Where a route crosses an FCA line.
 #[derive(Debug, Clone)]
@@ -175,23 +173,14 @@ pub fn route_path(
     (path.len() >= 2).then_some(path)
 }
 
-/// Where a pre-resolved `path` crosses the FCA line (airborne crossings must be ahead).
-pub fn crosses(
-    path: &[[f64; 2]],
-    fca_points: &[[f64; 2]],
-    airborne: bool,
-    lat: f64,
-    lon: f64,
-    hdg: i64,
-) -> Option<FcaCrossing> {
-    let cross = path_crossing(path, fca_points)?;
-    if airborne {
-        let brg = bearing_deg([lat, lon], [cross.lat, cross.lon]);
-        if angle_diff(hdg as f64, brg) > AHEAD_TOL_DEG {
-            return None;
-        }
-    }
-    Some(cross)
+/// Where a pre-resolved `path` crosses the FCA line. For airborne aircraft the `path` is already the
+/// *remaining* route (from the current position forward, via [`route_path`]/`remaining_anchors`), so
+/// any crossing it contains is genuinely ahead on the route. We deliberately do NOT additionally gate
+/// on current heading: matching vatflow's `validRouteCrossing`, a straight-line "is the crossing point
+/// ahead of my nose" test drops aircraft on holds/vectors/outbound dogleg legs whose route still
+/// crosses (e.g. filed `… EMI299018 … KOZAR …` that heads east before turning back through the FCA).
+pub fn crosses(path: &[[f64; 2]], fca_points: &[[f64; 2]]) -> Option<FcaCrossing> {
+    path_crossing(path, fca_points)
 }
 
 /// Whether an aircraft's filed route crosses the FCA, and where.
@@ -209,7 +198,7 @@ pub fn crossing_for(
     gs: i64,
 ) -> Option<FcaCrossing> {
     let path = route_path(nav, airports, dep, arr, route, lat, lon, hdg, gs)?;
-    crosses(&path, fca_points, gs >= 50, lat, lon, hdg)
+    crosses(&path, fca_points)
 }
 
 // --- metering (sequence crossing traffic) ---
@@ -768,8 +757,26 @@ mod tests {
         let nav = NavData::default();
         let ap = airports();
         let fca = [[41.0, -75.7], [38.0, -75.7]];
-        // Aircraft already west of the line, heading further west (270°) → crossing behind.
+        // Aircraft already west of the line, heading further west (270°). Its remaining route runs
+        // to KIAD (further west still) and never returns to the line, so there's no crossing ahead.
         let c = crossing_for(&fca, &nav, &ap, "KJFK", "KIAD", "", 39.2, -76.5, 270, 400);
         assert!(c.is_none(), "an aircraft past the line shouldn't match");
+    }
+
+    #[test]
+    fn dogleg_route_crosses_even_when_heading_away() {
+        // Regression: an aircraft flying AWAY from an FCA whose route still crosses it must match.
+        // The jet is at (39.0, -76.0) tracking east to a fix at -75.0, then doglegs back northwest
+        // through a line at lon -77.0 (mirrors a `… EMI299018 … KOZAR …` reroute). The straight-line
+        // bearing from its nose to the crossing is ~northwest (~150° off its easterly heading), which
+        // the old heading gate wrongly rejected. The remaining route clearly crosses, so it matches.
+        let fca = [[40.0, -77.0], [38.0, -77.0]];
+        let path = [[39.0, -76.0], [39.0, -75.0], [39.5, -78.0]];
+        let c = crosses(&path, &fca).expect("dogleg route crosses the lon -77.0 line");
+        assert!(
+            c.lon > -77.3 && c.lon < -76.7,
+            "crossing lon ~ -77.0, got {}",
+            c.lon
+        );
     }
 }

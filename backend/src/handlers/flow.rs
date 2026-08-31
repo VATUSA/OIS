@@ -474,7 +474,6 @@ pub async fn fca_counts(
 
         // Resolve each aircraft's route once, then test it against every active FCA.
         let mut tally = |fp: &FlightPlan, lat: f64, lon: f64, hdg: i64, gs: i64, alt: i64| {
-            let airborne = gs >= 50;
             let Some(path) = fca::route_path(
                 nav,
                 airports,
@@ -493,7 +492,7 @@ pub async fn fca_counts(
                     continue;
                 }
                 // Match the metering board: only count crossings within the FCA's ARTCC scope.
-                if let Some(cross) = fca::crosses(&path, &f.points.0, airborne, lat, lon, hdg)
+                if let Some(cross) = fca::crosses(&path, &f.points.0)
                     && passes_scope(f, airspace, cross.lat, cross.lon)
                     && let Some(c) = counts.get_mut(&f.id)
                 {
@@ -833,9 +832,9 @@ pub async fn flight_advisory(
             let crosses = match (&path, &fp) {
                 (Some(p), Some(plan)) => {
                     passes_filters(&fca, plan, Some(altitude))
-                        && fca::crosses(p, &fca.points.0, airborne, lat, lon, heading).is_some_and(
-                            |c| passes_scope(&fca, state.airspace.as_ref(), c.lat, c.lon),
-                        )
+                        && fca::crosses(p, &fca.points.0).is_some_and(|c| {
+                            passes_scope(&fca, state.airspace.as_ref(), c.lat, c.lon)
+                        })
                 }
                 _ => false,
             };
@@ -1116,8 +1115,7 @@ fn build_candidates(
         ) else {
             continue;
         };
-        let Some(cross) = fca::crosses(&path, &pts, airborne, p.latitude, p.longitude, p.heading)
-        else {
+        let Some(cross) = fca::crosses(&path, &pts) else {
             continue;
         };
         if !passes_scope(fca, airspace, cross.lat, cross.lon) {
@@ -1176,7 +1174,7 @@ fn build_candidates(
         ) else {
             continue;
         };
-        let Some(cross) = fca::crosses(&path, &pts, false, 0.0, 0.0, 0) else {
+        let Some(cross) = fca::crosses(&path, &pts) else {
             continue;
         };
         if !passes_scope(fca, airspace, cross.lat, cross.lon) {
