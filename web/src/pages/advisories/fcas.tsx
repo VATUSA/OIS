@@ -8,5 +8,5 @@ import {FcaMapView} from "@/components/map/FcaMapView";
  */
 export function AdvisoriesFcaPage() {
   const { flight } = useSearch({ strict: false }) as { flight?: string };
-  return <FcaMapView readOnly initialFlight={flight} persistKey="advisories" />;
+  return <FcaMapView readOnly overview initialFlight={flight} persistKey="advisories" />;
 }

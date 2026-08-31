@@ -14,6 +14,7 @@ import {
   useFcaCounts,
   useFcas,
   useFcaTraffic,
+  useFcaTrafficMany,
   useTraffic,
   useUpdateFca,
   type Fca,
@@ -69,11 +70,15 @@ function cycleAgeDays(cycle: string): number | null {
  */
 export function FcaMapView({
   readOnly = false,
+  overview = false,
   initialFlight,
   embedded = false,
   persistKey,
 }: {
   readOnly?: boolean;
+  /** ARTCC overview: overlay every active FCA in the selected ARTCC — matched traffic (tinted +
+   *  numbered per FCA) and routes — at once, rather than one FCA at a time. */
+  overview?: boolean;
   initialFlight?: string;
   embedded?: boolean;
   /** Stable key for remembering this map instance's pan/zoom (gated by the map.persistView setting). */
@@ -296,12 +301,42 @@ export function FcaMapView({
     [draft],
   );
 
-  // Matched (crossing) traffic for the selected FCA is drawn separately (tinted + numbered); exclude
-  // those callsigns from the plain traffic layer.
-  const matchedCallsigns = useMemo(
-    () => new Set((selectedFca ? fcaTraffic.data ?? [] : []).map((f) => f.callsign)),
-    [selectedFca, fcaTraffic.data],
+  // ARTCC overview: every enabled FCA in the chosen ARTCC, all their matched traffic drawn at once.
+  const overviewFcas = useMemo(
+    () =>
+      overview && artccFilter
+        ? (fcas.data ?? []).filter((f) => f.enabled && f.artcc === artccFilter && f.points.length >= 2)
+        : [],
+    [overview, artccFilter, fcas.data],
   );
+  const overviewTraffic = useFcaTrafficMany(overviewFcas.map((f) => f.id));
+  // A primitive signature so the group/callsign memos recompute only when the data (or set) changes.
+  const overviewSig = overviewTraffic
+    .map((r, i) => `${overviewFcas[i]?.id}:${overviewFcas[i]?.color}:${r.dataUpdatedAt}`)
+    .join("|");
+  const matchedGroups = useMemo(
+    () =>
+      overviewFcas.map((f, i) => ({
+        id: f.id,
+        color: f.color,
+        flights: (overviewTraffic[i]?.data ?? []) as MatchedFlight[],
+      })),
+    // overviewSig captures the ids, colors, and per-FCA data freshness that actually affect the output.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+    [overviewSig],
+  );
+
+  // Matched (crossing) traffic — for the selected FCA, or every overview FCA — is drawn separately
+  // (tinted + numbered); exclude those callsigns from the plain traffic layer.
+  const matchedCallsigns = useMemo(() => {
+    const set = new Set<string>();
+    if (overview) {
+      for (const g of matchedGroups) for (const f of g.flights) set.add(f.callsign);
+    } else if (selectedFca) {
+      for (const f of fcaTraffic.data ?? []) set.add(f.callsign);
+    }
+    return set;
+  }, [overview, matchedGroups, selectedFca, fcaTraffic.data]);
   const aircraft = useMemo<NormAircraft[]>(
     () =>
       (traffic.data ?? [])
@@ -362,6 +397,10 @@ export function FcaMapView({
     () => [...new Set((fcas.data ?? []).map((f) => f.artcc).filter(Boolean))].sort(),
     [fcas.data],
   );
+  // In overview mode, default to the first ARTCC that has FCAs so the map isn't blank on first load.
+  useEffect(() => {
+    if (overview && !artccFilter && artccOptions.length) setArtccFilter(artccOptions[0]);
+  }, [overview, artccFilter, artccOptions]);
 
   if (!canRead) {
     return (
@@ -655,8 +694,9 @@ export function FcaMapView({
         fcas={mapFcas}
         selectedFcaId={selectedId}
         atc={showAtc ? (atc.data as AtcData | undefined) ?? null : null}
-        matched={selectedFca ? (fcaTraffic.data as MatchedFlight[] | undefined) : undefined}
-        matchedColor={selectedFca?.color}
+        matched={!overview && selectedFca ? (fcaTraffic.data as MatchedFlight[] | undefined) : undefined}
+        matchedColor={overview ? undefined : selectedFca?.color}
+        matchedGroups={overview ? matchedGroups : undefined}
         namedRoutes={routes.data as NamedRoute[] | undefined}
         selectedRouteId={selectedRouteId}
         labeledRouteIds={labeledRoutes}
@@ -670,6 +710,51 @@ export function FcaMapView({
         onMatchedClick={(cs) => setRouteCallsign((cur) => (cur === cs ? null : cs))}
         onFcaClick={selectFca}
       >
+        {overview && (
+          <div className="pointer-events-auto absolute left-3 right-3 top-16 z-[520] flex flex-wrap items-center gap-2 md:left-1/2 md:right-auto md:top-3 md:-translate-x-1/2">
+            <div className="flex items-center gap-2 rounded-lg border bg-background/95 px-2.5 py-1.5 shadow-lg backdrop-blur">
+              <span className="text-xs font-semibold uppercase tracking-wide text-muted-foreground">ARTCC</span>
+              <select
+                value={artccFilter}
+                onChange={(e) => {
+                  setArtccFilter(e.target.value);
+                  setSelectedId(null);
+                }}
+                className="rounded-md border bg-background px-2 py-1 text-xs font-medium"
+              >
+                {artccOptions.length === 0 && <option value="">—</option>}
+                {artccOptions.map((a) => (
+                  <option key={a} value={a}>
+                    {a}
+                  </option>
+                ))}
+              </select>
+              <span className="text-xs text-muted-foreground">
+                Active <span className="font-semibold text-foreground">{overviewFcas.length}</span>
+              </span>
+            </div>
+            {overviewFcas.length > 0 && (
+              <div className="flex flex-wrap items-center gap-1.5">
+                {overviewFcas.map((f) => (
+                  <button
+                    key={f.id}
+                    type="button"
+                    onClick={() => selectFca(f.id)}
+                    title={`Open ${f.name}`}
+                    className="rounded-md border px-2 py-1 text-xs font-medium shadow-sm backdrop-blur transition-colors"
+                    style={{
+                      color: f.color,
+                      borderColor: `${f.color}66`,
+                      background: selectedId === f.id ? `${f.color}33` : `${f.color}18`,
+                    }}
+                  >
+                    {f.name}
+                  </button>
+                ))}
+              </div>
+            )}
+          </div>
+        )}
         {/* Map controls */}
         <div className="absolute left-3 top-3 z-[500] flex max-w-[calc(100%-1.5rem)] flex-wrap items-center gap-2">
           {!embedded && (

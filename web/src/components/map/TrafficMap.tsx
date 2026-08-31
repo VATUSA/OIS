@@ -56,6 +56,8 @@ export interface TrafficMapProps {
   atc?: AtcData | null;
   matched?: MatchedFlight[];
   matchedColor?: string | null;
+  /** Overview mode: several FCAs' matched traffic at once, each tinted its own color. */
+  matchedGroups?: { id: string; color: string; flights: MatchedFlight[] }[];
   namedRoutes?: NamedRoute[];
   selectedRouteId?: string | null;
   labeledRouteIds?: Set<string>;
@@ -110,6 +112,7 @@ export function TrafficMap({
   atc,
   matched,
   matchedColor,
+  matchedGroups,
   namedRoutes,
   selectedRouteId,
   labeledRouteIds,
@@ -175,6 +178,11 @@ export function TrafficMap({
   if (fcas?.length) layers.push(...buildFcaLayers(fcas, selectedFcaId));
   if (matched?.length && matchedColor)
     layers.push(...buildMatchedLayers(matched, matchedColor, aircraftStyle ?? "silhouette", sizeScale));
+  for (const group of matchedGroups ?? [])
+    if (group.flights.length)
+      layers.push(
+        ...buildMatchedLayers(group.flights, group.color, aircraftStyle ?? "silhouette", sizeScale, `-${group.id}`),
+      );
   if (selectedTrack?.length) layers.push(buildSelectedTrackLayer(selectedTrack));
   if (selectedRoutePath.length) layers.push(buildSelectedRouteLayer(selectedRoutePath));
   layers.push(
@@ -211,7 +219,9 @@ export function TrafficMap({
     if (info.layer?.id === "aircraft") {
       const id = (info.object as NormAircraft | undefined)?.id;
       if (id) onAircraftClick?.(id);
-    } else if (info.layer?.id === "matched") {
+    } else if (info.layer?.id?.startsWith("matched")) {
+      // The pickable glyph layer is "matched" (single) or "matched-<fcaId>" (overview groups);
+      // its sibling trail/dot/badge layers aren't pickable, so a pick here is always a glyph.
       const cs = (info.object as MatchedFlight | undefined)?.callsign;
       if (cs) onMatchedClick?.(cs);
     } else if (info.layer?.id === "fca-lines") {
