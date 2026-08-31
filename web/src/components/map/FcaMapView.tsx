@@ -1,6 +1,7 @@
 import {useEffect, useMemo, useRef, useState} from "react";
 import {Button, ConfirmButton, Input, Switch, useToast} from "@ois/ui";
-import {Home, Menu, Pencil, Plane, Plus, RadioTower, Tag, Trash2, X} from "lucide-react";
+import {ArrowLeft, Home, Menu, Pencil, Plane, Plus, RadioTower, Tag, Trash2, X} from "lucide-react";
+import {Link} from "@tanstack/react-router";
 
 import {useMe} from "@/lib/auth";
 import {hasPermission} from "@/lib/permissions";
@@ -73,6 +74,7 @@ function cycleAgeDays(cycle: string): number | null {
 export function FcaMapView({
   readOnly = false,
   overview = false,
+  eventId,
   initialFlight,
   embedded = false,
   persistKey,
@@ -81,6 +83,9 @@ export function FcaMapView({
   /** ARTCC overview: overlay every active FCA in the selected ARTCC — matched traffic (tinted +
    *  numbered per FCA) and routes — at once, rather than one FCA at a time. */
   overview?: boolean;
+  /** Event builder: scope every FCA (list + create/edit/delete) to this event, gated on events.plan.*
+   *  instead of flow.fca.*. Event FCAs stay off the live maps until published. */
+  eventId?: number;
   initialFlight?: string;
   embedded?: boolean;
   /** Stable key for remembering this map instance's pan/zoom (gated by the map.persistView setting). */
@@ -88,18 +93,21 @@ export function FcaMapView({
 }) {
   const { data: me } = useMe();
   const toast = useToast();
-  const canRead = readOnly || hasPermission(me, "flow.fca.read");
-  const canEdit = !readOnly && hasPermission(me, "flow.fca.update");
-  const canDelete = !readOnly && hasPermission(me, "flow.fca.delete");
-  const canEditRoute = !readOnly && hasPermission(me, "flow.route.update");
-  const canDeleteRoute = !readOnly && hasPermission(me, "flow.route.delete");
+  const eventMode = eventId != null;
+  const canRead = readOnly || hasPermission(me, eventMode ? "events.plan.read" : "flow.fca.read");
+  const canEdit = !readOnly && hasPermission(me, eventMode ? "events.plan.update" : "flow.fca.update");
+  const canDelete =
+    !readOnly && hasPermission(me, eventMode ? "events.plan.update" : "flow.fca.delete");
+  // Routes are shared (not event-scoped); the event builder doesn't edit them.
+  const canEditRoute = !readOnly && !eventMode && hasPermission(me, "flow.route.update");
+  const canDeleteRoute = !readOnly && !eventMode && hasPermission(me, "flow.route.delete");
 
-  const fcas = useFcas();
+  const fcas = useFcas(eventId);
   const traffic = useTraffic();
   const routes = useRoutes();
-  const createFca = useCreateFca();
-  const updateFca = useUpdateFca();
-  const deleteFca = useDeleteFca();
+  const createFca = useCreateFca(eventId);
+  const updateFca = useUpdateFca(eventId);
+  const deleteFca = useDeleteFca(eventId);
   const createRoute = useCreateRoute();
   const updateRoute = useUpdateRoute();
   const deleteRoute = useDeleteRoute();
@@ -458,13 +466,25 @@ export function FcaMapView({
             (mobileList ? "max-md:translate-x-0" : "max-md:-translate-x-full")
           }
         >
-          <div className="flex items-center justify-between border-b px-4 py-3">
-            <span className="text-sm font-semibold uppercase tracking-wide">Flow Constrained Areas</span>
+          <div className="flex items-center gap-2 border-b px-4 py-3">
+            {eventMode && (
+              <Link
+                to="/planning/events/$eventId"
+                params={{ eventId: String(eventId) }}
+                title="Back to the event"
+                className="text-muted-foreground transition-colors hover:text-foreground"
+              >
+                <ArrowLeft className="size-4" />
+              </Link>
+            )}
+            <span className="text-sm font-semibold uppercase tracking-wide">
+              {eventMode ? "Event FCAs" : "Flow Constrained Areas"}
+            </span>
             <button
               type="button"
               aria-label="Close list"
               onClick={() => setMobileList(false)}
-              className="text-muted-foreground hover:text-foreground md:hidden"
+              className="ml-auto text-muted-foreground hover:text-foreground md:hidden"
             >
               <X className="size-4" />
             </button>
