@@ -1,9 +1,17 @@
+import {useMemo} from "react";
 import {Link, useParams} from "@tanstack/react-router";
-import {Badge, buttonVariants} from "@ois/ui";
+import {Badge, Button, buttonVariants, ConfirmButton, Switch} from "@ois/ui";
 import {Map, Plus} from "lucide-react";
 
 import {FcaMapView} from "@/components/map/FcaMapView";
-import {useFcas, type Fca} from "@/lib/fca";
+import {
+  useArchiveEventFca,
+  useFcas,
+  useFcaTrafficMany,
+  usePublishEventFca,
+  useSetEventFcaAuto,
+  type Fca,
+} from "@/lib/fca";
 import {useMe} from "@/lib/auth";
 import {hasPermission} from "@/lib/permissions";
 
@@ -19,9 +27,9 @@ function statusBadge(fca: Fca) {
 }
 
 /**
- * Event manager "FCAs" tab: the planned/published/archived FCAs for this event, plus a link into the
- * full-screen builder. Publish/archive/auto-publish controls arrive in a later pass; here it's the
- * roster + entry point.
+ * Event manager "FCAs" tab: the event's FCAs with their lifecycle. Planned FCAs can auto-publish
+ * (30 min before start) or be published now; published ones can be archived; archived stay as history.
+ * The full-screen builder is where they're drawn.
  */
 export function EventFcasSection({ eventId }: { eventId: number }) {
   const { data: me } = useMe();
@@ -29,12 +37,27 @@ export function EventFcasSection({ eventId }: { eventId: number }) {
   const fcas = useFcas(eventId);
   const rows = fcas.data ?? [];
 
+  const publish = usePublishEventFca(eventId);
+  const archive = useArchiveEventFca(eventId);
+  const setAuto = useSetEventFcaAuto(eventId);
+
+  // Crossing counts for the FCAs that are actually metering (planned + published).
+  const activeIds = useMemo(
+    () => rows.filter((f) => f.event_status !== "archived").map((f) => f.id),
+    [rows],
+  );
+  const traffic = useFcaTrafficMany(activeIds);
+  const countFor = (id: string) => {
+    const i = activeIds.indexOf(id);
+    return i >= 0 ? traffic[i]?.data?.length : undefined;
+  };
+
   return (
     <div className="flex flex-col gap-4">
       <div className="flex flex-wrap items-center justify-between gap-2">
         <p className="max-w-2xl text-sm text-muted-foreground">
-          FCAs planned for this event. They stay off every live map until published (manually or 30 min
-          before start), and are archived when the event ends.
+          FCAs planned for this event. They stay off every live map until published (manually, or
+          automatically 30 min before start), and are archived when the event ends.
         </p>
         <Link
           to="/planning/events/$eventId/fcas"
@@ -64,15 +87,62 @@ export function EventFcasSection({ eventId }: { eventId: number }) {
         </div>
       ) : (
         <ul className="divide-y rounded-md border">
-          {rows.map((fca) => (
-            <li key={fca.id} className="flex items-center gap-3 px-3 py-2 text-sm">
-              <span className="size-3 shrink-0 rounded-full" style={{ background: fca.color }} />
-              <span className="font-mono font-medium">{fca.name || "Untitled"}</span>
-              <Badge variant="secondary">{fca.mode === "mit" ? `${fca.mit} MIT` : `${fca.rate}/hr`}</Badge>
-              {fca.artcc && <span className="text-xs text-muted-foreground">{fca.artcc}</span>}
-              <span className="ml-auto">{statusBadge(fca)}</span>
-            </li>
-          ))}
+          {rows.map((fca) => {
+            const status = fca.event_status ?? "planned";
+            const count = countFor(fca.id);
+            return (
+              <li key={fca.id} className="flex flex-wrap items-center gap-x-3 gap-y-2 px-3 py-2 text-sm">
+                <span className="size-3 shrink-0 rounded-full" style={{ background: fca.color }} />
+                <span className="font-mono font-medium">{fca.name || "Untitled"}</span>
+                <Badge variant="secondary">
+                  {fca.mode === "mit" ? `${fca.mit} MIT` : `${fca.rate}/hr`}
+                </Badge>
+                {fca.artcc && <span className="text-xs text-muted-foreground">{fca.artcc}</span>}
+                {status !== "archived" && count != null && (
+                  <span className="text-xs text-muted-foreground">{count} crossing</span>
+                )}
+                <div className="ml-auto flex items-center gap-2">
+                  {statusBadge(fca)}
+                  {canEdit && status === "planned" && (
+                    <>
+                      <label
+                        className="flex items-center gap-1.5 text-xs text-muted-foreground"
+                        title="Automatically publish this FCA 30 minutes before the event starts"
+                      >
+                        <Switch
+                          checked={fca.auto_publish}
+                          onCheckedChange={(v) => setAuto.mutate({ fcaId: fca.id, auto: v })}
+                          className="scale-[0.68]"
+                        />
+                        auto
+                      </label>
+                      <Button size="sm" onClick={() => publish.mutate(fca.id)}>
+                        Publish
+                      </Button>
+                      <ConfirmButton
+                        size="sm"
+                        variant="ghost"
+                        onConfirm={() => archive.mutate(fca.id)}
+                        warn={`Cancel the ${fca.name || "untitled"} FCA?`}
+                      >
+                        Cancel
+                      </ConfirmButton>
+                    </>
+                  )}
+                  {canEdit && status === "published" && (
+                    <ConfirmButton
+                      size="sm"
+                      variant="outline"
+                      onConfirm={() => archive.mutate(fca.id)}
+                      warn={`Archive the ${fca.name || "untitled"} FCA? It comes off every live map.`}
+                    >
+                      Archive
+                    </ConfirmButton>
+                  )}
+                </div>
+              </li>
+            );
+          })}
         </ul>
       )}
     </div>

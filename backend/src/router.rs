@@ -223,6 +223,18 @@ pub fn build_router(state: AppState) -> Router {
             "/api/v1/events/{id}/fcas/{fca_id}",
             put(events::update_event_fca).delete(events::delete_event_fca),
         )
+        .route(
+            "/api/v1/events/{id}/fcas/{fca_id}/publish",
+            post(events::publish_event_fca),
+        )
+        .route(
+            "/api/v1/events/{id}/fcas/{fca_id}/archive",
+            post(events::archive_event_fca),
+        )
+        .route(
+            "/api/v1/events/{id}/fcas/{fca_id}/auto",
+            put(events::set_event_fca_auto),
+        )
         // Reusable per-airport runway configs (default AAR/ADR + wind rule) for event planning
         .route(
             "/api/v1/airport-configs/{icao}",

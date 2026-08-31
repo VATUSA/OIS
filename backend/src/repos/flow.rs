@@ -154,6 +154,61 @@ pub async fn update_fca(
     Ok(result.rows_affected() > 0)
 }
 
+/// Publish an event FCA (planned → published) so it shows on live maps; stamps `published_at`.
+/// Scoped to the event; false if it isn't there or isn't currently `planned`.
+pub async fn mark_event_fca_published(
+    pool: &PgPool,
+    event_id: i64,
+    fca_id: &str,
+) -> Result<bool, ApiError> {
+    let r = sqlx::query(
+        "update flow.fca set event_status = 'published', published_at = now() \
+         where id = $1 and event_id = $2 and event_status = 'planned'",
+    )
+    .bind(fca_id)
+    .bind(event_id)
+    .execute(pool)
+    .await
+    .map_err(|_| ApiError::Internal)?;
+    Ok(r.rows_affected() > 0)
+}
+
+/// Archive an event FCA (planned/published → archived); stamps `archived_at`. Kept as event history,
+/// hidden from every live map. Scoped to the event; false if it isn't there or is already archived.
+pub async fn mark_event_fca_archived(
+    pool: &PgPool,
+    event_id: i64,
+    fca_id: &str,
+) -> Result<bool, ApiError> {
+    let r = sqlx::query(
+        "update flow.fca set event_status = 'archived', archived_at = now() \
+         where id = $1 and event_id = $2 and event_status in ('planned', 'published')",
+    )
+    .bind(fca_id)
+    .bind(event_id)
+    .execute(pool)
+    .await
+    .map_err(|_| ApiError::Internal)?;
+    Ok(r.rows_affected() > 0)
+}
+
+/// Set an event FCA's auto-publish flag. Scoped to the event.
+pub async fn set_event_fca_auto(
+    pool: &PgPool,
+    event_id: i64,
+    fca_id: &str,
+    auto: bool,
+) -> Result<bool, ApiError> {
+    let r = sqlx::query("update flow.fca set auto_publish = $3 where id = $1 and event_id = $2")
+        .bind(fca_id)
+        .bind(event_id)
+        .bind(auto)
+        .execute(pool)
+        .await
+        .map_err(|_| ApiError::Internal)?;
+    Ok(r.rows_affected() > 0)
+}
+
 pub async fn delete_fca(pool: &PgPool, id: &str) -> Result<bool, ApiError> {
     // Soft-delete so the historical dashboard can still show the FCA during the window it existed.
     let result =
