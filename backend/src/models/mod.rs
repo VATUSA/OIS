@@ -1152,6 +1152,12 @@ pub struct UpsertFcaRequest {
     pub enabled: Option<bool>,
 }
 
+/// Toggle an event FCA's auto-publish flag (publish 30 min before the event starts).
+#[derive(Debug, Deserialize, ToSchema)]
+pub struct SetFcaAutoRequest {
+    pub auto_publish: bool,
+}
+
 /// A named reference route on the flow map, defined by a filed-route string and resolved to a
 /// track by the nav engine (kept fresh on every read). Shared; not tied to any aircraft.
 #[derive(Debug, Serialize, ToSchema)]

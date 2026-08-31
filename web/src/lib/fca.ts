@@ -202,6 +202,66 @@ export function useDeleteFca(eventId?: number) {
   });
 }
 
+/** Publish an event FCA (planned → published) so it goes live on every map. */
+export function usePublishEventFca(eventId: number) {
+  const queryClient = useQueryClient();
+  const toast = useToast();
+  return useMutation({
+    mutationFn: async (fcaId: string) => {
+      const { data, error } = await ois.POST("/api/v1/events/{id}/fcas/{fca_id}/publish", {
+        params: { path: { id: eventId, fca_id: fcaId } },
+      });
+      if (error || !data) throw new Error("publish failed");
+      return data;
+    },
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: fcaKey(eventId) });
+      queryClient.invalidateQueries({ queryKey: ["fcas"] }); // now on the live maps
+      toast.success("FCA published");
+    },
+    onError: () => toast.error("Couldn’t publish the FCA"),
+  });
+}
+
+/** Archive an event FCA (planned/published → archived), pulling it off the live maps. */
+export function useArchiveEventFca(eventId: number) {
+  const queryClient = useQueryClient();
+  const toast = useToast();
+  return useMutation({
+    mutationFn: async (fcaId: string) => {
+      const { data, error } = await ois.POST("/api/v1/events/{id}/fcas/{fca_id}/archive", {
+        params: { path: { id: eventId, fca_id: fcaId } },
+      });
+      if (error || !data) throw new Error("archive failed");
+      return data;
+    },
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: fcaKey(eventId) });
+      queryClient.invalidateQueries({ queryKey: ["fcas"] });
+      toast.success("FCA archived");
+    },
+    onError: () => toast.error("Couldn’t archive the FCA"),
+  });
+}
+
+/** Toggle whether an event FCA auto-publishes 30 min before the event starts. */
+export function useSetEventFcaAuto(eventId: number) {
+  const queryClient = useQueryClient();
+  const toast = useToast();
+  return useMutation({
+    mutationFn: async ({ fcaId, auto }: { fcaId: string; auto: boolean }) => {
+      const { data, error } = await ois.PUT("/api/v1/events/{id}/fcas/{fca_id}/auto", {
+        params: { path: { id: eventId, fca_id: fcaId } },
+        body: { auto_publish: auto },
+      });
+      if (error || !data) throw new Error("save failed");
+      return data;
+    },
+    onSuccess: () => queryClient.invalidateQueries({ queryKey: fcaKey(eventId) }),
+    onError: () => toast.error("Couldn’t change auto-publish"),
+  });
+}
+
 /** An aircraft's filed route (lat/lon anchors) — fetched on demand when clicked. */
 export function useAircraftRoute(callsign: string | null) {
   return useQuery({

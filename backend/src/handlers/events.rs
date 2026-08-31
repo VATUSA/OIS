@@ -25,9 +25,10 @@ use crate::{
         AddPackageItemRequest, AirportRateBody, AirportStatBody, CombinedStatBody,
         CreateGroundStopRequest, CreatePackageRequest, CreateTmiRequest, DccRequestBody,
         EventAvailabilityBody, EventBody, EventCaptureBody, EventDebriefBody, EventStatsBody,
-        FacilitySupportBody, FcaBody, KeyCountBody, TmiPackageBody, UpdateDccRequest,
-        UpdateEventCaptureRequest, UpdateEventDebriefRequest, UpsertAirportRateRequest,
-        UpsertFacilitySupportRequest, UpsertFcaRequest, UpsertProgramRequest,
+        FacilitySupportBody, FcaBody, KeyCountBody, SetFcaAutoRequest, TmiPackageBody,
+        UpdateDccRequest, UpdateEventCaptureRequest, UpdateEventDebriefRequest,
+        UpsertAirportRateRequest, UpsertFacilitySupportRequest, UpsertFcaRequest,
+        UpsertProgramRequest,
     },
     repos::{
         access as access_repo, ace as ace_repo, availability as availability_repo,
@@ -984,6 +985,79 @@ pub async fn delete_event_fca(
     let pool = state.db.as_ref().ok_or(ApiError::ServiceUnavailable)?;
     owned_event_fca(pool, id, &fca_id).await?;
     flow_repo::delete_fca(pool, &fca_id).await?;
+    Ok(Json(flow_repo::list_event_fcas(pool, id).await?))
+}
+
+#[utoipa::path(
+    post,
+    path = "/api/v1/events/{id}/fcas/{fca_id}/publish",
+    tag = "events",
+    params(
+        ("id" = i64, Path, description = "VATUSA event id"),
+        ("fca_id" = String, Path, description = "FCA id")
+    ),
+    responses((status = 200, body = Vec<FcaBody>), (status = 401), (status = 404), (status = 409))
+)]
+pub async fn publish_event_fca(
+    State(state): State<AppState>,
+    _permission: RequirePermission<EventsPlanUpdate>,
+    Path((id, fca_id)): Path<(i64, String)>,
+) -> Result<Json<Vec<FcaBody>>, ApiError> {
+    let pool = state.db.as_ref().ok_or(ApiError::ServiceUnavailable)?;
+    let fca = owned_event_fca(pool, id, &fca_id).await?;
+    if fca.event_status.as_deref() != Some("planned") {
+        return Err(ApiError::Conflict); // only a planned FCA can be published
+    }
+    flow_repo::mark_event_fca_published(pool, id, &fca_id).await?;
+    state.publish(crate::realtime::topic::FCA); // it's live on every map now
+    Ok(Json(flow_repo::list_event_fcas(pool, id).await?))
+}
+
+#[utoipa::path(
+    post,
+    path = "/api/v1/events/{id}/fcas/{fca_id}/archive",
+    tag = "events",
+    params(
+        ("id" = i64, Path, description = "VATUSA event id"),
+        ("fca_id" = String, Path, description = "FCA id")
+    ),
+    responses((status = 200, body = Vec<FcaBody>), (status = 401), (status = 404), (status = 409))
+)]
+pub async fn archive_event_fca(
+    State(state): State<AppState>,
+    _permission: RequirePermission<EventsPlanUpdate>,
+    Path((id, fca_id)): Path<(i64, String)>,
+) -> Result<Json<Vec<FcaBody>>, ApiError> {
+    let pool = state.db.as_ref().ok_or(ApiError::ServiceUnavailable)?;
+    let fca = owned_event_fca(pool, id, &fca_id).await?;
+    if !matches!(fca.event_status.as_deref(), Some("planned" | "published")) {
+        return Err(ApiError::Conflict); // already archived
+    }
+    flow_repo::mark_event_fca_archived(pool, id, &fca_id).await?;
+    state.publish(crate::realtime::topic::FCA); // archiving a published FCA removes it from live maps
+    Ok(Json(flow_repo::list_event_fcas(pool, id).await?))
+}
+
+#[utoipa::path(
+    put,
+    path = "/api/v1/events/{id}/fcas/{fca_id}/auto",
+    tag = "events",
+    params(
+        ("id" = i64, Path, description = "VATUSA event id"),
+        ("fca_id" = String, Path, description = "FCA id")
+    ),
+    request_body = SetFcaAutoRequest,
+    responses((status = 200, body = Vec<FcaBody>), (status = 401), (status = 404))
+)]
+pub async fn set_event_fca_auto(
+    State(state): State<AppState>,
+    _permission: RequirePermission<EventsPlanUpdate>,
+    Path((id, fca_id)): Path<(i64, String)>,
+    Json(payload): Json<SetFcaAutoRequest>,
+) -> Result<Json<Vec<FcaBody>>, ApiError> {
+    let pool = state.db.as_ref().ok_or(ApiError::ServiceUnavailable)?;
+    owned_event_fca(pool, id, &fca_id).await?;
+    flow_repo::set_event_fca_auto(pool, id, &fca_id, payload.auto_publish).await?;
     Ok(Json(flow_repo::list_event_fcas(pool, id).await?))
 }
 
