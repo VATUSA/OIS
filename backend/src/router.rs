@@ -214,6 +214,15 @@ pub fn build_router(state: AppState) -> Router {
             "/api/v1/events/{id}/packages/{package_id}/deactivate",
             post(events::deactivate_event_package),
         )
+        // Event-specific FCAs — planned in the event manager, invisible on live maps until published
+        .route(
+            "/api/v1/events/{id}/fcas",
+            get(events::list_event_fcas).post(events::create_event_fca),
+        )
+        .route(
+            "/api/v1/events/{id}/fcas/{fca_id}",
+            put(events::update_event_fca).delete(events::delete_event_fca),
+        )
         // Reusable per-airport runway configs (default AAR/ADR + wind rule) for event planning
         .route(
             "/api/v1/airport-configs/{icao}",

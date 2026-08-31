@@ -1110,6 +1110,12 @@ pub struct FcaBody {
     pub manual_seq: bool,
     pub updated_at: DateTime<Utc>,
     pub updated_by: Option<String>,
+    /// Event this FCA belongs to (null = an ordinary shared FCA visible on every map).
+    pub event_id: Option<i64>,
+    /// Event FCA lifecycle: planned | published | archived (null for shared FCAs).
+    pub event_status: Option<String>,
+    /// Whether an event FCA auto-publishes 30 min before the event starts.
+    pub auto_publish: bool,
 }
 
 #[derive(Debug, Deserialize, ToSchema)]

@@ -10,12 +10,17 @@ use crate::models::{FcaBody, UpsertFcaRequest, UpsertRouteRequest};
 
 const FCA_SELECT: &str = "select f.id, f.name, f.color, f.artcc, f.points, f.dests, \
     f.origins, f.fixes, f.scope, f.min_fl, f.max_fl, f.dir, f.mode, f.rate, f.mit, \
-    f.enabled, f.manual_order, f.manual_seq, f.updated_at, u.display_name as updated_by \
+    f.enabled, f.manual_order, f.manual_seq, f.updated_at, u.display_name as updated_by, \
+    f.event_id, f.event_status, f.auto_publish \
     from flow.fca f left join identity.users u on u.id = f.updated_by";
+
+/// Event FCAs are hidden from every live map and the metering engine until they're `published`;
+/// planned + archived ones are only ever seen in their event's builder ([`list_event_fcas`]).
+const NOT_HIDDEN_EVENT: &str = "(f.event_id is null or f.event_status = 'published')";
 
 pub async fn list_fcas(pool: &PgPool) -> Result<Vec<FcaBody>, ApiError> {
     sqlx::query_as::<_, FcaBody>(&format!(
-        "{FCA_SELECT} where f.deleted_at is null order by f.name"
+        "{FCA_SELECT} where f.deleted_at is null and {NOT_HIDDEN_EVENT} order by f.name"
     ))
     .fetch_all(pool)
     .await
@@ -27,9 +32,22 @@ pub async fn list_fcas(pool: &PgPool) -> Result<Vec<FcaBody>, ApiError> {
 pub async fn list_fcas_at(pool: &PgPool, at: DateTime<Utc>) -> Result<Vec<FcaBody>, ApiError> {
     sqlx::query_as::<_, FcaBody>(&format!(
         "{FCA_SELECT} where f.enabled and f.created_at <= $1 \
-           and (f.deleted_at is null or f.deleted_at > $1) order by f.name"
+           and (f.deleted_at is null or f.deleted_at > $1) and {NOT_HIDDEN_EVENT} order by f.name"
     ))
     .bind(at)
+    .fetch_all(pool)
+    .await
+    .map_err(|_| ApiError::Internal)
+}
+
+/// Every FCA belonging to one event — planned, published, and archived — for the event manager's
+/// builder. Unlike [`list_fcas`] this ignores the publish gate (that's the whole point of the builder).
+pub async fn list_event_fcas(pool: &PgPool, event_id: i64) -> Result<Vec<FcaBody>, ApiError> {
+    sqlx::query_as::<_, FcaBody>(&format!(
+        "{FCA_SELECT} where f.event_id = $1 and f.deleted_at is null \
+           order by f.event_status, f.name"
+    ))
+    .bind(event_id)
     .fetch_all(pool)
     .await
     .map_err(|_| ApiError::Internal)
@@ -82,6 +100,31 @@ pub async fn create_fca(
     // bind_fca sets $1..$16 (the 16 shared columns, $16 = actor → updated_by);
     // created_by reuses $16 in the SQL, so no extra bind is needed.
     let row = bind_fca(q, req, actor)
+        .fetch_one(pool)
+        .await
+        .map_err(|_| ApiError::Internal)?;
+    use sqlx::Row;
+    row.try_get::<String, _>("id")
+        .map_err(|_| ApiError::Internal)
+}
+
+/// Create an FCA owned by an event. Same columns as [`create_fca`], plus `event_id` and a starting
+/// `event_status = 'planned'` — so it's invisible on live maps until published.
+pub async fn create_event_fca(
+    pool: &PgPool,
+    event_id: i64,
+    req: &UpsertFcaRequest,
+    actor: &str,
+) -> Result<String, ApiError> {
+    let q = sqlx::query(
+        "insert into flow.fca
+             (name, color, artcc, points, dests, origins, fixes, scope, min_fl, max_fl,
+              dir, mode, rate, mit, enabled, updated_by, created_by, event_id, event_status)
+         values ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$16,$17,'planned')
+         returning id",
+    );
+    let row = bind_fca(q, req, actor)
+        .bind(event_id)
         .fetch_one(pool)
         .await
         .map_err(|_| ApiError::Internal)?;
