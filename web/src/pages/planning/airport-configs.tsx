@@ -42,6 +42,15 @@ function ConfigForm({
 }) {
   const [f, setF] = useState<UpsertAirportConfig>(initial);
   const set = (patch: Partial<UpsertAirportConfig>) => setF((p) => ({ ...p, ...patch }));
+  // The runways field is edited as free text — parsing on every keystroke would eat the spaces and
+  // commas you type between runways. Parse to the array only when saving.
+  const [runwaysText, setRunwaysText] = useState(() => (initial.landing_runways ?? []).join(", "));
+  const parseRunways = (s: string) =>
+    s
+      .split(/[,\s]+/)
+      .map((r) => r.trim().toUpperCase())
+      .filter(Boolean);
+  const save = () => onSave({ ...f, landing_runways: parseRunways(runwaysText) });
 
   return (
     <div className="flex flex-col gap-3 rounded-md border bg-muted/30 p-3">
@@ -71,10 +80,8 @@ function ConfigForm({
         <label className="col-span-2 flex flex-col gap-1 text-xs">
           <span className="text-muted-foreground">Landing runways</span>
           <Input
-            value={(f.landing_runways ?? []).join(", ")}
-            onChange={(e) =>
-              set({ landing_runways: e.target.value.split(/[,\s]+/).map((s) => s.trim().toUpperCase()).filter(Boolean) })
-            }
+            value={runwaysText}
+            onChange={(e) => setRunwaysText(e.target.value)}
             placeholder="26L, 27R, 28"
           />
         </label>
@@ -108,7 +115,7 @@ function ConfigForm({
           <Button variant="ghost" size="sm" onClick={onCancel}>
             Cancel
           </Button>
-          <Button size="sm" disabled={!f.name.trim() || pending} onClick={() => onSave(f)}>
+          <Button size="sm" disabled={!f.name.trim() || pending} onClick={save}>
             {editingId ? "Save" : "Add config"}
           </Button>
         </div>
