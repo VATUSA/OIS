@@ -309,16 +309,18 @@ export function FcaMapView({
     [draft],
   );
 
-  // ARTCC overview: every enabled FCA in the SELECTED ARTCC. All their matched traffic draws on the
-  // map at once, and the right panel stacks their strips. Requires a specific ARTCC (not "ALL").
+  // ARTCC overview: every enabled FCA — nationwide when "ALL", or scoped to the selected ARTCC. All
+  // their matched traffic draws on the map at once, and the right panel stacks their strips.
   const overviewFcas = useMemo(
     () =>
-      overview && artccFilter
-        ? (fcas.data ?? []).filter((f) => f.enabled && f.artcc === artccFilter && f.points.length >= 2)
+      overview
+        ? (fcas.data ?? []).filter(
+            (f) => f.enabled && f.points.length >= 2 && (!artccFilter || f.artcc === artccFilter),
+          )
         : [],
     [overview, artccFilter, fcas.data],
   );
-  const overviewActive = overview && !!artccFilter;
+  const overviewActive = overview;
   const overviewTraffic = useFcaTrafficMany(overviewFcas.map((f) => f.id));
   // A primitive signature so the group/callsign memos recompute only when the data (or set) changes.
   const overviewSig = overviewTraffic
@@ -355,7 +357,9 @@ export function FcaMapView({
   }, [overview, matchedGroups, selectedFca, fcaTraffic.data]);
   const aircraft = useMemo<NormAircraft[]>(
     () =>
-      (traffic.data ?? [])
+      // In overview mode only FCA-crossing traffic is shown (drawn as the tinted/numbered matched
+      // groups); the rest of the network is noise here, so drop it.
+      (overviewActive ? [] : traffic.data ?? [])
         .filter((a) => !matchedCallsigns.has(a.callsign))
         .map((a) => ({
           id: a.callsign,
@@ -373,7 +377,7 @@ export function FcaMapView({
           flightRules: a.flight_rules,
           filedAlt: a.filed_alt,
         })),
-    [traffic.data, matchedCallsigns],
+    [overviewActive, traffic.data, matchedCallsigns],
   );
 
   const mapFcas = useMemo<MapFca[]>(
@@ -413,13 +417,14 @@ export function FcaMapView({
     () => [...new Set((fcas.data ?? []).map((f) => f.artcc).filter(Boolean))].sort(),
     [fcas.data],
   );
-  // In overview mode, default to the first ARTCC that has FCAs so the map isn't blank on first load.
+  // Frame the map to the ARTCC selection in overview mode: a specific ARTCC's extent, or the whole
+  // CONUS for "ALL" (which stacks every FCA nationwide).
   useEffect(() => {
-    if (overview && !artccFilter && artccOptions.length) setArtccFilter(artccOptions[0]);
-  }, [overview, artccFilter, artccOptions]);
-  // On selecting an ARTCC in overview mode, zoom the map out to that ARTCC's extent.
-  useEffect(() => {
-    if (!overview || !artccFilter) return;
+    if (!overview) return;
+    if (!artccFilter) {
+      camera.home();
+      return;
+    }
     const feature = facilityFeature(artccFilter);
     const pts = feature ? facilityPoints(feature) : [];
     if (pts.length) camera.fitBounds(pts, { padding: 40, maxZoom: 7 });
@@ -826,10 +831,9 @@ export function FcaMapView({
 
       {overviewActive && !draft ? (
         <FcaOverviewPanel
-          artcc={artccFilter}
+          artcc={artccFilter || "ALL"}
           groups={overviewGroups}
           onFocusFlight={focusFlight}
-          onClose={() => setArtccFilter("")}
         />
       ) : (
         selectedFca &&
