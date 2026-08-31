@@ -214,6 +214,10 @@ pub fn build_router(state: AppState) -> Router {
             "/api/v1/events/{id}/packages/{package_id}/deactivate",
             post(events::deactivate_event_package),
         )
+        .route(
+            "/api/v1/events/{id}/packages/{package_id}/auto",
+            put(events::set_event_package_auto),
+        )
         // Event-specific FCAs — planned in the event manager, invisible on live maps until published
         .route(
             "/api/v1/events/{id}/fcas",

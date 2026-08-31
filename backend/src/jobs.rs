@@ -13,6 +13,7 @@ use crate::feed::nav::NavData;
 use crate::feed::nav_source;
 use crate::feed::winds::{self, Winds};
 use crate::realtime::{Events, WsEvent, topic};
+use crate::repos::events as events_repo;
 use crate::repos::flow as flow_repo;
 use crate::repos::stats as stats_repo;
 use crate::repos::tmu as tmu_repo;
@@ -295,6 +296,68 @@ pub fn spawn_event_fca_lifecycle(pool: PgPool, events: Events) {
                     tracing::info!(changed, "event FCA lifecycle pass");
                 }
                 Err(_) => tracing::warn!("event FCA lifecycle pass failed"),
+            }
+        }
+    });
+}
+
+/// Drive event TMI packages through their lifecycle: auto-activate draft + auto packages ~30 min
+/// before their event starts (materializing live TMU rows), and auto-deactivate (archive) activated
+/// ones when it ends. Acts as the package's `updated_by`. Nudges connected clients when anything
+/// changed. Runs every minute.
+pub fn spawn_event_package_lifecycle(pool: PgPool, events: Events) {
+    tokio::spawn(async move {
+        let mut ticker = tokio::time::interval(EVENT_FCA_INTERVAL);
+        loop {
+            ticker.tick().await;
+            let mut changed = 0u32;
+
+            // Auto-activate: draft + auto packages entering the 30-min pre-event window.
+            match events_repo::auto_due_packages(&pool).await {
+                Ok(due) => {
+                    for (package_id, event_id, actor) in due {
+                        match crate::handlers::events::activate_package(
+                            &pool,
+                            event_id,
+                            &package_id,
+                            &actor,
+                        )
+                        .await
+                        {
+                            Ok(()) => changed += 1,
+                            Err(_) => tracing::warn!(%package_id, "auto-activate package failed"),
+                        }
+                    }
+                }
+                Err(_) => tracing::warn!("auto-due package query failed"),
+            }
+
+            // Auto-archive: activated packages whose event has ended.
+            match events_repo::ended_activated_packages(&pool).await {
+                Ok(ended) => {
+                    for (package_id, _event_id, actor) in ended {
+                        match crate::handlers::events::deactivate_package(
+                            &pool,
+                            &package_id,
+                            &actor,
+                        )
+                        .await
+                        {
+                            Ok(()) => changed += 1,
+                            Err(_) => tracing::warn!(%package_id, "auto-archive package failed"),
+                        }
+                    }
+                }
+                Err(_) => tracing::warn!("ended-package query failed"),
+            }
+
+            if changed > 0 {
+                for t in [topic::PROGRAM, topic::TMI, topic::GROUND_STOP] {
+                    let _ = events.send(WsEvent {
+                        topic: t.to_string(),
+                    });
+                }
+                tracing::info!(changed, "event package lifecycle pass");
             }
         }
     });

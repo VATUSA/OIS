@@ -48,8 +48,9 @@ pub async fn run() -> color_eyre::Result<()> {
         feed::stats::spawn_collector(pool.clone(), state.feed.clone(), state.airspace.clone());
         jobs::spawn_stats_compaction(pool.clone());
         jobs::spawn_capture_scheduler(pool.clone());
-        // Event FCAs: auto-publish 30 min before start, auto-archive at end (nudges the maps).
+        // Event FCAs + TMI packages: auto-publish 30 min before start, auto-archive at end.
         jobs::spawn_event_fca_lifecycle(pool.clone(), state.events.clone());
+        jobs::spawn_event_package_lifecycle(pool.clone(), state.events.clone());
         // VATUSA member sync: register the roster-change webhook and periodically reconcile.
         feed::vatusa::spawn_register_webhooks(pool.clone());
         feed::vatusa::spawn_reconcile(pool);

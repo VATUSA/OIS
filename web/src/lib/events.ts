@@ -419,6 +419,24 @@ export function useDeactivatePackage(eventId: number) {
   });
 }
 
+/** Toggle whether a package auto-activates 30 min before the event starts. */
+export function useSetPackageAuto(eventId: number) {
+  const queryClient = useQueryClient();
+  const toast = useToast();
+  return useMutation({
+    mutationFn: async ({ packageId, auto }: { packageId: string; auto: boolean }) => {
+      const { data, error } = await ois.PUT("/api/v1/events/{id}/packages/{package_id}/auto", {
+        params: { path: { id: eventId, package_id: packageId } },
+        body: { auto_publish: auto },
+      });
+      if (error || !data) throw new Error("save failed");
+      return data;
+    },
+    onSuccess: () => queryClient.invalidateQueries({ queryKey: ["event-packages", eventId] }),
+    onError: () => toast.error("Couldn’t change auto-publish"),
+  });
+}
+
 /** VATUSA's HTML/BBCode event blurb → plain text (safe to render, no markup). */
 export function eventBodyText(body: string): string {
   return body

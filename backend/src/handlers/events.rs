@@ -710,14 +710,27 @@ pub async fn activate_event_package(
 ) -> Result<Json<Vec<TmiPackageBody>>, ApiError> {
     let user = current_user.as_ref().ok_or(ApiError::Unauthorized)?;
     let pool = state.db.as_ref().ok_or(ApiError::ServiceUnavailable)?;
-
     if package_status(pool, id, &package_id).await? != "draft" {
         return Err(ApiError::Conflict); // already activated
     }
-    let event = events_repo::get(pool, id)
+    activate_package(pool, id, &package_id, &user.id).await?;
+    Ok(Json(events_repo::list_packages(pool, id).await?))
+}
+
+/// Materialize a draft package's items into the live TMU tables (programs/restrictions/ground stops),
+/// recording each item's `live_ref`, then mark the package activated. Shared by the manual Activate
+/// handler and the auto-publish scheduler; `actor` is a real user id (stored as created_by/updated_by).
+/// Assumes the package is currently a draft.
+pub(crate) async fn activate_package(
+    pool: &sqlx::PgPool,
+    event_id: i64,
+    package_id: &str,
+    actor: &str,
+) -> Result<(), ApiError> {
+    let event = events_repo::get(pool, event_id)
         .await?
         .ok_or(ApiError::NotFound)?;
-    let items = events_repo::list_package_items(pool, &package_id).await?;
+    let items = events_repo::list_package_items(pool, package_id).await?;
 
     // A published restriction posts to Discord like any other; resolve the channel once (None ⇒ skip).
     let tmu_channel = integration_repo::channel_id(pool, crate::handlers::tmu::TMU_CHANNEL).await?;
@@ -741,7 +754,7 @@ pub async fn activate_event_package(
                     // planned programs auto-expire an hour after the event ends
                     active_until: Some(event.end_time),
                 };
-                tmu_repo::upsert_program(pool, &p.icao, &req, &[], &user.id).await?;
+                tmu_repo::upsert_program(pool, &p.icao, &req, &[], actor).await?;
                 // Programs are keyed by ICAO; that's the handle for later cleanup.
                 p.icao
             }
@@ -756,9 +769,9 @@ pub async fn activate_event_package(
                     stop_time: r.stop_time,
                 };
                 // Activation goes live: create then publish so the restriction is active.
-                let tmi_id = tmu_repo::create_tmi(pool, &req, &user.id).await?;
+                let tmi_id = tmu_repo::create_tmi(pool, &req, actor).await?;
                 let mut tx = pool.begin().await.map_err(|_| ApiError::Internal)?;
-                let tmi = tmu_repo::publish_tmi(&mut tx, &tmi_id, &user.id).await?;
+                let tmi = tmu_repo::publish_tmi(&mut tx, &tmi_id, actor).await?;
                 if let (Some(tmi), Some(channel_id)) = (tmi, tmu_channel.clone()) {
                     let job = serde_json::json!({
                         "channel_id": channel_id,
@@ -791,9 +804,9 @@ pub async fn activate_event_package(
                     until: g.until.clone(),
                 };
                 let gs_id =
-                    tmu_repo::create_ground_stop(pool, &req, &scope, g.until.as_deref(), &user.id)
+                    tmu_repo::create_ground_stop(pool, &req, &scope, g.until.as_deref(), actor)
                         .await?;
-                tmu_repo::publish_ground_stop(pool, &gs_id, &user.id).await?;
+                tmu_repo::publish_ground_stop(pool, &gs_id, actor).await?;
                 gs_id
             }
             _ => continue,
@@ -801,8 +814,8 @@ pub async fn activate_event_package(
         events_repo::set_item_live_ref(pool, &item.id, &live_ref).await?;
     }
 
-    events_repo::mark_package_activated(pool, &package_id, &user.id).await?;
-    Ok(Json(events_repo::list_packages(pool, id).await?))
+    events_repo::mark_package_activated(pool, package_id, actor).await?;
+    Ok(())
 }
 
 #[utoipa::path(
@@ -823,14 +836,22 @@ pub async fn deactivate_event_package(
 ) -> Result<Json<Vec<TmiPackageBody>>, ApiError> {
     let user = current_user.as_ref().ok_or(ApiError::Unauthorized)?;
     let pool = state.db.as_ref().ok_or(ApiError::ServiceUnavailable)?;
-
     if package_status(pool, id, &package_id).await? != "activated" {
         return Err(ApiError::Conflict); // only an activated package can be deactivated
     }
+    deactivate_package(pool, &package_id, &user.id).await?;
+    Ok(Json(events_repo::list_packages(pool, id).await?))
+}
 
-    // Cancel exactly the live rows this package created (best-effort — a row already cleared
-    // manually or auto-expired just returns false), then archive the package.
-    for item in events_repo::list_package_item_refs(pool, &package_id).await? {
+/// Cancel exactly the live rows a package created (best-effort — a row already cleared manually or
+/// auto-expired just returns false), then archive the package. Shared by the manual Deactivate handler
+/// and the auto-archive scheduler. Assumes the package is currently activated.
+pub(crate) async fn deactivate_package(
+    pool: &sqlx::PgPool,
+    package_id: &str,
+    actor: &str,
+) -> Result<(), ApiError> {
+    for item in events_repo::list_package_item_refs(pool, package_id).await? {
         let Some(reference) = item.live_ref.as_deref() else {
             continue;
         };
@@ -847,8 +868,34 @@ pub async fn deactivate_event_package(
             _ => {}
         }
     }
+    events_repo::mark_package_archived(pool, package_id, actor).await?;
+    Ok(())
+}
 
-    events_repo::mark_package_archived(pool, &package_id, &user.id).await?;
+#[utoipa::path(
+    put,
+    path = "/api/v1/events/{id}/packages/{package_id}/auto",
+    tag = "events",
+    params(
+        ("id" = i64, Path, description = "VATUSA event id"),
+        ("package_id" = String, Path, description = "Package id")
+    ),
+    request_body = SetFcaAutoRequest,
+    responses((status = 200, body = Vec<TmiPackageBody>), (status = 401), (status = 404))
+)]
+pub async fn set_event_package_auto(
+    State(state): State<AppState>,
+    _permission: RequirePermission<EventsPlanUpdate>,
+    Path((id, package_id)): Path<(i64, String)>,
+    Json(payload): Json<SetFcaAutoRequest>,
+) -> Result<Json<Vec<TmiPackageBody>>, ApiError> {
+    let pool = state.db.as_ref().ok_or(ApiError::ServiceUnavailable)?;
+    // Ownership: the package must belong to this event.
+    match events_repo::get_package_owner(pool, &package_id).await? {
+        Some((event_id, _)) if event_id == id => {}
+        _ => return Err(ApiError::NotFound),
+    }
+    events_repo::set_package_auto(pool, &package_id, payload.auto_publish).await?;
     Ok(Json(events_repo::list_packages(pool, id).await?))
 }
 
