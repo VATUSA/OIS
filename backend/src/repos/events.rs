@@ -283,14 +283,15 @@ struct PackageRow {
     id: String,
     name: String,
     status: String,
+    auto_publish: bool,
     activated_at: Option<DateTime<Utc>>,
     archived_at: Option<DateTime<Utc>>,
     updated_at: DateTime<Utc>,
     updated_by: Option<String>,
 }
 
-const PACKAGE_SELECT: &str = "select p.id, p.name, p.status, p.activated_at, p.archived_at, p.updated_at, \
-    u.display_name as updated_by \
+const PACKAGE_SELECT: &str = "select p.id, p.name, p.status, p.auto_publish, p.activated_at, \
+    p.archived_at, p.updated_at, u.display_name as updated_by \
     from events.tmi_package p left join identity.users u on u.id = p.updated_by";
 
 /// A package item plus the live-row reference recorded at activation (for deactivation cleanup).
@@ -332,6 +333,7 @@ pub async fn list_packages(pool: &PgPool, event_id: i64) -> Result<Vec<TmiPackag
             id: r.id,
             name: r.name,
             status: r.status,
+            auto_publish: r.auto_publish,
             activated_at: r.activated_at,
             archived_at: r.archived_at,
             updated_at: r.updated_at,
@@ -487,6 +489,50 @@ pub async fn mark_package_archived(
         .map_err(|_| ApiError::Internal)?;
     tx.commit().await.map_err(|_| ApiError::Internal)?;
     Ok(())
+}
+
+/// Toggle a package's auto-publish flag.
+pub async fn set_package_auto(
+    pool: &PgPool,
+    package_id: &str,
+    auto: bool,
+) -> Result<bool, ApiError> {
+    let r = sqlx::query("update events.tmi_package set auto_publish = $2 where id = $1")
+        .bind(package_id)
+        .bind(auto)
+        .execute(pool)
+        .await
+        .map_err(|_| ApiError::Internal)?;
+    Ok(r.rows_affected() > 0)
+}
+
+/// `(package_id, event_id, actor)` for a package the scheduler should act on. `actor` is the package's
+/// `updated_by` (the human who last touched it); rows with no attributable actor are skipped.
+pub type SchedulablePackage = (String, i64, String);
+
+/// Draft + auto packages whose event is within 30 min of starting (and hasn't ended) — auto-activate.
+pub async fn auto_due_packages(pool: &PgPool) -> Result<Vec<SchedulablePackage>, ApiError> {
+    sqlx::query_as::<_, SchedulablePackage>(
+        "select p.id, p.event_id, p.updated_by from events.tmi_package p \
+         join events.event e on e.id = p.event_id \
+         where p.status = 'draft' and p.auto_publish and p.updated_by is not null \
+           and now() >= e.start_time - interval '30 minutes' and now() < e.end_time",
+    )
+    .fetch_all(pool)
+    .await
+    .map_err(|_| ApiError::Internal)
+}
+
+/// Activated packages whose event has ended — auto-deactivate (cancel live rows) + archive.
+pub async fn ended_activated_packages(pool: &PgPool) -> Result<Vec<SchedulablePackage>, ApiError> {
+    sqlx::query_as::<_, SchedulablePackage>(
+        "select p.id, p.event_id, p.updated_by from events.tmi_package p \
+         join events.event e on e.id = p.event_id \
+         where p.status = 'activated' and p.updated_by is not null and now() >= e.end_time",
+    )
+    .fetch_all(pool)
+    .await
+    .map_err(|_| ApiError::Internal)
 }
 
 /// The event's debrief notes + who last edited them (display name), if written.

@@ -556,6 +556,8 @@ pub struct TmiPackageBody {
     pub name: String,
     /// draft | activated | archived
     pub status: String,
+    /// Whether this package auto-activates 30 min before the event starts.
+    pub auto_publish: bool,
     pub activated_at: Option<DateTime<Utc>>,
     /// When the package was deactivated (its live rows cancelled); null unless archived.
     pub archived_at: Option<DateTime<Utc>>,

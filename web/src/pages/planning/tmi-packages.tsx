@@ -1,5 +1,5 @@
 import {useState} from "react";
-import {Badge, Button, Card, CardContent, ConfirmButton, Input, useConfirm} from "@ois/ui";
+import {Badge, Button, Card, CardContent, ConfirmButton, Input, Switch, useConfirm} from "@ois/ui";
 import {Archive, Gauge, Layers, Play, Plus, X} from "lucide-react";
 
 import {useMe} from "@/lib/auth";
@@ -15,6 +15,7 @@ import {
   useDeletePackage,
   useDeletePackageItem,
   usePackages,
+  useSetPackageAuto,
 } from "@/lib/events";
 import {hasPermission} from "@/lib/permissions";
 import {formatZulu, parseZulu} from "@/lib/time";
@@ -198,6 +199,7 @@ function PackageCard({
   const addItem = useAddPackageItem(eventId);
   const activate = useActivatePackage(eventId);
   const deactivate = useDeactivatePackage(eventId);
+  const setAuto = useSetPackageAuto(eventId);
   const rates = useAirportRates(eventId);
   const confirm = useConfirm();
   const draft = pkg.status === "draft";
@@ -253,6 +255,19 @@ function PackageCard({
                 <Gauge />
                 Programs from rates
               </Button>
+            )}
+            {draft && (
+              <label
+                className="flex items-center gap-1.5 text-xs text-muted-foreground"
+                title="Automatically activate this package 30 minutes before the event starts"
+              >
+                <Switch
+                  checked={pkg.auto_publish}
+                  onCheckedChange={(v) => setAuto.mutate({ packageId: pkg.id, auto: v })}
+                  className="scale-[0.68]"
+                />
+                auto
+              </label>
             )}
             {draft && (
               <Button

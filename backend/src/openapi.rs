@@ -71,6 +71,7 @@ use utoipa::OpenApi;
         crate::handlers::events::delete_event_package_item,
         crate::handlers::events::activate_event_package,
         crate::handlers::events::deactivate_event_package,
+        crate::handlers::events::set_event_package_auto,
         crate::handlers::events::list_event_fcas,
         crate::handlers::events::create_event_fca,
         crate::handlers::events::update_event_fca,
