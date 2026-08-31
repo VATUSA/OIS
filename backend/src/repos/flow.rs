@@ -209,6 +209,35 @@ pub async fn set_event_fca_auto(
     Ok(r.rows_affected() > 0)
 }
 
+/// One automatic-lifecycle pass (run periodically by the scheduler):
+///   * publish planned + `auto_publish` FCAs once their event is within 30 min of starting (and hasn't
+///     ended yet — so a missed window still recovers on the next tick);
+///   * archive any still-live (planned/published) FCA whose event has ended.
+///
+/// Returns the number of rows changed, so the caller can skip the realtime nudge when nothing moved.
+pub async fn run_event_fca_lifecycle(pool: &PgPool) -> Result<u64, ApiError> {
+    let published = sqlx::query(
+        "update flow.fca f set event_status = 'published', published_at = now() \
+         from events.event e \
+         where f.event_id = e.id and f.event_status = 'planned' and f.auto_publish \
+           and now() >= e.start_time - interval '30 minutes' and now() < e.end_time \
+           and f.deleted_at is null",
+    )
+    .execute(pool)
+    .await
+    .map_err(|_| ApiError::Internal)?;
+    let archived = sqlx::query(
+        "update flow.fca f set event_status = 'archived', archived_at = now() \
+         from events.event e \
+         where f.event_id = e.id and f.event_status in ('planned', 'published') \
+           and now() >= e.end_time and f.deleted_at is null",
+    )
+    .execute(pool)
+    .await
+    .map_err(|_| ApiError::Internal)?;
+    Ok(published.rows_affected() + archived.rows_affected())
+}
+
 pub async fn delete_fca(pool: &PgPool, id: &str) -> Result<bool, ApiError> {
     // Soft-delete so the historical dashboard can still show the FCA during the window it existed.
     let result =

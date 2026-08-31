@@ -10,7 +10,7 @@ import {API_BASE} from "./api";
  */
 const TOPIC_KEYS: Record<string, string[][]> = {
   "flow.release": [["idst"], ["fca-traffic"], ["departures"]],
-  "flow.fca": [["fcas"], ["fca-traffic"], ["fca-counts"], ["idst"]],
+  "flow.fca": [["fcas"], ["fca-traffic"], ["fca-counts"], ["idst"], ["event-fcas"]],
   "tmu.gdp": [["gdps"], ["gdp-board"], ["departures"]],
   "tmu.tmi": [["tmis"]],
   "tmu.groundstop": [["ground-stops"], ["departures"]],

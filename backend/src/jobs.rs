@@ -12,10 +12,15 @@ use crate::feed::FeedState;
 use crate::feed::nav::NavData;
 use crate::feed::nav_source;
 use crate::feed::winds::{self, Winds};
+use crate::realtime::{Events, WsEvent, topic};
+use crate::repos::flow as flow_repo;
 use crate::repos::stats as stats_repo;
 use crate::repos::tmu as tmu_repo;
 
 const CLEANUP_INTERVAL: Duration = Duration::from_secs(15 * 60);
+
+/// How often to run the event-FCA auto-publish / auto-archive pass.
+const EVENT_FCA_INTERVAL: Duration = Duration::from_secs(60);
 
 /// How often to age the stats position table.
 const STATS_COMPACTION_INTERVAL: Duration = Duration::from_secs(60 * 60);
@@ -268,6 +273,28 @@ pub fn spawn_cleanup(pool: PgPool) {
                 }
                 Ok(_) => {}
                 Err(_) => tracing::warn!("tmu cleanup pass failed"),
+            }
+        }
+    });
+}
+
+/// Drive event FCAs through their lifecycle: publish `planned` + auto ones ~30 min before their event
+/// starts, and archive still-live ones when it ends. Nudges connected maps (`flow.fca`) whenever
+/// anything changed. Runs every minute.
+pub fn spawn_event_fca_lifecycle(pool: PgPool, events: Events) {
+    tokio::spawn(async move {
+        let mut ticker = tokio::time::interval(EVENT_FCA_INTERVAL);
+        loop {
+            ticker.tick().await;
+            match flow_repo::run_event_fca_lifecycle(&pool).await {
+                Ok(0) => {}
+                Ok(changed) => {
+                    let _ = events.send(WsEvent {
+                        topic: topic::FCA.to_string(),
+                    });
+                    tracing::info!(changed, "event FCA lifecycle pass");
+                }
+                Err(_) => tracing::warn!("event FCA lifecycle pass failed"),
             }
         }
     });
