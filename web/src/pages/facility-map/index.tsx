@@ -313,6 +313,7 @@ export function FacilityMapView({
         camera={camera}
         boundaries={boundaries}
         boundaryEmphasis={!!feature}
+        atcBoundaries={ALL_BOUNDARIES}
         aircraft={aircraft}
         getAircraftColor={getAircraftColor}
         atc={showAtc ? ((atc.data as AtcData | undefined) ?? null) : null}
