@@ -735,7 +735,10 @@ mod tests {
         }
         // And it landed just past the last occupant, not somewhere absurd.
         let last = base + 49.0 * req;
-        assert!(got >= last && got <= last + 2.0 * req, "unexpected slot {got}");
+        assert!(
+            got >= last && got <= last + 2.0 * req,
+            "unexpected slot {got}"
+        );
     }
 
     fn base_program() -> ProgramInputs {
