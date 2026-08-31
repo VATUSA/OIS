@@ -92,11 +92,23 @@ export function useRefreshData() {
 }
 
 /** All FCAs (shared across controllers). */
-export function useFcas() {
+/** React Query key for an FCA list — the shared set, or one event's planned/published/archived set. */
+const fcaKey = (eventId?: number) => (eventId == null ? ["fcas"] : ["event-fcas", eventId]);
+
+/** FCAs. With `eventId` this is the event manager's builder set (planned + published + archived,
+ *  from `/events/{id}/fcas`); otherwise the shared live set (or a historical snapshot). */
+export function useFcas(eventId?: number) {
   const at = useHistoricalAt();
   return useQuery({
-    queryKey: at == null ? ["fcas"] : ["hist-fcas", at],
+    queryKey: eventId != null ? fcaKey(eventId) : at == null ? ["fcas"] : ["hist-fcas", at],
     queryFn: async () => {
+      if (eventId != null) {
+        const { data, error } = await ois.GET("/api/v1/events/{id}/fcas", {
+          params: { path: { id: eventId } },
+        });
+        if (error || !data) throw new Error("failed to load event FCAs");
+        return data;
+      }
       if (at != null) {
         const { data, error } = await ois.GET("/api/v1/stats/hist/fcas", {
           params: { query: { at } },
@@ -108,33 +120,49 @@ export function useFcas() {
       if (error || !data) throw new Error("failed to load FCAs");
       return data;
     },
-    staleTime: at == null ? undefined : Infinity,
-    placeholderData: at == null ? undefined : keepPreviousData,
+    staleTime: eventId != null || at == null ? undefined : Infinity,
+    placeholderData: eventId == null && at != null ? keepPreviousData : undefined,
   });
 }
 
-export function useCreateFca() {
+export function useCreateFca(eventId?: number) {
   const queryClient = useQueryClient();
   const toast = useToast();
   return useMutation({
     mutationFn: async (body: UpsertFca) => {
+      if (eventId != null) {
+        const { data, error } = await ois.POST("/api/v1/events/{id}/fcas", {
+          params: { path: { id: eventId } },
+          body,
+        });
+        if (error || !data) throw new Error("create failed");
+        return data;
+      }
       const { data, error } = await ois.POST("/api/v1/flow/fcas", { body });
       if (error || !data) throw new Error("create failed");
       return data;
     },
     onSuccess: () => {
-      queryClient.invalidateQueries({ queryKey: ["fcas"] });
+      queryClient.invalidateQueries({ queryKey: fcaKey(eventId) });
       toast.success("FCA created");
     },
     onError: () => toast.error("Couldn’t create the FCA"),
   });
 }
 
-export function useUpdateFca() {
+export function useUpdateFca(eventId?: number) {
   const queryClient = useQueryClient();
   const toast = useToast();
   return useMutation({
     mutationFn: async ({ id, body }: { id: string; body: UpsertFca }) => {
+      if (eventId != null) {
+        const { data, error } = await ois.PUT("/api/v1/events/{id}/fcas/{fca_id}", {
+          params: { path: { id: eventId, fca_id: id } },
+          body,
+        });
+        if (error || !data) throw new Error("save failed");
+        return data;
+      }
       const { data, error } = await ois.PUT("/api/v1/flow/fcas/{id}", {
         params: { path: { id } },
         body,
@@ -143,24 +171,31 @@ export function useUpdateFca() {
       return data;
     },
     onSuccess: () => {
-      queryClient.invalidateQueries({ queryKey: ["fcas"] });
+      queryClient.invalidateQueries({ queryKey: fcaKey(eventId) });
     },
     onError: () => toast.error("Couldn’t save the FCA"),
   });
 }
 
-export function useDeleteFca() {
+export function useDeleteFca(eventId?: number) {
   const queryClient = useQueryClient();
   const toast = useToast();
   return useMutation({
     mutationFn: async (id: string) => {
+      if (eventId != null) {
+        const { error } = await ois.DELETE("/api/v1/events/{id}/fcas/{fca_id}", {
+          params: { path: { id: eventId, fca_id: id } },
+        });
+        if (error) throw new Error("delete failed");
+        return;
+      }
       const { error } = await ois.DELETE("/api/v1/flow/fcas/{id}", {
         params: { path: { id } },
       });
       if (error) throw new Error("delete failed");
     },
     onSuccess: () => {
-      queryClient.invalidateQueries({ queryKey: ["fcas"] });
+      queryClient.invalidateQueries({ queryKey: fcaKey(eventId) });
       toast.success("FCA deleted");
     },
     onError: () => toast.error("Couldn’t delete the FCA"),

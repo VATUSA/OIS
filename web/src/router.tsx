@@ -24,6 +24,7 @@ import {SharedBoardPage} from "@/pages/dashboards/shared";
 import {TmuPage} from "@/pages/tmu";
 import {PlanningEventsPage} from "@/pages/planning/events";
 import {EventPlanningPage} from "@/pages/planning/event";
+import {EventFcaBuilderPage} from "@/pages/planning/event-fcas";
 import {AirportConfigsPage} from "@/pages/planning/airport-configs";
 import {StatsPage} from "@/pages/stats";
 import {StatsFlightPage} from "@/pages/stats/flight";
@@ -334,6 +335,13 @@ const planningEventRoute = createRoute({
   component: EventPlanningPage,
 });
 
+const planningEventFcasRoute = createRoute({
+  getParentRoute: () => planningRoute,
+  path: "events/$eventId/fcas",
+  component: EventFcaBuilderPage,
+  staticData: { layout: "full" },
+});
+
 // --- Historical (persisted network statistics, replay + dashboard) ---
 
 const statsRoute = createRoute({
@@ -484,6 +492,7 @@ const routeTree = rootRoute.addChildren([
     planningEventsRoute,
     planningAirportConfigsRoute,
     planningEventRoute,
+    planningEventFcasRoute,
   ]),
   statsRoute.addChildren([statsIndexRoute, statsFlightRoute, statsReplayRoute, statsDashboardRoute]),
   adminRoute.addChildren([

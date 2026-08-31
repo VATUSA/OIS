@@ -14,13 +14,15 @@ import {AirportRatesSection} from "@/pages/planning/airport-rates";
 import {AceSection} from "@/pages/planning/ace";
 import {AvailabilitySection} from "@/pages/planning/availability";
 import {TmiPackagesSection} from "@/pages/planning/tmi-packages";
+import {EventFcasSection} from "@/pages/planning/event-fcas";
 import {EventStatsSection} from "@/pages/planning/event-stats";
 
-type TabId = "airports" | "facility" | "tmi" | "ace" | "availability" | "stats";
+type TabId = "airports" | "facility" | "tmi" | "fcas" | "ace" | "availability" | "stats";
 const TABS: { id: TabId; label: string }[] = [
   { id: "airports", label: "Airports & rates" },
   { id: "facility", label: "Facility support" },
   { id: "tmi", label: "TMI packages" },
+  { id: "fcas", label: "FCAs" },
   { id: "ace", label: "ACE" },
   { id: "availability", label: "Availability" },
   { id: "stats", label: "Stats & debrief" },
@@ -195,6 +197,7 @@ export function EventPlanningPage() {
         )}
         {tab === "facility" && <FacilitySupportSection eventId={id} />}
         {tab === "tmi" && <TmiPackagesSection eventId={id} />}
+        {tab === "fcas" && <EventFcasSection eventId={id} />}
         {tab === "ace" && (
           <AceSection eventId={id} eventStart={e.start_time} eventEnd={e.end_time} />
         )}
