@@ -25,14 +25,14 @@ use crate::{
         AddPackageItemRequest, AirportRateBody, AirportStatBody, CombinedStatBody,
         CreateGroundStopRequest, CreatePackageRequest, CreateTmiRequest, DccRequestBody,
         EventAvailabilityBody, EventBody, EventCaptureBody, EventDebriefBody, EventStatsBody,
-        FacilitySupportBody, KeyCountBody, TmiPackageBody, UpdateDccRequest,
+        FacilitySupportBody, FcaBody, KeyCountBody, TmiPackageBody, UpdateDccRequest,
         UpdateEventCaptureRequest, UpdateEventDebriefRequest, UpsertAirportRateRequest,
-        UpsertFacilitySupportRequest, UpsertProgramRequest,
+        UpsertFacilitySupportRequest, UpsertFcaRequest, UpsertProgramRequest,
     },
     repos::{
         access as access_repo, ace as ace_repo, availability as availability_repo,
-        events as events_repo, integration as integration_repo, stats as stats_repo,
-        tmu as tmu_repo,
+        events as events_repo, flow as flow_repo, integration as integration_repo,
+        stats as stats_repo, tmu as tmu_repo,
     },
     state::AppState,
 };
@@ -875,6 +875,116 @@ async fn capture_body(
         capture_end: cap.and_then(|c| c.end_time),
         can_edit,
     })
+}
+
+// --- Event-specific FCAs (planned in the event manager; stored in flow.fca with an event_id) ---
+
+/// Fetch an FCA and confirm it belongs to `event_id` — 404 otherwise, so one event can't touch
+/// another's (or a shared) FCA through these routes.
+async fn owned_event_fca(
+    pool: &sqlx::PgPool,
+    event_id: i64,
+    fca_id: &str,
+) -> Result<FcaBody, ApiError> {
+    let fca = flow_repo::get_fca(pool, fca_id)
+        .await?
+        .ok_or(ApiError::NotFound)?;
+    if fca.event_id != Some(event_id) {
+        return Err(ApiError::NotFound);
+    }
+    Ok(fca)
+}
+
+#[utoipa::path(
+    get,
+    path = "/api/v1/events/{id}/fcas",
+    tag = "events",
+    params(("id" = i64, Path, description = "VATUSA event id")),
+    responses((status = 200, body = Vec<FcaBody>), (status = 401), (status = 404))
+)]
+pub async fn list_event_fcas(
+    State(state): State<AppState>,
+    _permission: RequirePermission<EventsPlanRead>,
+    Path(id): Path<i64>,
+) -> Result<Json<Vec<FcaBody>>, ApiError> {
+    let pool = state.db.as_ref().ok_or(ApiError::ServiceUnavailable)?;
+    Ok(Json(flow_repo::list_event_fcas(pool, id).await?))
+}
+
+#[utoipa::path(
+    post,
+    path = "/api/v1/events/{id}/fcas",
+    tag = "events",
+    params(("id" = i64, Path, description = "VATUSA event id")),
+    request_body = UpsertFcaRequest,
+    responses((status = 200, body = Vec<FcaBody>), (status = 400), (status = 401), (status = 404))
+)]
+pub async fn create_event_fca(
+    State(state): State<AppState>,
+    _permission: RequirePermission<EventsPlanUpdate>,
+    Extension(current_user): Extension<Option<CurrentUser>>,
+    Path(id): Path<i64>,
+    Json(payload): Json<UpsertFcaRequest>,
+) -> Result<Json<Vec<FcaBody>>, ApiError> {
+    let user = current_user.as_ref().ok_or(ApiError::Unauthorized)?;
+    let pool = state.db.as_ref().ok_or(ApiError::ServiceUnavailable)?;
+    if payload.name.trim().is_empty() || payload.points.len() < 2 {
+        return Err(ApiError::BadRequest);
+    }
+    if events_repo::get(pool, id).await?.is_none() {
+        return Err(ApiError::NotFound);
+    }
+    flow_repo::create_event_fca(pool, id, &payload, &user.id).await?;
+    Ok(Json(flow_repo::list_event_fcas(pool, id).await?))
+}
+
+#[utoipa::path(
+    put,
+    path = "/api/v1/events/{id}/fcas/{fca_id}",
+    tag = "events",
+    params(
+        ("id" = i64, Path, description = "VATUSA event id"),
+        ("fca_id" = String, Path, description = "FCA id")
+    ),
+    request_body = UpsertFcaRequest,
+    responses((status = 200, body = Vec<FcaBody>), (status = 400), (status = 401), (status = 404))
+)]
+pub async fn update_event_fca(
+    State(state): State<AppState>,
+    _permission: RequirePermission<EventsPlanUpdate>,
+    Extension(current_user): Extension<Option<CurrentUser>>,
+    Path((id, fca_id)): Path<(i64, String)>,
+    Json(payload): Json<UpsertFcaRequest>,
+) -> Result<Json<Vec<FcaBody>>, ApiError> {
+    let user = current_user.as_ref().ok_or(ApiError::Unauthorized)?;
+    let pool = state.db.as_ref().ok_or(ApiError::ServiceUnavailable)?;
+    if payload.name.trim().is_empty() || payload.points.len() < 2 {
+        return Err(ApiError::BadRequest);
+    }
+    owned_event_fca(pool, id, &fca_id).await?;
+    flow_repo::update_fca(pool, &fca_id, &payload, &user.id).await?;
+    Ok(Json(flow_repo::list_event_fcas(pool, id).await?))
+}
+
+#[utoipa::path(
+    delete,
+    path = "/api/v1/events/{id}/fcas/{fca_id}",
+    tag = "events",
+    params(
+        ("id" = i64, Path, description = "VATUSA event id"),
+        ("fca_id" = String, Path, description = "FCA id")
+    ),
+    responses((status = 200, body = Vec<FcaBody>), (status = 401), (status = 404))
+)]
+pub async fn delete_event_fca(
+    State(state): State<AppState>,
+    _permission: RequirePermission<EventsPlanUpdate>,
+    Path((id, fca_id)): Path<(i64, String)>,
+) -> Result<Json<Vec<FcaBody>>, ApiError> {
+    let pool = state.db.as_ref().ok_or(ApiError::ServiceUnavailable)?;
+    owned_event_fca(pool, id, &fca_id).await?;
+    flow_repo::delete_fca(pool, &fca_id).await?;
+    Ok(Json(flow_repo::list_event_fcas(pool, id).await?))
 }
 
 #[utoipa::path(
