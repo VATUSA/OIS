@@ -43,6 +43,9 @@ export interface TrafficMapProps {
   boundaries?: GeoJSON.FeatureCollection;
   /** Draw the boundary bolder + lightly filled (facility map's single-facility focus). */
   boundaryEmphasis?: boolean;
+  /** Boundary set to shade online ARTCC centers against. Defaults to `boundaries`; pass the full
+   *  national set when `boundaries` is narrowed to one facility, so every online center still shades. */
+  atcBoundaries?: GeoJSON.FeatureCollection;
   trails?: PathDatum[];
   routeOverlays?: PathDatum[];
   rings?: { data: NormAircraft[]; nm: number } | null;
@@ -96,6 +99,7 @@ export function TrafficMap({
   labels,
   boundaries,
   boundaryEmphasis,
+  atcBoundaries,
   trails,
   routeOverlays,
   rings,
@@ -147,9 +151,11 @@ export function TrafficMap({
   const anyLabel =
     !!labels && (labels.callsign || labels.type || labels.alt || labels.speed);
 
+  // Centers shade against the full national set, not the (possibly single-facility) outline set.
+  const centerBoundaries = atcBoundaries ?? boundaries;
   const atcAnchors = useMemo(
-    () => (atc && boundaries ? computeAtcAnchors(atc, boundaries) : []),
-    [atc, boundaries],
+    () => (atc && centerBoundaries ? computeAtcAnchors(atc, centerBoundaries) : []),
+    [atc, centerBoundaries],
   );
 
   const selectedRoutePath = useMemo<PathDatum[]>(
@@ -159,7 +165,7 @@ export function TrafficMap({
 
   const layers: Layer[] = [];
   if (boundaries) layers.push(buildBoundaryLayer(boundaries, resolvedTheme, boundaryEmphasis));
-  if (atc && boundaries) layers.push(...buildAtcLayers(atc, boundaries));
+  if (atc && centerBoundaries) layers.push(...buildAtcLayers(atc, centerBoundaries));
   if (atcAnchors.length) layers.push(buildAtcHoverLayer(atcAnchors));
   if (trails?.length) layers.push(buildTrailLayer(trails, resolvedTheme));
   if (routeOverlays?.length) layers.push(buildRouteOverlayLayer(routeOverlays));
