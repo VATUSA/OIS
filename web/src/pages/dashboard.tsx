@@ -1,28 +1,117 @@
 import {Badge, Button, Card, CardContent} from "@ois/ui";
 import {Link} from "@tanstack/react-router";
-import {ArrowRight, Gauge, type LucideIcon, OctagonX, Plane, Split, Timer,} from "lucide-react";
+import {
+  ArrowRight,
+  CalendarClock,
+  Gauge,
+  LayoutDashboard,
+  type LucideIcon,
+  Megaphone,
+  OctagonX,
+  Plane,
+  Radar,
+  Split,
+  Timer,
+  TrendingUp,
+  Waypoints,
+  Wind,
+} from "lucide-react";
 
 import {login, useMe} from "@/lib/auth";
+import {useUpcomingEvents} from "@/lib/events";
 import {useFeedStatus} from "@/lib/feed";
 import {hasPermission} from "@/lib/permissions";
 import {useGroundStops, usePrograms, useTmis} from "@/lib/tmu";
-import {hhmmZulu} from "@/lib/time";
+import {formatZuluFull, hhmmZulu} from "@/lib/time";
+
+const FEATURES: { icon: LucideIcon; title: string; body: string }[] = [
+  {
+    icon: Gauge,
+    title: "Traffic management",
+    body: "Metering programs, ground stops, and restrictions — issued, tracked, and shared live.",
+  },
+  {
+    icon: Waypoints,
+    title: "Flow constrained areas",
+    body: "Draw FCAs, sequence crossing traffic, and issue CFR releases against the live network.",
+  },
+  {
+    icon: CalendarClock,
+    title: "Event planning",
+    body: "Per-event airport rates, facility support, staffing, and TMI packages that go live on cue.",
+  },
+  {
+    icon: Wind,
+    title: "Runway balancer",
+    body: "Assign arrivals to runways from live demand, with a rolling 10-minute board.",
+  },
+  {
+    icon: Radar,
+    title: "Facility maps",
+    body: "A public, per-facility TMU map of live traffic with staff-editable color rules.",
+  },
+  {
+    icon: TrendingUp,
+    title: "Historical replay",
+    body: "Scrub a past event or window and replay your dashboards at any instant.",
+  },
+];
+
+/** Public entry points that need no sign-in. */
+function PublicLink({ to, icon: Icon, label }: { to: string; icon: LucideIcon; label: string }) {
+  return (
+    <Link
+      to={to as "/"}
+      className="flex items-center gap-1.5 rounded-md border px-3 py-1.5 text-sm font-medium transition-colors hover:bg-accent/40"
+    >
+      <Icon className="size-4 text-muted-foreground" />
+      {label}
+    </Link>
+  );
+}
 
 function SignedOut() {
   return (
-    <div className="flex flex-col items-center justify-center gap-6 py-24 text-center">
-      <div className="flex flex-col items-center gap-2">
-        <h1 className="text-3xl font-semibold tracking-tight">
+    <div className="flex flex-col gap-12 py-10">
+      {/* Hero */}
+      <div className="flex flex-col items-center gap-5 text-center">
+        <Badge variant="secondary" className="uppercase tracking-wide">
+          VATUSA operations
+        </Badge>
+        <h1 className="max-w-2xl text-4xl font-semibold tracking-tight sm:text-5xl">
           Event Operational Information System
         </h1>
-        <p className="max-w-md text-muted-foreground">
-          The VATUSA operations platform. Sign in with your VATSIM account to
-          continue.
+        <p className="max-w-xl text-muted-foreground">
+          The traffic-management and event-planning platform for VATUSA — flow control, FCAs, runway
+          balancing, and live facility maps, all in one place.
         </p>
+        <div className="flex flex-col items-center gap-3">
+          <Button size="lg" onClick={login}>
+            Sign in with VATSIM
+          </Button>
+          <div className="flex flex-wrap items-center justify-center gap-2 pt-2">
+            <span className="text-xs text-muted-foreground">Or explore without signing in:</span>
+            <PublicLink to="/advisories" icon={Megaphone} label="Advisories" />
+            <PublicLink to="/advisories/fcas" icon={Waypoints} label="FCA overview" />
+            <PublicLink to="/facility-map" icon={Radar} label="Facility maps" />
+          </div>
+        </div>
       </div>
-      <Button size="lg" onClick={login}>
-        Sign in with VATSIM
-      </Button>
+
+      {/* Feature grid */}
+      <div className="grid gap-4 sm:grid-cols-2 lg:grid-cols-3">
+        {FEATURES.map((f) => (
+          <Card key={f.title}>
+            <CardContent className="flex flex-col gap-2 pt-6">
+              <span className="flex size-9 items-center justify-center rounded-md bg-primary/10 text-primary">
+                <f.icon className="size-5" />
+              </span>
+              <span className="font-semibold">{f.title}</span>
+              <span className="text-sm text-muted-foreground">{f.body}</span>
+            </CardContent>
+          </Card>
+        ))}
+      </div>
     </div>
   );
 }
@@ -105,6 +194,96 @@ function Empty({ children }: { children: React.ReactNode }) {
   return <p className="py-6 text-center text-sm text-muted-foreground">{children}</p>;
 }
 
+/** A tool tile in the signed-in launchpad. */
+function ToolCard({
+  to,
+  icon: Icon,
+  label,
+  desc,
+}: {
+  to: string;
+  icon: LucideIcon;
+  label: string;
+  desc: string;
+}) {
+  return (
+    <Link to={to as "/"}>
+      <Card className="h-full transition-colors hover:border-primary/50 hover:bg-accent/30">
+        <CardContent className="flex items-start gap-3 py-4">
+          <span className="flex size-9 shrink-0 items-center justify-center rounded-md bg-primary/10 text-primary">
+            <Icon className="size-5" />
+          </span>
+          <div className="flex flex-col">
+            <span className="text-sm font-semibold">{label}</span>
+            <span className="text-xs text-muted-foreground">{desc}</span>
+          </div>
+        </CardContent>
+      </Card>
+    </Link>
+  );
+}
+
+/** Launchpad: quick links to the tools this controller can use (public ones always shown). */
+function QuickAccess() {
+  const { data: me } = useMe();
+  const tools = [
+    { to: "/planning/events", icon: CalendarClock, label: "Events", desc: "Plan & manage", show: hasPermission(me, "events.plan.read") },
+    { to: "/ops/tmu", icon: Gauge, label: "Traffic management", desc: "Programs · GS · TMIs", show: hasPermission(me, "tmu.program.read") },
+    { to: "/ops/fca", icon: Waypoints, label: "FCA flow", desc: "Constrained areas", show: hasPermission(me, "flow.fca.read") },
+    { to: "/ops/idst", icon: Timer, label: "Departures", desc: "Release scheduling", show: hasPermission(me, "flow.fca.read") },
+    { to: "/ops/runway", icon: Wind, label: "Runway balancer", desc: "Arrival runways", show: hasPermission(me, "flow.runway.read") },
+    { to: "/ops/my", icon: LayoutDashboard, label: "My dashboards", desc: "Custom boards", show: hasPermission(me, "tmu.program.read") },
+    { to: "/historical", icon: TrendingUp, label: "Historical", desc: "Replay & stats", show: hasPermission(me, "stats.data.read") },
+    { to: "/facility-map", icon: Radar, label: "Facility maps", desc: "Live TMU map", show: true },
+  ].filter((t) => t.show);
+
+  if (tools.length === 0) return null;
+  return (
+    <div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-4">
+      {tools.map((t) => (
+        <ToolCard key={t.to} to={t.to} icon={t.icon} label={t.label} desc={t.desc} />
+      ))}
+    </div>
+  );
+}
+
+/** Upcoming (and in-progress) events, soonest first. Gated on events access by the caller. */
+function UpcomingEvents() {
+  const events = useUpcomingEvents();
+  const now = Date.now();
+  const upcoming = (events.data ?? [])
+    .filter((e) => new Date(e.end_time).getTime() >= now)
+    .slice(0, 5);
+
+  return (
+    <Section title="Upcoming events" count={upcoming.length} to="/planning/events">
+      {!events.data ? (
+        <Empty>Loading…</Empty>
+      ) : upcoming.length === 0 ? (
+        <Empty>No upcoming events.</Empty>
+      ) : (
+        <ul className="flex flex-col divide-y divide-border/60">
+          {upcoming.map((e) => (
+            <li key={e.id} className="flex items-center justify-between gap-2 py-2 text-sm">
+              <Link
+                to="/planning/events/$eventId"
+                params={{ eventId: String(e.id) }}
+                className="min-w-0 flex-1 truncate font-medium hover:text-primary"
+              >
+                {e.title}
+              </Link>
+              <span className="flex shrink-0 items-center gap-2 text-muted-foreground">
+                {e.facility && <span className="font-mono text-xs">{e.facility}</span>}
+                <span className="text-xs">{formatZuluFull(e.start_time)}</span>
+              </span>
+            </li>
+          ))}
+        </ul>
+      )}
+    </Section>
+  );
+}
+
 function Overview() {
   const { data: me } = useMe();
   const { data: feed } = useFeedStatus();
@@ -112,6 +291,7 @@ function Overview() {
   const canPrograms = hasPermission(me, "tmu.program.read");
   const canGroundStops = hasPermission(me, "tmu.groundstop.read");
   const canTmis = hasPermission(me, "tmu.tmi.read");
+  const canPlan = hasPermission(me, "events.plan.read");
 
   const programs = usePrograms();
   const groundStops = useGroundStops();
@@ -153,6 +333,7 @@ function Overview() {
 
       {/* Operational lists */}
       <div className="grid gap-4 lg:grid-cols-3">
+        {canPlan && <UpcomingEvents />}
         {canPrograms && (
           <Section title="Metering programs" count={progList.length} to="/ops/tmu">
             {progList.length === 0 ? (
@@ -228,7 +409,7 @@ function Overview() {
         )}
       </div>
 
-      {!canPrograms && !canGroundStops && !canTmis && (
+      {!canPrograms && !canGroundStops && !canTmis && !canPlan && (
         <Card>
           <CardContent className="flex items-center gap-3 py-8 text-sm text-muted-foreground">
             <Timer className="size-5" />
@@ -261,6 +442,7 @@ export function DashboardPage() {
         </p>
       </div>
 
+      <QuickAccess />
       <Overview />
     </div>
   );
