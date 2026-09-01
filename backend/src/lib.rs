@@ -46,6 +46,8 @@ pub async fn run() -> color_eyre::Result<()> {
         feed::events::spawn_sync(pool.clone());
         // Persistent stats collection off the shared feed snapshot + its retention compaction.
         feed::stats::spawn_collector(pool.clone(), state.feed.clone(), state.airspace.clone());
+        // Per-flight delay legs (taxi-out + arrival transit) for the average-delay page.
+        feed::delays::spawn_collector(pool.clone(), state.feed.clone(), state.runways.clone());
         jobs::spawn_stats_compaction(pool.clone());
         jobs::spawn_capture_scheduler(pool.clone());
         // Event FCAs + TMI packages: auto-publish 30 min before start, auto-archive at end.

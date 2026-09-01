@@ -5,6 +5,7 @@
 pub mod airports;
 pub mod airspace;
 pub mod coverage;
+pub mod delays;
 pub mod events;
 pub mod facilities;
 pub mod fca;
