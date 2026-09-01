@@ -9,7 +9,9 @@ use sqlx::{PgPool, Postgres, QueryBuilder, Transaction};
 
 use crate::errors::ApiError;
 use crate::feed::winds::Winds;
-use crate::models::{KeyCountBody, NetworkPointBody, StatsFlightDetail, StatsFlightSummary};
+use crate::models::{
+    DelayGroup, DelaySummary, KeyCountBody, NetworkPointBody, StatsFlightDetail, StatsFlightSummary,
+};
 
 // --- decoupled row inputs (the collector fills these from feed structs) ---------------------
 
@@ -218,6 +220,129 @@ pub async fn prune_flight_legs(pool: &PgPool, before: DateTime<Utc>) -> Result<u
         .await
         .map_err(db)?;
     Ok(res.rows_affected())
+}
+
+/// Aggregate expression shared by every delay grouping ($1..$5 = kind, since, airport, runway, proc).
+const DELAY_AGG: &str = "count(*)::bigint as n, \
+    round(avg(duration_sec))::bigint as avg_sec, \
+    percentile_cont(0.5) within group (order by duration_sec)::bigint as median_sec, \
+    percentile_cont(0.9) within group (order by duration_sec)::bigint as p90_sec";
+const DELAY_FILTER: &str = "kind = $1 and end_time >= $2 \
+    and ($3::text is null or airport = $3) \
+    and ($4::text is null or runway = $4) \
+    and ($5::text is null or procedure = $5)";
+
+#[derive(sqlx::FromRow)]
+struct AggRow {
+    key: Option<String>,
+    n: i64,
+    avg_sec: Option<i64>,
+    median_sec: Option<i64>,
+    p90_sec: Option<i64>,
+}
+
+impl From<AggRow> for DelayGroup {
+    fn from(r: AggRow) -> Self {
+        DelayGroup {
+            key: r.key.unwrap_or_default(),
+            count: r.n,
+            avg_sec: r.avg_sec.unwrap_or(0),
+            median_sec: r.median_sec.unwrap_or(0),
+            p90_sec: r.p90_sec.unwrap_or(0),
+        }
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn run_agg(
+    pool: &PgPool,
+    sql: &str,
+    kind: &str,
+    since: DateTime<Utc>,
+    airport: Option<&str>,
+    runway: Option<&str>,
+    procedure: Option<&str>,
+) -> Result<Vec<DelayGroup>, ApiError> {
+    let rows = sqlx::query_as::<_, AggRow>(sql)
+        .bind(kind)
+        .bind(since)
+        .bind(airport)
+        .bind(runway)
+        .bind(procedure)
+        .fetch_all(pool)
+        .await
+        .map_err(db)?;
+    Ok(rows.into_iter().map(DelayGroup::from).collect())
+}
+
+/// Average-delay summary for one leg `kind` since `since`, filtered by the optional airport/runway/
+/// procedure. Per-runway and per-procedure breakdowns are computed only when `airport` is set.
+#[allow(clippy::too_many_arguments)]
+pub async fn delay_summary(
+    pool: &PgPool,
+    kind: &str,
+    airport: Option<&str>,
+    runway: Option<&str>,
+    procedure: Option<&str>,
+    since: DateTime<Utc>,
+    window_hours: i64,
+) -> Result<DelaySummary, ApiError> {
+    let overall_sql =
+        format!("select null::text as key, {DELAY_AGG} from stats.flight_leg where {DELAY_FILTER}");
+    let by = |dim: &str| {
+        format!(
+            "select {dim} as key, {DELAY_AGG} from stats.flight_leg \
+             where {DELAY_FILTER} and {dim} is not null group by {dim} order by n desc, {dim}"
+        )
+    };
+
+    let overall = run_agg(pool, &overall_sql, kind, since, airport, runway, procedure)
+        .await?
+        .into_iter()
+        .next()
+        .unwrap_or(DelayGroup {
+            key: String::new(),
+            count: 0,
+            avg_sec: 0,
+            median_sec: 0,
+            p90_sec: 0,
+        });
+    let by_airport = run_agg(
+        pool,
+        &by("airport"),
+        kind,
+        since,
+        airport,
+        runway,
+        procedure,
+    )
+    .await?;
+    let (by_runway, by_procedure) = if airport.is_some() {
+        (
+            run_agg(pool, &by("runway"), kind, since, airport, runway, procedure).await?,
+            run_agg(
+                pool,
+                &by("procedure"),
+                kind,
+                since,
+                airport,
+                runway,
+                procedure,
+            )
+            .await?,
+        )
+    } else {
+        (Vec::new(), Vec::new())
+    };
+
+    Ok(DelaySummary {
+        kind: kind.to_string(),
+        window_hours,
+        overall,
+        by_airport,
+        by_runway,
+        by_procedure,
+    })
 }
 
 /// Record a flight-plan revision for any flight whose plan changed since its last recorded revision —

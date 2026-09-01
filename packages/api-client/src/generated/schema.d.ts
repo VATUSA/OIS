@@ -1726,6 +1726,22 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/v1/stats/delays": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get: operations["delay_summary"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/v1/stats/flights/{id}": {
         parameters: {
             query?: never;
@@ -2924,6 +2940,36 @@ export interface components {
         DecideAceRequestRequest: {
             /** @description `completed` or `cancelled`. */
             outcome: string;
+        };
+        /** @description One aggregated delay group — a set of flight legs sharing an airport, runway, or procedure. */
+        DelayGroup: {
+            /**
+             * Format: int64
+             * @description Mean / median / 90th-percentile leg duration, in seconds.
+             */
+            avg_sec: number;
+            /** Format: int64 */
+            count: number;
+            /** @description The group value (airport ICAO / runway id / procedure base name); empty for the overall row. */
+            key: string;
+            /** Format: int64 */
+            median_sec: number;
+            /** Format: int64 */
+            p90_sec: number;
+        };
+        /** @description Average-delay summary for one leg `kind` over a rolling window, with optional filters applied. */
+        DelaySummary: {
+            /** @description Per-airport aggregates; each airport's `median_sec` is its normalization baseline. */
+            by_airport: components["schemas"]["DelayGroup"][];
+            by_procedure: components["schemas"]["DelayGroup"][];
+            /** @description Per-runway / per-procedure breakdowns — populated only when an `airport` filter is set. */
+            by_runway: components["schemas"]["DelayGroup"][];
+            /** @description `departure` (taxi-out) or `arrival` (transit). */
+            kind: string;
+            /** @description Aggregate over the whole filtered set. */
+            overall: components["schemas"]["DelayGroup"];
+            /** Format: int64 */
+            window_hours: number;
         };
         /** @description A pending ground/proposed departure out of a field (for the Departures view). */
         DepartureFlight: {
@@ -9185,6 +9231,42 @@ export interface operations {
                 content?: never;
             };
             404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+        };
+    };
+    delay_summary: {
+        parameters: {
+            query?: {
+                /** @description departure | arrival (default departure) */
+                kind?: string;
+                /** @description Filter to one airport ICAO */
+                airport?: string;
+                /** @description Filter to one runway */
+                runway?: string;
+                /** @description Filter to one SID/STAR */
+                procedure?: string;
+                /** @description Window hours back (default 24, max 720) */
+                hours?: number;
+            };
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["DelaySummary"];
+                };
+            };
+            401: {
                 headers: {
                     [name: string]: unknown;
                 };

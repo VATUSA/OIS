@@ -17,9 +17,9 @@ use crate::{
     feed::stats::reconstruct::reconstruct_at,
     handlers::{atc, feed as feed_handlers, flow as flow_handlers, runway as runway_handlers},
     models::{
-        AtcBoard, CaptureSummaryBody, DeparturesResponse, NetworkPointBody, ReplayBody,
-        ReplayChunkBody, ReplayFlightBody, ReplayPlan, StatsAirportBody, StatsFlightDetail,
-        StatsFlightSummary, StatsTrackBody, TrafficAircraft,
+        AtcBoard, CaptureSummaryBody, DelaySummary, DeparturesResponse, NetworkPointBody,
+        ReplayBody, ReplayChunkBody, ReplayFlightBody, ReplayPlan, StatsAirportBody,
+        StatsFlightDetail, StatsFlightSummary, StatsTrackBody, TrafficAircraft,
     },
     repos::stats as stats_repo,
     state::AppState,
@@ -114,6 +114,65 @@ pub async fn airport_stats(
         arrivals,
         icao,
     }))
+}
+
+#[derive(Deserialize)]
+pub struct DelayQuery {
+    /// `departure` (taxi-out) or `arrival` (transit); default departure.
+    kind: Option<String>,
+    /// Filter to one airport (also enables the per-runway / per-procedure breakdowns).
+    airport: Option<String>,
+    runway: Option<String>,
+    procedure: Option<String>,
+    /// Rolling window, hours back (default 24, max 720).
+    hours: Option<i64>,
+}
+
+fn norm_opt(s: Option<String>) -> Option<String> {
+    s.map(|v| v.trim().to_ascii_uppercase())
+        .filter(|v| !v.is_empty())
+}
+
+#[utoipa::path(
+    get,
+    path = "/api/v1/stats/delays",
+    tag = "stats",
+    params(
+        ("kind" = Option<String>, Query, description = "departure | arrival (default departure)"),
+        ("airport" = Option<String>, Query, description = "Filter to one airport ICAO"),
+        ("runway" = Option<String>, Query, description = "Filter to one runway"),
+        ("procedure" = Option<String>, Query, description = "Filter to one SID/STAR"),
+        ("hours" = Option<i64>, Query, description = "Window hours back (default 24, max 720)")
+    ),
+    responses((status = 200, body = DelaySummary), (status = 401))
+)]
+pub async fn delay_summary(
+    State(state): State<AppState>,
+    _permission: RequirePermission<StatsRead>,
+    Query(q): Query<DelayQuery>,
+) -> Result<Json<DelaySummary>, ApiError> {
+    let kind = if q.kind.as_deref() == Some("arrival") {
+        "arrival"
+    } else {
+        "departure"
+    };
+    let hours = q.hours.unwrap_or(24).clamp(1, 720);
+    let since = Utc::now() - Duration::hours(hours);
+    let airport = norm_opt(q.airport);
+    let runway = norm_opt(q.runway);
+    let procedure = norm_opt(q.procedure);
+    Ok(Json(
+        stats_repo::delay_summary(
+            pool(&state)?,
+            kind,
+            airport.as_deref(),
+            runway.as_deref(),
+            procedure.as_deref(),
+            since,
+            hours,
+        )
+        .await?,
+    ))
 }
 
 #[derive(Deserialize)]

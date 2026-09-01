@@ -257,6 +257,7 @@ pub fn build_router(state: AppState) -> Router {
         // Persisted VATSIM stats (historical read API)
         .route("/api/v1/stats/network/history", get(stats::network_history))
         .route("/api/v1/stats/airports/top", get(stats::airports_top))
+        .route("/api/v1/stats/delays", get(stats::delay_summary))
         .route("/api/v1/stats/airports/{icao}", get(stats::airport_stats))
         .route(
             "/api/v1/stats/airports/{icao}/movements",
