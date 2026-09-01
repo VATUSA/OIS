@@ -3,6 +3,7 @@ import {Badge, Button, Card, CardContent, useToast} from "@ois/ui";
 import {useNavigate, useSearch} from "@tanstack/react-router";
 import {Link2, Pause, Play, Rewind} from "lucide-react";
 
+import {ZuluDateTime} from "@/components/zulu-datetime";
 import {DashboardGrid} from "@/features/dashboard/DashboardGrid";
 import {HistoricalProvider} from "@/features/dashboard/historical";
 import {EMPTY_DASHBOARD, type DashboardState} from "@/features/dashboard/types";
@@ -40,16 +41,6 @@ function normalize(raw: unknown): DashboardState {
 const zulu = (unixS: number) =>
   new Date(unixS * 1000).toISOString().slice(11, 16) + "Z";
 
-/** Local <input type="datetime-local"> value ↔ unix seconds (UTC). */
-const toLocalInput = (unixS: number) => {
-  const d = new Date(unixS * 1000);
-  const pad = (n: number) => String(n).padStart(2, "0");
-  return `${d.getUTCFullYear()}-${pad(d.getUTCMonth() + 1)}-${pad(d.getUTCDate())}T${pad(d.getUTCHours())}:${pad(d.getUTCMinutes())}`;
-};
-const fromLocalInput = (v: string): number | null => {
-  const ms = Date.parse(v + "Z");
-  return Number.isFinite(ms) ? Math.floor(ms / 1000) : null;
-};
 
 interface Win {
   from: number;
@@ -362,31 +353,21 @@ export function HistoricalDashboardPage() {
             <div className="flex flex-wrap items-end gap-3">
               <label className="flex flex-col gap-1 text-xs">
                 <span className="text-muted-foreground">From (Zulu)</span>
-                <input
-                  type="datetime-local"
-                  className="h-9 rounded-md border bg-background px-2 text-sm"
-                  value={toLocalInput(custom.from)}
-                  onChange={(e) => {
-                    const from = fromLocalInput(e.target.value);
-                    if (from != null) {
-                      setCustom((c) => ({ from, to: c.to }));
-                      patchSearch({ from, to: custom.to, capture: undefined, t: undefined });
-                    }
+                <ZuluDateTime
+                  value={custom.from}
+                  onChange={(from) => {
+                    setCustom((c) => ({ from, to: c.to }));
+                    patchSearch({ from, to: custom.to, capture: undefined, t: undefined });
                   }}
                 />
               </label>
               <label className="flex flex-col gap-1 text-xs">
                 <span className="text-muted-foreground">To (Zulu)</span>
-                <input
-                  type="datetime-local"
-                  className="h-9 rounded-md border bg-background px-2 text-sm"
-                  value={toLocalInput(custom.to)}
-                  onChange={(e) => {
-                    const to = fromLocalInput(e.target.value);
-                    if (to != null) {
-                      setCustom((c) => ({ from: c.from, to }));
-                      patchSearch({ from: custom.from, to, capture: undefined, t: undefined });
-                    }
+                <ZuluDateTime
+                  value={custom.to}
+                  onChange={(to) => {
+                    setCustom((c) => ({ from: c.from, to }));
+                    patchSearch({ from: custom.from, to, capture: undefined, t: undefined });
                   }}
                 />
               </label>
