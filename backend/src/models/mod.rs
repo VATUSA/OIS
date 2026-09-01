@@ -641,6 +641,33 @@ pub struct KeyCountBody {
     pub count: i64,
 }
 
+/// One aggregated delay group — a set of flight legs sharing an airport, runway, or procedure.
+#[derive(Debug, Serialize, ToSchema)]
+pub struct DelayGroup {
+    /// The group value (airport ICAO / runway id / procedure base name); empty for the overall row.
+    pub key: String,
+    pub count: i64,
+    /// Mean / median / 90th-percentile leg duration, in seconds.
+    pub avg_sec: i64,
+    pub median_sec: i64,
+    pub p90_sec: i64,
+}
+
+/// Average-delay summary for one leg `kind` over a rolling window, with optional filters applied.
+#[derive(Debug, Serialize, ToSchema)]
+pub struct DelaySummary {
+    /// `departure` (taxi-out) or `arrival` (transit).
+    pub kind: String,
+    pub window_hours: i64,
+    /// Aggregate over the whole filtered set.
+    pub overall: DelayGroup,
+    /// Per-airport aggregates; each airport's `median_sec` is its normalization baseline.
+    pub by_airport: Vec<DelayGroup>,
+    /// Per-runway / per-procedure breakdowns — populated only when an `airport` filter is set.
+    pub by_runway: Vec<DelayGroup>,
+    pub by_procedure: Vec<DelayGroup>,
+}
+
 // --- stats read API (/api/v1/stats/*) ---
 
 /// Serialize an i64 session id as a JSON string — the hashed ids exceed JS's safe-integer range,
