@@ -28,6 +28,8 @@ const STATS_COMPACTION_INTERVAL: Duration = Duration::from_secs(60 * 60);
 /// Positions this old are downsampled (keep 1-of-N); older than the prune horizon they're dropped.
 const STATS_DOWNSAMPLE_AFTER_DAYS: i64 = 2;
 const STATS_PRUNE_AFTER_DAYS: i64 = 14;
+/// Delay legs are tiny (one row per flight leg) and useful over a longer window than raw positions.
+const DELAY_LEG_RETAIN_DAYS: i64 = 30;
 /// Keep every Nth 15s sample in the downsample band (4 → ~1-minute resolution).
 const STATS_KEEP_EVERY: i64 = 4;
 
@@ -191,6 +193,13 @@ pub fn spawn_stats_compaction(pool: PgPool) {
                 Ok(n) if n > 0 => tracing::info!(deleted = n, "stats: pruned old TM history"),
                 Ok(_) => {}
                 Err(_) => tracing::warn!("stats: TM history prune pass failed"),
+            }
+
+            let legs_before = now - chrono::Duration::days(DELAY_LEG_RETAIN_DAYS);
+            match stats_repo::prune_flight_legs(&pool, legs_before).await {
+                Ok(n) if n > 0 => tracing::info!(deleted = n, "stats: pruned old flight legs"),
+                Ok(_) => {}
+                Err(_) => tracing::warn!("stats: flight-leg prune pass failed"),
             }
         }
     });

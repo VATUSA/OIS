@@ -172,6 +172,54 @@ pub async fn upsert_flights(
     Ok(())
 }
 
+/// A completed flight leg (departure taxi-out or arrival transit) for `stats.flight_leg`.
+pub struct FlightLegRow {
+    pub kind: &'static str,
+    pub airport: String,
+    pub callsign: String,
+    pub cid: i32,
+    pub aircraft: Option<String>,
+    pub runway: Option<String>,
+    pub procedure: Option<String>,
+    pub start: DateTime<Utc>,
+    pub end: DateTime<Utc>,
+    pub duration_sec: i32,
+}
+
+/// Persist completed flight legs (few per tick).
+pub async fn insert_flight_legs(pool: &PgPool, rows: &[FlightLegRow]) -> Result<(), ApiError> {
+    for chunk in rows.chunks(1000) {
+        let mut qb: QueryBuilder<Postgres> = QueryBuilder::new(
+            "insert into stats.flight_leg \
+             (kind, airport, callsign, cid, aircraft, runway, procedure, start_time, end_time, duration_sec) ",
+        );
+        qb.push_values(chunk, |mut b, r| {
+            b.push_bind(r.kind)
+                .push_bind(&r.airport)
+                .push_bind(&r.callsign)
+                .push_bind(r.cid)
+                .push_bind(&r.aircraft)
+                .push_bind(&r.runway)
+                .push_bind(&r.procedure)
+                .push_bind(r.start)
+                .push_bind(r.end)
+                .push_bind(r.duration_sec);
+        });
+        qb.build().execute(pool).await.map_err(db)?;
+    }
+    Ok(())
+}
+
+/// Drop flight legs older than `before` (retention).
+pub async fn prune_flight_legs(pool: &PgPool, before: DateTime<Utc>) -> Result<u64, ApiError> {
+    let res = sqlx::query("delete from stats.flight_leg where end_time < $1")
+        .bind(before)
+        .execute(pool)
+        .await
+        .map_err(db)?;
+    Ok(res.rows_affected())
+}
+
 /// Record a flight-plan revision for any flight whose plan changed since its last recorded revision —
 /// keyed off VATSIM's `revision_id`, falling back to a route/dep/arr content compare when it's null.
 /// Set-based against the incoming tick batch (lateral-joined to each session's latest revision), so
