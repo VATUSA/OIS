@@ -1794,7 +1794,10 @@ pub struct PublicRestriction {
     pub requesting: String,
     /// Providing facility (ARTCC/TRACON).
     pub providing: String,
+    /// The raw NTML line.
     pub restriction: String,
+    /// Plain-English rendering for pilots (null for a raw-typed restriction).
+    pub decoded: Option<String>,
     pub start_time: DateTime<Utc>,
     /// null = until further notice.
     pub stop_time: Option<DateTime<Utc>>,

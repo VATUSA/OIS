@@ -133,7 +133,8 @@ function GdpRow({ gdp }: { gdp: PublicGdp }) {
 function RestrictionRow({ r }: { r: PublicRestriction }) {
   return (
     <Row>
-      <span className="text-sm font-medium">{r.restriction}</span>
+      <span className="text-sm font-medium">{r.decoded || r.restriction}</span>
+      {r.decoded && <span className="font-mono text-xs text-muted-foreground">{r.restriction}</span>}
       <div className="flex flex-wrap items-center gap-x-2 gap-y-1 text-xs text-muted-foreground">
         <span className="font-mono">
           {r.requesting} <span className="text-muted-foreground/60">req</span> ·{" "}

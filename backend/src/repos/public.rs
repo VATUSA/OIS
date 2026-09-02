@@ -62,7 +62,7 @@ pub async fn ground_stop_for_airport(
 
 pub async fn active_restrictions(pool: &PgPool) -> Result<Vec<PublicRestriction>, ApiError> {
     sqlx::query_as::<_, PublicRestriction>(
-        "select id, requesting, providing, restriction, start_time, stop_time \
+        "select id, requesting, providing, restriction, decoded, start_time, stop_time \
          from tmu.tmis \
          where status = 'published' and (stop_time is null or stop_time > now()) \
          order by start_time",

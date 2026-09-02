@@ -4005,11 +4005,14 @@ export interface components {
         };
         /** @description An active inter-facility restriction (MIT / spacing) as pilots see it. */
         PublicRestriction: {
+            /** @description Plain-English rendering for pilots (null for a raw-typed restriction). */
+            decoded?: string | null;
             id: string;
             /** @description Providing facility (ARTCC/TRACON). */
             providing: string;
             /** @description Requesting facility (ARTCC/TRACON). */
             requesting: string;
+            /** @description The raw NTML line. */
             restriction: string;
             /** Format: date-time */
             start_time: string;

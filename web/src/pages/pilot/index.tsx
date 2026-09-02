@@ -6,7 +6,7 @@ import {OctagonX, Plane, Split, Timer, Waypoints} from "lucide-react";
 import {FlightSearch} from "@/components/flight-search";
 import {useTraffic} from "@/lib/fca";
 import {hhmmZulu} from "@/lib/time";
-import {type FlightAdvisory, usePublicFlight} from "@/lib/public";
+import {type FlightAdvisory, usePublicBoard, usePublicFlight} from "@/lib/public";
 
 function DelayBadge({ min }: { min: number }) {
   if (min <= 0) return <Badge variant="outline">no delay</Badge>;
@@ -196,6 +196,8 @@ export function PilotPage() {
   const [callsign, setCallsign] = useState<string | null>(null);
   const traffic = useTraffic();
   const flight = usePublicFlight(callsign);
+  const board = usePublicBoard();
+  const restrictions = board.data?.restrictions ?? [];
 
   return (
     <div className="mx-auto flex w-full max-w-2xl flex-col gap-6">
@@ -225,6 +227,34 @@ export function PilotPage() {
         ) : flight.data ? (
           <Result f={flight.data} />
         ) : null)}
+
+      {restrictions.length > 0 && (
+        <Card>
+          <CardContent className="flex flex-col gap-3 pt-6">
+            <div className="flex items-center gap-2">
+              <Split className="size-4 text-muted-foreground" />
+              <span className="text-sm font-semibold">Active restrictions</span>
+              <Badge variant="secondary">{restrictions.length}</Badge>
+            </div>
+            <ul className="flex flex-col divide-y divide-border/60">
+              {restrictions.map((r) => (
+                <li key={r.id} className="flex flex-col gap-0.5 py-2 text-sm">
+                  <span>{r.decoded || r.restriction}</span>
+                  <span className="flex items-center gap-2 text-xs text-muted-foreground">
+                    <span className="font-mono">
+                      {r.requesting} → {r.providing}
+                    </span>
+                    <span className="ml-auto font-mono">
+                      {hhmmZulu(r.start_time)}
+                      {r.stop_time ? `–${hhmmZulu(r.stop_time)}` : " · UFN"}
+                    </span>
+                  </span>
+                </li>
+              ))}
+            </ul>
+          </CardContent>
+        </Card>
+      )}
     </div>
   );
 }
