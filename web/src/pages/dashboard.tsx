@@ -4,7 +4,6 @@ import {
   ArrowRight,
   CalendarClock,
   Gauge,
-  LayoutDashboard,
   type LucideIcon,
   Megaphone,
   OctagonX,
@@ -195,92 +194,126 @@ function Empty({ children }: { children: React.ReactNode }) {
 }
 
 /** A tool tile in the signed-in launchpad. */
-function ToolCard({
-  to,
-  icon: Icon,
-  label,
-  desc,
-}: {
-  to: string;
-  icon: LucideIcon;
-  label: string;
-  desc: string;
-}) {
-  return (
-    <Link to={to as "/"}>
-      <Card className="h-full transition-colors hover:border-primary/50 hover:bg-accent/30">
-        <CardContent className="flex items-start gap-3 py-4">
-          <span className="flex size-9 shrink-0 items-center justify-center rounded-md bg-primary/10 text-primary">
-            <Icon className="size-5" />
-          </span>
-          <div className="flex flex-col">
-            <span className="text-sm font-semibold">{label}</span>
-            <span className="text-xs text-muted-foreground">{desc}</span>
-          </div>
-        </CardContent>
-      </Card>
-    </Link>
-  );
+/** A coarse "in Xd Yh" / "Xh Ym" / "Ym" from a millisecond delta. */
+function countdown(ms: number): string {
+  const abs = Math.abs(ms);
+  const d = Math.floor(abs / 86_400_000);
+  const h = Math.floor((abs % 86_400_000) / 3_600_000);
+  const m = Math.floor((abs % 3_600_000) / 60_000);
+  if (d > 0) return `${d}d ${h}h`;
+  if (h > 0) return `${h}h ${m}m`;
+  return `${m}m`;
 }
 
-/** Launchpad: quick links to the tools this controller can use (public ones always shown). */
-function QuickAccess() {
-  const { data: me } = useMe();
-  const tools = [
-    { to: "/planning/events", icon: CalendarClock, label: "Events", desc: "Plan & manage", show: hasPermission(me, "events.plan.read") },
-    { to: "/ops/tmu", icon: Gauge, label: "Traffic management", desc: "Programs · GS · TMIs", show: hasPermission(me, "tmu.program.read") },
-    { to: "/ops/fca", icon: Waypoints, label: "FCA flow", desc: "Constrained areas", show: hasPermission(me, "flow.fca.read") },
-    { to: "/ops/idst", icon: Timer, label: "Departures", desc: "Release scheduling", show: hasPermission(me, "flow.fca.read") },
-    { to: "/ops/runway", icon: Wind, label: "Runway balancer", desc: "Arrival runways", show: hasPermission(me, "flow.runway.read") },
-    { to: "/ops/my", icon: LayoutDashboard, label: "My dashboards", desc: "Custom boards", show: hasPermission(me, "tmu.program.read") },
-    { to: "/historical", icon: TrendingUp, label: "Historical", desc: "Replay & stats", show: hasPermission(me, "stats.data.read") },
-    { to: "/facility-map", icon: Radar, label: "Facility maps", desc: "Live TMU map", show: true },
-  ].filter((t) => t.show);
-
-  if (tools.length === 0) return null;
-  return (
-    <div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-4">
-      {tools.map((t) => (
-        <ToolCard key={t.to} to={t.to} icon={t.icon} label={t.label} desc={t.desc} />
-      ))}
-    </div>
-  );
-}
-
-/** Upcoming (and in-progress) events, soonest first. Gated on events access by the caller. */
-function UpcomingEvents() {
+/**
+ * The event happening right now, or — if none — the next one scheduled. The homepage's headline: a
+ * controller lands and immediately sees whether they're mid-event and how long is left, or what's next.
+ * Gated on events access by the caller.
+ */
+function FeaturedEvent() {
   const events = useUpcomingEvents();
   const now = Date.now();
-  const upcoming = (events.data ?? [])
-    .filter((e) => new Date(e.end_time).getTime() >= now)
-    .slice(0, 5);
+  const sorted = (events.data ?? [])
+    .slice()
+    .sort((a, b) => new Date(a.start_time).getTime() - new Date(b.start_time).getTime());
+  const current = sorted.find(
+    (e) => new Date(e.start_time).getTime() <= now && now <= new Date(e.end_time).getTime(),
+  );
+  const next = sorted.find((e) => new Date(e.start_time).getTime() > now);
+  const featured = current ?? next;
+  const alsoUpcoming = sorted.filter((e) => new Date(e.start_time).getTime() > now && e !== featured).slice(0, 3);
+
+  if (!events.data) {
+    return (
+      <Card>
+        <CardContent className="py-10 text-center text-sm text-muted-foreground">Loading events…</CardContent>
+      </Card>
+    );
+  }
+  if (!featured) {
+    return (
+      <Card>
+        <CardContent className="flex items-center gap-3 py-8 text-sm text-muted-foreground">
+          <CalendarClock className="size-5" />
+          No events on the calendar right now.
+        </CardContent>
+      </Card>
+    );
+  }
+
+  const live = !!current;
+  const start = new Date(featured.start_time).getTime();
+  const end = new Date(featured.end_time).getTime();
 
   return (
-    <Section title="Upcoming events" count={upcoming.length} to="/planning/events">
-      {!events.data ? (
-        <Empty>Loading…</Empty>
-      ) : upcoming.length === 0 ? (
-        <Empty>No upcoming events.</Empty>
-      ) : (
-        <ul className="flex flex-col divide-y divide-border/60">
-          {upcoming.map((e) => (
-            <li key={e.id} className="flex items-center justify-between gap-2 py-2 text-sm">
-              <Link
-                to="/planning/events/$eventId"
-                params={{ eventId: String(e.id) }}
-                className="min-w-0 flex-1 truncate font-medium hover:text-primary"
-              >
-                {e.title}
-              </Link>
-              <span className="flex shrink-0 items-center gap-2 text-muted-foreground">
-                {e.facility && <span className="font-mono text-xs">{e.facility}</span>}
-                <span className="text-xs">{formatZuluFull(e.start_time)}</span>
+    <Card className="overflow-hidden">
+      <div className="flex flex-col gap-5 p-6 sm:flex-row">
+        {featured.banner_image_url && (
+          <img
+            src={featured.banner_image_url}
+            alt=""
+            className="h-32 w-full rounded-md object-cover sm:h-auto sm:w-56"
+          />
+        )}
+        <div className="flex min-w-0 flex-1 flex-col gap-3">
+          <div className="flex flex-wrap items-center gap-2">
+            {live ? (
+              <span className="flex items-center gap-1.5 rounded-full bg-emerald-500/15 px-2 py-0.5 text-xs font-semibold uppercase tracking-wide text-emerald-500">
+                <span className="size-1.5 animate-pulse rounded-full bg-emerald-500" />
+                Live now
               </span>
-            </li>
-          ))}
-        </ul>
-      )}
-    </Section>
+            ) : (
+              <Badge variant="secondary" className="uppercase tracking-wide">
+                Next event
+              </Badge>
+            )}
+            <span className="text-sm font-medium text-muted-foreground">
+              {live ? `ends in ${countdown(end - now)}` : `starts in ${countdown(start - now)}`}
+            </span>
+          </div>
+
+          <Link
+            to="/planning/events/$eventId"
+            params={{ eventId: String(featured.id) }}
+            className="text-2xl font-semibold tracking-tight hover:text-primary"
+          >
+            {featured.title}
+          </Link>
+
+          <div className="flex flex-wrap items-center gap-x-3 gap-y-1 text-sm text-muted-foreground">
+            {featured.facility && (
+              <span className="font-mono font-medium text-foreground">{featured.facility}</span>
+            )}
+            <span className="flex items-center gap-1.5">
+              <CalendarClock className="size-3.5" />
+              {formatZuluFull(featured.start_time)} – {formatZuluFull(featured.end_time)}
+            </span>
+          </div>
+
+          {alsoUpcoming.length > 0 && (
+            <div className="mt-1 flex flex-col gap-1 border-t pt-3 text-sm">
+              <span className="text-xs font-medium uppercase tracking-wide text-muted-foreground">
+                Also coming up
+              </span>
+              {alsoUpcoming.map((e) => (
+                <Link
+                  key={e.id}
+                  to="/planning/events/$eventId"
+                  params={{ eventId: String(e.id) }}
+                  className="flex items-center justify-between gap-2 hover:text-primary"
+                >
+                  <span className="min-w-0 truncate">{e.title}</span>
+                  <span className="flex shrink-0 items-center gap-2 text-muted-foreground">
+                    {e.facility && <span className="font-mono text-xs">{e.facility}</span>}
+                    <span className="text-xs">{formatZuluFull(e.start_time)}</span>
+                  </span>
+                </Link>
+              ))}
+            </div>
+          )}
+        </div>
+      </div>
+    </Card>
   );
 }
 
@@ -307,6 +340,9 @@ function Overview() {
 
   return (
     <div className="flex flex-col gap-6">
+      {/* Headline: the current or next event */}
+      {canPlan && <FeaturedEvent />}
+
       {/* Live snapshot tiles */}
       <div className="grid gap-4 sm:grid-cols-2 lg:grid-cols-4">
         <StatTile
@@ -333,7 +369,6 @@ function Overview() {
 
       {/* Operational lists */}
       <div className="grid gap-4 lg:grid-cols-3">
-        {canPlan && <UpcomingEvents />}
         {canPrograms && (
           <Section title="Metering programs" count={progList.length} to="/ops/tmu">
             {progList.length === 0 ? (
@@ -442,7 +477,6 @@ export function DashboardPage() {
         </p>
       </div>
 
-      <QuickAccess />
       <Overview />
     </div>
   );
