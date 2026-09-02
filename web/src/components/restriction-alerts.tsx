@@ -58,7 +58,7 @@ function tmiAlert(t: Tmi): RestrictionAlert {
     kind: "Restriction",
     color: COLORS.tmi,
     title: `${t.requesting} → ${t.providing}`,
-    lines: [t.restriction],
+    lines: [t.decoded || t.restriction],
   };
 }
 
