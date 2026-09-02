@@ -18,6 +18,8 @@ import {
   useSetPackageAuto,
 } from "@/lib/events";
 import {hasPermission} from "@/lib/permissions";
+import {NtmlEditor} from "@/components/ntml-editor";
+import {EMPTY_NTML, type Ntml} from "@/lib/ntml";
 import {formatZulu, parseZulu} from "@/lib/time";
 
 /** ICAOs already covered by a program item in a package. */
@@ -69,6 +71,8 @@ function AddItemForm({
   const rates = useAirportRates(eventId);
   const [kind, setKind] = useState<Kind>("program");
   const [f, setF] = useState<Record<string, string>>({});
+  const [structured, setStructured] = useState(false);
+  const [ntml, setNtml] = useState<Ntml>(EMPTY_NTML);
   const set = (k: string, v: string) => setF((prev) => ({ ...prev, [k]: v }));
 
   function submit() {
@@ -82,11 +86,14 @@ function AddItemForm({
         mit: Number(f.mit) || 0,
       };
     } else if (kind === "restriction") {
-      if (!f.requesting || !f.providing || !f.restriction) return;
+      if (!f.requesting || !f.providing) return;
+      if (!structured && !f.restriction) return;
+      if (structured && (!ntml.element.trim() || !ntml.kind.trim())) return;
       payload = {
         requesting: f.requesting,
         providing: f.providing,
-        restriction: f.restriction,
+        restriction: structured ? "" : f.restriction,
+        structured: structured ? ntml : undefined,
         start_time: parseZulu(f.start ?? "") ?? undefined,
         stop_time: parseZulu(f.stop ?? "") ?? undefined,
       };
@@ -100,7 +107,13 @@ function AddItemForm({
     }
     add.mutate(
       { packageId, kind, payload },
-      { onSuccess: () => setF({}) },
+      {
+        onSuccess: () => {
+          setF({});
+          setStructured(false);
+          setNtml(EMPTY_NTML);
+        },
+      },
     );
   }
 
@@ -126,6 +139,8 @@ function AddItemForm({
             onClick={() => {
               setKind(k.value);
               setF({});
+              setStructured(false);
+              setNtml(EMPTY_NTML);
             }}
           >
             {k.label}
@@ -161,13 +176,26 @@ function AddItemForm({
           </>
         )}
         {kind === "restriction" && (
-          <>
-            {field("requesting", "requesting", "w-28 font-mono uppercase")}
-            {field("providing", "providing", "w-28 font-mono uppercase")}
-            {field("restriction", "restriction (e.g. 20 MIT)", "w-48")}
-            {field("start", "start DD/HHMMz", "w-32")}
-            {field("stop", "stop DD/HHMMz", "w-32")}
-          </>
+          <div className="flex w-full flex-col gap-2">
+            <div className="flex flex-wrap items-center gap-2">
+              {field("requesting", "requesting", "w-28 font-mono uppercase")}
+              {field("providing", "providing", "w-28 font-mono uppercase")}
+              {field("start", "start DD/HHMMz", "w-32")}
+              {field("stop", "stop DD/HHMMz", "w-32")}
+              <button
+                type="button"
+                onClick={() => setStructured((v) => !v)}
+                className="rounded-md border px-2.5 py-1.5 text-xs font-medium hover:bg-accent/40"
+              >
+                {structured ? "Structured ✓" : "Structured"}
+              </button>
+            </div>
+            {structured ? (
+              <NtmlEditor value={ntml} onChange={setNtml} />
+            ) : (
+              field("restriction", "restriction (e.g. 20 MIT)", "w-64")
+            )}
+          </div>
         )}
         {kind === "ground_stop" && (
           <>
