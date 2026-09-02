@@ -27,6 +27,7 @@ import {EventPlanningPage} from "@/pages/planning/event";
 import {EventFcaBuilderPage} from "@/pages/planning/event-fcas";
 import {AirportConfigsPage} from "@/pages/planning/airport-configs";
 import {StatsPage} from "@/pages/stats";
+import {DelaysPage} from "@/pages/stats/delays";
 import {StatsFlightPage} from "@/pages/stats/flight";
 // Replay pulls in deck.gl + MapLibre — code-split so it only loads on its route.
 const CaptureReplayPage = lazyRouteComponent(() => import("@/pages/stats/replay"), "CaptureReplayPage");
@@ -401,6 +402,12 @@ const statsDashboardRoute = createRoute({
   },
 });
 
+const statsDelaysRoute = createRoute({
+  getParentRoute: () => statsRoute,
+  path: "delays",
+  component: DelaysPage,
+});
+
 // --- Admin ---
 
 const adminRoute = createRoute({
@@ -494,7 +501,13 @@ const routeTree = rootRoute.addChildren([
     planningEventRoute,
     planningEventFcasRoute,
   ]),
-  statsRoute.addChildren([statsIndexRoute, statsFlightRoute, statsReplayRoute, statsDashboardRoute]),
+  statsRoute.addChildren([
+    statsIndexRoute,
+    statsFlightRoute,
+    statsReplayRoute,
+    statsDashboardRoute,
+    statsDelaysRoute,
+  ]),
   adminRoute.addChildren([
     adminIndexRoute,
     adminAccessRoute,

@@ -304,6 +304,12 @@ function MobileMenu({
                 Replay map
               </Link>
             </DropdownMenuItem>
+            <DropdownMenuItem asChild>
+              <Link to="/historical/delays">
+                <Timer />
+                Delays
+              </Link>
+            </DropdownMenuItem>
           </>
         )}
 
@@ -472,6 +478,12 @@ export function Navbar() {
                 <Link to="/historical/replay">
                   <Film />
                   Replay map
+                </Link>
+              </DropdownMenuItem>
+              <DropdownMenuItem asChild>
+                <Link to="/historical/delays">
+                  <Timer />
+                  Delays
                 </Link>
               </DropdownMenuItem>
             </NavGroup>

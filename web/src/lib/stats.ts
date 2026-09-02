@@ -13,6 +13,36 @@ export type CaptureSummary = components["schemas"]["CaptureSummaryBody"];
 export type Replay = components["schemas"]["ReplayBody"];
 export type ReplayFlight = components["schemas"]["ReplayFlightBody"];
 export type ResolvedRoute = components["schemas"]["ResolvedRoute"];
+export type DelaySummary = components["schemas"]["DelaySummary"];
+export type DelayGroup = components["schemas"]["DelayGroup"];
+
+/** Average-delay aggregates for one leg kind over a rolling window, with optional filters. */
+export function useDelaySummary(params: {
+  kind: "departure" | "arrival";
+  airport?: string;
+  runway?: string;
+  procedure?: string;
+  hours: number;
+}) {
+  return useQuery({
+    queryKey: ["stats-delays", params],
+    queryFn: async (): Promise<DelaySummary> => {
+      const { data, error } = await ois.GET("/api/v1/stats/delays", {
+        params: {
+          query: {
+            kind: params.kind,
+            airport: params.airport || undefined,
+            runway: params.runway || undefined,
+            procedure: params.procedure || undefined,
+            hours: params.hours,
+          },
+        },
+      });
+      if (error || !data) throw new Error("failed to load delays");
+      return data;
+    },
+  });
+}
 
 /** Sample spacing for a window length — mirrors the backend so chunks fetch a stable step. */
 export function adaptiveStep(windowSecs: number): number {
