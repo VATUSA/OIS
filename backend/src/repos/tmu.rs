@@ -16,7 +16,7 @@ use crate::{
 
 const SELECT: &str = "select t.id, t.requesting, t.providing, t.restriction, \
     t.start_time, t.stop_time, t.status, t.published_at, t.created_at, \
-    u.display_name as author \
+    u.display_name as author, t.structured, t.decoded \
     from tmu.tmis t left join identity.users u on u.id = t.created_by";
 
 pub async fn list_tmis(pool: &PgPool, status: Option<&str>) -> Result<Vec<TmiBody>, ApiError> {
@@ -57,14 +57,18 @@ pub async fn create_tmi(
     req: &CreateTmiRequest,
     created_by: &str,
 ) -> Result<String, ApiError> {
+    // A structured TMI stores its parsed fields + the decoded English; a raw one leaves both null.
+    let decoded = req.structured.as_ref().map(crate::tmi::render_english);
     sqlx::query_scalar::<_, String>(
         "insert into tmu.tmis \
-         (requesting, providing, restriction, start_time, stop_time, created_by) \
-         values ($1, $2, $3, coalesce($4, now()), $5, $6) returning id",
+         (requesting, providing, restriction, structured, decoded, start_time, stop_time, created_by) \
+         values ($1, $2, $3, $4, $5, coalesce($6, now()), $7, $8) returning id",
     )
     .bind(&req.requesting)
     .bind(&req.providing)
     .bind(&req.restriction)
+    .bind(req.structured.as_ref().map(sqlx::types::Json))
+    .bind(decoded)
     .bind(req.start_time)
     .bind(req.stop_time)
     .bind(created_by)

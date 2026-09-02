@@ -221,6 +221,8 @@ use utoipa::OpenApi;
         crate::models::ScopeUpdate,
         crate::models::TmiBody,
         crate::models::CreateTmiRequest,
+        crate::models::NtmlRestriction,
+        crate::models::Bound,
         crate::models::UpdateTmiRequest,
         crate::models::GateRule,
         crate::models::ProgramBody,
