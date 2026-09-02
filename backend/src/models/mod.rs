@@ -177,6 +177,7 @@ pub struct TmiBody {
     pub requesting: String,
     /// Providing facility (ARTCC/TRACON).
     pub providing: String,
+    /// The canonical raw NTML line (typed directly, or encoded from `structured`).
     pub restriction: String,
     pub start_time: DateTime<Utc>,
     pub stop_time: Option<DateTime<Utc>>,
@@ -185,13 +186,76 @@ pub struct TmiBody {
     pub created_at: DateTime<Utc>,
     /// Author display name (from the creating user).
     pub author: Option<String>,
+    /// Parsed NTML fields when built with the structured form (null for a raw-typed TMI).
+    #[schema(value_type = Option<NtmlRestriction>)]
+    pub structured: Option<sqlx::types::Json<NtmlRestriction>>,
+    /// Plain-English rendering of `structured` for pilots (null for a raw-typed TMI).
+    pub decoded: Option<String>,
+}
+
+/// A structured NTML restriction (the form-built TMI content). Encoded to the raw `restriction` line
+/// and rendered to `decoded` English by `crate::tmi`. The requesting/providing facilities and the
+/// valid window live on the TMI itself, not here.
+#[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
+pub struct NtmlRestriction {
+    /// Airport/facility element, e.g. `JFK` or `EWR,LGA`.
+    pub element: String,
+    /// `arrivals` | `departures` | `enroute`.
+    pub direction: String,
+    /// Fix / NAVAID / airway the restriction is via, e.g. `CAMRN`, `J152`.
+    #[serde(default)]
+    pub via: Option<String>,
+    /// Restriction type: `MIT` | `MINIT` | `STOP` | `DSP` | `APREQ` | `TBM` | `CFR` | `TXT`.
+    pub kind: String,
+    /// Value for `MIT` (miles) / `MINIT` (minutes).
+    #[serde(default)]
+    pub value: Option<i32>,
+    /// Free text when `kind = TXT`.
+    #[serde(default)]
+    pub text: Option<String>,
+    /// Qualifier, e.g. `NO STACKS`, `PER AIRPORT`, `AS ONE`, `SINGLE STREAM`.
+    #[serde(default)]
+    pub qualifier: Option<String>,
+    /// Aircraft type: `ALL` | `JET` | `PROP` | `TURBOPROP`.
+    #[serde(default)]
+    pub aircraft: Option<String>,
+    /// Speed limit, e.g. `{ op: "≤", value: 210 }`.
+    #[serde(default)]
+    pub speed: Option<Bound>,
+    /// Altitude limit, e.g. `{ op: "AOB", value: 90 }` (FL090).
+    #[serde(default)]
+    pub altitude: Option<Bound>,
+    /// Impacting-condition category, e.g. `VOLUME`, `WEATHER`, `EQUIPMENT`.
+    #[serde(default)]
+    pub condition: Option<String>,
+    /// Impacting-condition detail, e.g. `THUNDERSTORMS`, `STARS`.
+    #[serde(default)]
+    pub condition_detail: Option<String>,
+    /// Excluded facilities/airports, e.g. `["PHL"]`.
+    #[serde(default)]
+    pub exclude: Vec<String>,
+}
+
+/// A speed/altitude limit: an operator plus a value. Speed ops are `=`/`≤`/`≥`; altitude ops are
+/// `AT`/`AOB` (at or below) / `AOA` (at or above).
+#[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
+pub struct Bound {
+    pub op: String,
+    pub value: i32,
 }
 
 #[derive(Debug, Deserialize, ToSchema)]
 pub struct CreateTmiRequest {
     pub requesting: String,
     pub providing: String,
+    /// Raw NTML line for a raw-typed TMI; ignored (overwritten by the encoded line) when `structured`
+    /// is present.
+    #[serde(default)]
     pub restriction: String,
+    /// Structured NTML fields — when present the backend encodes the raw line + renders the decoded
+    /// English from these, and `restriction` is derived.
+    #[serde(default)]
+    pub structured: Option<NtmlRestriction>,
     #[serde(default)]
     pub start_time: Option<DateTime<Utc>>,
     #[serde(default)]

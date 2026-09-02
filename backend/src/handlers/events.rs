@@ -765,6 +765,7 @@ pub(crate) async fn activate_package(
                     requesting: r.requesting,
                     providing: r.providing,
                     restriction: r.restriction,
+                    structured: None,
                     start_time: r.start_time,
                     stop_time: r.stop_time,
                 };

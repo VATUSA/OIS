@@ -2746,6 +2746,15 @@ export interface components {
             /** Format: int64 */
             total: number;
         };
+        /**
+         * @description A speed/altitude limit: an operator plus a value. Speed ops are `=`/`≤`/`≥`; altitude ops are
+         *     `AT`/`AOB` (at or below) / `AOA` (at or above).
+         */
+        Bound: {
+            op: string;
+            /** Format: int32 */
+            value: number;
+        };
         /** @description A saved/open capture window (for the replay picker). */
         CaptureSummaryBody: {
             /** Format: date-time */
@@ -2862,11 +2871,16 @@ export interface components {
         CreateTmiRequest: {
             providing: string;
             requesting: string;
-            restriction: string;
+            /**
+             * @description Raw NTML line for a raw-typed TMI; ignored (overwritten by the encoded line) when `structured`
+             *     is present.
+             */
+            restriction?: string;
             /** Format: date-time */
             start_time?: string | null;
             /** Format: date-time */
             stop_time?: string | null;
+            structured?: null | components["schemas"]["NtmlRestriction"];
         };
         /** @description A manually-added runway end (for fields the bundled dataset lacks). */
         CustomEnd: {
@@ -3820,6 +3834,40 @@ export interface components {
             /** Format: int32 */
             peak_pilots?: number | null;
         };
+        /**
+         * @description A structured NTML restriction (the form-built TMI content). Encoded to the raw `restriction` line
+         *     and rendered to `decoded` English by `crate::tmi`. The requesting/providing facilities and the
+         *     valid window live on the TMI itself, not here.
+         */
+        NtmlRestriction: {
+            /** @description Aircraft type: `ALL` | `JET` | `PROP` | `TURBOPROP`. */
+            aircraft?: string | null;
+            altitude?: null | components["schemas"]["Bound"];
+            /** @description Impacting-condition category, e.g. `VOLUME`, `WEATHER`, `EQUIPMENT`. */
+            condition?: string | null;
+            /** @description Impacting-condition detail, e.g. `THUNDERSTORMS`, `STARS`. */
+            condition_detail?: string | null;
+            /** @description `arrivals` | `departures` | `enroute`. */
+            direction: string;
+            /** @description Airport/facility element, e.g. `JFK` or `EWR,LGA`. */
+            element: string;
+            /** @description Excluded facilities/airports, e.g. `["PHL"]`. */
+            exclude?: string[];
+            /** @description Restriction type: `MIT` | `MINIT` | `STOP` | `DSP` | `APREQ` | `TBM` | `CFR` | `TXT`. */
+            kind: string;
+            /** @description Qualifier, e.g. `NO STACKS`, `PER AIRPORT`, `AS ONE`, `SINGLE STREAM`. */
+            qualifier?: string | null;
+            speed?: null | components["schemas"]["Bound"];
+            /** @description Free text when `kind = TXT`. */
+            text?: string | null;
+            /**
+             * Format: int32
+             * @description Value for `MIT` (miles) / `MINIT` (minutes).
+             */
+            value?: number | null;
+            /** @description Fix / NAVAID / airway the restriction is via, e.g. `CAMRN`, `J152`. */
+            via?: string | null;
+        };
         /** @description One outbound job handed to the bot on lease. `payload` carries everything the handler needs. */
         OutboundJobBody: {
             /** Format: int32 */
@@ -4392,6 +4440,8 @@ export interface components {
             author?: string | null;
             /** Format: date-time */
             created_at: string;
+            /** @description Plain-English rendering of `structured` for pilots (null for a raw-typed TMI). */
+            decoded?: string | null;
             id: string;
             /** @description Providing facility (ARTCC/TRACON). */
             providing: string;
@@ -4399,12 +4449,14 @@ export interface components {
             published_at?: string | null;
             /** @description Requesting facility (ARTCC/TRACON). */
             requesting: string;
+            /** @description The canonical raw NTML line (typed directly, or encoded from `structured`). */
             restriction: string;
             /** Format: date-time */
             start_time: string;
             status: string;
             /** Format: date-time */
             stop_time?: string | null;
+            structured?: null | components["schemas"]["NtmlRestriction"];
         };
         /** @description A named bundle of draft TMIs for an event; activating it creates live tmu.* rows. */
         TmiPackageBody: {

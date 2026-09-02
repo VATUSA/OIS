@@ -12,6 +12,7 @@ pub mod repos;
 pub mod reqlog;
 pub mod router;
 pub mod state;
+pub mod tmi;
 
 use std::net::SocketAddr;
 

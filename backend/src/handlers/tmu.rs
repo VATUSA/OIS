@@ -74,6 +74,13 @@ pub async fn create_tmi(
 
     payload.requesting = payload.requesting.trim().to_ascii_uppercase();
     payload.providing = payload.providing.trim().to_ascii_uppercase();
+    // A structured (form-built) TMI derives its raw line from the fields; a raw TMI uses the text.
+    if let Some(s) = &payload.structured {
+        if s.element.trim().is_empty() || s.kind.trim().is_empty() {
+            return Err(ApiError::BadRequest);
+        }
+        payload.restriction = crate::tmi::encode(s);
+    }
     payload.restriction = payload.restriction.trim().to_string();
     if payload.requesting.is_empty()
         || payload.providing.is_empty()
