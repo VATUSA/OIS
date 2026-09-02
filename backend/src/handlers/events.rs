@@ -54,7 +54,12 @@ struct ProgramItem {
 struct RestrictionItem {
     requesting: String,
     providing: String,
+    #[serde(default)]
     restriction: String,
+    /// Structured NTML fields — when present the raw `restriction` is derived (encoded) from them and
+    /// the decoded English is generated at activation.
+    #[serde(default)]
+    structured: Option<crate::models::NtmlRestriction>,
     #[serde(default)]
     start_time: Option<DateTime<Utc>>,
     #[serde(default)]
@@ -89,6 +94,10 @@ fn normalize_item(kind: &str, payload: Value) -> Result<Value, ApiError> {
                 serde_json::from_value(payload).map_err(|_| ApiError::BadRequest)?;
             r.requesting = r.requesting.trim().to_string();
             r.providing = r.providing.trim().to_string();
+            // A structured restriction derives its raw line; a raw one uses the typed text.
+            if let Some(s) = &r.structured {
+                r.restriction = crate::tmi::encode(s);
+            }
             r.restriction = r.restriction.trim().to_string();
             if r.requesting.is_empty() || r.providing.is_empty() || r.restriction.is_empty() {
                 return Err(ApiError::BadRequest);
@@ -765,7 +774,7 @@ pub(crate) async fn activate_package(
                     requesting: r.requesting,
                     providing: r.providing,
                     restriction: r.restriction,
-                    structured: None,
+                    structured: r.structured,
                     start_time: r.start_time,
                     stop_time: r.stop_time,
                 };

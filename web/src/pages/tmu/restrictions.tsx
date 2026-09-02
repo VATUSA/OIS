@@ -6,6 +6,8 @@ import {hasPermission} from "@/lib/permissions";
 import {formatZulu, parseZulu} from "@/lib/time";
 import {useMe} from "@/lib/auth";
 import {type Tmi, useCancelTmi, useCreateTmi, useDeleteTmi, usePublishTmi, useTmis,} from "@/lib/tmu";
+import {NtmlEditor} from "@/components/ntml-editor";
+import {EMPTY_NTML, type Ntml} from "@/lib/ntml";
 
 function statusVariant(
   status: string,
@@ -16,49 +18,39 @@ function statusVariant(
   return "secondary";
 }
 
-type FormState = {
-  requesting: string;
-  providing: string;
-  restriction: string;
-  start: string;
-  stop: string;
-};
+type FormState = { requesting: string; providing: string; restriction: string; start: string; stop: string };
+const EMPTY: FormState = { requesting: "", providing: "", restriction: "", start: "", stop: "" };
 
-const EMPTY: FormState = {
-  requesting: "",
-  providing: "",
-  restriction: "",
-  start: "",
-  stop: "",
-};
-
-const COLS =
-  "grid grid-cols-[minmax(0,1fr)_minmax(0,1fr)_minmax(0,3fr)_minmax(0,1.2fr)_minmax(0,1.2fr)_auto] items-end gap-3";
-
-function Head({ children }: { children: React.ReactNode }) {
+function Labeled({ label, children }: { label: string; children: React.ReactNode }) {
   return (
-    <span className="text-xs font-medium uppercase tracking-wide text-muted-foreground">
+    <label className="flex flex-col gap-1 text-xs">
+      <span className="text-muted-foreground">{label}</span>
       {children}
-    </span>
+    </label>
   );
 }
 
 function CreateForm() {
   const create = useCreateTmi();
   const toast = useToast();
+  const [mode, setMode] = useState<"structured" | "raw">("structured");
   const [form, setForm] = useState<FormState>(EMPTY);
+  const [ntml, setNtml] = useState<Ntml>(EMPTY_NTML);
 
-  function set<K extends keyof FormState>(key: K, value: string) {
+  const set = <K extends keyof FormState>(key: K, value: string) =>
     setForm((f) => ({ ...f, [key]: value }));
-  }
 
   function submit() {
-    if (
-      !form.requesting.trim() ||
-      !form.providing.trim() ||
-      !form.restriction.trim()
-    ) {
-      toast.warning("Requesting, providing, and restriction are required");
+    if (!form.requesting.trim() || !form.providing.trim()) {
+      toast.warning("Requesting and providing are required");
+      return;
+    }
+    if (mode === "raw" && !form.restriction.trim()) {
+      toast.warning("A restriction is required");
+      return;
+    }
+    if (mode === "structured" && (!ntml.element.trim() || !ntml.kind.trim())) {
+      toast.warning("An element and a restriction type are required");
       return;
     }
     const start = form.start.trim() ? parseZulu(form.start) : null;
@@ -75,60 +67,70 @@ function CreateForm() {
       {
         requesting: form.requesting,
         providing: form.providing,
-        restriction: form.restriction,
+        restriction: mode === "raw" ? form.restriction : "",
+        structured: mode === "structured" ? ntml : undefined,
         start_time: start,
         stop_time: stop,
       },
-      { onSuccess: () => setForm(EMPTY) },
+      {
+        onSuccess: () => {
+          setForm(EMPTY);
+          setNtml(EMPTY_NTML);
+        },
+      },
     );
   }
 
   return (
     <Card>
-      <CardContent className="flex flex-col gap-3 pt-6">
-        <div className="overflow-x-auto">
-          <div className={`${COLS} min-w-[860px]`}>
-            <Head>Requesting</Head>
-            <Head>Providing</Head>
-            <Head>Restriction</Head>
-            <Head>Start time</Head>
-            <Head>Stop time</Head>
-            <span />
+      <CardContent className="flex flex-col gap-4 pt-6">
+        <div className="flex flex-wrap items-end gap-3">
+          <div className="flex overflow-hidden rounded-md border">
+            {(["structured", "raw"] as const).map((m) => (
+              <button
+                key={m}
+                type="button"
+                onClick={() => setMode(m)}
+                className={
+                  "px-3 py-1.5 text-sm font-medium transition-colors " +
+                  (mode === m ? "bg-primary text-primary-foreground" : "hover:bg-accent/40")
+                }
+              >
+                {m === "structured" ? "Structured" : "Raw"}
+              </button>
+            ))}
+          </div>
+          <Labeled label="Requesting">
+            <Input className="w-32" placeholder="ARTCC/TRACON" value={form.requesting} onChange={(e) => set("requesting", e.target.value)} />
+          </Labeled>
+          <Labeled label="Providing">
+            <Input className="w-32" placeholder="ARTCC/TRACON" value={form.providing} onChange={(e) => set("providing", e.target.value)} />
+          </Labeled>
+          <Labeled label="Start time">
+            <Input className="w-28" placeholder="DD/HHMMz" value={form.start} onChange={(e) => set("start", e.target.value)} />
+          </Labeled>
+          <Labeled label="Stop time">
+            <Input className="w-28" placeholder="DD/HHMMz" value={form.stop} onChange={(e) => set("stop", e.target.value)} />
+          </Labeled>
+        </div>
 
+        {mode === "raw" ? (
+          <Labeled label="Restriction (raw NTML line)">
             <Input
-              placeholder="ARTCC/TRACON"
-              value={form.requesting}
-              onChange={(e) => set("requesting", e.target.value)}
-            />
-            <Input
-              placeholder="ARTCC/TRACON"
-              value={form.providing}
-              onChange={(e) => set("providing", e.target.value)}
-            />
-            <Input
-              placeholder="e.g. 20 MIT jets / 250kt"
+              placeholder="e.g. JFK arrivals via CAMRN 20MIT NO STACKS TYPE:ALL"
               value={form.restriction}
               onChange={(e) => set("restriction", e.target.value)}
             />
-            <Input
-              placeholder="DD/HHMMz"
-              value={form.start}
-              onChange={(e) => set("start", e.target.value)}
-            />
-            <Input
-              placeholder="DD/HHMMz"
-              value={form.stop}
-              onChange={(e) => set("stop", e.target.value)}
-            />
-            <Button
-              className="whitespace-nowrap"
-              disabled={create.isPending}
-              onClick={submit}
-            >
-              <Plus />
-              Add restriction
-            </Button>
-          </div>
+          </Labeled>
+        ) : (
+          <NtmlEditor value={ntml} onChange={setNtml} />
+        )}
+
+        <div className="flex justify-end">
+          <Button disabled={create.isPending} onClick={submit}>
+            <Plus />
+            Add restriction
+          </Button>
         </div>
       </CardContent>
     </Card>
@@ -155,7 +157,10 @@ function TmiRow({
       </td>
       <td className="py-2 pr-3 font-mono text-xs">{tmi.requesting}</td>
       <td className="py-2 pr-3 font-mono text-xs">{tmi.providing}</td>
-      <td className="py-2 pr-3">{tmi.restriction}</td>
+      <td className="py-2 pr-3">
+        <div className="font-mono text-xs">{tmi.restriction}</div>
+        {tmi.decoded && <div className="text-xs text-muted-foreground">{tmi.decoded}</div>}
+      </td>
       <td className="py-2 pr-3 font-mono text-xs text-muted-foreground">
         {formatZulu(tmi.start_time)}
       </td>
