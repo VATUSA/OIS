@@ -20,6 +20,10 @@ permission!(UsersDirectoryRead, ["users", "directory"], Read);
 // audit log
 permission!(AuditLogsRead, ["audit", "logs"], Read);
 
+// Background jobs viewer (issue #34): read statuses, and "update" = trigger an immediate run.
+permission!(SystemJobsRead, ["system", "jobs"], Read);
+permission!(SystemJobsUpdate, ["system", "jobs"], Update);
+
 // service accounts (bot credential management)
 permission!(ServiceAccountsRead, ["service_accounts"], Read);
 permission!(ServiceAccountsCreate, ["service_accounts"], Create);

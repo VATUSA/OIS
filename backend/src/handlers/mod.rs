@@ -16,6 +16,7 @@ pub mod flow;
 pub mod gdp;
 pub mod health;
 pub mod integration;
+pub mod jobs;
 pub mod preferences;
 pub mod public;
 pub mod runway;

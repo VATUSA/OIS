@@ -100,6 +100,38 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/v1/admin/jobs": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get: operations["list_jobs"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/admin/jobs/{name}/run": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        post: operations["run_job"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/v1/admin/service-accounts": {
         parameters: {
             query?: never;
@@ -3867,6 +3899,31 @@ export interface components {
             /** Format: date-time */
             wheels_up: string;
         };
+        /** @description A single background job's observable status. */
+        JobStatus: {
+            description: string;
+            /**
+             * Format: int64
+             * @description Nominal run interval in seconds; `None` for continuous/event-driven jobs.
+             */
+            interval_secs?: number | null;
+            last_detail?: string | null;
+            /** Format: int64 */
+            last_finished_ms: number;
+            /** @description Outcome of the last completed run (`None` = never finished). */
+            last_ok?: boolean | null;
+            /**
+             * Format: int64
+             * @description Epoch-ms of the last run start / finish (0 = never).
+             */
+            last_started_ms: number;
+            name: string;
+            running: boolean;
+            /** Format: int64 */
+            runs: number;
+            /** @description Whether the admin viewer may trigger an immediate run. */
+            triggerable: boolean;
+        };
         KeyCountBody: {
             /** Format: int64 */
             count: number;
@@ -4963,6 +5020,12 @@ export interface operations {
                 action?: string;
                 /** @description Filter to one actor (per-actor dossier) */
                 actor_id?: string;
+                /** @description Free-text search (action / resource / reason / actor) */
+                q?: string;
+                /** @description Only entries at/after this time (RFC 3339) */
+                from?: string;
+                /** @description Only entries at/before this time (RFC 3339) */
+                to?: string;
                 /** @description 1-based page (default 1) */
                 page?: number;
                 /** @description Page size (default 50, max 100) */
@@ -4983,6 +5046,63 @@ export interface operations {
                 };
             };
             401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+        };
+    };
+    list_jobs: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["JobStatus"][];
+                };
+            };
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+        };
+    };
+    run_job: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /** @description Job name */
+                name: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            202: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            404: {
                 headers: {
                     [name: string]: unknown;
                 };

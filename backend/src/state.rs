@@ -45,6 +45,8 @@ pub struct AppState {
     /// Realtime push hub: mutation handlers publish a topic here; connected websockets fan it out to
     /// clients, which then refetch via REST (see `crate::realtime`).
     pub events: crate::realtime::Events,
+    /// Background-job status registry for the admin "Background Tasks" viewer (last run + trigger).
+    pub jobs: Arc<crate::job_registry::JobRegistry>,
 }
 
 impl AppState {
@@ -70,6 +72,7 @@ impl AppState {
         let winds_refreshed = Arc::new(AtomicI64::new(0));
         let metar_cache = Arc::new(Mutex::new(HashMap::new()));
         let events = broadcast::channel(256).0;
+        let jobs = Arc::new(crate::job_registry::JobRegistry::new());
         tracing::info!(
             nav_points = nav.load().len(),
             nav_cycle = nav.load().cycle(),
@@ -106,6 +109,7 @@ impl AppState {
                 winds_refreshed,
                 metar_cache,
                 events,
+                jobs,
             });
         }
 
@@ -123,6 +127,7 @@ impl AppState {
             winds_refreshed,
             metar_cache,
             events,
+            jobs,
         })
     }
 
@@ -141,6 +146,7 @@ impl AppState {
             winds_refreshed: Arc::new(AtomicI64::new(0)),
             metar_cache: Arc::new(Mutex::new(HashMap::new())),
             events: broadcast::channel(256).0,
+            jobs: Arc::new(crate::job_registry::JobRegistry::new()),
         }
     }
 }

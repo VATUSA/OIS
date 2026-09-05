@@ -1,5 +1,5 @@
 import {Link} from "@tanstack/react-router";
-import {KeyRound, LayoutDashboard, type LucideIcon, MessageSquare, ScrollText, ShieldCheck,} from "lucide-react";
+import {Activity, KeyRound, LayoutDashboard, type LucideIcon, MessageSquare, ScrollText, ShieldCheck,} from "lucide-react";
 
 import {useMe} from "@/lib/auth";
 import {hasPermission} from "@/lib/permissions";
@@ -25,6 +25,12 @@ const NAV: Item[] = [
     to: "/admin/audit",
     icon: ScrollText,
     permission: "audit.logs.read",
+  },
+  {
+    label: "Background Tasks",
+    to: "/admin/jobs",
+    icon: Activity,
+    permission: "system.jobs.read",
   },
   {
     label: "API Keys",

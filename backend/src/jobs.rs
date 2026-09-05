@@ -13,6 +13,7 @@ use crate::feed::nav::NavData;
 use crate::feed::nav_source;
 use crate::feed::trajectory::ProfileTable;
 use crate::feed::winds::{self, Winds};
+use crate::job_registry::{JobRegistry, run_interval};
 use crate::realtime::{Events, WsEvent, topic};
 use crate::repos::aircraft_profiles as aircraft_profiles_repo;
 use crate::repos::events as events_repo;
@@ -102,16 +103,27 @@ pub async fn refresh_winds_once(
 /// Keep the in-memory nav database current: refresh at startup and every 24h. On any
 /// failure the existing data is kept — the server always has a coherent dataset from the
 /// compile-time bundle seed.
-pub fn spawn_nav_refresh(nav: Arc<ArcSwap<NavData>>, refreshed: Arc<AtomicI64>) {
-    tokio::spawn(async move {
-        let mut ticker = tokio::time::interval(NAV_REFRESH_INTERVAL);
-        loop {
-            ticker.tick().await;
-            if let Err(e) = refresh_nav_once(&nav, &refreshed).await {
-                tracing::warn!(error = %e, "nav refresh failed; keeping current data");
+pub fn spawn_nav_refresh(
+    reg: Arc<JobRegistry>,
+    nav: Arc<ArcSwap<NavData>>,
+    refreshed: Arc<AtomicI64>,
+) {
+    tokio::spawn(run_interval(
+        reg,
+        "nav_refresh",
+        "Fetch the latest FAA NASR nav cycle",
+        NAV_REFRESH_INTERVAL,
+        move || {
+            let (nav, refreshed) = (nav.clone(), refreshed.clone());
+            async move {
+                match refresh_nav_once(&nav, &refreshed).await {
+                    Ok(true) => Ok("nav cycle updated".to_string()),
+                    Ok(false) => Ok("already current".to_string()),
+                    Err(e) => Err(e),
+                }
             }
-        }
-    });
+        },
+    ));
 }
 
 /// Keep winds aloft current for ETA prediction: once the airport database is loaded, fetch
@@ -119,21 +131,34 @@ pub fn spawn_nav_refresh(nav: Arc<ArcSwap<NavData>>, refreshed: Arc<AtomicI64>) 
 /// present, each successful refresh also snapshots the winds to `stats.winds` so historical replay
 /// can reconstruct past ETAs.
 pub fn spawn_winds_refresh(
+    reg: Arc<JobRegistry>,
     feed: FeedState,
     winds: Arc<ArcSwap<Winds>>,
     refreshed: Arc<AtomicI64>,
     pool: Option<sqlx::PgPool>,
 ) {
     tokio::spawn(async move {
+        // Not run_interval: winds has a variable cadence (fast retry until the airport DB loads,
+        // then hourly), so it's observed but not manually triggerable.
+        reg.register(
+            "winds_refresh",
+            "Fetch winds aloft (AWC FB tables)",
+            Some(WINDS_REFRESH_INTERVAL.as_secs()),
+            false,
+        );
         let client = reqwest::Client::builder()
             .user_agent("ois-winds/1.0 (+https://vatusa.net)")
             .timeout(Duration::from_secs(60))
             .build()
             .unwrap_or_default();
         loop {
+            reg.begin("winds_refresh");
             match refresh_winds_once(&feed, &winds, &refreshed, &client).await {
                 // Airport DB not loaded yet — retry soon.
-                None => tokio::time::sleep(Duration::from_secs(30)).await,
+                None => {
+                    reg.finish("winds_refresh", false, "airport database not loaded yet");
+                    tokio::time::sleep(Duration::from_secs(30)).await;
+                }
                 Some(n) => {
                     if n > 0 {
                         tracing::info!(stations = n, "winds aloft refreshed");
@@ -145,8 +170,10 @@ pub fn spawn_winds_refresh(
                                 tracing::warn!(error = ?e, "winds snapshot store failed");
                             }
                         }
+                        reg.finish("winds_refresh", true, format!("{n} stations"));
                     } else {
                         tracing::warn!("winds refresh returned no stations; keeping current");
+                        reg.finish("winds_refresh", false, "no stations returned");
                     }
                     tokio::time::sleep(WINDS_REFRESH_INTERVAL).await;
                 }
@@ -158,240 +185,285 @@ pub fn spawn_winds_refresh(
 /// Keep the trajectory model's aircraft performance profiles current: load them from the DB at
 /// startup and hot-swap them in, then reload periodically. Fails safe — a failed load keeps the
 /// current table (initially the legacy default).
-pub fn spawn_aircraft_profiles_refresh(pool: PgPool, profiles: Arc<ArcSwap<ProfileTable>>) {
-    tokio::spawn(async move {
-        let mut ticker = tokio::time::interval(AIRCRAFT_PROFILES_INTERVAL);
-        loop {
-            ticker.tick().await;
-            match aircraft_profiles_repo::load_all(&pool).await {
-                Ok(table) => profiles.store(Arc::new(table)),
-                Err(e) => {
-                    tracing::warn!(error = ?e, "aircraft profile reload failed; keeping current")
+pub fn spawn_aircraft_profiles_refresh(
+    reg: Arc<JobRegistry>,
+    pool: PgPool,
+    profiles: Arc<ArcSwap<ProfileTable>>,
+) {
+    tokio::spawn(run_interval(
+        reg,
+        "aircraft_profiles_refresh",
+        "Reload aircraft performance profiles from the DB",
+        AIRCRAFT_PROFILES_INTERVAL,
+        move || {
+            let (pool, profiles) = (pool.clone(), profiles.clone());
+            async move {
+                match aircraft_profiles_repo::load_all(&pool).await {
+                    Ok(table) => {
+                        profiles.store(Arc::new(table));
+                        Ok("reloaded".to_string())
+                    }
+                    Err(e) => Err(format!("{e:?}")),
                 }
             }
-        }
-    });
+        },
+    ));
 }
 
 /// Age the stats position time-series: downsample the 2–14 day band to ~1-minute resolution and
 /// drop raw positions past the 14-day horizon (Tier-1 simplified tracks on `stats.flight` survive).
 /// Rows inside an open/saved `stats.capture` window are skipped (retained at full fidelity). Runs
 /// hourly; a slow, batched, saved-window-aware alternative to TimescaleDB retention.
-pub fn spawn_stats_compaction(pool: PgPool) {
-    tokio::spawn(async move {
-        let mut ticker = tokio::time::interval(STATS_COMPACTION_INTERVAL);
-        loop {
-            ticker.tick().await;
-            let now = Utc::now();
-            let downsample_before = now - chrono::Duration::days(STATS_DOWNSAMPLE_AFTER_DAYS);
-            let prune_before = now - chrono::Duration::days(STATS_PRUNE_AFTER_DAYS);
+pub fn spawn_stats_compaction(reg: Arc<JobRegistry>, pool: PgPool) {
+    tokio::spawn(run_interval(
+        reg,
+        "stats_compaction",
+        "Downsample + prune the stats position time-series",
+        STATS_COMPACTION_INTERVAL,
+        move || {
+            let pool = pool.clone();
+            async move { stats_compaction_once(&pool).await }
+        },
+    ));
+}
 
-            match stats_repo::downsample_positions(
-                &pool,
+/// One stats-compaction pass: downsample the 2–14 day band and prune everything past the horizon
+/// (positions, winds, TM history, flight legs). Best-effort — a failed sub-pass is logged and the
+/// others still run; returns a summary of rows removed.
+async fn stats_compaction_once(pool: &PgPool) -> Result<String, String> {
+    let now = Utc::now();
+    let downsample_before = now - chrono::Duration::days(STATS_DOWNSAMPLE_AFTER_DAYS);
+    let prune_before = now - chrono::Duration::days(STATS_PRUNE_AFTER_DAYS);
+    let legs_before = now - chrono::Duration::days(DELAY_LEG_RETAIN_DAYS);
+    let mut removed: u64 = 0;
+
+    for (label, res) in [
+        (
+            "downsample",
+            stats_repo::downsample_positions(
+                pool,
                 prune_before,
                 downsample_before,
                 STATS_KEEP_EVERY,
             )
-            .await
-            {
-                Ok(n) if n > 0 => tracing::info!(deleted = n, "stats: downsampled positions"),
-                Ok(_) => {}
-                Err(_) => tracing::warn!("stats: downsample pass failed"),
+            .await,
+        ),
+        (
+            "positions",
+            stats_repo::prune_positions(pool, prune_before).await,
+        ),
+        ("winds", stats_repo::prune_winds(pool, prune_before).await),
+        (
+            "tm-history",
+            crate::repos::tmu::prune_history(pool, prune_before).await,
+        ),
+        (
+            "flight-legs",
+            stats_repo::prune_flight_legs(pool, legs_before).await,
+        ),
+    ] {
+        match res {
+            Ok(n) => {
+                if n > 0 {
+                    tracing::info!(deleted = n, pass = label, "stats: compaction");
+                }
+                removed += n;
             }
-
-            match stats_repo::prune_positions(&pool, prune_before).await {
-                Ok(n) if n > 0 => tracing::info!(deleted = n, "stats: pruned old positions"),
-                Ok(_) => {}
-                Err(_) => tracing::warn!("stats: prune pass failed"),
-            }
-
-            match stats_repo::prune_winds(&pool, prune_before).await {
-                Ok(n) if n > 0 => tracing::info!(deleted = n, "stats: pruned old winds"),
-                Ok(_) => {}
-                Err(_) => tracing::warn!("stats: winds prune pass failed"),
-            }
-
-            // Retain traffic-management history (published TMIs/GDPs/ground stops kept for replay)
-            // for the same window; hard-drop only rows that ran past the horizon.
-            match crate::repos::tmu::prune_history(&pool, prune_before).await {
-                Ok(n) if n > 0 => tracing::info!(deleted = n, "stats: pruned old TM history"),
-                Ok(_) => {}
-                Err(_) => tracing::warn!("stats: TM history prune pass failed"),
-            }
-
-            let legs_before = now - chrono::Duration::days(DELAY_LEG_RETAIN_DAYS);
-            match stats_repo::prune_flight_legs(&pool, legs_before).await {
-                Ok(n) if n > 0 => tracing::info!(deleted = n, "stats: pruned old flight legs"),
-                Ok(_) => {}
-                Err(_) => tracing::warn!("stats: flight-leg prune pass failed"),
-            }
+            Err(_) => tracing::warn!(pass = label, "stats: compaction sub-pass failed"),
         }
-    });
+    }
+    Ok(format!("{removed} rows removed"))
 }
 
 /// Drive per-event stat capture: for each event with capture enabled, open a `stats.capture`
 /// window once the event is inside `[start - pre, end + post]`, and close+save it once that window
 /// has passed. Runs every minute. Idempotent — it keys off whether an open capture already exists.
-pub fn spawn_capture_scheduler(pool: PgPool) {
-    tokio::spawn(async move {
-        let mut ticker = tokio::time::interval(CAPTURE_SCHEDULER_INTERVAL);
-        loop {
-            ticker.tick().await;
-            let rows = match stats_repo::list_capture_schedule(&pool).await {
-                Ok(r) => r,
-                Err(_) => {
-                    tracing::warn!("stats: capture schedule query failed");
-                    continue;
-                }
-            };
-            let now = Utc::now();
-            for r in rows {
-                let window_start = r.start_time - chrono::Duration::minutes(r.pre_minutes as i64);
-                let window_end = r.end_time + chrono::Duration::minutes(r.post_minutes as i64);
-                let in_window = now >= window_start && now <= window_end;
+pub fn spawn_capture_scheduler(reg: Arc<JobRegistry>, pool: PgPool) {
+    tokio::spawn(run_interval(
+        reg,
+        "capture_scheduler",
+        "Open/close per-event stat capture windows",
+        CAPTURE_SCHEDULER_INTERVAL,
+        move || {
+            let pool = pool.clone();
+            async move { capture_scheduler_once(&pool).await }
+        },
+    ));
+}
 
-                match (in_window, r.open_capture_id.as_deref()) {
-                    // Inside the window with no capture yet → open one covering the whole window.
-                    (true, None) => {
-                        match stats_repo::create_capture(
-                            &pool,
-                            Some(r.event_id),
-                            &r.title,
-                            window_start,
-                            None,
-                        )
-                        .await
-                        {
-                            Ok(id) => tracing::info!(
-                                event = r.event_id,
-                                capture = %id,
-                                "stats: opened event capture"
-                            ),
-                            Err(_) => {
-                                tracing::warn!(event = r.event_id, "stats: open capture failed")
-                            }
-                        }
+/// One capture-scheduler pass: open a capture for each event now inside its window, and close+save
+/// captures whose window has ended. Idempotent. Returns a summary of what changed.
+async fn capture_scheduler_once(pool: &PgPool) -> Result<String, String> {
+    let rows = stats_repo::list_capture_schedule(pool)
+        .await
+        .map_err(|_| "capture schedule query failed".to_string())?;
+    let now = Utc::now();
+    let (mut opened, mut saved) = (0u32, 0u32);
+    for r in rows {
+        let window_start = r.start_time - chrono::Duration::minutes(r.pre_minutes as i64);
+        let window_end = r.end_time + chrono::Duration::minutes(r.post_minutes as i64);
+        let in_window = now >= window_start && now <= window_end;
+
+        match (in_window, r.open_capture_id.as_deref()) {
+            // Inside the window with no capture yet → open one covering the whole window.
+            (true, None) => {
+                match stats_repo::create_capture(
+                    pool,
+                    Some(r.event_id),
+                    &r.title,
+                    window_start,
+                    None,
+                )
+                .await
+                {
+                    Ok(id) => {
+                        tracing::info!(event = r.event_id, capture = %id, "stats: opened event capture");
+                        opened += 1;
                     }
-                    // Past the window with an open capture → close + save it.
-                    (false, Some(_)) if now > window_end => {
-                        match stats_repo::close_open_event_captures(&pool, r.event_id, window_end)
-                            .await
-                        {
-                            Ok(n) if n > 0 => {
-                                tracing::info!(event = r.event_id, "stats: saved event capture")
-                            }
-                            _ => {}
-                        }
-                    }
-                    _ => {}
+                    Err(_) => tracing::warn!(event = r.event_id, "stats: open capture failed"),
                 }
             }
+            // Past the window with an open capture → close + save it.
+            (false, Some(_)) if now > window_end => {
+                if let Ok(n) =
+                    stats_repo::close_open_event_captures(pool, r.event_id, window_end).await
+                    && n > 0
+                {
+                    tracing::info!(event = r.event_id, "stats: saved event capture");
+                    saved += 1;
+                }
+            }
+            _ => {}
         }
-    });
+    }
+    Ok(if opened == 0 && saved == 0 {
+        "no changes".to_string()
+    } else {
+        format!("{opened} opened, {saved} saved")
+    })
 }
 
 /// Periodically expire finished TMIs/ground stops and delete ones that ended over an hour
 /// ago. Runs once at startup, then every 15 minutes.
-pub fn spawn_cleanup(pool: PgPool) {
-    tokio::spawn(async move {
-        let mut ticker = tokio::time::interval(CLEANUP_INTERVAL);
-        loop {
-            ticker.tick().await;
-            match tmu_repo::run_cleanup(&pool).await {
-                Ok(stats) if stats.expired > 0 || stats.deleted > 0 => {
-                    tracing::info!(
-                        expired = stats.expired,
-                        deleted = stats.deleted,
-                        "tmu cleanup pass"
-                    );
+pub fn spawn_cleanup(reg: Arc<JobRegistry>, pool: PgPool) {
+    tokio::spawn(run_interval(
+        reg,
+        "tmu_cleanup",
+        "Expire + delete finished TMIs / ground stops",
+        CLEANUP_INTERVAL,
+        move || {
+            let pool = pool.clone();
+            async move {
+                match tmu_repo::run_cleanup(&pool).await {
+                    Ok(stats) => {
+                        if stats.expired > 0 || stats.deleted > 0 {
+                            tracing::info!(
+                                expired = stats.expired,
+                                deleted = stats.deleted,
+                                "tmu cleanup pass"
+                            );
+                        }
+                        Ok(format!(
+                            "{} expired, {} deleted",
+                            stats.expired, stats.deleted
+                        ))
+                    }
+                    Err(_) => Err("cleanup pass failed".to_string()),
                 }
-                Ok(_) => {}
-                Err(_) => tracing::warn!("tmu cleanup pass failed"),
             }
-        }
-    });
+        },
+    ));
 }
 
 /// Drive event FCAs through their lifecycle: publish `planned` + auto ones ~30 min before their event
 /// starts, and archive still-live ones when it ends. Nudges connected maps (`flow.fca`) whenever
 /// anything changed. Runs every minute.
-pub fn spawn_event_fca_lifecycle(pool: PgPool, events: Events) {
-    tokio::spawn(async move {
-        let mut ticker = tokio::time::interval(EVENT_FCA_INTERVAL);
-        loop {
-            ticker.tick().await;
-            match flow_repo::run_event_fca_lifecycle(&pool).await {
-                Ok(0) => {}
-                Ok(changed) => {
-                    let _ = events.send(WsEvent {
-                        topic: topic::FCA.to_string(),
-                    });
-                    tracing::info!(changed, "event FCA lifecycle pass");
+pub fn spawn_event_fca_lifecycle(reg: Arc<JobRegistry>, pool: PgPool, events: Events) {
+    tokio::spawn(run_interval(
+        reg,
+        "event_fca_lifecycle",
+        "Auto-publish / archive event FCAs",
+        EVENT_FCA_INTERVAL,
+        move || {
+            let (pool, events) = (pool.clone(), events.clone());
+            async move {
+                match flow_repo::run_event_fca_lifecycle(&pool).await {
+                    Ok(0) => Ok("no changes".to_string()),
+                    Ok(changed) => {
+                        let _ = events.send(WsEvent {
+                            topic: topic::FCA.to_string(),
+                        });
+                        tracing::info!(changed, "event FCA lifecycle pass");
+                        Ok(format!("{changed} changed"))
+                    }
+                    Err(_) => Err("lifecycle pass failed".to_string()),
                 }
-                Err(_) => tracing::warn!("event FCA lifecycle pass failed"),
             }
-        }
-    });
+        },
+    ));
 }
 
 /// Drive event TMI packages through their lifecycle: auto-activate draft + auto packages ~30 min
 /// before their event starts (materializing live TMU rows), and auto-deactivate (archive) activated
 /// ones when it ends. Acts as the package's `updated_by`. Nudges connected clients when anything
 /// changed. Runs every minute.
-pub fn spawn_event_package_lifecycle(pool: PgPool, events: Events) {
-    tokio::spawn(async move {
-        let mut ticker = tokio::time::interval(EVENT_FCA_INTERVAL);
-        loop {
-            ticker.tick().await;
-            let mut changed = 0u32;
+pub fn spawn_event_package_lifecycle(reg: Arc<JobRegistry>, pool: PgPool, events: Events) {
+    tokio::spawn(run_interval(
+        reg,
+        "event_package_lifecycle",
+        "Auto-activate / archive event TMI packages",
+        EVENT_FCA_INTERVAL,
+        move || {
+            let (pool, events) = (pool.clone(), events.clone());
+            async move { event_package_lifecycle_once(&pool, &events).await }
+        },
+    ));
+}
 
-            // Auto-activate: draft + auto packages entering the 30-min pre-event window.
-            match events_repo::auto_due_packages(&pool).await {
-                Ok(due) => {
-                    for (package_id, event_id, actor) in due {
-                        match crate::handlers::events::activate_package(
-                            &pool,
-                            event_id,
-                            &package_id,
-                            &actor,
-                        )
-                        .await
-                        {
-                            Ok(()) => changed += 1,
-                            Err(_) => tracing::warn!(%package_id, "auto-activate package failed"),
-                        }
-                    }
-                }
-                Err(_) => tracing::warn!("auto-due package query failed"),
-            }
+/// One event-TMI-package lifecycle pass: auto-activate draft+auto packages entering the pre-event
+/// window and auto-archive activated ones whose event ended; nudges clients when anything changed.
+async fn event_package_lifecycle_once(pool: &PgPool, events: &Events) -> Result<String, String> {
+    let mut changed = 0u32;
 
-            // Auto-archive: activated packages whose event has ended.
-            match events_repo::ended_activated_packages(&pool).await {
-                Ok(ended) => {
-                    for (package_id, _event_id, actor) in ended {
-                        match crate::handlers::events::deactivate_package(
-                            &pool,
-                            &package_id,
-                            &actor,
-                        )
-                        .await
-                        {
-                            Ok(()) => changed += 1,
-                            Err(_) => tracing::warn!(%package_id, "auto-archive package failed"),
-                        }
-                    }
+    // Auto-activate: draft + auto packages entering the 30-min pre-event window.
+    match events_repo::auto_due_packages(pool).await {
+        Ok(due) => {
+            for (package_id, event_id, actor) in due {
+                match crate::handlers::events::activate_package(pool, event_id, &package_id, &actor)
+                    .await
+                {
+                    Ok(()) => changed += 1,
+                    Err(_) => tracing::warn!(%package_id, "auto-activate package failed"),
                 }
-                Err(_) => tracing::warn!("ended-package query failed"),
-            }
-
-            if changed > 0 {
-                for t in [topic::PROGRAM, topic::TMI, topic::GROUND_STOP] {
-                    let _ = events.send(WsEvent {
-                        topic: t.to_string(),
-                    });
-                }
-                tracing::info!(changed, "event package lifecycle pass");
             }
         }
-    });
+        Err(_) => tracing::warn!("auto-due package query failed"),
+    }
+
+    // Auto-archive: activated packages whose event has ended.
+    match events_repo::ended_activated_packages(pool).await {
+        Ok(ended) => {
+            for (package_id, _event_id, actor) in ended {
+                match crate::handlers::events::deactivate_package(pool, &package_id, &actor).await {
+                    Ok(()) => changed += 1,
+                    Err(_) => tracing::warn!(%package_id, "auto-archive package failed"),
+                }
+            }
+        }
+        Err(_) => tracing::warn!("ended-package query failed"),
+    }
+
+    if changed > 0 {
+        for t in [topic::PROGRAM, topic::TMI, topic::GROUND_STOP] {
+            let _ = events.send(WsEvent {
+                topic: t.to_string(),
+            });
+        }
+        tracing::info!(changed, "event package lifecycle pass");
+    }
+    Ok(if changed > 0 {
+        format!("{changed} changed")
+    } else {
+        "no changes".to_string()
+    })
 }
