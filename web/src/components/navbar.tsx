@@ -279,6 +279,12 @@ function MobileMenu({
                 Airport configs
               </Link>
             </DropdownMenuItem>
+            <DropdownMenuItem asChild>
+              <Link to="/planning/aircraft-profiles">
+                <Plane />
+                Aircraft profiles
+              </Link>
+            </DropdownMenuItem>
           </>
         )}
 
@@ -455,6 +461,12 @@ export function Navbar() {
                 <Link to="/planning/airport-configs">
                   <Wind />
                   Airport configs
+                </Link>
+              </DropdownMenuItem>
+              <DropdownMenuItem asChild>
+                <Link to="/planning/aircraft-profiles">
+                  <Plane />
+                  Aircraft profiles
                 </Link>
               </DropdownMenuItem>
             </NavGroup>

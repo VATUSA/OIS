@@ -589,6 +589,53 @@ pub struct UpsertAirportConfigRequest {
     pub calm_default: bool,
 }
 
+/// A configurable aircraft performance profile (climb / cruise / descent schedules) used by the
+/// trajectory / ETA model. Keyed by `kind` (`type` / `wake` / `default`) + `key` (ICAO type, wake
+/// token, or empty). See migration 0059 and `feed::trajectory`.
+#[derive(Debug, Serialize, ToSchema, sqlx::FromRow)]
+pub struct AircraftProfileBody {
+    pub kind: String,
+    pub key: String,
+    pub name: String,
+    pub climb_ias_lo: f64,
+    pub climb_ias_hi: f64,
+    pub climb_mach: Option<f64>,
+    pub climb_fpm_lo: f64,
+    pub climb_fpm_hi: f64,
+    pub cruise_tas: Option<f64>,
+    pub cruise_mach: Option<f64>,
+    pub service_ceiling_ft: f64,
+    pub desc_mach: Option<f64>,
+    pub desc_ias_hi: f64,
+    pub desc_ias_lo: f64,
+    pub desc_fpm: f64,
+    pub updated_at: DateTime<Utc>,
+    pub updated_by: Option<String>,
+}
+
+/// Create or update an aircraft performance profile. `kind` + `key` come from the URL path.
+#[derive(Debug, Deserialize, ToSchema)]
+pub struct UpsertAircraftProfileRequest {
+    #[serde(default)]
+    pub name: String,
+    pub climb_ias_lo: f64,
+    pub climb_ias_hi: f64,
+    #[serde(default)]
+    pub climb_mach: Option<f64>,
+    pub climb_fpm_lo: f64,
+    pub climb_fpm_hi: f64,
+    #[serde(default)]
+    pub cruise_tas: Option<f64>,
+    #[serde(default)]
+    pub cruise_mach: Option<f64>,
+    pub service_ceiling_ft: f64,
+    #[serde(default)]
+    pub desc_mach: Option<f64>,
+    pub desc_ias_hi: f64,
+    pub desc_ias_lo: f64,
+    pub desc_fpm: f64,
+}
+
 /// The forecast wind at an airport for a given time (Open-Meteo, or live METAR fallback).
 #[derive(Debug, Serialize, ToSchema)]
 pub struct AirportForecastBody {

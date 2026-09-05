@@ -161,6 +161,7 @@ pub fn compute(
     data: &VatsimData,
     airports: &AirportDb,
     winds: &Winds,
+    profiles: &trajectory::ProfileTable,
     issued: &HashMap<String, DateTime<Utc>>,
     now: DateTime<Utc>,
 ) -> Flow {
@@ -176,6 +177,7 @@ pub fn compute(
             continue;
         }
         let (ty, wake) = fp.aircraft_type_wake();
+        let profile = profiles.resolve(&ty, &wake);
         let dep = fp.departure.to_ascii_uppercase();
         let gate = arrival_gate(&fp.route, icao);
         let excluded = program.is_some_and(|pg| is_excluded(&ty, &wake, pg));
@@ -202,9 +204,21 @@ pub fn compute(
             let dist = dist_to_arr.unwrap();
             let (alat, alon) = arr.unwrap();
             let cruise = trajectory::parse_alt_ft(&fp.altitude);
-            let tas = parse_tas(&fp.cruise_tas);
+            let cruise_tas =
+                trajectory::capped_cruise_tas(parse_tas(&fp.cruise_tas), cruise, profile);
             let hw = winds.route_headwind(&[[p.latitude, p.longitude], [alat, alon]], cruise);
-            let ete_sec = trajectory::profile_transit_sec(dist, p.altitude as f64, cruise, tas, hw);
+            // Airborne arrival: climb from current altitude (if still climbing), cruise, then
+            // descend to the field — timed over the straight-line distance remaining.
+            let vp = trajectory::VerticalProfile::build(
+                p.altitude as f64,
+                dist,
+                0.0,
+                cruise,
+                cruise_tas,
+                profile,
+                hw,
+            );
+            let ete_sec = vp.time_between(dist, 0.0);
             flights.push(FlowFlight {
                 callsign: p.callsign.clone(),
                 dep,
@@ -220,7 +234,7 @@ pub fn compute(
             etd_ms.push(None);
         } else {
             // On the ground (or position-less): estimate a full route flight time.
-            let (route_nm, ft_min) = ground_estimate(&dep, arr, fp, airports, winds);
+            let (route_nm, ft_min) = ground_estimate(&dep, arr, fp, airports, winds, profile);
             flights.push(FlowFlight {
                 callsign: p.callsign.clone(),
                 dep,
@@ -248,10 +262,11 @@ pub fn compute(
             continue;
         }
         let (ty, wake) = fp.aircraft_type_wake();
+        let profile = profiles.resolve(&ty, &wake);
         let dep = fp.departure.to_ascii_uppercase();
         let gate = arrival_gate(&fp.route, icao);
         let excluded = program.is_some_and(|pg| is_excluded(&ty, &wake, pg));
-        let (route_nm, ft_min) = ground_estimate(&dep, arr, fp, airports, winds);
+        let (route_nm, ft_min) = ground_estimate(&dep, arr, fp, airports, winds, profile);
         let etd = proposed_etd(&fp.deptime, now);
         flights.push(FlowFlight {
             callsign: pf.callsign.clone(),
@@ -490,12 +505,22 @@ pub fn ready_time_slot(
     data: &VatsimData,
     airports: &AirportDb,
     winds: &Winds,
+    profiles: &trajectory::ProfileTable,
     issued: &HashMap<String, DateTime<Utc>>,
     callsign: &str,
     ready: DateTime<Utc>,
     now: DateTime<Utc>,
 ) -> Option<DateTime<Utc>> {
-    let flow = compute(icao, Some(program), data, airports, winds, issued, now);
+    let flow = compute(
+        icao,
+        Some(program),
+        data,
+        airports,
+        winds,
+        profiles,
+        issued,
+        now,
+    );
     let target = flow.flights.iter().find(|f| f.callsign == callsign)?;
     // enroute time = STA - proposed wheels-up (both already computed for this flight)
     let sta = target.sta?.timestamp_millis();
@@ -529,13 +554,15 @@ pub fn ready_time_slot(
     DateTime::from_timestamp_millis(cand as i64 - flight_ms)
 }
 
-/// Route length (nm) and full flight time (min) for a ground/proposed flight.
+/// Route length (nm) and full flight time (min) for a ground/proposed flight, using the aircraft's
+/// performance profile (climb → cruise → descent) over the whole route from the surface.
 fn ground_estimate(
     dep: &str,
     arr: Option<(f64, f64)>,
     fp: &super::vatsim::FlightPlan,
     airports: &AirportDb,
     winds: &Winds,
+    profile: &trajectory::AircraftProfile,
 ) -> (f64, f64) {
     let dep_pt = airports.get(dep).copied();
     let route_nm = match (dep_pt, arr) {
@@ -543,16 +570,17 @@ fn ground_estimate(
         _ => 300.0,
     };
     let cruise = trajectory::parse_alt_ft(&fp.altitude);
-    let tas = parse_tas(&fp.cruise_tas);
+    let cruise_tas = trajectory::capped_cruise_tas(parse_tas(&fp.cruise_tas), cruise, profile);
     let hw = match (dep_pt, arr) {
         (Some((dlat, dlon)), Some((alat, alon))) => {
             winds.route_headwind(&[[dlat, dlon], [alat, alon]], cruise)
         }
         _ => None,
     };
-    // Full-route flight time from the surface (climb modeled) + taxi allowance.
-    let ft_min =
-        trajectory::profile_transit_sec(route_nm, 0.0, cruise, tas, hw) / 60.0 + GROUND_TAXI_MIN;
+    // Full-route flight time from the surface (climb + descent modeled) + taxi allowance.
+    let vp =
+        trajectory::VerticalProfile::build(0.0, route_nm, 0.0, cruise, cruise_tas, profile, hw);
+    let ft_min = vp.time_between(route_nm, 0.0) / 60.0 + GROUND_TAXI_MIN;
     (route_nm, ft_min)
 }
 
@@ -1008,6 +1036,7 @@ mod tests {
             &data,
             &airports(),
             &Winds::default(),
+            &trajectory::ProfileTable::default(),
             &HashMap::new(),
             t0(),
         );
@@ -1156,6 +1185,7 @@ mod tests {
             &data,
             &airports(),
             &Winds::default(),
+            &trajectory::ProfileTable::default(),
             &HashMap::new(),
             "GRD1",
             ready,

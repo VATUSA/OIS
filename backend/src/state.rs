@@ -9,7 +9,7 @@ use tokio::sync::broadcast;
 
 use crate::feed::{
     self, FeedState, airspace::Boundaries, facilities::FacilityState, nav::NavData,
-    runway_db::RunwayDb, tracon::TraconState, winds::Winds,
+    runway_db::RunwayDb, tracon::TraconState, trajectory::ProfileTable, winds::Winds,
 };
 
 /// Lean application state: the DB pool (optional so the process can boot without a
@@ -33,6 +33,10 @@ pub struct AppState {
     /// Winds aloft, for ETA correction. Starts empty (still air) and is hot-swapped by
     /// `jobs::spawn_winds_refresh`, so it sits behind an `ArcSwap` for lock-free reads.
     pub winds: Arc<ArcSwap<Winds>>,
+    /// Configurable per-aircraft performance profiles for the trajectory model. Starts as the
+    /// legacy default table and is reloaded from the DB by `jobs::spawn_aircraft_profiles_refresh`,
+    /// so it sits behind an `ArcSwap` for lock-free reads (incl. from the DB-less feed subsystem).
+    pub aircraft_profiles: Arc<ArcSwap<ProfileTable>>,
     /// Epoch-ms of the last successful nav / winds fetch (0 = not yet fetched at runtime).
     pub nav_refreshed: Arc<AtomicI64>,
     pub winds_refreshed: Arc<AtomicI64>,
@@ -61,6 +65,7 @@ impl AppState {
         let airspace = Arc::new(Boundaries::load());
         let runways = Arc::new(RunwayDb::load());
         let winds = Arc::new(ArcSwap::from_pointee(Winds::default()));
+        let aircraft_profiles = Arc::new(ArcSwap::from_pointee(ProfileTable::default()));
         let nav_refreshed = Arc::new(AtomicI64::new(0));
         let winds_refreshed = Arc::new(AtomicI64::new(0));
         let metar_cache = Arc::new(Mutex::new(HashMap::new()));
@@ -96,6 +101,7 @@ impl AppState {
                 airspace,
                 runways,
                 winds,
+                aircraft_profiles,
                 nav_refreshed,
                 winds_refreshed,
                 metar_cache,
@@ -112,6 +118,7 @@ impl AppState {
             airspace,
             runways,
             winds,
+            aircraft_profiles,
             nav_refreshed,
             winds_refreshed,
             metar_cache,
@@ -129,6 +136,7 @@ impl AppState {
             airspace: Arc::new(Boundaries::load()),
             runways: Arc::new(RunwayDb::load()),
             winds: Arc::new(ArcSwap::from_pointee(Winds::default())),
+            aircraft_profiles: Arc::new(ArcSwap::from_pointee(ProfileTable::default())),
             nav_refreshed: Arc::new(AtomicI64::new(0)),
             winds_refreshed: Arc::new(AtomicI64::new(0)),
             metar_cache: Arc::new(Mutex::new(HashMap::new())),

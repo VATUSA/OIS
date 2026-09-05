@@ -140,24 +140,47 @@ fn altitude_matches(
 /// covers the climb itself).
 const GROUND_TAXI_SEC: f64 = 8.0 * 60.0;
 
-/// ETA to the FCA crossing via the shared climb-profile + winds model. Airborne aircraft
-/// start from their current altitude; ground aircraft climb from the surface and carry a
-/// taxi allowance.
+/// ETA to the FCA crossing via the shared vertical-profile + winds model. The profile is built
+/// over the whole remaining route to the arrival (so descent is modeled when the crossing is near
+/// the destination); the crossing sits `along_nm` ahead. Airborne aircraft start from their current
+/// altitude; ground aircraft climb from the surface and carry a taxi allowance.
+#[allow(clippy::too_many_arguments)]
 fn eta_to_crossing(
     airborne: bool,
+    route_len_nm: f64,
     along_nm: f64,
     cur_alt_ft: f64,
     cruise_alt_ft: f64,
-    tas: f64,
+    cruise_tas: f64,
+    profile: &trajectory::AircraftProfile,
     headwind: Option<f64>,
     now: DateTime<Utc>,
 ) -> DateTime<Utc> {
-    let from_alt = if airborne { cur_alt_ft } else { 0.0 };
-    let mut sec = trajectory::profile_transit_sec(along_nm, from_alt, cruise_alt_ft, tas, headwind);
+    let start_alt = if airborne { cur_alt_ft } else { 0.0 };
+    let vp = trajectory::VerticalProfile::build(
+        start_alt,
+        route_len_nm,
+        0.0, // arrival field elevation ≈ sea level (v1 approximation)
+        cruise_alt_ft,
+        cruise_tas,
+        profile,
+        headwind,
+    );
+    // Distances are nm-to-destination: the aircraft is at `route_len_nm`, the crossing `along_nm`
+    // ahead of it (i.e. `route_len_nm − along_nm` from the field).
+    let crossing_d = (route_len_nm - along_nm).max(0.0);
+    let mut sec = vp.time_between(route_len_nm, crossing_d);
     if !airborne {
         sec += GROUND_TAXI_SEC;
     }
     now + Duration::seconds(sec as i64)
+}
+
+/// Total great-circle length (nm) of a resolved route path.
+fn path_len_nm(path: &[[f64; 2]]) -> f64 {
+    path.windows(2)
+        .map(|w| crate::feed::flow::gc_dist(w[0][0], w[0][1], w[1][0], w[1][1]))
+        .sum()
 }
 
 fn validate_fca(req: &UpsertFcaRequest) -> Result<(), ApiError> {
@@ -1089,6 +1112,7 @@ fn build_candidates(
     nav: &NavData,
     airspace: &Boundaries,
     winds: &Winds,
+    profiles: &trajectory::ProfileTable,
     releases: &ReleaseMap,
     now: DateTime<Utc>,
 ) -> (Vec<FcaFlight>, Vec<fca::MeterInput>) {
@@ -1121,15 +1145,21 @@ fn build_candidates(
         if !passes_scope(fca, airspace, cross.lat, cross.lon) {
             continue;
         }
+        let (ty, wake) = fp.aircraft_type_wake();
+        let profile = profiles.resolve(&ty, &wake);
         let cruise = trajectory::parse_alt_ft(&fp.altitude);
-        let tas = trajectory::tas_or_default(fp.cruise_tas.parse().unwrap_or(0.0), cruise);
+        let filed_tas = fp.cruise_tas.parse().unwrap_or(0.0);
+        let cruise_tas = trajectory::capped_cruise_tas(filed_tas, cruise, profile);
         let headwind = winds.route_headwind(&path, cruise);
+        let route_len = path_len_nm(&path);
         let eta = eta_to_crossing(
             airborne,
+            route_len,
             cross.along_nm,
             p.altitude as f64,
             cruise,
-            tas,
+            cruise_tas,
+            profile,
             headwind,
             now,
         );
@@ -1137,7 +1167,7 @@ fn build_candidates(
         metas.push(fca::MeterInput {
             eta_ms: eta.timestamp_millis(),
             airborne,
-            cross_speed: trajectory::predicted_cross_speed(tas, cruise, headwind),
+            cross_speed: trajectory::effective_gs(cruise_tas, headwind).max(120.0),
             frozen_ms: rel.map(|(cta, _)| *cta),
         });
         flights.push(fca_flight(
@@ -1184,15 +1214,29 @@ fn build_candidates(
             .get(&fp.departure.to_ascii_uppercase())
             .copied()
             .unwrap_or((0.0, 0.0));
+        let (ty, wake) = fp.aircraft_type_wake();
+        let profile = profiles.resolve(&ty, &wake);
         let cruise = trajectory::parse_alt_ft(&fp.altitude);
-        let tas = trajectory::tas_or_default(fp.cruise_tas.parse().unwrap_or(0.0), cruise);
+        let filed_tas = fp.cruise_tas.parse().unwrap_or(0.0);
+        let cruise_tas = trajectory::capped_cruise_tas(filed_tas, cruise, profile);
         let headwind = winds.route_headwind(&path, cruise);
-        let eta = eta_to_crossing(false, cross.along_nm, 0.0, cruise, tas, headwind, now);
+        let route_len = path_len_nm(&path);
+        let eta = eta_to_crossing(
+            false,
+            route_len,
+            cross.along_nm,
+            0.0,
+            cruise,
+            cruise_tas,
+            profile,
+            headwind,
+            now,
+        );
         let rel = releases.get(&pf.callsign);
         metas.push(fca::MeterInput {
             eta_ms: eta.timestamp_millis(),
             airborne: false,
-            cross_speed: trajectory::predicted_cross_speed(tas, cruise, headwind),
+            cross_speed: trajectory::effective_gs(cruise_tas, headwind).max(120.0),
             frozen_ms: rel.map(|(cta, _)| *cta),
         });
         flights.push(fca_flight(
@@ -1269,6 +1313,7 @@ async fn metered_flights(
     };
     let nav = state.nav.load_full();
     let winds = state.winds.load_full();
+    let aircraft_profiles = state.aircraft_profiles.load_full();
     let airspace = state.airspace.clone();
     tokio::task::spawn_blocking(move || {
         let (flights, metas) = build_candidates(
@@ -1278,6 +1323,7 @@ async fn metered_flights(
             nav.as_ref(),
             airspace.as_ref(),
             winds.as_ref(),
+            aircraft_profiles.as_ref(),
             &releases,
             now,
         );
@@ -1387,6 +1433,7 @@ pub async fn list_idst(
     };
     let nav = state.nav.load_full();
     let winds = state.winds.load_full();
+    let aircraft_profiles = state.aircraft_profiles.load_full();
     let airspace = state.airspace.clone();
 
     let (mut unscheduled, mut released) = tokio::task::spawn_blocking(move || {
@@ -1401,6 +1448,7 @@ pub async fn list_idst(
                 nav.as_ref(),
                 airspace.as_ref(),
                 winds.as_ref(),
+                aircraft_profiles.as_ref(),
                 releases,
                 now,
             );
@@ -1502,6 +1550,7 @@ pub async fn mark_release(
             state.nav.load_full().as_ref(),
             state.airspace.as_ref(),
             state.winds.load_full().as_ref(),
+            state.aircraft_profiles.load_full().as_ref(),
             &releases,
             now,
         )
@@ -1588,6 +1637,7 @@ pub async fn clear_release(
             state.nav.load_full().as_ref(),
             state.airspace.as_ref(),
             state.winds.load_full().as_ref(),
+            state.aircraft_profiles.load_full().as_ref(),
             &releases,
             now,
         )
