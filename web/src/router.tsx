@@ -40,7 +40,6 @@ import {AdminLayout} from "@/pages/admin/layout";
 import {AdminOverview} from "@/pages/admin/overview";
 import {AdminAccessControl} from "@/pages/admin/access-control";
 import {AdminAudit} from "@/pages/admin/audit";
-import {AdminServiceAccounts} from "@/pages/admin/service-accounts";
 import {AdminApiKeys} from "@/pages/admin/api-keys";
 import {AdminDiscord} from "@/pages/admin/discord";
 
@@ -442,11 +441,6 @@ const adminAuditRoute = createRoute({
   component: AdminAudit,
 });
 
-const adminServiceAccountsRoute = createRoute({
-  getParentRoute: () => adminRoute,
-  path: "service-accounts",
-  component: AdminServiceAccounts,
-});
 
 const adminApiKeysRoute = createRoute({
   getParentRoute: () => adminRoute,
@@ -520,7 +514,6 @@ const routeTree = rootRoute.addChildren([
     adminIndexRoute,
     adminAccessRoute,
     adminAuditRoute,
-    adminServiceAccountsRoute,
     adminApiKeysRoute,
     adminDiscordRoute,
   ]),

@@ -27,12 +27,6 @@ const NAV: Item[] = [
     permission: "audit.logs.read",
   },
   {
-    label: "Service Accounts",
-    to: "/admin/service-accounts",
-    icon: KeyRound,
-    permission: "service_accounts.read",
-  },
-  {
     label: "API Keys",
     to: "/admin/api-keys",
     icon: KeyRound,
