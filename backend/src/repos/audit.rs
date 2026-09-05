@@ -185,22 +185,49 @@ pub struct AuditLogFilters {
     /// Restrict to one audit actor (a user, api key, or service-account actor row) — the basis of a
     /// per-key or per-user activity dossier.
     pub actor_id: Option<String>,
+    /// Free-text search: case-insensitive match across action, resource, reason, and the actor's
+    /// display name / CID.
+    pub search: Option<String>,
+    /// Inclusive created_at range.
+    pub from: Option<DateTime<Utc>>,
+    pub to: Option<DateTime<Utc>>,
     pub limit: i64,
     pub offset: i64,
 }
 
+/// The shared WHERE clause for both count and fetch — same joins (`a` actors, `u` users) and the
+/// same bind order ($1 resource_type, $2 action, $3 resource_id, $4 actor_id, $5 search, $6 from,
+/// $7 to) so the two queries always agree on which rows match.
+const AUDIT_WHERE: &str = "\
+     where ($1::text is null or l.resource_type = $1) \
+       and ($2::text is null or l.action = $2) \
+       and ($3::text is null or l.resource_id = $3) \
+       and ($4::text is null or l.actor_id = $4) \
+       and ($5::text is null or ( \
+              l.action ilike '%' || $5 || '%' \
+           or l.resource_type ilike '%' || $5 || '%' \
+           or l.resource_id ilike '%' || $5 || '%' \
+           or l.reason ilike '%' || $5 || '%' \
+           or coalesce(u.display_name, a.display_name) ilike '%' || $5 || '%' \
+           or u.cid::text ilike '%' || $5 || '%' \
+       )) \
+       and ($6::timestamptz is null or l.created_at >= $6) \
+       and ($7::timestamptz is null or l.created_at <= $7)";
+
 pub async fn count_audit_logs(pool: &PgPool, filters: &AuditLogFilters) -> Result<i64, ApiError> {
-    sqlx::query_scalar::<_, i64>(
-        "select count(*) from access.audit_logs \
-         where ($1::text is null or resource_type = $1) \
-           and ($2::text is null or action = $2) \
-           and ($3::text is null or resource_id = $3) \
-           and ($4::text is null or actor_id = $4)",
-    )
+    sqlx::query_scalar::<_, i64>(&format!(
+        "select count(*) from access.audit_logs l \
+         left join access.actors a on a.id = l.actor_id \
+         left join identity.users u on u.id = a.user_id \
+         {AUDIT_WHERE}"
+    ))
     .bind(filters.resource_type.as_deref())
     .bind(filters.action.as_deref())
     .bind(filters.resource_id.as_deref())
     .bind(filters.actor_id.as_deref())
+    .bind(filters.search.as_deref())
+    .bind(filters.from)
+    .bind(filters.to)
     .fetch_one(pool)
     .await
     .map_err(|_| ApiError::Internal)
@@ -228,7 +255,7 @@ pub async fn fetch_audit_logs(
 ) -> Result<Vec<AuditLogEntry>, ApiError> {
     // `actor_display_name` falls back to the actor row's own label so api-key and service-account
     // actors (which have no linked user) still read as a name, not a blank.
-    let rows = sqlx::query_as::<_, AuditLogRow>(
+    let rows = sqlx::query_as::<_, AuditLogRow>(&format!(
         "select l.id, l.action, l.resource_type, l.resource_id, l.artcc_id, l.reason, \
                 a.actor_type as actor_type, \
                 u.cid as actor_cid, coalesce(u.display_name, a.display_name) as actor_display_name, \
@@ -237,17 +264,17 @@ pub async fn fetch_audit_logs(
          from access.audit_logs l \
          left join access.actors a on a.id = l.actor_id \
          left join identity.users u on u.id = a.user_id \
-         where ($1::text is null or l.resource_type = $1) \
-           and ($2::text is null or l.action = $2) \
-           and ($3::text is null or l.resource_id = $3) \
-           and ($4::text is null or l.actor_id = $4) \
+         {AUDIT_WHERE} \
          order by l.created_at desc \
-         limit $5 offset $6",
-    )
+         limit $8 offset $9"
+    ))
     .bind(filters.resource_type.as_deref())
     .bind(filters.action.as_deref())
     .bind(filters.resource_id.as_deref())
     .bind(filters.actor_id.as_deref())
+    .bind(filters.search.as_deref())
+    .bind(filters.from)
+    .bind(filters.to)
     .bind(filters.limit)
     .bind(filters.offset)
     .fetch_all(pool)
