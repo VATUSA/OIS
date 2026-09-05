@@ -118,6 +118,9 @@ pub fn draft_new_permission_names() -> Vec<&'static str> {
         "flow.facility_map.update", // edit a facility map's aircraft color rules (facility-scoped)
         "flow.aircraft_profiles.read", // view aircraft performance profiles
         "flow.aircraft_profiles.update", // manage aircraft performance profiles (national)
+        // --- system: background-jobs viewer (read status; update = trigger a run) ---
+        "system.jobs.read",
+        "system.jobs.update",
         // --- stats: persistent network statistics + saved capture windows ---
         "stats.data.read",
         "stats.capture.update",

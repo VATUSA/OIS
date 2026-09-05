@@ -4,6 +4,7 @@ pub mod config;
 pub mod errors;
 pub mod feed;
 pub mod handlers;
+pub mod job_registry;
 pub mod jobs;
 pub mod models;
 pub mod openapi;
@@ -35,27 +36,36 @@ pub async fn run() -> color_eyre::Result<()> {
     feed::spawn_poller(state.feed.clone());
     feed::facilities::spawn_refresh(state.facilities.clone());
     feed::tracon::spawn_refresh(state.tracons.clone());
-    jobs::spawn_nav_refresh(state.nav.clone(), state.nav_refreshed.clone());
+    jobs::spawn_nav_refresh(
+        state.jobs.clone(),
+        state.nav.clone(),
+        state.nav_refreshed.clone(),
+    );
     jobs::spawn_winds_refresh(
+        state.jobs.clone(),
         state.feed.clone(),
         state.winds.clone(),
         state.winds_refreshed.clone(),
         state.db.clone(),
     );
     if let Some(pool) = state.db.clone() {
-        jobs::spawn_cleanup(pool.clone());
+        jobs::spawn_cleanup(state.jobs.clone(), pool.clone());
         // Load configurable aircraft performance profiles and keep them current for the ETA model.
-        jobs::spawn_aircraft_profiles_refresh(pool.clone(), state.aircraft_profiles.clone());
+        jobs::spawn_aircraft_profiles_refresh(
+            state.jobs.clone(),
+            pool.clone(),
+            state.aircraft_profiles.clone(),
+        );
         feed::events::spawn_sync(pool.clone());
         // Persistent stats collection off the shared feed snapshot + its retention compaction.
         feed::stats::spawn_collector(pool.clone(), state.feed.clone(), state.airspace.clone());
         // Per-flight delay legs (taxi-out + arrival transit) for the average-delay page.
         feed::delays::spawn_collector(pool.clone(), state.feed.clone(), state.runways.clone());
-        jobs::spawn_stats_compaction(pool.clone());
-        jobs::spawn_capture_scheduler(pool.clone());
+        jobs::spawn_stats_compaction(state.jobs.clone(), pool.clone());
+        jobs::spawn_capture_scheduler(state.jobs.clone(), pool.clone());
         // Event FCAs + TMI packages: auto-publish 30 min before start, auto-archive at end.
-        jobs::spawn_event_fca_lifecycle(pool.clone(), state.events.clone());
-        jobs::spawn_event_package_lifecycle(pool.clone(), state.events.clone());
+        jobs::spawn_event_fca_lifecycle(state.jobs.clone(), pool.clone(), state.events.clone());
+        jobs::spawn_event_package_lifecycle(state.jobs.clone(), pool.clone(), state.events.clone());
         // VATUSA member sync: register the roster-change webhook and periodically reconcile.
         feed::vatusa::spawn_register_webhooks(pool.clone());
         feed::vatusa::spawn_reconcile(pool);

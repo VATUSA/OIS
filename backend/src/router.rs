@@ -10,8 +10,9 @@ use crate::{
     config::build_cors_layer,
     handlers::{
         access, ace, aircraft_profiles, airport_configs, api_keys, atc, audit, auth, dashboards,
-        docs, events, facilities, facility_map, feed, flow, gdp, health, integration, preferences,
-        public, runway, service_accounts, stats, tmu, users, webhooks,
+        docs, events, facilities, facility_map, feed, flow, gdp, health, integration,
+        jobs as jobs_handler, preferences, public, runway, service_accounts, stats, tmu, users,
+        webhooks,
     },
     openapi::ApiDoc,
     realtime,
@@ -436,6 +437,9 @@ pub fn build_router(state: AppState) -> Router {
         )
         // Audit log
         .route("/api/v1/admin/audit", get(audit::list_audit_logs))
+        // Background-tasks viewer (job status + manual trigger)
+        .route("/api/v1/admin/jobs", get(jobs_handler::list_jobs))
+        .route("/api/v1/admin/jobs/{name}/run", post(jobs_handler::run_job))
         // Service accounts (bot credentials)
         .route(
             "/api/v1/admin/service-accounts",
