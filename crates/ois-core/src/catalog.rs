@@ -46,6 +46,7 @@ pub fn default_roles() -> Vec<&'static str> {
         "VATUSA_STAFF", // division staff
         "EVENTS_TEAM",  // events team
         "EC",           // events coordinator
+        "AEC",          // assistant events coordinator
         "ACE",          // ACE team
         "NTMO",         // national traffic management officer
         "DCC_STAFF",    // DCC staff

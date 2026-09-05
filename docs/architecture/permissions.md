@@ -73,8 +73,8 @@ Shared domains (access/auth/users/events/training/…) are ported from osmium in
 
 ## Roles
 
-The assignable positional roles are `VATUSA_STAFF`, `EVENTS_TEAM`, `EC`, `ACE`, `NTMO`,
-and `DCC_STAFF`. Any of them can be granted nationally or **scoped to an ARTCC** via the
+The assignable positional roles are `VATUSA_STAFF`, `EVENTS_TEAM`, `EC`, `AEC`, `ACE`,
+`NTMO`, and `DCC_STAFF`. Any of them can be granted nationally or **scoped to an ARTCC** via the
 grant's `artcc_id` (e.g. an `EC` scoped to ZDC vs. a national `EC`) — scope is on the
 grant, not baked into the role. `SERVER_ADMIN` is a bootstrapped singleton (env CID)
 that holds every permission implicitly and is never assignable in the UI. `USER` is the
