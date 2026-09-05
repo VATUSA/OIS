@@ -257,6 +257,7 @@ pub const ASSIGNABLE_USER_ROLES: &[&str] = &[
     "VATUSA_STAFF",
     "EVENTS_TEAM",
     "EC",
+    "AEC",
     "ACE",
     "NTMO",
     "DCC_STAFF",
