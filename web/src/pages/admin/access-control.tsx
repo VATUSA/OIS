@@ -1,6 +1,6 @@
 import {useEffect, useMemo, useState} from "react";
 import {Badge, Button, Card, CardContent, cn, ConfirmButton, Input} from "@ois/ui";
-import {ChevronRight, Save, Search, Wand2} from "lucide-react";
+import {Save, Search, Wand2} from "lucide-react";
 
 import {
   type AdminUserRow,
@@ -15,10 +15,20 @@ import {
 } from "@/lib/access";
 import {type AccessPreset, ACCESS_PRESETS, BASE_PERMISSIONS, presetPermissions} from "@/lib/presets";
 import {Pagination} from "@/components/pagination";
-
-type ScopeState = { roles: string[]; perms: string[] };
+import {
+  PermissionScopeTree,
+  ScopeChips,
+  type ScopeBounds,
+  type ScopeSel,
+  type ScopeSelection,
+  defaultScope,
+  selectionIsValid,
+} from "@/components/access/scope-tree";
 
 const USERS_PAGE_SIZE = 25;
+
+/** National scope key is the empty string; anything else is an ARTCC id. */
+type ScopeKey = string;
 
 function saveErrorMessage(error: unknown): string {
   const status = (error as { status?: number } | null)?.status;
@@ -29,39 +39,83 @@ function saveErrorMessage(error: unknown): string {
   return "Save failed.";
 }
 
+/** Does a selection grant `name` at the given scope (""=national)? */
+function hasScope(sel: ScopeSel | undefined, key: ScopeKey): boolean {
+  if (!sel) return false;
+  return key === "" ? sel.national : sel.artccs.includes(key);
+}
+
+/** Return `sel` with the scope `key` added/removed; `undefined` when nothing is left selected. */
+function withScope(sel: ScopeSel | undefined, key: ScopeKey, on: boolean): ScopeSel | undefined {
+  let national = sel?.national ?? false;
+  let artccs = sel ? [...sel.artccs] : [];
+  if (key === "") {
+    national = on;
+  } else if (on) {
+    if (!artccs.includes(key)) artccs.push(key);
+  } else {
+    artccs = artccs.filter((a) => a !== key);
+  }
+  if (!national && artccs.length === 0) return undefined;
+  return { national, artccs };
+}
+
+/** All scope keys touched by a selection (""=national plus any ARTCC). */
+function scopeKeysOf(selection: ScopeSelection): Set<ScopeKey> {
+  const keys = new Set<ScopeKey>();
+  for (const s of selection.values()) {
+    if (s.national) keys.add("");
+    for (const a of s.artccs) keys.add(a);
+  }
+  return keys;
+}
+
+/** Names in a selection granted at scope `key`. */
+function namesAtScope(selection: ScopeSelection, key: ScopeKey): string[] {
+  const out: string[] = [];
+  for (const [name, s] of selection) if (hasScope(s, key)) out.push(name);
+  return out;
+}
+
 export function AdminAccessControl() {
   const [cid, setCid] = useState<number | undefined>(undefined);
   const [userQuery, setUserQuery] = useState("");
   const [debouncedQuery, setDebouncedQuery] = useState("");
   const [usersPage, setUsersPage] = useState(1);
-  const [selected, setSelected] = useState<{ cid: number; name: string } | null>(
-    null,
-  );
+  const [selected, setSelected] = useState<{ cid: number; name: string } | null>(null);
 
   const catalog = useCatalog();
   const access = useUserAccess(cid);
   const save = useSaveUserAccess();
 
-  const [working, setWorking] = useState<Record<string, ScopeState>>({});
-  const [scope, setScope] = useState(""); // "" = national
+  // The working selection: each permission / role mapped to the scope(s) it's granted at.
+  const [permSel, setPermSel] = useState<ScopeSelection>(new Map());
+  const [roleSel, setRoleSel] = useState<ScopeSelection>(new Map());
   const [reason, setReason] = useState("");
-  const [search, setSearch] = useState("");
-  const [openGroups, setOpenGroups] = useState<Set<string>>(new Set());
+  const [presetFacility, setPresetFacility] = useState(""); // for facility presets
+
+  // Scope keys present when this user's access loaded — always re-sent on save so a scope emptied
+  // in the UI is actually cleared server-side (untouched scopes are otherwise preserved).
+  const [originalScopeKeys, setOriginalScopeKeys] = useState<ScopeKey[]>([]);
 
   useEffect(() => {
     if (!access.data) return;
-    const next: Record<string, ScopeState> = {};
+    const perms: ScopeSelection = new Map();
+    const roles: ScopeSelection = new Map();
+    const original = new Set<ScopeKey>([""]);
     for (const s of access.data.scopes) {
       const key = s.artcc_id ?? "";
-      next[key] = {
-        roles: [...s.role_names],
-        perms: flattenTree(s.permissions as PermTree),
-      };
+      original.add(key);
+      for (const r of s.role_names) roles.set(r, withScope(roles.get(r), key, true)!);
+      for (const p of flattenTree(s.permissions as PermTree)) {
+        perms.set(p, withScope(perms.get(p), key, true)!);
+      }
     }
-    if (!next[""]) next[""] = { roles: [], perms: [] };
-    setWorking(next);
-    setScope("");
+    setPermSel(perms);
+    setRoleSel(roles);
+    setOriginalScopeKeys([...original]);
     setReason("");
+    setPresetFacility("");
     save.reset();
   }, [access.data]); // eslint-disable-line react-hooks/exhaustive-deps
 
@@ -72,148 +126,129 @@ export function AdminAccessControl() {
   useEffect(() => setUsersPage(1), [debouncedQuery]);
   const users = useAllUsers(usersPage, USERS_PAGE_SIZE, debouncedQuery);
 
-  const current: ScopeState = working[scope] ?? { roles: [], perms: [] };
-  // Server admins hold every permission implicitly — their permission tree is
-  // read-only, but their roles are still editable.
+  // Server admins hold every permission implicitly — the permission tree is read-only, but roles
+  // are still editable.
   const permsReadOnly = !!access.data?.server_admin;
+
+  const facilities = useMemo(() => catalog.data?.facilities ?? [], [catalog.data]);
+  // An admin may grant any catalog item nationally or at any facility; the server enforces the
+  // self-scope guard (you can only grant what you hold).
+  const anyScope: ScopeBounds = useMemo(
+    () => ({ national: true, artccs: facilities.map((f) => f.id) }),
+    [facilities],
+  );
 
   const allPerms = useMemo(
     () => flattenTree((catalog.data?.permissions ?? {}) as PermTree).sort(),
     [catalog.data],
   );
+  const permItems = useMemo(
+    () => allPerms.map((name) => ({ name, bounds: anyScope })),
+    [allPerms, anyScope],
+  );
+  const assignableRoles = useMemo(() => catalog.data?.roles ?? [], [catalog.data]);
 
-  const groups = useMemo(() => {
-    const q = search.trim().toLowerCase();
-    const map = new Map<string, string[]>();
-    for (const perm of allPerms) {
-      if (q && !perm.includes(q)) continue;
-      const domain = perm.split(".")[0];
-      if (!map.has(domain)) map.set(domain, []);
-      map.get(domain)!.push(perm);
-    }
-    return map;
-  }, [allPerms, search]);
-
-  function updateScope(mut: (s: ScopeState) => ScopeState) {
-    setWorking((w) => ({ ...w, [scope]: mut(w[scope] ?? { roles: [], perms: [] }) }));
-  }
-  function togglePerm(perm: string) {
-    updateScope((s) => ({
-      ...s,
-      perms: s.perms.includes(perm)
-        ? s.perms.filter((p) => p !== perm)
-        : [...s.perms, perm],
-    }));
-  }
-  function toggleRole(role: string) {
-    updateScope((s) => ({
-      ...s,
-      roles: s.roles.includes(role)
-        ? s.roles.filter((r) => r !== role)
-        : [...s.roles, role],
-    }));
-  }
-  function setGroup(perms: string[], on: boolean) {
-    updateScope((s) => {
-      const set = new Set(s.perms);
-      for (const p of perms) (on ? set.add(p) : set.delete(p));
-      return { ...s, perms: [...set] };
-    });
-  }
-  function toggleGroupOpen(domain: string) {
-    setOpenGroups((s) => {
-      const next = new Set(s);
-      if (next.has(domain)) next.delete(domain);
-      else next.add(domain);
-      return next;
-    });
-  }
-
-  // --- Presets: one-click bundles applied at a scope, toggled on/off. National presets target the
-  // national scope; facility presets target the facility chosen in the Scope selector above. Every
-  // preset also grants the sign-in baseline (BASE_PERMISSIONS) at NATIONAL scope.
-  function presetTarget(preset: AccessPreset): string | null {
+  // --- Presets: one-click bundles toggled on/off. National presets apply at national scope;
+  // facility presets apply at the facility chosen here. Every preset also grants the sign-in
+  // baseline (BASE_PERMISSIONS) at national scope.
+  function presetTarget(preset: AccessPreset): ScopeKey | null {
     if (preset.scope === "national") return "";
-    return scope === "" ? null : scope; // facility preset needs a facility selected
+    return presetFacility || null; // facility preset needs a facility chosen
   }
-  /** The per-scope contributions of a preset: domain perms + role at the target, baseline at national. */
-  function presetScopes(
+  /** Preset contributions: {perms, roles} at the target scope + baseline perms at national. */
+  function presetParts(
     preset: AccessPreset,
-    target: string,
-  ): { scope: string; perms: string[]; roles: string[] }[] {
+    target: ScopeKey,
+  ): { key: ScopeKey; perms: string[]; roles: string[] }[] {
     const domain = presetPermissions(preset, allPerms);
     const base = [...BASE_PERMISSIONS];
     if (target === "") {
-      return [{ scope: "", perms: [...new Set([...domain, ...base])], roles: preset.roles }];
+      return [{ key: "", perms: [...new Set([...domain, ...base])], roles: preset.roles }];
     }
     return [
-      { scope: target, perms: domain, roles: preset.roles },
-      { scope: "", perms: base, roles: [] },
+      { key: target, perms: domain, roles: preset.roles },
+      { key: "", perms: base, roles: [] },
     ];
   }
   function isPresetApplied(preset: AccessPreset): boolean {
     const target = presetTarget(preset);
     if (target == null) return false;
-    return presetScopes(preset, target).every(({ scope: key, perms, roles }) => {
-      const s = working[key];
+    return presetParts(preset, target).every(({ key, perms, roles }) => {
       return (
-        !!s &&
-        perms.every((p) => s.perms.includes(p)) &&
-        roles.every((r) => s.roles.includes(r))
+        perms.every((p) => hasScope(permSel.get(p), key)) &&
+        roles.every((r) => hasScope(roleSel.get(r), key))
       );
     });
   }
   function togglePreset(preset: AccessPreset) {
     const target = presetTarget(preset);
     if (target == null) return;
-    const applied = isPresetApplied(preset);
-    const parts = presetScopes(preset, target);
-    setWorking((w) => {
-      const next = { ...w };
-      for (const { scope: key, perms, roles } of parts) {
-        const cur = next[key] ?? { roles: [], perms: [] };
-        if (applied) {
-          const dropPerms = new Set(perms);
-          const dropRoles = new Set(roles);
-          next[key] = {
-            perms: cur.perms.filter((p) => !dropPerms.has(p)),
-            roles: cur.roles.filter((r) => !dropRoles.has(r)),
-          };
-        } else {
-          next[key] = {
-            perms: [...new Set([...cur.perms, ...perms])],
-            roles: [...new Set([...cur.roles, ...roles])],
-          };
+    const on = !isPresetApplied(preset);
+    const parts = presetParts(preset, target);
+    setPermSel((prev) => {
+      const next = new Map(prev);
+      for (const { key, perms } of parts) {
+        for (const p of perms) {
+          const s = withScope(next.get(p), key, on);
+          if (s) next.set(p, s);
+          else next.delete(p);
+        }
+      }
+      return next;
+    });
+    setRoleSel((prev) => {
+      const next = new Map(prev);
+      for (const { key, roles } of parts) {
+        for (const r of roles) {
+          const s = withScope(next.get(r), key, on);
+          if (s) next.set(r, s);
+          else next.delete(r);
         }
       }
       return next;
     });
   }
-  function removeAll() {
-    setWorking((w) => {
-      const next: Record<string, ScopeState> = {};
-      for (const key of Object.keys(w)) next[key] = { roles: [], perms: [] };
-      next[""] ??= { roles: [], perms: [] };
+
+  function toggleRole(role: string, on: boolean) {
+    setRoleSel((prev) => {
+      const next = new Map(prev);
+      if (on) next.set(role, defaultScope(anyScope));
+      else next.delete(role);
       return next;
     });
+  }
+  function setRoleScope(role: string, s: ScopeSel) {
+    setRoleSel((prev) => new Map(prev).set(role, s));
+  }
+  function removeAll() {
+    setPermSel(new Map());
+    setRoleSel(new Map());
   }
 
   function pickUser(user: AdminUserRow) {
     setSelected({ cid: user.cid, name: user.display_name });
     setCid(user.cid);
   }
+
+  const valid =
+    !!reason.trim() && selectionIsValid(permSel) && selectionIsValid(roleSel);
+
   function onSave() {
-    if (cid == null || !reason.trim()) return;
-    // Only send assignable roles. Non-assignable roles the target may hold (e.g.
-    // SERVER_ADMIN) are preserved server-side. For a server admin the permission tree
-    // is not editable, so send no permission changes (the server ignores them anyway).
-    const assignable = new Set(catalog.data?.roles ?? []);
-    const scopes = Object.entries(working).map(([key, val]) => ({
+    if (cid == null || !valid) return;
+    const assignable = new Set(assignableRoles);
+    // Re-send every scope that existed on load or is selected now, so cleared scopes are applied.
+    const keys = new Set<ScopeKey>([
+      "",
+      ...originalScopeKeys,
+      ...scopeKeysOf(permSel),
+      ...scopeKeysOf(roleSel),
+    ]);
+    const scopes = [...keys].map((key) => ({
       artcc_id: key === "" ? null : key,
       permissions: (permsReadOnly
         ? {}
-        : buildTree(val.perms)) as unknown as Record<string, never>,
-      role_names: val.roles.filter((role) => assignable.has(role)),
+        : buildTree(namesAtScope(permSel, key))) as unknown as Record<string, never>,
+      role_names: namesAtScope(roleSel, key).filter((r) => assignable.has(r)),
     }));
     save.mutate({ cid, body: { reason: reason.trim(), scopes } satisfies UpdateBody });
   }
@@ -223,8 +258,7 @@ export function AdminAccessControl() {
       <div>
         <h1 className="text-2xl font-semibold tracking-tight">Access Control</h1>
         <p className="text-muted-foreground">
-          Grant roles and fine-grained, per-ARTCC permissions. Every change is
-          audited.
+          Grant roles and fine-grained, per-ARTCC permissions. Every change is audited.
         </p>
       </div>
 
@@ -330,42 +364,16 @@ export function AdminAccessControl() {
       {access.data && (
         <Card>
           <CardContent className="flex flex-col gap-6 pt-6">
-            <div className="flex flex-wrap items-center justify-between gap-3">
-              <div className="flex items-center gap-2">
-                <span className="text-lg font-semibold">
-                  {selected?.name ?? `CID ${access.data.cid}`}
-                </span>
-                <span className="text-sm text-muted-foreground">
-                  CID {access.data.cid}
-                </span>
-                {access.data.server_admin && (
-                  <Badge variant="success">Server admin</Badge>
-                )}
-              </div>
-              <div className="flex items-center gap-2">
-                <label className="text-sm text-muted-foreground">Scope</label>
-                <select
-                  value={scope}
-                  onChange={(e) => {
-                    const value = e.target.value;
-                    setScope(value);
-                    setWorking((w) =>
-                      w[value] ? w : { ...w, [value]: { roles: [], perms: [] } },
-                    );
-                  }}
-                  className="h-9 rounded-md border border-input bg-background px-3 text-sm"
-                >
-                  <option value="">National</option>
-                  {catalog.data?.facilities.map((f) => (
-                    <option key={f.id} value={f.id}>
-                      {f.id} — {f.name}
-                    </option>
-                  ))}
-                </select>
-              </div>
+            <div className="flex flex-wrap items-center gap-2">
+              <span className="text-lg font-semibold">
+                {selected?.name ?? `CID ${access.data.cid}`}
+              </span>
+              <span className="text-sm text-muted-foreground">CID {access.data.cid}</span>
+              {access.data.server_admin && <Badge variant="success">Server admin</Badge>}
             </div>
 
-            {/* Presets — one-click permission bundles, toggled on/off. */}
+            {/* Presets — one-click bundles, toggled on/off. Each grants its role + perms at the
+                chosen scope, plus the sign-in baseline nationally. */}
             <section className="flex flex-col gap-2">
               <div className="flex items-center gap-1.5">
                 <Wand2 className="size-4 text-primary" />
@@ -373,7 +381,7 @@ export function AdminAccessControl() {
               </div>
               <div className="flex flex-wrap items-center gap-2">
                 {ACCESS_PRESETS.map((preset) => {
-                  const needsFacility = preset.scope === "facility" && scope === "";
+                  const needsFacility = preset.scope === "facility" && !presetFacility;
                   const applied = isPresetApplied(preset);
                   return (
                     <button
@@ -381,11 +389,7 @@ export function AdminAccessControl() {
                       type="button"
                       disabled={needsFacility}
                       onClick={() => togglePreset(preset)}
-                      title={
-                        needsFacility
-                          ? "Pick a facility in the Scope selector above first"
-                          : preset.description
-                      }
+                      title={needsFacility ? "Pick a facility first" : preset.description}
                       className={cn(
                         "rounded-md border px-3 py-1.5 text-sm font-medium transition-colors",
                         applied
@@ -395,11 +399,24 @@ export function AdminAccessControl() {
                       )}
                     >
                       {preset.label}
-                      {preset.scope === "facility" && scope !== "" ? ` · ${scope}` : ""}
+                      {preset.scope === "facility" && presetFacility ? ` · ${presetFacility}` : ""}
                     </button>
                   );
                 })}
-                <span className="mx-1 h-6 w-px bg-border" />
+                <select
+                  value={presetFacility}
+                  onChange={(e) => setPresetFacility(e.target.value)}
+                  title="Facility for a facility-scoped preset"
+                  className="h-8 rounded-md border border-input bg-background px-2 text-xs"
+                >
+                  <option value="">Facility…</option>
+                  {facilities.map((f) => (
+                    <option key={f.id} value={f.id}>
+                      {f.id}
+                    </option>
+                  ))}
+                </select>
+                <span className="mx-0.5 h-6 w-px bg-border" />
                 <ConfirmButton
                   size="sm"
                   variant="ghost"
@@ -410,116 +427,60 @@ export function AdminAccessControl() {
                 </ConfirmButton>
               </div>
               <p className="text-xs text-muted-foreground">
-                Click to add the bundle (its role, and the default sign-in permissions nationally) at
-                the selected scope; click again to remove it. “Facility EC” uses the Scope selector
-                above. You can fine-tune below — nothing is saved until you enter a reason and hit Save.
+                Each permission and role below is granted at National scope or specific ARTCCs — pick
+                the scope under each one. Nothing is saved until you enter a reason and hit Save.
               </p>
             </section>
 
             {permsReadOnly && (
               <div className="rounded-md border border-primary/30 bg-primary/5 px-3 py-2 text-sm text-muted-foreground">
                 Server admins hold every permission implicitly (managed via{" "}
-                <code>OIS_SERVER_ADMIN_CID</code>), so the permission tree is
-                read-only. Roles can still be changed.
+                <code>OIS_SERVER_ADMIN_CID</code>), so the permission tree is read-only. Roles can
+                still be changed.
               </div>
             )}
 
-            {/* Roles */}
+            {/* Roles — each with its own scope chips. */}
             <section className="flex flex-col gap-2">
               <h3 className="text-sm font-semibold">Roles</h3>
-              <div className="grid gap-1.5 sm:grid-cols-3 lg:grid-cols-4">
-                {catalog.data?.roles.map((role) => (
-                  <label
-                    key={role}
-                    className="flex items-center gap-2 rounded-md px-2 py-1 text-sm hover:bg-accent"
-                  >
-                    <input
-                      type="checkbox"
-                      className="size-4 accent-primary"
-                      checked={current.roles.includes(role)}
-                      onChange={() => toggleRole(role)}
-                    />
-                    {role}
-                  </label>
-                ))}
-              </div>
-            </section>
-
-            {/* Permissions */}
-            <section className="flex flex-col gap-2">
-              <div className="flex items-center justify-between gap-3">
-                <h3 className="text-sm font-semibold">Direct permissions</h3>
-                <div className="relative w-64">
-                  <Search className="absolute left-2.5 top-2.5 size-4 text-muted-foreground" />
-                  <Input
-                    value={search}
-                    onChange={(e) => setSearch(e.target.value)}
-                    placeholder="Search permissions"
-                    className="pl-8"
-                  />
-                </div>
-              </div>
-
-              <div className="flex flex-col gap-2">
-                {[...groups.entries()].map(([domain, perms]) => {
-                  const open = openGroups.has(domain) || search.trim().length > 0;
-                  const checked = perms.filter((p) =>
-                    current.perms.includes(p),
-                  ).length;
-                  const allOn = checked === perms.length;
+              <div className="grid gap-1.5 sm:grid-cols-2">
+                {assignableRoles.map((role) => {
+                  const sel = roleSel.get(role);
                   return (
-                    <div key={domain} className="overflow-hidden rounded-md border">
-                      <div className="flex items-center gap-2 bg-muted/40 px-3 py-2">
+                    <div key={role} className="rounded-md px-2 py-1">
+                      <label className="flex items-center gap-2 text-sm">
                         <input
                           type="checkbox"
                           className="size-4 accent-primary"
-                          disabled={permsReadOnly}
-                          checked={allOn}
-                          ref={(el) => {
-                            if (el) el.indeterminate = checked > 0 && !allOn;
-                          }}
-                          onChange={() => setGroup(perms, !allOn)}
+                          checked={!!sel}
+                          onChange={(e) => toggleRole(role, e.target.checked)}
                         />
-                        <button
-                          type="button"
-                          onClick={() => toggleGroupOpen(domain)}
-                          className="flex flex-1 items-center gap-1 text-left text-sm font-medium"
-                        >
-                          <ChevronRight
-                            className={cn(
-                              "size-4 transition-transform",
-                              open && "rotate-90",
-                            )}
-                          />
-                          {domain}
-                          <span className="ml-auto text-xs font-normal text-muted-foreground">
-                            {checked}/{perms.length}
-                          </span>
-                        </button>
-                      </div>
-                      {open && (
-                        <div className="grid gap-1 border-t px-3 py-2 sm:grid-cols-2">
-                          {perms.map((perm) => (
-                            <label
-                              key={perm}
-                              className="flex items-center gap-2 rounded px-1 py-0.5 text-sm hover:bg-accent"
-                            >
-                              <input
-                                type="checkbox"
-                                className="size-4 accent-primary"
-                                disabled={permsReadOnly}
-                                checked={current.perms.includes(perm)}
-                                onChange={() => togglePerm(perm)}
-                              />
-                              <span className="font-mono text-xs">{perm}</span>
-                            </label>
-                          ))}
-                        </div>
+                        {role}
+                      </label>
+                      {sel && (
+                        <ScopeChips
+                          bounds={anyScope}
+                          sel={sel}
+                          facilities={facilities}
+                          onChange={(s) => setRoleScope(role, s)}
+                        />
                       )}
                     </div>
                   );
                 })}
               </div>
+            </section>
+
+            {/* Direct permissions — the shared scope tree (same as the API-key editor). */}
+            <section className="flex flex-col gap-2">
+              <h3 className="text-sm font-semibold">Direct permissions</h3>
+              <PermissionScopeTree
+                items={permItems}
+                facilities={facilities}
+                selection={permSel}
+                disabled={permsReadOnly}
+                onChange={setPermSel}
+              />
             </section>
 
             {/* Reason + save */}
@@ -531,22 +492,15 @@ export function AdminAccessControl() {
                 placeholder="Recorded as a dossier entry on this controller's log"
               />
               <div className="flex items-center gap-3">
-                <Button
-                  onClick={onSave}
-                  disabled={!reason.trim() || save.isPending}
-                >
+                <Button onClick={onSave} disabled={!valid || save.isPending}>
                   <Save />
                   {save.isPending ? "Saving…" : "Save"}
                 </Button>
                 {save.isSuccess && (
-                  <span className="text-sm text-emerald-600 dark:text-emerald-400">
-                    Saved.
-                  </span>
+                  <span className="text-sm text-emerald-600 dark:text-emerald-400">Saved.</span>
                 )}
                 {save.isError && (
-                  <span className="text-sm text-destructive">
-                    {saveErrorMessage(save.error)}
-                  </span>
+                  <span className="text-sm text-destructive">{saveErrorMessage(save.error)}</span>
                 )}
               </div>
             </section>
