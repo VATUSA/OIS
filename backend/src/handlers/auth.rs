@@ -37,6 +37,7 @@ const BASELINE_SELF_SERVICE_PERMISSIONS: &[&str] = &[
     "auth.profile.read",
     "auth.profile.update",
     "auth.sessions.delete",
+    "access.self.read",
     "users.directory.read",
 ];
 
