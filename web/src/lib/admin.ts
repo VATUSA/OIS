@@ -17,17 +17,6 @@ export function useAuditLog(page = 1, pageSize = 50) {
   });
 }
 
-export function useServiceAccounts() {
-  return useQuery({
-    queryKey: ["service-accounts"],
-    queryFn: async () => {
-      const { data, error } = await ois.GET("/api/v1/admin/service-accounts");
-      if (error || !data) throw new Error("failed to load service accounts");
-      return data;
-    },
-  });
-}
-
 export function useFacilities() {
   return useQuery({
     queryKey: ["facilities"],

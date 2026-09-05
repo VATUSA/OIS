@@ -1,10 +1,10 @@
 import type {ReactNode} from "react";
 import {Link} from "@tanstack/react-router";
-import {Building2, KeyRound, type LucideIcon, ScrollText, ShieldCheck,} from "lucide-react";
+import {Building2, type LucideIcon, ScrollText, ShieldCheck,} from "lucide-react";
 import {Card, CardContent, CardHeader, CardTitle} from "@ois/ui";
 
 import {ActivityList} from "@/components/admin/activity";
-import {useAuditLog, useFacilities, useServiceAccounts} from "@/lib/admin";
+import {useAuditLog, useFacilities} from "@/lib/admin";
 
 function Stat({
   label,
@@ -38,7 +38,6 @@ function Stat({
 export function AdminOverview() {
   const facilities = useFacilities();
   const audit = useAuditLog(1, 8);
-  const serviceAccounts = useServiceAccounts();
 
   return (
     <div className="flex flex-col gap-6">
@@ -61,12 +60,6 @@ export function AdminOverview() {
           value={audit.data?.total ?? "—"}
           sub="recorded"
           icon={ScrollText}
-        />
-        <Stat
-          label="Service Accounts"
-          value={serviceAccounts.data?.length ?? "—"}
-          sub="machine clients"
-          icon={KeyRound}
         />
         <Stat label="Access" value="Admin" sub="your role" icon={ShieldCheck} />
       </div>
