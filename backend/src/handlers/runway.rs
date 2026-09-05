@@ -140,7 +140,15 @@ pub(crate) async fn build_board_from(
 
     // Arrivals from the given snapshot — clone the airport handle and drop the feed lock first.
     let airports = state.feed.read().await.airports.clone();
-    let arrivals = runway::collect_arrivals(&icao, data, airports.as_ref(), winds, now, window_min);
+    let arrivals = runway::collect_arrivals(
+        &icao,
+        data,
+        airports.as_ref(),
+        winds,
+        state.aircraft_profiles.load_full().as_ref(),
+        now,
+        window_min,
+    );
 
     // Assign each arrival a runway (override → STAR rule → AUTO).
     let assigned = runway::assign(&arrivals, &active_ids, &star_rules, &overrides);

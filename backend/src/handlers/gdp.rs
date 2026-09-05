@@ -145,6 +145,7 @@ async fn live_inbounds(state: &AppState, icao: &str, now: DateTime<Utc>) -> Vec<
         &snap.data,
         airports.as_ref(),
         state.winds.load_full().as_ref(),
+        state.aircraft_profiles.load_full().as_ref(),
         &HashMap::new(),
         now,
     );

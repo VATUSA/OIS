@@ -199,11 +199,13 @@ pub fn apply_preset(ends: &mut [RunwayEnd], preset: &str) {
 
 /// Collect airborne arrivals to `icao` within the window, with accurate climb-profile +
 /// winds ETAs (the same model `flow::compute` uses) and their detected STAR.
+#[allow(clippy::too_many_arguments)]
 pub fn collect_arrivals(
     icao: &str,
     data: &VatsimData,
     airports: &AirportDb,
     winds: &Winds,
+    profiles: &trajectory::ProfileTable,
     now: DateTime<Utc>,
     window_min: i64,
 ) -> Vec<Arrival> {
@@ -224,11 +226,23 @@ pub fn collect_arrivals(
         if dist < 3.0 {
             continue; // on the field / rolling out
         }
+        let (ty, wake) = fp.aircraft_type_wake();
+        let profile = profiles.resolve(&ty, &wake);
         let cruise = trajectory::parse_alt_ft(&fp.altitude);
-        let tas = trajectory::tas_or_default(fp.cruise_tas.parse().unwrap_or(0.0), cruise);
+        let cruise_tas =
+            trajectory::capped_cruise_tas(fp.cruise_tas.parse().unwrap_or(0.0), cruise, profile);
         let hw = winds.route_headwind(&[[p.latitude, p.longitude], [alat, alon]], cruise);
-        let ete_sec = trajectory::profile_transit_sec(dist, p.altitude as f64, cruise, tas, hw);
-        let eta = now + Duration::seconds(ete_sec as i64);
+        // Descent into the field is modeled: distance-to-destination is `dist`, arrival at d=0.
+        let vp = trajectory::VerticalProfile::build(
+            p.altitude as f64,
+            dist,
+            0.0,
+            cruise,
+            cruise_tas,
+            profile,
+            hw,
+        );
+        let eta = now + Duration::seconds(vp.time_between(dist, 0.0) as i64);
         if (eta - now).num_minutes() > window_min {
             continue;
         }

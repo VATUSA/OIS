@@ -1033,6 +1033,38 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/v1/flow/aircraft-profiles": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get: operations["list_profiles"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/flow/aircraft-profiles/{kind}/{key}": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put: operations["upsert_profile"];
+        post?: never;
+        delete: operations["delete_profile"];
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/v1/flow/aircraft/{callsign}/route": {
         parameters: {
             query?: never;
@@ -2506,6 +2538,43 @@ export interface components {
             display_name: string;
             rating?: string | null;
             roles: string[];
+        };
+        /**
+         * @description A configurable aircraft performance profile (climb / cruise / descent schedules) used by the
+         *     trajectory / ETA model. Keyed by `kind` (`type` / `wake` / `default`) + `key` (ICAO type, wake
+         *     token, or empty). See migration 0059 and `feed::trajectory`.
+         */
+        AircraftProfileBody: {
+            /** Format: double */
+            climb_fpm_hi: number;
+            /** Format: double */
+            climb_fpm_lo: number;
+            /** Format: double */
+            climb_ias_hi: number;
+            /** Format: double */
+            climb_ias_lo: number;
+            /** Format: double */
+            climb_mach?: number | null;
+            /** Format: double */
+            cruise_mach?: number | null;
+            /** Format: double */
+            cruise_tas?: number | null;
+            /** Format: double */
+            desc_fpm: number;
+            /** Format: double */
+            desc_ias_hi: number;
+            /** Format: double */
+            desc_ias_lo: number;
+            /** Format: double */
+            desc_mach?: number | null;
+            key: string;
+            kind: string;
+            name: string;
+            /** Format: double */
+            service_ceiling_ft: number;
+            /** Format: date-time */
+            updated_at: string;
+            updated_by?: string | null;
         };
         /** @description An aircraft's filed route resolved to lat/lon anchors, for plotting + a detail popup. */
         AircraftRoute: {
@@ -4581,6 +4650,34 @@ export interface components {
         UpdateUserAccessRequest: {
             reason: string;
             scopes: components["schemas"]["ScopeUpdate"][];
+        };
+        /** @description Create or update an aircraft performance profile. `kind` + `key` come from the URL path. */
+        UpsertAircraftProfileRequest: {
+            /** Format: double */
+            climb_fpm_hi: number;
+            /** Format: double */
+            climb_fpm_lo: number;
+            /** Format: double */
+            climb_ias_hi: number;
+            /** Format: double */
+            climb_ias_lo: number;
+            /** Format: double */
+            climb_mach?: number | null;
+            /** Format: double */
+            cruise_mach?: number | null;
+            /** Format: double */
+            cruise_tas?: number | null;
+            /** Format: double */
+            desc_fpm: number;
+            /** Format: double */
+            desc_ias_hi: number;
+            /** Format: double */
+            desc_ias_lo: number;
+            /** Format: double */
+            desc_mach?: number | null;
+            name?: string;
+            /** Format: double */
+            service_ceiling_ft: number;
         };
         UpsertAirportConfigRequest: {
             /** Format: int32 */
@@ -7751,6 +7848,107 @@ export interface operations {
                 };
             };
             401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+        };
+    };
+    list_profiles: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["AircraftProfileBody"][];
+                };
+            };
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+        };
+    };
+    upsert_profile: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                kind: string;
+                key: string;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["UpsertAircraftProfileRequest"];
+            };
+        };
+        responses: {
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["AircraftProfileBody"];
+                };
+            };
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+        };
+    };
+    delete_profile: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                kind: string;
+                key: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            204: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            404: {
                 headers: {
                     [name: string]: unknown;
                 };

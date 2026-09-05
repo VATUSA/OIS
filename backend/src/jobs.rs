@@ -11,8 +11,10 @@ use sqlx::PgPool;
 use crate::feed::FeedState;
 use crate::feed::nav::NavData;
 use crate::feed::nav_source;
+use crate::feed::trajectory::ProfileTable;
 use crate::feed::winds::{self, Winds};
 use crate::realtime::{Events, WsEvent, topic};
+use crate::repos::aircraft_profiles as aircraft_profiles_repo;
 use crate::repos::events as events_repo;
 use crate::repos::flow as flow_repo;
 use crate::repos::stats as stats_repo;
@@ -41,6 +43,10 @@ const NAV_REFRESH_INTERVAL: Duration = Duration::from_secs(24 * 60 * 60);
 
 /// How often to refresh winds aloft (AWC FB tables update ~4×/day; hourly keeps us current).
 const WINDS_REFRESH_INTERVAL: Duration = Duration::from_secs(60 * 60);
+
+/// How often to reload aircraft performance profiles from the DB (staff edits are rare, and the
+/// handler force-refreshes on write, so a slow poll is enough to catch out-of-band changes).
+const AIRCRAFT_PROFILES_INTERVAL: Duration = Duration::from_secs(5 * 60);
 
 /// Fetch the latest NASR data once and hot-swap it in when the cycle (or point count)
 /// changes. Records the fetch time on success. Returns `Ok(true)` when the data changed,
@@ -143,6 +149,24 @@ pub fn spawn_winds_refresh(
                         tracing::warn!("winds refresh returned no stations; keeping current");
                     }
                     tokio::time::sleep(WINDS_REFRESH_INTERVAL).await;
+                }
+            }
+        }
+    });
+}
+
+/// Keep the trajectory model's aircraft performance profiles current: load them from the DB at
+/// startup and hot-swap them in, then reload periodically. Fails safe — a failed load keeps the
+/// current table (initially the legacy default).
+pub fn spawn_aircraft_profiles_refresh(pool: PgPool, profiles: Arc<ArcSwap<ProfileTable>>) {
+    tokio::spawn(async move {
+        let mut ticker = tokio::time::interval(AIRCRAFT_PROFILES_INTERVAL);
+        loop {
+            ticker.tick().await;
+            match aircraft_profiles_repo::load_all(&pool).await {
+                Ok(table) => profiles.store(Arc::new(table)),
+                Err(e) => {
+                    tracing::warn!(error = ?e, "aircraft profile reload failed; keeping current")
                 }
             }
         }

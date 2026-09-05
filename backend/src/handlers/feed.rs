@@ -112,6 +112,7 @@ pub(crate) async fn flow_from_data(
         data,
         airports.as_ref(),
         winds,
+        state.aircraft_profiles.load_full().as_ref(),
         &issued,
         now,
     ))
@@ -368,6 +369,7 @@ pub async fn issue_cfr(
                     &snap.data,
                     airports.as_ref(),
                     state.winds.load_full().as_ref(),
+                    state.aircraft_profiles.load_full().as_ref(),
                     &issued,
                     &callsign,
                     ready,

@@ -1,5 +1,6 @@
 pub mod access;
 pub mod ace;
+pub mod aircraft_profiles;
 pub mod airport_configs;
 pub mod api_keys;
 pub mod atc;

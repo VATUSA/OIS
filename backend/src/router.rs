@@ -9,9 +9,9 @@ use crate::{
     auth::middleware::resolve_current_user,
     config::build_cors_layer,
     handlers::{
-        access, ace, airport_configs, api_keys, atc, audit, auth, dashboards, docs, events,
-        facilities, facility_map, feed, flow, gdp, health, integration, preferences, public,
-        runway, service_accounts, stats, tmu, users, webhooks,
+        access, ace, aircraft_profiles, airport_configs, api_keys, atc, audit, auth, dashboards,
+        docs, events, facilities, facility_map, feed, flow, gdp, health, integration, preferences,
+        public, runway, service_accounts, stats, tmu, users, webhooks,
     },
     openapi::ApiDoc,
     realtime,
@@ -253,6 +253,15 @@ pub fn build_router(state: AppState) -> Router {
         .route(
             "/api/v1/forecast/{icao}",
             get(airport_configs::forecast_wind),
+        )
+        // Aircraft performance profiles for the trajectory / ETA model (national reference data)
+        .route(
+            "/api/v1/flow/aircraft-profiles",
+            get(aircraft_profiles::list_profiles),
+        )
+        .route(
+            "/api/v1/flow/aircraft-profiles/{kind}/{key}",
+            put(aircraft_profiles::upsert_profile).delete(aircraft_profiles::delete_profile),
         )
         // Persisted VATSIM stats (historical read API)
         .route("/api/v1/stats/network/history", get(stats::network_history))

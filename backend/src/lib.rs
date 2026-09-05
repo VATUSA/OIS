@@ -44,6 +44,8 @@ pub async fn run() -> color_eyre::Result<()> {
     );
     if let Some(pool) = state.db.clone() {
         jobs::spawn_cleanup(pool.clone());
+        // Load configurable aircraft performance profiles and keep them current for the ETA model.
+        jobs::spawn_aircraft_profiles_refresh(pool.clone(), state.aircraft_profiles.clone());
         feed::events::spawn_sync(pool.clone());
         // Persistent stats collection off the shared feed snapshot + its retention compaction.
         feed::stats::spawn_collector(pool.clone(), state.feed.clone(), state.airspace.clone());

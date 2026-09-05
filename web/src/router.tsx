@@ -25,6 +25,7 @@ import {TmuPage} from "@/pages/tmu";
 import {PlanningEventsPage} from "@/pages/planning/events";
 import {EventPlanningPage} from "@/pages/planning/event";
 import {EventFcaBuilderPage} from "@/pages/planning/event-fcas";
+import {AircraftProfilesPage} from "@/pages/planning/aircraft-profiles";
 import {AirportConfigsPage} from "@/pages/planning/airport-configs";
 import {StatsPage} from "@/pages/stats";
 import {DelaysPage} from "@/pages/stats/delays";
@@ -330,6 +331,12 @@ const planningAirportConfigsRoute = createRoute({
   component: AirportConfigsPage,
 });
 
+const planningAircraftProfilesRoute = createRoute({
+  getParentRoute: () => planningRoute,
+  path: "aircraft-profiles",
+  component: AircraftProfilesPage,
+});
+
 const planningEventRoute = createRoute({
   getParentRoute: () => planningRoute,
   path: "events/$eventId",
@@ -498,6 +505,7 @@ const routeTree = rootRoute.addChildren([
     planningIndexRoute,
     planningEventsRoute,
     planningAirportConfigsRoute,
+    planningAircraftProfilesRoute,
     planningEventRoute,
     planningEventFcasRoute,
   ]),
