@@ -2,12 +2,17 @@ import {keepPreviousData, useQuery} from "@tanstack/react-query";
 
 import {ois} from "./api";
 
-export function useAuditLog(page = 1, pageSize = 50) {
+export type AuditFilters = { q?: string; from?: string; to?: string };
+
+export function useAuditLog(page = 1, pageSize = 50, filters: AuditFilters = {}) {
+  const q = filters.q?.trim() || undefined;
+  const from = filters.from || undefined;
+  const to = filters.to || undefined;
   return useQuery({
-    queryKey: ["audit", page, pageSize],
+    queryKey: ["audit", page, pageSize, q, from, to],
     queryFn: async () => {
       const { data, error } = await ois.GET("/api/v1/admin/audit", {
-        params: { query: { page, page_size: pageSize } },
+        params: { query: { page, page_size: pageSize, q, from, to } },
       });
       if (error || !data) throw new Error("failed to load audit log");
       return data;

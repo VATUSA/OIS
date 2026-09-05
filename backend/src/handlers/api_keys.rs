@@ -428,6 +428,9 @@ pub async fn key_audit(
         resource_id: None,
         action: None,
         actor_id: Some(actor_id),
+        search: None,
+        from: None,
+        to: None,
         limit: page_size,
         offset: (page - 1) * page_size,
     };
