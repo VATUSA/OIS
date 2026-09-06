@@ -867,7 +867,7 @@ pub async fn flight_advisory(
             let releases = load_releases(pool, &fca.id).await?;
             let (fca_id, fca_name, fca_color) =
                 (fca.id.clone(), fca.name.clone(), fca.color.clone());
-            let metered = metered_flights(&state, fca, releases, now).await?;
+            let metered = metered_flights(&state, fca, releases, now, false).await?;
             if let Some(f) = metered
                 .into_iter()
                 .find(|f| f.callsign.eq_ignore_ascii_case(&cs))
@@ -1100,6 +1100,33 @@ fn fca_flight(
         groundspeed: gs,
         altitude: alt,
         heading: hdg,
+        debug: None,
+    }
+}
+
+/// Build the debug detail for one crossing flight (only when debug mode is on): the resolved
+/// profile, the speeds/wind used, and any unresolvable filed-route tokens.
+#[allow(clippy::too_many_arguments)]
+fn fca_debug(
+    profiles: &trajectory::ProfileTable,
+    ty: &str,
+    wake: &str,
+    cruise_tas: f64,
+    cruise_alt: f64,
+    headwind: Option<f64>,
+    nav: &NavData,
+    airports: &AirportDb,
+    dep: &str,
+    arr: &str,
+    route: &str,
+) -> crate::models::FcaFlightDebug {
+    let (_waypoints, unresolved) = fca::full_route_named(nav, airports, dep, arr, route);
+    crate::models::FcaFlightDebug {
+        profile: profiles.resolve_label(ty, wake),
+        cruise_tas: cruise_tas.round() as i64,
+        cruise_alt: cruise_alt.round() as i64,
+        headwind: headwind.map(|h| h.round() as i64),
+        unresolved,
     }
 }
 
@@ -1115,6 +1142,7 @@ fn build_candidates(
     profiles: &trajectory::ProfileTable,
     releases: &ReleaseMap,
     now: DateTime<Utc>,
+    debug: bool,
 ) -> (Vec<FcaFlight>, Vec<fca::MeterInput>) {
     let pts = fca.points.0.clone();
     let mut flights = Vec::new();
@@ -1170,7 +1198,7 @@ fn build_candidates(
             cross_speed: trajectory::effective_gs(cruise_tas, headwind).max(120.0),
             frozen_ms: rel.map(|(cta, _)| *cta),
         });
-        flights.push(fca_flight(
+        let mut flight = fca_flight(
             &p.callsign,
             fp,
             if airborne { "airborne" } else { "ground" },
@@ -1183,7 +1211,23 @@ fn build_candidates(
             p.altitude,
             p.heading,
             rel,
-        ));
+        );
+        if debug {
+            flight.debug = Some(fca_debug(
+                profiles,
+                &ty,
+                &wake,
+                cruise_tas,
+                cruise,
+                headwind,
+                nav,
+                airports,
+                &fp.departure,
+                &fp.arrival,
+                &fp.route,
+            ));
+        }
+        flights.push(flight);
     }
 
     for pf in &data.prefiles {
@@ -1239,7 +1283,7 @@ fn build_candidates(
             cross_speed: trajectory::effective_gs(cruise_tas, headwind).max(120.0),
             frozen_ms: rel.map(|(cta, _)| *cta),
         });
-        flights.push(fca_flight(
+        let mut flight = fca_flight(
             &pf.callsign,
             fp,
             "proposed",
@@ -1252,7 +1296,23 @@ fn build_candidates(
             0,
             0,
             rel,
-        ));
+        );
+        if debug {
+            flight.debug = Some(fca_debug(
+                profiles,
+                &ty,
+                &wake,
+                cruise_tas,
+                cruise,
+                headwind,
+                nav,
+                airports,
+                &fp.departure,
+                &fp.arrival,
+                &fp.route,
+            ));
+        }
+        flights.push(flight);
     }
 
     (flights, metas)
@@ -1303,6 +1363,7 @@ async fn metered_flights(
     fca: FcaBody,
     releases: ReleaseMap,
     now: DateTime<Utc>,
+    debug: bool,
 ) -> Result<Vec<FcaFlight>, ApiError> {
     if fca.points.0.len() < 2 {
         return Ok(Vec::new());
@@ -1326,6 +1387,7 @@ async fn metered_flights(
             aircraft_profiles.as_ref(),
             &releases,
             now,
+            debug,
         );
         finalize(&fca, flights, &metas)
     })
@@ -1333,16 +1395,29 @@ async fn metered_flights(
     .map_err(|_| ApiError::Internal)
 }
 
+/// Query for the FCA traffic endpoint.
+#[derive(Deserialize)]
+pub struct TrafficQuery {
+    /// When true, each flight carries a `debug` block (profile used, speeds/wind, unresolved route
+    /// tokens) for the client's debug mode.
+    #[serde(default)]
+    debug: bool,
+}
+
 #[utoipa::path(
     get,
     path = "/api/v1/flow/fcas/{id}/traffic",
     tag = "flow",
-    params(("id" = String, Path, description = "FCA id")),
+    params(
+        ("id" = String, Path, description = "FCA id"),
+        ("debug" = Option<bool>, Query, description = "Include per-flight ETA/metering debug detail")
+    ),
     responses((status = 200, body = Vec<FcaFlight>), (status = 401), (status = 404))
 )]
 pub async fn fca_traffic(
     State(state): State<AppState>,
     Path(id): Path<String>,
+    Query(q): Query<TrafficQuery>,
 ) -> Result<Json<Vec<FcaFlight>>, ApiError> {
     let pool = state.db.as_ref().ok_or(ApiError::ServiceUnavailable)?;
     let fca = flow_repo::get_fca(pool, &id)
@@ -1350,7 +1425,9 @@ pub async fn fca_traffic(
         .ok_or(ApiError::NotFound)?;
     let releases = load_releases(pool, &id).await?;
     let now = Utc::now();
-    Ok(Json(metered_flights(&state, fca, releases, now).await?))
+    Ok(Json(
+        metered_flights(&state, fca, releases, now, q.debug).await?,
+    ))
 }
 
 /// Scope for the IDST board — comma-separated airport, TRACON, and ARTCC codes.
@@ -1451,6 +1528,7 @@ pub async fn list_idst(
                 aircraft_profiles.as_ref(),
                 releases,
                 now,
+                false,
             );
             for f in finalize(fca, flights, &metas) {
                 if (f.status != "ground" && f.status != "proposed")
@@ -1553,6 +1631,7 @@ pub async fn mark_release(
             state.aircraft_profiles.load_full().as_ref(),
             &releases,
             now,
+            false,
         )
     });
     let Some((mut flights, mut metas)) = built else {
@@ -1640,6 +1719,7 @@ pub async fn clear_release(
             state.aircraft_profiles.load_full().as_ref(),
             &releases,
             now,
+            false,
         )
     });
     let Some((flights, metas)) = built else {
