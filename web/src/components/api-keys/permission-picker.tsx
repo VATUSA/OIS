@@ -1,9 +1,8 @@
 import {useMemo, useState} from "react";
-import {ConfirmButton, cn} from "@ois/ui";
-import {Wand2} from "lucide-react";
 
 import type {ApiKeyPermission, ApiKeyPermissionInput, GrantablePermission} from "@/lib/api-keys";
-import {type AccessPreset, ACCESS_PRESETS, BASE_PERMISSIONS, presetPermissions} from "@/lib/presets";
+import {type AccessPreset, BASE_PERMISSIONS, presetPermissions} from "@/lib/presets";
+import {PresetBar} from "@/components/access/preset-bar";
 import {
   PermissionScopeTree,
   type ScopeItem,
@@ -124,60 +123,15 @@ export function PermissionPicker({
 
   return (
     <div className="flex flex-col gap-2">
-      {/* Presets — bundle grantable permissions (no roles on keys). */}
-      <div className="flex flex-col gap-1.5 rounded-md border bg-muted/20 p-2">
-        <div className="flex flex-wrap items-center gap-2">
-          <span className="flex items-center gap-1 text-xs font-medium text-muted-foreground">
-            <Wand2 className="size-3.5 text-primary" /> Presets
-          </span>
-          {ACCESS_PRESETS.map((preset) => {
-            const needsFacility = preset.scope === "facility" && !presetFacility;
-            const applied = isPresetApplied(preset);
-            return (
-              <button
-                key={preset.id}
-                type="button"
-                disabled={needsFacility}
-                onClick={() => togglePreset(preset)}
-                title={needsFacility ? "Pick a facility first" : preset.description}
-                className={cn(
-                  "rounded-md border px-2.5 py-1 text-xs font-medium transition-colors",
-                  applied
-                    ? "border-primary/60 bg-primary/15 text-primary"
-                    : "bg-background hover:bg-accent",
-                  needsFacility && "cursor-not-allowed opacity-50",
-                )}
-              >
-                {preset.label}
-                {preset.scope === "facility" && presetFacility ? ` · ${presetFacility}` : ""}
-              </button>
-            );
-          })}
-          <select
-            value={presetFacility}
-            onChange={(e) => setPresetFacility(e.target.value)}
-            title="Facility for the EC preset"
-            className="h-7 rounded-md border border-input bg-background px-2 text-xs"
-          >
-            <option value="">Facility…</option>
-            {facilities.map((f) => (
-              <option key={f.id} value={f.id}>
-                {f.id}
-              </option>
-            ))}
-          </select>
-          <span className="mx-0.5 h-5 w-px bg-border" />
-          <ConfirmButton
-            size="sm"
-            variant="ghost"
-            warn="Clear every permission on this key?"
-            onConfirm={() => onChange(new Map())}
-          >
-            Remove all
-          </ConfirmButton>
-        </div>
-      </div>
-
+      <PresetBar
+        isApplied={isPresetApplied}
+        onToggle={togglePreset}
+        facility={presetFacility}
+        facilities={facilities}
+        onFacility={setPresetFacility}
+        onRemoveAll={() => onChange(new Map())}
+        removeAllWarn="Clear every permission on this key?"
+      />
       <PermissionScopeTree
         items={items}
         facilities={facilities}
