@@ -259,6 +259,29 @@ function Strip({
           )}
         </div>
       )}
+
+      {f.debug && (
+        <div className="mt-1 ml-6 rounded border border-dashed border-amber-500/40 bg-amber-500/5 px-2 py-1 font-mono text-[10px] leading-relaxed text-muted-foreground">
+          <span>
+            profile <span className="text-amber-600 dark:text-amber-400">{f.debug.profile}</span>
+          </span>
+          {" · "}
+          <span>{Math.round(f.debug.cruise_tas)}kt TAS @ FL{Math.round(f.debug.cruise_alt / 100)}</span>
+          {f.debug.headwind != null && (
+            <>
+              {" · "}
+              <span>
+                {f.debug.headwind >= 0 ? "HW" : "TW"} {Math.abs(Math.round(f.debug.headwind))}kt
+              </span>
+            </>
+          )}
+          {f.debug.unresolved.length > 0 && (
+            <div className="text-destructive">
+              unresolved: {f.debug.unresolved.join(" ")}
+            </div>
+          )}
+        </div>
+      )}
     </li>
   );
 }

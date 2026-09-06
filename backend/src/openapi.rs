@@ -285,6 +285,7 @@ use utoipa::OpenApi;
         crate::models::RouteBody,
         crate::models::UpsertRouteRequest,
         crate::models::FcaFlight,
+        crate::models::FcaFlightDebug,
         crate::models::FixValidationBody,
         crate::models::ReleaseRequest,
         crate::models::ReorderRequest,

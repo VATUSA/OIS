@@ -196,6 +196,20 @@ impl ProfileTable {
             .or_else(|| self.by_wake.get(&wake.to_ascii_uppercase()))
             .unwrap_or(&self.default)
     }
+
+    /// A label for which tier `resolve` matched, for the debug view: `type:<T>`, `wake:<W>`, or
+    /// `default`.
+    pub fn resolve_label(&self, ty: &str, wake: &str) -> String {
+        let ty = ty.to_ascii_uppercase();
+        let wake = wake.to_ascii_uppercase();
+        if self.by_type.contains_key(&ty) {
+            format!("type:{ty}")
+        } else if self.by_wake.contains_key(&wake) {
+            format!("wake:{wake}")
+        } else {
+            "default".to_string()
+        }
+    }
 }
 
 /// The governing true airspeed for a climb/descent phase at `alt`: the IAS-schedule TAS,

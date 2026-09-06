@@ -156,7 +156,8 @@ export function FcaMapView({
   }, [showAtc]);
   const atc = useAtc(showAtc);
 
-  const fcaTraffic = useFcaTraffic(draft ? null : selectedId);
+  const debug = useSetting("debug.enabled", false).value;
+  const fcaTraffic = useFcaTraffic(draft ? null : selectedId, debug);
   const counts = useFcaCounts();
   const aircraftRoute = useAircraftRoute(routeCallsign);
   const dataStatus = useDataStatus();

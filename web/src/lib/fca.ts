@@ -339,12 +339,12 @@ export function useAtc(enabled: boolean) {
 }
 
 /** Aircraft whose filed route crosses one FCA, with ETA to the crossing. */
-export function useFcaTraffic(id: string | null) {
+export function useFcaTraffic(id: string | null, debug = false) {
   return useQuery({
-    queryKey: ["fca-traffic", id],
+    queryKey: ["fca-traffic", id, debug],
     queryFn: async () => {
       const { data, error } = await ois.GET("/api/v1/flow/fcas/{id}/traffic", {
-        params: { path: { id: id! } },
+        params: { path: { id: id! }, query: { debug: debug || undefined } },
       });
       if (error || !data) throw new Error("failed to load FCA traffic");
       return data;

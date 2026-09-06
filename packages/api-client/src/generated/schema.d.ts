@@ -3425,6 +3425,7 @@ export interface components {
              * @description Metered crossing time (after sequencing).
              */
             cross_time?: string | null;
+            debug?: null | components["schemas"]["FcaFlightDebug"];
             /** Format: int64 */
             delay_min: number;
             /**
@@ -3476,6 +3477,34 @@ export interface components {
             seq: number;
             /** @description airborne | ground | proposed */
             status: string;
+        };
+        /**
+         * @description Per-flight debug info surfaced by the client's debug mode: which performance profile drove the
+         *     ETA, the speeds/wind used, and any filed-route tokens that failed to resolve (issue #37).
+         */
+        FcaFlightDebug: {
+            /**
+             * Format: int64
+             * @description Filed cruise altitude (ft) used.
+             */
+            cruise_alt: number;
+            /**
+             * Format: int64
+             * @description Cruise TAS (kt) used for the ETA, after the profile cap.
+             */
+            cruise_tas: number;
+            /**
+             * Format: int64
+             * @description Mean route headwind (kt) applied (+ head / − tail); null = still air.
+             */
+            headwind?: number | null;
+            /** @description The resolved aircraft performance profile: "type:C172", "wake:H", or "default". */
+            profile: string;
+            /**
+             * @description Filed-route tokens that didn't resolve to a nav fix/navaid/airway/procedure — a likely
+             *     source of ETA/track error.
+             */
+            unresolved: string[];
         };
         FeedStatusBody: {
             airports_loaded: number;
@@ -8481,7 +8510,10 @@ export interface operations {
     };
     fca_traffic: {
         parameters: {
-            query?: never;
+            query?: {
+                /** @description Include per-flight ETA/metering debug detail */
+                debug?: boolean;
+            };
             header?: never;
             path: {
                 /** @description FCA id */

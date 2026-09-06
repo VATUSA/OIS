@@ -52,6 +52,14 @@ export const SETTINGS: SettingDef[] = [
       "Grow aircraft icons as you zoom in and shrink them when zoomed out, instead of a fixed size. Off keeps every icon a constant size.",
     control: { kind: "toggle", default: true },
   },
+  {
+    key: "debug.enabled",
+    group: "Advanced",
+    label: "Debug mode",
+    description:
+      "Show extra developer detail across OIS — for FCA traffic, the aircraft performance profile used for each ETA, the speeds and wind applied, and any filed-route tokens that failed to resolve.",
+    control: { kind: "toggle", default: false },
+  },
 ];
 
 /** The default value for a setting key (used before the server value loads, or when signed out). */

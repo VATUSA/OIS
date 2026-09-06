@@ -1379,6 +1379,27 @@ pub struct FcaFlight {
     pub groundspeed: i64,
     pub altitude: i64,
     pub heading: i64,
+    /// Debug detail for the ETA/metering model — only present when the request asks for it
+    /// (`?debug=1`) and the user has debug mode on. Omitted from normal payloads.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub debug: Option<FcaFlightDebug>,
+}
+
+/// Per-flight debug info surfaced by the client's debug mode: which performance profile drove the
+/// ETA, the speeds/wind used, and any filed-route tokens that failed to resolve (issue #37).
+#[derive(Debug, Serialize, ToSchema)]
+pub struct FcaFlightDebug {
+    /// The resolved aircraft performance profile: "type:C172", "wake:H", or "default".
+    pub profile: String,
+    /// Cruise TAS (kt) used for the ETA, after the profile cap.
+    pub cruise_tas: i64,
+    /// Filed cruise altitude (ft) used.
+    pub cruise_alt: i64,
+    /// Mean route headwind (kt) applied (+ head / − tail); null = still air.
+    pub headwind: Option<i64>,
+    /// Filed-route tokens that didn't resolve to a nav fix/navaid/airway/procedure — a likely
+    /// source of ETA/track error.
+    pub unresolved: Vec<String>,
 }
 
 /// Issue a CFR release for a crossing aircraft. `ready` (HHMMz) pins a wheels-up time;
