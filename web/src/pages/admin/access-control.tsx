@@ -1,6 +1,6 @@
 import {useEffect, useMemo, useState} from "react";
-import {Badge, Button, Card, CardContent, cn, ConfirmButton, Input} from "@ois/ui";
-import {Save, Search, Wand2} from "lucide-react";
+import {Badge, Button, Card, CardContent, cn, Input} from "@ois/ui";
+import {Save, Search} from "lucide-react";
 
 import {
   type AdminUserRow,
@@ -13,8 +13,9 @@ import {
   useSaveUserAccess,
   useUserAccess,
 } from "@/lib/access";
-import {type AccessPreset, ACCESS_PRESETS, BASE_PERMISSIONS, presetPermissions} from "@/lib/presets";
+import {type AccessPreset, BASE_PERMISSIONS, presetPermissions} from "@/lib/presets";
 import {Pagination} from "@/components/pagination";
+import {PresetBar} from "@/components/access/preset-bar";
 import {
   PermissionScopeTree,
   ScopeChips,
@@ -375,57 +376,16 @@ export function AdminAccessControl() {
             {/* Presets — one-click bundles, toggled on/off. Each grants its role + perms at the
                 chosen scope, plus the sign-in baseline nationally. */}
             <section className="flex flex-col gap-2">
-              <div className="flex items-center gap-1.5">
-                <Wand2 className="size-4 text-primary" />
-                <h3 className="text-sm font-semibold">Presets</h3>
-              </div>
-              <div className="flex flex-wrap items-center gap-2">
-                {ACCESS_PRESETS.map((preset) => {
-                  const needsFacility = preset.scope === "facility" && !presetFacility;
-                  const applied = isPresetApplied(preset);
-                  return (
-                    <button
-                      key={preset.id}
-                      type="button"
-                      disabled={needsFacility}
-                      onClick={() => togglePreset(preset)}
-                      title={needsFacility ? "Pick a facility first" : preset.description}
-                      className={cn(
-                        "rounded-md border px-3 py-1.5 text-sm font-medium transition-colors",
-                        applied
-                          ? "border-primary/60 bg-primary/15 text-primary"
-                          : "bg-background hover:bg-accent",
-                        needsFacility && "cursor-not-allowed opacity-50",
-                      )}
-                    >
-                      {preset.label}
-                      {preset.scope === "facility" && presetFacility ? ` · ${presetFacility}` : ""}
-                    </button>
-                  );
-                })}
-                <select
-                  value={presetFacility}
-                  onChange={(e) => setPresetFacility(e.target.value)}
-                  title="Facility for a facility-scoped preset"
-                  className="h-8 rounded-md border border-input bg-background px-2 text-xs"
-                >
-                  <option value="">Facility…</option>
-                  {facilities.map((f) => (
-                    <option key={f.id} value={f.id}>
-                      {f.id}
-                    </option>
-                  ))}
-                </select>
-                <span className="mx-0.5 h-6 w-px bg-border" />
-                <ConfirmButton
-                  size="sm"
-                  variant="ghost"
-                  warn="Clear every role and permission for this user (all scopes)?"
-                  onConfirm={removeAll}
-                >
-                  Remove all
-                </ConfirmButton>
-              </div>
+              <PresetBar
+                isApplied={isPresetApplied}
+                onToggle={togglePreset}
+                facility={presetFacility}
+                facilities={facilities}
+                onFacility={setPresetFacility}
+                onRemoveAll={removeAll}
+                removeAllWarn="Clear every role and permission for this user (all scopes)?"
+                size="lg"
+              />
               <p className="text-xs text-muted-foreground">
                 Each permission and role below is granted at National scope or specific ARTCCs — pick
                 the scope under each one. Nothing is saved until you enter a reason and hit Save.

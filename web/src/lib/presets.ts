@@ -22,6 +22,11 @@ export interface AccessPreset {
  *  integration/users/auth) is admin/bot/self and excluded from the facility + DCC presets. */
 const OPERATIONAL_DOMAINS = ["tmu", "flow", "events", "ace", "stats"] as const;
 
+/** Traffic-management domains for the NTMO preset. */
+const TRAFFIC_DOMAINS = ["tmu", "flow", "stats"] as const;
+/** Event-coordination domains for the Events Team preset. */
+const EVENT_DOMAINS = ["events", "ace"] as const;
+
 /**
  * The baseline every signed-in user holds via the `USER` role. Presets grant these at NATIONAL scope
  * so the result matches a normal user's defaults — this matters for the facility-EC preset (whose other
@@ -31,6 +36,7 @@ const OPERATIONAL_DOMAINS = ["tmu", "flow", "events", "ace", "stats"] as const;
 export const BASE_PERMISSIONS = ["ace.requests.create"] as const;
 
 export const ACCESS_PRESETS: readonly AccessPreset[] = [
+  // --- National ---
   {
     id: "vatusa_admin",
     label: "VATUSA Admin",
@@ -48,11 +54,44 @@ export const ACCESS_PRESETS: readonly AccessPreset[] = [
     domains: OPERATIONAL_DOMAINS,
   },
   {
+    id: "ntmo",
+    label: "NTMO",
+    description: "National traffic-management tools: TMU, flow, and stats.",
+    scope: "national",
+    roles: ["NTMO"],
+    domains: TRAFFIC_DOMAINS,
+  },
+  {
+    id: "events_team",
+    label: "Events Team",
+    description: "National event coordination (events + ACE support).",
+    scope: "national",
+    roles: ["EVENTS_TEAM"],
+    domains: EVENT_DOMAINS,
+  },
+  {
+    id: "ace_team",
+    label: "ACE Team",
+    description: "Handle ACE support requests, nationally.",
+    scope: "national",
+    roles: ["ACE"],
+    domains: ["ace"],
+  },
+  // --- Facility (scoped to the chosen ARTCC) ---
+  {
     id: "facility_ec",
     label: "Facility EC",
     description: "Operational permissions for one facility (no admin tools).",
     scope: "facility",
     roles: ["EC"],
+    domains: OPERATIONAL_DOMAINS,
+  },
+  {
+    id: "facility_aec",
+    label: "Facility AEC",
+    description: "Assistant EC — operational permissions for one facility.",
+    scope: "facility",
+    roles: ["AEC"],
     domains: OPERATIONAL_DOMAINS,
   },
 ];
