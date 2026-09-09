@@ -33,6 +33,9 @@ These are project rules, not preferences:
   stale contract — a silent failure. See `AGENTS.md` § "The API contract → typed client".
 - **Verify before "done": run `just ci`.** For a contract change, that means regenerate the client
   first, then `pnpm typecheck`. For DB behavior, run the stack and exercise the endpoint.
+- **Filing issues** follows [`docs/github-issues.md`](docs/github-issues.md) (labels, body structure,
+  scope tests, board). Don't self-assign/close/merge; keep comments to real moments; other repos are
+  read-only.
 
 ## The invariants that bite
 
