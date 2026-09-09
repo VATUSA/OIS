@@ -188,7 +188,13 @@ an existing one) or the bug and fix are unambiguous.
 - Commit or push only when the user asks. Always provide a ready-to-use commit message for a
   completed unit of work, in the repo's conventional-commit style (`type(scope): summary`), with a
   `Closes #N` line when it maps to a GitHub issue.
-- The GitHub remote is `VATUSA/OIS` (private). Issues are tracked there; use `gh` for issue/PR work.
+- The GitHub remote is `VATUSA/OIS` (private). Issues are tracked there and on
+  [Project 7](https://github.com/orgs/VATUSA/projects/7/views/1); use `gh` for issue/PR work.
+- **Filing an issue** follows [`docs/github-issues.md`](docs/github-issues.md) — the title, the
+  `type:`/`area:`/`priority:` labels, the *What happens / Why / What should happen / Acceptance* body
+  with file:line evidence, the blast-radius footer, and the scope tests for when a noticed problem
+  becomes its own `technical-debt` ticket. Agents don't self-assign, close, or merge; other repos are
+  read-only.
 
 ---
 
