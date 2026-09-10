@@ -189,6 +189,40 @@ export function useRemoveFacilitySupport(eventId: number) {
   });
 }
 
+export type Tier1Result = components["schemas"]["Tier1GenerateResult"];
+
+/** Fan out ACE support requests to the host ARTCC's Tier-1 neighbours for a Friday Night Op — part
+ *  of setting up an event's facility support. Needs `events.support.update`. */
+export function useGenerateTier1(eventId: number) {
+  const queryClient = useQueryClient();
+  const toast = useToast();
+  return useMutation({
+    mutationFn: async (): Promise<Tier1Result> => {
+      const { data, error } = await ois.POST(
+        "/api/v1/events/{id}/facilities/tier1",
+        { params: { path: { id: eventId } } },
+      );
+      if (error || !data) throw new Error("generate failed");
+      return data;
+    },
+    onSuccess: (r) => {
+      queryClient.invalidateQueries({ queryKey: ["event-facilities", eventId] });
+      queryClient.invalidateQueries({ queryKey: ["event-ace", eventId] });
+      const made = r.created.length;
+      const skipped = r.skipped.length;
+      if (made === 0 && skipped === 0) {
+        toast.success("No Tier-1 neighbours to request");
+      } else {
+        toast.success(
+          `Created ${made} request${made === 1 ? "" : "s"}` +
+            (skipped > 0 ? ` (skipped ${skipped} already open)` : ""),
+        );
+      }
+    },
+    onError: () => toast.error("Couldn’t generate Tier-1 requests"),
+  });
+}
+
 /** Planned per-airport AAR/ADR for one event (each row carries an `editable` flag). */
 export function useAirportRates(eventId: number) {
   return useQuery({
