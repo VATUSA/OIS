@@ -16,6 +16,7 @@ pub mod metar;
 pub mod nav;
 pub mod nav_source;
 pub mod neighbors;
+pub mod predict;
 pub mod runway;
 pub mod runway_db;
 pub mod stats;

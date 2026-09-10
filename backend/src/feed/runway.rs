@@ -7,12 +7,14 @@
 
 use std::collections::HashMap;
 
-use chrono::{DateTime, Duration, Utc};
+use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use utoipa::ToSchema;
 
 use super::airports::AirportDb;
 use super::flow::{arrival_gate, gc_dist};
+use super::nav::NavData;
+use super::predict;
 use super::trajectory;
 use super::vatsim::VatsimData;
 use super::winds::Winds;
@@ -197,13 +199,15 @@ pub fn apply_preset(ends: &mut [RunwayEnd], preset: &str) {
     }
 }
 
-/// Collect airborne arrivals to `icao` within the window, with accurate climb-profile +
-/// winds ETAs (the same model `flow::compute` uses) and their detected STAR.
+/// Collect airborne arrivals to `icao` within the window, with accurate along-route ETAs from the
+/// shared predictor (`predict::arrival_eta` — the same one `flow::compute` and FCA metering use)
+/// and their detected STAR.
 #[allow(clippy::too_many_arguments)]
 pub fn collect_arrivals(
     icao: &str,
     data: &VatsimData,
     airports: &AirportDb,
+    nav: &NavData,
     winds: &Winds,
     profiles: &trajectory::ProfileTable,
     now: DateTime<Utc>,
@@ -222,8 +226,7 @@ pub fn collect_arrivals(
         if p.groundspeed < 50 {
             continue; // airborne only
         }
-        let dist = gc_dist(p.latitude, p.longitude, alat, alon);
-        if dist < 3.0 {
+        if gc_dist(p.latitude, p.longitude, alat, alon) < 3.0 {
             continue; // on the field / rolling out
         }
         let (ty, wake) = fp.aircraft_type_wake();
@@ -231,19 +234,28 @@ pub fn collect_arrivals(
         let cruise = trajectory::parse_alt_ft(&fp.altitude);
         let cruise_tas =
             trajectory::capped_cruise_tas(fp.cruise_tas.parse().unwrap_or(0.0), cruise, profile);
-        let hw = winds.route_headwind(&[[p.latitude, p.longitude], [alat, alon]], cruise);
-        // Descent into the field is modeled: distance-to-destination is `dist`, arrival at d=0.
-        let vp = trajectory::VerticalProfile::build(
-            p.altitude as f64,
-            dist,
-            0.0,
-            cruise,
-            cruise_tas,
+        // Time the remaining along-route distance to the field through the shared predictor, so
+        // the ladder slot lines up with the aircraft's drawn route on the map.
+        let pred = predict::arrival_eta(
+            nav,
+            airports,
+            winds,
             profile,
-            hw,
+            &predict::ArrivalInput {
+                dep: &fp.departure,
+                arr: &fp.arrival,
+                route: &fp.route,
+                pos: [p.latitude, p.longitude],
+                alt_ft: p.altitude as f64,
+                gs: p.groundspeed,
+                hdg: p.heading,
+                arr_ll: [alat, alon],
+                cruise_ft: cruise,
+                cruise_tas,
+            },
+            now,
         );
-        let eta = now + Duration::seconds(vp.time_between(dist, 0.0) as i64);
-        if (eta - now).num_minutes() > window_min {
+        if (pred.eta - now).num_minutes() > window_min {
             continue;
         }
         out.push(Arrival {
@@ -251,8 +263,8 @@ pub fn collect_arrivals(
             dep: fp.departure.clone(),
             actype: fp.aircraft_short.clone(),
             star: arrival_gate(&fp.route, &icao).map(|s| star_base(&s)),
-            eta_ms: eta.timestamp_millis(),
-            dist_nm: dist,
+            eta_ms: pred.eta.timestamp_millis(),
+            dist_nm: pred.route_nm,
         });
     }
     out.sort_by_key(|a| a.eta_ms);

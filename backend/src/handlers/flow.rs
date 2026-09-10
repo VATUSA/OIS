@@ -9,7 +9,7 @@ use axum::{
     extract::{Extension, Path, Query, State},
     http::StatusCode,
 };
-use chrono::{DateTime, Duration, Utc};
+use chrono::{DateTime, Utc};
 use serde::Deserialize;
 
 use crate::{
@@ -23,8 +23,8 @@ use crate::{
     },
     errors::ApiError,
     feed::{
-        airports::AirportDb, airspace::Boundaries, facilities, fca, nav::NavData, trajectory,
-        vatsim::FlightPlan, vatsim::VatsimData, winds::Winds,
+        airports::AirportDb, airspace::Boundaries, facilities, fca, nav::NavData, predict,
+        trajectory, vatsim::FlightPlan, vatsim::VatsimData, winds::Winds,
     },
     jobs,
     models::{
@@ -134,53 +134,6 @@ fn altitude_matches(
         // Unknown on both → don't exclude.
         (None, None) => true,
     }
-}
-
-/// Taxi + spool-up allowance added to a ground aircraft's flight time (the profile model
-/// covers the climb itself).
-const GROUND_TAXI_SEC: f64 = 8.0 * 60.0;
-
-/// ETA to the FCA crossing via the shared vertical-profile + winds model. The profile is built
-/// over the whole remaining route to the arrival (so descent is modeled when the crossing is near
-/// the destination); the crossing sits `along_nm` ahead. Airborne aircraft start from their current
-/// altitude; ground aircraft climb from the surface and carry a taxi allowance.
-#[allow(clippy::too_many_arguments)]
-fn eta_to_crossing(
-    airborne: bool,
-    route_len_nm: f64,
-    along_nm: f64,
-    cur_alt_ft: f64,
-    cruise_alt_ft: f64,
-    cruise_tas: f64,
-    profile: &trajectory::AircraftProfile,
-    headwind: Option<f64>,
-    now: DateTime<Utc>,
-) -> DateTime<Utc> {
-    let start_alt = if airborne { cur_alt_ft } else { 0.0 };
-    let vp = trajectory::VerticalProfile::build(
-        start_alt,
-        route_len_nm,
-        0.0, // arrival field elevation ≈ sea level (v1 approximation)
-        cruise_alt_ft,
-        cruise_tas,
-        profile,
-        headwind,
-    );
-    // Distances are nm-to-destination: the aircraft is at `route_len_nm`, the crossing `along_nm`
-    // ahead of it (i.e. `route_len_nm − along_nm` from the field).
-    let crossing_d = (route_len_nm - along_nm).max(0.0);
-    let mut sec = vp.time_between(route_len_nm, crossing_d);
-    if !airborne {
-        sec += GROUND_TAXI_SEC;
-    }
-    now + Duration::seconds(sec as i64)
-}
-
-/// Total great-circle length (nm) of a resolved route path.
-fn path_len_nm(path: &[[f64; 2]]) -> f64 {
-    path.windows(2)
-        .map(|w| crate::feed::flow::gc_dist(w[0][0], w[0][1], w[1][0], w[1][1]))
-        .sum()
 }
 
 fn validate_fca(req: &UpsertFcaRequest) -> Result<(), ApiError> {
@@ -1179,8 +1132,8 @@ fn build_candidates(
         let filed_tas = fp.cruise_tas.parse().unwrap_or(0.0);
         let cruise_tas = trajectory::capped_cruise_tas(filed_tas, cruise, profile);
         let headwind = winds.route_headwind(&path, cruise);
-        let route_len = path_len_nm(&path);
-        let eta = eta_to_crossing(
+        let route_len = predict::path_len_nm(&path);
+        let eta = predict::eta_along_route(
             airborne,
             route_len,
             cross.along_nm,
@@ -1264,8 +1217,8 @@ fn build_candidates(
         let filed_tas = fp.cruise_tas.parse().unwrap_or(0.0);
         let cruise_tas = trajectory::capped_cruise_tas(filed_tas, cruise, profile);
         let headwind = winds.route_headwind(&path, cruise);
-        let route_len = path_len_nm(&path);
-        let eta = eta_to_crossing(
+        let route_len = predict::path_len_nm(&path);
+        let eta = predict::eta_along_route(
             false,
             route_len,
             cross.along_nm,

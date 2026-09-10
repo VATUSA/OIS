@@ -140,15 +140,22 @@ pub(crate) async fn build_board_from(
 
     // Arrivals from the given snapshot — clone the airport handle and drop the feed lock first.
     let airports = state.feed.read().await.airports.clone();
-    let arrivals = runway::collect_arrivals(
-        &icao,
-        data,
-        airports.as_ref(),
-        winds,
-        state.aircraft_profiles.load_full().as_ref(),
-        now,
-        window_min,
-    );
+    let nav = state.nav.load_full();
+    let profiles = state.aircraft_profiles.load_full();
+    // `collect_arrivals` resolves every arrival's filed route (CPU, no `.await`) — keep it off the
+    // async workers.
+    let arrivals = tokio::task::block_in_place(|| {
+        runway::collect_arrivals(
+            &icao,
+            data,
+            airports.as_ref(),
+            nav.as_ref(),
+            winds,
+            profiles.as_ref(),
+            now,
+            window_min,
+        )
+    });
 
     // Assign each arrival a runway (override → STAR rule → AUTO).
     let assigned = runway::assign(&arrivals, &active_ids, &star_rules, &overrides);
