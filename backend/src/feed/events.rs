@@ -54,6 +54,10 @@ impl VatusaEvent {
             start_time: start,
             end_time: end,
             review_status: self.review_status,
+            // List-only status flags — populated by `events_repo::list_all`, not the sync.
+            recording: String::new(),
+            ace_requested: false,
+            facility_support: false,
         })
     }
 }
@@ -162,6 +166,9 @@ mod tests {
             start_time: ts(end - 3600),
             end_time: ts(end),
             review_status: "approved".into(),
+            recording: String::new(),
+            ace_requested: false,
+            facility_support: false,
         }
     }
 

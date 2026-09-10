@@ -3250,6 +3250,8 @@ export interface components {
         };
         /** @description A VATUSA event, cached from the events API — the anchor for per-event planning. */
         EventBody: {
+            /** @description True when the event has an open or claimed ACE support request (list view only). */
+            ace_requested: boolean;
             banner_image_url: string;
             /** @description HTML/BBCode blurb straight from VATUSA (render sanitized on the client). */
             body: string;
@@ -3257,11 +3259,18 @@ export interface components {
             end_time: string;
             /** @description Host ARTCC id (e.g. ZTL). */
             facility: string;
+            /** @description True when any facility has been added to the event's facility support (list view only). */
+            facility_support: boolean;
             /**
              * Format: int64
              * @description VATUSA event id.
              */
             id: number;
+            /**
+             * @description Stats-capture state (list view only): `off` | `scheduled` | `recording` | `recorded`.
+             *     Empty from `GET /events/{id}` and the VATUSA sync.
+             */
+            recording: string;
             /** @description VATUSA review state (e.g. "approved"). */
             review_status: string;
             /** Format: date-time */
