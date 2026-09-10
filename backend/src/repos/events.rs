@@ -17,12 +17,35 @@ const EVENT_SELECT: &str = "select id, title, body, banner_image_url, facility, 
 
 /// All cached events (upcoming, in-progress, and recently-ended within the sync's retention window),
 /// soonest first. The client splits these into upcoming/past; the cache is already bounded by the
-/// sync's prune, so this stays small.
+/// sync's prune, so this stays small. Carries the at-a-glance status flags (`recording`,
+/// `ace_requested`, `facility_support`) the planning list shows as badges.
 pub async fn list_all(pool: &PgPool) -> Result<Vec<EventBody>, ApiError> {
-    sqlx::query_as::<_, EventBody>(&format!("{EVENT_SELECT} order by start_time"))
-        .fetch_all(pool)
-        .await
-        .map_err(|_| ApiError::Internal)
+    sqlx::query_as::<_, EventBody>(
+        "select e.id, e.title, e.body, e.banner_image_url, e.facility, e.start_time, e.end_time, \
+                e.review_status, \
+                case \
+                    when lc.status = 'open'  then 'recording' \
+                    when lc.status = 'saved' then 'recorded' \
+                    when ec.enabled          then 'scheduled' \
+                    else 'off' \
+                end as recording, \
+                exists (select 1 from ace.requests ar \
+                        where ar.event_id = e.id and ar.status in ('open', 'claimed')) \
+                    as ace_requested, \
+                exists (select 1 from events.facility_support fs where fs.event_id = e.id) \
+                    as facility_support \
+         from events.event e \
+         left join stats.event_capture ec on ec.event_id = e.id \
+         left join lateral ( \
+             select status from stats.capture \
+             where event_id = e.id and status <> 'discarded' \
+             order by start_time desc limit 1 \
+         ) lc on true \
+         order by e.start_time",
+    )
+    .fetch_all(pool)
+    .await
+    .map_err(|_| ApiError::Internal)
 }
 
 pub async fn get(pool: &PgPool, id: i64) -> Result<Option<EventBody>, ApiError> {

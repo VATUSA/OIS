@@ -22,6 +22,12 @@ function reviewVariant(status: string): "success" | "secondary" | "outline" {
   return "secondary";
 }
 
+const RECORDING: Record<string, { label: string; variant: "success" | "secondary" | "outline" }> = {
+  recording: { label: "Recording", variant: "success" },
+  scheduled: { label: "Scheduled", variant: "secondary" },
+  recorded: { label: "Recorded", variant: "outline" },
+};
+
 type Scope = "upcoming" | "past" | "all";
 const EMPTY_SORTING: SortingState = [];
 
@@ -90,6 +96,29 @@ function useEventColumns(): ColumnDef<EventSummary>[] {
         cell: (c) => {
           const s = String(c.getValue() ?? "");
           return s ? <Badge variant={reviewVariant(s)}>{s}</Badge> : <span className="text-muted-foreground">—</span>;
+        },
+      },
+      {
+        accessorKey: "recording",
+        header: "Recording",
+        cell: (c) => {
+          const r = RECORDING[String(c.getValue() ?? "")];
+          return r ? <Badge variant={r.variant}>{r.label}</Badge> : <span className="text-muted-foreground">—</span>;
+        },
+      },
+      {
+        id: "support",
+        header: "Support",
+        enableSorting: false,
+        cell: (c) => {
+          const e = c.row.original;
+          if (!e.ace_requested && !e.facility_support) return <span className="text-muted-foreground">—</span>;
+          return (
+            <div className="flex flex-wrap gap-1">
+              {e.ace_requested && <Badge variant="secondary">ACE</Badge>}
+              {e.facility_support && <Badge variant="outline">Facility</Badge>}
+            </div>
+          );
         },
       },
       {
