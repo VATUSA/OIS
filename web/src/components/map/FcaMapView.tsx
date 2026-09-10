@@ -1,5 +1,5 @@
 import {useEffect, useMemo, useRef, useState} from "react";
-import {Button, ConfirmButton, Input, Switch, useToast} from "@ois/ui";
+import {Button, ConfirmButton, Input, Switch, useTheme, useToast} from "@ois/ui";
 import {ArrowLeft, Home, Menu, Pencil, Plane, Plus, RadioTower, Tag, Trash2, X} from "lucide-react";
 import {Link} from "@tanstack/react-router";
 
@@ -31,6 +31,7 @@ import boundariesGeo from "@/assets/artcc-boundaries.json";
 
 import {TrafficMap} from "./TrafficMap";
 import {useMapCamera} from "./hooks/useMapCamera";
+import {aircraftColor, HIGHLIGHT} from "./lib/colors";
 import {US_HOME} from "./lib/constants";
 import {haversine, normPoints, toDeckPath, type LatLng} from "./lib/geo";
 import type {NormAircraft} from "./lib/types";
@@ -93,6 +94,7 @@ export function FcaMapView({
 }) {
   const { data: me } = useMe();
   const toast = useToast();
+  const { resolvedTheme } = useTheme();
   const eventMode = eventId != null;
   const canRead = readOnly || hasPermission(me, eventMode ? "events.plan.read" : "flow.fca.read");
   const canEdit = !readOnly && hasPermission(me, eventMode ? "events.plan.update" : "flow.fca.update");
@@ -364,30 +366,34 @@ export function FcaMapView({
     }
     return set;
   }, [overview, matchedGroups, selectedFca, fcaTraffic.data]);
-  const aircraft = useMemo<NormAircraft[]>(
-    () =>
-      // In overview mode only FCA-crossing traffic is shown (drawn as the tinted/numbered matched
-      // groups); the rest of the network is noise here, so drop it.
-      (overviewActive ? [] : traffic.data ?? [])
-        .filter((a) => !matchedCallsigns.has(a.callsign))
-        .map((a) => ({
-          id: a.callsign,
-          callsign: a.callsign,
-          actype: a.actype,
-          dep: a.dep,
-          arr: a.arr,
-          lat: a.lat,
-          lon: a.lon,
-          alt: a.alt,
-          gs: a.gs,
-          heading: a.heading,
-          star: a.star,
-          wake: a.wake,
-          flightRules: a.flight_rules,
-          filedAlt: a.filed_alt,
-        })),
-    [overviewActive, traffic.data, matchedCallsigns],
-  );
+  const aircraft = useMemo<NormAircraft[]>(() => {
+    // In overview mode only FCA-crossing traffic is shown (drawn as the tinted/numbered matched
+    // groups); the rest of the network is noise here — except the flight the user deep-linked to
+    // (`?flight=`) or clicked, which is always drawn so it's visible even without a crossing.
+    const base = overviewActive
+      ? routeCallsign
+        ? (traffic.data ?? []).filter((a) => a.callsign.toUpperCase() === routeCallsign)
+        : []
+      : (traffic.data ?? []);
+    return base
+      .filter((a) => !matchedCallsigns.has(a.callsign))
+      .map((a) => ({
+        id: a.callsign,
+        callsign: a.callsign,
+        actype: a.actype,
+        dep: a.dep,
+        arr: a.arr,
+        lat: a.lat,
+        lon: a.lon,
+        alt: a.alt,
+        gs: a.gs,
+        heading: a.heading,
+        star: a.star,
+        wake: a.wake,
+        flightRules: a.flight_rules,
+        filedAlt: a.filed_alt,
+      }));
+  }, [overviewActive, routeCallsign, traffic.data, matchedCallsigns]);
 
   const mapFcas = useMemo<MapFca[]>(
     () =>
@@ -740,6 +746,10 @@ export function FcaMapView({
         camera={camera}
         aircraft={aircraft}
         aircraftStyle={planeIcons ? "silhouette" : "triangle"}
+        selectedAircraftId={routeCallsign}
+        getAircraftColor={(a) =>
+          a.id.toUpperCase() === routeCallsign ? HIGHLIGHT : aircraftColor(resolvedTheme)
+        }
         boundaries={BOUNDARIES}
         fcas={mapFcas}
         selectedFcaId={selectedId}
