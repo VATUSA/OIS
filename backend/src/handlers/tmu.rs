@@ -5,6 +5,7 @@ use axum::{
     extract::{Extension, Path, Query, State},
     http::StatusCode,
 };
+use chrono::{DateTime, Utc};
 use serde::Deserialize;
 
 use crate::{
@@ -30,16 +31,48 @@ use serde_json::json;
 /// Logical channel name (mapped to a snowflake in the Discord config) where published TMIs are posted.
 pub(crate) const TMU_CHANNEL: &str = "tmu-advisories";
 
-#[derive(Deserialize)]
+#[derive(Debug, Default, Deserialize)]
 pub struct TmiListQuery {
     status: Option<String>,
+    #[serde(rename = "type")]
+    kind: Option<String>,
+    facility: Option<String>,
+    /// Active-during range (RFC 3339); a TMI matches when its window overlaps `[from, to]`.
+    from: Option<DateTime<Utc>>,
+    to: Option<DateTime<Utc>>,
+}
+
+/// Trim to a non-empty owned value, else `None`.
+fn clean(v: Option<String>) -> Option<String> {
+    v.as_deref()
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .map(str::to_owned)
+}
+
+impl TmiListQuery {
+    fn into_filters(self) -> tmu_repo::TmiFilters {
+        tmu_repo::TmiFilters {
+            status: clean(self.status),
+            kind: clean(self.kind),
+            facility: clean(self.facility),
+            from: self.from,
+            to: self.to,
+        }
+    }
 }
 
 #[utoipa::path(
     get,
     path = "/api/v1/tmu/tmis",
     tag = "tmu",
-    params(("status" = Option<String>, Query, description = "Filter by status")),
+    params(
+        ("status" = Option<String>, Query, description = "Filter by status (draft|published|expired|cancelled)"),
+        ("type" = Option<String>, Query, description = "Filter by structured restriction kind (MIT, MINIT, STOP, …); excludes raw-typed TMIs"),
+        ("facility" = Option<String>, Query, description = "Filter to TMIs where this facility is requesting or providing"),
+        ("from" = Option<String>, Query, description = "Active-during range start (RFC 3339)"),
+        ("to" = Option<String>, Query, description = "Active-during range end (RFC 3339)"),
+    ),
     responses((status = 200, body = Vec<TmiBody>), (status = 401))
 )]
 pub async fn list_tmis(
@@ -48,12 +81,9 @@ pub async fn list_tmis(
     Query(query): Query<TmiListQuery>,
 ) -> Result<Json<Vec<TmiBody>>, ApiError> {
     let pool = state.db.as_ref().ok_or(ApiError::ServiceUnavailable)?;
-    let status = query
-        .status
-        .as_deref()
-        .map(str::trim)
-        .filter(|v| !v.is_empty());
-    Ok(Json(tmu_repo::list_tmis(pool, status).await?))
+    Ok(Json(
+        tmu_repo::list_tmis(pool, &query.into_filters()).await?,
+    ))
 }
 
 #[utoipa::path(
@@ -503,6 +533,31 @@ mod tests {
         assert_eq!(clean_alnum("pa-28", 2, 4).as_deref(), Some("PA28"));
         assert_eq!(clean_alnum("x", 2, 4), None);
         assert_eq!(clean_alnum("toolong", 2, 4), None);
+    }
+
+    #[test]
+    fn tmi_list_query_into_filters_trims_and_drops_blanks() {
+        let q = TmiListQuery {
+            status: Some("  published ".into()),
+            kind: Some("MIT".into()),
+            facility: Some("   ".into()), // blank → None
+            from: None,
+            to: None,
+        };
+        let f = q.into_filters();
+        assert_eq!(f.status.as_deref(), Some("published"));
+        assert_eq!(f.kind.as_deref(), Some("MIT"));
+        assert_eq!(f.facility, None);
+
+        // An empty query yields no constraints.
+        let f = TmiListQuery::default().into_filters();
+        assert!(
+            f.status.is_none()
+                && f.kind.is_none()
+                && f.facility.is_none()
+                && f.from.is_none()
+                && f.to.is_none()
+        );
     }
 
     #[test]

@@ -13,10 +13,30 @@ export type UpsertProgram = components["schemas"]["UpsertProgramRequest"];
 export type GroundStop = components["schemas"]["GroundStopBody"];
 export type CreateGroundStop = components["schemas"]["CreateGroundStopRequest"];
 
-export function useTmis() {
+/** Optional TMI-list filters (the TMU restrictions page). `from`/`to` are RFC 3339 and match TMIs
+ *  whose validity window overlaps the range. Ignored in historical-replay mode. */
+export type TmiFilters = {
+  status?: string;
+  type?: string;
+  facility?: string;
+  from?: string;
+  to?: string;
+};
+
+export function useTmis(filters?: TmiFilters) {
   const at = useHistoricalAt();
+  // Drop blank values so an empty filter bar is a plain unfiltered list. Filters don't apply in
+  // historical-replay mode (the hist endpoint takes none).
+  const query: TmiFilters = {};
+  if (filters && at == null) {
+    for (const [k, v] of Object.entries(filters)) {
+      if (v) query[k as keyof TmiFilters] = v;
+    }
+  }
+  const hasFilters = Object.keys(query).length > 0;
   return useQuery({
-    queryKey: at == null ? ["tmis"] : ["hist-tmis", at],
+    queryKey:
+      at != null ? ["hist-tmis", at] : hasFilters ? ["tmis", query] : ["tmis"],
     queryFn: async () => {
       if (at != null) {
         const { data, error } = await ois.GET("/api/v1/stats/hist/tmis", {
@@ -25,7 +45,9 @@ export function useTmis() {
         if (error || !data) throw new Error("failed to load historical TMIs");
         return data;
       }
-      const { data, error } = await ois.GET("/api/v1/tmu/tmis");
+      const { data, error } = await ois.GET("/api/v1/tmu/tmis", {
+        params: { query },
+      });
       if (error || !data) throw new Error("failed to load TMIs");
       return data;
     },
