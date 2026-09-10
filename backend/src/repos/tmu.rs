@@ -19,14 +19,39 @@ const SELECT: &str = "select t.id, t.requesting, t.providing, t.restriction, \
     u.display_name as author, t.structured, t.decoded \
     from tmu.tmis t left join identity.users u on u.id = t.created_by";
 
-pub async fn list_tmis(pool: &PgPool, status: Option<&str>) -> Result<Vec<TmiBody>, ApiError> {
-    sqlx::query_as::<_, TmiBody>(&format!(
-        "{SELECT} where ($1::text is null or t.status = $1) order by t.created_at desc"
-    ))
-    .bind(status)
-    .fetch_all(pool)
-    .await
-    .map_err(|_| ApiError::Internal)
+/// Optional filters for the TMI list. Every field `None` → every TMI.
+#[derive(Debug, Default)]
+pub struct TmiFilters {
+    pub status: Option<String>,
+    /// Structured NTML restriction kind (`MIT`, `MINIT`, `STOP`, …). Raw-typed TMIs (no structured
+    /// form) never match a kind filter.
+    pub kind: Option<String>,
+    /// Matched against the requesting **or** providing facility, case-insensitively.
+    pub facility: Option<String>,
+    /// Active-during range: a TMI matches when its validity window overlaps `[from, to]`.
+    pub from: Option<DateTime<Utc>>,
+    pub to: Option<DateTime<Utc>>,
+}
+
+/// Shared WHERE + ordering for `list_tmis`. Bind order: `$1` status, `$2` kind, `$3` facility,
+/// `$4` range end (`to`), `$5` range start (`from`).
+const TMI_WHERE: &str = " where ($1::text is null or t.status = $1) \
+       and ($2::text is null or upper(t.structured->>'kind') = upper($2)) \
+       and ($3::text is null or upper(t.requesting) = upper($3) or upper(t.providing) = upper($3)) \
+       and ($4::timestamptz is null or t.start_time <= $4) \
+       and ($5::timestamptz is null or t.stop_time is null or t.stop_time >= $5) \
+     order by t.created_at desc";
+
+pub async fn list_tmis(pool: &PgPool, f: &TmiFilters) -> Result<Vec<TmiBody>, ApiError> {
+    sqlx::query_as::<_, TmiBody>(&format!("{SELECT}{TMI_WHERE}"))
+        .bind(f.status.as_deref())
+        .bind(f.kind.as_deref())
+        .bind(f.facility.as_deref())
+        .bind(f.to)
+        .bind(f.from)
+        .fetch_all(pool)
+        .await
+        .map_err(|_| ApiError::Internal)
 }
 
 pub async fn get_tmi(pool: &PgPool, id: &str) -> Result<Option<TmiBody>, ApiError> {

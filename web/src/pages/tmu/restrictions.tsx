@@ -5,9 +5,21 @@ import {Plus} from "lucide-react";
 import {hasPermission} from "@/lib/permissions";
 import {formatZulu, parseZulu} from "@/lib/time";
 import {useMe} from "@/lib/auth";
-import {type Tmi, useCancelTmi, useCreateTmi, useDeleteTmi, usePublishTmi, useTmis,} from "@/lib/tmu";
+import {
+  type Tmi,
+  type TmiFilters,
+  useCancelTmi,
+  useCreateTmi,
+  useDeleteTmi,
+  usePublishTmi,
+  useTmis,
+} from "@/lib/tmu";
 import {NtmlEditor} from "@/components/ntml-editor";
-import {EMPTY_NTML, type Ntml} from "@/lib/ntml";
+import {EMPTY_NTML, KINDS, type Ntml} from "@/lib/ntml";
+
+const SELECT_CLASS =
+  "h-9 rounded-md border border-input bg-background px-2 text-sm outline-none focus-visible:ring-2 focus-visible:ring-ring";
+const STATUSES = ["draft", "published", "expired", "cancelled"] as const;
 
 function statusVariant(
   status: string,
@@ -206,19 +218,100 @@ function TmiRow({
   );
 }
 
+/** Draft (in `YYYY-MM-DDTHH:mm` for the datetime-local inputs), converted to RFC 3339 on apply. */
+type Draft = { status: string; type: string; facility: string; from: string; to: string };
+const EMPTY_DRAFT: Draft = { status: "", type: "", facility: "", from: "", to: "" };
+
+function toFilters(d: Draft): TmiFilters {
+  return {
+    status: d.status || undefined,
+    type: d.type || undefined,
+    facility: d.facility.trim() || undefined,
+    from: d.from ? `${d.from}:00Z` : undefined,
+    to: d.to ? `${d.to}:00Z` : undefined,
+  };
+}
+
+function FilterBar({ onChange }: { onChange: (f: TmiFilters) => void }) {
+  const [draft, setDraft] = useState<Draft>(EMPTY_DRAFT);
+  const set = <K extends keyof Draft>(key: K, value: string) =>
+    setDraft((d) => ({ ...d, [key]: value }));
+  const active = Object.values(draft).some(Boolean);
+
+  return (
+    <form
+      className="flex flex-wrap items-end gap-3"
+      onSubmit={(e) => {
+        e.preventDefault();
+        onChange(toFilters(draft));
+      }}
+    >
+      <label className="flex flex-col gap-1 text-xs text-muted-foreground">
+        Status
+        <select className={SELECT_CLASS} value={draft.status} onChange={(e) => set("status", e.target.value)}>
+          <option value="">Any</option>
+          {STATUSES.map((s) => (
+            <option key={s} value={s}>{s}</option>
+          ))}
+        </select>
+      </label>
+      <label className="flex flex-col gap-1 text-xs text-muted-foreground">
+        Type
+        <select className={SELECT_CLASS} value={draft.type} onChange={(e) => set("type", e.target.value)}>
+          <option value="">Any</option>
+          {KINDS.map((k) => (
+            <option key={k} value={k}>{k}</option>
+          ))}
+        </select>
+      </label>
+      <label className="flex flex-col gap-1 text-xs text-muted-foreground">
+        Facility
+        <Input className="w-32" placeholder="ARTCC/TRACON" value={draft.facility} onChange={(e) => set("facility", e.target.value)} />
+      </label>
+      <label className="flex flex-col gap-1 text-xs text-muted-foreground">
+        Active from
+        <Input type="datetime-local" value={draft.from} onChange={(e) => set("from", e.target.value)} />
+      </label>
+      <label className="flex flex-col gap-1 text-xs text-muted-foreground">
+        Active to
+        <Input type="datetime-local" value={draft.to} onChange={(e) => set("to", e.target.value)} />
+      </label>
+      <Button type="submit" size="sm">
+        Filter
+      </Button>
+      {active && (
+        <Button
+          type="button"
+          size="sm"
+          variant="ghost"
+          onClick={() => {
+            setDraft(EMPTY_DRAFT);
+            onChange({});
+          }}
+        >
+          Clear
+        </Button>
+      )}
+    </form>
+  );
+}
+
 export function RestrictionsTab() {
   const { data: me } = useMe();
-  const tmis = useTmis();
+  const [filters, setFilters] = useState<TmiFilters>({});
+  const tmis = useTmis(filters);
   const canCreate = hasPermission(me, "tmu.tmi.create");
   const canPublish = hasPermission(me, "tmu.tmi.publish");
   const canDelete = hasPermission(me, "tmu.tmi.delete");
+  const filtered = Object.values(filters).some(Boolean);
 
   return (
     <div className="flex flex-col gap-6">
       {canCreate && <CreateForm />}
 
       <Card>
-        <CardContent className="pt-6">
+        <CardContent className="flex flex-col gap-4 pt-6">
+          <FilterBar onChange={setFilters} />
           {tmis.isError ? (
             <p className="py-8 text-center text-sm text-muted-foreground">
               Couldn&apos;t load restrictions.
@@ -229,7 +322,7 @@ export function RestrictionsTab() {
             </p>
           ) : tmis.data.length === 0 ? (
             <p className="py-8 text-center text-sm text-muted-foreground">
-              No restrictions yet.
+              {filtered ? "No restrictions match these filters." : "No restrictions yet."}
             </p>
           ) : (
             <div className="overflow-x-auto">
