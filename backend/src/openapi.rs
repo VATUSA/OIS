@@ -109,6 +109,7 @@ use utoipa::OpenApi;
         crate::handlers::stats::hist_tmis,
         crate::handlers::stats::hist_gdps,
         crate::handlers::stats::hist_ground_stops,
+        crate::handlers::airport_configs::list_all_airport_configs,
         crate::handlers::airport_configs::list_airport_configs,
         crate::handlers::airport_configs::create_airport_config,
         crate::handlers::airport_configs::update_airport_config,
