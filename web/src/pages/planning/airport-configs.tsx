@@ -1,12 +1,14 @@
-import {useState} from "react";
+import {useMemo, useState} from "react";
 import {Badge, Button, Card, CardContent, ConfirmButton, Input} from "@ois/ui";
-import {Plus, Wind, X} from "lucide-react";
+import {ArrowLeft, Plus, Wind, X} from "lucide-react";
 
 import {useMe} from "@/lib/auth";
+import {useFacilities} from "@/lib/admin";
 import {
   type AirportConfig,
   type UpsertAirportConfig,
   useAirportConfigs,
+  useAllAirportConfigs,
   useCreateAirportConfig,
   useDeleteAirportConfig,
   useUpdateAirportConfig,
@@ -16,6 +18,8 @@ import {hasPermission} from "@/lib/permissions";
 const clampRate = (n: number) => Math.max(0, Math.min(200, Math.round(n)));
 const clampDeg = (n: number) => Math.max(0, Math.min(360, Math.round(n)));
 const normIcao = (s: string) => s.replace(/[^a-zA-Z0-9]/g, "").toUpperCase().slice(0, 4);
+const SELECT_CLASS =
+  "h-9 rounded-md border border-input bg-background px-2 text-sm outline-none focus-visible:ring-2 focus-visible:ring-ring";
 
 const BLANK: UpsertAirportConfig = {
   name: "",
@@ -259,11 +263,109 @@ function AirportConfigs({ icao }: { icao: string }) {
   );
 }
 
+/** Every airport's configs, grouped by ICAO, with a click-through to the per-airport editor. */
+function AllConfigsList({
+  artcc,
+  onOpen,
+}: {
+  artcc: string | null;
+  onOpen: (icao: string) => void;
+}) {
+  const all = useAllAirportConfigs(artcc);
+
+  const groups = useMemo(() => {
+    const m = new Map<string, AirportConfig[]>();
+    for (const c of all.data ?? []) {
+      const list = m.get(c.icao);
+      if (list) list.push(c);
+      else m.set(c.icao, [c]);
+    }
+    return [...m.entries()].sort(([a], [b]) => a.localeCompare(b));
+  }, [all.data]);
+
+  if (all.isError) {
+    return (
+      <p className="py-8 text-center text-sm text-muted-foreground">Couldn&apos;t load configs.</p>
+    );
+  }
+  if (!all.data) {
+    return <p className="py-8 text-center text-sm text-muted-foreground">Loading…</p>;
+  }
+  if (groups.length === 0) {
+    return (
+      <p className="py-8 text-center text-sm text-muted-foreground">
+        {artcc ? `No configs for ${artcc}.` : "No airport configs yet."}
+      </p>
+    );
+  }
+
+  return (
+    <div className="flex flex-col gap-3">
+      {groups.map(([icao, configs]) => (
+        <div key={icao} className="rounded-lg border p-3">
+          <div className="mb-2 flex items-center justify-between gap-2">
+            <div className="flex items-baseline gap-2">
+              <span className="font-mono font-semibold">{icao}</span>
+              <span className="text-xs text-muted-foreground">
+                {configs[0].artcc || "—"} · {configs.length} config
+                {configs.length === 1 ? "" : "s"}
+              </span>
+            </div>
+            <Button
+              size="sm"
+              variant="ghost"
+              className="h-7 px-2"
+              onClick={() => onOpen(icao)}
+            >
+              Open
+            </Button>
+          </div>
+          <div className="overflow-x-auto">
+            <table className="w-full text-sm">
+              <thead>
+                <tr className="text-left text-xs uppercase tracking-wide text-muted-foreground">
+                  <th className="pb-1 pr-3 font-medium">Config</th>
+                  <th className="pb-1 pr-3 font-medium">Wind</th>
+                  <th className="pb-1 pr-3 font-medium">Runways</th>
+                  <th className="pb-1 font-medium">AAR / ADR</th>
+                </tr>
+              </thead>
+              <tbody>
+                {configs.map((c) => (
+                  <tr key={c.id} className="border-t">
+                    <td className="py-1.5 pr-3">
+                      {c.name}
+                      {c.calm_default && (
+                        <Badge variant="secondary" className="ml-2">
+                          calm default
+                        </Badge>
+                      )}
+                    </td>
+                    <td className="py-1.5 pr-3 font-mono text-xs">{windLabel(c)}</td>
+                    <td className="py-1.5 pr-3 font-mono text-xs text-muted-foreground">
+                      {c.landing_runways.join(", ") || "—"}
+                    </td>
+                    <td className="py-1.5 tabular-nums">
+                      {c.aar} / {c.adr}
+                    </td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+        </div>
+      ))}
+    </div>
+  );
+}
+
 export function AirportConfigsPage() {
   const { data: me } = useMe();
   const canRead = hasPermission(me, "events.plan.read");
+  const facilities = useFacilities();
   const [icao, setIcao] = useState("");
   const [entry, setEntry] = useState("");
+  const [artcc, setArtcc] = useState("");
 
   if (!canRead) {
     return (
@@ -275,6 +377,23 @@ export function AirportConfigsPage() {
     );
   }
 
+  if (icao) {
+    return (
+      <div className="mx-auto flex w-full max-w-4xl flex-col gap-6">
+        <Button variant="ghost" className="w-fit px-2" onClick={() => setIcao("")}>
+          <ArrowLeft className="size-4" />
+          All airports
+        </Button>
+        <AirportConfigs key={icao} icao={icao} />
+      </div>
+    );
+  }
+
+  const artccs = (facilities.data ?? [])
+    .filter((f) => f.active)
+    .map((f) => f.id)
+    .sort();
+
   return (
     <div className="mx-auto flex w-full max-w-4xl flex-col gap-6">
       <div>
@@ -285,29 +404,46 @@ export function AirportConfigsPage() {
         </p>
       </div>
 
-      <form
-        className="flex items-end gap-2"
-        onSubmit={(e) => {
-          e.preventDefault();
-          const v = normIcao(entry);
-          if (v.length >= 3) setIcao(v);
-        }}
-      >
+      <div className="flex flex-wrap items-end gap-3">
         <label className="flex flex-col gap-1 text-xs">
-          <span className="text-muted-foreground">Airport (ICAO)</span>
-          <Input
-            className="w-40 font-mono uppercase"
-            value={entry}
-            onChange={(e) => setEntry(normIcao(e.target.value))}
-            placeholder="KATL"
-          />
+          <span className="text-muted-foreground">ARTCC</span>
+          <select
+            className={SELECT_CLASS}
+            value={artcc}
+            onChange={(e) => setArtcc(e.target.value)}
+          >
+            <option value="">All</option>
+            {artccs.map((id) => (
+              <option key={id} value={id}>
+                {id}
+              </option>
+            ))}
+          </select>
         </label>
-        <Button type="submit" disabled={normIcao(entry).length < 3}>
-          Load
-        </Button>
-      </form>
+        <form
+          className="flex items-end gap-2"
+          onSubmit={(e) => {
+            e.preventDefault();
+            const v = normIcao(entry);
+            if (v.length >= 3) setIcao(v);
+          }}
+        >
+          <label className="flex flex-col gap-1 text-xs">
+            <span className="text-muted-foreground">Open airport (ICAO)</span>
+            <Input
+              className="w-40 font-mono uppercase"
+              value={entry}
+              onChange={(e) => setEntry(normIcao(e.target.value))}
+              placeholder="KATL"
+            />
+          </label>
+          <Button type="submit" disabled={normIcao(entry).length < 3}>
+            Open
+          </Button>
+        </form>
+      </div>
 
-      {icao && <AirportConfigs key={icao} icao={icao} />}
+      <AllConfigsList artcc={artcc || null} onOpen={setIcao} />
     </div>
   );
 }
