@@ -2,6 +2,7 @@
 //! the departure-field CFR view, and issuing/releasing CFRs.
 
 use std::collections::{HashMap, HashSet};
+use std::sync::Arc;
 
 use axum::{
     Json,
@@ -94,28 +95,39 @@ pub(crate) async fn program_inputs(
 
 /// Compute the metered flow for one arrival airport against a given snapshot at `now` (loads the
 /// program + issued CFRs from the DB). Shared by the live handler and the historical replay — the
-/// only difference is which `VatsimData` and instant are passed in.
+/// only difference is which snapshot and instant are passed in.
 pub(crate) async fn flow_from_data(
     state: &AppState,
     pool: &PgPool,
     icao: &str,
-    data: &crate::feed::vatsim::VatsimData,
-    winds: &crate::feed::winds::Winds,
+    snap: Arc<crate::feed::Snapshot>,
+    winds: Arc<crate::feed::winds::Winds>,
     now: DateTime<Utc>,
 ) -> Result<flow::Flow, ApiError> {
     let program = program_inputs(pool, icao).await?;
     let issued = tmu_repo::issued_cfr_map(pool, icao).await?;
     let airports = state.feed.read().await.airports.clone();
-    Ok(flow::compute(
-        icao,
-        program.as_ref(),
-        data,
-        airports.as_ref(),
-        winds,
-        state.aircraft_profiles.load_full().as_ref(),
-        &issued,
-        now,
-    ))
+    let nav = state.nav.load_full();
+    let profiles = state.aircraft_profiles.load_full();
+    let icao = icao.to_owned();
+    // `compute` resolves every arrival's filed route — pure CPU, no `.await`. Push it onto the
+    // blocking pool (matching the FCA `metered_flights` handler) so a burst of polling clients
+    // can't stall the async runtime.
+    tokio::task::spawn_blocking(move || {
+        flow::compute(
+            &icao,
+            program.as_ref(),
+            &snap.data,
+            airports.as_ref(),
+            nav.as_ref(),
+            winds.as_ref(),
+            profiles.as_ref(),
+            &issued,
+            now,
+        )
+    })
+    .await
+    .map_err(|_| ApiError::Internal)
 }
 
 /// Compute the live, metered flow for one arrival airport (loads program + issued CFRs).
@@ -126,10 +138,10 @@ pub(crate) async fn flow_for(
 ) -> Result<flow::Flow, ApiError> {
     // Clone the snapshot + airport handles and drop the feed lock before metering.
     let snapshot = state.feed.read().await.snapshot.clone();
-    match &snapshot {
+    match snapshot {
         Some(snap) => {
             let winds = state.winds.load_full();
-            flow_from_data(state, pool, icao, &snap.data, winds.as_ref(), Utc::now()).await
+            flow_from_data(state, pool, icao, snap, winds, Utc::now()).await
         }
         None => Ok(flow::Flow {
             icao: icao.to_string(),
@@ -203,12 +215,16 @@ pub async fn list_departures(
     let pool = state.db.as_ref().ok_or(ApiError::ServiceUnavailable)?;
     let dep = dep.trim().to_ascii_uppercase();
     // Read the live snapshot, then release the lock before computing per-destination flows.
-    let snapshot = state.feed.read().await.snapshot.clone();
-    let empty = crate::feed::vatsim::VatsimData::default();
-    let data = snapshot.as_ref().map(|s| &s.data).unwrap_or(&empty);
+    let snap = state
+        .feed
+        .read()
+        .await
+        .snapshot
+        .clone()
+        .unwrap_or_else(|| Arc::new(crate::feed::Snapshot::of(Default::default())));
     let winds = state.winds.load_full();
     Ok(Json(
-        departures_response(&state, pool, &dep, data, winds.as_ref(), Utc::now()).await?,
+        departures_response(&state, pool, &dep, snap, winds, Utc::now()).await?,
     ))
 }
 
@@ -218,8 +234,8 @@ pub(crate) async fn departures_response(
     state: &AppState,
     pool: &PgPool,
     dep: &str,
-    data: &crate::feed::vatsim::VatsimData,
-    winds: &crate::feed::winds::Winds,
+    snap: Arc<crate::feed::Snapshot>,
+    winds: Arc<crate::feed::winds::Winds>,
     now: DateTime<Utc>,
 ) -> Result<DeparturesResponse, ApiError> {
     // Resolve the field: an airport is just itself; a TRACON/ARTCC spans many airports.
@@ -237,7 +253,7 @@ pub(crate) async fn departures_response(
         .map(|p| p.icao)
         .collect();
 
-    let pending = flow::pending_departures(&member_set, data);
+    let pending = flow::pending_departures(&member_set, &snap.data);
 
     // FCA-issued releases (RDY/RLSD) for these departures — so a release set on the FCA page also
     // shows here, even when the destination has no GDP program (KSAN metered by an FCA, not a GDP).
@@ -252,7 +268,7 @@ pub(crate) async fn departures_response(
         .collect();
     let mut meta: HashMap<String, MeteredCfr> = HashMap::new();
     for dest in &dests {
-        let flow = flow_from_data(state, pool, dest, data, winds, now).await?;
+        let flow = flow_from_data(state, pool, dest, snap.clone(), winds.clone(), now).await?;
         for f in flow.flights {
             meta.insert(
                 f.callsign,
@@ -362,20 +378,34 @@ pub async fn issue_cfr(
                 let guard = state.feed.read().await;
                 (guard.snapshot.clone(), guard.airports.clone())
             };
-            match (program.as_ref(), snapshot.as_ref()) {
-                (Some(pg), Some(snap)) => flow::ready_time_slot(
-                    &airport,
-                    pg,
-                    &snap.data,
-                    airports.as_ref(),
-                    state.winds.load_full().as_ref(),
-                    state.aircraft_profiles.load_full().as_ref(),
-                    &issued,
-                    &callsign,
-                    ready,
-                    Utc::now(),
-                )
-                .unwrap_or(ready),
+            match (program, snapshot) {
+                (Some(pg), Some(snap)) => {
+                    let nav = state.nav.load_full();
+                    let winds = state.winds.load_full();
+                    let profiles = state.aircraft_profiles.load_full();
+                    let airport = airport.clone();
+                    let callsign = callsign.clone();
+                    // Route-resolving CPU — keep it off the async runtime (see `flow_from_data`).
+                    tokio::task::spawn_blocking(move || {
+                        flow::ready_time_slot(
+                            &airport,
+                            &pg,
+                            &snap.data,
+                            airports.as_ref(),
+                            nav.as_ref(),
+                            winds.as_ref(),
+                            profiles.as_ref(),
+                            &issued,
+                            &callsign,
+                            ready,
+                            Utc::now(),
+                        )
+                    })
+                    .await
+                    .ok()
+                    .flatten()
+                    .unwrap_or(ready)
+                }
                 _ => ready,
             }
         }

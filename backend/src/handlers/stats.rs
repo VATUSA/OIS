@@ -2,6 +2,7 @@
 //! system's API, gated on `stats.read`. Historical lookups only — "now" is served by the live feed.
 
 use std::collections::HashMap;
+use std::sync::Arc;
 
 use axum::{
     Json,
@@ -592,8 +593,9 @@ pub async fn hist_flow(
     let icao = norm_icao(&icao);
     let data = reconstruct_at(p, at).await?;
     let winds = winds_for(p, at).await?;
+    let snap = Arc::new(crate::feed::Snapshot::of(data));
     Ok(Json(
-        feed_handlers::flow_from_data(&state, p, &icao, &data, &winds, at).await?,
+        feed_handlers::flow_from_data(&state, p, &icao, snap, Arc::new(winds), at).await?,
     ))
 }
 
@@ -618,8 +620,9 @@ pub async fn hist_departures(
     let dep = norm_icao(&dep);
     let data = reconstruct_at(p, at).await?;
     let winds = winds_for(p, at).await?;
+    let snap = Arc::new(crate::feed::Snapshot::of(data));
     Ok(Json(
-        feed_handlers::departures_response(&state, p, &dep, &data, &winds, at).await?,
+        feed_handlers::departures_response(&state, p, &dep, snap, Arc::new(winds), at).await?,
     ))
 }
 
@@ -685,8 +688,9 @@ pub async fn hist_runway(
     let icao = norm_icao(&icao);
     let data = reconstruct_at(p, at).await?;
     let winds = winds_for(p, at).await?;
+    let snap = Arc::new(crate::feed::Snapshot::of(data));
     Ok(Json(
-        runway_handlers::build_board_from(&state, &icao, &data, &winds, at).await?,
+        runway_handlers::build_board_from(&state, &icao, snap, Arc::new(winds), at).await?,
     ))
 }
 

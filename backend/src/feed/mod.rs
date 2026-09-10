@@ -16,6 +16,7 @@ pub mod metar;
 pub mod nav;
 pub mod nav_source;
 pub mod neighbors;
+pub mod predict;
 pub mod runway;
 pub mod runway_db;
 pub mod stats;
@@ -42,6 +43,18 @@ pub struct Snapshot {
     pub fetched_at: DateTime<Utc>,
     pub source_timestamp: String,
     pub data: VatsimData,
+}
+
+impl Snapshot {
+    /// Wrap a `VatsimData` in a bare snapshot — for the historical replay (reconstructed data)
+    /// and empty-feed fallbacks, where `fetched_at` / `source_timestamp` carry no meaning.
+    pub fn of(data: VatsimData) -> Self {
+        Self {
+            fetched_at: Utc::now(),
+            source_timestamp: String::new(),
+            data,
+        }
+    }
 }
 
 #[derive(Clone, Default)]
