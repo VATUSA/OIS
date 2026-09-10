@@ -580,27 +580,6 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
-    "/api/v1/events/{id}/ace/tier1": {
-        parameters: {
-            query?: never;
-            header?: never;
-            path?: never;
-            cookie?: never;
-        };
-        get?: never;
-        put?: never;
-        /**
-         * Fan out ACE support requests to the host ARTCC's **Tier-1 neighbours** — the auto-request half of
-         *     FNO planning. Only valid for a Friday (UTC) event (the FNO definition). Idempotent: neighbours that
-         *     already have an open request on the event are skipped, so re-running never double-posts.
-         */
-        post: operations["generate_tier1"];
-        delete?: never;
-        options?: never;
-        head?: never;
-        patch?: never;
-        trace?: never;
-    };
     "/api/v1/events/{id}/ace/{req}": {
         parameters: {
             query?: never;
@@ -739,6 +718,28 @@ export interface paths {
         get: operations["list_event_facilities"];
         put?: never;
         post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/events/{id}/facilities/tier1": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Fan out ACE support requests to the host ARTCC's **Tier-1 neighbours** — the auto-request half of
+         *     FNO planning, part of setting up facility support for the event. Only valid for a Friday (UTC)
+         *     event (the FNO definition). Idempotent: neighbours that already have an open request on the event
+         *     are skipped, so re-running never double-posts.
+         */
+        post: operations["generate_tier1"];
         delete?: never;
         options?: never;
         head?: never;
@@ -6485,47 +6486,6 @@ export interface operations {
             };
         };
     };
-    generate_tier1: {
-        parameters: {
-            query?: never;
-            header?: never;
-            path: {
-                /** @description VATUSA event id */
-                id: number;
-            };
-            cookie?: never;
-        };
-        requestBody?: never;
-        responses: {
-            200: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": components["schemas"]["Tier1GenerateResult"];
-                };
-            };
-            /** @description Event is not a Friday (not an FNO) */
-            400: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content?: never;
-            };
-            401: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content?: never;
-            };
-            404: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content?: never;
-            };
-        };
-    };
     delete_request: {
         parameters: {
             query?: never;
@@ -7007,6 +6967,47 @@ export interface operations {
                 content: {
                     "application/json": components["schemas"]["FacilitySupportBody"][];
                 };
+            };
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+        };
+    };
+    generate_tier1: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /** @description VATUSA event id */
+                id: number;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Tier1GenerateResult"];
+                };
+            };
+            /** @description Event is not a Friday (not an FNO) */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
             };
             401: {
                 headers: {
