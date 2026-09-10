@@ -142,11 +142,12 @@ async fn live_inbounds(state: &AppState, icao: &str, now: DateTime<Utc>) -> Vec<
     let nav = state.nav.load_full();
     let winds = state.winds.load_full();
     let profiles = state.aircraft_profiles.load_full();
-    // `compute` resolves every arrival's filed route (CPU, no `.await`) — keep it off the async
-    // workers.
-    let flow = tokio::task::block_in_place(|| {
+    let icao = icao.to_owned();
+    // `compute` resolves every arrival's filed route — pure CPU. Push it onto the blocking pool
+    // (see `feed::flow_from_data`) rather than tying up an async worker.
+    let Ok(flow) = tokio::task::spawn_blocking(move || {
         flow::compute(
-            icao,
+            &icao,
             None, // no metering — we want the raw arrival picture
             &snap.data,
             airports.as_ref(),
@@ -156,7 +157,11 @@ async fn live_inbounds(state: &AppState, icao: &str, now: DateTime<Utc>) -> Vec<
             &HashMap::new(),
             now,
         )
-    });
+    })
+    .await
+    else {
+        return Vec::new();
+    };
     // Resolve each origin field's owning ARTCC once, memoized across shared departures.
     let map = state.facilities.read().await;
     let mut artcc_of: HashMap<String, Option<String>> = HashMap::new();

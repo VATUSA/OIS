@@ -45,6 +45,18 @@ pub struct Snapshot {
     pub data: VatsimData,
 }
 
+impl Snapshot {
+    /// Wrap a `VatsimData` in a bare snapshot — for the historical replay (reconstructed data)
+    /// and empty-feed fallbacks, where `fetched_at` / `source_timestamp` carry no meaning.
+    pub fn of(data: VatsimData) -> Self {
+        Self {
+            fetched_at: Utc::now(),
+            source_timestamp: String::new(),
+            data,
+        }
+    }
+}
+
 #[derive(Clone, Default)]
 pub struct FeedStatus {
     pub healthy: bool,

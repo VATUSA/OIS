@@ -7,8 +7,12 @@
 //! (correctly) used the real, longer, dog-legged route.
 //!
 //! Route resolution ([`fca::route_path`] → the nav engine) is the same one FCA metering uses. When
-//! a route can't be resolved to ≥ 2 anchors (blank/garbage route, unknown airport), we fall back to
-//! a straight-line great circle to the field so an arrival is never dropped.
+//! a route can't be resolved past its dep/arr endpoints (blank/`DCT` route, fixes the nav engine
+//! doesn't know, unknown airport), we fall back to a straight-line great circle to the field so an
+//! arrival is never dropped — and for a **not-yet-airborne** flight that fallback carries the
+//! [`GROUND_ROUTE_FACTOR`] allowance, because issue #63 only meant to drop the historical padding
+//! where an actual enroute path *is* resolved, not to start timing `DCT` prefiles on a distance no
+//! real routing can fly (that fed metered wheels-up / CFR times early).
 
 use chrono::{DateTime, Duration, Utc};
 
@@ -22,6 +26,13 @@ use super::winds::Winds;
 /// Taxi + spool-up allowance added to a not-yet-airborne aircraft's flight time (the profile model
 /// covers the climb itself).
 pub const GROUND_TAXI_SEC: f64 = 8.0 * 60.0;
+
+/// Great-circle → flyable-route length multiplier for a ground/proposed flight whose filed route
+/// won't resolve to an enroute path. Airway routings run a little longer than the direct great
+/// circle; without this a bare `DCT`/blank filing would be timed on an unachievable distance and
+/// its metered wheels-up / CFR time would skew early. Matches the factor `ground_estimate` applied
+/// before issue #63.
+pub const GROUND_ROUTE_FACTOR: f64 = 1.12;
 
 /// Total great-circle length (nm) of a resolved route path.
 pub fn path_len_nm(path: &[[f64; 2]]) -> f64 {
@@ -108,18 +119,29 @@ pub fn arrival_eta(
 ) -> ArrivalPrediction {
     let [lat, lon] = ac.pos;
     let airborne = ac.gs >= 50;
-    let (route_nm, headwind) = match fca::route_path(
+    let (mut route_nm, headwind, enroute_resolved) = match fca::route_path(
         nav, airports, ac.dep, ac.arr, ac.route, lat, lon, ac.hdg, ac.gs,
     ) {
+        // > 2 anchors ⇒ the nav engine placed at least one enroute point, so `path_len_nm` is a
+        // real routing distance. Exactly 2 (just the endpoints, or pos→field for an airborne
+        // aircraft with nothing ahead) is no better than the great circle.
         Some(path) => (
             path_len_nm(&path),
             winds.route_headwind(&path, ac.cruise_ft),
+            path.len() > 2,
         ),
         None => (
             gc_dist(lat, lon, ac.arr_ll[0], ac.arr_ll[1]),
             winds.route_headwind(&[ac.pos, ac.arr_ll], ac.cruise_ft),
+            false,
         ),
     };
+    // A not-yet-airborne flight timed on an unresolved (great-circle) distance would arrive earlier
+    // than any real routing allows; restore the pre-#63 padding for that case only. An airborne
+    // aircraft is timed against the route the map actually draws, so it must not be padded.
+    if !airborne && !enroute_resolved {
+        route_nm *= GROUND_ROUTE_FACTOR;
+    }
     let eta = eta_along_route(
         airborne,
         route_nm,
@@ -178,32 +200,92 @@ mod tests {
     }
 
     /// AC #3: one aircraft yields the same ETA via the arrival (ladder) path and the crossing
-    /// (FCA) path. `arrival_eta` and a crossing timed at the field are the identical code path —
-    /// this locks that so the surfaces can't drift apart again.
+    /// (FCA) path — timed off the **resolved filed route**, not a straight line. Uses the bundled
+    /// nav db and a real NJ-coast routing (`RBV WHITE SIE`): `arrival_eta` (the ladder/runway
+    /// path) must agree to the instant with `eta_along_route` timed at the field (the FCA path),
+    /// its distance must equal the independently resolved route length, and that length must be
+    /// meaningfully longer than the great circle to the field. Reverting `arrival_eta` to
+    /// `gc_dist` breaks the distance assertions.
     #[test]
-    fn arrival_and_crossing_eta_agree_at_the_field() {
-        // Airborne B738 ~300 nm north of KMIA, inbound from KJFK.
-        let ac = input([30.5, -80.0], 35_000.0, 440);
-        let pred = predict(&ac);
+    fn arrival_and_crossing_eta_agree_on_the_resolved_route() {
+        let nav = NavData::load();
+        let profile = AircraftProfile::default();
+        let ap: AirportDb = HashMap::from([
+            ("KJFK".to_string(), (40.64, -73.78)),
+            ("KDCA".to_string(), (38.85, -77.04)),
+        ]);
+        // Airborne B738 just south of KJFK tracking SW down the coast, filed KJFK -> KDCA.
+        let pos = [40.2, -74.0];
+        let ac = ArrivalInput {
+            dep: "KJFK",
+            arr: "KDCA",
+            route: "RBV WHITE SIE",
+            hdg: 220,
+            arr_ll: [38.85, -77.04],
+            ..input(pos, 24_000.0, 400)
+        };
+        let pred = arrival_eta(&nav, &ap, &Winds::default(), &profile, &ac, now());
 
-        // The FCA path: same resolved route, crossing point at the field (along == route_nm).
-        let hw = Winds::default().route_headwind(&[ac.pos, ac.arr_ll], ac.cruise_ft);
-        let crossing = eta_along_route(
+        // Distance follows the resolved route, exactly — and it's longer than the straight line.
+        let path = fca::route_path(
+            &nav, &ap, ac.dep, ac.arr, ac.route, pos[0], pos[1], ac.hdg, ac.gs,
+        )
+        .expect("route resolves");
+        let route_len = path_len_nm(&path);
+        let straight = gc_dist(pos[0], pos[1], ac.arr_ll[0], ac.arr_ll[1]);
+        assert!(
+            (pred.route_nm - route_len).abs() < 1e-6,
+            "arrival_eta must follow route_path"
+        );
+        assert!(
+            pred.route_nm > straight + 20.0,
+            "resolved route {:.0} nm should exceed the straight line {straight:.0} nm",
+            pred.route_nm
+        );
+
+        // FCA path: same resolved route, crossing timed at the field (along == route_len).
+        let hw = Winds::default().route_headwind(&path, ac.cruise_ft);
+        let fca_eta = eta_along_route(
             true,
-            pred.route_nm,
-            pred.route_nm,
+            route_len,
+            route_len,
             ac.alt_ft,
             ac.cruise_ft,
             ac.cruise_tas,
-            &AircraftProfile::default(),
+            &profile,
             hw,
             now(),
         );
-        assert_eq!(pred.eta, crossing);
+        assert_eq!(
+            pred.eta, fca_eta,
+            "ladder ETA must equal the FCA crossing-at-field ETA"
+        );
+    }
+
+    /// A not-yet-airborne flight with a bare/unresolvable route keeps the great-circle → route
+    /// padding, so its metered wheels-up / CFR time isn't computed on an unachievable distance.
+    /// An airborne aircraft with the same unresolved route is timed on the raw straight line
+    /// (that's the route the map draws).
+    #[test]
+    fn ground_flight_with_unresolved_route_keeps_the_route_padding() {
+        let straight = gc_dist(40.64, -73.78, 25.79, -80.29);
+
+        let ground = predict(&input([40.64, -73.78], 0.0, 0)); // route: "" -> only endpoints
         assert!(
-            pred.route_nm > 250.0 && pred.route_nm < 360.0,
-            "route_nm {}",
-            pred.route_nm
+            (ground.route_nm - straight * GROUND_ROUTE_FACTOR).abs() < 1e-6,
+            "ground route_nm {:.1} should be the padded {:.1}",
+            ground.route_nm,
+            straight * GROUND_ROUTE_FACTOR
+        );
+
+        // Airborne, same unresolved route: no padding — timed on the straight line to the field.
+        let airborne = predict(&input([31.0, -80.5], 35_000.0, 440));
+        let straight_air = gc_dist(31.0, -80.5, 25.79, -80.29);
+        assert!(
+            (airborne.route_nm - straight_air).abs() < 1.0,
+            "airborne route_nm {:.1} should be ~the straight line {:.1}, unpadded",
+            airborne.route_nm,
+            straight_air
         );
     }
 
