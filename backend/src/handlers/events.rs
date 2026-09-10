@@ -5,7 +5,9 @@ use axum::{
     extract::{Extension, Path, State},
     http::StatusCode,
 };
-use chrono::{DateTime, Utc};
+use std::collections::HashSet;
+
+use chrono::{DateTime, Datelike, Utc, Weekday};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
@@ -25,14 +27,14 @@ use crate::{
         AddPackageItemRequest, AirportRateBody, AirportStatBody, CombinedStatBody,
         CreateGroundStopRequest, CreatePackageRequest, CreateTmiRequest, DccRequestBody,
         EventAvailabilityBody, EventBody, EventCaptureBody, EventDebriefBody, EventStatsBody,
-        FacilitySupportBody, FcaBody, KeyCountBody, SetFcaAutoRequest, TmiPackageBody,
-        UpdateDccRequest, UpdateEventCaptureRequest, UpdateEventDebriefRequest,
+        FacilitySupportBody, FcaBody, KeyCountBody, SetFcaAutoRequest, Tier1GenerateResult,
+        TmiPackageBody, UpdateDccRequest, UpdateEventCaptureRequest, UpdateEventDebriefRequest,
         UpsertAirportRateRequest, UpsertFacilitySupportRequest, UpsertFcaRequest,
         UpsertProgramRequest,
     },
     repos::{
         access as access_repo, ace as ace_repo, availability as availability_repo,
-        events as events_repo, flow as flow_repo, integration as integration_repo,
+        events as events_repo, flow as flow_repo, integration as integration_repo, org as org_repo,
         stats as stats_repo, tmu as tmu_repo,
     },
     state::AppState,
@@ -442,6 +444,86 @@ pub async fn delete_event_facility(
     } else {
         Err(ApiError::NotFound)
     }
+}
+
+/// Fan out ACE support requests to the host ARTCC's **Tier-1 neighbours** — the auto-request half of
+/// FNO planning, part of setting up facility support for the event. Only valid for a Friday (UTC)
+/// event (the FNO definition). Idempotent: neighbours that already have an open request on the event
+/// are skipped, so re-running never double-posts.
+#[utoipa::path(
+    post,
+    path = "/api/v1/events/{id}/facilities/tier1",
+    tag = "events",
+    params(("id" = i64, Path, description = "VATUSA event id")),
+    responses(
+        (status = 200, body = Tier1GenerateResult),
+        (status = 400, description = "Event is not a Friday (not an FNO)"),
+        (status = 401), (status = 404)
+    )
+)]
+pub async fn generate_tier1(
+    State(state): State<AppState>,
+    _permission: RequirePermission<EventsSupportUpdate>,
+    Extension(current_user): Extension<Option<CurrentUser>>,
+    Path(event_id): Path<i64>,
+) -> Result<Json<Tier1GenerateResult>, ApiError> {
+    let user = current_user.as_ref().ok_or(ApiError::Unauthorized)?;
+    let p = state.db.as_ref().ok_or(ApiError::ServiceUnavailable)?;
+    let event = events_repo::get(p, event_id)
+        .await?
+        .ok_or(ApiError::NotFound)?;
+
+    // FNO = the event starts on a Friday in UTC.
+    if event.start_time.weekday() != Weekday::Fri {
+        return Err(ApiError::BadRequest);
+    }
+
+    // Known OIS facilities (active) — the filter that drops non-OIS (Canadian/oceanic) neighbours.
+    let known: HashSet<String> = org_repo::list_facilities(p)
+        .await?
+        .into_iter()
+        .map(|f| f.id)
+        .collect();
+    let neighbours = feed::neighbors::tier1(&event.facility, &known);
+
+    // Skip neighbours that already have an open request on this event (idempotent re-runs).
+    let existing: HashSet<String> = ace_repo::open_request_artccs(p, event_id)
+        .await?
+        .into_iter()
+        .collect();
+
+    let channel = integration_repo::channel_id(p, crate::handlers::ace::ACE_CHANNEL).await?;
+    let date = event.start_time.format("%a, %b %-d").to_string();
+
+    let mut created = Vec::new();
+    let mut skipped = Vec::new();
+    let mut tx = p.begin().await.map_err(|_| ApiError::Internal)?;
+    for n in neighbours {
+        if existing.contains(&n) {
+            skipped.push(n);
+            continue;
+        }
+        let details = format!(
+            "Tier-1 support for {}'s Friday Night Operation on {date}. Requesting ACE coverage from {n}.",
+            event.facility
+        );
+        crate::handlers::ace::create_one(
+            &mut tx,
+            &event,
+            channel.as_deref(),
+            &user.id,
+            &user.display_name,
+            Some(&n),
+            None,
+            1,
+            &details,
+        )
+        .await?;
+        created.push(n);
+    }
+    tx.commit().await.map_err(|_| ApiError::Internal)?;
+
+    Ok(Json(Tier1GenerateResult { created, skipped }))
 }
 
 #[utoipa::path(
