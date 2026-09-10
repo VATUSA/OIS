@@ -11155,8 +11155,16 @@ export interface operations {
     list_tmis: {
         parameters: {
             query?: {
-                /** @description Filter by status */
+                /** @description Filter by status (draft|published|expired|cancelled) */
                 status?: string;
+                /** @description Filter by structured restriction kind (MIT, MINIT, STOP, …); excludes raw-typed TMIs */
+                type?: string;
+                /** @description Filter to TMIs where this facility is requesting or providing */
+                facility?: string;
+                /** @description Active-during range start (RFC 3339) */
+                from?: string;
+                /** @description Active-during range end (RFC 3339) */
+                to?: string;
             };
             header?: never;
             path?: never;
