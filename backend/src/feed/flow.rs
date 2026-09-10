@@ -1229,53 +1229,90 @@ mod tests {
     }
 
     /// AC #3 (cross-surface): the arrival ladder (`compute`) and the runway ETE
-    /// (`runway::collect_arrivals`) must time the same aircraft identically — both now route
-    /// through `predict::arrival_eta`.
+    /// (`runway::collect_arrivals`) must time the same aircraft identically — both route through
+    /// `predict::arrival_eta` — and off the **resolved** filed route, not a straight line. The
+    /// aircraft files a real NJ-coast routing (`RBV WHITE SIE`, bundled nav), so its along-route
+    /// distance runs meaningfully longer than the great circle to the field; reverting
+    /// `predict::arrival_eta` to `gc_dist` fails the distance assertion.
     #[test]
-    fn ladder_and_runway_ete_agree_for_one_aircraft() {
+    fn ladder_and_runway_ete_agree_on_the_resolved_route() {
+        let ap: AirportDb = HashMap::from([
+            ("KJFK".to_string(), (40.6413, -73.7781)),
+            ("KDCA".to_string(), (38.8521, -77.0377)),
+        ]);
+        let nav = NavData::load();
+        let profiles = trajectory::ProfileTable::default();
+        // Airborne B738 just south of KJFK tracking SW down the coast, filed KJFK -> KDCA.
+        let mut p = pilot(
+            "AAL1",
+            40.2,
+            -74.0,
+            24_000,
+            400,
+            fp("KJFK", "KDCA", "RBV WHITE SIE"),
+        );
+        p.heading = 220;
         let data = VatsimData {
-            pilots: vec![pilot(
-                "AAL1",
-                39.5,
-                -74.5,
-                33_000,
-                430,
-                fp("KMIA", "KJFK", "DCT CAMRN KJFK"),
-            )],
+            pilots: vec![p],
             ..Default::default()
         };
         let flow = compute(
-            "KJFK",
+            "KDCA",
             None,
             &data,
-            &airports(),
-            &NavData::default(),
+            &ap,
+            &nav,
             &Winds::default(),
-            &trajectory::ProfileTable::default(),
+            &profiles,
             &HashMap::new(),
             t0(),
         );
         let arrivals = crate::feed::runway::collect_arrivals(
-            "KJFK",
+            "KDCA",
             &data,
-            &airports(),
-            &NavData::default(),
+            &ap,
+            &nav,
             &Winds::default(),
-            &trajectory::ProfileTable::default(),
+            &profiles,
             t0(),
-            240,
+            600,
         );
-        let ladder = flow
+        let f = flow
             .flights
             .iter()
             .find(|f| f.callsign == "AAL1")
-            .and_then(|f| f.eta)
-            .expect("ladder ETA");
+            .expect("ladder flight");
+        let ladder = f.eta.expect("ladder ETA");
         let ete = arrivals
             .iter()
             .find(|a| a.cs == "AAL1")
             .expect("runway ETE")
             .eta_ms;
+
+        let expected_len = crate::feed::predict::path_len_nm(
+            &crate::feed::fca::route_path(
+                &nav,
+                &ap,
+                "KJFK",
+                "KDCA",
+                "RBV WHITE SIE",
+                40.2,
+                -74.0,
+                220,
+                400,
+            )
+            .expect("route resolves"),
+        );
+        let straight = gc_dist(40.2, -74.0, 38.8521, -77.0377);
+        assert!(
+            (f.distance_nm.unwrap() - expected_len).abs() < 1.0,
+            "ladder distance {:?} should be the resolved route length {expected_len:.0} nm",
+            f.distance_nm
+        );
+        assert!(
+            expected_len > straight + 20.0,
+            "the coastal routing {expected_len:.0} nm should exceed the {straight:.0} nm straight line"
+        );
         assert!(
             (ladder.timestamp_millis() - ete).abs() < 1000,
             "ladder {ladder} and runway ETE {ete}ms disagree"

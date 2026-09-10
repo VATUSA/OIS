@@ -2,6 +2,7 @@
 //! runways + demand bins) and its config, computed live off the feed.
 
 use std::collections::{HashMap, HashSet};
+use std::sync::Arc;
 
 use axum::{
     Json,
@@ -61,20 +62,24 @@ async fn metar_for(state: &AppState, icao: &str) -> Option<crate::feed::metar::M
 
 /// Assemble the full board for `icao` off the live feed snapshot.
 async fn build_board(state: &AppState, icao: &str) -> Result<RunwayBoard, ApiError> {
-    let snapshot = state.feed.read().await.snapshot.clone();
-    let empty = crate::feed::vatsim::VatsimData::default();
-    let data = snapshot.as_ref().map(|s| &s.data).unwrap_or(&empty);
+    let snap = state
+        .feed
+        .read()
+        .await
+        .snapshot
+        .clone()
+        .unwrap_or_else(|| Arc::new(crate::feed::Snapshot::of(Default::default())));
     let winds = state.winds.load_full();
-    build_board_from(state, icao, data, winds.as_ref(), Utc::now()).await
+    build_board_from(state, icao, snap, winds, Utc::now()).await
 }
 
-/// Assemble the full board for `icao`: stored config + runway ends + arrivals (from `data`)
+/// Assemble the full board for `icao`: stored config + runway ends + arrivals (from the snapshot)
 /// assigned to runways + demand bins. Shared by the live handler and the historical replay.
 pub(crate) async fn build_board_from(
     state: &AppState,
     icao: &str,
-    data: &crate::feed::vatsim::VatsimData,
-    winds: &crate::feed::winds::Winds,
+    snap: Arc<crate::feed::Snapshot>,
+    winds: Arc<crate::feed::winds::Winds>,
     now: DateTime<Utc>,
 ) -> Result<RunwayBoard, ApiError> {
     let icao = icao.to_ascii_uppercase();
@@ -142,20 +147,25 @@ pub(crate) async fn build_board_from(
     let airports = state.feed.read().await.airports.clone();
     let nav = state.nav.load_full();
     let profiles = state.aircraft_profiles.load_full();
-    // `collect_arrivals` resolves every arrival's filed route (CPU, no `.await`) — keep it off the
-    // async workers.
-    let arrivals = tokio::task::block_in_place(|| {
-        runway::collect_arrivals(
-            &icao,
-            data,
-            airports.as_ref(),
-            nav.as_ref(),
-            winds,
-            profiles.as_ref(),
-            now,
-            window_min,
-        )
-    });
+    // `collect_arrivals` resolves every arrival's filed route — pure CPU. Push it onto the
+    // blocking pool (see `feed::flow_from_data`) rather than tying up an async worker.
+    let arrivals = {
+        let icao = icao.clone();
+        tokio::task::spawn_blocking(move || {
+            runway::collect_arrivals(
+                &icao,
+                &snap.data,
+                airports.as_ref(),
+                nav.as_ref(),
+                winds.as_ref(),
+                profiles.as_ref(),
+                now,
+                window_min,
+            )
+        })
+        .await
+        .map_err(|_| ApiError::Internal)?
+    };
 
     // Assign each arrival a runway (override → STAR rule → AUTO).
     let assigned = runway::assign(&arrivals, &active_ids, &star_rules, &overrides);
