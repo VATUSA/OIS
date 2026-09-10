@@ -22,4 +22,9 @@ desktop/src-tauri/target
 .idea
 .vscode/*
 !.vscode/extensions.json
-.claude
+
+# Claude Code — ignore personal/ephemeral state, but SHARE the team workflow
+# (slash commands + their helper scripts).
+.claude/*
+!.claude/commands/
+!.claude/scripts/
