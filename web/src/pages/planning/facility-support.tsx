@@ -1,6 +1,6 @@
 import {useEffect, useMemo, useState} from "react";
-import {Badge, Button, Card, CardContent, ConfirmButton, Input} from "@ois/ui";
-import {Plane, Users, Waypoints, X} from "lucide-react";
+import {Badge, Button, Card, CardContent, ConfirmButton, Input, useConfirm} from "@ois/ui";
+import {Network, Plane, Users, Waypoints, X} from "lucide-react";
 
 import {useMe} from "@/lib/auth";
 import {useFacilities} from "@/lib/admin";
@@ -8,10 +8,12 @@ import {ArtccCombobox} from "@/components/artcc-combobox";
 import {
   type FacilitySupport,
   useFacilitySupport,
+  useGenerateTier1,
   useRemoveFacilitySupport,
   useUpsertFacilitySupport,
 } from "@/lib/events";
 import {hasPermission} from "@/lib/permissions";
+import {isFridayUtc} from "@/lib/time";
 
 type Level = "required" | "preferred" | "not_required";
 
@@ -159,12 +161,30 @@ function FacilityRow({
   );
 }
 
-export function FacilitySupportSection({ eventId }: { eventId: number }) {
+export function FacilitySupportSection({
+  eventId,
+  eventStart,
+}: {
+  eventId: number;
+  eventStart: string;
+}) {
   const { data: me } = useMe();
   const canAdd = hasPermission(me, "events.support.update");
   const support = useFacilitySupport(eventId);
   const upsert = useUpsertFacilitySupport(eventId);
   const facilities = useFacilities();
+  const generateTier1 = useGenerateTier1(eventId);
+  const confirm = useConfirm();
+
+  const runTier1 = async () => {
+    const ok = await confirm({
+      title: "Generate Tier-1 requests?",
+      description:
+        "Opens an ACE support request for each neighbouring ARTCC that doesn’t already have one. This is a Friday Night Ops helper.",
+      confirmText: "Generate",
+    });
+    if (ok) generateTier1.mutate();
+  };
 
   const nameById = useMemo(
     () => new Map((facilities.data ?? []).map((f) => [f.id, f.name])),
@@ -188,6 +208,26 @@ export function FacilitySupportSection({ eventId }: { eventId: number }) {
             </span>
           </div>
         </div>
+
+        {canAdd && isFridayUtc(eventStart) && (
+          <div className="flex flex-wrap items-center justify-between gap-2 rounded-lg border border-dashed bg-muted/20 p-3">
+            <div className="flex items-center gap-2 text-sm">
+              <Network className="size-4 text-primary" />
+              <span>
+                <span className="font-medium">Friday Night Ops.</span> Fan out support requests to the
+                host’s Tier-1 neighbours.
+              </span>
+            </div>
+            <Button
+              size="sm"
+              variant="outline"
+              onClick={runTier1}
+              disabled={generateTier1.isPending}
+            >
+              Generate Tier-1 requests
+            </Button>
+          </div>
+        )}
 
         {canAdd && (
           <ArtccCombobox
