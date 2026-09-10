@@ -15,21 +15,27 @@ mechanism, says what "done" looks like, and is labeled so the board sorts it cor
 
 ## The board
 
-**Status** (the pipeline — one per issue):
+**Status** (the pipeline — one per issue, in flow order):
 
 | Status | Meaning |
 | --- | --- |
-| **Backlog** | Filed and triaged, not scheduled yet. Most new issues land here. |
-| **Ready** | Scoped and cleared to start — acceptance criteria are clear, nothing blocks it. |
-| **In progress** | Actively being worked. |
-| **In review** | Change is up (PR open) and awaiting review. |
-| **Done** | Merged/deployed. |
+| **Blocked** | Can't proceed — waiting on a dependency or a decision. |
+| **Triaging** | Being classified, scoped, sized, and prioritized. New issues start here. |
+| **To Do** | Triaged and cleared to start. |
+| **Returned** | Kicked back for rework (from review or test). |
+| **In build** | Actively being implemented. |
+| **Post build** | Build done — pre-test wrap-up (regenerate the client, apply migrations, self-check, `just ci`). |
+| **Testing Queue** | Awaiting test. |
+| **In Test** | Under test. |
+| **Code Review** | PR open, in review. |
+| **Shippable** | Approved and ready to ship. |
+| **Done** | Merged / deployed. |
 
 **Size** (rough effort, set at triage): `XS · S · M · L · XL`. XS ≈ a few lines; L/XL should usually
 be split into sub-issues (the board supports **Parent issue** / **Sub-issues progress**).
 
-Set **Status** and **Size** when the issue is triaged; link the PR (**Linked pull requests**) when
-one opens so the board tracks it automatically.
+Set **Size** during **Triaging**; link the PR (**Linked pull requests**) when one opens so the board
+tracks it automatically.
 
 ---
 
@@ -176,11 +182,15 @@ pointer rather than filing again.
 
 ## Lifecycle & agent etiquette
 
-- **New issues start in Backlog** with `type` + `area` + `priority`. A human triages to **Ready**
-  and sets Size; that's the signal it's cleared to start.
-- **Agents do not self-assign, move to Done, or close issues, and do not merge PRs** — a human
-  reviews and merges. An agent may move Backlog→In progress when it genuinely starts, and open the
-  PR (In review). Work lands on **`main`** per the project's no-branch rule (see `AGENTS.md`).
+- **New issues start in Triaging** with `type` + `area` + `priority`. A human classifies them, sets
+  **Size**, and moves them to **To Do** — that's the signal an issue is cleared to start. **Blocked**
+  is for anything waiting on a dependency/decision; **Returned** is where review or test kicks work
+  back.
+- **Agents do not self-assign, close issues, or merge PRs, and don't move an issue to Shippable or
+  Done** — a human owns review, ship, and close. An agent may move **To Do → In build** when it
+  genuinely starts, run the **Post build** wrap-up (client regen, migrations, `just ci`), and open
+  the PR (**Code Review**). Work lands on **`main`** per the project's no-branch rule (see
+  `AGENTS.md`).
 - **Comment sparingly** — an issue is a spec, not a chat log. Comment only at real moments: picking
   it up, hitting a genuine blocker (say what and why), or finishing (what changed + the verifying
   test). No running narration, no per-attempt logs, no flight/user IDs or "Reproduced YYYY-MM-DD"
