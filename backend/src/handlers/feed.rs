@@ -106,16 +106,23 @@ pub(crate) async fn flow_from_data(
     let program = program_inputs(pool, icao).await?;
     let issued = tmu_repo::issued_cfr_map(pool, icao).await?;
     let airports = state.feed.read().await.airports.clone();
-    Ok(flow::compute(
-        icao,
-        program.as_ref(),
-        data,
-        airports.as_ref(),
-        winds,
-        state.aircraft_profiles.load_full().as_ref(),
-        &issued,
-        now,
-    ))
+    let nav = state.nav.load_full();
+    let profiles = state.aircraft_profiles.load_full();
+    // `compute` now resolves every arrival's filed route (CPU, no `.await`) — keep it off the
+    // async workers so a burst of polling clients can't stall the runtime.
+    Ok(tokio::task::block_in_place(|| {
+        flow::compute(
+            icao,
+            program.as_ref(),
+            data,
+            airports.as_ref(),
+            nav.as_ref(),
+            winds,
+            profiles.as_ref(),
+            &issued,
+            now,
+        )
+    }))
 }
 
 /// Compute the live, metered flow for one arrival airport (loads program + issued CFRs).
@@ -363,19 +370,27 @@ pub async fn issue_cfr(
                 (guard.snapshot.clone(), guard.airports.clone())
             };
             match (program.as_ref(), snapshot.as_ref()) {
-                (Some(pg), Some(snap)) => flow::ready_time_slot(
-                    &airport,
-                    pg,
-                    &snap.data,
-                    airports.as_ref(),
-                    state.winds.load_full().as_ref(),
-                    state.aircraft_profiles.load_full().as_ref(),
-                    &issued,
-                    &callsign,
-                    ready,
-                    Utc::now(),
-                )
-                .unwrap_or(ready),
+                (Some(pg), Some(snap)) => {
+                    let nav = state.nav.load_full();
+                    let winds = state.winds.load_full();
+                    let profiles = state.aircraft_profiles.load_full();
+                    tokio::task::block_in_place(|| {
+                        flow::ready_time_slot(
+                            &airport,
+                            pg,
+                            &snap.data,
+                            airports.as_ref(),
+                            nav.as_ref(),
+                            winds.as_ref(),
+                            profiles.as_ref(),
+                            &issued,
+                            &callsign,
+                            ready,
+                            Utc::now(),
+                        )
+                    })
+                    .unwrap_or(ready)
+                }
                 _ => ready,
             }
         }
