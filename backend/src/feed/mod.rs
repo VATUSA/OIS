@@ -239,6 +239,10 @@ async fn poller(state: FeedState) {
             }
             Err(e) => {
                 consecutive_failures += 1;
+                // An outright failure isn't a "stale but successful" read — reset so a failure
+                // streak always retries at the fast cadence (below), even right after a stale
+                // freeze had already backed off to STALE_POLL_BACKOFF_SECS.
+                consecutive_stale_polls = 0;
                 tracing::warn!(error = %e, consecutive_failures, "feed: vatsim fetch failed");
                 // last_source_ts is left as-is: next_poll_delay sees its buffer target already
                 // passed and retries at the fast cadence instead of waiting out a full interval.
