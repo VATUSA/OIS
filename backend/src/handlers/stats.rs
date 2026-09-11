@@ -127,6 +127,10 @@ pub struct DelayQuery {
     procedure: Option<String>,
     /// Rolling window, hours back (default 24, max 720).
     hours: Option<i64>,
+    /// 1-based page of the per-airport breakdown (default 1).
+    page: Option<i64>,
+    /// Per-airport breakdown page size (default 25, max 100).
+    page_size: Option<i64>,
 }
 
 fn norm_opt(s: Option<String>) -> Option<String> {
@@ -143,7 +147,9 @@ fn norm_opt(s: Option<String>) -> Option<String> {
         ("airport" = Option<String>, Query, description = "Filter to one airport ICAO"),
         ("runway" = Option<String>, Query, description = "Filter to one runway"),
         ("procedure" = Option<String>, Query, description = "Filter to one SID/STAR"),
-        ("hours" = Option<i64>, Query, description = "Window hours back (default 24, max 720)")
+        ("hours" = Option<i64>, Query, description = "Window hours back (default 24, max 720)"),
+        ("page" = Option<i64>, Query, description = "Per-airport breakdown page (default 1)"),
+        ("page_size" = Option<i64>, Query, description = "Per-airport breakdown page size (default 25, max 100)")
     ),
     responses((status = 200, body = DelaySummary), (status = 401))
 )]
@@ -162,6 +168,8 @@ pub async fn delay_summary(
     let airport = norm_opt(q.airport);
     let runway = norm_opt(q.runway);
     let procedure = norm_opt(q.procedure);
+    let page = q.page.unwrap_or(1).max(1);
+    let page_size = q.page_size.unwrap_or(25).clamp(1, 100);
     Ok(Json(
         stats_repo::delay_summary(
             pool(&state)?,
@@ -171,6 +179,8 @@ pub async fn delay_summary(
             procedure.as_deref(),
             since,
             hours,
+            page,
+            page_size,
         )
         .await?,
     ))

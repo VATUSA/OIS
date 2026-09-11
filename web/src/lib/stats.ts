@@ -17,13 +17,16 @@ export type DelaySummary = components["schemas"]["DelaySummary"];
 export type DelayGroup = components["schemas"]["DelayGroup"];
 export type AtcBoard = components["schemas"]["AtcBoard"];
 
-/** Average-delay aggregates for one leg kind over a rolling window, with optional filters. */
+/** Average-delay aggregates for one leg kind over a rolling window, with optional filters.
+ * `page`/`pageSize` paginate the per-airport breakdown only. */
 export function useDelaySummary(params: {
   kind: "departure" | "arrival";
   airport?: string;
   runway?: string;
   procedure?: string;
   hours: number;
+  page?: number;
+  pageSize?: number;
 }) {
   return useQuery({
     queryKey: ["stats-delays", params],
@@ -36,6 +39,8 @@ export function useDelaySummary(params: {
             runway: params.runway || undefined,
             procedure: params.procedure || undefined,
             hours: params.hours,
+            page: params.page,
+            page_size: params.pageSize,
           },
         },
       });

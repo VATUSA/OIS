@@ -784,9 +784,16 @@ pub struct DelaySummary {
     pub window_hours: i64,
     /// Aggregate over the whole filtered set.
     pub overall: DelayGroup,
-    /// Per-airport aggregates; each airport's `median_sec` is its normalization baseline.
+    /// Per-airport aggregates, paginated (`page`/`page_size` below); each airport's `median_sec`
+    /// is its normalization baseline.
     pub by_airport: Vec<DelayGroup>,
+    /// Total distinct airports matching the filters (across all pages).
+    pub by_airport_total: i64,
+    /// 1-based page number and page size `by_airport` was fetched with.
+    pub page: i64,
+    pub page_size: i64,
     /// Per-runway / per-procedure breakdowns — populated only when an `airport` filter is set.
+    /// Unpaginated: inherently small, scoped to one airport.
     pub by_runway: Vec<DelayGroup>,
     pub by_procedure: Vec<DelayGroup>,
 }
