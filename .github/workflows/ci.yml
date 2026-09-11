@@ -55,3 +55,22 @@ jobs:
       - run: pnpm lint
       - run: pnpm typecheck
       - run: pnpm test
+
+  client-drift:
+    runs-on: ubuntu-latest
+    # Catches: an endpoint or #[derive(ToSchema)] model changed without regenerating
+    # @ois/api-client, leaving the web typecheck compiling against a stale contract. The OpenAPI
+    # document is a pure compile-time/utoipa artifact, so this dumps it directly instead of
+    # booting a live backend + DB.
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@nightly
+      - uses: rui314/setup-mold@v1
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo test -p ois-backend --lib openapi::dump_openapi_json -- --exact --ignored
+      - uses: pnpm/action-setup@v4
+      - uses: actions/setup-node@v4
+        with: { node-version: 22, cache: pnpm }
+      - run: pnpm install --frozen-lockfile
+      - run: OIS_OPENAPI_URL=/tmp/ois-openapi.json pnpm --filter @ois/api-client codegen
+      - run: git diff --exit-code -- packages/api-client/src/generated/schema.d.ts
