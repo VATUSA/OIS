@@ -231,6 +231,12 @@ pub fn spawn_aircraft_profiles_refresh(
 /// at full fidelity). Runs hourly; a slow, batched, saved-window-aware alternative to TimescaleDB
 /// retention.
 pub fn spawn_stats_compaction(reg: Arc<JobRegistry>, pool: PgPool) {
+    // Tracks the hour-bucket (`now / STATS_COMPACTION_INTERVAL`) whose COMPACTION_TIERS slices
+    // were last processed. The admin Jobs page can trigger this job on demand (`system.jobs.update`)
+    // in addition to its hourly schedule; a trigger landing in the same bucket as the last run must
+    // be a no-op for the tiered passes below, or it would re-downsample that tier's already-thinned
+    // survivors and compound well past the intended ratio (see `stats_compaction_once`).
+    let last_tier_hour = Arc::new(AtomicI64::new(0));
     tokio::spawn(run_interval(
         reg,
         "stats_compaction",
@@ -238,7 +244,8 @@ pub fn spawn_stats_compaction(reg: Arc<JobRegistry>, pool: PgPool) {
         STATS_COMPACTION_INTERVAL,
         move || {
             let pool = pool.clone();
-            async move { stats_compaction_once(&pool).await }
+            let last_tier_hour = last_tier_hour.clone();
+            async move { stats_compaction_once(&pool, &last_tier_hour).await }
         },
     ));
 }
@@ -247,7 +254,10 @@ pub fn spawn_stats_compaction(reg: Arc<JobRegistry>, pool: PgPool) {
 /// `COMPACTION_TIERS` boundary, and prune everything past the unrelated retention horizons (winds,
 /// TM history, flight legs — `stats.position` is never hard-deleted anymore). Best-effort — a
 /// failed sub-pass is logged and the others still run; returns a summary of rows removed.
-async fn stats_compaction_once(pool: &PgPool) -> Result<String, String> {
+async fn stats_compaction_once(
+    pool: &PgPool,
+    last_tier_hour: &AtomicI64,
+) -> Result<String, String> {
     let now = Utc::now();
     let legs_before = now - chrono::Duration::days(DELAY_LEG_RETAIN_DAYS);
     let prune_before = now - chrono::Duration::days(STATS_PRUNE_AFTER_DAYS);
@@ -257,14 +267,25 @@ async fn stats_compaction_once(pool: &PgPool) -> Result<String, String> {
         .unwrap_or_else(|_| chrono::Duration::hours(1));
     let mut removed: u64 = 0;
 
+    // Each tier's boundary slice is exactly one hour-bucket wide; run it at most once per bucket no
+    // matter how many times this fn is invoked within it (the scheduled tick, plus any manual
+    // "run now" trigger) — a second run would downsample that slice's already-thinned survivors
+    // again. `swap` both checks and immediately claims the bucket, so two near-simultaneous
+    // invocations can't both see it as due. A genuinely new bucket (the next scheduled tick, or a
+    // manual trigger after the interval has elapsed) still runs normally.
+    let hour_bucket = now.timestamp() / STATS_COMPACTION_INTERVAL.as_secs() as i64;
+    let tiers_due = last_tier_hour.swap(hour_bucket, Ordering::Relaxed) != hour_bucket;
+
     let mut passes: Vec<(&str, Result<u64, ApiError>)> = Vec::new();
-    for &(age_days, keep_every) in COMPACTION_TIERS {
-        let to = now - chrono::Duration::days(age_days);
-        let from = to - slice;
-        passes.push((
-            "downsample",
-            stats_repo::downsample_positions(pool, from, to, keep_every).await,
-        ));
+    if tiers_due {
+        for &(age_days, keep_every) in COMPACTION_TIERS {
+            let to = now - chrono::Duration::days(age_days);
+            let from = to - slice;
+            passes.push((
+                "downsample",
+                stats_repo::downsample_positions(pool, from, to, keep_every).await,
+            ));
+        }
     }
     passes.push(("winds", stats_repo::prune_winds(pool, prune_before).await));
     passes.push((
