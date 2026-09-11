@@ -462,7 +462,9 @@ pub struct EventBody {
     /// Empty from `GET /events/{id}` and the VATUSA sync.
     #[sqlx(default)]
     pub recording: String,
-    /// True when the event has an open or claimed ACE support request (list view only).
+    /// True when the event has an ACE support request that wasn't cancelled — support was
+    /// requested (still open, or since completed). List view only; always `false` from
+    /// `GET /events/{id}`.
     #[sqlx(default)]
     pub ace_requested: bool,
     /// True when any facility has been added to the event's facility support (list view only).
