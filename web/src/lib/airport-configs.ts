@@ -22,6 +22,20 @@ export function useAirportConfigs(icao: string | null) {
   });
 }
 
+/** Every airport's runway configs, optionally scoped to one owning ARTCC (the all-airports list). */
+export function useAllAirportConfigs(artcc: string | null) {
+  return useQuery({
+    queryKey: ["airport-configs", "all", artcc ?? null],
+    queryFn: async (): Promise<AirportConfig[]> => {
+      const { data, error } = await ois.GET("/api/v1/airport-configs", {
+        params: { query: artcc ? { artcc } : {} },
+      });
+      if (error || !data) throw new Error("failed to load configs");
+      return data;
+    },
+  });
+}
+
 export function useCreateAirportConfig(icao: string) {
   const qc = useQueryClient();
   return useMutation({
