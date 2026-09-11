@@ -7,6 +7,7 @@ import {type Flow, type FlowFlight, useAirportFlow} from "@/lib/feed";
 import {hhmmZulu} from "@/lib/time";
 import {DeparturesView} from "@/pages/departures";
 import {TaxiView} from "@/pages/taxi";
+import {ArrivalLadder} from "@/components/ladder/ArrivalLadder";
 
 type Sub = "summary" | "aircraft" | "ladder" | "demand" | "departures" | "taxi";
 
@@ -438,74 +439,32 @@ function passesLadderFilters(f: FlowFlight, filters: LadderFilters | undefined):
   return true;
 }
 
+const LADDER_CH = 7.5; // ≈ px per monospace char at text-xs
+
+/** Estimated rendered pixel width of one arrival tag — connector + pill padding/border/gaps +
+ * text (callsign + "HHMMz" time + optional gate). */
+function measureTagWidth(f: FlowFlight): number {
+  const gate = f.gate ? String(f.gate) : "";
+  const chars = f.callsign.length + 5 /* HHMMz */ + gate.length;
+  const gaps = (gate ? 2 : 1) * 8; // gap-2 between the mono spans
+  return 12 /* connector tick */ + 24 /* pill padding + border */ + gaps + chars * LADDER_CH;
+}
+
 export function LadderView({ flow, filters }: { flow: Flow; filters?: LadderFilters }) {
   const [win, setWin] = useState(60);
   const now = Date.now();
-
-  const PX = 7; // px per minute
-  const ROW = 26; // min vertical spacing between adjacent tags
-  const GUTTER = 46; // left column for the time axis (fits "1941z")
-  const PAD = 12;
-  const H = win * PX;
-  const yOf = (min: number) => H - (Math.max(0, Math.min(min, win)) / win) * H;
   const step = win <= 90 ? 10 : win <= 180 ? 15 : 30;
   const gateColors = gateColorMap(flow.flights);
 
   // Position by metered STA when available, else raw ETA.
   const timeOf = (f: FlowFlight) => f.sta ?? f.eta;
-  // Flights in window, earliest (nearest NOW) first — bottom to top.
   const items = flow.flights
     .filter((f) => f.status !== "arrived" && !f.excluded && timeOf(f) && passesLadderFilters(f, filters))
-    .map((f) => ({ f, min: minutesUntil(timeOf(f), now)! }))
-    .filter((x) => x.min >= -1 && x.min <= win)
-    .sort((a, b) => a.min - b.min);
+    .map((f) => ({ key: f.callsign, min: minutesUntil(timeOf(f), now)!, time: timeOf(f) as string, data: f }));
 
-  // Declutter with a fixed axis: NOW stays pinned at the bottom and the container never grows.
-  // When arrivals bunch up, shrink the min label gap so the stack still fits between the top pad
-  // and NOW (down to MIN_GAP, after which very dense arrivals overlap) instead of stretching the
-  // timeline. Normal density leaves the gap at ROW — identical to before.
-  const MIN_GAP = 13; // ≈ tag height
-  const gap = Math.max(MIN_GAP, Math.min(ROW, (H - PAD) / Math.max(items.length - 1, 1)));
-  let lastY = H + gap;
-  const placed = items.map(({ f, min }) => {
-    const y = Math.max(PAD, Math.min(yOf(min), lastY - gap));
-    lastY = y;
-    return { f, min, y };
-  });
-  const contentH = H + PAD;
-
-  // Size the scroll area to the widest strip (callsign + time + optional gate) so the ladder can get
-  // as narrow as its own text instead of being pinned to a fixed width. Slightly over-estimate the
-  // monospace text so nothing clips (which would otherwise force a scrollbar).
-  const CH = 7.5; // ≈ px per monospace char at text-xs
-  const stripW = (f: FlowFlight) => {
-    const gate = f.gate ? String(f.gate) : "";
-    const chars = f.callsign.length + 5 /* HHMMz */ + gate.length;
-    const gaps = (gate ? 2 : 1) * 8; // gap-2 between the mono spans
-    return 12 /* connector tick */ + 24 /* pill padding + border */ + gaps + chars * CH;
-  };
-  const widest = placed.reduce((m, { f }) => Math.max(m, stripW(f)), 0);
-  const minContent = Math.max(GUTTER + Math.ceil(widest), GUTTER + 96);
-
-  const gridlines = [];
-  for (let k = 0; k <= win / step; k++) {
-    const min = k * step;
-    const y = yOf(min);
-    gridlines.push(
-      <div key={`g${k}`}>
-        <div
-          className="absolute border-t border-border/40"
-          style={{ top: y, left: GUTTER, right: 0 }}
-        />
-        <span
-          className="absolute font-mono text-[10px] text-muted-foreground"
-          style={{ top: y - 6, left: 0, width: GUTTER - 12, textAlign: "right" }}
-        >
-          {hhmmZulu(new Date(now + min * 60000).toISOString())}
-        </span>
-      </div>,
-    );
-  }
+  const noMatch =
+    filters &&
+    (filters.gates?.length || filters.statuses?.length || filters.origins?.length || filters.types?.length);
 
   return (
     <Card>
@@ -534,74 +493,40 @@ export function LadderView({ flow, filters }: { flow: Flow; filters?: LadderFilt
             </Button>
           </div>
         </div>
-        <div className="overflow-x-auto">
-          <div className="relative" style={{ height: contentH, minWidth: minContent }}>
-            {/* vertical time axis */}
-            <div
-              className="absolute top-0 bottom-0 border-l border-border/60"
-              style={{ left: GUTTER }}
-            />
-            {gridlines}
-
-            {/* NOW baseline */}
-            <div
-              className="absolute border-t-2 border-primary"
-              style={{ top: yOf(0), left: GUTTER, right: 0 }}
-            >
+        <ArrivalLadder
+          items={items}
+          now={now}
+          win={win}
+          pxPerMin={7}
+          gutter={46}
+          step={step}
+          rowGap={26}
+          minGap={13}
+          pad={12}
+          autoFitWidth
+          emptyMessage={noMatch ? "No matching arrivals" : "No ETAs in window"}
+          measureTagWidth={measureTagWidth}
+          connectorColor={(f) => {
+            const st = STATUS_STYLE[f.status] ?? STATUS_STYLE.arrived;
+            const gname = summaryGateName(f.gate);
+            return (gname && gateColors[gname]) || st.color;
+          }}
+          renderTag={(f) => {
+            const st = STATUS_STYLE[f.status] ?? STATUS_STYLE.arrived;
+            const gname = summaryGateName(f.gate);
+            const color = (gname && gateColors[gname]) || st.color;
+            return (
               <span
-                className="absolute -top-2 text-[10px] font-semibold text-primary"
-                style={{ left: 0, width: GUTTER - 12, textAlign: "right" }}
+                className={`flex items-center gap-2 rounded-md border border-border/70 bg-muted/40 py-1 pl-2 pr-2.5 text-xs ${f.status === "proposed" ? "opacity-75" : ""}`}
+                style={{ borderLeftWidth: 3, borderLeftColor: color }}
               >
-                NOW
+                <span className="font-mono font-medium">{f.callsign}</span>
+                <span className="font-mono text-muted-foreground">{hhmmZulu(timeOf(f))}</span>
+                {f.gate && <span className="font-mono text-muted-foreground/80">{f.gate}</span>}
               </span>
-            </div>
-
-            {placed.length === 0 && (
-              <div className="absolute inset-x-0 top-1/2 text-center text-sm text-muted-foreground">
-                {filters &&
-                (filters.gates?.length ||
-                  filters.statuses?.length ||
-                  filters.origins?.length ||
-                  filters.types?.length)
-                  ? "No matching arrivals"
-                  : "No ETAs in window"}
-              </div>
-            )}
-
-            {placed.map(({ f, y }) => {
-              const st = STATUS_STYLE[f.status] ?? STATUS_STYLE.arrived;
-              const gname = summaryGateName(f.gate);
-              const color = (gname && gateColors[gname]) || st.color;
-              return (
-                <div
-                  key={f.callsign}
-                  className="absolute flex items-center"
-                  style={{ top: y - 11, left: GUTTER }}
-                >
-                  {/* connector tick to the axis */}
-                  <span
-                    className="h-0.5 w-3 shrink-0"
-                    style={{ backgroundColor: color }}
-                  />
-                  <span
-                    className={`flex items-center gap-2 rounded-md border border-border/70 bg-muted/40 py-1 pl-2 pr-2.5 text-xs ${f.status === "proposed" ? "opacity-75" : ""}`}
-                    style={{ borderLeftWidth: 3, borderLeftColor: color }}
-                  >
-                    <span className="font-mono font-medium">{f.callsign}</span>
-                    <span className="font-mono text-muted-foreground">
-                      {hhmmZulu(timeOf(f))}
-                    </span>
-                    {f.gate && (
-                      <span className="font-mono text-muted-foreground/80">
-                        {f.gate}
-                      </span>
-                    )}
-                  </span>
-                </div>
-              );
-            })}
-          </div>
-        </div>
+            );
+          }}
+        />
       </CardContent>
     </Card>
   );
