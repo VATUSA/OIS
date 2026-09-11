@@ -667,11 +667,20 @@ pub async fn flight_advisory(
     State(state): State<AppState>,
     Path(callsign): Path<String>,
 ) -> Result<Json<FlightAdvisory>, ApiError> {
-    let pool = state.db.as_ref().ok_or(ApiError::ServiceUnavailable)?;
     let cs = callsign.trim().to_ascii_uppercase();
+    Ok(Json(build_flight_advisory(&state, cs).await?))
+}
+
+/// Assemble the flight advisory for an already-normalized (upper-cased) callsign — the shared body
+/// of `flight_advisory` (public, by callsign) and `my_flight` (session, by CID).
+pub(crate) async fn build_flight_advisory(
+    state: &AppState,
+    cs: String,
+) -> Result<FlightAdvisory, ApiError> {
+    let pool = state.db.as_ref().ok_or(ApiError::ServiceUnavailable)?;
 
     // Locate the flight in the live feed (clone just the fields we need).
-    let (snapshot, airports) = feed_view(&state).await;
+    let (snapshot, airports) = feed_view(state).await;
     let hit = snapshot.as_ref().and_then(|s| {
         s.data
             .pilots
@@ -689,11 +698,11 @@ pub async fn flight_advisory(
             })
     });
     let Some((lat, lon, altitude, groundspeed, heading, fp)) = hit else {
-        return Ok(Json(FlightAdvisory {
+        return Ok(FlightAdvisory {
             callsign: cs,
             found: false,
             ..Default::default()
-        }));
+        });
     };
     let arr = fp
         .as_ref()
@@ -758,7 +767,7 @@ pub async fn flight_advisory(
         }
 
         // Arrival rate program — this flight's metered delay from the live flow.
-        let flow = crate::handlers::feed::flow_for(&state, pool, &arr).await?;
+        let flow = crate::handlers::feed::flow_for(state, pool, &arr).await?;
         if let (Some(aar), Some(ff)) = (
             flow.aar,
             flow.flights
@@ -820,7 +829,7 @@ pub async fn flight_advisory(
             let releases = load_releases(pool, &fca.id).await?;
             let (fca_id, fca_name, fca_color) =
                 (fca.id.clone(), fca.name.clone(), fca.color.clone());
-            let metered = metered_flights(&state, fca, releases, now, false).await?;
+            let metered = metered_flights(state, fca, releases, now, false).await?;
             if let Some(f) = metered
                 .into_iter()
                 .find(|f| f.callsign.eq_ignore_ascii_case(&cs))
@@ -846,7 +855,40 @@ pub async fn flight_advisory(
 
     adv.total_delay_min = delays.into_iter().max().unwrap_or(0);
     adv.edct = edcts.into_iter().max();
-    Ok(Json(adv))
+    Ok(adv)
+}
+
+/// Session-scoped "my flight" — resolve the caller's live flight by matching their VATSIM CID
+/// against the feed snapshot, then assemble the same advisory `flight_advisory` returns. `found` is
+/// false when the caller isn't connected (or has no flight plan) under their CID.
+#[utoipa::path(
+    get,
+    path = "/api/v1/me/flight",
+    tag = "public",
+    responses((status = 200, body = FlightAdvisory), (status = 401))
+)]
+pub async fn my_flight(
+    State(state): State<AppState>,
+    Extension(current_user): Extension<Option<CurrentUser>>,
+) -> Result<Json<FlightAdvisory>, ApiError> {
+    let user = current_user.as_ref().ok_or(ApiError::Unauthorized)?;
+    let cs = {
+        let (snapshot, _) = feed_view(&state).await;
+        snapshot.as_ref().and_then(|s| {
+            s.data
+                .pilots
+                .iter()
+                .find(|p| p.cid as i64 == user.cid)
+                .map(|p| p.callsign.to_ascii_uppercase())
+        })
+    };
+    match cs {
+        Some(cs) => Ok(Json(build_flight_advisory(&state, cs).await?)),
+        None => Ok(Json(FlightAdvisory {
+            found: false,
+            ..Default::default()
+        })),
+    }
 }
 
 /// How much of the current live filed traffic the nav engine fully resolves, plus the most

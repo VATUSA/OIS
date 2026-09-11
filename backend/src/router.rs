@@ -30,6 +30,8 @@ pub fn build_router(state: AppState) -> Router {
         .route("/api/v1/auth/vatsim/callback", get(auth::vatsim_callback))
         .route("/api/v1/auth/logout", post(auth::logout))
         .route("/api/v1/me", get(auth::me))
+        // The signed-in pilot's own live flight (CID-matched against the feed snapshot).
+        .route("/api/v1/me/flight", get(flow::my_flight))
         .route(
             "/api/v1/me/preferences/{namespace}",
             get(preferences::get_preferences).put(preferences::put_preferences),

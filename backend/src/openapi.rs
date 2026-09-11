@@ -35,6 +35,7 @@ use utoipa::OpenApi;
         crate::handlers::facilities::get_facility,
         crate::handlers::public::get_board,
         crate::handlers::flow::flight_advisory,
+        crate::handlers::flow::my_flight,
         crate::handlers::access::get_access_catalog,
         crate::handlers::access::get_self_access,
         crate::handlers::access::list_users,

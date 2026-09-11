@@ -4,9 +4,10 @@ import {Badge, Card, CardContent} from "@ois/ui";
 import {OctagonX, Plane, Split, Timer, Waypoints} from "lucide-react";
 
 import {FlightSearch} from "@/components/flight-search";
+import {useMe} from "@/lib/auth";
 import {useTraffic} from "@/lib/fca";
 import {hhmmZulu} from "@/lib/time";
-import {type FlightAdvisory, usePublicBoard, usePublicFlight} from "@/lib/public";
+import {type FlightAdvisory, useMyFlight, usePublicBoard, usePublicFlight} from "@/lib/public";
 
 function DelayBadge({ min }: { min: number }) {
   if (min <= 0) return <Badge variant="outline">no delay</Badge>;
@@ -194,8 +195,11 @@ function Result({ f }: { f: FlightAdvisory }) {
 
 export function PilotPage() {
   const [callsign, setCallsign] = useState<string | null>(null);
+  const { data: me } = useMe();
   const traffic = useTraffic();
   const flight = usePublicFlight(callsign);
+  // Auto-resolve the signed-in pilot's own flight when they haven't searched for a specific one.
+  const mine = useMyFlight(!!me && !callsign);
   const board = usePublicBoard();
   const restrictions = board.data?.restrictions ?? [];
 
@@ -215,8 +219,8 @@ export function PilotPage() {
         autoFocus
       />
 
-      {callsign &&
-        (flight.isLoading ? (
+      {callsign ? (
+        flight.isLoading ? (
           <p className="py-10 text-center text-sm text-muted-foreground">
             Looking up {callsign}…
           </p>
@@ -226,7 +230,22 @@ export function PilotPage() {
           </p>
         ) : flight.data ? (
           <Result f={flight.data} />
-        ) : null)}
+        ) : null
+      ) : mine.data?.found ? (
+        <div className="flex flex-col gap-2">
+          <p className="text-xs text-muted-foreground">
+            Showing your flight — search above to look up another.
+          </p>
+          <Result f={mine.data} />
+        </div>
+      ) : me && !mine.isLoading && mine.data ? (
+        <Card>
+          <CardContent className="py-10 text-center text-sm text-muted-foreground">
+            You’re not on the VATSIM network under your CID right now. Connect and file a flight
+            plan, or search for a callsign above.
+          </CardContent>
+        </Card>
+      ) : null}
 
       {restrictions.length > 0 && (
         <Card>

@@ -26,6 +26,23 @@ export function usePublicFlight(callsign: string | null) {
   });
 }
 
+/** The signed-in pilot's own live flight, CID-matched against the feed. Session-scoped: returns
+ *  `found: false` when not connected, and `undefined` when signed out or the feed is unavailable
+ *  (so the page falls back to manual search without showing an error). */
+export function useMyFlight(enabled: boolean) {
+  return useQuery({
+    queryKey: ["my-flight"],
+    enabled,
+    retry: false,
+    refetchInterval: 30_000,
+    queryFn: async () => {
+      const { data, error } = await ois.GET("/api/v1/me/flight");
+      if (error || !data) return undefined;
+      return data;
+    },
+  });
+}
+
 /** All active TMIs (ground stops, GDPs, restrictions, rate programs). Public, no auth. */
 export function usePublicBoard() {
   return useQuery({
