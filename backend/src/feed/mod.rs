@@ -37,7 +37,17 @@ use tokio::sync::RwLock;
 use airports::AirportDb;
 use vatsim::VatsimData;
 
-const POLL_SECS: u64 = 15;
+/// Poll ~10s after the source's last known `update_timestamp` — VATSIM refreshes ~15s, so this
+/// lands just after the next publish instead of averaging half a fixed interval either side of it.
+const REFRESH_BUFFER_SECS: u64 = 10;
+/// Fast retry cadence used when the refresh-buffer target has already passed (the fetch was late,
+/// `update_timestamp` didn't parse, this is the very first tick, or a failure streak is in
+/// progress) — catches the source's next publish quickly rather than waiting out a full interval.
+const FAST_POLL_SECS: u64 = 2;
+/// A single failed fetch must not flip `healthy` — transient connect/timeout blips on
+/// data.vatsim.net are normal and self-heal on the next tick. Only N in a row means the feed is
+/// actually behind.
+const MAX_CONSECUTIVE_FAILURES: u32 = 3;
 
 pub struct Snapshot {
     pub fetched_at: DateTime<Utc>,
@@ -91,10 +101,36 @@ pub fn new_state() -> FeedState {
     Arc::new(RwLock::new(FeedInner::default()))
 }
 
-/// Spawn the background poller. Safe to call once at startup; it loads the airport
-/// database, then refreshes the traffic snapshot every `POLL_SECS`.
+/// Spawn the background poller. Safe to call once at startup; it loads the airport database, then
+/// phase-locks to the source's own refresh cadence (see `next_poll_delay`).
 pub fn spawn_poller(state: FeedState) {
     tokio::spawn(async move { poller(state).await });
+}
+
+/// After a successful fetch with the source's `update_timestamp` (`None` before the first ever
+/// fetch), when to poll again: shortly after the source is expected to have refreshed
+/// (`update_timestamp + REFRESH_BUFFER_SECS`), or immediately at the fast-poll cadence if that
+/// target has already passed — this fetch was itself already late, `update_timestamp` failed to
+/// parse, there's no prior timestamp yet, or a failure streak is in progress (the caller leaves
+/// `last_source_ts` unchanged on failure, so this naturally retries fast during an outage instead
+/// of waiting out a full interval).
+fn next_poll_delay(last_source_ts: Option<DateTime<Utc>>, now: DateTime<Utc>) -> Duration {
+    let fast = Duration::from_secs(FAST_POLL_SECS);
+    let Some(ts) = last_source_ts else {
+        return Duration::ZERO;
+    };
+    let target = ts + chrono::Duration::seconds(REFRESH_BUFFER_SECS as i64);
+    if target > now {
+        (target - now).to_std().unwrap_or(fast)
+    } else {
+        fast
+    }
+}
+
+/// Whether `consecutive_failures` should flip `healthy` false — a single transient error must not;
+/// only `MAX_CONSECUTIVE_FAILURES` in a row means the feed is actually behind.
+fn should_mark_unhealthy(consecutive_failures: u32) -> bool {
+    consecutive_failures >= MAX_CONSECUTIVE_FAILURES
 }
 
 async fn poller(state: FeedState) {
@@ -124,15 +160,21 @@ async fn poller(state: FeedState) {
         }
     }
 
-    let mut ticker = tokio::time::interval(Duration::from_secs(POLL_SECS));
+    let mut last_source_ts: Option<DateTime<Utc>> = None;
+    let mut consecutive_failures: u32 = 0;
     loop {
-        ticker.tick().await;
+        tokio::time::sleep(next_poll_delay(last_source_ts, Utc::now())).await;
         match vatsim::fetch(&client).await {
             Ok(data) => {
+                consecutive_failures = 0;
                 let now = Utc::now();
                 let pilots = data.pilots.len();
                 let prefiles = data.prefiles.len();
                 let source_timestamp = data.general.update_timestamp.clone();
+                last_source_ts = DateTime::parse_from_rfc3339(&source_timestamp)
+                    .map(|dt| dt.with_timezone(&Utc))
+                    .ok()
+                    .or(last_source_ts);
                 let mut guard = state.write().await;
                 guard.status.healthy = true;
                 guard.status.last_ok = Some(now);
@@ -155,11 +197,65 @@ async fn poller(state: FeedState) {
                 }));
             }
             Err(e) => {
-                let mut guard = state.write().await;
-                guard.status.healthy = false;
-                guard.status.last_error = Some(e.to_string());
-                tracing::warn!(error = %e, "feed: vatsim fetch failed");
+                consecutive_failures += 1;
+                tracing::warn!(error = %e, consecutive_failures, "feed: vatsim fetch failed");
+                // last_source_ts is left as-is: next_poll_delay sees its buffer target already
+                // passed and retries at the fast cadence instead of waiting out a full interval.
+                if should_mark_unhealthy(consecutive_failures) {
+                    let mut guard = state.write().await;
+                    guard.status.healthy = false;
+                    guard.status.last_error = Some(e.to_string());
+                }
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn first_tick_polls_immediately() {
+        assert_eq!(next_poll_delay(None, Utc::now()), Duration::ZERO);
+    }
+
+    #[test]
+    fn waits_until_the_refresh_buffer_when_the_source_just_updated() {
+        let now = Utc::now();
+        let delay = next_poll_delay(Some(now), now);
+        // Buffer hasn't elapsed yet: wait roughly the remaining buffer, not the fast cadence.
+        assert_eq!(delay, Duration::from_secs(REFRESH_BUFFER_SECS));
+    }
+
+    #[test]
+    fn waits_less_as_the_buffer_elapses() {
+        let now = Utc::now();
+        let ts = now - chrono::Duration::seconds(4);
+        let delay = next_poll_delay(Some(ts), now);
+        assert_eq!(delay, Duration::from_secs(REFRESH_BUFFER_SECS - 4));
+    }
+
+    #[test]
+    fn fast_polls_once_the_buffer_target_has_passed() {
+        let now = Utc::now();
+        // A timestamp from well before now: the buffer target is already behind us.
+        let stale = now - chrono::Duration::seconds(REFRESH_BUFFER_SECS as i64 + 30);
+        assert_eq!(
+            next_poll_delay(Some(stale), now),
+            Duration::from_secs(FAST_POLL_SECS)
+        );
+    }
+
+    #[test]
+    fn a_single_failure_does_not_mark_unhealthy() {
+        assert!(!should_mark_unhealthy(1));
+        assert!(!should_mark_unhealthy(MAX_CONSECUTIVE_FAILURES - 1));
+    }
+
+    #[test]
+    fn n_consecutive_failures_marks_unhealthy() {
+        assert!(should_mark_unhealthy(MAX_CONSECUTIVE_FAILURES));
+        assert!(should_mark_unhealthy(MAX_CONSECUTIVE_FAILURES + 1));
     }
 }
