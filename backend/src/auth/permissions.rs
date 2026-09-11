@@ -107,3 +107,115 @@ permission!(
 // stats — persistent network statistics + saved capture windows
 permission!(StatsRead, ["stats", "data"], Read);
 permission!(StatsCaptureUpdate, ["stats", "capture"], Update);
+
+#[cfg(test)]
+mod sync_tests {
+    use std::collections::HashSet;
+
+    use sqlx::PgPool;
+
+    /// Every `permission!` macro invocation's derived dotted name (`segments.joined.action`),
+    /// parsed directly from this file's own source — the only way to enumerate every marker
+    /// without a compile-time registry (no `inventory`/`linkme` dependency exists in this
+    /// workspace, and source-parsing is the standard cheap-test pattern for this). Note: avoid
+    /// writing the macro-call text `permission!` immediately followed by an open paren anywhere
+    /// in this module's own comments/strings, or the scan below will find and misparse it too.
+    fn parse_marker_names() -> Vec<String> {
+        let source = include_str!("permissions.rs");
+        // Split across two literals so this very source line doesn't match itself when the whole
+        // file (this test module included) gets scanned below.
+        let needle = concat!("permission", "!(");
+        let mut names = Vec::new();
+        let mut rest = source;
+        while let Some(start) = rest.find(needle) {
+            rest = &rest[start + needle.len()..];
+            let end = rest.find(')').expect("unterminated permission! invocation");
+            let args = &rest[..end];
+            rest = &rest[end + 1..];
+
+            // `args` is `Name, ["seg1", "seg2"], Action` (whitespace/newlines allowed anywhere).
+            let bracket_start = args.find('[').expect("permission! missing segment list");
+            let bracket_end = args.find(']').expect("permission! missing segment list");
+            let segments: Vec<&str> = args[bracket_start + 1..bracket_end]
+                .split(',')
+                .map(|s| s.trim().trim_matches('"'))
+                .filter(|s| !s.is_empty())
+                .collect();
+            let action = args[bracket_end + 1..].trim_start_matches(',').trim();
+            names.push(format!(
+                "{}.{}",
+                segments.join("."),
+                action.to_ascii_lowercase()
+            ));
+        }
+        names
+    }
+
+    /// A `permission!` marker is meant to be grantable and documented, not just enforced — if it
+    /// only exists here, the access editor can never show or grant it, and the catalog silently
+    /// drifts from what the code actually checks (see #72/#74's `events_repo::list_all` incident
+    /// for what unaudited drift like this costs). Directional on purpose: catalog/migration
+    /// entries with *no* marker (`tmu.ntml.*`, `ace.team.*`, etc.) are already documented,
+    /// intentional not-yet-implemented state (see docs/features/*.md) — this only catches the
+    /// failure mode the issue describes, forgetting one of the other two places for something
+    /// that's actually enforced.
+    #[sqlx::test]
+    async fn every_permission_marker_has_a_catalog_entry_and_a_migration_row(pool: PgPool) {
+        let markers = parse_marker_names();
+        assert!(
+            markers.len() > 50,
+            "sanity: the source parser should find every permission! invocation in this file"
+        );
+
+        let catalog: HashSet<&str> = ois_core::catalog::draft_new_permission_names()
+            .into_iter()
+            .collect();
+        let db_rows: HashSet<String> = sqlx::query_scalar("select name from access.permissions")
+            .fetch_all(&pool)
+            .await
+            .unwrap()
+            .into_iter()
+            .collect();
+
+        for name in &markers {
+            assert!(
+                catalog.contains(name.as_str()),
+                "{name}: has a permission! marker in permissions.rs but no entry in \
+                 ois_core::catalog::draft_new_permission_names() — add it there"
+            );
+            assert!(
+                db_rows.contains(name),
+                "{name}: has a permission! marker in permissions.rs but no \
+                 `insert into access.permissions` row in any migration — add one"
+            );
+        }
+    }
+
+    /// Same directional check for the role trio: every role the access editor can actually grant
+    /// (`ASSIGNABLE_USER_ROLES`) must be a real default role and exist in the DB. Not the reverse
+    /// — `default_roles()` includes non-assignable machine/bootstrapped roles (`SERVER_ADMIN`,
+    /// `BOT`, `SERVICE_APP`) by design, and migration 0004's superseded role names are separate
+    /// pre-existing cruft, not this check's concern.
+    #[sqlx::test]
+    async fn every_assignable_role_has_a_default_and_a_migration_row(pool: PgPool) {
+        let defaults: HashSet<&str> = ois_core::catalog::default_roles().into_iter().collect();
+        let db_roles: HashSet<String> = sqlx::query_scalar("select name from access.roles")
+            .fetch_all(&pool)
+            .await
+            .unwrap()
+            .into_iter()
+            .collect();
+
+        for role in crate::repos::access::ASSIGNABLE_USER_ROLES {
+            assert!(
+                defaults.contains(role),
+                "{role}: in ASSIGNABLE_USER_ROLES but not ois_core::catalog::default_roles()"
+            );
+            assert!(
+                db_roles.contains(*role),
+                "{role}: in ASSIGNABLE_USER_ROLES but no `insert into access.roles` row in any \
+                 migration"
+            );
+        }
+    }
+}

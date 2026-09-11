@@ -402,3 +402,18 @@ use utoipa::OpenApi;
     )
 )]
 pub struct ApiDoc;
+
+/// A CI utility, not a real test: dumps the current OpenAPI document to a file so the
+/// client-drift check (`.github/workflows/ci.yml`'s `client-drift` job) can regenerate
+/// `@ois/api-client` and diff it against what's committed, without needing a live server + DB —
+/// the document is a pure compile-time/utoipa artifact. `#[ignore]` keeps it out of the normal
+/// `cargo test` run; invoke explicitly with `--ignored`.
+#[test]
+#[ignore = "CI utility — see .github/workflows/ci.yml's client-drift job"]
+fn dump_openapi_json() {
+    std::fs::write(
+        "/tmp/ois-openapi.json",
+        ApiDoc::openapi().to_pretty_json().unwrap(),
+    )
+    .unwrap();
+}
