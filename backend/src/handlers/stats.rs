@@ -6,23 +6,28 @@ use std::sync::Arc;
 
 use axum::{
     Json,
-    extract::{Path, Query, State},
+    extract::{Extension, Path, Query, State},
 };
 use chrono::{DateTime, Duration, Utc};
 use serde::Deserialize;
 use serde_json::{Value, json};
 
 use crate::{
-    auth::{permissions::StatsRead, require_permission::RequirePermission},
+    auth::{
+        context::CurrentUser,
+        permissions::{StatsCaptureUpdate, StatsRead, SystemJobsRead},
+        require_permission::RequirePermission,
+    },
     errors::ApiError,
     feed::stats::reconstruct::reconstruct_at,
     handlers::{atc, feed as feed_handlers, flow as flow_handlers, runway as runway_handlers},
     models::{
         AtcBoard, CaptureSummaryBody, DelaySummary, DeparturesResponse, NetworkPointBody,
-        ReplayBody, ReplayChunkBody, ReplayFlightBody, ReplayPlan, StatsAirportBody,
-        StatsFlightDetail, StatsFlightSummary, StatsTrackBody, TrafficAircraft,
+        ReplayBody, ReplayChunkBody, ReplayFlightBody, ReplayPlan, SaveCaptureRequest,
+        StatsAirportBody, StatsFlightDetail, StatsFlightSummary, StatsTrackBody,
+        StorageForecastBody, TrafficAircraft,
     },
-    repos::stats as stats_repo,
+    repos::{events as events_repo, stats as stats_repo},
     state::AppState,
 };
 
@@ -313,6 +318,49 @@ pub async fn list_captures(
     Ok(Json(
         stats_repo::list_replayable_captures(pool(&state)?).await?,
     ))
+}
+
+/// Save an already-viewed window (an event's or an ad-hoc one) as a permanent, named capture, so
+/// it survives compaction and reappears in the replay picker.
+#[utoipa::path(
+    post,
+    path = "/api/v1/stats/captures",
+    tag = "stats",
+    request_body = SaveCaptureRequest,
+    responses((status = 200, body = CaptureSummaryBody), (status = 400), (status = 401), (status = 404))
+)]
+pub async fn save_capture(
+    State(state): State<AppState>,
+    _permission: RequirePermission<StatsCaptureUpdate>,
+    Extension(current_user): Extension<Option<CurrentUser>>,
+    Json(payload): Json<SaveCaptureRequest>,
+) -> Result<Json<CaptureSummaryBody>, ApiError> {
+    let p = pool(&state)?;
+    let label = payload.label.trim();
+    if label.is_empty() || label.len() > 128 {
+        return Err(ApiError::BadRequest);
+    }
+    let from = DateTime::from_timestamp(payload.from, 0).ok_or(ApiError::BadRequest)?;
+    let to = DateTime::from_timestamp(payload.to, 0).ok_or(ApiError::BadRequest)?;
+    if to <= from {
+        return Err(ApiError::BadRequest);
+    }
+    if let Some(event_id) = payload.event_id {
+        if events_repo::get(p, event_id).await?.is_none() {
+            return Err(ApiError::NotFound);
+        }
+    }
+    if !stats_repo::has_positions_in(p, from, to).await? {
+        // Nothing left to keep — the window has already aged past what compaction retains.
+        return Err(ApiError::BadRequest);
+    }
+    let created_by = current_user.as_ref().map(|u| u.id.as_str());
+    let id =
+        stats_repo::save_capture_window(p, payload.event_id, label, from, to, created_by).await?;
+    let saved = stats_repo::capture_summary_get(p, &id)
+        .await?
+        .ok_or(ApiError::NotFound)?;
+    Ok(Json(saved))
 }
 
 #[derive(Deserialize)]
@@ -793,4 +841,20 @@ pub async fn hist_ground_stops(
     Ok(Json(
         crate::repos::tmu::list_ground_stops_at(p, parse_at(&q)?).await?,
     ))
+}
+
+/// Current `stats` schema disk usage and a naive, no-further-compaction projection — ops
+/// visibility for the same audience as the background-jobs page (`stats.compaction` is one of the
+/// listed jobs; this gives it size context).
+#[utoipa::path(
+    get,
+    path = "/api/v1/stats/storage-forecast",
+    tag = "stats",
+    responses((status = 200, body = StorageForecastBody), (status = 401))
+)]
+pub async fn storage_forecast(
+    State(state): State<AppState>,
+    _permission: RequirePermission<SystemJobsRead>,
+) -> Result<Json<StorageForecastBody>, ApiError> {
+    Ok(Json(stats_repo::storage_forecast(pool(&state)?).await?))
 }

@@ -1,7 +1,9 @@
 import {Badge, Button, Card, CardContent} from "@ois/ui";
+import {Database} from "lucide-react";
 
 import {timeAgo} from "@/lib/time";
 import {type JobStatus, useJobs, useRunJob} from "@/lib/jobs";
+import {useStorageForecast} from "@/lib/stats";
 
 /** A short human interval like "15m" / "24h" from a seconds value. */
 function formatInterval(secs: number | null | undefined): string {
@@ -10,6 +12,64 @@ function formatInterval(secs: number | null | undefined): string {
   if (secs < 3600) return `${Math.round(secs / 60)}m`;
   if (secs < 86400) return `${Math.round(secs / 3600)}h`;
   return `${Math.round(secs / 86400)}d`;
+}
+
+/** A human byte size, e.g. `4.2 GB`. */
+export function formatBytes(bytes: number): string {
+  if (bytes < 1024) return `${bytes} B`;
+  const units = ["KB", "MB", "GB", "TB"];
+  let n = bytes / 1024;
+  let i = 0;
+  while (n >= 1024 && i < units.length - 1) {
+    n /= 1024;
+    i++;
+  }
+  return `${n.toFixed(n < 10 ? 1 : 0)} ${units[i]}`;
+}
+
+/**
+ * Current `stats` schema disk usage and a naive growth projection — gives the compaction jobs
+ * below size context. The projection is a deliberately simple upper bound: it assumes the current
+ * daily ingest rate holds and does not model the compaction ladder's ongoing thinning.
+ */
+function StorageForecastCard() {
+  const forecast = useStorageForecast();
+  if (!forecast.data) return null;
+  const f = forecast.data;
+
+  return (
+    <Card>
+      <CardContent className="flex flex-col gap-4 p-5 sm:flex-row sm:items-center sm:justify-between">
+        <div className="flex items-center gap-3">
+          <span className="flex size-8 items-center justify-center rounded-md bg-muted text-muted-foreground">
+            <Database className="size-4" />
+          </span>
+          <div>
+            <div className="text-xs font-medium uppercase tracking-wide text-muted-foreground">
+              Stats storage
+            </div>
+            <div className="text-2xl font-bold">{formatBytes(f.total_bytes)}</div>
+          </div>
+        </div>
+        <div className="grid grid-cols-3 gap-4 text-sm sm:text-right">
+          <div>
+            <div className="text-muted-foreground">Daily growth</div>
+            <div className="tabular-nums font-medium">
+              {formatBytes(f.daily_growth_bytes)}/day
+            </div>
+          </div>
+          <div>
+            <div className="text-muted-foreground">In 30 days</div>
+            <div className="tabular-nums font-medium">{formatBytes(f.projected_30d_bytes)}</div>
+          </div>
+          <div>
+            <div className="text-muted-foreground">In 90 days</div>
+            <div className="tabular-nums font-medium">{formatBytes(f.projected_90d_bytes)}</div>
+          </div>
+        </div>
+      </CardContent>
+    </Card>
+  );
 }
 
 function StatusBadge({ job }: { job: JobStatus }) {
@@ -73,6 +133,7 @@ export function AdminJobs() {
           support it.
         </p>
       </div>
+      <StorageForecastCard />
       <Card>
         <CardContent className="overflow-x-auto pt-6">
           {jobs.data ? (

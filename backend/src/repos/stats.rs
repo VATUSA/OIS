@@ -668,6 +668,49 @@ pub async fn close_capture(
     Ok(res.rows_affected() > 0)
 }
 
+/// Save an already-elapsed `[start, end)` window as a capture directly, bypassing the open/close
+/// lifecycle — used to keep a window after the fact rather than while it's being recorded live.
+/// `relax_scope` is false: the data already exists, so there's nothing left for the live collector
+/// to relax scope for.
+pub async fn save_capture_window(
+    pool: &PgPool,
+    event_id: Option<i64>,
+    label: &str,
+    start_time: DateTime<Utc>,
+    end_time: DateTime<Utc>,
+    created_by: Option<&str>,
+) -> Result<String, ApiError> {
+    sqlx::query_scalar::<_, String>(
+        "insert into stats.capture (event_id, label, start_time, end_time, status, relax_scope, created_by)
+         values ($1, $2, $3, $4, 'saved', false, $5) returning id",
+    )
+    .bind(event_id)
+    .bind(label)
+    .bind(start_time)
+    .bind(end_time)
+    .bind(created_by)
+    .fetch_one(pool)
+    .await
+    .map_err(db)
+}
+
+/// Whether any raw `stats.position` row falls in `[from, to)` — used to reject saving a capture
+/// over a window that compaction has already thinned past the point of being worth keeping.
+pub async fn has_positions_in(
+    pool: &PgPool,
+    from: DateTime<Utc>,
+    to: DateTime<Utc>,
+) -> Result<bool, ApiError> {
+    sqlx::query_scalar::<_, bool>(
+        "select exists(select 1 from stats.position where ts >= $1 and ts < $2)",
+    )
+    .bind(from)
+    .bind(to)
+    .fetch_one(pool)
+    .await
+    .map_err(db)
+}
+
 // --- compaction / retention (saved-window-aware) ----------------------------------------------
 
 /// A `stats.position` row is protected from compaction while its `ts` falls inside a capture that is
@@ -702,16 +745,43 @@ pub async fn downsample_positions(
     Ok(res.rows_affected())
 }
 
-/// Drop all raw positions older than `before`, except protected (capture) rows. Returns rows
-/// deleted. Tier-1 simplified tracks on `stats.flight.path_simplified` survive this.
-pub async fn prune_positions(pool: &PgPool, before: DateTime<Utc>) -> Result<u64, ApiError> {
-    let sql = format!("delete from stats.position p where p.ts < $1 and {CAPTURE_GUARD}");
-    let res = sqlx::query(&sql)
-        .bind(before)
-        .execute(pool)
+/// Current disk usage and a naive, no-further-compaction projection for the `stats` schema —
+/// headline numbers only (it deliberately does not model the compaction ladder's ongoing
+/// thinning, so the projections are an upper bound, not a precise forecast).
+pub async fn storage_forecast(pool: &PgPool) -> Result<StorageForecastBody, ApiError> {
+    let total_bytes: i64 = sqlx::query_scalar(
+        "select coalesce(sum(pg_total_relation_size(format('stats.%I', tablename)::regclass)), 0)
+         from pg_tables where schemaname = 'stats'",
+    )
+    .fetch_one(pool)
+    .await
+    .map_err(db)?;
+    let position_bytes: i64 =
+        sqlx::query_scalar("select pg_total_relation_size('stats.position'::regclass)")
+            .fetch_one(pool)
+            .await
+            .map_err(db)?;
+    let position_rows: i64 = sqlx::query_scalar("select count(*) from stats.position")
+        .fetch_one(pool)
         .await
         .map_err(db)?;
-    Ok(res.rows_affected())
+    let daily_ingest_rows: i64 = sqlx::query_scalar(
+        "select count(*) from stats.position where ts >= now() - interval '1 day'",
+    )
+    .fetch_one(pool)
+    .await
+    .map_err(db)?;
+
+    let avg_row_bytes = position_bytes / position_rows.max(1);
+    let daily_growth_bytes = daily_ingest_rows * avg_row_bytes;
+    Ok(StorageForecastBody {
+        total_bytes,
+        position_bytes,
+        daily_ingest_rows,
+        daily_growth_bytes,
+        projected_30d_bytes: total_bytes + daily_growth_bytes * 30,
+        projected_90d_bytes: total_bytes + daily_growth_bytes * 90,
+    })
 }
 
 /// The most recent capture (open or saved) tied to an event — the window stats are generated over.
@@ -1169,7 +1239,7 @@ pub async fn flight_path_simplified(
 
 // --- capture replay ----------------------------------------------------------------------------
 
-use crate::models::CaptureSummaryBody;
+use crate::models::{CaptureSummaryBody, StorageForecastBody};
 
 /// Replayable captures (open or saved), newest first, with the tied event's title.
 pub async fn list_replayable_captures(pool: &PgPool) -> Result<Vec<CaptureSummaryBody>, ApiError> {
@@ -1191,6 +1261,23 @@ pub async fn capture_get(pool: &PgPool, id: &str) -> Result<Option<CaptureRow>, 
         .fetch_optional(pool)
         .await
         .map_err(db)
+}
+
+/// A single capture by id, in the joined summary shape (with the tied event's title) — the
+/// response shape for saving a new capture.
+pub async fn capture_summary_get(
+    pool: &PgPool,
+    id: &str,
+) -> Result<Option<CaptureSummaryBody>, ApiError> {
+    sqlx::query_as::<_, CaptureSummaryBody>(
+        "select c.id, c.event_id, e.title as event_title, c.label, c.start_time, c.end_time, c.status
+         from stats.capture c left join events.event e on e.id = c.event_id
+         where c.id = $1",
+    )
+    .bind(id)
+    .fetch_optional(pool)
+    .await
+    .map_err(db)
 }
 
 /// One thinned position sample for replay (`t` = seconds from the window start).
