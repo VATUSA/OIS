@@ -19,8 +19,10 @@ use crate::{
     },
     errors::ApiError,
     feed,
+    feed::facilities::FacilityMap,
     handlers::events::{normalize_icao, owning_artcc},
     models::{AirportConfigBody, AirportForecastBody, UpsertAirportConfigRequest},
+    repos::access::PermissionScope,
     repos::airport_configs as config_repo,
     state::AppState,
 };
@@ -117,15 +119,35 @@ pub async fn list_all_airport_configs(
         .filter(|v| !v.is_empty())
         .map(str::to_ascii_uppercase);
 
-    // One scope fetch for the whole list — each row already stores its owning ARTCC.
     let scope = principal
         .permission_scope(&state, CONFIG_PERMISSION)
         .await?;
-    let mut rows = config_repo::list_all(pool, artcc.as_deref()).await?;
-    for r in &mut rows {
-        r.editable = scope.allows((!r.artcc.is_empty()).then_some(r.artcc.as_str()));
-    }
-    Ok(Json(rows))
+    let rows = config_repo::list_all(pool).await?;
+    let facilities = state.facilities.read().await;
+    Ok(Json(annotate_and_filter(
+        rows,
+        &facilities,
+        &scope,
+        artcc.as_deref(),
+    )))
+}
+
+/// Resolve each row's live owning ARTCC (not its stored snapshot — that can go stale after a
+/// facility realignment) and use it for both `editable` and an optional `?artcc=` filter, matching
+/// `can_edit`/`create`/`update` which always check live.
+fn annotate_and_filter(
+    rows: Vec<AirportConfigBody>,
+    facilities: &FacilityMap,
+    scope: &PermissionScope,
+    artcc_filter: Option<&str>,
+) -> Vec<AirportConfigBody> {
+    rows.into_iter()
+        .filter_map(|mut r| {
+            let live = feed::facilities::artcc_for_airport(facilities, &r.icao);
+            r.editable = scope.allows(live.as_deref());
+            (artcc_filter.is_none() || live.as_deref() == artcc_filter).then_some(r)
+        })
+        .collect()
 }
 
 #[utoipa::path(
@@ -251,5 +273,111 @@ pub async fn delete_airport_config(
         Ok(StatusCode::NO_CONTENT)
     } else {
         Err(ApiError::NotFound)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::collections::HashSet;
+
+    use sqlx::PgPool;
+
+    use super::*;
+    use crate::feed::facilities::Facility;
+
+    async fn seed_user(pool: &PgPool) -> String {
+        sqlx::query_scalar::<_, String>(
+            "insert into identity.users (full_name, display_name) \
+             values ('Test User', 'Test User') returning id",
+        )
+        .fetch_one(pool)
+        .await
+        .unwrap()
+    }
+
+    fn upsert(name: &str) -> UpsertAirportConfigRequest {
+        UpsertAirportConfigRequest {
+            name: name.to_string(),
+            aar: 30,
+            adr: 30,
+            landing_runways: vec![],
+            wind_from_deg: 0,
+            wind_to_deg: 360,
+            calm_default: false,
+        }
+    }
+
+    /// Realignment scenario: KORD's config was created while ZDC owned it (stored `artcc: "ZDC"`),
+    /// but the live facility map now has it under ZAU. KDCA's stored value still matches live
+    /// (ZDC, unaffected). KXXX has no resolvable owning ARTCC at all (absent from the facility map)
+    /// — an empty-string stored `artcc` from a config created before any facility data existed.
+    #[sqlx::test]
+    async fn list_all_scopes_and_filters_by_the_live_artcc_not_the_stored_one(pool: PgPool) {
+        let user = seed_user(&pool).await;
+        config_repo::create(&pool, "KDCA", &upsert("DCA calm"), "ZDC", &user)
+            .await
+            .unwrap();
+        config_repo::create(&pool, "KORD", &upsert("ORD calm"), "ZDC", &user)
+            .await
+            .unwrap(); // stale: stored ZDC, live (below) is ZAU
+        config_repo::create(&pool, "KXXX", &upsert("XXX calm"), "", &user)
+            .await
+            .unwrap();
+
+        let facilities = FacilityMap::from([
+            (
+                "ZDC".to_string(),
+                Facility {
+                    kind: "artcc".to_string(),
+                    airports: vec!["KDCA".to_string()],
+                },
+            ),
+            (
+                "ZAU".to_string(),
+                Facility {
+                    kind: "artcc".to_string(),
+                    airports: vec!["KORD".to_string()],
+                },
+            ),
+        ]);
+
+        // Ordering is untouched by annotate_and_filter — assert it directly on the raw fetch.
+        let rows = config_repo::list_all(&pool).await.unwrap();
+        assert_eq!(rows.len(), 3, "all three rows come back unfiltered");
+        assert_eq!(
+            rows.iter().map(|r| r.icao.as_str()).collect::<Vec<_>>(),
+            ["KDCA", "KORD", "KXXX"],
+            "icao, calm_default desc, name"
+        );
+
+        // A ZAU-scoped principal: editable only where the LIVE artcc is ZAU (KORD), despite its
+        // stored value saying ZDC. The no-resolvable-ARTCC row (KXXX) is never editable under a
+        // Facilities scope.
+        let rows = config_repo::list_all(&pool).await.unwrap();
+        let zau_scope = PermissionScope::Facilities(HashSet::from(["ZAU".to_string()]));
+        let annotated = annotate_and_filter(rows, &facilities, &zau_scope, None);
+        let editable: Vec<_> = annotated
+            .iter()
+            .filter(|r| r.editable)
+            .map(|r| r.icao.as_str())
+            .collect();
+        assert_eq!(editable, ["KORD"]);
+
+        // National scope sees everything as editable, live-artcc-filtered to ZDC: only KDCA, even
+        // though KORD's *stored* value also says ZDC.
+        let rows = config_repo::list_all(&pool).await.unwrap();
+        let filtered =
+            annotate_and_filter(rows, &facilities, &PermissionScope::National, Some("ZDC"));
+        assert_eq!(
+            filtered.iter().map(|r| r.icao.as_str()).collect::<Vec<_>>(),
+            ["KDCA"]
+        );
+        assert!(filtered.iter().all(|r| r.editable));
+
+        // A scope covering nobody's ARTCC: nothing is editable.
+        let rows = config_repo::list_all(&pool).await.unwrap();
+        let no_scope = PermissionScope::Facilities(HashSet::new());
+        let annotated = annotate_and_filter(rows, &facilities, &no_scope, None);
+        assert!(annotated.iter().all(|r| !r.editable));
     }
 }
