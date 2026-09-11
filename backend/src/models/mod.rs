@@ -900,6 +900,37 @@ pub struct CaptureSummaryBody {
     pub status: String,
 }
 
+/// Save an already-viewed `[from, to]` window as a permanent, named capture.
+#[derive(Debug, Deserialize, ToSchema)]
+pub struct SaveCaptureRequest {
+    /// Ties the capture to an event; omit for a manual (ad-hoc) save.
+    pub event_id: Option<i64>,
+    pub label: String,
+    /// Window start (Unix epoch seconds).
+    pub from: i64,
+    /// Window end (Unix epoch seconds).
+    pub to: i64,
+}
+
+/// Headline current-size and projected-growth numbers for the `stats` schema, driven by the
+/// current raw ingest rate. A simple, explicitly naive projection — it does not model the
+/// compaction ladder's ongoing thinning, so it's an upper bound, not a forecast of steady state.
+#[derive(Debug, Serialize, ToSchema)]
+pub struct StorageForecastBody {
+    /// Total on-disk bytes across the `stats` schema's tables (incl. indexes).
+    pub total_bytes: i64,
+    /// On-disk bytes of `stats.position` alone (the fast-growing table compaction targets).
+    pub position_bytes: i64,
+    /// Rows ingested into `stats.position` in the last 24h.
+    pub daily_ingest_rows: i64,
+    /// Naive projected daily growth in bytes, from the current ingest rate and average row size.
+    pub daily_growth_bytes: i64,
+    /// Naive `total_bytes + 30 * daily_growth_bytes`, assuming no further compaction ever ran.
+    pub projected_30d_bytes: i64,
+    /// Naive `total_bytes + 90 * daily_growth_bytes`, assuming no further compaction ever ran.
+    pub projected_90d_bytes: i64,
+}
+
 /// One flight's downsampled track within a replay window.
 #[derive(Debug, Serialize, ToSchema)]
 pub struct ReplayFlightBody {
