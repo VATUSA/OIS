@@ -1,6 +1,6 @@
-import {useState} from "react";
-import {Badge, Card, CardContent, Switch} from "@ois/ui";
-import {ArrowLeft} from "lucide-react";
+import {useEffect, useState} from "react";
+import {Badge, Button, Card, CardContent, Switch} from "@ois/ui";
+import {ArrowLeft, ChevronLeft, ChevronRight} from "lucide-react";
 
 import {useMe} from "@/lib/auth";
 import {hasPermission} from "@/lib/permissions";
@@ -98,6 +98,13 @@ export function DelaysPage() {
   const [procedure, setProcedure] = useState("");
   const [hours, setHours] = useState(24);
   const [normalize, setNormalize] = useState(false);
+  const [page, setPage] = useState(1);
+
+  // A filter change invalidates whatever page was showing (the by-airport list underneath it
+  // shifts) — start back at the first page.
+  useEffect(() => {
+    setPage(1);
+  }, [kind, airport, runway, procedure, hours]);
 
   const summary = useDelaySummary({
     kind,
@@ -105,6 +112,8 @@ export function DelaysPage() {
     runway: runway || undefined,
     procedure: procedure || undefined,
     hours,
+    page,
+    pageSize: 25,
   });
 
   if (!canRead) {
@@ -241,10 +250,38 @@ export function DelaysPage() {
       ) : !airport ? (
         <Card>
           <CardContent className="pt-6">
-            <div className="mb-2 text-[10px] font-medium uppercase tracking-wide text-muted-foreground">
-              By airport · median {metric}
+            <div className="mb-2 flex items-center justify-between">
+              <span className="text-[10px] font-medium uppercase tracking-wide text-muted-foreground">
+                By airport · median {metric}
+              </span>
+              <span className="text-xs text-muted-foreground">{d.by_airport_total} airports</span>
             </div>
             <GroupList groups={d.by_airport} baseline={null} normalize={false} onPick={pickAirport} />
+            {d.by_airport_total > d.page_size && (
+              <div className="mt-3 flex items-center justify-end gap-2">
+                <span className="text-xs text-muted-foreground">
+                  Page {d.page} of {Math.max(1, Math.ceil(d.by_airport_total / d.page_size))}
+                </span>
+                <Button
+                  size="sm"
+                  variant="outline"
+                  className="h-7 px-2"
+                  disabled={d.page <= 1}
+                  onClick={() => setPage((p) => Math.max(1, p - 1))}
+                >
+                  <ChevronLeft className="size-3.5" />
+                </Button>
+                <Button
+                  size="sm"
+                  variant="outline"
+                  className="h-7 px-2"
+                  disabled={d.page * d.page_size >= d.by_airport_total}
+                  onClick={() => setPage((p) => p + 1)}
+                >
+                  <ChevronRight className="size-3.5" />
+                </Button>
+              </div>
+            )}
           </CardContent>
         </Card>
       ) : (

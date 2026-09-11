@@ -275,8 +275,56 @@ async fn run_agg(
     Ok(rows.into_iter().map(DelayGroup::from).collect())
 }
 
+/// The per-airport breakdown, paginated — this is the only `delay_summary` grouping that can grow
+/// unbounded (every airport with delay data nationally, vs. `by_runway`/`by_procedure` which are
+/// scoped to one already-picked airport). Returns the page's rows plus the total distinct-airport
+/// count for the same filters.
+#[allow(clippy::too_many_arguments)]
+async fn by_airport_page(
+    pool: &PgPool,
+    kind: &str,
+    since: DateTime<Utc>,
+    airport: Option<&str>,
+    runway: Option<&str>,
+    procedure: Option<&str>,
+    limit: i64,
+    offset: i64,
+) -> Result<(Vec<DelayGroup>, i64), ApiError> {
+    let sql = format!(
+        "select airport as key, {DELAY_AGG} from stats.flight_leg \
+         where {DELAY_FILTER} and airport is not null group by airport \
+         order by n desc, airport limit $6 offset $7"
+    );
+    let rows = sqlx::query_as::<_, AggRow>(&sql)
+        .bind(kind)
+        .bind(since)
+        .bind(airport)
+        .bind(runway)
+        .bind(procedure)
+        .bind(limit)
+        .bind(offset)
+        .fetch_all(pool)
+        .await
+        .map_err(db)?;
+    let total_sql = format!(
+        "select count(distinct airport) from stats.flight_leg \
+         where {DELAY_FILTER} and airport is not null"
+    );
+    let total: i64 = sqlx::query_scalar(&total_sql)
+        .bind(kind)
+        .bind(since)
+        .bind(airport)
+        .bind(runway)
+        .bind(procedure)
+        .fetch_one(pool)
+        .await
+        .map_err(db)?;
+    Ok((rows.into_iter().map(DelayGroup::from).collect(), total))
+}
+
 /// Average-delay summary for one leg `kind` since `since`, filtered by the optional airport/runway/
 /// procedure. Per-runway and per-procedure breakdowns are computed only when `airport` is set.
+/// `page`/`page_size` paginate `by_airport` only — the other groupings are inherently small.
 #[allow(clippy::too_many_arguments)]
 pub async fn delay_summary(
     pool: &PgPool,
@@ -286,6 +334,8 @@ pub async fn delay_summary(
     procedure: Option<&str>,
     since: DateTime<Utc>,
     window_hours: i64,
+    page: i64,
+    page_size: i64,
 ) -> Result<DelaySummary, ApiError> {
     let overall_sql =
         format!("select null::text as key, {DELAY_AGG} from stats.flight_leg where {DELAY_FILTER}");
@@ -307,14 +357,15 @@ pub async fn delay_summary(
             median_sec: 0,
             p90_sec: 0,
         });
-    let by_airport = run_agg(
+    let (by_airport, by_airport_total) = by_airport_page(
         pool,
-        &by("airport"),
         kind,
         since,
         airport,
         runway,
         procedure,
+        page_size,
+        (page - 1) * page_size,
     )
     .await?;
     let (by_runway, by_procedure) = if airport.is_some() {
@@ -340,6 +391,9 @@ pub async fn delay_summary(
         window_hours,
         overall,
         by_airport,
+        by_airport_total,
+        page,
+        page_size,
         by_runway,
         by_procedure,
     })
