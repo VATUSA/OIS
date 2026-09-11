@@ -28,10 +28,11 @@ never pick one yourself). Everything goes through `gh` against `VATUSA/OIS`. Do 
 
 - **Recover existing work first** — `git worktree list` and `git branch --list "*/$ARGUMENTS/*"`.
   If a branch/worktree for this issue exists, resume it; do **not** repeat work already done.
-- Otherwise create a **temporary worktree** and branch. The "work on `main`, never create or switch
-  branches" rule protects the main checkout; a worktree is the sanctioned exception:
+- Otherwise create a **temporary worktree** and branch. The "work on `next`, never create or switch
+  branches" rule protects the primary checkout; a worktree is the sanctioned exception. Fork from
+  `next` (the integration branch; PRs target it, and `main` is promoted from it separately — see #87):
   ```bash
-  git worktree add ../ois-wt/{branch} -b {branch} origin/main
+  git worktree add ../ois-wt/{branch} -b {branch} origin/next
   ```
   Branch format: `{type}/{issue}/{2-4-word-desc}`, max 50 chars, `type` ∈ `feat|fix|chore`
   (e.g. `feat/47/save-event-replays`). Work only inside that worktree.
