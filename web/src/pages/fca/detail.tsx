@@ -9,6 +9,7 @@ import {GripVertical, RotateCcw, X} from "lucide-react";
 
 import {type Fca, type FcaFlight, useClearRelease, useMarkRelease, useReorderFca,} from "@/lib/fca";
 import {hhmmZulu} from "@/lib/time";
+import {ArrivalLadder} from "@/components/ladder/ArrivalLadder";
 
 const STATUS = {
   airborne: { label: "AIR", color: "#22c55e", text: "text-emerald-500" },
@@ -49,99 +50,53 @@ function delayTag(f: FcaFlight): string {
   return f.status === "airborne" ? "air" : "gnd";
 }
 
+const LADDER_WIN = 60;
+const LADDER_CH = 7; // ≈ px per monospace/tabular char at text-xs
+
+/** Estimated rendered pixel width of one metering tag — connector + pill padding/border/gaps +
+ * text (seq + callsign + "HH:MMz"-ish time). Mirrors `airport.tsx`'s `stripW`. */
+function measureTagWidth(f: FcaFlight): number {
+  const chars = String(f.seq).length + f.callsign.length + 5;
+  return 12 /* connector tick */ + 30 /* pill padding + border + gaps */ + chars * LADDER_CH;
+}
+
 /** Metering ladder — plots each flight by its metered crossing time (now at bottom). */
 function Ladder({ flights, now }: { flights: FcaFlight[]; now: number }) {
-  const WIN = 60;
-  const PX = 5;
-  const ROW = 22;
-  const GUTTER = 54;
-  const H = WIN * PX;
-  const yOf = (min: number) => H - (Math.max(0, Math.min(min, WIN)) / WIN) * H;
-
   const items = flights
     .map((f) => ({ f, min: minutesUntil(f.cross_time, now) }))
-    .filter((x): x is { f: FcaFlight; min: number } => x.min != null)
-    .filter((x) => x.min >= -1 && x.min <= WIN)
-    .sort((a, b) => a.min - b.min);
-
-  let lastY = H + ROW;
-  const placed = items.map(({ f, min }) => {
-    const y = Math.min(yOf(min), lastY - ROW);
-    lastY = y;
-    return { f, min, y };
-  });
-  const topY = placed.length ? placed[placed.length - 1].y : H;
-  const shift = topY < 6 ? 6 - topY : 0;
-  const contentH = H + shift + 10;
-
-  const grid = [];
-  for (let k = 0; k <= WIN / 10; k++) {
-    const y = yOf(k * 10) + shift;
-    grid.push(
-      <div key={k}>
-        <div
-          className="absolute border-t border-border/40"
-          style={{ top: y, left: GUTTER, right: 0 }}
-        />
-        <span
-          className="absolute font-mono text-[10px] text-muted-foreground"
-          style={{ top: y - 6, left: 0, width: GUTTER - 8, textAlign: "right" }}
-        >
-          {hhmmZulu(new Date(now + k * 10 * 60000).toISOString())}
-        </span>
-      </div>,
-    );
-  }
-
-  if (placed.length === 0) {
-    return (
-      <p className="py-6 text-center text-xs text-muted-foreground">
-        No crossings in the next {WIN} min.
-      </p>
-    );
-  }
+    // `min` is non-null only when `cross_time` was itself a valid, non-empty timestamp.
+    .filter((x): x is { f: FcaFlight; min: number } => x.min != null && !!x.f.cross_time)
+    .map((x) => ({ key: x.f.callsign, min: x.min, time: x.f.cross_time as string, data: x.f }));
 
   return (
-    <div className="relative" style={{ height: contentH, minWidth: 260 }}>
-      <div
-        className="absolute top-0 bottom-0 border-l border-border/60"
-        style={{ left: GUTTER }}
-      />
-      {grid}
-      <div
-        className="absolute border-t-2 border-primary"
-        style={{ top: yOf(0) + shift, left: GUTTER, right: 0 }}
-      >
-        <span
-          className="absolute -top-2 text-[10px] font-semibold text-primary"
-          style={{ left: 0, width: GUTTER - 8, textAlign: "right" }}
-        >
-          NOW
-        </span>
-      </div>
-      {placed.map(({ f, y }) => {
+    <ArrivalLadder
+      items={items}
+      now={now}
+      win={LADDER_WIN}
+      pxPerMin={5}
+      gutter={54}
+      step={10}
+      rowGap={22}
+      minGap={11}
+      pad={6}
+      minWidth={260}
+      emptyMessage={`No crossings in the next ${LADDER_WIN} min.`}
+      measureTagWidth={measureTagWidth}
+      connectorColor={(f) => statusOf(f.status).color}
+      renderTag={(f) => {
         const st = statusOf(f.status);
         return (
-          <div
-            key={f.callsign}
-            className="absolute flex items-center"
-            style={{ top: y + shift - 10, left: GUTTER }}
+          <span
+            className="flex items-center gap-1.5 rounded border border-border/70 bg-muted/40 py-0.5 pl-1.5 pr-2 text-xs"
+            style={{ borderLeftWidth: 3, borderLeftColor: st.color }}
           >
-            <span className="h-0.5 w-3 shrink-0" style={{ background: st.color }} />
-            <span
-              className="flex items-center gap-1.5 rounded border border-border/70 bg-muted/40 py-0.5 pl-1.5 pr-2 text-xs"
-              style={{ borderLeftWidth: 3, borderLeftColor: st.color }}
-            >
-              <span className="tabular-nums text-muted-foreground">{f.seq}</span>
-              <span className="font-mono font-medium">{f.callsign}</span>
-              <span className="font-mono text-muted-foreground">
-                {hhmmZulu(f.cross_time)}
-              </span>
-            </span>
-          </div>
+            <span className="tabular-nums text-muted-foreground">{f.seq}</span>
+            <span className="font-mono font-medium">{f.callsign}</span>
+            <span className="font-mono text-muted-foreground">{hhmmZulu(f.cross_time)}</span>
+          </span>
         );
-      })}
-    </div>
+      }}
+    />
   );
 }
 
