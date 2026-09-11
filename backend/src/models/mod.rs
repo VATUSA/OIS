@@ -458,6 +458,18 @@ pub struct EventBody {
     pub end_time: DateTime<Utc>,
     /// VATUSA review state (e.g. "approved").
     pub review_status: String,
+    /// Stats-capture state (list view only): `off` | `scheduled` | `recording` | `recorded`.
+    /// Empty from `GET /events/{id}` and the VATUSA sync.
+    #[sqlx(default)]
+    pub recording: String,
+    /// True when the event has an ACE support request that wasn't cancelled — support was
+    /// requested (still open, or since completed). List view only; always `false` from
+    /// `GET /events/{id}`.
+    #[sqlx(default)]
+    pub ace_requested: bool,
+    /// True when any facility has been added to the event's facility support (list view only).
+    #[sqlx(default)]
+    pub facility_support: bool,
 }
 
 /// Whether an event needs national DCC support.
