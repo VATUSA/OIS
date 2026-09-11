@@ -749,8 +749,11 @@ pub async fn downsample_positions(
 /// headline numbers only (it deliberately does not model the compaction ladder's ongoing
 /// thinning, so the projections are an upper bound, not a precise forecast).
 pub async fn storage_forecast(pool: &PgPool) -> Result<StorageForecastBody, ApiError> {
+    // `sum(bigint)` returns `numeric` in Postgres (headroom against overflow), not `bigint` —
+    // cast back or sqlx refuses to decode it into `i64` (this 500'd on every call until caught in
+    // review: decode error "Rust type `i64` ... is not compatible with SQL type `NUMERIC`").
     let total_bytes: i64 = sqlx::query_scalar(
-        "select coalesce(sum(pg_total_relation_size(format('stats.%I', tablename)::regclass)), 0)
+        "select coalesce(sum(pg_total_relation_size(format('stats.%I', tablename)::regclass)), 0)::bigint
          from pg_tables where schemaname = 'stats'",
     )
     .fetch_one(pool)
