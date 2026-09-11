@@ -248,6 +248,10 @@ pub fn build_router(state: AppState) -> Router {
         )
         // Reusable per-airport runway configs (default AAR/ADR + wind rule) for event planning
         .route(
+            "/api/v1/airport-configs",
+            get(airport_configs::list_all_airport_configs),
+        )
+        .route(
             "/api/v1/airport-configs/{icao}",
             get(airport_configs::list_airport_configs).post(airport_configs::create_airport_config),
         )

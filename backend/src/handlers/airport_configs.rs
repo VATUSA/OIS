@@ -90,6 +90,44 @@ async fn can_edit(state: &AppState, principal: &Principal, icao: &str) -> Result
     Ok(scope.allows(artcc.as_deref()))
 }
 
+#[derive(Deserialize)]
+pub struct ConfigListQuery {
+    /// Scope to one owning ARTCC; omit for every airport.
+    pub artcc: Option<String>,
+}
+
+#[utoipa::path(
+    get, path = "/api/v1/airport-configs", tag = "events",
+    params(("artcc" = Option<String>, Query, description = "Scope to one owning ARTCC")),
+    responses((status = 200, body = Vec<AirportConfigBody>), (status = 401))
+)]
+pub async fn list_all_airport_configs(
+    State(state): State<AppState>,
+    _permission: RequirePermission<EventsPlanRead>,
+    Extension(current_user): Extension<Option<CurrentUser>>,
+    Extension(current_api_key): Extension<Option<CurrentApiKey>>,
+    Query(q): Query<ConfigListQuery>,
+) -> Result<Json<Vec<AirportConfigBody>>, ApiError> {
+    let principal = Principal::require(current_user.as_ref(), current_api_key.as_ref())?;
+    let pool = state.db.as_ref().ok_or(ApiError::ServiceUnavailable)?;
+    let artcc = q
+        .artcc
+        .as_deref()
+        .map(str::trim)
+        .filter(|v| !v.is_empty())
+        .map(str::to_ascii_uppercase);
+
+    // One scope fetch for the whole list — each row already stores its owning ARTCC.
+    let scope = principal
+        .permission_scope(&state, CONFIG_PERMISSION)
+        .await?;
+    let mut rows = config_repo::list_all(pool, artcc.as_deref()).await?;
+    for r in &mut rows {
+        r.editable = scope.allows((!r.artcc.is_empty()).then_some(r.artcc.as_str()));
+    }
+    Ok(Json(rows))
+}
+
 #[utoipa::path(
     get, path = "/api/v1/airport-configs/{icao}", tag = "events",
     params(("icao" = String, Path)),

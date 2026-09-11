@@ -24,6 +24,22 @@ pub async fn list_by_icao(pool: &PgPool, icao: &str) -> Result<Vec<AirportConfig
     .map_err(|_| ApiError::Internal)
 }
 
+/// Every airport's configs, optionally scoped to one owning ARTCC — ordered by airport for the
+/// all-airports list view.
+pub async fn list_all(
+    pool: &PgPool,
+    artcc: Option<&str>,
+) -> Result<Vec<AirportConfigBody>, ApiError> {
+    sqlx::query_as::<_, AirportConfigBody>(&format!(
+        "{CONFIG_SELECT} where ($1::text is null or c.artcc = $1) \
+         order by c.icao, c.calm_default desc, c.name"
+    ))
+    .bind(artcc)
+    .fetch_all(pool)
+    .await
+    .map_err(|_| ApiError::Internal)
+}
+
 pub async fn get(pool: &PgPool, id: &str) -> Result<Option<AirportConfigBody>, ApiError> {
     sqlx::query_as::<_, AirportConfigBody>(&format!("{CONFIG_SELECT} where c.id = $1"))
         .bind(id)
