@@ -53,6 +53,22 @@ export const SETTINGS: SettingDef[] = [
     control: { kind: "toggle", default: true },
   },
   {
+    key: "map.aircraftIconSize",
+    group: "Map",
+    label: "Aircraft icon size",
+    description: "Scale aircraft symbols on the map up or down.",
+    control: {
+      kind: "select",
+      default: "100",
+      options: [
+        { value: "60", label: "Small (60%)" },
+        { value: "80", label: "Smaller (80%)" },
+        { value: "100", label: "Default (100%)" },
+        { value: "125", label: "Larger (125%)" },
+      ],
+    },
+  },
+  {
     key: "debug.enabled",
     group: "Advanced",
     label: "Debug mode",
