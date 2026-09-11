@@ -123,6 +123,11 @@ export interface ChartWidget {
   topN?: number;
   /** Per-series color overrides, keyed by series key (field key or airport icao). */
   colors?: Record<string, string>;
+  /** Per-category color overrides for bar/scatter charts, keyed by the rendered x-axis value (e.g.
+   * a STAR/gate name). Takes precedence over the series color, letting one column stand out
+   * regardless of which series it belongs to. Pie charts already key `colors` by category directly
+   * and don't use this. */
+  categoryColors?: Record<string, string>;
   /** Rescale each series to 0–100% of its own max, so mixed-scale series compare on one axis. */
   normalize?: boolean;
   /** Horizontal reference lines (ignored while normalized, since units differ). */

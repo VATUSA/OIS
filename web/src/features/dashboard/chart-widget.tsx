@@ -225,18 +225,34 @@ function buildDefinition(
   categorical: boolean,
   series: Series[],
   colorFor: (key: string, i: number) => string,
+  categoryColors: Record<string, string>,
   normalized: boolean,
   thresholds: ChartThreshold[],
 ) {
   const x = xAccessor(xKey);
-  const seriesMarks = series.map((s, i) => {
+  // Bar/scatter render one discrete mark per datum, so a category override can recolor a single
+  // column regardless of which series it belongs to; line/area draw one continuous shape per
+  // series, where per-point recoloring is a materially different (and more ambiguous) visual, so
+  // they keep the flat per-series color.
+  const resolvedColor = (d: Row, fallback: string) => categoryColors[String(x(d) ?? "")] ?? fallback;
+  const seriesMarks = series.flatMap((s, i) => {
     const y = yAccessor(s.key);
     const color = colorFor(s.key, i);
-    if (chartType === "line") return lineY(data, { x, y, stroke: color });
-    if (chartType === "area") return areaY(data, { x, y, fill: color });
-    if (chartType === "scatter")
-      return dot(data, { x, y, fill: color, stroke: color, r: 3.5 });
-    return barY(data, { x, y, fill: color });
+    if (chartType === "line") return [lineY(data, { x, y, stroke: color })];
+    if (chartType === "area") return [areaY(data, { x, y, fill: color })];
+    if (chartType === "scatter") {
+      // dot() only takes a static fill/stroke, unlike barY's per-datum channel — split into one
+      // dot() mark per resolved color instead so a category override still recolors just its points.
+      const groups = new Map<string, Row[]>();
+      for (const d of data) {
+        const c = resolvedColor(d, color);
+        let arr = groups.get(c);
+        if (!arr) groups.set(c, (arr = []));
+        arr.push(d);
+      }
+      return [...groups.entries()].map(([c, gd]) => dot(gd, { x, y, fill: c, stroke: c, r: 3.5 }));
+    }
+    return [barY(data, { x, y, fill: (d: Row) => resolvedColor(d, color) })];
   });
   const thresholdMarks =
     !normalized && thresholds.length
@@ -452,6 +468,14 @@ function ChartInner({
   const setColor = (key: string, hex: string) =>
     onChange(widget.id, { colors: { ...colors, [key]: hex } });
 
+  const categoryColors = widget.categoryColors ?? {};
+  // The distinct x-categories in render order (same trim/order as what's actually drawn) — drives
+  // both the per-datum bar/scatter recoloring below and the config panel's category swatch list.
+  const categories = useMemo(
+    () => (shaped.categorical ? shaped.data.map((r) => String(r[widget.x] ?? "")) : []),
+    [shaped, widget.x],
+  );
+
   const xLabel = labelOf(source, widget.x);
   const definition = useMemo(
     () =>
@@ -463,12 +487,13 @@ function ChartInner({
         shaped.categorical,
         shaped.series,
         colorFor,
+        categoryColors,
         normalize,
         thresholds,
       ),
-    // colorFor closes over `colors`; recompute when colors/thresholds change.
+    // colorFor closes over `colors`; recompute when colors/categoryColors/thresholds change.
     // eslint-disable-next-line react-hooks/exhaustive-deps
-    [shaped, widget.chartType, widget.x, xLabel, colors, normalize, thresholds],
+    [shaped, widget.chartType, widget.x, xLabel, colors, categoryColors, normalize, thresholds],
   );
 
   const ready = widget.x && (aggregate === "count" || widget.y.length > 0);
@@ -549,6 +574,7 @@ function ChartInner({
           source={source}
           widget={widget}
           series={shaped.series}
+          categories={categories}
           multiAirport={multiAirport}
           onChange={onChange}
           onClose={() => setConfiguring(false)}
