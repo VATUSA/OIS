@@ -50,6 +50,7 @@ export function ChartConfigPanel({
   source,
   widget,
   series,
+  categories,
   multiAirport,
   onChange,
   onClose,
@@ -57,6 +58,8 @@ export function ChartConfigPanel({
   source: DataSource;
   widget: ChartWidgetT;
   series: Series[];
+  /** Distinct x-axis categories currently rendered, in order — drives the category-color rows. */
+  categories: string[];
   multiAirport: boolean;
   onChange: (id: string, patch: Record<string, unknown>) => void;
   onClose: () => void;
@@ -78,6 +81,18 @@ export function ChartConfigPanel({
   ];
   const ySet = new Set(widget.y);
   const thresholds = widget.thresholds ?? [];
+  const categoryColors = widget.categoryColors ?? {};
+  const showCategoryColors =
+    (widget.chartType === "bar" || widget.chartType === "scatter") &&
+    aggregate !== "none" &&
+    categories.length > 0;
+  const setCategoryColor = (cat: string, hex: string) =>
+    set({ categoryColors: { ...categoryColors, [cat]: hex } });
+  const clearCategoryColor = (cat: string) => {
+    const next = { ...categoryColors };
+    delete next[cat];
+    set({ categoryColors: next });
+  };
 
   const addAirport = async () => {
     const raw = await prompt({ title: "Add airport", label: "ICAO", placeholder: "KBOS" });
@@ -241,6 +256,35 @@ export function ChartConfigPanel({
                         aria-label={`Colour for ${s.label}`}
                       />
                       <span className="truncate">{s.label}</span>
+                    </div>
+                  ))}
+                </div>
+              </Field>
+            )}
+
+            {showCategoryColors && (
+              <Field label="Category colours">
+                <div className="flex flex-col gap-1.5">
+                  {categories.map((cat, i) => (
+                    <div key={cat} className="flex items-center gap-2 text-sm">
+                      <input
+                        type="color"
+                        value={categoryColors[cat] ?? colorAt(i)}
+                        onChange={(e) => setCategoryColor(cat, e.target.value)}
+                        className="h-6 w-8 cursor-pointer rounded border bg-transparent"
+                        aria-label={`Colour for ${cat}`}
+                      />
+                      <span className="truncate">{cat}</span>
+                      {categoryColors[cat] != null && (
+                        <button
+                          type="button"
+                          onClick={() => clearCategoryColor(cat)}
+                          className="ml-auto text-muted-foreground hover:text-destructive"
+                          aria-label={`Reset ${cat} to its series colour`}
+                        >
+                          <X className="size-3.5" />
+                        </button>
+                      )}
                     </div>
                   ))}
                 </div>
