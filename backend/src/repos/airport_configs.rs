@@ -24,17 +24,14 @@ pub async fn list_by_icao(pool: &PgPool, icao: &str) -> Result<Vec<AirportConfig
     .map_err(|_| ApiError::Internal)
 }
 
-/// Every airport's configs, optionally scoped to one owning ARTCC — ordered by airport for the
-/// all-airports list view.
-pub async fn list_all(
-    pool: &PgPool,
-    artcc: Option<&str>,
-) -> Result<Vec<AirportConfigBody>, ApiError> {
+/// Every airport's configs — ordered by airport for the all-airports list view. Unfiltered: the
+/// `artcc` column is a snapshot taken at row creation and can go stale after a facility
+/// realignment, so scoping/filtering by owning ARTCC is done by the caller against the *live*
+/// facility map instead (see `handlers::airport_configs::annotate_and_filter`).
+pub async fn list_all(pool: &PgPool) -> Result<Vec<AirportConfigBody>, ApiError> {
     sqlx::query_as::<_, AirportConfigBody>(&format!(
-        "{CONFIG_SELECT} where ($1::text is null or c.artcc = $1) \
-         order by c.icao, c.calm_default desc, c.name"
+        "{CONFIG_SELECT} order by c.icao, c.calm_default desc, c.name"
     ))
-    .bind(artcc)
     .fetch_all(pool)
     .await
     .map_err(|_| ApiError::Internal)
