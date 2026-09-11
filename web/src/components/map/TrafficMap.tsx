@@ -138,6 +138,8 @@ export function TrafficMap({
   // step so panning-induced micro-zooms don't re-render the layers every frame. Controlled maps also
   // re-render via the camera, but tracking it here keeps the one code path for both.
   const dynamicScale = useSetting("map.dynamicAircraftScale", true).value;
+  // User-chosen base size (percent, e.g. "80"), independent of the zoom-driven scale above.
+  const iconSizePct = useSetting("map.aircraftIconSize", "100").value;
   const [zoom, setZoom] = useState(
     () => initialViewState?.zoom ?? camera?.viewState.zoom ?? US_HOME.zoom,
   );
@@ -149,7 +151,7 @@ export function TrafficMap({
     },
     [camera],
   );
-  const sizeScale = dynamicScale ? zoomAircraftScale(zoom) : 1;
+  const sizeScale = (dynamicScale ? zoomAircraftScale(zoom) : 1) * (Number(iconSizePct) / 100);
 
   const anyLabel =
     !!labels && (labels.callsign || labels.type || labels.alt || labels.speed);
