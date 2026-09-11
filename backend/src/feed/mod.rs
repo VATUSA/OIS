@@ -147,6 +147,17 @@ fn next_poll_delay(
     }
 }
 
+/// Whether a successful fetch's parsed timestamp should extend the stale-poll streak: either it
+/// didn't parse at all, or it parsed to the same value already on record — neither is new
+/// information, so both count the same toward `MAX_CONSECUTIVE_STALE_POLLS` (see #92). A parse
+/// failure must count as stale too, not reset the streak — otherwise a persistently malformed
+/// `update_timestamp` (fetch `Ok`, field unparseable every time) can sustain the 2s fast-poll
+/// forever off a `last_source_ts` that's frozen at its last known-good value, exactly the failure
+/// mode this streak exists to bound.
+fn is_stale_poll(parsed_ts: Option<DateTime<Utc>>, last_source_ts: Option<DateTime<Utc>>) -> bool {
+    parsed_ts.is_none() || parsed_ts == last_source_ts
+}
+
 /// Whether `consecutive_failures` should flip `healthy` false — a single transient error must not;
 /// only `MAX_CONSECUTIVE_FAILURES` in a row means the feed is actually behind.
 fn should_mark_unhealthy(consecutive_failures: u32) -> bool {
@@ -196,9 +207,7 @@ async fn poller(state: FeedState) {
                 let parsed_ts = DateTime::parse_from_rfc3339(&source_timestamp)
                     .map(|dt| dt.with_timezone(&Utc))
                     .ok();
-                // A parse failure falls back to the old timestamp too — no new information either
-                // way, so it counts as stale the same as an unchanged value.
-                consecutive_stale_polls = if parsed_ts.is_some() && parsed_ts == last_source_ts {
+                consecutive_stale_polls = if is_stale_poll(parsed_ts, last_source_ts) {
                     consecutive_stale_polls + 1
                 } else {
                     0
@@ -307,6 +316,35 @@ mod tests {
             next_poll_delay(Some(stale), MAX_CONSECUTIVE_STALE_POLLS, now),
             Duration::from_secs(STALE_POLL_BACKOFF_SECS)
         );
+    }
+
+    #[test]
+    fn unchanged_timestamp_is_stale() {
+        let ts = Utc::now();
+        assert!(is_stale_poll(Some(ts), Some(ts)));
+    }
+
+    #[test]
+    fn advanced_timestamp_is_not_stale() {
+        let now = Utc::now();
+        let later = now + chrono::Duration::seconds(15);
+        assert!(!is_stale_poll(Some(later), Some(now)));
+    }
+
+    #[test]
+    fn unparseable_timestamp_is_stale_even_with_a_prior_good_one() {
+        // The bug this closes: a persistently malformed `update_timestamp` (fetch `Ok`, field
+        // unparseable every time) must extend the streak, not reset it — otherwise it can sustain
+        // the fast-poll forever off a `last_source_ts` frozen at its last known-good value, same as
+        // an unchanged-but-parseable timestamp would.
+        let last_good = Utc::now();
+        assert!(is_stale_poll(None, Some(last_good)));
+    }
+
+    #[test]
+    fn first_ever_fetch_is_not_stale() {
+        let ts = Utc::now();
+        assert!(!is_stale_poll(Some(ts), None));
     }
 
     #[test]
