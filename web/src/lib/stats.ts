@@ -1,5 +1,5 @@
 import {useCallback, useEffect, useMemo, useRef, useState} from "react";
-import {useQuery} from "@tanstack/react-query";
+import {keepPreviousData, useQuery} from "@tanstack/react-query";
 import type {components} from "@ois/api-client";
 
 import {ois} from "./api";
@@ -15,6 +15,7 @@ export type ReplayFlight = components["schemas"]["ReplayFlightBody"];
 export type ResolvedRoute = components["schemas"]["ResolvedRoute"];
 export type DelaySummary = components["schemas"]["DelaySummary"];
 export type DelayGroup = components["schemas"]["DelayGroup"];
+export type AtcBoard = components["schemas"]["AtcBoard"];
 
 /** Average-delay aggregates for one leg kind over a rolling window, with optional filters. */
 export function useDelaySummary(params: {
@@ -254,6 +255,24 @@ export function useWindowReplay(from: number | null, to: number | null, step = 3
         params: { query: { from: from!, to: to!, step } },
       });
       if (error || !data) throw new Error("failed to load replay");
+      return data;
+    },
+  });
+}
+
+/** Online ATC at a replay instant (Unix seconds), bucketed to 30s so scrubbing/playback doesn't
+ * refetch on every animation frame — matches the granularity replay data already runs at. */
+export function useReplayAtc(atSeconds: number | null) {
+  const bucketed = atSeconds == null ? null : Math.floor(atSeconds / 30) * 30;
+  return useQuery({
+    queryKey: ["stats-replay-atc", bucketed],
+    enabled: bucketed != null,
+    placeholderData: keepPreviousData, // avoid a blank overlay flash between buckets
+    queryFn: async (): Promise<AtcBoard> => {
+      const { data, error } = await ois.GET("/api/v1/stats/hist/atc", {
+        params: { query: { at: bucketed! } },
+      });
+      if (error || !data) throw new Error("failed to load ATC");
       return data;
     },
   });
