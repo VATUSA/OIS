@@ -30,7 +30,7 @@ pub async fn list_all(pool: &PgPool) -> Result<Vec<EventBody>, ApiError> {
                     else 'off' \
                 end as recording, \
                 exists (select 1 from ace.requests ar \
-                        where ar.event_id = e.id and ar.status in ('open', 'claimed')) \
+                        where ar.event_id = e.id and ar.status <> 'cancelled') \
                     as ace_requested, \
                 exists (select 1 from events.facility_support fs where fs.event_id = e.id) \
                     as facility_support \

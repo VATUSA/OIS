@@ -3250,7 +3250,11 @@ export interface components {
         };
         /** @description A VATUSA event, cached from the events API — the anchor for per-event planning. */
         EventBody: {
-            /** @description True when the event has an open or claimed ACE support request (list view only). */
+            /**
+             * @description True when the event has an ACE support request that wasn't cancelled — support was
+             *     requested (still open, or since completed). List view only; always `false` from
+             *     `GET /events/{id}`.
+             */
             ace_requested: boolean;
             banner_image_url: string;
             /** @description HTML/BBCode blurb straight from VATUSA (render sanitized on the client). */
