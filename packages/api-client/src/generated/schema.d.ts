@@ -1658,6 +1658,27 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/v1/me/flight": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * Session-scoped "my flight" — resolve the caller's live flight by matching their VATSIM CID
+         *     against the feed snapshot, then assemble the same advisory `flight_advisory` returns. `found` is
+         *     false when the caller isn't connected (or has no flight plan) under their CID.
+         */
+        get: operations["my_flight"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/v1/me/preferences/{namespace}": {
         parameters: {
             query?: never;
@@ -9389,6 +9410,31 @@ export interface operations {
                 };
                 content: {
                     "application/json": components["schemas"]["DiscordLinkBody"];
+                };
+            };
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+        };
+    };
+    my_flight: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["FlightAdvisory"];
                 };
             };
             401: {
