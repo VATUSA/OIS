@@ -5,13 +5,14 @@ import {ArrowLeft, Pause, Play, SkipBack, SlidersHorizontal, TriangleAlert, X} f
 
 import {useMe} from "@/lib/auth";
 import {hasPermission} from "@/lib/permissions";
-import {type Replay, resolveRoutes, useCaptures, useProgressiveReplay} from "@/lib/stats";
+import {type Replay, resolveRoutes, useCaptures, useProgressiveReplay, useReplayAtc} from "@/lib/stats";
 import {webgl2Available} from "@/lib/webgl";
 import {formatZuluFull} from "@/lib/time";
 import boundariesGeo from "@/assets/artcc-boundaries.json";
 import {TrafficMap} from "@/components/map/TrafficMap";
 import {US_HOME} from "@/components/map/lib/constants";
 import {aircraftColor, HIGHLIGHT} from "@/components/map/lib/colors";
+import type {AtcData} from "@/components/map/layers/atc";
 
 const SPEEDS = [1, 2, 4, 8, 16, 32, 64];
 /** Below this groundspeed an aircraft is treated as on the ground (taxi/parked). */
@@ -199,6 +200,12 @@ function ReplayMap({
   const [showRoutes, setShowRoutes] = useState(false);
   const [routeCache, setRouteCache] = useState<Record<string, RouteGeom>>({});
   const pendingRoutes = useRef<Set<string>>(new Set());
+
+  // Online ATC overlay at the current replay instant (off by default — extra fetches only when
+  // wanted). `useReplayAtc` buckets internally so this doesn't refetch on every animation frame.
+  const [showAtc, setShowAtc] = useState(false);
+  const atSeconds = Math.floor(Date.parse(replay.window_start) / 1000) + Math.floor(clock);
+  const atc = useReplayAtc(showAtc ? atSeconds : null);
 
   // Clicked flight — draws its flown-so-far track and opens the log panel.
   const [selectedId, setSelectedId] = useState<string | null>(null);
@@ -467,6 +474,7 @@ function ReplayMap({
         rings={rings ? { data: shown, nm: ringNm } : null}
         selectedTrack={trackPath}
         filedRoute={selectedRoute ?? null}
+        atc={showAtc ? ((atc.data as AtcData | undefined) ?? null) : null}
         onAircraftClick={(id) => setSelectedId((prev) => (prev === id ? null : id))}
       >
         <div className="pointer-events-none absolute left-3 top-3 z-10 rounded-md bg-background/80 px-3 py-1.5 text-sm shadow backdrop-blur">
@@ -509,6 +517,9 @@ function ReplayMap({
             )}
             <Toggle checked={showRoutes} onChange={setShowRoutes}>
               Show all routes
+            </Toggle>
+            <Toggle checked={showAtc} onChange={setShowAtc}>
+              Show ATC
             </Toggle>
             <div className="my-0.5 h-px bg-border" />
 
