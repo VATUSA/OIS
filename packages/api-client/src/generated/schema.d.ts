@@ -3137,15 +3137,33 @@ export interface components {
         };
         /** @description Average-delay summary for one leg `kind` over a rolling window, with optional filters applied. */
         DelaySummary: {
-            /** @description Per-airport aggregates; each airport's `median_sec` is its normalization baseline. */
+            /**
+             * @description Per-airport aggregates, paginated (`page`/`page_size` below); each airport's `median_sec`
+             *     is its normalization baseline.
+             */
             by_airport: components["schemas"]["DelayGroup"][];
+            /**
+             * Format: int64
+             * @description Total distinct airports matching the filters (across all pages).
+             */
+            by_airport_total: number;
             by_procedure: components["schemas"]["DelayGroup"][];
-            /** @description Per-runway / per-procedure breakdowns — populated only when an `airport` filter is set. */
+            /**
+             * @description Per-runway / per-procedure breakdowns — populated only when an `airport` filter is set.
+             *     Unpaginated: inherently small, scoped to one airport.
+             */
             by_runway: components["schemas"]["DelayGroup"][];
             /** @description `departure` (taxi-out) or `arrival` (transit). */
             kind: string;
             /** @description Aggregate over the whole filtered set. */
             overall: components["schemas"]["DelayGroup"];
+            /**
+             * Format: int64
+             * @description 1-based page number and page size `by_airport` was fetched with.
+             */
+            page: number;
+            /** Format: int64 */
+            page_size: number;
             /** Format: int64 */
             window_hours: number;
         };
@@ -9882,6 +9900,10 @@ export interface operations {
                 procedure?: string;
                 /** @description Window hours back (default 24, max 720) */
                 hours?: number;
+                /** @description Per-airport breakdown page (default 1) */
+                page?: number;
+                /** @description Per-airport breakdown page size (default 25, max 100) */
+                page_size?: number;
             };
             header?: never;
             path?: never;
