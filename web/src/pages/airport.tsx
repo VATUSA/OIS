@@ -460,17 +460,19 @@ export function LadderView({ flow, filters }: { flow: Flow; filters?: LadderFilt
     .filter((x) => x.min >= -1 && x.min <= win)
     .sort((a, b) => a.min - b.min);
 
-  // Declutter: walk bottom→top, pushing each tag up so labels never overlap.
-  let lastY = H + ROW;
+  // Declutter with a fixed axis: NOW stays pinned at the bottom and the container never grows.
+  // When arrivals bunch up, shrink the min label gap so the stack still fits between the top pad
+  // and NOW (down to MIN_GAP, after which very dense arrivals overlap) instead of stretching the
+  // timeline. Normal density leaves the gap at ROW — identical to before.
+  const MIN_GAP = 13; // ≈ tag height
+  const gap = Math.max(MIN_GAP, Math.min(ROW, (H - PAD) / Math.max(items.length - 1, 1)));
+  let lastY = H + gap;
   const placed = items.map(({ f, min }) => {
-    const y = Math.min(yOf(min), lastY - ROW);
+    const y = Math.max(PAD, Math.min(yOf(min), lastY - gap));
     lastY = y;
     return { f, min, y };
   });
-  // Shift the whole stack down if decluttering pushed the top tag off-canvas.
-  const topY = placed.length ? placed[placed.length - 1].y : H;
-  const shift = topY < PAD ? PAD - topY : 0;
-  const contentH = H + shift + PAD;
+  const contentH = H + PAD;
 
   // Size the scroll area to the widest strip (callsign + time + optional gate) so the ladder can get
   // as narrow as its own text instead of being pinned to a fixed width. Slightly over-estimate the
@@ -488,7 +490,7 @@ export function LadderView({ flow, filters }: { flow: Flow; filters?: LadderFilt
   const gridlines = [];
   for (let k = 0; k <= win / step; k++) {
     const min = k * step;
-    const y = yOf(min) + shift;
+    const y = yOf(min);
     gridlines.push(
       <div key={`g${k}`}>
         <div
@@ -544,7 +546,7 @@ export function LadderView({ flow, filters }: { flow: Flow; filters?: LadderFilt
             {/* NOW baseline */}
             <div
               className="absolute border-t-2 border-primary"
-              style={{ top: yOf(0) + shift, left: GUTTER, right: 0 }}
+              style={{ top: yOf(0), left: GUTTER, right: 0 }}
             >
               <span
                 className="absolute -top-2 text-[10px] font-semibold text-primary"
@@ -574,7 +576,7 @@ export function LadderView({ flow, filters }: { flow: Flow; filters?: LadderFilt
                 <div
                   key={f.callsign}
                   className="absolute flex items-center"
-                  style={{ top: y + shift - 11, left: GUTTER }}
+                  style={{ top: y - 11, left: GUTTER }}
                 >
                   {/* connector tick to the axis */}
                   <span
