@@ -232,15 +232,21 @@ by the backend (`dotenvy`) and docker-compose; Vite reads `web/.env.local`. Both
 
 ## Testing & verification
 
-- **Rust tests run single-threaded** (`-- --test-threads=1`) — many touch shared setup. Pure logic
-  (the trajectory model, permission tree, metering) has unit tests; add tests alongside such code.
+- **Rust tests are self-contained and run in parallel** (`cargo nextest run`, no shared global
+  state). Pure logic (the trajectory model, permission tree, metering) has unit tests; add tests
+  alongside such code.
 - **Never hit real external APIs in tests** (VATSIM, VATUSA, Open-Meteo, AWC). The feed and clients
   are structured so the pure logic is testable without the network.
 - **The web gate is `pnpm typecheck`** (there is no eslint task wired into turbo). It only tells the
   truth after the client is regenerated for any contract change (see codegen above).
-- **DB-touching backend behavior** is generally verified by running the stack (`just up && just
-  backend`) and exercising the endpoint, since the repo layer uses runtime queries (no compile-time
-  `sqlx` macros, so the DB need not be present to compile).
+- **DB-touching repo logic** can be covered by a `#[sqlx::test]` (real Postgres, one throwaway
+  database per test, migrations applied automatically — no `migrations = "..."` attribute needed,
+  it auto-discovers `backend/migrations`). CI provisions a `postgres:17` service for the `rust` job
+  and exports `DATABASE_URL` to it; to run the same tests locally, point `DATABASE_URL` at your dev
+  Postgres (`just up` starts it) and run `cargo test` as usual — no other setup. Since the repo
+  layer uses runtime queries (no compile-time `sqlx` macros), the DB need not be present to
+  *compile*, only to *run* a `#[sqlx::test]`. Handler-level / end-to-end behavior is still generally
+  verified by running the full stack (`just up && just backend`) and exercising the endpoint.
 - Read the `test result:` summary line, not just the exit code.
 
 Definition of done for a change: `just ci` is green, the client is regenerated if the contract moved,
