@@ -8,6 +8,7 @@ use arc_swap::ArcSwap;
 use chrono::Utc;
 use sqlx::PgPool;
 
+use crate::errors::ApiError;
 use crate::feed::FeedState;
 use crate::feed::nav::NavData;
 use crate::feed::nav_source;
@@ -28,13 +29,27 @@ const EVENT_FCA_INTERVAL: Duration = Duration::from_secs(60);
 
 /// How often to age the stats position table.
 const STATS_COMPACTION_INTERVAL: Duration = Duration::from_secs(60 * 60);
-/// Positions this old are downsampled (keep 1-of-N); older than the prune horizon they're dropped.
-const STATS_DOWNSAMPLE_AFTER_DAYS: i64 = 2;
+/// Retention horizon for winds and TM history — unrelated to `stats.position`, unaffected by its
+/// compaction ladder rework, still hard-pruned past this age.
 const STATS_PRUNE_AFTER_DAYS: i64 = 14;
 /// Delay legs are tiny (one row per flight leg) and useful over a longer window than raw positions.
 const DELAY_LEG_RETAIN_DAYS: i64 = 30;
-/// Keep every Nth 15s sample in the downsample band (4 → ~1-minute resolution).
-const STATS_KEEP_EVERY: i64 = 4;
+
+/// Weekly compaction ladder for `stats.position`: `(age_days, keep_every)`. When a position's age
+/// first crosses `age_days`, keep only every `keep_every`-th sample of the survivors handed down
+/// from the previous tier — an *incremental* factor, not a cumulative target. Each pass only looks
+/// at the narrow slice of rows crossing that boundary *right now*, one `STATS_COMPACTION_INTERVAL`
+/// wide (so consecutive runs tile the timeline with no gap and, just as importantly, no overlap —
+/// an overlap would downsample the same rows twice in one tier and compound past the intended
+/// ratio), never the whole historical band — reprocessing already-thinned rows on every tick would
+/// grind survivors down to nothing well before they're meant to move to the next tier. Because each
+/// row is (assuming the job doesn't miss a tick) touched exactly once per boundary it crosses,
+/// these incremental ×4 steps compound to the effective density: full fidelity for a week, ~1 min
+/// resolution (÷4) for the next, ~4 min (÷16 cumulative) the week after, and ~16 min (÷64
+/// cumulative) forever past three weeks — nothing is ever fully deleted, only thinned further. A
+/// missed tick leaves a thin gap of not-yet-downsampled rows rather than losing or double-thinning
+/// any — the safe direction to fail in.
+const COMPACTION_TIERS: &[(i64, i64)] = &[(7, 4), (14, 4), (21, 4)];
 
 /// How often to open/close event stat-capture windows.
 const CAPTURE_SCHEDULER_INTERVAL: Duration = Duration::from_secs(60);
@@ -210,58 +225,79 @@ pub fn spawn_aircraft_profiles_refresh(
     ));
 }
 
-/// Age the stats position time-series: downsample the 2–14 day band to ~1-minute resolution and
-/// drop raw positions past the 14-day horizon (Tier-1 simplified tracks on `stats.flight` survive).
-/// Rows inside an open/saved `stats.capture` window are skipped (retained at full fidelity). Runs
-/// hourly; a slow, batched, saved-window-aware alternative to TimescaleDB retention.
+/// Age the stats position time-series through the weekly `COMPACTION_TIERS` ladder — full fidelity
+/// for a week, then progressively coarser, forever (nothing is hard-deleted past the ladder
+/// anymore). Rows inside an open/saved `stats.capture` window are skipped at every tier (retained
+/// at full fidelity). Runs hourly; a slow, batched, saved-window-aware alternative to TimescaleDB
+/// retention.
 pub fn spawn_stats_compaction(reg: Arc<JobRegistry>, pool: PgPool) {
+    // Tracks the hour-bucket (`now / STATS_COMPACTION_INTERVAL`) whose COMPACTION_TIERS slices
+    // were last processed. The admin Jobs page can trigger this job on demand (`system.jobs.update`)
+    // in addition to its hourly schedule; a trigger landing in the same bucket as the last run must
+    // be a no-op for the tiered passes below, or it would re-downsample that tier's already-thinned
+    // survivors and compound well past the intended ratio (see `stats_compaction_once`).
+    let last_tier_hour = Arc::new(AtomicI64::new(0));
     tokio::spawn(run_interval(
         reg,
         "stats_compaction",
-        "Downsample + prune the stats position time-series",
+        "Downsample the stats position time-series through the weekly retention ladder",
         STATS_COMPACTION_INTERVAL,
         move || {
             let pool = pool.clone();
-            async move { stats_compaction_once(&pool).await }
+            let last_tier_hour = last_tier_hour.clone();
+            async move { stats_compaction_once(&pool, &last_tier_hour).await }
         },
     ));
 }
 
-/// One stats-compaction pass: downsample the 2–14 day band and prune everything past the horizon
-/// (positions, winds, TM history, flight legs). Best-effort — a failed sub-pass is logged and the
-/// others still run; returns a summary of rows removed.
-async fn stats_compaction_once(pool: &PgPool) -> Result<String, String> {
+/// One stats-compaction pass: downsample the narrow slice of positions crossing each
+/// `COMPACTION_TIERS` boundary, and prune everything past the unrelated retention horizons (winds,
+/// TM history, flight legs — `stats.position` is never hard-deleted anymore). Best-effort — a
+/// failed sub-pass is logged and the others still run; returns a summary of rows removed.
+async fn stats_compaction_once(
+    pool: &PgPool,
+    last_tier_hour: &AtomicI64,
+) -> Result<String, String> {
     let now = Utc::now();
-    let downsample_before = now - chrono::Duration::days(STATS_DOWNSAMPLE_AFTER_DAYS);
-    let prune_before = now - chrono::Duration::days(STATS_PRUNE_AFTER_DAYS);
     let legs_before = now - chrono::Duration::days(DELAY_LEG_RETAIN_DAYS);
+    let prune_before = now - chrono::Duration::days(STATS_PRUNE_AFTER_DAYS);
+    // Exactly the run interval, so consecutive ticks tile the timeline with no gap *and* no
+    // overlap — an overlap would downsample the same rows twice per tier (see COMPACTION_TIERS).
+    let slice = chrono::Duration::from_std(STATS_COMPACTION_INTERVAL)
+        .unwrap_or_else(|_| chrono::Duration::hours(1));
     let mut removed: u64 = 0;
 
-    for (label, res) in [
-        (
-            "downsample",
-            stats_repo::downsample_positions(
-                pool,
-                prune_before,
-                downsample_before,
-                STATS_KEEP_EVERY,
-            )
-            .await,
-        ),
-        (
-            "positions",
-            stats_repo::prune_positions(pool, prune_before).await,
-        ),
-        ("winds", stats_repo::prune_winds(pool, prune_before).await),
-        (
-            "tm-history",
-            crate::repos::tmu::prune_history(pool, prune_before).await,
-        ),
-        (
-            "flight-legs",
-            stats_repo::prune_flight_legs(pool, legs_before).await,
-        ),
-    ] {
+    // Each tier's boundary slice is exactly one hour-bucket wide; run it at most once per bucket no
+    // matter how many times this fn is invoked within it (the scheduled tick, plus any manual
+    // "run now" trigger) — a second run would downsample that slice's already-thinned survivors
+    // again. `swap` both checks and immediately claims the bucket, so two near-simultaneous
+    // invocations can't both see it as due. A genuinely new bucket (the next scheduled tick, or a
+    // manual trigger after the interval has elapsed) still runs normally.
+    let hour_bucket = now.timestamp() / STATS_COMPACTION_INTERVAL.as_secs() as i64;
+    let tiers_due = last_tier_hour.swap(hour_bucket, Ordering::Relaxed) != hour_bucket;
+
+    let mut passes: Vec<(&str, Result<u64, ApiError>)> = Vec::new();
+    if tiers_due {
+        for &(age_days, keep_every) in COMPACTION_TIERS {
+            let to = now - chrono::Duration::days(age_days);
+            let from = to - slice;
+            passes.push((
+                "downsample",
+                stats_repo::downsample_positions(pool, from, to, keep_every).await,
+            ));
+        }
+    }
+    passes.push(("winds", stats_repo::prune_winds(pool, prune_before).await));
+    passes.push((
+        "tm-history",
+        crate::repos::tmu::prune_history(pool, prune_before).await,
+    ));
+    passes.push((
+        "flight-legs",
+        stats_repo::prune_flight_legs(pool, legs_before).await,
+    ));
+
+    for (label, res) in passes {
         match res {
             Ok(n) => {
                 if n > 0 {
