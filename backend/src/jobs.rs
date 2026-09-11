@@ -38,20 +38,18 @@ const DELAY_LEG_RETAIN_DAYS: i64 = 30;
 /// Weekly compaction ladder for `stats.position`: `(age_days, keep_every)`. When a position's age
 /// first crosses `age_days`, keep only every `keep_every`-th sample of the survivors handed down
 /// from the previous tier — an *incremental* factor, not a cumulative target. Each pass only looks
-/// at the narrow slice of rows crossing that boundary *right now* (see `COMPACTION_SLICE_HOURS`),
-/// never the whole historical band — reprocessing already-thinned rows on every hourly tick would
-/// compound the thinning far past what's intended (a wide band re-run hourly for days would grind
-/// survivors down to nothing). Because each row is only ever touched once per boundary it crosses,
+/// at the narrow slice of rows crossing that boundary *right now*, one `STATS_COMPACTION_INTERVAL`
+/// wide (so consecutive runs tile the timeline with no gap and, just as importantly, no overlap —
+/// an overlap would downsample the same rows twice in one tier and compound past the intended
+/// ratio), never the whole historical band — reprocessing already-thinned rows on every tick would
+/// grind survivors down to nothing well before they're meant to move to the next tier. Because each
+/// row is (assuming the job doesn't miss a tick) touched exactly once per boundary it crosses,
 /// these incremental ×4 steps compound to the effective density: full fidelity for a week, ~1 min
 /// resolution (÷4) for the next, ~4 min (÷16 cumulative) the week after, and ~16 min (÷64
-/// cumulative) forever past three weeks — nothing is ever fully deleted, only thinned further.
+/// cumulative) forever past three weeks — nothing is ever fully deleted, only thinned further. A
+/// missed tick leaves a thin gap of not-yet-downsampled rows rather than losing or double-thinning
+/// any — the safe direction to fail in.
 const COMPACTION_TIERS: &[(i64, i64)] = &[(7, 4), (14, 4), (21, 4)];
-
-/// Width of the "just crossed a tier boundary" slice each compaction pass processes, in hours —
-/// the run interval plus slack for an occasional missed tick, so a boundary crossing is always
-/// caught (a rare double-processed sliver at the edge over-thins a small subset once; that's a far
-/// smaller and self-limiting error than reprocessing the entire historical band every run).
-const COMPACTION_SLICE_HOURS: i64 = 2;
 
 /// How often to open/close event stat-capture windows.
 const CAPTURE_SCHEDULER_INTERVAL: Duration = Duration::from_secs(60);
@@ -253,7 +251,10 @@ async fn stats_compaction_once(pool: &PgPool) -> Result<String, String> {
     let now = Utc::now();
     let legs_before = now - chrono::Duration::days(DELAY_LEG_RETAIN_DAYS);
     let prune_before = now - chrono::Duration::days(STATS_PRUNE_AFTER_DAYS);
-    let slice = chrono::Duration::hours(COMPACTION_SLICE_HOURS);
+    // Exactly the run interval, so consecutive ticks tile the timeline with no gap *and* no
+    // overlap — an overlap would downsample the same rows twice per tier (see COMPACTION_TIERS).
+    let slice = chrono::Duration::from_std(STATS_COMPACTION_INTERVAL)
+        .unwrap_or_else(|_| chrono::Duration::hours(1));
     let mut removed: u64 = 0;
 
     let mut passes: Vec<(&str, Result<u64, ApiError>)> = Vec::new();
