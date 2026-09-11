@@ -761,10 +761,16 @@ pub async fn storage_forecast(pool: &PgPool) -> Result<StorageForecastBody, ApiE
             .fetch_one(pool)
             .await
             .map_err(db)?;
-    let position_rows: i64 = sqlx::query_scalar("select count(*) from stats.position")
-        .fetch_one(pool)
-        .await
-        .map_err(db)?;
+    // Planner's row estimate (from the last ANALYZE/autovacuum), not an exact `count(*)` — this
+    // table is the fast-growing one compaction targets, so an exact scan here would be a
+    // needlessly heavy full-table read every time this (frequently-polled) endpoint is hit; an
+    // estimate is plenty for a headline "average row size" input to a naive projection anyway.
+    let position_rows: i64 = sqlx::query_scalar(
+        "select greatest(reltuples::bigint, 0) from pg_class where oid = 'stats.position'::regclass",
+    )
+    .fetch_one(pool)
+    .await
+    .map_err(db)?;
     let daily_ingest_rows: i64 = sqlx::query_scalar(
         "select count(*) from stats.position where ts >= now() - interval '1 day'",
     )
