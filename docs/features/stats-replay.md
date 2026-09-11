@@ -53,31 +53,41 @@ layers, each trading fidelity for size only where it doesn't hurt:
    revision changes** (`insert … on conflict (session_id, effective_from) do nothing`, guarded by a
    revision comparison in `repos/stats.rs`). An unamended flight stores exactly one plan; a diversion
    stores two. Near-zero cost for the common case.
-4. **Age-banded downsampling.** Positions older than **`STATS_DOWNSAMPLE_AFTER_DAYS = 2`** days are
-   thinned to **keep every 4th sample** (`STATS_KEEP_EVERY = 4`) per session — ~15s resolution drops
-   to ~1 minute. Recent data stays full-fidelity; the trend-level past doesn't need every point.
-5. **Prune horizon.** Positions and winds older than **`STATS_PRUNE_AFTER_DAYS = 14`** days are
-   deleted outright (the Tier-1 simplified tracks remain). Published TM history (TMIs/GDPs/ground
-   stops) is pruned on the same horizon.
+4. **Weekly compaction ladder.** `stats.position` is never hard-deleted. Instead it thins in fixed
+   weekly tiers (`COMPACTION_TIERS` in `jobs.rs`): full fidelity (~15s) for the first week, then
+   ~1 min for the second week, ~4 min for the third, and ~16 min forever after that. Each tier is
+   an *incremental* ×4 thin applied once, exactly when a row first crosses that tier's age boundary
+   (a narrow, one-`STATS_COMPACTION_INTERVAL`-wide slice, not the whole historical band — see the
+   doc comment on `COMPACTION_TIERS`) — the incremental steps compound to the cumulative densities
+   above.
+5. **Prune horizon (winds & TM history only).** Winds snapshots and published TM history
+   (TMIs/GDPs/ground stops) older than **`STATS_PRUNE_AFTER_DAYS = 14`** days are deleted outright —
+   unrelated to `stats.position`, which is only ever thinned, never dropped.
 6. **Capture guard.** Any row whose `ts` falls inside an **open or saved** `stats.capture` window is
-   **exempt from both downsampling and pruning** — captured events keep full ~15s fidelity
-   indefinitely (`CAPTURE_GUARD` in `repos/stats.rs`).
+   **exempt from downsampling** — captured events keep full ~15s fidelity indefinitely
+   (`CAPTURE_GUARD` in `repos/stats.rs`). A window can be **saved after the fact**, too (see
+   [Capture windows](#capture-windows)).
 7. **Read-time thinning for replay.** `replay_positions(from, to, step_s)` returns **one sample per
    `(session, step_s-bucket)`** via `DISTINCT ON`, so a replay payload stays bounded even for a
    full-network event capture, without touching stored fidelity.
 
-The compaction job (`backend/src/jobs.rs`, `spawn_stats_compaction`) runs **hourly**, applying the
-downsample band then the prune horizon then the winds/TM-history prunes — each skipping capture-guarded
-rows.
+The compaction job (`backend/src/jobs.rs`, `spawn_stats_compaction`) runs **hourly**, applying each
+ladder tier's boundary-crossing slice then the winds/TM-history prunes — each skipping
+capture-guarded rows.
 
 ### Retention tiers at a glance
 
 | Age | What's kept |
 | --- | --- |
-| 0–2 days | every sample (~15s), full fidelity |
-| 2–14 days | 1-of-4 samples (~1 min) |
-| > 14 days | raw positions dropped; only the Douglas–Peucker `path_simplified` per flight survives |
-| **inside a saved capture** | **full fidelity, forever** (never downsampled or pruned) |
+| 0–7 days | every sample (~15s), full fidelity |
+| 7–14 days | 1-of-4 samples (~1 min) |
+| 14–21 days | 1-of-16 (~4 min) |
+| > 21 days | 1-of-64 (~16 min), **forever** — never fully deleted |
+| **inside a saved capture** | **full fidelity, forever** (never downsampled) |
+
+A live estimate of current `stats` schema disk usage and a naive (no-compaction) growth projection
+is available at `GET /api/v1/stats/storage-forecast` (`system.jobs.read`; surfaced on
+`/admin/jobs`).
 
 ## Replay
 
@@ -111,6 +121,13 @@ event. While **open**, the collector relaxes the US scope filter (`relax_scope`)
 is recorded; a **saved** window is protected from compaction forever (full fidelity). A capture
 scheduler (`jobs.rs`) opens/closes event windows automatically; event capture + stats live in
 migration 0040.
+
+A window can also be saved **after the fact** — `POST /api/v1/stats/captures`
+(`stats.capture.update`) turns an already-viewed `[from, to]` window (from the replay map's custom
+window, or tied to an event) into a permanent `saved` capture directly, no open/close lifecycle
+needed. It's rejected (400) if raw positions no longer exist in that window (already thinned past
+the point of being worth keeping) — check before saving anything older than the full-fidelity
+tier.
 
 ## Key files
 
