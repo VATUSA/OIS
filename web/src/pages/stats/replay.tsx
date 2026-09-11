@@ -1,11 +1,17 @@
 import {useEffect, useMemo, useRef, useState} from "react";
-import {Button, useTheme} from "@ois/ui";
+import {Button, usePrompt, useTheme} from "@ois/ui";
 import {Link, useNavigate, useSearch} from "@tanstack/react-router";
 import {ArrowLeft, Pause, Play, SkipBack, SlidersHorizontal, TriangleAlert, X} from "lucide-react";
 
 import {useMe} from "@/lib/auth";
 import {hasPermission} from "@/lib/permissions";
-import {type Replay, resolveRoutes, useCaptures, useProgressiveReplay} from "@/lib/stats";
+import {
+  type Replay,
+  resolveRoutes,
+  useCaptures,
+  useProgressiveReplay,
+  useSaveCapture,
+} from "@/lib/stats";
 import {webgl2Available} from "@/lib/webgl";
 import {formatZuluFull} from "@/lib/time";
 import boundariesGeo from "@/assets/artcc-boundaries.json";
@@ -741,6 +747,9 @@ const defaultWindow = (): Win => {
 export function CaptureReplayPage() {
   const { data: me } = useMe();
   const canRead = hasPermission(me, "stats.data.read");
+  const canSaveCapture = hasPermission(me, "stats.capture.update");
+  const prompt = usePrompt();
+  const saveCapture = useSaveCapture();
 
   const search = useSearch({ strict: false }) as ReplaySearch;
   const navigate = useNavigate();
@@ -759,6 +768,25 @@ export function CaptureReplayPage() {
       ? { from: search.from, to: search.to }
       : defaultWindow(),
   );
+
+  async function saveAsCapture() {
+    const label = (
+      await prompt({
+        title: "Save as capture",
+        label: "Label",
+        placeholder: "e.g. ZDC event traffic",
+        confirmText: "Save",
+      })
+    )?.trim();
+    if (!label) return;
+    try {
+      const saved = await saveCapture.mutateAsync({ label, from: win.from, to: win.to });
+      setCaptureId(saved.id);
+      patch({ capture: saved.id, from: undefined, to: undefined });
+    } catch {
+      // surfaced via the mutation's onError toast
+    }
+  }
 
   const usingCapture = !!captureId;
   // Resolve the selection to a [from, to] Unix window (a capture's own start/end, or the custom
@@ -866,6 +894,15 @@ export function CaptureReplayPage() {
                       }}
                     />
                   </label>
+                  {canSaveCapture && (
+                    <Button
+                      variant="outline"
+                      onClick={() => void saveAsCapture()}
+                      disabled={saveCapture.isPending}
+                    >
+                      Save as capture…
+                    </Button>
+                  )}
                 </div>
               )}
             </div>

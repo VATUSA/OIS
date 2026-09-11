@@ -283,10 +283,17 @@ pub fn build_router(state: AppState) -> Router {
         )
         .route("/api/v1/stats/flights/{id}", get(stats::flight_detail))
         .route("/api/v1/stats/flights/{id}/track", get(stats::flight_track))
-        .route("/api/v1/stats/captures", get(stats::list_captures))
+        .route(
+            "/api/v1/stats/captures",
+            get(stats::list_captures).post(stats::save_capture),
+        )
         .route(
             "/api/v1/stats/captures/{id}/replay",
             get(stats::capture_replay),
+        )
+        .route(
+            "/api/v1/stats/storage-forecast",
+            get(stats::storage_forecast),
         )
         .route("/api/v1/stats/replay", get(stats::window_replay))
         .route("/api/v1/stats/replay/positions", get(stats::replay_chunk))

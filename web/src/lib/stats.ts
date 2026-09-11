@@ -1,6 +1,7 @@
 import {useCallback, useEffect, useMemo, useRef, useState} from "react";
-import {useQuery} from "@tanstack/react-query";
+import {useMutation, useQuery, useQueryClient} from "@tanstack/react-query";
 import type {components} from "@ois/api-client";
+import {useToast} from "@ois/ui";
 
 import {ois} from "./api";
 
@@ -10,6 +11,8 @@ export type StatsAirport = components["schemas"]["StatsAirportBody"];
 export type StatsFlightSummary = components["schemas"]["StatsFlightSummary"];
 export type StatsFlightDetail = components["schemas"]["StatsFlightDetail"];
 export type CaptureSummary = components["schemas"]["CaptureSummaryBody"];
+export type SaveCapture = components["schemas"]["SaveCaptureRequest"];
+export type StorageForecast = components["schemas"]["StorageForecastBody"];
 export type Replay = components["schemas"]["ReplayBody"];
 export type ReplayFlight = components["schemas"]["ReplayFlightBody"];
 export type ResolvedRoute = components["schemas"]["ResolvedRoute"];
@@ -221,6 +224,37 @@ export function useCaptures() {
     queryFn: async (): Promise<CaptureSummary[]> => {
       const { data, error } = await ois.GET("/api/v1/stats/captures");
       if (error || !data) throw new Error("failed to load captures");
+      return data;
+    },
+  });
+}
+
+/** Save an already-viewed window as a permanent, named capture. */
+export function useSaveCapture() {
+  const qc = useQueryClient();
+  const toast = useToast();
+  return useMutation({
+    mutationFn: async (body: SaveCapture): Promise<CaptureSummary> => {
+      const { data, error } = await ois.POST("/api/v1/stats/captures", { body });
+      if (error || !data) throw new Error("failed to save capture");
+      return data;
+    },
+    onSuccess: () => {
+      qc.invalidateQueries({ queryKey: ["stats-captures"] });
+      toast.success("Capture saved");
+    },
+    onError: () =>
+      toast.error("Couldn’t save that window — it may already be past retention"),
+  });
+}
+
+/** Current `stats` schema disk usage + a naive growth projection (admin/jobs page). */
+export function useStorageForecast() {
+  return useQuery({
+    queryKey: ["stats-storage-forecast"],
+    queryFn: async (): Promise<StorageForecast> => {
+      const { data, error } = await ois.GET("/api/v1/stats/storage-forecast");
+      if (error || !data) throw new Error("failed to load storage forecast");
       return data;
     },
   });

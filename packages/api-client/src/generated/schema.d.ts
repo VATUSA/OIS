@@ -1768,7 +1768,11 @@ export interface paths {
         };
         get: operations["list_captures"];
         put?: never;
-        post?: never;
+        /**
+         * Save an already-viewed window (an event's or an ad-hoc one) as a permanent, named capture, so
+         *     it survives compaction and reappears in the replay picker.
+         */
+        post: operations["save_capture"];
         delete?: never;
         options?: never;
         head?: never;
@@ -2064,6 +2068,27 @@ export interface paths {
          *     for the flights that appear in this chunk. The frontend fetches chunks as the clock advances.
          */
         get: operations["replay_chunk"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/stats/storage-forecast": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * Current `stats` schema disk usage and a naive, no-further-compaction projection — ops
+         *     visibility for the same audience as the background-jobs page (`stats.compaction` is one of the
+         *     listed jobs; this gives it size context).
+         */
+        get: operations["storage_forecast"];
         put?: never;
         post?: never;
         delete?: never;
@@ -4414,6 +4439,25 @@ export interface components {
             /** @description Runway the aircraft should move to. */
             to_rwy: string;
         };
+        /** @description Save an already-viewed `[from, to]` window as a permanent, named capture. */
+        SaveCaptureRequest: {
+            /**
+             * Format: int64
+             * @description Ties the capture to an event; omit for a manual (ad-hoc) save.
+             */
+            event_id?: number | null;
+            /**
+             * Format: int64
+             * @description Window start (Unix epoch seconds).
+             */
+            from: number;
+            label: string;
+            /**
+             * Format: int64
+             * @description Window end (Unix epoch seconds).
+             */
+            to: number;
+        };
         /** @description Body for saving a named config. */
         SavedConfigRequest: {
             active_ends?: string[];
@@ -4556,6 +4600,43 @@ export interface components {
             points: Record<string, never>;
             /** @description `full` | `simplified` | `none` */
             resolution: string;
+        };
+        /**
+         * @description Headline current-size and projected-growth numbers for the `stats` schema, driven by the
+         *     current raw ingest rate. A simple, explicitly naive projection — it does not model the
+         *     compaction ladder's ongoing thinning, so it's an upper bound, not a forecast of steady state.
+         */
+        StorageForecastBody: {
+            /**
+             * Format: int64
+             * @description Naive projected daily growth in bytes, from the current ingest rate and average row size.
+             */
+            daily_growth_bytes: number;
+            /**
+             * Format: int64
+             * @description Rows ingested into `stats.position` in the last 24h.
+             */
+            daily_ingest_rows: number;
+            /**
+             * Format: int64
+             * @description On-disk bytes of `stats.position` alone (the fast-growing table compaction targets).
+             */
+            position_bytes: number;
+            /**
+             * Format: int64
+             * @description Naive `total_bytes + 30 * daily_growth_bytes`, assuming no further compaction ever ran.
+             */
+            projected_30d_bytes: number;
+            /**
+             * Format: int64
+             * @description Naive `total_bytes + 90 * daily_growth_bytes`, assuming no further compaction ever ran.
+             */
+            projected_90d_bytes: number;
+            /**
+             * Format: int64
+             * @description Total on-disk bytes across the `stats` schema's tables (incl. indexes).
+             */
+            total_bytes: number;
         };
         /** @description A departure currently being timed at a field. */
         TaxiActive: {
@@ -9607,6 +9688,47 @@ export interface operations {
             };
         };
     };
+    save_capture: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["SaveCaptureRequest"];
+            };
+        };
+        responses: {
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["CaptureSummaryBody"];
+                };
+            };
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+        };
+    };
     capture_replay: {
         parameters: {
             query?: {
@@ -10304,6 +10426,31 @@ export interface operations {
                     [name: string]: unknown;
                 };
                 content?: never;
+            };
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+        };
+    };
+    storage_forecast: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["StorageForecastBody"];
+                };
             };
             401: {
                 headers: {
