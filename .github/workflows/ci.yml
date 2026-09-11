@@ -8,6 +8,26 @@ on:
 jobs:
   rust:
     runs-on: ubuntu-latest
+    # Backs #[sqlx::test] repo tests: one throwaway database per test, migrations applied
+    # automatically (auto-discovers backend/migrations — no `migrations = "..."` needed). The repo
+    # layer's runtime (non-macro) sqlx queries still don't need the DB to *compile*, only to *run*
+    # one of these tests.
+    services:
+      postgres:
+        image: postgres:17
+        env:
+          POSTGRES_USER: ois
+          POSTGRES_PASSWORD: ois
+          POSTGRES_DB: ois
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd pg_isready
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+    env:
+      DATABASE_URL: postgres://ois:ois@localhost:5432/ois
     steps:
       - uses: actions/checkout@v4
       # Nightly matches rust-toolchain.toml (parallel front-end + mold linker; see .cargo/config.toml).
