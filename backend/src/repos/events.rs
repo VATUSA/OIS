@@ -596,3 +596,114 @@ pub async fn upsert_debrief(
     .map_err(|_| ApiError::Internal)?;
     Ok(())
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    async fn seed_user(pool: &PgPool) -> String {
+        sqlx::query_scalar::<_, String>(
+            "insert into identity.users (full_name, display_name) \
+             values ('Test User', 'Test User') returning id",
+        )
+        .fetch_one(pool)
+        .await
+        .unwrap()
+    }
+
+    async fn seed_event(pool: &PgPool, id: i64, title: &str) {
+        let start = Utc::now();
+        sqlx::query(
+            "insert into events.event (id, title, start_time, end_time) values ($1, $2, $3, $4)",
+        )
+        .bind(id)
+        .bind(title)
+        .bind(start)
+        .bind(start + chrono::Duration::hours(4))
+        .execute(pool)
+        .await
+        .unwrap();
+    }
+
+    /// `list_all`'s `ace_requested` must reflect "any non-cancelled request", not a hardcoded
+    /// status list — this is exactly the regression #61 shipped: an earlier version filtered on
+    /// `status in ('open', 'claimed')`, which went silently dead-and-wrong once migration 0050
+    /// dropped `'claimed'` from the valid set and made `'completed'` a normal terminal state (a
+    /// fulfilled request still means support was requested). Also covers `recording` (derived from
+    /// the latest non-discarded `stats.capture` / `stats.event_capture.enabled`) and
+    /// `facility_support` in the same pass, since they're computed by the same query.
+    #[sqlx::test]
+    async fn list_all_computes_status_flags_from_live_state(pool: PgPool) {
+        let user = seed_user(&pool).await;
+
+        // ace_requested cases: open/completed -> true, cancelled -> false, no request -> false.
+        seed_event(&pool, 90001, "open request").await;
+        seed_event(&pool, 90002, "completed request").await;
+        seed_event(&pool, 90003, "cancelled request").await;
+        seed_event(&pool, 90004, "no request").await;
+        for (event_id, status) in [(90001, "open"), (90002, "completed"), (90003, "cancelled")] {
+            sqlx::query(
+                "insert into ace.requests (event_id, requested_by, status) values ($1, $2, $3)",
+            )
+            .bind(event_id)
+            .bind(&user)
+            .bind(status)
+            .execute(&pool)
+            .await
+            .unwrap();
+        }
+
+        // recording cases: an open capture -> "recording", a saved (non-discarded) capture ->
+        // "recorded", enabled event_capture with no capture row -> "scheduled", neither -> "off".
+        seed_event(&pool, 90005, "recording").await;
+        seed_event(&pool, 90006, "recorded").await;
+        seed_event(&pool, 90007, "scheduled").await;
+        for (event_id, status) in [(90005, "open"), (90006, "saved")] {
+            sqlx::query(
+                "insert into stats.capture (event_id, start_time, status) values ($1, now(), $2)",
+            )
+            .bind(event_id)
+            .bind(status)
+            .execute(&pool)
+            .await
+            .unwrap();
+        }
+        sqlx::query("insert into stats.event_capture (event_id, enabled) values ($1, true)")
+            .bind(90007)
+            .execute(&pool)
+            .await
+            .unwrap();
+
+        // facility_support: present on one event, absent on the rest.
+        sqlx::query("insert into events.facility_support (event_id, facility) values ($1, 'ZDC')")
+            .bind(90001)
+            .execute(&pool)
+            .await
+            .unwrap();
+
+        let events = list_all(&pool).await.unwrap();
+        let by_id = |id: i64| events.iter().find(|e| e.id == id).unwrap();
+
+        assert!(
+            by_id(90001).ace_requested,
+            "open request counts as requested"
+        );
+        assert!(
+            by_id(90002).ace_requested,
+            "completed request still counts as requested"
+        );
+        assert!(
+            !by_id(90003).ace_requested,
+            "cancelled request doesn't count"
+        );
+        assert!(!by_id(90004).ace_requested, "no request at all");
+
+        assert_eq!(by_id(90005).recording, "recording");
+        assert_eq!(by_id(90006).recording, "recorded");
+        assert_eq!(by_id(90007).recording, "scheduled");
+        assert_eq!(by_id(90004).recording, "off");
+
+        assert!(by_id(90001).facility_support);
+        assert!(!by_id(90002).facility_support);
+    }
+}
