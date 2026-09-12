@@ -241,8 +241,16 @@ pub struct DueReminder {
 /// the claimer has a linked Discord account, the request isn't cancelled, and no `job_type` job has
 /// already been enqueued for this claim — so a released claim or a cancelled request naturally
 /// drops out, and a repeat scheduler tick never double-sends.
+/// Claims whose event falls in `(now + hours_after, now + hours_before]` — i.e. this tier's own
+/// window, not "anything within `hours_before`". Without a lower bound, a claim first seen after its
+/// event is already inside a *later* tier's window (e.g. claimed at T-3h, before either reminder has
+/// fired) would match every tier whose upper bound is ≥3h simultaneously — sending a 24h-tier
+/// reminder (labelled "24h") and a 6h-tier reminder back to back for an event that's actually only
+/// 3 hours out. Bounding each tier to its own slice ensures a claim only ever matches the tier whose
+/// window it's *actually* currently in.
 pub async fn claims_due_for_reminder(
     pool: &PgPool,
+    hours_after: i64,
     hours_before: i64,
     job_type: &str,
 ) -> Result<Vec<DueReminder>, ApiError> {
@@ -254,18 +262,51 @@ pub async fn claims_due_for_reminder(
          join events.event e on e.id = r.event_id \
          join integration.external_sync_mappings m \
            on m.system_code = 'discord' and m.entity_type = 'user' and m.local_id = c.claimed_by \
-         where e.start_time > now() \
-           and e.start_time <= now() + make_interval(hours => $1::int) \
+         where e.start_time > now() + make_interval(hours => $1::int) \
+           and e.start_time <= now() + make_interval(hours => $2::int) \
            and not exists ( \
              select 1 from integration.outbound_jobs j \
-             where j.job_type = $2 and j.subject_type = 'ace_claim' and j.subject_id = c.id \
+             where j.job_type = $3 and j.subject_type = 'ace_claim' and j.subject_id = c.id \
            )",
     )
+    .bind(hours_after as i32)
     .bind(hours_before as i32)
     .bind(job_type)
     .fetch_all(pool)
     .await
     .map_err(|_| ApiError::Internal)
+}
+
+/// Enqueue a reminder job, atomically no-op'ing if one already exists for this `(job_type,
+/// claim_id)` pair. `claims_due_for_reminder`'s own `not exists` check avoids the redundant work in
+/// the common case, but two scheduler ticks racing on the same claim (e.g. two backend processes
+/// briefly overlapping during a rolling deploy) could both pass that check before either commits —
+/// the partial unique index backing this `on conflict` (migration 0066) is what actually closes the
+/// race, scoped to just the reminder job types so it can't affect other `outbound_jobs` consumers
+/// (e.g. `ace_request_notify`, which legitimately enqueues more than once per subject).
+/// Returns `true` if a row was actually inserted (the reminder should be considered sent).
+pub async fn enqueue_reminder_job(
+    tx: &mut Transaction<'_, Postgres>,
+    job_type: &str,
+    claim_id: &str,
+    payload: &serde_json::Value,
+) -> Result<bool, ApiError> {
+    let payload = serde_json::to_string(payload).unwrap_or_else(|_| "{}".to_string());
+    let inserted_id: Option<String> = sqlx::query_scalar(
+        "insert into integration.outbound_jobs (job_type, payload, subject_type, subject_id) \
+         values ($1, $2::jsonb, 'ace_claim', $3) \
+         on conflict (subject_id, job_type) where job_type in \
+           ('ace_claim_reminder_24h', 'ace_claim_reminder_6h') \
+         do nothing \
+         returning id",
+    )
+    .bind(job_type)
+    .bind(payload)
+    .bind(claim_id)
+    .fetch_optional(&mut **tx)
+    .await
+    .map_err(|_| ApiError::Internal)?;
+    Ok(inserted_id.is_some())
 }
 
 #[cfg(test)]
@@ -371,7 +412,7 @@ mod tests {
         let due_request = seed_claimed_request(&pool, due_event, &requester, &claimer).await;
         seed_claimed_request(&pool, not_due_event, &requester, &claimer).await;
 
-        let due = claims_due_for_reminder(&pool, 24, "ace_claim_reminder_24h")
+        let due = claims_due_for_reminder(&pool, 6, 24, "ace_claim_reminder_24h")
             .await
             .unwrap();
         assert_eq!(due.len(), 1);
@@ -379,6 +420,40 @@ mod tests {
         assert_eq!(due[0].event_title, "Fall Fly-In");
         assert_eq!(due[0].position.as_deref(), Some("DCA_APP"));
         assert_eq!(due[0].claim_id, claim_id_for(&pool, &due_request).await);
+    }
+
+    /// The 24h tier must NOT match an event that's already inside the 6h tier's window — without a
+    /// lower bound, a claim first seen after its event has already crossed into a *later* tier's
+    /// window (e.g. a same-day claim made 3 hours before the event, before either reminder has
+    /// fired) would match both tiers simultaneously: a 6h-tier reminder (correct) and a 24h-tier
+    /// reminder (wrong — the label says "24h" when the event is actually 3 hours out).
+    #[sqlx::test]
+    async fn claims_due_for_reminder_24h_tier_excludes_events_already_inside_the_6h_window(
+        pool: PgPool,
+    ) {
+        let requester = seed_user(&pool, "Requester").await;
+        let claimer = seed_user(&pool, "Claimer").await;
+        link_discord(&pool, &claimer, "999888777").await;
+        let late_event = seed_event(&pool, 1, 3).await; // already inside the 6h window
+
+        seed_claimed_request(&pool, late_event, &requester, &claimer).await;
+
+        let due_24h = claims_due_for_reminder(&pool, 6, 24, "ace_claim_reminder_24h")
+            .await
+            .unwrap();
+        assert!(
+            due_24h.is_empty(),
+            "a 3h-out event must not match the 24h tier (6h, 24h] window"
+        );
+
+        let due_6h = claims_due_for_reminder(&pool, 0, 6, "ace_claim_reminder_6h")
+            .await
+            .unwrap();
+        assert_eq!(
+            due_6h.len(),
+            1,
+            "the same event must still match the 6h tier — it's genuinely due"
+        );
     }
 
     #[sqlx::test]
@@ -393,7 +468,7 @@ mod tests {
             .await
             .unwrap();
 
-        let due = claims_due_for_reminder(&pool, 6, "ace_claim_reminder_6h")
+        let due = claims_due_for_reminder(&pool, 0, 6, "ace_claim_reminder_6h")
             .await
             .unwrap();
         assert!(due.is_empty());
@@ -410,9 +485,50 @@ mod tests {
 
         mark_job_sent(&pool, "ace_claim_reminder_24h", &claim_id).await;
 
-        let due = claims_due_for_reminder(&pool, 24, "ace_claim_reminder_24h")
+        let due = claims_due_for_reminder(&pool, 6, 24, "ace_claim_reminder_24h")
             .await
             .unwrap();
         assert!(due.is_empty(), "already-reminded claim must not resurface");
+    }
+
+    /// The DB-level dedup (migration 0066's partial unique index) is what actually closes the race
+    /// between two scheduler ticks — this proves the second `enqueue_reminder_job` call for the same
+    /// claim+tier no-ops rather than erroring or inserting a duplicate row.
+    #[sqlx::test]
+    async fn enqueue_reminder_job_is_atomic_against_a_duplicate_insert(pool: PgPool) {
+        let requester = seed_user(&pool, "Requester").await;
+        let claimer = seed_user(&pool, "Claimer").await;
+        link_discord(&pool, &claimer, "999888777").await;
+        let event_id = seed_event(&pool, 1, 23).await;
+        let request_id = seed_claimed_request(&pool, event_id, &requester, &claimer).await;
+        let claim_id = claim_id_for(&pool, &request_id).await;
+        let payload = serde_json::json!({"discord_user_id": "999888777"});
+
+        let mut tx1 = pool.begin().await.unwrap();
+        let first = enqueue_reminder_job(&mut tx1, "ace_claim_reminder_24h", &claim_id, &payload)
+            .await
+            .unwrap();
+        tx1.commit().await.unwrap();
+        assert!(first, "the first enqueue for this claim+tier must insert");
+
+        let mut tx2 = pool.begin().await.unwrap();
+        let second = enqueue_reminder_job(&mut tx2, "ace_claim_reminder_24h", &claim_id, &payload)
+            .await
+            .unwrap();
+        tx2.commit().await.unwrap();
+        assert!(
+            !second,
+            "a second enqueue for the same claim+tier must no-op, not insert a duplicate"
+        );
+
+        let count: i64 = sqlx::query_scalar(
+            "select count(*) from integration.outbound_jobs \
+             where job_type = 'ace_claim_reminder_24h' and subject_id = $1",
+        )
+        .bind(&claim_id)
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        assert_eq!(count, 1, "exactly one row must exist, not two");
     }
 }

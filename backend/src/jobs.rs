@@ -22,7 +22,6 @@ use crate::repos::ace as ace_repo;
 use crate::repos::aircraft_profiles as aircraft_profiles_repo;
 use crate::repos::events as events_repo;
 use crate::repos::flow as flow_repo;
-use crate::repos::integration as integration_repo;
 use crate::repos::stats as stats_repo;
 use crate::repos::tmu as tmu_repo;
 
@@ -386,10 +385,14 @@ async fn capture_scheduler_once(pool: &PgPool) -> Result<String, String> {
 /// How often to check for ACE claims crossing a reminder threshold.
 const ACE_REMINDER_INTERVAL: Duration = Duration::from_secs(15 * 60);
 
-/// Reminder thresholds and the outbound-job type used both to dispatch and to de-duplicate each
-/// (via `not exists` against `integration.outbound_jobs` in `claims_due_for_reminder`).
-const ACE_REMINDER_TIERS: &[(i64, &str)] =
-    &[(24, "ace_claim_reminder_24h"), (6, "ace_claim_reminder_6h")];
+/// Reminder tiers as `(hours_after, hours_before, job_type)` — each tier's own window (see
+/// `claims_due_for_reminder`'s doc comment for why the lower bound matters), and the outbound-job
+/// type used both to dispatch and to de-duplicate each (via `not exists` against
+/// `integration.outbound_jobs`).
+const ACE_REMINDER_TIERS: &[(i64, i64, &str)] = &[
+    (6, 24, "ace_claim_reminder_24h"),
+    (0, 6, "ace_claim_reminder_6h"),
+];
 
 /// DM ACE claimers a reminder at T-24h and T-6h before their event starts. Idempotent by
 /// construction: each tick re-queries live state (crossed the threshold, event still upcoming, not
@@ -410,31 +413,39 @@ pub fn spawn_ace_reminder_scheduler(reg: Arc<JobRegistry>, pool: PgPool) {
 
 async fn ace_reminder_scheduler_once(pool: &PgPool) -> Result<String, String> {
     let mut sent = 0u32;
-    for &(hours, job_type) in ACE_REMINDER_TIERS {
-        let due = ace_repo::claims_due_for_reminder(pool, hours, job_type)
+    let mut tier_failed = false;
+    // Each tier is queried and enqueued independently — a transient failure on one tier's query
+    // must not skip the other tier's check for this cycle (they're unrelated thresholds), so errors
+    // are logged and accumulated rather than propagated with `?`, which would abort the whole loop
+    // on the first failure.
+    for &(hours_after, hours_before, job_type) in ACE_REMINDER_TIERS {
+        let due = match ace_repo::claims_due_for_reminder(pool, hours_after, hours_before, job_type)
             .await
-            .map_err(|_| "ace reminder query failed".to_string())?;
+        {
+            Ok(due) => due,
+            Err(e) => {
+                tracing::warn!(job_type, error = ?e, "ace reminder query failed");
+                tier_failed = true;
+                continue;
+            }
+        };
         for r in due {
             let payload = json!({
                 "discord_user_id": r.discord_user_id,
                 "event_title": r.event_title,
                 "position": r.position,
-                "reminder": format!("{hours}h"),
+                "reminder": format!("{hours_before}h"),
             });
-            let Ok(mut tx) = pool.begin().await else {
-                continue;
+            let mut tx = match pool.begin().await {
+                Ok(tx) => tx,
+                Err(e) => {
+                    tracing::warn!(claim = %r.claim_id, job_type, error = %e, "ace reminder tx begin failed");
+                    continue;
+                }
             };
-            match integration_repo::enqueue_job(
-                &mut tx,
-                job_type,
-                &payload,
-                Some("ace_claim"),
-                Some(&r.claim_id),
-            )
-            .await
-            {
-                Ok(_) => {
-                    if tx.commit().await.is_ok() {
+            match ace_repo::enqueue_reminder_job(&mut tx, job_type, &r.claim_id, &payload).await {
+                Ok(inserted) => {
+                    if tx.commit().await.is_ok() && inserted {
                         sent += 1;
                     }
                 }
@@ -443,6 +454,9 @@ async fn ace_reminder_scheduler_once(pool: &PgPool) -> Result<String, String> {
                 }
             }
         }
+    }
+    if tier_failed && sent == 0 {
+        return Err("one or more ace reminder tiers failed to query".to_string());
     }
     Ok(if sent == 0 {
         "no changes".to_string()
