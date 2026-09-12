@@ -319,7 +319,7 @@ async function fetchHistAtc(at: number) {
 }
 
 /** Online ATC (badges + TRACON areas + centers) for the map ATC layer. Only polls while the layer
- * is enabled; the geometry is heavier than traffic so it refreshes every 30s. Inside a
+ * is enabled; matches the traffic layer's 15s cadence so logon/logoff appears promptly. Inside a
  * `HistoricalProvider` it reconstructs the online ATC at the scrubber instant. */
 export function useAtc(enabled: boolean) {
   const at = useHistoricalAt();
@@ -332,7 +332,7 @@ export function useAtc(enabled: boolean) {
       return data;
     },
     enabled,
-    refetchInterval: at == null ? 30_000 : false,
+    refetchInterval: at == null ? 15_000 : false,
     staleTime: at == null ? 0 : Infinity,
     placeholderData: at == null ? undefined : keepPreviousData,
   });
