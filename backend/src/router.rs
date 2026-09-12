@@ -9,10 +9,10 @@ use crate::{
     auth::middleware::resolve_current_user,
     config::build_cors_layer,
     handlers::{
-        access, ace, aircraft_profiles, airport_configs, api_keys, atc, audit, auth, dashboards,
-        docs, events, facilities, facility_documents, facility_map, feed, flow, gdp, health,
-        integration, jobs as jobs_handler, preferences, public, runway, service_accounts, stats,
-        tmu, users, webhooks,
+        access, ace, aircraft_profiles, airport_configs, airport_surface, api_keys, atc, audit,
+        auth, dashboards, docs, events, facilities, facility_documents, facility_map, feed, flow,
+        gdp, health, integration, jobs as jobs_handler, preferences, public, runway,
+        service_accounts, stats, tmu, users, webhooks,
     },
     openapi::ApiDoc,
     realtime,
@@ -275,6 +275,37 @@ pub fn build_router(state: AppState) -> Router {
         .route(
             "/api/v1/forecast/{icao}",
             get(airport_configs::forecast_wind),
+        )
+        // Editable airport surface geometry (gates, ramp/apron areas, taxiways) for the #164 epic
+        .route(
+            "/api/v1/airports/{icao}/surface",
+            get(airport_surface::get_airport_surface),
+        )
+        .route(
+            "/api/v1/airports/{icao}/gates",
+            post(airport_surface::create_airport_gate),
+        )
+        .route(
+            "/api/v1/airports/{icao}/gates/{id}",
+            put(airport_surface::update_airport_gate).delete(airport_surface::delete_airport_gate),
+        )
+        .route(
+            "/api/v1/airports/{icao}/ramp-areas",
+            post(airport_surface::create_airport_ramp_area),
+        )
+        .route(
+            "/api/v1/airports/{icao}/ramp-areas/{id}",
+            put(airport_surface::update_airport_ramp_area)
+                .delete(airport_surface::delete_airport_ramp_area),
+        )
+        .route(
+            "/api/v1/airports/{icao}/taxiways",
+            post(airport_surface::create_airport_taxiway),
+        )
+        .route(
+            "/api/v1/airports/{icao}/taxiways/{id}",
+            put(airport_surface::update_airport_taxiway)
+                .delete(airport_surface::delete_airport_taxiway),
         )
         // Aircraft performance profiles for the trajectory / ETA model (national reference data)
         .route(

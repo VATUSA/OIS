@@ -620,6 +620,84 @@ pub struct UpsertAirportConfigRequest {
     pub calm_default: bool,
 }
 
+/// An airport surface point (a gate or parking position). Runways are not modeled here — they're
+/// already covered by the bundled OurAirports data in `feed::runway_db`.
+#[derive(Debug, Serialize, ToSchema, sqlx::FromRow)]
+pub struct AirportGateBody {
+    pub id: String,
+    pub icao: String,
+    pub name: String,
+    pub lat: f64,
+    pub lon: f64,
+    /// `manual` | `osm` | `crc`.
+    pub source: String,
+    pub updated_at: DateTime<Utc>,
+    /// Whether the requesting user may edit this airport's surface data (per their ARTCC scope).
+    #[sqlx(default)]
+    pub editable: bool,
+}
+
+#[derive(Debug, Deserialize, ToSchema)]
+pub struct UpsertAirportGateRequest {
+    pub name: String,
+    pub lat: f64,
+    pub lon: f64,
+}
+
+/// An airport ramp or apron area. `rings` is an array of rings, each an array of `[lat, lon]` —
+/// the outer boundary only (holes aren't modeled).
+#[derive(Debug, Serialize, ToSchema, sqlx::FromRow)]
+pub struct AirportRampAreaBody {
+    pub id: String,
+    pub icao: String,
+    pub name: String,
+    /// `ramp` | `apron`.
+    pub kind: String,
+    #[schema(value_type = Vec<Vec<Vec<f64>>>)]
+    pub rings: sqlx::types::Json<Vec<Vec<[f64; 2]>>>,
+    /// `manual` | `osm` | `crc`.
+    pub source: String,
+    pub updated_at: DateTime<Utc>,
+    #[sqlx(default)]
+    pub editable: bool,
+}
+
+#[derive(Debug, Deserialize, ToSchema)]
+pub struct UpsertAirportRampAreaRequest {
+    pub name: String,
+    pub kind: String,
+    pub rings: Vec<Vec<[f64; 2]>>,
+}
+
+/// An airport taxiway centerline. `points` is an ordered array of `[lat, lon]`.
+#[derive(Debug, Serialize, ToSchema, sqlx::FromRow)]
+pub struct AirportTaxiwayBody {
+    pub id: String,
+    pub icao: String,
+    pub name: String,
+    #[schema(value_type = Vec<Vec<f64>>)]
+    pub points: sqlx::types::Json<Vec<[f64; 2]>>,
+    /// `manual` | `osm` | `crc`.
+    pub source: String,
+    pub updated_at: DateTime<Utc>,
+    #[sqlx(default)]
+    pub editable: bool,
+}
+
+#[derive(Debug, Deserialize, ToSchema)]
+pub struct UpsertAirportTaxiwayRequest {
+    pub name: String,
+    pub points: Vec<[f64; 2]>,
+}
+
+/// An airport's full surface geometry, combined for one read.
+#[derive(Debug, Serialize, ToSchema)]
+pub struct AirportSurfaceBody {
+    pub gates: Vec<AirportGateBody>,
+    pub ramp_areas: Vec<AirportRampAreaBody>,
+    pub taxiways: Vec<AirportTaxiwayBody>,
+}
+
 /// A configurable aircraft performance profile (climb / cruise / descent schedules) used by the
 /// trajectory / ETA model. Keyed by `kind` (`type` / `wake` / `default`) + `key` (ICAO type, wake
 /// token, or empty). See migration 0059 and `feed::trajectory`.
