@@ -25,14 +25,36 @@ const FALLBACK_TEMPLATE: &str = "**{{title}} | Planning Thread**\n\
     🟢 = Available\n🟡 = Partially available/unsure\n🔴 = Unavailable\n\
     ───────────────────────────";
 
-/// Substitute each `{{key}}` in `template` with its value. Plain sequential replace — the template
-/// only ever carries a handful of known placeholders, not user-authored HTML/logic, so this is
-/// simpler and safer than pulling in a templating engine for it.
+/// Substitute each `{{key}}` in `template` with its value, in a single left-to-right pass over the
+/// *template* text only. A repeated sequential `.replace()` per key would re-scan already-substituted
+/// values on every later pass — a value that happens to contain literal `{{other_key}}` text (e.g. an
+/// event title of "Fly-in {{ntmo_ping}} Weekend") would then get that text rewritten into a real
+/// mention by a later iteration, injecting an extra ping the template never asked for at that spot.
+/// Scanning the source once and appending substituted values straight to the output — never feeding
+/// them back through the scan — makes that class of re-injection structurally impossible. An unknown
+/// or malformed `{{...}}` token (typo, or no closing `}}`) is left as literal text.
 fn render_template(template: &str, vars: &[(&str, &str)]) -> String {
-    let mut out = template.to_string();
-    for (key, value) in vars {
-        out = out.replace(&format!("{{{{{key}}}}}"), value);
+    let mut out = String::with_capacity(template.len());
+    let mut rest = template;
+    while let Some(start) = rest.find("{{") {
+        out.push_str(&rest[..start]);
+        let after_open = &rest[start + 2..];
+        match after_open.find("}}") {
+            Some(end) => {
+                let key = &after_open[..end];
+                match vars.iter().find(|(k, _)| *k == key) {
+                    Some((_, value)) => out.push_str(value),
+                    None => out.push_str(&rest[start..start + 2 + end + 2]),
+                }
+                rest = &after_open[end + 2..];
+            }
+            None => {
+                out.push_str(&rest[start..]);
+                rest = "";
+            }
+        }
     }
+    out.push_str(rest);
     out
 }
 
@@ -110,6 +132,10 @@ pub(crate) async fn create_event_thread(
             ("dcc_ping", &dcc_ping),
         ],
     );
+    // Discord rejects a message over 2000 chars outright; the template is capped on save, but the
+    // per-event facility_lines block can still push a long template over the edge, so truncate the
+    // final rendered content as a hard safety net rather than let send_message fail wholesale.
+    let content = truncate(&content, 2000);
 
     let event_id = p
         .get("event_id")
@@ -188,5 +214,37 @@ mod tests {
             🟢 = Available\n🟡 = Partially available/unsure\n🔴 = Unavailable\n\
             ───────────────────────────";
         assert_eq!(out, expected);
+    }
+
+    /// A value that happens to contain literal `{{other_key}}` text must not be re-scanned and
+    /// substituted again — that would let an event title like "Fly-in {{ntmo_ping}} Weekend" inject
+    /// an extra role ping the template's own placeholder slot didn't ask for at that position. The
+    /// old sequential-`.replace()` implementation was vulnerable to exactly this; a single pass over
+    /// the template text (never re-scanning already-substituted output) is not.
+    #[test]
+    fn a_substituted_value_containing_placeholder_syntax_is_not_re_substituted() {
+        let out = render_template(
+            "Title: {{title}} Ping: {{ntmo_ping}}",
+            &[
+                ("title", "Fly-in {{ntmo_ping}} Weekend"),
+                ("ntmo_ping", "<@&222>"),
+            ],
+        );
+        assert_eq!(out, "Title: Fly-in {{ntmo_ping}} Weekend Ping: <@&222>");
+    }
+
+    /// An unrecognized `{{...}}` token (a typo, or a placeholder that doesn't exist) is left as
+    /// literal text rather than panicking or silently dropping it.
+    #[test]
+    fn unknown_placeholder_is_left_literal() {
+        let out = render_template("Hi {{typo}}!", &[("name", "Alex")]);
+        assert_eq!(out, "Hi {{typo}}!");
+    }
+
+    /// A `{{` with no matching closing `}}` doesn't panic on the slice arithmetic.
+    #[test]
+    fn unclosed_placeholder_does_not_panic() {
+        let out = render_template("Hi {{name", &[("name", "Alex")]);
+        assert_eq!(out, "Hi {{name");
     }
 }
