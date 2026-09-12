@@ -24,7 +24,7 @@
     "vitest": "^4.1.11"
   },
   "dependencies": {
-    "@deck.gl/core": "^9.1",
+    "@deck.gl/core": "^9.4",
     "@deck.gl/extensions": "^9.1",
     "@deck.gl/layers": "^9.1",
     "@deck.gl/react": "^9.1",
