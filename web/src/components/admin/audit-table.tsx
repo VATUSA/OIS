@@ -3,11 +3,13 @@ import {Badge, Tooltip, TooltipContent, TooltipTrigger} from "@ois/ui";
 import type {components} from "@ois/api-client";
 import {
   type ColumnDef,
-  type SortingState,
+  createSortedRowModel,
   flexRender,
-  getCoreRowModel,
-  getSortedRowModel,
-  useReactTable,
+  rowSortingFeature,
+  type SortingState,
+  sortFns,
+  tableFeatures,
+  useTable,
 } from "@tanstack/react-table";
 import {ArrowDown, ArrowUp, ChevronsUpDown} from "lucide-react";
 
@@ -16,12 +18,21 @@ import {actionVariant, cap, pastTense, resourceLabel, shortId} from "@/lib/audit
 
 type AuditLogEntry = components["schemas"]["AuditLogEntry"];
 
+// v9 registers sorting explicitly instead of bundling it automatically (see #133). The full
+// built-in `sortFns` registry (not hand-picked entries) keeps v8's auto-detected sorting behavior
+// for every column type here, since none of them declare a custom `sortingFn`.
+const features = tableFeatures({
+  rowSortingFeature,
+  sortedRowModel: createSortedRowModel(),
+  sortFns,
+});
+
 /** The audit log as a sortable TanStack table. Sorting reorders the current page (the list is
  * offset-paginated server-side, newest first). */
 export function AuditTable({ items }: { items: AuditLogEntry[] }) {
   const [sorting, setSorting] = useState<SortingState>([{ id: "created_at", desc: true }]);
 
-  const columns = useMemo<ColumnDef<AuditLogEntry>[]>(
+  const columns = useMemo<ColumnDef<typeof features, AuditLogEntry>[]>(
     () => [
       {
         accessorKey: "created_at",
@@ -82,13 +93,12 @@ export function AuditTable({ items }: { items: AuditLogEntry[] }) {
     [],
   );
 
-  const table = useReactTable({
+  const table = useTable({
+    features,
     data: items,
     columns,
     state: { sorting },
     onSortingChange: setSorting,
-    getCoreRowModel: getCoreRowModel(),
-    getSortedRowModel: getSortedRowModel(),
   });
 
   if (items.length === 0) {
@@ -130,7 +140,7 @@ export function AuditTable({ items }: { items: AuditLogEntry[] }) {
         <tbody>
           {table.getRowModel().rows.map((r) => (
             <tr key={r.id} className="border-b last:border-0">
-              {r.getVisibleCells().map((c) => (
+              {r.getAllCells().map((c) => (
                 <td key={c.id} className="py-2 pr-4 align-top">
                   {flexRender(c.column.columnDef.cell, c.getContext())}
                 </td>
