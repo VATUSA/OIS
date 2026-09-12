@@ -16,4 +16,7 @@
   margin: 0;
   box-shadow: none;
   color: inherit;
+  /* The suggested [popover] UA stylesheet also sets overflow: auto, which could clip our inner
+     box if the host's auto-sized dimensions don't exactly match its content in every browser. */
+  overflow: visible;
 }
