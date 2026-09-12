@@ -1251,6 +1251,17 @@ pub struct PushGuildSnapshotRequest {
     pub guilds: Vec<DiscordGuildSnapshotBody>,
 }
 
+/// The event-thread message body template (placeholders substituted by the bot at render time).
+#[derive(Debug, Serialize, ToSchema)]
+pub struct EventThreadTemplateBody {
+    pub body: String,
+}
+
+#[derive(Debug, Deserialize, ToSchema)]
+pub struct UpsertEventThreadTemplateRequest {
+    pub body: String,
+}
+
 /// The current user's Discord account link.
 #[derive(Debug, Serialize, ToSchema)]
 pub struct DiscordLinkBody {
