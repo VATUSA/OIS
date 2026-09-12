@@ -15,6 +15,26 @@ import {useWebglAvailable} from "./hooks/useWebglAvailable";
  * Leaflet longitude-offset machinery. */
 const MAP_VIEW = new MapView({ repeat: true });
 
+/**
+ * maplibre-gl 6 resolves its worker script's URL by string-concatenating a filename at runtime
+ * (`new URL('./' + name, import.meta.url)`), which neither Vite's dev optimizer nor its production
+ * Rollup build can statically detect as a worker import — the real worker file never gets
+ * bundled/served, so the request silently falls back to `index.html` and every vector tile fails
+ * to parse (the basemap stays blank; deck.gl, which has no worker dependency, is unaffected).
+ * Loading the worker ourselves via Vite's `?worker&url` suffix (a static, analyzable specifier)
+ * makes Vite bundle it — resolving its own relative imports — into a self-contained asset and hand
+ * back its URL; setting `config.WORKER_URL` before react-map-gl constructs the map makes maplibre
+ * use that instead of computing its own. Both imports stay dynamic so maplibre-gl remains in its
+ * own lazy chunk rather than bloating the main bundle.
+ */
+const mapLibPromise = Promise.all([
+  import("maplibre-gl"),
+  import("maplibre-gl/dist/maplibre-gl-worker.mjs?worker&url"),
+]).then(([mod, workerUrl]) => {
+  mod.setWorkerUrl(workerUrl.default);
+  return mod;
+});
+
 /** deck.gl calls props.onResize directly, so an explicit `undefined` (no camera) crashes it. */
 const NOOP = () => {};
 
@@ -128,6 +148,7 @@ export function MapCanvas({
           // vendored basemaps once our aeroway layers are added, so force a fresh basemap. deck owns
           // the camera, so MapLibre re-syncs to the current view with no reset.
           key={resolvedTheme}
+          mapLib={mapLibPromise}
           mapStyle={CARTO_STYLE[resolvedTheme]}
           attributionControl={false}
           onLoad={(e) => ensureAeroway(e.target as unknown as StyleMap, resolvedTheme)}
