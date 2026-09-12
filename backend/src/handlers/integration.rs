@@ -18,11 +18,11 @@ use crate::{
     models::{
         AceRequestBody, AckJobRequest, DiscordAceClaimRequest, DiscordAceInfoBody,
         DiscordAvailabilityRequest, DiscordAvailabilityResult, DiscordConfigBody, DiscordLinkBody,
-        OutboundJobBody, PushGuildSnapshotRequest, UpsertDiscordConfigRequest,
+        DiscordTmiInfoBody, OutboundJobBody, PushGuildSnapshotRequest, UpsertDiscordConfigRequest,
     },
     repos::{
         access as access_repo, ace as ace_repo, availability as availability_repo,
-        events as events_repo, integration as integration_repo,
+        events as events_repo, integration as integration_repo, tmu as tmu_repo,
     },
     state::AppState,
 };
@@ -133,6 +133,26 @@ pub async fn discord_ace_info(
         slots: request.slots,
         claims_count: request.claims_count,
         time_options,
+    }))
+}
+
+/// What the bot needs to reply to a "View structured" button click on a TMI post.
+#[utoipa::path(
+    get, path = "/api/v1/integration/discord/tmi/{id}", tag = "integration",
+    params(("id" = String, Path)),
+    responses((status = 200, body = DiscordTmiInfoBody), (status = 401), (status = 404))
+)]
+pub async fn discord_tmi_info(
+    State(state): State<AppState>,
+    _permission: RequirePermission<IntegrationJobsUpdate>,
+    Path(id): Path<String>,
+) -> Result<Json<DiscordTmiInfoBody>, ApiError> {
+    let tmi = tmu_repo::get_tmi(pool(&state)?, &id)
+        .await?
+        .ok_or(ApiError::NotFound)?;
+    Ok(Json(DiscordTmiInfoBody {
+        restriction: tmi.restriction,
+        decoded: tmi.decoded,
     }))
 }
 

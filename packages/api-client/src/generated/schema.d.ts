@@ -1642,6 +1642,23 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/v1/integration/discord/tmi/{id}": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** What the bot needs to reply to a "View structured" button click on a TMI post. */
+        get: operations["discord_tmi_info"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/v1/integration/jobs/lease": {
         parameters: {
             query?: never;
@@ -3345,6 +3362,15 @@ export interface components {
         DiscordMapEntry: {
             id: string;
             name: string;
+        };
+        /**
+         * @description What the bot needs for the "View structured" reply on a TMI post: the raw line (already what's
+         *     posted) plus its plain-English structured breakdown, when the TMI was entered via the structured
+         *     form (null for a raw-typed TMI).
+         */
+        DiscordTmiInfoBody: {
+            decoded?: string | null;
+            restriction: string;
         };
         /**
          * @description One person's availability response for an event (from the DCC thread 🟢/🟡/🔴 buttons). `roles`
@@ -9648,6 +9674,39 @@ export interface operations {
                 content?: never;
             };
             401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+        };
+    };
+    discord_tmi_info: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["DiscordTmiInfoBody"];
+                };
+            };
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            404: {
                 headers: {
                     [name: string]: unknown;
                 };

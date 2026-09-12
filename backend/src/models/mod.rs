@@ -1274,6 +1274,15 @@ pub struct DiscordAceInfoBody {
     pub time_options: Vec<String>,
 }
 
+/// What the bot needs for the "View structured" reply on a TMI post: the raw line (already what's
+/// posted) plus its plain-English structured breakdown, when the TMI was entered via the structured
+/// form (null for a raw-typed TMI).
+#[derive(Debug, Serialize, ToSchema)]
+pub struct DiscordTmiInfoBody {
+    pub restriction: String,
+    pub decoded: Option<String>,
+}
+
 /// Bot interaction callback: a Discord user submitted the claim modal on an ACE request. The backend
 /// resolves the Discord id to the linked OIS user and claims a slot on their behalf. `start_hhmm` /
 /// `end_hhmm` are the modal's raw Zulu times (e.g. "2330"); the backend parses them against the
