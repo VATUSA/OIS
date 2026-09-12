@@ -8,6 +8,8 @@ use arc_swap::ArcSwap;
 use chrono::Utc;
 use sqlx::PgPool;
 
+use serde_json::json;
+
 use crate::errors::ApiError;
 use crate::feed::FeedState;
 use crate::feed::nav::NavData;
@@ -16,9 +18,11 @@ use crate::feed::trajectory::ProfileTable;
 use crate::feed::winds::{self, Winds};
 use crate::job_registry::{JobRegistry, run_interval};
 use crate::realtime::{Events, WsEvent, topic};
+use crate::repos::ace as ace_repo;
 use crate::repos::aircraft_profiles as aircraft_profiles_repo;
 use crate::repos::events as events_repo;
 use crate::repos::flow as flow_repo;
+use crate::repos::integration as integration_repo;
 use crate::repos::stats as stats_repo;
 use crate::repos::tmu as tmu_repo;
 
@@ -376,6 +380,74 @@ async fn capture_scheduler_once(pool: &PgPool) -> Result<String, String> {
         "no changes".to_string()
     } else {
         format!("{opened} opened, {saved} saved")
+    })
+}
+
+/// How often to check for ACE claims crossing a reminder threshold.
+const ACE_REMINDER_INTERVAL: Duration = Duration::from_secs(15 * 60);
+
+/// Reminder thresholds and the outbound-job type used both to dispatch and to de-duplicate each
+/// (via `not exists` against `integration.outbound_jobs` in `claims_due_for_reminder`).
+const ACE_REMINDER_TIERS: &[(i64, &str)] =
+    &[(24, "ace_claim_reminder_24h"), (6, "ace_claim_reminder_6h")];
+
+/// DM ACE claimers a reminder at T-24h and T-6h before their event starts. Idempotent by
+/// construction: each tick re-queries live state (crossed the threshold, event still upcoming, not
+/// already reminded), so a released claim or a cancelled request simply stops matching — no
+/// separate "cancel the scheduled reminder" step is needed. Runs every 15 minutes.
+pub fn spawn_ace_reminder_scheduler(reg: Arc<JobRegistry>, pool: PgPool) {
+    tokio::spawn(run_interval(
+        reg,
+        "ace_reminder_scheduler",
+        "DM ACE claimers a reminder at T-24h/T-6h before their event",
+        ACE_REMINDER_INTERVAL,
+        move || {
+            let pool = pool.clone();
+            async move { ace_reminder_scheduler_once(&pool).await }
+        },
+    ));
+}
+
+async fn ace_reminder_scheduler_once(pool: &PgPool) -> Result<String, String> {
+    let mut sent = 0u32;
+    for &(hours, job_type) in ACE_REMINDER_TIERS {
+        let due = ace_repo::claims_due_for_reminder(pool, hours, job_type)
+            .await
+            .map_err(|_| "ace reminder query failed".to_string())?;
+        for r in due {
+            let payload = json!({
+                "discord_user_id": r.discord_user_id,
+                "event_title": r.event_title,
+                "position": r.position,
+                "reminder": format!("{hours}h"),
+            });
+            let Ok(mut tx) = pool.begin().await else {
+                continue;
+            };
+            match integration_repo::enqueue_job(
+                &mut tx,
+                job_type,
+                &payload,
+                Some("ace_claim"),
+                Some(&r.claim_id),
+            )
+            .await
+            {
+                Ok(_) => {
+                    if tx.commit().await.is_ok() {
+                        sent += 1;
+                    }
+                }
+                Err(_) => {
+                    tracing::warn!(claim = %r.claim_id, job_type, "ace reminder enqueue failed")
+                }
+            }
+        }
+    }
+    Ok(if sent == 0 {
+        "no changes".to_string()
+    } else {
+        format!("{sent} reminder(s) enqueued")
     })
 }
 
