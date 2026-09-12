@@ -1642,6 +1642,39 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/v1/integration/discord/thread-template": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get: operations["get_event_thread_template"];
+        put: operations["put_event_thread_template"];
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/integration/discord/tmi/{id}": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** What the bot needs to reply to a "View structured" button click on a TMI post. */
+        get: operations["discord_tmi_info"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/v1/integration/jobs/lease": {
         parameters: {
             query?: never;
@@ -3347,6 +3380,15 @@ export interface components {
             name: string;
         };
         /**
+         * @description What the bot needs for the "View structured" reply on a TMI post: the raw line (already what's
+         *     posted) plus its plain-English structured breakdown, when the TMI was entered via the structured
+         *     form (null for a raw-typed TMI).
+         */
+        DiscordTmiInfoBody: {
+            decoded?: string | null;
+            restriction: string;
+        };
+        /**
          * @description One person's availability response for an event (from the DCC thread 🟢/🟡/🔴 buttons). `roles`
          *     carries the responder's assignable roles (e.g. `NTMO`) so the planner can read NOM vs shadow intent.
          */
@@ -3444,6 +3486,10 @@ export interface components {
             window_end?: string | null;
             /** Format: date-time */
             window_start?: string | null;
+        };
+        /** @description The event-thread message body template (placeholders substituted by the bot at render time). */
+        EventThreadTemplateBody: {
+            body: string;
         };
         /** @description A VATUSA facility (ARTCC). `artcc_id` scope values reference `id`. */
         FacilityBody: {
@@ -4983,6 +5029,9 @@ export interface components {
         };
         UpsertDiscordConfigRequest: {
             guilds: components["schemas"]["DiscordGuildConfigInput"][];
+        };
+        UpsertEventThreadTemplateRequest: {
+            body: string;
         };
         UpsertFacilityDocumentRequest: {
             title: string;
@@ -9648,6 +9697,99 @@ export interface operations {
                 content?: never;
             };
             401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+        };
+    };
+    get_event_thread_template: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["EventThreadTemplateBody"];
+                };
+            };
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+        };
+    };
+    put_event_thread_template: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["UpsertEventThreadTemplateRequest"];
+            };
+        };
+        responses: {
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["EventThreadTemplateBody"];
+                };
+            };
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+        };
+    };
+    discord_tmi_info: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["DiscordTmiInfoBody"];
+                };
+            };
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            404: {
                 headers: {
                     [name: string]: unknown;
                 };

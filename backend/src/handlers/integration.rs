@@ -18,11 +18,12 @@ use crate::{
     models::{
         AceRequestBody, AckJobRequest, DiscordAceClaimRequest, DiscordAceInfoBody,
         DiscordAvailabilityRequest, DiscordAvailabilityResult, DiscordConfigBody, DiscordLinkBody,
-        OutboundJobBody, PushGuildSnapshotRequest, UpsertDiscordConfigRequest,
+        DiscordTmiInfoBody, EventThreadTemplateBody, OutboundJobBody, PushGuildSnapshotRequest,
+        UpsertDiscordConfigRequest, UpsertEventThreadTemplateRequest,
     },
     repos::{
         access as access_repo, ace as ace_repo, availability as availability_repo,
-        events as events_repo, integration as integration_repo,
+        events as events_repo, integration as integration_repo, tmu as tmu_repo,
     },
     state::AppState,
 };
@@ -136,6 +137,26 @@ pub async fn discord_ace_info(
     }))
 }
 
+/// What the bot needs to reply to a "View structured" button click on a TMI post.
+#[utoipa::path(
+    get, path = "/api/v1/integration/discord/tmi/{id}", tag = "integration",
+    params(("id" = String, Path)),
+    responses((status = 200, body = DiscordTmiInfoBody), (status = 401), (status = 404))
+)]
+pub async fn discord_tmi_info(
+    State(state): State<AppState>,
+    _permission: RequirePermission<IntegrationJobsUpdate>,
+    Path(id): Path<String>,
+) -> Result<Json<DiscordTmiInfoBody>, ApiError> {
+    let tmi = tmu_repo::get_tmi(pool(&state)?, &id)
+        .await?
+        .ok_or(ApiError::NotFound)?;
+    Ok(Json(DiscordTmiInfoBody {
+        restriction: tmi.restriction,
+        decoded: tmi.decoded,
+    }))
+}
+
 #[utoipa::path(
     post, path = "/api/v1/integration/discord/ace/{id}/claim", tag = "integration",
     params(("id" = String, Path)), request_body = DiscordAceClaimRequest,
@@ -180,6 +201,7 @@ pub async fn discord_ace_claim(
     let (slots, count) =
         ace_repo::claim_request(&mut tx, &id, &user_id, &notes, start, end).await?;
     crate::handlers::ace::enqueue_notify(&mut tx, p, &id, slots, count).await?;
+    crate::handlers::ace::enqueue_claim_dm(&mut tx, p, &id, &user_id).await?;
     tx.commit().await.map_err(|_| ApiError::Internal)?;
 
     ace_repo::get_request(p, &id)
@@ -283,6 +305,98 @@ pub async fn put_discord_config(
     }
     integration_repo::upsert_config(p, &payload).await?;
     Ok(Json(integration_repo::get_config(p).await?))
+}
+
+#[utoipa::path(
+    get, path = "/api/v1/integration/discord/thread-template", tag = "integration",
+    responses((status = 200, body = EventThreadTemplateBody), (status = 401))
+)]
+pub async fn get_event_thread_template(
+    State(state): State<AppState>,
+    _permission: RequirePermission<DiscordConfigRead>,
+) -> Result<Json<EventThreadTemplateBody>, ApiError> {
+    let body = integration_repo::get_event_thread_template(pool(&state)?).await?;
+    Ok(Json(EventThreadTemplateBody { body }))
+}
+
+/// Discord rejects a message over 2000 chars outright. Cap well under that so the per-event
+/// substitutions (title, date_line, facility_lines — one line per required/preferred facility) have
+/// headroom before the bot's own truncation safety net (`jobs::thread::create_event_thread`) has to
+/// kick in. Counted in `char`s (Unicode scalar values), not bytes — the shipped default template
+/// itself uses multi-byte box-drawing dividers and emoji, so a byte-length check would reject a
+/// template that looks well under the cap in the textarea the admin is actually looking at.
+const MAX_TEMPLATE_LEN: usize = 1500;
+
+fn validate_template_body(body: &str) -> Result<&str, ApiError> {
+    let trimmed = body.trim();
+    if trimmed.is_empty() || trimmed.chars().count() > MAX_TEMPLATE_LEN {
+        return Err(ApiError::BadRequest);
+    }
+    Ok(trimmed)
+}
+
+#[utoipa::path(
+    put, path = "/api/v1/integration/discord/thread-template", tag = "integration",
+    request_body = UpsertEventThreadTemplateRequest,
+    responses((status = 200, body = EventThreadTemplateBody), (status = 400), (status = 401))
+)]
+pub async fn put_event_thread_template(
+    State(state): State<AppState>,
+    _permission: RequirePermission<DiscordConfigUpdate>,
+    Json(payload): Json<UpsertEventThreadTemplateRequest>,
+) -> Result<Json<EventThreadTemplateBody>, ApiError> {
+    let trimmed = validate_template_body(&payload.body)?;
+    let body = integration_repo::set_event_thread_template(pool(&state)?, trimmed).await?;
+    Ok(Json(EventThreadTemplateBody { body }))
+}
+
+#[cfg(test)]
+mod thread_template_tests {
+    use super::*;
+
+    #[test]
+    fn rejects_empty_or_whitespace_only_body() {
+        assert!(matches!(
+            validate_template_body(""),
+            Err(ApiError::BadRequest)
+        ));
+        assert!(matches!(
+            validate_template_body("   \n  "),
+            Err(ApiError::BadRequest)
+        ));
+    }
+
+    #[test]
+    fn rejects_a_body_over_the_max_length() {
+        let too_long = "a".repeat(MAX_TEMPLATE_LEN + 1);
+        assert!(matches!(
+            validate_template_body(&too_long),
+            Err(ApiError::BadRequest)
+        ));
+    }
+
+    #[test]
+    fn accepts_a_body_at_or_under_the_max_length() {
+        let at_max = "a".repeat(MAX_TEMPLATE_LEN);
+        assert_eq!(
+            validate_template_body(&at_max).unwrap().chars().count(),
+            MAX_TEMPLATE_LEN
+        );
+        assert_eq!(validate_template_body("  hi  ").unwrap(), "hi");
+    }
+
+    /// The cap counts characters, not bytes — a template built from the same multi-byte box-drawing
+    /// dividers and emoji as the shipped default must not be rejected just because its byte length
+    /// exceeds the char cap while its actual character count doesn't.
+    #[test]
+    fn multi_byte_characters_are_counted_once_each_not_by_their_byte_length() {
+        // "─" is 3 bytes and "🟢" is 4 bytes in UTF-8, so this string's byte length is well over
+        // MAX_TEMPLATE_LEN even though its character count is far under it.
+        let body: String = "─🟢".repeat(300);
+        assert!(body.len() > MAX_TEMPLATE_LEN); // sanity check: byte length would wrongly reject this
+        assert!(body.chars().count() < MAX_TEMPLATE_LEN);
+        assert!(validate_template_body(&body).is_ok());
+    }
 }
 
 /// The bot pushes the guilds it's in (channels + roles) so the editor can offer dropdowns. Gated by

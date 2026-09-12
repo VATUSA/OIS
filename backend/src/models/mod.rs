@@ -1251,6 +1251,17 @@ pub struct PushGuildSnapshotRequest {
     pub guilds: Vec<DiscordGuildSnapshotBody>,
 }
 
+/// The event-thread message body template (placeholders substituted by the bot at render time).
+#[derive(Debug, Serialize, ToSchema)]
+pub struct EventThreadTemplateBody {
+    pub body: String,
+}
+
+#[derive(Debug, Deserialize, ToSchema)]
+pub struct UpsertEventThreadTemplateRequest {
+    pub body: String,
+}
+
 /// The current user's Discord account link.
 #[derive(Debug, Serialize, ToSchema)]
 pub struct DiscordLinkBody {
@@ -1272,6 +1283,15 @@ pub struct DiscordAceInfoBody {
     pub claims_count: i64,
     /// Zulu HHMM options spanning the event window (for the start/end dropdowns).
     pub time_options: Vec<String>,
+}
+
+/// What the bot needs for the "View structured" reply on a TMI post: the raw line (already what's
+/// posted) plus its plain-English structured breakdown, when the TMI was entered via the structured
+/// form (null for a raw-typed TMI).
+#[derive(Debug, Serialize, ToSchema)]
+pub struct DiscordTmiInfoBody {
+    pub restriction: String,
+    pub decoded: Option<String>,
 }
 
 /// Bot interaction callback: a Discord user submitted the claim modal on an ACE request. The backend
