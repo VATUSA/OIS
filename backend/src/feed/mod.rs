@@ -39,11 +39,23 @@ use vatsim::VatsimData;
 
 /// Poll ~10s after the source's last known `update_timestamp` — VATSIM refreshes ~15s, so this
 /// lands just after the next publish instead of averaging half a fixed interval either side of it.
+/// Left as-is rather than re-tuned: a one-off live sample against the real feed (see #92) showed
+/// steady-state capture lag of ~23-25s, not the ~10-12s this targets — but that's a single
+/// measurement, not a tuned constant. The `tracing::debug!` added in #92 is the way to gather real
+/// production numbers before changing this.
 const REFRESH_BUFFER_SECS: u64 = 10;
 /// Fast retry cadence used when the refresh-buffer target has already passed (the fetch was late,
 /// `update_timestamp` didn't parse, this is the very first tick, or a failure streak is in
 /// progress) — catches the source's next publish quickly rather than waiting out a full interval.
 const FAST_POLL_SECS: u64 = 2;
+/// 30 fast-polls (~60s) of an unchanged `update_timestamp` after the refresh-buffer target has
+/// passed means the source is presumed frozen (a stale-but-200-OK response), not mid-catch-up —
+/// well past the ~23-25s publish latency observed live against the real feed (see #92), so normal
+/// catch-up near the buffer boundary won't false-trigger this.
+const MAX_CONSECUTIVE_STALE_POLLS: u32 = 30;
+/// Backoff cadence once `MAX_CONSECUTIVE_STALE_POLLS` is hit — a 15x cut from the 2s fast-poll
+/// while still checking back often enough to recover quickly once the source actually advances.
+const STALE_POLL_BACKOFF_SECS: u64 = 30;
 /// A single failed fetch must not flip `healthy` — transient connect/timeout blips on
 /// data.vatsim.net are normal and self-heal on the next tick. Only N in a row means the feed is
 /// actually behind.
@@ -113,8 +125,14 @@ pub fn spawn_poller(state: FeedState) {
 /// target has already passed — this fetch was itself already late, `update_timestamp` failed to
 /// parse, there's no prior timestamp yet, or a failure streak is in progress (the caller leaves
 /// `last_source_ts` unchanged on failure, so this naturally retries fast during an outage instead
-/// of waiting out a full interval).
-fn next_poll_delay(last_source_ts: Option<DateTime<Utc>>, now: DateTime<Utc>) -> Duration {
+/// of waiting out a full interval). Once `consecutive_stale_polls` reaches
+/// `MAX_CONSECUTIVE_STALE_POLLS` — the source has kept responding `Ok` but its own timestamp hasn't
+/// moved — back off to `STALE_POLL_BACKOFF_SECS` instead of fast-polling forever (see #92).
+fn next_poll_delay(
+    last_source_ts: Option<DateTime<Utc>>,
+    consecutive_stale_polls: u32,
+    now: DateTime<Utc>,
+) -> Duration {
     let fast = Duration::from_secs(FAST_POLL_SECS);
     let Some(ts) = last_source_ts else {
         return Duration::ZERO;
@@ -122,9 +140,22 @@ fn next_poll_delay(last_source_ts: Option<DateTime<Utc>>, now: DateTime<Utc>) ->
     let target = ts + chrono::Duration::seconds(REFRESH_BUFFER_SECS as i64);
     if target > now {
         (target - now).to_std().unwrap_or(fast)
+    } else if consecutive_stale_polls >= MAX_CONSECUTIVE_STALE_POLLS {
+        Duration::from_secs(STALE_POLL_BACKOFF_SECS)
     } else {
         fast
     }
+}
+
+/// Whether a successful fetch's parsed timestamp should extend the stale-poll streak: either it
+/// didn't parse at all, or it parsed to the same value already on record — neither is new
+/// information, so both count the same toward `MAX_CONSECUTIVE_STALE_POLLS` (see #92). A parse
+/// failure must count as stale too, not reset the streak — otherwise a persistently malformed
+/// `update_timestamp` (fetch `Ok`, field unparseable every time) can sustain the 2s fast-poll
+/// forever off a `last_source_ts` that's frozen at its last known-good value, exactly the failure
+/// mode this streak exists to bound.
+fn is_stale_poll(parsed_ts: Option<DateTime<Utc>>, last_source_ts: Option<DateTime<Utc>>) -> bool {
+    parsed_ts.is_none() || parsed_ts == last_source_ts
 }
 
 /// Whether `consecutive_failures` should flip `healthy` false — a single transient error must not;
@@ -162,8 +193,10 @@ async fn poller(state: FeedState) {
 
     let mut last_source_ts: Option<DateTime<Utc>> = None;
     let mut consecutive_failures: u32 = 0;
+    let mut consecutive_stale_polls: u32 = 0;
     loop {
-        tokio::time::sleep(next_poll_delay(last_source_ts, Utc::now())).await;
+        let delay = next_poll_delay(last_source_ts, consecutive_stale_polls, Utc::now());
+        tokio::time::sleep(delay).await;
         match vatsim::fetch(&client).await {
             Ok(data) => {
                 consecutive_failures = 0;
@@ -171,10 +204,27 @@ async fn poller(state: FeedState) {
                 let pilots = data.pilots.len();
                 let prefiles = data.prefiles.len();
                 let source_timestamp = data.general.update_timestamp.clone();
-                last_source_ts = DateTime::parse_from_rfc3339(&source_timestamp)
+                let parsed_ts = DateTime::parse_from_rfc3339(&source_timestamp)
                     .map(|dt| dt.with_timezone(&Utc))
-                    .ok()
-                    .or(last_source_ts);
+                    .ok();
+                consecutive_stale_polls = if is_stale_poll(parsed_ts, last_source_ts) {
+                    consecutive_stale_polls + 1
+                } else {
+                    0
+                };
+                if consecutive_stale_polls == MAX_CONSECUTIVE_STALE_POLLS {
+                    tracing::warn!(
+                        consecutive_stale_polls,
+                        "feed: source timestamp hasn't advanced in a while, backing off"
+                    );
+                }
+                tracing::debug!(
+                    prior_poll_delay_secs = delay.as_secs(),
+                    source_timestamp = %source_timestamp,
+                    snapshot_age_secs = parsed_ts.map(|ts| (now - ts).num_seconds()),
+                    "feed: poll succeeded"
+                );
+                last_source_ts = parsed_ts.or(last_source_ts);
                 let mut guard = state.write().await;
                 guard.status.healthy = true;
                 guard.status.last_ok = Some(now);
@@ -198,6 +248,10 @@ async fn poller(state: FeedState) {
             }
             Err(e) => {
                 consecutive_failures += 1;
+                // An outright failure isn't a "stale but successful" read — reset so a failure
+                // streak always retries at the fast cadence (below), even right after a stale
+                // freeze had already backed off to STALE_POLL_BACKOFF_SECS.
+                consecutive_stale_polls = 0;
                 tracing::warn!(error = %e, consecutive_failures, "feed: vatsim fetch failed");
                 // last_source_ts is left as-is: next_poll_delay sees its buffer target already
                 // passed and retries at the fast cadence instead of waiting out a full interval.
@@ -217,13 +271,13 @@ mod tests {
 
     #[test]
     fn first_tick_polls_immediately() {
-        assert_eq!(next_poll_delay(None, Utc::now()), Duration::ZERO);
+        assert_eq!(next_poll_delay(None, 0, Utc::now()), Duration::ZERO);
     }
 
     #[test]
     fn waits_until_the_refresh_buffer_when_the_source_just_updated() {
         let now = Utc::now();
-        let delay = next_poll_delay(Some(now), now);
+        let delay = next_poll_delay(Some(now), 0, now);
         // Buffer hasn't elapsed yet: wait roughly the remaining buffer, not the fast cadence.
         assert_eq!(delay, Duration::from_secs(REFRESH_BUFFER_SECS));
     }
@@ -232,7 +286,7 @@ mod tests {
     fn waits_less_as_the_buffer_elapses() {
         let now = Utc::now();
         let ts = now - chrono::Duration::seconds(4);
-        let delay = next_poll_delay(Some(ts), now);
+        let delay = next_poll_delay(Some(ts), 0, now);
         assert_eq!(delay, Duration::from_secs(REFRESH_BUFFER_SECS - 4));
     }
 
@@ -242,9 +296,55 @@ mod tests {
         // A timestamp from well before now: the buffer target is already behind us.
         let stale = now - chrono::Duration::seconds(REFRESH_BUFFER_SECS as i64 + 30);
         assert_eq!(
-            next_poll_delay(Some(stale), now),
+            next_poll_delay(Some(stale), 0, now),
             Duration::from_secs(FAST_POLL_SECS)
         );
+    }
+
+    #[test]
+    fn backs_off_once_the_fast_poll_streak_is_stale_for_too_long() {
+        let now = Utc::now();
+        let stale = now - chrono::Duration::seconds(REFRESH_BUFFER_SECS as i64 + 30);
+        // Still within the normal catch-up window: fast-poll as usual.
+        assert_eq!(
+            next_poll_delay(Some(stale), MAX_CONSECUTIVE_STALE_POLLS - 1, now),
+            Duration::from_secs(FAST_POLL_SECS)
+        );
+        // The source has kept responding Ok with this same stale timestamp for too long: a
+        // frozen-but-successful feed can't sustain fast-poll forever (see #92).
+        assert_eq!(
+            next_poll_delay(Some(stale), MAX_CONSECUTIVE_STALE_POLLS, now),
+            Duration::from_secs(STALE_POLL_BACKOFF_SECS)
+        );
+    }
+
+    #[test]
+    fn unchanged_timestamp_is_stale() {
+        let ts = Utc::now();
+        assert!(is_stale_poll(Some(ts), Some(ts)));
+    }
+
+    #[test]
+    fn advanced_timestamp_is_not_stale() {
+        let now = Utc::now();
+        let later = now + chrono::Duration::seconds(15);
+        assert!(!is_stale_poll(Some(later), Some(now)));
+    }
+
+    #[test]
+    fn unparseable_timestamp_is_stale_even_with_a_prior_good_one() {
+        // The bug this closes: a persistently malformed `update_timestamp` (fetch `Ok`, field
+        // unparseable every time) must extend the streak, not reset it — otherwise it can sustain
+        // the fast-poll forever off a `last_source_ts` frozen at its last known-good value, same as
+        // an unchanged-but-parseable timestamp would.
+        let last_good = Utc::now();
+        assert!(is_stale_poll(None, Some(last_good)));
+    }
+
+    #[test]
+    fn first_ever_fetch_is_not_stale() {
+        let ts = Utc::now();
+        assert!(!is_stale_poll(Some(ts), None));
     }
 
     #[test]
