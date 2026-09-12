@@ -334,7 +334,8 @@ export function FcaMapView({
   const [hiddenRoutes, setHiddenRoutes] = useState<Set<string>>(() => {
     try {
       const raw = localStorage.getItem("fca.hiddenRoutes");
-      return raw ? new Set(JSON.parse(raw)) : new Set();
+      const v: unknown = raw ? JSON.parse(raw) : [];
+      return new Set(Array.isArray(v) && v.every((x) => typeof x === "string") ? v : []);
     } catch {
       return new Set();
     }
