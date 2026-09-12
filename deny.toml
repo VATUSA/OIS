@@ -1,0 +1,37 @@
+[advisories]
+version = 2
+yanked = "deny"
+# Pre-existing, transitive: ois-discord -> serenity 0.12.5 -> tokio-tungstenite -> tokio-rustls
+# -> rustls 0.22.4 -> rustls-webpki 0.102.8. rustls 0.22's dependency spec caps webpki below the
+# patched releases, so a lockfile-only `cargo update` can't fix this — it needs a serenity version
+# bump, tracked in #98. Remove these once #98 lands.
+ignore = [
+    "RUSTSEC-2026-0049",
+    "RUSTSEC-2026-0098",
+    "RUSTSEC-2026-0099",
+    "RUSTSEC-2026-0104",
+]
+
+[licenses]
+version = 2
+allow = [
+    "MIT",
+    "Apache-2.0",
+    "BSD-2-Clause",
+    "BSD-3-Clause",
+    "ISC",
+    "Unicode-3.0",
+    "Zlib",
+    "CC0-1.0",
+    # Used by webpki-roots / webpki-root-certs (root-certificate data crates pulled in via
+    # reqwest/rustls) — a standard, permissive data license for exactly this purpose.
+    "CDLA-Permissive-2.0",
+]
+
+[bans]
+multiple-versions = "warn"
+wildcards = "warn"
+
+[sources]
+unknown-registry = "deny"
+unknown-git = "deny"
