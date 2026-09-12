@@ -14,6 +14,9 @@ ENV OIS_VERSION=$OIS_VERSION
 RUN pnpm --filter docs-site build
 
 FROM nginx:1-alpine AS runtime
+# Patch OS packages to the latest in the Alpine 3.x branch repos so fixed CVEs in the base image
+# (e.g. util-linux/libuuid) don't ship — the pinned nginx tag lags the repos. Rebuilds re-apply it.
+RUN apk upgrade --no-cache
 COPY deploy/docs-nginx.conf /etc/nginx/conf.d/default.conf
 COPY --from=builder /app/docs-site/.vitepress/dist /usr/share/nginx/html
 EXPOSE 80
