@@ -304,6 +304,30 @@ pub async fn upsert_config(
     Ok(())
 }
 
+// --- event-thread message template (singleton row; see migration 0065) ---------------------------
+
+/// The configured event-thread message body (placeholders substituted by the bot at render time).
+pub async fn get_event_thread_template(pool: &PgPool) -> Result<String, ApiError> {
+    sqlx::query_scalar::<_, String>(
+        "select body from integration.event_thread_template where id = 'default'",
+    )
+    .fetch_one(pool)
+    .await
+    .map_err(|_| ApiError::Internal)
+}
+
+pub async fn set_event_thread_template(pool: &PgPool, body: &str) -> Result<String, ApiError> {
+    sqlx::query(
+        "insert into integration.event_thread_template (id, body) values ('default', $1) \
+         on conflict (id) do update set body = excluded.body",
+    )
+    .bind(body)
+    .execute(pool)
+    .await
+    .map_err(|_| ApiError::Internal)?;
+    get_event_thread_template(pool).await
+}
+
 // --- guild snapshot (channels + roles the bot sees; drives the config dropdowns) ------------------
 
 /// Every guild the bot is in, with its channels + roles.
@@ -427,4 +451,32 @@ async fn replace_map(
         .map_err(|_| ApiError::Internal)?;
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use sqlx::PgPool;
+
+    use super::*;
+
+    #[sqlx::test]
+    async fn event_thread_template_get_returns_the_seeded_default(pool: PgPool) {
+        let body = get_event_thread_template(&pool).await.unwrap();
+        assert!(
+            body.contains("{{title}}"),
+            "seeded default carries the placeholders"
+        );
+    }
+
+    #[sqlx::test]
+    async fn event_thread_template_set_then_get_round_trips(pool: PgPool) {
+        let updated = set_event_thread_template(&pool, "Custom: {{title}}")
+            .await
+            .unwrap();
+        assert_eq!(updated, "Custom: {{title}}");
+        assert_eq!(
+            get_event_thread_template(&pool).await.unwrap(),
+            "Custom: {{title}}"
+        );
+    }
 }

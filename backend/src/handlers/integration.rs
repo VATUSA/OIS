@@ -18,7 +18,8 @@ use crate::{
     models::{
         AceRequestBody, AckJobRequest, DiscordAceClaimRequest, DiscordAceInfoBody,
         DiscordAvailabilityRequest, DiscordAvailabilityResult, DiscordConfigBody, DiscordLinkBody,
-        OutboundJobBody, PushGuildSnapshotRequest, UpsertDiscordConfigRequest,
+        EventThreadTemplateBody, OutboundJobBody, PushGuildSnapshotRequest,
+        UpsertDiscordConfigRequest, UpsertEventThreadTemplateRequest,
     },
     repos::{
         access as access_repo, ace as ace_repo, availability as availability_repo,
@@ -283,6 +284,36 @@ pub async fn put_discord_config(
     }
     integration_repo::upsert_config(p, &payload).await?;
     Ok(Json(integration_repo::get_config(p).await?))
+}
+
+#[utoipa::path(
+    get, path = "/api/v1/integration/discord/thread-template", tag = "integration",
+    responses((status = 200, body = EventThreadTemplateBody), (status = 401))
+)]
+pub async fn get_event_thread_template(
+    State(state): State<AppState>,
+    _permission: RequirePermission<DiscordConfigRead>,
+) -> Result<Json<EventThreadTemplateBody>, ApiError> {
+    let body = integration_repo::get_event_thread_template(pool(&state)?).await?;
+    Ok(Json(EventThreadTemplateBody { body }))
+}
+
+#[utoipa::path(
+    put, path = "/api/v1/integration/discord/thread-template", tag = "integration",
+    request_body = UpsertEventThreadTemplateRequest,
+    responses((status = 200, body = EventThreadTemplateBody), (status = 400), (status = 401))
+)]
+pub async fn put_event_thread_template(
+    State(state): State<AppState>,
+    _permission: RequirePermission<DiscordConfigUpdate>,
+    Json(payload): Json<UpsertEventThreadTemplateRequest>,
+) -> Result<Json<EventThreadTemplateBody>, ApiError> {
+    if payload.body.trim().is_empty() {
+        return Err(ApiError::BadRequest);
+    }
+    let body =
+        integration_repo::set_event_thread_template(pool(&state)?, payload.body.trim()).await?;
+    Ok(Json(EventThreadTemplateBody { body }))
 }
 
 /// The bot pushes the guilds it's in (channels + roles) so the editor can offer dropdowns. Gated by

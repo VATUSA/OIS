@@ -14,9 +14,13 @@ export type DiscordGuildRole = components["schemas"]["DiscordGuildRole"];
 export type UpsertDiscordConfig =
   components["schemas"]["UpsertDiscordConfigRequest"];
 export type DiscordLink = components["schemas"]["DiscordLinkBody"];
+export type EventThreadTemplate = components["schemas"]["EventThreadTemplateBody"];
+export type UpsertEventThreadTemplate =
+  components["schemas"]["UpsertEventThreadTemplateRequest"];
 
 const KEY = ["discord-config"] as const;
 const LINK_KEY = ["discord-link"] as const;
+const THREAD_TEMPLATE_KEY = ["event-thread-template"] as const;
 
 /** The Discord config: configured guilds + the bot's guild snapshot (for dropdowns). Needs
  *  `discord.config.read`. */
@@ -48,6 +52,38 @@ export function useUpdateDiscordConfig() {
       toast.success("Discord configuration saved");
     },
     onError: () => toast.error("Couldn’t save the Discord configuration"),
+  });
+}
+
+/** The event-thread message body template. Needs `discord.config.read`. */
+export function useEventThreadTemplate() {
+  return useQuery({
+    queryKey: THREAD_TEMPLATE_KEY,
+    queryFn: async (): Promise<EventThreadTemplate> => {
+      const { data, error } = await ois.GET("/api/v1/integration/discord/thread-template");
+      if (error || !data) throw new Error("failed to load the thread template");
+      return data;
+    },
+  });
+}
+
+/** Save the event-thread message body template. Needs `discord.config.update`. */
+export function useUpdateEventThreadTemplate() {
+  const qc = useQueryClient();
+  const toast = useToast();
+  return useMutation({
+    mutationFn: async (body: UpsertEventThreadTemplate): Promise<EventThreadTemplate> => {
+      const { data, error } = await ois.PUT("/api/v1/integration/discord/thread-template", {
+        body,
+      });
+      if (error || !data) throw new Error("save failed");
+      return data;
+    },
+    onSuccess: (data) => {
+      qc.setQueryData(THREAD_TEMPLATE_KEY, data);
+      toast.success("Thread template saved");
+    },
+    onError: () => toast.error("Couldn’t save the thread template"),
   });
 }
 

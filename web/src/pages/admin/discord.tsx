@@ -14,8 +14,10 @@ import {
   type DiscordGuildSnapshot,
   type DiscordMapEntry,
   useDiscordConfig,
+  useEventThreadTemplate,
   useRefreshDiscord,
   useUpdateDiscordConfig,
+  useUpdateEventThreadTemplate,
 } from "@/lib/integration";
 
 /** Logical channel names the backend resolves when enqueuing Discord jobs. Surfaced as hints so an
@@ -263,6 +265,60 @@ function GuildCard({
   );
 }
 
+const TEXTAREA_CLASS =
+  "min-h-48 w-full rounded-md border border-input bg-background px-3 py-2 font-mono text-sm shadow-sm transition-colors placeholder:text-muted-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring";
+
+/** The event-thread message body template, edited independently of the guild list above (separate
+ * endpoint, separate save action). */
+function ThreadTemplateCard() {
+  const query = useEventThreadTemplate();
+  const save = useUpdateEventThreadTemplate();
+  const [body, setBody] = useState("");
+
+  const loaded = query.data;
+  useEffect(() => {
+    if (loaded) setBody(loaded.body);
+  }, [loaded]);
+
+  return (
+    <Card>
+      <CardHeader>
+        <CardTitle>Event-thread message template</CardTitle>
+        <CardDescription>
+          Posted at the top of every event planning thread. Placeholders:{" "}
+          <code>{"{{title}}"}</code>, <code>{"{{date_line}}"}</code>,{" "}
+          <code>{"{{facility_lines}}"}</code>, <code>{"{{ntmo_ping}}"}</code>,{" "}
+          <code>{"{{dcc_ping}}"}</code>.
+        </CardDescription>
+      </CardHeader>
+      <CardContent className="flex flex-col gap-3">
+        {query.isError ? (
+          <p className="text-sm text-muted-foreground">Couldn&apos;t load the template.</p>
+        ) : !loaded ? (
+          <p className="text-sm text-muted-foreground">Loading…</p>
+        ) : (
+          <>
+            <textarea
+              className={TEXTAREA_CLASS}
+              value={body}
+              onChange={(e) => setBody(e.target.value)}
+            />
+            <div className="flex justify-end">
+              <Button
+                size="sm"
+                disabled={!body.trim() || save.isPending}
+                onClick={() => save.mutate({ body })}
+              >
+                {save.isPending ? "Saving…" : "Save template"}
+              </Button>
+            </div>
+          </>
+        )}
+      </CardContent>
+    </Card>
+  );
+}
+
 export function AdminDiscord() {
   const query = useDiscordConfig();
   const save = useUpdateDiscordConfig();
@@ -330,6 +386,8 @@ export function AdminDiscord() {
           Refresh from Discord
         </Button>
       </div>
+
+      <ThreadTemplateCard />
 
       {query.isError ? (
         <Card>
