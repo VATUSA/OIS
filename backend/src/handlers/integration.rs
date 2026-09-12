@@ -301,12 +301,14 @@ pub async fn get_event_thread_template(
 /// Discord rejects a message over 2000 chars outright. Cap well under that so the per-event
 /// substitutions (title, date_line, facility_lines — one line per required/preferred facility) have
 /// headroom before the bot's own truncation safety net (`jobs::thread::create_event_thread`) has to
-/// kick in.
+/// kick in. Counted in `char`s (Unicode scalar values), not bytes — the shipped default template
+/// itself uses multi-byte box-drawing dividers and emoji, so a byte-length check would reject a
+/// template that looks well under the cap in the textarea the admin is actually looking at.
 const MAX_TEMPLATE_LEN: usize = 1500;
 
 fn validate_template_body(body: &str) -> Result<&str, ApiError> {
     let trimmed = body.trim();
-    if trimmed.is_empty() || trimmed.len() > MAX_TEMPLATE_LEN {
+    if trimmed.is_empty() || trimmed.chars().count() > MAX_TEMPLATE_LEN {
         return Err(ApiError::BadRequest);
     }
     Ok(trimmed)
@@ -356,10 +358,23 @@ mod thread_template_tests {
     fn accepts_a_body_at_or_under_the_max_length() {
         let at_max = "a".repeat(MAX_TEMPLATE_LEN);
         assert_eq!(
-            validate_template_body(&at_max).unwrap().len(),
+            validate_template_body(&at_max).unwrap().chars().count(),
             MAX_TEMPLATE_LEN
         );
         assert_eq!(validate_template_body("  hi  ").unwrap(), "hi");
+    }
+
+    /// The cap counts characters, not bytes — a template built from the same multi-byte box-drawing
+    /// dividers and emoji as the shipped default must not be rejected just because its byte length
+    /// exceeds the char cap while its actual character count doesn't.
+    #[test]
+    fn multi_byte_characters_are_counted_once_each_not_by_their_byte_length() {
+        // "─" is 3 bytes and "🟢" is 4 bytes in UTF-8, so this string's byte length is well over
+        // MAX_TEMPLATE_LEN even though its character count is far under it.
+        let body: String = "─🟢".repeat(300);
+        assert!(body.len() > MAX_TEMPLATE_LEN); // sanity check: byte length would wrongly reject this
+        assert!(body.chars().count() < MAX_TEMPLATE_LEN);
+        assert!(validate_template_body(&body).is_ok());
     }
 }
 
