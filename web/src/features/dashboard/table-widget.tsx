@@ -9,14 +9,13 @@ import {
   TooltipContent,
   TooltipTrigger,
 } from "@ois/ui";
+import {flexRender, type SortingState} from "@tanstack/react-table";
 import {
-  type ColumnDef,
-  flexRender,
   getCoreRowModel,
   getSortedRowModel,
-  type SortingState,
-  useReactTable,
-} from "@tanstack/react-table";
+  type LegacyColumnDef as ColumnDef,
+  useLegacyTable as useReactTable,
+} from "@tanstack/react-table/legacy";
 import {ArrowDown, ArrowUp, Check, ChevronsUpDown, Columns3} from "lucide-react";
 
 import {hhmmZulu} from "@/lib/time";
