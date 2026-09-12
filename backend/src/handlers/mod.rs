@@ -10,6 +10,7 @@ pub mod dashboards;
 pub mod docs;
 pub mod events;
 pub mod facilities;
+pub mod facility_documents;
 pub mod facility_map;
 pub mod feed;
 pub mod flow;

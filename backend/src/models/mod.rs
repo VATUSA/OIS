@@ -76,6 +76,25 @@ pub struct FacilityBody {
     pub active: bool,
 }
 
+/// A configured reference document (SOP/LOA/etc.) for a facility.
+#[derive(Debug, Serialize, ToSchema, sqlx::FromRow)]
+pub struct FacilityDocumentBody {
+    pub id: String,
+    pub facility_id: String,
+    pub title: String,
+    pub url: String,
+    pub updated_at: DateTime<Utc>,
+    /// Whether the requesting user may edit this facility's documents (per their ARTCC scope).
+    #[sqlx(default)]
+    pub editable: bool,
+}
+
+#[derive(Debug, Deserialize, ToSchema)]
+pub struct UpsertFacilityDocumentRequest {
+    pub title: String,
+    pub url: String,
+}
+
 /// Assignable roles + permission catalog + facilities for the access editor.
 #[derive(Debug, Serialize, ToSchema)]
 pub struct AccessCatalogBody {
@@ -1264,6 +1283,15 @@ pub struct DiscordAceInfoBody {
     pub claims_count: i64,
     /// Zulu HHMM options spanning the event window (for the start/end dropdowns).
     pub time_options: Vec<String>,
+}
+
+/// What the bot needs for the "View structured" reply on a TMI post: the raw line (already what's
+/// posted) plus its plain-English structured breakdown, when the TMI was entered via the structured
+/// form (null for a raw-typed TMI).
+#[derive(Debug, Serialize, ToSchema)]
+pub struct DiscordTmiInfoBody {
+    pub restriction: String,
+    pub decoded: Option<String>,
 }
 
 /// Bot interaction callback: a Discord user submitted the claim modal on an ACE request. The backend

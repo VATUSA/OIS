@@ -1034,6 +1034,38 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/v1/facilities/{facility_id}/documents": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get: operations["list_facility_documents"];
+        put?: never;
+        post: operations["create_facility_document"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/facilities/{facility_id}/documents/{id}": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put: operations["update_facility_document"];
+        post?: never;
+        delete: operations["delete_facility_document"];
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/v1/facilities/{id}": {
         parameters: {
             query?: never;
@@ -1619,6 +1651,23 @@ export interface paths {
         };
         get: operations["get_event_thread_template"];
         put: operations["put_event_thread_template"];
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/integration/discord/tmi/{id}": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** What the bot needs to reply to a "View structured" button click on a TMI post. */
+        get: operations["discord_tmi_info"];
+        put?: never;
         post?: never;
         delete?: never;
         options?: never;
@@ -3331,6 +3380,15 @@ export interface components {
             name: string;
         };
         /**
+         * @description What the bot needs for the "View structured" reply on a TMI post: the raw line (already what's
+         *     posted) plus its plain-English structured breakdown, when the TMI was entered via the structured
+         *     form (null for a raw-typed TMI).
+         */
+        DiscordTmiInfoBody: {
+            decoded?: string | null;
+            restriction: string;
+        };
+        /**
          * @description One person's availability response for an event (from the DCC thread 🟢/🟡/🔴 buttons). `roles`
          *     carries the responder's assignable roles (e.g. `NTMO`) so the planner can read NOM vs shadow intent.
          */
@@ -3439,6 +3497,17 @@ export interface components {
             id: string;
             name: string;
             region?: string | null;
+        };
+        /** @description A configured reference document (SOP/LOA/etc.) for a facility. */
+        FacilityDocumentBody: {
+            /** @description Whether the requesting user may edit this facility's documents (per their ARTCC scope). */
+            editable: boolean;
+            facility_id: string;
+            id: string;
+            title: string;
+            /** Format: date-time */
+            updated_at: string;
+            url: string;
         };
         /** @description A facility's map color-rule configuration (one per ARTCC). */
         FacilityMapConfigBody: {
@@ -4963,6 +5032,10 @@ export interface components {
         };
         UpsertEventThreadTemplateRequest: {
             body: string;
+        };
+        UpsertFacilityDocumentRequest: {
+            title: string;
+            url: string;
         };
         /** @description Upsert body for a facility's map color rules. */
         UpsertFacilityMapConfigRequest: {
@@ -8082,6 +8155,164 @@ export interface operations {
             };
         };
     };
+    list_facility_documents: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                facility_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["FacilityDocumentBody"][];
+                };
+            };
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+        };
+    };
+    create_facility_document: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                facility_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["UpsertFacilityDocumentRequest"];
+            };
+        };
+        responses: {
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["FacilityDocumentBody"];
+                };
+            };
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+        };
+    };
+    update_facility_document: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                facility_id: string;
+                id: string;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["UpsertFacilityDocumentRequest"];
+            };
+        };
+        responses: {
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["FacilityDocumentBody"];
+                };
+            };
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+        };
+    };
+    delete_facility_document: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                facility_id: string;
+                id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            204: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+        };
+    };
     get_facility: {
         parameters: {
             query?: never;
@@ -9526,6 +9757,39 @@ export interface operations {
                 content?: never;
             };
             401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+        };
+    };
+    discord_tmi_info: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["DiscordTmiInfoBody"];
+                };
+            };
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            404: {
                 headers: {
                     [name: string]: unknown;
                 };

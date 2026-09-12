@@ -1,4 +1,5 @@
 mod ace;
+mod dm;
 mod thread;
 mod tmi;
 
@@ -11,6 +12,7 @@ use serenity::all::Http;
 
 use crate::snapshot::snapshot_and_push;
 use ace::{notify_ace_claim, post_ace_request};
+use dm::send_claim_dm;
 use thread::create_event_thread;
 use tmi::post_tmi;
 
@@ -52,6 +54,7 @@ async fn perform_job(
     match job.job_type.as_str() {
         "ace_request_post" => post_ace_request(http, &job.payload).await,
         "ace_request_notify" => notify_ace_claim(http, &job.payload).await,
+        "ace_claim_dm" => send_claim_dm(http, &job.payload).await,
         "tmi_publish" => post_tmi(http, &job.payload).await,
         "event_thread_create" => create_event_thread(http, &job.payload).await,
         // The admin's "Refresh from Discord" button — re-pull + push the guild snapshot.
