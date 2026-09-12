@@ -1,0 +1,21 @@
+name: Release
+
+# Cuts a GitHub Release with auto-generated notes (a changelog built from merged PR titles since
+# the last tag) whenever a version tag is pushed — the same v* trigger build-images.yml already
+# uses to build prod images, so tagging a release does both in one push. No new secrets: uses the
+# default GITHUB_TOKEN.
+on:
+  push:
+    tags: ["v*"]
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: softprops/action-gh-release@v2
+        with:
+          generate_release_notes: true
