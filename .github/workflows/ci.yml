@@ -33,7 +33,7 @@ jobs:
     env:
       DATABASE_URL: postgres://ois:ois@localhost:5432/ois
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       # Nightly matches rust-toolchain.toml (parallel front-end + mold linker; see .cargo/config.toml).
       - uses: dtolnay/rust-toolchain@nightly
         with:
@@ -51,7 +51,7 @@ jobs:
   js:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - uses: pnpm/action-setup@v4
       - uses: actions/setup-node@v7
         with: { node-version: 22, cache: pnpm }
@@ -72,7 +72,7 @@ jobs:
     # Advisories (RUSTSEC vulnerabilities) + license policy for the whole Cargo workspace, in one
     # pass. Config + rationale for any ignored advisory/allowed license lives in deny.toml.
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - uses: EmbarkStudios/cargo-deny-action@v2
 
   client-drift:
@@ -82,7 +82,7 @@ jobs:
     # document is a pure compile-time/utoipa artifact, so this dumps it directly instead of
     # booting a live backend + DB.
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - uses: dtolnay/rust-toolchain@nightly
       - uses: rui314/setup-mold@v1
       - uses: Swatinem/rust-cache@v2
