@@ -304,6 +304,52 @@ pub async fn upsert_config(
     Ok(())
 }
 
+// --- event-thread message template (singleton row; see migration 0065) ---------------------------
+
+/// Fallback if the seeded 'default' row is ever missing (manual DB fix, botched rollback) — same
+/// text migration 0065 seeds. Degrading to this keeps event-thread creation working rather than
+/// 500ing every `publish_event_discord` call on what would otherwise be a single point of failure.
+const FALLBACK_EVENT_THREAD_TEMPLATE: &str = "**{{title}} | Planning Thread**\n\
+    {{title}} is on {{date_line}}\n\n\
+    Review the following for your facility:\n\
+    - TMU/TMI package\n\
+    - Staffing\n\
+    - Configs and AAR\n\n\
+    {{facility_lines}}\n\
+    Attempt to coordinate as many plans (initiatives, reroutes, etc.) in a timely manner, and fill \
+    out all appropriate areas of the staffing data.\n\
+    ───────────────────────────\n\
+    {{ntmo_ping}} please react with your availability to NOM for this event. {{dcc_ping}} please \
+    react with your availability to shadow this event.\n\n\
+    🟢 = Available\n🟡 = Partially available/unsure\n🔴 = Unavailable\n\
+    ───────────────────────────";
+
+/// The configured event-thread message body (placeholders substituted by the bot at render time).
+pub async fn get_event_thread_template(pool: &PgPool) -> Result<String, ApiError> {
+    let row = sqlx::query_scalar::<_, String>(
+        "select body from integration.event_thread_template where id = 'default'",
+    )
+    .fetch_optional(pool)
+    .await
+    .map_err(|_| ApiError::Internal)?;
+    Ok(row.unwrap_or_else(|| {
+        tracing::warn!("event_thread_template 'default' row missing — using compiled-in fallback");
+        FALLBACK_EVENT_THREAD_TEMPLATE.to_string()
+    }))
+}
+
+pub async fn set_event_thread_template(pool: &PgPool, body: &str) -> Result<String, ApiError> {
+    sqlx::query_scalar::<_, String>(
+        "insert into integration.event_thread_template (id, body) values ('default', $1) \
+         on conflict (id) do update set body = excluded.body \
+         returning body",
+    )
+    .bind(body)
+    .fetch_one(pool)
+    .await
+    .map_err(|_| ApiError::Internal)
+}
+
 // --- guild snapshot (channels + roles the bot sees; drives the config dropdowns) ------------------
 
 /// Every guild the bot is in, with its channels + roles.
@@ -427,4 +473,45 @@ async fn replace_map(
         .map_err(|_| ApiError::Internal)?;
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use sqlx::PgPool;
+
+    use super::*;
+
+    #[sqlx::test]
+    async fn event_thread_template_get_returns_the_seeded_default(pool: PgPool) {
+        let body = get_event_thread_template(&pool).await.unwrap();
+        assert!(
+            body.contains("{{title}}"),
+            "seeded default carries the placeholders"
+        );
+    }
+
+    #[sqlx::test]
+    async fn event_thread_template_set_then_get_round_trips(pool: PgPool) {
+        let updated = set_event_thread_template(&pool, "Custom: {{title}}")
+            .await
+            .unwrap();
+        assert_eq!(updated, "Custom: {{title}}");
+        assert_eq!(
+            get_event_thread_template(&pool).await.unwrap(),
+            "Custom: {{title}}"
+        );
+    }
+
+    /// If the seeded 'default' row is ever missing, get_event_thread_template must degrade to the
+    /// compiled-in fallback rather than error — a single point of failure that would otherwise block
+    /// every `publish_event_discord` call.
+    #[sqlx::test]
+    async fn missing_default_row_degrades_to_the_compiled_in_fallback(pool: PgPool) {
+        sqlx::query("delete from integration.event_thread_template where id = 'default'")
+            .execute(&pool)
+            .await
+            .unwrap();
+        let body = get_event_thread_template(&pool).await.unwrap();
+        assert_eq!(body, FALLBACK_EVENT_THREAD_TEMPLATE);
+    }
 }

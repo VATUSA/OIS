@@ -1517,6 +1517,7 @@ pub async fn publish_event_discord(
     }
     let ntmo_role_id = integration_repo::role_id(pool, "ntmo").await?;
     let dcc_trainee_role_id = integration_repo::role_id(pool, "dcc-trainee").await?;
+    let thread_template = integration_repo::get_event_thread_template(pool).await?;
 
     let thread_name = format!("{} {}", event.start_time.format("%Y%m%d"), event.title);
     let date_line = format!(
@@ -1535,6 +1536,7 @@ pub async fn publish_event_discord(
         "ntmo_role_id": ntmo_role_id,
         "dcc_trainee_role_id": dcc_trainee_role_id,
         "event_id": id,
+        "thread_template": thread_template,
     });
     integration_repo::enqueue_job(
         &mut tx,

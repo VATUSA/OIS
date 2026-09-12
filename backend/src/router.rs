@@ -409,6 +409,10 @@ pub fn build_router(state: AppState) -> Router {
             get(integration::get_discord_config).put(integration::put_discord_config),
         )
         .route(
+            "/api/v1/integration/discord/thread-template",
+            get(integration::get_event_thread_template).put(integration::put_event_thread_template),
+        )
+        .route(
             "/api/v1/integration/discord/guilds/snapshot",
             post(integration::push_guild_snapshot),
         )
@@ -423,6 +427,10 @@ pub fn build_router(state: AppState) -> Router {
         .route(
             "/api/v1/integration/discord/ace/{id}",
             get(integration::discord_ace_info),
+        )
+        .route(
+            "/api/v1/integration/discord/tmi/{id}",
+            get(integration::discord_tmi_info),
         )
         .route(
             "/api/v1/integration/discord/availability/{id}",
