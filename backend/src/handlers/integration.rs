@@ -298,6 +298,20 @@ pub async fn get_event_thread_template(
     Ok(Json(EventThreadTemplateBody { body }))
 }
 
+/// Discord rejects a message over 2000 chars outright. Cap well under that so the per-event
+/// substitutions (title, date_line, facility_lines — one line per required/preferred facility) have
+/// headroom before the bot's own truncation safety net (`jobs::thread::create_event_thread`) has to
+/// kick in.
+const MAX_TEMPLATE_LEN: usize = 1500;
+
+fn validate_template_body(body: &str) -> Result<&str, ApiError> {
+    let trimmed = body.trim();
+    if trimmed.is_empty() || trimmed.len() > MAX_TEMPLATE_LEN {
+        return Err(ApiError::BadRequest);
+    }
+    Ok(trimmed)
+}
+
 #[utoipa::path(
     put, path = "/api/v1/integration/discord/thread-template", tag = "integration",
     request_body = UpsertEventThreadTemplateRequest,
@@ -308,12 +322,45 @@ pub async fn put_event_thread_template(
     _permission: RequirePermission<DiscordConfigUpdate>,
     Json(payload): Json<UpsertEventThreadTemplateRequest>,
 ) -> Result<Json<EventThreadTemplateBody>, ApiError> {
-    if payload.body.trim().is_empty() {
-        return Err(ApiError::BadRequest);
-    }
-    let body =
-        integration_repo::set_event_thread_template(pool(&state)?, payload.body.trim()).await?;
+    let trimmed = validate_template_body(&payload.body)?;
+    let body = integration_repo::set_event_thread_template(pool(&state)?, trimmed).await?;
     Ok(Json(EventThreadTemplateBody { body }))
+}
+
+#[cfg(test)]
+mod thread_template_tests {
+    use super::*;
+
+    #[test]
+    fn rejects_empty_or_whitespace_only_body() {
+        assert!(matches!(
+            validate_template_body(""),
+            Err(ApiError::BadRequest)
+        ));
+        assert!(matches!(
+            validate_template_body("   \n  "),
+            Err(ApiError::BadRequest)
+        ));
+    }
+
+    #[test]
+    fn rejects_a_body_over_the_max_length() {
+        let too_long = "a".repeat(MAX_TEMPLATE_LEN + 1);
+        assert!(matches!(
+            validate_template_body(&too_long),
+            Err(ApiError::BadRequest)
+        ));
+    }
+
+    #[test]
+    fn accepts_a_body_at_or_under_the_max_length() {
+        let at_max = "a".repeat(MAX_TEMPLATE_LEN);
+        assert_eq!(
+            validate_template_body(&at_max).unwrap().len(),
+            MAX_TEMPLATE_LEN
+        );
+        assert_eq!(validate_template_body("  hi  ").unwrap(), "hi");
+    }
 }
 
 /// The bot pushes the guilds it's in (channels + roles) so the editor can offer dropdowns. Gated by
