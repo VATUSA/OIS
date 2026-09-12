@@ -471,14 +471,6 @@ function ProgramCard({
                 />
                 Wake L
               </label>
-              <label className="flex items-center gap-2 text-sm">
-                <input
-                  type="checkbox"
-                  checked={draft.jets_only}
-                  onChange={(e) => patch({ jets_only: e.target.checked })}
-                />
-                Jets / turbines only
-              </label>
               <label className="flex items-center gap-2 text-sm text-muted-foreground">
                 Types
                 <Input
@@ -496,11 +488,32 @@ function ProgramCard({
             <span className="text-sm text-muted-foreground">
               {[
                 wakeL && "wake L",
-                draft.jets_only && "jets/turbines only",
                 draft.exclude_types.length && `types ${draft.exclude_types.join(", ")}`,
               ]
                 .filter(Boolean)
                 .join(" · ") || "none"}
+            </span>
+          )}
+        </div>
+
+        {/* aircraft inclusion — kept separate from "Exclude" above; jets_only is an inclusion
+            filter (checked = keep only jets/turbines), not an exclusion (see #95). */}
+        <div className="flex flex-wrap items-center gap-4 border-t pt-3">
+          <span className="text-xs font-medium uppercase tracking-wide text-muted-foreground">
+            Limit to
+          </span>
+          {canEdit ? (
+            <label className="flex items-center gap-2 text-sm">
+              <input
+                type="checkbox"
+                checked={draft.jets_only}
+                onChange={(e) => patch({ jets_only: e.target.checked })}
+              />
+              Jets / turbines only
+            </label>
+          ) : (
+            <span className="text-sm text-muted-foreground">
+              {draft.jets_only ? "jets/turbines only" : "none"}
             </span>
           )}
         </div>

@@ -5,6 +5,9 @@ import {
   DropdownMenuContent,
   DropdownMenuItem,
   DropdownMenuTrigger,
+  Tooltip,
+  TooltipContent,
+  TooltipTrigger,
 } from "@ois/ui";
 import {
   type ColumnDef,
@@ -30,6 +33,19 @@ function Cell({ value, type }: { value: unknown; type: FieldType }) {
   if (value == null || value === "") return <span className="text-muted-foreground">—</span>;
   if (type === "time") return <>{hhmmZulu(String(value))}</>;
   if (type === "bool") return <>{value ? "yes" : "no"}</>;
+  // Free-text fields can run long — cap the width and reveal the full value on hover rather than
+  // wrapping the row or overflowing the column.
+  if (type === "string") {
+    const text = String(value);
+    return (
+      <Tooltip>
+        <TooltipTrigger asChild>
+          <span className="block max-w-[16rem] truncate">{text}</span>
+        </TooltipTrigger>
+        <TooltipContent>{text}</TooltipContent>
+      </Tooltip>
+    );
+  }
   return <>{String(value)}</>;
 }
 

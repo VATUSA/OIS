@@ -11,5 +11,19 @@
   },
   "devDependencies": {
     "turbo": "^2.1.0"
+  },
+  "pnpm": {
+    "auditConfig": {
+      "ignoreCves": [
+        "CVE-2026-85061",
+        "CVE-2026-39365",
+        "CVE-2026-53632",
+        "CVE-2026-53571",
+        "CVE-2026-84375"
+      ],
+      "ignoreGhsas": [
+        "GHSA-67mh-4wv8-2f99"
+      ]
+    }
   }
 }

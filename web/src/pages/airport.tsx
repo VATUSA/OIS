@@ -1,6 +1,6 @@
 import {useMemo, useState} from "react";
 import {Button, Card, CardContent, Input} from "@ois/ui";
-import {Lock} from "lucide-react";
+import {Filter, Lock} from "lucide-react";
 
 import type {LadderFilters} from "@/features/dashboard/types";
 import {type Flow, type FlowFlight, useAirportFlow} from "@/lib/feed";
@@ -462,6 +462,9 @@ export function LadderView({ flow, filters }: { flow: Flow; filters?: LadderFilt
     .filter((f) => f.status !== "arrived" && !f.excluded && timeOf(f) && passesLadderFilters(f, filters))
     .map((f) => ({ key: f.callsign, min: minutesUntil(timeOf(f), now)!, time: timeOf(f) as string, data: f }));
 
+  // Despite the name, this is "is any filter category active" — not literally "no match" (that's
+  // only true once it's also combined with an empty `items`). Drives both the empty-state message
+  // below and the header's filter indicator (see #96), since both need the same "filtered?" check.
   const noMatch =
     filters &&
     (filters.gates?.length || filters.statuses?.length || filters.origins?.length || filters.types?.length);
@@ -470,9 +473,10 @@ export function LadderView({ flow, filters }: { flow: Flow; filters?: LadderFilt
     <Card>
       <CardContent className="pt-6">
         <div className="mb-3 flex items-center justify-between">
-          <span className="text-xs font-medium uppercase tracking-wide text-muted-foreground">
+          <span className="flex items-center gap-1.5 text-xs font-medium uppercase tracking-wide text-muted-foreground">
             Arrival ladder · {win} min · {flow.aar != null ? "metered STA" : "ETA"} · now
             at bottom
+            {noMatch && <Filter className="size-3.5 shrink-0" />}
           </span>
           <div className="flex gap-1">
             <Button
