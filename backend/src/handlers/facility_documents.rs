@@ -142,7 +142,7 @@ pub async fn delete_facility_document(
         return Err(ApiError::Forbidden);
     }
 
-    if doc_repo::delete(pool, &id).await? {
+    if doc_repo::delete(pool, &id, &facility_id).await? {
         Ok(StatusCode::NO_CONTENT)
     } else {
         Err(ApiError::NotFound)
@@ -189,7 +189,9 @@ mod tests {
             .unwrap();
         assert!(mismatched.is_none());
 
-        assert!(doc_repo::delete(&pool, &created.id).await.unwrap());
+        // Wrong facility_id on delete, too — a ZDC document can't be deleted via a ZAU-scoped call.
+        assert!(!doc_repo::delete(&pool, &created.id, "ZAU").await.unwrap());
+        assert!(doc_repo::delete(&pool, &created.id, "ZDC").await.unwrap());
         assert!(
             doc_repo::list_by_facility(&pool, "ZDC")
                 .await

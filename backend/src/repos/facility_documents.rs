@@ -73,9 +73,12 @@ pub async fn update(
     get(pool, id).await
 }
 
-pub async fn delete(pool: &PgPool, id: &str) -> Result<bool, ApiError> {
-    let r = sqlx::query("delete from org.facility_documents where id = $1")
+/// Scoped to `facility_id` so a caller can't delete a different facility's document by supplying
+/// its id under their own facility's path (the same cross-facility check `update` already does).
+pub async fn delete(pool: &PgPool, id: &str, facility_id: &str) -> Result<bool, ApiError> {
+    let r = sqlx::query("delete from org.facility_documents where id = $1 and facility_id = $2")
         .bind(id)
+        .bind(facility_id)
         .execute(pool)
         .await
         .map_err(|_| ApiError::Internal)?;
