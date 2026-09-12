@@ -1,5 +1,5 @@
 import {useMemo, useState} from "react";
-import {Badge} from "@ois/ui";
+import {Badge, Tooltip, TooltipContent, TooltipTrigger} from "@ois/ui";
 import type {components} from "@ois/api-client";
 import {
   type ColumnDef,
@@ -27,9 +27,14 @@ export function AuditTable({ items }: { items: AuditLogEntry[] }) {
         accessorKey: "created_at",
         header: "Time",
         cell: (c) => (
-          <span className="whitespace-nowrap font-mono text-xs text-muted-foreground" title={timeAgo(c.getValue<string>())}>
-            {formatZuluFull(c.getValue<string>())}
-          </span>
+          <Tooltip>
+            <TooltipTrigger asChild>
+              <span className="whitespace-nowrap font-mono text-xs text-muted-foreground">
+                {formatZuluFull(c.getValue<string>())}
+              </span>
+            </TooltipTrigger>
+            <TooltipContent>{timeAgo(c.getValue<string>())}</TooltipContent>
+          </Tooltip>
         ),
       },
       {

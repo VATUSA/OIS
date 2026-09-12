@@ -21,6 +21,12 @@ export {
 } from "./components/dropdown-menu";
 export { Avatar, AvatarImage, AvatarFallback } from "./components/avatar";
 export {
+  Tooltip,
+  TooltipTrigger,
+  TooltipContent,
+  TooltipProvider,
+} from "./components/tooltip";
+export {
   DialogProvider,
   useConfirm,
   usePrompt,
