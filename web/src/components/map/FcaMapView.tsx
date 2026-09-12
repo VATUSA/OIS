@@ -607,10 +607,20 @@ export function FcaMapView({
     [aircraftRoute.data],
   );
 
-  // Sidebar FCA list — filtered by name/fix + ARTCC.
+  // Custom order applies over the FULL live FCA set, never the filtered view — a drag performed
+  // while `filter`/`artccFilter` narrows the list must not discard position info for FCAs
+  // currently hidden by that filter (see #109 QA: feeding this the filtered list let a filtered
+  // drag silently overwrite the stored order with just the visible subset).
+  const allFcaIds = useMemo(() => (fcas.data ?? []).map((f) => f.id), [fcas.data]);
+  const [fcaOrder, setFcaOrder] = usePersistedOrder("fca.fcaOrder", allFcaIds);
+  const orderedAllFcas = useMemo(() => {
+    const byId = new Map((fcas.data ?? []).map((f) => [f.id, f]));
+    return fcaOrder.map((id) => byId.get(id)).filter((f): f is NonNullable<typeof f> => !!f);
+  }, [fcas.data, fcaOrder]);
+  // Sidebar FCA list — the ordered set above, filtered by name/fix + ARTCC for display.
   const shown = useMemo(() => {
     const q = filter.trim().toLowerCase();
-    return (fcas.data ?? []).filter((f) => {
+    return orderedAllFcas.filter((f) => {
       if (artccFilter && f.artcc !== artccFilter) return false;
       if (!q) return true;
       return (
@@ -619,17 +629,14 @@ export function FcaMapView({
         f.artcc.toLowerCase().includes(q)
       );
     });
-  }, [fcas.data, filter, artccFilter]);
-  const shownIds = useMemo(() => shown.map((f) => f.id), [shown]);
-  const [fcaOrder, setFcaOrder] = usePersistedOrder("fca.fcaOrder", shownIds);
-  const orderedFcas = useMemo(() => {
-    const byId = new Map(shown.map((f) => [f.id, f]));
-    return fcaOrder.map((id) => byId.get(id)).filter((f): f is NonNullable<typeof f> => !!f);
-  }, [shown, fcaOrder]);
+  }, [orderedAllFcas, filter, artccFilter]);
   const fcaDragSensors = useSensors(useSensor(PointerSensor, { activationConstraint: { distance: 6 } }));
   function onFcaDragEnd(e: DragEndEvent) {
     const { active, over } = e;
     if (!over || active.id === over.id) return;
+    // Indices in the full order, not the (possibly filtered) visible list — dragging within a
+    // filtered view still repositions the dragged item relative to the drop target in the
+    // complete list, so nothing outside the current filter gets dropped from `order`.
     const from = fcaOrder.indexOf(String(active.id));
     const to = fcaOrder.indexOf(String(over.id));
     if (from < 0 || to < 0) return;
@@ -761,9 +768,9 @@ export function FcaMapView({
                     collisionDetection={closestCenter}
                     onDragEnd={onFcaDragEnd}
                   >
-                    <SortableContext items={fcaOrder} strategy={verticalListSortingStrategy}>
+                    <SortableContext items={shown.map((f) => f.id)} strategy={verticalListSortingStrategy}>
                       <ul>
-                        {orderedFcas.map((fca) => (
+                        {shown.map((fca) => (
                           <FcaRow
                             key={fca.id}
                             fca={fca}
