@@ -9,13 +9,16 @@ import {
   TooltipContent,
   TooltipTrigger,
 } from "@ois/ui";
-import {flexRender, type SortingState} from "@tanstack/react-table";
 import {
-  getCoreRowModel,
-  getSortedRowModel,
-  type LegacyColumnDef as ColumnDef,
-  useLegacyTable as useReactTable,
-} from "@tanstack/react-table/legacy";
+  type ColumnDef,
+  createSortedRowModel,
+  flexRender,
+  rowSortingFeature,
+  type SortingState,
+  sortFns,
+  tableFeatures,
+  useTable,
+} from "@tanstack/react-table";
 import {ArrowDown, ArrowUp, Check, ChevronsUpDown, Columns3} from "lucide-react";
 
 import {hhmmZulu} from "@/lib/time";
@@ -27,6 +30,15 @@ import {useReportWidgetStatus} from "./widget-status";
 
 /** Shared stable reference for the unsorted state (see the note where it's used). */
 const EMPTY_SORTING: SortingState = [];
+
+// v9 registers sorting explicitly instead of bundling it automatically (see #133). The full
+// built-in `sortFns` registry (not hand-picked entries) keeps v8's auto-detected sorting behavior,
+// since no column here declares a custom `sortingFn`.
+const features = tableFeatures({
+  rowSortingFeature,
+  sortedRowModel: createSortedRowModel(),
+  sortFns,
+});
 
 function Cell({ value, type }: { value: unknown; type: FieldType }) {
   if (value == null || value === "") return <span className="text-muted-foreground">—</span>;
@@ -119,7 +131,7 @@ function TableInner({
     [source],
   );
 
-  const columns = useMemo<ColumnDef<Row>[]>(
+  const columns = useMemo<ColumnDef<typeof features, Row>[]>(
     () =>
       visible
         .map((key) => source.fields.find((fd) => fd.key === key))
@@ -135,7 +147,8 @@ function TableInner({
 
   // Stable empty reference when unsorted — a fresh `[]` each render would churn the table state.
   const sorting = (widget.sort ?? EMPTY_SORTING) as SortingState;
-  const table = useReactTable({
+  const table = useTable({
+    features,
     data: rows,
     columns,
     state: { sorting },
@@ -143,11 +156,6 @@ function TableInner({
       const next = typeof updater === "function" ? updater(sorting) : updater;
       onChange(widget.id, { sort: next });
     },
-    getCoreRowModel: getCoreRowModel(),
-    getSortedRowModel: getSortedRowModel(),
-    // We don't paginate/expand; disabling auto-reset avoids a data-change → reset → re-render loop.
-    autoResetPageIndex: false,
-    autoResetExpanded: false,
   });
 
   return (
@@ -198,7 +206,7 @@ function TableInner({
             <tbody>
               {table.getRowModel().rows.map((r) => (
                 <tr key={r.id} className="border-t">
-                  {r.getVisibleCells().map((c) => {
+                  {r.getAllCells().map((c) => {
                     const type = typeByKey[c.column.id];
                     return (
                       <td
