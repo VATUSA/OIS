@@ -8,6 +8,7 @@ pub mod auth;
 pub mod availability;
 pub mod dashboards;
 pub mod events;
+pub mod facility_documents;
 pub mod facility_map;
 pub mod flow;
 pub mod gdp;

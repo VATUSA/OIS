@@ -10,9 +10,9 @@ use crate::{
     config::build_cors_layer,
     handlers::{
         access, ace, aircraft_profiles, airport_configs, api_keys, atc, audit, auth, dashboards,
-        docs, events, facilities, facility_map, feed, flow, gdp, health, integration,
-        jobs as jobs_handler, preferences, public, runway, service_accounts, stats, tmu, users,
-        webhooks,
+        docs, events, facilities, facility_documents, facility_map, feed, flow, gdp, health,
+        integration, jobs as jobs_handler, preferences, public, runway, service_accounts, stats,
+        tmu, users, webhooks,
     },
     openapi::ApiDoc,
     realtime,
@@ -72,6 +72,17 @@ pub fn build_router(state: AppState) -> Router {
         // Facilities (ARTCC directory) — public reference data
         .route("/api/v1/facilities", get(facilities::list_facilities))
         .route("/api/v1/facilities/{id}", get(facilities::get_facility))
+        // Facility reference documents — facility-scoped config
+        .route(
+            "/api/v1/facilities/{facility_id}/documents",
+            get(facility_documents::list_facility_documents)
+                .post(facility_documents::create_facility_document),
+        )
+        .route(
+            "/api/v1/facilities/{facility_id}/documents/{id}",
+            put(facility_documents::update_facility_document)
+                .delete(facility_documents::delete_facility_document),
+        )
         // Public advisories — read-only, no auth (active TMIs). The FCA overview
         // reuses the now-public GET /api/v1/flow/fcas via the shared map.
         .route("/api/v1/public/board", get(public::get_board))
