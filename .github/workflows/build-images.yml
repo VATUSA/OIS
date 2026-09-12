@@ -47,18 +47,22 @@ jobs:
 
       # App version = the programmer-controlled base in the root VERSION file, plus the short commit,
       # e.g. "1.0.1-a1b2c3d". Baked into every image (build-arg OIS_VERSION) and set as its
-      # image.version label + a matching image tag.
+      # image.version label + a matching image tag. `image` is the lowercased repo path an OCI
+      # reference requires — GITHUB_REPOSITORY keeps the org's original case (VATUSA/OIS), which
+      # metadata-action lowercases for the push but a hand-built ref (e.g. Trivy's) would not.
       - name: Compute version
         id: ver
         run: |
           BASE="$(tr -d '[:space:]' < VERSION)"
           echo "version=${BASE}-${GITHUB_SHA::7}" >> "$GITHUB_OUTPUT"
+          IMAGE="${REGISTRY}/${GITHUB_REPOSITORY}-${{ matrix.name }}"
+          echo "image=${IMAGE,,}" >> "$GITHUB_OUTPUT"
 
       - name: Image metadata
         id: meta
         uses: docker/metadata-action@v5
         with:
-          images: ${{ env.REGISTRY }}/${{ github.repository }}-${{ matrix.name }}
+          images: ${{ steps.ver.outputs.image }}
           tags: |
             type=raw,value=${{ steps.ver.outputs.version }}
             type=ref,event=branch
@@ -88,7 +92,7 @@ jobs:
       - name: Scan image for vulnerabilities
         uses: aquasecurity/trivy-action@v0.36.0
         with:
-          image-ref: ${{ env.REGISTRY }}/${{ github.repository }}-${{ matrix.name }}:${{ steps.ver.outputs.version }}
+          image-ref: ${{ steps.ver.outputs.image }}:${{ steps.ver.outputs.version }}
           severity: CRITICAL,HIGH
           ignore-unfixed: true
           exit-code: "1"
