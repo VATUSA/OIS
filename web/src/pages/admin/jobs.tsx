@@ -97,7 +97,13 @@ function JobRow({ job }: { job: JobStatus }) {
         <StatusBadge job={job} />
       </td>
       <td className="py-2 pr-3 whitespace-nowrap tabular-nums text-muted-foreground">{lastRun}</td>
-      <td className="py-2 pr-3 text-xs text-muted-foreground">{job.last_detail ?? "—"}</td>
+      <td
+        className={`py-2 pr-3 text-xs ${
+          job.last_ok === false ? "font-medium text-destructive" : "text-muted-foreground"
+        }`}
+      >
+        {job.last_detail ?? "—"}
+      </td>
       <td className="py-2 pr-3 tabular-nums text-muted-foreground">
         {formatInterval(job.interval_secs)}
       </td>
