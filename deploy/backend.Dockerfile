@@ -28,7 +28,10 @@ RUN cargo build --release --bin ois-backend
 
 FROM debian:bookworm-slim AS runtime
 # ca-certificates: outbound HTTPS (VATSIM/VATUSA/SimAware). libssl3: sqlx's native-tls.
+# `upgrade` patches base-image OS packages to the latest security-fixed versions (the pinned
+# debian:bookworm-slim tag lags the repos); rebuilds re-apply it.
 RUN apt-get update \
+ && apt-get upgrade -y \
  && apt-get install -y --no-install-recommends ca-certificates libssl3 \
  && rm -rf /var/lib/apt/lists/*
 RUN useradd --system --uid 10001 --user-group ois
