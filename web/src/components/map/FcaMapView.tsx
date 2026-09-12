@@ -1,6 +1,6 @@
 import {useEffect, useMemo, useRef, useState} from "react";
 import {Button, ConfirmButton, Input, Switch, useTheme, useToast} from "@ois/ui";
-import {ArrowLeft, Home, Menu, Pencil, Plane, Plus, RadioTower, Tag, Trash2, X} from "lucide-react";
+import {ArrowLeft, Eye, EyeOff, Home, Menu, Pencil, Plane, Plus, RadioTower, Tag, Trash2, X} from "lucide-react";
 import {Link} from "@tanstack/react-router";
 
 import {useMe} from "@/lib/auth";
@@ -122,6 +122,8 @@ export function FcaMapView({
   const [selectedId, setSelectedId] = useState<string | null>(null);
   const [selectedRouteId, setSelectedRouteId] = useState<string | null>(null);
   const [labeledRoutes, setLabeledRoutes] = useState<Set<string>>(new Set());
+  // Display-only, per-viewer route visibility (see #108) — never touches the saved route data.
+  const [hiddenRoutes, setHiddenRoutes] = useState<Set<string>>(new Set());
   const [routeCallsign, setRouteCallsign] = useState<string | null>(null);
   const [mobileList, setMobileList] = useState(false);
   const [filter, setFilter] = useState("");
@@ -221,6 +223,19 @@ export function FcaMapView({
       else n.add(id);
       return n;
     });
+
+  const toggleRouteVisibility = (id: string) =>
+    setHiddenRoutes((s) => {
+      const n = new Set(s);
+      if (n.has(id)) n.delete(id);
+      else n.add(id);
+      return n;
+    });
+
+  const allRoutesHidden =
+    !!routes.data && routes.data.length > 0 && routes.data.every((r) => hiddenRoutes.has(r.id));
+  const toggleAllRoutesVisibility = () =>
+    setHiddenRoutes(allRoutesHidden ? new Set() : new Set(routes.data?.map((r) => r.id)));
 
   // --- FCA drawing / editing ---
   const drawing = !!draft && phase === "draw";
@@ -634,16 +649,32 @@ export function FcaMapView({
                   <>
                     <div className="flex items-center justify-between px-3 pt-3">
                       <span className="text-xs font-semibold uppercase tracking-wide text-muted-foreground">Routes</span>
-                      {canEditRoute && (
-                        <button
-                          type="button"
-                          onClick={startNewRoute}
-                          className="flex items-center gap-1 text-xs text-primary hover:underline"
-                        >
-                          <Plus className="size-3.5" />
-                          New route
-                        </button>
-                      )}
+                      <div className="flex items-center gap-3">
+                        {routes.data && routes.data.length > 0 && (
+                          <button
+                            type="button"
+                            title={allRoutesHidden ? "Show all routes" : "Hide all routes"}
+                            onClick={toggleAllRoutesVisibility}
+                            className="text-muted-foreground hover:text-foreground"
+                          >
+                            {allRoutesHidden ? (
+                              <EyeOff className="size-3.5" />
+                            ) : (
+                              <Eye className="size-3.5" />
+                            )}
+                          </button>
+                        )}
+                        {canEditRoute && (
+                          <button
+                            type="button"
+                            onClick={startNewRoute}
+                            className="flex items-center gap-1 text-xs text-primary hover:underline"
+                          >
+                            <Plus className="size-3.5" />
+                            New route
+                          </button>
+                        )}
+                      </div>
                     </div>
                     {routes.data && routes.data.length > 0 ? (
                       <ul className="max-h-48 overflow-y-auto p-1">
@@ -652,7 +683,8 @@ export function FcaMapView({
                             key={r.id}
                             className={
                               "flex items-center gap-2 rounded px-2 py-1.5 text-sm " +
-                              (r.id === selectedRouteId ? "bg-accent/40" : "")
+                              (r.id === selectedRouteId ? "bg-accent/40 " : "") +
+                              (hiddenRoutes.has(r.id) ? "opacity-50" : "")
                             }
                           >
                             <span className="size-3 shrink-0 rounded-full" style={{ background: r.color, border: `2px solid ${r.color}` }} />
@@ -667,6 +699,18 @@ export function FcaMapView({
                                 <span className="ml-1.5 text-xs text-amber-500" title={`Unresolved: ${r.unresolved.join(" ")}`}>
                                   ⚠{r.unresolved.length}
                                 </span>
+                              )}
+                            </button>
+                            <button
+                              type="button"
+                              title={hiddenRoutes.has(r.id) ? "Show route" : "Hide route"}
+                              onClick={() => toggleRouteVisibility(r.id)}
+                              className="text-muted-foreground hover:text-foreground"
+                            >
+                              {hiddenRoutes.has(r.id) ? (
+                                <EyeOff className="size-3.5" />
+                              ) : (
+                                <Eye className="size-3.5" />
                               )}
                             </button>
                             <button
@@ -757,7 +801,7 @@ export function FcaMapView({
         matched={!overview && selectedFca ? (fcaTraffic.data as MatchedFlight[] | undefined) : undefined}
         matchedColor={overview ? undefined : selectedFca?.color}
         matchedGroups={overview ? matchedGroups : undefined}
-        namedRoutes={routes.data as NamedRoute[] | undefined}
+        namedRoutes={(routes.data as NamedRoute[] | undefined)?.filter((r) => !hiddenRoutes.has(r.id))}
         selectedRouteId={selectedRouteId}
         labeledRouteIds={labeledRoutes}
         filedRoute={filedRoute}
