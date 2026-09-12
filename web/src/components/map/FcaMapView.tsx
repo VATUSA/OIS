@@ -1,6 +1,9 @@
 import {useEffect, useMemo, useRef, useState} from "react";
 import {Button, ConfirmButton, Input, Switch, useTheme, useToast} from "@ois/ui";
-import {ArrowLeft, Home, Menu, Pencil, Plane, Plus, RadioTower, Tag, Trash2, X} from "lucide-react";
+import {closestCenter, DndContext, type DragEndEvent, PointerSensor, useSensor, useSensors} from "@dnd-kit/core";
+import {arrayMove, SortableContext, useSortable, verticalListSortingStrategy} from "@dnd-kit/sortable";
+import {CSS} from "@dnd-kit/utilities";
+import {ArrowLeft, GripVertical, Home, Menu, Pencil, Plane, Plus, RadioTower, Tag, Trash2, X} from "lucide-react";
 import {Link} from "@tanstack/react-router";
 
 import {useMe} from "@/lib/auth";
@@ -31,6 +34,7 @@ import boundariesGeo from "@/assets/artcc-boundaries.json";
 
 import {TrafficMap} from "./TrafficMap";
 import {useMapCamera} from "./hooks/useMapCamera";
+import {usePersistedOrder} from "./hooks/usePersistedOrder";
 import {aircraftColor, HIGHLIGHT} from "./lib/colors";
 import {US_HOME} from "./lib/constants";
 import {haversine, normPoints, toDeckPath, type LatLng} from "./lib/geo";
@@ -65,6 +69,179 @@ function cycleAgeDays(cycle: string): number | null {
   if (!m) return null;
   const d = Date.UTC(Number(m[1]), Number(m[2]) - 1, Number(m[3]));
   return Math.floor((Date.now() - d) / 86_400_000);
+}
+
+/** One draggable row in the sidebar FCA list (see #109 — order is per-viewer, via `usePersistedOrder`). */
+function FcaRow({
+  fca,
+  selected,
+  count,
+  canEdit,
+  canDelete,
+  onSelect,
+  onToggleEnabled,
+  onEdit,
+  onDelete,
+}: {
+  fca: Fca;
+  selected: boolean;
+  count: number;
+  canEdit: boolean;
+  canDelete: boolean;
+  onSelect: () => void;
+  onToggleEnabled: () => void;
+  onEdit: () => void;
+  onDelete: () => void;
+}) {
+  const { attributes, listeners, setNodeRef, transform, transition, isDragging } = useSortable({
+    id: fca.id,
+  });
+  const style = {
+    transform: CSS.Transform.toString(transform),
+    transition,
+    opacity: isDragging ? 0.5 : fca.enabled ? 1 : 0.55,
+  };
+  return (
+    <li
+      ref={setNodeRef}
+      style={style}
+      className={"flex items-center gap-2 border-b px-3 py-2 text-sm " + (selected ? "bg-accent/40" : "")}
+    >
+      <button
+        type="button"
+        className="cursor-grab text-muted-foreground/60 hover:text-foreground"
+        {...attributes}
+        {...listeners}
+      >
+        <GripVertical className="size-3.5" />
+      </button>
+      <span
+        className="size-3 shrink-0 rounded-full"
+        style={{ background: fca.color }}
+        title={fca.enabled ? "Enabled" : "Disabled"}
+      />
+      <button type="button" onClick={onSelect} className="flex-1 truncate text-left font-mono">
+        {fca.name}
+        {fca.artcc && <span className="ml-1.5 text-xs text-muted-foreground">{fca.artcc}</span>}
+      </button>
+      <span
+        className={
+          "shrink-0 rounded px-1.5 text-xs font-medium tabular-nums " +
+          (count > 0 ? "bg-primary/15 text-primary" : "text-muted-foreground/50")
+        }
+      >
+        {count}
+      </span>
+      {canEdit && (
+        <span
+          className="flex shrink-0 items-center"
+          title={fca.enabled ? "Enabled — click to disable" : "Disabled — click to enable"}
+        >
+          <Switch
+            checked={fca.enabled}
+            onCheckedChange={onToggleEnabled}
+            aria-label={`${fca.enabled ? "Disable" : "Enable"} the ${fca.name} FCA`}
+            className="scale-[0.68]"
+          />
+        </span>
+      )}
+      {canEdit && (
+        <button type="button" title="Edit" onClick={onEdit} className="text-muted-foreground hover:text-foreground">
+          <Pencil className="size-3.5" />
+        </button>
+      )}
+      {canDelete && (
+        <ConfirmButton
+          size="icon"
+          className="size-7"
+          title="Delete"
+          aria-label="Delete FCA"
+          onConfirm={onDelete}
+          warn={`Delete the “${fca.name}” FCA?`}
+        >
+          <Trash2 className="size-3.5" />
+        </ConfirmButton>
+      )}
+    </li>
+  );
+}
+
+/** One draggable row in the ROUTES panel (see #109 — order is per-viewer, via `usePersistedOrder`). */
+function RouteRow({
+  r,
+  selected,
+  canEditRoute,
+  canDeleteRoute,
+  labeled,
+  onSelect,
+  onToggleFixes,
+  onEdit,
+  onDelete,
+}: {
+  r: MapRoute;
+  selected: boolean;
+  canEditRoute: boolean;
+  canDeleteRoute: boolean;
+  labeled: boolean;
+  onSelect: () => void;
+  onToggleFixes: () => void;
+  onEdit: () => void;
+  onDelete: () => void;
+}) {
+  const { attributes, listeners, setNodeRef, transform, transition, isDragging } = useSortable({
+    id: r.id,
+  });
+  const style = { transform: CSS.Transform.toString(transform), transition, opacity: isDragging ? 0.5 : 1 };
+  return (
+    <li
+      ref={setNodeRef}
+      style={style}
+      className={"flex items-center gap-2 rounded px-2 py-1.5 text-sm " + (selected ? "bg-accent/40" : "")}
+    >
+      <button
+        type="button"
+        className="cursor-grab text-muted-foreground/60 hover:text-foreground"
+        {...attributes}
+        {...listeners}
+      >
+        <GripVertical className="size-3.5" />
+      </button>
+      <span className="size-3 shrink-0 rounded-full" style={{ background: r.color, border: `2px solid ${r.color}` }} />
+      <button type="button" title={r.route} onClick={onSelect} className="flex-1 truncate text-left font-mono">
+        {r.name}
+        {r.unresolved.length > 0 && (
+          <span className="ml-1.5 text-xs text-amber-500" title={`Unresolved: ${r.unresolved.join(" ")}`}>
+            ⚠{r.unresolved.length}
+          </span>
+        )}
+      </button>
+      <button
+        type="button"
+        title={labeled ? "Hide fix names" : "Show fix names"}
+        onClick={onToggleFixes}
+        className={"transition-colors " + (labeled ? "text-primary" : "text-muted-foreground hover:text-foreground")}
+      >
+        <Tag className="size-3.5" />
+      </button>
+      {canEditRoute && (
+        <button type="button" title="Edit" onClick={onEdit} className="text-muted-foreground hover:text-foreground">
+          <Pencil className="size-3.5" />
+        </button>
+      )}
+      {canDeleteRoute && (
+        <ConfirmButton
+          size="icon"
+          className="size-7"
+          title="Delete"
+          aria-label="Delete route"
+          onConfirm={onDelete}
+          warn={`Delete the “${r.name}” route?`}
+        >
+          <Trash2 className="size-3.5" />
+        </ConfirmButton>
+      )}
+    </li>
+  );
 }
 
 /**
@@ -113,6 +290,21 @@ export function FcaMapView({
   const createRoute = useCreateRoute();
   const updateRoute = useUpdateRoute();
   const deleteRoute = useDeleteRoute();
+  const routeIds = useMemo(() => (routes.data ?? []).map((r) => r.id), [routes.data]);
+  const [routeOrder, setRouteOrder] = usePersistedOrder("fca.routeOrder", routeIds);
+  const orderedRoutes = useMemo(() => {
+    const byId = new Map((routes.data ?? []).map((r) => [r.id, r]));
+    return routeOrder.map((id) => byId.get(id)).filter((r): r is NonNullable<typeof r> => !!r);
+  }, [routes.data, routeOrder]);
+  const routeDragSensors = useSensors(useSensor(PointerSensor, { activationConstraint: { distance: 6 } }));
+  function onRouteDragEnd(e: DragEndEvent) {
+    const { active, over } = e;
+    if (!over || active.id === over.id) return;
+    const from = routeOrder.indexOf(String(active.id));
+    const to = routeOrder.indexOf(String(over.id));
+    if (from < 0 || to < 0) return;
+    setRouteOrder(arrayMove(routeOrder, from, to));
+  }
 
   // FCA draft (drawn on the map) + route form (a filed-route string).
   const [draft, setDraft] = useState<Draft | null>(null);
@@ -428,6 +620,21 @@ export function FcaMapView({
       );
     });
   }, [fcas.data, filter, artccFilter]);
+  const shownIds = useMemo(() => shown.map((f) => f.id), [shown]);
+  const [fcaOrder, setFcaOrder] = usePersistedOrder("fca.fcaOrder", shownIds);
+  const orderedFcas = useMemo(() => {
+    const byId = new Map(shown.map((f) => [f.id, f]));
+    return fcaOrder.map((id) => byId.get(id)).filter((f): f is NonNullable<typeof f> => !!f);
+  }, [shown, fcaOrder]);
+  const fcaDragSensors = useSensors(useSensor(PointerSensor, { activationConstraint: { distance: 6 } }));
+  function onFcaDragEnd(e: DragEndEvent) {
+    const { active, over } = e;
+    if (!over || active.id === over.id) return;
+    const from = fcaOrder.indexOf(String(active.id));
+    const to = fcaOrder.indexOf(String(over.id));
+    if (from < 0 || to < 0) return;
+    setFcaOrder(arrayMove(fcaOrder, from, to));
+  }
   const artccOptions = useMemo(
     () => [...new Set((fcas.data ?? []).map((f) => f.artcc).filter(Boolean))].sort(),
     [fcas.data],
@@ -549,75 +756,30 @@ export function FcaMapView({
                     No FCAs.{canEdit && " Draw one with “New FCA”."}
                   </p>
                 ) : (
-                  <ul>
-                    {shown.map((fca) => (
-                      <li
-                        key={fca.id}
-                        className={
-                          "flex items-center gap-2 border-b px-3 py-2 text-sm " +
-                          (fca.id === selectedId ? "bg-accent/40 " : "") +
-                          (fca.enabled ? "" : "opacity-55")
-                        }
-                      >
-                        <span
-                          className="size-3 shrink-0 rounded-full"
-                          style={{ background: fca.color }}
-                          title={fca.enabled ? "Enabled" : "Disabled"}
-                        />
-                        <button
-                          type="button"
-                          onClick={() => selectFca(fca.id)}
-                          className="flex-1 truncate text-left font-mono"
-                        >
-                          {fca.name}
-                          {fca.artcc && <span className="ml-1.5 text-xs text-muted-foreground">{fca.artcc}</span>}
-                        </button>
-                        <span
-                          className={
-                            "shrink-0 rounded px-1.5 text-xs font-medium tabular-nums " +
-                            ((counts.data?.[fca.id] ?? 0) > 0 ? "bg-primary/15 text-primary" : "text-muted-foreground/50")
-                          }
-                        >
-                          {counts.data?.[fca.id] ?? 0}
-                        </span>
-                        {canEdit && (
-                          <span
-                            className="flex shrink-0 items-center"
-                            title={fca.enabled ? "Enabled — click to disable" : "Disabled — click to enable"}
-                          >
-                            <Switch
-                              checked={fca.enabled}
-                              onCheckedChange={() => toggleEnabled(fca)}
-                              aria-label={`${fca.enabled ? "Disable" : "Enable"} the ${fca.name} FCA`}
-                              className="scale-[0.68]"
-                            />
-                          </span>
-                        )}
-                        {canEdit && (
-                          <button
-                            type="button"
-                            title="Edit"
-                            onClick={() => startEdit(fca)}
-                            className="text-muted-foreground hover:text-foreground"
-                          >
-                            <Pencil className="size-3.5" />
-                          </button>
-                        )}
-                        {canDelete && (
-                          <ConfirmButton
-                            size="icon"
-                            className="size-7"
-                            title="Delete"
-                            aria-label="Delete FCA"
-                            onConfirm={() => deleteFca.mutate(fca.id)}
-                            warn={`Delete the “${fca.name}” FCA?`}
-                          >
-                            <Trash2 className="size-3.5" />
-                          </ConfirmButton>
-                        )}
-                      </li>
-                    ))}
-                  </ul>
+                  <DndContext
+                    sensors={fcaDragSensors}
+                    collisionDetection={closestCenter}
+                    onDragEnd={onFcaDragEnd}
+                  >
+                    <SortableContext items={fcaOrder} strategy={verticalListSortingStrategy}>
+                      <ul>
+                        {orderedFcas.map((fca) => (
+                          <FcaRow
+                            key={fca.id}
+                            fca={fca}
+                            selected={fca.id === selectedId}
+                            count={counts.data?.[fca.id] ?? 0}
+                            canEdit={canEdit}
+                            canDelete={canDelete}
+                            onSelect={() => selectFca(fca.id)}
+                            onToggleEnabled={() => toggleEnabled(fca)}
+                            onEdit={() => startEdit(fca)}
+                            onDelete={() => deleteFca.mutate(fca.id)}
+                          />
+                        ))}
+                      </ul>
+                    </SortableContext>
+                  </DndContext>
                 )}
               </div>
 
@@ -646,65 +808,30 @@ export function FcaMapView({
                       )}
                     </div>
                     {routes.data && routes.data.length > 0 ? (
-                      <ul className="max-h-48 overflow-y-auto p-1">
-                        {routes.data.map((r) => (
-                          <li
-                            key={r.id}
-                            className={
-                              "flex items-center gap-2 rounded px-2 py-1.5 text-sm " +
-                              (r.id === selectedRouteId ? "bg-accent/40" : "")
-                            }
-                          >
-                            <span className="size-3 shrink-0 rounded-full" style={{ background: r.color, border: `2px solid ${r.color}` }} />
-                            <button
-                              type="button"
-                              title={r.route}
-                              onClick={() => setSelectedRouteId((cur) => (cur === r.id ? null : r.id))}
-                              className="flex-1 truncate text-left font-mono"
-                            >
-                              {r.name}
-                              {r.unresolved.length > 0 && (
-                                <span className="ml-1.5 text-xs text-amber-500" title={`Unresolved: ${r.unresolved.join(" ")}`}>
-                                  ⚠{r.unresolved.length}
-                                </span>
-                              )}
-                            </button>
-                            <button
-                              type="button"
-                              title={labeledRoutes.has(r.id) ? "Hide fix names" : "Show fix names"}
-                              onClick={() => toggleFixes(r.id)}
-                              className={
-                                "transition-colors " +
-                                (labeledRoutes.has(r.id) ? "text-primary" : "text-muted-foreground hover:text-foreground")
-                              }
-                            >
-                              <Tag className="size-3.5" />
-                            </button>
-                            {canEditRoute && (
-                              <button
-                                type="button"
-                                title="Edit"
-                                onClick={() => startEditRoute(r)}
-                                className="text-muted-foreground hover:text-foreground"
-                              >
-                                <Pencil className="size-3.5" />
-                              </button>
-                            )}
-                            {canDeleteRoute && (
-                              <ConfirmButton
-                                size="icon"
-                                className="size-7"
-                                title="Delete"
-                                aria-label="Delete route"
-                                onConfirm={() => deleteRoute.mutate(r.id)}
-                                warn={`Delete the “${r.name}” route?`}
-                              >
-                                <Trash2 className="size-3.5" />
-                              </ConfirmButton>
-                            )}
-                          </li>
-                        ))}
-                      </ul>
+                      <DndContext
+                        sensors={routeDragSensors}
+                        collisionDetection={closestCenter}
+                        onDragEnd={onRouteDragEnd}
+                      >
+                        <SortableContext items={routeOrder} strategy={verticalListSortingStrategy}>
+                          <ul className="max-h-48 overflow-y-auto p-1">
+                            {orderedRoutes.map((r) => (
+                              <RouteRow
+                                key={r.id}
+                                r={r}
+                                selected={r.id === selectedRouteId}
+                                canEditRoute={canEditRoute}
+                                canDeleteRoute={canDeleteRoute}
+                                labeled={labeledRoutes.has(r.id)}
+                                onSelect={() => setSelectedRouteId((cur) => (cur === r.id ? null : r.id))}
+                                onToggleFixes={() => toggleFixes(r.id)}
+                                onEdit={() => startEditRoute(r)}
+                                onDelete={() => deleteRoute.mutate(r.id)}
+                              />
+                            ))}
+                          </ul>
+                        </SortableContext>
+                      </DndContext>
                     ) : (
                       <p className="px-3 py-3 text-xs text-muted-foreground">
                         No routes yet.{canEditRoute && " Add one with “New route”."}
