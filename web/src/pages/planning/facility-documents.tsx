@@ -180,7 +180,9 @@ function FacilityDocuments({ facilityId }: { facilityId: string }) {
 
 export function FacilityDocumentsPage() {
   const { data: me } = useMe();
-  const canRead = hasPermission(me, "events.plan.read");
+  // Must match the backend gate (`facilities.docs.read`) — `events.plan.read` doesn't authorize
+  // this endpoint, it would just make the page appear before every fetch 403s.
+  const canRead = hasPermission(me, "facilities.docs.read");
   const facilities = useFacilities();
   const [facilityId, setFacilityId] = useState("");
 
@@ -188,7 +190,7 @@ export function FacilityDocumentsPage() {
     return (
       <Card>
         <CardContent className="py-16 text-center text-sm text-muted-foreground">
-          You don&apos;t have event planning access yet.
+          You don&apos;t have access to facility documents yet.
         </CardContent>
       </Card>
     );
