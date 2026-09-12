@@ -23,8 +23,11 @@ Cargo + pnpm/Turbo workspaces, tied together by a `justfile`. See `AGENTS.md` §
 
 These are project rules, not preferences:
 
-- **Work on `main`. Never create or switch branches.** Make edits directly on `main` and keep them.
-  Do not `git checkout -b`.
+- **Work on `next`. Never create or switch branches in the primary checkout.** `next` is the
+  integration branch — issue work forks a worktree from `origin/next` and PRs target `next` (see
+  `.claude/commands/start.md`/`ship.md`); a worktree is the sanctioned exception to "never create or
+  switch branches." `main` is promoted from `next` via a separate, manual release PR only — don't
+  target `main` directly for issue work.
 - **Always produce a commit message** for a completed unit of work — conventional-commit style
   (`type(scope): summary`), a short body, a `Closes #N` line when it maps to an issue, and the
   `Co-Authored-By` trailer the session specifies. Commit/push only when the user asks.
