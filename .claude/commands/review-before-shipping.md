@@ -11,7 +11,7 @@ every phase; all must pass before you report the review clean.
 re-pin, and re-run from Phase 1 (the review is of a commit, not a dirty tree).
 
 ## Phase 1 — Diff inventory
-`git diff main...HEAD --stat`, then read the full diff. Know exactly what was added, changed, removed.
+`git diff next...HEAD --stat`, then read the full diff. Know exactly what was added, changed, removed.
 
 ## Phase 2 — Code-quality review
 Review every changed file for:

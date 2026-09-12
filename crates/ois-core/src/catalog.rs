@@ -61,6 +61,24 @@ pub fn default_roles() -> Vec<&'static str> {
 /// below are the new national tooling and are firmed up in their feature specs.
 pub fn draft_new_permission_names() -> Vec<&'static str> {
     vec![
+        // --- auth: self-service profile + session (ported from osmium) ---
+        "auth.profile.read",
+        "auth.profile.update",
+        "auth.sessions.delete",
+        // --- access: the permission-editor UI backend (ported from osmium) ---
+        "access.self.read",
+        "access.catalog.read",
+        "access.users.read",
+        "access.users.update",
+        // --- users: directory (ported from osmium) ---
+        "users.directory.read",
+        // --- audit log (ported from osmium) ---
+        "audit.logs.read",
+        // --- service accounts: bot credential management (ported from osmium) ---
+        "service_accounts.read",
+        "service_accounts.create",
+        "service_accounts.update",
+        "service_accounts.delete",
         // --- events (operational coordination; posting/review stays in the current
         // VATUSA website — OIS owns the prior/during/post window) ---
         "events.plan.read",                // view an event's planning package
@@ -75,7 +93,9 @@ pub fn draft_new_permission_names() -> Vec<&'static str> {
         "events.discord.publish",          // open the coordination thread + ping staff
         "events.debrief.read",             // read the post-event debrief
         "events.debrief.create",           // write a post-event debrief entry
-        // --- tmu: NTML / ADV / TMI ---
+        "events.availability.update",      // indicate availability on a DCC event thread
+        // --- tmu: NTML / ADV / TMI (ntml/adv/delays were never implemented — see
+        // docs/features/tmu-ntml-adv-tmi.md; program/groundstop/cfr are the real, live ones) ---
         "tmu.ntml.read",
         "tmu.ntml.create",
         "tmu.ntml.update",
@@ -89,10 +109,18 @@ pub fn draft_new_permission_names() -> Vec<&'static str> {
         "tmu.tmi.update",
         "tmu.tmi.publish",
         "tmu.tmi.delete",
+        "tmu.program.read",
+        "tmu.program.update",
+        "tmu.program.delete",
+        "tmu.groundstop.read",
+        "tmu.groundstop.create",
+        "tmu.groundstop.publish",
+        "tmu.groundstop.delete",
         "tmu.gdp.read",
         "tmu.gdp.create",
         "tmu.gdp.publish",
         "tmu.gdp.delete",
+        "tmu.cfr.assign",
         "tmu.delays.read",
         // --- ace: support requests + team ---
         "ace.requests.read",
@@ -124,9 +152,10 @@ pub fn draft_new_permission_names() -> Vec<&'static str> {
         // --- stats: persistent network statistics + saved capture windows ---
         "stats.data.read",
         "stats.capture.update",
-        // --- discord config ---
+        // --- discord / integration: outbound-job queue (the bot) + guild config mapping ---
         "discord.config.read",
         "discord.config.update",
+        "integration.jobs.update",
         // --- facilities ---
         "facilities.directory.read",
         "facilities.directory.update",

@@ -101,3 +101,13 @@ async fn run_startup_migrations(
     tracing::info!("running startup migrations");
     sqlx::migrate!("./migrations").run(pool).await
 }
+
+#[cfg(test)]
+mod tests {
+    /// Not a behavior test — a guardrail. `#[sqlx::test]` applies every embedded migration (in
+    /// order) against a fresh database as its own setup step before the body runs; reaching this
+    /// line at all is the assertion. Otherwise a broken/out-of-order migration is only discovered
+    /// when a real backend boots against a real DB.
+    #[sqlx::test]
+    async fn migrations_apply_cleanly(_pool: sqlx::PgPool) {}
+}
