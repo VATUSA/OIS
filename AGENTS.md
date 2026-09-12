@@ -183,8 +183,10 @@ an existing one) or the bug and fix are unambiguous.
 
 ### Git workflow
 
-- Land work on `main`. This project does **not** use feature branches for agent work — do not create
-  or switch branches; make edits on `main` and keep the changes. (This is a standing project rule.)
+- Land work on `next`, the integration branch — fork a worktree from `origin/next` per issue and
+  target PRs at `next` (never `main` directly); `main` is promoted from `next` via a separate,
+  manual release PR (see #87). Don't create or switch branches in the *primary* checkout — the
+  worktree-per-issue flow is the sanctioned exception. (This is a standing project rule.)
 - Commit or push only when the user asks. Always provide a ready-to-use commit message for a
   completed unit of work, in the repo's conventional-commit style (`type(scope): summary`), with a
   `Closes #N` line when it maps to a GitHub issue.

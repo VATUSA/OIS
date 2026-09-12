@@ -14,18 +14,18 @@ moved, **regenerate the client first** (see `/review-before-shipping` Phase 3). 
 otherwise.
 
 ## Step 2 — Coverage check
-`git diff main...HEAD --stat`. For each changed source file, confirm new logic has a test and sad
+`git diff next...HEAD --stat`. For each changed source file, confirm new logic has a test and sad
 paths are covered (metering / trajectory / permission resolution especially). Add missing tests and
 re-gate.
 
-## Step 3 — Commit (to the feature branch, never `main`)
+## Step 3 — Commit (to the feature branch, never `next`)
 - Confirm the branch is `{feat|fix|chore}/{issue}/{desc}` and you are in the issue's worktree — **never
-  commit onto `main`**; if you are on `main`, stop and ask.
+  commit onto `next`**; if you are on `next`, stop and ask.
 - Stage with **explicit paths** (not `git add -A`), then commit. Message: conventional
   `type(scope): summary`, a short body, `Closes #$ARGUMENTS`, and the required trailer:
   `Co-Authored-By: Claude Opus 4.8 <noreply@anthropic.com>`.
 - Integrity check: `git status --short` (nothing you meant to ship still shows `M`) and
-  `git diff origin/main..HEAD --name-only` (lists every intended file).
+  `git diff origin/next..HEAD --name-only` (lists every intended file).
 
 ## Step 4 — Review the committed HEAD
 Run `/review-before-shipping` to completion against this commit. If it applies a fix, commit it,
@@ -36,7 +36,7 @@ re-run the Step 3 integrity check, and re-run the review so it covers the new HE
 
 ## Step 6 — Open the PR
 ```bash
-gh pr create --repo VATUSA/OIS --base main --title "type(scope): summary" --body "$(cat <<'EOF'
+gh pr create --repo VATUSA/OIS --base next --title "type(scope): summary" --body "$(cat <<'EOF'
 ## Summary
 <1–3 bullets — what changed and why>
 
@@ -61,6 +61,6 @@ green, but `just ci` locally is the primary evidence. Do not sit blocked waiting
   so with justification (not application logic, not data-affecting) so it can skip runtime verification.
 
 ## Step 8 — Hand back
-Return to the `main` worktree, `git pull`, and remove the issue worktree if finished
+Return to the `next` worktree, `git pull`, and remove the issue worktree if finished
 (`git worktree remove ../ois-wt/{branch}`). Refresh your inventory from the **board** (not memory)
 before the next issue.

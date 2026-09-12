@@ -2,6 +2,11 @@ name: Build images
 
 # Build and push the backend + web images to GHCR on pushes to main, on version tags, and on
 # demand. Deploying a given tag to dev/staging/prod is a downstream step (pull the tag you want).
+#
+# Deliberately does NOT build on `next`: `next` is the integration/test-server branch (see #87) and
+# merging into it should not cut new prod-tagged images. A manual `workflow_dispatch` run on `next`
+# still works and tags `:next` (never `:latest`, which is gated to the default branch below) — that
+# is how test-server builds happen. Do not add `next` to the push branches list.
 on:
   push:
     branches: [main]
