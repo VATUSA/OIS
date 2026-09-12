@@ -7,6 +7,7 @@ use axum::{
     extract::{Extension, Path, State},
     http::StatusCode,
 };
+use reqwest::Url;
 
 use crate::{
     auth::{
@@ -23,11 +24,29 @@ use crate::{
 
 const UPDATE_PERMISSION: &str = "facilities.docs.update";
 
+/// Trim/uppercase/validate a facility (ARTCC) id — same shape check as
+/// `handlers::facility_map::normalize_facility` / `handlers::airport_configs::normalize_icao`.
+fn normalize_facility(id: &str) -> Option<String> {
+    let id = id.trim().to_ascii_uppercase();
+    if (2..=4).contains(&id.len()) && id.chars().all(|c| c.is_ascii_alphanumeric()) {
+        Some(id)
+    } else {
+        None
+    }
+}
+
 fn validate(req: &UpsertFacilityDocumentRequest) -> Result<(), ApiError> {
     if req.title.trim().is_empty() || req.title.len() > 200 {
         return Err(ApiError::BadRequest);
     }
     if req.url.trim().is_empty() || req.url.len() > 2000 {
+        return Err(ApiError::BadRequest);
+    }
+    // Reject non-http(s) schemes (e.g. `javascript:`) — the web page renders this URL directly as
+    // an `<a href>`, so an unvalidated scheme is a stored-XSS vector reachable by any
+    // facility-scoped editor. Mirrors `handlers::auth::validate_return_to`'s scheme check.
+    let parsed = Url::parse(req.url.trim()).map_err(|_| ApiError::BadRequest)?;
+    if !matches!(parsed.scheme(), "http" | "https") {
         return Err(ApiError::BadRequest);
     }
     Ok(())
@@ -47,6 +66,7 @@ pub async fn list_facility_documents(
 ) -> Result<Json<Vec<FacilityDocumentBody>>, ApiError> {
     let principal = Principal::require(current_user.as_ref(), current_api_key.as_ref())?;
     let pool = state.db.as_ref().ok_or(ApiError::ServiceUnavailable)?;
+    let facility_id = normalize_facility(&facility_id).ok_or(ApiError::BadRequest)?;
 
     let scope = principal
         .permission_scope(&state, UPDATE_PERMISSION)
@@ -74,6 +94,7 @@ pub async fn create_facility_document(
 ) -> Result<Json<FacilityDocumentBody>, ApiError> {
     let principal = Principal::require(current_user.as_ref(), current_api_key.as_ref())?;
     let pool = state.db.as_ref().ok_or(ApiError::ServiceUnavailable)?;
+    let facility_id = normalize_facility(&facility_id).ok_or(ApiError::BadRequest)?;
     validate(&req)?;
 
     let scope = principal
@@ -104,6 +125,7 @@ pub async fn update_facility_document(
 ) -> Result<Json<FacilityDocumentBody>, ApiError> {
     let principal = Principal::require(current_user.as_ref(), current_api_key.as_ref())?;
     let pool = state.db.as_ref().ok_or(ApiError::ServiceUnavailable)?;
+    let facility_id = normalize_facility(&facility_id).ok_or(ApiError::BadRequest)?;
     validate(&req)?;
 
     let scope = principal
@@ -134,6 +156,7 @@ pub async fn delete_facility_document(
 ) -> Result<StatusCode, ApiError> {
     let principal = Principal::require(current_user.as_ref(), current_api_key.as_ref())?;
     let pool = state.db.as_ref().ok_or(ApiError::ServiceUnavailable)?;
+    let facility_id = normalize_facility(&facility_id).ok_or(ApiError::BadRequest)?;
 
     let scope = principal
         .permission_scope(&state, UPDATE_PERMISSION)
@@ -213,5 +236,38 @@ mod tests {
 
         let empty_scope = PermissionScope::Facilities(HashSet::new());
         assert!(!empty_scope.allows(Some("ZDC")));
+    }
+
+    /// A `javascript:` (or any non-http(s)) URL must be rejected — the web page renders the stored
+    /// URL directly as an `<a href>`, so an unvalidated scheme is a stored-XSS vector.
+    #[test]
+    fn validate_rejects_non_http_schemes() {
+        let mut req = upsert("ZDC SOP");
+        req.url = "javascript:alert(document.cookie)".to_string();
+        assert!(matches!(validate(&req), Err(ApiError::BadRequest)));
+
+        req.url = "data:text/html,<script>alert(1)</script>".to_string();
+        assert!(matches!(validate(&req), Err(ApiError::BadRequest)));
+
+        req.url = "not a url at all".to_string();
+        assert!(matches!(validate(&req), Err(ApiError::BadRequest)));
+
+        req.url = "https://example.com/doc.pdf".to_string();
+        assert!(validate(&req).is_ok());
+
+        req.url = "http://example.com/doc.pdf".to_string();
+        assert!(validate(&req).is_ok());
+    }
+
+    /// Facility ids are trimmed/uppercased/shape-checked before use, matching
+    /// `facility_map::normalize_facility` — a lowercase or malformed id must not silently reach the
+    /// scope check or the DB with the wrong case (which would mismatch a stored, uppercase grant).
+    #[test]
+    fn normalize_facility_trims_uppercases_and_validates_shape() {
+        assert_eq!(normalize_facility(" zdc "), Some("ZDC".to_string()));
+        assert_eq!(normalize_facility("ZDC"), Some("ZDC".to_string()));
+        assert_eq!(normalize_facility("z"), None);
+        assert_eq!(normalize_facility("toolongid"), None);
+        assert_eq!(normalize_facility("Z-C"), None);
     }
 }
