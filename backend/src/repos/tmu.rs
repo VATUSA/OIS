@@ -567,3 +567,77 @@ pub async fn prune_history(pool: &PgPool, before: DateTime<Utc>) -> Result<u64, 
     }
     Ok(total)
 }
+
+#[cfg(test)]
+mod tests {
+    use sqlx::PgPool;
+
+    use super::*;
+    use crate::models::NtmlRestriction;
+
+    async fn seed_user(pool: &PgPool) -> String {
+        sqlx::query_scalar::<_, String>(
+            "insert into identity.users (full_name, display_name) \
+             values ('Test User', 'Test User') returning id",
+        )
+        .fetch_one(pool)
+        .await
+        .unwrap()
+    }
+
+    /// The `restriction`/`structured`/`decoded` split a raw-typed TMI and a structured (form-built)
+    /// one leave for the bot's "View structured" reply: a raw TMI has `structured`/`decoded` null,
+    /// a structured one has both populated (mirrors `handlers::tmu::create_tmi`'s own pre-processing,
+    /// since that derivation happens in the handler, not this repo layer).
+    #[sqlx::test]
+    async fn get_tmi_reflects_raw_vs_structured_entry(pool: PgPool) {
+        let user = seed_user(&pool).await;
+
+        let raw_id = create_tmi(
+            &pool,
+            &CreateTmiRequest {
+                requesting: "ZDC".to_string(),
+                providing: "ZNY".to_string(),
+                restriction: "ZDC ZNY 20MIT via CAMRN".to_string(),
+                structured: None,
+                start_time: None,
+                stop_time: None,
+            },
+            &user,
+        )
+        .await
+        .unwrap();
+        let raw = get_tmi(&pool, &raw_id).await.unwrap().unwrap();
+        assert_eq!(raw.restriction, "ZDC ZNY 20MIT via CAMRN");
+        assert!(raw.structured.is_none());
+        assert!(raw.decoded.is_none());
+
+        let structured: NtmlRestriction = serde_json::from_value(serde_json::json!({
+            "element": "JFK",
+            "direction": "arrivals",
+            "kind": "MIT",
+            "via": "CAMRN",
+            "value": 20,
+        }))
+        .unwrap();
+        let encoded = crate::tmi::encode(&structured);
+        let structured_id = create_tmi(
+            &pool,
+            &CreateTmiRequest {
+                requesting: "ZDC".to_string(),
+                providing: "ZNY".to_string(),
+                restriction: encoded.clone(),
+                structured: Some(structured),
+                start_time: None,
+                stop_time: None,
+            },
+            &user,
+        )
+        .await
+        .unwrap();
+        let built = get_tmi(&pool, &structured_id).await.unwrap().unwrap();
+        assert_eq!(built.restriction, encoded);
+        assert!(built.structured.is_some());
+        assert!(built.decoded.is_some());
+    }
+}
