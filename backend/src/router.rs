@@ -414,6 +414,10 @@ pub fn build_router(state: AppState) -> Router {
             get(integration::discord_ace_info),
         )
         .route(
+            "/api/v1/integration/discord/tmi/{id}",
+            get(integration::discord_tmi_info),
+        )
+        .route(
             "/api/v1/integration/discord/availability/{id}",
             post(integration::discord_availability),
         )
