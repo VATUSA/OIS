@@ -22,7 +22,10 @@ use crate::{
         AceRequestBody, ClaimAceRequest, CreateAceRequestRequest, DecideAceRequestRequest,
         EventBody,
     },
-    repos::{ace as ace_repo, events as events_repo, integration as integration_repo},
+    repos::{
+        ace as ace_repo, events as events_repo, facility_documents as facility_documents_repo,
+        integration as integration_repo,
+    },
     state::AppState,
 };
 use serde_json::json;
@@ -177,6 +180,55 @@ pub(crate) async fn enqueue_notify(
     integration_repo::enqueue_job(
         tx,
         "ace_request_notify",
+        &job,
+        Some("ace_request"),
+        Some(request_id),
+    )
+    .await?;
+    Ok(())
+}
+
+/// Build + enqueue an `ace_claim_dm` job in `tx` DMing the claimer their facility's configured
+/// documents plus a confirmation. No-op if the claimer has never linked a Discord account — there's
+/// no channel to DM them through.
+pub(crate) async fn enqueue_claim_dm(
+    tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+    p: &sqlx::PgPool,
+    request_id: &str,
+    claimer_user_id: &str,
+) -> Result<(), ApiError> {
+    let Some((discord_user_id, _)) = integration_repo::get_discord_link(p, claimer_user_id).await?
+    else {
+        return Ok(());
+    };
+    let request = ace_repo::get_request(p, request_id).await?;
+    let (artcc, position, event_title) = match request {
+        Some(r) => {
+            let title = events_repo::get(p, r.event_id)
+                .await?
+                .map(|e| e.title)
+                .unwrap_or_default();
+            (r.artcc_id, r.position, title)
+        }
+        None => (None, None, String::new()),
+    };
+    let mut documents = Vec::new();
+    if let Some(artcc) = &artcc {
+        documents = facility_documents_repo::list_by_facility(p, artcc)
+            .await?
+            .into_iter()
+            .map(|d| json!({ "title": d.title, "url": d.url }))
+            .collect();
+    }
+    let job = json!({
+        "discord_user_id": discord_user_id,
+        "event_title": event_title,
+        "position": position,
+        "documents": documents,
+    });
+    integration_repo::enqueue_job(
+        tx,
+        "ace_claim_dm",
         &job,
         Some("ace_request"),
         Some(request_id),
@@ -349,6 +401,7 @@ pub async fn claim_request(
     )
     .await?;
     enqueue_notify(&mut tx, p, &req, slots, count).await?;
+    enqueue_claim_dm(&mut tx, p, &req, &user.id).await?;
     tx.commit().await.map_err(|_| ApiError::Internal)?;
 
     ace_repo::get_request(p, &req)
@@ -404,4 +457,143 @@ pub async fn decide_request(
         .await?
         .map(Json)
         .ok_or(ApiError::NotFound)
+}
+
+#[cfg(test)]
+mod tests {
+    use sqlx::PgPool;
+
+    use super::*;
+    use crate::models::UpsertFacilityDocumentRequest;
+
+    async fn seed_user(pool: &PgPool, name: &str) -> String {
+        sqlx::query_scalar::<_, String>(
+            "insert into identity.users (full_name, display_name) values ($1, $1) returning id",
+        )
+        .bind(name)
+        .fetch_one(pool)
+        .await
+        .unwrap()
+    }
+
+    async fn seed_event(pool: &PgPool) -> i64 {
+        sqlx::query_scalar::<_, i64>(
+            "insert into events.event (id, title, start_time, end_time) \
+             values (1, 'Fall Fly-In', now(), now() + interval '2 hours') returning id",
+        )
+        .fetch_one(pool)
+        .await
+        .unwrap()
+    }
+
+    async fn link_discord(pool: &PgPool, user_id: &str, discord_id: &str) {
+        sqlx::query(
+            "insert into integration.external_sync_mappings \
+             (system_code, entity_type, local_id, external_id) \
+             values ('discord', 'user', $1, $2)",
+        )
+        .bind(user_id)
+        .bind(discord_id)
+        .execute(pool)
+        .await
+        .unwrap();
+    }
+
+    async fn dm_job_count(pool: &PgPool) -> i64 {
+        sqlx::query_scalar::<_, i64>(
+            "select count(*) from integration.outbound_jobs where job_type = 'ace_claim_dm'",
+        )
+        .fetch_one(pool)
+        .await
+        .unwrap()
+    }
+
+    #[sqlx::test]
+    async fn enqueue_claim_dm_sends_when_the_claimer_is_linked(pool: PgPool) {
+        let requester = seed_user(&pool, "Requester").await;
+        let claimer = seed_user(&pool, "Claimer").await;
+        let event_id = seed_event(&pool).await;
+        link_discord(&pool, &claimer, "999888777").await;
+        facility_documents_repo::create(
+            &pool,
+            "ZDC",
+            &UpsertFacilityDocumentRequest {
+                title: "ZDC SOP".to_string(),
+                url: "https://example.com/sop".to_string(),
+            },
+        )
+        .await
+        .unwrap();
+
+        // The request is opened and committed first, exactly like production (someone opens an ACE
+        // request; separately, much later, someone else claims it) — `enqueue_claim_dm` reads the
+        // request/event via the pool, not the claim's own transaction, same as `enqueue_notify`
+        // already does, so the request row must already be visible outside that transaction.
+        let mut open_tx = pool.begin().await.unwrap();
+        let request_id = ace_repo::create_request(
+            &mut open_tx,
+            event_id,
+            &requester,
+            Some("ZDC"),
+            Some("DCA_APP"),
+            1,
+            "need coverage",
+        )
+        .await
+        .unwrap();
+        open_tx.commit().await.unwrap();
+
+        let mut tx = pool.begin().await.unwrap();
+        ace_repo::claim_request(&mut tx, &request_id, &claimer, "", None, None)
+            .await
+            .unwrap();
+        enqueue_claim_dm(&mut tx, &pool, &request_id, &claimer)
+            .await
+            .unwrap();
+        tx.commit().await.unwrap();
+
+        assert_eq!(dm_job_count(&pool).await, 1);
+        let payload: serde_json::Value = sqlx::query_scalar(
+            "select payload from integration.outbound_jobs where job_type = 'ace_claim_dm'",
+        )
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        assert_eq!(payload["discord_user_id"], "999888777");
+        assert_eq!(payload["event_title"], "Fall Fly-In");
+        assert_eq!(payload["position"], "DCA_APP");
+        assert_eq!(payload["documents"][0]["title"], "ZDC SOP");
+    }
+
+    #[sqlx::test]
+    async fn enqueue_claim_dm_is_a_no_op_when_the_claimer_has_no_discord_link(pool: PgPool) {
+        let requester = seed_user(&pool, "Requester").await;
+        let claimer = seed_user(&pool, "Claimer").await;
+        let event_id = seed_event(&pool).await;
+
+        let mut open_tx = pool.begin().await.unwrap();
+        let request_id = ace_repo::create_request(
+            &mut open_tx,
+            event_id,
+            &requester,
+            Some("ZDC"),
+            Some("DCA_APP"),
+            1,
+            "need coverage",
+        )
+        .await
+        .unwrap();
+        open_tx.commit().await.unwrap();
+
+        let mut tx = pool.begin().await.unwrap();
+        ace_repo::claim_request(&mut tx, &request_id, &claimer, "", None, None)
+            .await
+            .unwrap();
+        enqueue_claim_dm(&mut tx, &pool, &request_id, &claimer)
+            .await
+            .unwrap();
+        tx.commit().await.unwrap();
+
+        assert_eq!(dm_job_count(&pool).await, 0);
+    }
 }
