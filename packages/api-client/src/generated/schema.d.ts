@@ -1034,6 +1034,38 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/v1/facilities/{facility_id}/documents": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get: operations["list_facility_documents"];
+        put?: never;
+        post: operations["create_facility_document"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/facilities/{facility_id}/documents/{id}": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put: operations["update_facility_document"];
+        post?: never;
+        delete: operations["delete_facility_document"];
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/v1/facilities/{id}": {
         parameters: {
             query?: never;
@@ -3420,6 +3452,17 @@ export interface components {
             name: string;
             region?: string | null;
         };
+        /** @description A configured reference document (SOP/LOA/etc.) for a facility. */
+        FacilityDocumentBody: {
+            /** @description Whether the requesting user may edit this facility's documents (per their ARTCC scope). */
+            editable: boolean;
+            facility_id: string;
+            id: string;
+            title: string;
+            /** Format: date-time */
+            updated_at: string;
+            url: string;
+        };
         /** @description A facility's map color-rule configuration (one per ARTCC). */
         FacilityMapConfigBody: {
             /** @description Hex color for aircraft matching no rule; empty = the map's theme default. */
@@ -4940,6 +4983,10 @@ export interface components {
         };
         UpsertDiscordConfigRequest: {
             guilds: components["schemas"]["DiscordGuildConfigInput"][];
+        };
+        UpsertFacilityDocumentRequest: {
+            title: string;
+            url: string;
         };
         /** @description Upsert body for a facility's map color rules. */
         UpsertFacilityMapConfigRequest: {
@@ -8056,6 +8103,164 @@ export interface operations {
                 content: {
                     "application/json": components["schemas"]["FacilityBody"][];
                 };
+            };
+        };
+    };
+    list_facility_documents: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                facility_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["FacilityDocumentBody"][];
+                };
+            };
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+        };
+    };
+    create_facility_document: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                facility_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["UpsertFacilityDocumentRequest"];
+            };
+        };
+        responses: {
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["FacilityDocumentBody"];
+                };
+            };
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+        };
+    };
+    update_facility_document: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                facility_id: string;
+                id: string;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["UpsertFacilityDocumentRequest"];
+            };
+        };
+        responses: {
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["FacilityDocumentBody"];
+                };
+            };
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+        };
+    };
+    delete_facility_document: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                facility_id: string;
+                id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            204: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
             };
         };
     };
