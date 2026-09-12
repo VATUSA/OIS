@@ -55,3 +55,18 @@ jobs:
       - run: pnpm lint
       - run: pnpm typecheck
       - run: pnpm test
+      # Dependabot vulnerability alerts aren't enabled on this repo yet, so this is the active
+      # JS-side advisory gate (see #89) rather than a passive GitHub setting. Advisories ignored
+      # pending real fixes are tracked in root package.json's `pnpm.auditConfig`, not here — pnpm
+      # 9.12's documented `pnpm audit --ignore <GHSA>` flag errors ("Unknown option") despite its
+      # own --help describing it, and a `pnpm-workspace.yaml`-level auditConfig is silently not
+      # applied either; only the package.json `pnpm` field form actually takes effect.
+      - run: pnpm audit --audit-level=high
+
+  deny:
+    runs-on: ubuntu-latest
+    # Advisories (RUSTSEC vulnerabilities) + license policy for the whole Cargo workspace, in one
+    # pass. Config + rationale for any ignored advisory/allowed license lives in deny.toml.
+    steps:
+      - uses: actions/checkout@v4
+      - uses: EmbarkStudios/cargo-deny-action@v2
