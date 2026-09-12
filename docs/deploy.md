@@ -58,10 +58,12 @@ docker compose pull && docker compose up -d
 just smoke
 ```
 
-The smoke check retries `/health` for up to ~20s (the container needs a moment to start), then
-fails the command (non-zero exit) if the API never comes up **or** comes up but reports its
-database unreachable — `/health` itself always returns HTTP 200, even when the DB is down, so a
-plain "did it return 200" check would miss that. A failing `just deploy` means the new containers
+The smoke check retries `/health` for up to ~60s by default (`SMOKE_ATTEMPTS` env var to tune it) —
+covering both the API not being reachable yet and being reachable but still reporting its database
+unready, since migrations run before the API's TCP listener binds and can take a while on a fresh
+DB. It fails the command (non-zero exit) only once that budget is spent without a healthy response
+— `/health` itself always returns HTTP 200, even when the DB is down, so a plain "did it return
+200" check would miss that. A failing `just deploy` means the new containers
 are already running but unhealthy; docker doesn't automatically revert.
 
 ## Rolling back
