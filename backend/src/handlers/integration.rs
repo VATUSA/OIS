@@ -200,6 +200,7 @@ pub async fn discord_ace_claim(
     let (slots, count) =
         ace_repo::claim_request(&mut tx, &id, &user_id, &notes, start, end).await?;
     crate::handlers::ace::enqueue_notify(&mut tx, p, &id, slots, count).await?;
+    crate::handlers::ace::enqueue_claim_dm(&mut tx, p, &id, &user_id).await?;
     tx.commit().await.map_err(|_| ApiError::Internal)?;
 
     ace_repo::get_request(p, &id)
