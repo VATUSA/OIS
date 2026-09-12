@@ -5,3 +5,25 @@
 
 /* Scan the shared UI package for Tailwind classes (it lives outside web/). */
 @source "../../packages/ui/src";
+
+/* @tanstack/charts' DOM tooltip host mounts via the native Popover API (top-layer stacking) and
+   themes itself via inline styles reading these exact custom properties with fallbacks (see
+   node_modules/@tanstack/charts/dist/tooltip.js's `createTooltip`) — background/border/padding/
+   box-shadow/color are set as `element.style.<prop> = "var(--ts-chart-tooltip-<prop>, <default>)"`.
+   Inline styles always win over a class rule targeting those same properties directly, so
+   `.ts-chart-tooltip { background: transparent; ... }` has no effect (verified: computed styles
+   stay at the browser/library defaults). Overriding the custom properties themselves is the
+   library's actual, working customization point — the inline style's `var()` reads whatever value
+   these resolve to, so setting them here does take effect. `margin`/`overflow` aren't part of that
+   inline-style set, so a normal property override still works fine for those two (see #136). */
+.ts-chart-tooltip {
+  --ts-chart-tooltip-background: transparent;
+  --ts-chart-tooltip-border: none;
+  --ts-chart-tooltip-padding: 0;
+  --ts-chart-tooltip-shadow: none;
+  --ts-chart-tooltip-color: inherit;
+  margin: 0;
+  /* The [popover] UA stylesheet also sets overflow: auto, which could clip our inner box if the
+     host's auto-sized dimensions don't exactly match its content in every browser. */
+  overflow: visible;
+}

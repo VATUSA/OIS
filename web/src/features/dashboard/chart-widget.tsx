@@ -239,11 +239,15 @@ function buildDefinition(
   const seriesMarks = series.flatMap((s, i) => {
     const y = yAccessor(s.key);
     const color = colorFor(s.key, i);
-    if (chartType === "line") return [lineY(data, { x, y, stroke: color })];
-    if (chartType === "area") return [areaY(data, { x, y, fill: color })];
+    // `id: s.key` makes ChartPoint.markId (the tooltip's only per-point identity field) resolve
+    // back to the real series — otherwise it defaults to an auto-generated id like "line-0" (#136).
+    if (chartType === "line") return [lineY(data, { x, y, stroke: color, id: s.key })];
+    if (chartType === "area") return [areaY(data, { x, y, fill: color, id: s.key })];
     if (chartType === "scatter") {
       // dot() only takes a static fill/stroke, unlike barY's per-datum channel — split into one
       // dot() mark per resolved color instead so a category override still recolors just its points.
+      // All of a series' color-split marks share the same `id: s.key` — a correct many-to-one
+      // mapping back to the series for the tooltip lookup.
       const groups = new Map<string, Row[]>();
       for (const d of data) {
         const c = resolvedColor(d, color);
@@ -251,9 +255,9 @@ function buildDefinition(
         if (!arr) groups.set(c, (arr = []));
         arr.push(d);
       }
-      return [...groups.entries()].map(([c, gd]) => dot(gd, { x, y, fill: c, stroke: c, r: 3.5 }));
+      return [...groups.entries()].map(([c, gd]) => dot(gd, { x, y, fill: c, stroke: c, r: 3.5, id: s.key }));
     }
-    return [barY(data, { x, y, fill: (d: Row) => resolvedColor(d, color) })];
+    return [barY(data, { x, y, fill: (d: Row) => resolvedColor(d, color), id: s.key })];
   });
   const thresholdMarks =
     !normalized && thresholds.length
@@ -491,6 +495,12 @@ function ChartInner({
     // eslint-disable-next-line react-hooks/exhaustive-deps
     [shaped, widget.chartType, widget.x, xLabel, colors, categoryColors, normalize, thresholds],
   );
+  // ChartPoint.markId === the series' `key` (set via `id:` in buildDefinition's marks) — this maps
+  // a tooltip point back to its real, human series label instead of the mark's raw generated id.
+  const labelByMarkId = useMemo(
+    () => new Map(shaped.series.map((s) => [s.key, s.label])),
+    [shaped.series],
+  );
 
   const ready = widget.x && (aggregate === "count" || widget.y.length > 0);
   const empty = shaped.data.length === 0;
@@ -537,24 +547,25 @@ function ChartInner({
               const pts = ctx.points;
               if (!pts.length) return null;
               return (
-                <div className="pointer-events-none rounded-md border bg-popover px-2.5 py-1.5 text-xs shadow-lg">
-                  <div className="mb-1 font-medium text-foreground">{String(pts[0].xValue)}</div>
+                <div className="pointer-events-none rounded-md border bg-popover px-2 py-1 text-xs shadow-md">
+                  <div className="mb-0.5 font-medium text-foreground">{String(pts[0].xValue)}</div>
                   <div className="flex flex-col gap-0.5">
-                    {pts.map((p, i) => (
-                      <div key={i} className="flex items-center gap-2">
-                        <span
-                          className="inline-block size-2 rounded-sm"
-                          style={{ background: p.color }}
-                        />
-                        {p.groupLabel && (
-                          <span className="text-muted-foreground">{p.groupLabel}</span>
-                        )}
-                        <span className="ml-auto tabular-nums text-foreground">
-                          {fmtNumber(Number(p.yValue))}
-                          {normalize ? "%" : ""}
-                        </span>
-                      </div>
-                    ))}
+                    {pts.map((p, i) => {
+                      const label = shaped.series.length > 1 ? labelByMarkId.get(p.markId) : undefined;
+                      return (
+                        <div key={i} className="flex items-center gap-1.5">
+                          <span
+                            className="inline-block size-2 rounded-sm"
+                            style={{ background: p.color }}
+                          />
+                          {label && <span className="text-muted-foreground">{label}</span>}
+                          <span className="ml-auto tabular-nums text-foreground">
+                            {fmtNumber(Number(p.yValue))}
+                            {normalize ? "%" : ""}
+                          </span>
+                        </div>
+                      );
+                    })}
                   </div>
                 </div>
               );
