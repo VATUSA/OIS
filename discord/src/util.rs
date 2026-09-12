@@ -6,6 +6,10 @@ use serenity::all::{ChannelId, CreateInteractionResponse, CreateInteractionRespo
 /// (`interactions::ace_claim`).
 pub(crate) const ACE_CLAIM_PREFIX: &str = "ace_claim:";
 
+/// Custom-id prefix for the "View structured" button on a TMI post; shared by the button builder
+/// (`jobs::tmi`) and the interaction handler that strips it (`interactions::tmi_structured`).
+pub(crate) const TMI_STRUCTURED_PREFIX: &str = "tmiV:";
+
 /// Resolve the `channel_id` snowflake from a job payload.
 pub(crate) fn channel(p: &Value) -> Result<ChannelId, String> {
     let id: u64 = str_field(p, "channel_id")

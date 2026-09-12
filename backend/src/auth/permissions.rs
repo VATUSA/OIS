@@ -80,6 +80,11 @@ permission!(IntegrationJobsUpdate, ["integration", "jobs"], Update);
 permission!(DiscordConfigRead, ["discord", "config"], Read);
 permission!(DiscordConfigUpdate, ["discord", "config"], Update);
 
+// facilities — reference documents (SOPs/LOAs), facility-scoped; consumed by the Discord
+// ACE-claim DM (#143's sub-issue E)
+permission!(FacilitiesDocsRead, ["facilities", "docs"], Read);
+permission!(FacilitiesDocsUpdate, ["facilities", "docs"], Update);
+
 // flow — flow constrained areas (FCAs)
 permission!(FlowFcaRead, ["flow", "fca"], Read);
 permission!(FlowFcaUpdate, ["flow", "fca"], Update);
