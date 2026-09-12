@@ -339,15 +339,15 @@ pub async fn get_event_thread_template(pool: &PgPool) -> Result<String, ApiError
 }
 
 pub async fn set_event_thread_template(pool: &PgPool, body: &str) -> Result<String, ApiError> {
-    sqlx::query(
+    sqlx::query_scalar::<_, String>(
         "insert into integration.event_thread_template (id, body) values ('default', $1) \
-         on conflict (id) do update set body = excluded.body",
+         on conflict (id) do update set body = excluded.body \
+         returning body",
     )
     .bind(body)
-    .execute(pool)
+    .fetch_one(pool)
     .await
-    .map_err(|_| ApiError::Internal)?;
-    get_event_thread_template(pool).await
+    .map_err(|_| ApiError::Internal)
 }
 
 // --- guild snapshot (channels + roles the bot sees; drives the config dropdowns) ------------------

@@ -58,6 +58,23 @@ fn render_template(template: &str, vars: &[(&str, &str)]) -> String {
     out
 }
 
+/// Cap the one-line-per-facility block specifically, rather than truncating the whole rendered
+/// message: `{{ntmo_ping}}`/`{{dcc_ping}}` and the availability legend sit *after* this block in the
+/// default template, so a blind tail-truncation of the final content on a long facility list would
+/// silently drop the ping section entirely — the ping would never fire, with nothing logged.
+/// Truncating this one growable piece up front keeps everything after it in the template intact.
+const MAX_FACILITY_LINES_LEN: usize = 1000;
+
+fn cap_facility_lines(facility_lines: String) -> String {
+    if facility_lines.chars().count() <= MAX_FACILITY_LINES_LEN {
+        return facility_lines;
+    }
+    format!(
+        "{}\n_…and more facilities not shown here (see the event page)._\n",
+        truncate(facility_lines.trim_end(), MAX_FACILITY_LINES_LEN)
+    )
+}
+
 pub(crate) async fn create_event_thread(
     http: &Arc<Http>,
     p: &Value,
@@ -108,6 +125,7 @@ pub(crate) async fn create_event_thread(
     if facility_lines.is_empty() {
         facility_lines.push_str("_No facilities marked required/preferred yet._\n");
     }
+    let facility_lines = cap_facility_lines(facility_lines);
 
     let ntmo = str_field(p, "ntmo_role_id");
     let dcc = str_field(p, "dcc_trainee_role_id");
@@ -246,5 +264,50 @@ mod tests {
     fn unclosed_placeholder_does_not_panic() {
         let out = render_template("Hi {{name", &[("name", "Alex")]);
         assert_eq!(out, "Hi {{name");
+    }
+
+    #[test]
+    fn cap_facility_lines_leaves_a_short_list_untouched() {
+        let lines = "• **ZDC** <@111>\n• **ZNY** <@222>\n".to_string();
+        assert_eq!(cap_facility_lines(lines.clone()), lines);
+    }
+
+    /// A long facility list is clipped rather than left to grow the final rendered content past
+    /// Discord's 2000-char limit — the regression this guards is the ping section (which sits after
+    /// `{{facility_lines}}` in the template) getting silently truncated away along with the overflow.
+    #[test]
+    fn cap_facility_lines_clips_an_oversized_list_and_notes_the_clip() {
+        let one_line = "• **ZDC** <@111>\n";
+        let lines: String = one_line.repeat(100); // well over MAX_FACILITY_LINES_LEN
+        let capped = cap_facility_lines(lines);
+        assert!(capped.chars().count() < one_line.len() * 100);
+        assert!(capped.contains("…and more facilities not shown here"));
+    }
+
+    /// End-to-end regression check for the actual bug: with an oversized facility list rendered into
+    /// the real fallback template and then run through the same final 2000-char safety-net truncate
+    /// `create_event_thread` applies, the ping section (which sits *after* `{{facility_lines}}`) must
+    /// still survive. Before `cap_facility_lines` existed, a large enough facility list pushed the
+    /// total rendered length past 2000 chars and the blind tail-truncate silently cut the pings off.
+    #[test]
+    fn ping_section_survives_an_oversized_facility_list_after_final_truncation() {
+        let huge_facility_lines = "• **ZDC** <@111111111111111111>\n".repeat(100); // ~3300 chars raw
+        let capped = cap_facility_lines(huge_facility_lines);
+        let rendered = render_template(
+            FALLBACK_TEMPLATE,
+            &[
+                ("title", "Fall Fly-In"),
+                ("date_line", "Sat, Jan 1 · 1200z"),
+                ("facility_lines", &capped),
+                ("ntmo_ping", "<@&222>"),
+                ("dcc_ping", "<@&333>"),
+            ],
+        );
+        let final_content = truncate(&rendered, 2000);
+        assert!(final_content.chars().count() <= 2000);
+        assert!(
+            final_content.contains("<@&222>") && final_content.contains("<@&333>"),
+            "ping section was cut off by final truncation: {final_content:?}"
+        );
     }
 }
