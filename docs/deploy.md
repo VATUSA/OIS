@@ -19,7 +19,9 @@ versus not.
 
 ## One-time host setup
 
-On the deploy host (test server or prod):
+On the deploy host (test server or prod), besides `docker`/`docker compose`/`just`: the `smoke`
+recipe also needs `curl` and `jq` (both usually already present on any Linux server image; install
+them if not).
 
 1. Copy `.env.example` to `.env` and fill in real values — see the file's own comments for what
    each one does. The same `docker-compose.yml` runs every environment; only `.env` differs.
