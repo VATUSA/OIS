@@ -17,6 +17,11 @@ the current backend, website, and flow tool.
 - [architecture/api-conventions.md](architecture/api-conventions.md) — REST shape, auth, errors, OpenAPI.
 - [architecture/integrations.md](architecture/integrations.md) — VATSIM, VATUSA, Discord, email, service accounts.
 
+## Operating OIS
+
+- [deploy.md](deploy.md) — deploying to the test server / prod, the post-deploy health check,
+  rolling back, and cutting a release.
+
 ## Feature specs
 
 Each states the problem, data model, exact permissions, API surface, and Discord touchpoints.
