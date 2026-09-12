@@ -1,5 +1,5 @@
 import {useMemo, useState} from "react";
-import {Badge, Button, Card, CardContent} from "@ois/ui";
+import {Badge, Button, Card, CardContent, Tooltip, TooltipContent, TooltipTrigger} from "@ois/ui";
 import {useNavigate} from "@tanstack/react-router";
 import {
   type ColumnDef,
@@ -70,7 +70,21 @@ function EventActions({ event }: { event: EventSummary }) {
 function useEventColumns(): ColumnDef<EventSummary>[] {
   return useMemo(
     () => [
-      { accessorKey: "title", header: "Name", cell: (c) => <span className="font-medium">{String(c.getValue())}</span> },
+      {
+        accessorKey: "title",
+        header: "Name",
+        cell: (c) => {
+          const title = String(c.getValue());
+          return (
+            <Tooltip>
+              <TooltipTrigger asChild>
+                <span className="block max-w-[20rem] truncate font-medium">{title}</span>
+              </TooltipTrigger>
+              <TooltipContent>{title}</TooltipContent>
+            </Tooltip>
+          );
+        },
+      },
       {
         accessorKey: "facility",
         header: "Facility",

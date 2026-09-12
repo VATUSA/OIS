@@ -50,7 +50,7 @@ utoipa-swagger-ui = { version = "9.0.2", features = ["axum"] }
 dotenvy = "0.15.7"
 
 # --- discord bot ---
-serenity = { version = "0.12", default-features = false, features = ["client", "gateway", "rustls_backend", "model"] }
+serenity = { version = "0.12", default-features = false, features = ["client", "gateway", "native_tls_backend", "model"] }
 
 # --- internal crates ---
 ois-core = { path = "crates/ois-core" }
