@@ -1,14 +1,13 @@
 import {useMemo, useState} from "react";
 import {Badge, Tooltip, TooltipContent, TooltipTrigger} from "@ois/ui";
 import type {components} from "@ois/api-client";
+import {type SortingState, flexRender} from "@tanstack/react-table";
 import {
-  type ColumnDef,
-  type SortingState,
-  flexRender,
   getCoreRowModel,
   getSortedRowModel,
-  useReactTable,
-} from "@tanstack/react-table";
+  type LegacyColumnDef as ColumnDef,
+  useLegacyTable as useReactTable,
+} from "@tanstack/react-table/legacy";
 import {ArrowDown, ArrowUp, ChevronsUpDown} from "lucide-react";
 
 import {formatZuluFull, timeAgo} from "@/lib/time";
