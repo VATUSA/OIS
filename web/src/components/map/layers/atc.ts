@@ -30,6 +30,23 @@ export interface AtcPositionLite {
 const CTR = hexToRgb(ATC_COLORS.CTR);
 const APP = hexToRgb(ATC_COLORS.APP);
 
+/** A single lat/lon (or lon/lat) coordinate pair with both values finite. */
+function isValidPoint(p: number[] | null | undefined): p is number[] {
+  return (
+    !!p &&
+    p.length >= 2 &&
+    Number.isFinite(p[0]) &&
+    Number.isFinite(p[1])
+  );
+}
+
+/** A polygon ring needs at least 3 distinct vertices, each finite — fewer (or a stray non-finite
+ * value from partial/degenerate upstream data) triangulates into a huge stretched sliver instead
+ * of failing visibly, which is exactly the "stretched boundary" glitch this guards against. */
+function isValidRing(ring: number[][]): boolean {
+  return ring.length >= 3 && ring.every(isValidPoint);
+}
+
 /**
  * ATC area shading: online centers get their bundled ARTCC polygon shaded teal; TRACONs get their
  * matched SimAware rings shaded orange, or a ~25 NM circle fallback. Badges + area id labels are HTML
@@ -59,10 +76,15 @@ export function buildAtcLayers(atc: AtcData, boundaries: GeoJSON.FeatureCollecti
     );
   }
 
-  // TRACON polygon rings (rings are [lat, lon]; deck polygons want [lon, lat]).
+  // TRACON polygon rings (rings are [lat, lon]; deck polygons want [lon, lat]). A malformed ring
+  // is dropped on its own — other valid rings on the same TRACON still render.
   const ringPolys = atc.tracons
     .filter((t) => !t.circle && t.rings.length > 0)
-    .flatMap((t) => t.rings.map((ring) => ({ contour: ring.map(([lat, lon]) => [lon, lat]) })));
+    .flatMap((t) =>
+      t.rings
+        .filter(isValidRing)
+        .map((ring) => ({ contour: ring.map(([lat, lon]) => [lon, lat]) })),
+    );
   if (ringPolys.length > 0) {
     layers.push(
       new PolygonLayer<{ contour: number[][] }>({
@@ -82,7 +104,7 @@ export function buildAtcLayers(atc: AtcData, boundaries: GeoJSON.FeatureCollecti
 
   // TRACON circle fallbacks (~25 NM).
   const circles = atc.tracons
-    .filter((t) => t.circle)
+    .filter((t) => isValidPoint(t.circle))
     .map((t) => ({ pos: [t.circle![1], t.circle![0]] as [number, number] }));
   if (circles.length > 0) {
     layers.push(
@@ -169,10 +191,10 @@ export function computeAtcAnchors(atc: AtcData, boundaries: GeoJSON.FeatureColle
     if (at) anchors.push({ type: "area", lat: at[0], lon: at[1], id: c.id, color: ATC_COLORS.CTR, positions: c.positions });
   }
   for (const t of atc.tracons) {
-    const at =
-      (t.label as [number, number] | null | undefined) ??
-      (t.circle as [number, number] | null | undefined) ??
-      ringsCentroid(t.rings);
+    // `??` only falls through on null/undefined, not on a present-but-invalid point (e.g. `[]` or
+    // `[NaN, NaN]`), so each candidate is validated explicitly instead of relying on nullish-coalescing.
+    const candidates: (number[] | null | undefined)[] = [t.label, t.circle, ringsCentroid(t.rings)];
+    const at = candidates.find(isValidPoint);
     if (at) {
       anchors.push({ type: "area", lat: at[0], lon: at[1], id: t.id, name: t.name, color: ATC_COLORS.APP, positions: t.positions });
     }
