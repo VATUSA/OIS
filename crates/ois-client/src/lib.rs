@@ -56,6 +56,13 @@ pub struct AceInfo {
     pub time_options: Vec<String>,
 }
 
+/// What the bot needs to reply to a "View structured" button click on a TMI post.
+#[derive(Debug, Clone, Deserialize)]
+pub struct DiscordTmiInfo {
+    pub restriction: String,
+    pub decoded: Option<String>,
+}
+
 #[derive(Debug, Serialize)]
 struct DiscordAceClaimBody<'a> {
     discord_user_id: &'a str,
@@ -203,6 +210,20 @@ impl OisClient {
             return Err(ClientError::Status(resp.status().as_u16()));
         }
         Ok(resp.json::<AceInfo>().await?)
+    }
+
+    /// The raw line + structured breakdown (if any) for a TMI's "View structured" reply.
+    pub async fn tmi_info(&self, tmi_id: &str) -> Result<DiscordTmiInfo, ClientError> {
+        let resp = self
+            .http
+            .get(self.url(&format!("/api/v1/integration/discord/tmi/{tmi_id}")))
+            .bearer_auth(&self.token)
+            .send()
+            .await?;
+        if !resp.status().is_success() {
+            return Err(ClientError::Status(resp.status().as_u16()));
+        }
+        Ok(resp.json::<DiscordTmiInfo>().await?)
     }
 
     #[allow(clippy::too_many_arguments)]

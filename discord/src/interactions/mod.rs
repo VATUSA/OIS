@@ -1,11 +1,12 @@
 mod ace_claim;
 mod event_availability;
+mod tmi_structured;
 
 use ois_client::OisClient;
 use serenity::all::{Context, EventHandler, Interaction, Ready};
 
 use crate::snapshot::snapshot_and_push;
-use crate::util::ACE_CLAIM_PREFIX;
+use crate::util::{ACE_CLAIM_PREFIX, TMI_STRUCTURED_PREFIX};
 
 pub(crate) struct Handler {
     pub(crate) api: OisClient,
@@ -41,6 +42,12 @@ impl EventHandler for Handler {
         // custom_id = evtavail:{green|yellow|red}:{event_id}
         if let Some(rest) = cid.strip_prefix("evtavail:") {
             event_availability::handle(&ctx, &mc, &self.api, rest).await;
+            return;
+        }
+
+        // "View structured" button on a TMI post → look up + reply ephemerally.
+        if let Some(tmi_id) = cid.strip_prefix(TMI_STRUCTURED_PREFIX) {
+            tmi_structured::handle(&ctx, &mc, &self.api, tmi_id).await;
             return;
         }
 
