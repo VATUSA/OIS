@@ -436,16 +436,9 @@ async fn ace_reminder_scheduler_once(pool: &PgPool) -> Result<String, String> {
                 "position": r.position,
                 "reminder": format!("{hours_before}h"),
             });
-            let mut tx = match pool.begin().await {
-                Ok(tx) => tx,
-                Err(e) => {
-                    tracing::warn!(claim = %r.claim_id, job_type, error = %e, "ace reminder tx begin failed");
-                    continue;
-                }
-            };
-            match ace_repo::enqueue_reminder_job(&mut tx, job_type, &r.claim_id, &payload).await {
+            match ace_repo::enqueue_reminder_job(pool, job_type, &r.claim_id, &payload).await {
                 Ok(inserted) => {
-                    if tx.commit().await.is_ok() && inserted {
+                    if inserted {
                         sent += 1;
                     }
                 }
@@ -455,7 +448,11 @@ async fn ace_reminder_scheduler_once(pool: &PgPool) -> Result<String, String> {
             }
         }
     }
-    if tier_failed && sent == 0 {
+    // Unconditional on `tier_failed`: a persistently-failing tier must always surface to the
+    // JobRegistry as a failure, even in a cycle where the *other* tier had genuine hits — masking
+    // it behind `sent == 0` would hide an ongoing problem for as long as the healthy tier keeps
+    // producing reminders.
+    if tier_failed {
         return Err("one or more ace reminder tiers failed to query".to_string());
     }
     Ok(if sent == 0 {
