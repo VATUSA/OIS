@@ -3,11 +3,13 @@ import {Badge, Button, Card, CardContent, Tooltip, TooltipContent, TooltipTrigge
 import {useNavigate} from "@tanstack/react-router";
 import {
   type ColumnDef,
+  createSortedRowModel,
   flexRender,
-  getCoreRowModel,
-  getSortedRowModel,
+  rowSortingFeature,
   type SortingState,
-  useReactTable,
+  sortFns,
+  tableFeatures,
+  useTable,
 } from "@tanstack/react-table";
 import {ArrowDown, ArrowUp, ChevronsUpDown, ExternalLink, SlidersHorizontal} from "lucide-react";
 
@@ -15,6 +17,15 @@ import {useMe} from "@/lib/auth";
 import {type EventSummary, useUpcomingEvents, vatusaEditUrl} from "@/lib/events";
 import {hasPermission} from "@/lib/permissions";
 import {formatZuluFull} from "@/lib/time";
+
+// v9 registers sorting explicitly instead of bundling it automatically (see #133). The full
+// built-in `sortFns` registry (not hand-picked entries) keeps v8's auto-detected sorting behavior,
+// since no column here declares a custom `sortingFn`.
+const features = tableFeatures({
+  rowSortingFeature,
+  sortedRowModel: createSortedRowModel(),
+  sortFns,
+});
 
 function reviewVariant(status: string): "success" | "secondary" | "outline" {
   if (status === "approved") return "success";
@@ -67,7 +78,7 @@ function EventActions({ event }: { event: EventSummary }) {
   );
 }
 
-function useEventColumns(): ColumnDef<EventSummary>[] {
+function useEventColumns(): ColumnDef<typeof features, EventSummary>[] {
   return useMemo(
     () => [
       {
@@ -149,15 +160,12 @@ function useEventColumns(): ColumnDef<EventSummary>[] {
 function EventsTable({ events }: { events: EventSummary[] }) {
   const columns = useEventColumns();
   const [sorting, setSorting] = useState<SortingState>([{ id: "start_time", desc: false }]);
-  const table = useReactTable({
+  const table = useTable({
+    features,
     data: events,
     columns,
     state: { sorting },
     onSortingChange: setSorting,
-    getCoreRowModel: getCoreRowModel(),
-    getSortedRowModel: getSortedRowModel(),
-    autoResetPageIndex: false,
-    autoResetExpanded: false,
   });
 
   return (
@@ -198,7 +206,7 @@ function EventsTable({ events }: { events: EventSummary[] }) {
         <tbody>
           {table.getRowModel().rows.map((r) => (
             <tr key={r.id} className="border-t transition-colors hover:bg-accent/30">
-              {r.getVisibleCells().map((cell) => (
+              {r.getAllCells().map((cell) => (
                 <td key={cell.id} className="py-2 pr-3">
                   {flexRender(cell.column.columnDef.cell, cell.getContext())}
                 </td>
