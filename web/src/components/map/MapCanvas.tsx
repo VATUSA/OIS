@@ -151,6 +151,12 @@ export function MapCanvas({
           mapLib={mapLibPromise}
           mapStyle={CARTO_STYLE[resolvedTheme]}
           attributionControl={false}
+          // deck.gl renders this as a sibling div ON TOP of its own canvas (same absolute bounds),
+          // and neither deck.gl nor react-map-gl sets pointer-events on it — without this, the
+          // basemap div/canvas silently swallows every click/drag before deck's own canvas (where
+          // picking + the pan/zoom controller live) ever sees it. No native MapLibre control is used
+          // anywhere in this app, so nothing inside needs to stay clickable.
+          style={{ pointerEvents: "none" }}
           onLoad={(e) => ensureAeroway(e.target as unknown as StyleMap, resolvedTheme)}
           onStyleData={(e) => ensureAeroway(e.target as unknown as StyleMap, resolvedTheme)}
         >
