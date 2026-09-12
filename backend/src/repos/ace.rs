@@ -284,9 +284,13 @@ pub async fn claims_due_for_reminder(
 /// the partial unique index backing this `on conflict` (migration 0066) is what actually closes the
 /// race, scoped to just the reminder job types so it can't affect other `outbound_jobs` consumers
 /// (e.g. `ace_request_notify`, which legitimately enqueues more than once per subject).
+/// Takes a plain pool rather than a transaction: the single `insert ... on conflict ... returning`
+/// is already atomic on its own, so wrapping it in a transaction would add two round trips (begin +
+/// commit) with no correctness benefit — unlike `enqueue_job` in `repos::integration`, which several
+/// callers deliberately run as one step inside a larger multi-statement transaction.
 /// Returns `true` if a row was actually inserted (the reminder should be considered sent).
 pub async fn enqueue_reminder_job(
-    tx: &mut Transaction<'_, Postgres>,
+    pool: &PgPool,
     job_type: &str,
     claim_id: &str,
     payload: &serde_json::Value,
@@ -303,7 +307,7 @@ pub async fn enqueue_reminder_job(
     .bind(job_type)
     .bind(payload)
     .bind(claim_id)
-    .fetch_optional(&mut **tx)
+    .fetch_optional(pool)
     .await
     .map_err(|_| ApiError::Internal)?;
     Ok(inserted_id.is_some())
@@ -504,18 +508,14 @@ mod tests {
         let claim_id = claim_id_for(&pool, &request_id).await;
         let payload = serde_json::json!({"discord_user_id": "999888777"});
 
-        let mut tx1 = pool.begin().await.unwrap();
-        let first = enqueue_reminder_job(&mut tx1, "ace_claim_reminder_24h", &claim_id, &payload)
+        let first = enqueue_reminder_job(&pool, "ace_claim_reminder_24h", &claim_id, &payload)
             .await
             .unwrap();
-        tx1.commit().await.unwrap();
         assert!(first, "the first enqueue for this claim+tier must insert");
 
-        let mut tx2 = pool.begin().await.unwrap();
-        let second = enqueue_reminder_job(&mut tx2, "ace_claim_reminder_24h", &claim_id, &payload)
+        let second = enqueue_reminder_job(&pool, "ace_claim_reminder_24h", &claim_id, &payload)
             .await
             .unwrap();
-        tx2.commit().await.unwrap();
         assert!(
             !second,
             "a second enqueue for the same claim+tier must no-op, not insert a duplicate"
