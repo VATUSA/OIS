@@ -5,3 +5,15 @@
 
 /* Scan the shared UI package for Tailwind classes (it lives outside web/). */
 @source "../../packages/ui/src";
+
+/* @tanstack/charts' DOM tooltip host mounts via the native Popover API (top-layer stacking), which
+   gets default browser chrome (background/border/padding) — reset it so only our own themed
+   renderTooltipBody box shows, not a double wrapper (see #136). */
+.ts-chart-tooltip {
+  background: transparent;
+  border: none;
+  padding: 0;
+  margin: 0;
+  box-shadow: none;
+  color: inherit;
+}
