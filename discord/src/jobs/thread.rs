@@ -8,7 +8,33 @@ use serenity::all::{
 
 use crate::util::{channel, str_field, truncate};
 
-const DIVIDER: &str = "───────────────────────────";
+/// Fallback body if the payload somehow lacks `thread_template` (e.g. mid-deploy) — identical text
+/// to what was hard-coded here before the website-configured template existed.
+const FALLBACK_TEMPLATE: &str = "**{{title}} | Planning Thread**\n\
+    {{title}} is on {{date_line}}\n\n\
+    Review the following for your facility:\n\
+    - TMU/TMI package\n\
+    - Staffing\n\
+    - Configs and AAR\n\n\
+    {{facility_lines}}\n\
+    Attempt to coordinate as many plans (initiatives, reroutes, etc.) in a timely manner, and fill \
+    out all appropriate areas of the staffing data.\n\
+    ───────────────────────────\n\
+    {{ntmo_ping}} please react with your availability to NOM for this event. {{dcc_ping}} please \
+    react with your availability to shadow this event.\n\n\
+    🟢 = Available\n🟡 = Partially available/unsure\n🔴 = Unavailable\n\
+    ───────────────────────────";
+
+/// Substitute each `{{key}}` in `template` with its value. Plain sequential replace — the template
+/// only ever carries a handful of known placeholders, not user-authored HTML/logic, so this is
+/// simpler and safer than pulling in a templating engine for it.
+fn render_template(template: &str, vars: &[(&str, &str)]) -> String {
+    let mut out = template.to_string();
+    for (key, value) in vars {
+        out = out.replace(&format!("{{{{{key}}}}}"), value);
+    }
+    out
+}
 
 pub(crate) async fn create_event_thread(
     http: &Arc<Http>,
@@ -73,21 +99,16 @@ pub(crate) async fn create_event_thread(
         .map(|r| format!("<@&{r}>"))
         .unwrap_or_else(|| "@DCC Trainee".to_string());
 
-    let content = format!(
-        "**{title} | Planning Thread**\n\
-         {title} is on {date_line}\n\n\
-         Review the following for your facility:\n\
-         - TMU/TMI package\n\
-         - Staffing\n\
-         - Configs and AAR\n\n\
-         {facility_lines}\n\
-         Attempt to coordinate as many plans (initiatives, reroutes, etc.) in a timely manner, and \
-         fill out all appropriate areas of the staffing data.\n\
-         {DIVIDER}\n\
-         {ntmo_ping} please react with your availability to NOM for this event. {dcc_ping} please \
-         react with your availability to shadow this event.\n\n\
-         🟢 = Available\n🟡 = Partially available/unsure\n🔴 = Unavailable\n\
-         {DIVIDER}"
+    let template = str_field(p, "thread_template").unwrap_or(FALLBACK_TEMPLATE);
+    let content = render_template(
+        template,
+        &[
+            ("title", title),
+            ("date_line", date_line),
+            ("facility_lines", &facility_lines),
+            ("ntmo_ping", &ntmo_ping),
+            ("dcc_ping", &dcc_ping),
+        ],
     );
 
     let event_id = p
@@ -123,4 +144,49 @@ pub(crate) async fn create_event_thread(
         .await
         .map_err(|e| format!("thread send_message failed: {e}"))?;
     Ok(Some(json!({ "thread_id": thread.id.get().to_string() })))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn render_template_substitutes_every_placeholder() {
+        let out = render_template(
+            "Hi {{name}}, your event is {{when}}.",
+            &[("name", "Alex"), ("when", "Saturday")],
+        );
+        assert_eq!(out, "Hi Alex, your event is Saturday.");
+    }
+
+    /// The fallback template, rendered, must match exactly what the old hard-coded `format!` call
+    /// produced for the same inputs — this is the regression check for replacing that call.
+    #[test]
+    fn fallback_template_matches_the_old_hard_coded_output() {
+        let out = render_template(
+            FALLBACK_TEMPLATE,
+            &[
+                ("title", "Test Event"),
+                ("date_line", "Sat, Jan 1 · 1200z"),
+                ("facility_lines", "• **ZDC** <@111>\n"),
+                ("ntmo_ping", "<@&222>"),
+                ("dcc_ping", "<@&333>"),
+            ],
+        );
+        let expected = "**Test Event | Planning Thread**\n\
+            Test Event is on Sat, Jan 1 · 1200z\n\n\
+            Review the following for your facility:\n\
+            - TMU/TMI package\n\
+            - Staffing\n\
+            - Configs and AAR\n\n\
+            • **ZDC** <@111>\n\n\
+            Attempt to coordinate as many plans (initiatives, reroutes, etc.) in a timely manner, and \
+            fill out all appropriate areas of the staffing data.\n\
+            ───────────────────────────\n\
+            <@&222> please react with your availability to NOM for this event. <@&333> please \
+            react with your availability to shadow this event.\n\n\
+            🟢 = Available\n🟡 = Partially available/unsure\n🔴 = Unavailable\n\
+            ───────────────────────────";
+        assert_eq!(out, expected);
+    }
 }
