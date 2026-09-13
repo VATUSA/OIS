@@ -117,7 +117,17 @@ export function SurfaceMap({
       const open = outer.length > 1 && haversine(outer[0] as LatLng, outer[outer.length - 1] as LatLng) < 0.01
         ? outer.slice(0, -1)
         : outer;
-      setDraft({ kind, id, name: r.name, rampKind: r.kind === "ramp" ? "ramp" : "apron", points: open as LatLng[] });
+      // This editor only draws/edits the outer ring — any further rings (e.g. a hole) are carried
+      // through untouched so save() can resend them rather than silently dropping them.
+      const extraRings = r.rings.slice(1) as LatLng[][];
+      setDraft({
+        kind,
+        id,
+        name: r.name,
+        rampKind: r.kind === "ramp" ? "ramp" : "apron",
+        points: open as LatLng[],
+        extraRings,
+      });
     }
     setPhase("edit");
   };
@@ -127,7 +137,11 @@ export function SurfaceMap({
       if (!d) return d;
       const p: LatLng = [lat, lon];
       const last = d.points[d.points.length - 1];
-      if (last && haversine(last, p) < 0.05) return d; // dedupe accidental double-click jitter
+      // Dedupe only near-identical repeated clicks (e.g. a double-click whose two events land a
+      // pixel apart, missing the time-based check above) — 0.001nm (~1.85m) is far below any
+      // legitimate spacing between real airport-surface vertices (adjacent gates, tight taxiway
+      // curves), unlike the previous 0.05nm (~92m) threshold, which silently swallowed those.
+      if (last && haversine(last, p) < 0.001) return d;
       const points = [...d.points, p];
       // A gate is a single point — placing it finalizes the shape immediately.
       if (d.kind === "gate") setPhase("edit");
@@ -164,7 +178,13 @@ export function SurfaceMap({
       if (draft.id) updateTaxiway.mutate({ id: draft.id, body }, { onSuccess: onDone });
       else createTaxiway.mutate(body, { onSuccess: onDone });
     } else {
-      const body = { name: draft.name.trim(), kind: draft.rampKind, rings: [[...points, points[0]]] };
+      // Any rings beyond the outer one (e.g. a hole) came from an existing row this editor doesn't
+      // draw — resend them unchanged rather than silently dropping them (see startEditExisting).
+      const body = {
+        name: draft.name.trim(),
+        kind: draft.rampKind,
+        rings: [[...points, points[0]], ...(draft.extraRings ?? [])],
+      };
       if (draft.id) updateRamp.mutate({ id: draft.id, body }, { onSuccess: onDone });
       else createRamp.mutate(body, { onSuccess: onDone });
     }
@@ -204,7 +224,10 @@ export function SurfaceMap({
   ];
 
   const handleClick = (info: PickingInfo, event: unknown) => {
-    if (draft) {
+    // Once a shape is finalized (phase "edit" — reached via Finish/Close-shape, a double-click, or
+    // opening an existing shape to edit), a stray map click must not silently append another vertex:
+    // only actively placing points (phase "draw") should react to clicks at all.
+    if (draft && phase === "draw") {
       if (info.layer?.id === "surface-draft-vertices") return; // a click meant to grab a handle
       if (!info.coordinate) return;
       if (draft.kind === "gate") {
@@ -227,6 +250,7 @@ export function SurfaceMap({
       addVertex(info.coordinate as [number, number]);
       return;
     }
+    if (draft) return; // phase "edit": dragging handles is the only interaction, handled separately
     if (!editable) return;
     const kind = layerIdToKind(info.layer?.id);
     const id = (info.object as { id?: string } | undefined)?.id;
