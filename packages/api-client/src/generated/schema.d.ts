@@ -2936,8 +2936,12 @@ export interface components {
             updated_at: string;
         };
         /**
-         * @description An airport ramp or apron area. `rings` is an array of rings, each an array of `[lat, lon]` —
-         *     the outer boundary only (holes aren't modeled).
+         * @description An airport ramp or apron area. `rings` is an array of rings, each an array of `[lat, lon]`.
+         *     Every row created so far (manual entry, the OSM seed) has exactly one ring — the outer
+         *     boundary — and the map editor (`SurfaceMap.tsx`) only ever draws/edits that first ring; nothing
+         *     in `validate_ramp_area` rejects further rings (e.g. a hole), so a future ingestion path (a CRC
+         *     profile/GeoJSON import) producing one isn't a contract violation — the editor preserves any
+         *     rings beyond the first untouched rather than dropping them on save.
          */
         AirportRampAreaBody: {
             editable: boolean;
