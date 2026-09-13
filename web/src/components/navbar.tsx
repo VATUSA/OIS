@@ -23,6 +23,7 @@ import {
   LogOut,
   Megaphone,
   Menu,
+  MapPinned,
   Plane,
   PlaneTakeoff,
   Radar,
@@ -287,6 +288,12 @@ function MobileMenu({
               </Link>
             </DropdownMenuItem>
             <DropdownMenuItem asChild>
+              <Link to="/planning/airport-surface">
+                <MapPinned />
+                Airport surface data
+              </Link>
+            </DropdownMenuItem>
+            <DropdownMenuItem asChild>
               <Link to="/planning/aircraft-profiles">
                 <Plane />
                 Aircraft profiles
@@ -474,6 +481,12 @@ export function Navbar() {
                 <Link to="/planning/facility-documents">
                   <FileText />
                   Facility documents
+                </Link>
+              </DropdownMenuItem>
+              <DropdownMenuItem asChild>
+                <Link to="/planning/airport-surface">
+                  <MapPinned />
+                  Airport surface data
                 </Link>
               </DropdownMenuItem>
               <DropdownMenuItem asChild>

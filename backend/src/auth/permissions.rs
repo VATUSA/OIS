@@ -97,6 +97,9 @@ permission!(FlowRunwayRead, ["flow", "runway"], Read);
 permission!(FlowRunwayUpdate, ["flow", "runway"], Update);
 // Facility map — per-facility aircraft color rules (view is public; editing is facility-scoped).
 permission!(FlowFacilityMapUpdate, ["flow", "facility_map"], Update);
+// Airport surface data (gates/parking, ramp/apron areas, taxiways, #164's sub-issue B) — reads are
+// open to planners (EventsPlanRead); writes are facility-scoped by this permission.
+permission!(FlowSurfaceDataUpdate, ["flow", "surface_data"], Update);
 // Aircraft performance profiles for the trajectory/ETA model (national reference data).
 permission!(
     FlowAircraftProfilesRead,
