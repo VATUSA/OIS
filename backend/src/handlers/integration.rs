@@ -15,6 +15,7 @@ use crate::{
         require_permission::RequirePermission,
     },
     errors::ApiError,
+    handlers::events::normalize_facility,
     models::{
         AceRequestBody, AckJobRequest, DiscordAceClaimRequest, DiscordAceInfoBody,
         DiscordAvailabilityRequest, DiscordAvailabilityResult, DiscordConfigBody, DiscordLinkBody,
@@ -300,6 +301,12 @@ pub async fn put_discord_config(
     let p = pool(&state)?;
     for g in &payload.guilds {
         if g.name.trim().is_empty() || g.guild_id.trim().is_empty() {
+            return Err(ApiError::BadRequest);
+        }
+        // Reject rather than silently drop: an invalid facility here would otherwise vanish with a
+        // 200 response, leaving no signal to the caller that the value they submitted never made it
+        // into discord_config_facilities (#194).
+        if g.facilities.iter().any(|f| normalize_facility(f).is_none()) {
             return Err(ApiError::BadRequest);
         }
     }
