@@ -53,6 +53,8 @@ export function SurfaceMap({
   const [phase, setPhase] = useState<"draw" | "edit">("draw");
   const dragIndex = useRef<number | null>(null);
   const [draggingVertex, setDraggingVertex] = useState(false);
+  // The double-click-finish timer (see handleClick). Reset in startNew/startEditExisting so a
+  // timestamp from finishing one draft can't make the very next draft's first click look doubled.
   const lastClickT = useRef(0);
 
   const createGate = useCreateAirportGate(icao);
@@ -96,11 +98,15 @@ export function SurfaceMap({
   }, [surface]);
 
   const startNew = (kind: SurfaceKind) => {
+    // A stale timestamp from finishing a *previous* draft's double-click must not make this
+    // draft's very first map click look like a double-click too (see lastClickT's declaration).
+    lastClickT.current = 0;
     setDraft({ kind, name: "", rampKind: "apron", points: [] });
     setPhase("draw");
   };
 
   const startEditExisting = (kind: SurfaceKind, id: string) => {
+    lastClickT.current = 0;
     if (kind === "gate") {
       const g = surface.gates.find((x) => x.id === id);
       if (!g) return;
