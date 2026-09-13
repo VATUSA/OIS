@@ -1270,6 +1270,10 @@ pub struct DiscordGuildConfigBody {
     pub guild_id: String,
     pub channels: Vec<DiscordMapEntry>,
     pub roles: Vec<DiscordMapEntry>,
+    /// ARTCCs this guild serves — lets `channel_id`/`role_id` prefer this guild over another one
+    /// defining the same logical name for a different facility (#194). Empty = no facility
+    /// preference (only ever wins via the created-at fallback).
+    pub facilities: Vec<String>,
 }
 
 /// The whole Discord config: the configured guilds, plus a snapshot of the guilds the bot is in
@@ -1293,6 +1297,8 @@ pub struct DiscordGuildConfigInput {
     pub channels: Vec<DiscordMapEntry>,
     #[serde(default)]
     pub roles: Vec<DiscordMapEntry>,
+    #[serde(default)]
+    pub facilities: Vec<String>,
 }
 
 /// One channel in a guild snapshot (the real channels the bot sees).
