@@ -15,7 +15,7 @@
     "@tailwindcss/vite": "^4.3.3",
     "@types/d3-scale": "^4.0.9",
     "@types/node": "^22",
-    "@types/react": "^19.2.18",
+    "@types/react": "^19.3.0",
     "@types/react-dom": "^19.3.0",
     "@vitejs/plugin-react": "^6.1.1",
     "tailwindcss": "^4.3.3",
@@ -41,7 +41,7 @@
     "d3-scale": "^4.0.2",
     "lucide-react": "^1.31.0",
     "maplibre-gl": "^6.4.1",
-    "react": "^19.2.8",
+    "react": "^19.3.0",
     "react-dom": "^19.3.0",
     "react-grid-layout": "^2.2.4",
     "react-map-gl": "^8"
