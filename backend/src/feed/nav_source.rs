@@ -678,7 +678,40 @@ struct OutMeta {
 
 #[cfg(test)]
 mod tests {
+    use std::io::Write;
+
     use super::*;
+
+    /// Round-trips a real deflate-compressed archive through `read_zip_member` — a compile-clean
+    /// `zip` major bump (e.g. #193's 3→8) doesn't guarantee the `deflate` feature still actually
+    /// decompresses correctly at runtime, only that the API shape matches.
+    #[test]
+    fn read_zip_member_round_trips_a_deflated_entry() {
+        let mut buf = Vec::new();
+        {
+            let mut writer = zip::ZipWriter::new(Cursor::new(&mut buf));
+            let opts = zip::write::SimpleFileOptions::default()
+                .compression_method(zip::CompressionMethod::Deflated);
+            writer.start_file("NAV_BASE.csv", opts).unwrap();
+            writer.write_all(b"hello,world").unwrap();
+            writer.finish().unwrap();
+        }
+
+        let s = read_zip_member(&buf, &["NAV_BASE.csv", "NAV.csv"]).unwrap();
+        assert_eq!(s, "hello,world");
+    }
+
+    #[test]
+    fn read_zip_member_errs_when_none_of_the_names_are_present() {
+        let mut buf = Vec::new();
+        {
+            let mut writer = zip::ZipWriter::new(Cursor::new(&mut buf));
+            let opts = zip::write::SimpleFileOptions::default();
+            writer.start_file("OTHER.csv", opts).unwrap();
+            writer.finish().unwrap();
+        }
+        assert!(read_zip_member(&buf, &["NAV_BASE.csv", "NAV.csv"]).is_err());
+    }
 
     #[test]
     fn parses_quoted_csv_fields() {
