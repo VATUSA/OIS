@@ -173,7 +173,9 @@ pub async fn publish_tmi(
     let pool = state.db.as_ref().ok_or(ApiError::ServiceUnavailable)?;
 
     // Resolve the target channel before the tx; no config just means "don't post" (skip enqueue).
-    let channel = integration_repo::channel_id(pool, TMU_CHANNEL).await?;
+    // Unscoped: a TMI has requesting/providing ARTCCs but no single "issuing facility", and the TMU
+    // channel may be network-wide rather than per-facility (#194).
+    let channel = integration_repo::channel_id(pool, TMU_CHANNEL, None).await?;
     let mut tx = pool.begin().await.map_err(|_| ApiError::Internal)?;
     let tmi = tmu_repo::publish_tmi(&mut tx, &id, &user.id)
         .await?

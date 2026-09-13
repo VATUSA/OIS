@@ -35,12 +35,17 @@ event from VATUSA into a local cache and hangs the planning modules off it.
   a unit, plus per-item CRUD.
 - **Capture + stats** — a saved capture window over the event, and computed event stats
   (backed by the `stats` domain).
+- **Discord coordination thread** — `POST /events/{id}/discord/publish` enqueues
+  `event_thread_create`; the bot creates the DCC thread from a configurable template and
+  pings the required staff roles. See [discord-integration.md](discord-integration.md).
+- **Post-event debrief** — a per-event debrief record (`events.debrief.{read,create}`).
 
 **Not built (from the original spec)**
 
 - The `events.events` operational record with a `coordination_status` lifecycle.
 - The positions roster and controller **slots** sign-up/booking.
-- The Discord coordination-thread / staffing-notification outbound jobs.
+- Cross-ARTCC staffing-request Discord notifications (staffing requests exist as data;
+  nothing enqueues a Discord side effect for them).
 
 ## Data model
 
@@ -91,13 +96,16 @@ via a per-permission scope check in the handler (`permission_scope(...).allows(a
 | `events.staffing_requests.read` | view staffing requests | read |
 | `events.staffing_requests.create` | create/update/delete staffing requests | staff |
 | `events.staffing_requests.decide` | acknowledge/decline a request | staff |
+| `events.discord.publish` | open the DCC coordination thread + ping staff | national/staff |
+| `events.debrief.read` | read a post-event debrief | read |
+| `events.debrief.create` | write a post-event debrief entry | staff |
 
 The capture-window write reuses **`stats.capture.update`** (it writes `stats.event_capture`),
 and the wind forecast + airport-config reads use `events.plan.read`.
 
 **Not used.** `events.staffing_requests.decide` is seeded but not yet wired to a handler;
-the original spec's `events.items.*`, `events.positions.*`, `events.slots.claim`,
-`events.discord.publish`, and `events.debrief.*` permissions are **not** implemented.
+the original spec's `events.items.*`, `events.positions.*`, and `events.slots.claim`
+permissions are **not** implemented.
 
 ## API
 
@@ -126,6 +134,9 @@ Versioned REST under `/api/v1`, handlers in `backend/src/handlers/events.rs`
 | `GET /events/{id}/capture` | `events.plan.read` |
 | `PUT /events/{id}/capture` | `stats.capture.update` |
 | `GET /events/{id}/stats` | `events.plan.read` |
+| `POST /events/{id}/discord/publish` | `events.discord.publish` |
+| `GET /events/{id}/debrief` | `events.plan.read` |
+| `PUT /events/{id}/debrief` | `events.debrief.create` |
 
 Reusable per-airport runway configs (used by the event-day planner) live under
 `airport-configs`:
@@ -140,6 +151,6 @@ Reusable per-airport runway configs (used by the event-day planner) live under
 ## Not built
 
 - The operational-record lifecycle, positions roster, and controller slot booking.
-- Cross-ARTCC staffing **notifications** and the Discord coordination thread (the
-  `integration` outbound-queue plumbing exists, but no `events` handler enqueues today).
-- A post-event debrief record.
+- Cross-ARTCC staffing-request **notifications** — staffing requests exist as data, but
+  nothing enqueues a Discord side effect for them (the coordination thread itself, above,
+  is a separate and already-built job).

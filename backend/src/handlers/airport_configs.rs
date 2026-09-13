@@ -92,6 +92,17 @@ async fn can_edit(state: &AppState, principal: &Principal, icao: &str) -> Result
     Ok(scope.allows(artcc.as_deref()))
 }
 
+/// Fail-closed if the caller can't edit `icao`. Every write handler below calls this instead of
+/// duplicating the `owning_artcc` + `permission_scope` + `scope.allows` check inline (#198: the
+/// inline copies had silently drifted out of any test's reach).
+async fn require_edit(state: &AppState, principal: &Principal, icao: &str) -> Result<(), ApiError> {
+    if can_edit(state, principal, icao).await? {
+        Ok(())
+    } else {
+        Err(ApiError::Forbidden)
+    }
+}
+
 #[derive(Deserialize)]
 pub struct ConfigListQuery {
     /// Scope to one owning ARTCC; omit for every airport.
@@ -191,15 +202,9 @@ pub async fn create_airport_config(
     let pool = state.db.as_ref().ok_or(ApiError::ServiceUnavailable)?;
     let icao = normalize_icao(&icao).ok_or(ApiError::BadRequest)?;
     validate(&req)?;
+    require_edit(&state, &principal, &icao).await?;
 
     let artcc = owning_artcc(&state, &icao).await;
-    let scope = principal
-        .permission_scope(&state, CONFIG_PERMISSION)
-        .await?;
-    if !scope.allows(artcc.as_deref()) {
-        return Err(ApiError::Forbidden);
-    }
-
     let mut row = config_repo::create(
         pool,
         &icao,
@@ -229,14 +234,7 @@ pub async fn update_airport_config(
     let pool = state.db.as_ref().ok_or(ApiError::ServiceUnavailable)?;
     let icao = normalize_icao(&icao).ok_or(ApiError::BadRequest)?;
     validate(&req)?;
-
-    let artcc = owning_artcc(&state, &icao).await;
-    let scope = principal
-        .permission_scope(&state, CONFIG_PERMISSION)
-        .await?;
-    if !scope.allows(artcc.as_deref()) {
-        return Err(ApiError::Forbidden);
-    }
+    require_edit(&state, &principal, &icao).await?;
 
     let mut row = config_repo::update(pool, &id, &icao, &req, principal.user_id())
         .await?
@@ -260,14 +258,7 @@ pub async fn delete_airport_config(
     let principal = Principal::require(current_user.as_ref(), current_api_key.as_ref())?;
     let pool = state.db.as_ref().ok_or(ApiError::ServiceUnavailable)?;
     let icao = normalize_icao(&icao).ok_or(ApiError::BadRequest)?;
-
-    let artcc = owning_artcc(&state, &icao).await;
-    let scope = principal
-        .permission_scope(&state, CONFIG_PERMISSION)
-        .await?;
-    if !scope.allows(artcc.as_deref()) {
-        return Err(ApiError::Forbidden);
-    }
+    require_edit(&state, &principal, &icao).await?;
 
     if config_repo::delete(pool, &id).await? {
         Ok(StatusCode::NO_CONTENT)
@@ -379,5 +370,72 @@ mod tests {
         let no_scope = PermissionScope::Facilities(HashSet::new());
         let annotated = annotate_and_filter(rows, &facilities, &no_scope, None);
         assert!(annotated.iter().all(|r| !r.editable));
+    }
+
+    // --- ARTCC-scope authorization boundary (#198) ---
+    //
+    // The test above (`annotate_and_filter`) exercises a *different*, list-only filtering
+    // function against a plain `PermissionScope` value — it never calls `can_edit`/`require_edit`.
+    // (create/update/delete_airport_config used to duplicate this check inline instead of calling
+    // either helper, which meant these tests didn't actually cover the write path at all — fixed
+    // alongside adding this coverage, so require_edit is now the single gate every write handler
+    // calls.) These tests close that gap.
+
+    use crate::scope_test_support::{self, artcc, grant, principal_for, test_state};
+
+    #[sqlx::test]
+    async fn national_scope_can_edit_any_artccs_airport(pool: PgPool) {
+        let user = scope_test_support::seed_user(&pool).await;
+        grant(&pool, &user, "events.config.update", None).await;
+        let principal = principal_for(&user);
+        let state = test_state(
+            pool,
+            std::collections::HashMap::from([("ZDC".to_string(), artcc(&["KDCA"]))]),
+        );
+        assert!(can_edit(&state, &principal, "KDCA").await.unwrap());
+    }
+
+    #[sqlx::test]
+    async fn matching_artcc_scope_can_edit_its_own_airport(pool: PgPool) {
+        let user = scope_test_support::seed_user(&pool).await;
+        grant(&pool, &user, "events.config.update", Some("ZDC")).await;
+        let principal = principal_for(&user);
+        let state = test_state(
+            pool,
+            std::collections::HashMap::from([("ZDC".to_string(), artcc(&["KDCA"]))]),
+        );
+        assert!(can_edit(&state, &principal, "KDCA").await.unwrap());
+    }
+
+    #[sqlx::test]
+    async fn wrong_artcc_scope_is_rejected(pool: PgPool) {
+        let user = scope_test_support::seed_user(&pool).await;
+        // Granted for ZAU, but KDCA is owned by ZDC.
+        grant(&pool, &user, "events.config.update", Some("ZAU")).await;
+        let principal = principal_for(&user);
+        let state = test_state(
+            pool,
+            std::collections::HashMap::from([("ZDC".to_string(), artcc(&["KDCA"]))]),
+        );
+        assert!(!can_edit(&state, &principal, "KDCA").await.unwrap());
+        assert!(matches!(
+            require_edit(&state, &principal, "KDCA").await,
+            Err(ApiError::Forbidden)
+        ));
+    }
+
+    #[sqlx::test]
+    async fn no_grant_at_all_is_rejected(pool: PgPool) {
+        let user = scope_test_support::seed_user(&pool).await;
+        let principal = principal_for(&user);
+        let state = test_state(
+            pool,
+            std::collections::HashMap::from([("ZDC".to_string(), artcc(&["KDCA"]))]),
+        );
+        assert!(!can_edit(&state, &principal, "KDCA").await.unwrap());
+        assert!(matches!(
+            require_edit(&state, &principal, "KDCA").await,
+            Err(ApiError::Forbidden)
+        ));
     }
 }

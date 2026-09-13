@@ -226,3 +226,309 @@ pub async fn decide_request(
     tx.commit().await.map_err(|_| ApiError::Internal)?;
     Ok(())
 }
+
+/// A claim whose event start has crossed a reminder threshold, with what the DM needs.
+#[derive(sqlx::FromRow)]
+pub struct DueReminder {
+    pub claim_id: String,
+    pub discord_user_id: String,
+    pub event_title: String,
+    pub position: Option<String>,
+}
+
+/// Claims due for a `job_type` reminder: their event starts within the next `hours_before` hours
+/// (i.e. the T-`hours_before`h threshold has just been crossed and the event hasn't started yet),
+/// the claimer has a linked Discord account, the request isn't cancelled, and no `job_type` job has
+/// already been enqueued for this claim — so a released claim or a cancelled request naturally
+/// drops out, and a repeat scheduler tick never double-sends.
+/// Claims whose event falls in `(now + hours_after, now + hours_before]` — i.e. this tier's own
+/// window, not "anything within `hours_before`". Without a lower bound, a claim first seen after its
+/// event is already inside a *later* tier's window (e.g. claimed at T-3h, before either reminder has
+/// fired) would match every tier whose upper bound is ≥3h simultaneously — sending a 24h-tier
+/// reminder (labelled "24h") and a 6h-tier reminder back to back for an event that's actually only
+/// 3 hours out. Bounding each tier to its own slice ensures a claim only ever matches the tier whose
+/// window it's *actually* currently in.
+pub async fn claims_due_for_reminder(
+    pool: &PgPool,
+    hours_after: i64,
+    hours_before: i64,
+    job_type: &str,
+) -> Result<Vec<DueReminder>, ApiError> {
+    sqlx::query_as::<_, DueReminder>(
+        "select c.id as claim_id, m.external_id as discord_user_id, e.title as event_title, \
+                r.position \
+         from ace.claims c \
+         join ace.requests r on r.id = c.request_id and r.status <> 'cancelled' \
+         join events.event e on e.id = r.event_id \
+         join integration.external_sync_mappings m \
+           on m.system_code = 'discord' and m.entity_type = 'user' and m.local_id = c.claimed_by \
+         where e.start_time > now() + make_interval(hours => $1::int) \
+           and e.start_time <= now() + make_interval(hours => $2::int) \
+           and not exists ( \
+             select 1 from integration.outbound_jobs j \
+             where j.job_type = $3 and j.subject_type = 'ace_claim' and j.subject_id = c.id \
+           )",
+    )
+    .bind(hours_after as i32)
+    .bind(hours_before as i32)
+    .bind(job_type)
+    .fetch_all(pool)
+    .await
+    .map_err(|_| ApiError::Internal)
+}
+
+/// Enqueue a reminder job, atomically no-op'ing if one already exists for this `(job_type,
+/// claim_id)` pair. `claims_due_for_reminder`'s own `not exists` check avoids the redundant work in
+/// the common case, but two scheduler ticks racing on the same claim (e.g. two backend processes
+/// briefly overlapping during a rolling deploy) could both pass that check before either commits —
+/// the partial unique index backing this `on conflict` (migration 0066) is what actually closes the
+/// race, scoped to just the reminder job types so it can't affect other `outbound_jobs` consumers
+/// (e.g. `ace_request_notify`, which legitimately enqueues more than once per subject).
+/// Takes a plain pool rather than a transaction: the single `insert ... on conflict ... returning`
+/// is already atomic on its own, so wrapping it in a transaction would add two round trips (begin +
+/// commit) with no correctness benefit — unlike `enqueue_job` in `repos::integration`, which several
+/// callers deliberately run as one step inside a larger multi-statement transaction.
+/// Returns `true` if a row was actually inserted (the reminder should be considered sent).
+pub async fn enqueue_reminder_job(
+    pool: &PgPool,
+    job_type: &str,
+    claim_id: &str,
+    payload: &serde_json::Value,
+) -> Result<bool, ApiError> {
+    let payload = serde_json::to_string(payload).unwrap_or_else(|_| "{}".to_string());
+    let inserted_id: Option<String> = sqlx::query_scalar(
+        "insert into integration.outbound_jobs (job_type, payload, subject_type, subject_id) \
+         values ($1, $2::jsonb, 'ace_claim', $3) \
+         on conflict (subject_id, job_type) where job_type in \
+           ('ace_claim_reminder_24h', 'ace_claim_reminder_6h') \
+         do nothing \
+         returning id",
+    )
+    .bind(job_type)
+    .bind(payload)
+    .bind(claim_id)
+    .fetch_optional(pool)
+    .await
+    .map_err(|_| ApiError::Internal)?;
+    Ok(inserted_id.is_some())
+}
+
+#[cfg(test)]
+mod tests {
+    use sqlx::PgPool;
+
+    use super::*;
+
+    async fn seed_user(pool: &PgPool, name: &str) -> String {
+        sqlx::query_scalar::<_, String>(
+            "insert into identity.users (full_name, display_name) values ($1, $1) returning id",
+        )
+        .bind(name)
+        .fetch_one(pool)
+        .await
+        .unwrap()
+    }
+
+    async fn seed_event(pool: &PgPool, id: i64, hours_from_now: i64) -> i64 {
+        sqlx::query_scalar::<_, i64>(
+            "insert into events.event (id, title, start_time, end_time) \
+             values ($1, 'Fall Fly-In', now() + make_interval(hours => $2::int), \
+                     now() + make_interval(hours => $2::int) + interval '2 hours') \
+             returning id",
+        )
+        .bind(id)
+        .bind(hours_from_now as i32)
+        .fetch_one(pool)
+        .await
+        .unwrap()
+    }
+
+    async fn link_discord(pool: &PgPool, user_id: &str, discord_id: &str) {
+        sqlx::query(
+            "insert into integration.external_sync_mappings \
+             (system_code, entity_type, local_id, external_id) \
+             values ('discord', 'user', $1, $2)",
+        )
+        .bind(user_id)
+        .bind(discord_id)
+        .execute(pool)
+        .await
+        .unwrap();
+    }
+
+    async fn seed_claimed_request(
+        pool: &PgPool,
+        event_id: i64,
+        requester: &str,
+        claimer: &str,
+    ) -> String {
+        let mut tx = pool.begin().await.unwrap();
+        let request_id = create_request(
+            &mut tx,
+            event_id,
+            requester,
+            Some("ZDC"),
+            Some("DCA_APP"),
+            1,
+            "need coverage",
+        )
+        .await
+        .unwrap();
+        tx.commit().await.unwrap();
+
+        let mut tx = pool.begin().await.unwrap();
+        claim_request(&mut tx, &request_id, claimer, "", None, None)
+            .await
+            .unwrap();
+        tx.commit().await.unwrap();
+        request_id
+    }
+
+    async fn mark_job_sent(pool: &PgPool, job_type: &str, claim_id: &str) {
+        sqlx::query(
+            "insert into integration.outbound_jobs (job_type, payload, subject_type, subject_id) \
+             values ($1, '{}'::jsonb, 'ace_claim', $2)",
+        )
+        .bind(job_type)
+        .bind(claim_id)
+        .execute(pool)
+        .await
+        .unwrap();
+    }
+
+    async fn claim_id_for(pool: &PgPool, request_id: &str) -> String {
+        sqlx::query_scalar::<_, String>("select id from ace.claims where request_id = $1")
+            .bind(request_id)
+            .fetch_one(pool)
+            .await
+            .unwrap()
+    }
+
+    #[sqlx::test]
+    async fn claims_due_for_reminder_matches_the_24h_scheduling_math(pool: PgPool) {
+        let requester = seed_user(&pool, "Requester").await;
+        let claimer = seed_user(&pool, "Claimer").await;
+        link_discord(&pool, &claimer, "999888777").await;
+
+        let due_event = seed_event(&pool, 1, 23).await; // inside the T-24h window
+        let not_due_event = seed_event(&pool, 2, 30).await; // outside it
+
+        let due_request = seed_claimed_request(&pool, due_event, &requester, &claimer).await;
+        seed_claimed_request(&pool, not_due_event, &requester, &claimer).await;
+
+        let due = claims_due_for_reminder(&pool, 6, 24, "ace_claim_reminder_24h")
+            .await
+            .unwrap();
+        assert_eq!(due.len(), 1);
+        assert_eq!(due[0].discord_user_id, "999888777");
+        assert_eq!(due[0].event_title, "Fall Fly-In");
+        assert_eq!(due[0].position.as_deref(), Some("DCA_APP"));
+        assert_eq!(due[0].claim_id, claim_id_for(&pool, &due_request).await);
+    }
+
+    /// The 24h tier must NOT match an event that's already inside the 6h tier's window — without a
+    /// lower bound, a claim first seen after its event has already crossed into a *later* tier's
+    /// window (e.g. a same-day claim made 3 hours before the event, before either reminder has
+    /// fired) would match both tiers simultaneously: a 6h-tier reminder (correct) and a 24h-tier
+    /// reminder (wrong — the label says "24h" when the event is actually 3 hours out).
+    #[sqlx::test]
+    async fn claims_due_for_reminder_24h_tier_excludes_events_already_inside_the_6h_window(
+        pool: PgPool,
+    ) {
+        let requester = seed_user(&pool, "Requester").await;
+        let claimer = seed_user(&pool, "Claimer").await;
+        link_discord(&pool, &claimer, "999888777").await;
+        let late_event = seed_event(&pool, 1, 3).await; // already inside the 6h window
+
+        seed_claimed_request(&pool, late_event, &requester, &claimer).await;
+
+        let due_24h = claims_due_for_reminder(&pool, 6, 24, "ace_claim_reminder_24h")
+            .await
+            .unwrap();
+        assert!(
+            due_24h.is_empty(),
+            "a 3h-out event must not match the 24h tier (6h, 24h] window"
+        );
+
+        let due_6h = claims_due_for_reminder(&pool, 0, 6, "ace_claim_reminder_6h")
+            .await
+            .unwrap();
+        assert_eq!(
+            due_6h.len(),
+            1,
+            "the same event must still match the 6h tier — it's genuinely due"
+        );
+    }
+
+    #[sqlx::test]
+    async fn claims_due_for_reminder_excludes_a_cancelled_request(pool: PgPool) {
+        let requester = seed_user(&pool, "Requester").await;
+        let claimer = seed_user(&pool, "Claimer").await;
+        link_discord(&pool, &claimer, "999888777").await;
+        let event_id = seed_event(&pool, 1, 5).await; // inside the T-6h window too
+
+        let request_id = seed_claimed_request(&pool, event_id, &requester, &claimer).await;
+        decide_request(&pool, &request_id, &requester, "cancelled")
+            .await
+            .unwrap();
+
+        let due = claims_due_for_reminder(&pool, 0, 6, "ace_claim_reminder_6h")
+            .await
+            .unwrap();
+        assert!(due.is_empty());
+    }
+
+    #[sqlx::test]
+    async fn claims_due_for_reminder_is_idempotent(pool: PgPool) {
+        let requester = seed_user(&pool, "Requester").await;
+        let claimer = seed_user(&pool, "Claimer").await;
+        link_discord(&pool, &claimer, "999888777").await;
+        let event_id = seed_event(&pool, 1, 23).await;
+        let request_id = seed_claimed_request(&pool, event_id, &requester, &claimer).await;
+        let claim_id = claim_id_for(&pool, &request_id).await;
+
+        mark_job_sent(&pool, "ace_claim_reminder_24h", &claim_id).await;
+
+        let due = claims_due_for_reminder(&pool, 6, 24, "ace_claim_reminder_24h")
+            .await
+            .unwrap();
+        assert!(due.is_empty(), "already-reminded claim must not resurface");
+    }
+
+    /// The DB-level dedup (migration 0066's partial unique index) is what actually closes the race
+    /// between two scheduler ticks — this proves the second `enqueue_reminder_job` call for the same
+    /// claim+tier no-ops rather than erroring or inserting a duplicate row.
+    #[sqlx::test]
+    async fn enqueue_reminder_job_is_atomic_against_a_duplicate_insert(pool: PgPool) {
+        let requester = seed_user(&pool, "Requester").await;
+        let claimer = seed_user(&pool, "Claimer").await;
+        link_discord(&pool, &claimer, "999888777").await;
+        let event_id = seed_event(&pool, 1, 23).await;
+        let request_id = seed_claimed_request(&pool, event_id, &requester, &claimer).await;
+        let claim_id = claim_id_for(&pool, &request_id).await;
+        let payload = serde_json::json!({"discord_user_id": "999888777"});
+
+        let first = enqueue_reminder_job(&pool, "ace_claim_reminder_24h", &claim_id, &payload)
+            .await
+            .unwrap();
+        assert!(first, "the first enqueue for this claim+tier must insert");
+
+        let second = enqueue_reminder_job(&pool, "ace_claim_reminder_24h", &claim_id, &payload)
+            .await
+            .unwrap();
+        assert!(
+            !second,
+            "a second enqueue for the same claim+tier must no-op, not insert a duplicate"
+        );
+
+        let count: i64 = sqlx::query_scalar(
+            "select count(*) from integration.outbound_jobs \
+             where job_type = 'ace_claim_reminder_24h' and subject_id = $1",
+        )
+        .bind(&claim_id)
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        assert_eq!(count, 1, "exactly one row must exist, not two");
+    }
+}

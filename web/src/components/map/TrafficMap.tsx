@@ -168,39 +168,71 @@ export function TrafficMap({
     [filedRoute],
   );
 
-  const layers: Layer[] = [];
-  if (boundaries) layers.push(buildBoundaryLayer(boundaries, resolvedTheme, boundaryEmphasis));
-  if (atc && centerBoundaries) layers.push(...buildAtcLayers(atc, centerBoundaries));
-  if (atcAnchors.length) layers.push(buildAtcHoverLayer(atcAnchors));
-  if (trails?.length) layers.push(buildTrailLayer(trails, resolvedTheme));
-  if (routeOverlays?.length) layers.push(buildRouteOverlayLayer(routeOverlays));
-  if (namedRoutes?.length)
-    layers.push(...buildNamedRouteLayers(namedRoutes, selectedRouteId, labeledRouteIds ?? EMPTY_SET));
-  if (rings?.data.length) layers.push(buildRingLayer(rings.data, rings.nm, resolvedTheme));
-  if (fcas?.length) layers.push(...buildFcaLayers(fcas, selectedFcaId));
-  if (matched?.length && matchedColor)
-    layers.push(...buildMatchedLayers(matched, matchedColor, aircraftStyle ?? "silhouette", sizeScale));
-  for (const group of matchedGroups ?? [])
-    if (group.flights.length)
-      layers.push(
-        ...buildMatchedLayers(group.flights, group.color, aircraftStyle ?? "silhouette", sizeScale, `-${group.id}`),
-      );
-  if (selectedTrack?.length) layers.push(buildSelectedTrackLayer(selectedTrack));
-  if (selectedRoutePath.length) layers.push(buildSelectedRouteLayer(selectedRoutePath));
-  layers.push(
-    buildAircraftLayer(aircraft, {
-      theme: resolvedTheme,
-      style: aircraftStyle,
-      getColor: getAircraftColor,
-      getSize: getAircraftSize,
-      sizeScale,
-      highlightKey: selectedAircraftId,
-    }),
-  );
-  if (anyLabel && labels) layers.push(buildLabelLayer(aircraft, labels, resolvedTheme));
-  if (filedRoute?.waypoints.length)
-    layers.push(buildWaypointLayer(filedRoute.waypoints, resolvedTheme));
-  if (draft) layers.push(...buildDraftLayers(draft));
+  const layers: Layer[] = useMemo(() => {
+    const out: Layer[] = [];
+    if (boundaries) out.push(buildBoundaryLayer(boundaries, resolvedTheme, boundaryEmphasis));
+    if (atc && centerBoundaries) out.push(...buildAtcLayers(atc, centerBoundaries));
+    if (atcAnchors.length) out.push(buildAtcHoverLayer(atcAnchors));
+    if (trails?.length) out.push(buildTrailLayer(trails, resolvedTheme));
+    if (routeOverlays?.length) out.push(buildRouteOverlayLayer(routeOverlays));
+    if (namedRoutes?.length)
+      out.push(...buildNamedRouteLayers(namedRoutes, selectedRouteId, labeledRouteIds ?? EMPTY_SET));
+    if (rings?.data.length) out.push(buildRingLayer(rings.data, rings.nm, resolvedTheme));
+    if (fcas?.length) out.push(...buildFcaLayers(fcas, selectedFcaId));
+    if (matched?.length && matchedColor)
+      out.push(...buildMatchedLayers(matched, matchedColor, aircraftStyle ?? "silhouette", sizeScale));
+    for (const group of matchedGroups ?? [])
+      if (group.flights.length)
+        out.push(
+          ...buildMatchedLayers(group.flights, group.color, aircraftStyle ?? "silhouette", sizeScale, `-${group.id}`),
+        );
+    if (selectedTrack?.length) out.push(buildSelectedTrackLayer(selectedTrack));
+    if (selectedRoutePath.length) out.push(buildSelectedRouteLayer(selectedRoutePath));
+    out.push(
+      buildAircraftLayer(aircraft, {
+        theme: resolvedTheme,
+        style: aircraftStyle,
+        getColor: getAircraftColor,
+        getSize: getAircraftSize,
+        sizeScale,
+        highlightKey: selectedAircraftId,
+      }),
+    );
+    if (anyLabel && labels) out.push(buildLabelLayer(aircraft, labels, resolvedTheme));
+    if (filedRoute?.waypoints.length) out.push(buildWaypointLayer(filedRoute.waypoints, resolvedTheme));
+    if (draft) out.push(...buildDraftLayers(draft));
+    return out;
+  }, [
+    boundaries,
+    resolvedTheme,
+    boundaryEmphasis,
+    atc,
+    centerBoundaries,
+    atcAnchors,
+    trails,
+    routeOverlays,
+    namedRoutes,
+    selectedRouteId,
+    labeledRouteIds,
+    rings,
+    fcas,
+    selectedFcaId,
+    matched,
+    matchedColor,
+    matchedGroups,
+    aircraftStyle,
+    sizeScale,
+    selectedTrack,
+    selectedRoutePath,
+    aircraft,
+    getAircraftColor,
+    getAircraftSize,
+    selectedAircraftId,
+    anyLabel,
+    labels,
+    filedRoute,
+    draft,
+  ]);
 
   const handleClick = (info: PickingInfo, event: unknown) => {
     if (drawMode === "draw") {

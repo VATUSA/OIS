@@ -68,6 +68,21 @@ async fn can_edit(
     Ok(scope.allows(Some(facility_id)))
 }
 
+/// Fail-closed if the caller can't edit `facility_id`. `put_config` calls this instead of
+/// duplicating the `permission_scope` + `scope.allows` check inline (#198: the inline copy had
+/// silently drifted out of any test's reach).
+async fn require_edit(
+    state: &AppState,
+    principal: &Principal,
+    facility_id: &str,
+) -> Result<(), ApiError> {
+    if can_edit(state, Some(principal), facility_id).await? {
+        Ok(())
+    } else {
+        Err(ApiError::Forbidden)
+    }
+}
+
 #[utoipa::path(
     get, path = "/api/v1/facility-map/{id}/config", tag = "flow",
     params(("id" = String, Path)),
@@ -112,13 +127,7 @@ pub async fn put_config(
     let facility_id = normalize_facility(&id).ok_or(ApiError::BadRequest)?;
     let pool = state.db.as_ref().ok_or(ApiError::ServiceUnavailable)?;
     validate(&req)?;
-
-    let scope = principal
-        .permission_scope(&state, CONFIG_PERMISSION)
-        .await?;
-    if !scope.allows(Some(&facility_id)) {
-        return Err(ApiError::Forbidden);
-    }
+    require_edit(&state, &principal, &facility_id).await?;
 
     config_repo::upsert(pool, &facility_id, &req, principal.user_id()).await?;
     Ok(Json(FacilityMapConfigBody {
@@ -127,4 +136,69 @@ pub async fn put_config(
         default_color: req.default_color,
         editable: true,
     }))
+}
+
+#[cfg(test)]
+mod tests {
+    use sqlx::PgPool;
+
+    use super::*;
+    use crate::scope_test_support::{self, grant, principal_for, test_state};
+
+    // --- ARTCC-scope authorization boundary (#198) ---
+    //
+    // This file had no tests at all — `can_edit` (used for the read-side `editable` flag) had zero
+    // coverage. `put_config`'s write gate used to duplicate the same check inline instead of
+    // calling `can_edit`, which meant these tests didn't actually cover the write path at all —
+    // fixed alongside adding this coverage, so `require_edit` is now the single gate `put_config`
+    // calls.
+
+    #[sqlx::test]
+    async fn national_scope_can_edit_any_facility(pool: PgPool) {
+        let user = scope_test_support::seed_user(&pool).await;
+        grant(&pool, &user, "flow.facility_map.update", None).await;
+        let principal = principal_for(&user);
+        let state = test_state(pool, std::collections::HashMap::new());
+        assert!(can_edit(&state, Some(&principal), "ZDC").await.unwrap());
+    }
+
+    #[sqlx::test]
+    async fn matching_facility_scope_can_edit_its_own_facility(pool: PgPool) {
+        let user = scope_test_support::seed_user(&pool).await;
+        grant(&pool, &user, "flow.facility_map.update", Some("ZDC")).await;
+        let principal = principal_for(&user);
+        let state = test_state(pool, std::collections::HashMap::new());
+        assert!(can_edit(&state, Some(&principal), "ZDC").await.unwrap());
+    }
+
+    #[sqlx::test]
+    async fn wrong_facility_scope_is_rejected(pool: PgPool) {
+        let user = scope_test_support::seed_user(&pool).await;
+        grant(&pool, &user, "flow.facility_map.update", Some("ZAU")).await;
+        let principal = principal_for(&user);
+        let state = test_state(pool, std::collections::HashMap::new());
+        assert!(!can_edit(&state, Some(&principal), "ZDC").await.unwrap());
+        assert!(matches!(
+            require_edit(&state, &principal, "ZDC").await,
+            Err(ApiError::Forbidden)
+        ));
+    }
+
+    #[sqlx::test]
+    async fn no_grant_at_all_is_rejected(pool: PgPool) {
+        let user = scope_test_support::seed_user(&pool).await;
+        let principal = principal_for(&user);
+        let state = test_state(pool, std::collections::HashMap::new());
+        assert!(!can_edit(&state, Some(&principal), "ZDC").await.unwrap());
+        assert!(matches!(
+            require_edit(&state, &principal, "ZDC").await,
+            Err(ApiError::Forbidden)
+        ));
+    }
+
+    #[sqlx::test]
+    async fn no_principal_at_all_is_rejected(pool: PgPool) {
+        let state = test_state(pool, std::collections::HashMap::new());
+        assert!(!can_edit(&state, None, "ZDC").await.unwrap());
+    }
 }
