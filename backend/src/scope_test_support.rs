@@ -38,6 +38,7 @@ pub(crate) fn test_state(pool: PgPool, facilities: HashMap<String, Facility>) ->
         nav: Arc::new(ArcSwap::from_pointee(NavData::load())),
         airspace: Arc::new(Boundaries::load()),
         runways: Arc::new(RunwayDb::load()),
+        gates: Arc::new(ArcSwap::from_pointee(HashMap::new())),
         winds: Arc::new(ArcSwap::from_pointee(Winds::default())),
         aircraft_profiles: Arc::new(ArcSwap::from_pointee(ProfileTable::default())),
         nav_refreshed: Arc::new(AtomicI64::new(0)),
