@@ -1,8 +1,7 @@
 //! Editable airport surface geometry (gates/parking positions, ramp/apron areas, taxiways) — the
 //! foundation the #164 epic's data-driven departure-timing work keys on. Reads are open to planners
 //! (`events.plan.read`); writes are facility-scoped by the airport's owning ARTCC
-//! (`events.config.update`), reusing the same scope infra as `airport_configs`. The dedicated
-//! `flow.surface_data.update` permission + web editor are sub-issue B (#178).
+//! (`flow.surface_data.update`), reusing the same scope infra as `airport_configs`.
 
 use axum::{
     Json,
@@ -13,7 +12,7 @@ use axum::{
 use crate::{
     auth::{
         context::{CurrentApiKey, CurrentUser},
-        permissions::{EventsConfigUpdate, EventsPlanRead},
+        permissions::{EventsPlanRead, FlowSurfaceDataUpdate},
         principal::Principal,
         require_permission::RequirePermission,
     },
@@ -27,7 +26,7 @@ use crate::{
     state::AppState,
 };
 
-const CONFIG_PERMISSION: &str = "events.config.update";
+const CONFIG_PERMISSION: &str = "flow.surface_data.update";
 
 fn validate_gate(req: &UpsertAirportGateRequest) -> Result<(), ApiError> {
     if req.name.trim().is_empty() || req.name.len() > 64 {
@@ -120,7 +119,7 @@ pub async fn get_airport_surface(
 )]
 pub async fn create_airport_gate(
     State(state): State<AppState>,
-    _permission: RequirePermission<EventsConfigUpdate>,
+    _permission: RequirePermission<FlowSurfaceDataUpdate>,
     Extension(current_user): Extension<Option<CurrentUser>>,
     Extension(current_api_key): Extension<Option<CurrentApiKey>>,
     Path(icao): Path<String>,
@@ -144,7 +143,7 @@ pub async fn create_airport_gate(
 )]
 pub async fn update_airport_gate(
     State(state): State<AppState>,
-    _permission: RequirePermission<EventsConfigUpdate>,
+    _permission: RequirePermission<FlowSurfaceDataUpdate>,
     Extension(current_user): Extension<Option<CurrentUser>>,
     Extension(current_api_key): Extension<Option<CurrentApiKey>>,
     Path((icao, id)): Path<(String, String)>,
@@ -170,7 +169,7 @@ pub async fn update_airport_gate(
 )]
 pub async fn delete_airport_gate(
     State(state): State<AppState>,
-    _permission: RequirePermission<EventsConfigUpdate>,
+    _permission: RequirePermission<FlowSurfaceDataUpdate>,
     Extension(current_user): Extension<Option<CurrentUser>>,
     Extension(current_api_key): Extension<Option<CurrentApiKey>>,
     Path((icao, id)): Path<(String, String)>,
@@ -196,7 +195,7 @@ pub async fn delete_airport_gate(
 )]
 pub async fn create_airport_ramp_area(
     State(state): State<AppState>,
-    _permission: RequirePermission<EventsConfigUpdate>,
+    _permission: RequirePermission<FlowSurfaceDataUpdate>,
     Extension(current_user): Extension<Option<CurrentUser>>,
     Extension(current_api_key): Extension<Option<CurrentApiKey>>,
     Path(icao): Path<String>,
@@ -220,7 +219,7 @@ pub async fn create_airport_ramp_area(
 )]
 pub async fn update_airport_ramp_area(
     State(state): State<AppState>,
-    _permission: RequirePermission<EventsConfigUpdate>,
+    _permission: RequirePermission<FlowSurfaceDataUpdate>,
     Extension(current_user): Extension<Option<CurrentUser>>,
     Extension(current_api_key): Extension<Option<CurrentApiKey>>,
     Path((icao, id)): Path<(String, String)>,
@@ -246,7 +245,7 @@ pub async fn update_airport_ramp_area(
 )]
 pub async fn delete_airport_ramp_area(
     State(state): State<AppState>,
-    _permission: RequirePermission<EventsConfigUpdate>,
+    _permission: RequirePermission<FlowSurfaceDataUpdate>,
     Extension(current_user): Extension<Option<CurrentUser>>,
     Extension(current_api_key): Extension<Option<CurrentApiKey>>,
     Path((icao, id)): Path<(String, String)>,
@@ -272,7 +271,7 @@ pub async fn delete_airport_ramp_area(
 )]
 pub async fn create_airport_taxiway(
     State(state): State<AppState>,
-    _permission: RequirePermission<EventsConfigUpdate>,
+    _permission: RequirePermission<FlowSurfaceDataUpdate>,
     Extension(current_user): Extension<Option<CurrentUser>>,
     Extension(current_api_key): Extension<Option<CurrentApiKey>>,
     Path(icao): Path<String>,
@@ -296,7 +295,7 @@ pub async fn create_airport_taxiway(
 )]
 pub async fn update_airport_taxiway(
     State(state): State<AppState>,
-    _permission: RequirePermission<EventsConfigUpdate>,
+    _permission: RequirePermission<FlowSurfaceDataUpdate>,
     Extension(current_user): Extension<Option<CurrentUser>>,
     Extension(current_api_key): Extension<Option<CurrentApiKey>>,
     Path((icao, id)): Path<(String, String)>,
@@ -322,7 +321,7 @@ pub async fn update_airport_taxiway(
 )]
 pub async fn delete_airport_taxiway(
     State(state): State<AppState>,
-    _permission: RequirePermission<EventsConfigUpdate>,
+    _permission: RequirePermission<FlowSurfaceDataUpdate>,
     Extension(current_user): Extension<Option<CurrentUser>>,
     Extension(current_api_key): Extension<Option<CurrentApiKey>>,
     Path((icao, id)): Path<(String, String)>,
