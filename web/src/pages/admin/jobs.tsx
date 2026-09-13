@@ -83,7 +83,7 @@ function StatusBadge({ job }: { job: JobStatus }) {
 }
 
 function JobRow({ job }: { job: JobStatus }) {
-  const run = useRunJob();
+  const run = useRunJob(job.name);
   const lastRun =
     job.last_finished_ms > 0 ? timeAgo(new Date(job.last_finished_ms).toISOString()) : "—";
 
@@ -115,7 +115,7 @@ function JobRow({ job }: { job: JobStatus }) {
             variant="ghost"
             className="h-7 px-2"
             disabled={job.running || run.isPending}
-            onClick={() => run.mutate(job.name)}
+            onClick={() => run.mutate()}
           >
             Run now
           </Button>
