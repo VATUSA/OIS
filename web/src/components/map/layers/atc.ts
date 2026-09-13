@@ -2,6 +2,7 @@ import {GeoJsonLayer, PolygonLayer, ScatterplotLayer} from "@deck.gl/layers";
 import type {Layer} from "@deck.gl/core";
 
 import {ATC_COLORS, hexToRgb} from "../lib/colors";
+import {toDeckPath, toDeckPoint, type LatLng} from "../lib/geo";
 import type {RGBA} from "../lib/types";
 
 /** ATC board subset the map renders (from the /flow/atc endpoint). */
@@ -81,9 +82,7 @@ export function buildAtcLayers(atc: AtcData, boundaries: GeoJSON.FeatureCollecti
   const ringPolys = atc.tracons
     .filter((t) => !t.circle && t.rings.length > 0)
     .flatMap((t) =>
-      t.rings
-        .filter(isValidRing)
-        .map((ring) => ({ contour: ring.map(([lat, lon]) => [lon, lat]) })),
+      t.rings.filter(isValidRing).map((ring) => ({ contour: toDeckPath(ring as LatLng[]) })),
     );
   if (ringPolys.length > 0) {
     layers.push(
@@ -105,7 +104,7 @@ export function buildAtcLayers(atc: AtcData, boundaries: GeoJSON.FeatureCollecti
   // TRACON circle fallbacks (~25 NM).
   const circles = atc.tracons
     .filter((t) => isValidPoint(t.circle))
-    .map((t) => ({ pos: [t.circle![1], t.circle![0]] as [number, number] }));
+    .map((t) => ({ pos: toDeckPoint(t.circle as LatLng) }));
   if (circles.length > 0) {
     layers.push(
       new ScatterplotLayer<{ pos: [number, number] }>({

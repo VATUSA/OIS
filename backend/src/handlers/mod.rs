@@ -2,6 +2,7 @@ pub mod access;
 pub mod ace;
 pub mod aircraft_profiles;
 pub mod airport_configs;
+pub mod airport_surface;
 pub mod api_keys;
 pub mod atc;
 pub mod audit;

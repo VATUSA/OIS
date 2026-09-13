@@ -5,6 +5,7 @@ import {aircraftIconUrl} from "@/lib/aircraft-icons";
 import {aircraftTypeScale} from "@/lib/aircraft-icon-size";
 import {clampGlyphSize} from "./aircraft";
 import {hexToRgb} from "../lib/colors";
+import {toDeckPath, type LatLng} from "../lib/geo";
 import {TRIANGLE_ICON} from "../lib/icons";
 import type {RGBA} from "../lib/types";
 
@@ -49,7 +50,7 @@ export function buildMatchedLayers(
     data: withPos,
     getPath: (f): [number, number][] =>
       f.path && f.path.length >= 2
-        ? f.path.map(([lat, lon]) => [lon, lat] as [number, number])
+        ? toDeckPath(f.path as LatLng[])
         : [
             [f.lon, f.lat],
             [f.cross_lon, f.cross_lat],

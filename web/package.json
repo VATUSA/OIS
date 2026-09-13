@@ -16,7 +16,7 @@
     "@types/d3-scale": "^4.0.9",
     "@types/node": "^22",
     "@types/react": "^19.2.18",
-    "@types/react-dom": "^19.2.4",
+    "@types/react-dom": "^19.3.0",
     "@vitejs/plugin-react": "^6.1.1",
     "tailwindcss": "^4.3.3",
     "typescript": "^5",
@@ -33,8 +33,8 @@
     "@dnd-kit/utilities": "^3.2.2",
     "@ois/api-client": "workspace:^",
     "@ois/ui": "workspace:^",
-    "@tanstack/charts": "^0.14.0",
-    "@tanstack/react-charts": "^0.14.0",
+    "@tanstack/charts": "^0.17.0",
+    "@tanstack/react-charts": "^0.17.0",
     "@tanstack/react-query": "^5.102.8",
     "@tanstack/react-router": "^1.170.27",
     "@tanstack/react-table": "^9.2.4",
@@ -42,7 +42,7 @@
     "lucide-react": "^1.31.0",
     "maplibre-gl": "^6.4.1",
     "react": "^19.2.8",
-    "react-dom": "^19.2.8",
+    "react-dom": "^19.3.0",
     "react-grid-layout": "^2.2.4",
     "react-map-gl": "^8"
   }
