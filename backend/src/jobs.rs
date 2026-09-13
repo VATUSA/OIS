@@ -296,6 +296,10 @@ async fn stats_compaction_once(
         "flight-legs",
         stats_repo::prune_flight_legs(pool, legs_before).await,
     ));
+    passes.push((
+        "taxi-observations",
+        stats_repo::prune_taxi_observations(pool, legs_before).await,
+    ));
 
     for (label, res) in passes {
         match res {

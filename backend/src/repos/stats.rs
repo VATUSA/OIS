@@ -222,6 +222,55 @@ pub async fn prune_flight_legs(pool: &PgPool, before: DateTime<Utc>) -> Result<u
     Ok(res.rows_affected())
 }
 
+/// A completed departure's pushback+startup and taxi-out timings for `stats.taxi_observation`
+/// (#164 sub-issue C — the raw observations a later per-gate/type/runway estimator learns from).
+pub struct TaxiObservationRow {
+    pub airport: String,
+    pub gate_id: Option<String>,
+    pub aircraft: Option<String>,
+    pub runway: Option<String>,
+    pub pushback_sec: Option<i32>,
+    pub taxi_sec: i32,
+    pub observed_at: DateTime<Utc>,
+}
+
+/// Persist completed taxi observations (few per tick).
+pub async fn insert_taxi_observations(
+    pool: &PgPool,
+    rows: &[TaxiObservationRow],
+) -> Result<(), ApiError> {
+    for chunk in rows.chunks(1000) {
+        let mut qb: QueryBuilder<Postgres> = QueryBuilder::new(
+            "insert into stats.taxi_observation \
+             (airport, gate_id, aircraft, runway, pushback_sec, taxi_sec, observed_at) ",
+        );
+        qb.push_values(chunk, |mut b, r| {
+            b.push_bind(&r.airport)
+                .push_bind(&r.gate_id)
+                .push_bind(&r.aircraft)
+                .push_bind(&r.runway)
+                .push_bind(r.pushback_sec)
+                .push_bind(r.taxi_sec)
+                .push_bind(r.observed_at);
+        });
+        qb.build().execute(pool).await.map_err(db)?;
+    }
+    Ok(())
+}
+
+/// Drop taxi observations older than `before` (retention).
+pub async fn prune_taxi_observations(
+    pool: &PgPool,
+    before: DateTime<Utc>,
+) -> Result<u64, ApiError> {
+    let res = sqlx::query("delete from stats.taxi_observation where observed_at < $1")
+        .bind(before)
+        .execute(pool)
+        .await
+        .map_err(db)?;
+    Ok(res.rows_affected())
+}
+
 /// Aggregate expression shared by every delay grouping ($1..$5 = kind, since, airport, runway, proc).
 const DELAY_AGG: &str = "count(*)::bigint as n, \
     round(avg(duration_sec))::bigint as avg_sec, \
