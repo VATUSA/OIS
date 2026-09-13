@@ -55,3 +55,6 @@ export function centroid(ring: LatLng[]): LatLng {
 
 /** Convert a [lat, lon] polyline to deck's [lon, lat] path order. */
 export const toDeckPath = (pts: LatLng[]): [number, number][] => pts.map(([lat, lon]) => [lon, lat]);
+
+/** Convert a single [lat, lon] point to deck's [lon, lat] order. */
+export const toDeckPoint = ([lat, lon]: LatLng): [number, number] => [lon, lat];
