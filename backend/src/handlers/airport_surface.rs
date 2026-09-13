@@ -560,4 +560,63 @@ mod tests {
         );
         assert_eq!(artcc_id.as_deref(), Some("ZDC"));
     }
+
+    // --- ARTCC-scope authorization boundary (#198) ---
+    //
+    // Every test above drives `surface_repo` directly, never `can_edit`/`require_edit` — so a
+    // `require_edit` stubbed to `Ok(())` (ARTCC-scope enforcement silently disabled) would not
+    // fail any of them. These tests close that gap.
+    //
+    // Grants `flow.surface_data.update` (this file's `CONFIG_PERMISSION`, not the earlier
+    // `events.config.update` placeholder these tests were originally written against — updated
+    // while resolving a rebase conflict against #178's already-merged permission rename).
+
+    use crate::scope_test_support;
+    use crate::scope_test_support::{artcc, grant, principal_for, test_state};
+    use std::collections::HashMap;
+
+    #[sqlx::test]
+    async fn national_scope_can_edit_any_artccs_airport(pool: PgPool) {
+        let user = scope_test_support::seed_user(&pool).await;
+        grant(&pool, &user, "flow.surface_data.update", None).await;
+        let principal = principal_for(&user);
+        let state = test_state(pool, HashMap::from([("ZDC".to_string(), artcc(&["KDCA"]))]));
+        assert!(can_edit(&state, &principal, "KDCA").await.unwrap());
+        assert!(require_edit(&state, &principal, "KDCA").await.is_ok());
+    }
+
+    #[sqlx::test]
+    async fn matching_artcc_scope_can_edit_its_own_airport(pool: PgPool) {
+        let user = scope_test_support::seed_user(&pool).await;
+        grant(&pool, &user, "flow.surface_data.update", Some("ZDC")).await;
+        let principal = principal_for(&user);
+        let state = test_state(pool, HashMap::from([("ZDC".to_string(), artcc(&["KDCA"]))]));
+        assert!(can_edit(&state, &principal, "KDCA").await.unwrap());
+    }
+
+    #[sqlx::test]
+    async fn wrong_artcc_scope_is_rejected(pool: PgPool) {
+        let user = scope_test_support::seed_user(&pool).await;
+        // Granted for ZAU, but KDCA is owned by ZDC.
+        grant(&pool, &user, "flow.surface_data.update", Some("ZAU")).await;
+        let principal = principal_for(&user);
+        let state = test_state(pool, HashMap::from([("ZDC".to_string(), artcc(&["KDCA"]))]));
+        assert!(!can_edit(&state, &principal, "KDCA").await.unwrap());
+        assert!(matches!(
+            require_edit(&state, &principal, "KDCA").await,
+            Err(ApiError::Forbidden)
+        ));
+    }
+
+    #[sqlx::test]
+    async fn no_grant_at_all_is_rejected(pool: PgPool) {
+        let user = scope_test_support::seed_user(&pool).await;
+        let principal = principal_for(&user);
+        let state = test_state(pool, HashMap::from([("ZDC".to_string(), artcc(&["KDCA"]))]));
+        assert!(!can_edit(&state, &principal, "KDCA").await.unwrap());
+        assert!(matches!(
+            require_edit(&state, &principal, "KDCA").await,
+            Err(ApiError::Forbidden)
+        ));
+    }
 }
