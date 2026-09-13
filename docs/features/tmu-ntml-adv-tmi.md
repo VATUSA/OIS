@@ -173,10 +173,20 @@ The departures view (`/tmu/departures/{dep}`) also surfaces **FCA releases** fro
 `flow` domain as frozen CFRs — see [flow.md](flow.md#fca-releases-in-the-departures-view).
 Mutations publish the `tmu`/`flow.cfr` realtime topics so open boards nudge-and-refetch.
 
+## Discord
+
+`publish_tmi` (`tmu.tmi.publish`) resolves the `integration.discord_channels` logical name
+`tmu-advisories` and, if configured, enqueues an outbound `tmi_publish` job in the same
+transaction — see [discord-integration.md](discord-integration.md) for the queue mechanics. The
+bot posts the raw restriction text (a `**REQ → PROV**` header line names the requesting/providing
+facilities — the encoded restriction string itself doesn't carry them) plus a **View structured**
+button; clicking it looks the TMI up again and replies ephemerally with its plain-English decoded
+description, or a note that none exists for a TMI that was typed as free-form text rather than
+entered via the structured form.
+
 ## Not built
 
 - NTML entries and advisories as first-class records, the plain-language parser, and the
-  public advisory/TMI API from the original spec.
+  public advisory/TMI API from the original spec — so there is no separate `adv_publish` Discord
+  job either; only TMIs post today.
 - The average-delay page (`tmu.delays.read`).
-- Discord embeds on publish (the outbound-queue plumbing is the `integration` domain's,
-  and no `tmu` handler enqueues today).
