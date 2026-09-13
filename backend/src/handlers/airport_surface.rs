@@ -1,8 +1,7 @@
 //! Editable airport surface geometry (gates/parking positions, ramp/apron areas, taxiways) — the
 //! foundation the #164 epic's data-driven departure-timing work keys on. Reads are open to planners
 //! (`events.plan.read`); writes are facility-scoped by the airport's owning ARTCC
-//! (`events.config.update`), reusing the same scope infra as `airport_configs`. The dedicated
-//! `flow.surface_data.update` permission + web editor are sub-issue B (#178).
+//! (`flow.surface_data.update`), reusing the same scope infra as `airport_configs`.
 
 use axum::{
     Json,
@@ -13,7 +12,7 @@ use axum::{
 use crate::{
     auth::{
         context::{CurrentApiKey, CurrentUser},
-        permissions::{EventsConfigUpdate, EventsPlanRead},
+        permissions::{EventsPlanRead, FlowSurfaceDataUpdate},
         principal::Principal,
         require_permission::RequirePermission,
     },
@@ -27,7 +26,7 @@ use crate::{
     state::AppState,
 };
 
-const CONFIG_PERMISSION: &str = "events.config.update";
+const CONFIG_PERMISSION: &str = "flow.surface_data.update";
 
 fn validate_gate(req: &UpsertAirportGateRequest) -> Result<(), ApiError> {
     if req.name.trim().is_empty() || req.name.len() > 64 {
@@ -59,7 +58,7 @@ fn validate_taxiway(req: &UpsertAirportTaxiwayRequest) -> Result<(), ApiError> {
     Ok(())
 }
 
-/// Does the caller hold `events.config.update` nationally or for `icao`'s owning ARTCC?
+/// Does the caller hold `flow.surface_data.update` nationally or for `icao`'s owning ARTCC?
 async fn can_edit(state: &AppState, principal: &Principal, icao: &str) -> Result<bool, ApiError> {
     let artcc = owning_artcc(state, icao).await;
     let scope = principal.permission_scope(state, CONFIG_PERMISSION).await?;
@@ -120,7 +119,7 @@ pub async fn get_airport_surface(
 )]
 pub async fn create_airport_gate(
     State(state): State<AppState>,
-    _permission: RequirePermission<EventsConfigUpdate>,
+    _permission: RequirePermission<FlowSurfaceDataUpdate>,
     Extension(current_user): Extension<Option<CurrentUser>>,
     Extension(current_api_key): Extension<Option<CurrentApiKey>>,
     Path(icao): Path<String>,
@@ -144,7 +143,7 @@ pub async fn create_airport_gate(
 )]
 pub async fn update_airport_gate(
     State(state): State<AppState>,
-    _permission: RequirePermission<EventsConfigUpdate>,
+    _permission: RequirePermission<FlowSurfaceDataUpdate>,
     Extension(current_user): Extension<Option<CurrentUser>>,
     Extension(current_api_key): Extension<Option<CurrentApiKey>>,
     Path((icao, id)): Path<(String, String)>,
@@ -170,7 +169,7 @@ pub async fn update_airport_gate(
 )]
 pub async fn delete_airport_gate(
     State(state): State<AppState>,
-    _permission: RequirePermission<EventsConfigUpdate>,
+    _permission: RequirePermission<FlowSurfaceDataUpdate>,
     Extension(current_user): Extension<Option<CurrentUser>>,
     Extension(current_api_key): Extension<Option<CurrentApiKey>>,
     Path((icao, id)): Path<(String, String)>,
@@ -196,7 +195,7 @@ pub async fn delete_airport_gate(
 )]
 pub async fn create_airport_ramp_area(
     State(state): State<AppState>,
-    _permission: RequirePermission<EventsConfigUpdate>,
+    _permission: RequirePermission<FlowSurfaceDataUpdate>,
     Extension(current_user): Extension<Option<CurrentUser>>,
     Extension(current_api_key): Extension<Option<CurrentApiKey>>,
     Path(icao): Path<String>,
@@ -220,7 +219,7 @@ pub async fn create_airport_ramp_area(
 )]
 pub async fn update_airport_ramp_area(
     State(state): State<AppState>,
-    _permission: RequirePermission<EventsConfigUpdate>,
+    _permission: RequirePermission<FlowSurfaceDataUpdate>,
     Extension(current_user): Extension<Option<CurrentUser>>,
     Extension(current_api_key): Extension<Option<CurrentApiKey>>,
     Path((icao, id)): Path<(String, String)>,
@@ -246,7 +245,7 @@ pub async fn update_airport_ramp_area(
 )]
 pub async fn delete_airport_ramp_area(
     State(state): State<AppState>,
-    _permission: RequirePermission<EventsConfigUpdate>,
+    _permission: RequirePermission<FlowSurfaceDataUpdate>,
     Extension(current_user): Extension<Option<CurrentUser>>,
     Extension(current_api_key): Extension<Option<CurrentApiKey>>,
     Path((icao, id)): Path<(String, String)>,
@@ -272,7 +271,7 @@ pub async fn delete_airport_ramp_area(
 )]
 pub async fn create_airport_taxiway(
     State(state): State<AppState>,
-    _permission: RequirePermission<EventsConfigUpdate>,
+    _permission: RequirePermission<FlowSurfaceDataUpdate>,
     Extension(current_user): Extension<Option<CurrentUser>>,
     Extension(current_api_key): Extension<Option<CurrentApiKey>>,
     Path(icao): Path<String>,
@@ -296,7 +295,7 @@ pub async fn create_airport_taxiway(
 )]
 pub async fn update_airport_taxiway(
     State(state): State<AppState>,
-    _permission: RequirePermission<EventsConfigUpdate>,
+    _permission: RequirePermission<FlowSurfaceDataUpdate>,
     Extension(current_user): Extension<Option<CurrentUser>>,
     Extension(current_api_key): Extension<Option<CurrentApiKey>>,
     Path((icao, id)): Path<(String, String)>,
@@ -322,7 +321,7 @@ pub async fn update_airport_taxiway(
 )]
 pub async fn delete_airport_taxiway(
     State(state): State<AppState>,
-    _permission: RequirePermission<EventsConfigUpdate>,
+    _permission: RequirePermission<FlowSurfaceDataUpdate>,
     Extension(current_user): Extension<Option<CurrentUser>>,
     Extension(current_api_key): Extension<Option<CurrentApiKey>>,
     Path((icao, id)): Path<(String, String)>,
@@ -476,5 +475,78 @@ mod tests {
 
         let taxiways = surface_repo::list_taxiways(&pool, "KDCA").await.unwrap();
         assert_eq!(taxiways.len(), 84);
+    }
+
+    /// Migration 0068's backfill runs once, at migration time, against whatever
+    /// `events.config.update` grants already exist then — it can't see grants seeded by a test
+    /// afterwards. This re-runs the same statements the migration uses directly, to prove the
+    /// query logic itself (matching on the old permission, preserving `granted`/`artcc_id`,
+    /// idempotent via `on conflict`) is correct, independent of migration-ordering concerns.
+    #[sqlx::test]
+    async fn permission_backfill_repoints_existing_events_config_update_grants(pool: PgPool) {
+        sqlx::query(
+            "insert into access.role_permissions (role_name, permission_name) \
+             values ('EC', 'events.config.update') on conflict do nothing",
+        )
+        .execute(&pool)
+        .await
+        .unwrap();
+        let user = seed_user(&pool).await;
+        sqlx::query(
+            "insert into access.user_permissions (user_id, permission_name, granted, artcc_id) \
+             values ($1, 'events.config.update', false, 'ZDC')",
+        )
+        .bind(&user)
+        .execute(&pool)
+        .await
+        .unwrap();
+
+        sqlx::query(
+            "insert into access.role_permissions (role_name, permission_name) \
+             select role_name, 'flow.surface_data.update' from access.role_permissions \
+             where permission_name = 'events.config.update' \
+             on conflict (role_name, permission_name) do nothing",
+        )
+        .execute(&pool)
+        .await
+        .unwrap();
+        sqlx::query(
+            "insert into access.user_permissions (user_id, permission_name, granted, artcc_id) \
+             select user_id, 'flow.surface_data.update', granted, artcc_id \
+             from access.user_permissions where permission_name = 'events.config.update' \
+             on conflict (user_id, permission_name, (coalesce(artcc_id, ''))) do nothing",
+        )
+        .execute(&pool)
+        .await
+        .unwrap();
+
+        let role_has_it: bool = sqlx::query_scalar(
+            "select exists(select 1 from access.role_permissions \
+             where role_name = 'EC' and permission_name = 'flow.surface_data.update')",
+        )
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        assert!(
+            role_has_it,
+            "EC's events.config.update grant must carry over"
+        );
+
+        // The user's original grant was a facility-scoped *denial* (granted = false, artcc_id =
+        // ZDC) — the backfill must preserve both fields exactly, not just blanket-grant the new
+        // permission.
+        let (granted, artcc_id): (bool, Option<String>) = sqlx::query_as(
+            "select granted, artcc_id from access.user_permissions \
+             where user_id = $1 and permission_name = 'flow.surface_data.update'",
+        )
+        .bind(&user)
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        assert!(
+            !granted,
+            "a denial must carry over as a denial, not flip to a grant"
+        );
+        assert_eq!(artcc_id.as_deref(), Some("ZDC"));
     }
 }
