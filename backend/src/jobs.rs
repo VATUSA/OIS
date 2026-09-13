@@ -17,9 +17,11 @@ use crate::feed::nav_source;
 use crate::feed::trajectory::ProfileTable;
 use crate::feed::winds::{self, Winds};
 use crate::job_registry::{JobRegistry, run_interval};
+use crate::models::AirportGateBody;
 use crate::realtime::{Events, WsEvent, topic};
 use crate::repos::ace as ace_repo;
 use crate::repos::aircraft_profiles as aircraft_profiles_repo;
+use crate::repos::airport_surface as airport_surface_repo;
 use crate::repos::events as events_repo;
 use crate::repos::flow as flow_repo;
 use crate::repos::stats as stats_repo;
@@ -66,6 +68,10 @@ const WINDS_REFRESH_INTERVAL: Duration = Duration::from_secs(60 * 60);
 /// How often to reload aircraft performance profiles from the DB (staff edits are rare, and the
 /// handler force-refreshes on write, so a slow poll is enough to catch out-of-band changes).
 const AIRCRAFT_PROFILES_INTERVAL: Duration = Duration::from_secs(5 * 60);
+
+/// How often to reload airport surface gates from the DB (staff edits are rare, and the handler
+/// force-refreshes on write, so a slow poll is enough to catch out-of-band changes).
+const AIRPORT_GATES_INTERVAL: Duration = Duration::from_secs(5 * 60);
 
 /// Fetch the latest NASR data once and hot-swap it in when the cycle (or point count)
 /// changes. Records the fetch time on success. Returns `Ok(true)` when the data changed,
@@ -228,6 +234,34 @@ pub fn spawn_aircraft_profiles_refresh(
     ));
 }
 
+/// Keep the airport surface gate cache current for the DB-less feed subsystem
+/// (`feed::taxi_observations`'s gate matching): load every gate from the DB at startup and
+/// hot-swap it in, then reload periodically. Fails safe — a failed load keeps the current map.
+pub fn spawn_airport_gates_refresh(
+    reg: Arc<JobRegistry>,
+    pool: PgPool,
+    gates: Arc<ArcSwap<std::collections::HashMap<String, Vec<AirportGateBody>>>>,
+) {
+    tokio::spawn(run_interval(
+        reg,
+        "airport_gates_refresh",
+        "Reload airport surface gates from the DB",
+        AIRPORT_GATES_INTERVAL,
+        move || {
+            let (pool, gates) = (pool.clone(), gates.clone());
+            async move {
+                match airport_surface_repo::load_all_gates(&pool).await {
+                    Ok(by_icao) => {
+                        gates.store(Arc::new(by_icao));
+                        Ok("reloaded".to_string())
+                    }
+                    Err(e) => Err(format!("{e:?}")),
+                }
+            }
+        },
+    ));
+}
+
 /// Age the stats position time-series through the weekly `COMPACTION_TIERS` ladder — full fidelity
 /// for a week, then progressively coarser, forever (nothing is hard-deleted past the ladder
 /// anymore). Rows inside an open/saved `stats.capture` window are skipped at every tier (retained
@@ -298,6 +332,10 @@ async fn stats_compaction_once(
     passes.push((
         "flight-legs",
         stats_repo::prune_flight_legs(pool, legs_before).await,
+    ));
+    passes.push((
+        "taxi-observations",
+        stats_repo::prune_taxi_observations(pool, legs_before).await,
     ));
 
     for (label, res) in passes {
