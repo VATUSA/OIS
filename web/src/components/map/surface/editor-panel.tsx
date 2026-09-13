@@ -14,6 +14,10 @@ export interface SurfaceDraft {
   name: string;
   rampKind: "ramp" | "apron";
   points: LatLng[];
+  /** A ramp/apron area's rings beyond the first (e.g. a hole) — this editor only draws/edits the
+   * outer ring, so these are carried through unedited and must be resent as-is on save, not
+   * silently dropped. Always empty for a new draft or a non-ramp shape. */
+  extraRings?: LatLng[][];
 }
 
 const HINT: Record<SurfaceKind, string> = {

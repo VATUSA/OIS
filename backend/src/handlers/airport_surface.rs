@@ -476,4 +476,77 @@ mod tests {
         let taxiways = surface_repo::list_taxiways(&pool, "KDCA").await.unwrap();
         assert_eq!(taxiways.len(), 84);
     }
+
+    /// Migration 0068's backfill runs once, at migration time, against whatever
+    /// `events.config.update` grants already exist then — it can't see grants seeded by a test
+    /// afterwards. This re-runs the same statements the migration uses directly, to prove the
+    /// query logic itself (matching on the old permission, preserving `granted`/`artcc_id`,
+    /// idempotent via `on conflict`) is correct, independent of migration-ordering concerns.
+    #[sqlx::test]
+    async fn permission_backfill_repoints_existing_events_config_update_grants(pool: PgPool) {
+        sqlx::query(
+            "insert into access.role_permissions (role_name, permission_name) \
+             values ('EC', 'events.config.update') on conflict do nothing",
+        )
+        .execute(&pool)
+        .await
+        .unwrap();
+        let user = seed_user(&pool).await;
+        sqlx::query(
+            "insert into access.user_permissions (user_id, permission_name, granted, artcc_id) \
+             values ($1, 'events.config.update', false, 'ZDC')",
+        )
+        .bind(&user)
+        .execute(&pool)
+        .await
+        .unwrap();
+
+        sqlx::query(
+            "insert into access.role_permissions (role_name, permission_name) \
+             select role_name, 'flow.surface_data.update' from access.role_permissions \
+             where permission_name = 'events.config.update' \
+             on conflict (role_name, permission_name) do nothing",
+        )
+        .execute(&pool)
+        .await
+        .unwrap();
+        sqlx::query(
+            "insert into access.user_permissions (user_id, permission_name, granted, artcc_id) \
+             select user_id, 'flow.surface_data.update', granted, artcc_id \
+             from access.user_permissions where permission_name = 'events.config.update' \
+             on conflict (user_id, permission_name, (coalesce(artcc_id, ''))) do nothing",
+        )
+        .execute(&pool)
+        .await
+        .unwrap();
+
+        let role_has_it: bool = sqlx::query_scalar(
+            "select exists(select 1 from access.role_permissions \
+             where role_name = 'EC' and permission_name = 'flow.surface_data.update')",
+        )
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        assert!(
+            role_has_it,
+            "EC's events.config.update grant must carry over"
+        );
+
+        // The user's original grant was a facility-scoped *denial* (granted = false, artcc_id =
+        // ZDC) — the backfill must preserve both fields exactly, not just blanket-grant the new
+        // permission.
+        let (granted, artcc_id): (bool, Option<String>) = sqlx::query_as(
+            "select granted, artcc_id from access.user_permissions \
+             where user_id = $1 and permission_name = 'flow.surface_data.update'",
+        )
+        .bind(&user)
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        assert!(
+            !granted,
+            "a denial must carry over as a denial, not flip to a grant"
+        );
+        assert_eq!(artcc_id.as_deref(), Some("ZDC"));
+    }
 }
