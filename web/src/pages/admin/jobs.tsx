@@ -83,7 +83,7 @@ function StatusBadge({ job }: { job: JobStatus }) {
 }
 
 function JobRow({ job }: { job: JobStatus }) {
-  const run = useRunJob();
+  const run = useRunJob(job.name);
   const lastRun =
     job.last_finished_ms > 0 ? timeAgo(new Date(job.last_finished_ms).toISOString()) : "—";
 
@@ -97,7 +97,13 @@ function JobRow({ job }: { job: JobStatus }) {
         <StatusBadge job={job} />
       </td>
       <td className="py-2 pr-3 whitespace-nowrap tabular-nums text-muted-foreground">{lastRun}</td>
-      <td className="py-2 pr-3 text-xs text-muted-foreground">{job.last_detail ?? "—"}</td>
+      <td
+        className={`py-2 pr-3 text-xs ${
+          job.last_ok === false ? "font-medium text-destructive" : "text-muted-foreground"
+        }`}
+      >
+        {job.last_detail ?? "—"}
+      </td>
       <td className="py-2 pr-3 tabular-nums text-muted-foreground">
         {formatInterval(job.interval_secs)}
       </td>
@@ -109,7 +115,7 @@ function JobRow({ job }: { job: JobStatus }) {
             variant="ghost"
             className="h-7 px-2"
             disabled={job.running || run.isPending}
-            onClick={() => run.mutate(job.name)}
+            onClick={() => run.mutate()}
           >
             Run now
           </Button>

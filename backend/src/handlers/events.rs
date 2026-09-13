@@ -129,7 +129,7 @@ const SUPPORT_LEVELS: [&str; 3] = ["required", "preferred", "not_required"];
 const RATE_PERMISSION: &str = "events.rate.update";
 const SUPPORT_PERMISSION: &str = "events.support.update";
 
-fn normalize_facility(raw: &str) -> Option<String> {
+pub(crate) fn normalize_facility(raw: &str) -> Option<String> {
     let f = raw.trim().to_ascii_uppercase();
     (!f.is_empty() && f.len() <= 8 && f.chars().all(|c| c.is_ascii_alphanumeric())).then_some(f)
 }
@@ -492,7 +492,14 @@ pub async fn generate_tier1(
         .into_iter()
         .collect();
 
-    let channel = integration_repo::channel_id(p, crate::handlers::ace::ACE_CHANNEL).await?;
+    // Resolved per-neighbor (not once for the whole batch): each request is routed to the guild
+    // serving the neighbor being asked, not the host (#194).
+    let mut channels = std::collections::HashMap::new();
+    for n in &neighbours {
+        let ch =
+            integration_repo::channel_id(p, crate::handlers::ace::ACE_CHANNEL, Some(n)).await?;
+        channels.insert(n.clone(), ch);
+    }
     let date = event.start_time.format("%a, %b %-d").to_string();
 
     let mut created = Vec::new();
@@ -507,6 +514,7 @@ pub async fn generate_tier1(
             "Tier-1 support for {}'s Friday Night Operation on {date}. Requesting ACE coverage from {n}.",
             event.facility
         );
+        let channel = channels.get(&n).cloned().flatten();
         crate::handlers::ace::create_one(
             &mut tx,
             &event,
@@ -824,7 +832,16 @@ pub(crate) async fn activate_package(
     let items = events_repo::list_package_items(pool, package_id).await?;
 
     // A published restriction posts to Discord like any other; resolve the channel once (None ⇒ skip).
-    let tmu_channel = integration_repo::channel_id(pool, crate::handlers::tmu::TMU_CHANNEL).await?;
+    // Normalized: `event.facility` is a raw passthrough of the external VATUSA v3 events API field
+    // (feed/events.rs) with no case/format guarantee, but discord_config_facilities.artcc_id is
+    // stored uppercase and matched exactly — an unnormalized value would silently never match,
+    // falling back to the pre-#194 first-created-wins behavior with no error.
+    let tmu_channel = integration_repo::channel_id(
+        pool,
+        crate::handlers::tmu::TMU_CHANNEL,
+        normalize_facility(&event.facility).as_deref(),
+    )
+    .await?;
 
     // Materialize each draft item into the live TMU tables, recording a `live_ref` so the package
     // can later be deactivated (cancelling exactly what it created).
@@ -1495,12 +1512,18 @@ pub async fn publish_event_discord(
     }
 
     // Route by the host's DCC region; fall back to the generic `events` channel if unmapped/unconfigured.
+    // Both calls are scoped by the host facility (normalized — see activate_package's comment on
+    // why raw event.facility can't be trusted as-is) so the guild serving it wins a same-named
+    // collision with another guild (#194).
+    let facility = normalize_facility(&event.facility);
     let mut channel = None;
     if let Some(region) = dcc_region(&event.facility) {
-        channel = integration_repo::channel_id(pool, &format!("region-{region}")).await?;
+        channel =
+            integration_repo::channel_id(pool, &format!("region-{region}"), facility.as_deref())
+                .await?;
     }
     if channel.is_none() {
-        channel = integration_repo::channel_id(pool, EVENTS_CHANNEL).await?;
+        channel = integration_repo::channel_id(pool, EVENTS_CHANNEL, facility.as_deref()).await?;
     }
     let channel = channel.ok_or(ApiError::BadRequest)?;
 
@@ -1515,8 +1538,10 @@ pub async fn publish_event_discord(
         let ec_user_ids = integration_repo::ec_discord_ids(pool, &f.facility).await?;
         facilities.push(serde_json::json!({ "id": f.facility, "ec_user_ids": ec_user_ids }));
     }
-    let ntmo_role_id = integration_repo::role_id(pool, "ntmo").await?;
-    let dcc_trainee_role_id = integration_repo::role_id(pool, "dcc-trainee").await?;
+    // Unscoped: these read as facility-generic staff roles pinged on every event thread, not roles
+    // that vary per facility (#194).
+    let ntmo_role_id = integration_repo::role_id(pool, "ntmo", None).await?;
+    let dcc_trainee_role_id = integration_repo::role_id(pool, "dcc-trainee", None).await?;
     let thread_template = integration_repo::get_event_thread_template(pool).await?;
 
     let thread_name = format!("{} {}", event.start_time.format("%Y%m%d"), event.title);

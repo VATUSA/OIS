@@ -8,6 +8,8 @@ use arc_swap::ArcSwap;
 use chrono::Utc;
 use sqlx::PgPool;
 
+use serde_json::json;
+
 use crate::errors::ApiError;
 use crate::feed::FeedState;
 use crate::feed::nav::NavData;
@@ -15,8 +17,11 @@ use crate::feed::nav_source;
 use crate::feed::trajectory::ProfileTable;
 use crate::feed::winds::{self, Winds};
 use crate::job_registry::{JobRegistry, run_interval};
+use crate::models::AirportGateBody;
 use crate::realtime::{Events, WsEvent, topic};
+use crate::repos::ace as ace_repo;
 use crate::repos::aircraft_profiles as aircraft_profiles_repo;
+use crate::repos::airport_surface as airport_surface_repo;
 use crate::repos::events as events_repo;
 use crate::repos::flow as flow_repo;
 use crate::repos::stats as stats_repo;
@@ -63,6 +68,10 @@ const WINDS_REFRESH_INTERVAL: Duration = Duration::from_secs(60 * 60);
 /// How often to reload aircraft performance profiles from the DB (staff edits are rare, and the
 /// handler force-refreshes on write, so a slow poll is enough to catch out-of-band changes).
 const AIRCRAFT_PROFILES_INTERVAL: Duration = Duration::from_secs(5 * 60);
+
+/// How often to reload airport surface gates from the DB (staff edits are rare, and the handler
+/// force-refreshes on write, so a slow poll is enough to catch out-of-band changes).
+const AIRPORT_GATES_INTERVAL: Duration = Duration::from_secs(5 * 60);
 
 /// Fetch the latest NASR data once and hot-swap it in when the cycle (or point count)
 /// changes. Records the fetch time on success. Returns `Ok(true)` when the data changed,
@@ -225,6 +234,34 @@ pub fn spawn_aircraft_profiles_refresh(
     ));
 }
 
+/// Keep the airport surface gate cache current for the DB-less feed subsystem
+/// (`feed::taxi_observations`'s gate matching): load every gate from the DB at startup and
+/// hot-swap it in, then reload periodically. Fails safe — a failed load keeps the current map.
+pub fn spawn_airport_gates_refresh(
+    reg: Arc<JobRegistry>,
+    pool: PgPool,
+    gates: Arc<ArcSwap<std::collections::HashMap<String, Vec<AirportGateBody>>>>,
+) {
+    tokio::spawn(run_interval(
+        reg,
+        "airport_gates_refresh",
+        "Reload airport surface gates from the DB",
+        AIRPORT_GATES_INTERVAL,
+        move || {
+            let (pool, gates) = (pool.clone(), gates.clone());
+            async move {
+                match airport_surface_repo::load_all_gates(&pool).await {
+                    Ok(by_icao) => {
+                        gates.store(Arc::new(by_icao));
+                        Ok("reloaded".to_string())
+                    }
+                    Err(e) => Err(format!("{e:?}")),
+                }
+            }
+        },
+    ));
+}
+
 /// Age the stats position time-series through the weekly `COMPACTION_TIERS` ladder — full fidelity
 /// for a week, then progressively coarser, forever (nothing is hard-deleted past the ladder
 /// anymore). Rows inside an open/saved `stats.capture` window are skipped at every tier (retained
@@ -295,6 +332,10 @@ async fn stats_compaction_once(
     passes.push((
         "flight-legs",
         stats_repo::prune_flight_legs(pool, legs_before).await,
+    ));
+    passes.push((
+        "taxi-observations",
+        stats_repo::prune_taxi_observations(pool, legs_before).await,
     ));
 
     for (label, res) in passes {
@@ -376,6 +417,86 @@ async fn capture_scheduler_once(pool: &PgPool) -> Result<String, String> {
         "no changes".to_string()
     } else {
         format!("{opened} opened, {saved} saved")
+    })
+}
+
+/// How often to check for ACE claims crossing a reminder threshold.
+const ACE_REMINDER_INTERVAL: Duration = Duration::from_secs(15 * 60);
+
+/// Reminder tiers as `(hours_after, hours_before, job_type)` — each tier's own window (see
+/// `claims_due_for_reminder`'s doc comment for why the lower bound matters), and the outbound-job
+/// type used both to dispatch and to de-duplicate each (via `not exists` against
+/// `integration.outbound_jobs`).
+const ACE_REMINDER_TIERS: &[(i64, i64, &str)] = &[
+    (6, 24, "ace_claim_reminder_24h"),
+    (0, 6, "ace_claim_reminder_6h"),
+];
+
+/// DM ACE claimers a reminder at T-24h and T-6h before their event starts. Idempotent by
+/// construction: each tick re-queries live state (crossed the threshold, event still upcoming, not
+/// already reminded), so a released claim or a cancelled request simply stops matching — no
+/// separate "cancel the scheduled reminder" step is needed. Runs every 15 minutes.
+pub fn spawn_ace_reminder_scheduler(reg: Arc<JobRegistry>, pool: PgPool) {
+    tokio::spawn(run_interval(
+        reg,
+        "ace_reminder_scheduler",
+        "DM ACE claimers a reminder at T-24h/T-6h before their event",
+        ACE_REMINDER_INTERVAL,
+        move || {
+            let pool = pool.clone();
+            async move { ace_reminder_scheduler_once(&pool).await }
+        },
+    ));
+}
+
+async fn ace_reminder_scheduler_once(pool: &PgPool) -> Result<String, String> {
+    let mut sent = 0u32;
+    let mut tier_failed = false;
+    // Each tier is queried and enqueued independently — a transient failure on one tier's query
+    // must not skip the other tier's check for this cycle (they're unrelated thresholds), so errors
+    // are logged and accumulated rather than propagated with `?`, which would abort the whole loop
+    // on the first failure.
+    for &(hours_after, hours_before, job_type) in ACE_REMINDER_TIERS {
+        let due = match ace_repo::claims_due_for_reminder(pool, hours_after, hours_before, job_type)
+            .await
+        {
+            Ok(due) => due,
+            Err(e) => {
+                tracing::warn!(job_type, error = ?e, "ace reminder query failed");
+                tier_failed = true;
+                continue;
+            }
+        };
+        for r in due {
+            let payload = json!({
+                "discord_user_id": r.discord_user_id,
+                "event_title": r.event_title,
+                "position": r.position,
+                "reminder": format!("{hours_before}h"),
+            });
+            match ace_repo::enqueue_reminder_job(pool, job_type, &r.claim_id, &payload).await {
+                Ok(inserted) => {
+                    if inserted {
+                        sent += 1;
+                    }
+                }
+                Err(_) => {
+                    tracing::warn!(claim = %r.claim_id, job_type, "ace reminder enqueue failed")
+                }
+            }
+        }
+    }
+    // Unconditional on `tier_failed`: a persistently-failing tier must always surface to the
+    // JobRegistry as a failure, even in a cycle where the *other* tier had genuine hits — masking
+    // it behind `sent == 0` would hide an ongoing problem for as long as the healthy tier keeps
+    // producing reminders.
+    if tier_failed {
+        return Err("one or more ace reminder tiers failed to query".to_string());
+    }
+    Ok(if sent == 0 {
+        "no changes".to_string()
+    } else {
+        format!("{sent} reminder(s) enqueued")
     })
 }
 

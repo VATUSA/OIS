@@ -12,6 +12,8 @@ pub mod realtime;
 pub mod repos;
 pub mod reqlog;
 pub mod router;
+#[cfg(test)]
+pub(crate) mod scope_test_support;
 pub mod state;
 pub mod tmi;
 
@@ -56,16 +58,27 @@ pub async fn run() -> color_eyre::Result<()> {
             pool.clone(),
             state.aircraft_profiles.clone(),
         );
+        // Airport surface gates, for feed::taxi_observations's gate matching (kept DB-less).
+        jobs::spawn_airport_gates_refresh(state.jobs.clone(), pool.clone(), state.gates.clone());
         feed::events::spawn_sync(pool.clone());
         // Persistent stats collection off the shared feed snapshot + its retention compaction.
         feed::stats::spawn_collector(pool.clone(), state.feed.clone(), state.airspace.clone());
         // Per-flight delay legs (taxi-out + arrival transit) for the average-delay page.
         feed::delays::spawn_collector(pool.clone(), state.feed.clone(), state.runways.clone());
+        // Per-gate/type/runway pushback+taxi-out observations (#164 sub-issue C).
+        feed::taxi_observations::spawn_collector(
+            pool.clone(),
+            state.feed.clone(),
+            state.runways.clone(),
+            state.gates.clone(),
+        );
         jobs::spawn_stats_compaction(state.jobs.clone(), pool.clone());
         jobs::spawn_capture_scheduler(state.jobs.clone(), pool.clone());
         // Event FCAs + TMI packages: auto-publish 30 min before start, auto-archive at end.
         jobs::spawn_event_fca_lifecycle(state.jobs.clone(), pool.clone(), state.events.clone());
         jobs::spawn_event_package_lifecycle(state.jobs.clone(), pool.clone(), state.events.clone());
+        // ACE-claim reminder DMs at T-24h/T-6h before the event.
+        jobs::spawn_ace_reminder_scheduler(state.jobs.clone(), pool.clone());
         // VATUSA member sync: register the roster-change webhook and periodically reconcile.
         feed::vatusa::spawn_register_webhooks(pool.clone());
         feed::vatusa::spawn_reconcile(pool);

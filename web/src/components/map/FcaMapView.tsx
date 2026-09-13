@@ -331,7 +331,22 @@ export function FcaMapView({
   const [selectedRouteId, setSelectedRouteId] = useState<string | null>(null);
   const [labeledRoutes, setLabeledRoutes] = useState<Set<string>>(new Set());
   // Display-only, per-viewer route visibility (see #108) — never touches the saved route data.
-  const [hiddenRoutes, setHiddenRoutes] = useState<Set<string>>(new Set());
+  const [hiddenRoutes, setHiddenRoutes] = useState<Set<string>>(() => {
+    try {
+      const raw = localStorage.getItem("fca.hiddenRoutes");
+      const v: unknown = raw ? JSON.parse(raw) : [];
+      return new Set(Array.isArray(v) && v.every((x) => typeof x === "string") ? v : []);
+    } catch {
+      return new Set();
+    }
+  });
+  useEffect(() => {
+    try {
+      localStorage.setItem("fca.hiddenRoutes", JSON.stringify([...hiddenRoutes]));
+    } catch {
+      /* non-fatal */
+    }
+  }, [hiddenRoutes]);
   const [routeCallsign, setRouteCallsign] = useState<string | null>(null);
   const [mobileList, setMobileList] = useState(false);
   const [filter, setFilter] = useState("");
@@ -638,6 +653,13 @@ export function FcaMapView({
     [aircraftRoute.data],
   );
 
+  // Memoized so the named-routes map layers only rebuild (re-tessellate/re-upload) when the route
+  // set or hidden-set actually changes, not on every unrelated FcaMapView re-render.
+  const visibleRoutes = useMemo(
+    () => (routes.data as NamedRoute[] | undefined)?.filter((r) => !hiddenRoutes.has(r.id)),
+    [routes.data, hiddenRoutes],
+  );
+
   // Custom order applies over the FULL live FCA set, never the filtered view — a drag performed
   // while `filter`/`artccFilter` narrows the list must not discard position info for FCAs
   // currently hidden by that filter (see #109 QA: feeding this the filtered list let a filtered
@@ -940,7 +962,7 @@ export function FcaMapView({
         matched={!overview && selectedFca ? (fcaTraffic.data as MatchedFlight[] | undefined) : undefined}
         matchedColor={overview ? undefined : selectedFca?.color}
         matchedGroups={overview ? matchedGroups : undefined}
-        namedRoutes={(routes.data as NamedRoute[] | undefined)?.filter((r) => !hiddenRoutes.has(r.id))}
+        namedRoutes={visibleRoutes}
         selectedRouteId={selectedRouteId}
         labeledRouteIds={labeledRoutes}
         filedRoute={filedRoute}

@@ -1,12 +1,16 @@
 # ACE support requests
 
-> **Status: v1 built (2026-08-22).** The `ace.requests` + `ace.team_members` tables (migration 0047),
-> the six `ace.*` permissions with USER/ACE role grants, the request lifecycle
-> (`open → claimed → completed/cancelled`, state-guarded in-transaction), the roster endpoints, and
-> the national ACE page at `/ops/ace` are implemented. **Deferred (needs the unbuilt Discord bot):**
-> the `#aceteam-requests` embed + CLAIM button, the `ace_request_notify` EC ping, and the Discord
-> slash-command — the `discord_message_id` column is reserved for them. Also deferred: ARTCC-scoped
-> claim/decide and booking/scheduling. The sections below are the original spec.
+> **Status: v1 built (2026-08-22), Discord side built since.** The `ace.requests` +
+> `ace.team_members` tables (migration 0047), the six `ace.*` permissions with USER/ACE role
+> grants, the request lifecycle (`open → claimed → completed/cancelled`, state-guarded
+> in-transaction), the roster endpoints, and the national ACE page at `/ops/ace` are implemented.
+> The Discord side (once deferred pending the bot) is built too: the `#aceteam-requests` embed +
+> **claim** button (with a modal time-picker for the claimer's covered window), the
+> `ace_request_notify` EC DM/ping on claim, and T-24h/T-6h claim reminder DMs — see
+> [discord-integration.md](discord-integration.md). No Discord slash-command exists (interactions
+> are all button/modal, not commands). Still deferred: ARTCC-scoped claim/decide and
+> booking/scheduling. The sections below are the original spec; the [Discord](#discord) section
+> below is kept current with what's actually built.
 
 ## Problem
 
@@ -143,17 +147,24 @@ Button clicks call back into the API as a service account. The bot owns no data.
 
 | outbound `job_type` | enqueued when                          | payload (key fields)                                           | bot action                                                                 |
 | ------------------- | -------------------------------------- | ------------------------------------------------------------- | -------------------------------------------------------------------------- |
-| `ace_request_post`  | request created (`status='open'`)      | `request_id`, `requested_by`, `artcc_id`, `position`, `details` | post embed to `#aceteam-requests` with a **CLAIM** button; on ack, store returned `discord_message_id` back on the request |
+| `ace_request_post`  | request created (`status='open'`)      | `request_id`, `requested_by`, `artcc_id`, `position`, `details` | post embed to `#aceteam-requests` with a **claim** button; on ack, store returned `discord_message_id` back on the request |
 | `ace_request_notify`| request claimed                        | `request_id`, `claimed_by`, `artcc_id`, `discord_message_id`  | ping/DM the requesting ARTCC's **EC**; **edit the original embed** to show the claimer and disable the button |
+| `ace_claim_dm`      | a claim links to a Discord account     | `discord_user_id`, `event_title`, `position`, `documents`      | DM the claimer a summary of what they signed up for + facility documents |
+| `ace_claim_reminder_24h` / `ace_claim_reminder_6h` | the periodic reminder scheduler finds a claim due in that window (`backend/src/jobs.rs`) | `discord_user_id`, `event_title`, `position`, `reminder` (e.g. `"24h"`) | DM the claimer a reminder; each tier is deduped so a claim is only ever reminded once per tier |
 
 Flow:
 
 1. `POST /ace/requests` → row `open` + enqueue `ace_request_post`.
 2. Bot posts embed with claim button; acks with the Discord message id → persisted on `ace.requests.discord_message_id`.
-3. User clicks **CLAIM** in Discord → bot calls `POST /ace/requests/{id}/claim` as the service account on behalf of the
-   linked user (same endpoint the site button uses).
-4. Handler flips `open → claimed` and enqueues `ace_request_notify`.
-5. Bot notifies the EC and edits the embed in place.
+3. User clicks **claim** in Discord → the bot opens an ephemeral time-picker (start/end select menus, then a confirm
+   button that pops a notes modal); submitting calls `POST /ace/requests/{id}/claim` as the service account on behalf
+   of the linked user (same endpoint the site button uses), carrying the picked times + notes.
+4. Handler flips `open → claimed` and enqueues `ace_request_notify` plus, if the claimer has a linked Discord account,
+   `ace_claim_dm`.
+5. Bot notifies the EC, edits the embed in place, and DMs the claimer their claim summary.
+6. A periodic backend scheduler (`spawn_ace_reminder_scheduler`, every 15 minutes) later enqueues
+   `ace_claim_reminder_24h`/`_6h` DMs as each claim's event start time approaches (T-24h and T-6h),
+   deduped per tier via a unique index so a rolling deploy can't double-send.
 
 The EC targeted by `ace_request_notify` is resolved from the request's `artcc_id` (facility-scoped `EC` role
 holders for that ARTCC). Channel/role mapping lives in the `integration` config tables (edited via

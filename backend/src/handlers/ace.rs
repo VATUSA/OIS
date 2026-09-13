@@ -18,6 +18,7 @@ use crate::{
         require_permission::RequirePermission,
     },
     errors::ApiError,
+    handlers::events::normalize_facility,
     models::{
         AceRequestBody, ClaimAceRequest, CreateAceRequestRequest, DecideAceRequestRequest,
         EventBody,
@@ -133,9 +134,27 @@ pub(crate) async fn enqueue_notify(
                     .and_then(|v| v.as_str())
                     .map(str::to_owned)
             });
+    // The request's static fields (unchanged by claiming) let the bot re-render the whole embed; read
+    // them from the committed row + the event. Fetched before the channel lookup so its ARTCC can
+    // scope which guild's channel wins a same-named collision (#194).
+    let request = ace_repo::get_request(p, request_id).await?;
+    let (artcc, position, details, event_title) = match request {
+        Some(r) => {
+            let title = events_repo::get(p, r.event_id)
+                .await?
+                .map(|e| e.title)
+                .unwrap_or_default();
+            (r.artcc_id, r.position, r.details, title)
+        }
+        None => (None, None, String::new(), String::new()),
+    };
+    // The stored artcc_id isn't guaranteed normalize_facility-clean (create_request only ever
+    // trim+uppercased it before facility-scoping was added) — normalize just the routing hint,
+    // not `artcc` itself, which the job payload below embeds verbatim for display.
+    let facility_hint = artcc.as_deref().and_then(normalize_facility);
     let (Some(message_id), Some(channel_id)) = (
         message_id,
-        integration_repo::channel_id(p, ACE_CHANNEL).await?,
+        integration_repo::channel_id(p, ACE_CHANNEL, facility_hint.as_deref()).await?,
     ) else {
         return Ok(());
     };
@@ -151,19 +170,6 @@ pub(crate) async fn enqueue_notify(
             })
         })
         .collect();
-    // The request's static fields (unchanged by claiming) let the bot re-render the whole embed; read
-    // them from the committed row + the event.
-    let request = ace_repo::get_request(p, request_id).await?;
-    let (artcc, position, details, event_title) = match request {
-        Some(r) => {
-            let title = events_repo::get(p, r.event_id)
-                .await?
-                .map(|e| e.title)
-                .unwrap_or_default();
-            (r.artcc_id, r.position, r.details, title)
-        }
-        None => (None, None, String::new(), String::new()),
-    };
     let job = json!({
         "channel_id": channel_id,
         "message_id": message_id,
@@ -283,7 +289,12 @@ pub async fn create_request(
     let artcc = clean(payload.artcc_id).map(|a| a.to_ascii_uppercase());
     let position = clean(payload.position);
 
-    let channel = integration_repo::channel_id(p, ACE_CHANNEL).await?;
+    // Storage keeps the trim+uppercase-only value (unchanged from before facility-scoping); the
+    // facility hint passed to channel_id goes through the same normalize_facility() validation
+    // used everywhere else a facility scopes Discord routing, since an unnormalized value could
+    // never match a stored (normalize_facility-validated) discord_config_facilities.artcc_id.
+    let facility_hint = artcc.as_deref().and_then(normalize_facility);
+    let channel = integration_repo::channel_id(p, ACE_CHANNEL, facility_hint.as_deref()).await?;
     let mut tx = p.begin().await.map_err(|_| ApiError::Internal)?;
     let id = create_one(
         &mut tx,
