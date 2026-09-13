@@ -77,7 +77,7 @@ fn angle_diff(a: f64, b: f64) -> f64 {
 }
 
 /// The runway end at `icao` whose heading is closest to `heading` (within tolerance), else None.
-fn nearest_runway(runways: &RunwayDb, icao: &str, heading: i64) -> Option<String> {
+pub(crate) fn nearest_runway(runways: &RunwayDb, icao: &str, heading: i64) -> Option<String> {
     let mut best: Option<(String, f64)> = None;
     for e in runways.ends_for(icao) {
         let d = angle_diff(heading as f64, e.hdg as f64);

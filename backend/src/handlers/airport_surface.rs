@@ -74,6 +74,14 @@ async fn require_edit(state: &AppState, principal: &Principal, icao: &str) -> Re
     }
 }
 
+/// Reload the DB gate catalog into `AppState::gates` so a write applies to `feed::taxi_observations`
+/// gate matching at once, instead of waiting for `jobs::spawn_airport_gates_refresh`'s next poll.
+async fn refresh_gates_cache(state: &AppState, pool: &sqlx::PgPool) -> Result<(), ApiError> {
+    let by_icao = surface_repo::load_all_gates(pool).await?;
+    state.gates.store(std::sync::Arc::new(by_icao));
+    Ok(())
+}
+
 #[utoipa::path(
     get, path = "/api/v1/airports/{icao}/surface", tag = "events",
     params(("icao" = String, Path)),
@@ -132,6 +140,7 @@ pub async fn create_airport_gate(
     require_edit(&state, &principal, &icao).await?;
 
     let mut row = surface_repo::create_gate(pool, &icao, &req, principal.user_id()).await?;
+    refresh_gates_cache(&state, pool).await?;
     row.editable = true;
     Ok(Json(row))
 }
@@ -158,6 +167,7 @@ pub async fn update_airport_gate(
     let mut row = surface_repo::update_gate(pool, &id, &icao, &req, principal.user_id())
         .await?
         .ok_or(ApiError::NotFound)?;
+    refresh_gates_cache(&state, pool).await?;
     row.editable = true;
     Ok(Json(row))
 }
@@ -180,6 +190,7 @@ pub async fn delete_airport_gate(
     require_edit(&state, &principal, &icao).await?;
 
     if surface_repo::delete_gate(pool, &id, &icao).await? {
+        refresh_gates_cache(&state, pool).await?;
         Ok(StatusCode::NO_CONTENT)
     } else {
         Err(ApiError::NotFound)
