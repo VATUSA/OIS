@@ -271,6 +271,23 @@ pub async fn prune_taxi_observations(
     Ok(res.rows_affected())
 }
 
+/// Every taxi observation for one airport — the sample set `feed::taxi_estimate::estimate` walks
+/// its fallback ladder over (#164 sub-issue D). No recency filter: the table is already pruned to
+/// `DELAY_LEG_RETAIN_DAYS` by `prune_taxi_observations` above, so every row is already in-window.
+pub async fn taxi_samples_for_airport(
+    pool: &PgPool,
+    airport: &str,
+) -> Result<Vec<crate::feed::taxi_estimate::TaxiSample>, ApiError> {
+    sqlx::query_as(
+        "select gate_id, aircraft, runway, pushback_sec, taxi_sec \
+         from stats.taxi_observation where airport = $1",
+    )
+    .bind(airport)
+    .fetch_all(pool)
+    .await
+    .map_err(db)
+}
+
 /// Aggregate expression shared by every delay grouping ($1..$5 = kind, since, airport, runway, proc).
 const DELAY_AGG: &str = "count(*)::bigint as n, \
     round(avg(duration_sec))::bigint as avg_sec, \
