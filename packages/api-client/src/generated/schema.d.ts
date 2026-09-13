@@ -276,6 +276,118 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/v1/airports/{icao}/gates": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        post: operations["create_airport_gate"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/airports/{icao}/gates/{id}": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put: operations["update_airport_gate"];
+        post?: never;
+        delete: operations["delete_airport_gate"];
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/airports/{icao}/ramp-areas": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        post: operations["create_airport_ramp_area"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/airports/{icao}/ramp-areas/{id}": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put: operations["update_airport_ramp_area"];
+        post?: never;
+        delete: operations["delete_airport_ramp_area"];
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/airports/{icao}/surface": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get: operations["get_airport_surface"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/airports/{icao}/taxiways": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        post: operations["create_airport_taxiway"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/airports/{icao}/taxiways/{id}": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put: operations["update_airport_taxiway"];
+        post?: never;
+        delete: operations["delete_airport_taxiway"];
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/v1/api-keys": {
         parameters: {
             query?: never;
@@ -2804,6 +2916,42 @@ export interface components {
             /** Format: int32 */
             wind_kt: number;
         };
+        /**
+         * @description An airport surface point (a gate or parking position). Runways are not modeled here — they're
+         *     already covered by the bundled OurAirports data in `feed::runway_db`.
+         */
+        AirportGateBody: {
+            /** @description Whether the requesting user may edit this airport's surface data (per their ARTCC scope). */
+            editable: boolean;
+            icao: string;
+            id: string;
+            /** Format: double */
+            lat: number;
+            /** Format: double */
+            lon: number;
+            name: string;
+            /** @description `manual` | `osm` | `crc`. */
+            source: string;
+            /** Format: date-time */
+            updated_at: string;
+        };
+        /**
+         * @description An airport ramp or apron area. `rings` is an array of rings, each an array of `[lat, lon]` —
+         *     the outer boundary only (holes aren't modeled).
+         */
+        AirportRampAreaBody: {
+            editable: boolean;
+            icao: string;
+            id: string;
+            /** @description `ramp` | `apron`. */
+            kind: string;
+            name: string;
+            rings: number[][][];
+            /** @description `manual` | `osm` | `crc`. */
+            source: string;
+            /** Format: date-time */
+            updated_at: string;
+        };
         /** @description A planned per-airport arrival/departure rate for an event. */
         AirportRateBody: {
             /**
@@ -2848,6 +2996,24 @@ export interface components {
              * @description Distinct pilots (CIDs) that arrived at or departed from this airport.
              */
             unique_pilots: number;
+        };
+        /** @description An airport's full surface geometry, combined for one read. */
+        AirportSurfaceBody: {
+            gates: components["schemas"]["AirportGateBody"][];
+            ramp_areas: components["schemas"]["AirportRampAreaBody"][];
+            taxiways: components["schemas"]["AirportTaxiwayBody"][];
+        };
+        /** @description An airport taxiway centerline. `points` is an ordered array of `[lat, lon]`. */
+        AirportTaxiwayBody: {
+            editable: boolean;
+            icao: string;
+            id: string;
+            name: string;
+            points: number[][];
+            /** @description `manual` | `osm` | `crc`. */
+            source: string;
+            /** Format: date-time */
+            updated_at: string;
         };
         /**
          * @description A key as listed (never the secret). `permissions` is the granted subset; effective authority at
@@ -5017,6 +5183,18 @@ export interface components {
             /** Format: int32 */
             wind_to_deg: number;
         };
+        UpsertAirportGateRequest: {
+            /** Format: double */
+            lat: number;
+            /** Format: double */
+            lon: number;
+            name: string;
+        };
+        UpsertAirportRampAreaRequest: {
+            kind: string;
+            name: string;
+            rings: number[][][];
+        };
         UpsertAirportRateRequest: {
             /** Format: int32 */
             aar: number;
@@ -5026,6 +5204,10 @@ export interface components {
             config_id?: string | null;
             /** @description `predicted` or `override`; defaults to `override` when omitted. */
             source?: string | null;
+        };
+        UpsertAirportTaxiwayRequest: {
+            name: string;
+            points: number[][];
         };
         UpsertDiscordConfigRequest: {
             guilds: components["schemas"]["DiscordGuildConfigInput"][];
@@ -5823,6 +6005,426 @@ export interface operations {
         };
     };
     delete_airport_config: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                icao: string;
+                id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            204: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+        };
+    };
+    create_airport_gate: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                icao: string;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["UpsertAirportGateRequest"];
+            };
+        };
+        responses: {
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["AirportGateBody"];
+                };
+            };
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+        };
+    };
+    update_airport_gate: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                icao: string;
+                id: string;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["UpsertAirportGateRequest"];
+            };
+        };
+        responses: {
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["AirportGateBody"];
+                };
+            };
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+        };
+    };
+    delete_airport_gate: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                icao: string;
+                id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            204: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+        };
+    };
+    create_airport_ramp_area: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                icao: string;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["UpsertAirportRampAreaRequest"];
+            };
+        };
+        responses: {
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["AirportRampAreaBody"];
+                };
+            };
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+        };
+    };
+    update_airport_ramp_area: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                icao: string;
+                id: string;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["UpsertAirportRampAreaRequest"];
+            };
+        };
+        responses: {
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["AirportRampAreaBody"];
+                };
+            };
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+        };
+    };
+    delete_airport_ramp_area: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                icao: string;
+                id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            204: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+        };
+    };
+    get_airport_surface: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                icao: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["AirportSurfaceBody"];
+                };
+            };
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+        };
+    };
+    create_airport_taxiway: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                icao: string;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["UpsertAirportTaxiwayRequest"];
+            };
+        };
+        responses: {
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["AirportTaxiwayBody"];
+                };
+            };
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+        };
+    };
+    update_airport_taxiway: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                icao: string;
+                id: string;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["UpsertAirportTaxiwayRequest"];
+            };
+        };
+        responses: {
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["AirportTaxiwayBody"];
+                };
+            };
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+        };
+    };
+    delete_airport_taxiway: {
         parameters: {
             query?: never;
             header?: never;
