@@ -27,6 +27,7 @@ import {EventPlanningPage} from "@/pages/planning/event";
 import {EventFcaBuilderPage} from "@/pages/planning/event-fcas";
 import {AircraftProfilesPage} from "@/pages/planning/aircraft-profiles";
 import {AirportConfigsPage} from "@/pages/planning/airport-configs";
+import {AirportSurfacePage} from "@/pages/planning/airport-surface";
 import {FacilityDocumentsPage} from "@/pages/planning/facility-documents";
 import {StatsPage} from "@/pages/stats";
 import {DelaysPage} from "@/pages/stats/delays";
@@ -338,6 +339,12 @@ const planningFacilityDocumentsRoute = createRoute({
   component: FacilityDocumentsPage,
 });
 
+const planningAirportSurfaceRoute = createRoute({
+  getParentRoute: () => planningRoute,
+  path: "airport-surface",
+  component: AirportSurfacePage,
+});
+
 const planningAircraftProfilesRoute = createRoute({
   getParentRoute: () => planningRoute,
   path: "aircraft-profiles",
@@ -514,6 +521,7 @@ const routeTree = rootRoute.addChildren([
     planningEventsRoute,
     planningAirportConfigsRoute,
     planningFacilityDocumentsRoute,
+    planningAirportSurfaceRoute,
     planningAircraftProfilesRoute,
     planningEventRoute,
     planningEventFcasRoute,

@@ -277,8 +277,10 @@ function buildDefinition(
     : (v: ChartValue) => fmtNumber(Number(v));
   return defineChart({
     marks: [...seriesMarks, ...thresholdMarks],
-    x: { scale: xScale, axis: { label: xLabel } },
-    y: { scale: scaleLinear, axis: { label: yLabel, ticks: { format: yFormat } } },
+    scales: {
+      x: { scale: xScale, axis: { label: xLabel } },
+      y: { scale: scaleLinear, axis: { label: yLabel, ticks: { format: yFormat } } },
+    },
     tooltip,
   });
 }

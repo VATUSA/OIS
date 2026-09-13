@@ -6,8 +6,24 @@ use serenity::all::{CreateMessage, Http, UserId};
 use crate::util::str_field;
 
 /// The DM body: a claim confirmation, plus either the facility's configured documents or a note
-/// that none exist yet.
-fn build_dm_content(event_title: &str, position: Option<&str>, documents: &[Value]) -> String {
+/// that none exist yet. A reminder (`reminder: Some("24h" | "6h")`) is a short line only — the
+/// documents were already sent in the original confirmation, no need to re-list them.
+fn build_dm_content(
+    event_title: &str,
+    position: Option<&str>,
+    documents: &[Value],
+    reminder: Option<&str>,
+) -> String {
+    if let Some(when) = reminder {
+        return match position {
+            Some(p) if !p.is_empty() => {
+                format!(
+                    "⏰ Reminder: you're confirmed to work **{p}** at **{event_title}** in about {when}."
+                )
+            }
+            _ => format!("⏰ Reminder: you're confirmed for **{event_title}** in about {when}."),
+        };
+    }
     let confirmation = match position {
         Some(p) if !p.is_empty() => {
             format!("✅ You're confirmed to work **{p}** at **{event_title}**.")
@@ -41,8 +57,9 @@ pub(crate) async fn send_claim_dm(http: &Arc<Http>, p: &Value) -> Result<Option<
         .and_then(Value::as_array)
         .cloned()
         .unwrap_or_default();
+    let reminder = str_field(p, "reminder");
 
-    let content = build_dm_content(event_title, position, &documents);
+    let content = build_dm_content(event_title, position, &documents, reminder);
     UserId::new(discord_user_id)
         .dm(http, CreateMessage::new().content(content))
         .await
@@ -61,7 +78,7 @@ mod tests {
             json!({"title": "ZDC SOP", "url": "https://example.com/sop"}),
             json!({"title": "ZDC LOA", "url": "https://example.com/loa"}),
         ];
-        let out = build_dm_content("Fall Fly-In", Some("DCA_APP"), &docs);
+        let out = build_dm_content("Fall Fly-In", Some("DCA_APP"), &docs, None);
         assert_eq!(
             out,
             "✅ You're confirmed to work **DCA_APP** at **Fall Fly-In**.\n\n\
@@ -73,7 +90,7 @@ mod tests {
 
     #[test]
     fn build_dm_content_notes_no_documents() {
-        let out = build_dm_content("Fall Fly-In", Some("DCA_APP"), &[]);
+        let out = build_dm_content("Fall Fly-In", Some("DCA_APP"), &[], None);
         assert_eq!(
             out,
             "✅ You're confirmed to work **DCA_APP** at **Fall Fly-In**.\n\n\
@@ -83,11 +100,30 @@ mod tests {
 
     #[test]
     fn build_dm_content_without_a_position() {
-        let out = build_dm_content("Fall Fly-In", None, &[]);
+        let out = build_dm_content("Fall Fly-In", None, &[], None);
         assert_eq!(
             out,
             "✅ You're confirmed for **Fall Fly-In**.\n\n\
              No documents configured for this facility yet."
+        );
+    }
+
+    #[test]
+    fn build_dm_content_reminder_is_short_and_skips_documents() {
+        let docs = vec![json!({"title": "ZDC SOP", "url": "https://example.com/sop"})];
+        let out = build_dm_content("Fall Fly-In", Some("DCA_APP"), &docs, Some("24h"));
+        assert_eq!(
+            out,
+            "⏰ Reminder: you're confirmed to work **DCA_APP** at **Fall Fly-In** in about 24h."
+        );
+    }
+
+    #[test]
+    fn build_dm_content_reminder_without_a_position() {
+        let out = build_dm_content("Fall Fly-In", None, &[], Some("6h"));
+        assert_eq!(
+            out,
+            "⏰ Reminder: you're confirmed for **Fall Fly-In** in about 6h."
         );
     }
 }
