@@ -380,4 +380,60 @@ mod tests {
         let annotated = annotate_and_filter(rows, &facilities, &no_scope, None);
         assert!(annotated.iter().all(|r| !r.editable));
     }
+
+    // --- ARTCC-scope authorization boundary (#198) ---
+    //
+    // The test above (`annotate_and_filter`) exercises a *different*, list-only filtering
+    // function against a plain `PermissionScope` value — it never calls `can_edit`, the real,
+    // DB-backed gate every write handler in this file calls. These tests close that gap.
+
+    use crate::scope_test_support::{self, artcc, grant, principal_for, test_state};
+
+    #[sqlx::test]
+    async fn national_scope_can_edit_any_artccs_airport(pool: PgPool) {
+        let user = scope_test_support::seed_user(&pool).await;
+        grant(&pool, &user, "events.config.update", None).await;
+        let principal = principal_for(&user);
+        let state = test_state(
+            pool,
+            std::collections::HashMap::from([("ZDC".to_string(), artcc(&["KDCA"]))]),
+        );
+        assert!(can_edit(&state, &principal, "KDCA").await.unwrap());
+    }
+
+    #[sqlx::test]
+    async fn matching_artcc_scope_can_edit_its_own_airport(pool: PgPool) {
+        let user = scope_test_support::seed_user(&pool).await;
+        grant(&pool, &user, "events.config.update", Some("ZDC")).await;
+        let principal = principal_for(&user);
+        let state = test_state(
+            pool,
+            std::collections::HashMap::from([("ZDC".to_string(), artcc(&["KDCA"]))]),
+        );
+        assert!(can_edit(&state, &principal, "KDCA").await.unwrap());
+    }
+
+    #[sqlx::test]
+    async fn wrong_artcc_scope_is_rejected(pool: PgPool) {
+        let user = scope_test_support::seed_user(&pool).await;
+        // Granted for ZAU, but KDCA is owned by ZDC.
+        grant(&pool, &user, "events.config.update", Some("ZAU")).await;
+        let principal = principal_for(&user);
+        let state = test_state(
+            pool,
+            std::collections::HashMap::from([("ZDC".to_string(), artcc(&["KDCA"]))]),
+        );
+        assert!(!can_edit(&state, &principal, "KDCA").await.unwrap());
+    }
+
+    #[sqlx::test]
+    async fn no_grant_at_all_is_rejected(pool: PgPool) {
+        let user = scope_test_support::seed_user(&pool).await;
+        let principal = principal_for(&user);
+        let state = test_state(
+            pool,
+            std::collections::HashMap::from([("ZDC".to_string(), artcc(&["KDCA"]))]),
+        );
+        assert!(!can_edit(&state, &principal, "KDCA").await.unwrap());
+    }
 }

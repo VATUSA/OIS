@@ -128,3 +128,57 @@ pub async fn put_config(
         editable: true,
     }))
 }
+
+#[cfg(test)]
+mod tests {
+    use sqlx::PgPool;
+
+    use super::*;
+    use crate::scope_test_support::{self, grant, principal_for, test_state};
+
+    // --- ARTCC-scope authorization boundary (#198) ---
+    //
+    // This file had no tests at all — `can_edit` (used both for the read-side `editable` flag and,
+    // duplicated inline, for `put_config`'s write gate) had zero coverage.
+
+    #[sqlx::test]
+    async fn national_scope_can_edit_any_facility(pool: PgPool) {
+        let user = scope_test_support::seed_user(&pool).await;
+        grant(&pool, &user, "flow.facility_map.update", None).await;
+        let principal = principal_for(&user);
+        let state = test_state(pool, std::collections::HashMap::new());
+        assert!(can_edit(&state, Some(&principal), "ZDC").await.unwrap());
+    }
+
+    #[sqlx::test]
+    async fn matching_facility_scope_can_edit_its_own_facility(pool: PgPool) {
+        let user = scope_test_support::seed_user(&pool).await;
+        grant(&pool, &user, "flow.facility_map.update", Some("ZDC")).await;
+        let principal = principal_for(&user);
+        let state = test_state(pool, std::collections::HashMap::new());
+        assert!(can_edit(&state, Some(&principal), "ZDC").await.unwrap());
+    }
+
+    #[sqlx::test]
+    async fn wrong_facility_scope_is_rejected(pool: PgPool) {
+        let user = scope_test_support::seed_user(&pool).await;
+        grant(&pool, &user, "flow.facility_map.update", Some("ZAU")).await;
+        let principal = principal_for(&user);
+        let state = test_state(pool, std::collections::HashMap::new());
+        assert!(!can_edit(&state, Some(&principal), "ZDC").await.unwrap());
+    }
+
+    #[sqlx::test]
+    async fn no_grant_at_all_is_rejected(pool: PgPool) {
+        let user = scope_test_support::seed_user(&pool).await;
+        let principal = principal_for(&user);
+        let state = test_state(pool, std::collections::HashMap::new());
+        assert!(!can_edit(&state, Some(&principal), "ZDC").await.unwrap());
+    }
+
+    #[sqlx::test]
+    async fn no_principal_at_all_is_rejected(pool: PgPool) {
+        let state = test_state(pool, std::collections::HashMap::new());
+        assert!(!can_edit(&state, None, "ZDC").await.unwrap());
+    }
+}
