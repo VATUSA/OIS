@@ -9,11 +9,15 @@
 //! observations feed a later per-gate/type/runway estimator (#164 sub-issue D).
 //!
 //! `process()` stays pure and DB-free (like `delays::process`) so it's directly unit-testable;
-//! gate resolution (which needs a DB read) happens in `spawn_collector`'s async wrapper.
+//! gate resolution reads `AppState::gates` (kept current by `jobs::spawn_airport_gates_refresh`
+//! and force-reloaded on write by `handlers::airport_surface`) — the feed subsystem itself never
+//! queries the DB inline, matching the rest of `feed/*`.
 
 use std::collections::HashMap;
+use std::sync::Arc;
 use std::time::Duration;
 
+use arc_swap::ArcSwap;
 use chrono::{DateTime, Utc};
 use sqlx::PgPool;
 
@@ -24,7 +28,6 @@ use super::flow::gc_dist;
 use super::runway_db::RunwayDb;
 use super::vatsim::VatsimData;
 use crate::models::AirportGateBody;
-use crate::repos::airport_surface;
 use crate::repos::stats::{self as repo, TaxiObservationRow};
 
 // Matches feed/taxi.rs / feed/delays.rs's own departure-taxi boundary.
@@ -104,6 +107,7 @@ fn process(
         let gs = p.groundspeed;
         let alt = p.altitude;
         let dep = fp.departure.to_ascii_uppercase();
+        let arr = fp.arrival.to_ascii_uppercase();
         if dep.is_empty() {
             continue;
         }
@@ -117,8 +121,15 @@ fn process(
             }
             if s.phase == Phase::Rolling
                 && (gs > GS_STOP || alt >= s.base_alt + ALT_CLIMB_FT)
-                && let Some(start_ms) = s.start_ms
+                && let Some(start) = s.start_ms
             {
+                // A very short observed roll means we caught it mid-taxi; fall back to
+                // first-seen, matching feed/delays.rs's departure half.
+                let start_ms = if now_ms - start < 3_000 && s.first_seen_ms < start {
+                    s.first_seen_ms
+                } else {
+                    start
+                };
                 let dur = (now_ms - start_ms) / 1000;
                 if (MIN_TAXI_SEC..=MAX_TAXI_SEC).contains(&dur) {
                     let pushback_sec = (start_ms > s.first_seen_ms)
@@ -138,7 +149,16 @@ fn process(
                 done.push(p.callsign.clone());
             }
         } else if let Some(&(dlat, dlon)) = airports.get(&dep) {
-            if gc_dist(p.latitude, p.longitude, dlat, dlon) <= DEP_PROX_NM
+            // Exclude pattern work / touch-and-goes / short dep-arr hops: sitting at the field at
+            // low speed while also near this same flight plan's arrival airport means we're
+            // watching an arrival taxi-in (or a circuit), not a genuine pushback — matching
+            // feed/delays.rs's departure half.
+            let arriving_turnaround = gs <= GS_STOP
+                && airports.get(&arr).is_some_and(|&(alat, alon)| {
+                    gc_dist(p.latitude, p.longitude, alat, alon) < 5.0
+                });
+            if !arriving_turnaround
+                && gc_dist(p.latitude, p.longitude, dlat, dlon) <= DEP_PROX_NM
                 && !(gs > GS_STOP && alt > 500)
             {
                 // If we're already past the roll threshold the very first time we see this
@@ -178,12 +198,18 @@ fn process(
 }
 
 /// Spawn the taxi-observation collector (DB-gated). Reuses OIS's shared feed snapshot, exactly
-/// like `feed::delays::spawn_collector`; dedupes on the snapshot's source timestamp.
-pub fn spawn_collector(pool: PgPool, feed: FeedState, runways: std::sync::Arc<RunwayDb>) {
+/// like `feed::delays::spawn_collector`; dedupes on the snapshot's source timestamp. Gate matching
+/// reads `gates` (kept current by `jobs::spawn_airport_gates_refresh`) — no DB read in the loop.
+pub fn spawn_collector(
+    pool: PgPool,
+    feed: FeedState,
+    runways: Arc<RunwayDb>,
+    gates: Arc<ArcSwap<HashMap<String, Vec<AirportGateBody>>>>,
+) {
     tokio::spawn(async move {
         let mut state = TaxiObsState::default();
         let mut last_source = String::new();
-        let mut gate_cache: HashMap<String, Vec<AirportGateBody>> = HashMap::new();
+        let empty_gates: Vec<AirportGateBody> = Vec::new();
         let mut ticker = tokio::time::interval(Duration::from_secs(COLLECT_SECS));
         loop {
             ticker.tick().await;
@@ -206,28 +232,13 @@ pub fn spawn_collector(pool: PgPool, feed: FeedState, runways: std::sync::Arc<Ru
                 continue;
             }
 
-            gate_cache.clear();
+            let by_icao = gates.load();
             let mut rows = Vec::with_capacity(raw.len());
             for r in raw {
-                let gates = match gate_cache.get(&r.airport) {
-                    Some(g) => g,
-                    None => {
-                        let g = airport_surface::list_gates(&pool, &r.airport)
-                            .await
-                            .unwrap_or_else(|e| {
-                                tracing::warn!(
-                                    error = ?e,
-                                    airport = %r.airport,
-                                    "taxi_observations: gate lookup failed, recording without a gate match"
-                                );
-                                Vec::new()
-                            });
-                        gate_cache.entry(r.airport.clone()).or_insert(g)
-                    }
-                };
+                let gates_here = by_icao.get(&r.airport).unwrap_or(&empty_gates);
                 rows.push(TaxiObservationRow {
                     airport: r.airport,
-                    gate_id: nearest_gate(gates, r.lat, r.lon),
+                    gate_id: nearest_gate(gates_here, r.lat, r.lon),
                     aircraft: r.aircraft,
                     runway: r.runway,
                     pushback_sec: r.pushback_sec,
@@ -276,6 +287,35 @@ mod tests {
         HashMap::from([("KAAA".to_string(), (40.0, -74.0))])
     }
 
+    /// KAAA and KBBB co-located, for the arriving-turnaround test below.
+    fn airports_with_arrival() -> AirportDb {
+        HashMap::from([
+            ("KAAA".to_string(), (40.0, -74.0)),
+            ("KBBB".to_string(), (40.0, -74.0)),
+        ])
+    }
+
+    fn one_with_arrival(lat: f64, gs: i64, alt: i64, dep: &str, arr: &str) -> VatsimData {
+        VatsimData {
+            pilots: vec![Pilot {
+                callsign: "AAL1".into(),
+                latitude: lat,
+                longitude: -74.0,
+                altitude: alt,
+                groundspeed: gs,
+                heading: 0,
+                flight_plan: Some(FlightPlan {
+                    departure: dep.into(),
+                    arrival: arr.into(),
+                    aircraft_short: "B738".into(),
+                    ..Default::default()
+                }),
+                ..Default::default()
+            }],
+            ..Default::default()
+        }
+    }
+
     #[test]
     fn records_pushback_and_taxi_out() {
         let (ap, rw) = (airports(), RunwayDb::default());
@@ -305,6 +345,38 @@ mod tests {
         assert_eq!(obs.len(), 1);
         assert_eq!(obs[0].pushback_sec, None);
         assert_eq!(obs[0].taxi_sec, 60);
+    }
+
+    #[test]
+    fn very_short_roll_in_one_tick_falls_back_to_first_seen_instead_of_dropping() {
+        let (ap, rw) = (airports(), RunwayDb::default());
+        let mut st = TaxiObsState::default();
+        // Parked at t=0; by t=50 groundspeed has already jumped past both the roll and stop
+        // thresholds between two polls (a fast-accelerating GA departure). Without the
+        // first-seen fallback this reads as a zero-second roll (start_ms == now_ms) and is
+        // silently dropped instead of recovered.
+        process(&mut st, &ap, &rw, &one(40.0, 0, 0, "KAAA"), t(0));
+        let obs = process(&mut st, &ap, &rw, &one(40.0, 80, 400, "KAAA"), t(50));
+
+        assert_eq!(obs.len(), 1);
+        assert_eq!(obs[0].taxi_sec, 50);
+    }
+
+    #[test]
+    fn arriving_turnaround_does_not_start_a_departure_session() {
+        let (ap, rw) = (airports_with_arrival(), RunwayDb::default());
+        let mut st = TaxiObsState::default();
+        // Low groundspeed near both this flight plan's departure AND arrival airport (pattern
+        // work, a touch-and-go, or a same-field circuit) must not be mistaken for a pushback.
+        process(
+            &mut st,
+            &ap,
+            &rw,
+            &one_with_arrival(40.0, 20, 0, "KAAA", "KBBB"),
+            t(0),
+        );
+
+        assert!(st.dep.is_empty());
     }
 
     fn gate(id: &str, lat: f64, lon: f64) -> AirportGateBody {

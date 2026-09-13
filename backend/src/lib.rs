@@ -56,6 +56,8 @@ pub async fn run() -> color_eyre::Result<()> {
             pool.clone(),
             state.aircraft_profiles.clone(),
         );
+        // Airport surface gates, for feed::taxi_observations's gate matching (kept DB-less).
+        jobs::spawn_airport_gates_refresh(state.jobs.clone(), pool.clone(), state.gates.clone());
         feed::events::spawn_sync(pool.clone());
         // Persistent stats collection off the shared feed snapshot + its retention compaction.
         feed::stats::spawn_collector(pool.clone(), state.feed.clone(), state.airspace.clone());
@@ -66,6 +68,7 @@ pub async fn run() -> color_eyre::Result<()> {
             pool.clone(),
             state.feed.clone(),
             state.runways.clone(),
+            state.gates.clone(),
         );
         jobs::spawn_stats_compaction(state.jobs.clone(), pool.clone());
         jobs::spawn_capture_scheduler(state.jobs.clone(), pool.clone());
