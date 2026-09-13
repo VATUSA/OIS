@@ -19,6 +19,7 @@ import {
   useUpdateDiscordConfig,
   useUpdateEventThreadTemplate,
 } from "@/lib/integration";
+import {useFacilities} from "@/lib/admin";
 
 /** Logical channel names the backend resolves when enqueuing Discord jobs. Surfaced as hints so an
  *  admin knows which names actually drive a feature. Keep in sync with the handlers' constants. */
@@ -44,6 +45,7 @@ type DraftGuild = {
   guild_id: string;
   channels: DiscordMapEntry[];
   roles: DiscordMapEntry[];
+  facilities: string[];
 };
 
 type Opt = { id: string; label: string };
@@ -169,12 +171,14 @@ function GuildCard({
   guild,
   snapshot,
   botGuilds,
+  artccs,
   onChange,
   onRemove,
 }: {
   guild: DraftGuild;
   snapshot: DiscordGuildSnapshot | undefined;
   botGuilds: DiscordGuildSnapshot[];
+  artccs: string[];
   onChange: (next: DraftGuild) => void;
   onRemove: () => void;
 }) {
@@ -245,6 +249,41 @@ function GuildCard({
             click “Refresh from Discord”.
           </p>
         )}
+
+        <div className="flex flex-col gap-1.5">
+          <span className="text-sm font-medium">Facilities served</span>
+          <p className="text-xs text-muted-foreground">
+            If another server maps the same logical channel/role name, the one whose facilities
+            include the relevant ARTCC wins that name here — otherwise the first-configured server
+            still wins, as before.
+          </p>
+          <div className="flex flex-wrap gap-1.5">
+            {artccs.map((a) => {
+              const active = guild.facilities.includes(a);
+              return (
+                <button
+                  key={a}
+                  type="button"
+                  aria-pressed={active}
+                  onClick={() =>
+                    set({
+                      facilities: active
+                        ? guild.facilities.filter((f) => f !== a)
+                        : [...guild.facilities, a],
+                    })
+                  }
+                  className={`rounded-md border px-2 py-1 text-xs font-mono ${
+                    active
+                      ? "border-primary/60 bg-primary/15 text-primary"
+                      : "bg-background/95 hover:bg-muted"
+                  }`}
+                >
+                  {a}
+                </button>
+              );
+            })}
+          </div>
+        </div>
 
         <MapEditor
           label="Channels"
@@ -323,6 +362,7 @@ export function AdminDiscord() {
   const query = useDiscordConfig();
   const save = useUpdateDiscordConfig();
   const refresh = useRefreshDiscord();
+  const facilities = useFacilities();
 
   const [guilds, setGuilds] = useState<DraftGuild[]>([]);
 
@@ -336,12 +376,17 @@ export function AdminDiscord() {
         guild_id: g.guild_id,
         channels: g.channels,
         roles: g.roles,
+        facilities: g.facilities,
       })),
     );
   }, [loaded]);
 
   const botGuilds = loaded?.available ?? [];
   const snapshotFor = (gid: string) => botGuilds.find((b) => b.guild_id === gid);
+  const artccs = (facilities.data ?? [])
+    .filter((f) => f.active)
+    .map((f) => f.id)
+    .sort();
 
   const clean = (entries: DiscordMapEntry[]) =>
     entries
@@ -356,12 +401,13 @@ export function AdminDiscord() {
         name: g.name.trim(),
         guild_id: g.guild_id.trim(),
         channels: clean(g.channels),
+        facilities: g.facilities,
         roles: clean(g.roles),
       })),
     });
 
   const addGuild = () =>
-    setGuilds((gs) => [...gs, { name: "", guild_id: "", channels: [], roles: [] }]);
+    setGuilds((gs) => [...gs, { name: "", guild_id: "", channels: [], roles: [], facilities: [] }]);
   const updateGuild = (i: number, next: DraftGuild) =>
     setGuilds((gs) => gs.map((g, idx) => (idx === i ? next : g)));
   const removeGuild = (i: number) => setGuilds((gs) => gs.filter((_, idx) => idx !== i));
@@ -417,6 +463,7 @@ export function AdminDiscord() {
               guild={g}
               snapshot={g.guild_id ? snapshotFor(g.guild_id) : undefined}
               botGuilds={botGuilds}
+              artccs={artccs}
               onChange={(next) => updateGuild(i, next)}
               onRemove={() => removeGuild(i)}
             />
