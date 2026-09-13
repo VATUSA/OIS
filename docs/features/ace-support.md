@@ -149,8 +149,8 @@ Button clicks call back into the API as a service account. The bot owns no data.
 | ------------------- | -------------------------------------- | ------------------------------------------------------------- | -------------------------------------------------------------------------- |
 | `ace_request_post`  | request created (`status='open'`)      | `request_id`, `requested_by`, `artcc_id`, `position`, `details` | post embed to `#aceteam-requests` with a **claim** button; on ack, store returned `discord_message_id` back on the request |
 | `ace_request_notify`| request claimed                        | `request_id`, `claimed_by`, `artcc_id`, `discord_message_id`  | ping/DM the requesting ARTCC's **EC**; **edit the original embed** to show the claimer and disable the button |
-| `ace_claim_dm`      | a claim links to a Discord account     | `claimer_discord_id`, event/position details                  | DM the claimer a summary of what they signed up for |
-| `ace_claim_reminder_24h` / `ace_claim_reminder_6h` | the periodic reminder scheduler finds a claim due in that window (`backend/src/jobs.rs`) | same shape as `ace_claim_dm` + a `reminder` tag | DM the claimer a reminder; each tier is deduped so a claim is only ever reminded once per tier |
+| `ace_claim_dm`      | a claim links to a Discord account     | `discord_user_id`, `event_title`, `position`, `documents`      | DM the claimer a summary of what they signed up for + facility documents |
+| `ace_claim_reminder_24h` / `ace_claim_reminder_6h` | the periodic reminder scheduler finds a claim due in that window (`backend/src/jobs.rs`) | `discord_user_id`, `event_title`, `position`, `reminder` (e.g. `"24h"`) | DM the claimer a reminder; each tier is deduped so a claim is only ever reminded once per tier |
 
 Flow:
 
@@ -162,8 +162,9 @@ Flow:
 4. Handler flips `open → claimed` and enqueues `ace_request_notify` plus, if the claimer has a linked Discord account,
    `ace_claim_dm`.
 5. Bot notifies the EC, edits the embed in place, and DMs the claimer their claim summary.
-6. A periodic backend scheduler (`spawn_ace_reminder_scheduler`) later enqueues `ace_claim_reminder_24h`/`_6h` DMs as
-   each claim's covered time approaches, deduped per tier via a unique index so a rolling deploy can't double-send.
+6. A periodic backend scheduler (`spawn_ace_reminder_scheduler`, every 15 minutes) later enqueues
+   `ace_claim_reminder_24h`/`_6h` DMs as each claim's event start time approaches (T-24h and T-6h),
+   deduped per tier via a unique index so a rolling deploy can't double-send.
 
 The EC targeted by `ace_request_notify` is resolved from the request's `artcc_id` (facility-scoped `EC` role
 holders for that ARTCC). Channel/role mapping lives in the `integration` config tables (edited via
