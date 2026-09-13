@@ -211,6 +211,10 @@ export function SurfaceMap({
         if (draft.points.length === 0) addVertex(info.coordinate as [number, number]);
         return; // a gate is placed on its first click — further clicks are no-ops until saved
       }
+      // Once the shape is finished (renaming/saving an already-placed taxiway or ramp), a stray
+      // map click must be a no-op — not silently append another vertex — matching the FCA
+      // polyline editor's `drawMode === "draw"` guard.
+      if (phase !== "draw") return;
       // Detect a double-click (deck has no onDblClick); it finishes the shape rather than adding
       // one more vertex at the same spot, matching the FCA polyline editor's convention.
       const t = (event as { srcEvent?: { timeStamp?: number } })?.srcEvent?.timeStamp ?? performance.now();

@@ -58,7 +58,7 @@ fn validate_taxiway(req: &UpsertAirportTaxiwayRequest) -> Result<(), ApiError> {
     Ok(())
 }
 
-/// Does the caller hold `events.config.update` nationally or for `icao`'s owning ARTCC?
+/// Does the caller hold `flow.surface_data.update` nationally or for `icao`'s owning ARTCC?
 async fn can_edit(state: &AppState, principal: &Principal, icao: &str) -> Result<bool, ApiError> {
     let artcc = owning_artcc(state, icao).await;
     let scope = principal.permission_scope(state, CONFIG_PERMISSION).await?;
