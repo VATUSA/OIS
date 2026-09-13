@@ -12,6 +12,8 @@ pub mod realtime;
 pub mod repos;
 pub mod reqlog;
 pub mod router;
+#[cfg(test)]
+pub(crate) mod scope_test_support;
 pub mod state;
 pub mod tmi;
 
