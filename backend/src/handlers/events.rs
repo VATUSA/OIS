@@ -129,7 +129,7 @@ const SUPPORT_LEVELS: [&str; 3] = ["required", "preferred", "not_required"];
 const RATE_PERMISSION: &str = "events.rate.update";
 const SUPPORT_PERMISSION: &str = "events.support.update";
 
-fn normalize_facility(raw: &str) -> Option<String> {
+pub(crate) fn normalize_facility(raw: &str) -> Option<String> {
     let f = raw.trim().to_ascii_uppercase();
     (!f.is_empty() && f.len() <= 8 && f.chars().all(|c| c.is_ascii_alphanumeric())).then_some(f)
 }
@@ -832,10 +832,14 @@ pub(crate) async fn activate_package(
     let items = events_repo::list_package_items(pool, package_id).await?;
 
     // A published restriction posts to Discord like any other; resolve the channel once (None ⇒ skip).
+    // Normalized: `event.facility` is a raw passthrough of the external VATUSA v3 events API field
+    // (feed/events.rs) with no case/format guarantee, but discord_config_facilities.artcc_id is
+    // stored uppercase and matched exactly — an unnormalized value would silently never match,
+    // falling back to the pre-#194 first-created-wins behavior with no error.
     let tmu_channel = integration_repo::channel_id(
         pool,
         crate::handlers::tmu::TMU_CHANNEL,
-        Some(&event.facility),
+        normalize_facility(&event.facility).as_deref(),
     )
     .await?;
 
@@ -1508,16 +1512,18 @@ pub async fn publish_event_discord(
     }
 
     // Route by the host's DCC region; fall back to the generic `events` channel if unmapped/unconfigured.
-    // Both calls are scoped by the host facility so the guild serving it wins a same-named
+    // Both calls are scoped by the host facility (normalized — see activate_package's comment on
+    // why raw event.facility can't be trusted as-is) so the guild serving it wins a same-named
     // collision with another guild (#194).
+    let facility = normalize_facility(&event.facility);
     let mut channel = None;
     if let Some(region) = dcc_region(&event.facility) {
         channel =
-            integration_repo::channel_id(pool, &format!("region-{region}"), Some(&event.facility))
+            integration_repo::channel_id(pool, &format!("region-{region}"), facility.as_deref())
                 .await?;
     }
     if channel.is_none() {
-        channel = integration_repo::channel_id(pool, EVENTS_CHANNEL, Some(&event.facility)).await?;
+        channel = integration_repo::channel_id(pool, EVENTS_CHANNEL, facility.as_deref()).await?;
     }
     let channel = channel.ok_or(ApiError::BadRequest)?;
 
