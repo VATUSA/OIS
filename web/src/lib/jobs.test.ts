@@ -1,6 +1,6 @@
 import {describe, expect, it} from "vitest";
 
-import {jobsPollInterval, type JobStatus} from "./jobs";
+import {jobsPollInterval, withJobRestored, withJobRunning, type JobStatus} from "./jobs";
 
 function job(over: Partial<JobStatus>): JobStatus {
   return {
@@ -38,5 +38,34 @@ describe("jobsPollInterval", () => {
 
   it("polls slow for an empty job list", () => {
     expect(jobsPollInterval([])).toBe(5000);
+  });
+});
+
+describe("withJobRunning", () => {
+  it("marks only the named job as running", () => {
+    const jobs = [job({ name: "a" }), job({ name: "b" })];
+    const result = withJobRunning(jobs, "a");
+    expect(result?.find((j) => j.name === "a")?.running).toBe(true);
+    expect(result?.find((j) => j.name === "b")?.running).toBe(false);
+  });
+
+  it("passes through undefined", () => {
+    expect(withJobRunning(undefined, "a")).toBeUndefined();
+  });
+});
+
+describe("withJobRestored", () => {
+  it("restores only the named job, leaving a different job's own concurrent update intact", () => {
+    // Job "a" was optimistically marked running, then failed; job "b" is a *different* job whose
+    // own in-flight optimistic update must survive "a"'s rollback — this is the exact bug found in
+    // review: an unscoped rollback snapshot clobbering a concurrent, unrelated mutation.
+    const jobs = [job({ name: "a", running: true }), job({ name: "b", running: true })];
+    const result = withJobRestored(jobs, "a", job({ name: "a", running: false }));
+    expect(result?.find((j) => j.name === "a")?.running).toBe(false);
+    expect(result?.find((j) => j.name === "b")?.running).toBe(true);
+  });
+
+  it("passes through undefined", () => {
+    expect(withJobRestored(undefined, "a", job({ name: "a" }))).toBeUndefined();
   });
 });
