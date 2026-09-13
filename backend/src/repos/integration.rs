@@ -123,28 +123,50 @@ pub async fn ack_job(
     Ok(res.rows_affected() > 0)
 }
 
-/// Resolve a logical channel name to its Discord snowflake for the configured guild (None if
-/// unmapped / no config). Callers skip enqueuing a Discord job when there's nowhere to post.
-pub async fn channel_id(pool: &PgPool, name: &str) -> Result<Option<String>, ApiError> {
+/// Resolve a logical channel name to its Discord snowflake (None if unmapped / no config). When two
+/// guilds define the same logical name, the one whose config lists `facility` among its ARTCCs
+/// (`integration.discord_config_facilities`, #194) wins; otherwise falls back to whichever guild
+/// was configured first, same as before facility-scoping existed. Callers skip enqueuing a Discord
+/// job when there's nowhere to post.
+pub async fn channel_id(
+    pool: &PgPool,
+    name: &str,
+    facility: Option<&str>,
+) -> Result<Option<String>, ApiError> {
     sqlx::query_scalar::<_, String>(
         "select ch.channel_id from integration.discord_channels ch \
          join integration.discord_configs c on c.id = ch.config_id \
-         where ch.name = $1 order by c.created_at limit 1",
+         left join integration.discord_config_facilities f \
+           on f.config_id = c.id and f.artcc_id = $2 \
+         where ch.name = $1 \
+         order by (f.artcc_id is not null) desc, c.created_at \
+         limit 1",
     )
     .bind(name)
+    .bind(facility)
     .fetch_optional(pool)
     .await
     .map_err(|_| ApiError::Internal)
 }
 
-/// Resolve a logical role name to its Discord snowflake for the configured guild (None if unmapped).
-pub async fn role_id(pool: &PgPool, name: &str) -> Result<Option<String>, ApiError> {
+/// Resolve a logical role name to its Discord snowflake. Same facility-preference/fallback
+/// behavior as `channel_id` — see there for details.
+pub async fn role_id(
+    pool: &PgPool,
+    name: &str,
+    facility: Option<&str>,
+) -> Result<Option<String>, ApiError> {
     sqlx::query_scalar::<_, String>(
         "select r.role_id from integration.discord_roles r \
          join integration.discord_configs c on c.id = r.config_id \
-         where r.name = $1 order by c.created_at limit 1",
+         left join integration.discord_config_facilities f \
+           on f.config_id = c.id and f.artcc_id = $2 \
+         where r.name = $1 \
+         order by (f.artcc_id is not null) desc, c.created_at \
+         limit 1",
     )
     .bind(name)
+    .bind(facility)
     .fetch_optional(pool)
     .await
     .map_err(|_| ApiError::Internal)
@@ -242,6 +264,18 @@ async fn map_entries(
         .map_err(|_| ApiError::Internal)
 }
 
+/// The ARTCCs a guild's config serves (#194) — see `channel_id`/`role_id`.
+async fn facility_entries(pool: &PgPool, config_id: &str) -> Result<Vec<String>, ApiError> {
+    sqlx::query_scalar::<_, String>(
+        "select artcc_id from integration.discord_config_facilities \
+         where config_id = $1 order by artcc_id",
+    )
+    .bind(config_id)
+    .fetch_all(pool)
+    .await
+    .map_err(|_| ApiError::Internal)
+}
+
 /// The full Discord config: every configured guild + its maps, plus the bot's guild snapshot for
 /// the editor's dropdowns. Empty `guilds` when nothing's been configured yet.
 pub async fn get_config(pool: &PgPool) -> Result<DiscordConfigBody, ApiError> {
@@ -256,6 +290,7 @@ pub async fn get_config(pool: &PgPool) -> Result<DiscordConfigBody, ApiError> {
         guilds.push(DiscordGuildConfigBody {
             channels: map_entries(pool, "discord_channels", "channel_id", &id).await?,
             roles: map_entries(pool, "discord_roles", "role_id", &id).await?,
+            facilities: facility_entries(pool, &id).await?,
             id: Some(id),
             name,
             guild_id,
@@ -299,6 +334,21 @@ pub async fn upsert_config(
         )
         .await?;
         replace_map(&mut tx, "discord_roles", "role_id", &config_id, &g.roles).await?;
+        for artcc in &g.facilities {
+            let artcc = artcc.trim().to_ascii_uppercase();
+            if artcc.is_empty() {
+                continue;
+            }
+            sqlx::query(
+                "insert into integration.discord_config_facilities (config_id, artcc_id) \
+                 values ($1, $2) on conflict do nothing",
+            )
+            .bind(&config_id)
+            .bind(&artcc)
+            .execute(&mut *tx)
+            .await
+            .map_err(|_| ApiError::Internal)?;
+        }
     }
     tx.commit().await.map_err(|_| ApiError::Internal)?;
     Ok(())
@@ -513,5 +563,74 @@ mod tests {
             .unwrap();
         let body = get_event_thread_template(&pool).await.unwrap();
         assert_eq!(body, FALLBACK_EVENT_THREAD_TEMPLATE);
+    }
+
+    /// `created_at` is explicit (not `default now()`) so two guilds seeded back-to-back have a
+    /// deterministic creation order for the fallback-tiebreak assertions below.
+    async fn seed_guild(
+        pool: &PgPool,
+        guild_name: &str,
+        channel_name: &str,
+        created_at: DateTime<Utc>,
+    ) -> String {
+        let config_id = sqlx::query_scalar::<_, String>(
+            "insert into integration.discord_configs (name, guild_id, created_at) \
+             values ($1, $2, $3) returning id",
+        )
+        .bind(guild_name)
+        .bind(format!("{guild_name}-snowflake"))
+        .bind(created_at)
+        .fetch_one(pool)
+        .await
+        .unwrap();
+        sqlx::query(
+            "insert into integration.discord_channels (config_id, name, channel_id) \
+             values ($1, $2, $3)",
+        )
+        .bind(&config_id)
+        .bind(channel_name)
+        .bind(format!("{config_id}-channel"))
+        .execute(pool)
+        .await
+        .unwrap();
+        config_id
+    }
+
+    /// Reproduces #194: two guilds configure the same logical channel name. Before the fix, the
+    /// second (later-created) guild's mapping was always unreachable, regardless of facility.
+    #[sqlx::test]
+    async fn second_guild_with_same_name_routes_by_facility(pool: PgPool) {
+        let t0 = Utc::now();
+        let first = seed_guild(&pool, "DCC", "aceteam-requests", t0).await;
+        let second = seed_guild(
+            &pool,
+            "VATUSA",
+            "aceteam-requests",
+            t0 + chrono::Duration::seconds(1),
+        )
+        .await;
+        sqlx::query(
+            "insert into integration.discord_config_facilities (config_id, artcc_id) \
+             values ($1, 'ZZZ')",
+        )
+        .bind(&second)
+        .execute(&pool)
+        .await
+        .unwrap();
+
+        // Facility-scoped lookup: the second (facility-matched) guild wins, not the first-created one.
+        let scoped = channel_id(&pool, "aceteam-requests", Some("ZZZ"))
+            .await
+            .unwrap();
+        assert_eq!(scoped, Some(format!("{second}-channel")));
+
+        // No facility given, or a facility no guild claims: falls back to the first-created guild,
+        // exactly like before facility-scoping existed.
+        let unscoped = channel_id(&pool, "aceteam-requests", None).await.unwrap();
+        assert_eq!(unscoped, Some(format!("{first}-channel")));
+        let unmatched = channel_id(&pool, "aceteam-requests", Some("XYZ"))
+            .await
+            .unwrap();
+        assert_eq!(unmatched, Some(format!("{first}-channel")));
     }
 }

@@ -88,11 +88,21 @@ Notes:
 | `integration.discord_channels` | logical `name` → Discord `channel_id`, scoped to a config |
 | `integration.discord_roles` | logical `name` → Discord `role_id` (the staff roles pinged on event publish) |
 | `integration.discord_categories` | logical `name` → Discord `category_id` (parent for DCC threads/forum) |
+| `integration.discord_config_facilities` | which ARTCC(s) a guild's config serves — `(config_id, artcc_id)`, many-to-many |
 
 Features reference channels/roles/categories by **logical name** (e.g. `dcc`, `tmu`, `aceteam-requests`), never by raw
 snowflake, so retargeting a channel is a config edit and touches no feature code. To spare operators from pasting
 snowflakes, the config UI can populate dropdowns from a live guild snapshot proxied through the bot (guilds, channels,
 categories, roles).
+
+**Multi-guild name collisions.** Two guilds can each configure the same logical name (e.g. both defining
+`aceteam-requests`) — `discord_config_facilities` is how `channel_id`/`role_id` (`backend/src/repos/integration.rs`)
+pick the right one: a caller that knows the relevant facility (an ACE request's ARTCC, an event's host) passes it, and
+the guild whose facilities include that ARTCC wins the name over any other guild defining it. A caller with no
+facility to pass, or a facility no guild claims, falls back to whichever guild was configured first — the same
+behavior as before facility-scoping existed. Not every call site is facility-scoped: `handlers::tmu::publish_tmi`'s
+TMU channel and the generic `ntmo`/`dcc-trainee` event-thread roles are left unscoped since they don't have a single
+unambiguous owning facility.
 
 **Account linking.** Linking ties a VATSIM identity to a Discord user; the mapping is stored in
 `integration.external_sync_mappings` (`system_code = 'discord'`, `entity_type = 'user'`, `local_id = <VATSIM cid>`,

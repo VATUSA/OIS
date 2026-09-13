@@ -3505,6 +3505,12 @@ export interface components {
         /** @description One configured guild (DCC / VATUSA / …) + its logical-name maps. */
         DiscordGuildConfigBody: {
             channels: components["schemas"]["DiscordMapEntry"][];
+            /**
+             * @description ARTCCs this guild serves — lets `channel_id`/`role_id` prefer this guild over another one
+             *     defining the same logical name for a different facility (#194). Empty = no facility
+             *     preference (only ever wins via the created-at fallback).
+             */
+            facilities: string[];
             guild_id: string;
             /** @description Null until this guild's config row has been saved. */
             id?: string | null;
@@ -3513,6 +3519,7 @@ export interface components {
         };
         DiscordGuildConfigInput: {
             channels?: components["schemas"]["DiscordMapEntry"][];
+            facilities?: string[];
             guild_id: string;
             name: string;
             roles?: components["schemas"]["DiscordMapEntry"][];
