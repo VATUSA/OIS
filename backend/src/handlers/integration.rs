@@ -24,7 +24,7 @@ use crate::{
     },
     repos::{
         access as access_repo, ace as ace_repo, availability as availability_repo,
-        events as events_repo, integration as integration_repo, tmu as tmu_repo,
+        events as events_repo, integration as integration_repo, org as org_repo, tmu as tmu_repo,
     },
     state::AppState,
 };
@@ -305,9 +305,16 @@ pub async fn put_discord_config(
         }
         // Reject rather than silently drop: an invalid facility here would otherwise vanish with a
         // 200 response, leaving no signal to the caller that the value they submitted never made it
-        // into discord_config_facilities (#194).
-        if g.facilities.iter().any(|f| normalize_facility(f).is_none()) {
-            return Err(ApiError::BadRequest);
+        // into discord_config_facilities (#194). Checks existence, not just shape — a well-formed
+        // but nonexistent/typo'd code (e.g. "ZDX") would otherwise pass this check and only fail
+        // later as an opaque 500 from discord_config_facilities' FK constraint (migration 0070).
+        for f in &g.facilities {
+            let Some(id) = normalize_facility(f) else {
+                return Err(ApiError::BadRequest);
+            };
+            if org_repo::find_facility(p, &id).await?.is_none() {
+                return Err(ApiError::BadRequest);
+            }
         }
     }
     integration_repo::upsert_config(p, &payload).await?;
