@@ -3,6 +3,8 @@
 //! the repo is unscoped. Explicit per-type functions, mirroring `airport_configs`/
 //! `facility_documents` — no generic CRUD abstraction over the three geometry kinds.
 
+use std::collections::HashMap;
+
 use sqlx::PgPool;
 
 use crate::{
@@ -24,6 +26,23 @@ pub async fn list_gates(pool: &PgPool, icao: &str) -> Result<Vec<AirportGateBody
         .fetch_all(pool)
         .await
         .map_err(|_| ApiError::Internal)
+}
+
+/// Every gate, grouped by ICAO — for `AppState::gates` (`jobs::spawn_airport_gates_refresh` and
+/// the force-reload on write in `handlers::airport_surface`), so the DB-less feed subsystem
+/// (`feed::taxi_observations`) can match a spawn point to a gate without querying inline.
+pub async fn load_all_gates(
+    pool: &PgPool,
+) -> Result<HashMap<String, Vec<AirportGateBody>>, ApiError> {
+    let rows = sqlx::query_as::<_, AirportGateBody>(GATE_SELECT)
+        .fetch_all(pool)
+        .await
+        .map_err(|_| ApiError::Internal)?;
+    let mut by_icao: HashMap<String, Vec<AirportGateBody>> = HashMap::new();
+    for g in rows {
+        by_icao.entry(g.icao.clone()).or_default().push(g);
+    }
+    Ok(by_icao)
 }
 
 pub async fn get_gate(pool: &PgPool, id: &str) -> Result<Option<AirportGateBody>, ApiError> {
