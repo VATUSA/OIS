@@ -103,34 +103,33 @@ Notes:
 | `integration.discord_channels` | logical `name` → Discord `channel_id`, scoped to a config (`unique(config_id, name)`) |
 | `integration.discord_roles` | logical `name` → Discord `role_id`, scoped to a config (the staff roles pinged on event publish) |
 | `integration.discord_categories` | logical `name` → Discord `category_id`, scoped to a config — modeled but currently unused (see [Job types](#job-types)) |
+| `integration.discord_config_facilities` | which ARTCC(s) a guild's config serves — `(config_id, artcc_id)`, many-to-many |
 
 Features reference channels/roles by **logical name** (e.g. `tmu-advisories`, `aceteam-requests`, `events`, or a
 per-region name like `region-zdc`), never by raw snowflake, so retargeting a channel is a config edit and touches no
 feature code. The config UI populates dropdowns from a live guild snapshot the bot pushes on connect and on-demand
 (the `guild_snapshot` job).
 
-**Multi-guild is supported for guild *discovery* (`snapshot_and_push` iterates every guild the bot is in, with no
-hard-coded guild id anywhere in `ois-discord` or the backend), but the generic per-feature channel/role names
-(`aceteam-requests`, `tmu-advisories`, `events`, `ntmo`, `dcc-trainee`) are resolved globally, not per-guild** —
-`channel_id(name)`/`role_id(name)` (`backend/src/repos/integration.rs`) join across every configured guild and pick
-whichever config was created first (`order by c.created_at limit 1`) if more than one guild defines that name. The
-schema allows this collision (`unique(config_id, name)`, not a global unique on `name`), so a second guild reusing one
-of these generic names has its mapping silently ignored forever — no error surfaces anywhere. **Practical effect: a
-2nd/3rd guild is config-only exactly as long as it doesn't reuse an existing generic name.** Per-region features
-already sidestep this by giving each destination its own name (`region-{region}`, resolved with a fallback to the
-generic `events` name only when no region-specific channel is configured) — the same pattern would need to be applied
-to ACE/TMU/event-staff-role routing for genuine multi-guild support of those features. Tracked as a follow-up:
-[#194](https://github.com/VATUSA/OIS/issues/194).
+**Multi-guild is supported for both guild *discovery* (`snapshot_and_push` iterates every guild the bot is in, with
+no hard-coded guild id anywhere in `ois-discord` or the backend) and, since #194, the generic per-feature
+channel/role names (`aceteam-requests`, `tmu-advisories`, `events`, `ntmo`, `dcc-trainee`)** — see **Multi-guild name
+collisions** below for how `channel_id`/`role_id` resolve which guild wins when two define the same name.
 
 **Walkthrough: adding a guild.** Invite the bot to the new guild, then in the admin config page
 (`/admin/discord`, `discord.config.update`): click "Refresh from Discord" (enqueues `guild_snapshot`
 so the new guild's channels/roles populate the dropdowns) → **Add guild**, pick it from the synced
-guild list, and map whichever logical channel/role names that guild needs → **Save**. No code
-change, no redeploy, no migration. This is genuinely config-only **as long as the new guild's
-mapped names don't collide with an existing guild's** (see above) — a region-scoped feature
-(`region-{artcc}`) is always safe to add this way; giving a second guild its own `aceteam-requests`
-or `tmu-advisories` channel today is not, until [#194](https://github.com/VATUSA/OIS/issues/194) is
-fixed.
+guild list, map whichever logical channel/role names that guild needs, and set the ARTCC(s) it
+serves in `facilities` if it shares a generic name with another guild → **Save**. No code change, no
+redeploy, no migration.
+
+**Multi-guild name collisions.** Two guilds can each configure the same logical name (e.g. both defining
+`aceteam-requests`) — `discord_config_facilities` is how `channel_id`/`role_id` (`backend/src/repos/integration.rs`)
+pick the right one: a caller that knows the relevant facility (an ACE request's ARTCC, an event's host) passes it, and
+the guild whose facilities include that ARTCC wins the name over any other guild defining it. A caller with no
+facility to pass, or a facility no guild claims, falls back to whichever guild was configured first — the same
+behavior as before facility-scoping existed. Not every call site is facility-scoped: `handlers::tmu::publish_tmi`'s
+TMU channel and the generic `ntmo`/`dcc-trainee` event-thread roles are left unscoped since they don't have a single
+unambiguous owning facility.
 
 **Account linking.** Linking ties a VATSIM identity to a Discord user; the mapping is stored in
 `integration.external_sync_mappings` (`system_code = 'discord'`, `entity_type = 'user'`, `local_id = <OIS user id>`,
@@ -190,5 +189,5 @@ All interactions are Discord message components (buttons, select menus, modals) 
   (`ChannelType::PublicThread`), not a forum post.
 - **Account linking entry point — moot.** Neither option below was needed: linking isn't bot- or site-driven at all,
   it's read directly from VATUSA's own member data (see [Config & account linking](#config--account-linking)).
-- **Multi-guild routing for generic channel/role names** — open; see the note in
-  [Config & account linking](#config--account-linking) and [#194](https://github.com/VATUSA/OIS/issues/194).
+- **Multi-guild routing for generic channel/role names — resolved by #194.** See **Multi-guild name
+  collisions** in [Config & account linking](#config--account-linking).
