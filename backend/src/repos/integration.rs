@@ -616,7 +616,7 @@ mod tests {
         .await;
         sqlx::query(
             "insert into integration.discord_config_facilities (config_id, artcc_id) \
-             values ($1, 'ZZZ')",
+             values ($1, 'ZDC')",
         )
         .bind(&second)
         .execute(&pool)
@@ -624,7 +624,7 @@ mod tests {
         .unwrap();
 
         // Facility-scoped lookup: the second (facility-matched) guild wins, not the first-created one.
-        let scoped = channel_id(&pool, "aceteam-requests", Some("ZZZ"))
+        let scoped = channel_id(&pool, "aceteam-requests", Some("ZDC"))
             .await
             .unwrap();
         assert_eq!(scoped, Some(format!("{second}-channel")));
@@ -633,7 +633,7 @@ mod tests {
         // exactly like before facility-scoping existed.
         let unscoped = channel_id(&pool, "aceteam-requests", None).await.unwrap();
         assert_eq!(unscoped, Some(format!("{first}-channel")));
-        let unmatched = channel_id(&pool, "aceteam-requests", Some("XYZ"))
+        let unmatched = channel_id(&pool, "aceteam-requests", Some("ZAB"))
             .await
             .unwrap();
         assert_eq!(unmatched, Some(format!("{first}-channel")));
@@ -674,14 +674,14 @@ mod tests {
         }
         sqlx::query(
             "insert into integration.discord_config_facilities (config_id, artcc_id) \
-             values ($1, 'ZZZ')",
+             values ($1, 'ZDC')",
         )
         .bind(&second)
         .execute(&pool)
         .await
         .unwrap();
 
-        let scoped = role_id(&pool, "ntmo", Some("ZZZ")).await.unwrap();
+        let scoped = role_id(&pool, "ntmo", Some("ZDC")).await.unwrap();
         assert_eq!(scoped, Some("second-role".to_string()));
         let unscoped = role_id(&pool, "ntmo", None).await.unwrap();
         assert_eq!(unscoped, Some("first-role".to_string()));
