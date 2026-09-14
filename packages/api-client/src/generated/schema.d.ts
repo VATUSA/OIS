@@ -2375,6 +2375,22 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/v1/tmu/flow/{icao}/aadc": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get: operations["airport_aadc"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/v1/tmu/gdp": {
         parameters: {
             query?: never;
@@ -2715,6 +2731,45 @@ export interface paths {
 export type webhooks = Record<string, never>;
 export interface components {
     schemas: {
+        /**
+         * @description One bucket of forward arrival demand, broken down by every dimension AADC supports (#242):
+         *     status, aircraft category (wake), carrier, and arrival fix.
+         */
+        AadcBucket: {
+            by_afix: {
+                [key: string]: number;
+            };
+            by_carrier: {
+                [key: string]: number;
+            };
+            by_category: {
+                [key: string]: number;
+            };
+            by_status: {
+                [key: string]: number;
+            };
+            /** Format: date-time */
+            end: string;
+            /** Format: date-time */
+            start: string;
+            /** Format: int64 */
+            total: number;
+        };
+        /** @description Full AADC response for one airport: bucketed demand plus the wind-favored AAR/ADR reference. */
+        AadcResponse: {
+            /** Format: int32 */
+            aar: number;
+            /** Format: int32 */
+            adr: number;
+            /** Format: int32 */
+            bucket_min: number;
+            buckets: components["schemas"]["AadcBucket"][];
+            /** @description The `airport_config` row the AAR/ADR came from, if any configs exist for this airport. */
+            config_id?: string | null;
+            /** Format: date-time */
+            generated_at: string;
+            icao: string;
+        };
         /**
          * @description One rate change within a GDP window: the AAR takes effect at `start_time` (HHMM Zulu)
          *     and holds until the next step or the window end.
@@ -4019,6 +4074,11 @@ export interface components {
         FlowFlight: {
             aircraft_type: string;
             callsign: string;
+            /**
+             * @description Wake/weight category (`L`/`M`/`H`/`J`) parsed from the filed aircraft string; null when
+             *     not one of those four (AADC's "Aircraft Category" dimension, #242).
+             */
+            category?: string | null;
             /**
              * Format: date-time
              * @description Proposed wheels-up (EDCT / Call-For-Release) for ground & proposed flights.
@@ -11665,6 +11725,49 @@ export interface operations {
                 content: {
                     "application/json": components["schemas"]["Flow"];
                 };
+            };
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            503: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+        };
+    };
+    airport_aadc: {
+        parameters: {
+            query?: {
+                /** @description Bucket width in minutes: 15, 30, or 60 */
+                bucket_min?: number;
+            };
+            header?: never;
+            path: {
+                /** @description Arrival airport ICAO */
+                icao: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["AadcResponse"];
+                };
+            };
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
             };
             401: {
                 headers: {

@@ -1,3 +1,4 @@
+import {AadcWidgetView} from "./aadc-widget";
 import {AtcWidgetView} from "./atc-widget";
 import {ChartWidget} from "./chart-widget";
 import {FacilityMapWidgetView} from "./facility-map-widget";
@@ -34,6 +35,8 @@ export function WidgetBody({
       return <ChartWidget widget={widget} editing={editing} onChange={onUpdate} />;
     case "atc":
       return <AtcWidgetView widget={widget} />;
+    case "aadc":
+      return <AadcWidgetView widget={widget} onUpdate={onUpdate} />;
     case "text":
       return <TextWidgetView widget={widget} editing={editing} onChange={onUpdate} />;
     case "divider":
@@ -73,6 +76,8 @@ export function widgetTitle(widget: Widget): string {
     }
     case "atc":
       return `${widget.facility.id} · ATC`;
+    case "aadc":
+      return `${widget.icao} · AADC`;
     case "text":
     case "divider":
       return ""; // bare widgets render no header

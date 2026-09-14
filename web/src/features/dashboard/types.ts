@@ -161,6 +161,19 @@ export interface AtcWidget {
   facility: FacilityRef;
 }
 
+/** AADC (Airport Arrival Demand Chart, #242): bucketed forward arrival demand for one airport,
+ * broken down by a selected dimension, against the wind-favored AAR. A bespoke widget kind (not a
+ * `sources.ts` chart source) because it needs stacked-by-dimension bars and a live AAR reference
+ * line — neither of which the generic `ChartWidget` grammar supports. */
+export interface AadcWidget {
+  id: string;
+  kind: "aadc";
+  title?: string;
+  icao: string;
+  bucketMin: 15 | 30 | 60;
+  dimension: "status" | "category" | "carrier" | "afix";
+}
+
 export type Widget =
   | ViewWidget
   | StatWidget
@@ -169,6 +182,7 @@ export type Widget =
   | TableWidget
   | ChartWidget
   | AtcWidget
+  | AadcWidget
   | TextWidget
   | DividerWidget;
 export type WidgetKind = Widget["kind"];
@@ -214,6 +228,9 @@ export function defaultCell(w: Widget): { w: number; h: number; minW: number; mi
       return { w: 5, h: 4, minW: 3, minH: 3 };
     case "atc":
       return { w: 4, h: 6, minW: 3, minH: 3 };
+    case "aadc":
+      // Enough columns to keep the 16 default 15-min buckets from crowding.
+      return { w: 6, h: 5, minW: 4, minH: 3 };
     case "text":
       return { w: 4, h: 1, minW: 2, minH: 1 };
     case "divider":

@@ -12,6 +12,7 @@ import {
   ThemeToggle,
 } from "@ois/ui";
 import {
+  BarChart3,
   BookOpen,
   CalendarClock,
   ChevronDown,
@@ -262,6 +263,14 @@ function MobileMenu({
                 </Link>
               </DropdownMenuItem>
             )}
+            {canPrograms && (
+              <DropdownMenuItem asChild>
+                <Link to="/ops/aadc">
+                  <BarChart3 />
+                  Arrival demand chart
+                </Link>
+              </DropdownMenuItem>
+            )}
           </>
         )}
 
@@ -457,6 +466,14 @@ export function Navbar() {
                   <Link to="/ops/runway">
                     <Split />
                     Runway balancer
+                  </Link>
+                </DropdownMenuItem>
+              )}
+              {canPrograms && (
+                <DropdownMenuItem asChild>
+                  <Link to="/ops/aadc">
+                    <BarChart3 />
+                    Arrival demand chart
                   </Link>
                 </DropdownMenuItem>
               )}

@@ -133,3 +133,110 @@ pub async fn delete(pool: &PgPool, id: &str) -> Result<bool, ApiError> {
         .map_err(|_| ApiError::Internal)?;
     Ok(r.rows_affected() > 0)
 }
+
+/// True if `dir` falls within `[from, to]` degrees, inclusive, wrap-around allowed (e.g.
+/// `from=350, to=10` covers 350..360 and 0..10). Port of the client's `inWindRange`
+/// (`web/src/lib/airport-configs.ts`) — kept in sync by hand, not shared code, since one side is
+/// TS and the other Rust.
+pub fn in_wind_range(dir: i32, from: i32, to: i32) -> bool {
+    if from <= to {
+        dir >= from && dir <= to
+    } else {
+        dir >= from || dir <= to
+    }
+}
+
+/// The config a wind direction selects: the first non-calm config whose rule contains the
+/// direction, else the calm-default, else the first config. `None` wind (calm/unknown) always
+/// falls through to the calm-default/first. Port of the client's `matchConfig` (#242's AADC AAR
+/// line resolves this the same way the event-planning rate predictor already does).
+pub fn favored_config(
+    configs: &[AirportConfigBody],
+    wind_dir: Option<i32>,
+) -> Option<&AirportConfigBody> {
+    if let Some(dir) = wind_dir
+        && let Some(m) = configs
+            .iter()
+            .find(|c| !c.calm_default && in_wind_range(dir, c.wind_from_deg, c.wind_to_deg))
+    {
+        return Some(m);
+    }
+    configs.iter().find(|c| c.calm_default).or(configs.first())
+}
+
+#[cfg(test)]
+mod tests {
+    use chrono::Utc;
+
+    use super::*;
+
+    fn cfg(id: &str, aar: i32, from: i32, to: i32, calm: bool) -> AirportConfigBody {
+        AirportConfigBody {
+            id: id.into(),
+            icao: "KTST".into(),
+            name: id.into(),
+            aar,
+            adr: aar,
+            landing_runways: vec![],
+            wind_from_deg: from,
+            wind_to_deg: to,
+            calm_default: calm,
+            artcc: "ZZZ".into(),
+            updated_at: Utc::now(),
+            updated_by: None,
+            editable: true,
+        }
+    }
+
+    #[test]
+    fn in_wind_range_handles_wraparound() {
+        assert!(in_wind_range(5, 350, 10));
+        assert!(in_wind_range(355, 350, 10));
+        assert!(!in_wind_range(180, 350, 10));
+        assert!(in_wind_range(180, 170, 190));
+    }
+
+    #[test]
+    fn favored_config_matches_the_in_range_non_calm_config() {
+        let configs = vec![
+            cfg("calm", 30, 0, 0, true),
+            cfg("north", 30, 340, 20, false),
+            cfg("south", 40, 160, 200, false),
+        ];
+        let picked = favored_config(&configs, Some(180)).unwrap();
+        assert_eq!(picked.id, "south");
+    }
+
+    #[test]
+    fn favored_config_falls_back_to_calm_default_when_wind_is_none() {
+        let configs = vec![
+            cfg("calm", 30, 0, 0, true),
+            cfg("north", 30, 340, 20, false),
+        ];
+        let picked = favored_config(&configs, None).unwrap();
+        assert_eq!(picked.id, "calm");
+    }
+
+    #[test]
+    fn favored_config_falls_back_to_calm_default_when_no_rule_matches() {
+        let configs = vec![
+            cfg("calm", 30, 0, 0, true),
+            cfg("north", 30, 340, 20, false),
+        ];
+        // 180 matches neither the wraparound "north" rule nor anything else.
+        let picked = favored_config(&configs, Some(180)).unwrap();
+        assert_eq!(picked.id, "calm");
+    }
+
+    #[test]
+    fn favored_config_falls_back_to_first_when_no_calm_default_exists() {
+        let configs = vec![cfg("only", 30, 340, 20, false)];
+        let picked = favored_config(&configs, Some(180)).unwrap();
+        assert_eq!(picked.id, "only");
+    }
+
+    #[test]
+    fn favored_config_returns_none_for_an_empty_list() {
+        assert!(favored_config(&[], Some(180)).is_none());
+    }
+}

@@ -44,6 +44,9 @@ pub struct FlowFlight {
     pub callsign: String,
     pub dep: String,
     pub aircraft_type: String,
+    /// Wake/weight category (`L`/`M`/`H`/`J`) parsed from the filed aircraft string; null when
+    /// not one of those four (AADC's "Aircraft Category" dimension, #242).
+    pub category: Option<String>,
     /// Arrival gate (STAR/fix) derived from the filed route; null if none matched.
     pub gate: Option<String>,
     /// `airborne` | `ground` | `proposed` | `arrived`.
@@ -190,6 +193,7 @@ pub fn compute(
                 callsign: p.callsign.clone(),
                 dep,
                 aircraft_type: ty,
+                category: (!wake.is_empty()).then_some(wake),
                 gate: gate.clone(),
                 status: "arrived".into(),
                 distance_nm: dist_to_arr,
@@ -230,6 +234,7 @@ pub fn compute(
                 callsign: p.callsign.clone(),
                 dep,
                 aircraft_type: ty,
+                category: (!wake.is_empty()).then_some(wake),
                 gate: gate.clone(),
                 status: "airborne".into(),
                 distance_nm: Some(pred.route_nm),
@@ -247,6 +252,7 @@ pub fn compute(
                 callsign: p.callsign.clone(),
                 dep,
                 aircraft_type: ty,
+                category: (!wake.is_empty()).then_some(wake),
                 gate,
                 status: "ground".into(),
                 distance_nm: Some(route_nm),
@@ -280,6 +286,7 @@ pub fn compute(
             callsign: pf.callsign.clone(),
             dep,
             aircraft_type: ty,
+            category: (!wake.is_empty()).then_some(wake),
             gate,
             status: "proposed".into(),
             distance_nm: Some(route_nm),
@@ -319,6 +326,118 @@ pub fn compute(
         over_capacity: program.map(|p| demand_60min as i32 > p.aar),
         flights,
     }
+}
+
+/// Forward window AADC buckets over (#242): fixed at 4 hours regardless of bucket size.
+const AADC_WINDOW_HOURS: i64 = 4;
+/// Carrier breakdowns are capped to the busiest operators in the window; everything else
+/// (including non-airline callsigns) folds into `AADC_OTHER` so the response stays bounded at a
+/// busy international airport.
+const AADC_TOP_CARRIERS: usize = 8;
+const AADC_OTHER: &str = "OTHER";
+
+/// One bucket of forward arrival demand, broken down by every dimension AADC supports (#242):
+/// status, aircraft category (wake), carrier, and arrival fix.
+#[derive(Debug, Clone, Serialize, ToSchema)]
+pub struct AadcBucket {
+    pub start: DateTime<Utc>,
+    pub end: DateTime<Utc>,
+    pub total: i64,
+    pub by_status: HashMap<String, i64>,
+    pub by_category: HashMap<String, i64>,
+    pub by_carrier: HashMap<String, i64>,
+    pub by_afix: HashMap<String, i64>,
+}
+
+/// Full AADC response for one airport: bucketed demand plus the wind-favored AAR/ADR reference.
+#[derive(Debug, Serialize, ToSchema)]
+pub struct AadcResponse {
+    pub icao: String,
+    pub bucket_min: i32,
+    pub aar: i32,
+    pub adr: i32,
+    /// The `airport_config` row the AAR/ADR came from, if any configs exist for this airport.
+    pub config_id: Option<String>,
+    pub buckets: Vec<AadcBucket>,
+    pub generated_at: DateTime<Utc>,
+}
+
+/// Callsign's leading airline/carrier code (e.g. `AAL123` -> `AAL`), or `None` for anything that
+/// doesn't look like a scheduled-carrier callsign (bare tail numbers, etc.) — the ICAO convention
+/// is a 2-4 letter operator prefix ahead of a numeric flight number.
+fn carrier_of(callsign: &str) -> Option<String> {
+    let prefix: String = callsign
+        .chars()
+        .take_while(|c| c.is_ascii_alphabetic())
+        .collect();
+    (prefix.len() >= 2 && prefix.len() <= 4).then_some(prefix)
+}
+
+/// Bucket `flights` into `bucket_min`-wide slots across a fixed forward window, tallying every
+/// AADC dimension per bucket. Reuses the exact same landed-exclusion + demand filter as
+/// `demand_60min` above (`status != "arrived" && !excluded`, `eta` inside the window) rather than
+/// reinventing it — an already-landed flight must never inflate a future bucket.
+pub fn bucket_aadc(flights: &[FlowFlight], now: DateTime<Utc>, bucket_min: i32) -> Vec<AadcBucket> {
+    let bucket_min = bucket_min.max(1) as i64;
+    let window_end = now + Duration::hours(AADC_WINDOW_HOURS);
+    let n_buckets = ((AADC_WINDOW_HOURS * 60) / bucket_min).max(1) as usize;
+
+    let demand: Vec<&FlowFlight> = flights
+        .iter()
+        .filter(|f| f.status != "arrived" && !f.excluded)
+        .filter(|f| f.eta.is_some_and(|e| e >= now && e < window_end))
+        .collect();
+
+    // Rank carriers over the whole window first, so one bucket's small sample doesn't arbitrarily
+    // decide who gets folded into "OTHER".
+    let mut carrier_totals: HashMap<String, i64> = HashMap::new();
+    for f in &demand {
+        if let Some(c) = carrier_of(&f.callsign) {
+            *carrier_totals.entry(c).or_default() += 1;
+        }
+    }
+    let mut ranked: Vec<&String> = carrier_totals.keys().collect();
+    ranked.sort_by(|a, b| carrier_totals[*b].cmp(&carrier_totals[*a]).then(a.cmp(b)));
+    let top_carriers: HashSet<&str> = ranked
+        .into_iter()
+        .take(AADC_TOP_CARRIERS)
+        .map(|s| s.as_str())
+        .collect();
+
+    let mut buckets: Vec<AadcBucket> = (0..n_buckets)
+        .map(|i| {
+            let start = now + Duration::minutes(i as i64 * bucket_min);
+            AadcBucket {
+                end: start + Duration::minutes(bucket_min),
+                start,
+                total: 0,
+                by_status: HashMap::new(),
+                by_category: HashMap::new(),
+                by_carrier: HashMap::new(),
+                by_afix: HashMap::new(),
+            }
+        })
+        .collect();
+
+    for f in &demand {
+        let Some(eta) = f.eta else { continue };
+        let idx = ((eta - now).num_seconds() / (bucket_min * 60)) as usize;
+        let Some(b) = buckets.get_mut(idx) else {
+            continue;
+        };
+        b.total += 1;
+        *b.by_status.entry(f.status.clone()).or_default() += 1;
+        let category = f.category.clone().unwrap_or_else(|| AADC_OTHER.to_string());
+        *b.by_category.entry(category).or_default() += 1;
+        let carrier = carrier_of(&f.callsign)
+            .filter(|c| top_carriers.contains(c.as_str()))
+            .unwrap_or_else(|| AADC_OTHER.to_string());
+        *b.by_carrier.entry(carrier).or_default() += 1;
+        let afix = f.gate.clone().unwrap_or_else(|| AADC_OTHER.to_string());
+        *b.by_afix.entry(afix).or_default() += 1;
+    }
+
+    buckets
 }
 
 fn is_excluded(ty: &str, wake: &str, pg: &ProgramInputs) -> bool {
@@ -1324,5 +1443,105 @@ mod tests {
             aar,
             ..base_program()
         }
+    }
+
+    // ---- AADC bucketing (#242) ----
+
+    #[test]
+    fn carrier_of_extracts_the_leading_operator_prefix() {
+        assert_eq!(carrier_of("AAL123"), Some("AAL".to_string()));
+        assert_eq!(carrier_of("DAL1"), Some("DAL".to_string()));
+        assert_eq!(carrier_of("N12345"), None); // bare tail number, 1-letter prefix
+        assert_eq!(carrier_of("1234"), None); // no alphabetic prefix at all
+    }
+
+    #[test]
+    fn bucket_aadc_assigns_flights_to_the_right_15min_bucket() {
+        let flights = vec![
+            ff("AAL1", "airborne", 10, Some("CAMRN")), // bucket 0 (0-15min)
+            ff("DAL2", "ground", 50, Some("LENDY")),   // bucket 3 (45-60min)
+        ];
+        let buckets = bucket_aadc(&flights, t0(), 15);
+        assert_eq!(buckets.len(), 16); // 4h / 15min
+        assert_eq!(buckets[0].total, 1);
+        assert_eq!(buckets[3].total, 1);
+        assert_eq!(buckets[1].total, 0);
+    }
+
+    #[test]
+    fn bucket_aadc_excludes_arrived_and_out_of_window_flights() {
+        let flights = vec![
+            FlowFlight {
+                excluded: false,
+                ..ff("UAL1", "arrived", 0, None)
+            },
+            // Already past (negative offset) — must not land in bucket 0.
+            ff("SWA2", "airborne", -5, None),
+            // Beyond the fixed 4-hour window.
+            ff("JBU3", "proposed", 300, None),
+            // Excluded from metering — should still be excluded from AADC demand too.
+            FlowFlight {
+                excluded: true,
+                ..ff("FDX4", "ground", 30, None)
+            },
+        ];
+        let buckets = bucket_aadc(&flights, t0(), 15);
+        let total: i64 = buckets.iter().map(|b| b.total).sum();
+        assert_eq!(total, 0, "no flight here should count toward demand");
+    }
+
+    #[test]
+    fn bucket_aadc_breaks_down_every_dimension() {
+        let flights = vec![FlowFlight {
+            category: Some("H".into()),
+            ..ff("AAL123", "airborne", 5, Some("CAMRN"))
+        }];
+        let buckets = bucket_aadc(&flights, t0(), 15);
+        let b = &buckets[0];
+        assert_eq!(b.by_status.get("airborne"), Some(&1));
+        assert_eq!(b.by_category.get("H"), Some(&1));
+        assert_eq!(b.by_carrier.get("AAL"), Some(&1));
+        assert_eq!(b.by_afix.get("CAMRN"), Some(&1));
+    }
+
+    #[test]
+    fn bucket_aadc_caps_carrier_breakdown_to_top_n_plus_other() {
+        // 9 distinct single-flight carriers (AAA..III) plus a 10th (JJJ) with 2 flights. JJJ
+        // outranks everyone and takes 1 of the 8 top-carrier slots; among the 9 tied-at-1
+        // carriers only the 7 alphabetically-first fit the remaining slots — HHH and III must
+        // fold into OTHER (2 flights).
+        let prefixes = [
+            "AAA", "BBB", "CCC", "DDD", "EEE", "FFF", "GGG", "HHH", "III",
+        ];
+        let mut flights: Vec<FlowFlight> = prefixes
+            .iter()
+            .map(|p| ff(&format!("{p}1"), "airborne", 5, None))
+            .collect();
+        flights.push(ff("JJJ1", "airborne", 5, None));
+        flights.push(ff("JJJ2", "airborne", 5, None));
+
+        let buckets = bucket_aadc(&flights, t0(), 15);
+        let by_carrier = &buckets[0].by_carrier;
+        assert_eq!(
+            by_carrier.get("JJJ"),
+            Some(&2),
+            "the busiest carrier must survive the cap"
+        );
+        assert_eq!(
+            by_carrier.len(),
+            AADC_TOP_CARRIERS + 1,
+            "top N carriers plus one OTHER bucket"
+        );
+        assert_eq!(
+            by_carrier.get("HHH"),
+            None,
+            "a lowest-ranked carrier must be dropped"
+        );
+        assert_eq!(
+            by_carrier.get("III"),
+            None,
+            "a lowest-ranked carrier must be dropped"
+        );
+        assert_eq!(by_carrier.get(AADC_OTHER), Some(&2));
     }
 }
