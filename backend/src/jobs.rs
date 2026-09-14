@@ -115,9 +115,13 @@ pub async fn refresh_airports_once(
     feed: &FeedState,
     client: &reqwest::Client,
 ) -> Result<usize, String> {
-    let (db, iata) = crate::feed::airports::fetch(client)
-        .await
-        .map_err(|e| e.to_string())?;
+    let (db, iata) = crate::feed::airports::fetch(client).await.map_err(|e| {
+        // The job registry tracks this failure (visible on the admin Background Tasks page), but
+        // a persistent upstream failure — the whole point #216 exists to catch — deserves a log
+        // line too, not just a page someone has to remember to open.
+        tracing::warn!(error = %e, "feed: airport database fetch failed; retrying next tick");
+        e.to_string()
+    })?;
     let n = db.len();
     let mut guard = feed.write().await;
     guard.status.airports_loaded = n;
