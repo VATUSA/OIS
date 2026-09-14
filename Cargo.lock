@@ -1565,7 +1565,7 @@ dependencies = [
 
 [[package]]
 name = "ois-backend"
-version = "1.0.1"
+version = "0.1.0"
 dependencies = [
  "arc-swap",
  "axum",
@@ -1597,7 +1597,7 @@ dependencies = [
 
 [[package]]
 name = "ois-client"
-version = "0.1.0"
+version = "0.0.0"
 dependencies = [
  "reqwest",
  "serde",
@@ -1607,7 +1607,7 @@ dependencies = [
 
 [[package]]
 name = "ois-core"
-version = "0.1.0"
+version = "0.0.0"
 dependencies = [
  "serde",
  "serde_json",
@@ -1616,7 +1616,7 @@ dependencies = [
 
 [[package]]
 name = "ois-discord"
-version = "0.1.0"
+version = "0.0.0"
 dependencies = [
  "color-eyre",
  "dotenvy",
