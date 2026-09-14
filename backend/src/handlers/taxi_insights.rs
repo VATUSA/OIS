@@ -27,6 +27,12 @@ fn norm_opt(s: Option<String>) -> Option<String> {
         .filter(|v| !v.is_empty())
 }
 
+/// Trims only, no case change — `gate_id` is an opaque `gen_random_uuid()::text` value, not a
+/// code like airport/aircraft/runway, so uppercasing it would never match the stored lowercase id.
+fn norm_gate_id(s: Option<String>) -> Option<String> {
+    s.map(|v| v.trim().to_string()).filter(|v| !v.is_empty())
+}
+
 #[derive(Deserialize)]
 pub struct ObservationsQuery {
     airport: Option<String>,
@@ -67,7 +73,7 @@ pub async fn list_taxi_observations(
     let page_size = q.page_size.unwrap_or(50).clamp(1, 100);
     let filters = ObservationFilters {
         airport: norm_opt(q.airport),
-        gate_id: norm_opt(q.gate_id),
+        gate_id: norm_gate_id(q.gate_id),
         aircraft: norm_opt(q.aircraft),
         runway: norm_opt(q.runway),
         from: q.from,
@@ -130,7 +136,7 @@ pub async fn list_taxi_estimates(
     let page_size = q.page_size.unwrap_or(50).clamp(1, 100);
     let filters = EstimateFilters {
         airport,
-        gate_id: norm_opt(q.gate_id),
+        gate_id: norm_gate_id(q.gate_id),
         aircraft: norm_opt(q.aircraft),
         runway: norm_opt(q.runway),
         from: q.from,
@@ -150,4 +156,31 @@ pub async fn list_taxi_estimates(
         page,
         page_size,
     }))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn norm_opt_uppercases_and_trims_codes() {
+        assert_eq!(
+            norm_opt(Some("  kjfk ".to_string())),
+            Some("KJFK".to_string())
+        );
+        assert_eq!(norm_opt(Some("   ".to_string())), None);
+        assert_eq!(norm_opt(None), None);
+    }
+
+    /// Regression: gate ids are lowercase `gen_random_uuid()::text` values, not codes — a filter
+    /// that uppercased them would never match the stored row and silently return nothing.
+    #[test]
+    fn norm_gate_id_preserves_case() {
+        assert_eq!(
+            norm_gate_id(Some("  040003e5-8f36-47eb-bb57-7f342bd96a20  ".to_string())),
+            Some("040003e5-8f36-47eb-bb57-7f342bd96a20".to_string())
+        );
+        assert_eq!(norm_gate_id(Some("   ".to_string())), None);
+        assert_eq!(norm_gate_id(None), None);
+    }
 }
