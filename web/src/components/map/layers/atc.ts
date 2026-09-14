@@ -205,15 +205,39 @@ export function computeAtcAnchors(atc: AtcData, boundaries: GeoJSON.FeatureColle
 export const anchorHeader = (a: AtcAnchor) =>
   a.type === "airport" ? a.icao : `${a.id}${a.name ? " · " + a.name : ""}`;
 
+/** Which stacked pills `AtcBadge` (`markers/AtcMarkers.tsx`) renders for an airport, in order.
+ * Shared with the hover hit-area below so the two can't drift apart. */
+export function atcBadgeKinds(positions: AtcPositionLite[]): string[] {
+  return ["DEL", "GND", "TWR", "ATIS"].filter((k) => positions.some((p) => p.kind === k));
+}
+
+// Pixel dimensions mirroring the marker CSS in `markers/AtcMarkers.tsx`, used to size the hover
+// hit-area below.
+const BADGE_PX = 14; // AtcBadge: each pill's width/height
+const BADGE_GAP_PX = 1; // AtcBadge: gap between stacked pills
+const AREA_CHAR_PX = 7; // AreaPill: ui-monospace 11px 700-weight advance width, rounded up
+const AREA_PAD_PX = 10; // AreaPill: `padding: "1px 5px"`, both sides
+
+/** Half the visible marker's rendered width, in pixels — an airport's badge stack width for
+ * `AtcBadge`, or the id pill's text width for `AreaPill`. */
+function hoverRadiusPx(a: AtcAnchor): number {
+  const halfWidth =
+    a.type === "airport"
+      ? (atcBadgeKinds(a.positions).length * (BADGE_PX + BADGE_GAP_PX)) / 2
+      : (a.id.length * AREA_CHAR_PX + AREA_PAD_PX) / 2;
+  return halfWidth + 4; // a small margin past the exact edge
+}
+
 /** An invisible pickable circle at each anchor so deck's getTooltip can fire on hover (DOM markers
- * sit under deck's event layer and can't be hovered directly). */
+ * sit under deck's event layer and can't be hovered directly). Sized per anchor to cover the actual
+ * rendered marker — a fixed radius left most of a multi-badge stack or a long area id unpickable. */
 export function buildAtcHoverLayer(anchors: AtcAnchor[]) {
   return new ScatterplotLayer<AtcAnchor>({
     id: "atc-hover",
     data: anchors,
     pickable: true,
     getPosition: (a) => [a.lon, a.lat],
-    getRadius: 13,
+    getRadius: hoverRadiusPx,
     radiusUnits: "pixels",
     radiusMinPixels: 13,
     getFillColor: [0, 0, 0, 0], // invisible, but still pickable

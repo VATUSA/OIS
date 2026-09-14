@@ -1,13 +1,13 @@
 import {Marker} from "react-map-gl/maplibre";
 
 import {ATC_COLORS} from "../lib/colors";
-import type {AtcAnchor, AtcPositionLite} from "../layers/atc";
+import {atcBadgeKinds, type AtcAnchor, type AtcPositionLite} from "../layers/atc";
 
 const letter = (kind: string) => (kind === "ATIS" ? "A" : kind[0]);
 
 /** A staffed airport's stacked DEL/GND/TWR/ATIS pills. */
 function AtcBadge({ lat, lon, positions }: { lat: number; lon: number; positions: AtcPositionLite[] }) {
-  const kinds = ["DEL", "GND", "TWR", "ATIS"].filter((k) => positions.some((p) => p.kind === k));
+  const kinds = atcBadgeKinds(positions);
   if (kinds.length === 0) return null;
   return (
     <Marker longitude={lon} latitude={lat} anchor="center">
