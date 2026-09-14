@@ -33,7 +33,7 @@ export function Footer() {
             Privacy
           </Link>
           <a href={LICENSE_URL} target="_blank" rel="noreferrer" className={linkClass}>
-            License · GPL-3.0
+            License · MIT
           </a>
           <a
             href={GITHUB_URL}
