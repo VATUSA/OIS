@@ -33,6 +33,8 @@ jobs:
             dockerfile: deploy/web.Dockerfile
           - name: docs
             dockerfile: deploy/docs.Dockerfile
+          - name: discord
+            dockerfile: deploy/discord.Dockerfile
     steps:
       - uses: actions/checkout@v7
 
