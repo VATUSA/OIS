@@ -3860,6 +3860,7 @@ export interface components {
             headwind?: number | null;
             /** @description The resolved aircraft performance profile: "type:C172", "wake:H", or "default". */
             profile: string;
+            taxi_estimate?: null | components["schemas"]["TaxiEstimateDebug"];
             /**
              * @description Filed-route tokens that didn't resolve to a nav fix/navaid/airway/procedure — a likely
              *     source of ETA/track error.
@@ -4987,6 +4988,31 @@ export interface components {
              * @description When the roll began, for a live client-side timer; null while watching.
              */
             rolling_since?: string | null;
+        };
+        /**
+         * @description How a departure's pushback+taxi allowance was derived (#164 sub-issue F): the matched
+         *     gate/runway (if any) and each metric's fallback-ladder tier + sample count.
+         */
+        TaxiEstimateDebug: {
+            /** @description The matched gate/parking spot id, if the aircraft's position matched one. */
+            gate?: string | null;
+            /** Format: int64 */
+            pushback_samples: number;
+            /** Format: int64 */
+            pushback_sec: number;
+            /**
+             * @description Which fallback-ladder tier produced `pushback_sec`: "gate+type+runway", "airport+runway",
+             *     "airport", or "default".
+             */
+            pushback_tier: string;
+            /** @description The matched departure runway, if the aircraft was rolling. */
+            runway?: string | null;
+            /** Format: int64 */
+            taxi_samples: number;
+            /** Format: int64 */
+            taxi_sec: number;
+            /** @description Same tier labels as `pushback_tier`, for the taxi-out metric. */
+            taxi_tier: string;
         };
         /** @description The Taxi Monitor view for one field: stats plus the in-progress departures. */
         TaxiField: {

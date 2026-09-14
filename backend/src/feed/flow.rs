@@ -807,6 +807,23 @@ pub(crate) fn nearest_gate(gates: &[AirportGateBody], lat: f64, lon: f64) -> Opt
         .map(|(id, _)| id)
 }
 
+/// The full derivation behind a ground allowance (#164 sub-issue F): which gate/runway matched (if
+/// any), and the pushback/taxi estimates `taxi_estimate`'s ladder produced from them. Debug-mode
+/// surfaces read this directly; [`resolve_ground_allowance_sec`] is the plain-total shorthand most
+/// callers want.
+pub(crate) struct GroundAllowanceBreakdown {
+    pub gate_id: Option<String>,
+    pub runway: Option<String>,
+    pub pushback: taxi_estimate::MetricEstimate,
+    pub taxi: taxi_estimate::MetricEstimate,
+}
+
+impl GroundAllowanceBreakdown {
+    pub fn total_sec(&self) -> f64 {
+        self.pushback.value_sec + self.taxi.value_sec
+    }
+}
+
 /// The ground allowance (pushback+startup + taxi-out, #164 sub-issue E) for a departure from `dep`:
 /// looks up `dep`'s cached observation samples, resolves a gate match whenever a real position
 /// (`pos`) is known, resolves a *runway* match only once `pos`'s groundspeed clears
@@ -816,14 +833,14 @@ pub(crate) fn nearest_gate(gates: &[AirportGateBody], lat: f64, lon: f64) -> Opt
 /// the airport/default tier, so nothing is silently dropped. `aircraft` should be the raw
 /// `FlightPlan::aircraft_short` (unnormalized), matching exactly what `feed::taxi_observations`
 /// persisted, or the gate/type/runway tier will never match on type.
-pub(crate) fn resolve_ground_allowance_sec(
+pub(crate) fn resolve_ground_allowance(
     gates: &HashMap<String, Vec<AirportGateBody>>,
     runways: &RunwayDb,
     taxi_samples: &HashMap<String, Vec<taxi_estimate::TaxiSample>>,
     dep: &str,
     aircraft: Option<&str>,
     pos: Option<(f64, f64, i64, i64)>,
-) -> f64 {
+) -> GroundAllowanceBreakdown {
     let empty: Vec<AirportGateBody> = Vec::new();
     let dep_samples = taxi_samples.get(dep).map(Vec::as_slice).unwrap_or(&[]);
     let (gate_id, runway) = match pos {
@@ -836,7 +853,25 @@ pub(crate) fn resolve_ground_allowance_sec(
         None => (None, None),
     };
     let est = taxi_estimate::estimate(dep_samples, gate_id.as_deref(), aircraft, runway.as_deref());
-    taxi_estimate::ground_allowance_sec(&est)
+    GroundAllowanceBreakdown {
+        gate_id,
+        runway,
+        pushback: est.pushback,
+        taxi: est.taxi,
+    }
+}
+
+/// Just the total seconds from [`resolve_ground_allowance`] — most callers don't need the
+/// derivation, only the number `predict::eta_along_route` adds to a not-yet-airborne ETA.
+pub(crate) fn resolve_ground_allowance_sec(
+    gates: &HashMap<String, Vec<AirportGateBody>>,
+    runways: &RunwayDb,
+    taxi_samples: &HashMap<String, Vec<taxi_estimate::TaxiSample>>,
+    dep: &str,
+    aircraft: Option<&str>,
+    pos: Option<(f64, f64, i64, i64)>,
+) -> f64 {
+    resolve_ground_allowance(gates, runways, taxi_samples, dep, aircraft, pos).total_sec()
 }
 
 fn engine(ty: &str) -> Option<Engine> {
@@ -1564,5 +1599,58 @@ mod tests {
         );
         // Once actually moving, the same heading legitimately resolves the gate/type/runway tier.
         assert_eq!(rolling, 600.0 + 50.0);
+    }
+
+    /// #164 sub-issue F: debug mode reads `resolve_ground_allowance`'s breakdown directly, so it
+    /// must expose the actual matched gate/runway and each metric's real tier + sample count — not
+    /// just the folded-together total `resolve_ground_allowance_sec` returns.
+    #[test]
+    fn resolve_ground_allowance_exposes_the_matched_key_and_tier() {
+        let runways = RunwayDb::load();
+        let end = runways
+            .ends_for("KJFK")
+            .into_iter()
+            .find(|e| e.id == "04L")
+            .expect("KJFK 04L is in the bundled runway data");
+        let gates = HashMap::from([("KJFK".to_string(), vec![gate("A1", 40.0, -74.0)])]);
+        let rows: Vec<taxi_estimate::TaxiSample> = (0..5)
+            .map(|_| taxi_sample("A1", "B738", "04L", 600))
+            .collect();
+        let samples = HashMap::from([("KJFK".to_string(), rows)]);
+
+        let breakdown = resolve_ground_allowance(
+            &gates,
+            &runways,
+            &samples,
+            "KJFK",
+            Some("B738"),
+            Some((40.0, -74.0, end.hdg as i64, TAXI_ROLL_GS_KT + 1)),
+        );
+        assert_eq!(breakdown.gate_id.as_deref(), Some("A1"));
+        assert_eq!(breakdown.runway.as_deref(), Some("04L"));
+        assert_eq!(
+            breakdown.taxi.tier,
+            taxi_estimate::EstimateTier::GateTypeRunway
+        );
+        assert_eq!(breakdown.taxi.sample_count, 5);
+        assert_eq!(breakdown.taxi.value_sec, 600.0);
+        assert_eq!(breakdown.pushback.value_sec, 50.0);
+        assert_eq!(breakdown.total_sec(), 650.0);
+
+        // A thin-data airport falls to the default tier with no matched key at all.
+        let default_breakdown = resolve_ground_allowance(
+            &HashMap::new(),
+            &RunwayDb::default(),
+            &HashMap::new(),
+            "KAAA",
+            Some("B738"),
+            Some((40.0, -74.0, 270, 20)),
+        );
+        assert_eq!(default_breakdown.gate_id, None);
+        assert_eq!(default_breakdown.runway, None);
+        assert_eq!(
+            default_breakdown.taxi.tier,
+            taxi_estimate::EstimateTier::Default
+        );
     }
 }

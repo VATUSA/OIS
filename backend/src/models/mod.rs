@@ -1577,6 +1577,29 @@ pub struct FcaFlightDebug {
     /// Filed-route tokens that didn't resolve to a nav fix/navaid/airway/procedure — a likely
     /// source of ETA/track error.
     pub unresolved: Vec<String>,
+    /// The learned ground-allowance derivation (#164 sub-issue F) — absent for an airborne flight,
+    /// which never applies one.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub taxi_estimate: Option<TaxiEstimateDebug>,
+}
+
+/// How a departure's pushback+taxi allowance was derived (#164 sub-issue F): the matched
+/// gate/runway (if any) and each metric's fallback-ladder tier + sample count.
+#[derive(Debug, Serialize, ToSchema)]
+pub struct TaxiEstimateDebug {
+    /// The matched gate/parking spot id, if the aircraft's position matched one.
+    pub gate: Option<String>,
+    /// The matched departure runway, if the aircraft was rolling.
+    pub runway: Option<String>,
+    pub pushback_sec: i64,
+    /// Which fallback-ladder tier produced `pushback_sec`: "gate+type+runway", "airport+runway",
+    /// "airport", or "default".
+    pub pushback_tier: String,
+    pub pushback_samples: i64,
+    pub taxi_sec: i64,
+    /// Same tier labels as `pushback_tier`, for the taxi-out metric.
+    pub taxi_tier: String,
+    pub taxi_samples: i64,
 }
 
 /// Issue a CFR release for a crossing aircraft. `ready` (HHMMz) pins a wheels-up time;

@@ -25,6 +25,19 @@ pub enum EstimateTier {
     Default,
 }
 
+impl EstimateTier {
+    /// A human-readable label for debug-mode surfaces (#164 sub-issue F) — not `Serialize` itself
+    /// since only this label, not the enum, needs to cross the API boundary.
+    pub fn label(self) -> &'static str {
+        match self {
+            EstimateTier::GateTypeRunway => "gate+type+runway",
+            EstimateTier::AirportRunway => "airport+runway",
+            EstimateTier::Airport => "airport",
+            EstimateTier::Default => "default",
+        }
+    }
+}
+
 #[derive(Debug, Clone, Copy)]
 pub struct MetricEstimate {
     pub value_sec: f64,

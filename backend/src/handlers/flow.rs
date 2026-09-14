@@ -1101,7 +1101,8 @@ fn fca_flight(
 }
 
 /// Build the debug detail for one crossing flight (only when debug mode is on): the resolved
-/// profile, the speeds/wind used, and any unresolvable filed-route tokens.
+/// profile, the speeds/wind used, any unresolvable filed-route tokens, and (when ground) the
+/// learned taxi/pushback derivation (#164 sub-issue F) — `taxi` is `None` for an airborne flight.
 #[allow(clippy::too_many_arguments)]
 fn fca_debug(
     profiles: &trajectory::ProfileTable,
@@ -1115,6 +1116,7 @@ fn fca_debug(
     dep: &str,
     arr: &str,
     route: &str,
+    taxi: Option<&feed_flow::GroundAllowanceBreakdown>,
 ) -> crate::models::FcaFlightDebug {
     let (_waypoints, unresolved) = fca::full_route_named(nav, airports, dep, arr, route);
     crate::models::FcaFlightDebug {
@@ -1123,6 +1125,16 @@ fn fca_debug(
         cruise_alt: cruise_alt.round() as i64,
         headwind: headwind.map(|h| h.round() as i64),
         unresolved,
+        taxi_estimate: taxi.map(|t| crate::models::TaxiEstimateDebug {
+            gate: t.gate_id.clone(),
+            runway: t.runway.clone(),
+            pushback_sec: t.pushback.value_sec.round() as i64,
+            pushback_tier: t.pushback.tier.label().to_string(),
+            pushback_samples: t.pushback.sample_count as i64,
+            taxi_sec: t.taxi.value_sec.round() as i64,
+            taxi_tier: t.taxi.tier.label().to_string(),
+            taxi_samples: t.taxi.sample_count as i64,
+        }),
     }
 }
 
@@ -1182,19 +1194,20 @@ fn build_candidates(
         let dep = fp.departure.to_ascii_uppercase();
         // Airborne pilots never apply the allowance (`eta_along_route`'s `!airborne` gate) — skip
         // the lookup for them and pass 0.0.
-        let allowance = if airborne {
-            0.0
+        let ground_taxi = if airborne {
+            None
         } else {
             let aircraft = (!fp.aircraft_short.is_empty()).then_some(fp.aircraft_short.as_str());
-            feed_flow::resolve_ground_allowance_sec(
+            Some(feed_flow::resolve_ground_allowance(
                 gates,
                 runways,
                 taxi_samples,
                 &dep,
                 aircraft,
                 Some((p.latitude, p.longitude, p.heading, p.groundspeed)),
-            )
+            ))
         };
+        let allowance = ground_taxi.as_ref().map(|b| b.total_sec()).unwrap_or(0.0);
         let eta = predict::eta_along_route(
             airborne,
             route_len,
@@ -1241,6 +1254,7 @@ fn build_candidates(
                 &fp.departure,
                 &fp.arrival,
                 &fp.route,
+                ground_taxi.as_ref(),
             ));
         }
         flights.push(flight);
@@ -1285,14 +1299,9 @@ fn build_candidates(
         // airport/default tier.
         let dep = fp.departure.to_ascii_uppercase();
         let aircraft = (!fp.aircraft_short.is_empty()).then_some(fp.aircraft_short.as_str());
-        let allowance = feed_flow::resolve_ground_allowance_sec(
-            gates,
-            runways,
-            taxi_samples,
-            &dep,
-            aircraft,
-            None,
-        );
+        let ground_taxi =
+            feed_flow::resolve_ground_allowance(gates, runways, taxi_samples, &dep, aircraft, None);
+        let allowance = ground_taxi.total_sec();
         let eta = predict::eta_along_route(
             false,
             route_len,
@@ -1339,6 +1348,7 @@ fn build_candidates(
                 &fp.departure,
                 &fp.arrival,
                 &fp.route,
+                Some(&ground_taxi),
             ));
         }
         flights.push(flight);
