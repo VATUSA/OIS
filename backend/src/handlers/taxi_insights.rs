@@ -33,6 +33,14 @@ fn norm_gate_id(s: Option<String>) -> Option<String> {
     s.map(|v| v.trim().to_string()).filter(|v| !v.is_empty())
 }
 
+/// An absent `fallback_tier` means "no filter" (`Ok(None)`); a present-but-unparseable value is a
+/// bad request, not silently "no filter" — otherwise a typo'd tier name would return every combo
+/// unfiltered with no error, indistinguishable from a correct all-match.
+fn parse_fallback_tier(s: Option<&str>) -> Result<Option<EstimateTier>, ApiError> {
+    s.map(|s| EstimateTier::parse(&s.to_ascii_lowercase()).ok_or(ApiError::BadRequest))
+        .transpose()
+}
+
 #[derive(Deserialize)]
 pub struct ObservationsQuery {
     airport: Option<String>,
@@ -142,10 +150,7 @@ pub async fn list_taxi_estimates(
         from: q.from,
         to: q.to,
         include_outliers: q.include_outliers.unwrap_or(true),
-        fallback_tier: q
-            .fallback_tier
-            .as_deref()
-            .and_then(|s| EstimateTier::parse(&s.to_ascii_lowercase())),
+        fallback_tier: parse_fallback_tier(q.fallback_tier.as_deref())?,
         limit: page_size,
         offset: (page - 1) * page_size,
     };
@@ -182,5 +187,36 @@ mod tests {
         );
         assert_eq!(norm_gate_id(Some("   ".to_string())), None);
         assert_eq!(norm_gate_id(None), None);
+    }
+
+    #[test]
+    fn parse_fallback_tier_absent_means_no_filter() {
+        assert!(matches!(parse_fallback_tier(None), Ok(None)));
+    }
+
+    #[test]
+    fn parse_fallback_tier_accepts_a_known_value_case_insensitively() {
+        assert!(matches!(
+            parse_fallback_tier(Some("Default")),
+            Ok(Some(EstimateTier::Default))
+        ));
+        assert!(matches!(
+            parse_fallback_tier(Some("gate_type_runway")),
+            Ok(Some(EstimateTier::GateTypeRunway))
+        ));
+    }
+
+    /// Regression: a typo'd or wrong-case tier name must reject with BadRequest, not silently
+    /// fall through to "no filter" (which would return every combo unfiltered with no error).
+    #[test]
+    fn parse_fallback_tier_rejects_an_unknown_value() {
+        assert!(matches!(
+            parse_fallback_tier(Some("Defualt")),
+            Err(ApiError::BadRequest)
+        ));
+        assert!(matches!(
+            parse_fallback_tier(Some("")),
+            Err(ApiError::BadRequest)
+        ));
     }
 }
