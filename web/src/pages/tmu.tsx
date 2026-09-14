@@ -33,6 +33,14 @@ export function TmuPage() {
   const [tab, setTab] = useState<Tab>(tabs[0]?.id ?? "programs");
   const active = tabs.some((t) => t.id === tab) ? tab : tabs[0]?.id;
 
+  if (tabs.length === 0) {
+    return (
+      <div className="flex h-[calc(100vh-3.5rem)] items-center justify-center text-sm text-muted-foreground">
+        You don&apos;t have traffic-management access.
+      </div>
+    );
+  }
+
   return (
     <div className="flex flex-col gap-6">
       <div>

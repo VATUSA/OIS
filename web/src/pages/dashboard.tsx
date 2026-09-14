@@ -400,7 +400,9 @@ function Overview() {
             label="Ground stops"
             value={gsList.length}
             accent={
-              gsList.length > 0 ? { bg: "bg-destructive/15", icon: "text-destructive" } : ACCENT.amber
+              gsList.length > 0
+                ? { bg: "bg-destructive/15", icon: "text-destructive" }
+                : { bg: "bg-muted", icon: "text-muted-foreground" }
             }
           />
         )}
