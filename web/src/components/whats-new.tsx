@@ -35,8 +35,10 @@ function WhatsNewInner() {
   useEffect(() => {
     if (prefs.isLoading || decided.current || !newestId) return;
     decided.current = true;
-    if (prefs.data == null) {
-      // Brand-new user (this namespace was never saved) — seed to newest, don't show a backlog.
+    if (!prefs.data?.lastSeenId) {
+      // Brand-new user (this namespace was never saved, or holds no lastSeenId yet) — seed to
+      // newest, don't show a backlog. The API returns `{}` rather than `null` when unset, so this
+      // must check the specific field rather than the whole blob's nullness.
       save.mutate({ lastSeenId: newestId });
       return;
     }
