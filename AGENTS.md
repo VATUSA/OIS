@@ -281,6 +281,31 @@ idempotent-friendly and numbered sequentially).
 
 ---
 
+## Versioning
+
+Three independent axes — they are not the same number:
+
+- **Product version** — the root `VERSION` file, SemVer, the single source of truth for the
+  deployed app. It already flows to the backend binary (`backend/build.rs`, baked in as
+  `OIS_VERSION`) and the web footer/image tags (`web/vite.config.ts`, `build-images.yml`);
+  `backend/Cargo.toml` and `web/package.json` mirror it manually on each bump (neither is read by
+  anything at runtime — they're just Cargo/npm's required version string). Pre-1.0 (`0.y.z`) means
+  no stability guarantee — anything, including the API shape, may change between `0.y` releases.
+  Reaching `1.0.0` is a deliberate commitment: we stand behind `/api/v1` and won't break it.
+- **API contract version** — the `/api/v1` URL path. Decoupled from the product version; only
+  moves on a breaking change, and only once frozen — a breaking change then means a new `/api/v2`
+  served alongside a deprecation window. Pre-1.0, `v1` stays malleable: breaking changes are
+  allowed on it (regen the typed client, move internal callers) rather than spinning up `/v2` for
+  every early change, since only the internal `@ois/api-client` consumes it today. Freeze `v1` at
+  product `1.0`.
+- **Monorepo strategy** — one version for the whole deployed unit; backend, web, and docs always
+  ship from the same commit under the same `VERSION`+sha tag. Internal, never-published
+  crates/packages (`ois-core`, `ois-client`, `discord`, `packages/ui`, `packages/api-client`) stay
+  pinned at `0.0.0` — they're workspace-internal and version-irrelevant, not independently
+  versioned.
+
+---
+
 ## Environment variables
 
 The full list with dev defaults is in `.env.example`. The ones that gate functionality:
