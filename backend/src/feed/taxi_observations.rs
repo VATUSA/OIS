@@ -30,8 +30,10 @@ use super::vatsim::VatsimData;
 use crate::models::AirportGateBody;
 use crate::repos::stats::{self as repo, TaxiObservationRow};
 
-// Matches feed/taxi.rs / feed/delays.rs's own departure-taxi boundary.
-const GS_START: i64 = 7; // kt — taxi has begun
+// Matches feed/taxi.rs / feed/delays.rs's own departure-taxi boundary — and
+// `feed::flow::TAXI_ROLL_GS_KT` (#164 sub-issue E), which trusts heading for runway matching from
+// this same instant onward. One shared constant, not two.
+use super::flow::TAXI_ROLL_GS_KT as GS_START;
 const GS_STOP: i64 = 60; // kt — airborne
 const ALT_CLIMB_FT: i64 = 100;
 const DEP_PROX_NM: f64 = 15.0;
