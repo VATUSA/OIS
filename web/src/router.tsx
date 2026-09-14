@@ -17,6 +17,7 @@ import {FcaPage} from "@/pages/fca";
 import {IdstPage} from "@/pages/idst";
 import {FacilityMapIndexPage, FacilityMapPage} from "@/pages/facility-map";
 import {RunwayPage} from "@/pages/runway";
+import {AadcPage} from "@/pages/aadc";
 import {DashboardPage} from "@/pages/dashboard";
 import {BoardViewPage} from "@/pages/dashboards/board";
 import {BoardLibraryPage} from "@/pages/dashboards/library";
@@ -205,6 +206,13 @@ const idstRoute = createRoute({
   getParentRoute: () => opsRoute,
   path: "idst",
   component: IdstPage,
+  staticData: { layout: "wide" },
+});
+
+const aadcRoute = createRoute({
+  getParentRoute: () => opsRoute,
+  path: "aadc",
+  component: AadcPage,
   staticData: { layout: "wide" },
 });
 
@@ -508,6 +516,7 @@ const routeTree = rootRoute.addChildren([
     fcaRoute,
     runwayRoute,
     idstRoute,
+    aadcRoute,
   ]),
   advisoriesRoute.addChildren([advisoriesIndexRoute, advisoriesFcaRoute]),
   facilityMapRoute.addChildren([facilityMapIndexRoute, facilityMapDetailRoute]),
