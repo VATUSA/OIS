@@ -136,7 +136,7 @@ export function AadcChart({
                       style={{ height: barH }}
                       title={`${hhmmZulu(b.start)}: ${b.total} arrivals`}
                     >
-                      {keys.map((k) => {
+                      {keys.map((k, ki) => {
                         const n = seg[k] ?? 0;
                         if (n === 0) return null;
                         return (
@@ -144,7 +144,7 @@ export function AadcChart({
                             key={k}
                             style={{
                               height: `${(n / b.total) * 100}%`,
-                              background: colorFor(dimension, k, keys.indexOf(k)),
+                              background: colorFor(dimension, k, ki),
                             }}
                             title={`${k}: ${n}`}
                           />
