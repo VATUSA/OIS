@@ -23,14 +23,19 @@ const TIERS = [
   { value: "gate_type_runway", label: "Gate + type + runway" },
   { value: "airport_runway", label: "Airport + runway" },
   { value: "airport", label: "Airport-wide" },
-  { value: "default", label: "Default (8 min)" },
+  // No duration in this label: the default is a different flat value per metric (pushback vs.
+  // taxi), and the actual value is already shown alongside the badge — a single hardcoded
+  // duration here would be wrong for one of the two.
+  { value: "default", label: "Default" },
 ];
 
-/** Seconds → "Mm Ss", or "—" when unknown. */
-function fmtDur(sec: number | null | undefined): string {
+/** Seconds → "Mm Ss", or "—" when unknown. Rounds to the nearest whole second first so a
+ * fractional remainder (e.g. 299.5) can't round up to "60s" instead of carrying into the minute. */
+export function fmtDur(sec: number | null | undefined): string {
   if (sec == null) return "—";
-  const m = Math.floor(sec / 60);
-  const s = Math.round(sec % 60);
+  const total = Math.round(sec);
+  const m = Math.floor(total / 60);
+  const s = total % 60;
   return `${m}m ${s}s`;
 }
 
