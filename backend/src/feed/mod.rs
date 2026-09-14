@@ -179,19 +179,9 @@ async fn poller(state: FeedState) {
         }
     };
 
-    match airports::fetch(&client).await {
-        Ok((db, iata)) => {
-            let n = db.len();
-            let mut guard = state.write().await;
-            guard.status.airports_loaded = n;
-            guard.airports = Arc::new(db);
-            guard.iata = Arc::new(iata);
-            tracing::info!(airports = n, "feed: airport database loaded");
-        }
-        Err(e) => {
-            tracing::warn!(error = %e, "feed: airport database load failed; ETAs degraded");
-        }
-    }
+    // The airport coordinate database is loaded by its own retrying job
+    // (`jobs::spawn_airports_refresh`, #216) — a one-shot fetch here left `airports` permanently
+    // empty on any transient boot failure, with no retry.
 
     let mut last_source_ts: Option<DateTime<Utc>> = None;
     let mut consecutive_failures: u32 = 0;
