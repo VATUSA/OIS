@@ -53,12 +53,10 @@ pub fn full_route_named(
     (waypoints, res.unresolved)
 }
 
-/// Trim anchors already behind an airborne aircraft; prepend its current position.
-fn remaining_anchors(anchors: &[[f64; 2]], lat: f64, lon: f64, hdg: f64) -> Vec<[f64; 2]> {
-    if anchors.len() < 2 {
-        return anchors.to_vec();
-    }
-    // Nearest leg by perpendicular distance in a local frame centred on the aircraft.
+/// The index of the first anchor still ahead of `(lat, lon)` along the polyline — a nearest-leg
+/// projection (perpendicular distance in a local frame centred on the aircraft) that's
+/// heading-independent, so it's valid at any speed: parked, taxiing, or flying.
+fn project_forward_index(anchors: &[[f64; 2]], lat: f64, lon: f64) -> usize {
     let mut best_leg = 0usize;
     let mut best_xt = f64::MAX;
     let mut best_along = 0.0;
@@ -86,11 +84,19 @@ fn remaining_anchors(anchors: &[[f64; 2]], lat: f64, lon: f64, hdg: f64) -> Vec<
         anchors[best_leg + 1][0],
         anchors[best_leg + 1][1],
     );
-    let mut idx = if best_along >= leg_len - 3.0 {
+    if best_along >= leg_len - 3.0 {
         best_leg + 1
     } else {
         best_leg
-    };
+    }
+}
+
+/// Trim anchors already behind an airborne aircraft; prepend its current position.
+fn remaining_anchors(anchors: &[[f64; 2]], lat: f64, lon: f64, hdg: f64) -> Vec<[f64; 2]> {
+    if anchors.len() < 2 {
+        return anchors.to_vec();
+    }
+    let mut idx = project_forward_index(anchors, lat, lon);
     // Skip fixes clearly behind the current heading.
     while idx < anchors.len() - 1 {
         let d = gc_dist(lat, lon, anchors[idx][0], anchors[idx][1]);
@@ -102,6 +108,34 @@ fn remaining_anchors(anchors: &[[f64; 2]], lat: f64, lon: f64, hdg: f64) -> Vec<
         }
     }
     let mut out = vec![[lat, lon]];
+    out.extend_from_slice(&anchors[idx..]);
+    out
+}
+
+/// Trim the full filed route to the forward remainder using only along-route position, never
+/// heading — a ground aircraft's heading is unreliable (parked, spun around on the ramp). Handles
+/// both a pre-departure aircraft (projects near the route start, keeping the whole route ahead)
+/// and a landed-at-destination aircraft (projects onto the final leg, keeping nothing ahead — so
+/// it drops out of any FCA it already passed).
+///
+/// Only prepends the aircraft's current position when it's meaningfully off the anchor it
+/// projects to (real progress along a leg) — an aircraft sitting right at `anchors[idx]` (e.g. at
+/// the airport reference point pre-departure, or landed at the destination) must not gain a
+/// redundant, zero-length leading point: callers (`predict::arrival_eta`) read the anchor *count*
+/// to tell "the nav engine resolved real waypoints" from "just the dep/arr endpoints," and an
+/// unresolved 2-anchor route must stay a 2-point path here, not silently become 3.
+fn forward_route_from_position(anchors: &[[f64; 2]], lat: f64, lon: f64) -> Vec<[f64; 2]> {
+    if anchors.len() < 2 {
+        return anchors.to_vec();
+    }
+    let idx = project_forward_index(anchors, lat, lon);
+    let at_anchor =
+        idx < anchors.len() && gc_dist(lat, lon, anchors[idx][0], anchors[idx][1]) < 0.05;
+    let mut out = if at_anchor {
+        Vec::new()
+    } else {
+        vec![[lat, lon]]
+    };
     out.extend_from_slice(&anchors[idx..]);
     out
 }
@@ -168,7 +202,7 @@ pub fn route_path(
     let path = if gs >= 50 {
         remaining_anchors(&anchors, lat, lon, hdg as f64)
     } else {
-        anchors
+        forward_route_from_position(&anchors, lat, lon)
     };
     (path.len() >= 2).then_some(path)
 }
@@ -467,6 +501,35 @@ mod tests {
         // A line far west of the JFK→IAD track.
         let fca = [[41.0, -90.0], [38.0, -90.0]];
         assert!(crossing_for(&fca, &nav, &ap, "KJFK", "KIAD", "", 0.0, 0.0, 0, 0).is_none());
+    }
+
+    #[test]
+    fn ground_at_destination_does_not_match_an_already_passed_fca() {
+        // Regression (#213): a JFK→IAD flight that has landed and is on the ground at KIAD must not
+        // still show as crossing the lon -75.7 line it flew through en route — the same geometry
+        // `detects_a_route_crossing_a_line` confirms the full route crosses.
+        let nav = NavData::default();
+        let ap = airports();
+        let fca = [[41.0, -75.7], [38.0, -75.7]];
+        let c = crossing_for(&fca, &nav, &ap, "KJFK", "KIAD", "", 38.95, -77.46, 0, 5);
+        assert!(
+            c.is_none(),
+            "a ground aircraft at its destination shouldn't match an FCA it already passed"
+        );
+    }
+
+    #[test]
+    fn ground_at_origin_still_matches_a_future_fca() {
+        // A pre-departure aircraft still on the ground at KJFK must still show its future crossing —
+        // trimming ground routes for #213 must not also drop a flight that hasn't left yet.
+        let nav = NavData::default();
+        let ap = airports();
+        let fca = [[41.0, -75.7], [38.0, -75.7]];
+        let c = crossing_for(&fca, &nav, &ap, "KJFK", "KIAD", "", 40.64, -73.78, 0, 0);
+        assert!(
+            c.is_some(),
+            "a pre-departure aircraft at its origin should still match a future crossing"
+        );
     }
 
     #[test]
