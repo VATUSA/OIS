@@ -288,6 +288,50 @@ pub async fn taxi_samples_for_airport(
     .map_err(db)
 }
 
+#[derive(sqlx::FromRow)]
+struct AirportTaxiSampleRow {
+    airport: String,
+    gate_id: Option<String>,
+    aircraft: Option<String>,
+    runway: Option<String>,
+    pushback_sec: Option<i32>,
+    taxi_sec: i32,
+}
+
+/// Every taxi observation across every airport, grouped by airport — the sample set the DB-less
+/// feed subsystem's ground-allowance cache is refreshed from (#164 sub-issue E,
+/// `jobs::spawn_taxi_estimate_samples_refresh`), mirroring `airport_surface::load_all_gates`'s
+/// load-all-then-group shape for the sibling `gates` cache.
+pub async fn load_all_taxi_samples(
+    pool: &PgPool,
+) -> Result<std::collections::HashMap<String, Vec<crate::feed::taxi_estimate::TaxiSample>>, ApiError>
+{
+    let rows: Vec<AirportTaxiSampleRow> = sqlx::query_as(
+        "select airport, gate_id, aircraft, runway, pushback_sec, taxi_sec \
+         from stats.taxi_observation",
+    )
+    .fetch_all(pool)
+    .await
+    .map_err(db)?;
+    let mut by_airport: std::collections::HashMap<
+        String,
+        Vec<crate::feed::taxi_estimate::TaxiSample>,
+    > = std::collections::HashMap::new();
+    for r in rows {
+        by_airport
+            .entry(r.airport)
+            .or_default()
+            .push(crate::feed::taxi_estimate::TaxiSample {
+                gate_id: r.gate_id,
+                aircraft: r.aircraft,
+                runway: r.runway,
+                pushback_sec: r.pushback_sec,
+                taxi_sec: r.taxi_sec,
+            });
+    }
+    Ok(by_airport)
+}
+
 /// Aggregate expression shared by every delay grouping ($1..$5 = kind, since, airport, runway, proc).
 const DELAY_AGG: &str = "count(*)::bigint as n, \
     round(avg(duration_sec))::bigint as avg_sec, \
