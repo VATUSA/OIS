@@ -155,11 +155,13 @@ function Section({
   title,
   count,
   to,
+  search,
   children,
 }: {
   title: string;
   count: number;
   to: string;
+  search?: Record<string, string>;
   children: React.ReactNode;
 }) {
   return (
@@ -172,6 +174,7 @@ function Section({
           </span>
           <Link
             to={to}
+            search={search}
             className="flex items-center gap-1 text-xs text-muted-foreground transition-colors hover:text-foreground"
           >
             View all <ArrowRight className="size-3.5" />
@@ -396,7 +399,12 @@ function Overview() {
         )}
 
         {canGroundStops && (
-          <Section title="Ground stops" count={gsList.length} to="/ops/tmu">
+          <Section
+            title="Ground stops"
+            count={gsList.length}
+            to="/ops/tmu"
+            search={{ tab: "ground-stops" }}
+          >
             {gsList.length === 0 ? (
               <Empty>No ground stops.</Empty>
             ) : (
@@ -423,7 +431,12 @@ function Overview() {
         )}
 
         {canTmis && (
-          <Section title="Restrictions" count={tmiList.length} to="/ops/tmu">
+          <Section
+            title="Restrictions"
+            count={tmiList.length}
+            to="/ops/tmu"
+            search={{ tab: "restrictions" }}
+          >
             {tmiList.length === 0 ? (
               <Empty>No published restrictions.</Empty>
             ) : (
