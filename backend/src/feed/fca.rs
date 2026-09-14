@@ -113,30 +113,36 @@ fn remaining_anchors(anchors: &[[f64; 2]], lat: f64, lon: f64, hdg: f64) -> Vec<
 }
 
 /// Trim the full filed route to the forward remainder using only along-route position, never
-/// heading — a ground aircraft's heading is unreliable (parked, spun around on the ramp). Handles
-/// both a pre-departure aircraft (projects near the route start, keeping the whole route ahead)
-/// and a landed-at-destination aircraft (projects onto the final leg, keeping nothing ahead — so
-/// it drops out of any FCA it already passed).
+/// heading — a ground aircraft's heading is unreliable (parked, spun around on the ramp).
 ///
-/// Only prepends the aircraft's current position when it's meaningfully off the anchor it
-/// projects to (real progress along a leg) — an aircraft sitting right at `anchors[idx]` (e.g. at
-/// the airport reference point pre-departure, or landed at the destination) must not gain a
-/// redundant, zero-length leading point: callers (`predict::arrival_eta`) read the anchor *count*
-/// to tell "the nav engine resolved real waypoints" from "just the dep/arr endpoints," and an
-/// unresolved 2-anchor route must stay a 2-point path here, not silently become 3.
+/// When `project_forward_index` lands on an *endpoint* of the whole route (index 0, or the last
+/// index), that anchor IS the airport the ground aircraft currently occupies — the departure field
+/// pre-push, or the arrival field once landed — so it's replaced by the aircraft's actual position
+/// instead of kept as a separate point ahead of it: a pre-departure aircraft keeps every real
+/// waypoint after the departure airport (still the whole future route); a landed aircraft has
+/// nothing left after the arrival airport, so the path collapses to one point and `route_path`
+/// reports no path at all. Any other index is a genuine, distinct waypoint still ahead, so the
+/// current position is prepended in front of it, unchanged.
+///
+/// This is index-based, not a distance/epsilon match on the aircraft's coordinates — a real gate or
+/// ramp position is essentially never the airport's exact reference point, so a naive "prepend
+/// always" would still add a spurious extra point at the route's start and inflate
+/// `predict::arrival_eta`'s "the nav engine resolved real waypoints" signal (`path.len() > 2`) for
+/// ordinary pre-departure traffic on an otherwise-unresolved route.
 fn forward_route_from_position(anchors: &[[f64; 2]], lat: f64, lon: f64) -> Vec<[f64; 2]> {
     if anchors.len() < 2 {
         return anchors.to_vec();
     }
     let idx = project_forward_index(anchors, lat, lon);
-    let at_anchor =
-        idx < anchors.len() && gc_dist(lat, lon, anchors[idx][0], anchors[idx][1]) < 0.05;
-    let mut out = if at_anchor {
-        Vec::new()
+    let keep_from = if idx == 0 {
+        1
+    } else if idx == anchors.len() - 1 {
+        anchors.len()
     } else {
-        vec![[lat, lon]]
+        idx
     };
-    out.extend_from_slice(&anchors[idx..]);
+    let mut out = vec![[lat, lon]];
+    out.extend_from_slice(&anchors[keep_from..]);
     out
 }
 
