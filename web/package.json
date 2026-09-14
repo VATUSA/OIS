@@ -44,6 +44,8 @@
     "react": "^19.3.0",
     "react-dom": "^19.3.0",
     "react-grid-layout": "^2.2.4",
-    "react-map-gl": "^8"
+    "react-map-gl": "^8",
+    "react-markdown": "^10.1.0",
+    "remark-gfm": "^4.0.1"
   }
 }
