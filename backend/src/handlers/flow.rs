@@ -1264,10 +1264,6 @@ fn build_candidates(
         if !passes_scope(fca, airspace, cross.lat, cross.lon) {
             continue;
         }
-        let (dep_lat, dep_lon) = airports
-            .get(&fp.departure.to_ascii_uppercase())
-            .copied()
-            .unwrap_or((0.0, 0.0));
         let (ty, wake) = fp.aircraft_type_wake();
         let profile = profiles.resolve(&ty, &wake);
         let cruise = trajectory::parse_alt_ft(&fp.altitude);
