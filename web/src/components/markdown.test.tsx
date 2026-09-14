@@ -34,4 +34,18 @@ describe("Markdown", () => {
     expect(html).toContain("&lt;script&gt;");
     expect(html).toContain("&lt;img");
   });
+
+  it("renders a single line break as a hard break, not a collapsed space", () => {
+    // eventBodyText() represents VATUSA's <br> tags as a lone \n (only 3+ newlines collapse to
+    // \n\n). Without remark-breaks, CommonMark treats that as a soft break — rendered as a plain
+    // space by the browser — so an existing <br>-formatted description would silently run its
+    // lines together.
+    const html = render("Line one\nLine two");
+    expect(html).toContain("<br");
+  });
+
+  it("passes through a link's title attribute", () => {
+    const html = render('[VATUSA](https://vatusa.net "Visit VATUSA")');
+    expect(html).toContain('title="Visit VATUSA"');
+  });
 });
