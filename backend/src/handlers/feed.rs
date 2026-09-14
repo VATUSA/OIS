@@ -109,6 +109,9 @@ pub(crate) async fn flow_from_data(
     let airports = state.feed.read().await.airports.clone();
     let nav = state.nav.load_full();
     let profiles = state.aircraft_profiles.load_full();
+    let gates = state.gates.load_full();
+    let runways = state.runways.clone();
+    let taxi_estimate_samples = state.taxi_estimate_samples.load_full();
     let icao = icao.to_owned();
     // `compute` resolves every arrival's filed route — pure CPU, no `.await`. Push it onto the
     // blocking pool (matching the FCA `metered_flights` handler) so a burst of polling clients
@@ -123,6 +126,9 @@ pub(crate) async fn flow_from_data(
             winds.as_ref(),
             profiles.as_ref(),
             &issued,
+            gates.as_ref(),
+            runways.as_ref(),
+            taxi_estimate_samples.as_ref(),
             now,
         )
     })
@@ -383,6 +389,9 @@ pub async fn issue_cfr(
                     let nav = state.nav.load_full();
                     let winds = state.winds.load_full();
                     let profiles = state.aircraft_profiles.load_full();
+                    let gates = state.gates.load_full();
+                    let runways = state.runways.clone();
+                    let taxi_estimate_samples = state.taxi_estimate_samples.load_full();
                     let airport = airport.clone();
                     let callsign = callsign.clone();
                     // Route-resolving CPU — keep it off the async runtime (see `flow_from_data`).
@@ -396,6 +405,9 @@ pub async fn issue_cfr(
                             winds.as_ref(),
                             profiles.as_ref(),
                             &issued,
+                            gates.as_ref(),
+                            runways.as_ref(),
+                            taxi_estimate_samples.as_ref(),
                             &callsign,
                             ready,
                             Utc::now(),
