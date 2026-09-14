@@ -115,8 +115,9 @@ pub fn new_state() -> FeedState {
     Arc::new(RwLock::new(FeedInner::default()))
 }
 
-/// Spawn the background poller. Safe to call once at startup; it loads the airport database, then
-/// phase-locks to the source's own refresh cadence (see `next_poll_delay`).
+/// Spawn the background poller. Safe to call once at startup; it phase-locks to the source's own
+/// refresh cadence (see `next_poll_delay`). The airport coordinate database is loaded separately
+/// by `jobs::spawn_airports_refresh` (#216), not by this poller.
 pub fn spawn_poller(state: FeedState) {
     tokio::spawn(async move { poller(state).await });
 }
