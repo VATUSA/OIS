@@ -73,6 +73,11 @@ const AIRCRAFT_PROFILES_INTERVAL: Duration = Duration::from_secs(5 * 60);
 /// force-refreshes on write, so a slow poll is enough to catch out-of-band changes).
 const AIRPORT_GATES_INTERVAL: Duration = Duration::from_secs(5 * 60);
 
+/// How often to reload taxi observation samples from the DB (#164 sub-issue E). Observations
+/// accrue continuously and slowly from live traffic — no write path needs an instant force-reload
+/// the way admin-edited gates do, so a slow poll is enough.
+const TAXI_ESTIMATE_SAMPLES_INTERVAL: Duration = Duration::from_secs(10 * 60);
+
 /// Fetch the latest NASR data once and hot-swap it in when the cycle (or point count)
 /// changes. Records the fetch time on success. Returns `Ok(true)` when the data changed,
 /// `Ok(false)` when it was already current, `Err` when the fetch failed or was empty. The
@@ -253,6 +258,37 @@ pub fn spawn_airport_gates_refresh(
                 match airport_surface_repo::load_all_gates(&pool).await {
                     Ok(by_icao) => {
                         gates.store(Arc::new(by_icao));
+                        Ok("reloaded".to_string())
+                    }
+                    Err(e) => Err(format!("{e:?}")),
+                }
+            }
+        },
+    ));
+}
+
+/// Keep the learned taxi-observation sample cache current for the DB-less feed subsystem
+/// (`feed::flow::resolve_ground_allowance_sec`, #164 sub-issue E): load every observation from the
+/// DB, group by airport, and hot-swap it in, then reload periodically. Fails safe — a failed load
+/// keeps the current map.
+pub fn spawn_taxi_estimate_samples_refresh(
+    reg: Arc<JobRegistry>,
+    pool: PgPool,
+    samples: Arc<
+        ArcSwap<std::collections::HashMap<String, Vec<crate::feed::taxi_estimate::TaxiSample>>>,
+    >,
+) {
+    tokio::spawn(run_interval(
+        reg,
+        "taxi_estimate_samples_refresh",
+        "Reload taxi observation samples from the DB",
+        TAXI_ESTIMATE_SAMPLES_INTERVAL,
+        move || {
+            let (pool, samples) = (pool.clone(), samples.clone());
+            async move {
+                match stats_repo::load_all_taxi_samples(&pool).await {
+                    Ok(by_airport) => {
+                        samples.store(Arc::new(by_airport));
                         Ok("reloaded".to_string())
                     }
                     Err(e) => Err(format!("{e:?}")),
