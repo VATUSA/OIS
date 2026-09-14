@@ -539,6 +539,25 @@ mod tests {
     }
 
     #[test]
+    fn ground_at_origin_on_the_reverse_leg_still_matches_a_future_fca() {
+        // Regression: `project_forward_index` is a plain geometric nearest-leg projection with no
+        // knowledge of "this position is a placeholder" — the caller must pass a real position.
+        // A prefile with no live position used to pass (0.0, 0.0) here, which happens to project
+        // onto the *arrival* end for this reversed KIAD->KJFK route (the same fixture the other
+        // tests use, direction swapped), collapsing the route to one point and losing a real future
+        // crossing entirely. With the caller now passing the real departure airport's coordinates
+        // (`handlers::flow::prefile_position`), it must still resolve correctly here too.
+        let nav = NavData::default();
+        let ap = airports();
+        let fca = [[41.0, -75.7], [38.0, -75.7]];
+        let c = crossing_for(&fca, &nav, &ap, "KIAD", "KJFK", "", 38.95, -77.46, 0, 0);
+        assert!(
+            c.is_some(),
+            "a pre-departure aircraft at KIAD (departing to KJFK) should still match a future crossing"
+        );
+    }
+
+    #[test]
     fn loads_bundled_nav_and_matches_a_real_route() {
         let nav = NavData::load();
         assert!(
