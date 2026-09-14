@@ -36,7 +36,9 @@ re-run the Step 3 integrity check, and re-run the review so it covers the new HE
 
 ## Step 6 — Open the PR
 ```bash
-gh pr create --repo VATUSA/OIS --base next --title "type(scope): summary" --body "$(cat <<'EOF'
+gh pr create --repo VATUSA/OIS --base next --title "type(scope): summary" --body "Closes #$ARGUMENTS
+
+$(cat <<'EOF'
 ## Summary
 <1–3 bullets — what changed and why>
 
@@ -47,12 +49,18 @@ gh pr create --repo VATUSA/OIS --base next --title "type(scope): summary" --body
 EOF
 )"
 ```
+The **`Closes #$ARGUMENTS`** line is required: it links the PR to the issue, populating the issue's
+**Linked pull requests** so the board shows exactly which PR belongs to which issue. (The base is `next`,
+not the default branch, so it links but won't auto-close the issue — a human closes it on release.)
+
 OIS **has** CI (`.github/workflows/ci.yml`) — `gh pr checks` returns real checks; confirm they go
 green, but `just ci` locally is the primary evidence. Do not sit blocked waiting on the remote run.
 
 ## Step 7 — Move the card + Moment 3 comment
 - `.claude/scripts/board-status.sh $ARGUMENTS "Testing Queue"` and confirm the issue is **assigned to
   me** — the review/test agent picks it up from there (Testing Queue → In Test → Code Review).
+- Confirm the PR shows under the issue's **Linked pull requests** (from the `Closes #N` in the PR body)
+  so the board displays the PR↔issue mapping. Link it manually if it didn't attach.
 - Post the **Moment 3** comment on the issue (≤1,200 chars): real **file paths** only; name the
   **blast radius** (does it touch the trajectory/ETA model, the permission/role three-in-sync
   invariants, or the OpenAPI→client contract — or none); and the **deploy note** — any new migration
