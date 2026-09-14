@@ -73,6 +73,11 @@ const AIRCRAFT_PROFILES_INTERVAL: Duration = Duration::from_secs(5 * 60);
 /// force-refreshes on write, so a slow poll is enough to catch out-of-band changes).
 const AIRPORT_GATES_INTERVAL: Duration = Duration::from_secs(5 * 60);
 
+/// How often to refresh the airport coordinate database (#216). Fast enough that a transient
+/// startup failure self-heals within minutes instead of requiring a restart; slow enough not to
+/// hammer the upstream (mwgg/Airports on GitHub raw).
+const AIRPORTS_REFRESH_INTERVAL: Duration = Duration::from_secs(5 * 60);
+
 /// Fetch the latest NASR data once and hot-swap it in when the cycle (or point count)
 /// changes. Records the fetch time on success. Returns `Ok(true)` when the data changed,
 /// `Ok(false)` when it was already current, `Err` when the fetch failed or was empty. The
@@ -100,6 +105,25 @@ pub async fn refresh_nav_once(
     }
     refreshed.store(Utc::now().timestamp_millis(), Ordering::Relaxed);
     Ok(changed)
+}
+
+/// Fetch the airport coordinate database once and hot-swap it in (#216). The existing data is
+/// always kept on failure — a transient boot/network failure no longer permanently strands
+/// `FeedInner::airports` empty, since the caller (`spawn_airports_refresh`) retries this
+/// periodically.
+pub async fn refresh_airports_once(
+    feed: &FeedState,
+    client: &reqwest::Client,
+) -> Result<usize, String> {
+    let (db, iata) = crate::feed::airports::fetch(client)
+        .await
+        .map_err(|e| e.to_string())?;
+    let n = db.len();
+    let mut guard = feed.write().await;
+    guard.status.airports_loaded = n;
+    guard.airports = Arc::new(db);
+    guard.iata = Arc::new(iata);
+    Ok(n)
 }
 
 /// Fetch winds aloft once and hot-swap them in. Returns `None` if the airport database
@@ -145,6 +169,33 @@ pub fn spawn_nav_refresh(
                     Ok(false) => Ok("already current".to_string()),
                     Err(e) => Err(e),
                 }
+            }
+        },
+    ));
+}
+
+/// Keep the airport coordinate database current: fetch it at startup and every 5 min (#216). A
+/// failed fetch — including the very first one at boot — is retried on the next tick rather than
+/// leaving `FeedInner::airports` permanently empty; the existing data (or the empty default) is
+/// kept until a fetch succeeds. Registered in the job registry so a stuck load is visible on the
+/// admin Background Tasks page instead of only a warn log.
+pub fn spawn_airports_refresh(reg: Arc<JobRegistry>, feed: FeedState) {
+    let client = reqwest::Client::builder()
+        .user_agent("ois-backend/0.1 (+https://vatusa.net)")
+        .timeout(Duration::from_secs(20))
+        .build()
+        .unwrap_or_default();
+    tokio::spawn(run_interval(
+        reg,
+        "airports_refresh",
+        "Fetch the airport coordinate database",
+        AIRPORTS_REFRESH_INTERVAL,
+        move || {
+            let (feed, client) = (feed.clone(), client.clone());
+            async move {
+                refresh_airports_once(&feed, &client)
+                    .await
+                    .map(|n| format!("{n} airports"))
             }
         },
     ));
