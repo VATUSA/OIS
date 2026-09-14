@@ -2,6 +2,7 @@ import {createRootRoute, createRoute, createRouter, lazyRouteComponent, Outlet, 
 
 import {FeedWatcher} from "@/components/feed-watcher";
 import {RestrictionAlerts} from "@/components/restriction-alerts";
+import {WhatsNew} from "@/components/whats-new";
 import {Footer} from "@/components/footer";
 import {Navbar} from "@/components/navbar";
 import {useMe} from "@/lib/auth";
@@ -110,6 +111,7 @@ function RootLayout() {
     >
       {embed ? null : <FeedWatcher />}
       {embed ? null : <RestrictionAlerts />}
+      {embed ? null : <WhatsNew />}
       {embed ? null : <Navbar />}
       {embed || layout === "full" ? (
         <Outlet />
