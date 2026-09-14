@@ -330,6 +330,12 @@ function MobileMenu({
                 Delays
               </Link>
             </DropdownMenuItem>
+            <DropdownMenuItem asChild>
+              <Link to="/historical/taxi">
+                <PlaneTakeoff />
+                Taxi insights
+              </Link>
+            </DropdownMenuItem>
           </>
         )}
 
@@ -522,6 +528,12 @@ export function Navbar() {
                 <Link to="/historical/delays">
                   <Timer />
                   Delays
+                </Link>
+              </DropdownMenuItem>
+              <DropdownMenuItem asChild>
+                <Link to="/historical/taxi">
+                  <PlaneTakeoff />
+                  Taxi insights
                 </Link>
               </DropdownMenuItem>
             </NavGroup>
