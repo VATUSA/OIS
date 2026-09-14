@@ -1192,7 +1192,7 @@ fn build_candidates(
                 taxi_samples,
                 &dep,
                 aircraft,
-                Some((p.latitude, p.longitude, p.heading)),
+                Some((p.latitude, p.longitude, p.heading, p.groundspeed)),
             )
         };
         let eta = predict::eta_along_route(
