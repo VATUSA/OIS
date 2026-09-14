@@ -51,8 +51,8 @@ OIS **has** CI (`.github/workflows/ci.yml`) — `gh pr checks` returns real chec
 green, but `just ci` locally is the primary evidence. Do not sit blocked waiting on the remote run.
 
 ## Step 7 — Move the card + Moment 3 comment
-- `.claude/scripts/board-status.sh $ARGUMENTS "Code Review"` and confirm the issue is **assigned to
-  me**.
+- `.claude/scripts/board-status.sh $ARGUMENTS "Testing Queue"` and confirm the issue is **assigned to
+  me** — the review/test agent picks it up from there (Testing Queue → In Test → Code Review).
 - Post the **Moment 3** comment on the issue (≤1,200 chars): real **file paths** only; name the
   **blast radius** (does it touch the trajectory/ETA model, the permission/role three-in-sync
   invariants, or the OpenAPI→client contract — or none); and the **deploy note** — any new migration

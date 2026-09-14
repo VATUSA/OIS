@@ -188,9 +188,9 @@ pointer rather than filing again.
   back.
 - **Agents do not self-assign, close issues, or merge PRs, and don't move an issue to Shippable or
   Done** — a human owns review, ship, and close. An agent may move **To Do → In build** when it
-  genuinely starts, run the **Post build** wrap-up (client regen, migrations, `just ci`), and open
-  the PR (**Code Review**). Work lands on **`main`** per the project's no-branch rule (see
-  `AGENTS.md`).
+  genuinely starts, run the **Post build** wrap-up (client regen, migrations, `just ci`), open the
+  PR, and hand off to **Testing Queue** — the review/test agent then advances it **In Test → Code
+  Review**. Work lands on **`main`** per the project's no-branch rule (see `AGENTS.md`).
 - **Comment sparingly** — an issue is a spec, not a chat log. Comment only at real moments: picking
   it up, hitting a genuine blocker (say what and why), or finishing (what changed + the verifying
   test). No running narration, no per-attempt logs, no flight/user IDs or "Reproduced YYYY-MM-DD"
