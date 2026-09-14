@@ -49,16 +49,14 @@ async fn feed_view(state: &AppState) -> (Option<Arc<crate::feed::Snapshot>>, Arc
 }
 
 /// A prefile's stand-in position for route resolution (#213) — it has no live coordinates, so use
-/// its departure airport's, matching `feed::flow::ground_estimate`'s pattern. `(0.0, 0.0)` would
-/// flow straight into `route_path`'s along-route ground trimming as if the aircraft were parked at
-/// Null Island, corrupting crossing detection and distance for every prefile. An unresolvable
-/// departure still safely yields no route via `route_path`'s own anchor-count check, regardless of
-/// this fallback.
-fn prefile_position(airports: &AirportDb, dep: &str) -> (f64, f64) {
-    airports
-        .get(&dep.to_ascii_uppercase())
-        .copied()
-        .unwrap_or((0.0, 0.0))
+/// its departure airport's, matching `feed::flow::ground_estimate`'s pattern. `None` when the
+/// departure doesn't resolve: `route_path`'s ground branch trims by along-route position, so a
+/// fabricated placeholder (e.g. `(0.0, 0.0)`) would corrupt crossing detection whenever the arrival
+/// or route content still resolves ≥2 anchors on its own (`nav::build_anchors` only skips the
+/// *departure* anchor for an unresolvable `dep` — it still resolves the arrival and any enroute
+/// fixes) — the caller must skip that prefile, not guess its position.
+fn prefile_position(airports: &AirportDb, dep: &str) -> Option<(f64, f64)> {
+    airports.get(&dep.to_ascii_uppercase()).copied()
 }
 
 /// Airport-code match, tolerant of a leading `K` (KJFK ~ JFK).
@@ -503,8 +501,9 @@ pub async fn fca_counts(
             }
         }
         for pf in &snap.data.prefiles {
-            if let Some(fp) = &pf.flight_plan {
-                let (lat, lon) = prefile_position(airports, &fp.departure);
+            if let Some(fp) = &pf.flight_plan
+                && let Some((lat, lon)) = prefile_position(airports, &fp.departure)
+            {
                 tally(fp, lat, lon, 0, 0, 0);
             }
         }
@@ -1244,7 +1243,9 @@ fn build_candidates(
         if !passes_filters(fca, fp, None) {
             continue;
         }
-        let (dep_lat, dep_lon) = prefile_position(airports, &fp.departure);
+        let Some((dep_lat, dep_lon)) = prefile_position(airports, &fp.departure) else {
+            continue;
+        };
         let Some(path) = fca::route_path(
             nav,
             airports,
@@ -1813,24 +1814,26 @@ mod prefile_position_tests {
     use super::prefile_position;
 
     /// Regression (#213): a prefile has no live position, so `fca_counts`/`build_candidates` must
-    /// resolve its departure airport's real coordinates — not fall through to `(0.0, 0.0)`, which
-    /// `route_path`'s ground branch now trims by along-route position instead of ignoring,
-    /// corrupting crossing detection and distance for a route that happens to project Null Island
-    /// onto its far end (see `feed::fca`'s own regression tests for that mechanism).
+    /// resolve its departure airport's real coordinates — not fall through to a fabricated `(0.0,
+    /// 0.0)`, which `route_path`'s ground branch now trims by along-route position instead of
+    /// ignoring, corrupting crossing detection and distance for a route that happens to project
+    /// Null Island onto its far end (see `feed::fca`'s own regression tests for that mechanism).
     #[test]
     fn resolves_the_real_departure_airport_not_null_island() {
         let airports: crate::feed::airports::AirportDb =
             HashMap::from([("KJFK".to_string(), (40.64, -73.78))]);
-        assert_eq!(prefile_position(&airports, "KJFK"), (40.64, -73.78));
+        assert_eq!(prefile_position(&airports, "KJFK"), Some((40.64, -73.78)));
         // Case-insensitive, matching route_path's own uppercasing.
-        assert_eq!(prefile_position(&airports, "kjfk"), (40.64, -73.78));
+        assert_eq!(prefile_position(&airports, "kjfk"), Some((40.64, -73.78)));
     }
 
     #[test]
-    fn falls_back_to_the_origin_for_an_unresolvable_airport() {
-        // route_path bails out via its own anchor-count check before this coordinate ever matters
-        // for an airport it can't resolve, so the fallback value itself is inert, not dangerous.
+    fn is_none_for_an_unresolvable_airport() {
+        // `nav::build_anchors` only skips the *departure* anchor for an unresolvable `dep` — it
+        // still resolves the arrival airport and any enroute fixes independently, so a fabricated
+        // position here could still reach route_path's ground trimming. The caller must skip this
+        // prefile instead of guessing a position.
         let airports: crate::feed::airports::AirportDb = HashMap::new();
-        assert_eq!(prefile_position(&airports, "ZZZZ"), (0.0, 0.0));
+        assert_eq!(prefile_position(&airports, "ZZZZ"), None);
     }
 }
