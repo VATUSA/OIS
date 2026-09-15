@@ -154,13 +154,44 @@ describe("preset highlighting (#264)", () => {
     expect(next.get("tmu.programs.update")).toEqual({ national: false, artccs: ["ZDC"] });
   });
 
-  it("removing a national preset keeps what another applied national preset grants (#275)", () => {
+  it("removing a national preset keeps what an overlapping applied preset grants (#275)", () => {
+    const g = ADMIN_GRANTABLE;
+    const events = togglePresetSelection(preset("events_team"), g, base(g), "", new Map());
+    const both = togglePresetSelection(preset("ntmo"), g, base(g), "", events);
+    // Together they light DCC Staff (and ACE Team, inside Events Team) too.
+    expect(presetApplied(preset("dcc_staff"), g, base(g), "", both)).toBe(true);
+
+    const noNtmo = togglePresetSelection(preset("ntmo"), g, base(g), "", both);
+    for (const p of TRAFFIC) expect(noNtmo.has(p)).toBe(false);
+    expect(presetApplied(preset("events_team"), g, base(g), "", noNtmo)).toBe(true);
+
+    const noEvents = togglePresetSelection(preset("events_team"), g, base(g), "", both);
+    expect(noEvents.has("events.config.update")).toBe(false);
+    expect(presetApplied(preset("ntmo"), g, base(g), "", noEvents)).toBe(true);
+  });
+
+  it("removing a preset inside a larger applied one still removes it; the larger one goes unlit (#275)", () => {
+    // DCC Staff alone and DCC Staff + NTMO are the same selection, so the click must act, not no-op.
     const g = ADMIN_GRANTABLE;
     const dcc = togglePresetSelection(preset("dcc_staff"), g, base(g), "", new Map());
-    const both = togglePresetSelection(preset("ntmo"), g, base(g), "", dcc);
-    expect(presetApplied(preset("ntmo"), g, base(g), "", both)).toBe(true);
-    const off = togglePresetSelection(preset("ntmo"), g, base(g), "", both);
-    expect(presetApplied(preset("dcc_staff"), g, base(g), "", off)).toBe(true);
+    for (const inner of ["ntmo", "events_team", "ace_team"]) {
+      expect(presetApplied(preset(inner), g, base(g), "", dcc)).toBe(true);
+      const off = togglePresetSelection(preset(inner), g, base(g), "", dcc);
+      expect(presetApplied(preset(inner), g, base(g), "", off)).toBe(false);
+      expect(presetApplied(preset("dcc_staff"), g, base(g), "", off)).toBe(false);
+    }
+  });
+
+  it("removing a facility preset keeps the baseline while its grants remain on the key (#275)", () => {
+    const g = ADMIN_GRANTABLE;
+    const ec = preset("facility_ec");
+    const sel = togglePresetSelection(preset("ntmo"), g, base(g), "", new Map());
+    sel.set("flow.fca.update", { national: false, artccs: ["ZDC"] }); // narrowed by hand: NTMO unlit
+    const on = togglePresetSelection(ec, g, base(g), "ZDC", sel);
+    expect(presetApplied(ec, g, base(g), "ZDC", on)).toBe(true);
+    const off = togglePresetSelection(ec, g, base(g), "ZDC", on);
+    expect(off.get("tmu.programs.update")).toEqual({ national: true, artccs: [] });
+    expect(off.get("ace.requests.create")).toEqual({ national: true, artccs: [] });
   });
 
   it("removing a national preset stacked on a facility preset hands the facility its ARTCC back (#275)", () => {
@@ -204,7 +235,9 @@ describe("preset highlighting (#264)", () => {
     const on = togglePresetSelection(ec, g, base(g), "ZDC", sel);
     expect(presetApplied(ec, g, base(g), "ZDC", on)).toBe(true);
     const off = togglePresetSelection(ec, g, base(g), "ZDC", on);
-    expect(off).toEqual(sel);
+    // The national grant stays, so the baseline does too: the selection can't show whether the
+    // baseline predates EC, and dropping one that did would silently lose it.
+    expect(off).toEqual(new Map([...sel, ["ace.requests.create", { national: true, artccs: [] }]]));
   });
 
   it("removing a preset also removes presets wholly inside it, which can't be told apart (#275)", () => {
@@ -250,4 +283,54 @@ describe("preset highlighting (#264)", () => {
     expect(presetCanApply(preset("facility_ec"), g, base(g), "")).toBe(true);
     expect(presetCanApply(preset("facility_ec"), [], [], "ZDC")).toBe(false);
   });
+});
+
+describe("preset click invariants (#275)", () => {
+  // An ARTCC-limited creator: traffic at ZDC+ZNY, ACE management at ZDC only.
+  const ARTCC_GRANTABLE: GrantablePermission[] = [
+    ...TRAFFIC.map((permission) => ({ permission, national: false, artccs: ["ZDC", "ZNY"] })),
+    { permission: "ace.requests.manage", national: false, artccs: ["ZDC"] },
+    national("ace.requests.create"),
+  ];
+  const clicks = ACCESS_PRESETS.flatMap((p) =>
+    p.scope === "facility" ? ["ZDC", "ZNY"].map((f) => ({ p, f })) : [{ p, f: "" }],
+  );
+  const key = (s: PermSelection) => JSON.stringify([...s].sort(([a], [b]) => a.localeCompare(b)));
+
+  /** Every distinct selection reachable in up to `depth` preset clicks from empty. */
+  function reachable(g: GrantablePermission[], depth: number): PermSelection[] {
+    const seen = new Map<string, PermSelection>([[key(new Map()), new Map()]]);
+    let frontier: PermSelection[] = [new Map()];
+    for (let d = 0; d < depth; d++) {
+      frontier = frontier.flatMap((sel) =>
+        clicks
+          .map(({ p, f }) => togglePresetSelection(p, g, base(g), f, sel))
+          .filter((next) => !seen.has(key(next)) && seen.set(key(next), next)),
+      );
+    }
+    return [...seen.values()];
+  }
+
+  for (const [name, g] of [
+    ["admin", ADMIN_GRANTABLE],
+    ["TMU-only", TMU_ONLY_GRANTABLE],
+    ["ARTCC-limited", ARTCC_GRANTABLE],
+  ] as const) {
+    it(`for a ${name} creator, every lit chip turns off and no click exceeds what can be delegated`, () => {
+      const bounds = new Map(g.map((b) => [b.permission, b] as const));
+      for (const sel of reachable(g, 3)) {
+        for (const { p, f } of clicks) {
+          const next = togglePresetSelection(p, g, base(g), f, sel);
+          if (presetApplied(p, g, base(g), f, sel)) {
+            expect(presetApplied(p, g, base(g), f, next), `${p.id}@${f} stays lit in ${key(sel)}`).toBe(false);
+          }
+          for (const [perm, s] of next) {
+            const b = bounds.get(perm)!;
+            expect(b, perm).toBeDefined();
+            expect(s.national ? b.national : b.national || s.artccs.every((a) => b.artccs.includes(a))).toBe(true);
+          }
+        }
+      }
+    });
+  }
 });

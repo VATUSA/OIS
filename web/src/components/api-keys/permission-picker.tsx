@@ -119,9 +119,9 @@ export function presetCanApply(
 }
 
 /** The selection after clicking a preset. Applied: subtracts what it contributes (a facility
- * preset's ARTCC, a national preset's perms) but keeps what the other applied presets grant, and
- * drops the baseline only once nothing still needs it. Otherwise: merges its perms in at the
- * preset's scope without narrowing existing grants (#275). */
+ * preset's ARTCC, a national preset's perms) but keeps what overlapping applied presets grant, and
+ * drops the baseline only once nothing still needs it — so a lit chip always turns off. Otherwise:
+ * merges its perms in at the preset's scope without narrowing existing grants (#275). */
 export function togglePresetSelection(
   preset: AccessPreset,
   grantable: GrantablePermission[],
@@ -137,9 +137,13 @@ export function togglePresetSelection(
     const scopeOf = (o: AccessPreset, at: string, p: string): ScopeSel =>
       o.scope === "facility" ? { national: false, artccs: [at] } : defaultScope(byName.get(p)!);
     const self = preset.scope === "facility" ? facility : "";
-    // Every other preset applied nationally or at an ARTCC in the selection. One whose grants all lie
-    // inside this preset's (itself, or e.g. NTMO inside VATUSA Admin) is indistinguishable from it, so
-    // it goes too.
+    // Whether everything preset `a` (applied at `aAt`) grants is also granted by `b` (at `bAt`).
+    const inside = (a: AccessPreset, aAt: string, aOwn: string[], b: AccessPreset, bAt: string, bOwn: string[]) =>
+      aOwn.every((p) => bOwn.includes(p) && covers(scopeOf(b, bAt, p), scopeOf(a, aAt, p)));
+    // Other presets applied nationally or at an ARTCC in the selection keep what they grant — except
+    // one inside this preset (itself, AEC ≡ EC, NTMO in VATUSA Admin) or containing it (VATUSA Admin
+    // over NTMO). Selection alone can't tell those apart from this preset, and keeping a container's
+    // grants would turn the click into a no-op.
     const selArtccs = [...new Set([...selection.values()].flatMap((s) => s.artccs))];
     const others = ACCESS_PRESETS.flatMap((o) =>
       (o.scope === "facility" ? selArtccs : [""]).map((at) => ({
@@ -150,7 +154,8 @@ export function togglePresetSelection(
     ).filter(
       ({ o, at, own: theirs }) =>
         presetApplied(o, grantable, baseNames, at, selection) &&
-        !theirs.every((p) => own.includes(p) && covers(scopeOf(preset, self, p), scopeOf(o, at, p))),
+        !inside(o, at, theirs, preset, self, own) &&
+        !inside(preset, self, own, o, at, theirs),
     );
     for (const p of own) {
       const s = next.get(p)!;
@@ -172,8 +177,9 @@ export function togglePresetSelection(
       if (kept.national || kept.artccs.length > 0) next.set(p, kept);
       else next.delete(p);
     }
-    // Keep the baseline while another preset (including this one at another ARTCC) is still applied.
-    if (others.length === 0) for (const p of baseNames) next.delete(p);
+    // Keep the baseline while another preset is still applied or any of this one's grants remain
+    // (at another ARTCC, or a national grant a facility preset leaves alone).
+    if (others.length === 0 && !own.some((p) => next.has(p))) for (const p of baseNames) next.delete(p);
     return next;
   }
   for (const p of own) {
