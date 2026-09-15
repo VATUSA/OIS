@@ -1,65 +1,130 @@
-/* OIS shared theme tokens (light + dark). Shared by web + desktop.
-   Imported by each app's Tailwind entry after `@import "tailwindcss";`. */
+/* OIS shared theme — the Console Design Language.
+   Spec, rationale, and the token tables this file implements: /DESIGN.md (repo root).
 
-/* Class-based dark mode (we toggle `.dark` on <html>). */
+   Dark-first: `.dark` is the canonical operator-console palette; `:root` (light) is the
+   token-swap counterpart. Class-based dark mode (`.dark` toggled on <html>). Tailwind v4
+   (CSS-first config). Shared by the web app and the Tauri desktop app.
+
+   Layers:
+     1. Console tokens (surfaces, ink, brand, semantic, radius) — the DESIGN.md names.
+     2. shadcn/ui semantic vars mapped onto those tokens, so every component inherits the
+        system for free (never restyle a component's colours — retune a token here).
+     3. `@theme inline` exposes both as Tailwind utilities (bg-panel, text-ink-2, bg-success,
+        border-line, text-brand, rounded-lg, …).
+
+   Rules (see DESIGN.md): one brand accent, no gradients, no chrome shadows, hairlines,
+   continuous corners, 400/600/700 type ladder, mono for data. Fonts are loaded by the app
+   entry (Inter for UI, JetBrains Mono for data). */
+
 @custom-variant dark (&:is(.dark *));
 
+/* ============================================================
+   LIGHT — the token-swap of the dark console.
+   ============================================================ */
 :root {
-  --radius: 0.625rem;
+  --radius: 12px;   /* shadcn components that read var(--radius) directly */
 
-  --background: oklch(1 0 0);
-  --foreground: oklch(0.145 0 0);
-  --card: oklch(1 0 0);
-  --card-foreground: oklch(0.145 0 0);
-  --popover: oklch(1 0 0);
-  --popover-foreground: oklch(0.145 0 0);
+  /* surfaces & ink */
+  --ground: #ffffff;
+  --panel: #ffffff;
+  --panel-2: #f5f5f7;
+  --card: #ffffff;
+  --chip: #f0f0f3;
+  --line: #e6e6ea;
+  --line-soft: #f0f0f3;
+  --ink: #16161a;
+  --ink-2: #5c5c66;
+  --ink-3: #9898a2;
 
-  --primary: oklch(0.55 0.16 255);
-  --primary-foreground: oklch(0.985 0 0);
-  --secondary: oklch(0.97 0 0);
-  --secondary-foreground: oklch(0.205 0 0);
-  --muted: oklch(0.97 0 0);
-  --muted-foreground: oklch(0.556 0 0);
-  --accent: oklch(0.96 0.02 255);
-  --accent-foreground: oklch(0.205 0 0);
-  --destructive: oklch(0.577 0.245 27.325);
-  --destructive-foreground: oklch(0.985 0 0);
+  /* brand accent — deeper on a light ground so text/fills hit AA */
+  --brand: #2f6fed;
+  --brand-ink: #2f6fed;
+  --brand-soft: rgb(47 111 237 / 0.10);
 
-  --border: oklch(0.922 0 0);
-  --input: oklch(0.922 0 0);
-  --ring: oklch(0.55 0.16 255);
+  /* semantic status (separate from the accent) */
+  --success: #1f9d63; --success-soft: rgb(31 157 99 / 0.12);
+  --warning: #a9740a; --warning-soft: rgb(169 116 10 / 0.12);
+  --danger:  #d64545; --danger-soft:  rgb(214 69 69 / 0.12);
+
+  /* --- shadcn/ui semantic mapping (every component reads these) --- */
+  --background: var(--ground);
+  --foreground: var(--ink);
+  --card-foreground: var(--ink);
+  --popover: var(--panel);
+  --popover-foreground: var(--ink);
+  --primary: var(--brand);
+  --primary-foreground: #ffffff;
+  --secondary: var(--panel-2);
+  --secondary-foreground: var(--ink);
+  --muted: var(--panel-2);
+  --muted-foreground: var(--ink-2);
+  --accent: var(--brand-soft);          /* soft brand wash for hover/selected */
+  --accent-foreground: var(--brand-ink);
+  --destructive: var(--danger);
+  --destructive-foreground: #ffffff;
+  --border: var(--line);
+  --input: var(--line);
+  --ring: var(--brand);
 }
 
+/* ============================================================
+   DARK — the canonical operator console.
+   ============================================================ */
 .dark {
-  --background: oklch(0.145 0 0);
-  --foreground: oklch(0.985 0 0);
-  --card: oklch(0.205 0 0);
-  --card-foreground: oklch(0.985 0 0);
-  --popover: oklch(0.205 0 0);
-  --popover-foreground: oklch(0.985 0 0);
+  --ground: #08080a;
+  --panel: #0f0f12;
+  --panel-2: #131317;
+  --card: #16161b;
+  --chip: #1c1c22;
+  --line: #26262d;
+  --line-soft: #1c1c22;
+  --ink: #f3f3f5;
+  --ink-2: #a1a1aa;
+  --ink-3: #6b6b74;
 
-  --primary: oklch(0.65 0.17 255);
-  --primary-foreground: oklch(0.145 0 0);
-  --secondary: oklch(0.269 0 0);
-  --secondary-foreground: oklch(0.985 0 0);
-  --muted: oklch(0.269 0 0);
-  --muted-foreground: oklch(0.708 0 0);
-  --accent: oklch(0.3 0.03 255);
-  --accent-foreground: oklch(0.985 0 0);
-  --destructive: oklch(0.704 0.191 22.216);
-  --destructive-foreground: oklch(0.985 0 0);
+  --brand: #6ea8fe;
+  --brand-ink: #a9cbff;
+  --brand-soft: rgb(110 168 254 / 0.16);
 
-  --border: oklch(1 0 0 / 10%);
-  --input: oklch(1 0 0 / 15%);
-  --ring: oklch(0.65 0.17 255);
+  --success: #43d089; --success-soft: rgb(67 208 137 / 0.13);
+  --warning: #efc14d; --warning-soft: rgb(239 193 77 / 0.13);
+  --danger:  #fb6b6b; --danger-soft:  rgb(251 107 107 / 0.13);
+
+  --background: var(--ground);
+  --foreground: var(--ink);
+  --card-foreground: var(--ink);
+  --popover: var(--panel-2);
+  --popover-foreground: var(--ink);
+  --primary: var(--brand);
+  --primary-foreground: #08080a;        /* dark ink on the pastel accent — white fails AA */
+  --secondary: var(--panel-2);
+  --secondary-foreground: var(--ink);
+  --muted: var(--panel-2);
+  --muted-foreground: var(--ink-2);
+  --accent: var(--brand-soft);
+  --accent-foreground: var(--brand-ink);
+  --destructive: var(--danger);
+  --destructive-foreground: #08080a;
+  --border: var(--line);
+  --input: var(--line);
+  --ring: var(--brand);
 }
 
+/* ============================================================
+   Tailwind utilities.
+   ============================================================ */
 @theme inline {
-  --radius-sm: calc(var(--radius) - 4px);
-  --radius-md: calc(var(--radius) - 2px);
-  --radius-lg: var(--radius);
-  --radius-xl: calc(var(--radius) + 4px);
+  /* radius scale (DESIGN.md) — generates rounded-xs … rounded-xl */
+  --radius-xs: 6px;
+  --radius-sm: 8px;
+  --radius-md: 12px;
+  --radius-lg: 16px;
+  --radius-xl: 20px;
 
+  --font-sans: "Inter", system-ui, -apple-system, sans-serif;
+  --font-mono: "JetBrains Mono", ui-monospace, monospace;
+
+  /* shadcn semantic colours */
   --color-background: var(--background);
   --color-foreground: var(--foreground);
   --color-card: var(--card);
@@ -79,6 +144,28 @@
   --color-border: var(--border);
   --color-input: var(--input);
   --color-ring: var(--ring);
+
+  /* console surface / ink extras */
+  --color-ground: var(--ground);
+  --color-panel: var(--panel);
+  --color-panel-2: var(--panel-2);
+  --color-chip: var(--chip);
+  --color-line: var(--line);
+  --color-line-soft: var(--line-soft);
+  --color-ink: var(--ink);
+  --color-ink-2: var(--ink-2);
+  --color-ink-3: var(--ink-3);
+
+  /* brand + semantic (soft tints for pills / washes) */
+  --color-brand: var(--brand);
+  --color-brand-ink: var(--brand-ink);
+  --color-brand-soft: var(--brand-soft);
+  --color-success: var(--success);
+  --color-success-soft: var(--success-soft);
+  --color-warning: var(--warning);
+  --color-warning-soft: var(--warning-soft);
+  --color-danger: var(--danger);
+  --color-danger-soft: var(--danger-soft);
 }
 
 @layer base {
@@ -88,6 +175,7 @@
   body {
     background-color: var(--color-background);
     color: var(--color-foreground);
+    font-family: var(--font-sans);
     -webkit-font-smoothing: antialiased;
   }
 }

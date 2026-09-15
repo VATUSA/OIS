@@ -52,8 +52,11 @@ headers. It should feel calm, precise, and obviously the same product on every s
 
 ## Tokens
 
-Ship these as CSS custom properties (web, consumed by Tailwind/shadcn theme in `packages/ui`) and as
-the same values in a JSON mirror the Tauri desktop app reads — **one source of truth for both.**
+These are implemented as CSS custom properties in **`packages/ui/src/styles/globals.css`** — the
+single source of truth, shared by the web app and (later) the Tauri desktop app. Dark lives under
+`.dark` (canonical), light under `:root`. They're wired into the shadcn/ui semantic vars and exposed as
+Tailwind utilities: `bg-panel`, `bg-card`, `text-ink-2`, `border-line`, `text-brand`, `bg-success`,
+`bg-warning-soft`, `rounded-lg`, etc. **Retune a token here — never restyle a component's colours.**
 
 ### Surfaces & ink (dark-first — the canonical palette)
 
@@ -74,9 +77,9 @@ the same values in a JSON mirror the Tauri desktop app reads — **one source of
 
 | Token | Hex | Use |
 | --- | --- | --- |
-| `--accent` | `#6ea8fe` | The single accent — pastel blue, VATUSA-aligned. Active state, primary button, focus, links |
-| `--accent-ink` | `#a9cbff` | Accent used as *text* on a dark ground |
-| `--accent-soft` | `rgba(110,168,254,.16)` | Accent tint fills (soft chips, focus wash) |
+| `--brand` | `#6ea8fe` | The single accent — pastel blue, VATUSA-aligned. Active state, primary button, focus, links. (shadcn `--primary`.) |
+| `--brand-ink` | `#a9cbff` | Brand as *text* on a dark ground |
+| `--brand-soft` | `rgba(110,168,254,.16)` | Brand tint fills — soft chips, hover/selected wash. (shadcn `--accent`.) |
 | `--good` / `--good-soft` | `#43d089` / `rgba(67,208,137,.13)` | Success / Active / positive trend |
 | `--bad` / `--bad-soft` | `#fb6b6b` / `rgba(251,107,107,.13)` | Danger / Inactive / negative trend |
 | `--warn` / `--warn-soft` | `#efc14d` / `rgba(239,193,77,.13)` | Warning / watch / flat trend |
@@ -125,7 +128,7 @@ problem on its own.
 ## Components (one each, tokens only)
 
 - **Nav item** — icon + label + right-aligned mono count. Active = `--panel-2` tile, icon shifts to
-  `--accent-ink`. Nested children indent behind a 1px vertical guide.
+  `--brand-ink`. Nested children indent behind a 1px vertical guide.
 - **Status pill** — `--pill`, a semantic soft-tint fill with same-hue text. Optional leading dot for
   people-status (Active/Inactive). Never for actions.
 - **Filter chip** — pill, leading icon + chevron, `--panel-2` fill, hairline. Plus a ghost "+ Add
@@ -135,8 +138,9 @@ problem on its own.
   same semantic hue.
 - **Data table** — select column, icon-led headers on `--card`, `--line-soft` row separators,
   tabular figures, state as a pill, identity as avatar + name(600) + email link.
-- **Buttons** — primary = solid `--accent` **pill**, white text. Secondary = `--panel-2` pill with a
-  hairline. Press = scale 0.97, 150–220ms ease-out, no bounce.
+- **Buttons** — primary = solid `--brand` **pill** with **dark ink** (`--primary-foreground`; white
+  fails AA on a pastel accent). Secondary = `--panel-2` pill with a hairline. Press = scale 0.97,
+  150–220ms ease-out, no bounce.
 - **Icons** — one-weight line icons (~1.7px stroke, round caps), `currentColor` so they inherit the
   row's ink/accent. Never give an icon its own colour.
 
