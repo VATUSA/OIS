@@ -13,8 +13,12 @@
 //! boundary resolves to the update it was first seen on; a push and start-up that both complete
 //! inside one poll can collapse into the taxi figure (the estimator's defaults cover that).
 //!
-//! A first burst that reaches [`GS_START`] is taxi, not a push (a powerback or no-tug gate-out):
-//! pushback and start-up are then `None`. Once taxiing, stops (hold short, queues) stay taxi.
+//! A push is the first burst while it stays below [`GS_START`] and within [`PUSH_MAX_M`] of where
+//! the aircraft was parked. A burst that breaks either limit is taxi — a powerback, a no-tug
+//! gate-out, or a slow GA taxi — unless it paused first: then the push ended at that pause and the
+//! taxi started where movement resumed (a short start-up the stop confirmation couldn't catch).
+//! Without a pause, pushback and start-up are `None`. Once taxiing, stops (hold short, queues)
+//! stay taxi.
 //!
 //! Departure filtering (proximity, arriving turnarounds, airborne thresholds) mirrors
 //! `feed/delays.rs`'s departure half; this module additionally matches the spawn point to the
@@ -60,6 +64,8 @@ const MOVE_M: f64 = 2.0;
 const BURST_MIN_M: f64 = 20.0;
 /// Consecutive contradicting updates that confirm a phase change (">2 updates").
 const CONFIRM_UPDATES: u32 = 3;
+/// Farthest a pushback moves from where the aircraft was parked; beyond it the burst is taxi.
+const PUSH_MAX_M: f64 = 150.0;
 const M_PER_NM: f64 = 1852.0;
 
 #[derive(Clone, Copy, PartialEq, Debug)]
@@ -98,6 +104,9 @@ struct Session {
     push_start_ms: Option<i64>,
     push_stop_ms: Option<i64>,
     taxi_start_ms: Option<i64>,
+    /// `(stop start, resume)` of the latest brief stop inside a push — too short to confirm as the
+    /// push stop, but where the push ended if the burst turns out to continue as taxi.
+    last_pause: Option<(i64, i64)>,
     base_alt: i64,
 }
 
@@ -106,10 +115,19 @@ impl Session {
     fn advance(&mut self, now_ms: i64, lat: f64, lon: f64, gs: i64, alt: i64) {
         let step_m = gc_dist(self.last_lat, self.last_lon, lat, lon) * M_PER_NM;
         (self.last_lat, self.last_lon) = (lat, lon);
+        let from_stand_m = gc_dist(self.first_lat, self.first_lon, lat, lon) * M_PER_NM;
 
-        // A "push" that reaches taxi speed was the taxi itself, with no tug.
-        if self.phase == Phase::PushingBack && gs > GS_START {
-            self.taxi_start_ms = self.push_start_ms.take();
+        // A "push" that reaches taxi speed or travels too far is taxiing: it split at its last pause
+        // (a stop still pending now, or an earlier brief one), else the whole burst was the taxi.
+        if self.phase == Phase::PushingBack && (gs > GS_START || from_stand_m > PUSH_MAX_M) {
+            let pause = self.run.map(|r| (r.start_ms, now_ms)).or(self.last_pause);
+            match pause {
+                Some((stop, resume)) => {
+                    self.push_stop_ms = Some(stop);
+                    self.taxi_start_ms = Some(resume);
+                }
+                None => self.taxi_start_ms = self.push_start_ms.take(),
+            }
             self.start_taxi(alt);
             return;
         }
@@ -119,6 +137,9 @@ impl Session {
 
         let moving = step_m >= MOVE_M;
         if moving == self.phase.is_moving() {
+            if let (Phase::PushingBack, Some(stop)) = (self.phase, self.run) {
+                self.last_pause = Some((stop.start_ms, now_ms));
+            }
             self.run = None;
             return;
         }
@@ -138,7 +159,7 @@ impl Session {
         let run = *run;
         self.run = None;
         match self.phase {
-            Phase::Parked if run.peak_gs <= GS_START => {
+            Phase::Parked if run.peak_gs <= GS_START && from_stand_m <= PUSH_MAX_M => {
                 self.phase = Phase::PushingBack;
                 self.push_start_ms = Some(run.start_ms);
             }
@@ -149,6 +170,7 @@ impl Session {
             Phase::PushingBack => {
                 self.phase = Phase::StartUp;
                 self.push_stop_ms = Some(run.start_ms);
+                self.last_pause = None;
             }
             Phase::Taxiing => unreachable!("returned above"),
         }
@@ -157,6 +179,7 @@ impl Session {
     fn start_taxi(&mut self, alt: i64) {
         self.phase = Phase::Taxiing;
         self.run = None;
+        self.last_pause = None;
         self.base_alt = alt;
     }
 
@@ -172,9 +195,11 @@ impl Session {
         .or(self.push_stop_ms)
         .unwrap_or(self.first_seen_ms);
         let secs = |from: i64, to: i64| ((to - from) / 1000) as i32;
-        let push_stop = self.push_stop_ms.filter(|&stop| stop <= taxi_start);
-        let pushback_sec = self.push_start_ms.zip(push_stop).map(|(a, b)| secs(a, b));
-        let startup_sec = push_stop.map(|stop| secs(stop, taxi_start));
+        let pushback_sec = self
+            .push_start_ms
+            .zip(self.push_stop_ms)
+            .map(|(a, b)| secs(a, b));
+        let startup_sec = self.push_stop_ms.map(|stop| secs(stop, taxi_start));
         (pushback_sec, startup_sec, (now_ms - taxi_start) / 1000)
     }
 }
@@ -275,6 +300,7 @@ fn process(
                         push_start_ms: None,
                         push_stop_ms: None,
                         taxi_start_ms: None,
+                        last_pause: None,
                         base_alt: alt,
                     },
                 );
@@ -539,6 +565,10 @@ mod tests {
                 (45, 22.0, 6, 0),
                 // ... but it keeps accelerating past 7 kt without stopping: it was the taxi.
                 (60, 60.0, 12, 0),
+                // A hold-short stop long enough to confirm a push stop, had the burst stayed a push.
+                (75, 60.0, 0, 0),
+                (90, 60.0, 0, 0),
+                (105, 60.0, 0, 0),
                 (180, 900.0, 80, 400),
             ],
         );
@@ -546,6 +576,164 @@ mod tests {
         assert_eq!(obs.len(), 1);
         assert_eq!(obs[0].pushback_sec, None);
         assert_eq!(obs[0].startup_sec, None);
+        assert_eq!(obs[0].taxi_sec, 165); // 15 → 180
+    }
+
+    #[test]
+    fn a_short_startup_before_taxi_speed_splits_the_push_at_its_pause() {
+        let mut st = TaxiObsState::default();
+        let obs = run_track(
+            &mut st,
+            &[
+                (0, 0.0, 0, 0),
+                // Tug push t=15..75 (confirmed at t=45).
+                (15, 7.0, 2, 0),
+                (30, 14.0, 2, 0),
+                (45, 21.0, 2, 0),
+                (60, 28.0, 2, 0),
+                // Only two still updates — too short to confirm the push stop ...
+                (75, 28.0, 0, 0),
+                (90, 28.0, 0, 0),
+                // ... then off at taxi speed.
+                (105, 60.0, 12, 0),
+                (120, 150.0, 15, 0),
+                (300, 900.0, 80, 400),
+            ],
+        );
+
+        assert_eq!(obs.len(), 1);
+        assert_eq!(obs[0].pushback_sec, Some(60)); // 15 → 75
+        assert_eq!(obs[0].startup_sec, Some(30)); // 75 → 105
+        assert_eq!(obs[0].taxi_sec, 195); // 105 → 300
+    }
+
+    #[test]
+    fn a_short_startup_then_a_slow_taxi_splits_the_push_at_its_pause() {
+        let mut st = TaxiObsState::default();
+        let obs = run_track(
+            &mut st,
+            &[
+                (0, 0.0, 0, 0),
+                (15, 7.0, 2, 0),
+                (30, 14.0, 2, 0),
+                (45, 21.0, 2, 0),
+                (60, 28.0, 2, 0),
+                (75, 28.0, 0, 0),
+                (90, 28.0, 0, 0),
+                // A 4 kt taxi — never taxi speed, but it leaves the stand's push radius.
+                (105, 60.0, 4, 0),
+                (120, 90.0, 4, 0),
+                (135, 120.0, 4, 0),
+                (150, 155.0, 4, 0),
+                (300, 900.0, 80, 400),
+            ],
+        );
+
+        assert_eq!(obs.len(), 1);
+        assert_eq!(obs[0].pushback_sec, Some(60));
+        assert_eq!(obs[0].startup_sec, Some(30));
+        assert_eq!(obs[0].taxi_sec, 195);
+    }
+
+    #[test]
+    fn a_slow_ga_taxi_with_a_run_up_is_not_a_push() {
+        let mut st = TaxiObsState::default();
+        // 5 kt (~39 m per update) for 4 minutes, a 90 s run-up, then departure.
+        let mut track: Vec<(i64, f64, i64, i64)> = vec![(0, 0.0, 0, 0)];
+        for i in 1..=16 {
+            track.push((i * 15, i as f64 * 39.0, 5, 0));
+        }
+        for i in 1..=6 {
+            track.push((240 + i * 15, 624.0, 0, 0));
+        }
+        track.push((345, 1500.0, 80, 400));
+
+        let obs = run_track(&mut st, &track);
+
+        assert_eq!(obs.len(), 1);
+        assert_eq!(obs[0].pushback_sec, None);
+        assert_eq!(obs[0].startup_sec, None);
+        assert_eq!(obs[0].taxi_sec, 330); // 15 → 345, run-up included
+    }
+
+    #[test]
+    fn a_two_update_shuffle_is_not_a_confirmed_push() {
+        let mut st = TaxiObsState::default();
+        let obs = run_track(
+            &mut st,
+            &[
+                (0, 0.0, 0, 0),
+                // Two moving updates covering 30 m — one short of confirmation.
+                (15, 15.0, 2, 0),
+                (30, 30.0, 2, 0),
+                (45, 30.0, 0, 0),
+                (60, 30.0, 0, 0),
+                (75, 30.0, 0, 0),
+                (90, 30.0, 0, 0),
+                (105, 80.0, 12, 0),
+                (120, 150.0, 15, 0),
+                (135, 220.0, 15, 0),
+                (255, 900.0, 80, 400),
+            ],
+        );
+
+        assert_eq!(obs.len(), 1);
+        assert_eq!(obs[0].pushback_sec, None);
+        assert_eq!(obs[0].taxi_sec, 150); // 105 → 255
+    }
+
+    #[test]
+    fn a_parked_aircraft_whose_altitude_drifts_is_not_recorded() {
+        let mut st = TaxiObsState::default();
+        let obs = run_track(
+            &mut st,
+            &[(0, 0.0, 0, 0), (15, 0.0, 0, 150), (30, 0.0, 0, 200)],
+        );
+
+        assert!(obs.is_empty());
+        assert_eq!(st.dep.len(), 1);
+    }
+
+    #[test]
+    fn a_departure_airborne_mid_confirmation_times_taxi_from_that_burst() {
+        let mut st = TaxiObsState::default();
+        let obs = run_track(
+            &mut st,
+            &[
+                (0, 0.0, 0, 0),
+                (15, 0.0, 0, 0),
+                // Two moving updates — the taxi burst isn't confirmed yet when it lifts off.
+                (30, 40.0, 10, 0),
+                (45, 120.0, 20, 0),
+                (60, 900.0, 80, 400),
+            ],
+        );
+
+        assert_eq!(obs.len(), 1);
+        assert_eq!(obs[0].taxi_sec, 30); // 30 → 60, not first-seen (60 s)
+    }
+
+    #[test]
+    fn a_climb_is_measured_from_the_altitude_where_taxi_started() {
+        let mut st = TaxiObsState::default();
+        let taxiing = run_track(
+            &mut st,
+            &[
+                (0, 0.0, 0, 0),
+                // The taxi burst reports 150 ft above the first-seen altitude (sloped field).
+                (15, 60.0, 12, 150),
+                (30, 130.0, 15, 150),
+                (45, 200.0, 15, 150),
+                (60, 270.0, 15, 160),
+            ],
+        );
+        assert!(
+            taxiing.is_empty(),
+            "a 10 ft change while taxiing isn't a takeoff"
+        );
+
+        let obs = run_track(&mut st, &[(180, 900.0, 80, 600)]);
+        assert_eq!(obs.len(), 1);
         assert_eq!(obs[0].taxi_sec, 165); // 15 → 180
     }
 
