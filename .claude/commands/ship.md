@@ -22,8 +22,9 @@ re-gate.
 - Confirm the branch is `{feat|fix|chore}/{issue}/{desc}` and you are in the issue's worktree — **never
   commit onto `next`**; if you are on `next`, stop and ask.
 - Stage with **explicit paths** (not `git add -A`), then commit. Message: conventional
-  `type(scope): summary`, a short body, `Closes #$ARGUMENTS`, and the required trailer:
-  `Co-Authored-By: Claude Opus 4.8 <noreply@anthropic.com>`.
+  `type(scope): summary`, a short body, `Closes #$ARGUMENTS`. **No attribution trailer** — commits in
+  this repo are authored solely as the user; never add `Co-Authored-By`, a session link, or any
+  agent/AI credit (see `CLAUDE.md`).
 - Integrity check: `git status --short` (nothing you meant to ship still shows `M`) and
   `git diff origin/next..HEAD --name-only` (lists every intended file).
 
@@ -42,8 +43,6 @@ gh pr create --repo VATUSA/OIS --base next --title "type(scope): summary" --body
 
 ## Test plan
 - <grounded checklist of what you actually verified: `just ci`, endpoints exercised, UI checked>
-
-🤖 Generated with [Claude Code](https://claude.com/claude-code)
 EOF
 )"
 ```
