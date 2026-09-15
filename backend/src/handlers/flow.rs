@@ -1939,6 +1939,7 @@ mod prefile_skip_integration_tests {
     use crate::feed::{
         airspace::Boundaries,
         nav::NavData,
+        runway_db::RunwayDb,
         trajectory::ProfileTable,
         vatsim::{FlightPlan, Prefile, VatsimData},
         winds::Winds,
@@ -2009,6 +2010,9 @@ mod prefile_skip_integration_tests {
             &Winds::default(),
             &ProfileTable::default(),
             &ReleaseMap::new(),
+            &HashMap::new(),
+            &RunwayDb::default(),
+            &HashMap::new(),
             Utc::now(),
             false,
         );
