@@ -725,6 +725,72 @@ mod tests {
     }
 
     #[test]
+    fn route_path_named_trims_a_ground_aircraft_at_a_real_mid_route_position() {
+        // A ground aircraft (gs < 50) with a *real* current position partway down the route must
+        // get the same forward-trimmed remainder `route_path` gives the real ETA model — not the
+        // full untrimmed filed route from departure. Reusing `forward_route_from_position` (shared
+        // with `route_path`) is what makes that hold; a version that fell back to the bare anchor
+        // list here would report RBV as still ahead and its total distance would diverge from
+        // `route_path`'s (`path_len_nm`) — the exact number `predict::arrival_eta` times the real
+        // ETA against.
+        let nav = NavData::load();
+        let ap = HashMap::from([
+            ("KJFK".to_string(), (40.64, -73.78)),
+            ("KDCA".to_string(), (38.85, -77.04)),
+        ]);
+        let empty = HashMap::new();
+        let white = nav.resolve("WHITE", &empty, None).expect("WHITE resolves");
+        let sie = nav.resolve("SIE", &empty, None).expect("SIE resolves");
+        // Same real position as the airborne test, but gs=0 — a taxiing/rolling ground aircraft,
+        // not an unresolved-position prefile placeholder (which the other ground test covers).
+        let pos = [white[0] * 0.2 + sie[0] * 0.8, white[1] * 0.2 + sie[1] * 0.8];
+        let fixes = route_path_named(
+            &nav,
+            &ap,
+            "KJFK",
+            "KDCA",
+            "RBV WHITE SIE",
+            pos[0],
+            pos[1],
+            0,
+            0,
+        )
+        .expect("remaining route should resolve");
+        let names: Vec<&str> = fixes.iter().map(|(n, ..)| n.as_str()).collect();
+        assert!(
+            !names.contains(&"RBV"),
+            "a ground aircraft already well past RBV must not still show it ahead, got {names:?}"
+        );
+        assert!(
+            names.contains(&"SIE"),
+            "SIE should still be ahead, got {names:?}"
+        );
+        // The last fix's cumulative distance must match route_path's own total length for the
+        // identical input — not necessarily the short "as the crow flies from here" distance,
+        // since ground trimming is index-based (keeps the current leg's start point) and so can
+        // legitimately retrace a short stretch, same as `route_path`'s raw polyline does.
+        let raw_path = route_path(
+            &nav,
+            &ap,
+            "KJFK",
+            "KDCA",
+            "RBV WHITE SIE",
+            pos[0],
+            pos[1],
+            0,
+            0,
+        )
+        .expect("route_path should resolve the same remainder");
+        let expected_total = crate::feed::predict::path_len_nm(&raw_path);
+        let last_d = fixes.last().unwrap().3;
+        assert!(
+            (last_d - expected_total).abs() < 0.5,
+            "route_path_named's total distance ({last_d}) should match route_path's \
+             path_len_nm ({expected_total}) for the identical input"
+        );
+    }
+
+    #[test]
     fn route_path_named_measures_from_current_position_when_airborne() {
         let nav = NavData::load();
         let ap = HashMap::from([
