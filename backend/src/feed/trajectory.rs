@@ -378,6 +378,31 @@ impl VerticalProfile {
         }
         secs
     }
+
+    /// Inverse of [`Self::time_between`] (#226's forward prediction scrubber): the
+    /// distance-to-destination reached after `elapsed_sec` starting from `from_d`. `time_between`
+    /// has no closed-form inverse (it's a numerical integral over climb/cruise/descent segments),
+    /// but it's monotonic in the target distance, so this binary-searches it the same way
+    /// [`triangle_peak`] searches a peak altitude. Clamped to `0.0` (already landed) when
+    /// `elapsed_sec` reaches or exceeds the full remaining flight time.
+    pub fn distance_after(&self, from_d: f64, elapsed_sec: f64) -> f64 {
+        if elapsed_sec <= 0.0 {
+            return from_d;
+        }
+        if elapsed_sec >= self.time_between(from_d, 0.0) {
+            return 0.0;
+        }
+        let (mut lo, mut hi) = (0.0_f64, from_d);
+        for _ in 0..24 {
+            let mid = (lo + hi) / 2.0;
+            if self.time_between(from_d, mid) > elapsed_sec {
+                lo = mid;
+            } else {
+                hi = mid;
+            }
+        }
+        (lo + hi) / 2.0
+    }
 }
 
 /// Integrate a climb/descent leg from `lo_alt` to `hi_alt` at a fixed vertical rate, returning
@@ -618,6 +643,35 @@ mod tests {
             peak <= 14000.5,
             "cruise capped at the 14k ceiling, peak {peak}"
         );
+    }
+
+    // ---- distance_after: time_between's inverse, for #226's forward prediction scrubber ----
+
+    #[test]
+    fn distance_after_round_trips_through_time_between() {
+        let vp = VerticalProfile::build(35000.0, 300.0, 0.0, 35000.0, 480.0, &b77w(), None);
+        for to_d in [250.0, 150.0, 50.0, 10.0] {
+            let elapsed = vp.time_between(300.0, to_d);
+            let back = vp.distance_after(300.0, elapsed);
+            assert!(
+                (back - to_d).abs() < 0.5,
+                "distance_after({elapsed}) = {back}, expected ~{to_d}"
+            );
+        }
+    }
+
+    #[test]
+    fn distance_after_at_zero_elapsed_is_the_starting_distance() {
+        let vp = VerticalProfile::build(0.0, 300.0, 0.0, 35000.0, 480.0, &b77w(), None);
+        assert!((vp.distance_after(300.0, 0.0) - 300.0).abs() < 1e-6);
+    }
+
+    #[test]
+    fn distance_after_clamps_to_zero_once_the_flight_would_have_landed() {
+        let vp = VerticalProfile::build(0.0, 300.0, 0.0, 35000.0, 480.0, &b77w(), None);
+        let total = vp.time_between(300.0, 0.0);
+        assert_eq!(vp.distance_after(300.0, total), 0.0);
+        assert_eq!(vp.distance_after(300.0, total + 3600.0), 0.0);
     }
 
     #[test]

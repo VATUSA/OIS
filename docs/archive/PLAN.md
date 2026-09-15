@@ -1,5 +1,9 @@
 # OIS — Plan of Action
 
+> **Archived — historical.** This is the pre-launch build plan, kept as a record of the decisions
+> that shaped the platform. It does not reflect current status; see [`docs/README.md`](../README.md)
+> and [`docs/features/`](../features/) for what's actually built today.
+
 ## What OIS is
 
 OIS (Event Operational Information System) — one monorepo (backend, web, Discord bot,

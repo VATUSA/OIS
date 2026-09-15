@@ -30,8 +30,10 @@ use super::vatsim::VatsimData;
 use crate::models::AirportGateBody;
 use crate::repos::stats::{self as repo, TaxiObservationRow};
 
-// Matches feed/taxi.rs / feed/delays.rs's own departure-taxi boundary.
-const GS_START: i64 = 7; // kt — taxi has begun
+// Matches feed/taxi.rs / feed/delays.rs's own departure-taxi boundary — and
+// `feed::flow::TAXI_ROLL_GS_KT` (#164 sub-issue E), which trusts heading for runway matching from
+// this same instant onward. One shared constant, not two.
+use super::flow::TAXI_ROLL_GS_KT as GS_START;
 const GS_STOP: i64 = 60; // kt — airborne
 const ALT_CLIMB_FT: i64 = 100;
 const DEP_PROX_NM: f64 = 15.0;
@@ -39,9 +41,6 @@ const MIN_TAXI_SEC: i64 = 3;
 const MAX_TAXI_SEC: i64 = 60 * 60;
 const SESSION_MAX_AGE_MS: i64 = 3 * 60 * 60_000;
 const COLLECT_SECS: u64 = 15;
-
-/// A gate/parking spot must be within this of the spawn point to count as a match.
-const GATE_MATCH_MAX_NM: f64 = 0.06; // ~360 ft
 
 #[derive(Clone, Copy, PartialEq)]
 enum Phase {
@@ -62,19 +61,6 @@ struct Session {
 #[derive(Default)]
 pub struct TaxiObsState {
     dep: HashMap<String, Session>,
-}
-
-/// The gate at `icao` nearest `(lat, lon)`, within `GATE_MATCH_MAX_NM`, else `None`.
-fn nearest_gate(gates: &[AirportGateBody], lat: f64, lon: f64) -> Option<String> {
-    let mut best: Option<(String, f64)> = None;
-    for g in gates {
-        let d = gc_dist(lat, lon, g.lat, g.lon);
-        if best.as_ref().is_none_or(|(_, bd)| d < *bd) {
-            best = Some((g.id.clone(), d));
-        }
-    }
-    best.filter(|(_, d)| *d <= GATE_MATCH_MAX_NM)
-        .map(|(id, _)| id)
 }
 
 /// One completed departure's timings, with `gate_id` left unresolved (`spawn_collector` fills it
@@ -238,7 +224,7 @@ pub fn spawn_collector(
                 let gates_here = by_icao.get(&r.airport).unwrap_or(&empty_gates);
                 rows.push(TaxiObservationRow {
                     airport: r.airport,
-                    gate_id: nearest_gate(gates_here, r.lat, r.lon),
+                    gate_id: super::flow::nearest_gate(gates_here, r.lat, r.lon),
                     aircraft: r.aircraft,
                     runway: r.runway,
                     pushback_sec: r.pushback_sec,
@@ -377,32 +363,5 @@ mod tests {
         );
 
         assert!(st.dep.is_empty());
-    }
-
-    fn gate(id: &str, lat: f64, lon: f64) -> AirportGateBody {
-        AirportGateBody {
-            id: id.to_string(),
-            icao: "KAAA".to_string(),
-            name: id.to_string(),
-            lat,
-            lon,
-            source: "manual".to_string(),
-            updated_at: Utc::now(),
-            editable: false,
-        }
-    }
-
-    #[test]
-    fn nearest_gate_matches_the_closest_within_range() {
-        let gates = vec![gate("A1", 40.0, -74.0), gate("A2", 40.01, -74.0)];
-        assert_eq!(nearest_gate(&gates, 40.0001, -74.0), Some("A1".to_string()));
-        assert_eq!(nearest_gate(&gates, 40.0099, -74.0), Some("A2".to_string()));
-    }
-
-    #[test]
-    fn nearest_gate_none_when_too_far() {
-        let gates = vec![gate("A1", 40.0, -74.0)];
-        assert_eq!(nearest_gate(&gates, 41.0, -74.0), None);
-        assert_eq!(nearest_gate(&[], 40.0, -74.0), None);
     }
 }

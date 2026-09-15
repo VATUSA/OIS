@@ -10,11 +10,28 @@ use serde::Serialize;
 use utoipa::ToSchema;
 
 use super::airports::AirportDb;
+use super::delays::nearest_runway;
 use super::nav::NavData;
 use super::predict;
+use super::runway_db::RunwayDb;
+use super::taxi_estimate;
 use super::trajectory;
 use super::vatsim::VatsimData;
 use super::winds::Winds;
+use crate::models::AirportGateBody;
+
+/// A gate/parking spot must be within this of a spawn point to count as a match (#164 sub-issue
+/// C/E — matches `feed::taxi_observations`'s own persistence-time gate matching exactly).
+const GATE_MATCH_MAX_NM: f64 = 0.06; // ~360 ft
+
+/// Groundspeed above which a pilot's heading reflects actual taxi movement rather than arbitrary
+/// gate-parking orientation (#164 sub-issue E). A stationary aircraft's heading is essentially
+/// random with respect to any runway, so [`resolve_ground_allowance_sec`] only trusts it — and
+/// attempts a runway match — once the aircraft has crossed this threshold; below it, the ladder
+/// falls to the airport/default tier instead of risking a coincidental wrong-runway match.
+/// Mirrors `taxi_observations`'s own roll-detection threshold (`GS_START`) — the same physical
+/// moment, one shared constant.
+pub(crate) const TAXI_ROLL_GS_KT: i64 = 7;
 
 /// Nominal arrival-stream groundspeed used to convert miles-in-trail to a time gap.
 const MIT_NOMINAL_KT: f64 = 360.0; // 6 nm/min
@@ -165,6 +182,9 @@ pub fn compute(
     winds: &Winds,
     profiles: &trajectory::ProfileTable,
     issued: &HashMap<String, DateTime<Utc>>,
+    gates: &HashMap<String, Vec<AirportGateBody>>,
+    runways: &RunwayDb,
+    taxi_samples: &HashMap<String, Vec<taxi_estimate::TaxiSample>>,
     now: DateTime<Utc>,
 ) -> Flow {
     let arr = airports.get(icao).copied();
@@ -228,6 +248,9 @@ pub fn compute(
                     cruise_ft: cruise,
                     cruise_tas,
                 },
+                // Airborne — `eta_along_route` only applies the ground allowance on its ground
+                // branch, so this value is structurally inert.
+                0.0,
                 now,
             );
             flights.push(FlowFlight {
@@ -246,8 +269,20 @@ pub fn compute(
             etd_ms.push(None);
         } else {
             // On the ground (or position-less): estimate a full route flight time.
-            let (route_nm, ft_min) =
-                ground_estimate(nav, &dep, arr, fp, airports, winds, profile, now);
+            let (route_nm, ft_min) = ground_estimate(
+                nav,
+                &dep,
+                arr,
+                fp,
+                airports,
+                winds,
+                profile,
+                Some((p.latitude, p.longitude, p.heading, p.groundspeed)),
+                gates,
+                runways,
+                taxi_samples,
+                now,
+            );
             flights.push(FlowFlight {
                 callsign: p.callsign.clone(),
                 dep,
@@ -280,7 +315,22 @@ pub fn compute(
         let dep = fp.departure.to_ascii_uppercase();
         let gate = arrival_gate(&fp.route, icao);
         let excluded = program.is_some_and(|pg| is_excluded(&ty, &wake, pg));
-        let (route_nm, ft_min) = ground_estimate(nav, &dep, arr, fp, airports, winds, profile, now);
+        // A prefile has no live position — gate/runway matching is skipped (`ground_estimate`
+        // passes `None`), falling to the airport/default tier.
+        let (route_nm, ft_min) = ground_estimate(
+            nav,
+            &dep,
+            arr,
+            fp,
+            airports,
+            winds,
+            profile,
+            None,
+            gates,
+            runways,
+            taxi_samples,
+            now,
+        );
         let etd = proposed_etd(&fp.deptime, now);
         flights.push(FlowFlight {
             callsign: pf.callsign.clone(),
@@ -635,6 +685,9 @@ pub fn ready_time_slot(
     winds: &Winds,
     profiles: &trajectory::ProfileTable,
     issued: &HashMap<String, DateTime<Utc>>,
+    gates: &HashMap<String, Vec<AirportGateBody>>,
+    runways: &RunwayDb,
+    taxi_samples: &HashMap<String, Vec<taxi_estimate::TaxiSample>>,
     callsign: &str,
     ready: DateTime<Utc>,
     now: DateTime<Utc>,
@@ -648,6 +701,9 @@ pub fn ready_time_slot(
         winds,
         profiles,
         issued,
+        gates,
+        runways,
+        taxi_samples,
         now,
     );
     let target = flow.flights.iter().find(|f| f.callsign == callsign)?;
@@ -687,6 +743,10 @@ pub fn ready_time_slot(
 /// filed route from the surface through the shared predictor (climb → cruise → descent + taxi),
 /// the same path an airborne arrival takes. Falls back to a nominal 300 nm leg when there are no
 /// departure/arrival coordinates to resolve a route from.
+///
+/// `pilot_pos` (`lat, lon, hdg, gs`) is the pilot's real position/heading/groundspeed when known —
+/// used to resolve a gate/runway match for the learned ground allowance (#164 sub-issue E); `None`
+/// for a prefile (no live position), which skips matching and falls to the airport/default tier.
 #[allow(clippy::too_many_arguments)]
 fn ground_estimate(
     nav: &NavData,
@@ -696,10 +756,17 @@ fn ground_estimate(
     airports: &AirportDb,
     winds: &Winds,
     profile: &trajectory::AircraftProfile,
+    pilot_pos: Option<(f64, f64, i64, i64)>,
+    gates: &HashMap<String, Vec<AirportGateBody>>,
+    runways: &RunwayDb,
+    taxi_samples: &HashMap<String, Vec<taxi_estimate::TaxiSample>>,
     now: DateTime<Utc>,
 ) -> (f64, f64) {
     let cruise = trajectory::parse_alt_ft(&fp.altitude);
     let cruise_tas = trajectory::capped_cruise_tas(parse_tas(&fp.cruise_tas), cruise, profile);
+    let aircraft = (!fp.aircraft_short.is_empty()).then_some(fp.aircraft_short.as_str());
+    let allowance =
+        resolve_ground_allowance_sec(gates, runways, taxi_samples, dep, aircraft, pilot_pos);
     match (airports.get(dep).copied(), arr) {
         (Some(dep_ll), Some(arr_ll)) => {
             let pred = predict::arrival_eta(
@@ -719,6 +786,7 @@ fn ground_estimate(
                     cruise_ft: cruise,
                     cruise_tas,
                 },
+                allowance,
                 now,
             );
             let ft_min = (pred.eta - now).num_seconds() as f64 / 60.0;
@@ -728,7 +796,7 @@ fn ground_estimate(
             let vp = trajectory::VerticalProfile::build(
                 0.0, 300.0, 0.0, cruise, cruise_tas, profile, None,
             );
-            let ft_min = vp.time_between(300.0, 0.0) / 60.0 + predict::GROUND_TAXI_SEC / 60.0;
+            let ft_min = vp.time_between(300.0, 0.0) / 60.0 + allowance / 60.0;
             (300.0, ft_min)
         }
     }
@@ -762,7 +830,7 @@ fn minutes(m: f64) -> Duration {
 }
 
 /// Filed cruise TAS (knots); defaults to 420 for missing/implausible values.
-fn parse_tas(raw: &str) -> f64 {
+pub(crate) fn parse_tas(raw: &str) -> f64 {
     let n: f64 = raw.trim().parse().unwrap_or(0.0);
     if (60.0..=1200.0).contains(&n) {
         n
@@ -840,6 +908,54 @@ pub fn gc_dist(lat1: f64, lon1: f64, lat2: f64, lon2: f64) -> f64 {
     let dlmb = (lon2 - lon1).to_radians();
     let a = (dphi / 2.0).sin().powi(2) + p1.cos() * p2.cos() * (dlmb / 2.0).sin().powi(2);
     2.0 * r * a.sqrt().asin()
+}
+
+/// The gate nearest `(lat, lon)`, within [`GATE_MATCH_MAX_NM`], else `None`. Shared by
+/// `feed::taxi_observations` (matching a completed departure's spawn point, #164 sub-issue C) and
+/// [`resolve_ground_allowance_sec`] below (matching a live/proposed departure's position, sub-issue
+/// E) — one implementation, not two.
+pub(crate) fn nearest_gate(gates: &[AirportGateBody], lat: f64, lon: f64) -> Option<String> {
+    let mut best: Option<(String, f64)> = None;
+    for g in gates {
+        let d = gc_dist(lat, lon, g.lat, g.lon);
+        if best.as_ref().is_none_or(|(_, bd)| d < *bd) {
+            best = Some((g.id.clone(), d));
+        }
+    }
+    best.filter(|(_, d)| *d <= GATE_MATCH_MAX_NM)
+        .map(|(id, _)| id)
+}
+
+/// The ground allowance (pushback+startup + taxi-out, #164 sub-issue E) for a departure from `dep`:
+/// looks up `dep`'s cached observation samples, resolves a gate match whenever a real position
+/// (`pos`) is known, resolves a *runway* match only once `pos`'s groundspeed clears
+/// [`TAXI_ROLL_GS_KT`] (a stationary/gate-parked aircraft's heading is not runway-meaningful — see
+/// that constant), and walks `taxi_estimate`'s fallback ladder. A prefile with no position, a route
+/// with no coordinate signal, or an aircraft that hasn't started moving yet all still resolve via
+/// the airport/default tier, so nothing is silently dropped. `aircraft` should be the raw
+/// `FlightPlan::aircraft_short` (unnormalized), matching exactly what `feed::taxi_observations`
+/// persisted, or the gate/type/runway tier will never match on type.
+pub(crate) fn resolve_ground_allowance_sec(
+    gates: &HashMap<String, Vec<AirportGateBody>>,
+    runways: &RunwayDb,
+    taxi_samples: &HashMap<String, Vec<taxi_estimate::TaxiSample>>,
+    dep: &str,
+    aircraft: Option<&str>,
+    pos: Option<(f64, f64, i64, i64)>,
+) -> f64 {
+    let empty: Vec<AirportGateBody> = Vec::new();
+    let dep_samples = taxi_samples.get(dep).map(Vec::as_slice).unwrap_or(&[]);
+    let (gate_id, runway) = match pos {
+        Some((lat, lon, hdg, gs)) => (
+            nearest_gate(gates.get(dep).unwrap_or(&empty), lat, lon),
+            (gs > TAXI_ROLL_GS_KT)
+                .then(|| nearest_runway(runways, dep, hdg))
+                .flatten(),
+        ),
+        None => (None, None),
+    };
+    let est = taxi_estimate::estimate(dep_samples, gate_id.as_deref(), aircraft, runway.as_deref());
+    taxi_estimate::ground_allowance_sec(&est)
 }
 
 fn engine(ty: &str) -> Option<Engine> {
@@ -1189,6 +1305,9 @@ mod tests {
             &Winds::default(),
             &trajectory::ProfileTable::default(),
             &HashMap::new(),
+            &HashMap::new(),
+            &RunwayDb::default(),
+            &HashMap::new(),
             t0(),
         );
 
@@ -1339,6 +1458,9 @@ mod tests {
             &Winds::default(),
             &trajectory::ProfileTable::default(),
             &HashMap::new(),
+            &HashMap::new(),
+            &RunwayDb::default(),
+            &HashMap::new(),
             "GRD1",
             ready,
             t0(),
@@ -1383,6 +1505,9 @@ mod tests {
             &nav,
             &Winds::default(),
             &profiles,
+            &HashMap::new(),
+            &HashMap::new(),
+            &RunwayDb::default(),
             &HashMap::new(),
             t0(),
         );
@@ -1543,5 +1668,120 @@ mod tests {
             "a lowest-ranked carrier must be dropped"
         );
         assert_eq!(by_carrier.get(AADC_OTHER), Some(&2));
+    }
+
+    fn gate(id: &str, lat: f64, lon: f64) -> AirportGateBody {
+        AirportGateBody {
+            id: id.to_string(),
+            icao: "KAAA".to_string(),
+            name: id.to_string(),
+            lat,
+            lon,
+            source: "manual".to_string(),
+            updated_at: Utc::now(),
+            editable: false,
+        }
+    }
+
+    #[test]
+    fn nearest_gate_matches_the_closest_within_range() {
+        let gates = vec![gate("A1", 40.0, -74.0), gate("A2", 40.01, -74.0)];
+        assert_eq!(nearest_gate(&gates, 40.0001, -74.0), Some("A1".to_string()));
+        assert_eq!(nearest_gate(&gates, 40.0099, -74.0), Some("A2".to_string()));
+    }
+
+    #[test]
+    fn nearest_gate_none_when_too_far() {
+        let gates = vec![gate("A1", 40.0, -74.0)];
+        assert_eq!(nearest_gate(&gates, 41.0, -74.0), None);
+        assert_eq!(nearest_gate(&[], 40.0, -74.0), None);
+    }
+
+    /// #164 sub-issue E, AC #3: an airport with zero taxi samples still resolves a sane, panic-free
+    /// ground allowance — falling straight through `taxi_estimate`'s ladder to its flat default.
+    #[test]
+    fn resolve_ground_allowance_sec_defaults_for_a_thin_data_airport() {
+        let gates = HashMap::new();
+        let runways = RunwayDb::default();
+        let samples = HashMap::new();
+        let allowance = resolve_ground_allowance_sec(
+            &gates,
+            &runways,
+            &samples,
+            "KAAA",
+            Some("B738"),
+            Some((40.0, -74.0, 270, 20)),
+        );
+        assert_eq!(allowance, predict::GROUND_TAXI_SEC + 300.0);
+    }
+
+    /// No position (a prefile, or the coordinate-less `ground_estimate` fallback) skips gate/runway
+    /// matching entirely rather than guessing — still resolves via the airport/default tier.
+    #[test]
+    fn resolve_ground_allowance_sec_skips_gate_and_runway_matching_without_a_position() {
+        let gates = HashMap::from([("KAAA".to_string(), vec![gate("A1", 40.0, -74.0)])]);
+        let runways = RunwayDb::default();
+        let samples = HashMap::new();
+        let allowance =
+            resolve_ground_allowance_sec(&gates, &runways, &samples, "KAAA", Some("B738"), None);
+        assert_eq!(allowance, predict::GROUND_TAXI_SEC + 300.0);
+    }
+
+    fn taxi_sample(
+        gate: &str,
+        aircraft: &str,
+        runway: &str,
+        taxi_sec: i32,
+    ) -> taxi_estimate::TaxiSample {
+        taxi_estimate::TaxiSample {
+            gate_id: Some(gate.to_string()),
+            aircraft: Some(aircraft.to_string()),
+            runway: Some(runway.to_string()),
+            pushback_sec: Some(50),
+            taxi_sec,
+        }
+    }
+
+    /// A stationary aircraft's heading is parking orientation, not runway alignment — even when it
+    /// happens to point exactly down a real runway's centerline, `resolve_ground_allowance_sec`
+    /// must not trust it: the gate/type/runway tier (600s) must NOT be picked over the airport-wide
+    /// blend (5 samples at 600s + 5 at 120s, median 360s) while groundspeed is at or below
+    /// [`TAXI_ROLL_GS_KT`].
+    #[test]
+    fn resolve_ground_allowance_sec_ignores_a_coincidental_heading_match_while_stationary() {
+        let runways = RunwayDb::load();
+        let end = runways
+            .ends_for("KJFK")
+            .into_iter()
+            .find(|e| e.id == "04L")
+            .expect("KJFK 04L is in the bundled runway data");
+        let gates = HashMap::from([("KJFK".to_string(), vec![gate("A1", 40.0, -74.0)])]);
+        let mut rows: Vec<taxi_estimate::TaxiSample> = (0..5)
+            .map(|_| taxi_sample("A1", "B738", "04L", 600))
+            .collect();
+        rows.extend((0..5).map(|_| taxi_sample("B2", "A320", "22R", 120)));
+        let samples = HashMap::from([("KJFK".to_string(), rows)]);
+
+        let stationary = resolve_ground_allowance_sec(
+            &gates,
+            &runways,
+            &samples,
+            "KJFK",
+            Some("B738"),
+            Some((40.0, -74.0, end.hdg as i64, TAXI_ROLL_GS_KT)),
+        );
+        // Airport-wide blend (median of the combined 10 samples), not the runway-specific 600s.
+        assert_eq!(stationary, 360.0 + 50.0);
+
+        let rolling = resolve_ground_allowance_sec(
+            &gates,
+            &runways,
+            &samples,
+            "KJFK",
+            Some("B738"),
+            Some((40.0, -74.0, end.hdg as i64, TAXI_ROLL_GS_KT + 1)),
+        );
+        // Once actually moving, the same heading legitimately resolves the gate/type/runway tier.
+        assert_eq!(rolling, 600.0 + 50.0);
     }
 }

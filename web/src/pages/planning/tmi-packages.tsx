@@ -47,7 +47,7 @@ function itemSummary(item: TmiPackageItem): string {
   const s = (k: string) => (p[k] == null ? "" : String(p[k]));
   if (item.kind === "program") {
     const extra = [
-      Number(p.trail) > 0 ? `${p.trail} MIN` : "",
+      Number(p.trail) > 0 ? `${p.trail} MINIT` : "",
       Number(p.mit) > 0 ? `${p.mit} MIT` : "",
     ]
       .filter(Boolean)
@@ -117,10 +117,11 @@ function AddItemForm({
     );
   }
 
-  const field = (key: string, placeholder: string, cls = "w-28") => (
+  const field = (key: string, placeholder: string, cls = "w-28", title?: string) => (
     <Input
       className={cls}
       placeholder={placeholder}
+      title={title}
       value={f[key] ?? ""}
       onChange={(e) => set(key, e.target.value)}
       onKeyDown={(e) => e.key === "Enter" && submit()}
@@ -171,8 +172,8 @@ function AddItemForm({
           <>
             {field("icao", "ICAO", "w-24 font-mono uppercase")}
             {field("aar", "AAR", "w-16")}
-            {field("trail", "trail", "w-16")}
-            {field("mit", "MIT", "w-16")}
+            {field("trail", "MINIT", "w-16", "Minutes in trail")}
+            {field("mit", "MIT", "w-16", "Miles in trail")}
           </>
         )}
         {kind === "restriction" && (

@@ -8,10 +8,13 @@ Where most tools focus on one ARTCC, OIS is **national**: any online aircraft, a
 
 - **See the live picture** — every online VATSIM flight on a map, with ARTCC and TRACON boundaries, online ATC positions, and inbound demand for each metered airport. See [The flow map](/map/overview).
 - **Browse a facility's traffic** — anyone can open the public [facility map](/map/facility-map) for an ARTCC to see live traffic centered on its airspace, colored by that facility's own rules.
+- **Build your own dashboard** — pin the stats and views you care about to a [custom board](/dashboard/boards) that updates live, and share it read-only with a link.
 - **Constrain the flow** — draw [Flow Constrained Areas](/tmu/fcas) (FCAs) and meter the traffic crossing them.
 - **Run a Ground Delay Program** — issue a [GDP](/tmu/gdp) that rations arrivals to an airport's acceptance rate, with **frozen** EDCTs so release times don't move on their own.
 - **Balance the runways** — assign arrivals to runways and watch a 10-minute demand board with the [Runway Balancer](/tmu/runway-balancer).
+- **See demand ahead of time** — the [arrival demand chart (AADC)](/tmu/aadc) buckets an airport's forward arrival push against its AAR, broken down by carrier, aircraft type, or arrival fix.
 - **Schedule departures** — work FCA-metered ground departures and hand out [CFR release times](/tmu/releases) from the [IDST](/tmu/idst) console; issued times stay locked.
+- **Plan an event** — coordinate staffing, airport rate plans, and facility support for a scheduled event from the [event planning](/planning/events) tools.
 - **Look back & replay** — review network statistics and [replay](/historical/replay) any past window as a time machine, with traffic, flow initiatives, and each flight's plan as they were.
 - **Publish advisories** — pilots and other facilities see active traffic initiatives on the public [advisories board](/advisories/board).
 
