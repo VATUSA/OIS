@@ -396,7 +396,7 @@ fn densify(a: [f64; 2], b: [f64; 2]) -> Vec<[f64; 2]> {
     (0..=n).map(|k| slerp(a, b, k as f64 / n as f64)).collect()
 }
 
-fn slerp(a: [f64; 2], b: [f64; 2], f: f64) -> [f64; 2] {
+pub(crate) fn slerp(a: [f64; 2], b: [f64; 2], f: f64) -> [f64; 2] {
     let (lat1, lon1) = (a[0].to_radians(), a[1].to_radians());
     let (lat2, lon2) = (b[0].to_radians(), b[1].to_radians());
     let d = 2.0
@@ -417,7 +417,7 @@ fn slerp(a: [f64; 2], b: [f64; 2], f: f64) -> [f64; 2] {
     [lat.to_degrees(), lon.to_degrees()]
 }
 
-fn bearing_deg(a: [f64; 2], b: [f64; 2]) -> f64 {
+pub(crate) fn bearing_deg(a: [f64; 2], b: [f64; 2]) -> f64 {
     let (lat1, lat2) = (a[0].to_radians(), b[0].to_radians());
     let dlon = (b[1] - a[1]).to_radians();
     let y = dlon.sin() * lat2.cos();
@@ -428,6 +428,30 @@ fn bearing_deg(a: [f64; 2], b: [f64; 2]) -> f64 {
 fn angle_diff(a: f64, b: f64) -> f64 {
     let d = (a - b).abs() % 360.0;
     if d > 180.0 { 360.0 - d } else { d }
+}
+
+/// Position and heading `target_nm` along `path` (a `[lat, lon]` polyline from its start), for
+/// #226's forward prediction scrubber — the geometric counterpart to
+/// `predict::project_along_route`'s along-route distance. Clamps to the last point (with that
+/// leg's bearing) once `target_nm` reaches or exceeds the polyline's total length. `path` must have
+/// at least 2 points — the caller (only ever fed an already-resolved [`route_path`]) guarantees
+/// this.
+pub(crate) fn point_and_heading_at(path: &[[f64; 2]], target_nm: f64) -> ([f64; 2], f64) {
+    let mut acc = 0.0;
+    for w in path.windows(2) {
+        let seg = gc_dist(w[0][0], w[0][1], w[1][0], w[1][1]);
+        if target_nm <= acc + seg {
+            let f = if seg > 0.0 {
+                ((target_nm - acc) / seg).clamp(0.0, 1.0)
+            } else {
+                0.0
+            };
+            return (slerp(w[0], w[1], f), bearing_deg(w[0], w[1]));
+        }
+        acc += seg;
+    }
+    let last = path.len() - 1;
+    (path[last], bearing_deg(path[last - 1], path[last]))
 }
 
 #[cfg(test)]
@@ -777,6 +801,59 @@ mod tests {
             c.lon > -77.3 && c.lon < -76.7,
             "crossing lon ~ -77.0, got {}",
             c.lon
+        );
+    }
+
+    // ---- point_and_heading_at: for #226's forward prediction scrubber ----
+
+    fn path_len(path: &[[f64; 2]]) -> f64 {
+        path.windows(2)
+            .map(|w| gc_dist(w[0][0], w[0][1], w[1][0], w[1][1]))
+            .sum()
+    }
+
+    #[test]
+    fn point_and_heading_at_returns_the_exact_endpoints() {
+        let path = [[40.0, -74.0], [39.0, -75.0], [38.0, -76.0]];
+        let (start, _) = point_and_heading_at(&path, 0.0);
+        assert_eq!(start, path[0]);
+
+        let total = path_len(&path);
+        let (end, _) = point_and_heading_at(&path, total);
+        assert!(
+            gc_dist(end[0], end[1], path[2][0], path[2][1]) < 0.1,
+            "expected the last point, got {end:?}"
+        );
+    }
+
+    #[test]
+    fn point_and_heading_at_interpolates_within_the_bracketing_leg() {
+        let path = [[40.0, -74.0], [39.0, -75.0], [38.0, -76.0]];
+        let leg1 = gc_dist(path[0][0], path[0][1], path[1][0], path[1][1]);
+        // Halfway into the first leg should land roughly on the great-circle midpoint, not on
+        // either endpoint or spilling into the second leg.
+        let (mid, heading) = point_and_heading_at(&path, leg1 / 2.0);
+        let d_from_start = gc_dist(path[0][0], path[0][1], mid[0], mid[1]);
+        assert!(
+            (d_from_start - leg1 / 2.0).abs() < 1.0,
+            "expected ~{}nm from the start, got {d_from_start}nm",
+            leg1 / 2.0
+        );
+        let expected_heading = bearing_deg(path[0], path[1]);
+        assert!(
+            angle_diff(heading, expected_heading) < 1.0,
+            "heading {heading} should match the first leg's bearing {expected_heading}"
+        );
+    }
+
+    #[test]
+    fn point_and_heading_at_clamps_past_the_end() {
+        let path = [[40.0, -74.0], [39.0, -75.0]];
+        let total = path_len(&path);
+        let (past, _) = point_and_heading_at(&path, total + 500.0);
+        assert!(
+            gc_dist(past[0], past[1], path[1][0], path[1][1]) < 0.1,
+            "overshoot must clamp to the last point, got {past:?}"
         );
     }
 }
