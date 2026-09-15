@@ -73,11 +73,11 @@ const AIRCRAFT_PROFILES_INTERVAL: Duration = Duration::from_secs(5 * 60);
 /// force-refreshes on write, so a slow poll is enough to catch out-of-band changes).
 const AIRPORT_GATES_INTERVAL: Duration = Duration::from_secs(5 * 60);
 
-/// How often to re-seed FAA airport surface geometry (#230/#231). The bundled extract is
-/// compile-time embedded (`include_str!`), so it only changes on a redeploy — this interval isn't
-/// about freshness, just giving the job a nominal cadence like every other registry entry; the
-/// meaningful trigger is `run_interval`'s immediate first tick on every boot, plus the admin
-/// Background Tasks page's (#40) on-demand re-run.
+/// How often to run the FAA airport surface seed (#230/#231). The seed only fills airports that have
+/// no `faa` rows yet (existing rows — and facility edits to them — are never touched), so this
+/// interval isn't about freshness, just a nominal cadence like every other registry entry; the
+/// meaningful trigger is `run_interval`'s immediate first tick on every boot (picking up airports a
+/// redeployed extract newly covers), plus the admin Background Tasks page's (#40) on-demand run.
 const FAA_SURFACE_SEED_INTERVAL: Duration = Duration::from_secs(24 * 60 * 60);
 
 /// How often to refresh the airport coordinate database (#216). Fast enough that a transient
@@ -329,8 +329,8 @@ pub fn spawn_airport_gates_refresh(
     ));
 }
 
-/// Idempotently re-seed `flow.airport_ramp_area` / `flow.airport_taxiway` from the bundled FAA
-/// Aerodrome Mapping extract (#230/#231) — `run_interval`'s immediate first tick means this runs
+/// Seed `flow.airport_ramp_area` / `flow.airport_taxiway` from the bundled FAA Aerodrome Mapping
+/// extract for airports with no `faa` rows yet (#230/#231) — `run_interval`'s immediate first tick means this runs
 /// once on every boot, in addition to being visible/triggerable on the admin Background Tasks page.
 /// No `AppState` cache to hot-swap here: unlike gates, nothing in the feed subsystem reads ramp/
 /// taxiway data — the map editor queries Postgres directly per request.
