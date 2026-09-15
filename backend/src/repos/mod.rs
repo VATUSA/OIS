@@ -20,6 +20,7 @@ pub mod public;
 pub mod runway;
 pub mod service_accounts;
 pub mod stats;
+pub mod taxi_insights;
 pub mod tmu;
 pub mod users;
 pub mod vatusa;

@@ -4,6 +4,7 @@
 
 pub mod airports;
 pub mod airspace;
+mod cifp;
 pub mod coverage;
 pub mod delays;
 pub mod events;
