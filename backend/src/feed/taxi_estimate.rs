@@ -1,4 +1,4 @@
-//! Robust per-(gate, aircraft type, runway) pushback+startup and taxi-out estimates from
+//! Robust per-(gate, aircraft type, runway) pushback, start-up, and taxi-out estimates from
 //! sub-issue C's raw observations (`stats.taxi_observation`, #164 sub-issue D). Pure, DB-free math
 //! — `repos::stats::taxi_samples_for_airport` fetches the sample set this operates over. No
 //! trajectory/ETA wiring here; that's sub-issue E.
@@ -13,6 +13,7 @@ pub struct TaxiSample {
     pub aircraft: Option<String>,
     pub runway: Option<String>,
     pub pushback_sec: Option<i32>,
+    pub startup_sec: Option<i32>,
     pub taxi_sec: i32,
 }
 
@@ -69,6 +70,7 @@ pub struct MetricEstimate {
 #[derive(Debug, Clone, Copy)]
 pub struct TaxiEstimate {
     pub pushback: MetricEstimate,
+    pub startup: MetricEstimate,
     pub taxi: MetricEstimate,
 }
 
@@ -81,10 +83,13 @@ const MIN_SAMPLES: usize = 5;
 /// idling unusually long for some unmodeled reason) rather than trusting an implausible estimate.
 pub(crate) const TAXI_BOUNDS_SEC: (f64, f64) = (60.0, 1800.0); // 1-30 min
 pub(crate) const PUSHBACK_BOUNDS_SEC: (f64, f64) = (0.0, 1200.0); // 0-20 min
+pub(crate) const STARTUP_BOUNDS_SEC: (f64, f64) = (0.0, 900.0); // 0-15 min
 
-/// No existing constant for a default pushback+startup duration (this is new with #164's C/D) — 5
-/// minutes is a reasonable starting point, adjustable once real data accumulates.
-const DEFAULT_PUSHBACK_SEC: f64 = 300.0;
+/// Defaults for the push and the start-up gap after it (#277). They split the original 5-minute
+/// pushback+startup default so a no-data airport's total ground allowance is unchanged; adjust once
+/// real data accumulates.
+const DEFAULT_PUSHBACK_SEC: f64 = 180.0;
+const DEFAULT_STARTUP_SEC: f64 = 120.0;
 
 fn median(mut values: Vec<f64>) -> f64 {
     values.sort_by(|a, b| a.partial_cmp(b).unwrap());
@@ -159,7 +164,7 @@ fn estimate_metric(
     }
 }
 
-/// A robust pushback+startup and taxi-out estimate for a departure matching `gate_id`/`aircraft`/
+/// A robust pushback, start-up, and taxi-out estimate for a departure matching `gate_id`/`aircraft`/
 /// `runway` (each `None` skips straight past the tiers that need it). `samples` must already be
 /// scoped to one airport (`repos::stats::taxi_samples_for_airport`) — the broadest ladder tier is
 /// simply "every sample given," not a separate airport filter.
@@ -179,6 +184,15 @@ pub fn estimate(
             PUSHBACK_BOUNDS_SEC,
             DEFAULT_PUSHBACK_SEC,
         ),
+        startup: estimate_metric(
+            samples,
+            gate_id,
+            aircraft,
+            runway,
+            |s| s.startup_sec.map(|v| v as f64),
+            STARTUP_BOUNDS_SEC,
+            DEFAULT_STARTUP_SEC,
+        ),
         taxi: estimate_metric(
             samples,
             gate_id,
@@ -191,10 +205,10 @@ pub fn estimate(
     }
 }
 
-/// The two phases summed into the single ground allowance the prediction service adds to a
+/// The three phases summed into the single ground allowance the prediction service adds to a
 /// not-yet-airborne flight's time (#164 sub-issue E — `feed::predict::eta_along_route`).
 pub fn ground_allowance_sec(est: &TaxiEstimate) -> f64 {
-    est.pushback.value_sec + est.taxi.value_sec
+    est.pushback.value_sec + est.startup.value_sec + est.taxi.value_sec
 }
 
 #[cfg(test)]
@@ -226,6 +240,7 @@ mod tests {
             aircraft: Some(aircraft.to_string()),
             runway: Some(runway.to_string()),
             pushback_sec: pushback,
+            startup_sec: pushback.map(|_| 90),
             taxi_sec: taxi,
         }
     }
@@ -290,6 +305,8 @@ mod tests {
         // No pushback figure on the lone sample either, so pushback also defaults.
         assert_eq!(est.pushback.tier, EstimateTier::Default);
         assert_eq!(est.pushback.value_sec, DEFAULT_PUSHBACK_SEC);
+        assert_eq!(est.startup.tier, EstimateTier::Default);
+        assert_eq!(est.startup.value_sec, DEFAULT_STARTUP_SEC);
     }
 
     #[test]
@@ -306,5 +323,24 @@ mod tests {
         assert_eq!(est.taxi.tier, EstimateTier::GateTypeRunway);
         assert_eq!(est.pushback.tier, EstimateTier::AirportRunway);
         assert_eq!(est.pushback.value_sec, 70.0);
+    }
+
+    #[test]
+    fn startup_walks_the_ladder_independently_and_sums_into_the_allowance() {
+        // Every sample at the exact key carries push and taxi, but none carries a start-up figure
+        // (e.g. no-tug departures) — start-up alone falls to the airport-runway tier.
+        let mut samples: Vec<TaxiSample> = (0..MIN_SAMPLES)
+            .map(|_| TaxiSample {
+                startup_sec: None,
+                ..sample("A1", "B738", "27L", Some(60), 200)
+            })
+            .collect();
+        samples.extend((0..MIN_SAMPLES).map(|_| sample("A2", "A320", "27L", Some(60), 200)));
+
+        let est = estimate(&samples, Some("A1"), Some("B738"), Some("27L"));
+        assert_eq!(est.pushback.tier, EstimateTier::GateTypeRunway);
+        assert_eq!(est.startup.tier, EstimateTier::AirportRunway);
+        assert_eq!(est.startup.value_sec, 90.0);
+        assert_eq!(ground_allowance_sec(&est), 60.0 + 90.0 + 200.0);
     }
 }

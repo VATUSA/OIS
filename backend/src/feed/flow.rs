@@ -927,23 +927,24 @@ pub(crate) fn nearest_gate(gates: &[AirportGateBody], lat: f64, lon: f64) -> Opt
 }
 
 /// The full derivation behind a ground allowance (#164 sub-issue F): which gate/runway matched (if
-/// any), and the pushback/taxi estimates `taxi_estimate`'s ladder produced from them. Debug-mode
+/// any), and the pushback/start-up/taxi estimates `taxi_estimate`'s ladder produced from them. Debug-mode
 /// surfaces read this directly; [`resolve_ground_allowance_sec`] is the plain-total shorthand most
 /// callers want.
 pub(crate) struct GroundAllowanceBreakdown {
     pub gate_id: Option<String>,
     pub runway: Option<String>,
     pub pushback: taxi_estimate::MetricEstimate,
+    pub startup: taxi_estimate::MetricEstimate,
     pub taxi: taxi_estimate::MetricEstimate,
 }
 
 impl GroundAllowanceBreakdown {
     pub fn total_sec(&self) -> f64 {
-        self.pushback.value_sec + self.taxi.value_sec
+        self.pushback.value_sec + self.startup.value_sec + self.taxi.value_sec
     }
 }
 
-/// The ground allowance (pushback+startup + taxi-out, #164 sub-issue E) for a departure from `dep`:
+/// The ground allowance (pushback + start-up + taxi-out, #164 sub-issue E) for a departure from `dep`:
 /// looks up `dep`'s cached observation samples, resolves a gate match whenever a real position
 /// (`pos`) is known, resolves a *runway* match only once `pos`'s groundspeed clears
 /// [`TAXI_ROLL_GS_KT`] (a stationary/gate-parked aircraft's heading is not runway-meaningful — see
@@ -976,6 +977,7 @@ pub(crate) fn resolve_ground_allowance(
         gate_id,
         runway,
         pushback: est.pushback,
+        startup: est.startup,
         taxi: est.taxi,
     }
 }
@@ -1773,6 +1775,7 @@ mod tests {
             aircraft: Some(aircraft.to_string()),
             runway: Some(runway.to_string()),
             pushback_sec: Some(50),
+            startup_sec: Some(40),
             taxi_sec,
         }
     }
@@ -1806,7 +1809,7 @@ mod tests {
             Some((40.0, -74.0, end.hdg as i64, TAXI_ROLL_GS_KT)),
         );
         // Airport-wide blend (median of the combined 10 samples), not the runway-specific 600s.
-        assert_eq!(stationary, 360.0 + 50.0);
+        assert_eq!(stationary, 360.0 + 50.0 + 40.0);
 
         let rolling = resolve_ground_allowance_sec(
             &gates,
@@ -1817,7 +1820,7 @@ mod tests {
             Some((40.0, -74.0, end.hdg as i64, TAXI_ROLL_GS_KT + 1)),
         );
         // Once actually moving, the same heading legitimately resolves the gate/type/runway tier.
-        assert_eq!(rolling, 600.0 + 50.0);
+        assert_eq!(rolling, 600.0 + 50.0 + 40.0);
     }
 
     /// #164 sub-issue F: debug mode reads `resolve_ground_allowance`'s breakdown directly, so it
@@ -1854,7 +1857,8 @@ mod tests {
         assert_eq!(breakdown.taxi.sample_count, 5);
         assert_eq!(breakdown.taxi.value_sec, 600.0);
         assert_eq!(breakdown.pushback.value_sec, 50.0);
-        assert_eq!(breakdown.total_sec(), 650.0);
+        assert_eq!(breakdown.startup.value_sec, 40.0);
+        assert_eq!(breakdown.total_sec(), 690.0);
 
         // A thin-data airport falls to the default tier with no matched key at all.
         let default_breakdown = resolve_ground_allowance(

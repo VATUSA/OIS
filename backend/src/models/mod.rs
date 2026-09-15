@@ -188,7 +188,7 @@ pub struct AuditLogPage {
 
 // --- taxi insights (#183): browsable history over raw observations + derived estimates ---
 
-/// One raw pushback+taxi observation (#164 sub-issue C).
+/// One raw pushback/start-up/taxi observation (#164 sub-issue C, #277).
 #[derive(Debug, Serialize, ToSchema, sqlx::FromRow)]
 pub struct TaxiObservationEntry {
     pub id: i64,
@@ -197,6 +197,7 @@ pub struct TaxiObservationEntry {
     pub aircraft: Option<String>,
     pub runway: Option<String>,
     pub pushback_sec: Option<i32>,
+    pub startup_sec: Option<i32>,
     pub taxi_sec: i32,
     pub observed_at: DateTime<Utc>,
     /// True when this row falls outside `taxi_estimate`'s own sanity-clamp bounds — computed at
@@ -224,6 +225,9 @@ pub struct TaxiEstimateEntry {
     pub pushback_sec: f64,
     pub pushback_tier: String,
     pub pushback_sample_count: i64,
+    pub startup_sec: f64,
+    pub startup_tier: String,
+    pub startup_sample_count: i64,
     pub taxi_sec: f64,
     pub taxi_tier: String,
     pub taxi_sample_count: i64,
@@ -1645,7 +1649,7 @@ pub struct FcaFlightDebug {
     pub taxi_estimate: Option<TaxiEstimateDebug>,
 }
 
-/// How a departure's pushback+taxi allowance was derived (#164 sub-issue F): the matched
+/// How a departure's pushback/start-up/taxi allowance was derived (#164 sub-issue F): the matched
 /// gate/runway (if any) and each metric's fallback-ladder tier + sample count.
 #[derive(Debug, Serialize, ToSchema)]
 pub struct TaxiEstimateDebug {
@@ -1658,6 +1662,10 @@ pub struct TaxiEstimateDebug {
     /// "airport", or "default".
     pub pushback_tier: String,
     pub pushback_samples: i64,
+    pub startup_sec: i64,
+    /// Same tier labels as `pushback_tier`, for the start-up gap after the push (#277).
+    pub startup_tier: String,
+    pub startup_samples: i64,
     pub taxi_sec: i64,
     /// Same tier labels as `pushback_tier`, for the taxi-out metric.
     pub taxi_tier: String,

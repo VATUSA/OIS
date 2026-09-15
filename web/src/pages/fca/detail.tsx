@@ -238,7 +238,9 @@ function Strip({
           {f.debug.taxi_estimate && (
             <div>
               push {f.debug.taxi_estimate.pushback_sec}s ({f.debug.taxi_estimate.pushback_tier}, n=
-              {f.debug.taxi_estimate.pushback_samples}) · taxi {f.debug.taxi_estimate.taxi_sec}s (
+              {f.debug.taxi_estimate.pushback_samples}) · start-up {f.debug.taxi_estimate.startup_sec}s (
+              {f.debug.taxi_estimate.startup_tier}, n={f.debug.taxi_estimate.startup_samples}) · taxi{" "}
+              {f.debug.taxi_estimate.taxi_sec}s (
               {f.debug.taxi_estimate.taxi_tier}, n={f.debug.taxi_estimate.taxi_samples})
               {f.debug.taxi_estimate.gate && ` · gate ${f.debug.taxi_estimate.gate}`}
               {f.debug.taxi_estimate.runway && ` · rwy ${f.debug.taxi_estimate.runway}`}

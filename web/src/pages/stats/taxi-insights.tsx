@@ -23,9 +23,9 @@ const TIERS = [
   { value: "gate_type_runway", label: "Gate + type + runway" },
   { value: "airport_runway", label: "Airport + runway" },
   { value: "airport", label: "Airport-wide" },
-  // No duration in this label: the default is a different flat value per metric (pushback vs.
-  // taxi), and the actual value is already shown alongside the badge — a single hardcoded
-  // duration here would be wrong for one of the two.
+  // No duration in this label: the default is a different flat value per metric (pushback,
+  // start-up, taxi), and the actual value is already shown alongside the badge — a single
+  // hardcoded duration here would be wrong for the others.
   { value: "default", label: "Default" },
 ];
 
@@ -239,6 +239,7 @@ export function TaxiInsightsPage() {
                         <th className="py-2 pr-3">Aircraft</th>
                         <th className="py-2 pr-3">Runway</th>
                         <th className="py-2 pr-3">Pushback</th>
+                        <th className="py-2 pr-3">Start-up</th>
                         <th className="py-2 pr-3">Taxi</th>
                         <th className="py-2 pr-3">Outlier</th>
                       </tr>
@@ -252,6 +253,7 @@ export function TaxiInsightsPage() {
                           <td className="py-2 pr-3">{o.aircraft ?? "—"}</td>
                           <td className="py-2 pr-3">{o.runway ?? "—"}</td>
                           <td className="py-2 pr-3">{fmtDur(o.pushback_sec)}</td>
+                          <td className="py-2 pr-3">{fmtDur(o.startup_sec)}</td>
                           <td className="py-2 pr-3">{fmtDur(o.taxi_sec)}</td>
                           <td className="py-2 pr-3">
                             {o.is_outlier && <Badge variant="destructive">outlier</Badge>}
@@ -260,7 +262,7 @@ export function TaxiInsightsPage() {
                       ))}
                       {observations.data.items.length === 0 && (
                         <tr>
-                          <td colSpan={8} className="py-6 text-center text-muted-foreground">
+                          <td colSpan={9} className="py-6 text-center text-muted-foreground">
                             No observations match these filters.
                           </td>
                         </tr>
@@ -297,6 +299,7 @@ export function TaxiInsightsPage() {
                       <th className="py-2 pr-3">Aircraft</th>
                       <th className="py-2 pr-3">Runway</th>
                       <th className="py-2 pr-3">Pushback</th>
+                      <th className="py-2 pr-3">Start-up</th>
                       <th className="py-2 pr-3">Taxi</th>
                     </tr>
                   </thead>
@@ -318,6 +321,15 @@ export function TaxiInsightsPage() {
                         </td>
                         <td className="py-2 pr-3">
                           <div className="flex items-center gap-1.5">
+                            {fmtDur(e.startup_sec)}
+                            <Badge variant="secondary">{tierLabel(e.startup_tier)}</Badge>
+                            <span className="text-xs text-muted-foreground">
+                              n={e.startup_sample_count}
+                            </span>
+                          </div>
+                        </td>
+                        <td className="py-2 pr-3">
+                          <div className="flex items-center gap-1.5">
                             {fmtDur(e.taxi_sec)}
                             <Badge variant="secondary">{tierLabel(e.taxi_tier)}</Badge>
                             <span className="text-xs text-muted-foreground">
@@ -329,7 +341,7 @@ export function TaxiInsightsPage() {
                     ))}
                     {estimates.data.items.length === 0 && (
                       <tr>
-                        <td colSpan={6} className="py-6 text-center text-muted-foreground">
+                        <td colSpan={7} className="py-6 text-center text-muted-foreground">
                           No estimates match these filters.
                         </td>
                       </tr>

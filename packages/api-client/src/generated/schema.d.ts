@@ -5154,7 +5154,7 @@ export interface components {
             rolling_since?: string | null;
         };
         /**
-         * @description How a departure's pushback+taxi allowance was derived (#164 sub-issue F): the matched
+         * @description How a departure's pushback/start-up/taxi allowance was derived (#164 sub-issue F): the matched
          *     gate/runway (if any) and each metric's fallback-ladder tier + sample count.
          */
         TaxiEstimateDebug: {
@@ -5171,6 +5171,12 @@ export interface components {
             pushback_tier: string;
             /** @description The matched departure runway, if the aircraft was rolling. */
             runway?: string | null;
+            /** Format: int64 */
+            startup_samples: number;
+            /** Format: int64 */
+            startup_sec: number;
+            /** @description Same tier labels as `pushback_tier`, for the start-up gap after the push (#277). */
+            startup_tier: string;
             /** Format: int64 */
             taxi_samples: number;
             /** Format: int64 */
@@ -5192,6 +5198,11 @@ export interface components {
             pushback_sec: number;
             pushback_tier: string;
             runway?: string | null;
+            /** Format: int64 */
+            startup_sample_count: number;
+            /** Format: double */
+            startup_sec: number;
+            startup_tier: string;
             /** Format: int64 */
             taxi_sample_count: number;
             /** Format: double */
@@ -5220,7 +5231,7 @@ export interface components {
             trend: string;
             volume: number;
         };
-        /** @description One raw pushback+taxi observation (#164 sub-issue C). */
+        /** @description One raw pushback/start-up/taxi observation (#164 sub-issue C, #277). */
         TaxiObservationEntry: {
             aircraft?: string | null;
             airport: string;
@@ -5237,6 +5248,8 @@ export interface components {
             /** Format: int32 */
             pushback_sec?: number | null;
             runway?: string | null;
+            /** Format: int32 */
+            startup_sec?: number | null;
             /** Format: int32 */
             taxi_sec: number;
         };
@@ -11886,7 +11899,7 @@ export interface operations {
                 to?: string;
                 /** @description Include out-of-bounds samples in the estimate's input (default true) */
                 include_outliers?: boolean;
-                /** @description Only combos where pushback or taxi resolved at this ladder tier */
+                /** @description Only combos where pushback, start-up, or taxi resolved at this ladder tier */
                 fallback_tier?: string;
                 /** @description 1-based page (default 1) */
                 page?: number;
