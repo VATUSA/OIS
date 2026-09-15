@@ -5,6 +5,11 @@ if you're looking for how to *use* the application, see the [user documentation 
 (deployed at docs.&lt;domain&gt;) instead. Nothing here explains how to use a feature; everything here
 explains how it's built.
 
+## Start here
+
+- **[../CONTRIBUTING.md](../CONTRIBUTING.md)** — how to file issues, the dev workflow, and PR
+  expectations. Read this first if you're about to contribute.
+
 ## Architecture
 
 - [architecture/overview.md](architecture/overview.md) — the services and how they fit together.
