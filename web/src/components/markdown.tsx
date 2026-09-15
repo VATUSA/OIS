@@ -16,8 +16,6 @@ export function Markdown({ children, className }: { children: string; className?
         components={{
           // react-markdown passes an extra `node` prop (the hast element) to every custom
           // component (`passNode: true`, hardcoded); it must never reach a real DOM element.
-          // react-markdown passes an extra `node` prop (the hast element) to every custom
-          // component (`passNode: true`, hardcoded); it must never reach a real DOM element.
           a: ({ href, children: linkChildren, node: _node, ...rest }) => (
             <a
               {...rest}
