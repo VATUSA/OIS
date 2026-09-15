@@ -1,8 +1,9 @@
 # Feature specs
 
-One spec per capability. Phase 1 fills these in before the matching backend domain is built. Each follows the template
-below so a spec always states its data model, its **exact permission entries**, its API surface, and its Discord
-touchpoints.
+One spec per built capability, describing what shipped — write a new one when a subsystem is
+substantial enough to need its own reference (not every small feature needs one). Each follows the
+template below so a spec always states its data model, its **exact permission entries**, its API
+surface, and its Discord touchpoints.
 
 ## Index
 
@@ -11,15 +12,18 @@ touchpoints.
 | [access-control.md](access-control.md)           | access               | built                           |
 | [api-keys.md](api-keys.md)                        | access (api_keys)    | built                           |
 | [stats-replay.md](stats-replay.md)               | stats                | built                           |
-| [events-workflow.md](events-workflow.md)         | events               | partially built (diverged from spec) |
-| [tmu-ntml-adv-tmi.md](tmu-ntml-adv-tmi.md)       | tmu                  | partially built (diverged from spec) |
-| [ace-support.md](ace-support.md)                 | ace, discord         | built (v1; Discord deferred)    |
-| [discord-integration.md](discord-integration.md) | discord, integration | built (bot + linking need Discord creds to run) |
-| [flow.md](flow.md)                               | flow                 | partially built (diverged from spec) |
+| [events-workflow.md](events-workflow.md)         | events               | built (diverged from original spec) |
+| [tmu-ntml-adv-tmi.md](tmu-ntml-adv-tmi.md)       | tmu                  | built (diverged from original spec) |
+| [ace-support.md](ace-support.md)                 | ace, discord         | built (local roster since removed — sourced from VATUSA) |
+| [discord-integration.md](discord-integration.md) | discord, integration | built |
+| [flow.md](flow.md)                               | flow                 | built (diverged from original spec) |
+| [aadc.md](aadc.md)                               | flow                 | built |
+| [taxi-insights.md](taxi-insights.md)             | stats, flow          | built |
+| [dashboard-boards.md](dashboard-boards.md)       | identity             | built |
 
-The three "partially built" specs have live migrations, handlers, and routes, but the
-shipped shape diverged from the original design — each doc carries a note at the top
-explaining the realignment. `ace` and `discord` remain genuine forward-looking specs.
+Every spec above is built. The "diverged from original spec" ones have live migrations,
+handlers, and routes, but the shipped shape differs from the original design — each doc
+carries a note at the top explaining the realignment.
 
 Event **posting, review, and approval remain in the current VATUSA website**; the
 events spec above covers only OIS's operational window (prior / during / post).
