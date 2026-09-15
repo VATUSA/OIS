@@ -153,6 +153,7 @@ use utoipa::OpenApi;
         crate::handlers::flow::update_route,
         crate::handlers::flow::delete_route,
         crate::handlers::flow::list_traffic,
+        crate::handlers::flow::projected_traffic,
         crate::handlers::flow::list_idst,
         crate::handlers::facility_map::get_config,
         crate::handlers::facility_map::put_config,

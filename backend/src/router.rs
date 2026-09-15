@@ -401,6 +401,10 @@ pub fn build_router(state: AppState) -> Router {
         )
         .route("/api/v1/flow/resolve-routes", post(flow::resolve_routes))
         .route("/api/v1/flow/traffic", get(flow::list_traffic))
+        .route(
+            "/api/v1/flow/traffic/projected",
+            get(flow::projected_traffic),
+        )
         .route("/api/v1/flow/idst", get(flow::list_idst))
         // Realtime push — additive over REST (see crate::realtime).
         .route("/api/v1/ws", get(realtime::ws))
