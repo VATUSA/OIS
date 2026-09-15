@@ -44,6 +44,52 @@ export function selectionIsValid(selection: PermSelection): boolean {
 }
 
 /**
+ * What a preset grants this creator beyond the sign-in baseline — the same set `togglePreset`
+ * writes. The baseline is excluded because every preset adds it: counting it made a preset with
+ * nothing of its own (e.g. ACE Team for a creator holding no `ace.*` beyond the baseline) read as
+ * applied as soon as any other preset was clicked (#264). A facility preset grants nothing until a
+ * facility is chosen, and then only what the creator can delegate at it.
+ */
+export function presetOwnPermissions(
+  preset: AccessPreset,
+  grantable: GrantablePermission[],
+  baseNames: readonly string[],
+  facility: string,
+): string[] {
+  if (preset.scope === "facility" && !facility) return [];
+  const byName = new Map(grantable.map((g) => [g.permission, g] as const));
+  const base = new Set(baseNames);
+  return presetPermissions(
+    preset,
+    grantable.map((g) => g.permission),
+  ).filter((p) => {
+    if (base.has(p)) return false;
+    if (preset.scope !== "facility") return true;
+    const g = byName.get(p)!;
+    return g.national || g.artccs.includes(facility);
+  });
+}
+
+/** Whether a preset is fully applied: it grants something of its own, all of it is selected
+ * (a facility preset's scoped to the chosen facility, not nationally), and so is the baseline. */
+export function presetApplied(
+  preset: AccessPreset,
+  grantable: GrantablePermission[],
+  baseNames: readonly string[],
+  facility: string,
+  selection: PermSelection,
+): boolean {
+  const own = presetOwnPermissions(preset, grantable, baseNames, facility);
+  if (own.length === 0) return false;
+  const ownSelected = own.every((p) => {
+    const s = selection.get(p);
+    if (!s) return false;
+    return preset.scope !== "facility" || (!s.national && s.artccs.includes(facility));
+  });
+  return ownSelected && baseNames.every((p) => selection.has(p));
+}
+
+/**
  * Permission picker for API keys: a presets bar over the shared grouped scope tree. Each checked
  * permission gets a scope control (National or specific ARTCCs) bounded by what the caller can
  * delegate (`grantable`).
@@ -76,10 +122,12 @@ export function PermissionPicker({
   );
   const scopeOf = (g: GrantablePermission): ScopeSel =>
     defaultScope({ national: g.national, artccs: g.artccs });
-  const isPresetApplied = (preset: AccessPreset) => {
-    const perms = [...presetPermissions(preset, grantableNames), ...baseNames];
-    return perms.length > 0 && perms.every((p) => selection.has(p));
-  };
+  const isPresetApplied = (preset: AccessPreset) =>
+    presetApplied(preset, grantable, baseNames, presetFacility, selection);
+  // A facility preset with no facility chosen is already gated by PresetBar ("pick a facility").
+  const canApplyPreset = (preset: AccessPreset) =>
+    (preset.scope === "facility" && !presetFacility) ||
+    presetOwnPermissions(preset, grantable, baseNames, presetFacility).length > 0;
   const togglePreset = (preset: AccessPreset) => {
     const domain = presetPermissions(preset, grantableNames);
     const next = new Map(selection);
@@ -125,6 +173,7 @@ export function PermissionPicker({
     <div className="flex flex-col gap-2">
       <PresetBar
         isApplied={isPresetApplied}
+        canApply={canApplyPreset}
         onToggle={togglePreset}
         facility={presetFacility}
         facilities={facilities}
