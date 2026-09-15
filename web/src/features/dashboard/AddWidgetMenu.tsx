@@ -55,6 +55,12 @@ export function AddWidgetMenu({ onAdd }: { onAdd: (widget: Widget) => void }) {
     }
   }
 
+  async function addAadc() {
+    const icao = await askIcao(prompt);
+    if (!icao) return;
+    onAdd({ id: newId(), kind: "aadc", icao, bucketMin: 15, dimension: "status" });
+  }
+
   async function addChart(sourceId: string, needsIcao: boolean) {
     const source = DATA_SOURCES_BY_ID[sourceId];
     if (!source) return;
@@ -143,6 +149,10 @@ export function AddWidgetMenu({ onAdd }: { onAdd: (widget: Widget) => void }) {
             {s.needsIcao && <span className="ml-auto text-xs text-muted-foreground">airport</span>}
           </DropdownMenuItem>
         ))}
+        <DropdownMenuItem onSelect={() => void addAadc()}>
+          Arrival demand chart (AADC)
+          <span className="ml-auto text-xs text-muted-foreground">airport</span>
+        </DropdownMenuItem>
         <DropdownMenuSeparator />
         <DropdownMenuLabel>Facilities (ARTCC / TRACON)</DropdownMenuLabel>
         {AIRPORT_SOURCES.map((s) => (

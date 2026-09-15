@@ -434,6 +434,7 @@ pub fn build_router(state: AppState) -> Router {
         // Live VATSIM feed
         .route("/api/v1/feed/status", get(feed::feed_status))
         .route("/api/v1/tmu/flow/{icao}", get(feed::airport_flow))
+        .route("/api/v1/tmu/flow/{icao}/aadc", get(feed::airport_aadc))
         .route("/api/v1/tmu/departures/{dep}", get(feed::list_departures))
         .route("/api/v1/tmu/taxi/{icao}", get(feed::taxi_stats))
         .route("/api/v1/tmu/cfr", post(feed::issue_cfr))
