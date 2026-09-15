@@ -9,7 +9,7 @@ use axum::{
     extract::{Extension, Path, Query, State},
     http::StatusCode,
 };
-use chrono::{DateTime, Utc};
+use chrono::{DateTime, Duration, Utc};
 use serde::Deserialize;
 
 use crate::{
@@ -29,10 +29,11 @@ use crate::{
     },
     jobs,
     models::{
-        AircraftRoute, AirportGateBody, DataStatus, FcaBody, FcaFlight, FixValidationBody,
-        FlightAdvisory, FlightFcaCrossing, FlightGdp, FlightGroundStop, FlightProgram, IdstFlight,
-        IdstResponse, ReleaseRequest, ReorderRequest, ResolveRouteRequest, ResolvedRoute,
-        RouteBody, RouteWaypoint, TrafficAircraft, UpsertFcaRequest, UpsertRouteRequest,
+        AircraftRoute, AirportGateBody, DataStatus, FcaBody, FcaFlight, FixPrediction,
+        FixValidationBody, FlightAdvisory, FlightFcaCrossing, FlightGdp, FlightGroundStop,
+        FlightProgram, IdstFlight, IdstResponse, ReleaseRequest, ReorderRequest,
+        ResolveRouteRequest, ResolvedRoute, RouteBody, RouteWaypoint, TrafficAircraft,
+        UpsertFcaRequest, UpsertRouteRequest,
     },
     repos::{flow as flow_repo, public as public_repo},
     state::AppState,
@@ -567,6 +568,20 @@ pub async fn aircraft_route(
             p.groundspeed,
         );
         let points = route_display_points(path, p.latitude, p.longitude);
+        let fixes = fix_predictions(
+            &state,
+            nav,
+            airports,
+            fp,
+            &points,
+            Some((p.latitude, p.longitude, p.heading, p.groundspeed)),
+            p.latitude,
+            p.longitude,
+            p.heading,
+            p.groundspeed,
+            p.altitude as f64,
+            Utc::now(),
+        );
         return Ok(Json(AircraftRoute {
             callsign: cs,
             aircraft_type: fp.aircraft_short.clone(),
@@ -579,6 +594,7 @@ pub async fn aircraft_route(
             unresolved,
             waypoints: to_waypoints(named),
             nav_cycle: nav.cycle().to_string(),
+            fixes,
         }));
     }
 
@@ -593,6 +609,7 @@ pub async fn aircraft_route(
         let (named, unresolved) =
             fca::full_route_named(nav, airports, &fp.departure, &fp.arrival, &fp.route);
         let points = named.iter().map(|(_, lat, lon)| [*lat, *lon]).collect();
+        let fixes = prefile_fix_predictions(&state, nav, airports, fp, Utc::now());
         return Ok(Json(AircraftRoute {
             callsign: cs,
             aircraft_type: fp.aircraft_short.clone(),
@@ -605,6 +622,7 @@ pub async fn aircraft_route(
             unresolved,
             waypoints: to_waypoints(named),
             nav_cycle: nav.cycle().to_string(),
+            fixes,
         }));
     }
 
@@ -1233,6 +1251,165 @@ fn to_waypoints(named: Vec<(String, f64, f64)>) -> Vec<RouteWaypoint> {
         .into_iter()
         .map(|(name, lat, lon)| RouteWaypoint { name, lat, lon })
         .collect()
+}
+
+/// The route-length scale factor for the debug per-fix table (#225 rework): `path_len_ge_2`
+/// anchors — `> 2` means the nav engine placed at least one real enroute point; exactly `2` (a
+/// direct/unexpandable filed route) is no better than a great circle. Mirrors
+/// `predict::arrival_eta`'s own `!airborne && !enroute_resolved` padding exactly, so a
+/// ground/prefile aircraft on an unresolved route gets the same [`predict::GROUND_ROUTE_FACTOR`]
+/// this debug table's ETAs would otherwise silently disagree with the real metering/ladder model
+/// on (a live-confirmed ~12% undercount before this fix).
+fn ground_route_scale(airborne: bool, path_len: usize) -> f64 {
+    let enroute_resolved = path_len > 2;
+    if !airborne && !enroute_resolved {
+        predict::GROUND_ROUTE_FACTOR
+    } else {
+        1.0
+    }
+}
+
+/// Per-fix predictions for the debug-mode route breakdown (#225): the same trajectory/ETA model
+/// FCA metering, the arrival ladder, and runway ETE all resolve through
+/// (`feed::predict`/`feed::trajectory`), just queried at every named fix instead of one crossing
+/// point. `lat`/`lon`/`hdg`/`gs` are the aircraft's live state, or the departure airport with
+/// `hdg`/`gs` `0` for a prefile (see [`prefile_fix_predictions`]). `pilot_pos` is the aircraft's real
+/// position for the ground-allowance gate/runway match — `Some` for any connected pilot (even
+/// parked, `gs`/`hdg` both `0`), `None` only for an actual prefile — matching
+/// [`feed_flow::ground_estimate`]'s own `pilot_pos` convention; it must not be re-derived from
+/// `gs`/`hdg` being nonzero, or a pilot idling at the gate is treated as position-less. `path` is
+/// the caller's already-resolved `fca::route_path` polyline for the same aircraft (reused for the
+/// headwind sample rather than re-resolving the route a second time). Returns an empty list when
+/// the route can't be resolved, exactly like `points`/`waypoints` already tolerate.
+#[allow(clippy::too_many_arguments)]
+fn fix_predictions(
+    state: &AppState,
+    nav: &NavData,
+    airports: &AirportDb,
+    fp: &FlightPlan,
+    path: &[[f64; 2]],
+    pilot_pos: Option<(f64, f64, i64, i64)>,
+    lat: f64,
+    lon: f64,
+    hdg: i64,
+    gs: i64,
+    cur_alt_ft: f64,
+    now: DateTime<Utc>,
+) -> Vec<FixPrediction> {
+    if path.len() < 2 {
+        return Vec::new();
+    }
+    let Some(named) = fca::route_path_named(
+        nav,
+        airports,
+        &fp.departure,
+        &fp.arrival,
+        &fp.route,
+        lat,
+        lon,
+        hdg,
+        gs,
+    ) else {
+        return Vec::new();
+    };
+
+    let airborne = gs >= 50;
+    let (ty, wake) = fp.aircraft_type_wake();
+    let profiles = state.aircraft_profiles.load_full();
+    let profile = profiles.resolve(&ty, &wake);
+    let cruise_alt = trajectory::parse_alt_ft(&fp.altitude);
+    let filed_tas: f64 = fp.cruise_tas.parse().unwrap_or(0.0);
+    let cruise_tas = trajectory::capped_cruise_tas(filed_tas, cruise_alt, profile);
+    let headwind = state.winds.load_full().route_headwind(path, cruise_alt);
+    let route_scale = ground_route_scale(airborne, path.len());
+    let route_len = predict::path_len_nm(path) * route_scale;
+
+    let dep = fp.departure.to_ascii_uppercase();
+    let ground_allowance = if airborne {
+        0.0
+    } else {
+        let aircraft = (!fp.aircraft_short.is_empty()).then_some(fp.aircraft_short.as_str());
+        feed_flow::resolve_ground_allowance_sec(
+            &state.gates.load_full(),
+            &state.runways,
+            &state.taxi_estimate_samples.load_full(),
+            &dep,
+            aircraft,
+            pilot_pos,
+        )
+    };
+
+    let start_alt = if airborne { cur_alt_ft } else { 0.0 };
+    let vp = trajectory::VerticalProfile::build(
+        start_alt, route_len, 0.0, cruise_alt, cruise_tas, profile, headwind,
+    );
+
+    let arr_ll = airports
+        .get(&fp.arrival.to_ascii_uppercase())
+        .map(|&(la, lo)| [la, lo]);
+    let mut out = Vec::with_capacity(named.len());
+    for (i, (name, flat, flon, along_nm)) in named.iter().enumerate() {
+        let (flat, flon, along_nm) = (*flat, *flon, *along_nm * route_scale);
+        let target_d = (route_len - along_nm).max(0.0);
+        let mut sec = vp.time_between(route_len, target_d);
+        if !airborne {
+            sec += ground_allowance;
+        }
+        let next = named.get(i + 1).map(|(_, la, lo, _)| [*la, *lo]);
+        // A degenerate target (this fix already *is* the arrival airport, e.g. the last named
+        // point on the route) would give a meaningless 0° bearing — fall back to current heading.
+        let heading_deg = next
+            .or(arr_ll)
+            .filter(|&to| feed_flow::gc_dist(flat, flon, to[0], to[1]) > 0.1)
+            .map(|to| fca::bearing_deg([flat, flon], to).round() as i64)
+            .unwrap_or(hdg);
+
+        out.push(FixPrediction {
+            name: name.clone(),
+            lat: flat,
+            lon: flon,
+            eta: now + Duration::seconds(sec as i64),
+            altitude_ft: vp.alt_at(target_d).round() as i64,
+            groundspeed_kt: vp.ground_speed_at(target_d).round() as i64,
+            heading_deg,
+            distance_nm: along_nm.round() as i64,
+        });
+    }
+    out
+}
+
+/// [`fix_predictions`] for a prefile: timed from its departure airport, exactly like
+/// `feed_flow::ground_estimate` and every other prefile caller (`prefile_position`, #213) — never a
+/// `(0.0, 0.0)` placeholder, which `route_path`'s ground trimming would project onto the route and
+/// prepend (thousands of nm of phantom distance, or a route collapsed to nothing). A prefile whose
+/// departure doesn't resolve gets no per-fix table, the same skip the other prefile callers apply.
+fn prefile_fix_predictions(
+    state: &AppState,
+    nav: &NavData,
+    airports: &AirportDb,
+    fp: &FlightPlan,
+    now: DateTime<Utc>,
+) -> Vec<FixPrediction> {
+    let Some((lat, lon)) = prefile_position(airports, &fp.departure) else {
+        return Vec::new();
+    };
+    // The *full* anchor set (named + unnamed), not the named-only `points` track, so the route
+    // length / headwind sample isn't undercounted by a skipped unnamed procedure-leg point.
+    let path = fca::route_path(
+        nav,
+        airports,
+        &fp.departure,
+        &fp.arrival,
+        &fp.route,
+        lat,
+        lon,
+        0,
+        0,
+    )
+    .unwrap_or_default();
+    fix_predictions(
+        state, nav, airports, fp, &path, None, lat, lon, 0, 0, 0.0, now,
+    )
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -2342,5 +2519,176 @@ mod prefile_skip_integration_tests {
             "a prefile whose departure can't be resolved must be skipped, not counted via a \
              fabricated (0.0, 0.0) position: got {flights:?}"
         );
+    }
+}
+
+#[cfg(test)]
+mod ground_route_scale_tests {
+    use super::ground_route_scale;
+
+    /// Regression (#225 rework): `fix_predictions` originally fed `path_len_nm` straight into the
+    /// debug table's ETA math with no padding, so a ground/prefile aircraft on an unresolved
+    /// (direct-filed, 2-anchor) route showed ETAs ~12% earlier than `predict::arrival_eta` — the
+    /// real model backing metering/the ladder/runway ETE — would compute for the identical flight.
+    #[test]
+    fn pads_a_ground_aircraft_on_an_unresolved_two_anchor_route() {
+        assert_eq!(
+            ground_route_scale(false, 2),
+            crate::feed::predict::GROUND_ROUTE_FACTOR
+        );
+    }
+
+    #[test]
+    fn does_not_pad_a_ground_aircraft_once_the_route_has_a_real_enroute_point() {
+        assert_eq!(ground_route_scale(false, 3), 1.0);
+    }
+
+    #[test]
+    fn never_pads_an_airborne_aircraft_even_on_an_unresolved_route() {
+        // An airborne aircraft is timed against the route the map actually draws (matching
+        // `predict::arrival_eta`'s own airborne branch) — padding it would double-correct.
+        assert_eq!(ground_route_scale(true, 2), 1.0);
+    }
+}
+
+#[cfg(test)]
+mod prefile_fix_predictions_tests {
+    use std::collections::HashMap;
+
+    use chrono::{DateTime, Utc};
+
+    use super::prefile_fix_predictions;
+    use crate::feed::{
+        flow as feed_flow, nav::NavData, predict, runway_db::RunwayDb, trajectory::AircraftProfile,
+        vatsim::FlightPlan, winds::Winds,
+    };
+    use crate::scope_test_support::test_state;
+
+    fn now() -> DateTime<Utc> {
+        DateTime::from_timestamp(1_700_000_000, 0).unwrap()
+    }
+
+    fn state() -> crate::state::AppState {
+        // Lazy pool: never connects — `prefile_fix_predictions` reads only the in-memory caches.
+        let pool = sqlx::PgPool::connect_lazy("postgres://unused@127.0.0.1/unused").unwrap();
+        test_state(pool, HashMap::new())
+    }
+
+    fn plan(dep: &str, arr: &str, route: &str) -> FlightPlan {
+        FlightPlan {
+            departure: dep.into(),
+            arrival: arr.into(),
+            route: route.into(),
+            altitude: "FL350".into(),
+            cruise_tas: "440".into(),
+            ..Default::default()
+        }
+    }
+
+    fn airports() -> HashMap<String, (f64, f64)> {
+        HashMap::from([
+            ("KJFK".to_string(), (40.64, -73.78)),
+            ("KDCA".to_string(), (38.85, -77.04)),
+            ("KIAD".to_string(), (38.95, -77.46)),
+        ])
+    }
+
+    /// The same prefile through the real ETA model (`ground_estimate`'s `arrival_eta` call, from
+    /// the departure airport) — what metering / airport-flow demand show for it.
+    fn real_arrival(
+        nav: &NavData,
+        ap: &HashMap<String, (f64, f64)>,
+        fp: &FlightPlan,
+    ) -> predict::ArrivalPrediction {
+        let dep_ll = ap[&fp.departure];
+        let arr_ll = ap[&fp.arrival];
+        let profile = AircraftProfile::default();
+        let cruise_ft = crate::feed::trajectory::parse_alt_ft(&fp.altitude);
+        let allowance = feed_flow::resolve_ground_allowance_sec(
+            &HashMap::new(),
+            &RunwayDb::load(),
+            &HashMap::new(),
+            &fp.departure,
+            None,
+            None,
+        );
+        predict::arrival_eta(
+            nav,
+            ap,
+            &Winds::default(),
+            &profile,
+            &predict::ArrivalInput {
+                dep: &fp.departure,
+                arr: &fp.arrival,
+                route: &fp.route,
+                pos: [dep_ll.0, dep_ll.1],
+                alt_ft: 0.0,
+                gs: 0,
+                hdg: 0,
+                arr_ll: [arr_ll.0, arr_ll.1],
+                cruise_ft,
+                cruise_tas: crate::feed::trajectory::capped_cruise_tas(440.0, cruise_ft, &profile),
+            },
+            allowance,
+            now(),
+        )
+    }
+
+    /// Regression (#225 QA): the prefile table was timed from a `(0.0, 0.0)` placeholder, which
+    /// `route_path`'s ground trimming prepends — KJFK→KDCA read ~4,900 nm instead of ~224 nm.
+    /// The last fix (the arrival field) must carry the real model's distance and ETA.
+    #[tokio::test]
+    async fn a_prefile_is_timed_from_its_departure_and_matches_the_real_arrival_eta() {
+        let (st, nav, ap) = (state(), NavData::load(), airports());
+        let fp = plan("KJFK", "KDCA", "RBV WHITE SIE");
+        let fixes = prefile_fix_predictions(&st, &nav, &ap, &fp, now());
+        let real = real_arrival(&nav, &ap, &fp);
+
+        let last = fixes.last().expect("the resolved route yields fixes");
+        assert_eq!(last.name, "KDCA");
+        assert!(
+            (last.distance_nm as f64 - real.route_nm).abs() <= 1.0,
+            "last fix {} nm vs real model {:.1} nm",
+            last.distance_nm,
+            real.route_nm
+        );
+        assert!(
+            (last.eta - real.eta).num_seconds().abs() <= 1,
+            "last fix ETA {} vs real model {}",
+            last.eta,
+            real.eta
+        );
+        assert!(fixes.iter().any(|f| f.name == "RBV"));
+    }
+
+    /// Regression (#225 QA): on a reversed, unresolved (direct) KIAD→KJFK route `(0,0)` projects
+    /// onto the *arrival* end and collapsed the table to nothing; from the departure it's a 2-anchor
+    /// route, so the ground `GROUND_ROUTE_FACTOR` padding must apply to the fix distance too.
+    #[tokio::test]
+    async fn a_direct_prefile_keeps_its_table_and_pads_the_distance_like_the_real_model() {
+        let (st, nav, ap) = (state(), NavData::load(), airports());
+        let fp = plan("KIAD", "KJFK", "");
+        let fixes = prefile_fix_predictions(&st, &nav, &ap, &fp, now());
+        let real = real_arrival(&nav, &ap, &fp);
+
+        let last = fixes
+            .last()
+            .expect("a direct prefile still yields the arrival fix");
+        assert_eq!(last.name, "KJFK");
+        assert!(
+            (last.distance_nm as f64 - real.route_nm).abs() <= 1.0,
+            "last fix {} nm vs real (padded) model {:.1} nm",
+            last.distance_nm,
+            real.route_nm
+        );
+        assert!((last.eta - real.eta).num_seconds().abs() <= 1);
+    }
+
+    #[tokio::test]
+    async fn a_prefile_whose_departure_does_not_resolve_gets_no_table() {
+        let (st, nav) = (state(), NavData::load());
+        let ap = HashMap::from([("KDCA".to_string(), (38.85, -77.04))]); // no KJFK
+        let fp = plan("KJFK", "KDCA", "RBV WHITE SIE");
+        assert!(prefile_fix_predictions(&st, &nav, &ap, &fp, now()).is_empty());
     }
 }

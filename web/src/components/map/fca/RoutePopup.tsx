@@ -3,6 +3,8 @@ import {Maximize2, Minus, X} from "lucide-react";
 
 import type {AircraftRoute, Fca, FcaFlight} from "@/lib/fca";
 import {lineNm, type LatLng} from "@/components/map/lib/geo";
+import {useSetting} from "@/lib/settings";
+import {hhmmZulu} from "@/lib/time";
 
 /**
  * A draggable/minimizable card showing a clicked aircraft's filed route (and, if an FCA is selected,
@@ -23,6 +25,8 @@ export function RoutePopup({
   const pts = route.points as LatLng[];
   const nm = Math.round(lineNm(pts));
   const unresolved = route.unresolved ?? [];
+  const debug = useSetting("debug.enabled", false).value;
+  const fixes = route.fixes ?? [];
 
   const [pos, setPos] = useState({ x: 12, y: 12 });
   const [minimized, setMinimized] = useState(false);
@@ -173,6 +177,40 @@ export function RoutePopup({
           </>
         )}
       </p>
+
+      {debug && fixes.length > 0 && (
+        <div className="mt-3 border-t border-border/60 pt-2.5">
+          <div className="mb-1 font-mono text-[11px] font-semibold text-amber-500/80">
+            DEBUG — per-fix prediction
+          </div>
+          <div className="max-h-40 overflow-y-auto rounded-lg border border-border/60 bg-muted/20">
+            <table className="w-full font-mono text-[11px]">
+              <thead className="sticky top-0 bg-muted/60 text-muted-foreground">
+                <tr>
+                  <th className="px-1.5 py-1 text-left">FIX</th>
+                  <th className="px-1.5 py-1 text-right">ETA</th>
+                  <th className="px-1.5 py-1 text-right">FL</th>
+                  <th className="px-1.5 py-1 text-right">KT</th>
+                  <th className="px-1.5 py-1 text-right">HDG</th>
+                  <th className="px-1.5 py-1 text-right">NM</th>
+                </tr>
+              </thead>
+              <tbody>
+                {fixes.map((f, i) => (
+                  <tr key={`${f.name}-${i}`} className="border-t border-border/40">
+                    <td className="px-1.5 py-0.5">{f.name}</td>
+                    <td className="px-1.5 py-0.5 text-right">{hhmmZulu(f.eta)}</td>
+                    <td className="px-1.5 py-0.5 text-right">{Math.round(f.altitude_ft / 100)}</td>
+                    <td className="px-1.5 py-0.5 text-right">{f.groundspeed_kt}</td>
+                    <td className="px-1.5 py-0.5 text-right">{String(f.heading_deg).padStart(3, "0")}°</td>
+                    <td className="px-1.5 py-0.5 text-right">{f.distance_nm}</td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+        </div>
+      )}
 
       {fca && (
         <div className="mt-3 flex items-baseline gap-1.5 border-t border-border/60 pt-2.5 font-mono text-xs">

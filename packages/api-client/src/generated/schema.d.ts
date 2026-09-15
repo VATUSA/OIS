@@ -2959,6 +2959,11 @@ export interface components {
             arr: string;
             callsign: string;
             dep: string;
+            /**
+             * @description Per-fix predictions from the shared trajectory/ETA model (debug mode; #225). Always
+             *     populated — the client only renders this when the user's `debug.enabled` setting is on.
+             */
+            fixes: components["schemas"]["FixPrediction"][];
             /** Format: int64 */
             groundspeed: number;
             /** @description FAA NASR cycle date backing the resolution (e.g. `2026-07-09`). */
@@ -3984,6 +3989,31 @@ export interface components {
             prefiles: number;
             /** @description The feed's own `update_timestamp` from VATSIM. */
             source_timestamp?: string | null;
+        };
+        /**
+         * @description One fix's predicted crossing time/altitude/speed/heading, from the same trajectory model that
+         *     backs every other ETA in OIS (metering, the arrival ladder, runway ETE).
+         */
+        FixPrediction: {
+            /** Format: int64 */
+            altitude_ft: number;
+            /**
+             * Format: int64
+             * @description Cumulative along-route distance, nm — from the aircraft's current position (airborne), or
+             *     from the departure airport (ground/prefile).
+             */
+            distance_nm: number;
+            /** Format: date-time */
+            eta: string;
+            /** Format: int64 */
+            groundspeed_kt: number;
+            /** Format: int64 */
+            heading_deg: number;
+            /** Format: double */
+            lat: number;
+            /** Format: double */
+            lon: number;
+            name: string;
         };
         /**
          * @description Route-fix tokens that don't resolve to a known nav fix/navaid/airway/procedure — likely typos in
