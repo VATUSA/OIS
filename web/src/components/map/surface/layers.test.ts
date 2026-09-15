@@ -39,9 +39,13 @@ const taxiway = (over: Partial<AirportTaxiway>): AirportTaxiway => ({
   id: "t1",
   icao: "KTST",
   name: "A",
-  points: [
-    [38.85, -77.04],
-    [38.86, -77.05],
+  rings: [
+    [
+      [38.85, -77.04],
+      [38.86, -77.05],
+      [38.85, -77.05],
+      [38.85, -77.04],
+    ],
   ],
   source: "manual",
   editable: true,
@@ -123,27 +127,26 @@ describe("buildSurfaceDraftLayers", () => {
     expect(layers.map((l) => l.id)).not.toContain("surface-draft-polygon");
   });
 
-  it("closes into a filled polygon only for a ramp in edit phase with >= 3 points", () => {
-    const points: [number, number][] = [
-      [38.85, -77.04],
-      [38.86, -77.04],
-      [38.86, -77.05],
-    ];
-    const drawing = buildSurfaceDraftLayers("ramp", points, "draw");
-    expect(drawing.map((l) => l.id)).not.toContain("surface-draft-polygon");
+  it.each(["ramp", "taxiway"] as const)(
+    "closes a %s into a filled polygon only in edit phase with >= 3 points (#278)",
+    (kind) => {
+      const points: [number, number][] = [
+        [38.85, -77.04],
+        [38.86, -77.04],
+        [38.86, -77.05],
+      ];
+      const drawing = buildSurfaceDraftLayers(kind, points, "draw");
+      expect(drawing.map((l) => l.id)).not.toContain("surface-draft-polygon");
 
-    const edited = buildSurfaceDraftLayers("ramp", points, "edit");
-    expect(edited.map((l) => l.id)).toContain("surface-draft-polygon");
-  });
+      const edited = buildSurfaceDraftLayers(kind, points, "edit");
+      expect(edited.map((l) => l.id)).toContain("surface-draft-polygon");
+    },
+  );
 
-  it("never closes a taxiway into a polygon, regardless of phase or point count", () => {
-    const points: [number, number][] = [
-      [38.85, -77.04],
-      [38.86, -77.04],
-      [38.86, -77.05],
-    ];
-    const layers = buildSurfaceDraftLayers("taxiway", points, "edit");
-    expect(layers.map((l) => l.id)).not.toContain("surface-draft-polygon");
-    expect(layers.map((l) => l.id)).toContain("surface-draft-line");
+  it("renders saved taxiways as a filled polygon layer, like ramp areas (#278)", () => {
+    const layers = buildSurfaceLayers(surface({ taxiways: [taxiway({ id: "t" })] }), null);
+    const layer = layers.find((l) => l.id === "surface-taxiways");
+    expect(layer?.constructor.name).toBe("PolygonLayer");
+    expect(layer?.props).toMatchObject({ filled: true });
   });
 });

@@ -86,8 +86,9 @@ export function SurfaceMap({
     if (centered.current) return;
     const pts: [number, number][] = [
       ...toDeckPath(surface.gates.map((g): LatLng => [g.lat, g.lon])),
-      ...surface.taxiways.flatMap((t) => toDeckPath(t.points as LatLng[])),
-      ...surface.ramp_areas.flatMap((r) => r.rings.flatMap((ring) => toDeckPath(ring as LatLng[]))),
+      ...[...surface.taxiways, ...surface.ramp_areas].flatMap((p) =>
+        p.rings.flatMap((ring) => toDeckPath(ring as LatLng[])),
+      ),
     ];
     if (pts.length > 0) {
       centered.current = true;
@@ -111,12 +112,11 @@ export function SurfaceMap({
       const g = surface.gates.find((x) => x.id === id);
       if (!g) return;
       setDraft({ kind, id, name: g.name, rampKind: "apron", points: [[g.lat, g.lon]] });
-    } else if (kind === "taxiway") {
-      const t = surface.taxiways.find((x) => x.id === id);
-      if (!t) return;
-      setDraft({ kind, id, name: t.name, rampKind: "apron", points: t.points as LatLng[] });
     } else {
-      const r = surface.ramp_areas.find((x) => x.id === id);
+      const r =
+        kind === "taxiway"
+          ? surface.taxiways.find((x) => x.id === id)
+          : surface.ramp_areas.find((x) => x.id === id);
       if (!r) return;
       const outer = r.rings[0] ?? [];
       // Strip the closing duplicate — the draft never carries it (see layers.ts).
@@ -130,7 +130,7 @@ export function SurfaceMap({
         kind,
         id,
         name: r.name,
-        rampKind: r.kind === "ramp" ? "ramp" : "apron",
+        rampKind: "kind" in r && r.kind === "ramp" ? "ramp" : "apron",
         points: open as LatLng[],
         extraRings,
       });
@@ -179,20 +179,19 @@ export function SurfaceMap({
       const body = { name: draft.name.trim(), lat: points[0][0], lon: points[0][1] };
       if (draft.id) updateGate.mutate({ id: draft.id, body }, { onSuccess: onDone });
       else createGate.mutate(body, { onSuccess: onDone });
-    } else if (draft.kind === "taxiway") {
-      const body = { name: draft.name.trim(), points };
-      if (draft.id) updateTaxiway.mutate({ id: draft.id, body }, { onSuccess: onDone });
-      else createTaxiway.mutate(body, { onSuccess: onDone });
     } else {
       // Any rings beyond the outer one (e.g. a hole) came from an existing row this editor doesn't
       // draw — resend them unchanged rather than silently dropping them (see startEditExisting).
-      const body = {
-        name: draft.name.trim(),
-        kind: draft.rampKind,
-        rings: [[...points, points[0]], ...(draft.extraRings ?? [])],
-      };
-      if (draft.id) updateRamp.mutate({ id: draft.id, body }, { onSuccess: onDone });
-      else createRamp.mutate(body, { onSuccess: onDone });
+      const rings = [[...points, points[0]], ...(draft.extraRings ?? [])];
+      if (draft.kind === "taxiway") {
+        const body = { name: draft.name.trim(), rings };
+        if (draft.id) updateTaxiway.mutate({ id: draft.id, body }, { onSuccess: onDone });
+        else createTaxiway.mutate(body, { onSuccess: onDone });
+      } else {
+        const body = { name: draft.name.trim(), kind: draft.rampKind, rings };
+        if (draft.id) updateRamp.mutate({ id: draft.id, body }, { onSuccess: onDone });
+        else createRamp.mutate(body, { onSuccess: onDone });
+      }
     }
   };
 

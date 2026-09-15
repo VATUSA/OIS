@@ -201,7 +201,7 @@ pub async fn delete_ramp_area(pool: &PgPool, id: &str, icao: &str) -> Result<boo
 // ---- taxiways ---------------------------------------------------------------
 
 const TAXIWAY_SELECT: &str =
-    "select id, icao, name, points, source, updated_at from flow.airport_taxiway";
+    "select id, icao, name, rings, source, updated_at from flow.airport_taxiway";
 
 pub async fn list_taxiways(pool: &PgPool, icao: &str) -> Result<Vec<AirportTaxiwayBody>, ApiError> {
     sqlx::query_as::<_, AirportTaxiwayBody>(&format!(
@@ -227,14 +227,14 @@ pub async fn create_taxiway(
     req: &UpsertAirportTaxiwayRequest,
     actor: &str,
 ) -> Result<AirportTaxiwayBody, ApiError> {
-    let points = sqlx::types::Json(&req.points);
+    let rings = sqlx::types::Json(&req.rings);
     let id: String = sqlx::query_scalar(
-        "insert into flow.airport_taxiway (icao, name, points, source, updated_by) \
+        "insert into flow.airport_taxiway (icao, name, rings, source, updated_by) \
          values ($1, $2, $3, 'manual', $4) returning id",
     )
     .bind(icao)
     .bind(&req.name)
-    .bind(points)
+    .bind(rings)
     .bind(actor)
     .fetch_one(pool)
     .await
@@ -249,15 +249,15 @@ pub async fn update_taxiway(
     req: &UpsertAirportTaxiwayRequest,
     actor: &str,
 ) -> Result<Option<AirportTaxiwayBody>, ApiError> {
-    let points = sqlx::types::Json(&req.points);
+    let rings = sqlx::types::Json(&req.rings);
     let r = sqlx::query(
-        "update flow.airport_taxiway set name = $3, points = $4, updated_by = $5 \
+        "update flow.airport_taxiway set name = $3, rings = $4, updated_by = $5 \
          where id = $1 and icao = $2",
     )
     .bind(id)
     .bind(icao)
     .bind(&req.name)
-    .bind(points)
+    .bind(rings)
     .bind(actor)
     .execute(pool)
     .await

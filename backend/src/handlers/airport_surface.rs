@@ -47,17 +47,22 @@ fn validate_ramp_area(req: &UpsertAirportRampAreaRequest) -> Result<(), ApiError
     if !matches!(req.kind.as_str(), "ramp" | "apron") {
         return Err(ApiError::BadRequest);
     }
-    if req.rings.is_empty() || req.rings.iter().any(|r| r.len() < 3) {
+    if !valid_rings(&req.rings) {
         return Err(ApiError::BadRequest);
     }
     Ok(())
 }
 
 fn validate_taxiway(req: &UpsertAirportTaxiwayRequest) -> Result<(), ApiError> {
-    if req.points.len() < 2 {
+    if !valid_rings(&req.rings) {
         return Err(ApiError::BadRequest);
     }
     Ok(())
+}
+
+/// A polygon (ramp area or taxiway pavement): at least one ring, each with at least 3 points.
+fn valid_rings(rings: &[Vec<[f64; 2]>]) -> bool {
+    !rings.is_empty() && rings.iter().all(|r| r.len() >= 3)
 }
 
 /// Does the caller hold `flow.surface_data.update` nationally or for `icao`'s owning ARTCC?
@@ -482,17 +487,42 @@ mod tests {
         );
     }
 
+    #[test]
+    fn a_taxiway_must_be_a_polygon_not_a_centerline() {
+        let taxiway = |rings: Vec<Vec<[f64; 2]>>| UpsertAirportTaxiwayRequest {
+            name: "A".to_string(),
+            rings,
+        };
+        // An open two-point line (the pre-#278 centerline shape) is rejected.
+        assert!(validate_taxiway(&taxiway(vec![vec![[38.85, -77.04], [38.86, -77.05]]])).is_err());
+        assert!(validate_taxiway(&taxiway(vec![])).is_err());
+        assert!(
+            validate_taxiway(&taxiway(vec![vec![
+                [38.85, -77.04],
+                [38.86, -77.05],
+                [38.85, -77.05]
+            ]]))
+            .is_ok()
+        );
+    }
+
     #[sqlx::test]
     async fn taxiway_crud_round_trip(pool: PgPool) {
         let user = seed_user(&pool).await;
         let req = UpsertAirportTaxiwayRequest {
             name: "A".to_string(),
-            points: vec![[38.85, -77.04], [38.86, -77.05]],
+            rings: vec![vec![
+                [38.85, -77.04],
+                [38.86, -77.05],
+                [38.85, -77.05],
+                [38.85, -77.04],
+            ]],
         };
+        assert!(validate_taxiway(&req).is_ok());
         let created = surface_repo::create_taxiway(&pool, "KTST", &req, &user)
             .await
             .unwrap();
-        assert_eq!(created.points.0.len(), 2);
+        assert_eq!(created.rings.0, req.rings);
 
         let listed = surface_repo::list_taxiways(&pool, "KTST").await.unwrap();
         assert_eq!(listed.len(), 1);
@@ -517,8 +547,10 @@ mod tests {
         assert_eq!(ramp_areas.len(), 4);
         assert!(ramp_areas.iter().all(|r| r.kind == "apron"));
 
+        // Migration 0067 seeded 84 OSM taxiway centerlines; 0076 deleted them when taxiways became
+        // pavement polygons (#278), since a centerline can't become one.
         let taxiways = surface_repo::list_taxiways(&pool, "KDCA").await.unwrap();
-        assert_eq!(taxiways.len(), 84);
+        assert!(taxiways.is_empty());
     }
 
     /// Migration 0068's backfill runs once, at migration time, against whatever
