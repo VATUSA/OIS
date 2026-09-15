@@ -573,6 +573,7 @@ pub async fn aircraft_route(
             nav,
             airports,
             fp,
+            &points,
             p.latitude,
             p.longitude,
             p.heading,
@@ -607,7 +608,35 @@ pub async fn aircraft_route(
         let (named, unresolved) =
             fca::full_route_named(nav, airports, &fp.departure, &fp.arrival, &fp.route);
         let points = named.iter().map(|(_, lat, lon)| [*lat, *lon]).collect();
-        let fixes = fix_predictions(&state, nav, airports, fp, 0.0, 0.0, 0, 0, 0.0, Utc::now());
+        // `points` (above) is named-anchors-only, for the drawn track; `fix_predictions` needs
+        // the *full* anchor set (named + unnamed) so its route length / headwind sample isn't
+        // undercounted by a skipped unnamed procedure-leg point — gs=0 gets that from
+        // `route_path` the same way `route_path_named`'s own "not airborne" branch does.
+        let full_path = fca::route_path(
+            nav,
+            airports,
+            &fp.departure,
+            &fp.arrival,
+            &fp.route,
+            0.0,
+            0.0,
+            0,
+            0,
+        )
+        .unwrap_or_default();
+        let fixes = fix_predictions(
+            &state,
+            nav,
+            airports,
+            fp,
+            &full_path,
+            0.0,
+            0.0,
+            0,
+            0,
+            0.0,
+            Utc::now(),
+        );
         return Ok(Json(AircraftRoute {
             callsign: cs,
             aircraft_type: fp.aircraft_short.clone(),
@@ -1256,14 +1285,17 @@ fn to_waypoints(named: Vec<(String, f64, f64)>) -> Vec<RouteWaypoint> {
 /// (`feed::predict`/`feed::trajectory`), just queried at every named fix instead of one crossing
 /// point. `lat`/`lon`/`hdg`/`gs` are the aircraft's live state, or `0`/`0`/`0`/`0` for a prefile
 /// (no live position) — `gs = 0` also makes [`fca::route_path_named`] measure distance from the
-/// departure rather than a (nonexistent) current position. Returns an empty list when the route
-/// can't be resolved, exactly like `points`/`waypoints` already tolerate.
+/// departure rather than a (nonexistent) current position. `path` is the caller's already-resolved
+/// `fca::route_path` polyline for the same aircraft (reused for the headwind sample rather than
+/// re-resolving the route a second time). Returns an empty list when the route can't be resolved,
+/// exactly like `points`/`waypoints` already tolerate.
 #[allow(clippy::too_many_arguments)]
 fn fix_predictions(
     state: &AppState,
     nav: &NavData,
     airports: &AirportDb,
     fp: &FlightPlan,
+    path: &[[f64; 2]],
     lat: f64,
     lon: f64,
     hdg: i64,
@@ -1271,20 +1303,10 @@ fn fix_predictions(
     cur_alt_ft: f64,
     now: DateTime<Utc>,
 ) -> Vec<FixPrediction> {
-    let Some(named) = fca::route_path_named(
-        nav,
-        airports,
-        &fp.departure,
-        &fp.arrival,
-        &fp.route,
-        lat,
-        lon,
-        hdg,
-        gs,
-    ) else {
+    if path.len() < 2 {
         return Vec::new();
-    };
-    let Some(path) = fca::route_path(
+    }
+    let Some(named) = fca::route_path_named(
         nav,
         airports,
         &fp.departure,
@@ -1305,8 +1327,8 @@ fn fix_predictions(
     let cruise_alt = trajectory::parse_alt_ft(&fp.altitude);
     let filed_tas: f64 = fp.cruise_tas.parse().unwrap_or(0.0);
     let cruise_tas = trajectory::capped_cruise_tas(filed_tas, cruise_alt, profile);
-    let headwind = state.winds.load_full().route_headwind(&path, cruise_alt);
-    let route_len = predict::path_len_nm(&path);
+    let headwind = state.winds.load_full().route_headwind(path, cruise_alt);
+    let route_len = predict::path_len_nm(path);
 
     let dep = fp.departure.to_ascii_uppercase();
     let ground_allowance = if airborne {
