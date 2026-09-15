@@ -14,7 +14,11 @@ export function Markdown({ children, className }: { children: string; className?
       <ReactMarkdown
         remarkPlugins={[remarkGfm, remarkBreaks]}
         components={{
-          a: ({ href, children: linkChildren, ...rest }) => (
+          // react-markdown passes an extra `node` prop (the hast element) to every custom
+          // component (`passNode: true`, hardcoded); it must never reach a real DOM element.
+          // react-markdown passes an extra `node` prop (the hast element) to every custom
+          // component (`passNode: true`, hardcoded); it must never reach a real DOM element.
+          a: ({ href, children: linkChildren, node: _node, ...rest }) => (
             <a
               {...rest}
               href={href}
@@ -25,8 +29,16 @@ export function Markdown({ children, className }: { children: string; className?
               {linkChildren}
             </a>
           ),
-          ul: ({ children: c }) => <ul className="list-disc pl-5">{c}</ul>,
-          ol: ({ children: c }) => <ol className="list-decimal pl-5">{c}</ol>,
+          ul: ({ children: c, node: _node, ...rest }) => (
+            <ul {...rest} className="list-disc pl-5">
+              {c}
+            </ul>
+          ),
+          ol: ({ children: c, node: _node, ...rest }) => (
+            <ol {...rest} className="list-decimal pl-5">
+              {c}
+            </ol>
+          ),
           h1: ({ children: c }) => <h3 className="font-semibold">{c}</h3>,
           h2: ({ children: c }) => <h3 className="font-semibold">{c}</h3>,
           h3: ({ children: c }) => <h3 className="font-semibold">{c}</h3>,

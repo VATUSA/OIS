@@ -48,4 +48,17 @@ describe("Markdown", () => {
     const html = render('[VATUSA](https://vatusa.net "Visit VATUSA")');
     expect(html).toContain('title="Visit VATUSA"');
   });
+
+  it("never leaks react-markdown's internal node prop onto a rendered element", () => {
+    // react-markdown hardcodes `passNode: true`, so every custom component receives an extra
+    // `node` prop (the hast AST element) alongside real DOM props. Spreading it onto a real
+    // element stringifies it as `node="[object Object]"` — a bogus attribute on every link.
+    const html = render("[VATUSA](https://vatusa.net)\n\n- one\n- two");
+    expect(html).not.toContain("node=");
+  });
+
+  it("preserves a numbered list's start value instead of always starting at 1", () => {
+    const html = render("3. three\n4. four\n5. five");
+    expect(html).toContain('start="3"');
+  });
 });
