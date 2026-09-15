@@ -356,7 +356,10 @@ pub async fn delete_airport_taxiway(
 #[utoipa::path(
     post, path = "/api/v1/airports/{icao}/surface/repull-faa", tag = "events",
     params(("icao" = String, Path)),
-    responses((status = 200, body = FaaRepullResult), (status = 401), (status = 403))
+    responses(
+        (status = 200, body = FaaRepullResult), (status = 401), (status = 403),
+        (status = 404, description = "The bundled FAA extract has no data for this airport")
+    )
 )]
 pub async fn repull_faa_surface(
     State(state): State<AppState>,

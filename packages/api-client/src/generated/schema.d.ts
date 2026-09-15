@@ -6567,6 +6567,13 @@ export interface operations {
                 };
                 content?: never;
             };
+            /** @description The bundled FAA extract has no data for this airport */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
         };
     };
     create_airport_taxiway: {

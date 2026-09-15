@@ -184,9 +184,11 @@ export function useRepullFaaSurface(icao: string) {
   const toast = useToast();
   return useMutation({
     mutationFn: async () => {
-      const { data, error } = await ois.POST("/api/v1/airports/{icao}/surface/repull-faa", {
-        params: { path: { icao } },
-      });
+      const { data, error, response } = await ois.POST(
+        "/api/v1/airports/{icao}/surface/repull-faa",
+        { params: { path: { icao } } },
+      );
+      if (response.status === 404) throw new Error("uncovered");
       if (error || !data) throw new Error("repull failed");
       return data;
     },
@@ -196,6 +198,11 @@ export function useRepullFaaSurface(icao: string) {
         description: `${data.taxiways_inserted} taxiways, ${data.ramps_inserted} ramps`,
       });
     },
-    onError: () => toast.error("Couldn’t re-pull FAA surface data"),
+    onError: (e) =>
+      e instanceof Error && e.message === "uncovered"
+        ? toast.error("No FAA data for this airport", {
+            description: "The bundled FAA extract doesn’t cover it — nothing was changed.",
+          })
+        : toast.error("Couldn’t re-pull FAA surface data"),
   });
 }
