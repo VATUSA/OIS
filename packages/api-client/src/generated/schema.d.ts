@@ -3560,7 +3560,7 @@ export interface components {
             /**
              * @description ARTCCs this guild serves — lets `channel_id`/`role_id` prefer this guild over another one
              *     defining the same logical name for a different facility (#194). Empty = no facility
-             *     preference (only ever wins via the created-at fallback).
+             *     preference (only ever wins via the sort-order fallback).
              */
             facilities: string[];
             guild_id: string;
