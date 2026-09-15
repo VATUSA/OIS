@@ -10,12 +10,12 @@ tables. Migrations are embedded in the backend binary and applied on startup (sq
 | `platform` | shared helpers (`touch_updated_at`), job bookkeeping |
 | `identity` | users, sessions |
 | `access` | roles, permissions, grants, service accounts, actors, audit log |
-| `org` | facilities (ARTCCs), roster/membership *(planned)* |
-| `events` | operational coordination: event record, hosts, positions, slots, staffing requests, debrief *(built; posting/review stays in the current VATUSA site)* |
-| `tmu` | NTML entries, advisories, TMIs, ground stops, rate programs, GDPs *(built)* |
-| `ace` | support requests, ACE team roster *(planned)* |
-| `flow` | FCAs, routes, runway configs, facility-map config, traffic data *(built)* |
-| `integration` | Discord config, the outbound-job queue *(planned)* |
+| `org` | facilities (ARTCCs) *(built)*; broader roster/membership beyond what VATUSA already provides *(planned)* |
+| `events` | operational coordination: event cache, DCC, facility support, airport rates, staffing requests, TMI packages, debrief *(built; posting/review stays in the current VATUSA site — see [events-workflow.md](../features/events-workflow.md))* |
+| `tmu` | NTML entries, TMIs, ground stops, rate programs, GDPs *(built)* |
+| `ace` | support requests *(built)* — there is no local ACE team roster; the team is sourced from VATUSA and the per-facility EC comes from the access-control role, not a stored list (migration `0051`) |
+| `flow` | FCAs, routes, runway configs, facility-map config, airport surface data, aircraft profiles, traffic data *(built)* |
+| `integration` | the outbound-job queue driving the Discord bot, plus Discord guild/channel/role config (`discord_configs`, `discord_channels`, `discord_roles`, `discord_categories`) *(built)* |
 | `stats` | connection/traffic statistics, flights, positions, captures *(built)* |
 | `media` | files + metadata *(planned)* |
 | `web` | site content (broadcasts, pages) *(planned)* |

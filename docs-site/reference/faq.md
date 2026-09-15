@@ -24,4 +24,9 @@ They sync from VATUSA automatically on sign-in and when your roster changes. See
 
 An **issued** release doesn't change on its own — see [Release times](/tmu/releases). If you saw a time move, it was likely a **proposed** (advisory) time, or a controller revised/compressed the program.
 
+## Can I build my own dashboard instead of using the home page?
+
+Yes — see [Custom boards](/dashboard/boards). You can pin the specific stats, tables, and charts you
+check every session, arrange them yourself, and optionally share the board as a read-only link.
+
 > More questions will be added here as they come up.

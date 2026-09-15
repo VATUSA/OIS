@@ -10,6 +10,8 @@ It's a controller/staff tool: viewing it needs the **`stats.data.read`** permiss
 - **Airport activity** — search a field (e.g. `KATL`) for its top aircraft, top origins and destinations, and recent movements.
 - **Flight history** — look up a flight to see its track, summary (distance, duration, max altitude/speed), and any **plan amendments** it filed.
 - **Saved captures** — recorded event/time windows you can [replay](/historical/replay) on the map.
+- **[Taxi & pushback insights](/historical/taxi-insights)** — browsable observed and learned taxi/pushback timing, by gate, aircraft, and runway.
+- **[Delays](/historical/delays)** — arrival and departure delay history, filterable by airport, runway, or procedure.
 
 ## How it's collected
 
