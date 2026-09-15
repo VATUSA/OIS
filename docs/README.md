@@ -5,6 +5,8 @@ the current backend, website, and flow tool.
 
 ## Start here
 
+- **[../CONTRIBUTING.md](../CONTRIBUTING.md)** — how to file issues, the dev workflow, and PR
+  expectations. Read this first if you're about to contribute.
 - **[PROPOSAL.md](PROPOSAL.md)** — the leadership proposal: problem, solution, plan,
   and the ask. Read this first for the case for OIS.
 - **[PLAN.md](PLAN.md)** — the phased build plan, locked decisions, and current status.
