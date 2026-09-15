@@ -10,11 +10,28 @@ use serde::Serialize;
 use utoipa::ToSchema;
 
 use super::airports::AirportDb;
+use super::delays::nearest_runway;
 use super::nav::NavData;
 use super::predict;
+use super::runway_db::RunwayDb;
+use super::taxi_estimate;
 use super::trajectory;
 use super::vatsim::VatsimData;
 use super::winds::Winds;
+use crate::models::AirportGateBody;
+
+/// A gate/parking spot must be within this of a spawn point to count as a match (#164 sub-issue
+/// C/E — matches `feed::taxi_observations`'s own persistence-time gate matching exactly).
+const GATE_MATCH_MAX_NM: f64 = 0.06; // ~360 ft
+
+/// Groundspeed above which a pilot's heading reflects actual taxi movement rather than arbitrary
+/// gate-parking orientation (#164 sub-issue E). A stationary aircraft's heading is essentially
+/// random with respect to any runway, so [`resolve_ground_allowance_sec`] only trusts it — and
+/// attempts a runway match — once the aircraft has crossed this threshold; below it, the ladder
+/// falls to the airport/default tier instead of risking a coincidental wrong-runway match.
+/// Mirrors `taxi_observations`'s own roll-detection threshold (`GS_START`) — the same physical
+/// moment, one shared constant.
+pub(crate) const TAXI_ROLL_GS_KT: i64 = 7;
 
 /// Nominal arrival-stream groundspeed used to convert miles-in-trail to a time gap.
 const MIT_NOMINAL_KT: f64 = 360.0; // 6 nm/min
@@ -44,6 +61,9 @@ pub struct FlowFlight {
     pub callsign: String,
     pub dep: String,
     pub aircraft_type: String,
+    /// Wake/weight category (`L`/`M`/`H`/`J`) parsed from the filed aircraft string; null when
+    /// not one of those four (AADC's "Aircraft Category" dimension, #242).
+    pub category: Option<String>,
     /// Arrival gate (STAR/fix) derived from the filed route; null if none matched.
     pub gate: Option<String>,
     /// `airborne` | `ground` | `proposed` | `arrived`.
@@ -162,6 +182,9 @@ pub fn compute(
     winds: &Winds,
     profiles: &trajectory::ProfileTable,
     issued: &HashMap<String, DateTime<Utc>>,
+    gates: &HashMap<String, Vec<AirportGateBody>>,
+    runways: &RunwayDb,
+    taxi_samples: &HashMap<String, Vec<taxi_estimate::TaxiSample>>,
     now: DateTime<Utc>,
 ) -> Flow {
     let arr = airports.get(icao).copied();
@@ -190,6 +213,7 @@ pub fn compute(
                 callsign: p.callsign.clone(),
                 dep,
                 aircraft_type: ty,
+                category: (!wake.is_empty()).then_some(wake),
                 gate: gate.clone(),
                 status: "arrived".into(),
                 distance_nm: dist_to_arr,
@@ -224,12 +248,16 @@ pub fn compute(
                     cruise_ft: cruise,
                     cruise_tas,
                 },
+                // Airborne — `eta_along_route` only applies the ground allowance on its ground
+                // branch, so this value is structurally inert.
+                0.0,
                 now,
             );
             flights.push(FlowFlight {
                 callsign: p.callsign.clone(),
                 dep,
                 aircraft_type: ty,
+                category: (!wake.is_empty()).then_some(wake),
                 gate: gate.clone(),
                 status: "airborne".into(),
                 distance_nm: Some(pred.route_nm),
@@ -241,12 +269,25 @@ pub fn compute(
             etd_ms.push(None);
         } else {
             // On the ground (or position-less): estimate a full route flight time.
-            let (route_nm, ft_min) =
-                ground_estimate(nav, &dep, arr, fp, airports, winds, profile, now);
+            let (route_nm, ft_min) = ground_estimate(
+                nav,
+                &dep,
+                arr,
+                fp,
+                airports,
+                winds,
+                profile,
+                Some((p.latitude, p.longitude, p.heading, p.groundspeed)),
+                gates,
+                runways,
+                taxi_samples,
+                now,
+            );
             flights.push(FlowFlight {
                 callsign: p.callsign.clone(),
                 dep,
                 aircraft_type: ty,
+                category: (!wake.is_empty()).then_some(wake),
                 gate,
                 status: "ground".into(),
                 distance_nm: Some(route_nm),
@@ -274,12 +315,28 @@ pub fn compute(
         let dep = fp.departure.to_ascii_uppercase();
         let gate = arrival_gate(&fp.route, icao);
         let excluded = program.is_some_and(|pg| is_excluded(&ty, &wake, pg));
-        let (route_nm, ft_min) = ground_estimate(nav, &dep, arr, fp, airports, winds, profile, now);
+        // A prefile has no live position — gate/runway matching is skipped (`ground_estimate`
+        // passes `None`), falling to the airport/default tier.
+        let (route_nm, ft_min) = ground_estimate(
+            nav,
+            &dep,
+            arr,
+            fp,
+            airports,
+            winds,
+            profile,
+            None,
+            gates,
+            runways,
+            taxi_samples,
+            now,
+        );
         let etd = proposed_etd(&fp.deptime, now);
         flights.push(FlowFlight {
             callsign: pf.callsign.clone(),
             dep,
             aircraft_type: ty,
+            category: (!wake.is_empty()).then_some(wake),
             gate,
             status: "proposed".into(),
             distance_nm: Some(route_nm),
@@ -319,6 +376,118 @@ pub fn compute(
         over_capacity: program.map(|p| demand_60min as i32 > p.aar),
         flights,
     }
+}
+
+/// Forward window AADC buckets over (#242): fixed at 4 hours regardless of bucket size.
+const AADC_WINDOW_HOURS: i64 = 4;
+/// Carrier breakdowns are capped to the busiest operators in the window; everything else
+/// (including non-airline callsigns) folds into `AADC_OTHER` so the response stays bounded at a
+/// busy international airport.
+const AADC_TOP_CARRIERS: usize = 8;
+const AADC_OTHER: &str = "OTHER";
+
+/// One bucket of forward arrival demand, broken down by every dimension AADC supports (#242):
+/// status, aircraft category (wake), carrier, and arrival fix.
+#[derive(Debug, Clone, Serialize, ToSchema)]
+pub struct AadcBucket {
+    pub start: DateTime<Utc>,
+    pub end: DateTime<Utc>,
+    pub total: i64,
+    pub by_status: HashMap<String, i64>,
+    pub by_category: HashMap<String, i64>,
+    pub by_carrier: HashMap<String, i64>,
+    pub by_afix: HashMap<String, i64>,
+}
+
+/// Full AADC response for one airport: bucketed demand plus the wind-favored AAR/ADR reference.
+#[derive(Debug, Serialize, ToSchema)]
+pub struct AadcResponse {
+    pub icao: String,
+    pub bucket_min: i32,
+    pub aar: i32,
+    pub adr: i32,
+    /// The `airport_config` row the AAR/ADR came from, if any configs exist for this airport.
+    pub config_id: Option<String>,
+    pub buckets: Vec<AadcBucket>,
+    pub generated_at: DateTime<Utc>,
+}
+
+/// Callsign's leading airline/carrier code (e.g. `AAL123` -> `AAL`), or `None` for anything that
+/// doesn't look like a scheduled-carrier callsign (bare tail numbers, etc.) — the ICAO convention
+/// is a 2-4 letter operator prefix ahead of a numeric flight number.
+fn carrier_of(callsign: &str) -> Option<String> {
+    let prefix: String = callsign
+        .chars()
+        .take_while(|c| c.is_ascii_alphabetic())
+        .collect();
+    (prefix.len() >= 2 && prefix.len() <= 4).then_some(prefix)
+}
+
+/// Bucket `flights` into `bucket_min`-wide slots across a fixed forward window, tallying every
+/// AADC dimension per bucket. Reuses the exact same landed-exclusion + demand filter as
+/// `demand_60min` above (`status != "arrived" && !excluded`, `eta` inside the window) rather than
+/// reinventing it — an already-landed flight must never inflate a future bucket.
+pub fn bucket_aadc(flights: &[FlowFlight], now: DateTime<Utc>, bucket_min: i32) -> Vec<AadcBucket> {
+    let bucket_min = bucket_min.max(1) as i64;
+    let window_end = now + Duration::hours(AADC_WINDOW_HOURS);
+    let n_buckets = ((AADC_WINDOW_HOURS * 60) / bucket_min).max(1) as usize;
+
+    let demand: Vec<&FlowFlight> = flights
+        .iter()
+        .filter(|f| f.status != "arrived" && !f.excluded)
+        .filter(|f| f.eta.is_some_and(|e| e >= now && e < window_end))
+        .collect();
+
+    // Rank carriers over the whole window first, so one bucket's small sample doesn't arbitrarily
+    // decide who gets folded into "OTHER".
+    let mut carrier_totals: HashMap<String, i64> = HashMap::new();
+    for f in &demand {
+        if let Some(c) = carrier_of(&f.callsign) {
+            *carrier_totals.entry(c).or_default() += 1;
+        }
+    }
+    let mut ranked: Vec<&String> = carrier_totals.keys().collect();
+    ranked.sort_by(|a, b| carrier_totals[*b].cmp(&carrier_totals[*a]).then(a.cmp(b)));
+    let top_carriers: HashSet<&str> = ranked
+        .into_iter()
+        .take(AADC_TOP_CARRIERS)
+        .map(|s| s.as_str())
+        .collect();
+
+    let mut buckets: Vec<AadcBucket> = (0..n_buckets)
+        .map(|i| {
+            let start = now + Duration::minutes(i as i64 * bucket_min);
+            AadcBucket {
+                end: start + Duration::minutes(bucket_min),
+                start,
+                total: 0,
+                by_status: HashMap::new(),
+                by_category: HashMap::new(),
+                by_carrier: HashMap::new(),
+                by_afix: HashMap::new(),
+            }
+        })
+        .collect();
+
+    for f in &demand {
+        let Some(eta) = f.eta else { continue };
+        let idx = ((eta - now).num_seconds() / (bucket_min * 60)) as usize;
+        let Some(b) = buckets.get_mut(idx) else {
+            continue;
+        };
+        b.total += 1;
+        *b.by_status.entry(f.status.clone()).or_default() += 1;
+        let category = f.category.clone().unwrap_or_else(|| AADC_OTHER.to_string());
+        *b.by_category.entry(category).or_default() += 1;
+        let carrier = carrier_of(&f.callsign)
+            .filter(|c| top_carriers.contains(c.as_str()))
+            .unwrap_or_else(|| AADC_OTHER.to_string());
+        *b.by_carrier.entry(carrier).or_default() += 1;
+        let afix = f.gate.clone().unwrap_or_else(|| AADC_OTHER.to_string());
+        *b.by_afix.entry(afix).or_default() += 1;
+    }
+
+    buckets
 }
 
 fn is_excluded(ty: &str, wake: &str, pg: &ProgramInputs) -> bool {
@@ -516,6 +685,9 @@ pub fn ready_time_slot(
     winds: &Winds,
     profiles: &trajectory::ProfileTable,
     issued: &HashMap<String, DateTime<Utc>>,
+    gates: &HashMap<String, Vec<AirportGateBody>>,
+    runways: &RunwayDb,
+    taxi_samples: &HashMap<String, Vec<taxi_estimate::TaxiSample>>,
     callsign: &str,
     ready: DateTime<Utc>,
     now: DateTime<Utc>,
@@ -529,6 +701,9 @@ pub fn ready_time_slot(
         winds,
         profiles,
         issued,
+        gates,
+        runways,
+        taxi_samples,
         now,
     );
     let target = flow.flights.iter().find(|f| f.callsign == callsign)?;
@@ -568,6 +743,10 @@ pub fn ready_time_slot(
 /// filed route from the surface through the shared predictor (climb → cruise → descent + taxi),
 /// the same path an airborne arrival takes. Falls back to a nominal 300 nm leg when there are no
 /// departure/arrival coordinates to resolve a route from.
+///
+/// `pilot_pos` (`lat, lon, hdg, gs`) is the pilot's real position/heading/groundspeed when known —
+/// used to resolve a gate/runway match for the learned ground allowance (#164 sub-issue E); `None`
+/// for a prefile (no live position), which skips matching and falls to the airport/default tier.
 #[allow(clippy::too_many_arguments)]
 fn ground_estimate(
     nav: &NavData,
@@ -577,10 +756,17 @@ fn ground_estimate(
     airports: &AirportDb,
     winds: &Winds,
     profile: &trajectory::AircraftProfile,
+    pilot_pos: Option<(f64, f64, i64, i64)>,
+    gates: &HashMap<String, Vec<AirportGateBody>>,
+    runways: &RunwayDb,
+    taxi_samples: &HashMap<String, Vec<taxi_estimate::TaxiSample>>,
     now: DateTime<Utc>,
 ) -> (f64, f64) {
     let cruise = trajectory::parse_alt_ft(&fp.altitude);
     let cruise_tas = trajectory::capped_cruise_tas(parse_tas(&fp.cruise_tas), cruise, profile);
+    let aircraft = (!fp.aircraft_short.is_empty()).then_some(fp.aircraft_short.as_str());
+    let allowance =
+        resolve_ground_allowance_sec(gates, runways, taxi_samples, dep, aircraft, pilot_pos);
     match (airports.get(dep).copied(), arr) {
         (Some(dep_ll), Some(arr_ll)) => {
             let pred = predict::arrival_eta(
@@ -600,6 +786,7 @@ fn ground_estimate(
                     cruise_ft: cruise,
                     cruise_tas,
                 },
+                allowance,
                 now,
             );
             let ft_min = (pred.eta - now).num_seconds() as f64 / 60.0;
@@ -609,7 +796,7 @@ fn ground_estimate(
             let vp = trajectory::VerticalProfile::build(
                 0.0, 300.0, 0.0, cruise, cruise_tas, profile, None,
             );
-            let ft_min = vp.time_between(300.0, 0.0) / 60.0 + predict::GROUND_TAXI_SEC / 60.0;
+            let ft_min = vp.time_between(300.0, 0.0) / 60.0 + allowance / 60.0;
             (300.0, ft_min)
         }
     }
@@ -643,7 +830,7 @@ fn minutes(m: f64) -> Duration {
 }
 
 /// Filed cruise TAS (knots); defaults to 420 for missing/implausible values.
-fn parse_tas(raw: &str) -> f64 {
+pub(crate) fn parse_tas(raw: &str) -> f64 {
     let n: f64 = raw.trim().parse().unwrap_or(0.0);
     if (60.0..=1200.0).contains(&n) {
         n
@@ -721,6 +908,54 @@ pub fn gc_dist(lat1: f64, lon1: f64, lat2: f64, lon2: f64) -> f64 {
     let dlmb = (lon2 - lon1).to_radians();
     let a = (dphi / 2.0).sin().powi(2) + p1.cos() * p2.cos() * (dlmb / 2.0).sin().powi(2);
     2.0 * r * a.sqrt().asin()
+}
+
+/// The gate nearest `(lat, lon)`, within [`GATE_MATCH_MAX_NM`], else `None`. Shared by
+/// `feed::taxi_observations` (matching a completed departure's spawn point, #164 sub-issue C) and
+/// [`resolve_ground_allowance_sec`] below (matching a live/proposed departure's position, sub-issue
+/// E) — one implementation, not two.
+pub(crate) fn nearest_gate(gates: &[AirportGateBody], lat: f64, lon: f64) -> Option<String> {
+    let mut best: Option<(String, f64)> = None;
+    for g in gates {
+        let d = gc_dist(lat, lon, g.lat, g.lon);
+        if best.as_ref().is_none_or(|(_, bd)| d < *bd) {
+            best = Some((g.id.clone(), d));
+        }
+    }
+    best.filter(|(_, d)| *d <= GATE_MATCH_MAX_NM)
+        .map(|(id, _)| id)
+}
+
+/// The ground allowance (pushback+startup + taxi-out, #164 sub-issue E) for a departure from `dep`:
+/// looks up `dep`'s cached observation samples, resolves a gate match whenever a real position
+/// (`pos`) is known, resolves a *runway* match only once `pos`'s groundspeed clears
+/// [`TAXI_ROLL_GS_KT`] (a stationary/gate-parked aircraft's heading is not runway-meaningful — see
+/// that constant), and walks `taxi_estimate`'s fallback ladder. A prefile with no position, a route
+/// with no coordinate signal, or an aircraft that hasn't started moving yet all still resolve via
+/// the airport/default tier, so nothing is silently dropped. `aircraft` should be the raw
+/// `FlightPlan::aircraft_short` (unnormalized), matching exactly what `feed::taxi_observations`
+/// persisted, or the gate/type/runway tier will never match on type.
+pub(crate) fn resolve_ground_allowance_sec(
+    gates: &HashMap<String, Vec<AirportGateBody>>,
+    runways: &RunwayDb,
+    taxi_samples: &HashMap<String, Vec<taxi_estimate::TaxiSample>>,
+    dep: &str,
+    aircraft: Option<&str>,
+    pos: Option<(f64, f64, i64, i64)>,
+) -> f64 {
+    let empty: Vec<AirportGateBody> = Vec::new();
+    let dep_samples = taxi_samples.get(dep).map(Vec::as_slice).unwrap_or(&[]);
+    let (gate_id, runway) = match pos {
+        Some((lat, lon, hdg, gs)) => (
+            nearest_gate(gates.get(dep).unwrap_or(&empty), lat, lon),
+            (gs > TAXI_ROLL_GS_KT)
+                .then(|| nearest_runway(runways, dep, hdg))
+                .flatten(),
+        ),
+        None => (None, None),
+    };
+    let est = taxi_estimate::estimate(dep_samples, gate_id.as_deref(), aircraft, runway.as_deref());
+    taxi_estimate::ground_allowance_sec(&est)
 }
 
 fn engine(ty: &str) -> Option<Engine> {
@@ -1070,6 +1305,9 @@ mod tests {
             &Winds::default(),
             &trajectory::ProfileTable::default(),
             &HashMap::new(),
+            &HashMap::new(),
+            &RunwayDb::default(),
+            &HashMap::new(),
             t0(),
         );
 
@@ -1220,6 +1458,9 @@ mod tests {
             &Winds::default(),
             &trajectory::ProfileTable::default(),
             &HashMap::new(),
+            &HashMap::new(),
+            &RunwayDb::default(),
+            &HashMap::new(),
             "GRD1",
             ready,
             t0(),
@@ -1264,6 +1505,9 @@ mod tests {
             &nav,
             &Winds::default(),
             &profiles,
+            &HashMap::new(),
+            &HashMap::new(),
+            &RunwayDb::default(),
             &HashMap::new(),
             t0(),
         );
@@ -1324,5 +1568,220 @@ mod tests {
             aar,
             ..base_program()
         }
+    }
+
+    // ---- AADC bucketing (#242) ----
+
+    #[test]
+    fn carrier_of_extracts_the_leading_operator_prefix() {
+        assert_eq!(carrier_of("AAL123"), Some("AAL".to_string()));
+        assert_eq!(carrier_of("DAL1"), Some("DAL".to_string()));
+        assert_eq!(carrier_of("N12345"), None); // bare tail number, 1-letter prefix
+        assert_eq!(carrier_of("1234"), None); // no alphabetic prefix at all
+    }
+
+    #[test]
+    fn bucket_aadc_assigns_flights_to_the_right_15min_bucket() {
+        let flights = vec![
+            ff("AAL1", "airborne", 10, Some("CAMRN")), // bucket 0 (0-15min)
+            ff("DAL2", "ground", 50, Some("LENDY")),   // bucket 3 (45-60min)
+        ];
+        let buckets = bucket_aadc(&flights, t0(), 15);
+        assert_eq!(buckets.len(), 16); // 4h / 15min
+        assert_eq!(buckets[0].total, 1);
+        assert_eq!(buckets[3].total, 1);
+        assert_eq!(buckets[1].total, 0);
+    }
+
+    #[test]
+    fn bucket_aadc_excludes_arrived_and_out_of_window_flights() {
+        let flights = vec![
+            FlowFlight {
+                excluded: false,
+                ..ff("UAL1", "arrived", 0, None)
+            },
+            // Already past (negative offset) — must not land in bucket 0.
+            ff("SWA2", "airborne", -5, None),
+            // Beyond the fixed 4-hour window.
+            ff("JBU3", "proposed", 300, None),
+            // Excluded from metering — should still be excluded from AADC demand too.
+            FlowFlight {
+                excluded: true,
+                ..ff("FDX4", "ground", 30, None)
+            },
+        ];
+        let buckets = bucket_aadc(&flights, t0(), 15);
+        let total: i64 = buckets.iter().map(|b| b.total).sum();
+        assert_eq!(total, 0, "no flight here should count toward demand");
+    }
+
+    #[test]
+    fn bucket_aadc_breaks_down_every_dimension() {
+        let flights = vec![FlowFlight {
+            category: Some("H".into()),
+            ..ff("AAL123", "airborne", 5, Some("CAMRN"))
+        }];
+        let buckets = bucket_aadc(&flights, t0(), 15);
+        let b = &buckets[0];
+        assert_eq!(b.by_status.get("airborne"), Some(&1));
+        assert_eq!(b.by_category.get("H"), Some(&1));
+        assert_eq!(b.by_carrier.get("AAL"), Some(&1));
+        assert_eq!(b.by_afix.get("CAMRN"), Some(&1));
+    }
+
+    #[test]
+    fn bucket_aadc_caps_carrier_breakdown_to_top_n_plus_other() {
+        // 9 distinct single-flight carriers (AAA..III) plus a 10th (JJJ) with 2 flights. JJJ
+        // outranks everyone and takes 1 of the 8 top-carrier slots; among the 9 tied-at-1
+        // carriers only the 7 alphabetically-first fit the remaining slots — HHH and III must
+        // fold into OTHER (2 flights).
+        let prefixes = [
+            "AAA", "BBB", "CCC", "DDD", "EEE", "FFF", "GGG", "HHH", "III",
+        ];
+        let mut flights: Vec<FlowFlight> = prefixes
+            .iter()
+            .map(|p| ff(&format!("{p}1"), "airborne", 5, None))
+            .collect();
+        flights.push(ff("JJJ1", "airborne", 5, None));
+        flights.push(ff("JJJ2", "airborne", 5, None));
+
+        let buckets = bucket_aadc(&flights, t0(), 15);
+        let by_carrier = &buckets[0].by_carrier;
+        assert_eq!(
+            by_carrier.get("JJJ"),
+            Some(&2),
+            "the busiest carrier must survive the cap"
+        );
+        assert_eq!(
+            by_carrier.len(),
+            AADC_TOP_CARRIERS + 1,
+            "top N carriers plus one OTHER bucket"
+        );
+        assert_eq!(
+            by_carrier.get("HHH"),
+            None,
+            "a lowest-ranked carrier must be dropped"
+        );
+        assert_eq!(
+            by_carrier.get("III"),
+            None,
+            "a lowest-ranked carrier must be dropped"
+        );
+        assert_eq!(by_carrier.get(AADC_OTHER), Some(&2));
+    }
+
+    fn gate(id: &str, lat: f64, lon: f64) -> AirportGateBody {
+        AirportGateBody {
+            id: id.to_string(),
+            icao: "KAAA".to_string(),
+            name: id.to_string(),
+            lat,
+            lon,
+            source: "manual".to_string(),
+            updated_at: Utc::now(),
+            editable: false,
+        }
+    }
+
+    #[test]
+    fn nearest_gate_matches_the_closest_within_range() {
+        let gates = vec![gate("A1", 40.0, -74.0), gate("A2", 40.01, -74.0)];
+        assert_eq!(nearest_gate(&gates, 40.0001, -74.0), Some("A1".to_string()));
+        assert_eq!(nearest_gate(&gates, 40.0099, -74.0), Some("A2".to_string()));
+    }
+
+    #[test]
+    fn nearest_gate_none_when_too_far() {
+        let gates = vec![gate("A1", 40.0, -74.0)];
+        assert_eq!(nearest_gate(&gates, 41.0, -74.0), None);
+        assert_eq!(nearest_gate(&[], 40.0, -74.0), None);
+    }
+
+    /// #164 sub-issue E, AC #3: an airport with zero taxi samples still resolves a sane, panic-free
+    /// ground allowance — falling straight through `taxi_estimate`'s ladder to its flat default.
+    #[test]
+    fn resolve_ground_allowance_sec_defaults_for_a_thin_data_airport() {
+        let gates = HashMap::new();
+        let runways = RunwayDb::default();
+        let samples = HashMap::new();
+        let allowance = resolve_ground_allowance_sec(
+            &gates,
+            &runways,
+            &samples,
+            "KAAA",
+            Some("B738"),
+            Some((40.0, -74.0, 270, 20)),
+        );
+        assert_eq!(allowance, predict::GROUND_TAXI_SEC + 300.0);
+    }
+
+    /// No position (a prefile, or the coordinate-less `ground_estimate` fallback) skips gate/runway
+    /// matching entirely rather than guessing — still resolves via the airport/default tier.
+    #[test]
+    fn resolve_ground_allowance_sec_skips_gate_and_runway_matching_without_a_position() {
+        let gates = HashMap::from([("KAAA".to_string(), vec![gate("A1", 40.0, -74.0)])]);
+        let runways = RunwayDb::default();
+        let samples = HashMap::new();
+        let allowance =
+            resolve_ground_allowance_sec(&gates, &runways, &samples, "KAAA", Some("B738"), None);
+        assert_eq!(allowance, predict::GROUND_TAXI_SEC + 300.0);
+    }
+
+    fn taxi_sample(
+        gate: &str,
+        aircraft: &str,
+        runway: &str,
+        taxi_sec: i32,
+    ) -> taxi_estimate::TaxiSample {
+        taxi_estimate::TaxiSample {
+            gate_id: Some(gate.to_string()),
+            aircraft: Some(aircraft.to_string()),
+            runway: Some(runway.to_string()),
+            pushback_sec: Some(50),
+            taxi_sec,
+        }
+    }
+
+    /// A stationary aircraft's heading is parking orientation, not runway alignment — even when it
+    /// happens to point exactly down a real runway's centerline, `resolve_ground_allowance_sec`
+    /// must not trust it: the gate/type/runway tier (600s) must NOT be picked over the airport-wide
+    /// blend (5 samples at 600s + 5 at 120s, median 360s) while groundspeed is at or below
+    /// [`TAXI_ROLL_GS_KT`].
+    #[test]
+    fn resolve_ground_allowance_sec_ignores_a_coincidental_heading_match_while_stationary() {
+        let runways = RunwayDb::load();
+        let end = runways
+            .ends_for("KJFK")
+            .into_iter()
+            .find(|e| e.id == "04L")
+            .expect("KJFK 04L is in the bundled runway data");
+        let gates = HashMap::from([("KJFK".to_string(), vec![gate("A1", 40.0, -74.0)])]);
+        let mut rows: Vec<taxi_estimate::TaxiSample> = (0..5)
+            .map(|_| taxi_sample("A1", "B738", "04L", 600))
+            .collect();
+        rows.extend((0..5).map(|_| taxi_sample("B2", "A320", "22R", 120)));
+        let samples = HashMap::from([("KJFK".to_string(), rows)]);
+
+        let stationary = resolve_ground_allowance_sec(
+            &gates,
+            &runways,
+            &samples,
+            "KJFK",
+            Some("B738"),
+            Some((40.0, -74.0, end.hdg as i64, TAXI_ROLL_GS_KT)),
+        );
+        // Airport-wide blend (median of the combined 10 samples), not the runway-specific 600s.
+        assert_eq!(stationary, 360.0 + 50.0);
+
+        let rolling = resolve_ground_allowance_sec(
+            &gates,
+            &runways,
+            &samples,
+            "KJFK",
+            Some("B738"),
+            Some((40.0, -74.0, end.hdg as i64, TAXI_ROLL_GS_KT + 1)),
+        );
+        // Once actually moving, the same heading legitimately resolves the gate/type/runway tier.
+        assert_eq!(rolling, 600.0 + 50.0);
     }
 }

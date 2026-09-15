@@ -23,15 +23,16 @@ use crate::{
     },
     errors::ApiError,
     feed::{
-        airports::AirportDb, airspace::Boundaries, facilities, fca, nav::NavData, predict,
-        trajectory, vatsim::FlightPlan, vatsim::VatsimData, winds::Winds,
+        airports::AirportDb, airspace::Boundaries, facilities, fca, flow as feed_flow,
+        nav::NavData, predict, runway_db::RunwayDb, taxi_estimate, trajectory, vatsim::FlightPlan,
+        vatsim::VatsimData, winds::Winds,
     },
     jobs,
     models::{
-        AircraftRoute, DataStatus, FcaBody, FcaFlight, FixValidationBody, FlightAdvisory,
-        FlightFcaCrossing, FlightGdp, FlightGroundStop, FlightProgram, IdstFlight, IdstResponse,
-        ReleaseRequest, ReorderRequest, ResolveRouteRequest, ResolvedRoute, RouteBody,
-        RouteWaypoint, TrafficAircraft, UpsertFcaRequest, UpsertRouteRequest,
+        AircraftRoute, AirportGateBody, DataStatus, FcaBody, FcaFlight, FixValidationBody,
+        FlightAdvisory, FlightFcaCrossing, FlightGdp, FlightGroundStop, FlightProgram, IdstFlight,
+        IdstResponse, ReleaseRequest, ReorderRequest, ResolveRouteRequest, ResolvedRoute,
+        RouteBody, RouteWaypoint, TrafficAircraft, UpsertFcaRequest, UpsertRouteRequest,
     },
     repos::{flow as flow_repo, public as public_repo},
     state::AppState,
@@ -46,6 +47,29 @@ type ReleaseMap = HashMap<String, (i64, i64)>;
 async fn feed_view(state: &AppState) -> (Option<Arc<crate::feed::Snapshot>>, Arc<AirportDb>) {
     let guard = state.feed.read().await;
     (guard.snapshot.clone(), guard.airports.clone())
+}
+
+/// A prefile's stand-in position for route resolution (#213) — it has no live coordinates, so use
+/// its departure airport's, matching `feed::flow::ground_estimate`'s pattern. `None` when the
+/// departure doesn't resolve: `route_path`'s ground branch trims by along-route position, so a
+/// fabricated placeholder (e.g. `(0.0, 0.0)`) would corrupt crossing detection whenever the arrival
+/// or route content still resolves ≥2 anchors on its own (`nav::build_anchors` only skips the
+/// *departure* anchor for an unresolvable `dep` — it still resolves the arrival and any enroute
+/// fixes) — the caller must skip that prefile, not guess its position.
+fn prefile_position(airports: &AirportDb, dep: &str) -> Option<(f64, f64)> {
+    airports.get(&dep.to_ascii_uppercase()).copied()
+}
+
+/// The polyline `aircraft_route` draws for a connected pilot (#213). `route_path`'s ground branch
+/// deliberately collapses to `None` once a ground aircraft has landed at its destination — correct
+/// for FCA-crossing detection (there's no crossing left ahead of it), but that same `None` must not
+/// turn into an empty `points` array here: this endpoint backs a map polyline + detail popup, and a
+/// landed/taxiing aircraft still needs a valid, non-empty track (its own position) rather than
+/// silently drawing nothing where the full filed route used to show. `waypoints` (from
+/// `full_route_named`, built separately by the caller) already carries the complete filed route for
+/// the popup regardless of this fallback, so this only fixes the drawn line.
+fn route_display_points(path: Option<Vec<[f64; 2]>>, lat: f64, lon: f64) -> Vec<[f64; 2]> {
+    path.unwrap_or_else(|| vec![[lat, lon]])
 }
 
 /// Airport-code match, tolerant of a leading `K` (KJFK ~ JFK).
@@ -490,8 +514,10 @@ pub async fn fca_counts(
             }
         }
         for pf in &snap.data.prefiles {
-            if let Some(fp) = &pf.flight_plan {
-                tally(fp, 0.0, 0.0, 0, 0, 0);
+            if let Some(fp) = &pf.flight_plan
+                && let Some((lat, lon)) = prefile_position(airports, &fp.departure)
+            {
+                tally(fp, lat, lon, 0, 0, 0);
             }
         }
         counts
@@ -529,7 +555,7 @@ pub async fn aircraft_route(
         let fp = p.flight_plan.as_ref().ok_or(ApiError::NotFound)?;
         let (named, unresolved) =
             fca::full_route_named(nav, airports, &fp.departure, &fp.arrival, &fp.route);
-        let points = fca::route_path(
+        let path = fca::route_path(
             nav,
             airports,
             &fp.departure,
@@ -539,8 +565,8 @@ pub async fn aircraft_route(
             p.longitude,
             p.heading,
             p.groundspeed,
-        )
-        .unwrap_or_default();
+        );
+        let points = route_display_points(path, p.latitude, p.longitude);
         return Ok(Json(AircraftRoute {
             callsign: cs,
             aircraft_type: fp.aircraft_short.clone(),
@@ -991,6 +1017,48 @@ pub async fn list_traffic(State(state): State<AppState>) -> Json<Vec<TrafficAirc
     Json(aircraft)
 }
 
+#[derive(Deserialize)]
+pub struct ProjectQuery {
+    /// How far ahead to project, in seconds (0..=5400).
+    offset_sec: i64,
+}
+
+#[utoipa::path(
+    get,
+    path = "/api/v1/flow/traffic/projected",
+    tag = "flow",
+    params(("offset_sec" = i64, Query, description = "Seconds ahead to project (0-5400)")),
+    responses((status = 200, body = Vec<TrafficAircraft>), (status = 400), (status = 401))
+)]
+pub async fn projected_traffic(
+    State(state): State<AppState>,
+    Query(q): Query<ProjectQuery>,
+) -> Result<Json<Vec<TrafficAircraft>>, ApiError> {
+    if !(0..=MAX_PROJECTION_SEC).contains(&q.offset_sec) {
+        return Err(ApiError::BadRequest);
+    }
+    let (snapshot, airports) = feed_view(&state).await;
+    let Some(snap) = snapshot else {
+        return Ok(Json(Vec::new()));
+    };
+    let nav = state.nav.load_full();
+    let profiles = state.aircraft_profiles.load_full();
+    let winds = state.winds.load_full();
+    let aircraft = tokio::task::spawn_blocking(move || {
+        project_traffic(
+            &snap.data,
+            nav.as_ref(),
+            airports.as_ref(),
+            profiles.as_ref(),
+            winds.as_ref(),
+            q.offset_sec,
+        )
+    })
+    .await
+    .map_err(|_| ApiError::Internal)?;
+    Ok(Json(aircraft))
+}
+
 /// Map a snapshot's pilots to the lightweight map-traffic shape (drops position-less aircraft).
 /// Pure of the live feed so the historical replay can reuse it against a reconstructed snapshot.
 pub(crate) fn traffic_from(data: &VatsimData) -> Vec<TrafficAircraft> {
@@ -1027,6 +1095,116 @@ pub(crate) fn traffic_from(data: &VatsimData) -> Vec<TrafficAircraft> {
                 flight_rules,
                 filed_alt,
             }
+        })
+        .collect()
+}
+
+/// Cap on how far ahead the prediction scrubber (#226) can project — bounds the compute cost of an
+/// arbitrary client-picked `offset_sec` and matches the issue's own suggested window.
+pub(crate) const MAX_PROJECTION_SEC: i64 = 90 * 60;
+
+/// `traffic_from`'s forward-time counterpart (#226): every airborne pilot is projected
+/// `offset_sec` ahead along its own resolved route, using the same shared trajectory/ETA model
+/// FCA metering and the arrival ladder use — never a separate, inconsistent prediction. Ground
+/// aircraft are left parked (not yet departed, nothing to project) and an aircraft whose route
+/// can't be resolved past its dep/arr endpoints is dropped rather than shown at a fabricated
+/// position, mirroring how `route_path` itself signals "can't resolve" with `None`.
+pub(crate) fn project_traffic(
+    data: &VatsimData,
+    nav: &NavData,
+    airports: &AirportDb,
+    profiles: &trajectory::ProfileTable,
+    winds: &Winds,
+    offset_sec: i64,
+) -> Vec<TrafficAircraft> {
+    let offset_sec = offset_sec as f64;
+    data.pilots
+        .iter()
+        .filter(|p| p.latitude != 0.0 || p.longitude != 0.0)
+        .filter_map(|p| {
+            let fp = p.flight_plan.as_ref()?;
+            let arr = fp.arrival.clone();
+            let airborne = p.groundspeed > 60 && p.altitude > 300;
+
+            let (star, wake, flight_rules, filed_alt) = (
+                feed_flow::arrival_gate(&fp.route, &arr)
+                    .map(|g| crate::feed::runway::star_base(&g)),
+                fp.aircraft_type_wake().1,
+                fp.flight_rules.clone(),
+                trajectory::parse_alt_ft(&fp.altitude) as i32,
+            );
+            let actype = fp.aircraft_short.clone();
+            let dep = fp.departure.clone();
+
+            if !airborne || offset_sec <= 0.0 {
+                // Not yet departed, or T=0: nothing to project, show where it actually is.
+                return Some(TrafficAircraft {
+                    callsign: p.callsign.clone(),
+                    lat: p.latitude,
+                    lon: p.longitude,
+                    heading: p.heading,
+                    gs: p.groundspeed,
+                    alt: p.altitude,
+                    dep,
+                    arr,
+                    actype,
+                    star,
+                    wake,
+                    flight_rules,
+                    filed_alt,
+                });
+            }
+
+            let path = fca::route_path(
+                nav,
+                airports,
+                &dep,
+                &arr,
+                &fp.route,
+                p.latitude,
+                p.longitude,
+                p.heading,
+                p.groundspeed,
+            )?;
+            let route_len_nm = predict::path_len_nm(&path);
+            let (ty, wake_code) = fp.aircraft_type_wake();
+            let profile = profiles.resolve(&ty, &wake_code);
+            let cruise_ft = trajectory::parse_alt_ft(&fp.altitude);
+            let cruise_tas = trajectory::capped_cruise_tas(
+                feed_flow::parse_tas(&fp.cruise_tas),
+                cruise_ft,
+                profile,
+            );
+            let headwind = winds.route_headwind(&path, p.altitude as f64);
+            let vp = trajectory::VerticalProfile::build(
+                p.altitude as f64,
+                route_len_nm,
+                0.0,
+                cruise_ft,
+                cruise_tas,
+                profile,
+                headwind,
+            );
+            let target_d = vp.distance_after(route_len_nm, offset_sec);
+            let ahead_nm = (route_len_nm - target_d).max(0.0);
+            let (pos, heading) = fca::point_and_heading_at(&path, ahead_nm);
+            let alt = vp.alt_at(target_d).round() as i64;
+
+            Some(TrafficAircraft {
+                callsign: p.callsign.clone(),
+                lat: pos[0],
+                lon: pos[1],
+                heading: heading.round() as i64,
+                gs: p.groundspeed,
+                alt,
+                dep,
+                arr,
+                actype,
+                star,
+                wake,
+                flight_rules,
+                filed_alt,
+            })
         })
         .collect()
 }
@@ -1136,6 +1314,9 @@ fn build_candidates(
     winds: &Winds,
     profiles: &trajectory::ProfileTable,
     releases: &ReleaseMap,
+    gates: &HashMap<String, Vec<AirportGateBody>>,
+    runways: &RunwayDb,
+    taxi_samples: &HashMap<String, Vec<taxi_estimate::TaxiSample>>,
     now: DateTime<Utc>,
     debug: bool,
 ) -> (Vec<FcaFlight>, Vec<fca::MeterInput>) {
@@ -1175,6 +1356,22 @@ fn build_candidates(
         let cruise_tas = trajectory::capped_cruise_tas(filed_tas, cruise, profile);
         let headwind = winds.route_headwind(&path, cruise);
         let route_len = predict::path_len_nm(&path);
+        let dep = fp.departure.to_ascii_uppercase();
+        // Airborne pilots never apply the allowance (`eta_along_route`'s `!airborne` gate) — skip
+        // the lookup for them and pass 0.0.
+        let allowance = if airborne {
+            0.0
+        } else {
+            let aircraft = (!fp.aircraft_short.is_empty()).then_some(fp.aircraft_short.as_str());
+            feed_flow::resolve_ground_allowance_sec(
+                gates,
+                runways,
+                taxi_samples,
+                &dep,
+                aircraft,
+                Some((p.latitude, p.longitude, p.heading, p.groundspeed)),
+            )
+        };
         let eta = predict::eta_along_route(
             airborne,
             route_len,
@@ -1184,6 +1381,7 @@ fn build_candidates(
             cruise_tas,
             profile,
             headwind,
+            allowance,
             now,
         );
         let rel = releases.get(&p.callsign);
@@ -1230,14 +1428,17 @@ fn build_candidates(
         if !passes_filters(fca, fp, None) {
             continue;
         }
+        let Some((dep_lat, dep_lon)) = prefile_position(airports, &fp.departure) else {
+            continue;
+        };
         let Some(path) = fca::route_path(
             nav,
             airports,
             &fp.departure,
             &fp.arrival,
             &fp.route,
-            0.0,
-            0.0,
+            dep_lat,
+            dep_lon,
             0,
             0,
         ) else {
@@ -1249,10 +1450,6 @@ fn build_candidates(
         if !passes_scope(fca, airspace, cross.lat, cross.lon) {
             continue;
         }
-        let (dep_lat, dep_lon) = airports
-            .get(&fp.departure.to_ascii_uppercase())
-            .copied()
-            .unwrap_or((0.0, 0.0));
         let (ty, wake) = fp.aircraft_type_wake();
         let profile = profiles.resolve(&ty, &wake);
         let cruise = trajectory::parse_alt_ft(&fp.altitude);
@@ -1260,6 +1457,18 @@ fn build_candidates(
         let cruise_tas = trajectory::capped_cruise_tas(filed_tas, cruise, profile);
         let headwind = winds.route_headwind(&path, cruise);
         let route_len = predict::path_len_nm(&path);
+        // A prefile has no live position — gate/runway matching is skipped, falling to the
+        // airport/default tier.
+        let dep = fp.departure.to_ascii_uppercase();
+        let aircraft = (!fp.aircraft_short.is_empty()).then_some(fp.aircraft_short.as_str());
+        let allowance = feed_flow::resolve_ground_allowance_sec(
+            gates,
+            runways,
+            taxi_samples,
+            &dep,
+            aircraft,
+            None,
+        );
         let eta = predict::eta_along_route(
             false,
             route_len,
@@ -1269,6 +1478,7 @@ fn build_candidates(
             cruise_tas,
             profile,
             headwind,
+            allowance,
             now,
         );
         let rel = releases.get(&pf.callsign);
@@ -1371,6 +1581,9 @@ async fn metered_flights(
     let winds = state.winds.load_full();
     let aircraft_profiles = state.aircraft_profiles.load_full();
     let airspace = state.airspace.clone();
+    let gates = state.gates.load_full();
+    let runways = state.runways.clone();
+    let taxi_estimate_samples = state.taxi_estimate_samples.load_full();
     tokio::task::spawn_blocking(move || {
         let (flights, metas) = build_candidates(
             &fca,
@@ -1381,6 +1594,9 @@ async fn metered_flights(
             winds.as_ref(),
             aircraft_profiles.as_ref(),
             &releases,
+            gates.as_ref(),
+            runways.as_ref(),
+            taxi_estimate_samples.as_ref(),
             now,
             debug,
         );
@@ -1507,6 +1723,9 @@ pub async fn list_idst(
     let winds = state.winds.load_full();
     let aircraft_profiles = state.aircraft_profiles.load_full();
     let airspace = state.airspace.clone();
+    let gates = state.gates.load_full();
+    let runways = state.runways.clone();
+    let taxi_estimate_samples = state.taxi_estimate_samples.load_full();
 
     let (mut unscheduled, mut released) = tokio::task::spawn_blocking(move || {
         let mut unscheduled: Vec<IdstFlight> = Vec::new();
@@ -1522,6 +1741,9 @@ pub async fn list_idst(
                 winds.as_ref(),
                 aircraft_profiles.as_ref(),
                 releases,
+                gates.as_ref(),
+                runways.as_ref(),
+                taxi_estimate_samples.as_ref(),
                 now,
                 false,
             );
@@ -1625,6 +1847,9 @@ pub async fn mark_release(
             state.winds.load_full().as_ref(),
             state.aircraft_profiles.load_full().as_ref(),
             &releases,
+            state.gates.load_full().as_ref(),
+            state.runways.as_ref(),
+            state.taxi_estimate_samples.load_full().as_ref(),
             now,
             false,
         )
@@ -1713,6 +1938,9 @@ pub async fn clear_release(
             state.winds.load_full().as_ref(),
             state.aircraft_profiles.load_full().as_ref(),
             &releases,
+            state.gates.load_full().as_ref(),
+            state.runways.as_ref(),
+            state.taxi_estimate_samples.load_full().as_ref(),
             now,
             false,
         )
@@ -1792,5 +2020,317 @@ mod filed_altitude_tests {
         assert_eq!(filed_altitude_ft(""), None);
         assert_eq!(filed_altitude_ft("VFR"), None);
         assert_eq!(filed_altitude_ft("0"), None);
+    }
+}
+
+/// #226's forward prediction scrubber, exercised against the real bundled nav db so the projected
+/// aircraft actually walks a resolved route rather than a synthetic one.
+#[cfg(test)]
+mod project_traffic_tests {
+    use std::collections::HashMap;
+
+    use super::{VatsimData, project_traffic};
+    use crate::feed::{
+        nav::NavData, trajectory::ProfileTable, vatsim::FlightPlan, vatsim::Pilot, vatsim::Prefile,
+        winds::Winds,
+    };
+
+    fn airports() -> HashMap<String, (f64, f64)> {
+        HashMap::from([
+            ("KJFK".to_string(), (40.64, -73.78)),
+            ("KDCA".to_string(), (38.85, -77.04)),
+        ])
+    }
+
+    /// Airborne B738 just south of KJFK tracking SW down the coast, filed KJFK -> KDCA via a
+    /// route the bundled nav db resolves (mirrors predict.rs's own resolved-route tests).
+    fn airborne_pilot() -> Pilot {
+        Pilot {
+            callsign: "TEST1".into(),
+            latitude: 40.2,
+            longitude: -74.0,
+            altitude: 24_000,
+            groundspeed: 400,
+            heading: 220,
+            flight_plan: Some(FlightPlan {
+                departure: "KJFK".into(),
+                arrival: "KDCA".into(),
+                route: "RBV WHITE SIE".into(),
+                aircraft_short: "B738".into(),
+                cruise_tas: "440".into(),
+                altitude: "35000".into(),
+                ..Default::default()
+            }),
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn zero_offset_matches_the_live_position() {
+        let data = VatsimData {
+            pilots: vec![airborne_pilot()],
+            ..Default::default()
+        };
+        let out = project_traffic(
+            &data,
+            &NavData::load(),
+            &airports(),
+            &ProfileTable::default(),
+            &Winds::default(),
+            0,
+        );
+        assert_eq!(out.len(), 1);
+        assert!((out[0].lat - 40.2).abs() < 1e-9);
+        assert!((out[0].lon - -74.0).abs() < 1e-9);
+    }
+
+    #[test]
+    fn an_airborne_aircraft_moves_forward_over_time() {
+        let data = VatsimData {
+            pilots: vec![airborne_pilot()],
+            ..Default::default()
+        };
+        let out = project_traffic(
+            &data,
+            &NavData::load(),
+            &airports(),
+            &ProfileTable::default(),
+            &Winds::default(),
+            20 * 60,
+        );
+        assert_eq!(out.len(), 1);
+        let moved = crate::feed::flow::gc_dist(40.2, -74.0, out[0].lat, out[0].lon);
+        assert!(
+            moved > 50.0,
+            "expected the aircraft to have moved meaningfully in 20 minutes, moved {moved}nm"
+        );
+    }
+
+    #[test]
+    fn a_ground_aircraft_stays_parked() {
+        let mut p = airborne_pilot();
+        p.groundspeed = 0;
+        p.altitude = 0;
+        let data = VatsimData {
+            pilots: vec![p],
+            ..Default::default()
+        };
+        let out = project_traffic(
+            &data,
+            &NavData::load(),
+            &airports(),
+            &ProfileTable::default(),
+            &Winds::default(),
+            30 * 60,
+        );
+        assert_eq!(out.len(), 1);
+        assert!((out[0].lat - 40.2).abs() < 1e-9);
+        assert!((out[0].lon - -74.0).abs() < 1e-9);
+    }
+
+    #[test]
+    fn an_unresolvable_route_is_dropped_not_fabricated() {
+        let mut p = airborne_pilot();
+        // Neither KJFK nor KDCA is in this test's tiny airport cache, and the route fixes won't
+        // resolve either — route_path returns None, so this aircraft must not appear at all.
+        p.flight_plan.as_mut().unwrap().departure = "ZZZZ".into();
+        p.flight_plan.as_mut().unwrap().arrival = "YYYY".into();
+        p.flight_plan.as_mut().unwrap().route = "".into();
+        let data = VatsimData {
+            pilots: vec![p],
+            ..Default::default()
+        };
+        let out = project_traffic(
+            &data,
+            &NavData::load(),
+            &HashMap::new(),
+            &ProfileTable::default(),
+            &Winds::default(),
+            20 * 60,
+        );
+        assert!(
+            out.is_empty(),
+            "an unresolvable route must be dropped, not shown at a fabricated position"
+        );
+    }
+
+    #[test]
+    fn prefiles_are_never_projected_matching_the_live_traffic_feed() {
+        // traffic_from() itself never includes prefiles (no live position to show) — project_traffic
+        // must not start doing so either.
+        let data = VatsimData {
+            prefiles: vec![Prefile {
+                callsign: "TEST2".into(),
+                flight_plan: Some(FlightPlan {
+                    departure: "KJFK".into(),
+                    arrival: "KDCA".into(),
+                    ..Default::default()
+                }),
+                ..Default::default()
+            }],
+            ..Default::default()
+        };
+        let out = project_traffic(
+            &data,
+            &NavData::load(),
+            &airports(),
+            &ProfileTable::default(),
+            &Winds::default(),
+            600,
+        );
+        assert!(out.is_empty());
+    }
+}
+
+#[cfg(test)]
+mod prefile_position_tests {
+    use std::collections::HashMap;
+
+    use super::prefile_position;
+
+    /// Regression (#213): a prefile has no live position, so `fca_counts`/`build_candidates` must
+    /// resolve its departure airport's real coordinates — not fall through to a fabricated `(0.0,
+    /// 0.0)`, which `route_path`'s ground branch now trims by along-route position instead of
+    /// ignoring, corrupting crossing detection and distance for a route that happens to project
+    /// Null Island onto its far end (see `feed::fca`'s own regression tests for that mechanism).
+    #[test]
+    fn resolves_the_real_departure_airport_not_null_island() {
+        let airports: crate::feed::airports::AirportDb =
+            HashMap::from([("KJFK".to_string(), (40.64, -73.78))]);
+        assert_eq!(prefile_position(&airports, "KJFK"), Some((40.64, -73.78)));
+        // Case-insensitive, matching route_path's own uppercasing.
+        assert_eq!(prefile_position(&airports, "kjfk"), Some((40.64, -73.78)));
+    }
+
+    #[test]
+    fn is_none_for_an_unresolvable_airport() {
+        // `nav::build_anchors` only skips the *departure* anchor for an unresolvable `dep` — it
+        // still resolves the arrival airport and any enroute fixes independently, so a fabricated
+        // position here could still reach route_path's ground trimming. The caller must skip this
+        // prefile instead of guessing a position.
+        let airports: crate::feed::airports::AirportDb = HashMap::new();
+        assert_eq!(prefile_position(&airports, "ZZZZ"), None);
+    }
+}
+
+#[cfg(test)]
+mod route_display_points_tests {
+    use super::route_display_points;
+
+    #[test]
+    fn returns_the_resolved_path_unchanged() {
+        let path = vec![[40.0, -73.0], [39.0, -74.0]];
+        assert_eq!(route_display_points(Some(path.clone()), 0.0, 0.0), path);
+    }
+
+    /// Regression (#213): `route_path`'s ground branch deliberately returns `None` once a ground
+    /// aircraft has landed at its destination (nothing left ahead of it to cross). That must not
+    /// turn into an empty polyline for the map/detail-popup endpoint — it should fall back to the
+    /// aircraft's own position rather than silently drawing nothing.
+    #[test]
+    fn falls_back_to_the_aircraft_s_own_position_when_the_route_has_collapsed() {
+        assert_eq!(
+            route_display_points(None, 38.95, -77.46),
+            vec![[38.95, -77.46]]
+        );
+    }
+}
+
+/// Regression (#213): the actual `build_candidates`/`fca_counts` wiring around `prefile_position`
+/// must skip a prefile with an unresolvable departure — not silently fall back to a fabricated
+/// position. `prefile_position_tests` above only covers the pure helper in isolation; these cover
+/// its use at the real call site, which is what a reverted `.unwrap_or((0.0, 0.0))` would break.
+#[cfg(test)]
+mod prefile_skip_integration_tests {
+    use std::collections::HashMap;
+
+    use chrono::Utc;
+
+    use super::{ReleaseMap, build_candidates};
+    use crate::feed::{
+        airspace::Boundaries,
+        nav::NavData,
+        runway_db::RunwayDb,
+        trajectory::ProfileTable,
+        vatsim::{FlightPlan, Prefile, VatsimData},
+        winds::Winds,
+    };
+    use crate::models::FcaBody;
+
+    fn fca_crossing_the_corridor() -> FcaBody {
+        FcaBody {
+            id: "test".into(),
+            name: "test".into(),
+            color: "#fff".into(),
+            artcc: "ZDC".into(),
+            // Crosses the JFK->DCA corridor between the real WHITE (40.0) and SIE (39.1) fixes.
+            points: sqlx::types::Json(vec![[39.5, -75.6], [39.5, -74.0]]),
+            dests: vec![],
+            origins: vec![],
+            fixes: vec![],
+            scope: vec![],
+            min_fl: None,
+            max_fl: None,
+            dir: "any".into(),
+            mode: "rate".into(),
+            rate: 30,
+            mit: 0,
+            enabled: true,
+            manual_order: vec![],
+            manual_seq: false,
+            updated_at: Utc::now(),
+            updated_by: None,
+            event_id: None,
+            event_status: None,
+            auto_publish: false,
+        }
+    }
+
+    /// A prefile whose departure ICAO isn't in the (tiny, test) airport cache, but whose arrival
+    /// and real enroute fixes (RBV/WHITE/SIE, via the bundled nav db) resolve on their own — the
+    /// exact shape `nav::build_anchors` produces ≥2 anchors for without ever needing the departure.
+    fn unresolvable_departure_prefile() -> VatsimData {
+        VatsimData {
+            prefiles: vec![Prefile {
+                callsign: "TEST1".into(),
+                flight_plan: Some(FlightPlan {
+                    departure: "KJFK".into(), // deliberately absent from `airports` below
+                    arrival: "KDCA".into(),
+                    route: "RBV WHITE SIE".into(),
+                    ..Default::default()
+                }),
+                ..Default::default()
+            }],
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn build_candidates_skips_a_prefile_whose_departure_does_not_resolve() {
+        let nav = NavData::load();
+        let airports: HashMap<String, (f64, f64)> =
+            HashMap::from([("KDCA".to_string(), (38.85, -77.04))]); // no KJFK entry
+        let fca = fca_crossing_the_corridor();
+        let data = unresolvable_departure_prefile();
+        let (flights, metas) = build_candidates(
+            &fca,
+            &data,
+            &airports,
+            &nav,
+            &Boundaries::default(),
+            &Winds::default(),
+            &ProfileTable::default(),
+            &ReleaseMap::new(),
+            &HashMap::new(),
+            &RunwayDb::default(),
+            &HashMap::new(),
+            Utc::now(),
+            false,
+        );
+        assert!(
+            flights.is_empty() && metas.is_empty(),
+            "a prefile whose departure can't be resolved must be skipped, not counted via a \
+             fabricated (0.0, 0.0) position: got {flights:?}"
+        );
     }
 }

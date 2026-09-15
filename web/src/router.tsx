@@ -2,6 +2,7 @@ import {createRootRoute, createRoute, createRouter, lazyRouteComponent, Outlet, 
 
 import {FeedWatcher} from "@/components/feed-watcher";
 import {RestrictionAlerts} from "@/components/restriction-alerts";
+import {WhatsNew} from "@/components/whats-new";
 import {Footer} from "@/components/footer";
 import {Navbar} from "@/components/navbar";
 import {useMe} from "@/lib/auth";
@@ -17,6 +18,7 @@ import {FcaPage} from "@/pages/fca";
 import {IdstPage} from "@/pages/idst";
 import {FacilityMapIndexPage, FacilityMapPage} from "@/pages/facility-map";
 import {RunwayPage} from "@/pages/runway";
+import {AadcPage} from "@/pages/aadc";
 import {DashboardPage} from "@/pages/dashboard";
 import {BoardViewPage} from "@/pages/dashboards/board";
 import {BoardLibraryPage} from "@/pages/dashboards/library";
@@ -31,6 +33,7 @@ import {AirportSurfacePage} from "@/pages/planning/airport-surface";
 import {FacilityDocumentsPage} from "@/pages/planning/facility-documents";
 import {StatsPage} from "@/pages/stats";
 import {DelaysPage} from "@/pages/stats/delays";
+import {TaxiInsightsPage} from "@/pages/stats/taxi-insights";
 import {StatsFlightPage} from "@/pages/stats/flight";
 // Replay pulls in deck.gl + MapLibre — code-split so it only loads on its route.
 const CaptureReplayPage = lazyRouteComponent(() => import("@/pages/stats/replay"), "CaptureReplayPage");
@@ -110,6 +113,7 @@ function RootLayout() {
     >
       {embed ? null : <FeedWatcher />}
       {embed ? null : <RestrictionAlerts />}
+      {embed ? null : <WhatsNew />}
       {embed ? null : <Navbar />}
       {embed || layout === "full" ? (
         <Outlet />
@@ -156,11 +160,25 @@ const airportRoute = createRoute({
   staticData: { layout: "wide" },
 });
 
+const TMU_TAB_IDS = [
+  "programs",
+  "restrictions",
+  "ground-stops",
+  "gdp",
+  "rate-calculator",
+] as const;
+type TmuTabId = (typeof TMU_TAB_IDS)[number];
+
 const tmuRoute = createRoute({
   getParentRoute: () => opsRoute,
   path: "tmu",
   component: TmuPage,
   staticData: { layout: "wide" },
+  // Which tab is active — permission-gated fallback (if the user can't see this tab) happens in
+  // the component, since that depends on auth state this route-level validator doesn't have.
+  validateSearch: (search: Record<string, unknown>): { tab?: TmuTabId } => ({
+    tab: TMU_TAB_IDS.includes(search.tab as TmuTabId) ? (search.tab as TmuTabId) : undefined,
+  }),
 });
 
 // Dashboards: a library at /ops/my, a board at /ops/my/$boardId, a shared read-only view at
@@ -205,6 +223,13 @@ const idstRoute = createRoute({
   getParentRoute: () => opsRoute,
   path: "idst",
   component: IdstPage,
+  staticData: { layout: "wide" },
+});
+
+const aadcRoute = createRoute({
+  getParentRoute: () => opsRoute,
+  path: "aadc",
+  component: AadcPage,
   staticData: { layout: "wide" },
 });
 
@@ -429,6 +454,12 @@ const statsDelaysRoute = createRoute({
   component: DelaysPage,
 });
 
+const statsTaxiRoute = createRoute({
+  getParentRoute: () => statsRoute,
+  path: "taxi",
+  component: TaxiInsightsPage,
+});
+
 // --- Admin ---
 
 const adminRoute = createRoute({
@@ -508,6 +539,7 @@ const routeTree = rootRoute.addChildren([
     fcaRoute,
     runwayRoute,
     idstRoute,
+    aadcRoute,
   ]),
   advisoriesRoute.addChildren([advisoriesIndexRoute, advisoriesFcaRoute]),
   facilityMapRoute.addChildren([facilityMapIndexRoute, facilityMapDetailRoute]),
@@ -532,6 +564,7 @@ const routeTree = rootRoute.addChildren([
     statsReplayRoute,
     statsDashboardRoute,
     statsDelaysRoute,
+    statsTaxiRoute,
   ]),
   adminRoute.addChildren([
     adminIndexRoute,

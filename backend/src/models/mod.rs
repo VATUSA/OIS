@@ -186,6 +186,58 @@ pub struct AuditLogPage {
     pub page_size: i64,
 }
 
+// --- taxi insights (#183): browsable history over raw observations + derived estimates ---
+
+/// One raw pushback+taxi observation (#164 sub-issue C).
+#[derive(Debug, Serialize, ToSchema, sqlx::FromRow)]
+pub struct TaxiObservationEntry {
+    pub id: i64,
+    pub airport: String,
+    pub gate_id: Option<String>,
+    pub aircraft: Option<String>,
+    pub runway: Option<String>,
+    pub pushback_sec: Option<i32>,
+    pub taxi_sec: i32,
+    pub observed_at: DateTime<Utc>,
+    /// True when this row falls outside `taxi_estimate`'s own sanity-clamp bounds — computed at
+    /// query time, never persisted.
+    pub is_outlier: bool,
+}
+
+/// A page of raw observations.
+#[derive(Debug, Serialize, ToSchema)]
+pub struct TaxiObservationPage {
+    pub items: Vec<TaxiObservationEntry>,
+    pub total: i64,
+    pub page: i64,
+    pub page_size: i64,
+}
+
+/// One derived per-(gate, aircraft, runway) estimate (#164 sub-issue D), computed live from the
+/// currently filtered sample set — not a stored row.
+#[derive(Debug, Serialize, ToSchema)]
+pub struct TaxiEstimateEntry {
+    pub airport: String,
+    pub gate_id: Option<String>,
+    pub aircraft: Option<String>,
+    pub runway: Option<String>,
+    pub pushback_sec: f64,
+    pub pushback_tier: String,
+    pub pushback_sample_count: i64,
+    pub taxi_sec: f64,
+    pub taxi_tier: String,
+    pub taxi_sample_count: i64,
+}
+
+/// A page of derived estimates.
+#[derive(Debug, Serialize, ToSchema)]
+pub struct TaxiEstimatePage {
+    pub items: Vec<TaxiEstimateEntry>,
+    pub total: i64,
+    pub page: i64,
+    pub page_size: i64,
+}
+
 // --- tmu: traffic management initiatives (TMIs) ---
 
 /// A Traffic Management Initiative.
@@ -1272,7 +1324,7 @@ pub struct DiscordGuildConfigBody {
     pub roles: Vec<DiscordMapEntry>,
     /// ARTCCs this guild serves — lets `channel_id`/`role_id` prefer this guild over another one
     /// defining the same logical name for a different facility (#194). Empty = no facility
-    /// preference (only ever wins via the created-at fallback).
+    /// preference (only ever wins via the sort-order fallback).
     pub facilities: Vec<String>,
 }
 

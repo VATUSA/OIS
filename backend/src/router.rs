@@ -12,7 +12,7 @@ use crate::{
         access, ace, aircraft_profiles, airport_configs, airport_surface, api_keys, atc, audit,
         auth, dashboards, docs, events, facilities, facility_documents, facility_map, feed, flow,
         gdp, health, integration, jobs as jobs_handler, preferences, public, runway,
-        service_accounts, stats, tmu, users, webhooks,
+        service_accounts, stats, taxi_insights, tmu, users, webhooks,
     },
     openapi::ApiDoc,
     realtime,
@@ -362,6 +362,14 @@ pub fn build_router(state: AppState) -> Router {
             "/api/v1/stats/hist/ground-stops",
             get(stats::hist_ground_stops),
         )
+        .route(
+            "/api/v1/stats/taxi/observations",
+            get(taxi_insights::list_taxi_observations),
+        )
+        .route(
+            "/api/v1/stats/taxi/estimates",
+            get(taxi_insights::list_taxi_estimates),
+        )
         // Flow constrained areas (FCAs) + live map traffic
         .route(
             "/api/v1/flow/fcas",
@@ -393,6 +401,10 @@ pub fn build_router(state: AppState) -> Router {
         )
         .route("/api/v1/flow/resolve-routes", post(flow::resolve_routes))
         .route("/api/v1/flow/traffic", get(flow::list_traffic))
+        .route(
+            "/api/v1/flow/traffic/projected",
+            get(flow::projected_traffic),
+        )
         .route("/api/v1/flow/idst", get(flow::list_idst))
         // Realtime push — additive over REST (see crate::realtime).
         .route("/api/v1/ws", get(realtime::ws))
@@ -422,6 +434,7 @@ pub fn build_router(state: AppState) -> Router {
         // Live VATSIM feed
         .route("/api/v1/feed/status", get(feed::feed_status))
         .route("/api/v1/tmu/flow/{icao}", get(feed::airport_flow))
+        .route("/api/v1/tmu/flow/{icao}/aadc", get(feed::airport_aadc))
         .route("/api/v1/tmu/departures/{dep}", get(feed::list_departures))
         .route("/api/v1/tmu/taxi/{icao}", get(feed::taxi_stats))
         .route("/api/v1/tmu/cfr", post(feed::issue_cfr))

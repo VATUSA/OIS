@@ -7,7 +7,7 @@ use utoipa::OpenApi;
 #[openapi(
     info(
         title = "OIS API",
-        version = "1.0.1",
+        version = "0.1.0",
         description = "VATUSA Event Operational Information System API"
     ),
     paths(
@@ -116,6 +116,8 @@ use utoipa::OpenApi;
         crate::handlers::stats::hist_tmis,
         crate::handlers::stats::hist_gdps,
         crate::handlers::stats::hist_ground_stops,
+        crate::handlers::taxi_insights::list_taxi_observations,
+        crate::handlers::taxi_insights::list_taxi_estimates,
         crate::handlers::airport_configs::list_all_airport_configs,
         crate::handlers::airport_configs::list_airport_configs,
         crate::handlers::airport_configs::create_airport_config,
@@ -151,6 +153,7 @@ use utoipa::OpenApi;
         crate::handlers::flow::update_route,
         crate::handlers::flow::delete_route,
         crate::handlers::flow::list_traffic,
+        crate::handlers::flow::projected_traffic,
         crate::handlers::flow::list_idst,
         crate::handlers::facility_map::get_config,
         crate::handlers::facility_map::put_config,
@@ -177,6 +180,7 @@ use utoipa::OpenApi;
         crate::handlers::gdp::compress_gdp,
         crate::handlers::feed::feed_status,
         crate::handlers::feed::airport_flow,
+        crate::handlers::feed::airport_aadc,
         crate::handlers::feed::list_departures,
         crate::handlers::feed::taxi_stats,
         crate::handlers::feed::issue_cfr,
@@ -353,6 +357,8 @@ use utoipa::OpenApi;
         crate::handlers::feed::FeedStatusBody,
         crate::feed::flow::Flow,
         crate::feed::flow::FlowFlight,
+        crate::feed::flow::AadcBucket,
+        crate::feed::flow::AadcResponse,
         crate::feed::taxi::TaxiField,
         crate::feed::taxi::TaxiActive,
         crate::models::DepartureFlight,
@@ -387,6 +393,10 @@ use utoipa::OpenApi;
         crate::models::Tier1GenerateResult,
         crate::models::AuditLogEntry,
         crate::models::AuditLogPage,
+        crate::models::TaxiObservationEntry,
+        crate::models::TaxiObservationPage,
+        crate::models::TaxiEstimateEntry,
+        crate::models::TaxiEstimatePage,
         crate::job_registry::JobStatus,
         crate::models::CreateServiceAccountRequest,
         crate::models::SetServiceAccountRolesRequest,

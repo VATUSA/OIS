@@ -1608,6 +1608,22 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/v1/flow/traffic/projected": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get: operations["projected_traffic"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/v1/flow/validate-fixes": {
         parameters: {
             query?: never;
@@ -2311,6 +2327,38 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/v1/stats/taxi/estimates": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get: operations["list_taxi_estimates"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/stats/taxi/observations": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get: operations["list_taxi_observations"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/v1/tmu/cfr": {
         parameters: {
             query?: never;
@@ -2367,6 +2415,22 @@ export interface paths {
             cookie?: never;
         };
         get: operations["airport_flow"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/tmu/flow/{icao}/aadc": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get: operations["airport_aadc"];
         put?: never;
         post?: never;
         delete?: never;
@@ -2715,6 +2779,45 @@ export interface paths {
 export type webhooks = Record<string, never>;
 export interface components {
     schemas: {
+        /**
+         * @description One bucket of forward arrival demand, broken down by every dimension AADC supports (#242):
+         *     status, aircraft category (wake), carrier, and arrival fix.
+         */
+        AadcBucket: {
+            by_afix: {
+                [key: string]: number;
+            };
+            by_carrier: {
+                [key: string]: number;
+            };
+            by_category: {
+                [key: string]: number;
+            };
+            by_status: {
+                [key: string]: number;
+            };
+            /** Format: date-time */
+            end: string;
+            /** Format: date-time */
+            start: string;
+            /** Format: int64 */
+            total: number;
+        };
+        /** @description Full AADC response for one airport: bucketed demand plus the wind-favored AAR/ADR reference. */
+        AadcResponse: {
+            /** Format: int32 */
+            aar: number;
+            /** Format: int32 */
+            adr: number;
+            /** Format: int32 */
+            bucket_min: number;
+            buckets: components["schemas"]["AadcBucket"][];
+            /** @description The `airport_config` row the AAR/ADR came from, if any configs exist for this airport. */
+            config_id?: string | null;
+            /** Format: date-time */
+            generated_at: string;
+            icao: string;
+        };
         /**
          * @description One rate change within a GDP window: the AAR takes effect at `start_time` (HHMM Zulu)
          *     and holds until the next step or the window end.
@@ -3512,7 +3615,7 @@ export interface components {
             /**
              * @description ARTCCs this guild serves — lets `channel_id`/`role_id` prefer this guild over another one
              *     defining the same logical name for a different facility (#194). Empty = no facility
-             *     preference (only ever wins via the created-at fallback).
+             *     preference (only ever wins via the sort-order fallback).
              */
             facilities: string[];
             guild_id: string;
@@ -4019,6 +4122,11 @@ export interface components {
         FlowFlight: {
             aircraft_type: string;
             callsign: string;
+            /**
+             * @description Wake/weight category (`L`/`M`/`H`/`J`) parsed from the filed aircraft string; null when
+             *     not one of those four (AADC's "Aircraft Category" dimension, #242).
+             */
+            category?: string | null;
             /**
              * Format: date-time
              * @description Proposed wheels-up (EDCT / Call-For-Release) for ground & proposed flights.
@@ -4988,6 +5096,36 @@ export interface components {
              */
             rolling_since?: string | null;
         };
+        /**
+         * @description One derived per-(gate, aircraft, runway) estimate (#164 sub-issue D), computed live from the
+         *     currently filtered sample set — not a stored row.
+         */
+        TaxiEstimateEntry: {
+            aircraft?: string | null;
+            airport: string;
+            gate_id?: string | null;
+            /** Format: int64 */
+            pushback_sample_count: number;
+            /** Format: double */
+            pushback_sec: number;
+            pushback_tier: string;
+            runway?: string | null;
+            /** Format: int64 */
+            taxi_sample_count: number;
+            /** Format: double */
+            taxi_sec: number;
+            taxi_tier: string;
+        };
+        /** @description A page of derived estimates. */
+        TaxiEstimatePage: {
+            items: components["schemas"]["TaxiEstimateEntry"][];
+            /** Format: int64 */
+            page: number;
+            /** Format: int64 */
+            page_size: number;
+            /** Format: int64 */
+            total: number;
+        };
         /** @description The Taxi Monitor view for one field: stats plus the in-progress departures. */
         TaxiField: {
             active: components["schemas"]["TaxiActive"][];
@@ -4999,6 +5137,36 @@ export interface components {
             sample_count: number;
             trend: string;
             volume: number;
+        };
+        /** @description One raw pushback+taxi observation (#164 sub-issue C). */
+        TaxiObservationEntry: {
+            aircraft?: string | null;
+            airport: string;
+            gate_id?: string | null;
+            /** Format: int64 */
+            id: number;
+            /**
+             * @description True when this row falls outside `taxi_estimate`'s own sanity-clamp bounds — computed at
+             *     query time, never persisted.
+             */
+            is_outlier: boolean;
+            /** Format: date-time */
+            observed_at: string;
+            /** Format: int32 */
+            pushback_sec?: number | null;
+            runway?: string | null;
+            /** Format: int32 */
+            taxi_sec: number;
+        };
+        /** @description A page of raw observations. */
+        TaxiObservationPage: {
+            items: components["schemas"]["TaxiObservationEntry"][];
+            /** Format: int64 */
+            page: number;
+            /** Format: int64 */
+            page_size: number;
+            /** Format: int64 */
+            total: number;
         };
         /**
          * @description Outcome of generating Tier-1 support requests for an FNO: the neighbouring ARTCCs a request was
@@ -10030,6 +10198,40 @@ export interface operations {
             };
         };
     };
+    projected_traffic: {
+        parameters: {
+            query: {
+                /** @description Seconds ahead to project (0-5400) */
+                offset_sec: number;
+            };
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["TrafficAircraft"][];
+                };
+            };
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+        };
+    };
     validate_fixes: {
         parameters: {
             query?: {
@@ -11545,6 +11747,102 @@ export interface operations {
             };
         };
     };
+    list_taxi_estimates: {
+        parameters: {
+            query: {
+                /** @description Airport ICAO (required — estimates are computed per-airport) */
+                airport: string;
+                /** @description Filter to one gate/parking spot */
+                gate_id?: string;
+                /** @description Filter to one aircraft type */
+                aircraft?: string;
+                /** @description Filter to one departure runway */
+                runway?: string;
+                /** @description Only include samples observed at/after (RFC 3339) */
+                from?: string;
+                /** @description Only include samples observed at/before (RFC 3339) */
+                to?: string;
+                /** @description Include out-of-bounds samples in the estimate's input (default true) */
+                include_outliers?: boolean;
+                /** @description Only combos where pushback or taxi resolved at this ladder tier */
+                fallback_tier?: string;
+                /** @description 1-based page (default 1) */
+                page?: number;
+                /** @description Page size (default 50, max 100) */
+                page_size?: number;
+            };
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["TaxiEstimatePage"];
+                };
+            };
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+        };
+    };
+    list_taxi_observations: {
+        parameters: {
+            query?: {
+                /** @description Filter to one airport ICAO */
+                airport?: string;
+                /** @description Filter to one gate/parking spot */
+                gate_id?: string;
+                /** @description Filter to one aircraft type */
+                aircraft?: string;
+                /** @description Filter to one departure runway */
+                runway?: string;
+                /** @description Only observed at/after (RFC 3339) */
+                from?: string;
+                /** @description Only observed at/before (RFC 3339) */
+                to?: string;
+                /** @description Include rows outside taxi_estimate's sanity bounds (default true) */
+                include_outliers?: boolean;
+                /** @description 1-based page (default 1) */
+                page?: number;
+                /** @description Page size (default 50, max 100) */
+                page_size?: number;
+            };
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["TaxiObservationPage"];
+                };
+            };
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+        };
+    };
     issue_cfr: {
         parameters: {
             query?: never;
@@ -11665,6 +11963,49 @@ export interface operations {
                 content: {
                     "application/json": components["schemas"]["Flow"];
                 };
+            };
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            503: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+        };
+    };
+    airport_aadc: {
+        parameters: {
+            query?: {
+                /** @description Bucket width in minutes: 15, 30, or 60 */
+                bucket_min?: number;
+            };
+            header?: never;
+            path: {
+                /** @description Arrival airport ICAO */
+                icao: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["AadcResponse"];
+                };
+            };
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
             };
             401: {
                 headers: {
