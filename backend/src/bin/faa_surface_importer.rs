@@ -1,4 +1,4 @@
-//! Offline importer: bundles US airport surface geometry (ramp/apron areas, taxiways) from the
+//! Offline importer: bundles US airport surface geometry (ramp/apron areas, taxiways, runways) from the
 //! FAA's Aeronautical Information Services "Aerodrome Mapping" (AM) ArcGIS feature services into
 //! a committed data file.
 //!
@@ -10,8 +10,12 @@
 //! bounding-box queries or rate limiting needed, unlike Overpass. See VATUSA/OIS#230.
 //!
 //! ```text
-//! cargo run -p ois-backend --bin faa-surface-importer
+//! cargo run -p ois-backend --bin faa-surface-importer                   # all layers
+//! cargo run -p ois-backend --bin faa-surface-importer -- --runways-only  # only AM_Runway (#279)
 //! ```
+//! `--runways-only` merges each airport's `runways` into the existing extract, leaving its taxiways
+//! and ramps untouched. It still fetches every layer, so airports are keyed exactly as a full run
+//! would key them (see **Keying** below).
 //! No database connection needed — this only makes HTTP calls to the FAA's ArcGIS services and
 //! writes the output file directly. A full run pages through ~20k taxiway and ~4k apron features
 //! nationwide, which completes in well under a minute against this first-party service.
@@ -27,7 +31,8 @@
 //! {
 //!   "KDCA": {
 //!     "taxiways": [{ "name": "M", "rings": [[[38.85, -77.04], ...]] }],
-//!     "ramps": [{ "name": "GENERAL AVIATION PARKING", "kind": "apron", "rings": [[[38.85, -77.04], ...]] }]
+//!     "ramps": [{ "name": "GENERAL AVIATION PARKING", "kind": "apron", "rings": [[[38.85, -77.04], ...]] }],
+//!     "runways": [{ "name": "01/19", "rings": [[[38.85, -77.04], ...]] }]
 //!   }
 //! }
 //! ```
@@ -39,6 +44,9 @@
 //!   codebase's existing `flow.airport_ramp_area.kind` convention (the `"ramp"` kind stays
 //!   reserved for manual/CRC-imported rows). `rings` holds a single ring (exterior only, same
 //!   simplification as taxiways) — polygon semantics, a 1:1 fit for `flow.airport_ramp_area.rings`.
+//! - `runways`: one entry per `AM_Runway` polygon feature — the runway pavement outline, same ring
+//!   shape as taxiways, a 1:1 fit for `flow.airport_runway.rings` (#279). Display geometry only:
+//!   `data/runways.json` stays the Runway Balancer's heading/length source.
 //! - `name` is the feature's `DESIGNATOR` field (e.g. taxiway letter, apron use description), or
 //!   `FAA-<OBJECTID>` when `DESIGNATOR` is blank.
 //! - **Keying.** The source `ICAO_ID` is unreliable: it's sometimes blank (all of KRUT's taxiways),
@@ -63,6 +71,12 @@ const TAXIWAY_URL: &str =
     "https://services6.arcgis.com/ssFJjBXIUyZDrSYZ/arcgis/rest/services/AM_Taxiway/FeatureServer/0";
 const APRON_URL: &str =
     "https://services6.arcgis.com/ssFJjBXIUyZDrSYZ/arcgis/rest/services/AM_Apron/FeatureServer/0";
+const RUNWAY_URL: &str =
+    "https://services6.arcgis.com/ssFJjBXIUyZDrSYZ/arcgis/rest/services/AM_Runway/FeatureServer/0";
+/// Attributes requested per layer. AM_Runway carries its designator (`01/19`) in `RWY_ID` — its
+/// `DESIGNATOR` is blank on almost every feature.
+const SURFACE_FIELDS: &str = "ICAO_ID,FAA_ID,DESIGNATOR,OBJECTID";
+const RUNWAY_FIELDS: &str = "ICAO_ID,FAA_ID,RWY_ID,OBJECTID";
 const PAGE_SIZE: usize = 2000;
 /// Safety cap on pages per layer (nationwide totals are ~11 pages at `PAGE_SIZE`) — guards
 /// against an infinite loop if the service ever ignores `resultOffset`.
@@ -78,13 +92,16 @@ const QUOTA_BACKOFF: Duration = Duration::from_secs(65);
 #[derive(Debug, Default, Serialize)]
 struct AirportSurface {
     #[serde(skip_serializing_if = "Vec::is_empty")]
-    taxiways: Vec<TaxiwayRow>,
+    taxiways: Vec<PolygonRow>,
     #[serde(skip_serializing_if = "Vec::is_empty")]
     ramps: Vec<RampRow>,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    runways: Vec<PolygonRow>,
 }
 
+/// A named pavement polygon — a taxiway or a runway.
 #[derive(Debug, Serialize)]
-struct TaxiwayRow {
+struct PolygonRow {
     name: String,
     rings: Vec<Vec<[f64; 2]>>,
 }
@@ -139,6 +156,9 @@ struct Properties {
     faa_id: Option<String>,
     #[serde(rename = "DESIGNATOR")]
     designator: Option<String>,
+    /// `AM_Runway` only: the runway designator, e.g. `01/19`.
+    #[serde(rename = "RWY_ID", default)]
+    rwy_id: Option<String>,
     #[serde(rename = "OBJECTID")]
     object_id: Option<i64>,
 }
@@ -263,11 +283,20 @@ fn feature_name(designator: Option<&str>, object_id: Option<i64>) -> String {
         .unwrap_or_else(|| format!("FAA-{}", object_id.unwrap_or_default()))
 }
 
-fn map_taxiways(
+/// A polygon feature's designator: `DESIGNATOR`, or `RWY_ID` for a runway.
+fn polygon_designator(p: &Properties) -> Option<&str> {
+    p.designator
+        .as_deref()
+        .filter(|d| !d.trim().is_empty())
+        .or(p.rwy_id.as_deref())
+}
+
+/// Maps `AM_Taxiway` or `AM_Runway` features — both are named pavement polygons — to rows by ICAO.
+fn map_polygons(
     features: &[Feature],
     canonical: &HashMap<String, String>,
-) -> (HashMap<String, Vec<TaxiwayRow>>, MapStats) {
-    let mut by_icao: HashMap<String, Vec<TaxiwayRow>> = HashMap::new();
+) -> (HashMap<String, Vec<PolygonRow>>, MapStats) {
+    let mut by_icao: HashMap<String, Vec<PolygonRow>> = HashMap::new();
     let mut stats = MapStats::default();
 
     for f in features {
@@ -282,8 +311,8 @@ fn map_taxiways(
             stats.skipped_no_geometry += 1;
             continue;
         };
-        by_icao.entry(icao).or_default().push(TaxiwayRow {
-            name: feature_name(f.properties.designator.as_deref(), f.properties.object_id),
+        by_icao.entry(icao).or_default().push(PolygonRow {
+            name: feature_name(polygon_designator(&f.properties), f.properties.object_id),
             rings: vec![ring],
         });
     }
@@ -331,9 +360,9 @@ fn client() -> reqwest::Client {
 /// One offset page of a layer. `orderByFields=OBJECTID` is required for offset paging to be
 /// stable — ArcGIS doesn't guarantee a consistent order across pages without one, which would
 /// silently duplicate some features and skip others.
-fn page_url(base_url: &str, offset: usize) -> String {
+fn page_url(base_url: &str, fields: &str, offset: usize) -> String {
     format!(
-        "{base_url}/query?where=1%3D1&outFields=ICAO_ID,FAA_ID,DESIGNATOR,OBJECTID&orderByFields=OBJECTID&f=geojson&resultRecordCount={PAGE_SIZE}&resultOffset={offset}"
+        "{base_url}/query?where=1%3D1&outFields={fields}&orderByFields=OBJECTID&f=geojson&resultRecordCount={PAGE_SIZE}&resultOffset={offset}"
     )
 }
 
@@ -360,9 +389,10 @@ fn classify_page(page: FeatureCollection) -> PageOutcome {
 async fn fetch_page(
     http: &reqwest::Client,
     base_url: &str,
+    fields: &str,
     offset: usize,
 ) -> Result<FeatureCollection, String> {
-    let url = page_url(base_url, offset);
+    let url = page_url(base_url, fields, offset);
     let mut last_err = String::new();
 
     for attempt in 1..=MAX_ATTEMPTS {
@@ -423,24 +453,56 @@ where
 async fn main() {
     tracing_subscriber::fmt::init();
     let http = client();
+    let out_path = concat!(env!("CARGO_MANIFEST_DIR"), "/data/faa_surface.json");
+    let runways_only = std::env::args().any(|a| a == "--runways-only");
 
     tracing::info!("fetching AM_Taxiway features");
-    let taxiway_features =
-        fetch_all_features(|offset| fetch_page(&http, TAXIWAY_URL, offset), PAGE_DELAY)
-            .await
-            .expect("failed to fetch AM_Taxiway features");
+    let taxiway_features = fetch_all_features(
+        |offset| fetch_page(&http, TAXIWAY_URL, SURFACE_FIELDS, offset),
+        PAGE_DELAY,
+    )
+    .await
+    .expect("failed to fetch AM_Taxiway features");
 
     tracing::info!("fetching AM_Apron features");
-    let apron_features =
-        fetch_all_features(|offset| fetch_page(&http, APRON_URL, offset), PAGE_DELAY)
-            .await
-            .expect("failed to fetch AM_Apron features");
+    let apron_features = fetch_all_features(
+        |offset| fetch_page(&http, APRON_URL, SURFACE_FIELDS, offset),
+        PAGE_DELAY,
+    )
+    .await
+    .expect("failed to fetch AM_Apron features");
 
+    tracing::info!("fetching AM_Runway features");
+    let runway_features = fetch_all_features(
+        |offset| fetch_page(&http, RUNWAY_URL, RUNWAY_FIELDS, offset),
+        PAGE_DELAY,
+    )
+    .await
+    .expect("failed to fetch AM_Runway features");
+
+    // Keyed across every layer, so a layer's airports land under the same ICAO either way.
     let canonical = canonical_icaos(
-        taxiway_features.iter().chain(apron_features.iter()),
+        taxiway_features
+            .iter()
+            .chain(apron_features.iter())
+            .chain(runway_features.iter()),
         &known_airports(),
     );
-    let (taxiways_by_icao, taxiway_stats) = map_taxiways(&taxiway_features, &canonical);
+    let (runways_by_icao, runway_stats) = map_polygons(&runway_features, &canonical);
+
+    if runways_only {
+        let existing = std::fs::read_to_string(out_path).expect("failed to read existing extract");
+        tracing::info!(
+            runway_features = runway_features.len(),
+            runway_skipped_no_icao = runway_stats.skipped_no_icao,
+            "merging runways into the existing extract"
+        );
+        std::fs::write(out_path, merge_runways(&existing, runways_by_icao))
+            .expect("failed to write output file");
+        return;
+    }
+
+    let (taxiways_by_icao, taxiway_stats) = map_polygons(&taxiway_features, &canonical);
     let (ramps_by_icao, apron_stats) = map_ramps(&apron_features, &canonical);
 
     let mut extract: HashMap<String, AirportSurface> = HashMap::new();
@@ -450,24 +512,54 @@ async fn main() {
     for (icao, ramps) in ramps_by_icao {
         extract.entry(icao).or_default().ramps = ramps;
     }
+    for (icao, runways) in runways_by_icao {
+        extract.entry(icao).or_default().runways = runways;
+    }
 
     tracing::info!(
         airports = extract.len(),
         taxiway_features = taxiway_features.len(),
         apron_features = apron_features.len(),
+        runway_features = runway_features.len(),
         taxiway_skipped_no_icao = taxiway_stats.skipped_no_icao,
         apron_skipped_no_icao = apron_stats.skipped_no_icao,
+        runway_skipped_no_icao = runway_stats.skipped_no_icao,
         taxiway_multi_ring_seen = taxiway_stats.multi_ring_seen,
         apron_multi_ring_seen = apron_stats.multi_ring_seen,
         "done"
     );
 
-    let out_path = concat!(env!("CARGO_MANIFEST_DIR"), "/data/faa_surface.json");
     // Compact, not pretty — this is a large array-of-coordinates file; per-element indentation
     // would multiply its size for a file nobody reads by hand.
     let out = serde_json::to_string(&extract).expect("extract should serialize");
     std::fs::write(out_path, out).expect("failed to write output file");
     tracing::info!(path = out_path, count = extract.len(), "wrote output file");
+}
+
+/// Sets each airport's `runways` in an existing extract (`--runways-only`), replacing any previous
+/// runways and leaving every other key untouched. An airport with runways but no other data gets
+/// an entry of its own; a previous runway set for an airport no longer in `runways` is dropped.
+fn merge_runways(existing: &str, runways: HashMap<String, Vec<PolygonRow>>) -> String {
+    let mut extract: serde_json::Map<String, serde_json::Value> =
+        serde_json::from_str(existing).expect("existing extract should parse");
+    for airport in extract.values_mut() {
+        if let Some(obj) = airport.as_object_mut() {
+            obj.remove("runways");
+        }
+    }
+    for (icao, rows) in runways {
+        let airport = extract
+            .entry(icao)
+            .or_insert_with(|| serde_json::Value::Object(Default::default()));
+        airport
+            .as_object_mut()
+            .expect("extract airports are objects")
+            .insert(
+                "runways".to_string(),
+                serde_json::to_value(rows).expect("runways should serialize"),
+            );
+    }
+    serde_json::to_string(&extract).expect("extract should serialize")
 }
 
 #[cfg(test)]
@@ -539,7 +631,7 @@ mod tests {
         ];
         let canonical = canonical_icaos(&features, &known(&["KDCA", "KMEM"]));
 
-        let (by_icao, stats) = map_taxiways(&features, &canonical);
+        let (by_icao, stats) = map_polygons(&features, &canonical);
 
         assert_eq!(stats.skipped_no_icao, 1);
         assert_eq!(stats.multi_ring_seen, 0);
@@ -553,6 +645,48 @@ mod tests {
 
         // blank DESIGNATOR falls back to a stable FAA-<OBJECTID> name.
         assert_eq!(by_icao["KMEM"][0].name, "FAA-42");
+    }
+
+    #[test]
+    fn runways_are_named_by_rwy_id() {
+        let mut rwy = feature(Some("KDCA"), Some("DCA"), None, 7, square());
+        rwy.properties.rwy_id = Some("01/19".into());
+        let features = vec![rwy];
+        let canonical = canonical_icaos(&features, &known(&["KDCA"]));
+
+        let (by_icao, _) = map_polygons(&features, &canonical);
+
+        assert_eq!(by_icao["KDCA"][0].name, "01/19");
+    }
+
+    #[test]
+    fn merging_runways_keeps_other_layers_and_replaces_previous_runways() {
+        let existing = r#"{"KDCA":{"taxiways":[{"name":"M","rings":[[[1.0,2.0]]]}],"runways":[{"name":"OLD","rings":[]}]},"KBVU":{"runways":[{"name":"GONE","rings":[]}]}}"#;
+        let runways = HashMap::from([
+            (
+                "KDCA".to_string(),
+                vec![PolygonRow {
+                    name: "01/19".into(),
+                    rings: vec![vec![[38.85, -77.04]]],
+                }],
+            ),
+            (
+                "KZZZ".to_string(),
+                vec![PolygonRow {
+                    name: "09/27".into(),
+                    rings: vec![vec![[1.0, 2.0]]],
+                }],
+            ),
+        ]);
+
+        let merged: serde_json::Value =
+            serde_json::from_str(&merge_runways(existing, runways)).unwrap();
+
+        assert_eq!(merged["KDCA"]["taxiways"][0]["name"], "M");
+        assert_eq!(merged["KDCA"]["runways"][0]["name"], "01/19");
+        assert_eq!(merged["KDCA"]["runways"].as_array().unwrap().len(), 1);
+        assert_eq!(merged["KZZZ"]["runways"][0]["name"], "09/27");
+        assert!(merged["KBVU"].get("runways").is_none());
     }
 
     /// Regression (#230 QA): every real source anomaly seen live in AM_Taxiway/AM_Apron.
@@ -576,7 +710,7 @@ mod tests {
         ];
         let canonical = canonical_icaos(&features, &known(&["PANC", "KDTW", "KRUT"]));
 
-        let (by_icao, stats) = map_taxiways(&features, &canonical);
+        let (by_icao, stats) = map_polygons(&features, &canonical);
 
         let mut keys: Vec<&str> = by_icao.keys().map(String::as_str).collect();
         keys.sort_unstable();
@@ -594,7 +728,7 @@ mod tests {
         ];
         let canonical = canonical_icaos(&features, &known(&[]));
         assert!(canonical.is_empty());
-        let (by_icao, _) = map_taxiways(&features, &canonical);
+        let (by_icao, _) = map_polygons(&features, &canonical);
         assert!(by_icao.contains_key("KAAA") && by_icao.contains_key("PAAA"));
     }
 
@@ -637,7 +771,7 @@ mod tests {
             ]),
         )];
 
-        let (by_icao, stats) = map_taxiways(&features, &HashMap::new());
+        let (by_icao, stats) = map_polygons(&features, &HashMap::new());
 
         assert_eq!(stats.multi_ring_seen, 1);
         // only the exterior ring's points are kept.
@@ -666,7 +800,7 @@ mod tests {
 
     #[test]
     fn page_urls_are_ordered_for_stable_offset_paging() {
-        let url = page_url(TAXIWAY_URL, 4000);
+        let url = page_url(TAXIWAY_URL, SURFACE_FIELDS, 4000);
         assert!(url.contains("orderByFields=OBJECTID"), "{url}");
         assert!(url.contains("resultOffset=4000"), "{url}");
         assert!(url.contains("FAA_ID"), "{url}");
@@ -737,7 +871,7 @@ mod tests {
             1,
             serde_json::json!([[[-77.0416274123456, 38.8520919987654]]]),
         )];
-        let (by_icao, _) = map_taxiways(&features, &HashMap::new());
+        let (by_icao, _) = map_polygons(&features, &HashMap::new());
         assert_eq!(
             by_icao["KDCA"][0].rings,
             vec![vec![[38.852092, -77.0416274]]]
@@ -746,7 +880,7 @@ mod tests {
 
     #[test]
     fn empty_page_yields_no_rows() {
-        let (by_icao, stats) = map_taxiways(&[], &HashMap::new());
+        let (by_icao, stats) = map_polygons(&[], &HashMap::new());
         assert!(by_icao.is_empty());
         assert_eq!(stats.skipped_no_icao, 0);
     }
@@ -760,7 +894,7 @@ mod tests {
             1,
             serde_json::json!([]),
         )];
-        let (by_icao, stats) = map_taxiways(&features, &HashMap::new());
+        let (by_icao, stats) = map_polygons(&features, &HashMap::new());
         assert!(by_icao.is_empty());
         assert_eq!(stats.skipped_no_geometry, 1);
     }

@@ -340,6 +340,38 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/v1/airports/{icao}/runways": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        post: operations["create_airport_runway"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/airports/{icao}/runways/{id}": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put: operations["update_airport_runway"];
+        post?: never;
+        delete: operations["delete_airport_runway"];
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/v1/airports/{icao}/surface": {
         parameters: {
             query?: never;
@@ -3105,6 +3137,22 @@ export interface components {
             updated_at: string;
             updated_by?: string | null;
         };
+        /**
+         * @description An airport runway's pavement outline (#279) — display geometry, independent of the Runway
+         *     Balancer's `data/runways.json`. `name` is the designator (e.g. `01/19`); `rings` has the same
+         *     shape and editor semantics as [`AirportTaxiwayBody::rings`].
+         */
+        AirportRunwayBody: {
+            editable: boolean;
+            icao: string;
+            id: string;
+            name: string;
+            rings: number[][][];
+            /** @description `manual` | `osm` | `crc` | `faa`. */
+            source: string;
+            /** Format: date-time */
+            updated_at: string;
+        };
         /** @description Debrief stats for one featured (configured) event airport over the capture window. */
         AirportStatBody: {
             /** Format: int64 */
@@ -3129,6 +3177,7 @@ export interface components {
         AirportSurfaceBody: {
             gates: components["schemas"]["AirportGateBody"][];
             ramp_areas: components["schemas"]["AirportRampAreaBody"][];
+            runways: components["schemas"]["AirportRunwayBody"][];
             taxiways: components["schemas"]["AirportTaxiwayBody"][];
         };
         /**
@@ -3804,6 +3853,7 @@ export interface components {
             osm_ramps_retired: number;
             osm_taxiways_retired: number;
             ramps_inserted: number;
+            runways_inserted: number;
             taxiways_inserted: number;
         };
         /** @description A VATUSA facility (ARTCC). `artcc_id` scope values reference `id`. */
@@ -5470,6 +5520,10 @@ export interface components {
             /** @description `predicted` or `override`; defaults to `override` when omitted. */
             source?: string | null;
         };
+        UpsertAirportRunwayRequest: {
+            name: string;
+            rings: number[][][];
+        };
         UpsertAirportTaxiwayRequest: {
             name: string;
             rings: number[][][];
@@ -6532,6 +6586,137 @@ export interface operations {
         };
     };
     delete_airport_ramp_area: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                icao: string;
+                id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            204: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+        };
+    };
+    create_airport_runway: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                icao: string;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["UpsertAirportRunwayRequest"];
+            };
+        };
+        responses: {
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["AirportRunwayBody"];
+                };
+            };
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+        };
+    };
+    update_airport_runway: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                icao: string;
+                id: string;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["UpsertAirportRunwayRequest"];
+            };
+        };
+        responses: {
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["AirportRunwayBody"];
+                };
+            };
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+        };
+    };
+    delete_airport_runway: {
         parameters: {
             query?: never;
             header?: never;

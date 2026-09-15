@@ -1,6 +1,12 @@
 import {describe, expect, it} from "vitest";
 
-import type {AirportGate, AirportRampArea, AirportSurface, AirportTaxiway} from "@/lib/airport-surface";
+import type {
+  AirportGate,
+  AirportRampArea,
+  AirportRunway,
+  AirportSurface,
+  AirportTaxiway,
+} from "@/lib/airport-surface";
 
 import {buildSurfaceDraftLayers, buildSurfaceLayers} from "./layers";
 
@@ -53,10 +59,29 @@ const taxiway = (over: Partial<AirportTaxiway>): AirportTaxiway => ({
   ...over,
 });
 
+const runway = (over: Partial<AirportRunway>): AirportRunway => ({
+  id: "rw1",
+  icao: "KTST",
+  name: "01/19",
+  rings: [
+    [
+      [38.85, -77.04],
+      [38.87, -77.04],
+      [38.87, -77.041],
+      [38.85, -77.04],
+    ],
+  ],
+  source: "faa",
+  editable: true,
+  updated_at: "2026-01-01T00:00:00Z",
+  ...over,
+});
+
 const surface = (over: Partial<AirportSurface>): AirportSurface => ({
   gates: [],
   ramp_areas: [],
   taxiways: [],
+  runways: [],
   ...over,
 });
 
@@ -142,6 +167,13 @@ describe("buildSurfaceDraftLayers", () => {
       expect(edited.map((l) => l.id)).toContain("surface-draft-polygon");
     },
   );
+
+  it("renders runways as a filled polygon layer and leaves out the selected one (#279)", () => {
+    const s = surface({ runways: [runway({ id: "a" }), runway({ id: "b" })] });
+    const all = buildSurfaceLayers(s, null).find((l) => l.id === "surface-runways");
+    expect(all?.constructor.name).toBe("PolygonLayer");
+    expect(dataIds(buildSurfaceLayers(s, { kind: "runway", id: "a" }), "surface-runways")).toEqual(["b"]);
+  });
 
   it("renders saved taxiways as a filled polygon layer, like ramp areas (#278)", () => {
     const layers = buildSurfaceLayers(surface({ taxiways: [taxiway({ id: "t" })] }), null);

@@ -8,14 +8,16 @@ export type AirportSurface = components["schemas"]["AirportSurfaceBody"];
 export type AirportGate = components["schemas"]["AirportGateBody"];
 export type AirportRampArea = components["schemas"]["AirportRampAreaBody"];
 export type AirportTaxiway = components["schemas"]["AirportTaxiwayBody"];
+export type AirportRunway = components["schemas"]["AirportRunwayBody"];
 export type UpsertAirportGate = components["schemas"]["UpsertAirportGateRequest"];
 export type UpsertAirportRampArea = components["schemas"]["UpsertAirportRampAreaRequest"];
 export type UpsertAirportTaxiway = components["schemas"]["UpsertAirportTaxiwayRequest"];
+export type UpsertAirportRunway = components["schemas"]["UpsertAirportRunwayRequest"];
 export type FaaRepullResult = components["schemas"]["FaaRepullResult"];
 
 const key = (icao: string) => ["airport-surface", icao] as const;
 
-/** An airport's full surface geometry (gates, ramp/apron areas, taxiways) for the editor. */
+/** An airport's full surface geometry (gates, ramp/apron areas, taxiways, runways) for the editor. */
 export function useAirportSurface(icao: string | null) {
   return useQuery({
     queryKey: key(icao ?? ""),
@@ -177,7 +179,56 @@ export function useDeleteAirportTaxiway(icao: string) {
   });
 }
 
-/** Re-pull this airport's FAA-sourced ramp/taxiway rows from the current bundled extract (#232) —
+export function useCreateAirportRunway(icao: string) {
+  const queryClient = useQueryClient();
+  const toast = useToast();
+  return useMutation({
+    mutationFn: async (body: UpsertAirportRunway) => {
+      const { data, error } = await ois.POST("/api/v1/airports/{icao}/runways", {
+        params: { path: { icao } },
+        body,
+      });
+      if (error || !data) throw new Error("create failed");
+      return data;
+    },
+    onSuccess: () => queryClient.invalidateQueries({ queryKey: key(icao) }),
+    onError: () => toast.error("Couldn’t add the runway"),
+  });
+}
+
+export function useUpdateAirportRunway(icao: string) {
+  const queryClient = useQueryClient();
+  const toast = useToast();
+  return useMutation({
+    mutationFn: async ({ id, body }: { id: string; body: UpsertAirportRunway }) => {
+      const { data, error } = await ois.PUT("/api/v1/airports/{icao}/runways/{id}", {
+        params: { path: { icao, id } },
+        body,
+      });
+      if (error || !data) throw new Error("save failed");
+      return data;
+    },
+    onSuccess: () => queryClient.invalidateQueries({ queryKey: key(icao) }),
+    onError: () => toast.error("Couldn’t save the runway"),
+  });
+}
+
+export function useDeleteAirportRunway(icao: string) {
+  const queryClient = useQueryClient();
+  const toast = useToast();
+  return useMutation({
+    mutationFn: async (id: string) => {
+      const { error } = await ois.DELETE("/api/v1/airports/{icao}/runways/{id}", {
+        params: { path: { icao, id } },
+      });
+      if (error) throw new Error("delete failed");
+    },
+    onSuccess: () => queryClient.invalidateQueries({ queryKey: key(icao) }),
+    onError: () => toast.error("Couldn’t delete the runway"),
+  });
+}
+
+/** Re-pull this airport's FAA-sourced ramp/taxiway/runway rows from the current bundled extract (#232) —
  * an on-demand equivalent of #231's nationwide startup seed, scoped to one airport. */
 export function useRepullFaaSurface(icao: string) {
   const queryClient = useQueryClient();
@@ -195,7 +246,7 @@ export function useRepullFaaSurface(icao: string) {
     onSuccess: (data: FaaRepullResult) => {
       queryClient.invalidateQueries({ queryKey: key(icao) });
       toast.success("Re-pulled FAA surface data", {
-        description: `${data.taxiways_inserted} taxiways, ${data.ramps_inserted} ramps`,
+        description: `${data.taxiways_inserted} taxiways, ${data.ramps_inserted} ramps, ${data.runways_inserted} runways`,
       });
     },
     onError: (e) =>

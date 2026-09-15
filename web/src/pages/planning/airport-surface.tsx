@@ -73,7 +73,12 @@ function AirportSurfaceEditor({ icao }: { icao: string }) {
     );
   }
 
-  const rows = [...surface.data.gates, ...surface.data.ramp_areas, ...surface.data.taxiways];
+  const rows = [
+    ...surface.data.gates,
+    ...surface.data.ramp_areas,
+    ...surface.data.taxiways,
+    ...surface.data.runways,
+  ];
   const editable = rows[0]?.editable ?? hasPermission(me, "flow.surface_data.update");
 
   return (

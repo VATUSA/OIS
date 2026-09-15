@@ -748,12 +748,36 @@ pub struct UpsertAirportTaxiwayRequest {
     pub rings: Vec<Vec<[f64; 2]>>,
 }
 
+/// An airport runway's pavement outline (#279) — display geometry, independent of the Runway
+/// Balancer's `data/runways.json`. `name` is the designator (e.g. `01/19`); `rings` has the same
+/// shape and editor semantics as [`AirportTaxiwayBody::rings`].
+#[derive(Debug, Serialize, ToSchema, sqlx::FromRow)]
+pub struct AirportRunwayBody {
+    pub id: String,
+    pub icao: String,
+    pub name: String,
+    #[schema(value_type = Vec<Vec<Vec<f64>>>)]
+    pub rings: sqlx::types::Json<Vec<Vec<[f64; 2]>>>,
+    /// `manual` | `osm` | `crc` | `faa`.
+    pub source: String,
+    pub updated_at: DateTime<Utc>,
+    #[sqlx(default)]
+    pub editable: bool,
+}
+
+#[derive(Debug, Deserialize, ToSchema)]
+pub struct UpsertAirportRunwayRequest {
+    pub name: String,
+    pub rings: Vec<Vec<[f64; 2]>>,
+}
+
 /// An airport's full surface geometry, combined for one read.
 #[derive(Debug, Serialize, ToSchema)]
 pub struct AirportSurfaceBody {
     pub gates: Vec<AirportGateBody>,
     pub ramp_areas: Vec<AirportRampAreaBody>,
     pub taxiways: Vec<AirportTaxiwayBody>,
+    pub runways: Vec<AirportRunwayBody>,
 }
 
 /// The result of re-pulling one airport's `source='faa'` surface geometry from the bundled FAA
@@ -762,6 +786,7 @@ pub struct AirportSurfaceBody {
 pub struct FaaRepullResult {
     pub taxiways_inserted: usize,
     pub ramps_inserted: usize,
+    pub runways_inserted: usize,
     pub osm_taxiways_retired: usize,
     pub osm_ramps_retired: usize,
 }

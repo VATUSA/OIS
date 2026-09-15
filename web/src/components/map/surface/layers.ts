@@ -2,13 +2,19 @@ import {PathLayer, PolygonLayer, ScatterplotLayer} from "@deck.gl/layers";
 import {PathStyleExtension} from "@deck.gl/extensions";
 import type {Layer} from "@deck.gl/core";
 
-import type {AirportGate, AirportRampArea, AirportSurface, AirportTaxiway} from "@/lib/airport-surface";
+import type {
+  AirportGate,
+  AirportRampArea,
+  AirportRunway,
+  AirportSurface,
+  AirportTaxiway,
+} from "@/lib/airport-surface";
 
 import {hexToRgb} from "../lib/colors";
 import {toDeckPath, type LatLng} from "../lib/geo";
 import type {RGBA} from "../lib/types";
 
-export type SurfaceKind = "gate" | "ramp" | "taxiway";
+export type SurfaceKind = "gate" | "ramp" | "taxiway" | "runway";
 
 export interface SelectedSurfaceItem {
   kind: SurfaceKind;
@@ -19,18 +25,19 @@ export const SURFACE_COLORS: Record<SurfaceKind, string> = {
   gate: "#f59e0b",
   taxiway: "#38bdf8",
   ramp: "#a78bfa",
+  runway: "#94a3b8",
 };
 
 /** Fewest vertices each shape needs before it can be finalized/saved. */
-export const MIN_SURFACE_POINTS: Record<SurfaceKind, number> = { gate: 1, taxiway: 3, ramp: 3 };
+export const MIN_SURFACE_POINTS: Record<SurfaceKind, number> = { gate: 1, taxiway: 3, ramp: 3, runway: 3 };
 
-/** Whether a kind is a polygon (ramp/apron area or taxiway pavement, #278) rather than a point. */
+/** Whether a kind is a polygon (ramp/apron area, taxiway or runway pavement) rather than a point. */
 export const isPolygonKind = (kind: SurfaceKind) => kind !== "gate";
 
 /** A ramp area's or taxiway's rings as deck.gl `[lon, lat]` polygon rings. */
 const toDeckRings = (rings: number[][][]) => rings.map((ring) => ring.map(([lat, lon]) => [lon, lat]));
 
-/** A filled, geographic (so it scales with zoom) polygon layer — ramp areas and taxiways share it. */
+/** A filled, geographic (so it scales with zoom) polygon layer — ramps, taxiways, runways share it. */
 function polygonLayer<T extends { rings: number[][][] }>(id: string, data: T[], kind: SurfaceKind): Layer {
   const [r, g, b] = hexToRgb(SURFACE_COLORS[kind]);
   return new PolygonLayer<T>({
@@ -49,7 +56,7 @@ function polygonLayer<T extends { rings: number[][][] }>(id: string, data: T[], 
 }
 
 /**
- * Saved geometry: ramp/apron areas and taxiway pavement as filled polygons, gates as points. The
+ * Saved geometry: ramp/apron areas and taxiway/runway pavement as filled polygons, gates as points. The
  * item matching `selected` (if any) is left out — it's rendered instead by the draft layers below,
  * so a being-edited shape doesn't show twice.
  */
@@ -62,6 +69,9 @@ export function buildSurfaceLayers(surface: AirportSurface, selected: SelectedSu
 
   const taxiways = surface.taxiways.filter((t) => !isSelected("taxiway", t.id));
   if (taxiways.length > 0) layers.push(polygonLayer<AirportTaxiway>("surface-taxiways", taxiways, "taxiway"));
+
+  const runways = surface.runways.filter((r) => !isSelected("runway", r.id));
+  if (runways.length > 0) layers.push(polygonLayer<AirportRunway>("surface-runways", runways, "runway"));
 
   const gates = surface.gates.filter((g) => !isSelected("gate", g.id));
   if (gates.length > 0) {

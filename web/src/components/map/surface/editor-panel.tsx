@@ -24,6 +24,7 @@ const HINT: Record<SurfaceKind, string> = {
   gate: "Click the map to place the gate.",
   taxiway: "Click to add corners of the taxiway pavement outline, then Close shape once you have at least 3.",
   ramp: "Click to add corners of the ramp/apron boundary, then Close shape once you have at least 3.",
+  runway: "Click to add corners of the runway pavement outline, then Close shape once you have at least 3.",
 };
 
 /**
