@@ -290,7 +290,7 @@ The full list with dev defaults is in `.env.example`. The ones that gate functio
 - **Server admin bootstrap**: `OIS_SERVER_ADMIN_CID` (comma-separated CIDs) — the only way to grant
   `SERVER_ADMIN`.
 - **VATUSA** (optional roster sync): `VATUSA_API_BASE`, `VATUSA_API_KEY`, `OIS_PUBLIC_URL`.
-- **Discord bot** (optional): `DISCORD_BOT_TOKEN`, `OIS_SERVICE_ACCOUNT_TOKEN`.
+- **Discord bot** (optional): `DISCORD_BOT_TOKEN`, `OIS_API_BASE`, `OIS_API_TOKEN`, `OIS_POLL_SECS`.
 - **Web/Vite dev**: `VITE_OIS_API_URL`, `OIS_OPENAPI_URL` (codegen source) — in `web/.env.local`.
 
 Never put secrets in the repo; `.env` / `web/.env.local` are gitignored.
