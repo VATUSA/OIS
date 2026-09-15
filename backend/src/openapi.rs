@@ -7,7 +7,7 @@ use utoipa::OpenApi;
 #[openapi(
     info(
         title = "OIS API",
-        version = "1.0.1",
+        version = "0.1.0",
         description = "VATUSA Event Operational Information System API"
     ),
     paths(
