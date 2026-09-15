@@ -7,7 +7,7 @@ use utoipa::OpenApi;
 #[openapi(
     info(
         title = "OIS API",
-        version = "1.0.1",
+        version = "0.1.0",
         description = "VATUSA Event Operational Information System API"
     ),
     paths(
@@ -116,6 +116,8 @@ use utoipa::OpenApi;
         crate::handlers::stats::hist_tmis,
         crate::handlers::stats::hist_gdps,
         crate::handlers::stats::hist_ground_stops,
+        crate::handlers::taxi_insights::list_taxi_observations,
+        crate::handlers::taxi_insights::list_taxi_estimates,
         crate::handlers::airport_configs::list_all_airport_configs,
         crate::handlers::airport_configs::list_airport_configs,
         crate::handlers::airport_configs::create_airport_config,
@@ -388,6 +390,10 @@ use utoipa::OpenApi;
         crate::models::Tier1GenerateResult,
         crate::models::AuditLogEntry,
         crate::models::AuditLogPage,
+        crate::models::TaxiObservationEntry,
+        crate::models::TaxiObservationPage,
+        crate::models::TaxiEstimateEntry,
+        crate::models::TaxiEstimatePage,
         crate::job_registry::JobStatus,
         crate::models::CreateServiceAccountRequest,
         crate::models::SetServiceAccountRolesRequest,

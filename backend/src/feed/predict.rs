@@ -346,6 +346,24 @@ mod tests {
     }
 
     #[test]
+    fn ground_flight_at_a_realistic_gate_offset_still_keeps_the_padding() {
+        // Regression guard (#213): a real gate/ramp position is never exactly the airport's
+        // reference point. fca.rs's ground-route trimming must recognize "still at the departure
+        // airport" structurally (by index), not by a near-exact coordinate match — otherwise
+        // padding silently drops for ordinary pre-departure traffic once it's off the ARP by even
+        // a few tenths of a mile.
+        let gate = [40.635, -73.775]; // ~0.4 nm from the KJFK reference point `input` resolves to
+        let straight = gc_dist(gate[0], gate[1], 25.79, -80.29);
+        let ground = predict(&input(gate, 0.0, 0));
+        assert!(
+            (ground.route_nm - straight * GROUND_ROUTE_FACTOR).abs() < 1e-6,
+            "ground route_nm {:.1} should be the padded {:.1} even from a gate offset from the ARP",
+            ground.route_nm,
+            straight * GROUND_ROUTE_FACTOR
+        );
+    }
+
+    #[test]
     fn unresolvable_route_falls_back_to_straight_line() {
         // Unknown airports → route_path yields < 2 anchors → straight-line fallback.
         let ac = ArrivalInput {

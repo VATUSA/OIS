@@ -18,3 +18,8 @@ services:
     build:
       context: .
       dockerfile: deploy/docs.Dockerfile
+
+  discord:
+    build:
+      context: .
+      dockerfile: deploy/discord.Dockerfile

@@ -1,8 +1,9 @@
 # Access control  *(built)*
 
 The fine-grained permission system and its editor — the backbone every other feature
-authorizes against. This is the one domain that is **implemented and working today**
-(the rest of the feature specs are forward-looking).
+authorizes against. This was the first domain built; every other spec in this directory
+has since shipped too (each carries its own status banner noting how it diverged from
+its original design) — see [features/README.md](README.md) for the current index.
 
 ## Problem
 
