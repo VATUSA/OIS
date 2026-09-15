@@ -5,7 +5,6 @@ import {
   CalendarClock,
   Gauge,
   type LucideIcon,
-  Megaphone,
   OctagonX,
   Plane,
   Radar,
@@ -23,48 +22,96 @@ import {hasPermission} from "@/lib/permissions";
 import {useGroundStops, usePrograms, useTmis} from "@/lib/tmu";
 import {formatZuluFull, hhmmZulu} from "@/lib/time";
 
-const FEATURES: { icon: LucideIcon; title: string; body: string }[] = [
+/** A tinted icon-chip accent — background + matching icon color, paired so they always read as one. */
+type Accent = { bg: string; icon: string };
+
+const ACCENT = {
+  teal: { bg: "bg-teal-500/15", icon: "text-teal-500" },
+  indigo: { bg: "bg-indigo-500/15", icon: "text-indigo-500" },
+  amber: { bg: "bg-amber-500/15", icon: "text-amber-500" },
+  rose: { bg: "bg-rose-500/15", icon: "text-rose-500" },
+  emerald: { bg: "bg-emerald-500/15", icon: "text-emerald-500" },
+  violet: { bg: "bg-violet-500/15", icon: "text-violet-500" },
+} as const satisfies Record<string, Accent>;
+
+function chipClass({ bg, icon }: Accent): string {
+  return `flex size-9 shrink-0 items-center justify-center rounded-md ${bg} ${icon}`;
+}
+
+const FEATURES: { icon: LucideIcon; title: string; body: string; to: string; accent: Accent }[] = [
   {
     icon: Gauge,
     title: "Traffic management",
     body: "Metering programs, ground stops, and restrictions — issued, tracked, and shared live.",
+    to: "/ops/tmu",
+    accent: ACCENT.teal,
   },
   {
     icon: Waypoints,
     title: "Flow constrained areas",
     body: "Draw FCAs, sequence crossing traffic, and issue CFR releases against the live network.",
+    to: "/ops/fca",
+    accent: ACCENT.indigo,
   },
   {
     icon: CalendarClock,
     title: "Event planning",
     body: "Per-event airport rates, facility support, staffing, and TMI packages that go live on cue.",
+    to: "/planning/events",
+    accent: ACCENT.amber,
   },
   {
     icon: Wind,
     title: "Runway balancer",
     body: "Assign arrivals to runways from live demand, with a rolling 10-minute board.",
+    to: "/ops/runway",
+    accent: ACCENT.rose,
   },
   {
     icon: Radar,
     title: "Facility maps",
     body: "A public, per-facility TMU map of live traffic with staff-editable color rules.",
+    to: "/facility-map",
+    accent: ACCENT.emerald,
   },
   {
     icon: TrendingUp,
     title: "Historical replay",
     body: "Scrub a past event or window and replay your dashboards at any instant.",
+    to: "/historical",
+    accent: ACCENT.violet,
   },
 ];
 
-/** Public entry points that need no sign-in. */
-function PublicLink({ to, icon: Icon, label }: { to: string; icon: LucideIcon; label: string }) {
+/** A navigable tool/feature card: icon chip + title + one-liner + arrow. Shared between the
+ * signed-out landing grid and (in principle) any future signed-in launchpad card grid, so the two
+ * states read as one visual system. */
+function FeatureCard({
+  to,
+  icon: Icon,
+  accent,
+  title,
+  body,
+}: {
+  to: string;
+  icon: LucideIcon;
+  accent: Accent;
+  title: string;
+  body: string;
+}) {
   return (
     <Link
       to={to as "/"}
-      className="flex items-center gap-1.5 rounded-md border px-3 py-1.5 text-sm font-medium transition-colors hover:bg-accent/40"
+      className="group flex items-start gap-3 rounded-lg border p-4 transition-colors hover:bg-accent/40 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
     >
-      <Icon className="size-4 text-muted-foreground" />
-      {label}
+      <span className={chipClass(accent)}>
+        <Icon className="size-5" />
+      </span>
+      <div className="flex min-w-0 flex-1 flex-col gap-0.5">
+        <span className="font-semibold">{title}</span>
+        <span className="text-sm text-muted-foreground">{body}</span>
+      </div>
+      <ArrowRight className="mt-1 size-4 shrink-0 text-muted-foreground transition-transform group-hover:translate-x-0.5" />
     </Link>
   );
 }
@@ -74,41 +121,40 @@ function SignedOut() {
     <div className="flex flex-col gap-12 py-10">
       {/* Hero */}
       <div className="flex flex-col items-center gap-5 text-center">
-        <Badge variant="secondary" className="uppercase tracking-wide">
-          VATUSA operations
-        </Badge>
+        <Radar className="size-10 text-primary" />
         <h1 className="max-w-2xl text-4xl font-semibold tracking-tight sm:text-5xl">
-          Event Operational Information System
+          OIS
         </h1>
         <p className="max-w-xl text-muted-foreground">
-          The traffic-management and event-planning platform for VATUSA — flow control, FCAs, runway
-          balancing, and live facility maps, all in one place.
+          VATUSA's traffic-management and event-planning platform.
         </p>
-        <div className="flex flex-col items-center gap-3">
-          <Button size="lg" onClick={login}>
-            Sign in with VATSIM
-          </Button>
-          <div className="flex flex-wrap items-center justify-center gap-2 pt-2">
-            <span className="text-xs text-muted-foreground">Or explore without signing in:</span>
-            <PublicLink to="/advisories" icon={Megaphone} label="Advisories" />
-            <PublicLink to="/advisories/fcas" icon={Waypoints} label="FCA overview" />
-            <PublicLink to="/facility-map" icon={Radar} label="Facility maps" />
-          </div>
-        </div>
+        <Button size="lg" onClick={login}>
+          Sign in with VATSIM
+        </Button>
+        <span className="text-xs text-muted-foreground">
+          Or browse{" "}
+          <Link to="/advisories" className="underline underline-offset-2 hover:text-foreground">
+            advisories
+          </Link>{" "}
+          and{" "}
+          <Link to="/facility-map" className="underline underline-offset-2 hover:text-foreground">
+            facility maps
+          </Link>{" "}
+          without signing in.
+        </span>
       </div>
 
       {/* Feature grid */}
-      <div className="grid gap-4 sm:grid-cols-2 lg:grid-cols-3">
+      <div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-3">
         {FEATURES.map((f) => (
-          <Card key={f.title}>
-            <CardContent className="flex flex-col gap-2 pt-6">
-              <span className="flex size-9 items-center justify-center rounded-md bg-primary/10 text-primary">
-                <f.icon className="size-5" />
-              </span>
-              <span className="font-semibold">{f.title}</span>
-              <span className="text-sm text-muted-foreground">{f.body}</span>
-            </CardContent>
-          </Card>
+          <FeatureCard
+            key={f.title}
+            to={f.to}
+            icon={f.icon}
+            accent={f.accent}
+            title={f.title}
+            body={f.body}
+          />
         ))}
       </div>
     </div>
@@ -119,22 +165,17 @@ function StatTile({
   icon: Icon,
   label,
   value,
-  tone,
+  accent,
 }: {
   icon: LucideIcon;
   label: string;
   value: string | number;
-  tone?: string;
+  accent: Accent;
 }) {
   return (
     <Card>
       <CardContent className="flex items-center gap-3 pt-6">
-        <span
-          className={
-            "flex size-9 items-center justify-center rounded-md bg-primary/10 " +
-            (tone ?? "text-primary")
-          }
-        >
+        <span className={chipClass(accent)}>
           <Icon className="size-5" />
         </span>
         <div className="flex flex-col">
@@ -196,7 +237,6 @@ function Empty({ children }: { children: React.ReactNode }) {
   return <p className="py-6 text-center text-sm text-muted-foreground">{children}</p>;
 }
 
-/** A tool tile in the signed-in launchpad. */
 /** A coarse "in Xd Yh" / "Xh Ym" / "Ym" from a millisecond delta. */
 function countdown(ms: number): string {
   const abs = Math.abs(ms);
@@ -352,21 +392,25 @@ function Overview() {
           icon={Plane}
           label="Pilots online"
           value={feed ? feed.pilots : "—"}
-          tone={feed?.healthy ? "text-emerald-500" : "text-muted-foreground"}
+          accent={feed?.healthy ? ACCENT.emerald : { bg: "bg-muted", icon: "text-muted-foreground" }}
         />
         {canPrograms && (
-          <StatTile icon={Gauge} label="Metering programs" value={progList.length} />
+          <StatTile icon={Gauge} label="Metering programs" value={progList.length} accent={ACCENT.teal} />
         )}
         {canGroundStops && (
           <StatTile
             icon={OctagonX}
             label="Ground stops"
             value={gsList.length}
-            tone={gsList.length > 0 ? "text-destructive" : "text-primary"}
+            accent={
+              gsList.length > 0
+                ? { bg: "bg-destructive/15", icon: "text-destructive" }
+                : { bg: "bg-muted", icon: "text-muted-foreground" }
+            }
           />
         )}
         {canTmis && (
-          <StatTile icon={Split} label="Restrictions" value={tmiList.length} />
+          <StatTile icon={Split} label="Restrictions" value={tmiList.length} accent={ACCENT.rose} />
         )}
       </div>
 
