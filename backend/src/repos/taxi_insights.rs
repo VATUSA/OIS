@@ -522,4 +522,33 @@ mod tests {
         assert_eq!(total, 1);
         assert_eq!(page[0].aircraft.as_deref(), Some("A320"));
     }
+
+    #[sqlx::test]
+    async fn fallback_tier_filter_matches_a_combo_on_its_start_up_tier_alone(pool: PgPool) {
+        let now = Utc::now();
+        let gate = seed_gate(&pool, "KAAA").await;
+        // B738: pushback and taxi resolve at GateTypeRunway, but no row carries a start-up figure,
+        // so start-up falls to the Airport tier (the A320 rows below supply 5 airport-wide values).
+        let mut rows: Vec<TaxiObservationRow> = (0..5)
+            .map(|i| TaxiObservationRow {
+                startup_sec: None,
+                ..row("KAAA", Some(&gate), "B738", "27L", Some(60), 200 + i, now)
+            })
+            .collect();
+        rows.extend(
+            (0..5).map(|i| row("KAAA", Some(&gate), "A320", "09R", Some(60), 300 + i, now)),
+        );
+        insert_taxi_observations(&pool, &rows).await.unwrap();
+
+        let airport_tier_only = EstimateFilters {
+            fallback_tier: Some(EstimateTier::Airport),
+            ..empty_est_filters("KAAA")
+        };
+        let (page, total) = fetch_taxi_estimates(&pool, &airport_tier_only)
+            .await
+            .unwrap();
+        assert_eq!(total, 1);
+        assert_eq!(page[0].aircraft.as_deref(), Some("B738"));
+        assert_eq!(page[0].startup_tier, EstimateTier::Airport.as_str());
+    }
 }
