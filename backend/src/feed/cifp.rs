@@ -22,7 +22,7 @@ use std::collections::HashMap;
 use chrono::NaiveDate;
 
 use super::nav::CoordList;
-use super::nav_source::{add_candidate, candidate_cycles, download, read_zip_member};
+use super::nav_source::{candidate_cycles, download, in_coverage, read_zip_member, round5};
 
 type Fetched<T> = Result<T, Box<dyn std::error::Error + Send + Sync>>;
 
@@ -106,7 +106,11 @@ fn is_primary(b: u8) -> bool {
     b == b'0' || b == b'1'
 }
 
-/// Builds an identifier -> coordinates table for one of the three fix-bearing record types.
+/// Builds an `(area code, identifier) -> coordinates` table for one of the three fix-bearing
+/// record types. Keyed by area code as well as identifier because ARINC 424's Customer/Area Code
+/// (columns 1-4, e.g. `SUSA`, `SCAN`, `SPAC`) is not unique per file — the same short identifier
+/// can legitimately appear in more than one FAA region, and conflating them would resolve a fix
+/// reference to whichever region's record happened to be inserted first (VATUSA/OIS#221).
 /// `id_range` is the 0-indexed byte range of the identifier field; column positions for section
 /// code (5), subsection code (6), and the coordinate pair (33-41, 42-51) are the same across all
 /// three tables.
@@ -115,8 +119,8 @@ fn parse_coord_table(
     section: u8,
     subsection: u8,
     id_range: std::ops::Range<usize>,
-) -> HashMap<String, CoordList> {
-    let mut out = HashMap::new();
+) -> HashMap<(String, String), CoordList> {
+    let mut out: HashMap<(String, String), CoordList> = HashMap::new();
     for line in text.lines() {
         let b = line.as_bytes();
         if b.len() < 51
@@ -134,27 +138,45 @@ fn parse_coord_table(
         let (Some(lat), Some(lon)) = (decode_lat(&line[32..41]), decode_lon(&line[41..51])) else {
             continue;
         };
-        add_candidate(&mut out, &id.to_ascii_uppercase(), lat, lon);
+        if !lat.is_finite() || !lon.is_finite() || !in_coverage(lat, lon) {
+            continue;
+        }
+        let key = (line[0..4].to_string(), id.to_ascii_uppercase());
+        let pt = [round5(lat), round5(lon)];
+        let entry = out.entry(key).or_default();
+        if !entry.contains(&pt) {
+            entry.push(pt);
+        }
     }
     out
 }
 
-/// Parses every Enroute Airway (`ER`) primary record, groups by Route Identifier, sorts by
-/// Sequence Number, and resolves each point's Fix Identifier against the VHF Navaid, NDB Navaid,
-/// or Enroute Waypoint table (chosen by the fix's own section/subsection code carried on the
-/// airway record). An airway that resolves fewer than 2 points is dropped, mirroring the
-/// `nav_source` @squawk airway path's same guard.
+/// Parses every Enroute Airway (`ER`) primary record, groups by (Area Code, Route Identifier) so
+/// two unrelated same-named airways in different FAA regions are never merged, sorts each group by
+/// Sequence Number, and resolves each point's Fix Identifier — within that same area — against the
+/// VHF Navaid, NDB Navaid, or Enroute Waypoint table (chosen by the fix's own section/subsection
+/// code carried on the airway record). An airway that resolves fewer than 2 points is dropped,
+/// mirroring the `nav_source` @squawk airway path's same guard.
+///
+/// A bare Route Identifier is not unique across areas (VATUSA/OIS#221 — e.g. a live cycle had 73
+/// IDs spanning more than one area, including a Kansas `V17` and an unrelated Hawaii `V17`). Since
+/// the output map — and the filed-route tokens it's looked up by — carry no area qualifier, when
+/// one Route Identifier resolves in more than one area this keeps only the richest (most-points)
+/// area's version rather than splicing them into one geometrically nonsensical path.
 fn parse_airways(text: &str) -> HashMap<String, CifpAirway> {
     let navaids = parse_coord_table(text, b'D', b' ', 13..17);
     let ndbs = parse_coord_table(text, b'D', b'B', 13..17);
     let waypoints = parse_coord_table(text, b'E', b'A', 13..18);
 
-    let mut by_route: HashMap<String, Vec<(u32, String, u8, u8)>> = HashMap::new();
+    // (area, route id) -> [(sequence, fix id, fix section, fix subsection)].
+    type AreaRouteLegs = HashMap<(String, String), Vec<(u32, String, u8, u8)>>;
+    let mut by_area_route: AreaRouteLegs = HashMap::new();
     for line in text.lines() {
         let b = line.as_bytes();
         if b.len() < 51 || !line.is_ascii() || b[4] != b'E' || b[5] != b'R' || !is_primary(b[38]) {
             continue;
         }
+        let area = line[0..4].to_string();
         let route_id = line[13..18].trim().to_ascii_uppercase();
         let fix_id = line[29..34].trim().to_ascii_uppercase();
         let Ok(seq) = line[25..29].trim().parse::<u32>() else {
@@ -163,14 +185,14 @@ fn parse_airways(text: &str) -> HashMap<String, CifpAirway> {
         if route_id.is_empty() || fix_id.is_empty() {
             continue;
         }
-        by_route
-            .entry(route_id)
+        by_area_route
+            .entry((area, route_id))
             .or_default()
             .push((seq, fix_id, b[36], b[37]));
     }
 
-    let mut out = HashMap::new();
-    for (route_id, mut points) in by_route {
+    let mut out: HashMap<String, CifpAirway> = HashMap::new();
+    for ((area, route_id), mut points) in by_area_route {
         points.sort_by_key(|p| p.0);
         let mut w = Vec::with_capacity(points.len());
         for (_, fix_id, fix_sec, fix_sub) in &points {
@@ -180,18 +202,26 @@ fn parse_airways(text: &str) -> HashMap<String, CifpAirway> {
                 (b'E', b'A') => &waypoints,
                 _ => continue,
             };
-            let Some([lat, lon]) = table.get(fix_id).and_then(|c| c.first()) else {
+            let key = (area.clone(), fix_id.clone());
+            let Some([lat, lon]) = table.get(&key).and_then(|c| c.first()) else {
                 continue;
             };
             w.push((fix_id.clone(), *lat, *lon));
         }
-        if w.len() >= 2 {
-            let t = route_id
-                .chars()
-                .next()
-                .map(String::from)
-                .unwrap_or_default();
-            out.insert(route_id, CifpAirway { t, w });
+        if w.len() < 2 {
+            continue;
+        }
+        let t = route_id
+            .chars()
+            .next()
+            .map(String::from)
+            .unwrap_or_default();
+        let candidate = CifpAirway { t, w };
+        match out.get(&route_id) {
+            Some(existing) if existing.w.len() >= candidate.w.len() => {}
+            _ => {
+                out.insert(route_id, candidate);
+            }
         }
     }
     out
@@ -253,6 +283,91 @@ mod tests {
         assert_eq!(a315.w[1].0, "SWIMM");
     }
 
+    /// Regression (#221): a live CIFP cycle had 73 Route Identifiers reused across more than one
+    /// FAA Customer/Area Code (e.g. a Kansas `V17` and an unrelated Hawaii `V17`). Two unrelated
+    /// airways sharing a designator, in different areas, must never be spliced into one path —
+    /// build a 2-point "V17" in area SUSA and a 3-point "V17" in area SPAC (with its own,
+    /// area-scoped navaid records) and confirm only one, self-consistent version comes out, never
+    /// a 5-point mix of both.
+    #[test]
+    fn same_route_id_in_two_areas_is_never_spliced_into_one_path() {
+        let susa_navaid = record(|f| {
+            f.area = "SUSA";
+            f.section = b'D';
+            f.subsection = b' ';
+            f.id = "ZBV";
+            f.lat = "N25421410";
+            f.lon = "W079173710";
+        });
+        let susa_waypoint = record(|f| {
+            f.area = "SUSA";
+            f.section = b'E';
+            f.subsection = b'A';
+            f.id = "SWIMM";
+            f.lat = "N25295920";
+            f.lon = "W079021809";
+        });
+        let susa_leg1 = er_record("SUSA", "V17", 100, "ZBV", b'D', b' ');
+        let susa_leg2 = er_record("SUSA", "V17", 110, "SWIMM", b'E', b'A');
+
+        let spac_navaid1 = record(|f| {
+            f.area = "SPAC";
+            f.section = b'D';
+            f.subsection = b' ';
+            f.id = "OGG";
+            f.lat = "N20543600";
+            f.lon = "W156255700";
+        });
+        let spac_navaid2 = record(|f| {
+            f.area = "SPAC";
+            f.section = b'D';
+            f.subsection = b' ';
+            f.id = "MKK";
+            f.lat = "N21091200";
+            f.lon = "W157095700";
+        });
+        let spac_waypoint = record(|f| {
+            f.area = "SPAC";
+            f.section = b'E';
+            f.subsection = b'A';
+            f.id = "HAKLE";
+            f.lat = "N21133600";
+            f.lon = "W157001200";
+        });
+        let spac_leg1 = er_record("SPAC", "V17", 100, "OGG", b'D', b' ');
+        let spac_leg2 = er_record("SPAC", "V17", 110, "MKK", b'D', b' ');
+        let spac_leg3 = er_record("SPAC", "V17", 120, "HAKLE", b'E', b'A');
+
+        let text = [
+            susa_navaid,
+            susa_waypoint,
+            susa_leg1,
+            susa_leg2,
+            spac_navaid1,
+            spac_navaid2,
+            spac_waypoint,
+            spac_leg1,
+            spac_leg2,
+            spac_leg3,
+        ]
+        .join("\r\n");
+
+        let v17 = parse_airways(&text)
+            .remove("V17")
+            .expect("V17 should resolve");
+
+        // Never the spliced 5-point mix of both areas' fixes.
+        assert_ne!(
+            v17.w.len(),
+            5,
+            "must not merge SUSA's and SPAC's V17 into one path"
+        );
+        // The richer (3-point) SPAC version wins; its fixes never mix with SUSA's ZBV/SWIMM.
+        assert_eq!(v17.w.len(), 3);
+        let ids: Vec<&str> = v17.w.iter().map(|w| w.0.as_str()).collect();
+        assert_eq!(ids, ["OGG", "MKK", "HAKLE"]);
+    }
+
     #[test]
     fn drops_an_airway_with_fewer_than_two_resolved_points() {
         let waypoint = "SUSAEAENRT   SWIMM K70    R   B N25295920W079021809                       W0080     NAR           SWIMM                    504052605";
@@ -271,5 +386,65 @@ mod tests {
             s.push(' ');
         }
         s
+    }
+
+    /// Fields for a synthetic VHF Navaid / NDB Navaid / Enroute Waypoint record, placed at their
+    /// real ARINC 424 column offsets rather than hand-aligned text (error-prone for a 132-column
+    /// fixed-width layout).
+    struct RecordFields {
+        area: &'static str,
+        section: u8,
+        subsection: u8,
+        id: &'static str,
+        lat: &'static str,
+        lon: &'static str,
+    }
+
+    /// Builds a 132-column fix-bearing record (`D`/`DB`/`EA`) from field values placed at their
+    /// real column offsets: area 0-3, section 4, subsection 5, identifier from 13, primary flag
+    /// 21 (always primary here), coordinates 32-41/41-51.
+    fn record(f: impl FnOnce(&mut RecordFields)) -> String {
+        let mut fields = RecordFields {
+            area: "SUSA",
+            section: b'D',
+            subsection: b' ',
+            id: "",
+            lat: "",
+            lon: "",
+        };
+        f(&mut fields);
+        let mut b = vec![b' '; 132];
+        b[0..4].copy_from_slice(fields.area.as_bytes());
+        b[4] = fields.section;
+        b[5] = fields.subsection;
+        b[13..13 + fields.id.len()].copy_from_slice(fields.id.as_bytes());
+        b[21] = b'0'; // primary record
+        b[32..41].copy_from_slice(fields.lat.as_bytes());
+        b[41..51].copy_from_slice(fields.lon.as_bytes());
+        String::from_utf8(b).unwrap()
+    }
+
+    /// Builds a 132-column Enroute Airway (`ER`) leg record: area 0-3, `ER` at 4-5, route id from
+    /// 13, sequence 25-29, fix id from 29, fix section/subsection 36-37, primary flag at 38.
+    fn er_record(
+        area: &str,
+        route_id: &str,
+        seq: u32,
+        fix_id: &str,
+        fix_sec: u8,
+        fix_sub: u8,
+    ) -> String {
+        let mut b = vec![b' '; 132];
+        b[0..4].copy_from_slice(area.as_bytes());
+        b[4] = b'E';
+        b[5] = b'R';
+        b[13..13 + route_id.len()].copy_from_slice(route_id.as_bytes());
+        let seq_str = format!("{seq:04}");
+        b[25..29].copy_from_slice(seq_str.as_bytes());
+        b[29..29 + fix_id.len()].copy_from_slice(fix_id.as_bytes());
+        b[36] = fix_sec;
+        b[37] = fix_sub;
+        b[38] = b'0'; // primary record
+        String::from_utf8(b).unwrap()
     }
 }
