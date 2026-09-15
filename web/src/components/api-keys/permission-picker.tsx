@@ -1,7 +1,7 @@
 import {useMemo, useState} from "react";
 
 import type {ApiKeyPermission, ApiKeyPermissionInput, GrantablePermission} from "@/lib/api-keys";
-import {type AccessPreset, BASE_PERMISSIONS, presetPermissions} from "@/lib/presets";
+import {ACCESS_PRESETS, type AccessPreset, BASE_PERMISSIONS, presetPermissions} from "@/lib/presets";
 import {PresetBar} from "@/components/access/preset-bar";
 import {
   PermissionScopeTree,
@@ -114,8 +114,9 @@ export function presetCanApply(
   );
 }
 
-/** The selection after clicking a preset: removes its perms + the baseline when it's applied,
- * otherwise grants them at the preset's scope. */
+/** The selection after clicking a preset. Applied: subtracts what it contributes (a facility
+ * preset's ARTCC, a national preset's perms), dropping the baseline only once nothing still needs
+ * it. Otherwise: merges its perms in at the preset's scope without narrowing existing grants (#275). */
 export function togglePresetSelection(
   preset: AccessPreset,
   grantable: GrantablePermission[],
@@ -124,25 +125,30 @@ export function togglePresetSelection(
   selection: PermSelection,
 ): PermSelection {
   const byName = new Map(grantable.map((g) => [g.permission, g] as const));
-  const domain = presetPermissions(
-    preset,
-    grantable.map((g) => g.permission),
-  );
+  const own = presetOwnPermissions(preset, grantable, baseNames, facility);
   const next = new Map(selection);
   if (presetApplied(preset, grantable, baseNames, facility, selection)) {
-    for (const p of [...domain, ...baseNames]) next.delete(p);
+    for (const p of own) {
+      const artccs = next.get(p)!.artccs.filter((a) => a !== facility);
+      if (preset.scope === "facility" && artccs.length > 0) next.set(p, { national: false, artccs });
+      else next.delete(p);
+    }
+    // Keep the baseline while this preset still grants at another ARTCC or another preset is applied.
+    const stillNeeded =
+      own.some((p) => next.has(p)) ||
+      ACCESS_PRESETS.some((o) => o.id !== preset.id && presetApplied(o, grantable, baseNames, facility, next));
+    if (!stillNeeded) for (const p of baseNames) next.delete(p);
     return next;
   }
-  for (const p of domain) {
-    const g = byName.get(p);
-    if (!g) continue;
+  for (const p of own) {
     if (preset.scope === "facility") {
-      // Scope to the chosen facility, only where the caller can actually delegate it.
-      if (facility && (g.national || g.artccs.includes(facility))) {
-        next.set(p, { national: false, artccs: [facility] });
-      }
+      // Add the chosen facility to what's selected; a national grant already covers it.
+      const s = next.get(p);
+      if (s?.national) continue;
+      const artccs = s?.artccs ?? [];
+      next.set(p, { national: false, artccs: artccs.includes(facility) ? artccs : [...artccs, facility] });
     } else {
-      next.set(p, defaultScope(g)); // national where held nationally, else all their ARTCCs
+      next.set(p, defaultScope(byName.get(p)!)); // national where held nationally, else all their ARTCCs
     }
   }
   // Baseline is always national (applied after domain so it wins for any overlap — national ⊇ facility).

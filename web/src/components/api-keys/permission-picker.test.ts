@@ -117,6 +117,36 @@ describe("preset highlighting (#264)", () => {
     expect([...off.keys()]).toEqual([]);
   });
 
+  it("a facility preset after a national preset keeps the national grants (#275)", () => {
+    const g = ADMIN_GRANTABLE;
+    const ntmo = togglePresetSelection(preset("ntmo"), g, base(g), "", new Map());
+    const next = togglePresetSelection(preset("facility_ec"), g, base(g), "ZDC", ntmo);
+    for (const p of TRAFFIC) expect(next.get(p)).toEqual({ national: true, artccs: [] });
+  });
+
+  it("stacking a facility preset at two ARTCCs merges, and removing one leaves the other (#275)", () => {
+    const g = ADMIN_GRANTABLE;
+    const ec = preset("facility_ec");
+    const zny = togglePresetSelection(ec, g, base(g), "ZNY", new Map());
+    const both = togglePresetSelection(ec, g, base(g), "ZDC", zny);
+    for (const p of TRAFFIC) expect(both.get(p)).toEqual({ national: false, artccs: ["ZNY", "ZDC"] });
+
+    const off = togglePresetSelection(ec, g, base(g), "ZDC", both);
+    for (const p of TRAFFIC) expect(off.get(p)).toEqual({ national: false, artccs: ["ZNY"] });
+    expect(off.has("ace.requests.create")).toBe(true); // EC still applied at ZNY needs it
+    expect(presetApplied(ec, g, base(g), "ZNY", off)).toBe(true);
+  });
+
+  it("removing a preset keeps the baseline another applied preset still needs (#275)", () => {
+    const g = ADMIN_GRANTABLE;
+    const ace = togglePresetSelection(preset("ace_team"), g, base(g), "", new Map());
+    const withNtmo = togglePresetSelection(preset("ntmo"), g, base(g), "", ace);
+    const off = togglePresetSelection(preset("ntmo"), g, base(g), "", withNtmo);
+    for (const p of TRAFFIC) expect(off.has(p)).toBe(false);
+    expect(off.has("ace.requests.create")).toBe(true);
+    expect(presetApplied(preset("ace_team"), g, base(g), "", off)).toBe(true);
+  });
+
   it("a national preset narrowed to one ARTCC no longer reads as applied", () => {
     const g = ADMIN_GRANTABLE;
     const sel = togglePresetSelection(preset("ntmo"), g, base(g), "", new Map());
