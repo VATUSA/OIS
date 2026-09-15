@@ -5,7 +5,7 @@ import vatusaLogo from "@/assets/vatusa-logo.png";
 import {DOCS_URL} from "@/lib/api";
 
 const GITHUB_URL = "https://github.com/VATUSA/OIS";
-const LICENSE_URL = `${GITHUB_URL}/blob/main/LICENSE`;
+const LICENSE_URL = `${GITHUB_URL}/blob/main/LICENSE.md`;
 
 // Full version like "1.0.1-a1b2c3d". The trailing segment is the build commit when it looks like a
 // short SHA — link the stamp straight to that commit, else fall back to the repo.

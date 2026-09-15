@@ -57,7 +57,7 @@ typed client** and **Permissions** sections:
 
 ## License
 
-Contributions are accepted under the project's license — see the `LICENSE` file at the
+Contributions are accepted under the project's license — see the `LICENSE.md` file at the
 repository root.
 
 ## Reporting a security issue
