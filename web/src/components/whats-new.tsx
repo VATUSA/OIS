@@ -1,7 +1,7 @@
 import {useEffect, useRef, useState} from "react";
 
 import {useMe} from "@/lib/auth";
-import {CHANGELOG, unseenEntries} from "@/lib/changelog";
+import {CHANGELOG, shouldSeed, unseenEntries} from "@/lib/changelog";
 import {usePreferences, useSavePreferences} from "@/lib/preferences";
 import {Modal} from "@/components/modal";
 
@@ -35,14 +35,12 @@ function WhatsNewInner() {
   useEffect(() => {
     if (prefs.isLoading || decided.current || !newestId) return;
     decided.current = true;
-    if (!prefs.data?.lastSeenId) {
-      // Brand-new user (this namespace was never saved, or holds no lastSeenId yet) — seed to
-      // newest, don't show a backlog. The API returns `{}` rather than `null` when unset, so this
-      // must check the specific field rather than the whole blob's nullness.
+    if (shouldSeed(prefs.data)) {
+      // Brand-new user — seed to newest, don't show a backlog.
       save.mutate({ lastSeenId: newestId });
       return;
     }
-    if (unseenEntries(CHANGELOG, prefs.data.lastSeenId).length > 0) {
+    if (unseenEntries(CHANGELOG, prefs.data?.lastSeenId).length > 0) {
       setOpen(true);
     }
   }, [prefs.isLoading, prefs.data, newestId]);

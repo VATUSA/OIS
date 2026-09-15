@@ -32,3 +32,15 @@ export function unseenEntries(
   const seenIdx = entries.findIndex((e) => e.id === lastSeenId);
   return seenIdx === -1 ? entries : entries.slice(0, seenIdx);
 }
+
+/**
+ * Whether this user's changelog prefs should be silently seeded to newest instead of shown a
+ * backlog (#206 AC5) — true for a brand-new user (the namespace was never saved) and for one whose
+ * saved blob holds no `lastSeenId` yet. `GET /api/v1/me/preferences/{namespace}` returns `{}`, not
+ * `null`, for an unset namespace, so this must check the specific field rather than the whole
+ * blob's nullness — checking `prefs == null` looks equivalent but never fires and regressed AC5
+ * for every user (#206).
+ */
+export function shouldSeed(prefs: { lastSeenId?: string } | null | undefined): boolean {
+  return !prefs?.lastSeenId;
+}
