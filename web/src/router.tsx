@@ -23,6 +23,7 @@ import {BoardViewPage} from "@/pages/dashboards/board";
 import {BoardLibraryPage} from "@/pages/dashboards/library";
 import {SharedBoardPage} from "@/pages/dashboards/shared";
 import {TmuPage} from "@/pages/tmu";
+import {TAB_IDS as TMU_TAB_IDS, type Tab as TmuTabId} from "@/pages/tmu/tab-state";
 import {PlanningEventsPage} from "@/pages/planning/events";
 import {EventPlanningPage} from "@/pages/planning/event";
 import {EventFcaBuilderPage} from "@/pages/planning/event-fcas";
@@ -158,15 +159,6 @@ const airportRoute = createRoute({
   component: AirportPage,
   staticData: { layout: "wide" },
 });
-
-const TMU_TAB_IDS = [
-  "programs",
-  "restrictions",
-  "ground-stops",
-  "gdp",
-  "rate-calculator",
-] as const;
-type TmuTabId = (typeof TMU_TAB_IDS)[number];
 
 const tmuRoute = createRoute({
   getParentRoute: () => opsRoute,

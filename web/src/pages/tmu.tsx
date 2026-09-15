@@ -1,3 +1,4 @@
+import {useEffect} from "react";
 import {useNavigate, useSearch} from "@tanstack/react-router";
 
 import {useMe} from "@/lib/auth";
@@ -7,13 +8,7 @@ import {GroundStopsTab} from "@/pages/tmu/ground-stops";
 import {ProgramsTab} from "@/pages/tmu/programs";
 import {RateCalculatorTab} from "@/pages/tmu/rate-calc";
 import {RestrictionsTab} from "@/pages/tmu/restrictions";
-
-type Tab =
-  | "programs"
-  | "restrictions"
-  | "ground-stops"
-  | "gdp"
-  | "rate-calculator";
+import {resolveTmuTab, saveLastTmuTab, type Tab} from "@/pages/tmu/tab-state";
 
 export function TmuPage() {
   const { data: me } = useMe();
@@ -32,7 +27,21 @@ export function TmuPage() {
 
   const { tab: requestedTab } = useSearch({ strict: false }) as { tab?: Tab };
   const navigate = useNavigate();
-  const active = tabs.some((t) => t.id === requestedTab) ? requestedTab : tabs[0]?.id;
+  const { active, needsUrlSync } = resolveTmuTab(tabs, requestedTab);
+
+  useEffect(() => {
+    if (active) saveLastTmuTab(active);
+  }, [active]);
+
+  useEffect(() => {
+    if (!needsUrlSync || !active) return;
+    void navigate({
+      to: "/ops/tmu",
+      search: (prev) => ({ ...prev, tab: active }),
+      replace: true,
+      resetScroll: false,
+    });
+  }, [needsUrlSync, active, navigate]);
 
   function selectTab(id: Tab) {
     void navigate({

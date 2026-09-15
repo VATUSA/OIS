@@ -43,6 +43,7 @@ import {DOCS_URL} from "@/lib/api";
 import {login, useLogout, useMe} from "@/lib/auth";
 import {useFeedStatus} from "@/lib/feed";
 import {hasPermission, isAdmin} from "@/lib/permissions";
+import {loadLastTmuTab} from "@/pages/tmu/tab-state";
 
 function initials(name: string) {
   return name
@@ -226,7 +227,7 @@ function MobileMenu({
               </DropdownMenuItem>
             )}
             <DropdownMenuItem asChild>
-              <Link to="/ops/tmu">
+              <Link to="/ops/tmu" search={{ tab: loadLastTmuTab() }}>
                 <Gauge />
                 TMU
               </Link>
@@ -429,7 +430,7 @@ export function Navbar() {
               )}
               {canOps && (
                 <DropdownMenuItem asChild>
-                  <Link to="/ops/tmu">
+                  <Link to="/ops/tmu" search={{ tab: loadLastTmuTab() }}>
                     <Gauge />
                     TMU
                   </Link>
