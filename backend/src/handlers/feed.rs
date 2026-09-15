@@ -6,11 +6,11 @@ use std::sync::Arc;
 
 use axum::{
     Json,
-    extract::{Extension, Path, State},
+    extract::{Extension, Path, Query, State},
     http::StatusCode,
 };
 use chrono::{DateTime, Utc};
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use sqlx::PgPool;
 use utoipa::ToSchema;
 
@@ -21,10 +21,12 @@ use crate::{
         require_permission::RequirePermission,
     },
     errors::ApiError,
+    feed,
     feed::facilities,
     feed::flow::{self, ProgramInputs},
     feed::taxi,
     models::{DepartureFlight, DeparturesResponse, IssueCfrRequest, IssuedCfrBody},
+    repos::airport_configs as config_repo,
     repos::{flow as flow_repo, tmu as tmu_repo},
     state::AppState,
 };
@@ -178,6 +180,66 @@ pub async fn airport_flow(
     let pool = state.db.as_ref().ok_or(ApiError::ServiceUnavailable)?;
     let icao = icao.trim().to_ascii_uppercase();
     Ok(Json(flow_for(&state, pool, &icao).await?))
+}
+
+#[derive(Deserialize)]
+pub struct AadcQuery {
+    /// Bucket width in minutes: 15, 30, or 60. Defaults to 15.
+    pub bucket_min: Option<i32>,
+}
+
+#[utoipa::path(
+    get,
+    path = "/api/v1/tmu/flow/{icao}/aadc",
+    tag = "tmu",
+    params(
+        ("icao" = String, Path, description = "Arrival airport ICAO"),
+        ("bucket_min" = Option<i32>, Query, description = "Bucket width in minutes: 15, 30, or 60"),
+    ),
+    responses(
+        (status = 200, body = crate::feed::flow::AadcResponse),
+        (status = 400),
+        (status = 401),
+        (status = 503),
+    )
+)]
+pub async fn airport_aadc(
+    State(state): State<AppState>,
+    _permission: RequirePermission<TmuProgramRead>,
+    Path(icao): Path<String>,
+    Query(q): Query<AadcQuery>,
+) -> Result<Json<flow::AadcResponse>, ApiError> {
+    let pool = state.db.as_ref().ok_or(ApiError::ServiceUnavailable)?;
+    let icao = icao.trim().to_ascii_uppercase();
+    let bucket_min = q.bucket_min.unwrap_or(15);
+    if !matches!(bucket_min, 15 | 30 | 60) {
+        return Err(ApiError::BadRequest);
+    }
+
+    let live = flow_for(&state, pool, &icao).await?;
+    let now = Utc::now();
+
+    let configs = config_repo::list_by_icao(pool, &icao).await?;
+    let airports = state.feed.read().await.airports.clone();
+    let wind_dir = feed::forecast::wind_at(&airports, &icao, now)
+        .await
+        .and_then(|h| h.dir);
+    let favored = config_repo::favored_config(&configs, wind_dir);
+    let (aar, adr, config_id) = favored
+        .map(|c| (c.aar, c.adr, Some(c.id.clone())))
+        .unwrap_or((0, 0, None));
+
+    let buckets = flow::bucket_aadc(&live.flights, now, bucket_min);
+
+    Ok(Json(flow::AadcResponse {
+        icao,
+        bucket_min,
+        aar,
+        adr,
+        config_id,
+        buckets,
+        generated_at: now,
+    }))
 }
 
 #[utoipa::path(
