@@ -9,7 +9,8 @@ use tokio::sync::broadcast;
 
 use crate::feed::{
     self, FeedState, airspace::Boundaries, facilities::FacilityState, nav::NavData,
-    runway_db::RunwayDb, tracon::TraconState, trajectory::ProfileTable, winds::Winds,
+    runway_db::RunwayDb, taxi_estimate, tracon::TraconState, trajectory::ProfileTable,
+    winds::Winds,
 };
 use crate::models::AirportGateBody;
 
@@ -43,6 +44,13 @@ pub struct AppState {
     /// `handlers::airport_surface`), so it sits behind an `ArcSwap` for lock-free reads from the
     /// DB-less feed subsystem (`feed::taxi_observations`).
     pub gates: Arc<ArcSwap<HashMap<String, Vec<AirportGateBody>>>>,
+    /// Learned per-gate/type/runway pushback+taxi observation samples, keyed by departure ICAO
+    /// (#164 sub-issue E). Starts empty and is reloaded from the DB every 10 min by
+    /// `jobs::spawn_taxi_estimate_samples_refresh`, so it sits behind an `ArcSwap` for lock-free
+    /// reads from the DB-less feed subsystem (`feed::flow::resolve_ground_allowance_sec`). Distinct
+    /// from `FeedInner::taxi_samples`, `feed::taxi.rs`'s own unrelated live 3h rolling aggregate for
+    /// the Taxi Monitor page.
+    pub taxi_estimate_samples: Arc<ArcSwap<HashMap<String, Vec<taxi_estimate::TaxiSample>>>>,
     /// Epoch-ms of the last successful nav / winds fetch (0 = not yet fetched at runtime).
     pub nav_refreshed: Arc<AtomicI64>,
     pub winds_refreshed: Arc<AtomicI64>,
@@ -75,6 +83,7 @@ impl AppState {
         let winds = Arc::new(ArcSwap::from_pointee(Winds::default()));
         let aircraft_profiles = Arc::new(ArcSwap::from_pointee(ProfileTable::default()));
         let gates = Arc::new(ArcSwap::from_pointee(HashMap::new()));
+        let taxi_estimate_samples = Arc::new(ArcSwap::from_pointee(HashMap::new()));
         let nav_refreshed = Arc::new(AtomicI64::new(0));
         let winds_refreshed = Arc::new(AtomicI64::new(0));
         let metar_cache = Arc::new(Mutex::new(HashMap::new()));
@@ -113,6 +122,7 @@ impl AppState {
                 winds,
                 aircraft_profiles,
                 gates,
+                taxi_estimate_samples,
                 nav_refreshed,
                 winds_refreshed,
                 metar_cache,
@@ -132,6 +142,7 @@ impl AppState {
             winds,
             aircraft_profiles,
             gates,
+            taxi_estimate_samples,
             nav_refreshed,
             winds_refreshed,
             metar_cache,
@@ -152,6 +163,7 @@ impl AppState {
             winds: Arc::new(ArcSwap::from_pointee(Winds::default())),
             aircraft_profiles: Arc::new(ArcSwap::from_pointee(ProfileTable::default())),
             gates: Arc::new(ArcSwap::from_pointee(HashMap::new())),
+            taxi_estimate_samples: Arc::new(ArcSwap::from_pointee(HashMap::new())),
             nav_refreshed: Arc::new(AtomicI64::new(0)),
             winds_refreshed: Arc::new(AtomicI64::new(0)),
             metar_cache: Arc::new(Mutex::new(HashMap::new())),

@@ -142,6 +142,9 @@ async fn live_inbounds(state: &AppState, icao: &str, now: DateTime<Utc>) -> Vec<
     let nav = state.nav.load_full();
     let winds = state.winds.load_full();
     let profiles = state.aircraft_profiles.load_full();
+    let gates = state.gates.load_full();
+    let runways = state.runways.clone();
+    let taxi_estimate_samples = state.taxi_estimate_samples.load_full();
     let icao = icao.to_owned();
     // `compute` resolves every arrival's filed route — pure CPU. Push it onto the blocking pool
     // (see `feed::flow_from_data`) rather than tying up an async worker.
@@ -155,6 +158,9 @@ async fn live_inbounds(state: &AppState, icao: &str, now: DateTime<Utc>) -> Vec<
             winds.as_ref(),
             profiles.as_ref(),
             &HashMap::new(),
+            gates.as_ref(),
+            runways.as_ref(),
+            taxi_estimate_samples.as_ref(),
             now,
         )
     })
