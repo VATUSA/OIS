@@ -1,21 +1,30 @@
-//! Idempotently seeds `flow.airport_ramp_area` / `flow.airport_taxiway` from the bundled FAA
-//! Aerodrome Mapping extract produced by `bin/faa_surface_importer.rs` (#230), tagging every row
-//! `source = 'faa'`. Touches only `source='faa'` rows on re-runs — `manual`/`crc` rows for the
-//! same airport are left untouched. One documented exception: a pre-existing `source='osm'` row
-//! (from migration `0067`'s KDCA seed) is retired for any ICAO the FAA extract also covers, since
-//! FAA data supersedes it — confirmed decision, see VATUSA/OIS#231. No gate rows are written: the
-//! FAA AM layer set has no gate/parking-stand layer (see #230).
+//! Seeds `flow.airport_ramp_area` / `flow.airport_taxiway` from the bundled FAA Aerodrome Mapping
+//! extract produced by `bin/faa_surface_importer.rs` (#230), tagging every row `source = 'faa'`.
+//!
+//! **Seed-if-absent (#231):** an airport is seeded only when it has no `faa` rows in either table.
+//! FAA geometry is a starting layer that facilities edit in the map editor, and an edit keeps the
+//! row's `source = 'faa'` — so re-running never touches an already-seeded airport: edits, deletes
+//! and row ids all persist. Refreshing one airport's FAA baseline is the explicit, permissioned
+//! re-pull (#232), not this boot job. `manual`/`crc` rows are never touched. One exception, an
+//! operator decision recorded on VATUSA/OIS#231: when an airport is seeded, its pre-existing
+//! `source='osm'` ramps/taxiways (migration `0067`'s KDCA seed) are retired, since FAA data
+//! supersedes them. No gate rows are written: the FAA AM layer set has no gate layer (see #230).
 //!
 //! Deliberately not folded into `repos::airport_surface` — that module is per-request CRUD for the
 //! map editor; this is a bulk load from bundled, compiled-in data, closer in spirit to
 //! `feed::runway_db`'s `include_str!` pattern than to a handler-facing repo.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 use serde::Deserialize;
 use sqlx::PgPool;
 
 use crate::errors::ApiError;
+
+/// `pg_advisory_xact_lock` key serializing FAA surface seeds across backend processes (and any
+/// other writer of `faa` rows): without it two concurrent runs both see an airport as unseeded and
+/// both insert its rows.
+const SEED_LOCK_KEY: i64 = 0x004F_4953_5F46_4141; // "OIS_FAA"
 
 #[derive(Debug, Deserialize)]
 struct ExtractAirport {
@@ -43,8 +52,15 @@ fn load_bundled_extract() -> HashMap<String, ExtractAirport> {
         .expect("bundled backend/data/faa_surface.json should parse")
 }
 
+fn db_err(e: sqlx::Error) -> ApiError {
+    tracing::error!(error = %e, "FAA surface seed query failed");
+    ApiError::Internal
+}
+
 #[derive(Debug, Default)]
 pub struct SeedSummary {
+    pub airports_seeded: usize,
+    pub airports_skipped: usize,
     pub taxiways_inserted: usize,
     pub ramps_inserted: usize,
     pub osm_taxiways_retired: usize,
@@ -55,113 +71,47 @@ impl std::fmt::Display for SeedSummary {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         write!(
             f,
-            "seeded {} taxiways + {} ramps (retired {} osm taxiways, {} osm ramps)",
+            "seeded {} airports ({} taxiways + {} ramps; retired {} osm taxiways, {} osm ramps), \
+             {} already seeded",
+            self.airports_seeded,
             self.taxiways_inserted,
             self.ramps_inserted,
             self.osm_taxiways_retired,
-            self.osm_ramps_retired
+            self.osm_ramps_retired,
+            self.airports_skipped
         )
     }
 }
 
-/// Re-seeds every `source='faa'` row from the bundled extract in one transaction. Safe to call
-/// repeatedly (each call fully replaces the prior `faa` rows, so nothing duplicates).
+/// Seeds every extract airport that has no `faa` rows yet, in one transaction under
+/// [`SEED_LOCK_KEY`]. Safe to call repeatedly and concurrently: already-seeded airports are skipped.
 pub async fn seed(pool: &PgPool) -> Result<SeedSummary, ApiError> {
     let extract = load_bundled_extract();
-    let icaos: Vec<&str> = extract.keys().map(String::as_str).collect();
-    seed_scoped(pool, &extract, &icaos).await
-}
+    let mut tx = begin_locked(pool).await?;
 
-/// Re-seeds one airport's `source='faa'` rows from the current bundled extract — the "re-pull from
-/// FAA" admin action (#232), reusing this module's own upsert logic rather than a re-implementation.
-/// If the extract no longer covers `icao`, this still clears any stale `faa` rows for it (a re-pull
-/// should faithfully mirror the extract's current coverage) but retires no `osm` rows, since nothing
-/// FAA-sourced is replacing them.
-pub async fn seed_for_icao(pool: &PgPool, icao: &str) -> Result<SeedSummary, ApiError> {
-    let extract = load_bundled_extract();
-    seed_scoped(pool, &extract, &[icao]).await
-}
-
-/// Shared core: clears `source='faa'` rows for every ICAO in `touch_icaos`, retires `source='osm'`
-/// rows only for those also present in `extract` (FAA data actually replacing them — see
-/// `seed_for_icao`'s doc comment for why an uncovered ICAO doesn't retire its `osm` rows), then
-/// inserts every extract row for the covered ICAOs. One transaction; `manual`/`crc` rows and `osm`
-/// rows for any ICAO outside `touch_icaos` are never touched.
-async fn seed_scoped(
-    pool: &PgPool,
-    extract: &HashMap<String, ExtractAirport>,
-    touch_icaos: &[&str],
-) -> Result<SeedSummary, ApiError> {
-    let covered: Vec<&str> = touch_icaos
-        .iter()
-        .copied()
-        .filter(|icao| extract.contains_key(*icao))
+    // Read after taking the lock, so a run that waited sees what the previous run committed.
+    let seeded: HashSet<String> = sqlx::query_scalar(
+        "select icao from flow.airport_taxiway where source = 'faa' \
+         union select icao from flow.airport_ramp_area where source = 'faa'",
+    )
+    .fetch_all(&mut *tx)
+    .await
+    .map_err(db_err)?
+    .into_iter()
+    .collect();
+    let to_seed: Vec<&str> = extract
+        .keys()
+        .map(String::as_str)
+        .filter(|icao| !seeded.contains(*icao))
         .collect();
 
-    let mut tx = pool.begin().await.map_err(|_| ApiError::Internal)?;
-
-    sqlx::query("delete from flow.airport_taxiway where source = 'faa' and icao = any($1)")
-        .bind(touch_icaos)
-        .execute(&mut *tx)
-        .await
-        .map_err(|_| ApiError::Internal)?;
-    sqlx::query("delete from flow.airport_ramp_area where source = 'faa' and icao = any($1)")
-        .bind(touch_icaos)
-        .execute(&mut *tx)
-        .await
-        .map_err(|_| ApiError::Internal)?;
-
-    let osm_taxiways_retired =
-        sqlx::query("delete from flow.airport_taxiway where source = 'osm' and icao = any($1)")
-            .bind(&covered)
-            .execute(&mut *tx)
-            .await
-            .map_err(|_| ApiError::Internal)?
-            .rows_affected() as usize;
-    let osm_ramps_retired =
-        sqlx::query("delete from flow.airport_ramp_area where source = 'osm' and icao = any($1)")
-            .bind(&covered)
-            .execute(&mut *tx)
-            .await
-            .map_err(|_| ApiError::Internal)?
-            .rows_affected() as usize;
-
-    let mut taxiways_inserted = 0usize;
-    let mut ramps_inserted = 0usize;
-    for icao in &covered {
-        let airport = &extract[*icao];
-        for t in &airport.taxiways {
-            sqlx::query(
-                "insert into flow.airport_taxiway (icao, name, points, source) \
-                 values ($1, $2, $3, 'faa')",
-            )
-            .bind(icao)
-            .bind(&t.name)
-            .bind(sqlx::types::Json(&t.points))
-            .execute(&mut *tx)
-            .await
-            .map_err(|_| ApiError::Internal)?;
-            taxiways_inserted += 1;
-        }
-        for r in &airport.ramps {
-            sqlx::query(
-                "insert into flow.airport_ramp_area (icao, name, kind, rings, source) \
-                 values ($1, $2, $3, $4, 'faa')",
-            )
-            .bind(icao)
-            .bind(&r.name)
-            .bind(&r.kind)
-            .bind(sqlx::types::Json(&r.rings))
-            .execute(&mut *tx)
-            .await
-            .map_err(|_| ApiError::Internal)?;
-            ramps_inserted += 1;
-        }
-    }
-
-    tx.commit().await.map_err(|_| ApiError::Internal)?;
+    let (osm_taxiways_retired, osm_ramps_retired) = retire_osm(&mut tx, &to_seed).await?;
+    let (taxiways_inserted, ramps_inserted) = insert_airports(&mut tx, &extract, &to_seed).await?;
+    tx.commit().await.map_err(db_err)?;
 
     Ok(SeedSummary {
+        airports_seeded: to_seed.len(),
+        airports_skipped: extract.len() - to_seed.len(),
         taxiways_inserted,
         ramps_inserted,
         osm_taxiways_retired,
@@ -169,9 +119,154 @@ async fn seed_scoped(
     })
 }
 
+/// The "re-pull from FAA" admin action (#232): an explicit refresh that **replaces** one airport's
+/// `source='faa'` rows with the current bundled extract (reverting facility edits to them, unlike
+/// [`seed`]), under the same [`SEED_LOCK_KEY`] so it can't race the boot seed. If the extract no
+/// longer covers `icao`, its stale `faa` rows are still cleared, but no `osm` rows are retired since
+/// nothing FAA-sourced replaces them. `manual`/`crc` rows are never touched.
+pub async fn seed_for_icao(pool: &PgPool, icao: &str) -> Result<SeedSummary, ApiError> {
+    let extract = load_bundled_extract();
+    let mut tx = begin_locked(pool).await?;
+
+    for sql in [
+        "delete from flow.airport_taxiway where source = 'faa' and icao = $1",
+        "delete from flow.airport_ramp_area where source = 'faa' and icao = $1",
+    ] {
+        sqlx::query(sql)
+            .bind(icao)
+            .execute(&mut *tx)
+            .await
+            .map_err(db_err)?;
+    }
+    let covered: Vec<&str> = if extract.contains_key(icao) {
+        vec![icao]
+    } else {
+        Vec::new()
+    };
+    let (osm_taxiways_retired, osm_ramps_retired) = retire_osm(&mut tx, &covered).await?;
+    let (taxiways_inserted, ramps_inserted) = insert_airports(&mut tx, &extract, &covered).await?;
+    tx.commit().await.map_err(db_err)?;
+
+    Ok(SeedSummary {
+        airports_seeded: covered.len(),
+        airports_skipped: 0,
+        taxiways_inserted,
+        ramps_inserted,
+        osm_taxiways_retired,
+        osm_ramps_retired,
+    })
+}
+
+async fn begin_locked(
+    pool: &PgPool,
+) -> Result<sqlx::Transaction<'static, sqlx::Postgres>, ApiError> {
+    let mut tx = pool.begin().await.map_err(db_err)?;
+    sqlx::query("select pg_advisory_xact_lock($1)")
+        .bind(SEED_LOCK_KEY)
+        .execute(&mut *tx)
+        .await
+        .map_err(db_err)?;
+    Ok(tx)
+}
+
+/// Retires the `osm` ramps/taxiways of `icaos` (airports FAA data is being written for). Returns
+/// `(taxiways, ramps)` deleted. Gates are never touched.
+async fn retire_osm(
+    conn: &mut sqlx::PgConnection,
+    icaos: &[&str],
+) -> Result<(usize, usize), ApiError> {
+    let taxiways =
+        sqlx::query("delete from flow.airport_taxiway where source = 'osm' and icao = any($1)")
+            .bind(icaos)
+            .execute(&mut *conn)
+            .await
+            .map_err(db_err)?
+            .rows_affected() as usize;
+    let ramps =
+        sqlx::query("delete from flow.airport_ramp_area where source = 'osm' and icao = any($1)")
+            .bind(icaos)
+            .execute(&mut *conn)
+            .await
+            .map_err(db_err)?
+            .rows_affected() as usize;
+    Ok((taxiways, ramps))
+}
+
+/// Inserts every extract row for `icaos` as `source='faa'` — one set-based insert per table (column
+/// arrays via `unnest`) rather than a round trip per row. Returns `(taxiways, ramps)` inserted.
+async fn insert_airports(
+    conn: &mut sqlx::PgConnection,
+    extract: &HashMap<String, ExtractAirport>,
+    icaos: &[&str],
+) -> Result<(usize, usize), ApiError> {
+    let (mut tw_icao, mut tw_name, mut tw_points) = (Vec::new(), Vec::new(), Vec::new());
+    let (mut ra_icao, mut ra_name, mut ra_kind, mut ra_rings) =
+        (Vec::new(), Vec::new(), Vec::new(), Vec::new());
+    for icao in icaos {
+        let airport = &extract[*icao];
+        for t in &airport.taxiways {
+            tw_icao.push(*icao);
+            tw_name.push(t.name.as_str());
+            tw_points.push(sqlx::types::Json(&t.points));
+        }
+        for r in &airport.ramps {
+            ra_icao.push(*icao);
+            ra_name.push(r.name.as_str());
+            ra_kind.push(r.kind.as_str());
+            ra_rings.push(sqlx::types::Json(&r.rings));
+        }
+    }
+
+    let taxiways_inserted = sqlx::query(
+        "insert into flow.airport_taxiway (icao, name, points, source) \
+         select icao, name, points, 'faa' from unnest($1::text[], $2::text[], $3::jsonb[]) \
+         as t(icao, name, points)",
+    )
+    .bind(&tw_icao)
+    .bind(&tw_name)
+    .bind(&tw_points)
+    .execute(&mut *conn)
+    .await
+    .map_err(db_err)?
+    .rows_affected() as usize;
+    let ramps_inserted = sqlx::query(
+        "insert into flow.airport_ramp_area (icao, name, kind, rings, source) \
+         select icao, name, kind, rings, 'faa' \
+         from unnest($1::text[], $2::text[], $3::text[], $4::jsonb[]) as r(icao, name, kind, rings)",
+    )
+    .bind(&ra_icao)
+    .bind(&ra_name)
+    .bind(&ra_kind)
+    .bind(&ra_rings)
+    .execute(&mut *conn)
+    .await
+    .map_err(db_err)?
+    .rows_affected() as usize;
+
+    Ok((taxiways_inserted, ramps_inserted))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::models::UpsertAirportTaxiwayRequest;
+    use crate::repos::airport_surface;
+    use crate::scope_test_support::seed_user;
+
+    async fn count(pool: &PgPool, sql: &str) -> i64 {
+        sqlx::query_scalar(sql).fetch_one(pool).await.unwrap()
+    }
+
+    async fn first_faa_taxiway(pool: &PgPool, icao: &str) -> String {
+        sqlx::query_scalar(
+            "select id from flow.airport_taxiway where icao = $1 and source = 'faa' \
+             order by id limit 1",
+        )
+        .bind(icao)
+        .fetch_one(pool)
+        .await
+        .unwrap()
+    }
 
     #[test]
     fn bundled_extract_parses() {
@@ -197,41 +292,158 @@ mod tests {
     }
 
     #[sqlx::test]
-    async fn seed_inserts_rows_from_the_bundled_extract(pool: sqlx::PgPool) {
+    async fn seed_inserts_rows_from_the_bundled_extract(pool: PgPool) {
         let summary = seed(&pool).await.unwrap();
         assert_eq!(summary.taxiways_inserted, 20069);
         assert_eq!(summary.ramps_inserted, 4082);
-
-        let taxiways: i64 = sqlx::query_scalar(
-            "select count(*) from flow.airport_taxiway where icao = 'KDCA' and source = 'faa'",
-        )
-        .fetch_one(&pool)
-        .await
-        .unwrap();
-        assert_eq!(taxiways, 105);
+        assert_eq!(summary.airports_seeded, 185);
+        assert_eq!(
+            count(
+                &pool,
+                "select count(*) from flow.airport_taxiway where icao = 'KDCA' and source = 'faa'"
+            )
+            .await,
+            105
+        );
     }
 
     #[sqlx::test]
-    async fn seeding_twice_produces_no_duplicates(pool: sqlx::PgPool) {
+    async fn a_second_run_touches_nothing(pool: PgPool) {
         seed(&pool).await.unwrap();
         let summary = seed(&pool).await.unwrap();
 
-        let taxiways: i64 =
-            sqlx::query_scalar("select count(*) from flow.airport_taxiway where source = 'faa'")
+        assert_eq!(summary.airports_seeded, 0);
+        assert_eq!(summary.airports_skipped, 185);
+        assert_eq!(summary.taxiways_inserted + summary.ramps_inserted, 0);
+        assert_eq!(
+            count(
+                &pool,
+                "select count(*) from flow.airport_taxiway where source = 'faa'"
+            )
+            .await,
+            20069
+        );
+    }
+
+    /// Regression (#231 QA): the seed used to replace every `faa` row on each run, reverting
+    /// map-editor edits, resurrecting deleted rows and churning every row id.
+    #[sqlx::test]
+    async fn facility_edits_and_deletes_of_faa_rows_survive_a_rerun(pool: PgPool) {
+        seed(&pool).await.unwrap();
+        let actor = seed_user(&pool).await;
+        let edited = first_faa_taxiway(&pool, "KDCA").await;
+        let req = UpsertAirportTaxiwayRequest {
+            name: "EDITED".into(),
+            points: vec![[38.85, -77.04], [38.86, -77.05]],
+        };
+        airport_surface::update_taxiway(&pool, &edited, "KDCA", &req, &actor)
+            .await
+            .unwrap()
+            .expect("the faa row is editable");
+        let deleted: String = sqlx::query_scalar(
+            "select id from flow.airport_taxiway where icao = 'KDCA' and source = 'faa' \
+             and id <> $1 limit 1",
+        )
+        .bind(&edited)
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        assert!(
+            airport_surface::delete_taxiway(&pool, &deleted, "KDCA")
+                .await
+                .unwrap()
+        );
+
+        seed(&pool).await.unwrap();
+
+        let name: String =
+            sqlx::query_scalar("select name from flow.airport_taxiway where id = $1")
+                .bind(&edited)
                 .fetch_one(&pool)
                 .await
-                .unwrap();
-        assert_eq!(taxiways as usize, summary.taxiways_inserted);
-        // second run's osm-retirement counts are 0 — nothing left to retire.
-        assert_eq!(summary.osm_taxiways_retired, 0);
-        assert_eq!(summary.osm_ramps_retired, 0);
+                .expect("edited row keeps its id");
+        assert_eq!(name, "EDITED");
+        assert_eq!(
+            count(
+                &pool,
+                "select count(*) from flow.airport_taxiway where icao = 'KDCA' and source = 'faa'"
+            )
+            .await,
+            104,
+            "the deleted faa row must stay deleted"
+        );
     }
 
     #[sqlx::test]
-    async fn a_manual_row_for_a_seeded_icao_survives_unchanged(pool: sqlx::PgPool) {
+    async fn concurrent_runs_do_not_duplicate_rows(pool: PgPool) {
+        let (a, b) = tokio::join!(seed(&pool), seed(&pool));
+        let (a, b) = (a.unwrap(), b.unwrap());
+        assert_eq!(a.airports_seeded + b.airports_seeded, 185);
+        assert_eq!(
+            count(
+                &pool,
+                "select count(*) from flow.airport_taxiway where source = 'faa'"
+            )
+            .await,
+            20069
+        );
+    }
+
+    #[sqlx::test]
+    async fn only_airports_without_faa_rows_are_seeded(pool: PgPool) {
+        seed(&pool).await.unwrap();
+        let kdca_id = first_faa_taxiway(&pool, "KDCA").await;
+        // An airport whose faa rows are all gone (both tables) counts as unseeded again.
+        sqlx::query("delete from flow.airport_taxiway where icao = 'KRUT' and source = 'faa'")
+            .execute(&pool)
+            .await
+            .unwrap();
+        sqlx::query("delete from flow.airport_ramp_area where icao = 'KRUT' and source = 'faa'")
+            .execute(&pool)
+            .await
+            .unwrap();
+
+        let summary = seed(&pool).await.unwrap();
+
+        assert_eq!(summary.airports_seeded, 1);
+        assert_eq!(summary.taxiways_inserted, 45);
+        assert_eq!(first_faa_taxiway(&pool, "KDCA").await, kdca_id);
+    }
+
+    #[sqlx::test]
+    async fn an_airport_with_only_faa_ramps_left_is_not_reseeded(pool: PgPool) {
+        seed(&pool).await.unwrap();
+        sqlx::query("delete from flow.airport_taxiway where icao = 'KRUT' and source = 'faa'")
+            .execute(&pool)
+            .await
+            .unwrap();
+
+        let summary = seed(&pool).await.unwrap();
+
+        assert_eq!(summary.airports_seeded, 0);
+        assert_eq!(
+            count(
+                &pool,
+                "select count(*) from flow.airport_ramp_area where icao = 'KRUT' and source = 'faa'"
+            )
+            .await,
+            11
+        );
+    }
+
+    #[sqlx::test]
+    async fn manual_and_crc_rows_for_a_seeded_icao_survive(pool: PgPool) {
         sqlx::query(
-            "insert into flow.airport_taxiway (icao, name, points, source) \
-             values ('KDCA', 'Hand-drawn', '[[1,2]]', 'manual')",
+            "insert into flow.airport_taxiway (icao, name, points, source) values \
+             ('KDCA', 'Hand-drawn', '[[1,2]]', 'manual'), ('KDCA', 'Imported', '[[1,2]]', 'crc')",
+        )
+        .execute(&pool)
+        .await
+        .unwrap();
+        sqlx::query(
+            "insert into flow.airport_ramp_area (icao, name, kind, rings, source) values \
+             ('KDCA', 'Hand-drawn', 'ramp', '[[[1,2]]]', 'manual'), \
+             ('KDCA', 'Imported', 'ramp', '[[[1,2]]]', 'crc')",
         )
         .execute(&pool)
         .await
@@ -239,52 +451,104 @@ mod tests {
 
         seed(&pool).await.unwrap();
 
-        let manual: i64 = sqlx::query_scalar(
-            "select count(*) from flow.airport_taxiway \
-             where icao = 'KDCA' and source = 'manual' and name = 'Hand-drawn'",
-        )
-        .fetch_one(&pool)
-        .await
-        .unwrap();
-        assert_eq!(manual, 1);
+        assert_eq!(
+            count(
+                &pool,
+                "select count(*) from flow.airport_taxiway \
+                 where icao = 'KDCA' and source in ('manual', 'crc')"
+            )
+            .await,
+            2
+        );
+        assert_eq!(
+            count(
+                &pool,
+                "select count(*) from flow.airport_ramp_area \
+                 where icao = 'KDCA' and source in ('manual', 'crc')"
+            )
+            .await,
+            2
+        );
     }
 
     #[sqlx::test]
-    async fn kdcas_pre_existing_osm_rows_are_retired(pool: sqlx::PgPool) {
+    async fn kdcas_pre_existing_osm_rows_are_retired(pool: PgPool) {
         // KDCA's migration-0067 osm seed (57 gates, 4 ramps, 84 taxiways) is already present from
         // the fresh #[sqlx::test] database's migrations.
-        let before: i64 = sqlx::query_scalar(
-            "select count(*) from flow.airport_taxiway where icao = 'KDCA' and source = 'osm'",
-        )
-        .fetch_one(&pool)
-        .await
-        .unwrap();
-        assert_eq!(before, 84);
+        assert_eq!(
+            count(
+                &pool,
+                "select count(*) from flow.airport_taxiway where icao = 'KDCA' and source = 'osm'"
+            )
+            .await,
+            84
+        );
 
         let summary = seed(&pool).await.unwrap();
         assert_eq!(summary.osm_taxiways_retired, 84);
         assert_eq!(summary.osm_ramps_retired, 4);
-
-        let after: i64 = sqlx::query_scalar(
-            "select count(*) from flow.airport_taxiway where icao = 'KDCA' and source = 'osm'",
-        )
-        .fetch_one(&pool)
-        .await
-        .unwrap();
-        assert_eq!(after, 0);
-
+        assert_eq!(
+            count(
+                &pool,
+                "select count(*) from flow.airport_taxiway where icao = 'KDCA' and source = 'osm'"
+            )
+            .await,
+            0
+        );
         // KDCA's osm gates are untouched — this seed writes no gate rows at all.
-        let gates: i64 = sqlx::query_scalar(
-            "select count(*) from flow.airport_gate where icao = 'KDCA' and source = 'osm'",
+        assert_eq!(
+            count(
+                &pool,
+                "select count(*) from flow.airport_gate where icao = 'KDCA' and source = 'osm'"
+            )
+            .await,
+            57
+        );
+    }
+
+    /// `osm` retirement applies only to airports being seeded in that run — an `osm` row added to an
+    /// already-seeded airport afterwards survives a rerun.
+    #[sqlx::test]
+    async fn osm_rows_of_an_already_seeded_airport_survive_a_rerun(pool: PgPool) {
+        seed(&pool).await.unwrap();
+        sqlx::query(
+            "insert into flow.airport_taxiway (icao, name, points, source) \
+             values ('KDCA', 'Later', '[[1,2]]', 'osm')",
         )
-        .fetch_one(&pool)
+        .execute(&pool)
         .await
         .unwrap();
-        assert_eq!(gates, 57);
+        sqlx::query(
+            "insert into flow.airport_ramp_area (icao, name, kind, rings, source) \
+             values ('KDCA', 'Later', 'apron', '[[[1,2]]]', 'osm')",
+        )
+        .execute(&pool)
+        .await
+        .unwrap();
+
+        let summary = seed(&pool).await.unwrap();
+
+        assert_eq!(summary.osm_taxiways_retired + summary.osm_ramps_retired, 0);
+        assert_eq!(
+            count(
+                &pool,
+                "select count(*) from flow.airport_taxiway where icao = 'KDCA' and source = 'osm'"
+            )
+            .await,
+            1
+        );
+        assert_eq!(
+            count(
+                &pool,
+                "select count(*) from flow.airport_ramp_area where icao = 'KDCA' and source = 'osm'"
+            )
+            .await,
+            1
+        );
     }
 
     #[sqlx::test]
-    async fn an_osm_row_for_an_icao_the_extract_does_not_cover_survives(pool: sqlx::PgPool) {
+    async fn an_osm_row_for_an_icao_the_extract_does_not_cover_survives(pool: PgPool) {
         sqlx::query(
             "insert into flow.airport_taxiway (icao, name, points, source) \
              values ('KZZZ', 'Untouched', '[[1,2]]', 'osm')",
@@ -295,17 +559,18 @@ mod tests {
 
         seed(&pool).await.unwrap();
 
-        let still_there: i64 = sqlx::query_scalar(
-            "select count(*) from flow.airport_taxiway where icao = 'KZZZ' and source = 'osm'",
-        )
-        .fetch_one(&pool)
-        .await
-        .unwrap();
-        assert_eq!(still_there, 1);
+        assert_eq!(
+            count(
+                &pool,
+                "select count(*) from flow.airport_taxiway where icao = 'KZZZ' and source = 'osm'"
+            )
+            .await,
+            1
+        );
     }
 
     #[sqlx::test]
-    async fn seed_for_icao_only_touches_the_requested_airport(pool: sqlx::PgPool) {
+    async fn seed_for_icao_only_touches_the_requested_airport(pool: PgPool) {
         let summary = seed_for_icao(&pool, "KDCA").await.unwrap();
         assert_eq!(summary.taxiways_inserted, 105);
         assert_eq!(summary.ramps_inserted, 15);
@@ -321,7 +586,7 @@ mod tests {
     }
 
     #[sqlx::test]
-    async fn seed_for_icao_retires_only_that_airports_osm_rows(pool: sqlx::PgPool) {
+    async fn seed_for_icao_retires_only_that_airports_osm_rows(pool: PgPool) {
         let summary = seed_for_icao(&pool, "KDCA").await.unwrap();
         assert_eq!(summary.osm_taxiways_retired, 84);
         assert_eq!(summary.osm_ramps_retired, 4);
@@ -336,7 +601,7 @@ mod tests {
     }
 
     #[sqlx::test]
-    async fn seed_for_icao_leaves_a_manual_row_untouched(pool: sqlx::PgPool) {
+    async fn seed_for_icao_leaves_a_manual_row_untouched(pool: PgPool) {
         sqlx::query(
             "insert into flow.airport_taxiway (icao, name, points, source) \
              values ('KDCA', 'Hand-drawn', '[[1,2]]', 'manual')",
@@ -358,9 +623,7 @@ mod tests {
     }
 
     #[sqlx::test]
-    async fn seed_for_icao_not_covered_by_the_extract_clears_stale_faa_rows_only(
-        pool: sqlx::PgPool,
-    ) {
+    async fn seed_for_icao_not_covered_by_the_extract_clears_stale_faa_rows_only(pool: PgPool) {
         sqlx::query(
             "insert into flow.airport_taxiway (icao, name, points, source) \
              values ('KZZZ', 'Stale', '[[1,2]]', 'faa')",
@@ -394,5 +657,58 @@ mod tests {
         .await
         .unwrap();
         assert_eq!(osm, 1);
+    }
+
+    /// The re-pull is an explicit refresh: unlike the boot seed, it replaces the airport's faa rows,
+    /// reverting a facility edit, without duplicating anything.
+    #[sqlx::test]
+    async fn seed_for_icao_restores_the_faa_baseline_after_an_edit(pool: PgPool) {
+        seed(&pool).await.unwrap();
+        let actor = seed_user(&pool).await;
+        let edited = first_faa_taxiway(&pool, "KDCA").await;
+        let req = UpsertAirportTaxiwayRequest {
+            name: "EDITED".into(),
+            points: vec![[38.85, -77.04], [38.86, -77.05]],
+        };
+        airport_surface::update_taxiway(&pool, &edited, "KDCA", &req, &actor)
+            .await
+            .unwrap()
+            .expect("the faa row is editable");
+
+        let summary = seed_for_icao(&pool, "KDCA").await.unwrap();
+
+        assert_eq!(summary.taxiways_inserted, 105);
+        assert_eq!(
+            count(
+                &pool,
+                "select count(*) from flow.airport_taxiway where icao = 'KDCA' and source = 'faa'"
+            )
+            .await,
+            105
+        );
+        assert_eq!(
+            count(
+                &pool,
+                "select count(*) from flow.airport_taxiway where icao = 'KDCA' and name = 'EDITED'"
+            )
+            .await,
+            0
+        );
+    }
+
+    /// The re-pull and the boot seed share `SEED_LOCK_KEY`, so racing them can't double-insert.
+    #[sqlx::test]
+    async fn seed_for_icao_and_seed_do_not_duplicate_when_concurrent(pool: PgPool) {
+        let (a, b) = tokio::join!(seed(&pool), seed_for_icao(&pool, "KDCA"));
+        a.unwrap();
+        b.unwrap();
+        assert_eq!(
+            count(
+                &pool,
+                "select count(*) from flow.airport_taxiway where icao = 'KDCA' and source = 'faa'"
+            )
+            .await,
+            105
+        );
     }
 }
