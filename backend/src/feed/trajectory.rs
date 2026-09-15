@@ -360,9 +360,11 @@ impl VerticalProfile {
     }
 
     /// Predicted ground speed (kt) at a distance-to-destination `d` — the phase-appropriate TAS
-    /// with wind applied, same as [`Self::time_between`] uses internally.
+    /// with wind applied, floored at [`GS_FLOOR_KT`] exactly like [`Self::time_between`]'s
+    /// internal integration, so a displayed speed never reads below what the paired ETA in the
+    /// same row was actually timed against.
     pub fn ground_speed_at(&self, d_nm: f64) -> f64 {
-        effective_gs(self.interp(d_nm, |s| s.2), self.headwind)
+        effective_gs(self.interp(d_nm, |s| s.2), self.headwind).max(GS_FLOOR_KT)
     }
 
     /// Seconds to fly from distance-to-destination `from_d` forward to `to_d` (`to_d < from_d`),
@@ -717,6 +719,25 @@ mod tests {
             descending.ground_speed_at(5.0) < 480.0,
             "expected a slower speed close to the field, got {}",
             descending.ground_speed_at(5.0)
+        );
+    }
+
+    /// Regression (#225 rework): `ground_speed_at` must apply the same [`GS_FLOOR_KT`] floor
+    /// `time_between`'s internal integration already does, or the debug table's KT column can read
+    /// below the speed its own row's ETA was actually timed against — a strong headwind on the
+    /// slow near-field approach TAS is exactly the case `effective_gs`'s own `tas * 0.4` clamp can
+    /// push under the floor.
+    #[test]
+    fn ground_speed_at_never_reads_below_the_floor_time_between_uses() {
+        // A slow GA aircraft's low descent IAS, plus a headwind, pushes `effective_gs`'s own
+        // `tas * 0.4` clamp (≈36kt here) below GS_FLOOR_KT — exactly the case `time_between`'s
+        // internal integration floors but `ground_speed_at` didn't.
+        let slow_with_headwind =
+            VerticalProfile::build(6000.0, 30.0, 0.0, 6000.0, 120.0, &c172(), Some(60.0));
+        assert!(
+            slow_with_headwind.ground_speed_at(1.0) >= GS_FLOOR_KT,
+            "got {}",
+            slow_with_headwind.ground_speed_at(1.0)
         );
     }
 
