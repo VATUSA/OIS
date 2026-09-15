@@ -210,6 +210,91 @@ mod validate_subset_tests {
         ];
         assert!(validate_subset(&pool, &user, &requested).await.is_ok());
     }
+
+    /// Every entry is checked, not just the first: a request is typically many (perm, ARTCC)
+    /// pairs, and an escalating entry after valid ones must still reject the whole request.
+    #[sqlx::test]
+    async fn an_escalating_entry_after_valid_ones_is_forbidden(pool: PgPool) {
+        let user = seed_user(&pool).await;
+        grant(&pool, &user, PERM, Some("ZDC")).await;
+        assign_role(&pool, &user, "USER").await;
+
+        let unheld = vec![
+            (PERM.to_string(), Some("ZDC".to_string())),
+            ("ace.requests.manage".to_string(), None),
+        ];
+        assert!(matches!(
+            validate_subset(&pool, &user, &unheld).await,
+            Err(ApiError::Forbidden)
+        ));
+
+        let wider_scope = vec![
+            ("ace.requests.create".to_string(), None),
+            (PERM.to_string(), Some("ZDC".to_string())),
+            (PERM.to_string(), None),
+        ];
+        assert!(matches!(
+            validate_subset(&pool, &user, &wider_scope).await,
+            Err(ApiError::Forbidden)
+        ));
+    }
+
+    /// A role held at one ARTCC grants its permissions at that ARTCC only — never nationally.
+    #[sqlx::test]
+    async fn an_artcc_scoped_role_only_allows_that_artcc(pool: PgPool) {
+        // The seeded ACE role grants ace.requests.decide (USER doesn't).
+        const ROLE_PERM: &str = "ace.requests.decide";
+        let user = seed_user(&pool).await;
+        sqlx::query(
+            "insert into access.user_roles (user_id, role_name, artcc_id) values ($1, 'ACE', 'ZDC')",
+        )
+        .bind(&user)
+        .execute(&pool)
+        .await
+        .unwrap();
+
+        assert!(
+            validate_subset(&pool, &user, &req(ROLE_PERM, Some("ZDC")))
+                .await
+                .is_ok()
+        );
+        assert!(matches!(
+            validate_subset(&pool, &user, &req(ROLE_PERM, None)).await,
+            Err(ApiError::Forbidden)
+        ));
+        assert!(matches!(
+            validate_subset(&pool, &user, &req(ROLE_PERM, Some("ZNY"))).await,
+            Err(ApiError::Forbidden)
+        ));
+    }
+
+    /// Isolates the owner-holds check: the ZDC grant still gives a ZDC scope (`permission_scope`
+    /// doesn't read denies), so only the effective-permission name check rejects it.
+    #[sqlx::test]
+    async fn a_denied_permission_is_forbidden_even_where_its_scope_would_allow(pool: PgPool) {
+        let user = seed_user(&pool).await;
+        grant(&pool, &user, PERM, Some("ZDC")).await;
+        deny(&pool, &user, PERM).await;
+        assert!(matches!(
+            validate_subset(&pool, &user, &req(PERM, Some("ZDC"))).await,
+            Err(ApiError::Forbidden)
+        ));
+    }
+
+    #[sqlx::test]
+    async fn a_server_admin_is_national_but_still_cannot_delegate_key_management(pool: PgPool) {
+        let user = seed_user(&pool).await;
+        assign_role(&pool, &user, "SERVER_ADMIN").await;
+        assert!(
+            validate_subset(&pool, &user, &req(PERM, None))
+                .await
+                .is_ok()
+        );
+        assert!(matches!(
+            validate_subset(&pool, &user, &req("api_keys.key.create", None)).await,
+            Err(ApiError::BadRequest)
+        ));
+    }
 }
 
 // --- CRUD ---
