@@ -137,9 +137,11 @@ export function togglePresetSelection(
     const scopeOf = (o: AccessPreset, at: string, p: string): ScopeSel =>
       o.scope === "facility" ? { national: false, artccs: [at] } : defaultScope(byName.get(p)!);
     const self = preset.scope === "facility" ? facility : "";
-    // Every other preset applied nationally or at an ARTCC in the selection. One whose grants all lie
-    // inside this preset's (itself, or e.g. NTMO inside VATUSA Admin) is indistinguishable from it, so
-    // it goes too.
+    // Every other preset applied nationally or at an ARTCC in the selection keeps its grants — except
+    // one whose grants all lie inside this preset's (itself, or e.g. NTMO inside VATUSA Admin) or that
+    // contains this preset's (e.g. DCC Staff over NTMO). Either can't be told apart from this preset
+    // in the selection, and keeping the containing one's grants would leave this chip lit — a click
+    // is never ignored, so it goes unlit too.
     const selArtccs = [...new Set([...selection.values()].flatMap((s) => s.artccs))];
     const others = ACCESS_PRESETS.flatMap((o) =>
       (o.scope === "facility" ? selArtccs : [""]).map((at) => ({
@@ -150,7 +152,8 @@ export function togglePresetSelection(
     ).filter(
       ({ o, at, own: theirs }) =>
         presetApplied(o, grantable, baseNames, at, selection) &&
-        !theirs.every((p) => own.includes(p) && covers(scopeOf(preset, self, p), scopeOf(o, at, p))),
+        !theirs.every((p) => own.includes(p) && covers(scopeOf(preset, self, p), scopeOf(o, at, p))) &&
+        !own.every((p) => theirs.includes(p) && covers(scopeOf(o, at, p), scopeOf(preset, self, p))),
     );
     for (const p of own) {
       const s = next.get(p)!;
@@ -172,8 +175,11 @@ export function togglePresetSelection(
       if (kept.national || kept.artccs.length > 0) next.set(p, kept);
       else next.delete(p);
     }
-    // Keep the baseline while another preset (including this one at another ARTCC) is still applied.
-    if (others.length === 0) for (const p of baseNames) next.delete(p);
+    // Keep the baseline while another preset (including this one at another ARTCC) is still applied,
+    // or any of this preset's perms remain (e.g. national grants a facility preset left alone).
+    if (others.length === 0 && !own.some((p) => next.has(p))) {
+      for (const p of baseNames) next.delete(p);
+    }
     return next;
   }
   for (const p of own) {

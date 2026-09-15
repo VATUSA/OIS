@@ -154,13 +154,42 @@ describe("preset highlighting (#264)", () => {
     expect(next.get("tmu.programs.update")).toEqual({ national: false, artccs: ["ZDC"] });
   });
 
-  it("removing a national preset keeps what another applied national preset grants (#275)", () => {
+  it("removing a preset inside a lit one still turns it off; the containing one goes unlit (#275)", () => {
     const g = ADMIN_GRANTABLE;
-    const dcc = togglePresetSelection(preset("dcc_staff"), g, base(g), "", new Map());
-    const both = togglePresetSelection(preset("ntmo"), g, base(g), "", dcc);
+    // DCC Staff alone already lights NTMO (its grants lie inside DCC Staff's).
+    const both = togglePresetSelection(preset("dcc_staff"), g, base(g), "", new Map());
     expect(presetApplied(preset("ntmo"), g, base(g), "", both)).toBe(true);
     const off = togglePresetSelection(preset("ntmo"), g, base(g), "", both);
-    expect(presetApplied(preset("dcc_staff"), g, base(g), "", off)).toBe(true);
+    // Accepted cost (operator decision): DCC Staff + NTMO is indistinguishable from DCC Staff alone,
+    // so turning NTMO off removes its perms and DCC Staff goes unlit rather than ignoring the click.
+    expect(presetApplied(preset("ntmo"), g, base(g), "", off)).toBe(false);
+    expect(presetApplied(preset("dcc_staff"), g, base(g), "", off)).toBe(false);
+    for (const p of TRAFFIC) expect(off.has(p)).toBe(false);
+  });
+
+  it("a preset lit alongside a containing one it lit up turns off when clicked (#275)", () => {
+    const g = ADMIN_GRANTABLE;
+    const ntmo = togglePresetSelection(preset("ntmo"), g, base(g), "", new Map());
+    const both = togglePresetSelection(preset("events_team"), g, base(g), "", ntmo);
+    // NTMO + Events Team is DCC Staff's whole set here, so DCC Staff (and ACE Team) light too.
+    expect(presetApplied(preset("dcc_staff"), g, base(g), "", both)).toBe(true);
+    for (const id of ["ntmo", "events_team"]) {
+      const off = togglePresetSelection(preset(id), g, base(g), "", both);
+      expect(presetApplied(preset(id), g, base(g), "", off)).toBe(false);
+    }
+  });
+
+  it("removing a facility preset keeps the baseline while national grants remain (#275)", () => {
+    const g = ADMIN_GRANTABLE;
+    const ec = preset("facility_ec");
+    const ntmo = togglePresetSelection(preset("ntmo"), g, base(g), "", new Map());
+    ntmo.set("flow.fca.update", { national: false, artccs: ["ZDC"] }); // narrowed by hand
+    const on = togglePresetSelection(ec, g, base(g), "ZDC", ntmo);
+    expect(presetApplied(ec, g, base(g), "ZDC", on)).toBe(true);
+    const off = togglePresetSelection(ec, g, base(g), "ZDC", on);
+    expect(off.get("tmu.programs.update")).toEqual({ national: true, artccs: [] });
+    expect(off.get("stats.history.read")).toEqual({ national: true, artccs: [] });
+    expect(off.has("ace.requests.create")).toBe(true);
   });
 
   it("removing a national preset stacked on a facility preset hands the facility its ARTCC back (#275)", () => {
@@ -204,7 +233,9 @@ describe("preset highlighting (#264)", () => {
     const on = togglePresetSelection(ec, g, base(g), "ZDC", sel);
     expect(presetApplied(ec, g, base(g), "ZDC", on)).toBe(true);
     const off = togglePresetSelection(ec, g, base(g), "ZDC", on);
-    expect(off).toEqual(sel);
+    // The national grant is left alone; the baseline stays with it, since a remaining own perm keeps
+    // the baseline (the selection can't tell a hand-picked grant from one a preset left, #275).
+    expect(off).toEqual(new Map([...sel, ["ace.requests.create", { national: true, artccs: [] }]]));
   });
 
   it("removing a preset also removes presets wholly inside it, which can't be told apart (#275)", () => {
@@ -250,4 +281,62 @@ describe("preset highlighting (#264)", () => {
     expect(presetCanApply(preset("facility_ec"), g, base(g), "")).toBe(true);
     expect(presetCanApply(preset("facility_ec"), [], [], "ZDC")).toBe(false);
   });
+});
+
+// ARTCC-limited creator: every grantable perm, the baseline included, only at ZDC.
+const ARTCC_LIMITED_GRANTABLE: GrantablePermission[] = ADMIN_GRANTABLE.map((g) => ({
+  ...g,
+  national: false,
+  artccs: ["ZDC"],
+}));
+
+/** Whether a selected scope lies within what the creator can delegate. */
+const withinBounds = (s: { national: boolean; artccs: string[] }, g: GrantablePermission) =>
+  g.national || (!s.national && s.artccs.every((a) => g.artccs.includes(a)));
+
+describe("preset click invariants (#275)", () => {
+  const FACILITIES = ["ZDC", "ZNY"];
+  const clicks = ACCESS_PRESETS.flatMap((p) =>
+    p.scope === "facility" ? FACILITIES.map((f) => ({ p, f })) : [{ p, f: "" }],
+  );
+  const stateKey = (sel: PermSelection) =>
+    JSON.stringify([...sel].sort(([a], [b]) => a.localeCompare(b)));
+  const label = (path: string[]) => path.join(" → ") || "(empty)";
+
+  it.each([
+    ["admin", ADMIN_GRANTABLE],
+    ["TMU-only", TMU_ONLY_GRANTABLE],
+    ["ARTCC-limited", ARTCC_LIMITED_GRANTABLE],
+  ] as const)(
+    "for a %s creator, every click stays within bounds and every lit chip turns off",
+    (_name, g) => {
+      const byName = new Map(g.map((x) => [x.permission, x] as const));
+      const b = base(g);
+      let frontier: { sel: PermSelection; path: string[] }[] = [{ sel: new Map(), path: [] }];
+      const seen = new Set([stateKey(new Map())]);
+
+      for (let depth = 0; depth <= 4; depth++) {
+        const nextFrontier: typeof frontier = [];
+        for (const { sel, path } of frontier) {
+          for (const [perm, s] of sel) {
+            const grant = byName.get(perm);
+            expect(grant && withinBounds(s, grant), `${perm} out of bounds after ${label(path)}`).toBe(true);
+          }
+          for (const { p, f } of clicks) {
+            const after = togglePresetSelection(p, g, b, f, sel);
+            const step = [...path, f ? `${p.id}@${f}` : p.id];
+            if (presetApplied(p, g, b, f, sel)) {
+              expect(presetApplied(p, g, b, f, after), `${label(step)} left ${p.id} lit`).toBe(false);
+            }
+            const key = stateKey(after);
+            if (depth < 4 && !seen.has(key)) {
+              seen.add(key);
+              nextFrontier.push({ sel: after, path: step });
+            }
+          }
+        }
+        frontier = nextFrontier;
+      }
+    },
+  );
 });
