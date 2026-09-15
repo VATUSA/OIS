@@ -59,6 +59,18 @@ fn prefile_position(airports: &AirportDb, dep: &str) -> Option<(f64, f64)> {
     airports.get(&dep.to_ascii_uppercase()).copied()
 }
 
+/// The polyline `aircraft_route` draws for a connected pilot (#213). `route_path`'s ground branch
+/// deliberately collapses to `None` once a ground aircraft has landed at its destination — correct
+/// for FCA-crossing detection (there's no crossing left ahead of it), but that same `None` must not
+/// turn into an empty `points` array here: this endpoint backs a map polyline + detail popup, and a
+/// landed/taxiing aircraft still needs a valid, non-empty track (its own position) rather than
+/// silently drawing nothing where the full filed route used to show. `waypoints` (from
+/// `full_route_named`, built separately by the caller) already carries the complete filed route for
+/// the popup regardless of this fallback, so this only fixes the drawn line.
+fn route_display_points(path: Option<Vec<[f64; 2]>>, lat: f64, lon: f64) -> Vec<[f64; 2]> {
+    path.unwrap_or_else(|| vec![[lat, lon]])
+}
+
 /// Airport-code match, tolerant of a leading `K` (KJFK ~ JFK).
 fn airport_match(filter: &str, code: &str) -> bool {
     let (f, c) = (filter.to_ascii_uppercase(), code.to_ascii_uppercase());
@@ -542,7 +554,7 @@ pub async fn aircraft_route(
         let fp = p.flight_plan.as_ref().ok_or(ApiError::NotFound)?;
         let (named, unresolved) =
             fca::full_route_named(nav, airports, &fp.departure, &fp.arrival, &fp.route);
-        let points = fca::route_path(
+        let path = fca::route_path(
             nav,
             airports,
             &fp.departure,
@@ -552,8 +564,8 @@ pub async fn aircraft_route(
             p.longitude,
             p.heading,
             p.groundspeed,
-        )
-        .unwrap_or_default();
+        );
+        let points = route_display_points(path, p.latitude, p.longitude);
         return Ok(Json(AircraftRoute {
             callsign: cs,
             aircraft_type: fp.aircraft_short.clone(),
@@ -1835,5 +1847,123 @@ mod prefile_position_tests {
         // prefile instead of guessing a position.
         let airports: crate::feed::airports::AirportDb = HashMap::new();
         assert_eq!(prefile_position(&airports, "ZZZZ"), None);
+    }
+}
+
+#[cfg(test)]
+mod route_display_points_tests {
+    use super::route_display_points;
+
+    #[test]
+    fn returns_the_resolved_path_unchanged() {
+        let path = vec![[40.0, -73.0], [39.0, -74.0]];
+        assert_eq!(route_display_points(Some(path.clone()), 0.0, 0.0), path);
+    }
+
+    /// Regression (#213): `route_path`'s ground branch deliberately returns `None` once a ground
+    /// aircraft has landed at its destination (nothing left ahead of it to cross). That must not
+    /// turn into an empty polyline for the map/detail-popup endpoint — it should fall back to the
+    /// aircraft's own position rather than silently drawing nothing.
+    #[test]
+    fn falls_back_to_the_aircraft_s_own_position_when_the_route_has_collapsed() {
+        assert_eq!(
+            route_display_points(None, 38.95, -77.46),
+            vec![[38.95, -77.46]]
+        );
+    }
+}
+
+/// Regression (#213): the actual `build_candidates`/`fca_counts` wiring around `prefile_position`
+/// must skip a prefile with an unresolvable departure — not silently fall back to a fabricated
+/// position. `prefile_position_tests` above only covers the pure helper in isolation; these cover
+/// its use at the real call site, which is what a reverted `.unwrap_or((0.0, 0.0))` would break.
+#[cfg(test)]
+mod prefile_skip_integration_tests {
+    use std::collections::HashMap;
+
+    use chrono::Utc;
+
+    use super::{ReleaseMap, build_candidates};
+    use crate::feed::{
+        airspace::Boundaries,
+        nav::NavData,
+        trajectory::ProfileTable,
+        vatsim::{FlightPlan, Prefile, VatsimData},
+        winds::Winds,
+    };
+    use crate::models::FcaBody;
+
+    fn fca_crossing_the_corridor() -> FcaBody {
+        FcaBody {
+            id: "test".into(),
+            name: "test".into(),
+            color: "#fff".into(),
+            artcc: "ZDC".into(),
+            // Crosses the JFK->DCA corridor between the real WHITE (40.0) and SIE (39.1) fixes.
+            points: sqlx::types::Json(vec![[39.5, -75.6], [39.5, -74.0]]),
+            dests: vec![],
+            origins: vec![],
+            fixes: vec![],
+            scope: vec![],
+            min_fl: None,
+            max_fl: None,
+            dir: "any".into(),
+            mode: "rate".into(),
+            rate: 30,
+            mit: 0,
+            enabled: true,
+            manual_order: vec![],
+            manual_seq: false,
+            updated_at: Utc::now(),
+            updated_by: None,
+            event_id: None,
+            event_status: None,
+            auto_publish: false,
+        }
+    }
+
+    /// A prefile whose departure ICAO isn't in the (tiny, test) airport cache, but whose arrival
+    /// and real enroute fixes (RBV/WHITE/SIE, via the bundled nav db) resolve on their own — the
+    /// exact shape `nav::build_anchors` produces ≥2 anchors for without ever needing the departure.
+    fn unresolvable_departure_prefile() -> VatsimData {
+        VatsimData {
+            prefiles: vec![Prefile {
+                callsign: "TEST1".into(),
+                flight_plan: Some(FlightPlan {
+                    departure: "KJFK".into(), // deliberately absent from `airports` below
+                    arrival: "KDCA".into(),
+                    route: "RBV WHITE SIE".into(),
+                    ..Default::default()
+                }),
+                ..Default::default()
+            }],
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn build_candidates_skips_a_prefile_whose_departure_does_not_resolve() {
+        let nav = NavData::load();
+        let airports: HashMap<String, (f64, f64)> =
+            HashMap::from([("KDCA".to_string(), (38.85, -77.04))]); // no KJFK entry
+        let fca = fca_crossing_the_corridor();
+        let data = unresolvable_departure_prefile();
+        let (flights, metas) = build_candidates(
+            &fca,
+            &data,
+            &airports,
+            &nav,
+            &Boundaries::default(),
+            &Winds::default(),
+            &ProfileTable::default(),
+            &ReleaseMap::new(),
+            Utc::now(),
+            false,
+        );
+        assert!(
+            flights.is_empty() && metas.is_empty(),
+            "a prefile whose departure can't be resolved must be skipped, not counted via a \
+             fabricated (0.0, 0.0) position: got {flights:?}"
+        );
     }
 }
