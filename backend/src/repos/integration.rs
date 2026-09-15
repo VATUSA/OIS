@@ -127,9 +127,10 @@ pub async fn ack_job(
 /// Shared by `channel_id`/`role_id`: resolve `name` to its Discord snowflake in `table` (`id_col`
 /// its snowflake column), preferring a guild whose config lists `facility` among its ARTCCs
 /// (`integration.discord_config_facilities`, #194) over one that doesn't, falling back to
-/// whichever guild was configured first when no guild matches (or none is given) — same as before
-/// facility-scoping existed. `table`/`id_col` are always one of the two hardcoded literals below,
-/// never caller/user input, so building the query with `format!` carries no injection risk.
+/// whichever guild is first in the configured (request-array) order when no guild matches (or
+/// none is given) — same as before facility-scoping existed. `table`/`id_col` are always one of
+/// the two hardcoded literals below, never caller/user input, so building the query with `format!`
+/// carries no injection risk.
 async fn resolve_scoped_id(
     pool: &PgPool,
     table: &str,
@@ -143,7 +144,7 @@ async fn resolve_scoped_id(
          left join integration.discord_config_facilities f \
            on f.config_id = c.id and f.artcc_id = $2 \
          where t.name = $1 \
-         order by (f.artcc_id is not null) desc, c.created_at \
+         order by (f.artcc_id is not null) desc, c.sort_order \
          limit 1"
     );
     sqlx::query_scalar::<_, String>(&query)
@@ -283,7 +284,7 @@ async fn facility_entries(pool: &PgPool, config_id: &str) -> Result<Vec<String>,
 /// the editor's dropdowns. Empty `guilds` when nothing's been configured yet.
 pub async fn get_config(pool: &PgPool) -> Result<DiscordConfigBody, ApiError> {
     let rows = sqlx::query_as::<_, (String, String, String)>(
-        "select id, name, guild_id from integration.discord_configs order by created_at",
+        "select id, name, guild_id from integration.discord_configs order by sort_order",
     )
     .fetch_all(pool)
     .await
@@ -316,15 +317,19 @@ pub async fn upsert_config(
         .execute(&mut *tx)
         .await
         .map_err(|_| ApiError::Internal)?;
-    for g in &req.guilds {
+    for (i, g) in req.guilds.iter().enumerate() {
         if g.guild_id.trim().is_empty() {
             continue;
         }
+        // sort_order is the request array's position, not a re-densified counter — a skipped
+        // (empty guild_id) entry leaves a gap, which is harmless for ordering.
         let config_id = sqlx::query_scalar::<_, String>(
-            "insert into integration.discord_configs (name, guild_id) values ($1, $2) returning id",
+            "insert into integration.discord_configs (name, guild_id, sort_order) \
+             values ($1, $2, $3) returning id",
         )
         .bind(g.name.trim())
         .bind(g.guild_id.trim())
+        .bind(i as i32)
         .fetch_one(&mut *tx)
         .await
         .map_err(|_| ApiError::Internal)?;
@@ -535,6 +540,7 @@ mod tests {
     use sqlx::PgPool;
 
     use super::*;
+    use crate::models::DiscordGuildConfigInput;
 
     #[sqlx::test]
     async fn event_thread_template_get_returns_the_seeded_default(pool: PgPool) {
@@ -570,21 +576,21 @@ mod tests {
         assert_eq!(body, FALLBACK_EVENT_THREAD_TEMPLATE);
     }
 
-    /// `created_at` is explicit (not `default now()`) so two guilds seeded back-to-back have a
-    /// deterministic creation order for the fallback-tiebreak assertions below.
+    /// `sort_order` is explicit so two guilds seeded in one test have a deterministic
+    /// fallback-tiebreak order (#203 — `created_at` no longer participates in that tiebreak).
     async fn seed_guild(
         pool: &PgPool,
         guild_name: &str,
         channel_name: &str,
-        created_at: DateTime<Utc>,
+        sort_order: i32,
     ) -> String {
         let config_id = sqlx::query_scalar::<_, String>(
-            "insert into integration.discord_configs (name, guild_id, created_at) \
+            "insert into integration.discord_configs (name, guild_id, sort_order) \
              values ($1, $2, $3) returning id",
         )
         .bind(guild_name)
         .bind(format!("{guild_name}-snowflake"))
-        .bind(created_at)
+        .bind(sort_order)
         .fetch_one(pool)
         .await
         .unwrap();
@@ -605,15 +611,8 @@ mod tests {
     /// second (later-created) guild's mapping was always unreachable, regardless of facility.
     #[sqlx::test]
     async fn second_guild_with_same_name_routes_by_facility(pool: PgPool) {
-        let t0 = Utc::now();
-        let first = seed_guild(&pool, "DCC", "aceteam-requests", t0).await;
-        let second = seed_guild(
-            &pool,
-            "VATUSA",
-            "aceteam-requests",
-            t0 + chrono::Duration::seconds(1),
-        )
-        .await;
+        let first = seed_guild(&pool, "DCC", "aceteam-requests", 0).await;
+        let second = seed_guild(&pool, "VATUSA", "aceteam-requests", 1).await;
         sqlx::query(
             "insert into integration.discord_config_facilities (config_id, artcc_id) \
              values ($1, 'ZDC')",
@@ -644,20 +643,17 @@ mod tests {
     /// own, not just the shared query logic already covered above.
     #[sqlx::test]
     async fn second_guild_with_same_role_name_routes_by_facility(pool: PgPool) {
-        let t0 = Utc::now();
         let first = sqlx::query_scalar::<_, String>(
-            "insert into integration.discord_configs (name, guild_id, created_at) \
-             values ('DCC', 'dcc-snowflake', $1) returning id",
+            "insert into integration.discord_configs (name, guild_id, sort_order) \
+             values ('DCC', 'dcc-snowflake', 0) returning id",
         )
-        .bind(t0)
         .fetch_one(&pool)
         .await
         .unwrap();
         let second = sqlx::query_scalar::<_, String>(
-            "insert into integration.discord_configs (name, guild_id, created_at) \
-             values ('VATUSA', 'vatusa-snowflake', $1) returning id",
+            "insert into integration.discord_configs (name, guild_id, sort_order) \
+             values ('VATUSA', 'vatusa-snowflake', 1) returning id",
         )
-        .bind(t0 + chrono::Duration::seconds(1))
         .fetch_one(&pool)
         .await
         .unwrap();
@@ -685,5 +681,61 @@ mod tests {
         assert_eq!(scoped, Some("second-role".to_string()));
         let unscoped = role_id(&pool, "ntmo", None).await.unwrap();
         assert_eq!(unscoped, Some("first-role".to_string()));
+    }
+
+    /// Reproduces #203: `upsert_config`'s full delete+reinsert transaction used to rely on
+    /// `created_at`'s `default now()`, which is the *transaction's* start time in Postgres — every
+    /// guild inserted in the loop got an identical timestamp, so the no-facility-match fallback
+    /// (`resolve_scoped_id`'s `order by ..., c.sort_order`) depended on Postgres's unspecified
+    /// same-value row order. Asserts the real `upsert_config` path gives each guild a distinct,
+    /// request-order `sort_order`, and that the fallback deterministically prefers the first one.
+    #[sqlx::test]
+    async fn upsert_config_gives_each_guild_a_distinct_sort_order(pool: PgPool) {
+        let req = UpsertDiscordConfigRequest {
+            guilds: vec![
+                DiscordGuildConfigInput {
+                    name: "DCC".to_string(),
+                    guild_id: "dcc-snowflake".to_string(),
+                    channels: vec![DiscordMapEntry {
+                        name: "ops".to_string(),
+                        id: "dcc-ops-channel".to_string(),
+                    }],
+                    roles: vec![],
+                    facilities: vec![],
+                },
+                DiscordGuildConfigInput {
+                    name: "VATUSA".to_string(),
+                    guild_id: "vatusa-snowflake".to_string(),
+                    channels: vec![DiscordMapEntry {
+                        name: "ops".to_string(),
+                        id: "vatusa-ops-channel".to_string(),
+                    }],
+                    roles: vec![],
+                    facilities: vec![],
+                },
+            ],
+        };
+        upsert_config(&pool, &req).await.unwrap();
+
+        let sort_orders: Vec<i32> = sqlx::query_scalar(
+            "select sort_order from integration.discord_configs order by sort_order",
+        )
+        .fetch_all(&pool)
+        .await
+        .unwrap();
+        assert_eq!(
+            sort_orders,
+            vec![0, 1],
+            "each guild should get a distinct sort_order matching its request-array position"
+        );
+
+        // No facility given, and neither guild claims one: the fallback deterministically returns
+        // the first-configured guild's mapping, every time — never a coin flip on row order.
+        for _ in 0..5 {
+            assert_eq!(
+                channel_id(&pool, "ops", None).await.unwrap(),
+                Some("dcc-ops-channel".to_string())
+            );
+        }
     }
 }
