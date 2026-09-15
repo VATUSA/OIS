@@ -39,6 +39,10 @@ These are project rules, not preferences:
 - **Filing issues** follows [`docs/github-issues.md`](docs/github-issues.md) (labels, body structure,
   scope tests, board). Don't self-assign/close/merge; keep comments to real moments; other repos are
   read-only.
+- **Any UI work follows [`DESIGN.md`](DESIGN.md).** OIS is one dark operator-console system — one
+  accent, no gradients, no chrome shadows, hairlines, continuous corners, the 400/600/700 ladder,
+  tokens only. Restyle through the shared shell/components in `packages/ui`; never hand-style a one-off
+  screen. `DESIGN.md`'s principles come from `.claude/skills/claude-apple-design-system/`.
 
 ## The invariants that bite
 
