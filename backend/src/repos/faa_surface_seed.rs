@@ -443,6 +443,47 @@ mod tests {
         );
     }
 
+    /// `osm` retirement applies only to airports being seeded in that run — an `osm` row added to an
+    /// already-seeded airport afterwards survives a rerun.
+    #[sqlx::test]
+    async fn osm_rows_of_an_already_seeded_airport_survive_a_rerun(pool: PgPool) {
+        seed(&pool).await.unwrap();
+        sqlx::query(
+            "insert into flow.airport_taxiway (icao, name, points, source) \
+             values ('KDCA', 'Later', '[[1,2]]', 'osm')",
+        )
+        .execute(&pool)
+        .await
+        .unwrap();
+        sqlx::query(
+            "insert into flow.airport_ramp_area (icao, name, kind, rings, source) \
+             values ('KDCA', 'Later', 'apron', '[[[1,2]]]', 'osm')",
+        )
+        .execute(&pool)
+        .await
+        .unwrap();
+
+        let summary = seed(&pool).await.unwrap();
+
+        assert_eq!(summary.osm_taxiways_retired + summary.osm_ramps_retired, 0);
+        assert_eq!(
+            count(
+                &pool,
+                "select count(*) from flow.airport_taxiway where icao = 'KDCA' and source = 'osm'"
+            )
+            .await,
+            1
+        );
+        assert_eq!(
+            count(
+                &pool,
+                "select count(*) from flow.airport_ramp_area where icao = 'KDCA' and source = 'osm'"
+            )
+            .await,
+            1
+        );
+    }
+
     #[sqlx::test]
     async fn an_osm_row_for_an_icao_the_extract_does_not_cover_survives(pool: PgPool) {
         sqlx::query(
