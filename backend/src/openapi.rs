@@ -327,6 +327,7 @@ use utoipa::OpenApi;
         crate::models::ReorderRequest,
         crate::models::AircraftRoute,
         crate::models::RouteWaypoint,
+        crate::models::FixPrediction,
         crate::models::ResolveRouteRequest,
         crate::models::ResolvedRoute,
         crate::models::DataStatus,

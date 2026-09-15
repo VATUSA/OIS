@@ -18,7 +18,16 @@ pub struct FcaCrossing {
     pub along_nm: f64,
 }
 
-/// Resolve the filed route to lat/lon anchors: departure → expanded enroute
+/// One resolved route anchor: a fix's name (empty for an unnamed procedure-leg point) and its
+/// position. Kept internal to this module — `route_path`'s public shape stays `[f64; 2]`; the
+/// name only matters to [`route_path_named`].
+#[derive(Clone)]
+struct NamedAnchor {
+    name: String,
+    ll: [f64; 2],
+}
+
+/// Resolve the filed route to anchors: departure → expanded enroute
 /// (fixes/navaids/airways/SID/STAR) → arrival, via the nav engine ([`NavData::build_anchors`]).
 fn route_anchors(
     nav: &NavData,
@@ -26,11 +35,14 @@ fn route_anchors(
     dep: &str,
     arr: &str,
     route: &str,
-) -> Vec<[f64; 2]> {
+) -> Vec<NamedAnchor> {
     nav.build_anchors(airports, dep, arr, route)
         .anchors
         .into_iter()
-        .map(|a| a.ll)
+        .map(|a| NamedAnchor {
+            name: a.name,
+            ll: a.ll,
+        })
         .collect()
 }
 
@@ -56,13 +68,13 @@ pub fn full_route_named(
 /// The index of the first anchor still ahead of `(lat, lon)` along the polyline — a nearest-leg
 /// projection (perpendicular distance in a local frame centred on the aircraft) that's
 /// heading-independent, so it's valid at any speed: parked, taxiing, or flying.
-fn project_forward_index(anchors: &[[f64; 2]], lat: f64, lon: f64) -> usize {
+fn project_forward_index(anchors: &[NamedAnchor], lat: f64, lon: f64) -> usize {
     let mut best_leg = 0usize;
     let mut best_xt = f64::MAX;
     let mut best_along = 0.0;
     for i in 0..anchors.len() - 1 {
-        let a = local([lat, lon], anchors[i]);
-        let b = local([lat, lon], anchors[i + 1]);
+        let a = local([lat, lon], anchors[i].ll);
+        let b = local([lat, lon], anchors[i + 1].ll);
         let (abx, aby) = (b.0 - a.0, b.1 - a.1);
         let (apx, apy) = (-a.0, -a.1);
         let len2 = abx * abx + aby * aby;
@@ -79,10 +91,10 @@ fn project_forward_index(anchors: &[[f64; 2]], lat: f64, lon: f64) -> usize {
         }
     }
     let leg_len = gc_dist(
-        anchors[best_leg][0],
-        anchors[best_leg][1],
-        anchors[best_leg + 1][0],
-        anchors[best_leg + 1][1],
+        anchors[best_leg].ll[0],
+        anchors[best_leg].ll[1],
+        anchors[best_leg + 1].ll[0],
+        anchors[best_leg + 1].ll[1],
     );
     if best_along >= leg_len - 3.0 {
         best_leg + 1
@@ -91,23 +103,26 @@ fn project_forward_index(anchors: &[[f64; 2]], lat: f64, lon: f64) -> usize {
     }
 }
 
-/// Trim anchors already behind an airborne aircraft; prepend its current position.
-fn remaining_anchors(anchors: &[[f64; 2]], lat: f64, lon: f64, hdg: f64) -> Vec<[f64; 2]> {
+/// Trim anchors already behind an airborne aircraft; prepend its current position (unnamed).
+fn remaining_anchors(anchors: &[NamedAnchor], lat: f64, lon: f64, hdg: f64) -> Vec<NamedAnchor> {
     if anchors.len() < 2 {
         return anchors.to_vec();
     }
     let mut idx = project_forward_index(anchors, lat, lon);
     // Skip fixes clearly behind the current heading.
     while idx < anchors.len() - 1 {
-        let d = gc_dist(lat, lon, anchors[idx][0], anchors[idx][1]);
-        let brg = bearing_deg([lat, lon], anchors[idx]);
+        let d = gc_dist(lat, lon, anchors[idx].ll[0], anchors[idx].ll[1]);
+        let brg = bearing_deg([lat, lon], anchors[idx].ll);
         if d > 5.0 && angle_diff(hdg, brg) > 110.0 {
             idx += 1;
         } else {
             break;
         }
     }
-    let mut out = vec![[lat, lon]];
+    let mut out = vec![NamedAnchor {
+        name: String::new(),
+        ll: [lat, lon],
+    }];
     out.extend_from_slice(&anchors[idx..]);
     out
 }
@@ -129,7 +144,7 @@ fn remaining_anchors(anchors: &[[f64; 2]], lat: f64, lon: f64, hdg: f64) -> Vec<
 /// always" would still add a spurious extra point at the route's start and inflate
 /// `predict::arrival_eta`'s "the nav engine resolved real waypoints" signal (`path.len() > 2`) for
 /// ordinary pre-departure traffic on an otherwise-unresolved route.
-fn forward_route_from_position(anchors: &[[f64; 2]], lat: f64, lon: f64) -> Vec<[f64; 2]> {
+fn forward_route_from_position(anchors: &[NamedAnchor], lat: f64, lon: f64) -> Vec<NamedAnchor> {
     if anchors.len() < 2 {
         return anchors.to_vec();
     }
@@ -141,7 +156,10 @@ fn forward_route_from_position(anchors: &[[f64; 2]], lat: f64, lon: f64) -> Vec<
     } else {
         idx
     };
-    let mut out = vec![[lat, lon]];
+    let mut out = vec![NamedAnchor {
+        name: String::new(),
+        ll: [lat, lon],
+    }];
     out.extend_from_slice(&anchors[keep_from..]);
     out
 }
@@ -210,7 +228,60 @@ pub fn route_path(
     } else {
         forward_route_from_position(&anchors, lat, lon)
     };
+    let path: Vec<[f64; 2]> = path.into_iter().map(|a| a.ll).collect();
     (path.len() >= 2).then_some(path)
+}
+
+/// Same resolution as [`route_path`], but keeps each named fix's identifier and its cumulative
+/// along-route distance (nm) instead of collapsing to a bare polyline. Distance accumulates
+/// across *every* anchor (named and unnamed) so an unnamed procedure-leg point in between doesn't
+/// undercount the distance to the next named fix. Shares `route_path`'s exact
+/// airborne/ground branch (`remaining_anchors` / `forward_route_from_position`), so the fixes and
+/// distances reported here are the same ones the real ETA model (via `route_path`) is measuring
+/// against — not a separate, potentially-diverging resolution.
+#[allow(clippy::too_many_arguments)]
+pub fn route_path_named(
+    nav: &NavData,
+    airports: &AirportDb,
+    dep: &str,
+    arr: &str,
+    route: &str,
+    lat: f64,
+    lon: f64,
+    hdg: i64,
+    gs: i64,
+) -> Option<Vec<(String, f64, f64, f64)>> {
+    let dep = dep.to_ascii_uppercase();
+    let arr = arr.to_ascii_uppercase();
+    let anchors = route_anchors(nav, airports, &dep, &arr, route);
+    if anchors.len() < 2 {
+        return None;
+    }
+    let path = if gs >= 50 {
+        remaining_anchors(&anchors, lat, lon, hdg as f64)
+    } else {
+        forward_route_from_position(&anchors, lat, lon)
+    };
+    if path.len() < 2 {
+        return None;
+    }
+
+    let mut cum = 0.0;
+    let mut out = Vec::new();
+    for i in 0..path.len() {
+        if i > 0 {
+            cum += gc_dist(
+                path[i - 1].ll[0],
+                path[i - 1].ll[1],
+                path[i].ll[0],
+                path[i].ll[1],
+            );
+        }
+        if !path[i].name.is_empty() {
+            out.push((path[i].name.clone(), path[i].ll[0], path[i].ll[1], cum));
+        }
+    }
+    Some(out)
 }
 
 /// Where a pre-resolved `path` crosses the FCA line. For airborne aircraft the `path` is already the
@@ -617,6 +688,84 @@ mod tests {
             "route via RBV WHITE SIE should cross the lat-39.5 line"
         );
         assert!((c.unwrap().lat - 39.5).abs() < 0.2);
+    }
+
+    #[test]
+    fn route_path_named_accumulates_distance_from_departure_when_on_the_ground() {
+        let nav = NavData::load();
+        let ap = HashMap::from([
+            ("KJFK".to_string(), (40.64, -73.78)),
+            ("KDCA".to_string(), (38.85, -77.04)),
+        ]);
+        // gs=0 takes the "not airborne" branch — full route from departure, lat/lon/hdg ignored.
+        let fixes = route_path_named(&nav, &ap, "KJFK", "KDCA", "RBV WHITE SIE", 0.0, 0.0, 0, 0)
+            .expect("route should resolve");
+        let names: Vec<&str> = fixes.iter().map(|(n, ..)| n.as_str()).collect();
+        assert!(
+            names.contains(&"RBV") && names.contains(&"WHITE") && names.contains(&"SIE"),
+            "expected RBV/WHITE/SIE among named fixes, got {names:?}"
+        );
+        // Distance is cumulative and non-decreasing, starting near 0 at the first named fix.
+        assert!(fixes[0].3 >= 0.0);
+        for w in fixes.windows(2) {
+            assert!(
+                w[1].3 >= w[0].3,
+                "distance should never decrease: {} then {}",
+                w[0].3,
+                w[1].3
+            );
+        }
+        // SIE is further from JFK than RBV (down the coast toward DCA).
+        let rbv_d = fixes.iter().find(|(n, ..)| n == "RBV").unwrap().3;
+        let sie_d = fixes.iter().find(|(n, ..)| n == "SIE").unwrap().3;
+        assert!(
+            sie_d > rbv_d,
+            "SIE ({sie_d}) should be farther than RBV ({rbv_d})"
+        );
+    }
+
+    #[test]
+    fn route_path_named_measures_from_current_position_when_airborne() {
+        let nav = NavData::load();
+        let ap = HashMap::from([
+            ("KJFK".to_string(), (40.64, -73.78)),
+            ("KDCA".to_string(), (38.85, -77.04)),
+        ]);
+        let empty = HashMap::new();
+        let white = nav.resolve("WHITE", &empty, None).expect("WHITE resolves");
+        let sie = nav.resolve("SIE", &empty, None).expect("SIE resolves");
+        // Positioned just short of SIE (between WHITE and SIE), heading down the coast toward
+        // it — gs=200 takes the airborne branch. Both WHITE and RBV (further back) should drop.
+        let hdg = bearing_deg(white, sie).round() as i64;
+        let pos = [white[0] * 0.2 + sie[0] * 0.8, white[1] * 0.2 + sie[1] * 0.8];
+        let fixes = route_path_named(
+            &nav,
+            &ap,
+            "KJFK",
+            "KDCA",
+            "RBV WHITE SIE",
+            pos[0],
+            pos[1],
+            hdg,
+            200,
+        )
+        .expect("remaining route should resolve");
+        let names: Vec<&str> = fixes.iter().map(|(n, ..)| n.as_str()).collect();
+        assert!(
+            !names.contains(&"RBV") && !names.contains(&"WHITE"),
+            "RBV/WHITE should be behind current position, got {names:?}"
+        );
+        assert!(
+            names.contains(&"SIE"),
+            "SIE should still be ahead, got {names:?}"
+        );
+        // Distance is measured from the current position (near SIE), not from JFK — small, not
+        // the ~hundred-nm full-route figure the ground-branch test sees.
+        let sie_d = fixes.iter().find(|(n, ..)| n == "SIE").unwrap().3;
+        assert!(
+            sie_d < 30.0,
+            "expected SIE within ~30nm of current position, got {sie_d}"
+        );
     }
 
     #[test]

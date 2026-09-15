@@ -1729,6 +1729,25 @@ pub struct AircraftRoute {
     pub waypoints: Vec<RouteWaypoint>,
     /// FAA NASR cycle date backing the resolution (e.g. `2026-07-09`).
     pub nav_cycle: String,
+    /// Per-fix predictions from the shared trajectory/ETA model (debug mode; #225). Always
+    /// populated — the client only renders this when the user's `debug.enabled` setting is on.
+    pub fixes: Vec<FixPrediction>,
+}
+
+/// One fix's predicted crossing time/altitude/speed/heading, from the same trajectory model that
+/// backs every other ETA in OIS (metering, the arrival ladder, runway ETE).
+#[derive(Debug, Clone, Serialize, ToSchema)]
+pub struct FixPrediction {
+    pub name: String,
+    pub lat: f64,
+    pub lon: f64,
+    pub eta: DateTime<Utc>,
+    pub altitude_ft: i64,
+    pub groundspeed_kt: i64,
+    pub heading_deg: i64,
+    /// Cumulative along-route distance, nm — from the aircraft's current position (airborne), or
+    /// from the departure airport (ground/prefile).
+    pub distance_nm: i64,
 }
 
 /// A named point along a resolved route.
