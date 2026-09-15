@@ -549,6 +549,7 @@ pub async fn aircraft_route(
             airports,
             fp,
             &points,
+            Some((p.latitude, p.longitude, p.heading, p.groundspeed)),
             p.latitude,
             p.longitude,
             p.heading,
@@ -605,6 +606,7 @@ pub async fn aircraft_route(
             airports,
             fp,
             &full_path,
+            None,
             0.0,
             0.0,
             0,
@@ -1103,15 +1105,35 @@ fn to_waypoints(named: Vec<(String, f64, f64)>) -> Vec<RouteWaypoint> {
         .collect()
 }
 
+/// The route-length scale factor for the debug per-fix table (#225 rework): `path_len_ge_2`
+/// anchors — `> 2` means the nav engine placed at least one real enroute point; exactly `2` (a
+/// direct/unexpandable filed route) is no better than a great circle. Mirrors
+/// `predict::arrival_eta`'s own `!airborne && !enroute_resolved` padding exactly, so a
+/// ground/prefile aircraft on an unresolved route gets the same [`predict::GROUND_ROUTE_FACTOR`]
+/// this debug table's ETAs would otherwise silently disagree with the real metering/ladder model
+/// on (a live-confirmed ~12% undercount before this fix).
+fn ground_route_scale(airborne: bool, path_len: usize) -> f64 {
+    let enroute_resolved = path_len > 2;
+    if !airborne && !enroute_resolved {
+        predict::GROUND_ROUTE_FACTOR
+    } else {
+        1.0
+    }
+}
+
 /// Per-fix predictions for the debug-mode route breakdown (#225): the same trajectory/ETA model
 /// FCA metering, the arrival ladder, and runway ETE all resolve through
 /// (`feed::predict`/`feed::trajectory`), just queried at every named fix instead of one crossing
 /// point. `lat`/`lon`/`hdg`/`gs` are the aircraft's live state, or `0`/`0`/`0`/`0` for a prefile
 /// (no live position) — `gs = 0` also makes [`fca::route_path_named`] measure distance from the
-/// departure rather than a (nonexistent) current position. `path` is the caller's already-resolved
-/// `fca::route_path` polyline for the same aircraft (reused for the headwind sample rather than
-/// re-resolving the route a second time). Returns an empty list when the route can't be resolved,
-/// exactly like `points`/`waypoints` already tolerate.
+/// departure rather than a (nonexistent) current position. `pilot_pos` is the aircraft's real
+/// position for the ground-allowance gate/runway match — `Some` for any connected pilot (even
+/// parked, `gs`/`hdg` both `0`), `None` only for an actual prefile — matching
+/// [`feed_flow::ground_estimate`]'s own `pilot_pos` convention; it must not be re-derived from
+/// `gs`/`hdg` being nonzero, or a pilot idling at the gate is treated as position-less. `path` is
+/// the caller's already-resolved `fca::route_path` polyline for the same aircraft (reused for the
+/// headwind sample rather than re-resolving the route a second time). Returns an empty list when
+/// the route can't be resolved, exactly like `points`/`waypoints` already tolerate.
 #[allow(clippy::too_many_arguments)]
 fn fix_predictions(
     state: &AppState,
@@ -1119,6 +1141,7 @@ fn fix_predictions(
     airports: &AirportDb,
     fp: &FlightPlan,
     path: &[[f64; 2]],
+    pilot_pos: Option<(f64, f64, i64, i64)>,
     lat: f64,
     lon: f64,
     hdg: i64,
@@ -1151,21 +1174,21 @@ fn fix_predictions(
     let filed_tas: f64 = fp.cruise_tas.parse().unwrap_or(0.0);
     let cruise_tas = trajectory::capped_cruise_tas(filed_tas, cruise_alt, profile);
     let headwind = state.winds.load_full().route_headwind(path, cruise_alt);
-    let route_len = predict::path_len_nm(path);
+    let route_scale = ground_route_scale(airborne, path.len());
+    let route_len = predict::path_len_nm(path) * route_scale;
 
     let dep = fp.departure.to_ascii_uppercase();
     let ground_allowance = if airborne {
         0.0
     } else {
         let aircraft = (!fp.aircraft_short.is_empty()).then_some(fp.aircraft_short.as_str());
-        let pos = (gs > 0 || hdg > 0).then_some((lat, lon, hdg, gs));
         feed_flow::resolve_ground_allowance_sec(
             &state.gates.load_full(),
             &state.runways,
             &state.taxi_estimate_samples.load_full(),
             &dep,
             aircraft,
-            pos,
+            pilot_pos,
         )
     };
 
@@ -1179,7 +1202,7 @@ fn fix_predictions(
         .map(|&(la, lo)| [la, lo]);
     let mut out = Vec::with_capacity(named.len());
     for (i, (name, flat, flon, along_nm)) in named.iter().enumerate() {
-        let (flat, flon, along_nm) = (*flat, *flon, *along_nm);
+        let (flat, flon, along_nm) = (*flat, *flon, *along_nm * route_scale);
         let target_d = (route_len - along_nm).max(0.0);
         let mut sec = vp.time_between(route_len, target_d);
         if !airborne {
@@ -1994,5 +2017,34 @@ mod filed_altitude_tests {
         assert_eq!(filed_altitude_ft(""), None);
         assert_eq!(filed_altitude_ft("VFR"), None);
         assert_eq!(filed_altitude_ft("0"), None);
+    }
+}
+
+#[cfg(test)]
+mod ground_route_scale_tests {
+    use super::ground_route_scale;
+
+    /// Regression (#225 rework): `fix_predictions` originally fed `path_len_nm` straight into the
+    /// debug table's ETA math with no padding, so a ground/prefile aircraft on an unresolved
+    /// (direct-filed, 2-anchor) route showed ETAs ~12% earlier than `predict::arrival_eta` — the
+    /// real model backing metering/the ladder/runway ETE — would compute for the identical flight.
+    #[test]
+    fn pads_a_ground_aircraft_on_an_unresolved_two_anchor_route() {
+        assert_eq!(
+            ground_route_scale(false, 2),
+            crate::feed::predict::GROUND_ROUTE_FACTOR
+        );
+    }
+
+    #[test]
+    fn does_not_pad_a_ground_aircraft_once_the_route_has_a_real_enroute_point() {
+        assert_eq!(ground_route_scale(false, 3), 1.0);
+    }
+
+    #[test]
+    fn never_pads_an_airborne_aircraft_even_on_an_unresolved_route() {
+        // An airborne aircraft is timed against the route the map actually draws (matching
+        // `predict::arrival_eta`'s own airborne branch) — padding it would double-correct.
+        assert_eq!(ground_route_scale(true, 2), 1.0);
     }
 }
