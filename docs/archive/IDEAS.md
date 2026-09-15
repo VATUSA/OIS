@@ -1,5 +1,9 @@
 # Ideas / backlog
 
+> **Archived — historical.** An early unscheduled-ideas scratchpad from before the project had a
+> GitHub issue tracker. New ideas belong in a GitHub issue (`type:feature`), not here. Kept for
+> reference; entries below may already be implemented or superseded.
+
 Unscheduled ideas not yet in [PLAN.md](PLAN.md). Promote to a feature spec + plan when picked up.
 
 ## Configurable aircraft performance profiles — _implemented on `feat/aircraft-profiles`_

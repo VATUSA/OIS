@@ -76,7 +76,7 @@ function parseTypes(v: string): string[] {
 
 function spacingLabel(trail: number, mit: number): string {
   if (mit > 0) return `${mit} MIT`;
-  if (trail > 0) return `${trail} MIN`;
+  if (trail > 0) return `${trail} MINIT`;
   return "AUTO";
 }
 
@@ -84,16 +84,19 @@ function TrailSelect({
   value,
   onChange,
   disabled,
+  title,
 }: {
   value: number;
   onChange: (v: number) => void;
   disabled?: boolean;
+  title?: string;
 }) {
   return (
     <select
       className={SELECT}
       value={value}
       disabled={disabled}
+      title={title}
       onChange={(e) => onChange(Number(e.target.value))}
     >
       {TRAIL_OPTS.map(([v, label]) => (
@@ -187,8 +190,13 @@ function SetProgramForm() {
           />
         </label>
         <label className="flex flex-col gap-1 text-xs font-medium uppercase tracking-wide text-muted-foreground">
-          Route trail
-          <TrailSelect value={trail} onChange={setTrail} disabled={!!mit.trim()} />
+          Trail (MINIT)
+          <TrailSelect
+            value={trail}
+            onChange={setTrail}
+            disabled={!!mit.trim()}
+            title="Minutes in trail"
+          />
         </label>
         <label className="flex flex-col gap-1 text-xs font-medium uppercase tracking-wide text-muted-foreground">
           MIT (nm)
@@ -314,16 +322,17 @@ function ProgramCard({
             )}
           </label>
           <label className="flex flex-col gap-1 text-xs font-medium uppercase tracking-wide text-muted-foreground">
-            Route trail
+            Trail (MINIT)
             {canEdit ? (
               <TrailSelect
                 value={draft.trail}
                 disabled={draft.mit > 0}
                 onChange={(v) => patch({ trail: v, mit: 0 })}
+                title="Minutes in trail"
               />
             ) : (
               <span className="text-base text-foreground">
-                {draft.trail > 0 ? `${draft.trail} MIN` : "AUTO"}
+                {draft.trail > 0 ? `${draft.trail} MINIT` : "AUTO"}
               </span>
             )}
           </label>
@@ -397,17 +406,21 @@ function ProgramCard({
                     value={g.name}
                     onChange={(e) => patchGate(i, { name: e.target.value })}
                   />
+                  <span className="text-[10px] uppercase text-muted-foreground">MINIT</span>
                   <TrailSelect
                     value={g.trail ?? 0}
                     disabled={(g.mit ?? 0) > 0}
                     onChange={(v) => patchGate(i, { trail: v, mit: 0 })}
+                    title="Minutes in trail"
                   />
+                  <span className="text-[10px] uppercase text-muted-foreground">MIT</span>
                   <Input
                     className="w-24"
                     type="number"
                     min={0}
                     max={300}
                     placeholder="MIT nm"
+                    title="Miles in trail"
                     value={g.mit || ""}
                     onChange={(e) =>
                       patchGate(i, { mit: Math.max(0, Number(e.target.value) || 0) })
