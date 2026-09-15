@@ -19,6 +19,7 @@
 //! of scope — see VATUSA/OIS#253's own follow-up note.
 
 use std::collections::HashMap;
+use std::collections::HashSet;
 
 use chrono::NaiveDate;
 
@@ -196,9 +197,15 @@ fn parse_coord_table(
 ///
 /// A bare Route Identifier is not unique across areas (VATUSA/OIS#221 — e.g. a live cycle had 73
 /// IDs spanning more than one area, including a Kansas `V17` and an unrelated Hawaii `V17`). Since
-/// the output map — and the filed-route tokens it's looked up by — carry no area qualifier, when
-/// one Route Identifier resolves in more than one area this keeps only the richest (most-points)
-/// area's version rather than splicing them into one geometrically nonsensical path.
+/// the output map — and the filed-route tokens it's looked up by — carry no area qualifier, a
+/// Route Identifier that resolves in more than one area is dropped entirely rather than guessing:
+/// picking "whichever area has more points" was tried and rejected (VATUSA/OIS#221 second review)
+/// because both areas' versions are typically real, currently-flown airways, and silently keeping
+/// one deletes the other's geometry without any error — a CONUS flight filing a designator that
+/// also exists in Alaska would get Alaska's geometry with no indication anything was wrong. A
+/// dropped Route Identifier simply fails to resolve, the same as any other unrecognized token
+/// (`nav.rs`'s `unresolved` list already handles a missing/empty airway lookup) — a route that
+/// can't be resolved beats one that resolves to the wrong region silently.
 fn parse_airways(text: &str) -> HashMap<String, CifpAirway> {
     let navaids = parse_coord_table(text, b'D', b' ', 13..17);
     let ndbs = parse_coord_table(text, b'D', b'B', 13..17);
@@ -228,6 +235,7 @@ fn parse_airways(text: &str) -> HashMap<String, CifpAirway> {
     }
 
     let mut out: HashMap<String, CifpAirway> = HashMap::new();
+    let mut collided: HashSet<String> = HashSet::new();
     for ((area, route_id), mut points) in by_area_route {
         points.sort_by_key(|p| p.0);
         let mut w = Vec::with_capacity(points.len());
@@ -247,18 +255,21 @@ fn parse_airways(text: &str) -> HashMap<String, CifpAirway> {
         if w.len() < 2 {
             continue;
         }
+        if collided.contains(&route_id) {
+            continue;
+        }
+        if out.remove(&route_id).is_some() {
+            // A different area already produced a version of this designator — ambiguous, drop
+            // both rather than guess which region a filed route meant (VATUSA/OIS#221).
+            collided.insert(route_id);
+            continue;
+        }
         let t = route_id
             .chars()
             .next()
             .map(String::from)
             .unwrap_or_default();
-        let candidate = CifpAirway { t, w };
-        match out.get(&route_id) {
-            Some(existing) if existing.w.len() >= candidate.w.len() => {}
-            _ => {
-                out.insert(route_id, candidate);
-            }
-        }
+        out.insert(route_id, CifpAirway { t, w });
     }
     out
 }
@@ -484,13 +495,15 @@ mod tests {
     }
 
     /// Regression (#221): a live CIFP cycle had 73 Route Identifiers reused across more than one
-    /// FAA Customer/Area Code (e.g. a Kansas `V17` and an unrelated Hawaii `V17`). Two unrelated
-    /// airways sharing a designator, in different areas, must never be spliced into one path —
-    /// build a 2-point "V17" in area SUSA and a 3-point "V17" in area SPAC (with its own,
-    /// area-scoped navaid records) and confirm only one, self-consistent version comes out, never
-    /// a 5-point mix of both.
+    /// FAA Customer/Area Code (e.g. a Kansas `V17` and an unrelated Hawaii `V17`), and a second
+    /// live cycle showed picking "whichever area has more points" just silently substitutes one
+    /// real airway for another equally real one in a different region (e.g. `V438`: Maryland vs.
+    /// Alaska). Two unrelated airways sharing a designator, in different areas, must never be
+    /// spliced together *or* have one silently picked over the other — build a 2-point "V17" in
+    /// area SUSA and a 3-point "V17" in area SPAC (with its own, area-scoped navaid records) and
+    /// confirm the collision drops the designator entirely rather than resolving to either side.
     #[test]
-    fn same_route_id_in_two_areas_is_never_spliced_into_one_path() {
+    fn same_route_id_in_two_areas_is_dropped_not_substituted() {
         let susa_navaid = record(|f| {
             f.area = "SUSA";
             f.section = b'D';
@@ -552,20 +565,10 @@ mod tests {
         ]
         .join("\r\n");
 
-        let v17 = parse_airways(&text)
-            .remove("V17")
-            .expect("V17 should resolve");
-
-        // Never the spliced 5-point mix of both areas' fixes.
-        assert_ne!(
-            v17.w.len(),
-            5,
-            "must not merge SUSA's and SPAC's V17 into one path"
+        assert!(
+            !parse_airways(&text).contains_key("V17"),
+            "an area-code collision must drop the designator, not resolve to either side"
         );
-        // The richer (3-point) SPAC version wins; its fixes never mix with SUSA's ZBV/SWIMM.
-        assert_eq!(v17.w.len(), 3);
-        let ids: Vec<&str> = v17.w.iter().map(|w| w.0.as_str()).collect();
-        assert_eq!(ids, ["OGG", "MKK", "HAKLE"]);
     }
 
     #[test]
