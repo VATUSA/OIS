@@ -36,6 +36,27 @@ impl EstimateTier {
             EstimateTier::Default => "default",
         }
     }
+
+    /// Stable wire/query string for this tier (#183's staff insights view filters on these).
+    pub fn as_str(self) -> &'static str {
+        match self {
+            EstimateTier::GateTypeRunway => "gate_type_runway",
+            EstimateTier::AirportRunway => "airport_runway",
+            EstimateTier::Airport => "airport",
+            EstimateTier::Default => "default",
+        }
+    }
+
+    /// Inverse of [`Self::as_str`], for parsing a filter query param.
+    pub fn parse(s: &str) -> Option<Self> {
+        match s {
+            "gate_type_runway" => Some(Self::GateTypeRunway),
+            "airport_runway" => Some(Self::AirportRunway),
+            "airport" => Some(Self::Airport),
+            "default" => Some(Self::Default),
+            _ => None,
+        }
+    }
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -58,8 +79,8 @@ const MIN_SAMPLES: usize = 5;
 /// Absolute backstop clamp applied to a tier's median — independent of the median's own outlier
 /// resistance, this catches a whole bucket being systematically bad (e.g. every sample at one gate
 /// idling unusually long for some unmodeled reason) rather than trusting an implausible estimate.
-const TAXI_BOUNDS_SEC: (f64, f64) = (60.0, 1800.0); // 1-30 min
-const PUSHBACK_BOUNDS_SEC: (f64, f64) = (0.0, 1200.0); // 0-20 min
+pub(crate) const TAXI_BOUNDS_SEC: (f64, f64) = (60.0, 1800.0); // 1-30 min
+pub(crate) const PUSHBACK_BOUNDS_SEC: (f64, f64) = (0.0, 1200.0); // 0-20 min
 
 /// No existing constant for a default pushback+startup duration (this is new with #164's C/D) — 5
 /// minutes is a reasonable starting point, adjustable once real data accumulates.
@@ -179,6 +200,19 @@ pub fn ground_allowance_sec(est: &TaxiEstimate) -> f64 {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn tier_as_str_and_parse_round_trip() {
+        for tier in [
+            EstimateTier::GateTypeRunway,
+            EstimateTier::AirportRunway,
+            EstimateTier::Airport,
+            EstimateTier::Default,
+        ] {
+            assert_eq!(EstimateTier::parse(tier.as_str()), Some(tier));
+        }
+        assert_eq!(EstimateTier::parse("not-a-tier"), None);
+    }
 
     fn sample(
         gate: &str,
