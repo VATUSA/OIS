@@ -9,7 +9,7 @@ use axum::{
     extract::{Extension, Path, Query, State},
     http::StatusCode,
 };
-use chrono::{DateTime, Utc};
+use chrono::{DateTime, Duration, Utc};
 use serde::Deserialize;
 
 use crate::{
@@ -29,10 +29,11 @@ use crate::{
     },
     jobs,
     models::{
-        AircraftRoute, AirportGateBody, DataStatus, FcaBody, FcaFlight, FixValidationBody,
-        FlightAdvisory, FlightFcaCrossing, FlightGdp, FlightGroundStop, FlightProgram, IdstFlight,
-        IdstResponse, ReleaseRequest, ReorderRequest, ResolveRouteRequest, ResolvedRoute,
-        RouteBody, RouteWaypoint, TrafficAircraft, UpsertFcaRequest, UpsertRouteRequest,
+        AircraftRoute, AirportGateBody, DataStatus, FcaBody, FcaFlight, FixPrediction,
+        FixValidationBody, FlightAdvisory, FlightFcaCrossing, FlightGdp, FlightGroundStop,
+        FlightProgram, IdstFlight, IdstResponse, ReleaseRequest, ReorderRequest,
+        ResolveRouteRequest, ResolvedRoute, RouteBody, RouteWaypoint, TrafficAircraft,
+        UpsertFcaRequest, UpsertRouteRequest,
     },
     repos::{flow as flow_repo, public as public_repo},
     state::AppState,
@@ -542,6 +543,18 @@ pub async fn aircraft_route(
             p.groundspeed,
         )
         .unwrap_or_default();
+        let fixes = fix_predictions(
+            &state,
+            nav,
+            airports,
+            fp,
+            p.latitude,
+            p.longitude,
+            p.heading,
+            p.groundspeed,
+            p.altitude as f64,
+            Utc::now(),
+        );
         return Ok(Json(AircraftRoute {
             callsign: cs,
             aircraft_type: fp.aircraft_short.clone(),
@@ -554,6 +567,7 @@ pub async fn aircraft_route(
             unresolved,
             waypoints: to_waypoints(named),
             nav_cycle: nav.cycle().to_string(),
+            fixes,
         }));
     }
 
@@ -568,6 +582,7 @@ pub async fn aircraft_route(
         let (named, unresolved) =
             fca::full_route_named(nav, airports, &fp.departure, &fp.arrival, &fp.route);
         let points = named.iter().map(|(_, lat, lon)| [*lat, *lon]).collect();
+        let fixes = fix_predictions(&state, nav, airports, fp, 0.0, 0.0, 0, 0, 0.0, Utc::now());
         return Ok(Json(AircraftRoute {
             callsign: cs,
             aircraft_type: fp.aircraft_short.clone(),
@@ -580,6 +595,7 @@ pub async fn aircraft_route(
             unresolved,
             waypoints: to_waypoints(named),
             nav_cycle: nav.cycle().to_string(),
+            fixes,
         }));
     }
 
@@ -1056,6 +1072,118 @@ fn to_waypoints(named: Vec<(String, f64, f64)>) -> Vec<RouteWaypoint> {
         .into_iter()
         .map(|(name, lat, lon)| RouteWaypoint { name, lat, lon })
         .collect()
+}
+
+/// Per-fix predictions for the debug-mode route breakdown (#225): the same trajectory/ETA model
+/// FCA metering, the arrival ladder, and runway ETE all resolve through
+/// (`feed::predict`/`feed::trajectory`), just queried at every named fix instead of one crossing
+/// point. `lat`/`lon`/`hdg`/`gs` are the aircraft's live state, or `0`/`0`/`0`/`0` for a prefile
+/// (no live position) — `gs = 0` also makes [`fca::route_path_named`] measure distance from the
+/// departure rather than a (nonexistent) current position. Returns an empty list when the route
+/// can't be resolved, exactly like `points`/`waypoints` already tolerate.
+#[allow(clippy::too_many_arguments)]
+fn fix_predictions(
+    state: &AppState,
+    nav: &NavData,
+    airports: &AirportDb,
+    fp: &FlightPlan,
+    lat: f64,
+    lon: f64,
+    hdg: i64,
+    gs: i64,
+    cur_alt_ft: f64,
+    now: DateTime<Utc>,
+) -> Vec<FixPrediction> {
+    let Some(named) = fca::route_path_named(
+        nav,
+        airports,
+        &fp.departure,
+        &fp.arrival,
+        &fp.route,
+        lat,
+        lon,
+        hdg,
+        gs,
+    ) else {
+        return Vec::new();
+    };
+    let Some(path) = fca::route_path(
+        nav,
+        airports,
+        &fp.departure,
+        &fp.arrival,
+        &fp.route,
+        lat,
+        lon,
+        hdg,
+        gs,
+    ) else {
+        return Vec::new();
+    };
+
+    let airborne = gs >= 50;
+    let (ty, wake) = fp.aircraft_type_wake();
+    let profiles = state.aircraft_profiles.load_full();
+    let profile = profiles.resolve(&ty, &wake);
+    let cruise_alt = trajectory::parse_alt_ft(&fp.altitude);
+    let filed_tas: f64 = fp.cruise_tas.parse().unwrap_or(0.0);
+    let cruise_tas = trajectory::capped_cruise_tas(filed_tas, cruise_alt, profile);
+    let headwind = state.winds.load_full().route_headwind(&path, cruise_alt);
+    let route_len = predict::path_len_nm(&path);
+
+    let dep = fp.departure.to_ascii_uppercase();
+    let ground_allowance = if airborne {
+        0.0
+    } else {
+        let aircraft = (!fp.aircraft_short.is_empty()).then_some(fp.aircraft_short.as_str());
+        let pos = (gs > 0 || hdg > 0).then_some((lat, lon, hdg, gs));
+        feed_flow::resolve_ground_allowance_sec(
+            &state.gates.load_full(),
+            &state.runways,
+            &state.taxi_estimate_samples.load_full(),
+            &dep,
+            aircraft,
+            pos,
+        )
+    };
+
+    let start_alt = if airborne { cur_alt_ft } else { 0.0 };
+    let vp = trajectory::VerticalProfile::build(
+        start_alt, route_len, 0.0, cruise_alt, cruise_tas, profile, headwind,
+    );
+
+    let arr_ll = airports
+        .get(&fp.arrival.to_ascii_uppercase())
+        .map(|&(la, lo)| [la, lo]);
+    let mut out = Vec::with_capacity(named.len());
+    for (i, (name, flat, flon, along_nm)) in named.iter().enumerate() {
+        let (flat, flon, along_nm) = (*flat, *flon, *along_nm);
+        let target_d = (route_len - along_nm).max(0.0);
+        let mut sec = vp.time_between(route_len, target_d);
+        if !airborne {
+            sec += ground_allowance;
+        }
+        let next = named.get(i + 1).map(|(_, la, lo, _)| [*la, *lo]);
+        // A degenerate target (this fix already *is* the arrival airport, e.g. the last named
+        // point on the route) would give a meaningless 0° bearing — fall back to current heading.
+        let heading_deg = next
+            .or(arr_ll)
+            .filter(|&to| feed_flow::gc_dist(flat, flon, to[0], to[1]) > 0.1)
+            .map(|to| fca::bearing_deg([flat, flon], to).round() as i64)
+            .unwrap_or(hdg);
+
+        out.push(FixPrediction {
+            name: name.clone(),
+            lat: flat,
+            lon: flon,
+            eta: now + Duration::seconds(sec as i64),
+            altitude_ft: vp.alt_at(target_d).round() as i64,
+            groundspeed_kt: vp.ground_speed_at(target_d).round() as i64,
+            heading_deg,
+            distance_nm: along_nm.round() as i64,
+        });
+    }
+    out
 }
 
 #[allow(clippy::too_many_arguments)]

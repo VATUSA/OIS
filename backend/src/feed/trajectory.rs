@@ -359,6 +359,12 @@ impl VerticalProfile {
         self.interp(d_nm, |s| s.1)
     }
 
+    /// Predicted ground speed (kt) at a distance-to-destination `d` — the phase-appropriate TAS
+    /// with wind applied, same as [`Self::time_between`] uses internally.
+    pub fn ground_speed_at(&self, d_nm: f64) -> f64 {
+        effective_gs(self.interp(d_nm, |s| s.2), self.headwind)
+    }
+
     /// Seconds to fly from distance-to-destination `from_d` forward to `to_d` (`to_d < from_d`),
     /// integrating the phase-appropriate groundspeed in small steps.
     pub fn time_between(&self, from_d: f64, to_d: f64) -> f64 {
@@ -641,6 +647,23 @@ mod tests {
         let still = VerticalProfile::build(35000.0, 400.0, 0.0, 35000.0, 460.0, &b77w(), None);
         let hw = VerticalProfile::build(35000.0, 400.0, 0.0, 35000.0, 460.0, &b77w(), Some(90.0));
         assert!(hw.time_between(400.0, 0.0) > still.time_between(400.0, 0.0));
+    }
+
+    #[test]
+    fn ground_speed_at_reflects_headwind_and_matches_alt_at_s_own_phase() {
+        // Same cruise-altitude comparison as `headwind_slows_the_vertical_model_too`, but on the
+        // per-point speed accessor the #225 per-fix debug table uses directly.
+        let still = VerticalProfile::build(35000.0, 400.0, 0.0, 35000.0, 460.0, &b77w(), None);
+        let hw = VerticalProfile::build(35000.0, 400.0, 0.0, 35000.0, 460.0, &b77w(), Some(90.0));
+        assert!(hw.ground_speed_at(200.0) < still.ground_speed_at(200.0));
+
+        // Near the field on a descent, ground speed should be well below the cruise TAS.
+        let descending = VerticalProfile::build(35000.0, 300.0, 0.0, 35000.0, 480.0, &b77w(), None);
+        assert!(
+            descending.ground_speed_at(5.0) < 480.0,
+            "expected a slower speed close to the field, got {}",
+            descending.ground_speed_at(5.0)
+        );
     }
 
     #[test]
