@@ -9,6 +9,7 @@ pub mod auth;
 pub mod availability;
 pub mod dashboards;
 pub mod events;
+pub mod faa_surface_seed;
 pub mod facility_documents;
 pub mod facility_map;
 pub mod flow;
