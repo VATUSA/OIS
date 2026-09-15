@@ -151,7 +151,7 @@ function RestrictionRow({ r }: { r: PublicRestriction }) {
 
 function spacing(trail: number, mit: number): string {
   if (mit > 0) return `${mit} MIT`;
-  if (trail > 0) return `${trail} MIN`;
+  if (trail > 0) return `${trail} MINIT`;
   return "AAR only";
 }
 
