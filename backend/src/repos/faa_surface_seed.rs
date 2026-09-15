@@ -168,7 +168,7 @@ mod tests {
     #[sqlx::test]
     async fn seed_inserts_rows_from_the_bundled_extract(pool: sqlx::PgPool) {
         let summary = seed(&pool).await.unwrap();
-        assert_eq!(summary.taxiways_inserted, 20024);
+        assert_eq!(summary.taxiways_inserted, 20069);
         assert_eq!(summary.ramps_inserted, 4082);
 
         let taxiways: i64 = sqlx::query_scalar(
