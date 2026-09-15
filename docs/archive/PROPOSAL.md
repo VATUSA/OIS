@@ -1,5 +1,9 @@
 # Proposal: OIS — a unified VATUSA operations platform
 
+> **Archived — historical.** This is the original leadership pitch that got the project approved. OIS
+> has since shipped; this document does not reflect current status. See
+> [`docs/README.md`](../README.md) and [`docs/features/`](../features/) for what's built today.
+
 **Prepared for:** VATUSA senior / division staff
 **Prepared by:** _[project lead — fill in]_
 **Date:** 2026-08-12

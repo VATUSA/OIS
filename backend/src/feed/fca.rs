@@ -53,12 +53,10 @@ pub fn full_route_named(
     (waypoints, res.unresolved)
 }
 
-/// Trim anchors already behind an airborne aircraft; prepend its current position.
-fn remaining_anchors(anchors: &[[f64; 2]], lat: f64, lon: f64, hdg: f64) -> Vec<[f64; 2]> {
-    if anchors.len() < 2 {
-        return anchors.to_vec();
-    }
-    // Nearest leg by perpendicular distance in a local frame centred on the aircraft.
+/// The index of the first anchor still ahead of `(lat, lon)` along the polyline — a nearest-leg
+/// projection (perpendicular distance in a local frame centred on the aircraft) that's
+/// heading-independent, so it's valid at any speed: parked, taxiing, or flying.
+fn project_forward_index(anchors: &[[f64; 2]], lat: f64, lon: f64) -> usize {
     let mut best_leg = 0usize;
     let mut best_xt = f64::MAX;
     let mut best_along = 0.0;
@@ -86,11 +84,19 @@ fn remaining_anchors(anchors: &[[f64; 2]], lat: f64, lon: f64, hdg: f64) -> Vec<
         anchors[best_leg + 1][0],
         anchors[best_leg + 1][1],
     );
-    let mut idx = if best_along >= leg_len - 3.0 {
+    if best_along >= leg_len - 3.0 {
         best_leg + 1
     } else {
         best_leg
-    };
+    }
+}
+
+/// Trim anchors already behind an airborne aircraft; prepend its current position.
+fn remaining_anchors(anchors: &[[f64; 2]], lat: f64, lon: f64, hdg: f64) -> Vec<[f64; 2]> {
+    if anchors.len() < 2 {
+        return anchors.to_vec();
+    }
+    let mut idx = project_forward_index(anchors, lat, lon);
     // Skip fixes clearly behind the current heading.
     while idx < anchors.len() - 1 {
         let d = gc_dist(lat, lon, anchors[idx][0], anchors[idx][1]);
@@ -103,6 +109,40 @@ fn remaining_anchors(anchors: &[[f64; 2]], lat: f64, lon: f64, hdg: f64) -> Vec<
     }
     let mut out = vec![[lat, lon]];
     out.extend_from_slice(&anchors[idx..]);
+    out
+}
+
+/// Trim the full filed route to the forward remainder using only along-route position, never
+/// heading — a ground aircraft's heading is unreliable (parked, spun around on the ramp).
+///
+/// When `project_forward_index` lands on an *endpoint* of the whole route (index 0, or the last
+/// index), that anchor IS the airport the ground aircraft currently occupies — the departure field
+/// pre-push, or the arrival field once landed — so it's replaced by the aircraft's actual position
+/// instead of kept as a separate point ahead of it: a pre-departure aircraft keeps every real
+/// waypoint after the departure airport (still the whole future route); a landed aircraft has
+/// nothing left after the arrival airport, so the path collapses to one point and `route_path`
+/// reports no path at all. Any other index is a genuine, distinct waypoint still ahead, so the
+/// current position is prepended in front of it, unchanged.
+///
+/// This is index-based, not a distance/epsilon match on the aircraft's coordinates — a real gate or
+/// ramp position is essentially never the airport's exact reference point, so a naive "prepend
+/// always" would still add a spurious extra point at the route's start and inflate
+/// `predict::arrival_eta`'s "the nav engine resolved real waypoints" signal (`path.len() > 2`) for
+/// ordinary pre-departure traffic on an otherwise-unresolved route.
+fn forward_route_from_position(anchors: &[[f64; 2]], lat: f64, lon: f64) -> Vec<[f64; 2]> {
+    if anchors.len() < 2 {
+        return anchors.to_vec();
+    }
+    let idx = project_forward_index(anchors, lat, lon);
+    let keep_from = if idx == 0 {
+        1
+    } else if idx == anchors.len() - 1 {
+        anchors.len()
+    } else {
+        idx
+    };
+    let mut out = vec![[lat, lon]];
+    out.extend_from_slice(&anchors[keep_from..]);
     out
 }
 
@@ -168,7 +208,7 @@ pub fn route_path(
     let path = if gs >= 50 {
         remaining_anchors(&anchors, lat, lon, hdg as f64)
     } else {
-        anchors
+        forward_route_from_position(&anchors, lat, lon)
     };
     (path.len() >= 2).then_some(path)
 }
@@ -396,7 +436,7 @@ fn densify(a: [f64; 2], b: [f64; 2]) -> Vec<[f64; 2]> {
     (0..=n).map(|k| slerp(a, b, k as f64 / n as f64)).collect()
 }
 
-fn slerp(a: [f64; 2], b: [f64; 2], f: f64) -> [f64; 2] {
+pub(crate) fn slerp(a: [f64; 2], b: [f64; 2], f: f64) -> [f64; 2] {
     let (lat1, lon1) = (a[0].to_radians(), a[1].to_radians());
     let (lat2, lon2) = (b[0].to_radians(), b[1].to_radians());
     let d = 2.0
@@ -417,7 +457,7 @@ fn slerp(a: [f64; 2], b: [f64; 2], f: f64) -> [f64; 2] {
     [lat.to_degrees(), lon.to_degrees()]
 }
 
-fn bearing_deg(a: [f64; 2], b: [f64; 2]) -> f64 {
+pub(crate) fn bearing_deg(a: [f64; 2], b: [f64; 2]) -> f64 {
     let (lat1, lat2) = (a[0].to_radians(), b[0].to_radians());
     let dlon = (b[1] - a[1]).to_radians();
     let y = dlon.sin() * lat2.cos();
@@ -428,6 +468,30 @@ fn bearing_deg(a: [f64; 2], b: [f64; 2]) -> f64 {
 fn angle_diff(a: f64, b: f64) -> f64 {
     let d = (a - b).abs() % 360.0;
     if d > 180.0 { 360.0 - d } else { d }
+}
+
+/// Position and heading `target_nm` along `path` (a `[lat, lon]` polyline from its start), for
+/// #226's forward prediction scrubber — the geometric counterpart to
+/// `predict::project_along_route`'s along-route distance. Clamps to the last point (with that
+/// leg's bearing) once `target_nm` reaches or exceeds the polyline's total length. `path` must have
+/// at least 2 points — the caller (only ever fed an already-resolved [`route_path`]) guarantees
+/// this.
+pub(crate) fn point_and_heading_at(path: &[[f64; 2]], target_nm: f64) -> ([f64; 2], f64) {
+    let mut acc = 0.0;
+    for w in path.windows(2) {
+        let seg = gc_dist(w[0][0], w[0][1], w[1][0], w[1][1]);
+        if target_nm <= acc + seg {
+            let f = if seg > 0.0 {
+                ((target_nm - acc) / seg).clamp(0.0, 1.0)
+            } else {
+                0.0
+            };
+            return (slerp(w[0], w[1], f), bearing_deg(w[0], w[1]));
+        }
+        acc += seg;
+    }
+    let last = path.len() - 1;
+    (path[last], bearing_deg(path[last - 1], path[last]))
 }
 
 #[cfg(test)]
@@ -467,6 +531,54 @@ mod tests {
         // A line far west of the JFK→IAD track.
         let fca = [[41.0, -90.0], [38.0, -90.0]];
         assert!(crossing_for(&fca, &nav, &ap, "KJFK", "KIAD", "", 0.0, 0.0, 0, 0).is_none());
+    }
+
+    #[test]
+    fn ground_at_destination_does_not_match_an_already_passed_fca() {
+        // Regression (#213): a JFK→IAD flight that has landed and is on the ground at KIAD must not
+        // still show as crossing the lon -75.7 line it flew through en route — the same geometry
+        // `detects_a_route_crossing_a_line` confirms the full route crosses.
+        let nav = NavData::default();
+        let ap = airports();
+        let fca = [[41.0, -75.7], [38.0, -75.7]];
+        let c = crossing_for(&fca, &nav, &ap, "KJFK", "KIAD", "", 38.95, -77.46, 0, 5);
+        assert!(
+            c.is_none(),
+            "a ground aircraft at its destination shouldn't match an FCA it already passed"
+        );
+    }
+
+    #[test]
+    fn ground_at_origin_still_matches_a_future_fca() {
+        // A pre-departure aircraft still on the ground at KJFK must still show its future crossing —
+        // trimming ground routes for #213 must not also drop a flight that hasn't left yet.
+        let nav = NavData::default();
+        let ap = airports();
+        let fca = [[41.0, -75.7], [38.0, -75.7]];
+        let c = crossing_for(&fca, &nav, &ap, "KJFK", "KIAD", "", 40.64, -73.78, 0, 0);
+        assert!(
+            c.is_some(),
+            "a pre-departure aircraft at its origin should still match a future crossing"
+        );
+    }
+
+    #[test]
+    fn ground_at_origin_on_the_reverse_leg_still_matches_a_future_fca() {
+        // Regression: `project_forward_index` is a plain geometric nearest-leg projection with no
+        // knowledge of "this position is a placeholder" — the caller must pass a real position.
+        // A prefile with no live position used to pass (0.0, 0.0) here, which happens to project
+        // onto the *arrival* end for this reversed KIAD->KJFK route (the same fixture the other
+        // tests use, direction swapped), collapsing the route to one point and losing a real future
+        // crossing entirely. With the caller now passing the real departure airport's coordinates
+        // (`handlers::flow::prefile_position`), it must still resolve correctly here too.
+        let nav = NavData::default();
+        let ap = airports();
+        let fca = [[41.0, -75.7], [38.0, -75.7]];
+        let c = crossing_for(&fca, &nav, &ap, "KIAD", "KJFK", "", 38.95, -77.46, 0, 0);
+        assert!(
+            c.is_some(),
+            "a pre-departure aircraft at KIAD (departing to KJFK) should still match a future crossing"
+        );
     }
 
     #[test]
@@ -777,6 +889,59 @@ mod tests {
             c.lon > -77.3 && c.lon < -76.7,
             "crossing lon ~ -77.0, got {}",
             c.lon
+        );
+    }
+
+    // ---- point_and_heading_at: for #226's forward prediction scrubber ----
+
+    fn path_len(path: &[[f64; 2]]) -> f64 {
+        path.windows(2)
+            .map(|w| gc_dist(w[0][0], w[0][1], w[1][0], w[1][1]))
+            .sum()
+    }
+
+    #[test]
+    fn point_and_heading_at_returns_the_exact_endpoints() {
+        let path = [[40.0, -74.0], [39.0, -75.0], [38.0, -76.0]];
+        let (start, _) = point_and_heading_at(&path, 0.0);
+        assert_eq!(start, path[0]);
+
+        let total = path_len(&path);
+        let (end, _) = point_and_heading_at(&path, total);
+        assert!(
+            gc_dist(end[0], end[1], path[2][0], path[2][1]) < 0.1,
+            "expected the last point, got {end:?}"
+        );
+    }
+
+    #[test]
+    fn point_and_heading_at_interpolates_within_the_bracketing_leg() {
+        let path = [[40.0, -74.0], [39.0, -75.0], [38.0, -76.0]];
+        let leg1 = gc_dist(path[0][0], path[0][1], path[1][0], path[1][1]);
+        // Halfway into the first leg should land roughly on the great-circle midpoint, not on
+        // either endpoint or spilling into the second leg.
+        let (mid, heading) = point_and_heading_at(&path, leg1 / 2.0);
+        let d_from_start = gc_dist(path[0][0], path[0][1], mid[0], mid[1]);
+        assert!(
+            (d_from_start - leg1 / 2.0).abs() < 1.0,
+            "expected ~{}nm from the start, got {d_from_start}nm",
+            leg1 / 2.0
+        );
+        let expected_heading = bearing_deg(path[0], path[1]);
+        assert!(
+            angle_diff(heading, expected_heading) < 1.0,
+            "heading {heading} should match the first leg's bearing {expected_heading}"
+        );
+    }
+
+    #[test]
+    fn point_and_heading_at_clamps_past_the_end() {
+        let path = [[40.0, -74.0], [39.0, -75.0]];
+        let total = path_len(&path);
+        let (past, _) = point_and_heading_at(&path, total + 500.0);
+        assert!(
+            gc_dist(past[0], past[1], path[1][0], path[1][1]) < 0.1,
+            "overshoot must clamp to the last point, got {past:?}"
         );
     }
 }

@@ -73,5 +73,23 @@ services:
       - "${BIND_HOST:-127.0.0.1}:${DOCS_PORT:-8081}:80"
     restart: unless-stopped
 
+  # Opt-in: not every deployment runs the bot. `docker compose --profile discord up -d`.
+  discord:
+    image: ${REGISTRY:-ghcr.io}/${IMAGE_REPO:-vatusa/ois}-discord:${IMAGE_TAG:-latest}
+    profiles: ["discord"]
+    depends_on:
+      - backend
+    # Same optional env-file pattern as backend: DISCORD_BOT_TOKEN/OIS_API_TOKEN live in .env or
+    # stack.env. No DATABASE_URL — the bot has no DB access.
+    env_file:
+      - path: .env
+        required: false
+      - path: stack.env
+        required: false
+    environment:
+      # Reach the backend over the compose network rather than its host-published port.
+      OIS_API_BASE: http://backend:3000
+    restart: unless-stopped
+
 volumes:
   ois_pg:
