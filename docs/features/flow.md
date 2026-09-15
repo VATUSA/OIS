@@ -6,7 +6,14 @@
 > Areas, a live-feed traffic view, shared reference routes, the runway balancer, an
 > IDST departure-release console, and the per-facility public map. This doc describes
 > what exists in code. Rate programs, ground stops, GDPs, and CFRs live in the `tmu`
-> domain — see [tmu-ntml-adv-tmi.md](tmu-ntml-adv-tmi.md).
+> domain — see [tmu-ntml-adv-tmi.md](tmu-ntml-adv-tmi.md). Two more `flow`-domain
+> features exist and aren't detailed below: **airport surface data** (gates/ramp
+> areas/taxiways, `flow.surface_data.update` — feeds the taxi/pushback model, see
+> [taxi-insights.md](taxi-insights.md)) and **aircraft performance profiles**
+> (`flow.aircraft_profiles.{read,update}` — climb/cruise/descent speeds per type,
+> feeding the shared trajectory/ETA model this whole domain's metering runs on). The
+> **arrival demand chart (AADC)** — a bucketed forward-demand view built on this same
+> live-flow computation — has its own spec: [aadc.md](aadc.md).
 
 ## Problem
 

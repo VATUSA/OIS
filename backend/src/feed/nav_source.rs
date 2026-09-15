@@ -89,7 +89,9 @@ pub async fn fetch_latest() -> Fetched<NavData> {
     }
 
     // 2. Airways + procedures from @squawk; on failure use the bundled blobs as-is.
-    let (airways_json, procedures_json) = match fetch_squawk_enroute(&client, &mut fixes).await {
+    let (squawk_airways_json, procedures_json) = match fetch_squawk_enroute(&client, &mut fixes)
+        .await
+    {
         Ok((a, p, sq_cycle)) => {
             // If FAA didn't provide a cycle, reflect the @squawk snapshot's.
             if source != "faa"
@@ -102,6 +104,28 @@ pub async fn fetch_latest() -> Fetched<NavData> {
         Err(e) => {
             tracing::warn!(error = %e, "@squawk enroute fetch failed; using bundled airways/procedures");
             (BUNDLED_AIRWAYS.to_string(), BUNDLED_PROCEDURES.to_string())
+        }
+    };
+
+    // 2b. CIFP replaces @squawk as the airway source when it succeeds (VATUSA/OIS#221):
+    // authoritative FAA data instead of a pinned npm snapshot. @squawk's airways above stay as
+    // the fallback — procedures are untouched and remain @squawk-only.
+    let airways_json = match super::cifp::fetch_airways(&client).await {
+        Ok(cifp_airways) if !cifp_airways.is_empty() => {
+            tracing::info!(count = cifp_airways.len(), "using CIFP airways");
+            let airways: HashMap<String, OutAirway> = cifp_airways
+                .into_iter()
+                .map(|(id, a)| (id, OutAirway { t: a.t, w: a.w }))
+                .collect();
+            serde_json::to_string(&airways)?
+        }
+        Ok(_) => {
+            tracing::warn!("CIFP airways parsed empty; using @squawk airways");
+            squawk_airways_json
+        }
+        Err(e) => {
+            tracing::warn!(error = %e, "CIFP airway fetch failed; using @squawk airways");
+            squawk_airways_json
         }
     };
 
@@ -178,7 +202,7 @@ async fn fetch_faa_cycle(client: &reqwest::Client, date: NaiveDate) -> Fetched<F
 }
 
 /// The current 28-day cycle and the two before it (fallbacks when the newest isn't posted).
-fn candidate_cycles() -> Vec<NaiveDate> {
+pub(super) fn candidate_cycles() -> Vec<NaiveDate> {
     let anchor = NaiveDate::from_ymd_opt(CYCLE_ANCHOR.0, CYCLE_ANCHOR.1, CYCLE_ANCHOR.2)
         .expect("valid cycle anchor");
     let today = Utc::now().date_naive();
@@ -493,7 +517,7 @@ fn num(row: &[String], idx: Option<usize>) -> Option<f64> {
 
 // --- shared helpers ---
 
-async fn download(client: &reqwest::Client, url: &str) -> Fetched<Vec<u8>> {
+pub(super) async fn download(client: &reqwest::Client, url: &str) -> Fetched<Vec<u8>> {
     let bytes = client
         .get(url)
         .send()
@@ -515,7 +539,7 @@ async fn fetch_gz_json<T: for<'de> Deserialize<'de>>(
     Ok(serde_json::from_str(&json)?)
 }
 
-fn read_zip_member(bytes: &[u8], names: &[&str]) -> Fetched<String> {
+pub(super) fn read_zip_member(bytes: &[u8], names: &[&str]) -> Fetched<String> {
     let mut archive = zip::ZipArchive::new(Cursor::new(bytes))?;
     for name in names {
         if let Ok(mut f) = archive.by_name(name) {
@@ -527,16 +551,16 @@ fn read_zip_member(bytes: &[u8], names: &[&str]) -> Fetched<String> {
     Err(format!("zip has none of {names:?}").into())
 }
 
-fn in_coverage(lat: f64, lon: f64) -> bool {
+pub(super) fn in_coverage(lat: f64, lon: f64) -> bool {
     (COVERAGE[0]..=COVERAGE[2]).contains(&lat) && (COVERAGE[1]..=COVERAGE[3]).contains(&lon)
 }
 
-fn round5(n: f64) -> f64 {
+pub(super) fn round5(n: f64) -> f64 {
     (n * 1e5).round() / 1e5
 }
 
 /// Append a `(lat, lon)` candidate for `id`, in-COVERAGE and de-duplicated.
-fn add_candidate(map: &mut HashMap<String, CoordList>, id: &str, lat: f64, lon: f64) {
+pub(super) fn add_candidate(map: &mut HashMap<String, CoordList>, id: &str, lat: f64, lon: f64) {
     if id.is_empty() || !lat.is_finite() || !lon.is_finite() || !in_coverage(lat, lon) {
         return;
     }
@@ -653,7 +677,7 @@ struct SqLeg {
     lon: Option<f64>,
 }
 
-#[derive(Serialize)]
+#[derive(Serialize, Deserialize)]
 struct OutAirway {
     t: String,
     w: Vec<(String, f64, f64)>,
@@ -678,7 +702,40 @@ struct OutMeta {
 
 #[cfg(test)]
 mod tests {
+    use std::io::Write;
+
     use super::*;
+
+    /// Round-trips a real deflate-compressed archive through `read_zip_member` — a compile-clean
+    /// `zip` major bump (e.g. #193's 3→8) doesn't guarantee the `deflate` feature still actually
+    /// decompresses correctly at runtime, only that the API shape matches.
+    #[test]
+    fn read_zip_member_round_trips_a_deflated_entry() {
+        let mut buf = Vec::new();
+        {
+            let mut writer = zip::ZipWriter::new(Cursor::new(&mut buf));
+            let opts = zip::write::SimpleFileOptions::default()
+                .compression_method(zip::CompressionMethod::Deflated);
+            writer.start_file("NAV_BASE.csv", opts).unwrap();
+            writer.write_all(b"hello,world").unwrap();
+            writer.finish().unwrap();
+        }
+
+        let s = read_zip_member(&buf, &["NAV_BASE.csv", "NAV.csv"]).unwrap();
+        assert_eq!(s, "hello,world");
+    }
+
+    #[test]
+    fn read_zip_member_errs_when_none_of_the_names_are_present() {
+        let mut buf = Vec::new();
+        {
+            let mut writer = zip::ZipWriter::new(Cursor::new(&mut buf));
+            let opts = zip::write::SimpleFileOptions::default();
+            writer.start_file("OTHER.csv", opts).unwrap();
+            writer.finish().unwrap();
+        }
+        assert!(read_zip_member(&buf, &["NAV_BASE.csv", "NAV.csv"]).is_err());
+    }
 
     #[test]
     fn parses_quoted_csv_fields() {
@@ -747,5 +804,56 @@ mod tests {
         assert_eq!(cands.len(), 3);
         assert_eq!((cands[0] - cands[1]).num_days(), 28);
         assert!(cands[0] <= Utc::now().date_naive());
+    }
+
+    /// Live parity check for VATUSA/OIS#221: CIFP's J10 (a real, well-populated jet airway) must
+    /// resolve at least as many points as @squawk's, and use the same start/end fix — evidence
+    /// that the FAA-authoritative source produces an equivalent-or-better airway, not silently
+    /// worse or differently-shaped data, before it's trusted as the live primary source.
+    /// Ignored by default (hits both FAA CIFP and unpkg):
+    /// `cargo test --lib feed::nav_source -- --ignored --nocapture`.
+    #[tokio::test]
+    #[ignore = "network: downloads CIFP + @squawk"]
+    async fn cifp_airway_has_parity_with_squawk_for_j10() {
+        let client = reqwest::Client::builder()
+            .user_agent("ois-nav-test/1.0 (+https://vatusa.net)")
+            .timeout(std::time::Duration::from_secs(90))
+            .build()
+            .expect("client");
+
+        let cifp = super::super::cifp::fetch_airways(&client)
+            .await
+            .expect("CIFP fetch");
+        let cifp_j10 = cifp.get("J10").expect("CIFP should have J10");
+
+        let mut fixes = HashMap::new();
+        let (squawk_json, _, _) = fetch_squawk_enroute(&client, &mut fixes)
+            .await
+            .expect("@squawk fetch");
+        let squawk_airways: HashMap<String, OutAirway> =
+            serde_json::from_str(&squawk_json).expect("@squawk airways JSON");
+        let squawk_j10 = squawk_airways.get("J10").expect("@squawk should have J10");
+
+        println!(
+            "J10: cifp={} points, squawk={} points",
+            cifp_j10.w.len(),
+            squawk_j10.w.len()
+        );
+        assert!(
+            cifp_j10.w.len() >= squawk_j10.w.len(),
+            "CIFP J10 ({} points) should be at least as complete as @squawk's ({} points)",
+            cifp_j10.w.len(),
+            squawk_j10.w.len()
+        );
+        assert_eq!(
+            cifp_j10.w.first().map(|p| &p.0),
+            squawk_j10.w.first().map(|p| &p.0),
+            "CIFP and @squawk J10 should start at the same fix"
+        );
+        assert_eq!(
+            cifp_j10.w.last().map(|p| &p.0),
+            squawk_j10.w.last().map(|p| &p.0),
+            "CIFP and @squawk J10 should end at the same fix"
+        );
     }
 }

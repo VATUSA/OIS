@@ -1,16 +1,19 @@
 # ACE support requests
 
-> **Status: v1 built (2026-08-22), Discord side built since.** The `ace.requests` +
-> `ace.team_members` tables (migration 0047), the six `ace.*` permissions with USER/ACE role
-> grants, the request lifecycle (`open → claimed → completed/cancelled`, state-guarded
-> in-transaction), the roster endpoints, and the national ACE page at `/ops/ace` are implemented.
-> The Discord side (once deferred pending the bot) is built too: the `#aceteam-requests` embed +
-> **claim** button (with a modal time-picker for the claimer's covered window), the
-> `ace_request_notify` EC DM/ping on claim, and T-24h/T-6h claim reminder DMs — see
-> [discord-integration.md](discord-integration.md). No Discord slash-command exists (interactions
-> are all button/modal, not commands). Still deferred: ARTCC-scoped claim/decide and
-> booking/scheduling. The sections below are the original spec; the [Discord](#discord) section
-> below is kept current with what's actually built.
+> **Status: v1 built (2026-08-22), Discord side built since, local roster removed since.** The
+> `ace.requests` table (migration 0047), the `ace.*` permissions with USER/ACE role grants, the
+> request lifecycle (`open → claimed → completed/cancelled`, state-guarded in-transaction), and the
+> national ACE page at `/ops/ace` are implemented. **`ace.team_members` and the `ace.team.*`
+> permissions were removed (migration `0051`)** — the ACE team roster is sourced from VATUSA, not
+> maintained locally, and the per-facility EC for Discord notification comes from the access
+> editor's `EC` role scoped to that facility, not a stored roster row. The Discord side is built:
+> the `#aceteam-requests` embed + **claim** button (with a modal time-picker for the claimer's
+> covered window), the `ace_request_notify` EC DM/ping on claim, and T-24h/T-6h claim reminder DMs —
+> see [discord-integration.md](discord-integration.md). No Discord slash-command exists
+> (interactions are all button/modal, not commands). Still deferred: ARTCC-scoped claim/decide and
+> booking/scheduling. The sections below are the original spec, kept for history — the roster
+> pieces (`ace.team_members`, `ace.team.*`) it describes **no longer exist**; see this banner for
+> what's current.
 
 ## Problem
 
