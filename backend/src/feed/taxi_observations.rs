@@ -253,23 +253,19 @@ fn process(
                 && airports.get(&arr).is_some_and(|&(alat, alon)| {
                     gc_dist(p.latitude, p.longitude, alat, alon) < 5.0
                 });
+            // Only start watching an aircraft first seen below taxi speed. One already moving (a
+            // backend restart mid-taxi, or the tick right after a recorded departure while still
+            // near the field) has no knowable taxi start — recording it produced short, duplicate
+            // taxi figures that skew the learned medians.
             if !arriving_turnaround
+                && gs <= GS_START
                 && gc_dist(p.latitude, p.longitude, dlat, dlon) <= DEP_PROX_NM
-                && !(gs > GS_STOP && alt > 500)
             {
-                // Already at taxi speed the very first time we see this departure: the push and
-                // start-up happened before we started watching, so taxi starts now and neither is
-                // measurable.
-                let already_rolling = gs > GS_START;
                 state.dep.insert(
                     p.callsign.clone(),
                     Session {
                         dep: dep.clone(),
-                        phase: if already_rolling {
-                            Phase::Taxiing
-                        } else {
-                            Phase::Parked
-                        },
+                        phase: Phase::Parked,
                         first_seen_ms: now_ms,
                         first_lat: p.latitude,
                         first_lon: p.longitude,
@@ -278,7 +274,7 @@ fn process(
                         run: None,
                         push_start_ms: None,
                         push_stop_ms: None,
-                        taxi_start_ms: already_rolling.then_some(now_ms),
+                        taxi_start_ms: None,
                         base_alt: alt,
                     },
                 );
@@ -554,17 +550,28 @@ mod tests {
     }
 
     #[test]
-    fn no_pushback_figure_when_already_rolling_on_first_seen() {
+    fn an_aircraft_first_seen_already_moving_is_not_recorded() {
         let (ap, rw) = (airports(), RunwayDb::default());
         let mut st = TaxiObsState::default();
-        // First tick already shows it rolling — pushback start is unknown, not zero.
+        // First tick already shows it rolling — its taxi start is unknown, so no observation.
         process(&mut st, &ap, &rw, &one(40.0, 20, 0, "KAAA"), t(0));
         let obs = process(&mut st, &ap, &rw, &one(40.0, 80, 400, "KAAA"), t(60));
+        assert!(obs.is_empty());
+        assert!(st.dep.is_empty());
+    }
 
-        assert_eq!(obs.len(), 1);
-        assert_eq!(obs[0].pushback_sec, None);
-        assert_eq!(obs[0].startup_sec, None);
-        assert_eq!(obs[0].taxi_sec, 60);
+    #[test]
+    fn a_recorded_departure_is_not_recorded_again_while_still_near_the_field() {
+        let (ap, rw) = (airports(), RunwayDb::default());
+        let mut st = TaxiObsState::default();
+        process(&mut st, &ap, &rw, &one(40.0, 0, 0, "KAAA"), t(0));
+        let first = process(&mut st, &ap, &rw, &one(40.0, 80, 100, "KAAA"), t(50));
+        assert_eq!(first.len(), 1);
+        // Next ticks: fast but still low (<500 ft) and inside the departure proximity radius.
+        let again = process(&mut st, &ap, &rw, &one(40.01, 140, 300, "KAAA"), t(65));
+        let again2 = process(&mut st, &ap, &rw, &one(40.03, 160, 450, "KAAA"), t(80));
+        assert!(again.is_empty() && again2.is_empty());
+        assert!(st.dep.is_empty());
     }
 
     #[test]
