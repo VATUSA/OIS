@@ -37,6 +37,7 @@ import {
   Wind,
 } from "lucide-react";
 
+import vatusaLogo from "@/assets/vatusa-logo.png";
 import {ZuluClock} from "@/components/zulu-clock";
 import {DOCS_URL} from "@/lib/api";
 import {login, useLogout, useMe} from "@/lib/auth";
@@ -374,7 +375,7 @@ export function Navbar() {
           canStats={canStats}
         />
         <Link to="/" className="flex items-center gap-2 font-semibold">
-          <Radar className="size-5 text-primary" />
+          <img src={vatusaLogo} alt="" className="size-6" />
           <span>OIS</span>
         </Link>
         <nav className="hidden items-center gap-1 text-sm text-muted-foreground sm:flex">
