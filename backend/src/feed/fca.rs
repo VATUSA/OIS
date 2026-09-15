@@ -697,9 +697,20 @@ mod tests {
             ("KJFK".to_string(), (40.64, -73.78)),
             ("KDCA".to_string(), (38.85, -77.04)),
         ]);
-        // gs=0 takes the "not airborne" branch — full route from departure, lat/lon/hdg ignored.
-        let fixes = route_path_named(&nav, &ap, "KJFK", "KDCA", "RBV WHITE SIE", 0.0, 0.0, 0, 0)
-            .expect("route should resolve");
+        // gs=0 takes the ground branch, positioned at the departure airport (as a prefile / parked
+        // aircraft is) — trimming keeps the whole future route, measured from the field.
+        let fixes = route_path_named(
+            &nav,
+            &ap,
+            "KJFK",
+            "KDCA",
+            "RBV WHITE SIE",
+            40.64,
+            -73.78,
+            0,
+            0,
+        )
+        .expect("route should resolve");
         let names: Vec<&str> = fixes.iter().map(|(n, ..)| n.as_str()).collect();
         assert!(
             names.contains(&"RBV") && names.contains(&"WHITE") && names.contains(&"SIE"),
@@ -721,6 +732,26 @@ mod tests {
         assert!(
             sie_d > rbv_d,
             "SIE ({sie_d}) should be farther than RBV ({rbv_d})"
+        );
+        // Magnitude, not just ordering: the total matches `route_path`'s length for the same
+        // input (a phantom leading point would add thousands of nm and still be monotonic).
+        let raw_path = route_path(
+            &nav,
+            &ap,
+            "KJFK",
+            "KDCA",
+            "RBV WHITE SIE",
+            40.64,
+            -73.78,
+            0,
+            0,
+        )
+        .expect("route_path resolves the same route");
+        let total = crate::feed::predict::path_len_nm(&raw_path);
+        let last_d = fixes.last().unwrap().3;
+        assert!(
+            (last_d - total).abs() < 0.5 && total < 300.0,
+            "total {last_d} nm should match route_path's {total} nm (~224 nm KJFK→KDCA)"
         );
     }
 
