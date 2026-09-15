@@ -10,6 +10,7 @@ import {type AccessPreset, ACCESS_PRESETS} from "@/lib/presets";
  */
 export function PresetBar({
   isApplied,
+  canApply = () => true,
   onToggle,
   facility,
   facilities,
@@ -19,6 +20,8 @@ export function PresetBar({
   size = "sm",
 }: {
   isApplied: (preset: AccessPreset) => boolean;
+  /** Whether the preset would grant anything; one that wouldn't renders disabled. */
+  canApply?: (preset: AccessPreset) => boolean;
   onToggle: (preset: AccessPreset) => void;
   facility: string;
   facilities: { id: string; name: string }[];
@@ -34,20 +37,28 @@ export function PresetBar({
 
   const Preset = ({ preset }: { preset: AccessPreset }) => {
     const needsFacility = preset.scope === "facility" && !facility;
+    const nothingToGrant = !needsFacility && !canApply(preset);
+    const disabled = needsFacility || nothingToGrant;
     const applied = isApplied(preset);
     return (
       <button
         type="button"
-        disabled={needsFacility}
+        disabled={disabled}
         onClick={() => onToggle(preset)}
-        title={needsFacility ? "Pick a facility first" : preset.description}
+        title={
+          needsFacility
+            ? "Pick a facility first"
+            : nothingToGrant
+              ? "Nothing in this preset that you can delegate"
+              : preset.description
+        }
         className={cn(
           "rounded-md border font-medium transition-colors",
           btn,
           applied
             ? "border-primary/60 bg-primary/15 text-primary"
             : "bg-background hover:bg-accent",
-          needsFacility && "cursor-not-allowed opacity-50",
+          disabled && "cursor-not-allowed opacity-50",
         )}
       >
         {preset.label}

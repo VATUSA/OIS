@@ -1,10 +1,10 @@
 import {useState} from "react";
-import {ArrowLeft, MapPinned} from "lucide-react";
-import {Button, Card, CardContent, Input} from "@ois/ui";
+import {ArrowLeft, MapPinned, RefreshCw} from "lucide-react";
+import {Button, Card, CardContent, Input, useConfirm} from "@ois/ui";
 
 import {useMe} from "@/lib/auth";
 import {hasPermission} from "@/lib/permissions";
-import {useAirportSurface} from "@/lib/airport-surface";
+import {useAirportSurface, useRepullFaaSurface} from "@/lib/airport-surface";
 import {useRunway} from "@/lib/runway";
 import {SurfaceMap} from "@/components/map/surface/SurfaceMap";
 
@@ -29,6 +29,26 @@ function RunwayList({ icao }: { icao: string }) {
         </div>
       </CardContent>
     </Card>
+  );
+}
+
+function RepullFaaButton({ icao }: { icao: string }) {
+  const repull = useRepullFaaSurface(icao);
+  const confirm = useConfirm();
+  const onClick = async () => {
+    const ok = await confirm({
+      title: `Re-pull ${icao} from FAA?`,
+      description:
+        "Replaces every FAA-sourced taxiway and ramp at this airport with the bundled FAA data. Edits made to those rows are lost, and any you deleted come back. Hand-drawn (manual) geometry isn’t touched.",
+      confirmText: "Re-pull",
+    });
+    if (ok) repull.mutate();
+  };
+  return (
+    <Button variant="outline" size="sm" disabled={repull.isPending} onClick={onClick}>
+      <RefreshCw className={`size-4 ${repull.isPending ? "animate-spin" : ""}`} />
+      Re-pull from FAA
+    </Button>
   );
 }
 
@@ -58,6 +78,11 @@ function AirportSurfaceEditor({ icao }: { icao: string }) {
 
   return (
     <div className="flex flex-col gap-4">
+      {editable && (
+        <div className="flex justify-end">
+          <RepullFaaButton icao={icao} />
+        </div>
+      )}
       <SurfaceMap icao={icao} surface={surface.data} editable={editable} />
       <RunwayList icao={icao} />
     </div>

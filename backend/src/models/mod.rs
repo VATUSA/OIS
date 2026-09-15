@@ -754,6 +754,16 @@ pub struct AirportSurfaceBody {
     pub taxiways: Vec<AirportTaxiwayBody>,
 }
 
+/// The result of re-pulling one airport's `source='faa'` surface geometry from the bundled FAA
+/// extract (#232) — a permissioned, on-demand equivalent of #231's nationwide startup seed.
+#[derive(Debug, Serialize, ToSchema)]
+pub struct FaaRepullResult {
+    pub taxiways_inserted: usize,
+    pub ramps_inserted: usize,
+    pub osm_taxiways_retired: usize,
+    pub osm_ramps_retired: usize,
+}
+
 /// A configurable aircraft performance profile (climb / cruise / descent schedules) used by the
 /// trajectory / ETA model. Keyed by `kind` (`type` / `wake` / `default`) + `key` (ICAO type, wake
 /// token, or empty). See migration 0059 and `feed::trajectory`.
@@ -1629,6 +1639,29 @@ pub struct FcaFlightDebug {
     /// Filed-route tokens that didn't resolve to a nav fix/navaid/airway/procedure — a likely
     /// source of ETA/track error.
     pub unresolved: Vec<String>,
+    /// The learned ground-allowance derivation (#164 sub-issue F) — absent for an airborne flight,
+    /// which never applies one.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub taxi_estimate: Option<TaxiEstimateDebug>,
+}
+
+/// How a departure's pushback+taxi allowance was derived (#164 sub-issue F): the matched
+/// gate/runway (if any) and each metric's fallback-ladder tier + sample count.
+#[derive(Debug, Serialize, ToSchema)]
+pub struct TaxiEstimateDebug {
+    /// The matched gate/parking spot id, if the aircraft's position matched one.
+    pub gate: Option<String>,
+    /// The matched departure runway, if the aircraft was rolling.
+    pub runway: Option<String>,
+    pub pushback_sec: i64,
+    /// Which fallback-ladder tier produced `pushback_sec`: "gate+type+runway", "airport+runway",
+    /// "airport", or "default".
+    pub pushback_tier: String,
+    pub pushback_samples: i64,
+    pub taxi_sec: i64,
+    /// Same tier labels as `pushback_tier`, for the taxi-out metric.
+    pub taxi_tier: String,
+    pub taxi_samples: i64,
 }
 
 /// Issue a CFR release for a crossing aircraft. `ready` (HHMMz) pins a wheels-up time;
@@ -1706,6 +1739,25 @@ pub struct AircraftRoute {
     pub waypoints: Vec<RouteWaypoint>,
     /// FAA NASR cycle date backing the resolution (e.g. `2026-07-09`).
     pub nav_cycle: String,
+    /// Per-fix predictions from the shared trajectory/ETA model (debug mode; #225). Always
+    /// populated — the client only renders this when the user's `debug.enabled` setting is on.
+    pub fixes: Vec<FixPrediction>,
+}
+
+/// One fix's predicted crossing time/altitude/speed/heading, from the same trajectory model that
+/// backs every other ETA in OIS (metering, the arrival ladder, runway ETE).
+#[derive(Debug, Clone, Serialize, ToSchema)]
+pub struct FixPrediction {
+    pub name: String,
+    pub lat: f64,
+    pub lon: f64,
+    pub eta: DateTime<Utc>,
+    pub altitude_ft: i64,
+    pub groundspeed_kt: i64,
+    pub heading_deg: i64,
+    /// Cumulative along-route distance, nm — from the aircraft's current position (airborne), or
+    /// from the departure airport (ground/prefile).
+    pub distance_nm: i64,
 }
 
 /// A named point along a resolved route.

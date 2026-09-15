@@ -1,16 +1,6 @@
 [advisories]
 version = 2
 yanked = "deny"
-# Pre-existing, transitive: ois-discord -> serenity 0.12.5 -> tokio-tungstenite -> tokio-rustls
-# -> rustls 0.22.4 -> rustls-webpki 0.102.8. rustls 0.22's dependency spec caps webpki below the
-# patched releases, so a lockfile-only `cargo update` can't fix this — it needs a serenity version
-# bump, tracked in #98. Remove these once #98 lands.
-ignore = [
-    "RUSTSEC-2026-0049",
-    "RUSTSEC-2026-0098",
-    "RUSTSEC-2026-0099",
-    "RUSTSEC-2026-0104",
-]
 
 [licenses]
 version = 2

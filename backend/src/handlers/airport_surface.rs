@@ -20,9 +20,11 @@ use crate::{
     handlers::events::{normalize_icao, owning_artcc},
     models::{
         AirportGateBody, AirportRampAreaBody, AirportSurfaceBody, AirportTaxiwayBody,
-        UpsertAirportGateRequest, UpsertAirportRampAreaRequest, UpsertAirportTaxiwayRequest,
+        FaaRepullResult, UpsertAirportGateRequest, UpsertAirportRampAreaRequest,
+        UpsertAirportTaxiwayRequest,
     },
     repos::airport_surface as surface_repo,
+    repos::faa_surface_seed as faa_surface_seed_repo,
     state::AppState,
 };
 
@@ -347,6 +349,37 @@ pub async fn delete_airport_taxiway(
     } else {
         Err(ApiError::NotFound)
     }
+}
+
+// ---- FAA re-pull (#232) ------------------------------------------------------
+
+#[utoipa::path(
+    post, path = "/api/v1/airports/{icao}/surface/repull-faa", tag = "events",
+    params(("icao" = String, Path)),
+    responses(
+        (status = 200, body = FaaRepullResult), (status = 401), (status = 403),
+        (status = 404, description = "The bundled FAA extract has no data for this airport")
+    )
+)]
+pub async fn repull_faa_surface(
+    State(state): State<AppState>,
+    _permission: RequirePermission<FlowSurfaceDataUpdate>,
+    Extension(current_user): Extension<Option<CurrentUser>>,
+    Extension(current_api_key): Extension<Option<CurrentApiKey>>,
+    Path(icao): Path<String>,
+) -> Result<Json<FaaRepullResult>, ApiError> {
+    let principal = Principal::require(current_user.as_ref(), current_api_key.as_ref())?;
+    let pool = state.db.as_ref().ok_or(ApiError::ServiceUnavailable)?;
+    let icao = normalize_icao(&icao).ok_or(ApiError::BadRequest)?;
+    require_edit(&state, &principal, &icao).await?;
+
+    let summary = faa_surface_seed_repo::seed_for_icao(pool, &icao).await?;
+    Ok(Json(FaaRepullResult {
+        taxiways_inserted: summary.taxiways_inserted,
+        ramps_inserted: summary.ramps_inserted,
+        osm_taxiways_retired: summary.osm_taxiways_retired,
+        osm_ramps_retired: summary.osm_ramps_retired,
+    }))
 }
 
 #[cfg(test)]

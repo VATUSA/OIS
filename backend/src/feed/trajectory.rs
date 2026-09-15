@@ -359,6 +359,14 @@ impl VerticalProfile {
         self.interp(d_nm, |s| s.1)
     }
 
+    /// Predicted ground speed (kt) at a distance-to-destination `d` — the phase-appropriate TAS
+    /// with wind applied, floored at [`GS_FLOOR_KT`] exactly like [`Self::time_between`]'s
+    /// internal integration, so a displayed speed never reads below what the paired ETA in the
+    /// same row was actually timed against.
+    pub fn ground_speed_at(&self, d_nm: f64) -> f64 {
+        effective_gs(self.interp(d_nm, |s| s.2), self.headwind).max(GS_FLOOR_KT)
+    }
+
     /// Seconds to fly from distance-to-destination `from_d` forward to `to_d` (`to_d < from_d`),
     /// integrating the phase-appropriate groundspeed in small steps.
     pub fn time_between(&self, from_d: f64, to_d: f64) -> f64 {
@@ -695,6 +703,42 @@ mod tests {
         let still = VerticalProfile::build(35000.0, 400.0, 0.0, 35000.0, 460.0, &b77w(), None);
         let hw = VerticalProfile::build(35000.0, 400.0, 0.0, 35000.0, 460.0, &b77w(), Some(90.0));
         assert!(hw.time_between(400.0, 0.0) > still.time_between(400.0, 0.0));
+    }
+
+    #[test]
+    fn ground_speed_at_reflects_headwind_and_matches_alt_at_s_own_phase() {
+        // Same cruise-altitude comparison as `headwind_slows_the_vertical_model_too`, but on the
+        // per-point speed accessor the #225 per-fix debug table uses directly.
+        let still = VerticalProfile::build(35000.0, 400.0, 0.0, 35000.0, 460.0, &b77w(), None);
+        let hw = VerticalProfile::build(35000.0, 400.0, 0.0, 35000.0, 460.0, &b77w(), Some(90.0));
+        assert!(hw.ground_speed_at(200.0) < still.ground_speed_at(200.0));
+
+        // Near the field on a descent, ground speed should be well below the cruise TAS.
+        let descending = VerticalProfile::build(35000.0, 300.0, 0.0, 35000.0, 480.0, &b77w(), None);
+        assert!(
+            descending.ground_speed_at(5.0) < 480.0,
+            "expected a slower speed close to the field, got {}",
+            descending.ground_speed_at(5.0)
+        );
+    }
+
+    /// Regression (#225 rework): `ground_speed_at` must apply the same [`GS_FLOOR_KT`] floor
+    /// `time_between`'s internal integration already does, or the debug table's KT column can read
+    /// below the speed its own row's ETA was actually timed against — a strong headwind on the
+    /// slow near-field approach TAS is exactly the case `effective_gs`'s own `tas * 0.4` clamp can
+    /// push under the floor.
+    #[test]
+    fn ground_speed_at_never_reads_below_the_floor_time_between_uses() {
+        // A slow GA aircraft's low descent IAS, plus a headwind, pushes `effective_gs`'s own
+        // `tas * 0.4` clamp (≈36kt here) below GS_FLOOR_KT — exactly the case `time_between`'s
+        // internal integration floors but `ground_speed_at` didn't.
+        let slow_with_headwind =
+            VerticalProfile::build(6000.0, 30.0, 0.0, 6000.0, 120.0, &c172(), Some(60.0));
+        assert!(
+            slow_with_headwind.ground_speed_at(1.0) >= GS_FLOOR_KT,
+            "got {}",
+            slow_with_headwind.ground_speed_at(1.0)
+        );
     }
 
     #[test]

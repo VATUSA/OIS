@@ -117,6 +117,186 @@ pub async fn validate_subset(
     Ok(())
 }
 
+#[cfg(test)]
+mod validate_subset_tests {
+    use sqlx::PgPool;
+
+    use super::validate_subset;
+    use crate::errors::ApiError;
+    use crate::scope_test_support::{grant, seed_user};
+
+    const PERM: &str = "flow.surface_data.update";
+
+    fn req(perm: &str, artcc: Option<&str>) -> Vec<(String, Option<String>)> {
+        vec![(perm.to_string(), artcc.map(str::to_string))]
+    }
+
+    async fn deny(pool: &PgPool, user_id: &str, perm: &str) {
+        sqlx::query(
+            "insert into access.user_permissions (user_id, permission_name, granted) \
+             values ($1, $2, false)",
+        )
+        .bind(user_id)
+        .bind(perm)
+        .execute(pool)
+        .await
+        .unwrap();
+    }
+
+    async fn assign_role(pool: &PgPool, user_id: &str, role: &str) {
+        sqlx::query("insert into access.user_roles (user_id, role_name) values ($1, $2)")
+            .bind(user_id)
+            .bind(role)
+            .execute(pool)
+            .await
+            .unwrap();
+    }
+
+    #[sqlx::test]
+    async fn forbidden_domain_is_rejected_even_when_the_owner_holds_it(pool: PgPool) {
+        let user = seed_user(&pool).await;
+        grant(&pool, &user, "api_keys.key.create", None).await;
+        let r = validate_subset(&pool, &user, &req("api_keys.key.create", None)).await;
+        assert!(matches!(r, Err(ApiError::BadRequest)));
+    }
+
+    #[sqlx::test]
+    async fn a_permission_the_owner_does_not_hold_is_forbidden(pool: PgPool) {
+        let user = seed_user(&pool).await;
+        let r = validate_subset(&pool, &user, &req(PERM, None)).await;
+        assert!(matches!(r, Err(ApiError::Forbidden)));
+    }
+
+    #[sqlx::test]
+    async fn a_role_grant_removed_by_an_explicit_deny_is_forbidden(pool: PgPool) {
+        let user = seed_user(&pool).await;
+        // USER grants ace.requests.create nationally — accepted before the deny (positive control).
+        assign_role(&pool, &user, "USER").await;
+        let perm = req("ace.requests.create", None);
+        assert!(validate_subset(&pool, &user, &perm).await.is_ok());
+
+        deny(&pool, &user, "ace.requests.create").await;
+        let r = validate_subset(&pool, &user, &perm).await;
+        assert!(matches!(r, Err(ApiError::Forbidden)));
+    }
+
+    #[sqlx::test]
+    async fn an_artcc_scoped_grant_only_allows_that_artcc(pool: PgPool) {
+        let user = seed_user(&pool).await;
+        grant(&pool, &user, PERM, Some("ZDC")).await;
+        assert!(matches!(
+            validate_subset(&pool, &user, &req(PERM, None)).await,
+            Err(ApiError::Forbidden)
+        ));
+        assert!(
+            validate_subset(&pool, &user, &req(PERM, Some("ZDC")))
+                .await
+                .is_ok()
+        );
+        assert!(matches!(
+            validate_subset(&pool, &user, &req(PERM, Some("ZNY"))).await,
+            Err(ApiError::Forbidden)
+        ));
+    }
+
+    #[sqlx::test]
+    async fn an_in_bounds_request_is_accepted(pool: PgPool) {
+        let user = seed_user(&pool).await;
+        grant(&pool, &user, PERM, None).await;
+        assign_role(&pool, &user, "USER").await;
+        let requested = vec![
+            (PERM.to_string(), Some("ZNY".to_string())),
+            ("ace.requests.create".to_string(), None),
+        ];
+        assert!(validate_subset(&pool, &user, &requested).await.is_ok());
+    }
+
+    /// Every entry is checked, not just the first: a request is typically many (perm, ARTCC)
+    /// pairs, and an escalating entry after valid ones must still reject the whole request.
+    #[sqlx::test]
+    async fn an_escalating_entry_after_valid_ones_is_forbidden(pool: PgPool) {
+        let user = seed_user(&pool).await;
+        grant(&pool, &user, PERM, Some("ZDC")).await;
+        assign_role(&pool, &user, "USER").await;
+
+        let unheld = vec![
+            (PERM.to_string(), Some("ZDC".to_string())),
+            ("ace.requests.manage".to_string(), None),
+        ];
+        assert!(matches!(
+            validate_subset(&pool, &user, &unheld).await,
+            Err(ApiError::Forbidden)
+        ));
+
+        let wider_scope = vec![
+            ("ace.requests.create".to_string(), None),
+            (PERM.to_string(), Some("ZDC".to_string())),
+            (PERM.to_string(), None),
+        ];
+        assert!(matches!(
+            validate_subset(&pool, &user, &wider_scope).await,
+            Err(ApiError::Forbidden)
+        ));
+    }
+
+    /// A role held at one ARTCC grants its permissions at that ARTCC only — never nationally.
+    #[sqlx::test]
+    async fn an_artcc_scoped_role_only_allows_that_artcc(pool: PgPool) {
+        // The seeded ACE role grants ace.requests.decide (USER doesn't).
+        const ROLE_PERM: &str = "ace.requests.decide";
+        let user = seed_user(&pool).await;
+        sqlx::query(
+            "insert into access.user_roles (user_id, role_name, artcc_id) values ($1, 'ACE', 'ZDC')",
+        )
+        .bind(&user)
+        .execute(&pool)
+        .await
+        .unwrap();
+
+        assert!(
+            validate_subset(&pool, &user, &req(ROLE_PERM, Some("ZDC")))
+                .await
+                .is_ok()
+        );
+        assert!(matches!(
+            validate_subset(&pool, &user, &req(ROLE_PERM, None)).await,
+            Err(ApiError::Forbidden)
+        ));
+        assert!(matches!(
+            validate_subset(&pool, &user, &req(ROLE_PERM, Some("ZNY"))).await,
+            Err(ApiError::Forbidden)
+        ));
+    }
+
+    /// Isolates the owner-holds check: the ZDC grant still gives a ZDC scope (`permission_scope`
+    /// doesn't read denies), so only the effective-permission name check rejects it.
+    #[sqlx::test]
+    async fn a_denied_permission_is_forbidden_even_where_its_scope_would_allow(pool: PgPool) {
+        let user = seed_user(&pool).await;
+        grant(&pool, &user, PERM, Some("ZDC")).await;
+        deny(&pool, &user, PERM).await;
+        assert!(matches!(
+            validate_subset(&pool, &user, &req(PERM, Some("ZDC"))).await,
+            Err(ApiError::Forbidden)
+        ));
+    }
+
+    #[sqlx::test]
+    async fn a_server_admin_is_national_but_still_cannot_delegate_key_management(pool: PgPool) {
+        let user = seed_user(&pool).await;
+        assign_role(&pool, &user, "SERVER_ADMIN").await;
+        assert!(
+            validate_subset(&pool, &user, &req(PERM, None))
+                .await
+                .is_ok()
+        );
+        assert!(matches!(
+            validate_subset(&pool, &user, &req("api_keys.key.create", None)).await,
+            Err(ApiError::BadRequest)
+        ));
+    }
+}
+
 // --- CRUD ---
 
 #[derive(sqlx::FromRow)]

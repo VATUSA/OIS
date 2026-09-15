@@ -356,6 +356,22 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/v1/airports/{icao}/surface/repull-faa": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        post: operations["repull_faa_surface"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/v1/airports/{icao}/taxiways": {
         parameters: {
             query?: never;
@@ -2959,6 +2975,11 @@ export interface components {
             arr: string;
             callsign: string;
             dep: string;
+            /**
+             * @description Per-fix predictions from the shared trajectory/ETA model (debug mode; #225). Always
+             *     populated — the client only renders this when the user's `debug.enabled` setting is on.
+             */
+            fixes: components["schemas"]["FixPrediction"][];
             /** Format: int64 */
             groundspeed: number;
             /** @description FAA NASR cycle date backing the resolution (e.g. `2026-07-09`). */
@@ -3771,6 +3792,16 @@ export interface components {
         EventThreadTemplateBody: {
             body: string;
         };
+        /**
+         * @description The result of re-pulling one airport's `source='faa'` surface geometry from the bundled FAA
+         *     extract (#232) — a permissioned, on-demand equivalent of #231's nationwide startup seed.
+         */
+        FaaRepullResult: {
+            osm_ramps_retired: number;
+            osm_taxiways_retired: number;
+            ramps_inserted: number;
+            taxiways_inserted: number;
+        };
         /** @description A VATUSA facility (ARTCC). `artcc_id` scope values reference `id`. */
         FacilityBody: {
             active: boolean;
@@ -3963,6 +3994,7 @@ export interface components {
             headwind?: number | null;
             /** @description The resolved aircraft performance profile: "type:C172", "wake:H", or "default". */
             profile: string;
+            taxi_estimate?: null | components["schemas"]["TaxiEstimateDebug"];
             /**
              * @description Filed-route tokens that didn't resolve to a nav fix/navaid/airway/procedure — a likely
              *     source of ETA/track error.
@@ -3983,6 +4015,31 @@ export interface components {
             prefiles: number;
             /** @description The feed's own `update_timestamp` from VATSIM. */
             source_timestamp?: string | null;
+        };
+        /**
+         * @description One fix's predicted crossing time/altitude/speed/heading, from the same trajectory model that
+         *     backs every other ETA in OIS (metering, the arrival ladder, runway ETE).
+         */
+        FixPrediction: {
+            /** Format: int64 */
+            altitude_ft: number;
+            /**
+             * Format: int64
+             * @description Cumulative along-route distance, nm — from the aircraft's current position (airborne), or
+             *     from the departure airport (ground/prefile).
+             */
+            distance_nm: number;
+            /** Format: date-time */
+            eta: string;
+            /** Format: int64 */
+            groundspeed_kt: number;
+            /** Format: int64 */
+            heading_deg: number;
+            /** Format: double */
+            lat: number;
+            /** Format: double */
+            lon: number;
+            name: string;
         };
         /**
          * @description Route-fix tokens that don't resolve to a known nav fix/navaid/airway/procedure — likely typos in
@@ -5095,6 +5152,31 @@ export interface components {
              * @description When the roll began, for a live client-side timer; null while watching.
              */
             rolling_since?: string | null;
+        };
+        /**
+         * @description How a departure's pushback+taxi allowance was derived (#164 sub-issue F): the matched
+         *     gate/runway (if any) and each metric's fallback-ladder tier + sample count.
+         */
+        TaxiEstimateDebug: {
+            /** @description The matched gate/parking spot id, if the aircraft's position matched one. */
+            gate?: string | null;
+            /** Format: int64 */
+            pushback_samples: number;
+            /** Format: int64 */
+            pushback_sec: number;
+            /**
+             * @description Which fallback-ladder tier produced `pushback_sec`: "gate+type+runway", "airport+runway",
+             *     "airport", or "default".
+             */
+            pushback_tier: string;
+            /** @description The matched departure runway, if the aircraft was rolling. */
+            runway?: string | null;
+            /** Format: int64 */
+            taxi_samples: number;
+            /** Format: int64 */
+            taxi_sec: number;
+            /** @description Same tier labels as `pushback_tier`, for the taxi-out metric. */
+            taxi_tier: string;
         };
         /**
          * @description One derived per-(gate, aircraft, runway) estimate (#164 sub-issue D), computed live from the
@@ -6503,6 +6585,46 @@ export interface operations {
                 };
             };
             401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+        };
+    };
+    repull_faa_surface: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                icao: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["FaaRepullResult"];
+                };
+            };
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description The bundled FAA extract has no data for this airport */
+            404: {
                 headers: {
                     [name: string]: unknown;
                 };
