@@ -10,8 +10,8 @@ name = "ois-backend"
 path = "src/main.rs"
 
 [[bin]]
-name = "osm-surface-importer"
-path = "src/bin/osm_surface_importer.rs"
+name = "faa-surface-importer"
+path = "src/bin/faa_surface_importer.rs"
 
 [dependencies]
 ois-core.workspace = true
