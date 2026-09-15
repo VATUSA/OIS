@@ -12,7 +12,7 @@ use crate::{
         access, ace, aircraft_profiles, airport_configs, airport_surface, api_keys, atc, audit,
         auth, dashboards, docs, events, facilities, facility_documents, facility_map, feed, flow,
         gdp, health, integration, jobs as jobs_handler, preferences, public, runway,
-        service_accounts, stats, tmu, users, webhooks,
+        service_accounts, stats, taxi_insights, tmu, users, webhooks,
     },
     openapi::ApiDoc,
     realtime,
@@ -361,6 +361,14 @@ pub fn build_router(state: AppState) -> Router {
         .route(
             "/api/v1/stats/hist/ground-stops",
             get(stats::hist_ground_stops),
+        )
+        .route(
+            "/api/v1/stats/taxi/observations",
+            get(taxi_insights::list_taxi_observations),
+        )
+        .route(
+            "/api/v1/stats/taxi/estimates",
+            get(taxi_insights::list_taxi_estimates),
         )
         // Flow constrained areas (FCAs) + live map traffic
         .route(

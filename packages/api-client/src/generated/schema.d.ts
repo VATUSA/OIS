@@ -2311,6 +2311,38 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/v1/stats/taxi/estimates": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get: operations["list_taxi_estimates"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/stats/taxi/observations": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get: operations["list_taxi_observations"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/v1/tmu/cfr": {
         parameters: {
             query?: never;
@@ -4988,6 +5020,36 @@ export interface components {
              */
             rolling_since?: string | null;
         };
+        /**
+         * @description One derived per-(gate, aircraft, runway) estimate (#164 sub-issue D), computed live from the
+         *     currently filtered sample set — not a stored row.
+         */
+        TaxiEstimateEntry: {
+            aircraft?: string | null;
+            airport: string;
+            gate_id?: string | null;
+            /** Format: int64 */
+            pushback_sample_count: number;
+            /** Format: double */
+            pushback_sec: number;
+            pushback_tier: string;
+            runway?: string | null;
+            /** Format: int64 */
+            taxi_sample_count: number;
+            /** Format: double */
+            taxi_sec: number;
+            taxi_tier: string;
+        };
+        /** @description A page of derived estimates. */
+        TaxiEstimatePage: {
+            items: components["schemas"]["TaxiEstimateEntry"][];
+            /** Format: int64 */
+            page: number;
+            /** Format: int64 */
+            page_size: number;
+            /** Format: int64 */
+            total: number;
+        };
         /** @description The Taxi Monitor view for one field: stats plus the in-progress departures. */
         TaxiField: {
             active: components["schemas"]["TaxiActive"][];
@@ -4999,6 +5061,36 @@ export interface components {
             sample_count: number;
             trend: string;
             volume: number;
+        };
+        /** @description One raw pushback+taxi observation (#164 sub-issue C). */
+        TaxiObservationEntry: {
+            aircraft?: string | null;
+            airport: string;
+            gate_id?: string | null;
+            /** Format: int64 */
+            id: number;
+            /**
+             * @description True when this row falls outside `taxi_estimate`'s own sanity-clamp bounds — computed at
+             *     query time, never persisted.
+             */
+            is_outlier: boolean;
+            /** Format: date-time */
+            observed_at: string;
+            /** Format: int32 */
+            pushback_sec?: number | null;
+            runway?: string | null;
+            /** Format: int32 */
+            taxi_sec: number;
+        };
+        /** @description A page of raw observations. */
+        TaxiObservationPage: {
+            items: components["schemas"]["TaxiObservationEntry"][];
+            /** Format: int64 */
+            page: number;
+            /** Format: int64 */
+            page_size: number;
+            /** Format: int64 */
+            total: number;
         };
         /**
          * @description Outcome of generating Tier-1 support requests for an FNO: the neighbouring ARTCCs a request was
@@ -11535,6 +11627,102 @@ export interface operations {
                 };
                 content: {
                     "application/json": components["schemas"]["StorageForecastBody"];
+                };
+            };
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+        };
+    };
+    list_taxi_estimates: {
+        parameters: {
+            query: {
+                /** @description Airport ICAO (required — estimates are computed per-airport) */
+                airport: string;
+                /** @description Filter to one gate/parking spot */
+                gate_id?: string;
+                /** @description Filter to one aircraft type */
+                aircraft?: string;
+                /** @description Filter to one departure runway */
+                runway?: string;
+                /** @description Only include samples observed at/after (RFC 3339) */
+                from?: string;
+                /** @description Only include samples observed at/before (RFC 3339) */
+                to?: string;
+                /** @description Include out-of-bounds samples in the estimate's input (default true) */
+                include_outliers?: boolean;
+                /** @description Only combos where pushback or taxi resolved at this ladder tier */
+                fallback_tier?: string;
+                /** @description 1-based page (default 1) */
+                page?: number;
+                /** @description Page size (default 50, max 100) */
+                page_size?: number;
+            };
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["TaxiEstimatePage"];
+                };
+            };
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+        };
+    };
+    list_taxi_observations: {
+        parameters: {
+            query?: {
+                /** @description Filter to one airport ICAO */
+                airport?: string;
+                /** @description Filter to one gate/parking spot */
+                gate_id?: string;
+                /** @description Filter to one aircraft type */
+                aircraft?: string;
+                /** @description Filter to one departure runway */
+                runway?: string;
+                /** @description Only observed at/after (RFC 3339) */
+                from?: string;
+                /** @description Only observed at/before (RFC 3339) */
+                to?: string;
+                /** @description Include rows outside taxi_estimate's sanity bounds (default true) */
+                include_outliers?: boolean;
+                /** @description 1-based page (default 1) */
+                page?: number;
+                /** @description Page size (default 50, max 100) */
+                page_size?: number;
+            };
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["TaxiObservationPage"];
                 };
             };
             401: {
