@@ -9,6 +9,10 @@ rust-version.workspace = true
 name = "ois-backend"
 path = "src/main.rs"
 
+[[bin]]
+name = "osm-surface-importer"
+path = "src/bin/osm_surface_importer.rs"
+
 [dependencies]
 ois-core.workspace = true
 
