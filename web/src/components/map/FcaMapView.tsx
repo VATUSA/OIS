@@ -25,6 +25,7 @@ import {
   type UpsertFca,
 } from "@/lib/fca";
 import {useCreateRoute, useDeleteRoute, useRoutes, useUpdateRoute, type MapRoute, type UpsertRoute} from "@/lib/route";
+import {MAX_PROJECTION_SEC, usePredictedTraffic} from "@/lib/prediction";
 import {useSetting} from "@/lib/settings";
 import {FlightSearch} from "@/components/flight-search";
 import {FcaDetail} from "@/pages/fca/detail";
@@ -384,6 +385,19 @@ export function FcaMapView({
   const atc = useAtc(showAtc);
 
   const debug = useSetting("debug.enabled", false).value;
+  const predictionScrubberSetting = useSetting("debug.predictionScrubber", false).value;
+  const predictionScrubberEnabled = debug && predictionScrubberSetting;
+  const [offsetSec, setOffsetSec] = useState(0);
+  // Debounce the fetched offset so a fast drag doesn't fire a fresh backend projection (real
+  // per-aircraft route resolution, run under spawn_blocking) on every slider tick — the slider
+  // itself still tracks `offsetSec` immediately for a responsive readout.
+  const [committedOffsetSec, setCommittedOffsetSec] = useState(0);
+  useEffect(() => {
+    const id = window.setTimeout(() => setCommittedOffsetSec(offsetSec), 150);
+    return () => window.clearTimeout(id);
+  }, [offsetSec]);
+  const scrubberActive = predictionScrubberEnabled && committedOffsetSec > 0;
+  const predictedTraffic = usePredictedTraffic(committedOffsetSec);
   const fcaTraffic = useFcaTraffic(draft ? null : selectedId, debug);
   const counts = useFcaCounts();
   const aircraftRoute = useAircraftRoute(routeCallsign);
@@ -604,15 +618,19 @@ export function FcaMapView({
     }
     return set;
   }, [overview, matchedGroups, selectedFca, fcaTraffic.data]);
+  // #226: with the prediction scrubber dragged forward, swap the map's traffic source for the
+  // projected positions — everything downstream (overview filtering, matched-callsign exclusion,
+  // the NormAircraft mapping) is unchanged, since projected traffic is the exact same shape.
+  const trafficSource = scrubberActive ? (predictedTraffic.data ?? traffic.data) : traffic.data;
   const aircraft = useMemo<NormAircraft[]>(() => {
     // In overview mode only FCA-crossing traffic is shown (drawn as the tinted/numbered matched
     // groups); the rest of the network is noise here — except the flight the user deep-linked to
     // (`?flight=`) or clicked, which is always drawn so it's visible even without a crossing.
     const base = overviewActive
       ? routeCallsign
-        ? (traffic.data ?? []).filter((a) => a.callsign.toUpperCase() === routeCallsign)
+        ? (trafficSource ?? []).filter((a) => a.callsign.toUpperCase() === routeCallsign)
         : []
-      : (traffic.data ?? []);
+      : (trafficSource ?? []);
     return base
       .filter((a) => !matchedCallsigns.has(a.callsign))
       .map((a) => ({
@@ -631,7 +649,7 @@ export function FcaMapView({
         flightRules: a.flight_rules,
         filedAlt: a.filed_alt,
       }));
-  }, [overviewActive, routeCallsign, traffic.data, matchedCallsigns]);
+  }, [overviewActive, routeCallsign, trafficSource, matchedCallsigns]);
 
   const mapFcas = useMemo<MapFca[]>(
     () =>
@@ -1025,6 +1043,34 @@ export function FcaMapView({
             variant="overlay"
           />
         </div>
+
+        {predictionScrubberEnabled && (
+          <div className="absolute inset-x-0 bottom-3 z-[500] flex justify-center px-3">
+            <div className="flex w-full max-w-xl items-center gap-3 rounded-lg border bg-background/95 px-3 py-2 text-xs shadow-lg backdrop-blur">
+              <span className="shrink-0 font-medium text-muted-foreground">
+                {offsetSec === 0 ? "Live" : `T+${Math.round(offsetSec / 60)}m`}
+              </span>
+              <input
+                type="range"
+                min={0}
+                max={MAX_PROJECTION_SEC}
+                step={30}
+                value={offsetSec}
+                onChange={(e) => setOffsetSec(Number(e.target.value))}
+                className="flex-1"
+                aria-label="Prediction scrubber — minutes ahead"
+              />
+              <button
+                type="button"
+                onClick={() => setOffsetSec(0)}
+                disabled={offsetSec === 0}
+                className="shrink-0 rounded-md border px-2 py-1 font-medium transition-colors hover:bg-muted disabled:opacity-50"
+              >
+                Reset
+              </button>
+            </div>
+          </div>
+        )}
 
         {navStale && (
           <div className="pointer-events-none absolute inset-x-0 top-3 z-[500] flex justify-center">
