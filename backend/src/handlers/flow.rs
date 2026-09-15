@@ -1012,11 +1012,10 @@ pub async fn projected_traffic(
     if !(0..=MAX_PROJECTION_SEC).contains(&q.offset_sec) {
         return Err(ApiError::BadRequest);
     }
-    let snapshot = state.feed.read().await.snapshot.clone();
+    let (snapshot, airports) = feed_view(&state).await;
     let Some(snap) = snapshot else {
         return Ok(Json(Vec::new()));
     };
-    let airports = state.feed.read().await.airports.clone();
     let nav = state.nav.load_full();
     let profiles = state.aircraft_profiles.load_full();
     let winds = state.winds.load_full();
