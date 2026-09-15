@@ -754,6 +754,16 @@ pub struct AirportSurfaceBody {
     pub taxiways: Vec<AirportTaxiwayBody>,
 }
 
+/// The result of re-pulling one airport's `source='faa'` surface geometry from the bundled FAA
+/// extract (#232) — a permissioned, on-demand equivalent of #231's nationwide startup seed.
+#[derive(Debug, Serialize, ToSchema)]
+pub struct FaaRepullResult {
+    pub taxiways_inserted: usize,
+    pub ramps_inserted: usize,
+    pub osm_taxiways_retired: usize,
+    pub osm_ramps_retired: usize,
+}
+
 /// A configurable aircraft performance profile (climb / cruise / descent schedules) used by the
 /// trajectory / ETA model. Keyed by `kind` (`type` / `wake` / `default`) + `key` (ICAO type, wake
 /// token, or empty). See migration 0059 and `feed::trajectory`.
