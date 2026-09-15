@@ -4,20 +4,15 @@
  * `web/src/components/map/lib/order-storage.ts`'s pattern.
  */
 
-export type Tab =
-  | "programs"
-  | "restrictions"
-  | "ground-stops"
-  | "gdp"
-  | "rate-calculator";
-
-export const TAB_IDS: readonly Tab[] = [
+export const TAB_IDS = [
   "programs",
   "restrictions",
   "ground-stops",
   "gdp",
   "rate-calculator",
-];
+] as const;
+
+export type Tab = (typeof TAB_IDS)[number];
 
 const LAST_TAB_KEY = "ois.tmu.lastTab";
 
@@ -34,6 +29,20 @@ export function resolveTmuTab(
   const visible = tabs.some((t) => t.id === requestedTab);
   const active = visible ? requestedTab : tabs[0]?.id;
   return { active, needsUrlSync: requestedTab != null && !visible };
+}
+
+/**
+ * Whether a `resolveTmuTab` result represents a tab the user actually landed on by choice — a
+ * bare `/ops/tmu`, or a validly requested tab — as opposed to an involuntary permission-fallback
+ * redirect (`needsUrlSync`). Only the former should overwrite the saved "last viewed" tab; saving
+ * on a fallback would clobber the user's real preference with whatever tab they got bounced to
+ * (#247 rework — `saveLastTmuTab` used to fire on every `active` change, fallback included).
+ */
+export function shouldSaveLastTmuTab(resolved: {
+  active: Tab | undefined;
+  needsUrlSync: boolean;
+}): resolved is { active: Tab; needsUrlSync: false } {
+  return resolved.active != null && !resolved.needsUrlSync;
 }
 
 /** The last tab the user actively viewed, or undefined if unset/unavailable (private mode etc). */

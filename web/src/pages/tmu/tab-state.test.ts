@@ -1,6 +1,6 @@
 import {describe, expect, it} from "vitest";
 
-import {resolveTmuTab} from "./tab-state";
+import {resolveTmuTab, shouldSaveLastTmuTab} from "./tab-state";
 
 const allTabs = [
   { id: "programs" as const },
@@ -31,10 +31,30 @@ describe("resolveTmuTab", () => {
     });
   });
 
-  it("has no active tab and no URL sync when the user can see nothing", () => {
+  it("has no active tab when the user can see nothing, but still flags the stale URL for a rewrite", () => {
     expect(resolveTmuTab([], "programs")).toEqual({
       active: undefined,
       needsUrlSync: true,
     });
+  });
+});
+
+describe("shouldSaveLastTmuTab", () => {
+  it("saves a bare-URL default (no fallback involved)", () => {
+    expect(shouldSaveLastTmuTab({ active: "programs", needsUrlSync: false })).toBe(true);
+  });
+
+  it("saves a validly requested tab", () => {
+    expect(shouldSaveLastTmuTab({ active: "restrictions", needsUrlSync: false })).toBe(true);
+  });
+
+  /** Regression (#247 rework): an involuntary permission-fallback must never overwrite the
+   * user's real "last viewed" preference with whatever tab they got bounced to. */
+  it("does not save an involuntary permission-fallback tab", () => {
+    expect(shouldSaveLastTmuTab({ active: "programs", needsUrlSync: true })).toBe(false);
+  });
+
+  it("does not save when there's no active tab at all", () => {
+    expect(shouldSaveLastTmuTab({ active: undefined, needsUrlSync: true })).toBe(false);
   });
 });

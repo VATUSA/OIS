@@ -8,7 +8,7 @@ import {GroundStopsTab} from "@/pages/tmu/ground-stops";
 import {ProgramsTab} from "@/pages/tmu/programs";
 import {RateCalculatorTab} from "@/pages/tmu/rate-calc";
 import {RestrictionsTab} from "@/pages/tmu/restrictions";
-import {resolveTmuTab, saveLastTmuTab, type Tab} from "@/pages/tmu/tab-state";
+import {resolveTmuTab, saveLastTmuTab, shouldSaveLastTmuTab, type Tab} from "@/pages/tmu/tab-state";
 
 export function TmuPage() {
   const { data: me } = useMe();
@@ -27,21 +27,12 @@ export function TmuPage() {
 
   const { tab: requestedTab } = useSearch({ strict: false }) as { tab?: Tab };
   const navigate = useNavigate();
-  const { active, needsUrlSync } = resolveTmuTab(tabs, requestedTab);
+  const resolved = resolveTmuTab(tabs, requestedTab);
+  const { active, needsUrlSync } = resolved;
 
   useEffect(() => {
-    if (active) saveLastTmuTab(active);
-  }, [active]);
-
-  useEffect(() => {
-    if (!needsUrlSync || !active) return;
-    void navigate({
-      to: "/ops/tmu",
-      search: (prev) => ({ ...prev, tab: active }),
-      replace: true,
-      resetScroll: false,
-    });
-  }, [needsUrlSync, active, navigate]);
+    if (shouldSaveLastTmuTab(resolved)) saveLastTmuTab(resolved.active);
+  }, [active, needsUrlSync]);
 
   function selectTab(id: Tab) {
     void navigate({
@@ -51,6 +42,12 @@ export function TmuPage() {
       resetScroll: false,
     });
   }
+
+  useEffect(() => {
+    // Rewrite the URL to match the resolved fallback tab (#247) — reuses selectTab's own
+    // navigate() call instead of a second, hand-duplicated one.
+    if (needsUrlSync && active) selectTab(active);
+  }, [needsUrlSync, active]);
 
   if (tabs.length === 0) {
     return (
