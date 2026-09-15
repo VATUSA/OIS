@@ -147,6 +147,78 @@ describe("preset highlighting (#264)", () => {
     expect(presetApplied(preset("ace_team"), g, base(g), "", off)).toBe(true);
   });
 
+  it("re-merging a facility already listed doesn't duplicate it (#275)", () => {
+    const g = ADMIN_GRANTABLE;
+    const sel: PermSelection = new Map([["tmu.programs.update", { national: false, artccs: ["ZDC"] }]]);
+    const next = togglePresetSelection(preset("facility_ec"), g, base(g), "ZDC", sel);
+    expect(next.get("tmu.programs.update")).toEqual({ national: false, artccs: ["ZDC"] });
+  });
+
+  it("removing a national preset keeps what another applied national preset grants (#275)", () => {
+    const g = ADMIN_GRANTABLE;
+    const dcc = togglePresetSelection(preset("dcc_staff"), g, base(g), "", new Map());
+    const both = togglePresetSelection(preset("ntmo"), g, base(g), "", dcc);
+    expect(presetApplied(preset("ntmo"), g, base(g), "", both)).toBe(true);
+    const off = togglePresetSelection(preset("ntmo"), g, base(g), "", both);
+    expect(presetApplied(preset("dcc_staff"), g, base(g), "", off)).toBe(true);
+  });
+
+  it("removing a national preset stacked on a facility preset hands the facility its ARTCC back (#275)", () => {
+    const g = ADMIN_GRANTABLE;
+    const ec = preset("facility_ec");
+    const ntmo = preset("ntmo");
+    const ecFirst = togglePresetSelection(ntmo, g, base(g), "ZDC", ecAtZdc(g));
+    const ntmoFirst = togglePresetSelection(ec, g, base(g), "ZDC", togglePresetSelection(ntmo, g, base(g), "", new Map()));
+    for (const on of [ecFirst, ntmoFirst]) {
+      const off = togglePresetSelection(ntmo, g, base(g), "ZDC", on);
+      for (const p of TRAFFIC) expect(off.get(p)).toEqual({ national: false, artccs: ["ZDC"] });
+      expect(off.get("ace.requests.create")).toEqual({ national: true, artccs: [] });
+      expect(presetApplied(ec, g, base(g), "ZDC", off)).toBe(true);
+    }
+  });
+
+  it("removing a national preset keeps a facility preset applied at an ARTCC other than the dropdown's (#275)", () => {
+    const g = ADMIN_GRANTABLE;
+    const zny = togglePresetSelection(preset("facility_ec"), g, base(g), "ZNY", new Map());
+    const on = togglePresetSelection(preset("ace_team"), g, base(g), "ZDC", zny);
+    const off = togglePresetSelection(preset("ace_team"), g, base(g), "ZDC", on);
+    expect(off.get("ace.requests.manage")).toEqual({ national: false, artccs: ["ZNY"] });
+    expect(presetApplied(preset("facility_ec"), g, base(g), "ZNY", off)).toBe(true);
+  });
+
+  it("a facility preset stacked on national grants reads as applied and removes only its ARTCC grants (#275)", () => {
+    const g = ADMIN_GRANTABLE;
+    const ec = preset("facility_ec");
+    const ntmo = togglePresetSelection(preset("ntmo"), g, base(g), "", new Map());
+    expect(presetApplied(ec, g, base(g), "ZDC", ntmo)).toBe(false); // nothing of its own at ZDC yet
+    const on = togglePresetSelection(ec, g, base(g), "ZDC", ntmo);
+    expect(presetApplied(ec, g, base(g), "ZDC", on)).toBe(true);
+    const off = togglePresetSelection(ec, g, base(g), "ZDC", on);
+    expect(off).toEqual(ntmo);
+  });
+
+  it("removing a facility preset leaves a hand-picked national grant national (#275)", () => {
+    const g = ADMIN_GRANTABLE;
+    const ec = preset("facility_ec");
+    const sel: PermSelection = new Map([["tmu.programs.update", { national: true, artccs: [] }]]);
+    const on = togglePresetSelection(ec, g, base(g), "ZDC", sel);
+    expect(presetApplied(ec, g, base(g), "ZDC", on)).toBe(true);
+    const off = togglePresetSelection(ec, g, base(g), "ZDC", on);
+    expect(off).toEqual(sel);
+  });
+
+  it("removing a preset also removes presets wholly inside it, which can't be told apart (#275)", () => {
+    const admin = ADMIN_GRANTABLE;
+    const all = togglePresetSelection(preset("vatusa_admin"), admin, base(admin), "", new Map());
+    expect([...togglePresetSelection(preset("vatusa_admin"), admin, base(admin), "", all).keys()]).toEqual([]);
+    // EC and AEC grant identical sets at ZDC.
+    expect([...togglePresetSelection(preset("facility_ec"), admin, base(admin), "ZDC", ecAtZdc(admin)).keys()]).toEqual([]);
+    // For a TMU-only creator, NTMO, DCC Staff and VATUSA Admin grant identical sets.
+    const tmu = TMU_ONLY_GRANTABLE;
+    const on = togglePresetSelection(preset("ntmo"), tmu, base(tmu), "", new Map());
+    expect([...togglePresetSelection(preset("ntmo"), tmu, base(tmu), "", on).keys()]).toEqual([]);
+  });
+
   it("a national preset narrowed to one ARTCC no longer reads as applied", () => {
     const g = ADMIN_GRANTABLE;
     const sel = togglePresetSelection(preset("ntmo"), g, base(g), "", new Map());
