@@ -35,5 +35,3 @@ Use the switch to park an FCA you'll want again — a nightly arrival push, an e
 ## Releasing metered departures
 
 For FCA-metered flights still on the ground, you issue [CFR releases](/tmu/releases) — either from the FCA map itself or, for a whole desk's worth of departures at once, from the [IDST console](/tmu/idst).
-
-> This page will grow with step-by-step walkthroughs. The essentials above match the current builder.

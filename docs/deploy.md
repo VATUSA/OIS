@@ -66,6 +66,19 @@ DB. It fails the command (non-zero exit) only once that budget is spent without 
 200" check would miss that. A failing `just deploy` means the new containers
 are already running but unhealthy; docker doesn't automatically revert.
 
+## The Discord bot (optional)
+
+The bot is a separate compose service, opt-in via a profile:
+
+```bash
+docker compose --profile discord up -d
+```
+
+It builds from `deploy/discord.Dockerfile` the same way backend/web/docs do, has no database
+access, and reaches the backend over the compose network (`OIS_API_BASE=http://backend:3000`).
+`.env`'s discord section documents `DISCORD_BOT_TOKEN`, `OIS_API_TOKEN` (a service-account token,
+not a user key), and `OIS_POLL_SECS`. Leaving the profile off (the default) runs OIS without it.
+
 ## Rolling back
 
 Set `.env`'s `IMAGE_TAG` back to the previous known-good value (a prior `vX.Y.Z`, or the previous

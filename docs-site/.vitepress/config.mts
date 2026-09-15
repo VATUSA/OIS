@@ -42,6 +42,13 @@ export default defineConfig({
         ],
       },
       {
+        text: "Your dashboard",
+        items: [
+          { text: "The home page", link: "/dashboard/home" },
+          { text: "Custom boards", link: "/dashboard/boards" },
+        ],
+      },
+      {
         text: "Using the map",
         items: [
           { text: "The flow map", link: "/map/overview" },
@@ -57,9 +64,20 @@ export default defineConfig({
           { text: "Flow Constrained Areas", link: "/tmu/fcas" },
           { text: "Ground Delay Programs", link: "/tmu/gdp" },
           { text: "Runway Balancer", link: "/tmu/runway-balancer" },
+          { text: "Arrival demand chart (AADC)", link: "/tmu/aadc" },
           { text: "Release times (CFR)", link: "/tmu/releases" },
           { text: "Departure scheduling (IDST)", link: "/tmu/idst" },
           { text: "Restrictions & programs", link: "/tmu/restrictions" },
+        ],
+      },
+      {
+        text: "Event planning",
+        items: [
+          { text: "Planning an event", link: "/planning/events" },
+          { text: "Airport rates & configs", link: "/planning/airport-configs" },
+          { text: "Facility documents", link: "/planning/facility-documents" },
+          { text: "Airport surface data", link: "/planning/airport-surface" },
+          { text: "Aircraft performance profiles", link: "/planning/aircraft-profiles" },
         ],
       },
       {
@@ -68,6 +86,8 @@ export default defineConfig({
           { text: "Statistics & replay", link: "/historical/overview" },
           { text: "Replay", link: "/historical/replay" },
           { text: "Data & retention", link: "/historical/retention" },
+          { text: "Taxi & pushback insights", link: "/historical/taxi-insights" },
+          { text: "Delays", link: "/historical/delays" },
         ],
       },
       {
