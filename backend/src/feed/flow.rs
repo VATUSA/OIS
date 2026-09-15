@@ -711,7 +711,7 @@ fn minutes(m: f64) -> Duration {
 }
 
 /// Filed cruise TAS (knots); defaults to 420 for missing/implausible values.
-fn parse_tas(raw: &str) -> f64 {
+pub(crate) fn parse_tas(raw: &str) -> f64 {
     let n: f64 = raw.trim().parse().unwrap_or(0.0);
     if (60.0..=1200.0).contains(&n) {
         n

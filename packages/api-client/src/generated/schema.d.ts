@@ -1608,6 +1608,22 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/v1/flow/traffic/projected": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get: operations["projected_traffic"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/v1/flow/validate-fixes": {
         parameters: {
             query?: never;
@@ -10021,6 +10037,40 @@ export interface operations {
                 content: {
                     "application/json": components["schemas"]["TrafficAircraft"][];
                 };
+            };
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+        };
+    };
+    projected_traffic: {
+        parameters: {
+            query: {
+                /** @description Seconds ahead to project (0-5400) */
+                offset_sec: number;
+            };
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["TrafficAircraft"][];
+                };
+            };
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
             };
             401: {
                 headers: {

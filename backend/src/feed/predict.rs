@@ -82,6 +82,44 @@ pub fn eta_along_route(
     now + Duration::seconds(sec as i64)
 }
 
+/// Inverse of [`eta_along_route`] (#226's forward prediction scrubber): the along-route distance
+/// ahead of the aircraft's **current** position reached after `elapsed_sec` of flight, using the
+/// same vertical-profile + winds model. Ground aircraft first burn `ground_allowance_sec` of
+/// `elapsed_sec` on the ground (floored at zero) before the profile inversion begins, mirroring how
+/// `eta_along_route` adds that allowance on top of the profile's own time going forward. Returns
+/// `0.0` once the aircraft would already have reached the destination.
+#[allow(clippy::too_many_arguments)]
+pub fn project_along_route(
+    airborne: bool,
+    route_len_nm: f64,
+    cur_alt_ft: f64,
+    cruise_alt_ft: f64,
+    cruise_tas: f64,
+    profile: &AircraftProfile,
+    headwind: Option<f64>,
+    ground_allowance_sec: f64,
+    elapsed_sec: f64,
+) -> f64 {
+    let start_alt = if airborne { cur_alt_ft } else { 0.0 };
+    let vp = trajectory::VerticalProfile::build(
+        start_alt,
+        route_len_nm,
+        0.0,
+        cruise_alt_ft,
+        cruise_tas,
+        profile,
+        headwind,
+    );
+    let flying_sec = if airborne {
+        elapsed_sec
+    } else {
+        (elapsed_sec - ground_allowance_sec).max(0.0)
+    };
+    let target_d = vp.distance_after(route_len_nm, flying_sec);
+    // `target_d` is nm-to-destination; the caller wants nm-ahead-of-current-position.
+    (route_len_nm - target_d).max(0.0)
+}
+
 /// ETA to the destination field + the along-route distance still to fly.
 pub struct ArrivalPrediction {
     pub eta: DateTime<Utc>,
@@ -404,5 +442,80 @@ mod tests {
         // behavior plus the ladder's default pushback figure.
         assert!(eta > now());
         assert!(eta >= flat);
+    }
+
+    // ---- project_along_route: eta_along_route's inverse, for #226's forward prediction scrubber ----
+
+    #[test]
+    fn project_along_route_at_zero_elapsed_stays_put() {
+        let profile = AircraftProfile::default();
+        let ahead = project_along_route(
+            true,
+            300.0,
+            35_000.0,
+            35_000.0,
+            440.0,
+            &profile,
+            None,
+            GROUND_TAXI_SEC,
+            0.0,
+        );
+        assert_eq!(ahead, 0.0);
+    }
+
+    #[test]
+    fn project_along_route_agrees_with_eta_along_route() {
+        // If eta_along_route says a target `along_nm` ahead is reached at ETA `now + T`, then
+        // project_along_route(elapsed = T) must project the aircraft to that same `along_nm`.
+        let profile = AircraftProfile::default();
+        let route_len = 300.0;
+        let along_nm = 120.0; // 120nm ahead of current position (180nm-to-destination target)
+        let eta = eta_along_route(
+            true,
+            route_len,
+            along_nm,
+            35_000.0,
+            35_000.0,
+            440.0,
+            &profile,
+            None,
+            0.0,
+            now(),
+        );
+        let elapsed = (eta - now()).num_seconds() as f64;
+        let projected = project_along_route(
+            true, route_len, 35_000.0, 35_000.0, 440.0, &profile, None, 0.0, elapsed,
+        );
+        assert!(
+            (projected - along_nm).abs() < 1.0,
+            "projected {projected}nm ahead, expected ~{along_nm}nm"
+        );
+    }
+
+    #[test]
+    fn project_along_route_clamps_at_the_destination() {
+        let profile = AircraftProfile::default();
+        let ahead = project_along_route(
+            true, 300.0, 35_000.0, 35_000.0, 440.0, &profile, None, 0.0, 999_999.0,
+        );
+        assert_eq!(ahead, 300.0, "never projects past the destination itself");
+    }
+
+    #[test]
+    fn project_along_route_burns_ground_allowance_before_moving() {
+        let profile = AircraftProfile::default();
+        // Elapsed time under the ground allowance: still on the ground, no distance covered.
+        let ahead = project_along_route(
+            false,
+            300.0,
+            0.0,
+            35_000.0,
+            440.0,
+            &profile,
+            None,
+            GROUND_TAXI_SEC,
+            60.0,
+        );
+        assert_eq!(ahead, 0.0);
     }
 }

@@ -76,6 +76,14 @@ export const SETTINGS: SettingDef[] = [
       "Show extra developer detail across OIS — for FCA traffic, the aircraft performance profile used for each ETA, the speeds and wind applied, and any filed-route tokens that failed to resolve.",
     control: { kind: "toggle", default: false },
   },
+  {
+    key: "debug.predictionScrubber",
+    group: "Advanced",
+    label: "Prediction scrubber (map)",
+    description:
+      "Requires Debug mode. Adds a forward-in-time scrubber to the flow map — scrubbing ahead projects every aircraft along its resolved route using the same ETA model as metering, instead of showing live positions.",
+    control: { kind: "toggle", default: false },
+  },
 ];
 
 /** The default value for a setting key (used before the server value loads, or when signed out). */
