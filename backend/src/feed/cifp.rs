@@ -119,7 +119,12 @@ fn parse_coord_table(
     let mut out = HashMap::new();
     for line in text.lines() {
         let b = line.as_bytes();
-        if b.len() < 51 || b[4] != section || b[5] != subsection || !is_primary(b[21]) {
+        if b.len() < 51
+            || !line.is_ascii()
+            || b[4] != section
+            || b[5] != subsection
+            || !is_primary(b[21])
+        {
             continue;
         }
         let id = line[id_range.clone()].trim();
@@ -147,7 +152,7 @@ fn parse_airways(text: &str) -> HashMap<String, CifpAirway> {
     let mut by_route: HashMap<String, Vec<(u32, String, u8, u8)>> = HashMap::new();
     for line in text.lines() {
         let b = line.as_bytes();
-        if b.len() < 51 || b[4] != b'E' || b[5] != b'R' || !is_primary(b[38]) {
+        if b.len() < 51 || !line.is_ascii() || b[4] != b'E' || b[5] != b'R' || !is_primary(b[38]) {
             continue;
         }
         let route_id = line[13..18].trim().to_ascii_uppercase();
