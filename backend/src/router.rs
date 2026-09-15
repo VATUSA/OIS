@@ -307,6 +307,10 @@ pub fn build_router(state: AppState) -> Router {
             put(airport_surface::update_airport_taxiway)
                 .delete(airport_surface::delete_airport_taxiway),
         )
+        .route(
+            "/api/v1/airports/{icao}/surface/repull-faa",
+            post(airport_surface::repull_faa_surface),
+        )
         // Aircraft performance profiles for the trajectory / ETA model (national reference data)
         .route(
             "/api/v1/flow/aircraft-profiles",

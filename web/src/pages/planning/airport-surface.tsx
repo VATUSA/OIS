@@ -1,10 +1,10 @@
 import {useState} from "react";
-import {ArrowLeft, MapPinned} from "lucide-react";
+import {ArrowLeft, MapPinned, RefreshCw} from "lucide-react";
 import {Button, Card, CardContent, Input} from "@ois/ui";
 
 import {useMe} from "@/lib/auth";
 import {hasPermission} from "@/lib/permissions";
-import {useAirportSurface} from "@/lib/airport-surface";
+import {useAirportSurface, useRepullFaaSurface} from "@/lib/airport-surface";
 import {useRunway} from "@/lib/runway";
 import {SurfaceMap} from "@/components/map/surface/SurfaceMap";
 
@@ -29,6 +29,16 @@ function RunwayList({ icao }: { icao: string }) {
         </div>
       </CardContent>
     </Card>
+  );
+}
+
+function RepullFaaButton({ icao }: { icao: string }) {
+  const repull = useRepullFaaSurface(icao);
+  return (
+    <Button variant="outline" size="sm" disabled={repull.isPending} onClick={() => repull.mutate()}>
+      <RefreshCw className={`size-4 ${repull.isPending ? "animate-spin" : ""}`} />
+      Re-pull from FAA
+    </Button>
   );
 }
 
@@ -58,6 +68,11 @@ function AirportSurfaceEditor({ icao }: { icao: string }) {
 
   return (
     <div className="flex flex-col gap-4">
+      {editable && (
+        <div className="flex justify-end">
+          <RepullFaaButton icao={icao} />
+        </div>
+      )}
       <SurfaceMap icao={icao} surface={surface.data} editable={editable} />
       <RunwayList icao={icao} />
     </div>

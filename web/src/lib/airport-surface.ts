@@ -11,6 +11,7 @@ export type AirportTaxiway = components["schemas"]["AirportTaxiwayBody"];
 export type UpsertAirportGate = components["schemas"]["UpsertAirportGateRequest"];
 export type UpsertAirportRampArea = components["schemas"]["UpsertAirportRampAreaRequest"];
 export type UpsertAirportTaxiway = components["schemas"]["UpsertAirportTaxiwayRequest"];
+export type FaaRepullResult = components["schemas"]["FaaRepullResult"];
 
 const key = (icao: string) => ["airport-surface", icao] as const;
 
@@ -173,5 +174,28 @@ export function useDeleteAirportTaxiway(icao: string) {
     },
     onSuccess: () => queryClient.invalidateQueries({ queryKey: key(icao) }),
     onError: () => toast.error("Couldn’t delete the taxiway"),
+  });
+}
+
+/** Re-pull this airport's FAA-sourced ramp/taxiway rows from the current bundled extract (#232) —
+ * an on-demand equivalent of #231's nationwide startup seed, scoped to one airport. */
+export function useRepullFaaSurface(icao: string) {
+  const queryClient = useQueryClient();
+  const toast = useToast();
+  return useMutation({
+    mutationFn: async () => {
+      const { data, error } = await ois.POST("/api/v1/airports/{icao}/surface/repull-faa", {
+        params: { path: { icao } },
+      });
+      if (error || !data) throw new Error("repull failed");
+      return data;
+    },
+    onSuccess: (data: FaaRepullResult) => {
+      queryClient.invalidateQueries({ queryKey: key(icao) });
+      toast.success("Re-pulled FAA surface data", {
+        description: `${data.taxiways_inserted} taxiways, ${data.ramps_inserted} ramps`,
+      });
+    },
+    onError: () => toast.error("Couldn’t re-pull FAA surface data"),
   });
 }

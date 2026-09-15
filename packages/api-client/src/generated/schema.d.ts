@@ -356,6 +356,22 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/v1/airports/{icao}/surface/repull-faa": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        post: operations["repull_faa_surface"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/v1/airports/{icao}/taxiways": {
         parameters: {
             query?: never;
@@ -3771,6 +3787,16 @@ export interface components {
         EventThreadTemplateBody: {
             body: string;
         };
+        /**
+         * @description The result of re-pulling one airport's `source='faa'` surface geometry from the bundled FAA
+         *     extract (#232) — a permissioned, on-demand equivalent of #231's nationwide startup seed.
+         */
+        FaaRepullResult: {
+            osm_ramps_retired: number;
+            osm_taxiways_retired: number;
+            ramps_inserted: number;
+            taxiways_inserted: number;
+        };
         /** @description A VATUSA facility (ARTCC). `artcc_id` scope values reference `id`. */
         FacilityBody: {
             active: boolean;
@@ -6503,6 +6529,39 @@ export interface operations {
                 };
             };
             401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+        };
+    };
+    repull_faa_surface: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                icao: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["FaaRepullResult"];
+                };
+            };
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            403: {
                 headers: {
                     [name: string]: unknown;
                 };
