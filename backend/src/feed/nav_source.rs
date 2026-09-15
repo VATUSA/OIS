@@ -107,25 +107,49 @@ pub async fn fetch_latest() -> Fetched<NavData> {
         }
     };
 
-    // 2b. CIFP replaces @squawk as the airway source when it succeeds (VATUSA/OIS#221):
-    // authoritative FAA data instead of a pinned npm snapshot. @squawk's airways above stay as
-    // the fallback — procedures are untouched and remain @squawk-only.
-    let airways_json = match super::cifp::fetch_airways(&client).await {
-        Ok(cifp_airways) if !cifp_airways.is_empty() => {
-            tracing::info!(count = cifp_airways.len(), "using CIFP airways");
-            let airways: HashMap<String, OutAirway> = cifp_airways
-                .into_iter()
-                .map(|(id, a)| (id, OutAirway { t: a.t, w: a.w }))
-                .collect();
-            serde_json::to_string(&airways)?
-        }
-        Ok(_) => {
-            tracing::warn!("CIFP airways parsed empty; using @squawk airways");
-            squawk_airways_json
+    // 2b. CIFP replaces @squawk as the airway and SID/STAR source when it succeeds
+    // (VATUSA/OIS#221, VATUSA/OIS#253): authoritative FAA data instead of a pinned npm snapshot.
+    // @squawk's airways/procedures above stay as the fallback for either half independently. One
+    // CIFP fetch feeds both parsers so the ~9MB file downloads once per refresh, not twice.
+    let (airways_json, procedures_json) = match super::cifp::fetch(&client).await {
+        Ok((cifp_airways, cifp_procs)) => {
+            let a = if cifp_airways.is_empty() {
+                tracing::warn!("CIFP airways parsed empty; using @squawk airways");
+                squawk_airways_json
+            } else {
+                tracing::info!(count = cifp_airways.len(), "using CIFP airways");
+                let airways: HashMap<String, OutAirway> = cifp_airways
+                    .into_iter()
+                    .map(|(id, a)| (id, OutAirway { t: a.t, w: a.w }))
+                    .collect();
+                serde_json::to_string(&airways)?
+            };
+            let p = if cifp_procs.is_empty() {
+                tracing::warn!("CIFP SID/STAR parsed empty; using @squawk procedures");
+                procedures_json
+            } else {
+                tracing::info!(count = cifp_procs.len(), "using CIFP SID/STAR");
+                let procs: HashMap<String, OutProc> = cifp_procs
+                    .into_iter()
+                    .map(|(id, p)| {
+                        (
+                            id,
+                            OutProc {
+                                ptype: p.ptype,
+                                apt: p.apt,
+                                common: p.common,
+                                transitions: p.transitions,
+                            },
+                        )
+                    })
+                    .collect();
+                serde_json::to_string(&procs)?
+            };
+            (a, p)
         }
         Err(e) => {
-            tracing::warn!(error = %e, "CIFP airway fetch failed; using @squawk airways");
-            squawk_airways_json
+            tracing::warn!(error = %e, "CIFP fetch failed; using @squawk airways/procedures");
+            (squawk_airways_json, procedures_json)
         }
     };
 
@@ -683,7 +707,7 @@ struct OutAirway {
     w: Vec<(String, f64, f64)>,
 }
 
-#[derive(Serialize, Clone)]
+#[derive(Serialize, Deserialize, Clone)]
 struct OutProc {
     #[serde(rename = "type")]
     ptype: String,
@@ -854,6 +878,66 @@ mod tests {
             cifp_j10.w.last().map(|p| &p.0),
             squawk_j10.w.last().map(|p| &p.0),
             "CIFP and @squawk J10 should end at the same fix"
+        );
+    }
+
+    /// Live parity check for VATUSA/OIS#253: CIFP's `CAMRN5` (a real, well-populated JFK STAR)
+    /// must resolve at least as many points as @squawk's, and use the same start/end fix —
+    /// mirroring #221's J10 airway parity check, now for SID/STAR before it's trusted as the
+    /// live primary source. Ignored by default (hits both FAA CIFP and unpkg):
+    /// `cargo test --lib feed::nav_source -- --ignored --nocapture`.
+    #[tokio::test]
+    #[ignore = "network: downloads CIFP + @squawk"]
+    async fn cifp_star_has_parity_with_squawk_for_camrn5() {
+        let client = reqwest::Client::builder()
+            .user_agent("ois-nav-test/1.0 (+https://vatusa.net)")
+            .timeout(std::time::Duration::from_secs(90))
+            .build()
+            .expect("client");
+
+        let cifp = super::super::cifp::fetch_procedures(&client)
+            .await
+            .expect("CIFP fetch");
+        let cifp_camrn5 = cifp.get("CAMRN5").expect("CIFP should have CAMRN5");
+        let cifp_points = cifp_camrn5.common.len()
+            + cifp_camrn5
+                .transitions
+                .values()
+                .map(Vec::len)
+                .max()
+                .unwrap_or(0);
+
+        let mut fixes = HashMap::new();
+        let (_, procedures_json, _) = fetch_squawk_enroute(&client, &mut fixes)
+            .await
+            .expect("@squawk fetch");
+        let squawk_procs: HashMap<String, OutProc> =
+            serde_json::from_str(&procedures_json).expect("@squawk procedures JSON");
+        let squawk_camrn5 = squawk_procs
+            .get("CAMRN5")
+            .expect("@squawk should have CAMRN5");
+        let squawk_points = squawk_camrn5.common.len()
+            + squawk_camrn5
+                .transitions
+                .values()
+                .map(Vec::len)
+                .max()
+                .unwrap_or(0);
+
+        println!("CAMRN5: cifp={cifp_points} points, squawk={squawk_points} points");
+        assert!(
+            cifp_points >= squawk_points,
+            "CIFP CAMRN5 ({cifp_points} points) should be at least as complete as @squawk's ({squawk_points} points)"
+        );
+        assert_eq!(
+            cifp_camrn5.common.first().map(|p| &p.0),
+            squawk_camrn5.common.first().map(|p| &p.0),
+            "CIFP and @squawk CAMRN5 should start their common route at the same fix"
+        );
+        assert_eq!(
+            cifp_camrn5.common.last().map(|p| &p.0),
+            squawk_camrn5.common.last().map(|p| &p.0),
+            "CIFP and @squawk CAMRN5 should end their common route at the same fix"
         );
     }
 }
