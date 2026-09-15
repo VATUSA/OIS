@@ -388,8 +388,16 @@ export function FcaMapView({
   const predictionScrubberSetting = useSetting("debug.predictionScrubber", false).value;
   const predictionScrubberEnabled = debug && predictionScrubberSetting;
   const [offsetSec, setOffsetSec] = useState(0);
-  const scrubberActive = predictionScrubberEnabled && offsetSec > 0;
-  const predictedTraffic = usePredictedTraffic(offsetSec);
+  // Debounce the fetched offset so a fast drag doesn't fire a fresh backend projection (real
+  // per-aircraft route resolution, run under spawn_blocking) on every slider tick — the slider
+  // itself still tracks `offsetSec` immediately for a responsive readout.
+  const [committedOffsetSec, setCommittedOffsetSec] = useState(0);
+  useEffect(() => {
+    const id = window.setTimeout(() => setCommittedOffsetSec(offsetSec), 150);
+    return () => window.clearTimeout(id);
+  }, [offsetSec]);
+  const scrubberActive = predictionScrubberEnabled && committedOffsetSec > 0;
+  const predictedTraffic = usePredictedTraffic(committedOffsetSec);
   const fcaTraffic = useFcaTraffic(draft ? null : selectedId, debug);
   const counts = useFcaCounts();
   const aircraftRoute = useAircraftRoute(routeCallsign);
