@@ -253,6 +253,9 @@ pub fn collect_arrivals(
                 cruise_ft: cruise,
                 cruise_tas,
             },
+            // Airborne-only caller (`groundspeed < 50` filtered above) — `arrival_eta` only
+            // applies the ground allowance on its ground branch, so any value here is inert.
+            0.0,
             now,
         );
         if (pred.eta - now).num_minutes() > window_min {

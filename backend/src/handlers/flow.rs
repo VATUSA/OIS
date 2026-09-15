@@ -23,15 +23,16 @@ use crate::{
     },
     errors::ApiError,
     feed::{
-        airports::AirportDb, airspace::Boundaries, facilities, fca, nav::NavData, predict,
-        trajectory, vatsim::FlightPlan, vatsim::VatsimData, winds::Winds,
+        airports::AirportDb, airspace::Boundaries, facilities, fca, flow as feed_flow,
+        nav::NavData, predict, runway_db::RunwayDb, taxi_estimate, trajectory, vatsim::FlightPlan,
+        vatsim::VatsimData, winds::Winds,
     },
     jobs,
     models::{
-        AircraftRoute, DataStatus, FcaBody, FcaFlight, FixValidationBody, FlightAdvisory,
-        FlightFcaCrossing, FlightGdp, FlightGroundStop, FlightProgram, IdstFlight, IdstResponse,
-        ReleaseRequest, ReorderRequest, ResolveRouteRequest, ResolvedRoute, RouteBody,
-        RouteWaypoint, TrafficAircraft, UpsertFcaRequest, UpsertRouteRequest,
+        AircraftRoute, AirportGateBody, DataStatus, FcaBody, FcaFlight, FixValidationBody,
+        FlightAdvisory, FlightFcaCrossing, FlightGdp, FlightGroundStop, FlightProgram, IdstFlight,
+        IdstResponse, ReleaseRequest, ReorderRequest, ResolveRouteRequest, ResolvedRoute,
+        RouteBody, RouteWaypoint, TrafficAircraft, UpsertFcaRequest, UpsertRouteRequest,
     },
     repos::{flow as flow_repo, public as public_repo},
     state::AppState,
@@ -1161,6 +1162,9 @@ fn build_candidates(
     winds: &Winds,
     profiles: &trajectory::ProfileTable,
     releases: &ReleaseMap,
+    gates: &HashMap<String, Vec<AirportGateBody>>,
+    runways: &RunwayDb,
+    taxi_samples: &HashMap<String, Vec<taxi_estimate::TaxiSample>>,
     now: DateTime<Utc>,
     debug: bool,
 ) -> (Vec<FcaFlight>, Vec<fca::MeterInput>) {
@@ -1200,6 +1204,22 @@ fn build_candidates(
         let cruise_tas = trajectory::capped_cruise_tas(filed_tas, cruise, profile);
         let headwind = winds.route_headwind(&path, cruise);
         let route_len = predict::path_len_nm(&path);
+        let dep = fp.departure.to_ascii_uppercase();
+        // Airborne pilots never apply the allowance (`eta_along_route`'s `!airborne` gate) — skip
+        // the lookup for them and pass 0.0.
+        let allowance = if airborne {
+            0.0
+        } else {
+            let aircraft = (!fp.aircraft_short.is_empty()).then_some(fp.aircraft_short.as_str());
+            feed_flow::resolve_ground_allowance_sec(
+                gates,
+                runways,
+                taxi_samples,
+                &dep,
+                aircraft,
+                Some((p.latitude, p.longitude, p.heading, p.groundspeed)),
+            )
+        };
         let eta = predict::eta_along_route(
             airborne,
             route_len,
@@ -1209,6 +1229,7 @@ fn build_candidates(
             cruise_tas,
             profile,
             headwind,
+            allowance,
             now,
         );
         let rel = releases.get(&p.callsign);
@@ -1284,6 +1305,18 @@ fn build_candidates(
         let cruise_tas = trajectory::capped_cruise_tas(filed_tas, cruise, profile);
         let headwind = winds.route_headwind(&path, cruise);
         let route_len = predict::path_len_nm(&path);
+        // A prefile has no live position — gate/runway matching is skipped, falling to the
+        // airport/default tier.
+        let dep = fp.departure.to_ascii_uppercase();
+        let aircraft = (!fp.aircraft_short.is_empty()).then_some(fp.aircraft_short.as_str());
+        let allowance = feed_flow::resolve_ground_allowance_sec(
+            gates,
+            runways,
+            taxi_samples,
+            &dep,
+            aircraft,
+            None,
+        );
         let eta = predict::eta_along_route(
             false,
             route_len,
@@ -1293,6 +1326,7 @@ fn build_candidates(
             cruise_tas,
             profile,
             headwind,
+            allowance,
             now,
         );
         let rel = releases.get(&pf.callsign);
@@ -1395,6 +1429,9 @@ async fn metered_flights(
     let winds = state.winds.load_full();
     let aircraft_profiles = state.aircraft_profiles.load_full();
     let airspace = state.airspace.clone();
+    let gates = state.gates.load_full();
+    let runways = state.runways.clone();
+    let taxi_estimate_samples = state.taxi_estimate_samples.load_full();
     tokio::task::spawn_blocking(move || {
         let (flights, metas) = build_candidates(
             &fca,
@@ -1405,6 +1442,9 @@ async fn metered_flights(
             winds.as_ref(),
             aircraft_profiles.as_ref(),
             &releases,
+            gates.as_ref(),
+            runways.as_ref(),
+            taxi_estimate_samples.as_ref(),
             now,
             debug,
         );
@@ -1531,6 +1571,9 @@ pub async fn list_idst(
     let winds = state.winds.load_full();
     let aircraft_profiles = state.aircraft_profiles.load_full();
     let airspace = state.airspace.clone();
+    let gates = state.gates.load_full();
+    let runways = state.runways.clone();
+    let taxi_estimate_samples = state.taxi_estimate_samples.load_full();
 
     let (mut unscheduled, mut released) = tokio::task::spawn_blocking(move || {
         let mut unscheduled: Vec<IdstFlight> = Vec::new();
@@ -1546,6 +1589,9 @@ pub async fn list_idst(
                 winds.as_ref(),
                 aircraft_profiles.as_ref(),
                 releases,
+                gates.as_ref(),
+                runways.as_ref(),
+                taxi_estimate_samples.as_ref(),
                 now,
                 false,
             );
@@ -1649,6 +1695,9 @@ pub async fn mark_release(
             state.winds.load_full().as_ref(),
             state.aircraft_profiles.load_full().as_ref(),
             &releases,
+            state.gates.load_full().as_ref(),
+            state.runways.as_ref(),
+            state.taxi_estimate_samples.load_full().as_ref(),
             now,
             false,
         )
@@ -1737,6 +1786,9 @@ pub async fn clear_release(
             state.winds.load_full().as_ref(),
             state.aircraft_profiles.load_full().as_ref(),
             &releases,
+            state.gates.load_full().as_ref(),
+            state.runways.as_ref(),
+            state.taxi_estimate_samples.load_full().as_ref(),
             now,
             false,
         )
