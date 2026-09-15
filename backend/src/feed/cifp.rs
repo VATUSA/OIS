@@ -14,8 +14,9 @@
 //! but no code or column layout here was copied or ported from it; the layout below comes from
 //! the spec.
 //!
-//! SID/STAR, approaches, and airspace records are out of scope here — see VATUSA/OIS#221's
-//! follow-up issue.
+//! SID/STAR (`PD`/`PE`) records are also parsed here (VATUSA/OIS#253), reusing the same
+//! fix-reference pointer scheme as airway legs. Approaches, holds, MSAs, and airspace remain out
+//! of scope — see VATUSA/OIS#253's own follow-up note.
 
 use std::collections::HashMap;
 
@@ -32,15 +33,22 @@ pub(super) struct CifpAirway {
     pub w: Vec<(String, f64, f64)>,
 }
 
-/// Fetch the current CIFP cycle (walking back like the FAA NASR path) and parse its Enroute
-/// Airway records into airways with resolved coordinates.
-pub(super) async fn fetch_airways(
-    client: &reqwest::Client,
-) -> Fetched<HashMap<String, CifpAirway>> {
+/// One resolved SID/STAR, in the same shape `nav_source`'s `OutProc` serializes to.
+pub(super) struct CifpProc {
+    pub ptype: String,
+    pub apt: Vec<String>,
+    pub common: Vec<(String, f64, f64)>,
+    pub transitions: HashMap<String, Vec<(String, f64, f64)>>,
+}
+
+/// Fetch the current CIFP cycle's raw text (walking back like the FAA NASR path if the newest
+/// isn't posted yet). Shared by the airway and procedure parsers so a refresh downloads the
+/// ~9MB CIFP file once, not once per parser.
+pub(super) async fn fetch_text(client: &reqwest::Client) -> Fetched<String> {
     let mut last_err: Option<Box<dyn std::error::Error + Send + Sync>> = None;
     for date in candidate_cycles() {
         match fetch_cycle(client, date).await {
-            Ok(text) => return Ok(parse_airways(&text)),
+            Ok(text) => return Ok(text),
             Err(e) => {
                 tracing::debug!(cycle = %date, error = %e, "CIFP cycle unavailable");
                 last_err = Some(e);
@@ -48,6 +56,34 @@ pub(super) async fn fetch_airways(
         }
     }
     Err(last_err.unwrap_or_else(|| "no CIFP cycle candidates".into()))
+}
+
+/// Fetch the current CIFP cycle and parse its Enroute Airway records into airways with resolved
+/// coordinates. Only exercised by the live parity test in `nav_source` — the real fetch path
+/// goes through the combined [`fetch`], which downloads the CIFP file once for both parsers.
+#[cfg(test)]
+pub(super) async fn fetch_airways(
+    client: &reqwest::Client,
+) -> Fetched<HashMap<String, CifpAirway>> {
+    Ok(parse_airways(&fetch_text(client).await?))
+}
+
+/// Fetch the current CIFP cycle and parse its SID/STAR records into procedures with resolved
+/// coordinates. Only exercised by the live parity test in `nav_source` — see [`fetch_airways`].
+#[cfg(test)]
+pub(super) async fn fetch_procedures(
+    client: &reqwest::Client,
+) -> Fetched<HashMap<String, CifpProc>> {
+    Ok(parse_procedures(&fetch_text(client).await?))
+}
+
+/// Fetch the current CIFP cycle once and parse both airways and procedures from it — the
+/// combined form `nav_source::fetch_latest` uses, to avoid downloading the CIFP file twice.
+pub(super) async fn fetch(
+    client: &reqwest::Client,
+) -> Fetched<(HashMap<String, CifpAirway>, HashMap<String, CifpProc>)> {
+    let text = fetch_text(client).await?;
+    Ok((parse_airways(&text), parse_procedures(&text)))
 }
 
 async fn fetch_cycle(client: &reqwest::Client, date: NaiveDate) -> Fetched<String> {
@@ -222,6 +258,170 @@ fn parse_airways(text: &str) -> HashMap<String, CifpAirway> {
             _ => {
                 out.insert(route_id, candidate);
             }
+        }
+    }
+    out
+}
+
+/// Builds an `identifier -> coordinates` table for one of the four fix-bearing record types a
+/// procedure leg can point at, **without** area-scoping (unlike [`parse_coord_table`], which
+/// airways rely on for the `V17`-style same-designator-different-region case, VATUSA/OIS#221).
+/// Deliberately different here: verified against a live CIFP cycle, ARINC enroute/terminal
+/// waypoint and VHF navaid identifiers are nationally unique (0 collisions across 32,457 enroute
+/// waypoints plus 37,628 terminal waypoints, 0/820 VHF navaids); only 2-letter NDB idents
+/// legitimately repeat (29/350), an acceptable residual resolved first-match same as an airway
+/// table's tie-break. Area-scoping a procedure's own fix lookups would actually be *wrong*: a
+/// SID/STAR's Area Code doesn't reliably match the area its referenced fixes are catalogued under
+/// near a FIR boundary (verified: Detroit-area STARs filed under Canada's `SCAN` area reference
+/// waypoints only catalogued under `SUSA`).
+///
+/// `subsection_pos` is 5 for the enroute `D`/`DB`/`EA` record layout (subsection right after the
+/// area code) and 12 for the airport-scoped `P`-section `PC` terminal-waypoint layout (subsection
+/// after the airport identifier) — the only structural difference between the two record
+/// families; every other offset (identifier, primary flag, coordinates) lines up.
+fn parse_ident_coord_table(
+    text: &str,
+    section: u8,
+    subsection: u8,
+    subsection_pos: usize,
+    id_range: std::ops::Range<usize>,
+) -> HashMap<String, CoordList> {
+    let mut out: HashMap<String, CoordList> = HashMap::new();
+    for line in text.lines() {
+        let b = line.as_bytes();
+        if b.len() < 51
+            || !line.is_ascii()
+            || b[4] != section
+            || b[subsection_pos] != subsection
+            || !is_primary(b[21])
+        {
+            continue;
+        }
+        let id = line[id_range.clone()].trim();
+        if id.is_empty() {
+            continue;
+        }
+        let (Some(lat), Some(lon)) = (decode_lat(&line[32..41]), decode_lon(&line[41..51])) else {
+            continue;
+        };
+        if !lat.is_finite() || !lon.is_finite() || !in_coverage(lat, lon) {
+            continue;
+        }
+        let pt = [round5(lat), round5(lon)];
+        let entry = out.entry(id.to_ascii_uppercase()).or_default();
+        if !entry.contains(&pt) {
+            entry.push(pt);
+        }
+    }
+    out
+}
+
+/// Parses every SID (`PD`) / STAR (`PE`) primary leg record, resolving each leg's fix against
+/// the VHF Navaid, NDB Navaid, Enroute Waypoint, or Terminal Waypoint table — chosen by the leg's
+/// own fix section/subsection pointer, the same scheme [`parse_airways`] uses for `ER` legs. A
+/// leg whose Path Terminator carries no fix (`CA`/`VA` course/heading-to-altitude, and similarly
+/// fix-less types) simply contributes no point rather than breaking the chain — this one rule is
+/// what handles all of the common leg types (IF/TF/CF/DF always carry a fix and resolve exactly
+/// like an airway leg; CA/VA never do) without a leg-type whitelist.
+///
+/// The same procedure/transition legitimately repeats verbatim across several airports in one
+/// metroplex-shared chart (VATUSA/OIS#253 — e.g. Detroit's `FOREY3` STAR is filed identically at
+/// ten airports). Grouping keeps each airport's occurrence separate until the final fold, which
+/// keeps whichever occurrence resolves the most points per transition — this both handles a
+/// genuine collision safely and transparently deduplicates the verbatim metroplex repeats.
+fn parse_procedures(text: &str) -> HashMap<String, CifpProc> {
+    let navaids = parse_ident_coord_table(text, b'D', b' ', 5, 13..17);
+    let ndbs = parse_ident_coord_table(text, b'D', b'B', 5, 13..17);
+    let waypoints = parse_ident_coord_table(text, b'E', b'A', 5, 13..18);
+    let terminal = parse_ident_coord_table(text, b'P', b'C', 12, 13..18);
+
+    // (subsection, proc id, airport, transition id) -> [(sequence, fix id, fix sec, fix sub)].
+    type LegGroups = HashMap<(u8, String, String, String), Vec<(u32, String, u8, u8)>>;
+    let mut groups: LegGroups = HashMap::new();
+    let mut apts_by_proc: HashMap<String, std::collections::HashSet<String>> = HashMap::new();
+
+    for line in text.lines() {
+        let b = line.as_bytes();
+        if b.len() < 51 || !line.is_ascii() || b[4] != b'P' || !is_primary(b[38]) {
+            continue;
+        }
+        let sub = b[12];
+        if sub != b'D' && sub != b'E' {
+            continue;
+        }
+        let apt = line[6..10].trim().to_ascii_uppercase();
+        let proc_id = line[13..19].trim().to_ascii_uppercase();
+        if apt.is_empty() || proc_id.is_empty() {
+            continue;
+        }
+        let Ok(seq) = line[26..29].trim().parse::<u32>() else {
+            continue;
+        };
+        let mut transition = line[20..25].trim().to_ascii_uppercase();
+        if transition == "ALL" {
+            transition.clear();
+        }
+        let fix_id = line[29..34].trim().to_ascii_uppercase();
+
+        apts_by_proc
+            .entry(proc_id.clone())
+            .or_default()
+            .insert(apt.clone());
+        groups
+            .entry((sub, proc_id, apt, transition))
+            .or_default()
+            .push((seq, fix_id, b[36], b[37]));
+    }
+
+    let mut out: HashMap<String, CifpProc> = HashMap::new();
+    for ((sub, proc_id, _apt, transition), mut legs) in groups {
+        legs.sort_by_key(|l| l.0);
+        let mut w = Vec::with_capacity(legs.len());
+        for (_, fix_id, fix_sec, fix_sub) in &legs {
+            if fix_id.is_empty() {
+                continue;
+            }
+            let table = match (*fix_sec, *fix_sub) {
+                (b'D', b'B') => &ndbs,
+                (b'D', _) => &navaids,
+                (b'E', b'A') => &waypoints,
+                (b'P', b'C') => &terminal,
+                _ => continue,
+            };
+            let Some([lat, lon]) = table.get(fix_id).and_then(|c| c.first()) else {
+                continue;
+            };
+            w.push((fix_id.clone(), *lat, *lon));
+        }
+        if w.is_empty() {
+            continue;
+        }
+
+        let entry = out.entry(proc_id.clone()).or_insert_with(|| CifpProc {
+            ptype: if sub == b'E' { "STAR" } else { "SID" }.to_string(),
+            apt: Vec::new(),
+            common: Vec::new(),
+            transitions: HashMap::new(),
+        });
+        if transition.is_empty() {
+            if w.len() > entry.common.len() {
+                entry.common = w;
+            }
+        } else {
+            match entry.transitions.get(&transition) {
+                Some(existing) if existing.len() >= w.len() => {}
+                _ => {
+                    entry.transitions.insert(transition, w);
+                }
+            }
+        }
+    }
+
+    for (proc_id, apts) in apts_by_proc {
+        if let Some(p) = out.get_mut(&proc_id) {
+            let mut apt: Vec<String> = apts.into_iter().collect();
+            apt.sort();
+            p.apt = apt;
         }
     }
     out
@@ -446,5 +646,215 @@ mod tests {
         b[37] = fix_sub;
         b[38] = b'0'; // primary record
         String::from_utf8(b).unwrap()
+    }
+
+    /// Builds a 132-column Terminal Waypoint (`PC`) record at its real column offsets: area 0-3,
+    /// section 4='P', airport 6-9, subsection 12='C', identifier from 13, primary flag 21
+    /// (always primary here), coordinates 32-41/41-51.
+    fn terminal_record(area: &str, apt: &str, id: &str, lat: &str, lon: &str) -> String {
+        let mut b = vec![b' '; 132];
+        b[0..4].copy_from_slice(area.as_bytes());
+        b[4] = b'P';
+        b[6..6 + apt.len()].copy_from_slice(apt.as_bytes());
+        b[12] = b'C';
+        b[13..13 + id.len()].copy_from_slice(id.as_bytes());
+        b[21] = b'0';
+        b[32..41].copy_from_slice(lat.as_bytes());
+        b[41..51].copy_from_slice(lon.as_bytes());
+        String::from_utf8(b).unwrap()
+    }
+
+    /// Builds a 132-column SID/STAR (`PD`/`PE`) leg record at its real column offsets: area 0-3,
+    /// section 4='P', airport 6-9, subsection 12 (`D`=SID, `E`=STAR), procedure id from 13,
+    /// transition id from 20, sequence 26-28, fix id from 29, fix section/subsection 36-37,
+    /// continuation flag 38 (always primary here). `fix_id` empty models a fix-less leg (`CA`/
+    /// `VA`) — `fix_sec`/`fix_sub` are ignored in that case.
+    #[allow(clippy::too_many_arguments)]
+    fn proc_leg(
+        area: &str,
+        apt: &str,
+        subsection: u8,
+        proc_id: &str,
+        transition: &str,
+        seq: u32,
+        fix_id: &str,
+        fix_sec: u8,
+        fix_sub: u8,
+    ) -> String {
+        let mut b = vec![b' '; 132];
+        b[0..4].copy_from_slice(area.as_bytes());
+        b[4] = b'P';
+        b[6..6 + apt.len()].copy_from_slice(apt.as_bytes());
+        b[12] = subsection;
+        b[13..13 + proc_id.len()].copy_from_slice(proc_id.as_bytes());
+        b[20..20 + transition.len()].copy_from_slice(transition.as_bytes());
+        let seq_str = format!("{seq:03}");
+        b[26..29].copy_from_slice(seq_str.as_bytes());
+        b[29..29 + fix_id.len()].copy_from_slice(fix_id.as_bytes());
+        b[36] = fix_sec;
+        b[37] = fix_sub;
+        b[38] = b'0'; // primary record
+        String::from_utf8(b).unwrap()
+    }
+
+    /// A SID with a single runway transition (`RW01`) whose legs are all fix-bearing (`IF`-style
+    /// initial fix, then `CF`/`TF` resolve identically — only the fix reference matters here, not
+    /// the Path Terminator itself, since a leg's point comes purely from a populated fix id).
+    #[test]
+    fn sid_runway_transition_resolves_fix_bearing_legs() {
+        let revge = terminal_record("SUSA", "KDCA", "REVGE", "N38512048", "W077005674");
+        let beble = terminal_record("SUSA", "KDCA", "BEBLE", "N38561839", "W077073659");
+        let leg1 = proc_leg(
+            "SUSA", "KDCA", b'D', "AMEEE1", "RW01", 10, "REVGE", b'P', b'C',
+        );
+        let leg2 = proc_leg(
+            "SUSA", "KDCA", b'D', "AMEEE1", "RW01", 20, "BEBLE", b'P', b'C',
+        );
+        let text = [revge, beble, leg1, leg2].join("\r\n");
+
+        let procs = parse_procedures(&text);
+        let p = procs.get("AMEEE1").expect("AMEEE1 should resolve");
+        assert_eq!(p.ptype, "SID");
+        assert_eq!(p.apt, vec!["KDCA".to_string()]);
+        assert!(p.common.is_empty());
+        let rw01 = p.transitions.get("RW01").expect("RW01 transition");
+        assert_eq!(
+            rw01.iter().map(|w| w.0.as_str()).collect::<Vec<_>>(),
+            ["REVGE", "BEBLE"]
+        );
+    }
+
+    /// A STAR whose common (`ALL`) route feeds a named enroute transition — the same
+    /// common/transitions split `nav.rs`'s `merge_procedure_legs` expects.
+    #[test]
+    fn star_splits_common_route_from_a_named_transition() {
+        let thhmp = record(|f| {
+            f.section = b'E';
+            f.subsection = b'A';
+            f.id = "THHMP";
+            f.lat = "N38590229";
+            f.lon = "W077093051";
+        });
+        let bulii = terminal_record("SUSA", "KJFK", "BULII", "N38561839", "W077073659");
+        let waves = record(|f| {
+            f.section = b'E';
+            f.subsection = b'A';
+            f.id = "WAVES";
+            f.lat = "N38545581";
+            f.lon = "W077062692";
+        });
+        let common1 = proc_leg(
+            "SUSA", "KJFK", b'E', "CAPSS4", "ALL", 10, "THHMP", b'E', b'A',
+        );
+        let common2 = proc_leg(
+            "SUSA", "KJFK", b'E', "CAPSS4", "ALL", 20, "BULII", b'P', b'C',
+        );
+        let trans1 = proc_leg(
+            "SUSA", "KJFK", b'E', "CAPSS4", "WAVES", 10, "WAVES", b'E', b'A',
+        );
+        let trans2 = proc_leg(
+            "SUSA", "KJFK", b'E', "CAPSS4", "WAVES", 20, "BULII", b'P', b'C',
+        );
+        let text = [thhmp, bulii, waves, common1, common2, trans1, trans2].join("\r\n");
+
+        let procs = parse_procedures(&text);
+        let p = procs.get("CAPSS4").expect("CAPSS4 should resolve");
+        assert_eq!(p.ptype, "STAR");
+        assert_eq!(
+            p.common.iter().map(|w| w.0.as_str()).collect::<Vec<_>>(),
+            ["THHMP", "BULII"]
+        );
+        let waves_t = p.transitions.get("WAVES").expect("WAVES transition");
+        assert_eq!(
+            waves_t.iter().map(|w| w.0.as_str()).collect::<Vec<_>>(),
+            ["WAVES", "BULII"]
+        );
+    }
+
+    /// A fix-less leg (modeling `CA`/`VA` course/heading-to-altitude — no Fix Identifier field)
+    /// mid-chain contributes no point but doesn't break the rest of the transition.
+    #[test]
+    fn fixless_leg_is_skipped_without_breaking_the_chain() {
+        let fimbi = terminal_record("SUSA", "KDCA", "FIMBI", "N38495501", "W077070326");
+        let mcnab = terminal_record("SUSA", "KDCA", "MCNAB", "N38454105", "W077014322");
+        let leg1 = proc_leg("SUSA", "KDCA", b'D', "AMEEE1", "RW19", 10, "", b' ', b' '); // VA, no fix
+        let leg2 = proc_leg(
+            "SUSA", "KDCA", b'D', "AMEEE1", "RW19", 20, "FIMBI", b'P', b'C',
+        );
+        let leg3 = proc_leg(
+            "SUSA", "KDCA", b'D', "AMEEE1", "RW19", 30, "MCNAB", b'P', b'C',
+        );
+        let text = [fimbi, mcnab, leg1, leg2, leg3].join("\r\n");
+
+        let procs = parse_procedures(&text);
+        let rw19 = &procs["AMEEE1"].transitions["RW19"];
+        assert_eq!(
+            rw19.iter().map(|w| w.0.as_str()).collect::<Vec<_>>(),
+            ["FIMBI", "MCNAB"]
+        );
+    }
+
+    /// The same procedure/transition filed identically at two airports (a metroplex-shared
+    /// chart, VATUSA/OIS#253 — e.g. Detroit's `FOREY3` STAR spans ten real airports) folds into
+    /// one clean, non-duplicated leg list, and both airports show up in `apt`.
+    #[test]
+    fn metroplex_duplicate_airports_fold_into_one_transition() {
+        let bobct = record(|f| {
+            f.section = b'E';
+            f.subsection = b'A';
+            f.id = "BOBCT";
+            f.lat = "N40325562";
+            f.lon = "W082004629";
+        });
+        let wwshr = record(|f| {
+            f.section = b'E';
+            f.subsection = b'A';
+            f.id = "WWSHR";
+            f.lat = "N41203409";
+            f.lon = "W082030576";
+        });
+        let karb1 = proc_leg(
+            "SUSA", "KARB", b'E', "FOREY3", "BOBCT", 10, "BOBCT", b'E', b'A',
+        );
+        let karb2 = proc_leg(
+            "SUSA", "KARB", b'E', "FOREY3", "BOBCT", 20, "WWSHR", b'E', b'A',
+        );
+        let kdet1 = proc_leg(
+            "SUSA", "KDET", b'E', "FOREY3", "BOBCT", 10, "BOBCT", b'E', b'A',
+        );
+        let kdet2 = proc_leg(
+            "SUSA", "KDET", b'E', "FOREY3", "BOBCT", 20, "WWSHR", b'E', b'A',
+        );
+        let text = [bobct, wwshr, karb1, karb2, kdet1, kdet2].join("\r\n");
+
+        let procs = parse_procedures(&text);
+        let p = &procs["FOREY3"];
+        assert_eq!(p.apt, vec!["KARB".to_string(), "KDET".to_string()]);
+        let bobct_t = &p.transitions["BOBCT"];
+        assert_eq!(
+            bobct_t.iter().map(|w| w.0.as_str()).collect::<Vec<_>>(),
+            ["BOBCT", "WWSHR"],
+            "must fold to one clean copy, not duplicate the two airports' identical legs"
+        );
+    }
+
+    /// A continuation record (Continuation Record No. at column 39 set to `'2'`) on a procedure
+    /// leg must not be read as an extra point.
+    #[test]
+    fn procedure_continuation_record_is_excluded() {
+        let revge = terminal_record("SUSA", "KDCA", "REVGE", "N38512048", "W077005674");
+        let leg1 = proc_leg(
+            "SUSA", "KDCA", b'D', "AMEEE1", "RW01", 10, "REVGE", b'P', b'C',
+        );
+        let mut cont = leg1.clone().into_bytes();
+        cont[29..29 + 5].copy_from_slice(b"ZZZZZ"); // would-be extra point, unresolvable anyway
+        cont[38] = b'2';
+        let cont = String::from_utf8(cont).unwrap();
+        let text = [revge, leg1, cont].join("\r\n");
+
+        let procs = parse_procedures(&text);
+        let rw01 = &procs["AMEEE1"].transitions["RW01"];
+        assert_eq!(rw01.len(), 1);
+        assert_eq!(rw01[0].0, "REVGE");
     }
 }
