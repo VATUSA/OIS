@@ -1,4 +1,4 @@
-import {useState} from "react";
+import {useNavigate, useSearch} from "@tanstack/react-router";
 
 import {useMe} from "@/lib/auth";
 import {hasPermission} from "@/lib/permissions";
@@ -30,8 +30,18 @@ export function TmuPage() {
     canPrograms && { id: "rate-calculator" as const, label: "Rate calculator" },
   ].filter(Boolean) as { id: Tab; label: string }[];
 
-  const [tab, setTab] = useState<Tab>(tabs[0]?.id ?? "programs");
-  const active = tabs.some((t) => t.id === tab) ? tab : tabs[0]?.id;
+  const { tab: requestedTab } = useSearch({ strict: false }) as { tab?: Tab };
+  const navigate = useNavigate();
+  const active = tabs.some((t) => t.id === requestedTab) ? requestedTab : tabs[0]?.id;
+
+  function selectTab(id: Tab) {
+    void navigate({
+      to: "/ops/tmu",
+      search: (prev) => ({ ...prev, tab: id }),
+      replace: true,
+      resetScroll: false,
+    });
+  }
 
   return (
     <div className="flex flex-col gap-6">
@@ -50,7 +60,7 @@ export function TmuPage() {
             <button
               key={t.id}
               type="button"
-              onClick={() => setTab(t.id)}
+              onClick={() => selectTab(t.id)}
               className={
                 "-mb-px shrink-0 whitespace-nowrap border-b-2 px-4 py-2 text-sm font-medium transition-colors " +
                 (active === t.id

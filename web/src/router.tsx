@@ -156,11 +156,25 @@ const airportRoute = createRoute({
   staticData: { layout: "wide" },
 });
 
+const TMU_TAB_IDS = [
+  "programs",
+  "restrictions",
+  "ground-stops",
+  "gdp",
+  "rate-calculator",
+] as const;
+type TmuTabId = (typeof TMU_TAB_IDS)[number];
+
 const tmuRoute = createRoute({
   getParentRoute: () => opsRoute,
   path: "tmu",
   component: TmuPage,
   staticData: { layout: "wide" },
+  // Which tab is active — permission-gated fallback (if the user can't see this tab) happens in
+  // the component, since that depends on auth state this route-level validator doesn't have.
+  validateSearch: (search: Record<string, unknown>): { tab?: TmuTabId } => ({
+    tab: TMU_TAB_IDS.includes(search.tab as TmuTabId) ? (search.tab as TmuTabId) : undefined,
+  }),
 });
 
 // Dashboards: a library at /ops/my, a board at /ops/my/$boardId, a shared read-only view at
