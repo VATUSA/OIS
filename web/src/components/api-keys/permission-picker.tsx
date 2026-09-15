@@ -70,8 +70,16 @@ export function presetOwnPermissions(
   });
 }
 
-/** Whether a preset is fully applied: it grants something of its own, all of it is selected
- * (a facility preset's scoped to the chosen facility, not nationally), and so is the baseline. */
+/** Whether `s` covers the full scope a creator holds a permission at — what `togglePreset` writes
+ * for a national preset (`defaultScope`): national if held nationally, else every held ARTCC. */
+function coversHeldScope(s: ScopeSel, g: GrantablePermission): boolean {
+  return s.national || (!g.national && g.artccs.every((a) => s.artccs.includes(a)));
+}
+
+/** Whether a preset is fully applied: it grants something of its own, all of it is selected at the
+ * scope the preset writes (a facility preset's at the chosen facility, not nationally; a national
+ * preset's at the creator's full held scope — so a facility preset's ARTCC-scoped grants never make
+ * a national preset read as applied, #264), and so is the baseline. */
 export function presetApplied(
   preset: AccessPreset,
   grantable: GrantablePermission[],
@@ -81,12 +89,65 @@ export function presetApplied(
 ): boolean {
   const own = presetOwnPermissions(preset, grantable, baseNames, facility);
   if (own.length === 0) return false;
+  const byName = new Map(grantable.map((g) => [g.permission, g] as const));
   const ownSelected = own.every((p) => {
     const s = selection.get(p);
     if (!s) return false;
-    return preset.scope !== "facility" || (!s.national && s.artccs.includes(facility));
+    return preset.scope === "facility"
+      ? !s.national && s.artccs.includes(facility)
+      : coversHeldScope(s, byName.get(p)!);
   });
   return ownSelected && baseNames.every((p) => selection.has(p));
+}
+
+/** Whether a preset's chip is enabled: it grants something of its own. A facility preset with no
+ * facility chosen stays enabled here — PresetBar already gates it with "Pick a facility first". */
+export function presetCanApply(
+  preset: AccessPreset,
+  grantable: GrantablePermission[],
+  baseNames: readonly string[],
+  facility: string,
+): boolean {
+  return (
+    (preset.scope === "facility" && !facility) ||
+    presetOwnPermissions(preset, grantable, baseNames, facility).length > 0
+  );
+}
+
+/** The selection after clicking a preset: removes its perms + the baseline when it's applied,
+ * otherwise grants them at the preset's scope. */
+export function togglePresetSelection(
+  preset: AccessPreset,
+  grantable: GrantablePermission[],
+  baseNames: readonly string[],
+  facility: string,
+  selection: PermSelection,
+): PermSelection {
+  const byName = new Map(grantable.map((g) => [g.permission, g] as const));
+  const domain = presetPermissions(
+    preset,
+    grantable.map((g) => g.permission),
+  );
+  const next = new Map(selection);
+  if (presetApplied(preset, grantable, baseNames, facility, selection)) {
+    for (const p of [...domain, ...baseNames]) next.delete(p);
+    return next;
+  }
+  for (const p of domain) {
+    const g = byName.get(p);
+    if (!g) continue;
+    if (preset.scope === "facility") {
+      // Scope to the chosen facility, only where the caller can actually delegate it.
+      if (facility && (g.national || g.artccs.includes(facility))) {
+        next.set(p, { national: false, artccs: [facility] });
+      }
+    } else {
+      next.set(p, defaultScope(g)); // national where held nationally, else all their ARTCCs
+    }
+  }
+  // Baseline is always national (applied after domain so it wins for any overlap — national ⊇ facility).
+  for (const p of baseNames) next.set(p, defaultScope(byName.get(p)!));
+  return next;
 }
 
 /**
@@ -113,44 +174,18 @@ export function PermissionPicker({
     () => new Map(grantable.map((g) => [g.permission, g] as const)),
     [grantable],
   );
-  const grantableNames = useMemo(() => grantable.map((g) => g.permission), [grantable]);
   // The sign-in baseline (BASE_PERMISSIONS) — always national — plus the preset's domain perms at its
   // scope. Keys hold no roles, so this is the only way a preset key gets the defaults a user has.
   const baseNames = useMemo(
     () => BASE_PERMISSIONS.filter((p) => grantableByName.has(p)),
     [grantableByName],
   );
-  const scopeOf = (g: GrantablePermission): ScopeSel =>
-    defaultScope({ national: g.national, artccs: g.artccs });
   const isPresetApplied = (preset: AccessPreset) =>
     presetApplied(preset, grantable, baseNames, presetFacility, selection);
-  // A facility preset with no facility chosen is already gated by PresetBar ("pick a facility").
   const canApplyPreset = (preset: AccessPreset) =>
-    (preset.scope === "facility" && !presetFacility) ||
-    presetOwnPermissions(preset, grantable, baseNames, presetFacility).length > 0;
-  const togglePreset = (preset: AccessPreset) => {
-    const domain = presetPermissions(preset, grantableNames);
-    const next = new Map(selection);
-    if (isPresetApplied(preset)) {
-      for (const p of [...domain, ...baseNames]) next.delete(p);
-    } else {
-      for (const p of domain) {
-        const g = grantableByName.get(p);
-        if (!g) continue;
-        if (preset.scope === "facility") {
-          // Scope to the chosen facility, only where the caller can actually delegate it.
-          if (presetFacility && (g.national || g.artccs.includes(presetFacility))) {
-            next.set(p, { national: false, artccs: [presetFacility] });
-          }
-        } else {
-          next.set(p, scopeOf(g)); // national where held nationally, else all their ARTCCs
-        }
-      }
-      // Baseline is always national (applied after domain so it wins for any overlap — national ⊇ facility).
-      for (const p of baseNames) next.set(p, scopeOf(grantableByName.get(p)!));
-    }
-    onChange(next);
-  };
+    presetCanApply(preset, grantable, baseNames, presetFacility);
+  const togglePreset = (preset: AccessPreset) =>
+    onChange(togglePresetSelection(preset, grantable, baseNames, presetFacility, selection));
 
   const items: ScopeItem[] = useMemo(
     () =>

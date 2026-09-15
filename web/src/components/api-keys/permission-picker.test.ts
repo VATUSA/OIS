@@ -3,7 +3,13 @@ import {describe, expect, it} from "vitest";
 import type {GrantablePermission} from "@/lib/api-keys";
 import {ACCESS_PRESETS, BASE_PERMISSIONS} from "@/lib/presets";
 
-import {type PermSelection, presetApplied, presetOwnPermissions} from "./permission-picker";
+import {
+  type PermSelection,
+  presetApplied,
+  presetCanApply,
+  presetOwnPermissions,
+  togglePresetSelection,
+} from "./permission-picker";
 
 const preset = (id: string) => ACCESS_PRESETS.find((p) => p.id === id)!;
 const national = (permission: string): GrantablePermission => ({ permission, national: true, artccs: [] });
@@ -82,5 +88,64 @@ describe("preset highlighting (#264)", () => {
       { permission: "flow.fca.update", national: false, artccs: ["ZNY"] },
     ];
     expect(presetOwnPermissions(preset("facility_ec"), g, [], "ZDC")).toEqual(["tmu.programs.update"]);
+  });
+
+  // Admin applies Facility EC at ZDC: every operational perm ARTCC-scoped, baseline national.
+  const ecAtZdc = (g: GrantablePermission[]): PermSelection =>
+    togglePresetSelection(preset("facility_ec"), g, base(g), "ZDC", new Map());
+
+  it("a facility preset's ARTCC-scoped grants don't light any national preset", () => {
+    const g = ADMIN_GRANTABLE;
+    const sel = ecAtZdc(g);
+    const lit = ACCESS_PRESETS.filter((p) => presetApplied(p, g, base(g), "ZDC", sel)).map((p) => p.id);
+    // AEC grants the identical set at ZDC, so it genuinely reads as applied too.
+    expect(lit).toEqual(["facility_ec", "facility_aec"]);
+  });
+
+  it("clicking a national preset after a facility preset grants it nationally, not strips it", () => {
+    const g = ADMIN_GRANTABLE;
+    const next = togglePresetSelection(preset("ntmo"), g, base(g), "ZDC", ecAtZdc(g));
+    for (const p of TRAFFIC) expect(next.get(p)).toEqual({ national: true, artccs: [] });
+    expect(next.get("ace.requests.create")).toEqual({ national: true, artccs: [] });
+    expect(presetApplied(preset("ntmo"), g, base(g), "ZDC", next)).toBe(true);
+  });
+
+  it("clicking an applied preset removes its perms and the baseline", () => {
+    const g = ADMIN_GRANTABLE;
+    const on = togglePresetSelection(preset("ntmo"), g, base(g), "", new Map());
+    const off = togglePresetSelection(preset("ntmo"), g, base(g), "", on);
+    expect([...off.keys()]).toEqual([]);
+  });
+
+  it("a national preset narrowed to one ARTCC no longer reads as applied", () => {
+    const g = ADMIN_GRANTABLE;
+    const sel = togglePresetSelection(preset("ntmo"), g, base(g), "", new Map());
+    sel.set("flow.fca.update", { national: false, artccs: ["ZDC"] });
+    expect(presetApplied(preset("ntmo"), g, base(g), "", sel)).toBe(false);
+  });
+
+  it("a national preset for a creator holding only ARTCCs is applied at all of those ARTCCs", () => {
+    const g: GrantablePermission[] = TRAFFIC.map((permission) => ({ permission, national: false, artccs: ["ZDC", "ZNY"] }));
+    const all = togglePresetSelection(preset("ntmo"), g, [], "", new Map());
+    expect(all.get("tmu.programs.update")).toEqual({ national: false, artccs: ["ZDC", "ZNY"] });
+    expect(presetApplied(preset("ntmo"), g, [], "", all)).toBe(true);
+    all.set("tmu.programs.update", { national: false, artccs: ["ZDC"] });
+    expect(presetApplied(preset("ntmo"), g, [], "", all)).toBe(false);
+  });
+
+  it("a preset isn't applied while the baseline is missing", () => {
+    const g = ADMIN_GRANTABLE;
+    const sel = togglePresetSelection(preset("ntmo"), g, base(g), "", new Map());
+    sel.delete("ace.requests.create");
+    expect(presetApplied(preset("ntmo"), g, base(g), "", sel)).toBe(false);
+  });
+
+  it("only presets with something of their own to grant are enabled", () => {
+    const g = TMU_ONLY_GRANTABLE;
+    expect(presetCanApply(preset("ntmo"), g, base(g), "")).toBe(true);
+    expect(presetCanApply(preset("ace_team"), g, base(g), "")).toBe(false);
+    // No facility yet: left enabled here, PresetBar shows "Pick a facility first".
+    expect(presetCanApply(preset("facility_ec"), g, base(g), "")).toBe(true);
+    expect(presetCanApply(preset("facility_ec"), [], [], "ZDC")).toBe(false);
   });
 });
