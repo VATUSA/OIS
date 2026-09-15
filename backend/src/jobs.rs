@@ -73,6 +73,13 @@ const AIRCRAFT_PROFILES_INTERVAL: Duration = Duration::from_secs(5 * 60);
 /// force-refreshes on write, so a slow poll is enough to catch out-of-band changes).
 const AIRPORT_GATES_INTERVAL: Duration = Duration::from_secs(5 * 60);
 
+/// How often to re-seed FAA airport surface geometry (#230/#231). The bundled extract is
+/// compile-time embedded (`include_str!`), so it only changes on a redeploy — this interval isn't
+/// about freshness, just giving the job a nominal cadence like every other registry entry; the
+/// meaningful trigger is `run_interval`'s immediate first tick on every boot, plus the admin
+/// Background Tasks page's (#40) on-demand re-run.
+const FAA_SURFACE_SEED_INTERVAL: Duration = Duration::from_secs(24 * 60 * 60);
+
 /// How often to refresh the airport coordinate database (#216). Fast enough that a transient
 /// startup failure self-heals within minutes instead of requiring a restart; slow enough not to
 /// hammer the upstream (mwgg/Airports on GitHub raw).
@@ -317,6 +324,29 @@ pub fn spawn_airport_gates_refresh(
                     }
                     Err(e) => Err(format!("{e:?}")),
                 }
+            }
+        },
+    ));
+}
+
+/// Idempotently re-seed `flow.airport_ramp_area` / `flow.airport_taxiway` from the bundled FAA
+/// Aerodrome Mapping extract (#230/#231) — `run_interval`'s immediate first tick means this runs
+/// once on every boot, in addition to being visible/triggerable on the admin Background Tasks page.
+/// No `AppState` cache to hot-swap here: unlike gates, nothing in the feed subsystem reads ramp/
+/// taxiway data — the map editor queries Postgres directly per request.
+pub fn spawn_faa_surface_seed(reg: Arc<JobRegistry>, pool: PgPool) {
+    tokio::spawn(run_interval(
+        reg,
+        "faa_surface_seed",
+        "Seed airport ramp/taxiway geometry from the bundled FAA AM extract",
+        FAA_SURFACE_SEED_INTERVAL,
+        move || {
+            let pool = pool.clone();
+            async move {
+                crate::repos::faa_surface_seed::seed(&pool)
+                    .await
+                    .map(|summary| summary.to_string())
+                    .map_err(|e| format!("{e:?}"))
             }
         },
     ));
