@@ -4,6 +4,15 @@
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
     <title>OIS</title>
+    <!-- Set the theme class before first paint so a dark-default app never flashes light.
+         Mirrors ThemeProvider (storageKey "ois-theme", default "dark"). -->
+    <script>
+      try {
+        var t = localStorage.getItem("ois-theme") || "dark";
+        var dark = t === "dark" || (t === "system" && matchMedia("(prefers-color-scheme: dark)").matches);
+        if (dark) document.documentElement.classList.add("dark");
+      } catch (e) { document.documentElement.classList.add("dark"); }
+    </script>
     <link rel="icon" href="/favicon.ico" sizes="any" />
     <link rel="icon" type="image/png" sizes="32x32" href="/favicon-32x32.png" />
     <link rel="icon" type="image/png" sizes="16x16" href="/favicon-16x16.png" />
