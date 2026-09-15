@@ -1,11 +1,12 @@
 //! Seeds `flow.airport_ramp_area` / `flow.airport_taxiway` from the bundled FAA Aerodrome Mapping
 //! extract produced by `bin/faa_surface_importer.rs` (#230), tagging every row `source = 'faa'`.
 //!
-//! **Seed-if-absent (#231):** an airport is seeded only when it has no `faa` rows in either table.
-//! FAA geometry is a starting layer that facilities edit in the map editor, and an edit keeps the
-//! row's `source = 'faa'` — so re-running never touches an already-seeded airport: edits, deletes
-//! and row ids all persist. Refreshing one airport's FAA baseline is the explicit, permissioned
-//! re-pull (#232), not this boot job. `manual`/`crc` rows are never touched. One exception, an
+//! **Seed once per airport (#231):** an airport is seeded only if it isn't recorded in
+//! `flow.airport_surface_faa_seeded` (migration `0074`) and has no `faa` rows; every seeded airport
+//! is recorded. FAA geometry is a starting layer that facilities edit in the map editor, and an edit
+//! keeps the row's `source = 'faa'` — so re-running never touches an already-seeded airport: edits,
+//! deletes (even of every faa row) and row ids all persist. Refreshing one airport's FAA baseline
+//! is the explicit, permissioned re-pull (#232), not this boot job. `manual`/`crc` rows are never touched. One exception, an
 //! operator decision recorded on VATUSA/OIS#231: when an airport is seeded, its pre-existing
 //! `source='osm'` ramps/taxiways (migration `0067`'s KDCA seed) are retired, since FAA data
 //! supersedes them. No gate rows are written: the FAA AM layer set has no gate layer (see #230).
@@ -83,7 +84,7 @@ impl std::fmt::Display for SeedSummary {
     }
 }
 
-/// Seeds every extract airport that has no `faa` rows yet, in one transaction under
+/// Seeds every extract airport not yet seeded (see the module doc), in one transaction under
 /// [`SEED_LOCK_KEY`]. Safe to call repeatedly and concurrently: already-seeded airports are skipped.
 pub async fn seed(pool: &PgPool) -> Result<SeedSummary, ApiError> {
     let extract = load_bundled_extract();
@@ -95,9 +96,11 @@ pub async fn seed(pool: &PgPool) -> Result<SeedSummary, ApiError> {
         .await
         .map_err(db_err)?;
 
-    // Read after taking the lock, so a run that waited sees what the previous run committed.
+    // Read after taking the lock, so a run that waited sees what the previous run committed. The
+    // marker table is what keeps an airport whose faa rows were all deleted from being re-seeded.
     let seeded: HashSet<String> = sqlx::query_scalar(
-        "select icao from flow.airport_taxiway where source = 'faa' \
+        "select icao from flow.airport_surface_faa_seeded \
+         union select icao from flow.airport_taxiway where source = 'faa' \
          union select icao from flow.airport_ramp_area where source = 'faa'",
     )
     .fetch_all(&mut *tx)
@@ -170,6 +173,15 @@ pub async fn seed(pool: &PgPool) -> Result<SeedSummary, ApiError> {
     .await
     .map_err(db_err)?
     .rows_affected() as usize;
+
+    sqlx::query(
+        "insert into flow.airport_surface_faa_seeded (icao) select unnest($1::text[]) \
+         on conflict (icao) do nothing",
+    )
+    .bind(&to_seed)
+    .execute(&mut *tx)
+    .await
+    .map_err(db_err)?;
 
     tx.commit().await.map_err(db_err)?;
 
@@ -326,16 +338,46 @@ mod tests {
         );
     }
 
-    #[sqlx::test]
-    async fn only_airports_without_faa_rows_are_seeded(pool: PgPool) {
-        seed(&pool).await.unwrap();
-        let kdca_id = first_faa_taxiway(&pool, "KDCA").await;
-        // An airport whose faa rows are all gone (both tables) counts as unseeded again.
-        sqlx::query("delete from flow.airport_taxiway where icao = 'KRUT' and source = 'faa'")
-            .execute(&pool)
+    async fn delete_all_faa_rows(pool: &PgPool, icao: &str) {
+        for table in ["flow.airport_taxiway", "flow.airport_ramp_area"] {
+            sqlx::query(&format!(
+                "delete from {table} where icao = $1 and source = 'faa'"
+            ))
+            .bind(icao)
+            .execute(pool)
             .await
             .unwrap();
-        sqlx::query("delete from flow.airport_ramp_area where icao = 'KRUT' and source = 'faa'")
+        }
+    }
+
+    /// Regression (#231 QA): "already seeded" was inferred from faa rows existing, so a facility
+    /// deleting all of an airport's faa rows (to redraw it by hand) got them re-inserted next boot.
+    #[sqlx::test]
+    async fn an_airport_whose_faa_rows_were_all_deleted_is_not_reseeded(pool: PgPool) {
+        seed(&pool).await.unwrap();
+        delete_all_faa_rows(&pool, "KRUT").await;
+
+        let summary = seed(&pool).await.unwrap();
+
+        assert_eq!(summary.airports_seeded, 0);
+        assert_eq!(
+            count(
+                &pool,
+                "select count(*) from flow.airport_taxiway where icao = 'KRUT' and source = 'faa'"
+            )
+            .await,
+            0
+        );
+    }
+
+    #[sqlx::test]
+    async fn an_unrecorded_airport_with_no_faa_rows_is_seeded_without_touching_others(
+        pool: PgPool,
+    ) {
+        seed(&pool).await.unwrap();
+        let kdca_id = first_faa_taxiway(&pool, "KDCA").await;
+        delete_all_faa_rows(&pool, "KRUT").await;
+        sqlx::query("delete from flow.airport_surface_faa_seeded where icao = 'KRUT'")
             .execute(&pool)
             .await
             .unwrap();
@@ -345,6 +387,19 @@ mod tests {
         assert_eq!(summary.airports_seeded, 1);
         assert_eq!(summary.taxiways_inserted, 45);
         assert_eq!(first_faa_taxiway(&pool, "KDCA").await, kdca_id);
+    }
+
+    #[sqlx::test]
+    async fn every_seeded_airport_is_recorded(pool: PgPool) {
+        seed(&pool).await.unwrap();
+        assert_eq!(
+            count(
+                &pool,
+                "select count(*) from flow.airport_surface_faa_seeded"
+            )
+            .await,
+            185
+        );
     }
 
     #[sqlx::test]
