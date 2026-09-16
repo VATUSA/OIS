@@ -54,15 +54,26 @@ fn validate_ramp_area(req: &UpsertAirportRampAreaRequest) -> Result<(), ApiError
 }
 
 fn validate_taxiway(req: &UpsertAirportTaxiwayRequest) -> Result<(), ApiError> {
+    if req.name.trim().is_empty() || req.name.len() > 64 {
+        return Err(ApiError::BadRequest);
+    }
     if !valid_rings(&req.rings) {
         return Err(ApiError::BadRequest);
     }
     Ok(())
 }
 
-/// A polygon (ramp area or taxiway pavement): at least one ring, each with at least 3 points.
+/// A polygon (ramp area or taxiway pavement): at least one ring, each with at least 3 points, every
+/// one of them a real `[lat, lon]`. An out-of-range point survives to the editor's `fitBounds` and
+/// parks that airport's map on a garbage viewport for everyone.
 fn valid_rings(rings: &[Vec<[f64; 2]>]) -> bool {
-    !rings.is_empty() && rings.iter().all(|r| r.len() >= 3)
+    !rings.is_empty()
+        && rings.iter().all(|r| {
+            r.len() >= 3
+                && r.iter().all(|&[lat, lon]| {
+                    (-90.0..=90.0).contains(&lat) && (-180.0..=180.0).contains(&lon)
+                })
+        })
 }
 
 /// Does the caller hold `flow.surface_data.update` nationally or for `icao`'s owning ARTCC?
@@ -485,6 +496,47 @@ mod tests {
                 .await
                 .unwrap()
         );
+    }
+
+    #[test]
+    fn a_taxiway_needs_a_name_like_every_other_surface_shape() {
+        let named = |name: &str| UpsertAirportTaxiwayRequest {
+            name: name.to_string(),
+            rings: vec![vec![[38.85, -77.04], [38.86, -77.05], [38.85, -77.05]]],
+        };
+        assert!(validate_taxiway(&named("")).is_err());
+        assert!(validate_taxiway(&named("   ")).is_err());
+        assert!(validate_taxiway(&named(&"A".repeat(65))).is_err());
+        assert!(validate_taxiway(&named("A")).is_ok());
+    }
+
+    #[test]
+    fn a_ring_point_outside_the_world_is_rejected() {
+        let rings = |p: [f64; 2]| vec![vec![p, [38.86, -77.05], [38.85, -77.05]]];
+        for bad in [
+            [900.0, -77.04],
+            [-91.0, -77.04],
+            [38.85, 181.0],
+            [38.85, -180.1],
+        ] {
+            assert!(
+                validate_taxiway(&UpsertAirportTaxiwayRequest {
+                    name: "A".to_string(),
+                    rings: rings(bad),
+                })
+                .is_err(),
+                "taxiway accepted {bad:?}"
+            );
+            assert!(
+                validate_ramp_area(&UpsertAirportRampAreaRequest {
+                    name: "North apron".to_string(),
+                    kind: "apron".to_string(),
+                    rings: rings(bad),
+                })
+                .is_err(),
+                "ramp area accepted {bad:?}"
+            );
+        }
     }
 
     #[test]

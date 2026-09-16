@@ -57,11 +57,13 @@ export function buildSurfaceLayers(surface: AirportSurface, selected: SelectedSu
   const layers: Layer[] = [];
   const isSelected = (kind: SurfaceKind, id: string) => selected?.kind === kind && selected.id === id;
 
-  const ramps = surface.ramp_areas.filter((r) => !isSelected("ramp", r.id));
-  if (ramps.length > 0) layers.push(polygonLayer<AirportRampArea>("surface-ramp-areas", ramps, "ramp"));
-
+  // Taxiways first: FAA pavement often overlaps an apron and the later layer wins deck.gl picking, so
+  // ramp areas stay the easier click target they were when taxiways drew as 3 px lines.
   const taxiways = surface.taxiways.filter((t) => !isSelected("taxiway", t.id));
   if (taxiways.length > 0) layers.push(polygonLayer<AirportTaxiway>("surface-taxiways", taxiways, "taxiway"));
+
+  const ramps = surface.ramp_areas.filter((r) => !isSelected("ramp", r.id));
+  if (ramps.length > 0) layers.push(polygonLayer<AirportRampArea>("surface-ramp-areas", ramps, "ramp"));
 
   const gates = surface.gates.filter((g) => !isSelected("gate", g.id));
   if (gates.length > 0) {
