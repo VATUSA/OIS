@@ -170,7 +170,6 @@ impl Session {
             Phase::PushingBack => {
                 self.phase = Phase::StartUp;
                 self.push_stop_ms = Some(run.start_ms);
-                self.last_pause = None;
             }
             Phase::Taxiing => unreachable!("returned above"),
         }
@@ -654,6 +653,55 @@ mod tests {
         assert_eq!(obs[0].pushback_sec, None);
         assert_eq!(obs[0].startup_sec, None);
         assert_eq!(obs[0].taxi_sec, 330); // 15 → 345, run-up included
+    }
+
+    #[test]
+    fn a_burst_already_past_the_push_radius_when_confirmed_is_taxi() {
+        let mut st = TaxiObsState::default();
+        // 7 kt — at or below GS_START, but 54 m per update, so the three confirming updates already
+        // cover more than PUSH_MAX_M. The hold-short stop would otherwise confirm a push stop.
+        let obs = run_track(
+            &mut st,
+            &[
+                (0, 0.0, 0, 0),
+                (15, 54.0, 7, 0),
+                (30, 108.0, 7, 0),
+                (45, 162.0, 7, 0),
+                (60, 162.0, 0, 0),
+                (75, 162.0, 0, 0),
+                (90, 162.0, 0, 0),
+                (105, 162.0, 0, 0),
+                (120, 400.0, 30, 0),
+                (135, 1200.0, 90, 300),
+            ],
+        );
+
+        assert_eq!(obs.len(), 1);
+        assert_eq!(obs[0].pushback_sec, None);
+        assert_eq!(obs[0].startup_sec, None);
+        assert_eq!(obs[0].taxi_sec, 120); // 15 → 135
+    }
+
+    #[test]
+    fn airborne_straight_out_of_a_push_times_taxi_from_the_push_start() {
+        let mut st = TaxiObsState::default();
+        // Confirmed as a push at t=45, then past GS_STOP on the very next update: the burst was the
+        // taxi, timed from where it began — not from first-seen, which would add the gate dwell.
+        let obs = run_track(
+            &mut st,
+            &[
+                (0, 0.0, 0, 0),
+                (15, 7.0, 2, 0),
+                (30, 14.0, 2, 0),
+                (45, 21.0, 2, 0),
+                (60, 300.0, 65, 0),
+            ],
+        );
+
+        assert_eq!(obs.len(), 1);
+        assert_eq!(obs[0].pushback_sec, None);
+        assert_eq!(obs[0].startup_sec, None);
+        assert_eq!(obs[0].taxi_sec, 45); // 15 → 60, not 60 from first-seen
     }
 
     #[test]
