@@ -460,6 +460,34 @@ mod tests {
         assert_eq!(kdca_faa_runways(&pool).await, 3);
     }
 
+    /// Deleting *every* faa runway an airport has leaves the marker as the only thing standing
+    /// between the facility and a re-seed on the next boot — the row guard can't help here.
+    #[sqlx::test]
+    async fn an_airport_whose_faa_runways_are_all_deleted_does_not_get_them_back(pool: PgPool) {
+        seed(&pool).await.unwrap();
+        sqlx::query("delete from flow.airport_runway where icao = 'KDCA' and source = 'faa'")
+            .execute(&pool)
+            .await
+            .unwrap();
+
+        assert_eq!(seed(&pool).await.unwrap().runways_inserted, 0);
+        assert_eq!(kdca_faa_runways(&pool).await, 0);
+    }
+
+    /// And with the marker gone but the rows still there, the existing-rows guard is what prevents
+    /// a duplicate set.
+    #[sqlx::test]
+    async fn an_airport_missing_its_runway_marker_is_not_seeded_twice(pool: PgPool) {
+        seed(&pool).await.unwrap();
+        sqlx::query("delete from flow.airport_runway_faa_seeded where icao = 'KDCA'")
+            .execute(&pool)
+            .await
+            .unwrap();
+
+        assert_eq!(seed(&pool).await.unwrap().runways_inserted, 0);
+        assert_eq!(kdca_faa_runways(&pool).await, 3);
+    }
+
     #[sqlx::test]
     async fn a_second_run_touches_nothing(pool: PgPool) {
         seed(&pool).await.unwrap();

@@ -539,7 +539,15 @@ async fn main() {
 /// Sets each airport's `runways` in an existing extract (`--runways-only`), replacing any previous
 /// runways and leaving every other key untouched. An airport with runways but no other data gets
 /// an entry of its own; a previous runway set for an airport no longer in `runways` is dropped.
+///
+/// Panics on an empty `runways`: [`fetch_all_features`] reads an empty first page as "no more
+/// features", so a degraded AM_Runway service is indistinguishable from a successful empty run, and
+/// merging it would strip every runway from the committed extract.
 fn merge_runways(existing: &str, runways: HashMap<String, Vec<PolygonRow>>) -> String {
+    assert!(
+        !runways.is_empty(),
+        "AM_Runway returned no mappable features — refusing to strip runways from the extract"
+    );
     let mut extract: serde_json::Map<String, serde_json::Value> =
         serde_json::from_str(existing).expect("existing extract should parse");
     for airport in extract.values_mut() {
@@ -687,6 +695,15 @@ mod tests {
         assert_eq!(merged["KDCA"]["runways"].as_array().unwrap().len(), 1);
         assert_eq!(merged["KZZZ"]["runways"][0]["name"], "09/27");
         assert!(merged["KBVU"].get("runways").is_none());
+    }
+
+    /// A degraded AM_Runway service returns an empty first page, which `fetch_all_features` reports
+    /// as a successful empty run — merging that would strip every runway from the committed extract.
+    #[test]
+    #[should_panic(expected = "refusing to strip runways")]
+    fn merging_an_empty_runway_set_refuses_rather_than_wiping_the_extract() {
+        let existing = r#"{"KDCA":{"runways":[{"name":"01/19","rings":[]}]}}"#;
+        merge_runways(existing, HashMap::new());
     }
 
     /// Regression (#230 QA): every real source anomaly seen live in AM_Taxiway/AM_Apron.

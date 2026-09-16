@@ -8,7 +8,12 @@ import type {
   AirportTaxiway,
 } from "@/lib/airport-surface";
 
-import {buildSurfaceDraftLayers, buildSurfaceLayers} from "./layers";
+import {
+  MIN_SURFACE_POINTS,
+  buildSurfaceDraftLayers,
+  buildSurfaceLayers,
+  isPolygonKind,
+} from "./layers";
 
 const gate = (over: Partial<AirportGate>): AirportGate => ({
   id: "g1",
@@ -180,5 +185,30 @@ describe("buildSurfaceDraftLayers", () => {
     const layer = layers.find((l) => l.id === "surface-taxiways");
     expect(layer?.constructor.name).toBe("PolygonLayer");
     expect(layer?.props).toMatchObject({ filled: true });
+  });
+});
+
+describe("runway polygons (#279)", () => {
+  it("a runway is a polygon kind needing 3 points, like taxiways and ramps", () => {
+    expect(isPolygonKind("runway")).toBe(true);
+    expect(MIN_SURFACE_POINTS.runway).toBe(MIN_SURFACE_POINTS.taxiway);
+  });
+
+  it("draws larger pavement first so the smaller shape on top stays pickable", () => {
+    const layers = buildSurfaceLayers(
+      surface({
+        ramp_areas: [rampArea({ id: "r" })],
+        runways: [runway({ id: "rw" })],
+        taxiways: [taxiway({ id: "t" })],
+        gates: [gate({ id: "g" })],
+      }),
+      null,
+    );
+    expect(layers.map((l) => l.id)).toEqual([
+      "surface-ramp-areas",
+      "surface-runways",
+      "surface-taxiways",
+      "surface-gates",
+    ]);
   });
 });

@@ -681,6 +681,21 @@ mod tests {
                 .len(),
             1
         );
+        // Also scoped by airport on delete: knowing the id isn't enough to remove another
+        // airport's runway, which is all an editor at KXXX would hold.
+        assert!(
+            !surface_repo::delete_runway(&pool, &created.id, "KXXX")
+                .await
+                .unwrap()
+        );
+        assert_eq!(
+            surface_repo::list_runways(&pool, "KTST")
+                .await
+                .unwrap()
+                .len(),
+            1
+        );
+
         assert!(
             surface_repo::delete_runway(&pool, &created.id, "KTST")
                 .await

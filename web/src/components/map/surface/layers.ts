@@ -64,14 +64,17 @@ export function buildSurfaceLayers(surface: AirportSurface, selected: SelectedSu
   const layers: Layer[] = [];
   const isSelected = (kind: SurfaceKind, id: string) => selected?.kind === kind && selected.id === id;
 
+  // Largest pavement first: the later layer wins deck.gl picking, and FAA taxiway polygons overlap
+  // runways at most real airports (KORD 71 of them, KDFW 72), so the smaller shape has to stay on top
+  // or clicking a taxiway opens the runway under it.
   const ramps = surface.ramp_areas.filter((r) => !isSelected("ramp", r.id));
   if (ramps.length > 0) layers.push(polygonLayer<AirportRampArea>("surface-ramp-areas", ramps, "ramp"));
 
-  const taxiways = surface.taxiways.filter((t) => !isSelected("taxiway", t.id));
-  if (taxiways.length > 0) layers.push(polygonLayer<AirportTaxiway>("surface-taxiways", taxiways, "taxiway"));
-
   const runways = surface.runways.filter((r) => !isSelected("runway", r.id));
   if (runways.length > 0) layers.push(polygonLayer<AirportRunway>("surface-runways", runways, "runway"));
+
+  const taxiways = surface.taxiways.filter((t) => !isSelected("taxiway", t.id));
+  if (taxiways.length > 0) layers.push(polygonLayer<AirportTaxiway>("surface-taxiways", taxiways, "taxiway"));
 
   const gates = surface.gates.filter((g) => !isSelected("gate", g.id));
   if (gates.length > 0) {
