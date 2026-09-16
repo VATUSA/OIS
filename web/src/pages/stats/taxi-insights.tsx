@@ -13,6 +13,7 @@ import {
 } from "@ois/ui";
 import {Clock, DoorOpen, Lock, Plane, PlaneTakeoff, Timer} from "lucide-react";
 
+import {ZuluDateTime} from "@/components/zulu-datetime";
 import {usePageHeader} from "@/components/shell/page-meta";
 import {useMe} from "@/lib/auth";
 import {hasPermission} from "@/lib/permissions";
@@ -169,8 +170,8 @@ export function TaxiInsightsPage() {
   const [gateDraft, setGateDraft] = useState("");
   const [aircraftDraft, setAircraftDraft] = useState("");
   const [runwayDraft, setRunwayDraft] = useState("");
-  const [fromDraft, setFromDraft] = useState("");
-  const [toDraft, setToDraft] = useState("");
+  const [fromDraft, setFromDraft] = useState<number | null>(null);
+  const [toDraft, setToDraft] = useState<number | null>(null);
   const [includeOutliers, setIncludeOutliers] = useState(true);
   const [fallbackTier, setFallbackTier] = useState("");
 
@@ -190,9 +191,8 @@ export function TaxiInsightsPage() {
       gateId: gateDraft.trim() || undefined,
       aircraft: aircraftDraft.trim().toUpperCase() || undefined,
       runway: runwayDraft.trim().toUpperCase() || undefined,
-      // datetime-local yields "YYYY-MM-DDTHH:mm"; append seconds so it parses as RFC 3339.
-      from: fromDraft ? `${fromDraft}:00Z` : undefined,
-      to: toDraft ? `${toDraft}:00Z` : undefined,
+      from: fromDraft != null ? new Date(fromDraft * 1000).toISOString() : undefined,
+      to: toDraft != null ? new Date(toDraft * 1000).toISOString() : undefined,
       includeOutliers,
     });
   const clear = () => {
@@ -200,8 +200,8 @@ export function TaxiInsightsPage() {
     setGateDraft("");
     setAircraftDraft("");
     setRunwayDraft("");
-    setFromDraft("");
-    setToDraft("");
+    setFromDraft(null);
+    setToDraft(null);
     setIncludeOutliers(true);
     setFallbackTier("");
     setFilters({});
@@ -261,24 +261,14 @@ export function TaxiInsightsPage() {
             onChange={(e) => setRunwayDraft(e.target.value)}
             className="h-8 w-20 font-mono uppercase placeholder:normal-case"
           />
-          <label className="flex items-center gap-1.5 text-xs text-ink-2">
+          <div className="flex items-center gap-1.5 text-xs text-ink-2">
             From
-            <Input
-              type="datetime-local"
-              value={fromDraft}
-              onChange={(e) => setFromDraft(e.target.value)}
-              className="h-8 w-auto font-mono"
-            />
-          </label>
-          <label className="flex items-center gap-1.5 text-xs text-ink-2">
+            <ZuluDateTime label="From" value={fromDraft} onChange={setFromDraft} onClear={() => setFromDraft(null)} />
+          </div>
+          <div className="flex items-center gap-1.5 text-xs text-ink-2">
             To
-            <Input
-              type="datetime-local"
-              value={toDraft}
-              onChange={(e) => setToDraft(e.target.value)}
-              className="h-8 w-auto font-mono"
-            />
-          </label>
+            <ZuluDateTime label="To" value={toDraft} onChange={setToDraft} onClear={() => setToDraft(null)} />
+          </div>
           {tab === "estimates" && (
             <Select
               size="sm"

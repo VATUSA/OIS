@@ -2,6 +2,7 @@ import {useState} from "react";
 import {Button, Card, ConfirmButton, Input, QueryState, StatusPill, Textarea} from "@ois/ui";
 import {LifeBuoy, Plus} from "lucide-react";
 
+import {ZuluDateTime} from "@/components/zulu-datetime";
 import {useMe} from "@/lib/auth";
 import {hasPermission} from "@/lib/permissions";
 import {toneOf} from "@/lib/status";
@@ -17,16 +18,8 @@ import {
   useReleaseEventAce,
 } from "@/lib/ace";
 
-/** Local `<input type="datetime-local">` value ↔ ISO UTC string, treating the picker as Zulu. */
-const toLocalInput = (iso: string): string => {
-  const d = new Date(iso);
-  const pad = (n: number) => String(n).padStart(2, "0");
-  return `${d.getUTCFullYear()}-${pad(d.getUTCMonth() + 1)}-${pad(d.getUTCDate())}T${pad(d.getUTCHours())}:${pad(d.getUTCMinutes())}`;
-};
-const fromLocalInput = (v: string): string | null => {
-  const ms = Date.parse(v + "Z");
-  return Number.isFinite(ms) ? new Date(ms).toISOString() : null;
-};
+const toUnix = (iso: string) => Math.floor(new Date(iso).getTime() / 1000);
+const toIso = (unixS: number) => new Date(unixS * 1000).toISOString();
 
 function CreateForm({ eventId }: { eventId: number }) {
   const create = useCreateEventAce(eventId);
@@ -105,11 +98,11 @@ function ClaimForm({
 }) {
   const claim = useClaimEventAce(eventId);
   const [notes, setNotes] = useState("");
-  const [start, setStart] = useState("");
-  const [end, setEnd] = useState("");
+  const [start, setStart] = useState<number | null>(null);
+  const [end, setEnd] = useState<number | null>(null);
 
-  const minLocal = toLocalInput(eventStart);
-  const maxLocal = toLocalInput(eventEnd);
+  const min = toUnix(eventStart);
+  const max = toUnix(eventEnd);
 
   const submit = () => {
     claim.mutate(
@@ -117,15 +110,15 @@ function ClaimForm({
         req,
         body: {
           notes: notes.trim() || null,
-          start_time: start ? fromLocalInput(start) : null,
-          end_time: end ? fromLocalInput(end) : null,
+          start_time: start != null ? toIso(start) : null,
+          end_time: end != null ? toIso(end) : null,
         },
       },
       {
         onSuccess: () => {
           setNotes("");
-          setStart("");
-          setEnd("");
+          setStart(null);
+          setEnd(null);
         },
       },
     );
@@ -144,26 +137,12 @@ function ClaimForm({
       </div>
       <div className="grid gap-2 sm:grid-cols-2">
         <div className="flex flex-col gap-1">
-          <label className="text-xs font-semibold text-ink-2">Available from (Zulu)</label>
-          <Input
-            className="h-8"
-            type="datetime-local"
-            min={minLocal}
-            max={maxLocal}
-            value={start}
-            onChange={(e) => setStart(e.target.value)}
-          />
+          <span className="text-xs font-semibold text-ink-2">Available from (Zulu)</span>
+          <ZuluDateTime label="Available from" value={start} min={min} max={max} onChange={setStart} onClear={() => setStart(null)} />
         </div>
         <div className="flex flex-col gap-1">
-          <label className="text-xs font-semibold text-ink-2">Available to (Zulu)</label>
-          <Input
-            className="h-8"
-            type="datetime-local"
-            min={minLocal}
-            max={maxLocal}
-            value={end}
-            onChange={(e) => setEnd(e.target.value)}
-          />
+          <span className="text-xs font-semibold text-ink-2">Available to (Zulu)</span>
+          <ZuluDateTime label="Available to" value={end} min={min} max={max} onChange={setEnd} onClear={() => setEnd(null)} />
         </div>
       </div>
       <div>

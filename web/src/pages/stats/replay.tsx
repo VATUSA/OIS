@@ -15,6 +15,7 @@ import {
 import {useNavigate, useSearch} from "@tanstack/react-router";
 import {Clock, Gauge, Lock, MapPin, MountainSnow, Pause, Play, SkipBack, SlidersHorizontal, TriangleAlert, X} from "lucide-react";
 
+import {ZuluDateTime} from "@/components/zulu-datetime";
 import {usePageHeader} from "@/components/shell/page-meta";
 
 import {useMe} from "@/lib/auth";
@@ -746,16 +747,6 @@ interface Win {
   to: number;
 }
 
-/** <input type="datetime-local"> value ↔ unix seconds (UTC/Zulu). */
-const toLocalInput = (unixS: number) => {
-  const d = new Date(unixS * 1000);
-  const pad = (n: number) => String(n).padStart(2, "0");
-  return `${d.getUTCFullYear()}-${pad(d.getUTCMonth() + 1)}-${pad(d.getUTCDate())}T${pad(d.getUTCHours())}:${pad(d.getUTCMinutes())}`;
-};
-const fromLocalInput = (v: string): number | null => {
-  const ms = Date.parse(v + "Z");
-  return Number.isFinite(ms) ? Math.floor(ms / 1000) : null;
-};
 const defaultWindow = (): Win => {
   const now = Math.floor(Date.now() / 1000);
   return { from: now - 3 * 3600, to: now };
@@ -870,36 +861,28 @@ export function CaptureReplayPage() {
 
         {!usingCapture && (
           <>
-            <label className="flex items-center gap-1.5 text-xs text-ink-2">
-              From (Zulu)
-              <Input
-                type="datetime-local"
-                className="h-8 w-auto font-mono"
-                value={toLocalInput(win.from)}
-                onChange={(e) => {
-                  const from = fromLocalInput(e.target.value);
-                  if (from != null) {
-                    setWin((w) => ({ from, to: w.to }));
-                    patch({ from, to: win.to, capture: undefined });
-                  }
+            <div className="flex items-center gap-1.5 text-xs text-ink-2">
+              From
+              <ZuluDateTime
+                label="From"
+                value={win.from}
+                onChange={(from) => {
+                  setWin((w) => ({ from, to: w.to }));
+                  patch({ from, to: win.to, capture: undefined });
                 }}
               />
-            </label>
-            <label className="flex items-center gap-1.5 text-xs text-ink-2">
-              To (Zulu)
-              <Input
-                type="datetime-local"
-                className="h-8 w-auto font-mono"
-                value={toLocalInput(win.to)}
-                onChange={(e) => {
-                  const to = fromLocalInput(e.target.value);
-                  if (to != null) {
-                    setWin((w) => ({ from: w.from, to }));
-                    patch({ from: win.from, to, capture: undefined });
-                  }
+            </div>
+            <div className="flex items-center gap-1.5 text-xs text-ink-2">
+              To
+              <ZuluDateTime
+                label="To"
+                value={win.to}
+                onChange={(to) => {
+                  setWin((w) => ({ from: w.from, to }));
+                  patch({ from: win.from, to, capture: undefined });
                 }}
               />
-            </label>
+            </div>
             {canSaveCapture && (
               <Button
                 size="sm"

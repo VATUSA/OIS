@@ -14,6 +14,7 @@ import {
 } from "@ois/ui";
 import {CircleDot, Clock, Plus, ShieldAlert, User} from "lucide-react";
 
+import {ZuluDateTime} from "@/components/zulu-datetime";
 import {hasPermission} from "@/lib/permissions";
 import {toneOf} from "@/lib/status";
 import {formatZulu, parseZulu} from "@/lib/time";
@@ -181,26 +182,27 @@ function TmiActions({
   );
 }
 
-/** Draft (in `YYYY-MM-DDTHH:mm` for the datetime-local inputs), converted to RFC 3339 on apply. */
-type Draft = { status: string; type: string; facility: string; from: string; to: string };
-const EMPTY_DRAFT: Draft = { status: "", type: "", facility: "", from: "", to: "" };
+/** Draft filters (window bounds as unix seconds, Zulu), converted to RFC 3339 on apply. */
+type Draft = { status: string; type: string; facility: string; from: number | null; to: number | null };
+const EMPTY_DRAFT: Draft = { status: "", type: "", facility: "", from: null, to: null };
+const iso = (unixS: number | null) => (unixS != null ? new Date(unixS * 1000).toISOString() : undefined);
 
 function toFilters(d: Draft): TmiFilters {
   return {
     status: d.status || undefined,
     type: d.type || undefined,
     facility: d.facility.trim() || undefined,
-    from: d.from ? `${d.from}:00Z` : undefined,
-    to: d.to ? `${d.to}:00Z` : undefined,
+    from: iso(d.from),
+    to: iso(d.to),
   };
 }
 
 /** Server-side filters — applied on submit, since each change is a new query. */
 function RestrictionFilters({ onChange }: { onChange: (f: TmiFilters) => void }) {
   const [draft, setDraft] = useState<Draft>(EMPTY_DRAFT);
-  const set = <K extends keyof Draft>(key: K, value: string) =>
+  const set = <K extends keyof Draft>(key: K, value: Draft[K]) =>
     setDraft((d) => ({ ...d, [key]: value }));
-  const active = Object.values(draft).some(Boolean);
+  const active = Object.values(draft).some((v) => v != null && v !== "");
 
   return (
     <form
@@ -229,14 +231,14 @@ function RestrictionFilters({ onChange }: { onChange: (f: TmiFilters) => void })
           value={draft.facility}
           onChange={(e) => set("facility", e.target.value)}
         />
-        <label className="flex items-center gap-1.5 text-xs text-ink-3">
+        <div className="flex items-center gap-1.5 text-xs text-ink-3">
           Active from
-          <Input className="h-8 w-auto font-mono text-xs" type="datetime-local" value={draft.from} onChange={(e) => set("from", e.target.value)} />
-        </label>
-        <label className="flex items-center gap-1.5 text-xs text-ink-3">
+          <ZuluDateTime label="Active from" value={draft.from} onChange={(v) => set("from", v)} onClear={() => set("from", null)} />
+        </div>
+        <div className="flex items-center gap-1.5 text-xs text-ink-3">
           to
-          <Input className="h-8 w-auto font-mono text-xs" type="datetime-local" value={draft.to} onChange={(e) => set("to", e.target.value)} />
-        </label>
+          <ZuluDateTime label="Active to" value={draft.to} onChange={(v) => set("to", v)} onClear={() => set("to", null)} />
+        </div>
         <Button type="submit" size="sm" variant="outline">
           Filter
         </Button>

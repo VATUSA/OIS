@@ -11,25 +11,44 @@ function parts(unixS: number): { date: string; time: string } {
   };
 }
 
+const dateOf = (unixS: number) => parts(unixS).date;
+
 /**
  * A themed Zulu date + 24-hour time picker whose value is unix **seconds (UTC)**. The date uses a
  * native `<input type="date">` styled with app tokens and a `color-scheme` bound to the active theme
  * (so its calendar popup is dark-aware in every theme); the time is a hand-built `HH:MM` field so it's
  * always 24-hour and fully themed, regardless of the browser's locale.
+ *
+ * `value` may be `null` for an optional field (a filter bound): it renders empty, picking a date
+ * commits it at 00:00Z unless a time is already typed, and clearing the date calls `onClear`.
  */
 export function ZuluDateTime({
   value,
   onChange,
+  onClear,
+  min,
+  max,
+  label = "",
   className,
 }: {
-  value: number;
+  value: number | null;
   onChange: (unixS: number) => void;
+  onClear?: () => void;
+  /** Earliest / latest selectable instant (unix seconds); bounds the calendar's days. */
+  min?: number;
+  max?: number;
+  /** Prefix for the fields' accessible names (e.g. "From"). */
+  label?: string;
   className?: string;
 }) {
-  const { date, time } = parts(value);
+  const committed = value == null ? null : parts(value);
+  // An optional field with no value yet remembers a typed time until a date completes it.
+  const [pendingTime, setPendingTime] = useState("");
+  const date = committed?.date ?? "";
+  const time = committed?.time ?? pendingTime;
 
   const commit = (dateStr: string, timeStr: string) => {
-    const ms = Date.parse(`${dateStr}T${timeStr}:00Z`);
+    const ms = Date.parse(`${dateStr}T${timeStr || "00:00"}:00Z`);
     if (!Number.isNaN(ms)) onChange(Math.floor(ms / 1000));
   };
 
@@ -38,18 +57,27 @@ export function ZuluDateTime({
       <input
         type="date"
         value={date}
-        onChange={(e) => e.target.value && commit(e.target.value, time)}
+        min={min != null ? dateOf(min) : undefined}
+        max={max != null ? dateOf(max) : undefined}
+        onChange={(e) => {
+          if (e.target.value) commit(e.target.value, time);
+          else onClear?.();
+        }}
         className="h-9 rounded-xs border border-line bg-panel-2 px-2 font-mono text-[13px] text-ink outline-none focus-visible:ring-2 focus-visible:ring-ring [color-scheme:light] dark:[color-scheme:dark]"
-        aria-label="Date (Zulu)"
+        aria-label={`${label} date (Zulu)`.trim()}
       />
-      <TimeField value={time} onChange={(t) => commit(date, t)} />
+      <TimeField
+        value={time}
+        label={label}
+        onChange={(t) => (date ? commit(date, t) : setPendingTime(t))}
+      />
       <span className="font-mono text-xs text-ink-3">Z</span>
     </div>
   );
 }
 
 /** A 24-hour `HH:MM` field. Local text while typing; commits a valid, clamped value on blur/Enter. */
-function TimeField({ value, onChange }: { value: string; onChange: (time: string) => void }) {
+function TimeField({ value, onChange, label }: { value: string; onChange: (time: string) => void; label: string }) {
   const [text, setText] = useState(value);
   // Re-sync when the committed value changes upstream (e.g. the date or scrubber moved it).
   useEffect(() => setText(value), [value]);
@@ -80,7 +108,7 @@ function TimeField({ value, onChange }: { value: string; onChange: (time: string
       }}
       placeholder="HH:MM"
       maxLength={5}
-      aria-label="Time (24-hour, Zulu)"
+      aria-label={`${label} time (24-hour, Zulu)`.trim()}
       className="h-9 w-[4.5rem] rounded-xs border border-line bg-panel-2 px-2 text-center font-mono text-[13px] tabular-nums text-ink placeholder:text-ink-3 outline-none focus-visible:ring-2 focus-visible:ring-ring"
     />
   );

@@ -2,6 +2,7 @@ import {useEffect, useState} from "react";
 import {Button, FilterBar, Input} from "@ois/ui";
 import {Search} from "lucide-react";
 
+import {ZuluDateTime} from "@/components/zulu-datetime";
 import {AuditTable} from "@/components/admin/audit-table";
 import {usePageHeader} from "@/components/shell/page-meta";
 import {useAuditLog} from "@/lib/admin";
@@ -13,8 +14,8 @@ export function AdminAudit() {
   const [page, setPage] = useState(1);
   // Draft inputs vs. the applied filters that actually drive the query.
   const [qDraft, setQDraft] = useState("");
-  const [fromDraft, setFromDraft] = useState("");
-  const [toDraft, setToDraft] = useState("");
+  const [fromDraft, setFromDraft] = useState<number | null>(null);
+  const [toDraft, setToDraft] = useState<number | null>(null);
   const [filters, setFilters] = useState<{ q: string; from: string; to: string }>({
     q: "",
     from: "",
@@ -29,14 +30,13 @@ export function AdminAudit() {
   const apply = () =>
     setFilters({
       q: qDraft,
-      // datetime-local yields "YYYY-MM-DDTHH:mm"; append seconds so it parses as RFC 3339.
-      from: fromDraft ? `${fromDraft}:00Z` : "",
-      to: toDraft ? `${toDraft}:00Z` : "",
+      from: fromDraft != null ? new Date(fromDraft * 1000).toISOString() : "",
+      to: toDraft != null ? new Date(toDraft * 1000).toISOString() : "",
     });
   const clear = () => {
     setQDraft("");
-    setFromDraft("");
-    setToDraft("");
+    setFromDraft(null);
+    setToDraft(null);
     setFilters({ q: "", from: "", to: "" });
   };
   const hasFilters = Boolean(filters.q || filters.from || filters.to);
@@ -64,24 +64,14 @@ export function AdminAudit() {
               className="rounded-full pl-9"
             />
           </div>
-          <label className="flex items-center gap-2 text-xs font-semibold text-ink-3">
+          <div className="flex items-center gap-2 text-xs font-semibold text-ink-3">
             From
-            <Input
-              type="datetime-local"
-              value={fromDraft}
-              onChange={(e) => setFromDraft(e.target.value)}
-              className="w-auto font-mono text-xs"
-            />
-          </label>
-          <label className="flex items-center gap-2 text-xs font-semibold text-ink-3">
+            <ZuluDateTime label="From" value={fromDraft} onChange={setFromDraft} onClear={() => setFromDraft(null)} />
+          </div>
+          <div className="flex items-center gap-2 text-xs font-semibold text-ink-3">
             To
-            <Input
-              type="datetime-local"
-              value={toDraft}
-              onChange={(e) => setToDraft(e.target.value)}
-              className="w-auto font-mono text-xs"
-            />
-          </label>
+            <ZuluDateTime label="To" value={toDraft} onChange={setToDraft} onClear={() => setToDraft(null)} />
+          </div>
           <Button type="submit" size="sm">
             Search
           </Button>
