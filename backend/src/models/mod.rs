@@ -729,14 +729,16 @@ pub struct UpsertAirportRampAreaRequest {
     pub rings: Vec<Vec<[f64; 2]>>,
 }
 
-/// An airport taxiway centerline. `points` is an ordered array of `[lat, lon]`.
+/// An airport taxiway's pavement outline (#278). `rings` has the same shape and editor semantics as
+/// [`AirportRampAreaBody::rings`]: an array of rings, each an array of `[lat, lon]`, the first being
+/// the outer boundary.
 #[derive(Debug, Serialize, ToSchema, sqlx::FromRow)]
 pub struct AirportTaxiwayBody {
     pub id: String,
     pub icao: String,
     pub name: String,
-    #[schema(value_type = Vec<Vec<f64>>)]
-    pub points: sqlx::types::Json<Vec<[f64; 2]>>,
+    #[schema(value_type = Vec<Vec<Vec<f64>>>)]
+    pub rings: sqlx::types::Json<Vec<Vec<[f64; 2]>>>,
     /// `manual` | `osm` | `crc`.
     pub source: String,
     pub updated_at: DateTime<Utc>,
@@ -747,7 +749,7 @@ pub struct AirportTaxiwayBody {
 #[derive(Debug, Deserialize, ToSchema)]
 pub struct UpsertAirportTaxiwayRequest {
     pub name: String,
-    pub points: Vec<[f64; 2]>,
+    pub rings: Vec<Vec<[f64; 2]>>,
 }
 
 /// An airport's full surface geometry, combined for one read.

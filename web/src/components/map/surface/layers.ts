@@ -22,10 +22,34 @@ export const SURFACE_COLORS: Record<SurfaceKind, string> = {
 };
 
 /** Fewest vertices each shape needs before it can be finalized/saved. */
-export const MIN_SURFACE_POINTS: Record<SurfaceKind, number> = { gate: 1, taxiway: 2, ramp: 3 };
+export const MIN_SURFACE_POINTS: Record<SurfaceKind, number> = { gate: 1, taxiway: 3, ramp: 3 };
+
+/** Whether a kind is a polygon (ramp/apron area or taxiway pavement, #278) rather than a point. */
+export const isPolygonKind = (kind: SurfaceKind) => kind !== "gate";
+
+/** A ramp area's or taxiway's rings as deck.gl `[lon, lat]` polygon rings. */
+const toDeckRings = (rings: number[][][]) => rings.map((ring) => ring.map(([lat, lon]) => [lon, lat]));
+
+/** A filled, geographic (so it scales with zoom) polygon layer — ramp areas and taxiways share it. */
+function polygonLayer<T extends { rings: number[][][] }>(id: string, data: T[], kind: SurfaceKind): Layer {
+  const [r, g, b] = hexToRgb(SURFACE_COLORS[kind]);
+  return new PolygonLayer<T>({
+    id,
+    data,
+    pickable: true,
+    getPolygon: (d) => toDeckRings(d.rings),
+    stroked: true,
+    filled: true,
+    getLineColor: [r, g, b, 200] as RGBA,
+    getFillColor: [r, g, b, 40] as RGBA,
+    getLineWidth: 2,
+    lineWidthUnits: "pixels",
+    lineWidthMinPixels: 1,
+  });
+}
 
 /**
- * Saved geometry: ramp/apron areas as filled polygons, taxiways as lines, gates as points. The
+ * Saved geometry: ramp/apron areas and taxiway pavement as filled polygons, gates as points. The
  * item matching `selected` (if any) is left out — it's rendered instead by the draft layers below,
  * so a being-edited shape doesn't show twice.
  */
@@ -33,42 +57,13 @@ export function buildSurfaceLayers(surface: AirportSurface, selected: SelectedSu
   const layers: Layer[] = [];
   const isSelected = (kind: SurfaceKind, id: string) => selected?.kind === kind && selected.id === id;
 
-  const ramps = surface.ramp_areas.filter((r) => !isSelected("ramp", r.id));
-  if (ramps.length > 0) {
-    const [r, g, b] = hexToRgb(SURFACE_COLORS.ramp);
-    layers.push(
-      new PolygonLayer<AirportRampArea>({
-        id: "surface-ramp-areas",
-        data: ramps,
-        pickable: true,
-        getPolygon: (d) => d.rings.map((ring) => ring.map(([lat, lon]) => [lon, lat])),
-        stroked: true,
-        filled: true,
-        getLineColor: [r, g, b, 200] as RGBA,
-        getFillColor: [r, g, b, 40] as RGBA,
-        getLineWidth: 2,
-        lineWidthUnits: "pixels",
-        lineWidthMinPixels: 1,
-      }),
-    );
-  }
-
+  // Taxiways first: FAA pavement often overlaps an apron and the later layer wins deck.gl picking, so
+  // ramp areas stay the easier click target they were when taxiways drew as 3 px lines.
   const taxiways = surface.taxiways.filter((t) => !isSelected("taxiway", t.id));
-  if (taxiways.length > 0) {
-    const [r, g, b] = hexToRgb(SURFACE_COLORS.taxiway);
-    layers.push(
-      new PathLayer<AirportTaxiway>({
-        id: "surface-taxiways",
-        data: taxiways,
-        pickable: true,
-        getPath: (d) => toDeckPath(d.points as LatLng[]),
-        getColor: [r, g, b, 220] as RGBA,
-        getWidth: 3,
-        widthUnits: "pixels",
-        widthMinPixels: 2,
-      }),
-    );
-  }
+  if (taxiways.length > 0) layers.push(polygonLayer<AirportTaxiway>("surface-taxiways", taxiways, "taxiway"));
+
+  const ramps = surface.ramp_areas.filter((r) => !isSelected("ramp", r.id));
+  if (ramps.length > 0) layers.push(polygonLayer<AirportRampArea>("surface-ramp-areas", ramps, "ramp"));
 
   const gates = surface.gates.filter((g) => !isSelected("gate", g.id));
   if (gates.length > 0) {
@@ -95,16 +90,16 @@ export function buildSurfaceLayers(surface: AirportSurface, selected: SelectedSu
 }
 
 /**
- * The in-progress draft: a point (gate), an open dashed polyline (taxiway, or a ramp/apron area
- * still being drawn), or a filled ring (a ramp/apron area once closed) — plus a draggable handle
- * per vertex, mirroring `layers/draft.ts`'s FCA draft rendering extended to three shape kinds.
- * `points` never carries a ramp's closing duplicate — the ring is closed visually here only.
+ * The in-progress draft: a point (gate), an open dashed polyline (a ramp/apron area or taxiway
+ * still being drawn), or a filled ring (once closed) — plus a draggable handle per vertex,
+ * mirroring `layers/draft.ts`'s FCA draft rendering extended to three shape kinds. `points` never
+ * carries a polygon's closing duplicate — the ring is closed visually here only.
  */
 export function buildSurfaceDraftLayers(kind: SurfaceKind, points: LatLng[], phase: "draw" | "edit"): Layer[] {
   const [r, g, b] = hexToRgb(SURFACE_COLORS[kind]);
   const path = toDeckPath(points);
   const layers: Layer[] = [];
-  const closedRing = kind === "ramp" && phase === "edit" && path.length >= 3;
+  const closedRing = isPolygonKind(kind) && phase === "edit" && path.length >= 3;
 
   if (closedRing) {
     layers.push(

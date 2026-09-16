@@ -1,12 +1,12 @@
 import {Button, Input} from "@ois/ui";
 
 import type {LatLng} from "../lib/geo";
-import {MIN_SURFACE_POINTS, type SurfaceKind} from "./layers";
+import {MIN_SURFACE_POINTS, isPolygonKind, type SurfaceKind} from "./layers";
 
 const SELECT_CLASS =
   "h-9 rounded-md border border-input bg-background px-2 text-sm outline-none focus-visible:ring-2 focus-visible:ring-ring";
 
-/** The shape being drawn or edited. `points` never carries a ramp's closing duplicate — that's
+/** The shape being drawn or edited. `points` never carries a polygon's closing duplicate — that's
  * added only when building the save request. */
 export interface SurfaceDraft {
   kind: SurfaceKind;
@@ -14,15 +14,15 @@ export interface SurfaceDraft {
   name: string;
   rampKind: "ramp" | "apron";
   points: LatLng[];
-  /** A ramp/apron area's rings beyond the first (e.g. a hole) — this editor only draws/edits the
+  /** A polygon's (ramp/apron area or taxiway) rings beyond the first (e.g. a hole) — this editor only draws/edits the
    * outer ring, so these are carried through unedited and must be resent as-is on save, not
-   * silently dropped. Always empty for a new draft or a non-ramp shape. */
+   * silently dropped. Always empty for a new draft or a gate. */
   extraRings?: LatLng[][];
 }
 
 const HINT: Record<SurfaceKind, string> = {
   gate: "Click the map to place the gate.",
-  taxiway: "Click to add points along the taxiway centerline. Double-click, Enter, or Finish when done.",
+  taxiway: "Click to add corners of the taxiway pavement outline, then Close shape once you have at least 3.",
   ramp: "Click to add corners of the ramp/apron boundary, then Close shape once you have at least 3.",
 };
 
@@ -62,9 +62,10 @@ export function SurfaceEditorPanel({
           <Button variant="ghost" size="sm" onClick={onCancel}>
             Cancel
           </Button>
-          {draft.kind !== "gate" && (
+          {/* Every non-gate kind is a polygon now (#278), so the only action is closing the ring. */}
+          {isPolygonKind(draft.kind) && (
             <Button size="sm" disabled={!canFinish} onClick={onFinishDraw}>
-              {draft.kind === "ramp" ? "Close shape" : "Finish"}
+              Close shape
             </Button>
           )}
         </div>

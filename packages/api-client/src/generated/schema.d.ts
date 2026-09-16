@@ -3131,13 +3131,17 @@ export interface components {
             ramp_areas: components["schemas"]["AirportRampAreaBody"][];
             taxiways: components["schemas"]["AirportTaxiwayBody"][];
         };
-        /** @description An airport taxiway centerline. `points` is an ordered array of `[lat, lon]`. */
+        /**
+         * @description An airport taxiway's pavement outline (#278). `rings` has the same shape and editor semantics as
+         *     [`AirportRampAreaBody::rings`]: an array of rings, each an array of `[lat, lon]`, the first being
+         *     the outer boundary.
+         */
         AirportTaxiwayBody: {
             editable: boolean;
             icao: string;
             id: string;
             name: string;
-            points: number[][];
+            rings: number[][][];
             /** @description `manual` | `osm` | `crc`. */
             source: string;
             /** Format: date-time */
@@ -5481,7 +5485,7 @@ export interface components {
         };
         UpsertAirportTaxiwayRequest: {
             name: string;
-            points: number[][];
+            rings: number[][][];
         };
         UpsertDiscordConfigRequest: {
             guilds: components["schemas"]["DiscordGuildConfigInput"][];

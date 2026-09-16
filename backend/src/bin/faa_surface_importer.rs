@@ -26,19 +26,15 @@
 //! ```json
 //! {
 //!   "KDCA": {
-//!     "taxiways": [{ "name": "M", "points": [[38.85, -77.04], ...] }],
+//!     "taxiways": [{ "name": "M", "rings": [[[38.85, -77.04], ...]] }],
 //!     "ramps": [{ "name": "GENERAL AVIATION PARKING", "kind": "apron", "rings": [[[38.85, -77.04], ...]] }]
 //!   }
 //! }
 //! ```
-//! - `taxiways`: one entry per `AM_Taxiway` polygon feature. **`points` is a closed pavement
-//!   outline, NOT a centerline** — FAA models taxiways as filled shapes, unlike OSM's line
-//!   geometry — held as the polygon's exterior ring verbatim as `[lat, lon]` pairs (first point ==
-//!   last point). `flow.airport_taxiway.points` / `AirportTaxiwayBody` are documented as a
-//!   *centerline* (the editor draws one, the map renders a `PathLayer`), so this is **not** a
-//!   semantic 1:1 copy: #231 must keep these rows distinguishable (`source = 'faa'`) so no consumer
-//!   treats an outline as a centerline. Interior rings (holes) are dropped — a live nationwide
-//!   sample of 500 features found none, so this is expected to be a no-op in practice.
+//! - `taxiways`: one entry per `AM_Taxiway` polygon feature. `rings` holds the pavement outline as a
+//!   single closed ring of `[lat, lon]` pairs (first point == last point) — polygon semantics, a
+//!   1:1 fit for `flow.airport_taxiway.rings` (#278). Interior rings (holes) are dropped — a live
+//!   nationwide sample of 500 features found none, so this is expected to be a no-op in practice.
 //! - `ramps`: one entry per `AM_Apron` polygon feature; `kind` is always `"apron"`, matching this
 //!   codebase's existing `flow.airport_ramp_area.kind` convention (the `"ramp"` kind stays
 //!   reserved for manual/CRC-imported rows). `rings` holds a single ring (exterior only, same
@@ -90,7 +86,7 @@ struct AirportSurface {
 #[derive(Debug, Serialize)]
 struct TaxiwayRow {
     name: String,
-    points: Vec<[f64; 2]>,
+    rings: Vec<Vec<[f64; 2]>>,
 }
 
 #[derive(Debug, Serialize)]
@@ -282,13 +278,13 @@ fn map_taxiways(
         if ring_count(&f.geometry) > 1 {
             stats.multi_ring_seen += 1;
         }
-        let Some(points) = exterior_ring_lat_lon(&f.geometry) else {
+        let Some(ring) = exterior_ring_lat_lon(&f.geometry) else {
             stats.skipped_no_geometry += 1;
             continue;
         };
         by_icao.entry(icao).or_default().push(TaxiwayRow {
             name: feature_name(f.properties.designator.as_deref(), f.properties.object_id),
-            points,
+            rings: vec![ring],
         });
     }
 
@@ -551,8 +547,8 @@ mod tests {
         let kdca = &by_icao["KDCA"][0];
         assert_eq!(kdca.name, "M");
         assert_eq!(
-            kdca.points,
-            vec![[38.85, -77.04], [38.851, -77.041], [38.85, -77.04]]
+            kdca.rings,
+            vec![vec![[38.85, -77.04], [38.851, -77.041], [38.85, -77.04]]]
         );
 
         // blank DESIGNATOR falls back to a stable FAA-<OBJECTID> name.
@@ -645,7 +641,8 @@ mod tests {
 
         assert_eq!(stats.multi_ring_seen, 1);
         // only the exterior ring's points are kept.
-        assert_eq!(by_icao["KDCA"][0].points.len(), 3);
+        assert_eq!(by_icao["KDCA"][0].rings.len(), 1);
+        assert_eq!(by_icao["KDCA"][0].rings[0].len(), 3);
     }
 
     #[test]
@@ -741,7 +738,10 @@ mod tests {
             serde_json::json!([[[-77.0416274123456, 38.8520919987654]]]),
         )];
         let (by_icao, _) = map_taxiways(&features, &HashMap::new());
-        assert_eq!(by_icao["KDCA"][0].points, vec![[38.852092, -77.0416274]]);
+        assert_eq!(
+            by_icao["KDCA"][0].rings,
+            vec![vec![[38.852092, -77.0416274]]]
+        );
     }
 
     #[test]
