@@ -63,7 +63,8 @@ export type DataTableProps<T extends RowData> = {
   rowCap?: number;
   /** Client-side page size once expanded (default 50). Ignored with `serverPagination`. */
   pageSize?: number;
-  /** The API pages; `data` is the current page. The row cap still applies within the page. */
+  /** The API pages; `data` is the current page, shown in the API's order (column sorting is off).
+   * The row cap still applies within the page. */
   serverPagination?: ServerPagination;
   selection?: Selection;
   onRowClick?: (row: T) => void;
@@ -113,7 +114,10 @@ export function DataTable<T extends RowData>({
   className,
 }: DataTableProps<T>) {
   const [ownSort, setOwnSort] = React.useState<SortingState>(initialSort ?? []);
-  const sorting = sort ?? ownSort;
+  // A server page is one slice of the API's ordering; sorting it locally would misrepresent the
+  // whole set, so server-paged tables keep the API's order.
+  const sortable = serverPagination == null;
+  const sorting = sortable ? (sort ?? ownSort) : [];
   const [expanded, setExpanded] = React.useState(false);
   const [page, setPage] = React.useState(1);
 
@@ -122,6 +126,7 @@ export function DataTable<T extends RowData>({
     data: data as T[],
     columns: columns as ColumnDef<typeof features, T>[],
     getRowId: getRowId ? (row: T, index: number) => getRowId(row, index) : undefined,
+    enableSorting: sortable,
     state: { sorting },
     onSortingChange: (updater) => {
       const next = typeof updater === "function" ? updater(sorting) : updater;

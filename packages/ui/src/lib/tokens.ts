@@ -15,17 +15,19 @@ export function readToken(name: string): string {
 }
 
 /**
- * Parse a token colour — `#rgb`, `#rrggbb`, `rgb(r g b / a)` or `rgb(r, g, b)` / `rgba(…)` — into
- * 0–255 channels with alpha 0–255 (deck.gl's convention). Unparseable input yields opaque grey so a
- * missing token is visible rather than invisible.
+ * Parse a token colour — `#rgb`, `#rgba`, `#rrggbb`, `#rrggbbaa`, `rgb(r g b / a)` or `rgb(r, g, b)` /
+ * `rgba(…)` — into 0–255 channels with alpha 0–255 (deck.gl's convention). The hex-with-alpha forms
+ * matter: the production CSS minifier rewrites `rgb(r g b / a)` tokens to them. Unparseable input
+ * yields opaque grey so a missing token is visible rather than invisible.
  */
 export function parseColor(value: string): Rgba {
   const v = value.trim();
-  const hex = /^#([0-9a-f]{3}|[0-9a-f]{6})$/i.exec(v);
+  const hex = /^#([0-9a-f]{3,4}|[0-9a-f]{6}|[0-9a-f]{8})$/i.exec(v);
   if (hex) {
-    const h = hex[1].length === 3 ? [...hex[1]].map((c) => c + c).join("") : hex[1];
-    const n = parseInt(h, 16);
-    return [(n >> 16) & 255, (n >> 8) & 255, n & 255, 255];
+    const digits = hex[1].length <= 4 ? [...hex[1]].map((c) => c + c).join("") : hex[1];
+    const channels = digits.match(/../g)!.map((pair) => parseInt(pair, 16));
+    const [r, g, b, a = 255] = channels;
+    return [r, g, b, a];
   }
   const fn = /^rgba?\(([^)]+)\)$/i.exec(v);
   if (fn) {

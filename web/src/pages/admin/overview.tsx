@@ -30,7 +30,7 @@ export function AdminOverview() {
   const { data: me } = useMe();
   const summary = useAdminSummary();
   const canAudit = hasPermission(me, "audit.logs.read");
-  const audit = useAuditLog(1, 10);
+  const audit = useAuditLog(1, 10, {}, { enabled: canAudit });
   const s = summary.data;
   const hasMetrics = !!s && (s.audit_events || s.new_users || s.jobs);
 

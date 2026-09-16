@@ -10,7 +10,12 @@ describe("pageWindow", () => {
   });
 
   it("caps a longer list and offers expand", () => {
-    expect(pageWindow(120, opts)).toMatchObject({ start: 0, end: 10, canExpand: true, pageCount: 1 });
+    expect(pageWindow(120, opts)).toEqual({ start: 0, end: 10, canExpand: true, canCollapse: false, pageCount: 1, page: 1 });
+  });
+
+  it("offers no Show-all when the list is exactly the cap", () => {
+    expect(pageWindow(10, opts)).toEqual({ start: 0, end: 10, canExpand: false, canCollapse: false, pageCount: 1, page: 1 });
+    expect(pageWindow(11, opts)).toMatchObject({ end: 10, canExpand: true });
   });
 
   it("paginates once expanded, and offers collapse", () => {
@@ -30,6 +35,11 @@ describe("pageWindow", () => {
     expect(pageWindow(30, { ...opts, rowCap: 5, expanded: true, page: 9, pageSize: 10 })).toMatchObject({
       page: 3, start: 20, end: 30,
     });
+  });
+
+  it("clamps a page below 1 to the first page", () => {
+    expect(pageWindow(30, { ...opts, rowCap: Infinity, page: 0, pageSize: 10 })).toMatchObject({ page: 1, start: 0, end: 10 });
+    expect(pageWindow(30, { ...opts, rowCap: Infinity, page: -2, pageSize: 10 })).toMatchObject({ page: 1, start: 0, end: 10 });
   });
 
   it("handles an empty list", () => {

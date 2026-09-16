@@ -183,3 +183,14 @@ export function itemForPath(pathname: string): { area: NavArea; group: NavGroup;
   }
   return best;
 }
+
+/**
+ * Whether `me` may open an Admin-area page: they can use some Admin link, and — when the path
+ * belongs to a nav item (itself or a page below it) — that item's permission. Pages below a group
+ * but not an item (a flight) keep their own checks.
+ */
+export function canOpenPath(me: Me | null | undefined, pathname: string): boolean {
+  if (!canSeeAdmin(me)) return false;
+  const hit = itemForPath(pathname);
+  return hit ? canSeeItem(me, hit.item) : true;
+}

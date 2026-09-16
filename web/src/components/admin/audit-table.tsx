@@ -69,7 +69,7 @@ const COLUMNS: DataColumn<AuditLogEntry>[] = [
   },
 ];
 
-/** Audit-log entries. Sorting reorders the loaded page; the API pages newest-first. */
+/** Audit-log entries, newest first. */
 export function AuditTable({
   items,
   isLoading,

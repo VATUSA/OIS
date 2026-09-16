@@ -6,12 +6,13 @@ import {ois} from "./api";
 
 export type AuditFilters = { q?: string; from?: string; to?: string };
 
-export function useAuditLog(page = 1, pageSize = 50, filters: AuditFilters = {}) {
+export function useAuditLog(page = 1, pageSize = 50, filters: AuditFilters = {}, { enabled = true } = {}) {
   const q = filters.q?.trim() || undefined;
   const from = filters.from || undefined;
   const to = filters.to || undefined;
   return useQuery({
     queryKey: ["audit", page, pageSize, q, from, to],
+    enabled,
     queryFn: async () => {
       const { data, error } = await ois.GET("/api/v1/admin/audit", {
         params: { query: { page, page_size: pageSize, q, from, to } },

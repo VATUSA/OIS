@@ -1,7 +1,18 @@
 import {describe, expect, it} from "vitest";
 
 import type {Me} from "./auth";
-import {AREAS, areaById, areaForPath, canSeeAdmin, canSeeArea, groupForPath, itemForPath, visibleGroups} from "./nav";
+import {
+  AREAS,
+  areaById,
+  areaForPath,
+  canOpenPath,
+  canSeeAdmin,
+  canSeeArea,
+  canSeeItem,
+  groupForPath,
+  itemForPath,
+  visibleGroups,
+} from "./nav";
 
 function me(permissions: Record<string, unknown>, server_admin = false): Me {
   return {
@@ -16,10 +27,79 @@ function me(permissions: Record<string, unknown>, server_admin = false): Me {
   } as Me;
 }
 
+/** A permission tree holding exactly `names` (dotted `segments.action`). */
+function holding(...names: string[]): Me {
+  const tree: Record<string, unknown> = {};
+  for (const name of names) {
+    const parts = name.split(".");
+    const action = parts.pop()!;
+    let node = tree;
+    for (const [i, seg] of parts.entries()) {
+      if (i === parts.length - 1) node[seg] = [...((node[seg] as string[]) ?? []), action];
+      else node = (node[seg] ??= {}) as Record<string, unknown>;
+    }
+  }
+  return me(tree);
+}
+
+/**
+ * Every nav link and the permission(s) its page's API requires, written out independently of
+ * `AREAS` (the backend `RequirePermission` markers are the source). `[]` = public.
+ */
+const REQUIRED: Record<string, readonly string[]> = {
+  "/advisories": [],
+  "/advisories/fcas": [],
+  "/facility-map": [],
+  "/pilot": [],
+  "/ops/airport": ["tmu.program.read"],
+  "/ops/tmu": ["tmu.program.read", "tmu.tmi.read", "flow.fca.read", "flow.runway.read"],
+  "/ops/my": ["tmu.program.read"],
+  "/ops/fca": ["flow.fca.read"],
+  "/ops/idst": ["flow.fca.read"],
+  "/ops/runway": ["flow.runway.read"],
+  "/ops/aadc": ["tmu.program.read"],
+  "/admin/planning/events": ["events.plan.read"],
+  "/admin/planning/airport-configs": ["events.plan.read"],
+  "/admin/planning/facility-documents": ["facilities.docs.read"],
+  "/admin/planning/airport-surface": ["events.plan.read"],
+  "/admin/planning/aircraft-profiles": ["flow.aircraft_profiles.read"],
+  "/admin/historical": ["stats.data.read"],
+  "/admin/historical/dashboard": ["stats.data.read"],
+  "/admin/historical/replay": ["stats.data.read"],
+  "/admin/historical/delays": ["stats.data.read"],
+  "/admin/historical/taxi": ["stats.data.read"],
+  "/admin/access": ["access.users.read"],
+  "/admin/audit": ["audit.logs.read"],
+  "/admin/jobs": ["system.jobs.read"],
+  "/admin/api-keys": ["api_keys.key.read"],
+  "/admin/discord": ["discord.config.read"],
+};
+
+const ALL_REQUIRED = [...new Set(Object.values(REQUIRED).flat())];
+const ITEMS = AREAS.flatMap((a) => a.groups.flatMap((g) => g.items));
+
 const labels = (u: Me | null, id: "advisories" | "operations" | "admin") =>
   visibleGroups(u, areaById(id)).flatMap((g) => g.items.map((i) => i.label));
 
 describe("nav gating", () => {
+  it("declares a required permission for every nav link, and no stale ones", () => {
+    expect(ITEMS.map((i) => i.to).sort()).toEqual(Object.keys(REQUIRED).sort());
+  });
+
+  for (const [to, required] of Object.entries(REQUIRED)) {
+    it(`${to} is shown exactly to holders of ${required.join(" | ") || "nothing (public)"}`, () => {
+      const item = ITEMS.find((i) => i.to === to)!;
+      if (required.length === 0) {
+        expect(canSeeItem(null, item)).toBe(true);
+        return;
+      }
+      expect(canSeeItem(null, item)).toBe(false);
+      // Every other link's permission, but none of this one's.
+      expect(canSeeItem(holding(...ALL_REQUIRED.filter((p) => !required.includes(p))), item)).toBe(false);
+      for (const permission of required) expect(canSeeItem(holding(permission), item)).toBe(true);
+    });
+  }
+
   it("shows anonymous users only the public Advisories area", () => {
     expect(labels(null, "advisories")).toEqual(["Advisories", "FCAs", "Facility Map", "Pilot"]);
     expect(canSeeArea(null, areaById("operations"))).toBe(false);
@@ -58,6 +138,28 @@ describe("nav gating", () => {
       const all = area.groups.flatMap((g) => g.items).length;
       expect(visibleGroups(admin, area).flatMap((g) => g.items)).toHaveLength(all);
     }
+  });
+});
+
+describe("canOpenPath", () => {
+  it("opens an admin page only to holders of that page's permission", () => {
+    const planner = holding("events.plan.read");
+    expect(canOpenPath(planner, "/admin/planning/events/123")).toBe(true);
+    expect(canOpenPath(planner, "/admin")).toBe(true);
+    for (const page of ["/admin/access", "/admin/audit", "/admin/jobs", "/admin/api-keys", "/admin/discord"]) {
+      expect(canOpenPath(planner, page)).toBe(false);
+    }
+    expect(canOpenPath(holding("audit.logs.read"), "/admin/audit")).toBe(true);
+  });
+
+  it("keeps the Admin page closed to users with no Admin-area link", () => {
+    const none = holding("tmu.program.read");
+    expect(canOpenPath(none, "/admin")).toBe(false);
+    expect(canOpenPath(null, "/admin/historical/flights/abc")).toBe(false);
+  });
+
+  it("defers pages below a group but not a nav item to their own checks", () => {
+    expect(canOpenPath(holding("events.plan.read"), "/admin/historical/flights/abc")).toBe(true);
   });
 });
 

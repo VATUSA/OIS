@@ -1,4 +1,4 @@
-import {useMemo, useState} from "react";
+import {useCallback, useMemo, useState} from "react";
 import {
   Button,
   Card,
@@ -31,6 +31,8 @@ import {
   useMyKeys,
   useRotateKey,
   useSetKeyPermissions,
+  withoutReveal,
+  withReveal,
 } from "@/lib/api-keys";
 import {
   buildPermissionInputs,
@@ -257,11 +259,14 @@ function CreateForm({ onCreated, onCancel }: { onCreated: (t: ApiKeyToken) => vo
 export function ApiKeysPage() {
   const { data: me, isLoading } = useMe();
   const keys = useMyKeys();
-  const rotate = useRotateKey().mutate;
+  // `mutateAsync`, not `mutate`: a per-call `onSuccess` fires only for the latest `mutate`, which would
+  // drop the token of an earlier rotation still in flight.
+  const rotate = useRotateKey().mutateAsync;
   const disable = useDisableKey().mutate;
   const del = useDeleteKey().mutate;
   const [creating, setCreating] = useState(false);
-  const [revealed, setRevealed] = useState<ApiKeyToken | null>(null);
+  const [reveals, setReveals] = useState<ApiKeyToken[]>([]);
+  const reveal = useCallback((t: ApiKeyToken) => setReveals((list) => withReveal(list, t)), []);
   const [activityFor, setActivityFor] = useState<ApiKey | null>(null);
   const [editing, setEditing] = useState<ApiKey | null>(null);
   const canCreate = hasPermission(me, "api_keys.key.create");
@@ -366,7 +371,7 @@ export function ApiKeysPage() {
                   size="sm"
                   variant="outline"
                   warn="Rotate the secret? The current token stops working."
-                  onConfirm={() => rotate(k.id, { onSuccess: (t) => setRevealed(t) })}
+                  onConfirm={() => rotate(k.id).then(reveal, () => {})}
                 >
                   Rotate
                 </ConfirmButton>
@@ -394,7 +399,7 @@ export function ApiKeysPage() {
         },
       },
     ],
-    [rotate, disable, del],
+    [rotate, reveal, disable, del],
   );
 
   if (isLoading) return <QueryState isLoading />;
@@ -411,12 +416,14 @@ export function ApiKeysPage() {
 
   return (
     <div className="flex flex-col gap-4">
-      {revealed && <TokenReveal token={revealed} onDismiss={() => setRevealed(null)} />}
+      {reveals.map((t) => (
+        <TokenReveal key={t.key.id} token={t} onDismiss={() => setReveals((list) => withoutReveal(list, t.key.id))} />
+      ))}
 
       {creating && (
         <CreateForm
           onCreated={(t) => {
-            setRevealed(t);
+            reveal(t);
             setCreating(false);
           }}
           onCancel={() => setCreating(false)}
