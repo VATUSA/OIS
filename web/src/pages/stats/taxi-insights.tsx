@@ -1,7 +1,20 @@
 import {useEffect, useState} from "react";
-import {Badge, Button, Card, CardContent, Input, Switch} from "@ois/ui";
+import {
+  Button,
+  DataTable,
+  type DataColumn,
+  EmptyState,
+  FilterBar,
+  Input,
+  SegmentedControl,
+  Select,
+  StatusPill,
+  Switch,
+} from "@ois/ui";
+import {Clock, DoorOpen, Lock, Plane, PlaneTakeoff, Timer} from "lucide-react";
 
-import {Pagination} from "@/components/pagination";
+import {ZuluDateTime} from "@/components/zulu-datetime";
+import {usePageHeader} from "@/components/shell/page-meta";
 import {useMe} from "@/lib/auth";
 import {hasPermission} from "@/lib/permissions";
 import {
@@ -15,9 +28,6 @@ const PAGE_SIZE = 50;
 
 const normIcao = (s: string) => s.replace(/[^a-zA-Z0-9]/g, "").toUpperCase().slice(0, 4);
 
-const selectClass =
-  "h-9 rounded-md border border-input bg-background px-2 text-sm outline-none focus-visible:ring-2 focus-visible:ring-ring";
-
 const TIERS = [
   { value: "", label: "Any tier" },
   { value: "gate_type_runway", label: "Gate + type + runway" },
@@ -28,6 +38,11 @@ const TIERS = [
   // hardcoded duration here would be wrong for the others.
   { value: "default", label: "Default" },
 ];
+
+const TAB_OPTIONS = [
+  { value: "observations", label: "Observations" },
+  { value: "estimates", label: "Estimates" },
+] as const;
 
 /** Seconds → "Mm Ss", or "—" when unknown. Rounds to the nearest whole second first so a
  * fractional remainder (e.g. 299.5) can't round up to "60s" instead of carrying into the minute. */
@@ -43,6 +58,107 @@ function tierLabel(tier: string): string {
   return TIERS.find((t) => t.value === tier)?.label ?? tier;
 }
 
+type Observation = NonNullable<ReturnType<typeof useTaxiObservations>["data"]>["items"][number];
+type Estimate = NonNullable<ReturnType<typeof useTaxiEstimates>["data"]>["items"][number];
+
+const dash = (v: string | null | undefined) => v ?? "—";
+
+const OBSERVATION_COLUMNS: DataColumn<Observation>[] = [
+  {
+    accessorKey: "observed_at",
+    header: "Time",
+    icon: Clock,
+    mono: true,
+    cell: (c) => <span className="whitespace-nowrap text-ink-2">{formatZuluFull(c.getValue<string>())}</span>,
+  },
+  {
+    accessorKey: "airport",
+    header: "Airport",
+    icon: Plane,
+    mono: true,
+    cell: (c) => <span className="font-semibold">{c.getValue<string>()}</span>,
+  },
+  { id: "gate", accessorFn: (o) => dash(o.gate_id), header: "Gate", icon: DoorOpen, mono: true },
+  { id: "aircraft", accessorFn: (o) => dash(o.aircraft), header: "Aircraft", mono: true },
+  { id: "runway", accessorFn: (o) => dash(o.runway), header: "Runway", icon: PlaneTakeoff, mono: true },
+  {
+    accessorKey: "pushback_sec",
+    header: "Pushback",
+    icon: Timer,
+    mono: true,
+    align: "right",
+    cell: (c) => fmtDur(c.getValue<number | null>()),
+  },
+  {
+    accessorKey: "startup_sec",
+    header: "Start-up",
+    mono: true,
+    align: "right",
+    cell: (c) => fmtDur(c.getValue<number | null>()),
+  },
+  {
+    accessorKey: "taxi_sec",
+    header: "Taxi",
+    mono: true,
+    align: "right",
+    cell: (c) => fmtDur(c.getValue<number | null>()),
+  },
+  {
+    accessorKey: "is_outlier",
+    header: "Outlier",
+    cell: (c) => (c.getValue<boolean>() ? <StatusPill tone="bad">outlier</StatusPill> : null),
+  },
+];
+
+/** A learned estimate: duration, the tier it fell back to, and its sample count. */
+function EstimateCell({ sec, tier, n }: { sec: number | null | undefined; tier: string; n: number }) {
+  return (
+    <div className="flex items-center gap-1.5 whitespace-nowrap">
+      <span className="font-mono">{fmtDur(sec)}</span>
+      <StatusPill tone="neutral">{tierLabel(tier)}</StatusPill>
+      <span className="font-mono text-xs text-ink-3">n={n}</span>
+    </div>
+  );
+}
+
+const ESTIMATE_COLUMNS: DataColumn<Estimate>[] = [
+  {
+    accessorKey: "airport",
+    header: "Airport",
+    icon: Plane,
+    mono: true,
+    cell: (c) => <span className="font-semibold">{c.getValue<string>()}</span>,
+  },
+  { id: "gate", accessorFn: (e) => dash(e.gate_id), header: "Gate", icon: DoorOpen, mono: true },
+  { id: "aircraft", accessorFn: (e) => dash(e.aircraft), header: "Aircraft", mono: true },
+  { id: "runway", accessorFn: (e) => dash(e.runway), header: "Runway", icon: PlaneTakeoff, mono: true },
+  {
+    accessorKey: "pushback_sec",
+    header: "Pushback",
+    icon: Timer,
+    cell: (c) => {
+      const e = c.row.original;
+      return <EstimateCell sec={e.pushback_sec} tier={e.pushback_tier} n={e.pushback_sample_count} />;
+    },
+  },
+  {
+    accessorKey: "startup_sec",
+    header: "Start-up",
+    cell: (c) => {
+      const e = c.row.original;
+      return <EstimateCell sec={e.startup_sec} tier={e.startup_tier} n={e.startup_sample_count} />;
+    },
+  },
+  {
+    accessorKey: "taxi_sec",
+    header: "Taxi",
+    cell: (c) => {
+      const e = c.row.original;
+      return <EstimateCell sec={e.taxi_sec} tier={e.taxi_tier} n={e.taxi_sample_count} />;
+    },
+  },
+];
+
 export function TaxiInsightsPage() {
   const { data: me } = useMe();
   const canRead = hasPermission(me, "stats.data.read");
@@ -54,12 +170,16 @@ export function TaxiInsightsPage() {
   const [gateDraft, setGateDraft] = useState("");
   const [aircraftDraft, setAircraftDraft] = useState("");
   const [runwayDraft, setRunwayDraft] = useState("");
-  const [fromDraft, setFromDraft] = useState("");
-  const [toDraft, setToDraft] = useState("");
+  const [fromDraft, setFromDraft] = useState<number | null>(null);
+  const [toDraft, setToDraft] = useState<number | null>(null);
   const [includeOutliers, setIncludeOutliers] = useState(true);
   const [fallbackTier, setFallbackTier] = useState("");
 
   const [filters, setFilters] = useState<TaxiInsightsFilters>({});
+
+  usePageHeader({
+    subtitle: "Raw departure timing observations and their learned per-gate/type/runway estimates.",
+  });
 
   useEffect(() => {
     setPage(1);
@@ -71,9 +191,8 @@ export function TaxiInsightsPage() {
       gateId: gateDraft.trim() || undefined,
       aircraft: aircraftDraft.trim().toUpperCase() || undefined,
       runway: runwayDraft.trim().toUpperCase() || undefined,
-      // datetime-local yields "YYYY-MM-DDTHH:mm"; append seconds so it parses as RFC 3339.
-      from: fromDraft ? `${fromDraft}:00Z` : undefined,
-      to: toDraft ? `${toDraft}:00Z` : undefined,
+      from: fromDraft != null ? new Date(fromDraft * 1000).toISOString() : undefined,
+      to: toDraft != null ? new Date(toDraft * 1000).toISOString() : undefined,
       includeOutliers,
     });
   const clear = () => {
@@ -81,8 +200,8 @@ export function TaxiInsightsPage() {
     setGateDraft("");
     setAircraftDraft("");
     setRunwayDraft("");
-    setFromDraft("");
-    setToDraft("");
+    setFromDraft(null);
+    setToDraft(null);
     setIncludeOutliers(true);
     setFallbackTier("");
     setFilters({});
@@ -101,270 +220,126 @@ export function TaxiInsightsPage() {
   const estimates = useTaxiEstimates(page, PAGE_SIZE, { ...filters, fallbackTier });
 
   if (!canRead) {
-    return (
-      <Card>
-        <CardContent className="py-16 text-center text-sm text-muted-foreground">
-          You don&apos;t have access to network statistics.
-        </CardContent>
-      </Card>
-    );
+    return <EmptyState icon={Lock}>You don&apos;t have access to network statistics.</EmptyState>;
   }
 
   return (
-    <div className="flex flex-col gap-6">
-      <div className="flex flex-col gap-1">
-        <h1 className="text-2xl font-semibold tracking-tight">Taxi &amp; Pushback Insights</h1>
-        <p className="text-muted-foreground">
-          Raw departure timing observations and their learned per-gate/type/runway estimates.
-        </p>
-      </div>
-
-      <Card>
-        <CardContent className="flex flex-col gap-4 pt-6">
-          <div className="flex overflow-hidden rounded-md border">
-            {(["observations", "estimates"] as const).map((t) => (
-              <button
-                key={t}
-                type="button"
-                onClick={() => setTab(t)}
-                className={
-                  "px-3 py-1.5 text-sm font-medium transition-colors " +
-                  (tab === t ? "bg-primary text-primary-foreground" : "hover:bg-accent/40")
-                }
-              >
-                {t === "observations" ? "Observations" : "Estimates"}
-              </button>
-            ))}
+    <div className="flex flex-col gap-4">
+      <form
+        onSubmit={(e) => {
+          e.preventDefault();
+          apply();
+        }}
+      >
+        <FilterBar>
+          <SegmentedControl aria-label="View" value={tab} onChange={setTab} options={TAB_OPTIONS} />
+          <Input
+            aria-label="Airport"
+            placeholder={tab === "estimates" ? "Airport (required)" : "Airport"}
+            value={airportDraft}
+            onChange={(e) => setAirportDraft(e.target.value)}
+            className={`h-8 font-mono uppercase placeholder:normal-case ${tab === "estimates" ? "w-40" : "w-24"}`}
+          />
+          <Input
+            aria-label="Gate"
+            placeholder="Gate id"
+            value={gateDraft}
+            onChange={(e) => setGateDraft(e.target.value)}
+            className="h-8 w-24 font-mono"
+          />
+          <Input
+            aria-label="Aircraft"
+            placeholder="Aircraft"
+            value={aircraftDraft}
+            onChange={(e) => setAircraftDraft(e.target.value)}
+            className="h-8 w-24 font-mono uppercase placeholder:normal-case"
+          />
+          <Input
+            aria-label="Runway"
+            placeholder="Runway"
+            value={runwayDraft}
+            onChange={(e) => setRunwayDraft(e.target.value)}
+            className="h-8 w-20 font-mono uppercase placeholder:normal-case"
+          />
+          <div className="flex items-center gap-1.5 text-xs text-ink-2">
+            From
+            <ZuluDateTime label="From" value={fromDraft} onChange={setFromDraft} onClear={() => setFromDraft(null)} />
           </div>
-
-          <form
-            className="flex flex-wrap items-end gap-3"
-            onSubmit={(e) => {
-              e.preventDefault();
-              apply();
-            }}
-          >
-            <label className="flex flex-col gap-1 text-xs font-medium text-muted-foreground">
-              Airport {tab === "estimates" && "(required)"}
-              <Input
-                placeholder="KJFK"
-                value={airportDraft}
-                onChange={(e) => setAirportDraft(e.target.value)}
-                className="w-24"
-              />
-            </label>
-            <label className="flex flex-col gap-1 text-xs font-medium text-muted-foreground">
-              Gate
-              <Input
-                placeholder="Gate id"
-                value={gateDraft}
-                onChange={(e) => setGateDraft(e.target.value)}
-                className="w-28"
-              />
-            </label>
-            <label className="flex flex-col gap-1 text-xs font-medium text-muted-foreground">
-              Aircraft
-              <Input
-                placeholder="B738"
-                value={aircraftDraft}
-                onChange={(e) => setAircraftDraft(e.target.value)}
-                className="w-24"
-              />
-            </label>
-            <label className="flex flex-col gap-1 text-xs font-medium text-muted-foreground">
-              Runway
-              <Input
-                placeholder="27L"
-                value={runwayDraft}
-                onChange={(e) => setRunwayDraft(e.target.value)}
-                className="w-20"
-              />
-            </label>
-            <label className="flex flex-col gap-1 text-xs font-medium text-muted-foreground">
-              From
-              <Input
-                type="datetime-local"
-                value={fromDraft}
-                onChange={(e) => setFromDraft(e.target.value)}
-              />
-            </label>
-            <label className="flex flex-col gap-1 text-xs font-medium text-muted-foreground">
-              To
-              <Input
-                type="datetime-local"
-                value={toDraft}
-                onChange={(e) => setToDraft(e.target.value)}
-              />
-            </label>
-            {tab === "estimates" && (
-              <label className="flex flex-col gap-1 text-xs font-medium text-muted-foreground">
-                Fallback tier
-                <select
-                  value={fallbackTier}
-                  onChange={(e) => setFallbackTier(e.target.value)}
-                  className={selectClass}
-                >
-                  {TIERS.map((t) => (
-                    <option key={t.value} value={t.value}>
-                      {t.label}
-                    </option>
-                  ))}
-                </select>
-              </label>
-            )}
-            <label className="flex items-center gap-1.5 pb-1.5 text-xs text-muted-foreground">
-              <Switch checked={includeOutliers} onCheckedChange={setIncludeOutliers} className="scale-[0.68]" />
-              Include outliers
-            </label>
-            <Button type="submit" size="sm">
-              Apply
-            </Button>
-            {hasFilters && (
-              <Button type="button" size="sm" variant="ghost" onClick={clear}>
-                Clear
-              </Button>
-            )}
-          </form>
-
-          {tab === "observations" ? (
-            observations.data ? (
-              <>
-                <div className="overflow-x-auto">
-                  <table className="w-full text-sm">
-                    <thead>
-                      <tr className="border-b text-left text-xs uppercase tracking-wide text-muted-foreground">
-                        <th className="py-2 pr-3">Time</th>
-                        <th className="py-2 pr-3">Airport</th>
-                        <th className="py-2 pr-3">Gate</th>
-                        <th className="py-2 pr-3">Aircraft</th>
-                        <th className="py-2 pr-3">Runway</th>
-                        <th className="py-2 pr-3">Pushback</th>
-                        <th className="py-2 pr-3">Start-up</th>
-                        <th className="py-2 pr-3">Taxi</th>
-                        <th className="py-2 pr-3">Outlier</th>
-                      </tr>
-                    </thead>
-                    <tbody className="divide-y divide-border/60">
-                      {observations.data.items.map((o) => (
-                        <tr key={o.id}>
-                          <td className="py-2 pr-3 whitespace-nowrap">{formatZuluFull(o.observed_at)}</td>
-                          <td className="py-2 pr-3 font-mono font-semibold">{o.airport}</td>
-                          <td className="py-2 pr-3 font-mono text-xs">{o.gate_id ?? "—"}</td>
-                          <td className="py-2 pr-3">{o.aircraft ?? "—"}</td>
-                          <td className="py-2 pr-3">{o.runway ?? "—"}</td>
-                          <td className="py-2 pr-3">{fmtDur(o.pushback_sec)}</td>
-                          <td className="py-2 pr-3">{fmtDur(o.startup_sec)}</td>
-                          <td className="py-2 pr-3">{fmtDur(o.taxi_sec)}</td>
-                          <td className="py-2 pr-3">
-                            {o.is_outlier && <Badge variant="destructive">outlier</Badge>}
-                          </td>
-                        </tr>
-                      ))}
-                      {observations.data.items.length === 0 && (
-                        <tr>
-                          <td colSpan={9} className="py-6 text-center text-muted-foreground">
-                            No observations match these filters.
-                          </td>
-                        </tr>
-                      )}
-                    </tbody>
-                  </table>
-                </div>
-                <Pagination
-                  page={observations.data.page}
-                  pageSize={observations.data.page_size}
-                  total={observations.data.total}
-                  onPageChange={setPage}
-                />
-              </>
-            ) : observations.isError ? (
-              <p className="py-6 text-center text-sm text-muted-foreground">
-                Couldn&apos;t load taxi observations.
-              </p>
-            ) : (
-              <p className="py-6 text-center text-sm text-muted-foreground">Loading…</p>
-            )
-          ) : !filters.airport ? (
-            <p className="py-6 text-center text-sm text-muted-foreground">
-              Enter an airport above — estimates are computed per airport.
-            </p>
-          ) : estimates.data ? (
-            <>
-              <div className="overflow-x-auto">
-                <table className="w-full text-sm">
-                  <thead>
-                    <tr className="border-b text-left text-xs uppercase tracking-wide text-muted-foreground">
-                      <th className="py-2 pr-3">Airport</th>
-                      <th className="py-2 pr-3">Gate</th>
-                      <th className="py-2 pr-3">Aircraft</th>
-                      <th className="py-2 pr-3">Runway</th>
-                      <th className="py-2 pr-3">Pushback</th>
-                      <th className="py-2 pr-3">Start-up</th>
-                      <th className="py-2 pr-3">Taxi</th>
-                    </tr>
-                  </thead>
-                  <tbody className="divide-y divide-border/60">
-                    {estimates.data.items.map((e, i) => (
-                      <tr key={i}>
-                        <td className="py-2 pr-3 font-mono font-semibold">{e.airport}</td>
-                        <td className="py-2 pr-3 font-mono text-xs">{e.gate_id ?? "—"}</td>
-                        <td className="py-2 pr-3">{e.aircraft ?? "—"}</td>
-                        <td className="py-2 pr-3">{e.runway ?? "—"}</td>
-                        <td className="py-2 pr-3">
-                          <div className="flex items-center gap-1.5">
-                            {fmtDur(e.pushback_sec)}
-                            <Badge variant="secondary">{tierLabel(e.pushback_tier)}</Badge>
-                            <span className="text-xs text-muted-foreground">
-                              n={e.pushback_sample_count}
-                            </span>
-                          </div>
-                        </td>
-                        <td className="py-2 pr-3">
-                          <div className="flex items-center gap-1.5">
-                            {fmtDur(e.startup_sec)}
-                            <Badge variant="secondary">{tierLabel(e.startup_tier)}</Badge>
-                            <span className="text-xs text-muted-foreground">
-                              n={e.startup_sample_count}
-                            </span>
-                          </div>
-                        </td>
-                        <td className="py-2 pr-3">
-                          <div className="flex items-center gap-1.5">
-                            {fmtDur(e.taxi_sec)}
-                            <Badge variant="secondary">{tierLabel(e.taxi_tier)}</Badge>
-                            <span className="text-xs text-muted-foreground">
-                              n={e.taxi_sample_count}
-                            </span>
-                          </div>
-                        </td>
-                      </tr>
-                    ))}
-                    {estimates.data.items.length === 0 && (
-                      <tr>
-                        <td colSpan={7} className="py-6 text-center text-muted-foreground">
-                          No estimates match these filters.
-                        </td>
-                      </tr>
-                    )}
-                  </tbody>
-                </table>
-              </div>
-              <Pagination
-                page={estimates.data.page}
-                pageSize={estimates.data.page_size}
-                total={estimates.data.total}
-                onPageChange={setPage}
-              />
-            </>
-          ) : estimates.isError ? (
-            <p className="py-6 text-center text-sm text-muted-foreground">
-              Couldn&apos;t load taxi estimates.
-            </p>
-          ) : (
-            <p className="py-6 text-center text-sm text-muted-foreground">Loading…</p>
+          <div className="flex items-center gap-1.5 text-xs text-ink-2">
+            To
+            <ZuluDateTime label="To" value={toDraft} onChange={setToDraft} onClear={() => setToDraft(null)} />
+          </div>
+          {tab === "estimates" && (
+            <Select
+              size="sm"
+              aria-label="Fallback tier"
+              value={fallbackTier}
+              onChange={(e) => setFallbackTier(e.target.value)}
+            >
+              {TIERS.map((t) => (
+                <option key={t.value} value={t.value}>
+                  {t.label}
+                </option>
+              ))}
+            </Select>
           )}
-        </CardContent>
-      </Card>
+          <label className="flex items-center gap-2 text-xs text-ink-2">
+            <Switch checked={includeOutliers} onCheckedChange={setIncludeOutliers} />
+            Include outliers
+          </label>
+          <Button type="submit" size="sm">
+            Apply
+          </Button>
+          {hasFilters && (
+            <Button type="button" size="sm" variant="ghost" onClick={clear}>
+              Clear
+            </Button>
+          )}
+        </FilterBar>
+      </form>
+
+      {tab === "observations" ? (
+        <DataTable
+          label="Taxi observations"
+          columns={OBSERVATION_COLUMNS}
+          data={observations.data?.items ?? []}
+          getRowId={(o) => String(o.id)}
+          rowCap={PAGE_SIZE}
+          serverPagination={
+            observations.data && {
+              page: observations.data.page,
+              pageSize: observations.data.page_size,
+              total: observations.data.total,
+              onPageChange: setPage,
+            }
+          }
+          isLoading={!observations.data && !observations.isError}
+          isError={!observations.data && observations.isError}
+          onRetry={() => observations.refetch()}
+          empty="No observations match these filters."
+        />
+      ) : !filters.airport ? (
+        <EmptyState icon={Plane}>Enter an airport above — estimates are computed per airport.</EmptyState>
+      ) : (
+        <DataTable
+          label="Taxi estimates"
+          columns={ESTIMATE_COLUMNS}
+          data={estimates.data?.items ?? []}
+          rowCap={PAGE_SIZE}
+          serverPagination={
+            estimates.data && {
+              page: estimates.data.page,
+              pageSize: estimates.data.page_size,
+              total: estimates.data.total,
+              onPageChange: setPage,
+            }
+          }
+          isLoading={!estimates.data && !estimates.isError}
+          isError={!estimates.data && estimates.isError}
+          onRetry={() => estimates.refetch()}
+          empty="No estimates match these filters."
+        />
+      )}
     </div>
   );
 }

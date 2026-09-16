@@ -13,6 +13,17 @@ export interface ChangelogEntry {
  */
 export const CHANGELOG: ChangelogEntry[] = [
   {
+    id: "2026-09-16-console-redesign",
+    date: "2026-09-16",
+    title: "A redesigned OIS",
+    highlights: [
+      "OIS has a new look: a dark, focused operator console that's consistent across every page.",
+      "Navigation is simpler — Advisories and Operations live in the top bar, with Planning, Historical, and Admin tools gathered under a single Admin workspace.",
+      "You only see links to the pages you have access to.",
+      "Tables now load faster with a compact default view you can expand, and paging through long lists.",
+    ],
+  },
+  {
     id: "2026-09-14-whats-new",
     date: "2026-09-14",
     title: "What's new panel",

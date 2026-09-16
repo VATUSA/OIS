@@ -25,7 +25,7 @@ export function Footer() {
       <div className="mx-auto flex w-full max-w-7xl flex-col gap-4 px-4 py-6 text-sm text-muted-foreground sm:flex-row sm:items-center">
         <div className="flex items-center gap-2">
           <img src={vatusaLogo} alt="" className="size-4" />
-          <span className="font-medium text-foreground">OIS</span>
+          <span className="font-semibold text-foreground">OIS</span>
           <span className="hidden sm:inline">· VATUSA Events · Operational Information System</span>
         </div>
 

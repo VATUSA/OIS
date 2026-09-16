@@ -67,18 +67,18 @@ interface MapCanvasProps {
 function DefaultFallback() {
   return (
     <div className="flex h-full w-full flex-col items-center justify-center gap-3 px-6 py-16 text-center">
-      <TriangleAlert className="h-8 w-8 text-muted-foreground" />
+      <TriangleAlert className="size-8 text-ink-3" />
       <div className="text-lg font-semibold">Map can&apos;t be drawn here</div>
-      <p className="max-w-md text-sm text-muted-foreground">
+      <p className="max-w-md text-sm text-ink-2">
         This map needs WebGL, which this browser has disabled. On iPhone and iPad this is almost always{" "}
-        <span className="font-medium text-foreground">Lockdown Mode</span> — it turns WebGL off, so the
+        <span className="font-semibold text-ink">Lockdown Mode</span> — it turns WebGL off, so the
         map paints black.
       </p>
-      <p className="max-w-md text-sm text-muted-foreground">
+      <p className="max-w-md text-sm text-ink-2">
         To view it, turn Lockdown Mode off for this site: tap{" "}
-        <span className="font-medium text-foreground">ᴀA</span> in Safari&apos;s address bar →{" "}
-        <span className="font-medium text-foreground">Website Settings</span> →{" "}
-        <span className="font-medium text-foreground">Lockdown Mode → Off</span>, then reload.
+        <span className="font-semibold text-ink">ᴀA</span> in Safari&apos;s address bar →{" "}
+        <span className="font-semibold text-ink">Website Settings</span> →{" "}
+        <span className="font-semibold text-ink">Lockdown Mode → Off</span>, then reload.
       </p>
     </div>
   );

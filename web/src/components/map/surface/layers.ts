@@ -10,9 +10,9 @@ import type {
   AirportTaxiway,
 } from "@/lib/airport-surface";
 
-import {hexToRgb} from "../lib/colors";
+import {type MapPalette, readMapPalette} from "../lib/colors";
 import {toDeckPath, type LatLng} from "../lib/geo";
-import type {RGBA} from "../lib/types";
+import type {RGB, RGBA} from "../lib/types";
 
 export type SurfaceKind = "gate" | "ramp" | "taxiway" | "runway";
 
@@ -21,12 +21,13 @@ export interface SelectedSurfaceItem {
   id: string;
 }
 
-export const SURFACE_COLORS: Record<SurfaceKind, string> = {
-  gate: "#f59e0b",
-  taxiway: "#38bdf8",
-  ramp: "#a78bfa",
-  runway: "#94a3b8",
-};
+/** Each kind's colour, from the series / map tokens. */
+export function surfaceColor(kind: SurfaceKind, palette: MapPalette = readMapPalette()): RGB {
+  if (kind === "gate") return palette.series[2];
+  if (kind === "taxiway") return palette.series[0];
+  if (kind === "ramp") return palette.series[3];
+  return palette.muted;
+}
 
 /** Fewest vertices each shape needs before it can be finalized/saved. */
 export const MIN_SURFACE_POINTS: Record<SurfaceKind, number> = { gate: 1, taxiway: 3, ramp: 3, runway: 3 };
@@ -38,8 +39,13 @@ export const isPolygonKind = (kind: SurfaceKind) => kind !== "gate";
 const toDeckRings = (rings: number[][][]) => rings.map((ring) => ring.map(([lat, lon]) => [lon, lat]));
 
 /** A filled, geographic (so it scales with zoom) polygon layer — ramps, taxiways, runways share it. */
-function polygonLayer<T extends { rings: number[][][] }>(id: string, data: T[], kind: SurfaceKind): Layer {
-  const [r, g, b] = hexToRgb(SURFACE_COLORS[kind]);
+function polygonLayer<T extends { rings: number[][][] }>(
+  id: string,
+  data: T[],
+  kind: SurfaceKind,
+  palette: MapPalette,
+): Layer {
+  const [r, g, b] = surfaceColor(kind, palette);
   return new PolygonLayer<T>({
     id,
     data,
@@ -60,7 +66,11 @@ function polygonLayer<T extends { rings: number[][][] }>(id: string, data: T[], 
  * item matching `selected` (if any) is left out — it's rendered instead by the draft layers below,
  * so a being-edited shape doesn't show twice.
  */
-export function buildSurfaceLayers(surface: AirportSurface, selected: SelectedSurfaceItem | null): Layer[] {
+export function buildSurfaceLayers(
+  surface: AirportSurface,
+  selected: SelectedSurfaceItem | null,
+  palette: MapPalette = readMapPalette(),
+): Layer[] {
   const layers: Layer[] = [];
   const isSelected = (kind: SurfaceKind, id: string) => selected?.kind === kind && selected.id === id;
 
@@ -68,17 +78,17 @@ export function buildSurfaceLayers(surface: AirportSurface, selected: SelectedSu
   // and stays clickable. FAA taxiway polygons overlap runways at most real airports (KORD 71 of
   // them, KDFW 72) and cross aprons, so ramps go down first, then runways, then taxiways (#278/#279).
   const ramps = surface.ramp_areas.filter((r) => !isSelected("ramp", r.id));
-  if (ramps.length > 0) layers.push(polygonLayer<AirportRampArea>("surface-ramp-areas", ramps, "ramp"));
+  if (ramps.length > 0) layers.push(polygonLayer<AirportRampArea>("surface-ramp-areas", ramps, "ramp", palette));
 
   const runways = surface.runways.filter((r) => !isSelected("runway", r.id));
-  if (runways.length > 0) layers.push(polygonLayer<AirportRunway>("surface-runways", runways, "runway"));
+  if (runways.length > 0) layers.push(polygonLayer<AirportRunway>("surface-runways", runways, "runway", palette));
 
   const taxiways = surface.taxiways.filter((t) => !isSelected("taxiway", t.id));
-  if (taxiways.length > 0) layers.push(polygonLayer<AirportTaxiway>("surface-taxiways", taxiways, "taxiway"));
+  if (taxiways.length > 0) layers.push(polygonLayer<AirportTaxiway>("surface-taxiways", taxiways, "taxiway", palette));
 
   const gates = surface.gates.filter((g) => !isSelected("gate", g.id));
   if (gates.length > 0) {
-    const [r, g, b] = hexToRgb(SURFACE_COLORS.gate);
+    const [r, g, b] = surfaceColor("gate", palette);
     layers.push(
       new ScatterplotLayer<AirportGate>({
         id: "surface-gates",
@@ -87,7 +97,7 @@ export function buildSurfaceLayers(surface: AirportSurface, selected: SelectedSu
         getPosition: (d) => [d.lon, d.lat],
         getFillColor: [r, g, b, 230] as RGBA,
         stroked: true,
-        getLineColor: [255, 255, 255, 220] as RGBA,
+        getLineColor: [...palette.ink, 220] as RGBA,
         getLineWidth: 1,
         lineWidthUnits: "pixels",
         getRadius: 5,
@@ -106,8 +116,13 @@ export function buildSurfaceLayers(surface: AirportSurface, selected: SelectedSu
  * mirroring `layers/draft.ts`'s FCA draft rendering extended to three shape kinds. `points` never
  * carries a polygon's closing duplicate — the ring is closed visually here only.
  */
-export function buildSurfaceDraftLayers(kind: SurfaceKind, points: LatLng[], phase: "draw" | "edit"): Layer[] {
-  const [r, g, b] = hexToRgb(SURFACE_COLORS[kind]);
+export function buildSurfaceDraftLayers(
+  kind: SurfaceKind,
+  points: LatLng[],
+  phase: "draw" | "edit",
+  palette: MapPalette = readMapPalette(),
+): Layer[] {
+  const [r, g, b] = surfaceColor(kind, palette);
   const path = toDeckPath(points);
   const layers: Layer[] = [];
   const closedRing = isPolygonKind(kind) && phase === "edit" && path.length >= 3;
@@ -148,7 +163,7 @@ export function buildSurfaceDraftLayers(kind: SurfaceKind, points: LatLng[], pha
       data: path.map((pos) => ({ pos })),
       pickable: true,
       getPosition: (d) => d.pos,
-      getFillColor: kind === "gate" ? ([r, g, b, 255] as RGBA) : [255, 255, 255, 255],
+      getFillColor: kind === "gate" ? ([r, g, b, 255] as RGBA) : ([...palette.ink, 255] as RGBA),
       stroked: true,
       getLineColor: [r, g, b, 255] as RGBA,
       getLineWidth: 2,

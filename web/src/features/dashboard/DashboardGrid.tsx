@@ -84,7 +84,11 @@ export function DashboardGrid({
   }
 
   return (
-    <div ref={containerRef}>
+    <div
+      ref={containerRef}
+      // Token-styled drag placeholder and resize handles (the library CSS ships red / black ones).
+      className="[&_.react-grid-placeholder]:!rounded-md [&_.react-grid-placeholder]:!bg-brand [&_.react-resizable-handle]:after:!border-ink-3"
+    >
       {width > 0 && (
         <ResponsiveGridLayout
           width={width}

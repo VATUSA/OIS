@@ -8,8 +8,9 @@ import {
   DropdownMenuSeparator,
   DropdownMenuTrigger,
   usePrompt,
+  Modal,
 } from "@ois/ui";
-import {Plus, X} from "lucide-react";
+import {Plus} from "lucide-react";
 
 import {FacilityCombobox, type FacilityPick} from "@/components/facility-combobox";
 import {defaultChartConfig} from "./chart-widget";
@@ -138,7 +139,7 @@ export function AddWidgetMenu({ onAdd }: { onAdd: (widget: Widget) => void }) {
         {DATA_SOURCES.map((s) => (
           <DropdownMenuItem key={s.id} onSelect={() => void addTable(s.id, s.needsIcao)}>
             {s.label}
-            {s.needsIcao && <span className="ml-auto text-xs text-muted-foreground">airport</span>}
+            {s.needsIcao && <span className="ml-auto text-xs text-ink-3">airport</span>}
           </DropdownMenuItem>
         ))}
         <DropdownMenuSeparator />
@@ -146,30 +147,30 @@ export function AddWidgetMenu({ onAdd }: { onAdd: (widget: Widget) => void }) {
         {DATA_SOURCES.filter((s) => s.fields.some((f) => f.type === "number")).map((s) => (
           <DropdownMenuItem key={s.id} onSelect={() => void addChart(s.id, s.needsIcao)}>
             {s.label}
-            {s.needsIcao && <span className="ml-auto text-xs text-muted-foreground">airport</span>}
+            {s.needsIcao && <span className="ml-auto text-xs text-ink-3">airport</span>}
           </DropdownMenuItem>
         ))}
         <DropdownMenuItem onSelect={() => void addAadc()}>
           Arrival demand chart (AADC)
-          <span className="ml-auto text-xs text-muted-foreground">airport</span>
+          <span className="ml-auto text-xs text-ink-3">airport</span>
         </DropdownMenuItem>
         <DropdownMenuSeparator />
         <DropdownMenuLabel>Facilities (ARTCC / TRACON)</DropdownMenuLabel>
         {AIRPORT_SOURCES.map((s) => (
           <DropdownMenuItem key={`fac-t-${s.id}`} onSelect={() => setFacAction({ type: "table", source: s.id })}>
             {s.label}
-            <span className="ml-auto text-xs text-muted-foreground">table</span>
+            <span className="ml-auto text-xs text-ink-3">table</span>
           </DropdownMenuItem>
         ))}
         {AIRPORT_SOURCES.filter((s) => s.fields.some((f) => f.type === "number")).map((s) => (
           <DropdownMenuItem key={`fac-c-${s.id}`} onSelect={() => setFacAction({ type: "chart", source: s.id })}>
             {s.label} — compare
-            <span className="ml-auto text-xs text-muted-foreground">chart</span>
+            <span className="ml-auto text-xs text-ink-3">chart</span>
           </DropdownMenuItem>
         ))}
         <DropdownMenuItem onSelect={() => setFacAction({ type: "atc" })}>
           Online ATC positions
-          <span className="ml-auto text-xs text-muted-foreground">atc</span>
+          <span className="ml-auto text-xs text-ink-3">atc</span>
         </DropdownMenuItem>
         <DropdownMenuSeparator />
         <DropdownMenuLabel>Map</DropdownMenuLabel>
@@ -178,7 +179,7 @@ export function AddWidgetMenu({ onAdd }: { onAdd: (widget: Widget) => void }) {
         </DropdownMenuItem>
         <DropdownMenuItem onSelect={() => setFacAction({ type: "facility_map" })}>
           Facility map
-          <span className="ml-auto text-xs text-muted-foreground">ARTCC</span>
+          <span className="ml-auto text-xs text-ink-3">ARTCC</span>
         </DropdownMenuItem>
         <DropdownMenuSeparator />
         <DropdownMenuLabel>Layout</DropdownMenuLabel>
@@ -193,44 +194,27 @@ export function AddWidgetMenu({ onAdd }: { onAdd: (widget: Widget) => void }) {
           onSelect={() => onAdd({ id: newId(), kind: "divider", orientation: "horizontal" })}
         >
           Divider
-          <span className="ml-auto text-xs text-muted-foreground">horizontal</span>
+          <span className="ml-auto text-xs text-ink-3">horizontal</span>
         </DropdownMenuItem>
         <DropdownMenuItem
           onSelect={() => onAdd({ id: newId(), kind: "divider", orientation: "vertical" })}
         >
           Divider
-          <span className="ml-auto text-xs text-muted-foreground">vertical</span>
+          <span className="ml-auto text-xs text-ink-3">vertical</span>
         </DropdownMenuItem>
       </DropdownMenuContent>
     </DropdownMenu>
 
-    {facAction && (
-      <div
-        className="fixed inset-0 z-[900] flex items-start justify-center bg-black/40 pt-32"
-        onClick={() => setFacAction(null)}
-      >
-        <div
-          className="w-80 rounded-lg border bg-background p-4 shadow-2xl"
-          onClick={(e) => e.stopPropagation()}
-        >
-          <div className="mb-3 flex items-center justify-between">
-            <span className="text-sm font-semibold">Add for a facility</span>
-            <button
-              type="button"
-              aria-label="Cancel"
-              onClick={() => setFacAction(null)}
-              className="text-muted-foreground hover:text-foreground"
-            >
-              <X className="size-4" />
-            </button>
-          </div>
-          <FacilityCombobox autoFocus onSelect={onFacilitySelect} />
-          <p className="mt-2 text-xs text-muted-foreground">
-            Covers every airport in the ARTCC or TRACON.
-          </p>
-        </div>
-      </div>
-    )}
+    <Modal
+      open={facAction != null}
+      onClose={() => setFacAction(null)}
+      title="Add for a facility"
+      description="Covers every airport in the ARTCC or TRACON."
+      size="sm"
+      placement="top"
+    >
+      <FacilityCombobox autoFocus onSelect={onFacilitySelect} />
+    </Modal>
     </>
   );
 }

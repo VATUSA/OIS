@@ -62,10 +62,3 @@ export function shortId(id: string | null | undefined): string | null {
   if (/^[0-9a-f]{8}-[0-9a-f]{4}-/i.test(id)) return `#${id.slice(0, 8)}`;
   return id;
 }
-
-export function actionVariant(action: string): "success" | "destructive" | "secondary" {
-  const a = action.toLowerCase();
-  if (/(create|assign|grant|add|publish|activat)/.test(a)) return "success";
-  if (/(delete|revoke|disable|remove|deny|cancel)/.test(a)) return "destructive";
-  return "secondary";
-}

@@ -11,22 +11,12 @@ function AtcBadge({ lat, lon, positions }: { lat: number; lon: number; positions
   if (kinds.length === 0) return null;
   return (
     <Marker longitude={lon} latitude={lat} anchor="center">
-      <div style={{ display: "flex", gap: 1, pointerEvents: "none" }}>
+      <div className="pointer-events-none flex gap-px">
         {kinds.map((k) => (
           <span
             key={k}
-            style={{
-              display: "inline-flex",
-              alignItems: "center",
-              justifyContent: "center",
-              width: 14,
-              height: 14,
-              background: ATC_COLORS[k] ?? "#94a3b8",
-              color: "#0a0a0a",
-              font: "800 10px ui-monospace,monospace",
-              borderRadius: 3,
-              boxShadow: "0 0 0 1px rgba(0,0,0,.5)",
-            }}
+            className="inline-flex size-3.5 items-center justify-center rounded-xs font-mono text-[10px] font-bold leading-none text-ground outline outline-1 outline-ground/50"
+            style={{ background: ATC_COLORS[k] ?? "var(--ink-3)" }}
           >
             {letter(k)}
           </span>
@@ -41,17 +31,8 @@ function AreaPill({ id, color, lat, lon }: { id: string; color: string; lat: num
   return (
     <Marker longitude={lon} latitude={lat} anchor="center">
       <span
-        style={{
-          display: "inline-block",
-          padding: "1px 5px",
-          background: "rgba(10,10,10,.85)",
-          color,
-          font: "700 11px ui-monospace,monospace",
-          borderRadius: 4,
-          boxShadow: `0 0 0 1px ${color}66`,
-          whiteSpace: "nowrap",
-          pointerEvents: "none",
-        }}
+        className="pointer-events-none inline-block whitespace-nowrap rounded-xs bg-panel px-[5px] py-px font-mono text-[11px] font-bold"
+        style={{ color, outline: `1px solid color-mix(in srgb, ${color} 40%, transparent)` }}
       >
         {id}
       </span>

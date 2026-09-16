@@ -49,6 +49,7 @@ export interface ArrivalLadderProps<T> {
   /** Top safety margin so the topmost slot never touches the container edge. */
   pad: number;
   renderTag: (data: T) => ReactNode;
+  /** A CSS colour for the tick into each tag — pass a token, e.g. `var(--flight-airborne)`. */
   connectorColor: (data: T) => string;
   /** Estimated rendered pixel width of one tag, for auto-sizing and bucket overflow decisions. */
   measureTagWidth: (data: T) => number;
@@ -112,9 +113,9 @@ export function ArrivalLadder<T>({
     const y = yOf(k * step);
     grid.push(
       <div key={k}>
-        <div className="absolute border-t border-border/40" style={{ top: y, left: gutter, right: 0 }} />
+        <div className="absolute border-t border-line-soft" style={{ top: y, left: gutter, right: 0 }} />
         <span
-          className="absolute font-mono text-[10px] text-muted-foreground"
+          className="absolute font-mono text-[10px] text-ink-3"
           style={{ top: y - 6, left: 0, width: gutter - 8, textAlign: "right" }}
         >
           {hhmmZulu(new Date(now + k * step * 60000).toISOString())}
@@ -124,17 +125,17 @@ export function ArrivalLadder<T>({
   }
 
   if (placed.length === 0) {
-    return <p className="py-6 text-center text-xs text-muted-foreground">{emptyMessage}</p>;
+    return <p className="py-6 text-center text-xs text-ink-3">{emptyMessage}</p>;
   }
 
   return (
-    <div ref={wrapRef} className={autoFitWidth ? "overflow-x-auto" : undefined}>
+    <div ref={wrapRef} className={autoFitWidth ? "overflow-x-auto pt-2" : "pt-2"}>
       <div className="relative" style={{ height: contentH, minWidth: contentMinWidth }}>
-        <div className="absolute top-0 bottom-0 border-l border-border/60" style={{ left: gutter }} />
+        <div className="absolute top-0 bottom-0 border-l border-line" style={{ left: gutter }} />
         {grid}
-        <div className="absolute border-t-2 border-primary" style={{ top: yOf(0), left: gutter, right: 0 }}>
+        <div className="absolute border-t border-brand" style={{ top: yOf(0), left: gutter, right: 0 }}>
           <span
-            className="absolute -top-2 text-[10px] font-semibold text-primary"
+            className="absolute -top-2 text-[10px] font-semibold text-brand-ink"
             style={{ left: 0, width: gutter - 8, textAlign: "right" }}
           >
             NOW
@@ -163,8 +164,8 @@ export function ArrivalLadder<T>({
                   <DropdownMenuTrigger asChild>
                     <Button
                       size="sm"
-                      variant="secondary"
-                      className="h-5 shrink-0 rounded px-1.5 text-[10px] font-semibold"
+                      variant="outline"
+                      className="h-5 shrink-0 px-2 font-mono text-[10px]"
                     >
                       +{overflowCount}
                     </Button>

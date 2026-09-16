@@ -1,11 +1,11 @@
 import {useEffect, useState} from "react";
-import {Button, Input} from "@ois/ui";
+import {Button, cn, Input, SegmentedControl, Textarea} from "@ois/ui";
 
 import {useValidateFixes} from "@/lib/fca";
 import type {Fca} from "@/lib/fca";
 import type {MapRoute} from "@/lib/route";
 import {lineNm, type LatLng} from "@/components/map/lib/geo";
-import {FCA_COLORS, ROUTE_COLORS} from "@/components/map/lib/colors";
+import {readFcaColors, readRouteColors, useFcaColors, useRouteColors} from "@/components/map/lib/colors";
 
 // --- FCA draft model ---
 
@@ -39,11 +39,12 @@ export const parseFl = (s: string): number | null => {
   return Number.isFinite(n) ? n : null;
 };
 
-export function blankDraft(count: number): Draft {
+/** A new FCA draft; `colors` is the swatch cycle (`useFcaColors()`), read now when omitted. */
+export function blankDraft(count: number, colors: string[] = readFcaColors()): Draft {
   return {
     id: null,
     name: `FCA ${count + 1}`,
-    color: FCA_COLORS[count % FCA_COLORS.length],
+    color: colors[count % colors.length],
     artcc: "",
     points: [],
     dests: "",
@@ -86,8 +87,9 @@ export type RouteForm = {
   arr: string;
   color: string;
 };
-export function blankRouteForm(count: number): RouteForm {
-  return { id: null, name: `Route ${count + 1}`, route: "", dep: "", arr: "", color: ROUTE_COLORS[count % ROUTE_COLORS.length] };
+/** A new route form; `colors` is the swatch cycle (`useRouteColors()`), read now when omitted. */
+export function blankRouteForm(count: number, colors: string[] = readRouteColors()): RouteForm {
+  return { id: null, name: `Route ${count + 1}`, route: "", dep: "", arr: "", color: colors[count % colors.length] };
 }
 export function routeFormFrom(r: MapRoute): RouteForm {
   return { id: r.id, name: r.name, route: r.route, dep: r.dep, arr: r.arr, color: r.color };
@@ -98,10 +100,38 @@ export function routeFormFrom(r: MapRoute): RouteForm {
 function Field({ label, help, children }: { label: string; help?: string; children: React.ReactNode }) {
   return (
     <label className="flex flex-col gap-1">
-      <span className="text-xs font-medium uppercase tracking-wide text-muted-foreground">{label}</span>
+      <span className="text-xs font-semibold uppercase tracking-wide text-ink-3">{label}</span>
       {children}
-      {help && <span className="text-[11px] leading-snug text-muted-foreground/80">{help}</span>}
+      {help && <span className="text-[11px] leading-snug text-ink-3">{help}</span>}
     </label>
+  );
+}
+
+/** Colour swatches from the token palette; a saved colour outside it still shows (titled with its hex). */
+function Swatches({ colors, value, onChange }: { colors: string[]; value: string; onChange: (c: string) => void }) {
+  const known = colors.some((c) => c.toLowerCase() === value.toLowerCase());
+  const all = known || !value ? colors : [...colors, value];
+  return (
+    <div className="flex flex-col gap-1">
+      <span className="text-xs font-semibold uppercase tracking-wide text-ink-3">Color</span>
+      <div className="flex flex-wrap gap-1.5">
+        {all.map((c) => {
+          const on = c.toLowerCase() === value.toLowerCase();
+          return (
+            <button
+              key={c}
+              type="button"
+              title={c}
+              aria-label={`Color ${c}`}
+              aria-pressed={on}
+              onClick={() => onChange(c)}
+              className={cn("size-6 rounded-full", on && "ring-2 ring-ring ring-offset-2 ring-offset-panel")}
+              style={{ background: c }}
+            />
+          );
+        })}
+      </div>
+    </div>
   );
 }
 
@@ -118,7 +148,7 @@ function FixesField({ value, onChange }: { value: string; onChange: (v: string) 
     <Field label="Route fixes" help="Only meter aircraft with these fixes in their FILED route. Blank = any route.">
       <Input className="font-mono uppercase" placeholder="LAIRI · blank = all" value={value} onChange={(e) => onChange(e.target.value)} />
       {unknown.length > 0 && (
-        <span className="text-[11px] leading-snug text-destructive">
+        <span className="text-[11px] leading-snug text-danger">
           Not a known fix: {unknown.join(", ")} — check for a typo; it won&apos;t match any traffic.
         </span>
       )}
@@ -140,19 +170,20 @@ export function RouteEditor({
   saving: boolean;
 }) {
   const set = <K extends keyof RouteForm>(k: K, v: RouteForm[K]) => onChange({ ...form, [k]: v });
+  const colors = useRouteColors();
   return (
     <div className="flex flex-col gap-3 p-3">
-      <div className="text-sm font-semibold text-primary">{form.id ? "EDIT ROUTE" : "NEW ROUTE"}</div>
+      <div className="text-sm font-semibold text-brand-ink">{form.id ? "EDIT ROUTE" : "NEW ROUTE"}</div>
       <Field label="Name">
         <Input value={form.name} onChange={(e) => set("name", e.target.value)} />
       </Field>
       <Field label="Route" help="A filed-route string — fixes, navaids, airways, SID/STAR. The nav engine draws it.">
-        <textarea
+        <Textarea
           value={form.route}
           onChange={(e) => set("route", e.target.value)}
           rows={3}
           placeholder="RBV Q430 BYRDD J48 MOL FLASK OZZZI2"
-          className="w-full rounded-md border border-input bg-background px-3 py-2 font-mono text-sm uppercase outline-none focus-visible:ring-2 focus-visible:ring-ring"
+          className="min-h-0 font-mono uppercase"
         />
       </Field>
       <div className="grid grid-cols-2 gap-3">
@@ -163,20 +194,7 @@ export function RouteEditor({
           <Input className="font-mono uppercase" maxLength={4} placeholder="KBOS" value={form.arr} onChange={(e) => set("arr", e.target.value)} />
         </Field>
       </div>
-      <div className="flex flex-col gap-1">
-        <span className="text-xs font-medium uppercase tracking-wide text-muted-foreground">Color</span>
-        <div className="flex flex-wrap gap-1.5">
-          {ROUTE_COLORS.map((c) => (
-            <button
-              key={c}
-              type="button"
-              onClick={() => set("color", c)}
-              className={"size-6 rounded-full " + (form.color === c ? "ring-2 ring-ring ring-offset-2 ring-offset-background" : "")}
-              style={{ background: c }}
-            />
-          ))}
-        </div>
-      </div>
+      <Swatches colors={colors} value={form.color} onChange={(c) => set("color", c)} />
       <div className="flex gap-2 pt-1">
         <Button className="flex-1" onClick={onSave} disabled={!form.name.trim() || !form.route.trim() || saving}>
           Save route
@@ -188,6 +206,11 @@ export function RouteEditor({
     </div>
   );
 }
+
+const MODE_OPTIONS = [
+  { value: "rate", label: "Rate · ac/hr" },
+  { value: "mit", label: "MIT · nm" },
+] as const;
 
 export function DraftEditor({
   draft,
@@ -205,11 +228,12 @@ export function DraftEditor({
   saving: boolean;
 }) {
   const set = <K extends keyof Draft>(k: K, v: Draft[K]) => onChange({ ...draft, [k]: v });
+  const colors = useFcaColors();
   return (
     <div className="flex flex-1 flex-col gap-3 overflow-y-auto p-3">
-      <div className="text-sm font-semibold text-primary">
-        {draft.id ? "EDIT FCA" : "NEW FCA"} · <span className="tabular-nums">{draft.points.length}</span> pts ·{" "}
-        <span className="tabular-nums">{Math.round(lineNm(draft.points))}</span> nm
+      <div className="text-sm font-semibold text-brand-ink">
+        {draft.id ? "EDIT FCA" : "NEW FCA"} · <span className="font-mono">{draft.points.length}</span> pts ·{" "}
+        <span className="font-mono">{Math.round(lineNm(draft.points))}</span> nm
       </div>
 
       <Field label="Name">
@@ -243,42 +267,28 @@ export function DraftEditor({
       </div>
 
       <div className="flex flex-col gap-1">
-        <span className="text-xs font-medium uppercase tracking-wide text-muted-foreground">Constraint</span>
-        <div className="flex gap-1">
-          <Button size="sm" className="flex-1" variant={draft.mode === "rate" ? "default" : "secondary"} onClick={() => set("mode", "rate")}>
-            Rate · ac/hr
-          </Button>
-          <Button size="sm" className="flex-1" variant={draft.mode === "mit" ? "default" : "secondary"} onClick={() => set("mode", "mit")}>
-            MIT · nm
-          </Button>
-        </div>
+        <span className="text-xs font-semibold uppercase tracking-wide text-ink-3">Constraint</span>
+        <SegmentedControl
+          aria-label="Constraint"
+          value={draft.mode}
+          onChange={(m) => set("mode", m)}
+          options={MODE_OPTIONS}
+          className="w-full [&>button]:flex-1 [&>button]:justify-center"
+        />
         {draft.mode === "rate" ? (
           <>
             <Input type="number" min={0} max={240} value={draft.rate} onChange={(e) => set("rate", Number(e.target.value) || 0)} />
-            <span className="text-[11px] text-muted-foreground/80">aircraft per hour → fixed time spacing (MINIT) between crossings.</span>
+            <span className="text-[11px] text-ink-3">aircraft per hour → fixed time spacing (MINIT) between crossings.</span>
           </>
         ) : (
           <>
             <Input type="number" min={0} max={200} value={draft.mit} onChange={(e) => set("mit", Number(e.target.value) || 0)} />
-            <span className="text-[11px] text-muted-foreground/80">miles-in-trail → spacing scaled by each aircraft&apos;s crossing speed.</span>
+            <span className="text-[11px] text-ink-3">miles-in-trail → spacing scaled by each aircraft&apos;s crossing speed.</span>
           </>
         )}
       </div>
 
-      <div className="flex flex-col gap-1">
-        <span className="text-xs font-medium uppercase tracking-wide text-muted-foreground">Color</span>
-        <div className="flex flex-wrap gap-1.5">
-          {FCA_COLORS.map((c) => (
-            <button
-              key={c}
-              type="button"
-              onClick={() => set("color", c)}
-              className={"size-6 rounded-full " + (draft.color === c ? "ring-2 ring-ring ring-offset-2 ring-offset-background" : "")}
-              style={{ background: c }}
-            />
-          ))}
-        </div>
-      </div>
+      <Swatches colors={colors} value={draft.color} onChange={(c) => set("color", c)} />
 
       <div className="mt-auto flex flex-col gap-2 pt-2">
         <div className="flex gap-2">
@@ -298,5 +308,5 @@ export function DraftEditor({
 }
 
 export function Kbd({ children }: { children: React.ReactNode }) {
-  return <kbd className="rounded border bg-muted px-1.5 py-0.5 font-mono text-xs">{children}</kbd>;
+  return <kbd className="rounded-xs border border-line bg-chip px-1.5 py-0.5 font-mono text-xs text-ink-2">{children}</kbd>;
 }

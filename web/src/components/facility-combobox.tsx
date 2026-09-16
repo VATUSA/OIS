@@ -1,5 +1,5 @@
 import {useMemo, useState} from "react";
-import {cn, Input} from "@ois/ui";
+import {cn, Input, StatusPill} from "@ois/ui";
 
 import {facilityKindLabel, useFacilityDirectory, type FlowFacility} from "@/lib/facilities";
 
@@ -83,32 +83,29 @@ export function FacilityCombobox({
           if (e.key === "Enter" && matches[0]) {
             e.preventDefault();
             pick(matches[0]);
-          } else if (e.key === "Escape") {
+          } else if (e.key === "Escape" && open) {
+            // Closing the list shouldn't also close an enclosing Modal.
+            e.preventDefault();
             setOpen(false);
           }
         }}
       />
       {open && matches.length > 0 && (
-        <ul className="absolute z-20 mt-1 max-h-64 w-full overflow-auto rounded-md border bg-popover p-1 shadow-md">
+        <ul className="absolute z-20 mt-1 max-h-64 w-full overflow-auto rounded-sm border border-line bg-panel-2 p-1">
           {matches.map((f) => (
             <li key={f.id}>
               <button
                 type="button"
                 onMouseDown={(e) => e.preventDefault()}
                 onClick={() => pick(f)}
-                className="flex w-full items-center gap-2 rounded-sm px-2 py-1.5 text-left text-sm transition-colors hover:bg-accent hover:text-accent-foreground"
+                className="flex w-full items-center gap-2 rounded-xs px-2 py-1.5 text-left text-sm text-ink transition-colors hover:bg-chip"
               >
-                <span className="w-12 shrink-0 font-mono font-medium">{f.id}</span>
-                <span
-                  className={
-                    "shrink-0 rounded px-1.5 py-0.5 text-[10px] font-medium uppercase " +
-                    (f.kind === "artcc" ? "bg-primary/15 text-primary" : "bg-amber-500/15 text-amber-600 dark:text-amber-400")
-                  }
-                >
+                <span className="w-12 shrink-0 font-mono font-semibold">{f.id}</span>
+                <StatusPill tone={f.kind === "artcc" ? "brand" : "neutral"} className="shrink-0 px-1.5 py-0 text-[10px] uppercase">
                   {facilityKindLabel(f.kind)}
-                </span>
-                {f.name && <span className="truncate text-muted-foreground">{f.name}</span>}
-                <span className="ml-auto shrink-0 text-xs tabular-nums text-muted-foreground/60">
+                </StatusPill>
+                {f.name && <span className="truncate text-ink-2">{f.name}</span>}
+                <span className="ml-auto shrink-0 font-mono text-xs tabular-nums text-ink-3">
                   {f.airports.length}
                 </span>
               </button>

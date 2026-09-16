@@ -1,25 +1,18 @@
 import {useMemo} from "react";
 import {
   Button,
+  type DataColumn,
+  DataTable,
   DropdownMenu,
   DropdownMenuContent,
   DropdownMenuItem,
   DropdownMenuTrigger,
+  type SortingState,
   Tooltip,
   TooltipContent,
   TooltipTrigger,
 } from "@ois/ui";
-import {
-  type ColumnDef,
-  createSortedRowModel,
-  flexRender,
-  rowSortingFeature,
-  type SortingState,
-  sortFns,
-  tableFeatures,
-  useTable,
-} from "@tanstack/react-table";
-import {ArrowDown, ArrowUp, Check, ChevronsUpDown, Columns3} from "lucide-react";
+import {Check, Columns3} from "lucide-react";
 
 import {hhmmZulu} from "@/lib/time";
 
@@ -30,18 +23,11 @@ import {useReportWidgetStatus} from "./widget-status";
 
 /** Shared stable reference for the unsorted state (see the note where it's used). */
 const EMPTY_SORTING: SortingState = [];
-
-// v9 registers sorting explicitly instead of bundling it automatically (see #133). The full
-// built-in `sortFns` registry (not hand-picked entries) keeps v8's auto-detected sorting behavior,
-// since no column here declares a custom `sortingFn`.
-const features = tableFeatures({
-  rowSortingFeature,
-  sortedRowModel: createSortedRowModel(),
-  sortFns,
-});
+/** The widget scrolls inside its grid cell, so every row renders (no cap / pages). */
+const ALL_ROWS = Number.MAX_SAFE_INTEGER;
 
 function Cell({ value, type }: { value: unknown; type: FieldType }) {
-  if (value == null || value === "") return <span className="text-muted-foreground">—</span>;
+  if (value == null || value === "") return <span className="text-ink-3">—</span>;
   if (type === "time") return <>{hhmmZulu(String(value))}</>;
   if (type === "bool") return <>{value ? "yes" : "no"}</>;
   // Free-text fields can run long — cap the width and reveal the full value on hover rather than
@@ -80,7 +66,7 @@ function ColumnPicker({
   return (
     <DropdownMenu>
       <DropdownMenuTrigger asChild>
-        <Button size="sm" variant="secondary" className="h-7 self-end">
+        <Button size="sm" variant="outline" className="h-7 self-end">
           <Columns3 />
           Columns
         </Button>
@@ -103,10 +89,6 @@ function ColumnPicker({
   );
 }
 
-function Notice({ children }: { children: React.ReactNode }) {
-  return <p className="py-6 text-center text-sm text-muted-foreground">{children}</p>;
-}
-
 function TableInner({
   source,
   widget,
@@ -126,12 +108,8 @@ function TableInner({
   const { rows, isLoading, isError, isFetching, dataUpdatedAt, refetch } = source.useRows(params);
   useReportWidgetStatus(isFetching, dataUpdatedAt, refetch);
   const visible = widget.columns ?? source.fields.map((fd) => fd.key);
-  const typeByKey = useMemo(
-    () => Object.fromEntries(source.fields.map((fd) => [fd.key, fd.type])) as Record<string, FieldType>,
-    [source],
-  );
 
-  const columns = useMemo<ColumnDef<typeof features, Row>[]>(
+  const columns = useMemo<DataColumn<Row>[]>(
     () =>
       visible
         .map((key) => source.fields.find((fd) => fd.key === key))
@@ -139,6 +117,8 @@ function TableInner({
         .map((fd) => ({
           accessorKey: fd.key,
           header: fd.label,
+          mono: fd.type === "time" || fd.type === "number",
+          align: fd.type === "number" ? ("right" as const) : undefined,
           cell: (info) => <Cell value={info.getValue()} type={fd.type} />,
         })),
     // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -147,16 +127,6 @@ function TableInner({
 
   // Stable empty reference when unsorted — a fresh `[]` each render would churn the table state.
   const sorting = (widget.sort ?? EMPTY_SORTING) as SortingState;
-  const table = useTable({
-    features,
-    data: rows,
-    columns,
-    state: { sorting },
-    onSortingChange: (updater) => {
-      const next = typeof updater === "function" ? updater(sorting) : updater;
-      onChange(widget.id, { sort: next });
-    },
-  });
 
   return (
     <div className="flex h-full flex-col gap-2">
@@ -167,69 +137,24 @@ function TableInner({
           onChange={(cols) => onChange(widget.id, { columns: cols })}
         />
       )}
-      {isError ? (
-        <Notice>Couldn&apos;t load data.</Notice>
-      ) : isLoading && rows.length === 0 ? (
-        <Notice>Loading…</Notice>
-      ) : rows.length === 0 ? (
-        <Notice>No rows.</Notice>
-      ) : (
-        <div className="min-h-0 flex-1 overflow-auto">
-          <table className="w-full text-sm">
-            <thead className="sticky top-0 z-10 bg-card">
-              {table.getHeaderGroups().map((hg) => (
-                <tr key={hg.id} className="text-left text-xs uppercase tracking-wide text-muted-foreground">
-                  {hg.headers.map((h) => {
-                    const sorted = h.column.getIsSorted();
-                    return (
-                      <th
-                        key={h.id}
-                        className="cursor-pointer select-none whitespace-nowrap pb-2 pr-3 font-medium"
-                        onClick={h.column.getToggleSortingHandler()}
-                      >
-                        <span className="inline-flex items-center gap-1">
-                          {flexRender(h.column.columnDef.header, h.getContext())}
-                          {sorted === "asc" ? (
-                            <ArrowUp className="size-3" />
-                          ) : sorted === "desc" ? (
-                            <ArrowDown className="size-3" />
-                          ) : (
-                            <ChevronsUpDown className="size-3 opacity-30" />
-                          )}
-                        </span>
-                      </th>
-                    );
-                  })}
-                </tr>
-              ))}
-            </thead>
-            <tbody>
-              {table.getRowModel().rows.map((r) => (
-                <tr key={r.id} className="border-t">
-                  {r.getAllCells().map((c) => {
-                    const type = typeByKey[c.column.id];
-                    return (
-                      <td
-                        key={c.id}
-                        className={
-                          "py-1.5 pr-3 " +
-                          (type === "number"
-                            ? "text-right tabular-nums"
-                            : type === "time"
-                              ? "font-mono text-xs"
-                              : "")
-                        }
-                      >
-                        {flexRender(c.column.columnDef.cell, c.getContext())}
-                      </td>
-                    );
-                  })}
-                </tr>
-              ))}
-            </tbody>
-          </table>
-        </div>
-      )}
+      <div className="min-h-0 flex-1">
+        <DataTable
+          label={source.label}
+          columns={columns}
+          data={rows}
+          sort={sorting}
+          onSortChange={(next) => onChange(widget.id, { sort: next })}
+          stickyHeader
+          rowCap={ALL_ROWS}
+          pageSize={ALL_ROWS}
+          isLoading={isLoading}
+          isError={isError}
+          onRetry={refetch}
+          empty="No rows."
+          // A bounded flex column lets the table's own scroll area hold the sticky header.
+          className="flex max-h-full flex-col"
+        />
+      </div>
     </div>
   );
 }
@@ -245,7 +170,7 @@ export function TableWidget({
 }) {
   const source = DATA_SOURCES_BY_ID[widget.source];
   if (!source) {
-    return <div className="p-4 text-sm text-muted-foreground">Unknown data source.</div>;
+    return <div className="p-4 text-sm text-ink-3">Unknown data source.</div>;
   }
   // Key by source id so switching source remounts and hook order stays consistent.
   return <TableInner key={source.id} source={source} widget={widget} editing={editing} onChange={onChange} />;

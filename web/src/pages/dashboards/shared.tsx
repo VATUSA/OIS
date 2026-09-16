@@ -1,7 +1,9 @@
+import {useMemo, useRef} from "react";
 import {useNavigate, useParams} from "@tanstack/react-router";
-import {Button} from "@ois/ui";
-import {Copy, LayoutDashboard} from "lucide-react";
+import {Button, EmptyState} from "@ois/ui";
+import {Copy, LayoutDashboard, Loader2} from "lucide-react";
 
+import {usePageHeader} from "@/components/shell/page-meta";
 import {DashboardGrid} from "@/features/dashboard/DashboardGrid";
 import {type DashboardState, EMPTY_DASHBOARD} from "@/features/dashboard/types";
 import {login, useMe} from "@/lib/auth";
@@ -15,12 +17,23 @@ function coerce(raw: unknown): DashboardState {
   return s;
 }
 
-function Centered({ children }: { children: React.ReactNode }) {
+const Spinner = ({ className }: { className?: string }) => (
+  <Loader2 className={"animate-spin " + (className ?? "")} />
+);
+
+function Centered({
+  children,
+  loading = false,
+  action,
+}: {
+  children: React.ReactNode;
+  loading?: boolean;
+  action?: React.ReactNode;
+}) {
   return (
-    <div className="flex flex-col items-center gap-3 py-24 text-center text-sm text-muted-foreground">
-      <LayoutDashboard className="size-8" />
+    <EmptyState icon={loading ? Spinner : LayoutDashboard} className="py-24" action={action}>
       {children}
-    </div>
+    </EmptyState>
   );
 }
 
@@ -36,48 +49,48 @@ export function SharedBoardPage() {
     navigate({ to: "/ops/my/$boardId", params: { boardId: id } });
   }
 
-  if (meLoading) return <Centered>Loading…</Centered>;
+  const saveRef = useRef(saveCopy);
+  saveRef.current = saveCopy;
+  const loaded = !!query.data;
+  const pending = copy.isPending;
+  const actions = useMemo(
+    () =>
+      loaded ? (
+        <Button onClick={() => void saveRef.current()} disabled={pending}>
+          <Copy />
+          Save a copy
+        </Button>
+      ) : undefined,
+    [loaded, pending],
+  );
+  usePageHeader({
+    title: query.data?.name,
+    subtitle: query.data ? `Shared by ${query.data.owner}` : undefined,
+    actions,
+  });
+
+  if (meLoading) return <Centered loading>Loading…</Centered>;
   if (!me) {
     return (
-      <Centered>
-        <p>Sign in to view this shared dashboard.</p>
-        <Button onClick={login}>Sign in with VATSIM</Button>
+      <Centered action={<Button onClick={login}>Sign in with VATSIM</Button>}>
+        Sign in to view this shared dashboard.
       </Centered>
     );
   }
   if (query.isError) return <Centered>This shared board wasn’t found.</Centered>;
-  if (query.isLoading || !query.data) return <Centered>Loading shared board…</Centered>;
+  if (query.isLoading || !query.data) return <Centered loading>Loading shared board…</Centered>;
 
   const state = coerce(query.data.data);
 
-  return (
-    <div className="flex flex-col gap-4">
-      <div className="flex flex-wrap items-center gap-2">
-        <h1 className="min-w-0 flex-1 truncate text-xl font-semibold tracking-tight">
-          {query.data.name}
-        </h1>
-        <span className="shrink-0 text-sm text-muted-foreground">shared by {query.data.owner}</span>
-        <Button
-          className="w-full shrink-0 sm:ml-auto sm:w-auto"
-          onClick={saveCopy}
-          disabled={copy.isPending}
-        >
-          <Copy />
-          Save a copy
-        </Button>
-      </div>
-
-      {state.widgets.length === 0 ? (
-        <Centered>This board has no widgets.</Centered>
-      ) : (
-        <DashboardGrid
-          state={state}
-          editing={false}
-          onLayoutChange={() => {}}
-          onRemove={() => {}}
-          onUpdate={() => {}}
-        />
-      )}
-    </div>
+  return state.widgets.length === 0 ? (
+    <Centered>This board has no widgets.</Centered>
+  ) : (
+    <DashboardGrid
+      state={state}
+      editing={false}
+      onLayoutChange={() => {}}
+      onRemove={() => {}}
+      onUpdate={() => {}}
+    />
   );
 }

@@ -1,20 +1,23 @@
-import {useState} from "react";
-import {Badge} from "@ois/ui";
+import {useMemo, useState} from "react";
+import {type DataColumn, DataTable, SegmentedControl, Sheet, StatusPill, toneText, type Tone} from "@ois/ui";
 import {ChevronDown, ChevronRight} from "lucide-react";
 
-import {BottomSheet} from "@/components/bottom-sheet";
 import {type Fca, type FcaFlight} from "@/lib/fca";
+import {FLIGHT_STATE_LABEL, toneOf} from "@/lib/status";
 import {hhmmZulu} from "@/lib/time";
 
 type Filter = "all" | "air" | "cfr";
 
-const STATUS = {
-  airborne: { label: "AIR", color: "#22c55e", text: "text-emerald-500" },
-  ground: { label: "GND", color: "#f59e0b", text: "text-amber-500" },
-  proposed: { label: "PROP", color: "#38bdf8", text: "text-sky-400" },
-} as const;
-function statusOf(s: string) {
-  return STATUS[s as keyof typeof STATUS] ?? STATUS.ground;
+const FILTERS = [
+  { value: "all" as const, label: "All" },
+  { value: "air" as const, label: "Air" },
+  { value: "cfr" as const, label: "CFR" },
+];
+
+/** A crossing flight's state tone and label (unknown states read as ground). */
+function statusOf(s: string): { tone: Tone; label: string } {
+  const state = toneOf("flight", s) !== "neutral" ? s : "ground";
+  return { tone: toneOf("flight", state), label: FLIGHT_STATE_LABEL[state] };
 }
 
 const modeLabel = (fca: Fca) => (fca.mode === "mit" ? `${fca.mit} MIT` : `${fca.rate}/hr`);
@@ -29,6 +32,56 @@ export interface OverviewGroup {
   fca: Fca;
   flights: FcaFlight[] | undefined;
 }
+
+/** One read-only crossing strip per row: sequence, state, flight, crossing time + delay. */
+const STRIP_COLUMNS: DataColumn<FcaFlight>[] = [
+  {
+    accessorKey: "seq",
+    header: "#",
+    mono: true,
+    align: "right",
+    cellClassName: "w-8 px-2 text-xs text-ink-3",
+  },
+  {
+    accessorKey: "callsign",
+    header: "Flight",
+    cellClassName: "px-2",
+    cell: (c) => {
+      const f = c.row.original;
+      const st = statusOf(f.status);
+      return (
+        <span className="flex min-w-0 items-center gap-2 text-xs">
+          <StatusPill tone={st.tone} className="px-1.5 text-[10px] leading-4">
+            {f.released ? "CFR" : st.label}
+          </StatusPill>
+          <span className="font-mono font-semibold">{f.callsign}</span>
+          <span className="truncate font-mono text-ink-3">
+            {f.dep}→{f.arr}
+          </span>
+        </span>
+      );
+    },
+  },
+  {
+    accessorKey: "cross_time",
+    header: "Crossing",
+    mono: true,
+    align: "right",
+    cellClassName: "px-2 text-xs leading-tight",
+    cell: (c) => {
+      const f = c.row.original;
+      const delayed = f.delay_sec >= 30;
+      return (
+        <span className="whitespace-nowrap">
+          <span className={delayed ? "text-ink" : toneText[statusOf(f.status).tone]}>{hhmmZulu(f.cross_time)}</span>
+          <span className={`block text-[10px] ${delayed ? "text-danger" : "text-success"}`}>
+            {delayed ? `+${Math.round(f.delay_sec / 60)}m` : "on time"}
+          </span>
+        </span>
+      );
+    },
+  },
+];
 
 /**
  * The ARTCC overview's right-hand "strips" panel: every active FCA in the selected ARTCC stacked as a
@@ -57,118 +110,102 @@ export function FcaOverviewPanel({
     });
 
   return (
-    <BottomSheet desktopClassName="h-full w-96 shrink-0 border-l" onClose={onClose} initialFraction={0.5}>
-      <div className="flex items-center gap-2 border-b px-4 py-3">
-        <span className="font-mono text-sm font-semibold uppercase tracking-wide">Strips · {artcc}</span>
-        <div className="ml-auto flex items-center gap-1">
-          {(["all", "air", "cfr"] as Filter[]).map((k) => (
-            <button
-              key={k}
-              type="button"
-              onClick={() => setFilter(k)}
-              className={
-                "rounded px-1.5 py-0.5 text-[10px] font-semibold uppercase tracking-wide transition-colors " +
-                (filter === k
-                  ? "bg-primary text-primary-foreground"
-                  : "text-muted-foreground hover:text-foreground")
-              }
-            >
-              {k === "cfr" ? "CFR" : k}
-            </button>
-          ))}
-        </div>
+    <Sheet className="h-full w-96 shrink-0 border-l border-line" onClose={onClose} initialFraction={0.5}>
+      <div className="flex items-center gap-2 border-b border-line px-4 py-3">
+        <span className="text-sm font-semibold">
+          Strips · <span className="font-mono">{artcc}</span>
+        </span>
+        <SegmentedControl
+          aria-label="Filter strips"
+          size="sm"
+          className="ml-auto"
+          value={filter}
+          onChange={setFilter}
+          options={FILTERS}
+        />
         {/* Clear the mobile sheet's close X. */}
         <span className="w-6 shrink-0 md:hidden" />
       </div>
 
       <div className="flex-1 overflow-y-auto">
         {groups.length === 0 ? (
-          <p className="p-4 text-sm text-muted-foreground">No active FCAs for {artcc}.</p>
+          <p className="p-4 text-sm text-ink-2">No active FCAs for {artcc}.</p>
         ) : (
-          groups.map(({ fca, flights }) => {
-            const list = (flights ?? []).filter((f) => f.status !== "proposed");
-            const air = list.filter((f) => f.status === "airborne").length;
-            const cfr = list.filter((f) => f.released).length;
-            const shown = list.filter((f) => matchesFilter(f, filter));
-            const isCollapsed = collapsed.has(fca.id);
-            return (
-              <div key={fca.id} className="border-b">
-                <button
-                  type="button"
-                  onClick={() => toggle(fca.id)}
-                  className="flex w-full items-center gap-2 px-3 py-2 text-left hover:bg-accent/30"
-                >
-                  {isCollapsed ? (
-                    <ChevronRight className="size-3.5 shrink-0 text-muted-foreground" />
-                  ) : (
-                    <ChevronDown className="size-3.5 shrink-0 text-muted-foreground" />
-                  )}
-                  <span className="size-2.5 shrink-0 rounded-sm" style={{ background: fca.color }} />
-                  <span className="truncate font-mono text-sm font-semibold">{fca.name}</span>
-                  <Badge variant="secondary">{modeLabel(fca)}</Badge>
-                  {fca.manual_seq && (
-                    <span className="rounded border px-1 text-[10px] font-semibold text-muted-foreground">
-                      MANUAL
-                    </span>
-                  )}
-                  <span className="ml-auto shrink-0 tabular-nums text-xs text-muted-foreground">
-                    {air} air · {cfr} CFR
-                  </span>
-                </button>
-                {!isCollapsed &&
-                  (flights == null ? (
-                    <p className="px-3 pb-2 text-xs text-muted-foreground">Loading…</p>
-                  ) : shown.length === 0 ? (
-                    <p className="px-3 pb-3 text-center text-xs text-muted-foreground">
-                      No {filter === "air" ? "airborne " : filter === "cfr" ? "CFR " : ""}traffic crossing
-                      this FCA.
-                    </p>
-                  ) : (
-                    <ul className="pb-1">
-                      {shown.map((f) => (
-                        <CompactStrip key={f.callsign} f={f} onClick={() => onFocusFlight?.(f.callsign)} />
-                      ))}
-                    </ul>
-                  ))}
-              </div>
-            );
-          })
+          groups.map((g) => (
+            <OverviewGroupSection
+              key={g.fca.id}
+              group={g}
+              filter={filter}
+              collapsed={collapsed.has(g.fca.id)}
+              onToggle={() => toggle(g.fca.id)}
+              onFocusFlight={onFocusFlight}
+            />
+          ))
         )}
       </div>
-    </BottomSheet>
+    </Sheet>
   );
 }
 
-/** A single read-only crossing strip — click to locate the aircraft on the map. */
-function CompactStrip({ f, onClick }: { f: FcaFlight; onClick?: () => void }) {
-  const st = statusOf(f.status);
-  const delayed = f.delay_sec >= 30;
+function OverviewGroupSection({
+  group: { fca, flights },
+  filter,
+  collapsed,
+  onToggle,
+  onFocusFlight,
+}: {
+  group: OverviewGroup;
+  filter: Filter;
+  collapsed: boolean;
+  onToggle: () => void;
+  onFocusFlight?: (callsign: string) => void;
+}) {
+  const list = useMemo(() => (flights ?? []).filter((f) => f.status !== "proposed"), [flights]);
+  const shown = useMemo(() => list.filter((f) => matchesFilter(f, filter)), [list, filter]);
+  const air = list.filter((f) => f.status === "airborne").length;
+  const cfr = list.filter((f) => f.released).length;
+
   return (
-    <li>
+    <div className="border-b border-line">
       <button
         type="button"
-        onClick={onClick}
-        className="flex w-full items-center gap-2 px-3 py-1.5 text-left text-xs hover:bg-accent/30"
-        style={{ borderLeft: `3px solid ${delayed ? "#ef4444" : st.color}` }}
+        onClick={onToggle}
+        aria-expanded={!collapsed}
+        className="flex w-full items-center gap-2 px-3 py-2 text-left hover:bg-panel-2"
       >
-        <span className="w-4 shrink-0 text-right tabular-nums text-muted-foreground">{f.seq}</span>
-        <span
-          className="shrink-0 rounded px-1 text-[10px] font-semibold"
-          style={{ color: st.color, border: `1px solid ${st.color}` }}
-        >
-          {f.released ? "CFR" : st.label}
-        </span>
-        <span className="font-mono font-semibold">{f.callsign}</span>
-        <span className="truncate font-mono text-muted-foreground">
-          {f.dep}→{f.arr}
-        </span>
-        <span className="ml-auto shrink-0 text-right font-mono leading-tight">
-          <span className={delayed ? "text-foreground" : st.text}>{hhmmZulu(f.cross_time)}</span>
-          <span className={`block text-[10px] ${delayed ? "text-destructive" : "text-emerald-500"}`}>
-            {delayed ? `+${Math.round(f.delay_sec / 60)}m` : "on time"}
-          </span>
+        {collapsed ? (
+          <ChevronRight className="size-3.5 shrink-0 text-ink-3" />
+        ) : (
+          <ChevronDown className="size-3.5 shrink-0 text-ink-3" />
+        )}
+        {/* The FCA's colour is user data. */}
+        <span className="size-2.5 shrink-0 rounded-full" style={{ background: fca.color }} />
+        <span className="truncate font-mono text-sm font-semibold">{fca.name}</span>
+        <StatusPill tone="neutral" className="font-mono">
+          {modeLabel(fca)}
+        </StatusPill>
+        {fca.manual_seq && <StatusPill tone="neutral">Manual</StatusPill>}
+        <span className="ml-auto shrink-0 font-mono text-xs text-ink-3">
+          {air} air · {cfr} CFR
         </span>
       </button>
-    </li>
+      {!collapsed && (
+        <div className="px-3 pb-3">
+          <DataTable
+            label={`${fca.name} crossing traffic`}
+            columns={STRIP_COLUMNS}
+            data={shown}
+            getRowId={(f) => f.callsign}
+            hideHeader
+            // Live ops list: always pages, never hides rows behind "Show all".
+            rowCap={Infinity}
+            pageSize={25}
+            onRowClick={(f) => onFocusFlight?.(f.callsign)}
+            isLoading={flights == null}
+            empty={`No ${filter === "air" ? "airborne " : filter === "cfr" ? "CFR " : ""}traffic crossing this FCA.`}
+          />
+        </div>
+      )}
+    </div>
   );
 }

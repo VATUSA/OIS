@@ -1,160 +1,192 @@
-import {useState} from "react";
-import {Badge, Button, Card, CardContent, Input} from "@ois/ui";
+import {useMemo, useState} from "react";
+import {useIsMutating} from "@tanstack/react-query";
+import {Button, type DataColumn, DataTable, Input, MetricCard, QueryState, StatusPill} from "@ois/ui";
+import {Clock, Plane, PlaneTakeoff} from "lucide-react";
 
 import {useMe} from "@/lib/auth";
-import {type Departure, useDepartures, useIssueCfr, useReleaseCfr,} from "@/lib/departures";
+import {type Departure, useDepartures, useIssueCfr, useReleaseCfr} from "@/lib/departures";
 import {useHistoricalAt} from "@/lib/historical-context";
 import {hasPermission} from "@/lib/permissions";
 import {hhmmZulu, parseHhmm} from "@/lib/time";
 
 function delayClass(min: number): string {
-  if (min >= 15) return "text-destructive";
-  if (min > 0) return "text-amber-500";
-  return "text-muted-foreground";
+  if (min >= 15) return "text-level-over";
+  if (min > 0) return "text-level-watch";
+  return "text-ink-3";
 }
 
-export function DepartureRow({
-  d,
-  canIssue: canIssueProp,
-  leading,
-}: {
-  d: Departure;
-  canIssue: boolean;
-  leading: React.ReactNode;
-}) {
-  // In historical replay the board is read-only — CFR actions would hit the live feed.
-  const canIssue = canIssueProp && useHistoricalAt() == null;
+/** Whether a CFR issue/release for this callsign is in flight (the row's editors share it). */
+function useRowBusy(callsign: string): boolean {
+  return (
+    useIsMutating({
+      predicate: (m) => {
+        const v = m.state.variables as { callsign?: string } | string | undefined;
+        return (typeof v === "string" ? v : v?.callsign) === callsign;
+      },
+    }) > 0
+  );
+}
+
+/** Ready-time editor: issue a CFR for a pilot-given HHMMz. */
+function ReadyCell({ d, canIssue }: { d: Departure; canIssue: boolean }) {
   const issue = useIssueCfr();
-  const release = useReleaseCfr();
+  const busy = useRowBusy(d.callsign);
   const [ready, setReady] = useState("");
-  const busy = issue.isPending || release.isPending;
-  const now = Date.now();
-  const releaseNow = d.cfr ? new Date(d.cfr).getTime() <= now + 60_000 : false;
+
+  if (!(d.has_program && !d.cfr_issued && canIssue)) return <span className="text-ink-3">—</span>;
 
   function setReadyTime() {
     const iso = parseHhmm(ready);
     if (!iso) return;
-    issue.mutate(
-      { callsign: d.callsign, airport: d.arrival, readyTime: iso },
-      { onSuccess: () => setReady("") },
-    );
+    issue.mutate({ callsign: d.callsign, airport: d.arrival, readyTime: iso }, { onSuccess: () => setReady("") });
   }
 
   return (
-    <tr className="border-t">
-      <td className="py-2 pr-3 tabular-nums text-muted-foreground">{leading}</td>
-      <td className="py-2 pr-3 font-mono font-medium">{d.callsign}</td>
-      <td className="py-2 pr-3 font-mono text-xs">{d.arrival}</td>
-      <td className="py-2 pr-3">{d.aircraft_type}</td>
-      <td className="py-2 pr-3 font-mono text-xs">{d.gate ?? "—"}</td>
-      <td className="py-2 pr-3 font-mono text-xs text-muted-foreground">
-        {hhmmZulu(d.eta)}
-      </td>
-      <td className={`py-2 pr-3 text-right tabular-nums ${delayClass(d.delay_min)}`}>
-        {d.delay_min > 0 ? `+${d.delay_min}` : "—"}
-      </td>
-      <td className="py-2 pr-3 text-right">
-        {d.cfr ? (
-          <span
-            className={`font-mono text-xs tabular-nums ${releaseNow ? "text-emerald-500" : "text-amber-500"}`}
-          >
-            {hhmmZulu(d.cfr)}
-          </span>
-        ) : (
-          "—"
-        )}
-      </td>
-      <td className="py-2 pr-3">
-        {d.has_program && !d.cfr_issued && canIssue ? (
-          <div className="flex items-center gap-1">
-            <Input
-              className="h-8 w-20 font-mono text-xs"
-              placeholder="HHMMz"
-              value={ready}
-              onChange={(e) => setReady(e.target.value)}
-              onKeyDown={(e) => e.key === "Enter" && setReadyTime()}
-            />
-            <Button
-              size="sm"
-              variant="secondary"
-              disabled={busy || !parseHhmm(ready)}
-              onClick={setReadyTime}
-            >
-              Set
-            </Button>
-          </div>
-        ) : (
-          <span className="text-muted-foreground">—</span>
-        )}
-      </td>
-      <td className="py-2 pr-3">
-        {!d.has_program ? (
-          <Badge variant="outline">no program</Badge>
-        ) : d.cfr_issued ? (
-          <Badge variant="success">issued</Badge>
-        ) : (
-          <Badge variant="secondary">proposed</Badge>
-        )}
-      </td>
-      <td className="py-2 text-right">
-        {!d.has_program ? (
-          <span className="text-xs text-muted-foreground">Release at will</span>
-        ) : canIssue ? (
-          <div className="flex justify-end gap-1">
-            {d.cfr_issued ? (
-              <Button
-                size="sm"
-                variant="ghost"
-                className="text-destructive hover:text-destructive"
-                disabled={busy}
-                onClick={() => release.mutate(d.callsign)}
-              >
-                Cancel
-              </Button>
-            ) : (
-              <>
-                <Button
-                  size="sm"
-                  variant="secondary"
-                  disabled={busy}
-                  onClick={() =>
-                    issue.mutate({ callsign: d.callsign, airport: d.arrival })
-                  }
-                >
-                  Issue CFR
-                </Button>
-                <Button
-                  size="sm"
-                  variant="ghost"
-                  disabled={busy}
-                  onClick={() =>
-                    issue.mutate({
-                      callsign: d.callsign,
-                      airport: d.arrival,
-                      readyTime: new Date().toISOString(),
-                    })
-                  }
-                >
-                  Release now
-                </Button>
-              </>
-            )}
-          </div>
-        ) : null}
-      </td>
-    </tr>
+    <div className="flex items-center gap-1">
+      <Input
+        aria-label={`Ready time for ${d.callsign}`}
+        className="h-8 w-20 font-mono text-xs"
+        placeholder="HHMMz"
+        value={ready}
+        onChange={(e) => setReady(e.target.value)}
+        onKeyDown={(e) => e.key === "Enter" && setReadyTime()}
+      />
+      <Button size="sm" variant="outline" disabled={busy || !parseHhmm(ready)} onClick={setReadyTime}>
+        Set
+      </Button>
+    </div>
   );
 }
 
-function Stat({ label, value }: { label: string; value: number }) {
+function ActionsCell({ d, canIssue }: { d: Departure; canIssue: boolean }) {
+  const issue = useIssueCfr();
+  const release = useReleaseCfr();
+  const busy = useRowBusy(d.callsign);
+
+  if (!d.has_program) return <span className="text-xs text-ink-3">Release at will</span>;
+  if (!canIssue) return null;
   return (
-    <div className="flex flex-col">
-      <span className="text-3xl font-semibold tabular-nums">{value}</span>
-      <span className="text-xs uppercase tracking-wide text-muted-foreground">
-        {label}
-      </span>
+    <div className="flex justify-end gap-1">
+      {d.cfr_issued ? (
+        <Button
+          size="sm"
+          variant="ghost"
+          className="text-danger hover:text-danger"
+          disabled={busy}
+          onClick={() => release.mutate(d.callsign)}
+        >
+          Cancel
+        </Button>
+      ) : (
+        <>
+          <Button
+            size="sm"
+            variant="outline"
+            disabled={busy}
+            onClick={() => issue.mutate({ callsign: d.callsign, airport: d.arrival })}
+          >
+            Issue CFR
+          </Button>
+          <Button
+            size="sm"
+            variant="ghost"
+            disabled={busy}
+            onClick={() =>
+              issue.mutate({ callsign: d.callsign, airport: d.arrival, readyTime: new Date().toISOString() })
+            }
+          >
+            Release now
+          </Button>
+        </>
+      )}
     </div>
   );
+}
+
+const timeKey = (iso: string | null | undefined) => (iso ? new Date(iso).getTime() : Infinity);
+
+function departureColumns(canIssue: boolean): DataColumn<Departure>[] {
+  return [
+    { accessorKey: "dep", header: "From", mono: true },
+    {
+      accessorKey: "callsign",
+      header: "Callsign",
+      icon: Plane,
+      mono: true,
+      cell: (c) => <span className="font-semibold">{c.row.original.callsign}</span>,
+    },
+    { accessorKey: "arrival", header: "To", mono: true },
+    { id: "aircraft_type", accessorFn: (d) => d.aircraft_type ?? "", header: "Type", mono: true },
+    {
+      id: "gate",
+      accessorFn: (d) => d.gate ?? "",
+      header: "Gate",
+      mono: true,
+      cell: (c) => c.row.original.gate ?? "—",
+    },
+    {
+      id: "eta",
+      accessorFn: (d) => timeKey(d.eta),
+      header: "ETA",
+      icon: Clock,
+      mono: true,
+      sortDescFirst: false,
+      cell: (c) => <span className="text-ink-2">{hhmmZulu(c.row.original.eta)}</span>,
+    },
+    {
+      accessorKey: "delay_min",
+      header: "Delay",
+      mono: true,
+      align: "right",
+      cell: (c) => {
+        const d = c.row.original.delay_min;
+        return <span className={delayClass(d)}>{d > 0 ? `+${d}` : "—"}</span>;
+      },
+    },
+    {
+      id: "cfr",
+      accessorFn: (d) => timeKey(d.cfr),
+      header: "CFR",
+      icon: PlaneTakeoff,
+      mono: true,
+      align: "right",
+      sortDescFirst: false,
+      cell: (c) => {
+        const d = c.row.original;
+        if (!d.cfr) return <span className="text-ink-3">—</span>;
+        const releaseNow = new Date(d.cfr).getTime() <= Date.now() + 60_000;
+        return <span className={releaseNow ? "text-success" : "text-warning"}>{hhmmZulu(d.cfr)}</span>;
+      },
+    },
+    {
+      id: "ready",
+      header: "Ready",
+      enableSorting: false,
+      cell: (c) => <ReadyCell d={c.row.original} canIssue={canIssue} />,
+    },
+    {
+      id: "state",
+      accessorFn: (d) => (!d.has_program ? "no program" : d.cfr_issued ? "issued" : "proposed"),
+      header: "State",
+      cell: (c) => {
+        const d = c.row.original;
+        return !d.has_program ? (
+          <StatusPill tone="neutral">no program</StatusPill>
+        ) : d.cfr_issued ? (
+          <StatusPill tone="good">issued</StatusPill>
+        ) : (
+          <StatusPill tone="brand">proposed</StatusPill>
+        );
+      },
+    },
+    {
+      id: "actions",
+      header: "",
+      enableSorting: false,
+      align: "right",
+      cell: (c) => <ActionsCell d={c.row.original} canIssue={canIssue} />,
+    },
+  ];
 }
 
 /**
@@ -164,99 +196,56 @@ function Stat({ label, value }: { label: string; value: number }) {
 export function DeparturesView({ icao }: { icao: string }) {
   const { data: me } = useMe();
   const departures = useDepartures(icao);
-  const canIssue = hasPermission(me, "tmu.cfr.assign");
-
-  if (departures.isError) {
-    return (
-      <Card>
-        <CardContent className="py-12 text-center text-sm text-muted-foreground">
-          Couldn&apos;t load departures for {icao}.
-        </CardContent>
-      </Card>
-    );
-  }
-  if (!departures.data) {
-    return (
-      <Card>
-        <CardContent className="py-12 text-center text-sm text-muted-foreground">
-          Loading departures…
-        </CardContent>
-      </Card>
-    );
-  }
+  // In historical replay the board is read-only — CFR actions would hit the live feed.
+  const replay = useHistoricalAt() != null;
+  const canIssue = hasPermission(me, "tmu.cfr.assign") && !replay;
+  const columns = useMemo(() => departureColumns(canIssue), [canIssue]);
+  const data = departures.data;
 
   return (
-    <div className="flex flex-col gap-6">
-      <Card>
-        <CardContent className="flex flex-col gap-4 pt-6">
-          {departures.data.facility_kind && (
-            <p className="text-sm text-muted-foreground">
-              <span className="font-medium capitalize text-foreground">
-                {departures.data.facility_kind}
-              </span>{" "}
-              facility ·{" "}
-              <span className="font-mono text-foreground">
-                {departures.data.airports.join(" ")}
-              </span>
-            </p>
-          )}
-          <div className="flex flex-wrap gap-10">
-            <Stat label="Total" value={departures.data.total} />
-            <Stat label="To metered fields" value={departures.data.to_metered} />
-            <Stat label="Holding on CFR" value={departures.data.holding_on_cfr} />
+    <QueryState
+      isLoading={!data && !departures.isError}
+      isError={departures.isError}
+      loading="Loading departures…"
+      error={`Couldn't load departures for ${icao}.`}
+      onRetry={() => departures.refetch()}
+      className="rounded-md border border-line py-12"
+    >
+      {data && (
+        <div className="flex flex-col gap-4">
+          <div className="grid gap-3 sm:grid-cols-3">
+            <MetricCard label="Total" icon={PlaneTakeoff} value={data.total} />
+            <MetricCard label="To metered fields" value={data.to_metered} />
+            <MetricCard label="Holding on CFR" value={data.holding_on_cfr} />
           </div>
-          <p className="text-sm text-muted-foreground">
-            Destinations with a TMU program:{" "}
-            {departures.data.program_destinations.length ? (
-              <span className="font-mono text-foreground">
-                {departures.data.program_destinations.join(", ")}
+          <div className="flex flex-wrap gap-x-6 gap-y-1 text-sm text-ink-2">
+            {data.facility_kind && (
+              <span>
+                <span className="font-semibold capitalize text-ink">{data.facility_kind}</span> facility ·{" "}
+                <span className="font-mono text-ink">{data.airports.join(" ")}</span>
               </span>
-            ) : (
-              "none"
             )}
-          </p>
-        </CardContent>
-      </Card>
-
-      <Card>
-        <CardContent className="pt-6">
-          {departures.data.departures.length === 0 ? (
-            <p className="py-8 text-center text-sm text-muted-foreground">
-              No pending departures out of {icao}.
-            </p>
-          ) : (
-            <div className="overflow-x-auto">
-              <table className="w-full text-sm">
-                <thead>
-                  <tr className="text-left text-xs uppercase tracking-wide text-muted-foreground">
-                    <th className="pb-2 pr-3 font-medium">From</th>
-                    <th className="pb-2 pr-3 font-medium">Callsign</th>
-                    <th className="pb-2 pr-3 font-medium">To</th>
-                    <th className="pb-2 pr-3 font-medium">Type</th>
-                    <th className="pb-2 pr-3 font-medium">Gate</th>
-                    <th className="pb-2 pr-3 font-medium">ETA</th>
-                    <th className="pb-2 pr-3 text-right font-medium">Delay</th>
-                    <th className="pb-2 pr-3 text-right font-medium">CFR</th>
-                    <th className="pb-2 pr-3 font-medium">Ready</th>
-                    <th className="pb-2 pr-3 font-medium" />
-                    <th className="pb-2" />
-                  </tr>
-                </thead>
-                <tbody>
-                  {departures.data.departures.map((d) => (
-                    <DepartureRow
-                      key={d.callsign}
-                      d={d}
-                      canIssue={canIssue}
-                      leading={<span className="font-mono text-xs">{d.dep}</span>}
-                    />
-                  ))}
-                </tbody>
-              </table>
-            </div>
-          )}
-        </CardContent>
-      </Card>
-    </div>
+            <span>
+              Destinations with a TMU program:{" "}
+              {data.program_destinations.length ? (
+                <span className="font-mono text-ink">{data.program_destinations.join(", ")}</span>
+              ) : (
+                "none"
+              )}
+            </span>
+          </div>
+          <DataTable
+            label={`Departures out of ${icao}`}
+            columns={columns}
+            data={data.departures}
+            getRowId={(d) => d.callsign}
+            // Live ops list: always pages, never hides rows behind "Show all".
+            rowCap={Infinity}
+            pageSize={25}
+            empty={`No pending departures out of ${icao}.`}
+          />
+        </div>
+      )}
+    </QueryState>
   );
 }

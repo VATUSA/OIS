@@ -23,9 +23,10 @@ export function FacilityMapWidgetView({
         initialRoutes={!!widget.routes}
       />
       {editing && (
-        <label className="absolute right-2 top-2 z-[50] flex items-center gap-1.5 rounded-md border bg-background/95 px-2.5 py-1.5 text-xs font-medium shadow-lg backdrop-blur">
+        <label className="absolute right-2 top-2 z-[50] flex items-center gap-1.5 rounded-md border border-line bg-panel px-2.5 py-1.5 text-xs font-semibold">
           <input
             type="checkbox"
+            className="size-3.5 accent-brand"
             checked={!widget.hideControls}
             onChange={(e) => onChange(widget.id, { hideControls: !e.target.checked })}
           />

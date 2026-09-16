@@ -1,6 +1,15 @@
 import {useEffect, useMemo, useState} from "react";
-import {Badge, Button, Card, CardContent, cn, Input} from "@ois/ui";
-import {Save, Search} from "lucide-react";
+import {
+  Button,
+  Card,
+  type DataColumn,
+  DataTable,
+  FilterBar,
+  Input,
+  QueryState,
+  StatusPill,
+} from "@ois/ui";
+import {Award, Hash, Save, Search, ShieldCheck, User} from "lucide-react";
 
 import {
   type AdminUserRow,
@@ -14,8 +23,8 @@ import {
   useUserAccess,
 } from "@/lib/access";
 import {type AccessPreset, BASE_PERMISSIONS, presetPermissions} from "@/lib/presets";
-import {Pagination} from "@/components/pagination";
 import {PresetBar} from "@/components/access/preset-bar";
+import {usePageHeader} from "@/components/shell/page-meta";
 import {
   PermissionScopeTree,
   ScopeChips,
@@ -27,6 +36,7 @@ import {
 } from "@/components/access/scope-tree";
 
 const USERS_PAGE_SIZE = 25;
+const SUBTITLE = "Grant roles and fine-grained, per-ARTCC permissions. Every change is audited.";
 
 /** National scope key is the empty string; anything else is an ARTCC id. */
 type ScopeKey = string;
@@ -126,6 +136,7 @@ export function AdminAccessControl() {
   }, [userQuery]);
   useEffect(() => setUsersPage(1), [debouncedQuery]);
   const users = useAllUsers(usersPage, USERS_PAGE_SIZE, debouncedQuery);
+  usePageHeader({ subtitle: SUBTITLE, count: users.data?.total ?? null });
 
   // Server admins hold every permission implicitly — the permission tree is read-only, but roles
   // are still editable.
@@ -254,217 +265,198 @@ export function AdminAccessControl() {
     save.mutate({ cid, body: { reason: reason.trim(), scopes } satisfies UpdateBody });
   }
 
-  return (
-    <div className="flex flex-col gap-6">
-      <div>
-        <h1 className="text-2xl font-semibold tracking-tight">Access Control</h1>
-        <p className="text-muted-foreground">
-          Grant roles and fine-grained, per-ARTCC permissions. Every change is audited.
-        </p>
-      </div>
-
-      <Card>
-        <CardContent className="flex flex-col gap-4 pt-6">
-          <div className="flex flex-col gap-1.5">
-            <label className="text-sm font-medium">Users</label>
-            <div className="relative w-full max-w-md">
-              <Search className="absolute left-2.5 top-2.5 size-4 text-muted-foreground" />
-              <Input
-                value={userQuery}
-                onChange={(e) => setUserQuery(e.target.value)}
-                placeholder="Search by name or CID"
-                className="pl-8"
-              />
-            </div>
-          </div>
-
-          {users.data ? (
-            users.data.items.length === 0 ? (
-              <p className="py-6 text-center text-sm text-muted-foreground">
-                {debouncedQuery ? "No users match." : "No users yet."}
-              </p>
-            ) : (
-              <>
-                <div className="overflow-x-auto">
-                  <table className="w-full text-sm">
-                    <thead>
-                      <tr className="border-b text-left text-xs uppercase tracking-wide text-muted-foreground">
-                        <th className="py-2 pr-4 font-medium">Name</th>
-                        <th className="py-2 pr-4 font-medium">CID</th>
-                        <th className="py-2 pr-4 font-medium">Rating</th>
-                        <th className="py-2 pr-4 font-medium">Roles</th>
-                      </tr>
-                    </thead>
-                    <tbody>
-                      {users.data.items.map((u) => (
-                        <tr
-                          key={u.cid}
-                          onClick={() => pickUser(u)}
-                          className={cn(
-                            "cursor-pointer border-b last:border-0 hover:bg-accent",
-                            selected?.cid === u.cid && "bg-accent",
-                          )}
-                        >
-                          <td className="py-2 pr-4 font-medium">{u.display_name}</td>
-                          <td className="whitespace-nowrap py-2 pr-4 font-mono text-xs text-muted-foreground">
-                            {u.cid}
-                          </td>
-                          <td className="py-2 pr-4 text-muted-foreground">{u.rating ?? "—"}</td>
-                          <td className="py-2 pr-4">
-                            <div className="flex flex-wrap gap-1">
-                              {u.roles.length === 0 ? (
-                                <span className="text-xs text-muted-foreground">—</span>
-                              ) : (
-                                u.roles.map((r) => (
-                                  <Badge key={r} variant="secondary">
-                                    {r}
-                                  </Badge>
-                                ))
-                              )}
-                            </div>
-                          </td>
-                        </tr>
-                      ))}
-                    </tbody>
-                  </table>
-                </div>
-                <Pagination
-                  page={users.data.page}
-                  pageSize={users.data.page_size}
-                  total={users.data.total}
-                  onPageChange={setUsersPage}
-                />
-              </>
-            )
-          ) : users.isError ? (
-            <p className="py-6 text-center text-sm text-muted-foreground">Couldn&apos;t load users.</p>
+  const userColumns = useMemo<DataColumn<AdminUserRow>[]>(
+    () => [
+      {
+        accessorKey: "display_name",
+        header: "Name",
+        icon: User,
+        cell: (c) => <span className="whitespace-nowrap font-semibold">{c.getValue<string>()}</span>,
+      },
+      { accessorKey: "cid", header: "CID", icon: Hash, mono: true },
+      {
+        accessorKey: "rating",
+        header: "Rating",
+        icon: Award,
+        cell: (c) => <span className="text-ink-2">{c.getValue<string | null>() ?? "—"}</span>,
+      },
+      {
+        accessorKey: "roles",
+        header: "Roles",
+        icon: ShieldCheck,
+        enableSorting: false,
+        cell: (c) => {
+          const roles = c.getValue<string[]>();
+          return roles.length === 0 ? (
+            <span className="text-xs text-ink-3">—</span>
           ) : (
-            <p className="py-6 text-center text-sm text-muted-foreground">Loading…</p>
-          )}
-        </CardContent>
-      </Card>
+            <div className="flex flex-wrap gap-1">
+              {roles.map((r) => (
+                <StatusPill key={r} tone="neutral">
+                  {r}
+                </StatusPill>
+              ))}
+            </div>
+          );
+        },
+      },
+    ],
+    [],
+  );
 
-      {cid != null && access.isError && (
-        <Card>
-          <CardContent className="py-10 text-center text-sm text-muted-foreground">
-            {(access.error as { status?: number } | null)?.status === 404
-              ? "No such user — they must have signed in to OIS at least once."
-              : "Couldn't load this user's access."}
-          </CardContent>
-        </Card>
-      )}
+  return (
+    <div className="flex flex-col gap-4">
+      <FilterBar>
+        <div className="relative w-full max-w-md">
+          <Search className="pointer-events-none absolute left-3 top-1/2 size-4 -translate-y-1/2 text-ink-3" />
+          <Input
+            aria-label="Search users"
+            value={userQuery}
+            onChange={(e) => setUserQuery(e.target.value)}
+            placeholder="Search by name or CID"
+            className="rounded-full pl-9"
+          />
+        </div>
+      </FilterBar>
 
-      {cid != null && access.isLoading && (
+      <DataTable
+        label="Users"
+        columns={userColumns}
+        data={users.data?.items ?? []}
+        getRowId={(u) => String(u.cid)}
+        rowCap={USERS_PAGE_SIZE}
+        selection={{ mode: "single", selected: cid != null ? String(cid) : null, onChange: () => {} }}
+        onRowClick={pickUser}
+        serverPagination={
+          users.data
+            ? {
+                page: users.data.page,
+                pageSize: users.data.page_size,
+                total: users.data.total,
+                onPageChange: setUsersPage,
+              }
+            : undefined
+        }
+        isLoading={users.isLoading}
+        isError={users.isError}
+        onRetry={() => users.refetch()}
+        empty={debouncedQuery ? "No users match." : "No users yet."}
+      />
+
+      {cid != null && (access.isError || access.isLoading) && (
         <Card>
-          <CardContent className="py-10 text-center text-sm text-muted-foreground">
-            Loading…
-          </CardContent>
+          <QueryState
+            isLoading={access.isLoading}
+            isError={access.isError}
+            error={
+              (access.error as { status?: number } | null)?.status === 404
+                ? "No such user — they must have signed in to OIS at least once."
+                : "Couldn't load this user's access."
+            }
+          />
         </Card>
       )}
 
       {access.data && (
-        <Card>
-          <CardContent className="flex flex-col gap-6 pt-6">
-            <div className="flex flex-wrap items-center gap-2">
-              <span className="text-lg font-semibold">
-                {selected?.name ?? `CID ${access.data.cid}`}
-              </span>
-              <span className="text-sm text-muted-foreground">CID {access.data.cid}</span>
-              {access.data.server_admin && <Badge variant="success">Server admin</Badge>}
+        <Card className="mt-2 flex flex-col gap-6 p-5">
+          <div className="flex flex-wrap items-center gap-2">
+            <h2 className="text-xl font-bold">{selected?.name ?? `CID ${access.data.cid}`}</h2>
+            <span className="font-mono text-sm text-ink-3">{access.data.cid}</span>
+            {access.data.server_admin && <StatusPill tone="good">Server admin</StatusPill>}
+          </div>
+
+          {/* Presets — one-click bundles, toggled on/off. Each grants its role + perms at the
+              chosen scope, plus the sign-in baseline nationally. */}
+          <section className="flex flex-col gap-2">
+            <PresetBar
+              isApplied={isPresetApplied}
+              onToggle={togglePreset}
+              facility={presetFacility}
+              facilities={facilities}
+              onFacility={setPresetFacility}
+              onRemoveAll={removeAll}
+              removeAllWarn="Clear every role and permission for this user (all scopes)?"
+              size="lg"
+            />
+            <p className="text-xs text-ink-3">
+              Each permission and role below is granted at National scope or specific ARTCCs — pick
+              the scope under each one. Nothing is saved until you enter a reason and hit Save.
+            </p>
+          </section>
+
+          {permsReadOnly && (
+            <div className="rounded-md border border-line bg-brand-soft px-3 py-2 text-sm text-ink-2">
+              Server admins hold every permission implicitly (managed via{" "}
+              <code className="font-mono">OIS_SERVER_ADMIN_CID</code>), so the permission tree is
+              read-only. Roles can still be changed.
             </div>
+          )}
 
-            {/* Presets — one-click bundles, toggled on/off. Each grants its role + perms at the
-                chosen scope, plus the sign-in baseline nationally. */}
-            <section className="flex flex-col gap-2">
-              <PresetBar
-                isApplied={isPresetApplied}
-                onToggle={togglePreset}
-                facility={presetFacility}
-                facilities={facilities}
-                onFacility={setPresetFacility}
-                onRemoveAll={removeAll}
-                removeAllWarn="Clear every role and permission for this user (all scopes)?"
-                size="lg"
-              />
-              <p className="text-xs text-muted-foreground">
-                Each permission and role below is granted at National scope or specific ARTCCs — pick
-                the scope under each one. Nothing is saved until you enter a reason and hit Save.
-              </p>
-            </section>
+          {/* Roles — each with its own scope chips. */}
+          <section className="flex flex-col gap-2">
+            <h3 className="text-sm font-semibold">Roles</h3>
+            <div className="grid gap-1.5 sm:grid-cols-2">
+              {assignableRoles.map((role) => {
+                const sel = roleSel.get(role);
+                return (
+                  <div key={role} className="rounded-xs px-2 py-1">
+                    <label className="flex items-center gap-2 text-sm">
+                      <input
+                        type="checkbox"
+                        className="size-4 accent-brand"
+                        checked={!!sel}
+                        onChange={(e) => toggleRole(role, e.target.checked)}
+                      />
+                      {role}
+                    </label>
+                    {sel && (
+                      <ScopeChips
+                        bounds={anyScope}
+                        sel={sel}
+                        facilities={facilities}
+                        onChange={(s) => setRoleScope(role, s)}
+                      />
+                    )}
+                  </div>
+                );
+              })}
+            </div>
+          </section>
 
-            {permsReadOnly && (
-              <div className="rounded-md border border-primary/30 bg-primary/5 px-3 py-2 text-sm text-muted-foreground">
-                Server admins hold every permission implicitly (managed via{" "}
-                <code>OIS_SERVER_ADMIN_CID</code>), so the permission tree is read-only. Roles can
-                still be changed.
-              </div>
-            )}
+          {/* Direct permissions — the shared scope tree (same as the API-key editor). */}
+          <section className="flex flex-col gap-2">
+            <h3 className="text-sm font-semibold">Direct permissions</h3>
+            <PermissionScopeTree
+              items={permItems}
+              facilities={facilities}
+              selection={permSel}
+              disabled={permsReadOnly}
+              onChange={setPermSel}
+            />
+          </section>
 
-            {/* Roles — each with its own scope chips. */}
-            <section className="flex flex-col gap-2">
-              <h3 className="text-sm font-semibold">Roles</h3>
-              <div className="grid gap-1.5 sm:grid-cols-2">
-                {assignableRoles.map((role) => {
-                  const sel = roleSel.get(role);
-                  return (
-                    <div key={role} className="rounded-md px-2 py-1">
-                      <label className="flex items-center gap-2 text-sm">
-                        <input
-                          type="checkbox"
-                          className="size-4 accent-primary"
-                          checked={!!sel}
-                          onChange={(e) => toggleRole(role, e.target.checked)}
-                        />
-                        {role}
-                      </label>
-                      {sel && (
-                        <ScopeChips
-                          bounds={anyScope}
-                          sel={sel}
-                          facilities={facilities}
-                          onChange={(s) => setRoleScope(role, s)}
-                        />
-                      )}
-                    </div>
-                  );
-                })}
-              </div>
-            </section>
-
-            {/* Direct permissions — the shared scope tree (same as the API-key editor). */}
-            <section className="flex flex-col gap-2">
-              <h3 className="text-sm font-semibold">Direct permissions</h3>
-              <PermissionScopeTree
-                items={permItems}
-                facilities={facilities}
-                selection={permSel}
-                disabled={permsReadOnly}
-                onChange={setPermSel}
-              />
-            </section>
-
-            {/* Reason + save */}
-            <section className="flex flex-col gap-2 border-t pt-4">
-              <label className="text-sm font-medium">Reason</label>
-              <Input
-                value={reason}
-                onChange={(e) => setReason(e.target.value)}
-                placeholder="Recorded as a dossier entry on this controller's log"
-              />
-              <div className="flex items-center gap-3">
-                <Button onClick={onSave} disabled={!valid || save.isPending}>
-                  <Save />
-                  {save.isPending ? "Saving…" : "Save"}
-                </Button>
-                {save.isSuccess && (
-                  <span className="text-sm text-emerald-600 dark:text-emerald-400">Saved.</span>
-                )}
-                {save.isError && (
-                  <span className="text-sm text-destructive">{saveErrorMessage(save.error)}</span>
-                )}
-              </div>
-            </section>
-          </CardContent>
+          {/* Reason + save */}
+          <section className="flex flex-col gap-2 border-t border-line pt-4">
+            <label htmlFor="access-reason" className="text-sm font-semibold">
+              Reason
+            </label>
+            <Input
+              id="access-reason"
+              value={reason}
+              onChange={(e) => setReason(e.target.value)}
+              placeholder="Recorded as a dossier entry on this controller's log"
+            />
+            <div className="flex items-center gap-3">
+              <Button onClick={onSave} disabled={!valid || save.isPending}>
+                <Save />
+                {save.isPending ? "Saving…" : "Save"}
+              </Button>
+              {save.isSuccess && <span className="text-sm text-success">Saved.</span>}
+              {save.isError && (
+                <span className="text-sm text-danger">{saveErrorMessage(save.error)}</span>
+              )}
+            </div>
+          </section>
         </Card>
       )}
     </div>

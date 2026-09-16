@@ -17,7 +17,7 @@ export type ConfirmButtonProps = Omit<ButtonProps, "onClick"> & {
 
 /**
  * A destructive button that confirms in place instead of via a browser popup: the first click
- * arms it (turns amber + fires a warning toast), a second click within `timeoutMs` runs the
+ * arms it (turns warning-toned + fires a warning toast), a second click within `timeoutMs` runs the
  * action (button flashes red), and no second click reverts it to its default look. Drop-in for
  * any delete/remove control — the surrounding mutation still shows the final success/error toast.
  */
@@ -33,13 +33,19 @@ export function ConfirmButton({
   disabled,
   ...rest
 }: ConfirmButtonProps) {
+  // A wrapping trigger (e.g. a tooltip via Slot) may inject its own onClick; run it alongside ours
+  // instead of letting the spread below replace the arm/confirm handler.
+  const { onClick: injectedClick, ...buttonProps } = rest as typeof rest & {
+    onClick?: React.MouseEventHandler<HTMLButtonElement>;
+  };
   const toast = useToast();
   const [state, setState] = React.useState<"idle" | "armed" | "firing">("idle");
   const timer = React.useRef<number | undefined>(undefined);
 
   React.useEffect(() => () => window.clearTimeout(timer.current), []);
 
-  const onClick = () => {
+  const onClick = (e: React.MouseEvent<HTMLButtonElement>) => {
+    injectedClick?.(e);
     window.clearTimeout(timer.current);
     if (state === "idle") {
       setState("armed");
@@ -67,9 +73,9 @@ export function ConfirmButton({
         className,
         // Applied last so the armed cue wins over any caller className.
         state === "armed" &&
-          "border-amber-500 text-amber-600 hover:bg-amber-500/10 dark:text-amber-400",
+          "border-warning text-warning hover:bg-warning-soft",
       )}
-      {...rest}
+      {...buttonProps}
     >
       {children}
     </Button>

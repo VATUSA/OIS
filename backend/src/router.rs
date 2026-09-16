@@ -9,9 +9,9 @@ use crate::{
     auth::middleware::resolve_current_user,
     config::build_cors_layer,
     handlers::{
-        access, ace, aircraft_profiles, airport_configs, airport_surface, api_keys, atc, audit,
-        auth, dashboards, docs, events, facilities, facility_documents, facility_map, feed, flow,
-        gdp, health, integration, jobs as jobs_handler, preferences, public, runway,
+        access, ace, admin, aircraft_profiles, airport_configs, airport_surface, api_keys, atc,
+        audit, auth, dashboards, docs, events, facilities, facility_documents, facility_map, feed,
+        flow, gdp, health, integration, jobs as jobs_handler, preferences, public, runway,
         service_accounts, stats, taxi_insights, tmu, users, webhooks,
     },
     openapi::ApiDoc,
@@ -528,6 +528,8 @@ pub fn build_router(state: AppState) -> Router {
             "/api/v1/admin/api-keys/{id}",
             delete(api_keys::admin_delete_key),
         )
+        // Admin landing summary (per-permission sections)
+        .route("/api/v1/admin/summary", get(admin::get_admin_summary))
         // Audit log
         .route("/api/v1/admin/audit", get(audit::list_audit_logs))
         // Background-tasks viewer (job status + manual trigger)

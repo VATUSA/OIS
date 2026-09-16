@@ -80,13 +80,31 @@ Tailwind utilities: `bg-panel`, `bg-card`, `text-ink-2`, `border-line`, `text-br
 | `--brand` | `#6ea8fe` | The single accent — pastel blue, VATUSA-aligned. Active state, primary button, focus, links. (shadcn `--primary`.) |
 | `--brand-ink` | `#a9cbff` | Brand as *text* on a dark ground |
 | `--brand-soft` | `rgba(110,168,254,.16)` | Brand tint fills — soft chips, hover/selected wash. (shadcn `--accent`.) |
-| `--good` / `--good-soft` | `#43d089` / `rgba(67,208,137,.13)` | Success / Active / positive trend |
-| `--bad` / `--bad-soft` | `#fb6b6b` / `rgba(251,107,107,.13)` | Danger / Inactive / negative trend |
-| `--warn` / `--warn-soft` | `#efc14d` / `rgba(239,193,77,.13)` | Warning / watch / flat trend |
+| `--success` / `--success-soft` | `#43d089` / `rgba(67,208,137,.13)` | Success / Active / positive trend |
+| `--danger` / `--danger-soft` | `#fb6b6b` / `rgba(251,107,107,.13)` | Danger / Inactive / negative trend |
+| `--warning` / `--warning-soft` | `#efc14d` / `rgba(239,193,77,.13)` | Warning / watch / flat trend |
 
 VATUSA is red/white/blue: **blue** is the accent, **white** is the ink, **red** is the danger
 semantic. Keep the accent and the status colours separate — e.g. a "Pending" state should use a
 neutral or the accent *deliberately*, not accidentally collide with brand.
+
+### Domain tokens (aviation meaning)
+
+Some colours carry operational meaning that three status hues can't hold. They are tokens too —
+defined for both themes in `globals.css`, exposed as utilities (`bg-flight-airborne`,
+`text-cat-ifr`, `fill-series-3`, …), and read from JS with `useTokens` / `useTokenRgba`
+(`@ois/ui`) where `var()` can't reach (deck.gl, chart attributes). Never re-declare them as hex.
+
+| Group | Tokens | Use |
+| --- | --- | --- |
+| Flight state | `--flight-airborne` · `--flight-ground` · `--flight-proposed` · `--flight-arrived` | Airport, AADC, FCA, ladder |
+| Flight category | `--cat-vfr` · `--cat-mvfr` · `--cat-ifr` · `--cat-lifr` | Weather category chips |
+| Load level | `--level-ok` · `--level-watch` · `--level-over` (alias success/warning/danger) | Runway bins, GDP, delays |
+| Series | `--series-1` … `--series-8` | Categorical chart series (carriers, fixes, gates, user charts) |
+| Map | `--map-aircraft` · `--map-highlight` · `--map-route` · `--map-boundary` · `--map-label` · `--map-label-bg` · `--map-waypoint-bg` · `--map-apron` · `--map-taxiway` · `--map-runway` | deck.gl / MapLibre layers |
+| ATC position | `--atc-del` · `--atc-gnd` · `--atc-twr` · `--atc-app` · `--atc-ctr` · `--atc-atis` | Controller badges and areas |
+
+Domain tokens are for data, never for chrome: a button is never `--cat-ifr`.
 
 ### Radius, spacing, type
 
@@ -113,17 +131,20 @@ content's left edge and rounding only that inner corner — not by rounding the 
 
 ## The shell (build this first)
 
-The single highest-leverage primitive. One rounded container, `--ground` base, holds:
+The single highest-leverage primitive. One full-height rounded frame on `--ground` (a thin gutter to
+the window, the system's only shadow beneath it) holds:
 
-- **Sidebar** (`--panel`, collapsible): window chrome row (traffic lights / back·forward·history /
-  collapse toggle — desktop-ready), a workspace switcher (logo tile + name + mono ID + chevron), a
-  pill **⌘K** search, then grouped nav.
-- **Main** (`--panel`, rounded top-left corner): a top bar with **breadcrumbs** (muted parent, bright
-  current crumb with its page icon), then the page header (large 700 title + count chip + subtitle,
-  with a segmented **Table/Board/List** view switch), then the content.
+- **Sidebar** (`--panel`, collapsible): a chrome row (back · forward · recent pages / collapse), the
+  identity (avatar + name + mono CID), a pill **⌘K** search, then **every section the user can use**
+  — Home, Advisories, Operations, Planning, Historical, Admin, and a **User** group (Profile, Settings,
+  API keys, Sign out) — and Docs / theme / Zulu clock at the foot. No dropdown menus for navigation. It is the only navigation: there is no top bar.
+- **Main**: a breadcrumb row (muted parents, bright current crumb with its icon), then the page's
+  **content panel** — inset and rounded on all four corners, with no divider between it and the
+  sidebar. Inside: the page header (700 title + count chip + subtitle, with a segmented view switch)
+  and the content. Don't repeat the page's name in section headings.
 
-Every page renders inside this frame. Getting this one component right fixes most of the cohesion
-problem on its own.
+Every signed-in page renders inside this frame. The only page outside it is the signed-out homepage,
+which keeps the public landing and the site footer (the footer appears nowhere else).
 
 ## Components (one each, tokens only)
 
@@ -136,13 +157,49 @@ problem on its own.
 - **Metric card** — `--card`, title + `--max` expand affordance, a big 700 tabular number, a semantic
   trend row, and a sparkline with a **flat** translucent area fill + emphasized endpoint dot in the
   same semantic hue.
-- **Data table** — select column, icon-led headers on `--card`, `--line-soft` row separators,
-  tabular figures, state as a pill, identity as avatar + name(600) + email link.
+- **Data table** — `DataTable` in `@ois/ui`: an opt-in select column, icon-led headers on
+  `--card`, `--line-soft` row separators, tabular figures, state as a pill, identity as avatar +
+  name(600) + email link. Every table shows a default row cap with a "Show all" expand, then
+  paginates — except live operational lists (departures, GDP flights, IDST, runway arrivals),
+  which page from the first row (`rowCap={Infinity}`) so no flight is hidden behind an expand.
 - **Buttons** — primary = solid `--brand` **pill** with **dark ink** (`--primary-foreground`; white
   fails AA on a pastel accent). Secondary = `--panel-2` pill with a hairline. Press = scale 0.97,
   150–220ms ease-out, no bounce.
 - **Icons** — one-weight line icons (~1.7px stroke, round caps), `currentColor` so they inherit the
   row's ink/accent. Never give an icon its own colour.
+
+---
+
+## Charts
+
+One approach: `@tanstack/charts`, wrapped by the chart components in `@ois/ui` (`Sparkline`,
+`TimeSeries`, `Bars`, `StackedBars`, `Donut`) that read their colours from tokens.
+
+- **Flat fills only.** Areas are a flat translucent fill of the series hue; never a gradient.
+- **Semantic colour.** Status-bearing data uses status or domain tokens (a load level is
+  `--level-*`, a flight state `--flight-*`); categorical series use `--series-1…8` in order.
+- **Faint structure.** Grid lines `--line-soft`, axes and tick labels `--ink-3` in mono 11–12px.
+- **Emphasize the endpoint.** Sparklines end in a dot in the line's hue; thresholds (an AAR cap) are
+  a dashed 1px rule in `--warning`.
+- **Both themes.** Every colour comes through tokens, so a chart re-reads on theme switch.
+
+---
+
+## Review checklist (web)
+
+Report each miss as `file:line — rule → fix`.
+
+- [ ] No hex, `rgb()`, or Tailwind palette class (`emerald-500`, `zinc-…`) outside `globals.css`.
+- [ ] No gradient; no `shadow-*` except the one under the app shell.
+- [ ] No `font-medium` (500). Weights are 400 / 600 / 700.
+- [ ] Radii from the scale (`rounded-xs…xl`, `rounded-full` for pills); no arbitrary radius.
+- [ ] Separators are 1px `border-line` / `border-line-soft`.
+- [ ] One accent: interactive state uses `primary`/`brand`; status colours only mean status.
+- [ ] IDs, counts, times and money render `font-mono` (tabular).
+- [ ] The page renders inside the shell; its title comes from route meta, not a hand-rolled `<h1>`.
+- [ ] Tables use `DataTable`; charts use the `@ois/ui` chart components; overlays use `Dialog`/`Sheet`.
+- [ ] Links and nav items the user can't use are not rendered.
+- [ ] Legible in both dark and light.
 
 ---
 

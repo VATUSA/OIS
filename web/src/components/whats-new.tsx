@@ -1,9 +1,9 @@
+import {Modal} from "@ois/ui";
 import {useEffect, useRef, useState} from "react";
 
 import {useMe} from "@/lib/auth";
 import {CHANGELOG, shouldSeed, unseenEntries} from "@/lib/changelog";
 import {usePreferences, useSavePreferences} from "@/lib/preferences";
-import {Modal} from "@/components/modal";
 
 const NAMESPACE = "changelog";
 
@@ -55,14 +55,14 @@ function WhatsNewInner() {
 
   return (
     <Modal open={open} onClose={dismiss} title="What's new">
-      <div className="flex flex-col gap-4">
+      <div className="flex flex-col divide-y divide-line-soft [&>*]:py-3 [&>*:first-child]:pt-0 [&>*:last-child]:pb-0">
         {entries.map((entry) => (
           <div key={entry.id} className="flex flex-col gap-1">
             <div className="flex items-baseline justify-between gap-2">
-              <span className="font-semibold">{entry.title}</span>
-              <span className="text-xs text-muted-foreground">{entry.date}</span>
+              <span className="font-semibold text-ink">{entry.title}</span>
+              <span className="shrink-0 font-mono text-xs text-ink-3">{entry.date}</span>
             </div>
-            <ul className="list-disc pl-5 text-sm text-muted-foreground">
+            <ul className="list-disc pl-5 text-sm text-ink-2 marker:text-ink-3">
               {entry.highlights.map((h, i) => (
                 <li key={i}>{h}</li>
               ))}

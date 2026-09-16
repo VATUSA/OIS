@@ -1,6 +1,7 @@
 // Presentational "layout" widgets — a free-text/heading block and a section divider. They carry no
 // data (no frame header, rendered `bare`); in edit mode each exposes lightweight inline controls.
 
+import {SegmentedControl, Select, Textarea} from "@ois/ui";
 import {AlignCenter, AlignLeft, AlignRight} from "lucide-react";
 
 import type {DividerWidget, TextWidget} from "./types";
@@ -11,7 +12,7 @@ type TextAlign = NonNullable<TextWidget["align"]>;
 const SIZE_CLASS: Record<TextSize, string> = {
   sm: "text-sm",
   md: "text-base",
-  lg: "text-xl font-semibold",
+  lg: "text-xl font-bold",
   xl: "text-3xl font-bold tracking-tight",
 };
 const ALIGN_CLASS: Record<TextAlign, string> = {
@@ -42,7 +43,7 @@ export function TextWidgetView({
     return (
       <div className={"flex h-full flex-col justify-center px-3 " + ALIGN_CLASS[align]}>
         <div className={"whitespace-pre-wrap break-words " + SIZE_CLASS[size]}>
-          {widget.content || <span className="text-muted-foreground">Empty text</span>}
+          {widget.content || <span className="text-ink-3">Empty text</span>}
         </div>
       </div>
     );
@@ -51,10 +52,11 @@ export function TextWidgetView({
   return (
     <div className="flex h-full flex-col gap-1.5 p-2">
       <div className="flex items-center gap-1">
-        <select
+        <Select
+          size="sm"
           value={size}
           onChange={(e) => onChange(widget.id, { size: e.target.value })}
-          className="h-7 rounded-md border border-input bg-background px-1.5 text-xs uppercase outline-none focus-visible:ring-2 focus-visible:ring-ring"
+          className="h-7 text-xs uppercase"
           aria-label="Text size"
         >
           {SIZES.map((s) => (
@@ -62,31 +64,20 @@ export function TextWidgetView({
               {s}
             </option>
           ))}
-        </select>
-        <div className="flex items-center gap-0.5">
-          {ALIGNS.map(({ id, Icon }) => (
-            <button
-              key={id}
-              type="button"
-              onClick={() => onChange(widget.id, { align: id })}
-              aria-label={`Align ${id}`}
-              className={
-                "rounded p-1 transition-colors " +
-                (align === id
-                  ? "bg-muted text-foreground"
-                  : "text-muted-foreground hover:text-foreground")
-              }
-            >
-              <Icon className="size-3.5" />
-            </button>
-          ))}
-        </div>
+        </Select>
+        <SegmentedControl
+          size="sm"
+          aria-label="Text alignment"
+          value={align}
+          onChange={(v) => onChange(widget.id, { align: v })}
+          options={ALIGNS.map(({ id, Icon }) => ({ value: id, label: <span className="sr-only">Align {id}</span>, icon: Icon }))}
+        />
       </div>
-      <textarea
+      <Textarea
         value={widget.content}
         onChange={(e) => onChange(widget.id, { content: e.target.value })}
         placeholder="Write a heading or note…"
-        className="min-h-0 flex-1 resize-none rounded-md border border-input bg-background p-2 text-sm outline-none focus-visible:ring-2 focus-visible:ring-ring"
+        className="min-h-0 flex-1 resize-none p-2"
       />
     </div>
   );
@@ -104,26 +95,26 @@ export function DividerWidgetView({
   if (widget.orientation === "vertical") {
     return (
       <div className="flex h-full justify-center px-2">
-        <span className="h-full w-px bg-border" />
+        <span className="h-full w-px bg-line" />
       </div>
     );
   }
 
   return (
     <div className="flex h-full items-center px-2">
-      <div className="flex w-full items-center gap-2 text-xs uppercase tracking-wide text-muted-foreground">
-        <span className="h-px flex-1 bg-border" />
+      <div className="flex w-full items-center gap-2 text-xs font-semibold text-ink-3">
+        <span className="h-px flex-1 bg-line" />
         {editing ? (
           <input
             value={widget.label ?? ""}
             onChange={(e) => onChange(widget.id, { label: e.target.value })}
             placeholder="Label…"
-            className="w-32 rounded border border-input bg-background px-1.5 py-0.5 text-center text-xs outline-none focus-visible:ring-2 focus-visible:ring-ring"
+            className="w-32 rounded-xs border border-line bg-panel-2 px-1.5 py-0.5 text-center text-xs outline-none focus-visible:ring-2 focus-visible:ring-ring"
           />
         ) : (
           widget.label && <span className="shrink-0">{widget.label}</span>
         )}
-        <span className="h-px flex-1 bg-border" />
+        <span className="h-px flex-1 bg-line" />
       </div>
     </div>
   );

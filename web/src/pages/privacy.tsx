@@ -3,35 +3,32 @@
 // action audit logs). It is descriptive, not a binding legal document — VATUSA should review and
 // replace it with an official policy. Linked from the footer.
 
+import {usePageHeader} from "@/components/shell/page-meta";
+
 function Section({ title, children }: { title: string; children: React.ReactNode }) {
   return (
-    <section className="flex flex-col gap-2">
-      <h2 className="text-lg font-semibold tracking-tight">{title}</h2>
-      <div className="flex flex-col gap-2 text-sm leading-relaxed text-muted-foreground">
-        {children}
-      </div>
+    <section className="flex flex-col gap-2 border-t border-line-soft pt-6 first-of-type:border-t-0 first-of-type:pt-0">
+      <h2 className="text-xl font-bold text-ink">{title}</h2>
+      <div className="flex flex-col gap-2 text-[15px] leading-relaxed text-ink-2">{children}</div>
     </section>
   );
 }
 
 export function PrivacyPage() {
-  return (
-    <div className="mx-auto flex w-full max-w-3xl flex-col gap-8">
-      <header className="flex flex-col gap-2">
-        <h1 className="text-3xl font-bold tracking-tight">Privacy</h1>
-        <p className="text-sm text-muted-foreground">
-          How the Operational Information System (OIS) handles your data. Last reviewed August 2026.
-        </p>
-      </header>
+  usePageHeader({
+    subtitle: "How the Operational Information System (OIS) handles your data. Last reviewed August 2026.",
+  });
 
-      <div className="rounded-lg border border-dashed p-4 text-sm text-muted-foreground">
+  return (
+    <div className="flex w-full max-w-3xl flex-col gap-6">
+      <div className="rounded-md border border-line bg-panel-2 p-4 text-sm leading-relaxed text-ink-2">
         This page describes OIS&apos;s current data practices in plain language. It is provided for
         transparency and is not a substitute for VATUSA&apos;s official policies or{" "}
         <a
           href="https://vatsim.net/"
           target="_blank"
           rel="noreferrer"
-          className="underline underline-offset-2 hover:text-foreground"
+          className="text-brand-ink underline underline-offset-2 hover:text-ink"
         >
           VATSIM&apos;s Privacy Policy
         </a>
@@ -48,7 +45,7 @@ export function PrivacyPage() {
 
       <Section title="Information we collect">
         <p>You sign in with your VATSIM account through VATSIM Connect (single sign-on). We receive:</p>
-        <ul className="ml-5 list-disc space-y-1">
+        <ul className="ml-5 list-disc space-y-1 marker:text-ink-3">
           <li>Your VATSIM CID, name, controller rating, and email address.</li>
           <li>A session cookie that keeps you signed in.</li>
           <li>

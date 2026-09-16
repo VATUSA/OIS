@@ -1,221 +1,207 @@
 import {useMemo, useState} from "react";
-import {Badge, Button, Card, CardContent, Tooltip, TooltipContent, TooltipTrigger} from "@ois/ui";
-import {useNavigate} from "@tanstack/react-router";
 import {
-  type ColumnDef,
-  createSortedRowModel,
-  flexRender,
-  rowSortingFeature,
-  type SortingState,
-  sortFns,
-  tableFeatures,
-  useTable,
-} from "@tanstack/react-table";
-import {ArrowDown, ArrowUp, ChevronsUpDown, ExternalLink, SlidersHorizontal} from "lucide-react";
+  Button,
+  Card,
+  type DataColumn,
+  DataTable,
+  EmptyState,
+  FilterBar,
+  QueryState,
+  SegmentedControl,
+  StatusPill,
+  Tooltip,
+  TooltipContent,
+  TooltipTrigger,
+} from "@ois/ui";
+import {useNavigate} from "@tanstack/react-router";
+import {Building2, CalendarClock, CircleDot, ExternalLink, Lock, Radio, SlidersHorizontal, Type} from "lucide-react";
 
+import {usePageHeader, useView} from "@/components/shell/page-meta";
 import {useMe} from "@/lib/auth";
 import {type EventSummary, useUpcomingEvents, vatusaEditUrl} from "@/lib/events";
 import {hasPermission} from "@/lib/permissions";
+import {toneOf} from "@/lib/status";
 import {formatZuluFull} from "@/lib/time";
 
-// v9 registers sorting explicitly instead of bundling it automatically (see #133). The full
-// built-in `sortFns` registry (not hand-picked entries) keeps v8's auto-detected sorting behavior,
-// since no column here declares a custom `sortingFn`.
-const features = tableFeatures({
-  rowSortingFeature,
-  sortedRowModel: createSortedRowModel(),
-  sortFns,
-});
-
-function reviewVariant(status: string): "success" | "secondary" | "outline" {
-  if (status === "approved") return "success";
-  if (status === "rejected" || status === "denied") return "outline";
-  return "secondary";
-}
-
-const RECORDING: Record<string, { label: string; variant: "success" | "secondary" | "outline" }> = {
-  recording: { label: "Recording", variant: "success" },
-  scheduled: { label: "Scheduled", variant: "secondary" },
-  recorded: { label: "Recorded", variant: "outline" },
+const RECORDING_LABEL: Record<string, string> = {
+  recording: "Recording",
+  scheduled: "Scheduled",
+  recorded: "Recorded",
 };
 
 type Scope = "upcoming" | "past" | "all";
-const EMPTY_SORTING: SortingState = [];
+const SCOPES = [
+  { value: "upcoming", label: "Upcoming" },
+  { value: "past", label: "Past" },
+  { value: "all", label: "All" },
+] as const;
+
+const SUBTITLE =
+  "VATUSA events. Open one to plan its TMI package, DCC support, facility staffing, and airport rates.";
 
 function endMs(e: EventSummary): number {
   const t = new Date(e.end_time).getTime();
   return Number.isNaN(t) ? 0 : t;
 }
 
-function EventActions({ event }: { event: EventSummary }) {
-  const navigate = useNavigate();
+const cap = (s: string) => s.charAt(0).toUpperCase() + s.slice(1).replace(/_/g, " ");
+
+function ReviewPill({ status }: { status: string }) {
+  if (!status) return <span className="text-ink-3">—</span>;
+  return <StatusPill tone={toneOf("review", status)}>{cap(status)}</StatusPill>;
+}
+
+function RecordingPill({ status }: { status: string }) {
+  const label = RECORDING_LABEL[status];
+  if (!label) return <span className="text-ink-3">—</span>;
+  return <StatusPill tone={toneOf("recording", status)}>{label}</StatusPill>;
+}
+
+function EditLink({ event }: { event: EventSummary }) {
   const editUrl = vatusaEditUrl(event);
+  if (!editUrl) return null;
   return (
-    <div className="flex items-center justify-end gap-1">
-      {editUrl && (
-        <a
-          href={editUrl}
-          target="_blank"
-          rel="noreferrer"
-          onClick={(e) => e.stopPropagation()}
-          title="Edit on VATUSA"
-          className="rounded-md p-1.5 text-muted-foreground transition-colors hover:bg-accent hover:text-foreground"
-        >
-          <ExternalLink className="size-4" />
-        </a>
+    <a
+      href={editUrl}
+      target="_blank"
+      rel="noreferrer"
+      onClick={(e) => e.stopPropagation()}
+      title="Edit on VATUSA"
+      className="rounded-full p-1.5 text-ink-3 transition-colors hover:bg-panel-2 hover:text-ink"
+    >
+      <ExternalLink className="size-4" />
+    </a>
+  );
+}
+
+function ManageButton({ event }: { event: EventSummary }) {
+  const navigate = useNavigate();
+  return (
+    <Button
+      size="sm"
+      onClick={(e) => {
+        e.stopPropagation();
+        navigate({ to: "/admin/planning/events/$eventId", params: { eventId: String(event.id) } });
+      }}
+    >
+      <SlidersHorizontal className="size-3.5" />
+      Manage
+    </Button>
+  );
+}
+
+const COLUMNS: DataColumn<EventSummary>[] = [
+  {
+    accessorKey: "title",
+    header: "Name",
+    icon: Type,
+    cell: (c) => {
+      const title = c.getValue<string>();
+      return (
+        <Tooltip>
+          <TooltipTrigger asChild>
+            <span className="block max-w-[16rem] truncate font-semibold">{title}</span>
+          </TooltipTrigger>
+          <TooltipContent>{title}</TooltipContent>
+        </Tooltip>
+      );
+    },
+  },
+  {
+    accessorKey: "facility",
+    header: "Facility",
+    icon: Building2,
+    mono: true,
+    cell: (c) => c.getValue<string>() || "—",
+  },
+  {
+    accessorKey: "start_time",
+    header: "Start (Z)",
+    icon: CalendarClock,
+    mono: true,
+    cell: (c) => <span className="whitespace-nowrap">{formatZuluFull(c.getValue<string>())}</span>,
+  },
+  {
+    accessorKey: "end_time",
+    header: "End (Z)",
+    mono: true,
+    cell: (c) => <span className="whitespace-nowrap text-ink-2">{formatZuluFull(c.getValue<string>())}</span>,
+  },
+  {
+    accessorKey: "review_status",
+    header: "Status",
+    icon: CircleDot,
+    cell: (c) => <ReviewPill status={c.getValue<string>() ?? ""} />,
+  },
+  {
+    accessorKey: "recording",
+    header: "Recording",
+    icon: Radio,
+    cell: (c) => <RecordingPill status={c.getValue<string>() ?? ""} />,
+  },
+  {
+    id: "support",
+    header: "Support",
+    enableSorting: false,
+    cell: (c) => {
+      const e = c.row.original;
+      if (!e.ace_requested && !e.facility_support) return <span className="text-ink-3">—</span>;
+      return (
+        <div className="flex flex-wrap gap-1">
+          {e.ace_requested && <StatusPill tone="neutral">ACE</StatusPill>}
+          {e.facility_support && <StatusPill tone="neutral">Facility</StatusPill>}
+        </div>
+      );
+    },
+  },
+  {
+    id: "actions",
+    header: () => <span className="sr-only">Actions</span>,
+    enableSorting: false,
+    align: "right",
+    cell: (c) => (
+      <div className="flex items-center justify-end gap-1">
+        <EditLink event={c.row.original} />
+        <ManageButton event={c.row.original} />
+      </div>
+    ),
+  },
+];
+
+function EventCard({ event: e }: { event: EventSummary }) {
+  return (
+    <Card className="flex flex-col overflow-hidden">
+      {e.banner_image_url ? (
+        <img src={e.banner_image_url} alt="" className="aspect-[16/7] w-full border-b border-line object-cover" />
+      ) : (
+        <div className="flex aspect-[16/7] w-full items-center justify-center border-b border-line bg-panel-2">
+          <CalendarClock className="size-6 text-ink-3" />
+        </div>
       )}
-      <Button
-        size="sm"
-        onClick={(e) => {
-          e.stopPropagation();
-          navigate({ to: "/planning/events/$eventId", params: { eventId: String(event.id) } });
-        }}
-      >
-        <SlidersHorizontal className="size-3.5" />
-        Manage
-      </Button>
-    </div>
-  );
-}
-
-function useEventColumns(): ColumnDef<typeof features, EventSummary>[] {
-  return useMemo(
-    () => [
-      {
-        accessorKey: "title",
-        header: "Name",
-        cell: (c) => {
-          const title = String(c.getValue());
-          return (
-            <Tooltip>
-              <TooltipTrigger asChild>
-                <span className="block max-w-[20rem] truncate font-medium">{title}</span>
-              </TooltipTrigger>
-              <TooltipContent>{title}</TooltipContent>
-            </Tooltip>
-          );
-        },
-      },
-      {
-        accessorKey: "facility",
-        header: "Facility",
-        cell: (c) => <span className="font-mono text-xs">{String(c.getValue() || "—")}</span>,
-      },
-      {
-        accessorKey: "start_time",
-        header: "Start (Z)",
-        cell: (c) => <span className="font-mono text-xs">{formatZuluFull(String(c.getValue()))}</span>,
-      },
-      {
-        accessorKey: "end_time",
-        header: "End (Z)",
-        cell: (c) => (
-          <span className="font-mono text-xs text-muted-foreground">
-            {formatZuluFull(String(c.getValue()))}
-          </span>
-        ),
-      },
-      {
-        accessorKey: "review_status",
-        header: "Status",
-        cell: (c) => {
-          const s = String(c.getValue() ?? "");
-          return s ? <Badge variant={reviewVariant(s)}>{s}</Badge> : <span className="text-muted-foreground">—</span>;
-        },
-      },
-      {
-        accessorKey: "recording",
-        header: "Recording",
-        cell: (c) => {
-          const r = RECORDING[String(c.getValue() ?? "")];
-          return r ? <Badge variant={r.variant}>{r.label}</Badge> : <span className="text-muted-foreground">—</span>;
-        },
-      },
-      {
-        id: "support",
-        header: "Support",
-        enableSorting: false,
-        cell: (c) => {
-          const e = c.row.original;
-          if (!e.ace_requested && !e.facility_support) return <span className="text-muted-foreground">—</span>;
-          return (
-            <div className="flex flex-wrap gap-1">
-              {e.ace_requested && <Badge variant="secondary">ACE</Badge>}
-              {e.facility_support && <Badge variant="outline">Facility</Badge>}
-            </div>
-          );
-        },
-      },
-      {
-        id: "actions",
-        header: () => <span className="sr-only">Actions</span>,
-        enableSorting: false,
-        cell: (c) => <EventActions event={c.row.original} />,
-      },
-    ],
-    [],
-  );
-}
-
-function EventsTable({ events }: { events: EventSummary[] }) {
-  const columns = useEventColumns();
-  const [sorting, setSorting] = useState<SortingState>([{ id: "start_time", desc: false }]);
-  const table = useTable({
-    features,
-    data: events,
-    columns,
-    state: { sorting },
-    onSortingChange: setSorting,
-  });
-
-  return (
-    <div className="overflow-x-auto">
-      <table className="w-full text-sm">
-        <thead>
-          {table.getHeaderGroups().map((hg) => (
-            <tr key={hg.id} className="text-left text-xs uppercase tracking-wide text-muted-foreground">
-              {hg.headers.map((h) => {
-                const sortable = h.column.getCanSort();
-                const sorted = h.column.getIsSorted();
-                return (
-                  <th
-                    key={h.id}
-                    className={
-                      "pb-2 pr-3 font-medium " + (h.column.id === "actions" ? "text-right" : "") +
-                      (sortable ? " cursor-pointer select-none" : "")
-                    }
-                    onClick={sortable ? h.column.getToggleSortingHandler() : undefined}
-                  >
-                    <span className="inline-flex items-center gap-1">
-                      {flexRender(h.column.columnDef.header, h.getContext())}
-                      {sortable &&
-                        (sorted === "asc" ? (
-                          <ArrowUp className="size-3" />
-                        ) : sorted === "desc" ? (
-                          <ArrowDown className="size-3" />
-                        ) : (
-                          <ChevronsUpDown className="size-3 opacity-30" />
-                        ))}
-                    </span>
-                  </th>
-                );
-              })}
-            </tr>
-          ))}
-        </thead>
-        <tbody>
-          {table.getRowModel().rows.map((r) => (
-            <tr key={r.id} className="border-t transition-colors hover:bg-accent/30">
-              {r.getAllCells().map((cell) => (
-                <td key={cell.id} className="py-2 pr-3">
-                  {flexRender(cell.column.columnDef.cell, cell.getContext())}
-                </td>
-              ))}
-            </tr>
-          ))}
-        </tbody>
-      </table>
-    </div>
+      <div className="flex flex-1 flex-col gap-3 p-4">
+        <div className="flex flex-col gap-1">
+          <div className="flex items-start justify-between gap-2">
+            <h3 className="line-clamp-2 font-semibold leading-snug" title={e.title}>
+              {e.title}
+            </h3>
+            {e.facility && <span className="shrink-0 font-mono text-xs text-ink-2">{e.facility}</span>}
+          </div>
+          <div className="font-mono text-xs text-ink-2">
+            {formatZuluFull(e.start_time)} – {formatZuluFull(e.end_time)}
+          </div>
+        </div>
+        <div className="flex flex-wrap gap-1">
+          {e.review_status && <ReviewPill status={e.review_status} />}
+          {RECORDING_LABEL[e.recording] && <RecordingPill status={e.recording} />}
+          {e.ace_requested && <StatusPill tone="neutral">ACE</StatusPill>}
+          {e.facility_support && <StatusPill tone="neutral">Facility</StatusPill>}
+        </div>
+        <div className="mt-auto flex items-center justify-end gap-1">
+          <EditLink event={e} />
+          <ManageButton event={e} />
+        </div>
+      </div>
+    </Card>
   );
 }
 
@@ -224,76 +210,69 @@ export function PlanningEventsPage() {
   const canPlan = hasPermission(me, "events.plan.read");
   const events = useUpcomingEvents();
   const [scope, setScope] = useState<Scope>("upcoming");
+  const view = useView();
 
   const now = Date.now();
   const filtered = useMemo(() => {
     if (!events.data) return undefined;
     if (scope === "all") return events.data;
-    return events.data.filter((e) =>
-      scope === "past" ? endMs(e) < now : endMs(e) >= now,
-    );
+    return events.data.filter((e) => (scope === "past" ? endMs(e) < now : endMs(e) >= now));
     // `now` intentionally captured once per render — the split is coarse (event granularity).
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [events.data, scope]);
 
-  const SCOPES: { id: Scope; label: string }[] = [
-    { id: "upcoming", label: "Upcoming" },
-    { id: "past", label: "Past" },
-    { id: "all", label: "All" },
-  ];
+  const board = useMemo(
+    () => (filtered ? [...filtered].sort((a, b) => a.start_time.localeCompare(b.start_time)) : []),
+    [filtered],
+  );
+
+  usePageHeader({
+    subtitle: SUBTITLE,
+    count: canPlan ? (filtered?.length ?? null) : null,
+    views: canPlan ? undefined : null,
+  });
+
+  if (!canPlan) {
+    return <EmptyState icon={Lock}>You don&apos;t have event planning access yet.</EmptyState>;
+  }
+
+  const empty = scope === "past" ? "No recent past events." : "No upcoming events on the VATUSA calendar right now.";
 
   return (
-    <div className="flex flex-col gap-6">
-      <div className="flex flex-wrap items-end justify-between gap-3">
-        <div>
-          <h1 className="text-2xl font-semibold tracking-tight">Events</h1>
-          <p className="text-muted-foreground">
-            VATUSA events. Open one to plan its TMI package, DCC support, facility staffing, and
-            airport rates.
-          </p>
-        </div>
-        {canPlan && (
-          <div className="flex rounded-md border p-0.5">
-            {SCOPES.map((s) => (
-              <button
-                key={s.id}
-                type="button"
-                onClick={() => setScope(s.id)}
-                className={
-                  "rounded px-3 py-1 text-sm transition-colors " +
-                  (scope === s.id
-                    ? "bg-accent text-foreground"
-                    : "text-muted-foreground hover:text-foreground")
-                }
-              >
-                {s.label}
-              </button>
+    <div className="flex flex-col gap-4">
+      <FilterBar>
+        <SegmentedControl aria-label="Event scope" value={scope} onChange={setScope} options={SCOPES} />
+      </FilterBar>
+
+      {view === "board" ? (
+        <QueryState
+          isLoading={events.isLoading}
+          isError={events.isError}
+          onRetry={() => events.refetch()}
+          isEmpty={board.length === 0}
+          empty={empty}
+          error="Couldn't load events."
+        >
+          <div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-3 2xl:grid-cols-4">
+            {board.map((e) => (
+              <EventCard key={e.id} event={e} />
             ))}
           </div>
-        )}
-      </div>
-
-      <Card>
-        <CardContent className="pt-6">
-          {!canPlan ? (
-            <p className="py-8 text-center text-sm text-muted-foreground">
-              You don&apos;t have event planning access yet.
-            </p>
-          ) : events.isError ? (
-            <p className="py-8 text-center text-sm text-muted-foreground">Couldn&apos;t load events.</p>
-          ) : !filtered ? (
-            <p className="py-8 text-center text-sm text-muted-foreground">Loading…</p>
-          ) : filtered.length === 0 ? (
-            <p className="py-8 text-center text-sm text-muted-foreground">
-              {scope === "past"
-                ? "No recent past events."
-                : "No upcoming events on the VATUSA calendar right now."}
-            </p>
-          ) : (
-            <EventsTable events={filtered} />
-          )}
-        </CardContent>
-      </Card>
+        </QueryState>
+      ) : (
+        <DataTable
+          label="Events"
+          columns={COLUMNS}
+          data={filtered ?? []}
+          getRowId={(e) => String(e.id)}
+          initialSort={[{ id: "start_time", desc: false }]}
+          rowCap={25}
+          isLoading={events.isLoading}
+          isError={events.isError}
+          onRetry={() => events.refetch()}
+          empty={empty}
+        />
+      )}
     </div>
   );
 }

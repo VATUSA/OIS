@@ -22,24 +22,24 @@ export function Markdown({ children, className }: { children: string; className?
               href={href}
               target="_blank"
               rel="noopener noreferrer"
-              className="underline underline-offset-2 hover:text-foreground"
+              className="text-brand-ink underline underline-offset-2 hover:text-ink"
             >
               {linkChildren}
             </a>
           ),
           ul: ({ children: c, node: _node, ...rest }) => (
-            <ul {...rest} className="list-disc pl-5">
+            <ul {...rest} className="list-disc pl-5 marker:text-ink-3">
               {c}
             </ul>
           ),
           ol: ({ children: c, node: _node, ...rest }) => (
-            <ol {...rest} className="list-decimal pl-5">
+            <ol {...rest} className="list-decimal pl-5 marker:text-ink-3">
               {c}
             </ol>
           ),
-          h1: ({ children: c }) => <h3 className="font-semibold">{c}</h3>,
-          h2: ({ children: c }) => <h3 className="font-semibold">{c}</h3>,
-          h3: ({ children: c }) => <h3 className="font-semibold">{c}</h3>,
+          h1: ({ children: c }) => <h3 className="font-semibold text-ink">{c}</h3>,
+          h2: ({ children: c }) => <h3 className="font-semibold text-ink">{c}</h3>,
+          h3: ({ children: c }) => <h3 className="font-semibold text-ink">{c}</h3>,
           p: ({ children: c }) => <p className="mb-2 last:mb-0">{c}</p>,
         }}
       >
