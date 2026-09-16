@@ -181,7 +181,7 @@ function FacilityDocuments({ facilityId, controls }: { facilityId: string; contr
         getRowId={(d) => d.id}
         rowCap={25}
         isLoading={docs.isLoading}
-        isError={docs.isError}
+        isError={!docs.data && docs.isError}
         onRetry={() => docs.refetch()}
         empty={`No documents for ${facilityId} yet${editable ? " — add one above." : "."}`}
       />

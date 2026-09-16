@@ -435,7 +435,7 @@ export function TmiPackagesSection({ eventId }: { eventId: number }) {
 
       <QueryState
         isLoading={packages.isLoading}
-        isError={packages.isError}
+        isError={!packages.data && packages.isError}
         onRetry={() => packages.refetch()}
         isEmpty={rows.length === 0}
         empty="No TMI packages yet."

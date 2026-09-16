@@ -157,7 +157,8 @@ problem on its own.
 - **Data table** — `DataTable` in `@ois/ui`: an opt-in select column, icon-led headers on
   `--card`, `--line-soft` row separators, tabular figures, state as a pill, identity as avatar +
   name(600) + email link. Every table shows a default row cap with a "Show all" expand, then
-  paginates.
+  paginates — except live operational lists (departures, GDP flights, IDST, runway arrivals),
+  which page from the first row (`rowCap={Infinity}`) so no flight is hidden behind an expand.
 - **Buttons** — primary = solid `--brand` **pill** with **dark ink** (`--primary-foreground`; white
   fails AA on a pastel accent). Secondary = `--panel-2` pill with a hairline. Press = scale 0.97,
   150–220ms ease-out, no bounce.

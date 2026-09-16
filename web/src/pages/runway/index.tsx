@@ -1,4 +1,4 @@
-import {useMemo, useState} from "react";
+import {createContext, useContext, useMemo, useState} from "react";
 import {
   Bars,
   Button,
@@ -565,79 +565,86 @@ function DemandChart({
 
 type Group = { id: string; hdg?: number; list: RunwayArrival[] };
 
-function arrivalColumns(
-  activeIds: string[],
-  recMap: Map<string, { to_rwy: string; level: string }>,
-  onOverride: (cs: string, rwy: string) => void,
-  canEdit: boolean,
-): DataColumn<RunwayArrival>[] {
-  return [
-    { accessorKey: "cs", header: "Callsign", mono: true, cellClassName: "px-2 font-semibold" },
-    {
-      id: "route",
-      accessorFn: (a) => `${a.dep} ${a.star ?? ""}`,
-      header: "Route",
-      mono: true,
-      cellClassName: "px-2 text-xs text-ink-2",
-      cell: (c) => (
-        <span className="whitespace-nowrap">
-          {c.row.original.dep} · {c.row.original.star ?? "—"}
+type AssignContext = {
+  activeIds: string[];
+  recMap: Map<string, { to_rwy: string; level: string }>;
+  onOverride: (cs: string, rwy: string) => void;
+  canEdit: boolean;
+};
+
+// The board refetches every 15s. Cells read the live assignment state from context so the column
+// definitions stay module-constant — a new cell function would remount the override Select and close
+// it (or drop focus) mid-choice.
+const AssignCtx = createContext<AssignContext | null>(null);
+
+function AssignCell({ a }: { a: RunwayArrival }) {
+  const { activeIds, recMap, onOverride, canEdit } = useContext(AssignCtx)!;
+  const rec = recMap.get(a.cs);
+  return (
+    <div className="flex items-center justify-end gap-1.5">
+      {rec && (
+        <span title={`Rebalance: move to ${rec.to_rwy}`}>
+          <StatusPill tone={toneOf("level", rec.level)} className="px-1.5 font-mono text-[10px] leading-4">
+            → {rec.to_rwy}
+          </StatusPill>
         </span>
-      ),
-    },
-    {
-      accessorKey: "eta",
-      header: "ETA",
-      mono: true,
-      cellClassName: "px-2 text-xs",
-      cell: (c) => (
-        <span className="whitespace-nowrap">
-          {zulu(c.row.original.eta)} <span className="text-ink-3">+{minsFromNow(c.row.original.eta)}</span>
-        </span>
-      ),
-    },
-    {
-      id: "assign",
-      header: "Assignment",
-      align: "right",
-      enableSorting: false,
-      cellClassName: "px-2",
-      cell: (c) => {
-        const a = c.row.original;
-        const rec = recMap.get(a.cs);
-        return (
-          <div className="flex items-center justify-end gap-1.5">
-            {rec && (
-              <span title={`Rebalance: move to ${rec.to_rwy}`}>
-                <StatusPill tone={toneOf("level", rec.level)} className="px-1.5 font-mono text-[10px] leading-4">
-                  → {rec.to_rwy}
-                </StatusPill>
-              </span>
-            )}
-            <StatusPill tone={a.src === "man" ? "brand" : "neutral"} className="px-1.5 font-mono text-[10px] uppercase leading-4">
-              {a.src}
-            </StatusPill>
-            <Select
-              size="sm"
-              aria-label={`Runway override for ${a.cs}`}
-              className="h-7 font-mono text-[11px]"
-              disabled={!canEdit}
-              value={a.src === "man" ? (a.rwy ?? "AUTO") : "AUTO"}
-              onChange={(e) => onOverride(a.cs, e.target.value)}
-            >
-              <option value="AUTO">AUTO</option>
-              {activeIds.map((id) => (
-                <option key={id} value={id}>
-                  {id}
-                </option>
-              ))}
-            </Select>
-          </div>
-        );
-      },
-    },
-  ];
+      )}
+      <StatusPill tone={a.src === "man" ? "brand" : "neutral"} className="px-1.5 font-mono text-[10px] uppercase leading-4">
+        {a.src}
+      </StatusPill>
+      <Select
+        size="sm"
+        aria-label={`Runway override for ${a.cs}`}
+        className="h-7 font-mono text-[11px]"
+        disabled={!canEdit}
+        value={a.src === "man" ? (a.rwy ?? "AUTO") : "AUTO"}
+        onChange={(e) => onOverride(a.cs, e.target.value)}
+      >
+        <option value="AUTO">AUTO</option>
+        {activeIds.map((id) => (
+          <option key={id} value={id}>
+            {id}
+          </option>
+        ))}
+      </Select>
+    </div>
+  );
 }
+
+const ARRIVAL_COLUMNS: DataColumn<RunwayArrival>[] = [
+  { accessorKey: "cs", header: "Callsign", mono: true, cellClassName: "px-2 font-semibold" },
+  {
+    id: "route",
+    accessorFn: (a) => `${a.dep} ${a.star ?? ""}`,
+    header: "Route",
+    mono: true,
+    cellClassName: "px-2 text-xs text-ink-2",
+    cell: (c) => (
+      <span className="whitespace-nowrap">
+        {c.row.original.dep} · {c.row.original.star ?? "—"}
+      </span>
+    ),
+  },
+  {
+    accessorKey: "eta",
+    header: "ETA",
+    mono: true,
+    cellClassName: "px-2 text-xs",
+    cell: (c) => (
+      <span className="whitespace-nowrap">
+        {zulu(c.row.original.eta)} <span className="text-ink-3">+{minsFromNow(c.row.original.eta)}</span>
+      </span>
+    ),
+  },
+  {
+    id: "assign",
+    header: "Assignment",
+    align: "right",
+    enableSorting: false,
+    cellClassName: "px-2",
+    cell: (c) => <AssignCell a={c.row.original} />,
+  },
+];
 
 function ArrivalsByRunway({
   ends,
@@ -661,9 +668,9 @@ function ArrivalsByRunway({
   }));
   const unassigned = arrivals.filter((a) => !a.rwy || !ends.some((e) => e.id === a.rwy));
   if (unassigned.length) groups.push({ id: "unassigned", list: unassigned });
-  const columns = arrivalColumns(activeIds, recMap, onOverride, canEdit);
 
   return (
+    <AssignCtx.Provider value={{ activeIds, recMap, onOverride, canEdit }}>
     <section className="flex flex-col gap-3">
       <h2 className="text-xl font-bold">Arrivals by runway</h2>
       <div className="grid grid-cols-1 gap-4 lg:grid-cols-2 2xl:grid-cols-3">
@@ -680,11 +687,13 @@ function ArrivalsByRunway({
             </div>
             <DataTable
               label={`Arrivals for ${g.id}`}
-              columns={columns}
+              columns={ARRIVAL_COLUMNS}
               data={g.list}
               getRowId={(a) => a.cs}
               hideHeader
-              rowCap={25}
+              // Live ops list: always pages, never hides rows behind "Show all".
+              rowCap={Infinity}
+              pageSize={25}
               rowClassName={(a) => (recMap.has(a.cs) ? "bg-warning-soft" : undefined)}
               empty="No arrivals"
             />
@@ -692,5 +701,6 @@ function ArrivalsByRunway({
         ))}
       </div>
     </section>
+    </AssignCtx.Provider>
   );
 }

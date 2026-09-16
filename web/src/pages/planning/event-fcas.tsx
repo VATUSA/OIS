@@ -197,7 +197,7 @@ export function EventFcasSection({ eventId }: { eventId: number }) {
           getRowId={(f) => f.id}
           rowCap={25}
           isLoading={fcas.isLoading}
-          isError={fcas.isError}
+          isError={!fcas.data && fcas.isError}
           onRetry={() => fcas.refetch()}
         />
       )}

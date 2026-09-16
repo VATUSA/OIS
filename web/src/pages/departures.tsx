@@ -239,7 +239,9 @@ export function DeparturesView({ icao }: { icao: string }) {
             columns={columns}
             data={data.departures}
             getRowId={(d) => d.callsign}
-            rowCap={25}
+            // Live ops list: always pages, never hides rows behind "Show all".
+            rowCap={Infinity}
+            pageSize={25}
             empty={`No pending departures out of ${icao}.`}
           />
         </div>

@@ -101,7 +101,9 @@ export function TaxiView({ icao }: { icao: string }) {
         columns={columns}
         data={rows}
         getRowId={(r) => `${r.field}-${r.callsign}`}
-        rowCap={25}
+        // Live ops list: always pages, never hides rows behind "Show all".
+        rowCap={Infinity}
+        pageSize={25}
         isLoading={stats.isLoading}
         isError={stats.isError}
         onRetry={() => stats.refetch()}

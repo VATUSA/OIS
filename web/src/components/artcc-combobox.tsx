@@ -70,7 +70,9 @@ export function ArtccCombobox({
           if (e.key === "Enter" && matches[0]) {
             e.preventDefault();
             pick(matches[0].id);
-          } else if (e.key === "Escape") {
+          } else if (e.key === "Escape" && open) {
+            // Closing the list shouldn't also close an enclosing Modal.
+            e.preventDefault();
             setOpen(false);
           }
         }}

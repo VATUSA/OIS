@@ -197,7 +197,9 @@ function OverviewGroupSection({
             data={shown}
             getRowId={(f) => f.callsign}
             hideHeader
-            rowCap={25}
+            // Live ops list: always pages, never hides rows behind "Show all".
+            rowCap={Infinity}
+            pageSize={25}
             onRowClick={(f) => onFocusFlight?.(f.callsign)}
             isLoading={flights == null}
             empty={`No ${filter === "air" ? "airborne " : filter === "cfr" ? "CFR " : ""}traffic crossing this FCA.`}

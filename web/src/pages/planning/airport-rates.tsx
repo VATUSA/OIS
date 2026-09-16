@@ -1,4 +1,4 @@
-import {useEffect, useMemo, useState} from "react";
+import {useEffect, useMemo, useRef, useState} from "react";
 import {Button, ConfirmButton, type DataColumn, DataTable, FilterBar, Input, Select, StatusPill} from "@ois/ui";
 import {CloudSun, Gauge, Plane, Plus, Settings2, Tag, Wand2, Wind, X} from "lucide-react";
 
@@ -26,6 +26,10 @@ function usePrediction(icao: string, atUnix: number | null) {
   const predicted = useMemo(() => matchConfig(configList, windDir), [configList, windDir]);
   return { configList, forecast, predicted };
 }
+
+/** AAR/ADR typed but not yet saved, per airport — "Manual" sends them, so switching to manual right after
+ * typing (before the blur-save round-trips) can't restore the old rates. */
+type RateDrafts = Map<string, { aar: string; adr: string }>;
 
 function useApplyConfig(eventId: number, icao: string) {
   const upsert = useUpsertAirportRate(eventId);
@@ -74,7 +78,17 @@ function ForecastCell({ eventId, row, atUnix }: { eventId: number; row: AirportR
   );
 }
 
-function ConfigCell({ eventId, row, atUnix }: { eventId: number; row: AirportRate; atUnix: number | null }) {
+function ConfigCell({
+  eventId,
+  row,
+  atUnix,
+  drafts,
+}: {
+  eventId: number;
+  row: AirportRate;
+  atUnix: number | null;
+  drafts: RateDrafts;
+}) {
   const { configList, predicted } = usePrediction(row.icao, atUnix);
   const upsert = useUpsertAirportRate(eventId);
   const applyConfig = useApplyConfig(eventId, row.icao);
@@ -91,7 +105,12 @@ function ConfigCell({ eventId, row, atUnix }: { eventId: number; row: AirportRat
     if (value === "manual") {
       upsert.mutate({
         icao: row.icao,
-        body: { aar: row.aar, adr: row.adr, config_id: null, source: "override" },
+        body: {
+          aar: clampRate(Number(drafts.get(row.icao)?.aar ?? row.aar) || 0),
+          adr: clampRate(Number(drafts.get(row.icao)?.adr ?? row.adr) || 0),
+          config_id: null,
+          source: "override",
+        },
       });
       return;
     }
@@ -112,7 +131,7 @@ function ConfigCell({ eventId, row, atUnix }: { eventId: number; row: AirportRat
   );
 }
 
-function RatesCell({ eventId, row }: { eventId: number; row: AirportRate }) {
+function RatesCell({ eventId, row, drafts }: { eventId: number; row: AirportRate; drafts: RateDrafts }) {
   const upsert = useUpsertAirportRate(eventId);
   const [aar, setAar] = useState(String(row.aar));
   const [adr, setAdr] = useState(String(row.adr));
@@ -120,7 +139,8 @@ function RatesCell({ eventId, row }: { eventId: number; row: AirportRate }) {
   useEffect(() => {
     setAar(String(row.aar));
     setAdr(String(row.adr));
-  }, [row.aar, row.adr]);
+    drafts.delete(row.icao);
+  }, [row.aar, row.adr, row.icao, drafts]);
 
   if (!row.editable) {
     return (
@@ -147,7 +167,10 @@ function RatesCell({ eventId, row }: { eventId: number; row: AirportRate }) {
         min={0}
         max={200}
         value={aar}
-        onChange={(e) => setAar(e.target.value)}
+        onChange={(e) => {
+          setAar(e.target.value);
+          drafts.set(row.icao, { aar: e.target.value, adr });
+        }}
         onBlur={saveManual}
       />
       <span className="text-ink-3">/</span>
@@ -158,7 +181,10 @@ function RatesCell({ eventId, row }: { eventId: number; row: AirportRate }) {
         min={0}
         max={200}
         value={adr}
-        onChange={(e) => setAdr(e.target.value)}
+        onChange={(e) => {
+          setAdr(e.target.value);
+          drafts.set(row.icao, { aar, adr: e.target.value });
+        }}
         onBlur={saveManual}
       />
     </div>
@@ -194,6 +220,7 @@ function RemoveCell({ eventId, row }: { eventId: number; row: AirportRate }) {
 
 export function AirportRatesSection({ eventId, eventStart }: { eventId: number; eventStart: string }) {
   const { data: me } = useMe();
+  const drafts = useRef<RateDrafts>(new Map()).current;
   const canEdit = hasPermission(me, "events.rate.update");
   const rates = useAirportRates(eventId);
   const upsert = useUpsertAirportRate(eventId);
@@ -233,13 +260,13 @@ export function AirportRatesSection({ eventId, eventStart }: { eventId: number; 
         header: "Config",
         icon: Settings2,
         enableSorting: false,
-        cell: (c) => <ConfigCell eventId={eventId} row={c.row.original} atUnix={atUnix} />,
+        cell: (c) => <ConfigCell eventId={eventId} row={c.row.original} atUnix={atUnix} drafts={drafts} />,
       },
       {
         accessorKey: "aar",
         header: "AAR / ADR",
         icon: Gauge,
-        cell: (c) => <RatesCell eventId={eventId} row={c.row.original} />,
+        cell: (c) => <RatesCell eventId={eventId} row={c.row.original} drafts={drafts} />,
       },
       {
         accessorKey: "source",
@@ -298,7 +325,7 @@ export function AirportRatesSection({ eventId, eventStart }: { eventId: number; 
         getRowId={(r) => r.icao}
         rowCap={25}
         isLoading={rates.isLoading}
-        isError={rates.isError}
+        isError={!rates.data && rates.isError}
         onRetry={() => rates.refetch()}
         empty="No airport rates set yet."
       />

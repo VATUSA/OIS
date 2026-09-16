@@ -1,4 +1,4 @@
-import {type ReactNode, useEffect, useMemo, useState} from "react";
+import {type ReactNode, useEffect, useMemo, useRef, useState} from "react";
 import {
   Button,
   Card,
@@ -40,6 +40,10 @@ function levelLabel(level: string): string {
   return LEVELS.find((l) => l.value === level)?.label ?? level;
 }
 
+/** Notes typed but not yet saved, per facility — the level control sends them too, so picking a level
+ * right after typing (before the notes blur-save round-trips) can't overwrite them with stale notes. */
+type NoteDrafts = Map<string, string>;
+
 /** Pills explaining why a facility surfaced in the list. */
 function WhyCell({ row }: { row: FacilitySupport }) {
   const parts: ReactNode[] = [];
@@ -72,7 +76,7 @@ function WhyCell({ row }: { row: FacilitySupport }) {
   return <div className="flex flex-wrap items-center gap-1">{parts}</div>;
 }
 
-function LevelCell({ eventId, row }: { eventId: number; row: FacilitySupport }) {
+function LevelCell({ eventId, row, drafts }: { eventId: number; row: FacilitySupport; drafts: NoteDrafts }) {
   const upsert = useUpsertFacilitySupport(eventId);
   if (!row.editable) {
     return <StatusPill tone={toneOf("support", row.level)}>{levelLabel(row.level)}</StatusPill>;
@@ -83,16 +87,21 @@ function LevelCell({ eventId, row }: { eventId: number; row: FacilitySupport }) 
       aria-label={`${row.facility} support level`}
       size="sm"
       value={row.stored ? (row.level as Level) : ""}
-      onChange={(level) => level && upsert.mutate({ facility: row.facility, body: { level, notes: row.notes } })}
+      onChange={(level) =>
+        level && upsert.mutate({ facility: row.facility, body: { level, notes: drafts.get(row.facility) ?? row.notes } })
+      }
       options={LEVELS}
     />
   );
 }
 
-function NotesCell({ eventId, row }: { eventId: number; row: FacilitySupport }) {
+function NotesCell({ eventId, row, drafts }: { eventId: number; row: FacilitySupport; drafts: NoteDrafts }) {
   const upsert = useUpsertFacilitySupport(eventId);
   const [notes, setNotes] = useState(row.notes);
-  useEffect(() => setNotes(row.notes), [row.notes]);
+  useEffect(() => {
+    setNotes(row.notes);
+    drafts.delete(row.facility);
+  }, [row.notes, row.facility, drafts]);
 
   if (!row.editable) return <span className="text-ink-2">{row.notes || "—"}</span>;
   return (
@@ -101,7 +110,10 @@ function NotesCell({ eventId, row }: { eventId: number; row: FacilitySupport }) 
       className="h-8 min-w-40"
       placeholder="notes"
       value={notes}
-      onChange={(e) => setNotes(e.target.value)}
+      onChange={(e) => {
+        setNotes(e.target.value);
+        drafts.set(row.facility, e.target.value);
+      }}
       onBlur={() => {
         if (notes !== row.notes) {
           upsert.mutate({ facility: row.facility, body: { level: row.level, notes } });
@@ -149,6 +161,7 @@ export function FacilitySupportSection({ eventId, eventStart }: { eventId: numbe
   const nameById = useMemo(() => new Map((facilities.data ?? []).map((f) => [f.id, f.name])), [facilities.data]);
 
   const rows = support.data ?? [];
+  const drafts = useRef<NoteDrafts>(new Map()).current;
 
   const columns = useMemo<DataColumn<FacilitySupport>[]>(
     () => [
@@ -183,14 +196,14 @@ export function FacilitySupportSection({ eventId, eventStart }: { eventId: numbe
         accessorKey: "level",
         header: "Level",
         icon: Gauge,
-        cell: (c) => <LevelCell eventId={eventId} row={c.row.original} />,
+        cell: (c) => <LevelCell eventId={eventId} row={c.row.original} drafts={drafts} />,
       },
       {
         accessorKey: "notes",
         header: "Notes",
         icon: NotebookPen,
         enableSorting: false,
-        cell: (c) => <NotesCell eventId={eventId} row={c.row.original} />,
+        cell: (c) => <NotesCell eventId={eventId} row={c.row.original} drafts={drafts} />,
       },
       {
         id: "actions",
@@ -241,7 +254,7 @@ export function FacilitySupportSection({ eventId, eventStart }: { eventId: numbe
         getRowId={(r) => r.facility}
         rowCap={25}
         isLoading={support.isLoading}
-        isError={support.isError}
+        isError={!support.data && support.isError}
         onRetry={() => support.refetch()}
         empty="No facilities involved yet — add airports or ACE requests, or add one above."
       />

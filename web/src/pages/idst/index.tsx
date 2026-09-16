@@ -176,8 +176,11 @@ function FlightTable({
         columns={COLUMNS}
         data={flights}
         getRowId={keyOf}
-        rowCap={25}
-        selection={{ mode: "single", selected: selKey, onChange: onSelect }}
+        // Live ops list: always pages, never hides rows behind "Show all".
+        rowCap={Infinity}
+        pageSize={25}
+        // Clicking the working flight again keeps it selected (the CFR panel stays open), as before.
+        selection={{ mode: "single", selected: selKey, onChange: (k) => k && onSelect(k) }}
         empty={empty}
       />
     </section>

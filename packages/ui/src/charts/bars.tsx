@@ -1,5 +1,5 @@
 import * as React from "react";
-import {barX, barY, defineChart, ruleX, ruleY, stack} from "@tanstack/charts";
+import {barX, barY, defineChart, ruleX, ruleY, stack, tickY} from "@tanstack/charts";
 import {tooltip} from "@tanstack/charts/tooltip";
 import {scaleBand, scaleLinear} from "d3-scale";
 
@@ -9,7 +9,8 @@ import {tokenNames, useChartTheme, type ChartColor} from "./theme";
 
 /**
  * Categorical bars, one value per category. `color` may vary per datum (a load level, a status);
- * `horizontal` lays categories down the y axis (long labels). `cap` draws a dashed warning rule.
+ * `horizontal` lays categories down the y axis (long labels). `cap` draws a dashed warning rule;
+ * `capOf` instead marks each (vertical) bar's own capacity with a warning tick, for caps that vary.
  */
 export function Bars<T>({
   data,
@@ -21,6 +22,7 @@ export function Bars<T>({
   label,
   valueFormat = formatCompact,
   cap,
+  capOf,
 }: {
   data: readonly T[];
   category: (d: T) => string;
@@ -32,6 +34,7 @@ export function Bars<T>({
   label: string;
   valueFormat?: (v: number) => string;
   cap?: number;
+  capOf?: (d: T) => number;
 }) {
   const used = React.useMemo(() => tokenNames(color ? data.map(color) : []), [data, color]);
   const { theme, color: resolve, seriesAt, cap: capColor } = useChartTheme(used);
@@ -55,7 +58,11 @@ export function Bars<T>({
           tooltip,
         })
       : defineChart({
-          marks: [barY(data, { x: category, y: value, fill, inset: 2 }), ...capMarks],
+          marks: [
+            barY(data, { x: category, y: value, fill, inset: 2 }),
+            ...capMarks,
+            ...(capOf ? [tickY(data, { x: category, y: capOf, stroke: capColor, strokeWidth: 2 })] : []),
+          ],
           scales: {
             x: { scale: scaleBand },
             y: { scale: scaleLinear, grid: true, axis: { ticks: { format: (v) => valueFormat(Number(v)) } } },
@@ -64,7 +71,7 @@ export function Bars<T>({
           tooltip,
         });
     // colours derive from `theme`; the accessors are expected to be stable per data identity.
-  }, [data, horizontal, cap, theme]);
+  }, [data, horizontal, cap, capOf, theme]);
 
   return (
     <ChartFrame
@@ -75,7 +82,8 @@ export function Bars<T>({
         const p = ctx.primaryPoint ?? ctx.points[0];
         if (!p) return null;
         const d = p.datum as T;
-        return <ChartTooltip title={category(d)} rows={[{ color: fill(d), value: valueFormat(value(d)) }]} />;
+        const v = valueFormat(value(d));
+        return <ChartTooltip title={category(d)} rows={[{ color: fill(d), value: capOf ? `${v} / ${valueFormat(capOf(d))}` : v }]} />;
       }}
     />
   );

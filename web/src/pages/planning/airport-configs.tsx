@@ -295,7 +295,7 @@ function AirportConfigs({ icao, onBack }: { icao: string; onBack: () => void }) 
         getRowId={(c) => c.id}
         rowCap={25}
         isLoading={configs.isLoading}
-        isError={configs.isError}
+        isError={!configs.data && configs.isError}
         onRetry={() => configs.refetch()}
         empty={`No configurations for ${icao} yet${editable ? " — add one above." : "."}`}
       />
@@ -366,7 +366,7 @@ function AllConfigs({
         initialSort={[{ id: "icao", desc: false }]}
         rowCap={25}
         isLoading={all.isLoading}
-        isError={all.isError}
+        isError={!all.data && all.isError}
         onRetry={() => all.refetch()}
         empty={empty}
       />
@@ -376,7 +376,7 @@ function AllConfigs({
   return (
     <QueryState
       isLoading={all.isLoading}
-      isError={all.isError}
+      isError={!all.data && all.isError}
       onRetry={() => all.refetch()}
       isEmpty={groups.length === 0}
       error="Couldn't load configs."

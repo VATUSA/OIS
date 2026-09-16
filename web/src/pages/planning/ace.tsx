@@ -317,7 +317,7 @@ export function AceSection({
 
       <QueryState
         isLoading={requests.isLoading}
-        isError={requests.isError}
+        isError={!requests.data && requests.isError}
         onRetry={() => requests.refetch()}
         isEmpty={(requests.data?.length ?? 0) === 0}
         error="Couldn’t load the requests."

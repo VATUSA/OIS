@@ -279,18 +279,17 @@ const binLabel = (b: DemandBin) => hhmmZulu(b.start);
 const binCount = (b: DemandBin) => b.count;
 const binColor = (b: DemandBin) => LEVEL_COLOR[b.level] ?? "ink-3";
 
+const binCap = (b: DemandBin) => b.cap;
+
+/** Demand per bin against that bin's own cap (AAR steps make the cap vary bin to bin). */
 function DemandChart({ demand }: { demand: GdpBoard["demand"] }) {
-  // The chart draws one capacity rule; with AAR steps the per-bin cap varies, so the rule is shown
-  // only while it's uniform (each bar's level colour still reflects its own cap).
-  const caps = new Set(demand.map((b) => b.cap));
-  const cap = caps.size === 1 ? demand[0]?.cap : undefined;
   return (
     <Bars
       data={demand}
       category={binLabel}
       value={binCount}
       color={binColor}
-      cap={cap}
+      capOf={binCap}
       height={160}
       label="Demand vs AAR"
     />
@@ -412,7 +411,9 @@ function FlightsTable({
       columns={columns}
       data={rows}
       getRowId={(f) => f.cs}
-      rowCap={25}
+      // Live ops list: always pages, never hides rows behind "Show all".
+      rowCap={Infinity}
+      pageSize={25}
       empty={exempt ? "No exempt inbounds." : "No controlled flights."}
     />
   );
@@ -736,7 +737,9 @@ export function GdpTab() {
         columns={columns}
         data={gdps.data ?? []}
         getRowId={(g) => g.id}
-        rowCap={25}
+        // Live ops list: always pages, never hides rows behind "Show all".
+        rowCap={Infinity}
+        pageSize={25}
         // Clicking the selected row keeps it open (the board only changes on another row).
         selection={{ mode: "single", selected, onChange: (id) => id && setSelected(id) }}
         isLoading={!gdps.data}

@@ -89,6 +89,9 @@ type RouteGeom = { path: [number, number][]; waypoints: { name: string; lat: num
 
 /** Airport-code match tolerant of a leading `K` (KJFK ~ JFK); `*`/blank = any. Mirrors the
  * backend's `airport_match`. */
+/** DataTable cap/page size that shows every row. */
+const ALL_ROWS = Number.MAX_SAFE_INTEGER;
+
 function matchAirport(pattern: string, code: string): boolean {
   const f = pattern.trim().toUpperCase();
   if (f === "" || f === "*") return true;
@@ -686,13 +689,16 @@ function ReplayMap({
                 </div>
               </div>
             )}
-            <div className="min-h-0 overflow-auto p-2">
+            <div className="min-h-0 p-2">
+              {/* Every flown sample, scrolling in place like the old log (a cap would hide the newest). */}
               <DataTable
                 label="Track log"
                 columns={logColumns}
                 data={flownRows}
                 getRowId={(p) => String(p[0])}
-                rowCap={25}
+                rowCap={ALL_ROWS}
+                pageSize={ALL_ROWS}
+                maxHeight="28vh"
                 stickyHeader
                 empty="No history yet at this time — press play or scrub forward."
               />

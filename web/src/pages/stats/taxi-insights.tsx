@@ -314,7 +314,7 @@ export function TaxiInsightsPage() {
           columns={OBSERVATION_COLUMNS}
           data={observations.data?.items ?? []}
           getRowId={(o) => String(o.id)}
-          rowCap={25}
+          rowCap={PAGE_SIZE}
           serverPagination={
             observations.data && {
               page: observations.data.page,
@@ -335,7 +335,7 @@ export function TaxiInsightsPage() {
           label="Taxi estimates"
           columns={ESTIMATE_COLUMNS}
           data={estimates.data?.items ?? []}
-          rowCap={25}
+          rowCap={PAGE_SIZE}
           serverPagination={
             estimates.data && {
               page: estimates.data.page,

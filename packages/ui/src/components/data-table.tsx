@@ -58,7 +58,8 @@ export type DataTableProps<T extends RowData> = {
   /** … or a controlled sort (e.g. persisted by a dashboard widget). */
   sort?: SortingState;
   onSortChange?: (sort: SortingState) => void;
-  /** Rows shown before "Show all" (default 10). */
+  /** Rows shown before "Show all" (default 10). `Infinity` skips the Show-all step and paginates
+   * straight away — for live operational lists where hidden rows would be missed. */
   rowCap?: number;
   /** Client-side page size once expanded (default 50). Ignored with `serverPagination`. */
   pageSize?: number;
@@ -280,7 +281,8 @@ export function DataTable<T extends RowData>({
   return (
     <QueryState
       isLoading={isLoading && data.length === 0}
-      isError={isError}
+      // A failed background refetch keeps the loaded rows (and any in-progress cell edits) on screen.
+      isError={isError && data.length === 0}
       isEmpty={data.length === 0 && (serverPagination?.total ?? 0) === 0}
       empty={empty}
       onRetry={onRetry}

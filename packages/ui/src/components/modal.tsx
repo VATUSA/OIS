@@ -4,6 +4,9 @@ import {X} from "lucide-react";
 
 import {cn} from "../lib/utils";
 
+/** Open modals, oldest first — the last one owns Escape. */
+const openModals: symbol[] = [];
+
 const SIZE = { sm: "max-w-sm", md: "max-w-lg", lg: "max-w-2xl", xl: "max-w-4xl" } as const;
 
 export type ModalProps = {
@@ -38,14 +41,25 @@ export function Modal({
   children,
   ...aria
 }: ModalProps) {
+  const onCloseRef = React.useRef(onClose);
+  onCloseRef.current = onClose;
   React.useEffect(() => {
     if (!open) return;
+    const id = Symbol("modal");
+    openModals.push(id);
+    // Escape closes only the topmost modal (a prompt over a settings drawer), and not when a control
+    // inside it already handled the key (a combobox closing its list calls preventDefault).
     const onKey = (e: KeyboardEvent) => {
-      if (e.key === "Escape") onClose();
+      if (e.key === "Escape" && !e.defaultPrevented && openModals[openModals.length - 1] === id) {
+        onCloseRef.current();
+      }
     };
     window.addEventListener("keydown", onKey);
-    return () => window.removeEventListener("keydown", onKey);
-  }, [open, onClose]);
+    return () => {
+      window.removeEventListener("keydown", onKey);
+      openModals.splice(openModals.indexOf(id), 1);
+    };
+  }, [open]);
 
   if (!open) return null;
 

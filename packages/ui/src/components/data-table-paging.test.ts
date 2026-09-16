@@ -20,6 +20,12 @@ describe("pageWindow", () => {
     expect(pageWindow(120, { ...opts, expanded: true, page: 3 })).toMatchObject({ start: 100, end: 120, page: 3 });
   });
 
+  it("pages straight away with no Show-all step when the cap is Infinity", () => {
+    expect(pageWindow(120, { ...opts, rowCap: Infinity, pageSize: 25, page: 2 })).toMatchObject({
+      start: 25, end: 50, canExpand: false, canCollapse: false, pageCount: 5, page: 2,
+    });
+  });
+
   it("clamps an out-of-range page (data shrank)", () => {
     expect(pageWindow(30, { ...opts, rowCap: 5, expanded: true, page: 9, pageSize: 10 })).toMatchObject({
       page: 3, start: 20, end: 30,

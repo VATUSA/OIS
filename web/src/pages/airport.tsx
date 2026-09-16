@@ -330,7 +330,9 @@ export function AircraftView({ flow }: { flow: Flow }) {
         data={flow.flights}
         getRowId={(f) => f.callsign}
         initialSort={[{ id: "seq", desc: false }]}
-        rowCap={25}
+        // Live ops list: always pages, never hides rows behind "Show all".
+        rowCap={Infinity}
+        pageSize={25}
         rowClassName={(f) => (f.excluded ? "opacity-45" : undefined)}
         empty={`No traffic filed to ${flow.icao} right now.`}
       />

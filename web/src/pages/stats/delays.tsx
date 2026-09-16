@@ -248,7 +248,7 @@ export function DelaysPage() {
         </label>
       </FilterBar>
 
-      <QueryState isLoading={!d && !summary.isError} isError={summary.isError} onRetry={() => summary.refetch()}>
+      <QueryState isLoading={!d && !summary.isError} isError={!d && summary.isError} onRetry={() => summary.refetch()}>
         {d && (
           <>
             <div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-4">
