@@ -5,7 +5,7 @@ import {Home} from "lucide-react";
 
 import {Footer} from "@/components/footer";
 import {useMe} from "@/lib/auth";
-import {areaForPath, itemForPath, visibleGroups} from "@/lib/nav";
+import {areaForPath, groupForPath, itemForPath, visibleGroups} from "@/lib/nav";
 
 import {AreaSidebar} from "./area-sidebar";
 import {CommandSearch} from "./command-search";
@@ -23,9 +23,11 @@ function useCrumbs(title: string | undefined): Crumb[] {
   const crumbs: Crumb[] = [
     { label: area.label, link: first ? (c) => <Link to={area.id === "admin" ? "/admin" : first.to}>{c}</Link> : undefined },
   ];
-  if (hit?.group.label && hit.group.label !== area.label) crumbs.push({ label: hit.group.label });
+  const groupLabel = hit?.group.label ?? groupForPath(pathname)?.label;
+  if (groupLabel && groupLabel !== area.label) crumbs.push({ label: groupLabel });
   if (hit) crumbs.push({ label: hit.item.label, icon: hit.item.icon, link: (c) => <Link to={hit.item.to}>{c}</Link> });
-  if (title && title !== hit?.item.label) crumbs.push({ label: title });
+  // The page title adds a crumb only below a nav item (an event, a flight), not on the item's own page.
+  if (title && (!hit || pathname !== hit.item.to)) crumbs.push({ label: title });
   return crumbs;
 }
 

@@ -1,4 +1,4 @@
-import {createContext, type ReactNode, useContext, useLayoutEffect, useState} from "react";
+import {createContext, type ReactNode, useCallback, useContext, useLayoutEffect, useRef, useState} from "react";
 import {useRouterState} from "@tanstack/react-router";
 import type {LucideIcon} from "lucide-react";
 
@@ -23,14 +23,20 @@ export type PageHeaderOverride = {
   views?: null;
 };
 
+const EMPTY: PageHeaderOverride = {};
+
 type Ctx = { override: PageHeaderOverride; set: (o: PageHeaderOverride) => void };
 const PageMetaContext = createContext<Ctx | null>(null);
 
 export function PageMetaProvider({ children }: { children: ReactNode }) {
-  const [override, set] = useState<PageHeaderOverride>({});
   const path = useRouterState({ select: (s) => s.location.pathname });
-  // A new page starts from its route meta, never the previous page's overrides.
-  useLayoutEffect(() => set({}), [path]);
+  const pathRef = useRef(path);
+  pathRef.current = path;
+  // Overrides are stamped with the path they were set on, so a new page starts from its route meta
+  // without a reset effect (which would run after — and wipe — the new page's own mount-time set).
+  const [stamped, setStamped] = useState<{ path: string; override: PageHeaderOverride }>({ path, override: {} });
+  const set = useCallback((override: PageHeaderOverride) => setStamped({ path: pathRef.current, override }), []);
+  const override = stamped.path === path ? stamped.override : EMPTY;
   return <PageMetaContext.Provider value={{ override, set }}>{children}</PageMetaContext.Provider>;
 }
 

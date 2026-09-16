@@ -28,6 +28,10 @@ const TONES = {
   level: { green: "good", yellow: "warn", red: "bad" },
   /** Flight category. */
   category: { VFR: "vfr", MVFR: "mvfr", IFR: "ifr", LIFR: "lifr" },
+  /** Event TMI package lifecycle. */
+  tmiPackage: { draft: "neutral", activated: "good", archived: "neutral" },
+  /** A controller's event availability. */
+  availability: { available: "good", partial: "warn", unavailable: "bad" },
   /** API key state. */
   apiKey: { active: "good", disabled: "neutral", expired: "bad" },
 } as const satisfies Record<string, Record<string, Tone>>;

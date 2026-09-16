@@ -41,7 +41,8 @@ export type NavItem = {
   exact?: boolean;
 };
 
-export type NavGroup = { label?: string; items: readonly NavItem[] };
+/** `prefix` claims deeper pages under the group that aren't nav items (an event, a flight). */
+export type NavGroup = { label?: string; prefix?: string; items: readonly NavItem[] };
 
 export type NavArea = {
   id: "advisories" | "operations" | "admin";
@@ -94,6 +95,7 @@ export const AREAS: readonly NavArea[] = [
     groups: [
       {
         label: "Planning",
+        prefix: "/admin/planning",
         items: [
           { label: "Events", to: "/admin/planning/events", icon: CalendarClock, permission: "events.plan.read" },
           { label: "Airport Configs", to: "/admin/planning/airport-configs", icon: Wind, permission: "events.plan.read" },
@@ -104,6 +106,7 @@ export const AREAS: readonly NavArea[] = [
       },
       {
         label: "Historical",
+        prefix: "/admin/historical",
         items: [
           { label: "Overview", to: "/admin/historical", icon: TrendingUp, permission: "stats.data.read", exact: true },
           { label: "Dashboard", to: "/admin/historical/dashboard", icon: LayoutDashboard, permission: "stats.data.read" },
@@ -160,6 +163,11 @@ const matchesPrefix = (pathname: string, prefix: string) =>
 
 export function areaForPath(pathname: string): NavArea | undefined {
   return AREAS.find((a) => a.prefixes.some((p) => matchesPrefix(pathname, p)));
+}
+
+/** The nav group whose `prefix` contains `pathname`, for pages below a group but not a nav item. */
+export function groupForPath(pathname: string): NavGroup | undefined {
+  return areaForPath(pathname)?.groups.find((g) => g.prefix && matchesPrefix(pathname, g.prefix));
 }
 
 /** The most specific nav item whose path contains `pathname` (for breadcrumbs). */

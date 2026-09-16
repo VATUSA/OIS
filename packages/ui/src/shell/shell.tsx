@@ -74,8 +74,8 @@ export function ShellContent({
     );
   }
   return (
-    <div className="min-h-0 flex-1 overflow-y-auto">
-      <div className={cn("flex w-full flex-col gap-6 px-4 py-6 sm:px-6", layout === "default" && "mx-auto max-w-7xl")}>
+    <div className="flex min-h-0 flex-1 flex-col overflow-y-auto">
+      <div className={cn("flex w-full flex-1 flex-col gap-6 px-4 py-6 sm:px-6", layout === "default" && "mx-auto max-w-7xl")}>
         {header}
         {children}
       </div>

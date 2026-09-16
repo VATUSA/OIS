@@ -67,8 +67,10 @@ export type DataTableProps<T extends RowData> = {
   selection?: Selection;
   onRowClick?: (row: T) => void;
   rowClassName?: (row: T) => string | undefined;
-  /** Keep the header visible while the table scrolls inside a bounded container. */
+  /** Keep the header visible while rows scroll; pair with `maxHeight` so the table owns the scroll. */
   stickyHeader?: boolean;
+  /** Bound the table body height (CSS length); rows scroll inside it. */
+  maxHeight?: number | string;
   hideHeader?: boolean;
   isLoading?: boolean;
   isError?: boolean;
@@ -100,6 +102,7 @@ export function DataTable<T extends RowData>({
   onRowClick,
   rowClassName,
   stickyHeader = false,
+  maxHeight,
   hideHeader = false,
   isLoading,
   isError,
@@ -149,7 +152,7 @@ export function DataTable<T extends RowData>({
 
   const body = (
     <div className={cn("overflow-hidden rounded-md border border-line", className)}>
-      <div className="overflow-x-auto">
+      <div className={maxHeight != null ? "overflow-auto" : "overflow-x-auto"} style={maxHeight != null ? { maxHeight } : undefined}>
         <table className="w-full border-collapse text-sm" aria-label={label}>
           {!hideHeader && (
             <thead className={cn("bg-card", stickyHeader && "sticky top-0 z-10")}>

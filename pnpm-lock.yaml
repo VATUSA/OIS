@@ -142,9 +142,6 @@ importers:
       '@tanstack/react-router':
         specifier: ^1.170.27
         version: 1.170.27(react-dom@19.3.0(react@19.3.0))(react@19.3.0)
-      '@tanstack/react-table':
-        specifier: ^9.2.4
-        version: 9.2.4(react-dom@19.3.0(react@19.3.0))(react@19.3.0)
       d3-scale:
         specifier: ^4.0.2
         version: 4.0.2

@@ -1,7 +1,7 @@
 import {describe, expect, it} from "vitest";
 
 import type {Me} from "./auth";
-import {AREAS, areaById, areaForPath, canSeeAdmin, canSeeArea, itemForPath, visibleGroups} from "./nav";
+import {AREAS, areaById, areaForPath, canSeeAdmin, canSeeArea, groupForPath, itemForPath, visibleGroups} from "./nav";
 
 function me(permissions: Record<string, unknown>, server_admin = false): Me {
   return {
@@ -71,5 +71,7 @@ describe("path lookup", () => {
     expect(itemForPath("/admin/historical/flights/abc")).toBeUndefined();
     expect(itemForPath("/advisories/fcas")?.item.label).toBe("FCAs");
     expect(itemForPath("/advisories")?.item.label).toBe("Advisories");
+    expect(groupForPath("/admin/historical/flights/abc")?.label).toBe("Historical");
+    expect(groupForPath("/admin/access")).toBeUndefined();
   });
 });

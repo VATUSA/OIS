@@ -8,8 +8,8 @@ screen needs something this package doesn't have, add it here rather than hand-s
 
 | Need | Use | Not |
 | --- | --- | --- |
-| A page title, count, subtitle, view switch | Route `staticData` meta (the shell renders `PageHeader`) | A hand-rolled `<h1>` |
-| A status, lifecycle or domain state | `StatusPill tone=…` (tones from `web/src/lib/status.ts` `toneOf`) | A Badge with ad-hoc colour classes |
+| A page title, count, subtitle, view switch | Route `staticData` meta; runtime values via `usePageHeader` (the shell renders `PageHeader`) | A hand-rolled `<h1>` |
+| A status, lifecycle or domain state | `StatusPill tone=…` (tones from `web/src/lib/status.ts` `toneOf`) | Ad-hoc coloured badges |
 | A small either/or choice or a view switch | `SegmentedControl` | Button `default`/`secondary` toggles |
 | Switching between sections of one page | `Tabs` | Underline tabs or bordered button groups |
 | Narrowing a list | `FilterBar` + `FilterChip` (+ `AddFilter`) | A row of raw `<select>`s |
@@ -20,13 +20,14 @@ screen needs something this package doesn't have, add it here rather than hand-s
 | A yes/no or one-field question | `useConfirm()` / `usePrompt()` | `window.confirm` |
 | A side column that becomes a bottom sheet on phones | `Sheet` | A custom drawer |
 | Search-and-jump over grouped results | `CommandPalette` (controlled; caller ranks results) | A custom overlay list |
-| Any tabular data | `DataTable` | A raw `<table>` |
+| Any tabular data | `DataTable` (`maxHeight` + `stickyHeader` for a bounded scroller) | A raw `<table>` |
+| The page frame, sidebar, breadcrumbs | `Shell` · `ShellContent` · `Sidebar*` · `Breadcrumbs` (composed once in `web/src/components/shell`) | Page-level layout chrome |
 | A chart | `Sparkline` · `TimeSeries` · `Bars` · `StackedBars` · `Donut` | Div bars or hand-drawn SVG |
 | A colour in JS (deck.gl, chart attrs) | `useTokens` / `useTokenRgba` | A hex constant |
 | A per-device UI preference | `useLocalStorage` | Raw `localStorage` calls |
 | Phone-width branching | `useIsMobile` | A local `matchMedia` |
 
-Primitives (`Button`, `Card`, `Input`, `Switch`, `DropdownMenu*`, `Tooltip*`, `Avatar*`, `Badge`) keep
+Primitives (`Button`, `Card`, `Input`, `Textarea`, `Switch`, `DropdownMenu*`, `Tooltip*`, `Avatar*`) keep
 their shadcn shapes, restyled to the tokens.
 
 ## Tests
