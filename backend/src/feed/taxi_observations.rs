@@ -11,7 +11,8 @@
 //! [`CONFIRM_UPDATES`] consecutive updates contradict the current phase (plus [`BURST_MIN_M`] of
 //! accumulated travel for a movement burst, rejecting position jitter). At the ~15 s feed cadence a
 //! boundary resolves to the update it was first seen on; a push and start-up that both complete
-//! inside one poll can collapse into the taxi figure (the estimator's defaults cover that).
+//! inside one poll records both as unmeasured (`NULL`) rather than as zero — the estimator skips
+//! those rows, since roughly half of real pushes go undetected at this cadence (#287).
 //!
 //! A push is the first burst while it stays below [`GS_START`] and runs *against* the reported
 //! heading — a tug pushes the aircraft backwards, taxi runs along the nose (#285). Steps vote by
@@ -162,6 +163,9 @@ struct Session {
     /// `(first forward step, how many have followed)` while pushing back — the candidate end of the
     /// push, confirmed at [`FLIP_CONFIRM_UPDATES`].
     fwd_flip: Option<(i64, u32)>,
+    /// A push happened (or may have) but its boundaries are unknown, so the phases are recorded as
+    /// unmeasured rather than as a real zero (#287).
+    push_missed: bool,
     base_alt: i64,
 }
 
@@ -212,6 +216,9 @@ impl Session {
         };
         let left_the_push = gs > GS_START || outran_push;
         if self.phase == Phase::PushingBack && left_the_push {
+            // A bound firing means the heading misled us for the whole burst; nothing it produced
+            // is trustworthy as a measurement.
+            self.push_missed |= outran_push;
             let pause = self.run.map(|r| (r.start_ms, now_ms)).or(self.last_pause);
             match pause {
                 Some((stop, resume)) => {
@@ -225,7 +232,12 @@ impl Session {
                     self.push_stop_ms = Some(now_ms);
                     self.taxi_start_ms = Some(now_ms);
                 }
-                None => self.taxi_start_ms = self.push_start_ms.take(),
+                // The burst was the taxi all along, or a bound fired on a push we can't trust: its
+                // phases are unknown, not zero.
+                None => {
+                    self.taxi_start_ms = self.push_start_ms.take();
+                    self.push_missed = true;
+                }
             }
             self.start_taxi(alt);
             return;
@@ -308,11 +320,21 @@ impl Session {
         .or(self.push_stop_ms)
         .unwrap_or(self.first_seen_ms);
         let secs = |from: i64, to: i64| ((to - from) / 1000) as i32;
-        let pushback_sec = self
+        let measured = self
             .push_start_ms
             .zip(self.push_stop_ms)
-            .map(|(a, b)| secs(a, b));
-        let startup_sec = self.push_stop_ms.map(|stop| secs(stop, taxi_start));
+            .map(|(a, b)| (secs(a, b), secs(b, taxi_start)));
+        // A departure that taxied straight off the stand genuinely did not push: that's a real zero
+        // the estimator should learn from, unlike a push whose boundaries we never saw (#287).
+        let no_push = self.phase == Phase::Taxiing
+            && self.push_start_ms.is_none()
+            && !self.push_missed
+            && self.taxi_start_ms.is_some();
+        let (pushback_sec, startup_sec) = match (measured, no_push) {
+            (Some((push, startup)), _) => (Some(push), Some(startup)),
+            (None, true) => (Some(0), Some(0)),
+            (None, false) => (None, None),
+        };
         (pushback_sec, startup_sec, (now_ms - taxi_start) / 1000)
     }
 }
@@ -367,17 +389,19 @@ fn process(
                 s.advance(now_ms, p.latitude, p.longitude, gs, alt, p.heading);
                 continue;
             }
-            let (pushback_sec, startup_sec, dur) = s.timings(now_ms);
-            // An implausible phase duration means the machine misread the session, so the whole
-            // observation goes rather than a metric being nulled — a null now means "no push at
-            // all" to the estimator (#287), which would be a lie here.
+            let (mut pushback_sec, mut startup_sec, dur) = s.timings(now_ms);
+            // An implausible phase duration (e.g. a real push then a flow hold past the start-up
+            // bound) means those two phases were misread, so they're recorded as unmeasured — the
+            // taxi figure is still good, and `None` is exactly the signal the estimator skips.
             let in_bounds = |v: Option<i32>, (lo, hi): (f64, f64)| {
                 v.is_none_or(|v| (lo..=hi).contains(&(v as f64)))
             };
-            if (MIN_TAXI_SEC..=MAX_TAXI_SEC).contains(&dur)
-                && in_bounds(pushback_sec, PUSHBACK_BOUNDS_SEC)
-                && in_bounds(startup_sec, STARTUP_BOUNDS_SEC)
+            if !in_bounds(pushback_sec, PUSHBACK_BOUNDS_SEC)
+                || !in_bounds(startup_sec, STARTUP_BOUNDS_SEC)
             {
+                (pushback_sec, startup_sec) = (None, None);
+            }
+            if (MIN_TAXI_SEC..=MAX_TAXI_SEC).contains(&dur) {
                 out.push(RawObservation {
                     airport: dep.clone(),
                     lat: s.first_lat,
@@ -426,6 +450,7 @@ fn process(
                         push_by_direction: false,
                         last_hdg: p.heading,
                         fwd_flip: None,
+                        push_missed: false,
                         base_alt: alt,
                     },
                 );
@@ -661,8 +686,8 @@ mod tests {
         );
 
         assert_eq!(obs.len(), 1);
-        assert_eq!(obs[0].pushback_sec, None);
-        assert_eq!(obs[0].startup_sec, None);
+        assert_eq!(obs[0].pushback_sec, Some(0));
+        assert_eq!(obs[0].startup_sec, Some(0));
         assert_eq!(obs[0].taxi_sec, 150); // 135 → 285
     }
 
@@ -687,8 +712,8 @@ mod tests {
         );
 
         assert_eq!(obs.len(), 1);
-        assert_eq!(obs[0].pushback_sec, None);
-        assert_eq!(obs[0].startup_sec, None);
+        assert_eq!(obs[0].pushback_sec, Some(0));
+        assert_eq!(obs[0].startup_sec, Some(0));
         assert_eq!(obs[0].taxi_sec, 120); // 15 → 135
     }
 
@@ -858,7 +883,7 @@ mod tests {
         );
 
         assert_eq!(obs.len(), 1);
-        assert_eq!(obs[0].pushback_sec, None);
+        assert_eq!(obs[0].pushback_sec, Some(0));
         assert_eq!(obs[0].taxi_sec, 135); // 15 → 150
     }
 
@@ -881,7 +906,7 @@ mod tests {
         );
 
         assert_eq!(obs.len(), 1);
-        assert_eq!(obs[0].pushback_sec, None);
+        assert_eq!(obs[0].pushback_sec, Some(0));
         assert_eq!(obs[0].taxi_sec, 135);
     }
 
@@ -906,8 +931,8 @@ mod tests {
         );
 
         assert_eq!(obs.len(), 1);
-        assert_eq!(obs[0].pushback_sec, None);
-        assert_eq!(obs[0].startup_sec, None);
+        assert_eq!(obs[0].pushback_sec, Some(0));
+        assert_eq!(obs[0].startup_sec, Some(0));
         assert_eq!(obs[0].taxi_sec, 150); // 15 → 165
     }
 
@@ -1000,11 +1025,11 @@ mod tests {
     }
 
     #[test]
-    fn an_implausible_pushback_drops_the_whole_observation() {
+    fn an_implausible_pushback_is_recorded_as_unmeasured() {
         let mut st = TaxiObsState::default();
         // A burst the heading can't classify (alternating steps) stays a push on the distance proxy,
         // which has no duration cap — so it can shuffle on the stand for 23 minutes. The resulting
-        // pushback is past PUSHBACK_BOUNDS_SEC, so the observation goes rather than being nulled.
+        // pushback is past PUSHBACK_BOUNDS_SEC, so both phases are recorded as unmeasured.
         let mut track: Vec<(i64, f64, i64, i64, i64)> = vec![
             (0, 0.0, 0, 0, 0),
             (15, 6.0, 2, 0, 180),
@@ -1028,17 +1053,18 @@ mod tests {
 
         let obs = run_track(&mut st, &track);
 
-        assert!(
-            obs.is_empty(),
-            "a >1200 s pushback is not a believable observation"
-        );
+        // The row survives for its taxi figure, with the phases recorded as unmeasured — `None` is
+        // exactly what the estimator skips, where a zero would be a lie (#287).
+        assert_eq!(obs.len(), 1);
+        assert_eq!(obs[0].pushback_sec, None);
+        assert_eq!(obs[0].startup_sec, None);
     }
 
     #[test]
-    fn an_implausible_start_up_drops_the_whole_observation() {
+    fn an_implausible_start_up_is_recorded_as_unmeasured() {
         let mut st = TaxiObsState::default();
-        // A push, then a 20-minute wait before taxiing — past STARTUP_BOUNDS_SEC. Nulling the metric
-        // would read as "no push at all" to the estimator (#287), so the row goes instead.
+        // A push, then a 20-minute flow hold before taxiing — past STARTUP_BOUNDS_SEC, so both
+        // phases are unmeasurable even though the push itself was real.
         let mut track: Vec<(i64, f64, i64, i64, i64)> = vec![
             (0, 0.0, 0, 0, 180),
             (15, 20.0, 2, 0, 180),
@@ -1057,10 +1083,9 @@ mod tests {
 
         let obs = run_track(&mut st, &track);
 
-        assert!(
-            obs.is_empty(),
-            "a >900 s start-up is not a believable observation"
-        );
+        assert_eq!(obs.len(), 1);
+        assert_eq!(obs[0].pushback_sec, None);
+        assert_eq!(obs[0].startup_sec, None);
     }
 
     #[test]
@@ -1079,8 +1104,8 @@ mod tests {
         let obs = run_track(&mut st, &track);
 
         assert_eq!(obs.len(), 1);
-        assert_eq!(obs[0].pushback_sec, None);
-        assert_eq!(obs[0].startup_sec, None);
+        assert_eq!(obs[0].pushback_sec, Some(0));
+        assert_eq!(obs[0].startup_sec, Some(0));
         assert_eq!(obs[0].taxi_sec, 330); // 15 → 345, run-up included
     }
 
@@ -1106,8 +1131,8 @@ mod tests {
         );
 
         assert_eq!(obs.len(), 1);
-        assert_eq!(obs[0].pushback_sec, None);
-        assert_eq!(obs[0].startup_sec, None);
+        assert_eq!(obs[0].pushback_sec, Some(0));
+        assert_eq!(obs[0].startup_sec, Some(0));
         assert_eq!(obs[0].taxi_sec, 120); // 15 → 135
     }
 
@@ -1155,8 +1180,8 @@ mod tests {
         );
 
         assert_eq!(obs.len(), 1);
-        assert_eq!(obs[0].pushback_sec, None);
-        assert_eq!(obs[0].startup_sec, None);
+        assert_eq!(obs[0].pushback_sec, Some(0));
+        assert_eq!(obs[0].startup_sec, Some(0));
         assert_eq!(obs[0].taxi_sec, 105); // 15 → 120, the hold included
     }
 
@@ -1238,7 +1263,7 @@ mod tests {
         );
 
         assert_eq!(obs.len(), 1);
-        assert_eq!(obs[0].pushback_sec, None);
+        assert_eq!(obs[0].pushback_sec, Some(0));
         assert_eq!(obs[0].taxi_sec, 150); // 105 → 255
     }
 
@@ -1299,6 +1324,62 @@ mod tests {
         let obs = run_track(&mut st, &[(180, 900.0, 80, 600, 0)]);
         assert_eq!(obs.len(), 1);
         assert_eq!(obs[0].taxi_sec, 165); // 15 → 180
+    }
+
+    #[test]
+    fn a_missed_push_and_a_real_no_push_are_recorded_differently() {
+        // #287: the estimator must be able to tell "this departure didn't push" (a real zero it can
+        // learn from) from "we couldn't measure a push" (skip this row). Only ~45% of real pushes
+        // are detected at the feed's cadence, so conflating them teaches a hub that nobody pushes.
+        let mut no_push = TaxiObsState::default();
+        let gate_out = run_track(
+            &mut no_push,
+            &[
+                (0, 0.0, 0, 0, 0),
+                (15, 40.0, 6, 0, 0),
+                (30, 80.0, 6, 0, 0),
+                (45, 120.0, 6, 0, 0),
+                (150, 900.0, 80, 400, 0),
+            ],
+        );
+        assert_eq!(
+            gate_out[0].pushback_sec,
+            Some(0),
+            "a real gate-out did not push"
+        );
+        assert_eq!(gate_out[0].startup_sec, Some(0));
+
+        // A push reclassified as taxi: a push may well have happened, but its boundaries are gone.
+        let mut reclassified = TaxiObsState::default();
+        let missed = run_track(
+            &mut reclassified,
+            &[
+                (0, 0.0, 0, 0, 0),
+                (15, 6.0, 2, 0, 180),
+                (30, 12.0, 2, 0, 0),
+                (45, 18.0, 2, 0, 180),
+                (60, 24.0, 2, 0, 0),
+                (75, 80.0, 12, 0, 0),
+                (180, 900.0, 80, 400, 0),
+            ],
+        );
+        assert_eq!(
+            missed[0].pushback_sec, None,
+            "a reclassified burst is unmeasured, not zero"
+        );
+        assert_eq!(missed[0].startup_sec, None);
+
+        // Airborne before any burst confirmed (push and start-up collapsed inside one poll).
+        let mut collapsed = TaxiObsState::default();
+        let quick = run_track(
+            &mut collapsed,
+            &[(0, 0.0, 0, 0, 0), (50, 900.0, 80, 400, 0)],
+        );
+        assert_eq!(
+            quick[0].pushback_sec, None,
+            "a one-poll departure is unmeasured"
+        );
+        assert_eq!(quick[0].startup_sec, None);
     }
 
     #[test]
