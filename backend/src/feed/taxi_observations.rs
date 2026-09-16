@@ -831,11 +831,13 @@ mod tests {
         let mut st = TaxiObsState::default();
         // Low groundspeed near both this flight plan's departure AND arrival airport (pattern
         // work, a touch-and-go, or a same-field circuit) must not be mistaken for a pushback.
+        // Below GS_START, so it is the turnaround filter doing the rejecting and not the
+        // "first seen already moving" gate — at taxi speed this would pass either way.
         process(
             &mut st,
             &ap,
             &rw,
-            &one_with_arrival(40.0, 20, 0, "KAAA", "KBBB"),
+            &one_with_arrival(40.0, 3, 0, "KAAA", "KBBB"),
             t(0),
         );
 
