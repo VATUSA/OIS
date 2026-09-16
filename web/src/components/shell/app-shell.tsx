@@ -11,11 +11,15 @@ import {CommandSearch} from "./command-search";
 import {PageMetaProvider, usePageHeaderOverride, useRouteMeta, useView} from "./page-meta";
 import {recordVisit} from "./recent-pages";
 
+/** The signed-in user's own pages (the sidebar's User group). */
+const USER_PAGES = new Set(["/profile", "/settings", "/api-keys"]);
+
 function useCrumbs(title: string | undefined): Crumb[] {
   const { data: me } = useMe();
   const pathname = useRouterState({ select: (s) => s.location.pathname });
   const area = areaForPath(pathname);
   if (pathname === "/") return [{ label: "Home", icon: Home }];
+  if (USER_PAGES.has(pathname)) return [{ label: "User" }, ...(title ? [{ label: title }] : [])];
   if (!area) return title ? [{ label: "Home", icon: Home, link: (c) => <Link to="/">{c}</Link> }, { label: title }] : [];
   const first = visibleGroups(me, area)[0]?.items[0];
   const hit = itemForPath(pathname);

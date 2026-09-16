@@ -135,9 +135,9 @@ The single highest-leverage primitive. One full-height rounded frame on `--groun
 the window, the system's only shadow beneath it) holds:
 
 - **Sidebar** (`--panel`, collapsible): a chrome row (back · forward · recent pages / collapse), the
-  identity switcher (avatar + name + mono CID), a pill **⌘K** search, then **every section the user
-  can use** — Home, Advisories, Operations, Planning, Historical, Admin — and Docs / theme / Zulu clock
-  at the foot. It is the only navigation: there is no top bar.
+  identity (avatar + name + mono CID), a pill **⌘K** search, then **every section the user can use**
+  — Home, Advisories, Operations, Planning, Historical, Admin, and a **User** group (Profile, Settings,
+  API keys, Sign out) — and Docs / theme / Zulu clock at the foot. No dropdown menus for navigation. It is the only navigation: there is no top bar.
 - **Main**: a breadcrumb row (muted parents, bright current crumb with its icon), then the page's
   **content panel** — inset and rounded on all four corners, with no divider between it and the
   sidebar. Inside: the page header (700 title + count chip + subtitle, with a segmented view switch)

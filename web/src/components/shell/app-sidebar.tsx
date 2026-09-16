@@ -18,16 +18,30 @@ import {
   TooltipContent,
   TooltipTrigger,
 } from "@ois/ui";
-import {BookOpen, ChevronDown, ChevronLeft, ChevronRight, History, Home, LogIn, Menu, PanelLeft, Search} from "lucide-react";
+import {
+  BookOpen,
+  ChevronLeft,
+  ChevronRight,
+  History,
+  Home,
+  KeyRound,
+  LogIn,
+  LogOut,
+  Menu,
+  PanelLeft,
+  Search,
+  Settings as SettingsIcon,
+  User as UserIcon,
+} from "lucide-react";
 
 import {ZuluClock} from "@/components/zulu-clock";
 import {DOCS_URL} from "@/lib/api";
-import {login, useMe} from "@/lib/auth";
+import {login, useLogout, useMe} from "@/lib/auth";
+import {hasPermission} from "@/lib/permissions";
 import {ADMIN_HOME, AREAS, visibleGroups} from "@/lib/nav";
 
 import {openCommandSearch} from "./command-search";
 import {useRecentPages} from "./recent-pages";
-import {initials, UserMenuItems} from "./user-menu";
 
 function ChromeButton({ label, onClick, children }: { label: string; onClick?: () => void; children: React.ReactNode }) {
   return (
@@ -90,8 +104,17 @@ function ChromeRow({ collapsed, onToggle }: { collapsed: boolean; onToggle: () =
   );
 }
 
-/** The workspace switcher, as the signed-in identity: avatar, name, mono CID · rating. */
-function IdentitySwitcher({ collapsed }: { collapsed: boolean }) {
+function initials(name: string) {
+  return name
+    .split(/\s+/)
+    .filter(Boolean)
+    .slice(0, 2)
+    .map((part) => part[0]!.toUpperCase())
+    .join("");
+}
+
+/** The signed-in identity (avatar, name, mono CID · rating), or the sign-in button. */
+function Identity({ collapsed }: { collapsed: boolean }) {
   const { data: me } = useMe();
   if (!me) {
     return collapsed ? (
@@ -105,34 +128,48 @@ function IdentitySwitcher({ collapsed }: { collapsed: boolean }) {
     );
   }
   return (
-    <DropdownMenu>
-      <DropdownMenuTrigger asChild>
-        <button
-          type="button"
-          className="flex w-full items-center gap-2.5 rounded-sm border-b border-line-soft px-1.5 pb-3 pt-1 text-left outline-none hover:bg-panel-2 focus-visible:ring-2 focus-visible:ring-ring"
-        >
-          <Avatar className="size-[30px] rounded-sm">
-            <AvatarFallback className="rounded-sm">{initials(me.display_name)}</AvatarFallback>
-          </Avatar>
-          {!collapsed && (
-            <>
-              <span className="min-w-0 flex-1">
-                <span className="block truncate text-[13.5px] font-semibold text-ink">{me.display_name}</span>
-                <span className="block truncate font-mono text-[10.5px] text-ink-3">
-                  CID {me.cid}
-                  {me.rating ? ` · ${me.rating}` : ""}
-                </span>
-              </span>
-              <ChevronDown className="size-3.5 text-ink-3" />
-            </>
-          )}
-        </button>
-      </DropdownMenuTrigger>
-      {/* Expanded, the menu matches the sidebar's width; collapsed, it keeps its natural width. */}
-      <DropdownMenuContent align="start" className={collapsed ? undefined : "w-[var(--radix-dropdown-menu-trigger-width)]"}>
-        <UserMenuItems me={me} />
-      </DropdownMenuContent>
-    </DropdownMenu>
+    <div
+      className="flex items-center gap-2.5 border-b border-line-soft px-1.5 pb-3 pt-1 group-data-[collapsed]/sidebar:justify-center"
+      title={collapsed ? me.display_name : undefined}
+    >
+      <Avatar className="size-[30px] rounded-sm">
+        <AvatarFallback className="rounded-sm">{initials(me.display_name)}</AvatarFallback>
+      </Avatar>
+      {!collapsed && (
+        <span className="min-w-0 flex-1">
+          <span className="block truncate text-[13.5px] font-semibold text-ink">{me.display_name}</span>
+          <span className="block truncate font-mono text-[10.5px] text-ink-3">
+            CID {me.cid}
+            {me.rating ? ` · ${me.rating}` : ""}
+          </span>
+        </span>
+      )}
+    </div>
+  );
+}
+
+/** Profile, settings, API keys and sign out — the signed-in user's own links. */
+function UserGroup() {
+  const { data: me } = useMe();
+  const logout = useLogout();
+  if (!me) return null;
+  return (
+    <SidebarGroup label="User">
+      <SidebarItem asChild icon={UserIcon} label="Profile">
+        <Link to="/profile" />
+      </SidebarItem>
+      <SidebarItem asChild icon={SettingsIcon} label="Settings">
+        <Link to="/settings" />
+      </SidebarItem>
+      {hasPermission(me, "api_keys.key.create") && (
+        <SidebarItem asChild icon={KeyRound} label="API keys">
+          <Link to="/api-keys" />
+        </SidebarItem>
+      )}
+      <SidebarItem asChild icon={LogOut} label="Sign out" className="w-full text-left">
+        <button type="button" onClick={() => logout.mutate()} />
+      </SidebarItem>
+    </SidebarGroup>
   );
 }
 
@@ -161,7 +198,7 @@ function SearchPill({ collapsed }: { collapsed: boolean }) {
 
 /**
  * Every section the user can use, grouped: Home, then Advisories, Operations, Planning, Historical and
- * Admin (its landing first). Shared by the desktop sidebar and the phone drawer.
+ * Admin (its landing first), then the user's own pages. Shared by the desktop sidebar and phone drawer.
  */
 function NavGroups() {
   const { data: me } = useMe();
@@ -188,6 +225,7 @@ function NavGroups() {
           ))}
         </SidebarGroup>
       ))}
+      <UserGroup />
     </>
   );
 }
@@ -214,7 +252,7 @@ export function AppSidebar({ collapsed, onToggle }: { collapsed: boolean; onTogg
       header={
         <>
           <ChromeRow collapsed={collapsed} onToggle={onToggle} />
-          <IdentitySwitcher collapsed={collapsed} />
+          <Identity collapsed={collapsed} />
           <SearchPill collapsed={collapsed} />
         </>
       }
@@ -236,7 +274,7 @@ export function MobileNavButton() {
       </Button>
       <Modal open={open} onClose={close} placement="left" title="OIS">
         <nav className="flex flex-col gap-3" onClick={(e) => (e.target as HTMLElement).closest("a") && close()}>
-          <IdentitySwitcher collapsed={false} />
+          <Identity collapsed={false} />
           <SearchPill collapsed={false} />
           <NavGroups />
           <SidebarFooter collapsed={false} />
