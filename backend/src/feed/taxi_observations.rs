@@ -82,6 +82,9 @@ const PUSH_MAX_M: f64 = 150.0;
 /// How far a step's track must run from the reported heading to count as moving backwards (a tug
 /// push) rather than forwards (taxi). Well clear of 90°, which is where a nose-swinging push sits.
 const BACKWARDS_DEG: f64 = 120.0;
+/// How close to the nose a step must run to be evidence the aircraft rolled out of its stand under
+/// its own power — the positive evidence behind a recorded zero pushback (#287).
+const FORWARDS_DEG: f64 = 60.0;
 /// Consecutive forward steps that end a push (the nose has turned into the taxi).
 const FLIP_CONFIRM_UPDATES: u32 = 2;
 /// Backstops on a push the heading classified: past either, the burst is taxi however it reads.
@@ -115,6 +118,9 @@ struct Run {
     /// a [`MOVE_M`] jitter step shouldn't outvote a tug step an order of magnitude longer.
     back_m: f64,
     fwd_m: f64,
+    /// Metres run close to the nose (within [`FORWARDS_DEG`]), as opposed to merely "not backwards".
+    /// A sideways tow is neither a push nor a roll-out, so it is evidence of neither (#287).
+    nose_first_m: f64,
 }
 
 impl Run {
@@ -132,11 +138,15 @@ impl Run {
 /// the heading at the *start* of the step: sampling the end biases every comparison of a turning
 /// aircraft by roughly half the turn.
 fn moved_backwards(from: (f64, f64), to: (f64, f64), hdg: i64) -> bool {
+    off_heading_deg(from, to, hdg) > BACKWARDS_DEG
+}
+
+/// How far a step from `from` to `to` ran off `hdg`, folded onto 0..=180 so a heading either side of
+/// north compares correctly (e.g. 350 vs 000).
+fn off_heading_deg(from: (f64, f64), to: (f64, f64), hdg: i64) -> f64 {
     let track = bearing_deg([from.0, from.1], [to.0, to.1]);
     let off = (track - hdg as f64).abs() % 360.0;
-    // Fold onto 0..=180 so a heading either side of north compares correctly (e.g. 350 vs 000).
-    let off = if off > 180.0 { 360.0 - off } else { off };
-    off > BACKWARDS_DEG
+    if off > 180.0 { 360.0 - off } else { off }
 }
 
 struct Session {
@@ -166,6 +176,11 @@ struct Session {
     /// A push happened (or may have) but its boundaries are unknown, so the phases are recorded as
     /// unmeasured rather than as a real zero (#287).
     push_missed: bool,
+    /// Whether the aircraft moved before the burst that became its taxi. Movement we saw but never
+    /// confirmed is how a real push hides, so it forfeits any claim of "never pushed" (#287).
+    stray_move: bool,
+    /// Whether the burst that became the taxi rolled out nose-first from a standstill (#287).
+    rolled_out: bool,
     base_alt: i64,
 }
 
@@ -174,8 +189,8 @@ impl Session {
     fn advance(&mut self, now_ms: i64, lat: f64, lon: f64, gs: i64, alt: i64, hdg: i64) {
         let step_m = gc_dist(self.last_lat, self.last_lon, lat, lon) * M_PER_NM;
         let moving = step_m >= MOVE_M;
-        let backwards =
-            moving && moved_backwards((self.last_lat, self.last_lon), (lat, lon), self.last_hdg);
+        let (prev_lat, prev_lon, step_hdg) = (self.last_lat, self.last_lon, self.last_hdg);
+        let backwards = moving && moved_backwards((prev_lat, prev_lon), (lat, lon), step_hdg);
         (self.last_lat, self.last_lon) = (lat, lon);
         self.last_hdg = hdg;
         let from_stand_m = gc_dist(self.first_lat, self.first_lon, lat, lon) * M_PER_NM;
@@ -247,6 +262,9 @@ impl Session {
         }
 
         if moving == self.phase.is_moving() {
+            if self.phase == Phase::Parked && self.run.is_some_and(|r| r.dist_m > 0.0) {
+                self.stray_move = true;
+            }
             if let (Phase::PushingBack, Some(stop)) = (self.phase, self.run) {
                 self.last_pause = Some((stop.start_ms, now_ms));
             }
@@ -260,6 +278,7 @@ impl Session {
             peak_gs: 0,
             back_m: 0.0,
             fwd_m: 0.0,
+            nose_first_m: 0.0,
         });
         run.updates += 1;
         run.dist_m += step_m;
@@ -269,6 +288,9 @@ impl Session {
                 run.back_m += step_m;
             } else {
                 run.fwd_m += step_m;
+                if off_heading_deg((prev_lat, prev_lon), (lat, lon), step_hdg) < FORWARDS_DEG {
+                    run.nose_first_m += step_m;
+                }
             }
         }
         if run.updates < CONFIRM_UPDATES || (moving && run.dist_m < BURST_MIN_M) {
@@ -287,6 +309,12 @@ impl Session {
                 self.push_by_direction = run.backwards().is_some();
             }
             Phase::Parked | Phase::StartUp => {
+                // Positive evidence of a departure that never pushed: it rolled out nose-first from
+                // a standstill, with nothing unconfirmed before it (#287).
+                self.rolled_out = self.phase == Phase::Parked
+                    && !self.stray_move
+                    && run.nose_first_m > run.back_m
+                    && run.nose_first_m > 0.0;
                 self.taxi_start_ms = Some(run.start_ms);
                 self.start_taxi(alt);
             }
@@ -329,6 +357,7 @@ impl Session {
         let no_push = self.phase == Phase::Taxiing
             && self.push_start_ms.is_none()
             && !self.push_missed
+            && self.rolled_out
             && self.taxi_start_ms.is_some();
         // A bound that fired says the heading misled us for this whole burst, so even boundaries it
         // produced aren't a measurement.
@@ -454,6 +483,8 @@ fn process(
                         last_hdg: p.heading,
                         fwd_flip: None,
                         push_missed: false,
+                        stray_move: false,
+                        rolled_out: false,
                         base_alt: alt,
                     },
                 );
@@ -470,6 +501,22 @@ fn process(
         .retain(|cs, s| seen.contains(cs) && now_ms - s.first_seen_ms < SESSION_MAX_AGE_MS);
 
     out
+}
+
+/// A recorded zero says "this departure started at a stand and rolled straight out". Without a gate
+/// match we don't know it started at a stand — the session may have opened mid-departure, or the
+/// airport may have no gates on file — so the phases go back to unmeasured rather than voting a zero
+/// into the estimator's pool (#287). A measured push is kept either way.
+fn phases_at_stand(
+    pushback_sec: Option<i32>,
+    startup_sec: Option<i32>,
+    known_stand: bool,
+) -> (Option<i32>, Option<i32>) {
+    if known_stand || pushback_sec != Some(0) {
+        (pushback_sec, startup_sec)
+    } else {
+        (None, None)
+    }
 }
 
 /// Spawn the taxi-observation collector (DB-gated). Reuses OIS's shared feed snapshot, exactly
@@ -511,13 +558,16 @@ pub fn spawn_collector(
             let mut rows = Vec::with_capacity(raw.len());
             for r in raw {
                 let gates_here = by_icao.get(&r.airport).unwrap_or(&empty_gates);
+                let gate_id = super::flow::nearest_gate(gates_here, r.lat, r.lon);
+                let (pushback_sec, startup_sec) =
+                    phases_at_stand(r.pushback_sec, r.startup_sec, gate_id.is_some());
                 rows.push(TaxiObservationRow {
                     airport: r.airport,
-                    gate_id: super::flow::nearest_gate(gates_here, r.lat, r.lon),
+                    gate_id,
                     aircraft: r.aircraft,
                     runway: r.runway,
-                    pushback_sec: r.pushback_sec,
-                    startup_sec: r.startup_sec,
+                    pushback_sec,
+                    startup_sec,
                     taxi_sec: r.taxi_sec,
                     observed_at: r.observed_at,
                 });
@@ -689,8 +739,10 @@ mod tests {
         );
 
         assert_eq!(obs.len(), 1);
-        assert_eq!(obs[0].pushback_sec, Some(0));
-        assert_eq!(obs[0].startup_sec, Some(0));
+        // It shuffled before it taxied: movement we couldn't confirm, so neither a push nor a
+        // proven no-push (#287 QA).
+        assert_eq!(obs[0].pushback_sec, None);
+        assert_eq!(obs[0].startup_sec, None);
         assert_eq!(obs[0].taxi_sec, 150); // 135 → 285
     }
 
@@ -1301,7 +1353,9 @@ mod tests {
         );
 
         assert_eq!(obs.len(), 1);
-        assert_eq!(obs[0].pushback_sec, Some(0));
+        // It shuffled before it taxied: movement we couldn't confirm, so neither a push nor a
+        // proven no-push (#287 QA).
+        assert_eq!(obs[0].pushback_sec, None);
         assert_eq!(obs[0].taxi_sec, 150); // 105 → 255
     }
 
@@ -1475,5 +1529,155 @@ mod tests {
         );
 
         assert!(st.dep.is_empty());
+    }
+
+    /// #287 QA: a tug push that only managed two moving updates before stopping never confirms, so
+    /// no push is recorded — but the aircraft plainly moved, and that movement is how a real push
+    /// hides. The row must say "unmeasured", not "never pushed".
+    #[test]
+    fn a_push_that_never_confirmed_is_not_a_recorded_zero() {
+        let mut st = TaxiObsState::default();
+        let obs = run_track(
+            &mut st,
+            &[
+                (0, 0.0, 0, 0, 180),
+                (15, 12.0, 2, 0, 180),
+                (30, 24.0, 2, 0, 180),
+                (45, 24.0, 0, 0, 180),
+                (60, 24.0, 0, 0, 180),
+                (75, 24.0, 0, 0, 180),
+                (90, 24.0, 0, 0, 180),
+                (105, -60.0, 12, 0, 180),
+                (120, -160.0, 15, 0, 180),
+                (135, -260.0, 15, 0, 180),
+                (400, -1200.0, 80, 400, 180),
+            ],
+        );
+
+        assert_eq!(obs.len(), 1);
+        assert_eq!(obs[0].pushback_sec, None);
+        assert_eq!(obs[0].startup_sec, None);
+    }
+
+    /// #287 QA: a session that opens with the aircraft already sitting at the hold short pushed back
+    /// long before we saw it. Rolling forward from there is not evidence of a no-push departure.
+    #[test]
+    fn a_departure_first_seen_away_from_a_stand_is_not_a_recorded_zero() {
+        let (ap, rw) = (airports(), RunwayDb::default());
+        let mut st = TaxiObsState::default();
+        for (secs, m, gs) in [
+            (0, 0.0, 0),
+            (15, 0.0, 0),
+            (30, 0.0, 0),
+            (45, 60.0, 10),
+            (60, 160.0, 15),
+            (75, 280.0, 20),
+        ] {
+            process(
+                &mut st,
+                &ap,
+                &rw,
+                &one_hdg(north(m), gs, 0, "KAAA", 0),
+                t(secs),
+            );
+        }
+        let obs = process(
+            &mut st,
+            &ap,
+            &rw,
+            &one_hdg(north(1200.0), 80, 400, "KAAA", 0),
+            t(300),
+        );
+
+        assert_eq!(obs.len(), 1);
+        // The observation itself can't tell a stand from a hold short — `phases_at_stand` decides,
+        // and with no gate match the phases stay unmeasured.
+        assert_eq!(
+            phases_at_stand(obs[0].pushback_sec, obs[0].startup_sec, false),
+            (None, None)
+        );
+        assert_eq!(
+            phases_at_stand(obs[0].pushback_sec, obs[0].startup_sec, true),
+            (Some(0), Some(0))
+        );
+    }
+
+    #[test]
+    fn a_zero_needs_a_stand_to_stand_on() {
+        // Away from a known gate a zero is not evidence of anything: it goes back to unmeasured.
+        assert_eq!(phases_at_stand(Some(0), Some(0), false), (None, None));
+        assert_eq!(phases_at_stand(Some(0), Some(0), true), (Some(0), Some(0)));
+        // A measured push is kept wherever it was seen, and NULL stays NULL.
+        assert_eq!(
+            phases_at_stand(Some(90), Some(60), false),
+            (Some(90), Some(60))
+        );
+        assert_eq!(phases_at_stand(None, None, true), (None, None));
+    }
+
+    /// A burst that ran across the nose — a sideways tow — is neither a push nor a roll-out, so it
+    /// can't be read as "never pushed" either (#287 QA).
+    #[test]
+    fn a_burst_across_the_nose_is_not_a_recorded_zero() {
+        let mut st = TaxiObsState::default();
+        let obs = run_track(
+            &mut st,
+            &[
+                (0, 0.0, 0, 0, 90),
+                (15, 60.0, 5, 0, 90),
+                (30, 120.0, 5, 0, 90),
+                (45, 180.0, 5, 0, 90),
+                (60, 180.0, 0, 0, 90),
+                (75, 180.0, 0, 0, 90),
+                (90, 180.0, 0, 0, 90),
+                (105, 900.0, 80, 400, 90),
+            ],
+        );
+
+        assert_eq!(obs[0].pushback_sec, None);
+        assert_eq!(obs[0].startup_sec, None);
+    }
+
+    /// A tow that wobbles — rolled back, nudged forward, then dragged sideways — is not a departure
+    /// that rolled out under its own power, even though more of its travel wasn't backwards than
+    /// was. Only travel along the nose is evidence of a roll-out (#287 QA).
+    #[test]
+    fn a_burst_with_more_backwards_travel_than_nose_first_is_not_a_recorded_zero() {
+        /// Metres east of the KAAA reference point, at 40 deg latitude.
+        fn east(m: f64) -> f64 {
+            -74.0 + m / 85_200.0
+        }
+        fn at(lat: f64, lon: f64, gs: i64, hdg: i64) -> VatsimData {
+            let mut data = one_hdg(lat, gs, 0, "KAAA", hdg);
+            data.pilots[0].longitude = lon;
+            data
+        }
+
+        let (ap, rw) = (airports(), RunwayDb::default());
+        let mut st = TaxiObsState::default();
+        // Nose south throughout: north is backwards, south is nose-first, east is across the nose.
+        let track = [
+            (0, north(0.0), east(0.0), 0),
+            (15, north(40.0), east(0.0), 2),  // 40 m backwards
+            (30, north(20.0), east(0.0), 2),  // 20 m nose-first
+            (45, north(20.0), east(30.0), 2), // 30 m sideways
+            (60, north(20.0), east(30.0), 0),
+            (75, north(20.0), east(30.0), 0),
+            (90, north(20.0), east(30.0), 0),
+        ];
+        for (secs, lat, lon, gs) in track {
+            process(&mut st, &ap, &rw, &at(lat, lon, gs, 180), t(secs));
+        }
+        let obs = process(
+            &mut st,
+            &ap,
+            &rw,
+            &at(north(-900.0), east(30.0), 80, 180),
+            t(300),
+        );
+
+        assert_eq!(obs.len(), 1);
+        assert_eq!(obs[0].pushback_sec, None);
+        assert_eq!(obs[0].startup_sec, None);
     }
 }
