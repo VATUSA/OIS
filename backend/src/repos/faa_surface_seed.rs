@@ -559,6 +559,34 @@ mod tests {
     }
 
     #[sqlx::test]
+    async fn seeded_taxiways_carry_the_extract_s_rings(pool: PgPool) {
+        seed(&pool).await.unwrap();
+        let (name, rings): (String, sqlx::types::Json<Vec<Vec<[f64; 2]>>>) = sqlx::query_as(
+            "select name, rings from flow.airport_taxiway where icao = 'KDCA' and source = 'faa' \
+             order by id limit 1",
+        )
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+
+        // FAA designators repeat within an airport (several features are named "A"), so the stored
+        // rings must match one of the extract's rows under that name — verbatim, not merely present.
+        let extract = load_bundled_extract();
+        let candidates: Vec<_> = extract["KDCA"]
+            .taxiways
+            .iter()
+            .filter(|t| t.name == name)
+            .collect();
+        assert!(!candidates.is_empty(), "seeded row comes from the extract");
+        assert!(
+            candidates.iter().any(|t| t.rings == rings.0),
+            "the extract's rings are stored verbatim"
+        );
+        assert_eq!(rings.0.len(), 1);
+        assert!(rings.0[0].len() >= 4, "a pavement outline, not a stub");
+    }
+
+    #[sqlx::test]
     async fn concurrent_runs_do_not_duplicate_rows(pool: PgPool) {
         let (a, b) = tokio::join!(seed(&pool), seed(&pool));
         let (a, b) = (a.unwrap(), b.unwrap());

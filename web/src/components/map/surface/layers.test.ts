@@ -212,3 +212,39 @@ describe("runway polygons (#279)", () => {
     ]);
   });
 });
+
+describe("polygon geometry (#278)", () => {
+  it("hands deck.gl [lon, lat] rings, not the API's [lat, lon]", () => {
+    const s = surface({
+      taxiways: [taxiway({ id: "t" })],
+      ramp_areas: [rampArea({ id: "r" })],
+    });
+    const layers = buildSurfaceLayers(s, null);
+    for (const [id, item] of [
+      ["surface-taxiways", taxiway({ id: "t" })],
+      ["surface-ramp-areas", rampArea({ id: "r" })],
+    ] as const) {
+      const layer = layers.find((l) => l.id === id);
+      const { getPolygon } = layer?.props as unknown as {
+        getPolygon: (d: typeof item) => number[][][];
+      };
+      expect(getPolygon(item), id).toEqual(item.rings.map((ring) => ring.map(([lat, lon]) => [lon, lat])));
+    }
+  });
+
+  it("a taxiway needs 3 points before it can be finalized, like a ramp", () => {
+    expect(MIN_SURFACE_POINTS.taxiway).toBe(3);
+    expect(MIN_SURFACE_POINTS.taxiway).toBe(MIN_SURFACE_POINTS.ramp);
+  });
+
+  // Superseded by #279's largest-first order: a taxiway crossing an apron is the smaller shape, so
+  // it sits on top and wins the click; the apron stays pickable everywhere else.
+  it("draws taxiways above ramp areas so pavement crossing an apron stays pickable", () => {
+    const layers = buildSurfaceLayers(
+      surface({ taxiways: [taxiway({ id: "t" })], ramp_areas: [rampArea({ id: "r" })] }),
+      null,
+    );
+    const ids = layers.map((l) => l.id);
+    expect(ids.indexOf("surface-ramp-areas")).toBeLessThan(ids.indexOf("surface-taxiways"));
+  });
+});

@@ -71,9 +71,10 @@ export function SurfaceEditorPanel({
           <Button variant="ghost" size="sm" onClick={onCancel}>
             Cancel
           </Button>
-          {draft.kind !== "gate" && (
+          {/* Every non-gate kind is a polygon now (#278), so the only action is closing the ring. */}
+          {isPolygonKind(draft.kind) && (
             <Button size="sm" disabled={!canFinish} onClick={onFinishDraw}>
-              {isPolygonKind(draft.kind) ? "Close shape" : "Finish"}
+              Close shape
             </Button>
           )}
         </div>
