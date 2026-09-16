@@ -1,4 +1,4 @@
-//! Read-only staff endpoints for #183: browse raw taxi/pushback observations and their derived
+//! Read-only staff endpoints for #183: browse raw taxi/start-up/pushback observations and their derived
 //! estimates. Gated on `StatsRead`, same as every other `/api/v1/stats/*` browsing endpoint — this
 //! data lives in the same `stats` schema and warrants no finer-grained permission.
 
@@ -127,7 +127,7 @@ pub struct EstimatesQuery {
         ("from" = Option<String>, Query, description = "Only include samples observed at/after (RFC 3339)"),
         ("to" = Option<String>, Query, description = "Only include samples observed at/before (RFC 3339)"),
         ("include_outliers" = Option<bool>, Query, description = "Include out-of-bounds samples in the estimate's input (default true)"),
-        ("fallback_tier" = Option<String>, Query, description = "Only combos where pushback or taxi resolved at this ladder tier"),
+        ("fallback_tier" = Option<String>, Query, description = "Only combos where pushback, start-up, or taxi resolved at this ladder tier"),
         ("page" = Option<i64>, Query, description = "1-based page (default 1)"),
         ("page_size" = Option<i64>, Query, description = "Page size (default 50, max 100)")
     ),

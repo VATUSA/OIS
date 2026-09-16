@@ -222,7 +222,7 @@ pub async fn prune_flight_legs(pool: &PgPool, before: DateTime<Utc>) -> Result<u
     Ok(res.rows_affected())
 }
 
-/// A completed departure's pushback+startup and taxi-out timings for `stats.taxi_observation`
+/// A completed departure's pushback, start-up, and taxi-out timings for `stats.taxi_observation`
 /// (#164 sub-issue C — the raw observations a later per-gate/type/runway estimator learns from).
 pub struct TaxiObservationRow {
     pub airport: String,
@@ -230,6 +230,7 @@ pub struct TaxiObservationRow {
     pub aircraft: Option<String>,
     pub runway: Option<String>,
     pub pushback_sec: Option<i32>,
+    pub startup_sec: Option<i32>,
     pub taxi_sec: i32,
     pub observed_at: DateTime<Utc>,
 }
@@ -242,7 +243,7 @@ pub async fn insert_taxi_observations(
     for chunk in rows.chunks(1000) {
         let mut qb: QueryBuilder<Postgres> = QueryBuilder::new(
             "insert into stats.taxi_observation \
-             (airport, gate_id, aircraft, runway, pushback_sec, taxi_sec, observed_at) ",
+             (airport, gate_id, aircraft, runway, pushback_sec, startup_sec, taxi_sec, observed_at) ",
         );
         qb.push_values(chunk, |mut b, r| {
             b.push_bind(&r.airport)
@@ -250,6 +251,7 @@ pub async fn insert_taxi_observations(
                 .push_bind(&r.aircraft)
                 .push_bind(&r.runway)
                 .push_bind(r.pushback_sec)
+                .push_bind(r.startup_sec)
                 .push_bind(r.taxi_sec)
                 .push_bind(r.observed_at);
         });
@@ -279,7 +281,7 @@ pub async fn taxi_samples_for_airport(
     airport: &str,
 ) -> Result<Vec<crate::feed::taxi_estimate::TaxiSample>, ApiError> {
     sqlx::query_as(
-        "select gate_id, aircraft, runway, pushback_sec, taxi_sec \
+        "select gate_id, aircraft, runway, pushback_sec, startup_sec, taxi_sec \
          from stats.taxi_observation where airport = $1",
     )
     .bind(airport)
@@ -295,6 +297,7 @@ struct AirportTaxiSampleRow {
     aircraft: Option<String>,
     runway: Option<String>,
     pushback_sec: Option<i32>,
+    startup_sec: Option<i32>,
     taxi_sec: i32,
 }
 
@@ -307,7 +310,7 @@ pub async fn load_all_taxi_samples(
 ) -> Result<std::collections::HashMap<String, Vec<crate::feed::taxi_estimate::TaxiSample>>, ApiError>
 {
     let rows: Vec<AirportTaxiSampleRow> = sqlx::query_as(
-        "select airport, gate_id, aircraft, runway, pushback_sec, taxi_sec \
+        "select airport, gate_id, aircraft, runway, pushback_sec, startup_sec, taxi_sec \
          from stats.taxi_observation",
     )
     .fetch_all(pool)
@@ -326,6 +329,7 @@ pub async fn load_all_taxi_samples(
                 aircraft: r.aircraft,
                 runway: r.runway,
                 pushback_sec: r.pushback_sec,
+                startup_sec: r.startup_sec,
                 taxi_sec: r.taxi_sec,
             });
     }
