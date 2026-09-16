@@ -1,7 +1,7 @@
 import {useMemo, useState} from "react";
 
 import type {ApiKeyPermission, ApiKeyPermissionInput, GrantablePermission} from "@/lib/api-keys";
-import {type AccessPreset, BASE_PERMISSIONS, presetPermissions} from "@/lib/presets";
+import {ACCESS_PRESETS, type AccessPreset, BASE_PERMISSIONS, presetPermissions} from "@/lib/presets";
 import {PresetBar} from "@/components/access/preset-bar";
 import {
   PermissionScopeTree,
@@ -70,16 +70,17 @@ export function presetOwnPermissions(
   });
 }
 
-/** Whether `s` covers the full scope a creator holds a permission at — what `togglePreset` writes
- * for a national preset (`defaultScope`): national if held nationally, else every held ARTCC. */
-function coversHeldScope(s: ScopeSel, g: GrantablePermission): boolean {
-  return s.national || (!g.national && g.artccs.every((a) => s.artccs.includes(a)));
+/** Whether scope `a` includes all of scope `b`. */
+function covers(a: ScopeSel, b: ScopeSel): boolean {
+  return a.national || (!b.national && b.artccs.every((x) => a.artccs.includes(x)));
 }
 
 /** Whether a preset is fully applied: it grants something of its own, all of it is selected at the
- * scope the preset writes (a facility preset's at the chosen facility, not nationally; a national
- * preset's at the creator's full held scope — so a facility preset's ARTCC-scoped grants never make
- * a national preset read as applied, #264), and so is the baseline. */
+ * scope the preset writes, and so is the baseline. A national preset's own perms must cover the
+ * creator's full held scope — so a facility preset's ARTCC-scoped grants never make a national preset
+ * read as applied (#264). A facility preset's own perms must each include the facility or be national
+ * (a national grant covers it, #275), with at least one actually at the facility — so national grants
+ * alone never light it (#264). */
 export function presetApplied(
   preset: AccessPreset,
   grantable: GrantablePermission[],
@@ -88,16 +89,19 @@ export function presetApplied(
   selection: PermSelection,
 ): boolean {
   const own = presetOwnPermissions(preset, grantable, baseNames, facility);
-  if (own.length === 0) return false;
+  if (own.length === 0 || !baseNames.every((p) => selection.has(p))) return false;
+  if (preset.scope === "facility") {
+    const sels = own.map((p) => selection.get(p));
+    return (
+      sels.every((s) => s && (s.national || s.artccs.includes(facility))) &&
+      sels.some((s) => s && !s.national)
+    );
+  }
   const byName = new Map(grantable.map((g) => [g.permission, g] as const));
-  const ownSelected = own.every((p) => {
+  return own.every((p) => {
     const s = selection.get(p);
-    if (!s) return false;
-    return preset.scope === "facility"
-      ? !s.national && s.artccs.includes(facility)
-      : coversHeldScope(s, byName.get(p)!);
+    return !!s && covers(s, defaultScope(byName.get(p)!)); // the creator's full held scope
   });
-  return ownSelected && baseNames.every((p) => selection.has(p));
 }
 
 /** Whether a preset's chip is enabled: it grants something of its own. A facility preset with no
@@ -114,8 +118,10 @@ export function presetCanApply(
   );
 }
 
-/** The selection after clicking a preset: removes its perms + the baseline when it's applied,
- * otherwise grants them at the preset's scope. */
+/** The selection after clicking a preset. Applied: subtracts what it contributes (a facility
+ * preset's ARTCC, a national preset's perms) but keeps what the other applied presets grant, and
+ * drops the baseline only once nothing still needs it. Otherwise: merges its perms in at the
+ * preset's scope without narrowing existing grants (#275). */
 export function togglePresetSelection(
   preset: AccessPreset,
   grantable: GrantablePermission[],
@@ -124,25 +130,67 @@ export function togglePresetSelection(
   selection: PermSelection,
 ): PermSelection {
   const byName = new Map(grantable.map((g) => [g.permission, g] as const));
-  const domain = presetPermissions(
-    preset,
-    grantable.map((g) => g.permission),
-  );
+  const own = presetOwnPermissions(preset, grantable, baseNames, facility);
   const next = new Map(selection);
   if (presetApplied(preset, grantable, baseNames, facility, selection)) {
-    for (const p of [...domain, ...baseNames]) next.delete(p);
+    // The scope a preset applied at `at` ("" for national) writes for one of its perms.
+    const scopeOf = (o: AccessPreset, at: string, p: string): ScopeSel =>
+      o.scope === "facility" ? { national: false, artccs: [at] } : defaultScope(byName.get(p)!);
+    const self = preset.scope === "facility" ? facility : "";
+    // Every other preset applied nationally or at an ARTCC in the selection keeps its grants — except
+    // one whose grants all lie inside this preset's (itself, or e.g. NTMO inside VATUSA Admin) or that
+    // contains this preset's (e.g. DCC Staff over NTMO). Either can't be told apart from this preset
+    // in the selection, and keeping the containing one's grants would leave this chip lit — a click
+    // is never ignored, so it goes unlit too.
+    const selArtccs = [...new Set([...selection.values()].flatMap((s) => s.artccs))];
+    const others = ACCESS_PRESETS.flatMap((o) =>
+      (o.scope === "facility" ? selArtccs : [""]).map((at) => ({
+        o,
+        at,
+        own: presetOwnPermissions(o, grantable, baseNames, at),
+      })),
+    ).filter(
+      ({ o, at, own: theirs }) =>
+        presetApplied(o, grantable, baseNames, at, selection) &&
+        !theirs.every((p) => own.includes(p) && covers(scopeOf(preset, self, p), scopeOf(o, at, p))) &&
+        !own.every((p) => theirs.includes(p) && covers(scopeOf(o, at, p), scopeOf(preset, self, p))),
+    );
+    for (const p of own) {
+      const s = next.get(p)!;
+      // A facility preset never granted a national scope, so leaves one alone.
+      let kept: ScopeSel =
+        preset.scope !== "facility"
+          ? { national: false, artccs: [] }
+          : s.national
+            ? s
+            : { national: false, artccs: s.artccs.filter((a) => a !== facility) };
+      for (const { o, at, own: theirs } of others) {
+        if (!theirs.includes(p)) continue;
+        const add = scopeOf(o, at, p);
+        kept =
+          kept.national || add.national
+            ? { national: true, artccs: [] }
+            : { national: false, artccs: [...new Set([...kept.artccs, ...add.artccs])] };
+      }
+      if (kept.national || kept.artccs.length > 0) next.set(p, kept);
+      else next.delete(p);
+    }
+    // Keep the baseline while another preset (including this one at another ARTCC) is still applied,
+    // or any of this preset's perms remain (e.g. national grants a facility preset left alone).
+    if (others.length === 0 && !own.some((p) => next.has(p))) {
+      for (const p of baseNames) next.delete(p);
+    }
     return next;
   }
-  for (const p of domain) {
-    const g = byName.get(p);
-    if (!g) continue;
+  for (const p of own) {
     if (preset.scope === "facility") {
-      // Scope to the chosen facility, only where the caller can actually delegate it.
-      if (facility && (g.national || g.artccs.includes(facility))) {
-        next.set(p, { national: false, artccs: [facility] });
-      }
+      // Add the chosen facility to what's selected; a national grant already covers it.
+      const s = next.get(p);
+      if (s?.national) continue;
+      const artccs = s?.artccs ?? [];
+      next.set(p, { national: false, artccs: artccs.includes(facility) ? artccs : [...artccs, facility] });
     } else {
-      next.set(p, defaultScope(g)); // national where held nationally, else all their ARTCCs
+      next.set(p, defaultScope(byName.get(p)!)); // national where held nationally, else all their ARTCCs
     }
   }
   // Baseline is always national (applied after domain so it wins for any overlap — national ⊇ facility).
