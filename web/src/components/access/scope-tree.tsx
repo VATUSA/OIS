@@ -1,5 +1,5 @@
 import {useMemo, useState} from "react";
-import {Badge, Input, cn} from "@ois/ui";
+import {Input, StatusPill, cn} from "@ois/ui";
 import {ChevronDown, ChevronRight} from "lucide-react";
 
 /** Per-item scope choice: grant nationally, or to the listed ARTCCs. */
@@ -46,10 +46,10 @@ function Chip({
       disabled={disabled}
       onClick={onClick}
       className={cn(
-        "rounded border px-1.5 py-0.5 text-xs font-medium transition-colors",
+        "rounded-full border px-2 py-0.5 font-mono text-xs font-semibold transition-colors",
         active
-          ? "border-primary bg-primary text-primary-foreground"
-          : "border-input text-muted-foreground hover:bg-accent",
+          ? "border-brand/40 bg-brand-soft text-brand-ink"
+          : "border-line bg-panel-2 text-ink-2 hover:bg-chip hover:text-ink",
         disabled && "cursor-not-allowed opacity-50",
       )}
     >
@@ -93,7 +93,7 @@ export function ScopeChips({
           onClick={() => onChange({ national: true, artccs: [] })}
         />
       )}
-      {bounds.national && <span className="text-xs text-muted-foreground">or</span>}
+      {bounds.national && <span className="text-xs text-ink-3">or</span>}
       {options.map((id) => (
         <Chip
           key={id}
@@ -104,7 +104,7 @@ export function ScopeChips({
         />
       ))}
       {!sel.national && sel.artccs.length === 0 && (
-        <span className="text-xs text-destructive">pick at least one ARTCC</span>
+        <span className="text-xs text-danger">pick at least one ARTCC</span>
       )}
     </div>
   );
@@ -164,15 +164,15 @@ export function PermissionScopeTree({
         placeholder="Filter permissions…"
         className="h-8"
       />
-      <div className="max-h-80 overflow-y-auto rounded-md border">
+      <div className="max-h-80 overflow-y-auto rounded-md border border-line bg-panel">
         {groups.length === 0 && (
-          <p className="px-2 py-4 text-center text-sm text-muted-foreground">No matches.</p>
+          <p className="px-2 py-4 text-center text-sm text-ink-3">No matches.</p>
         )}
         {groups.map(([domain, perms]) => {
           const isOpen = open.has(domain) || q.trim().length > 0;
           const selectedCount = perms.filter((p) => selection.has(p.name)).length;
           return (
-            <div key={domain} className="border-b last:border-0">
+            <div key={domain} className="border-b border-line-soft last:border-0">
               <button
                 type="button"
                 onClick={() => {
@@ -181,14 +181,18 @@ export function PermissionScopeTree({
                   else next.add(domain);
                   setOpen(next);
                 }}
-                className="flex w-full items-center gap-2 px-2 py-1.5 text-left text-sm font-medium hover:bg-accent"
+                className="flex w-full items-center gap-2 px-2 py-1.5 text-left text-sm font-semibold hover:bg-panel-2"
               >
-                {isOpen ? <ChevronDown className="size-4" /> : <ChevronRight className="size-4" />}
+                {isOpen ? (
+                  <ChevronDown className="size-4 text-ink-3" />
+                ) : (
+                  <ChevronRight className="size-4 text-ink-3" />
+                )}
                 <span className="font-mono">{domain}</span>
                 {selectedCount > 0 && (
-                  <Badge variant="secondary" className="text-[10px]">
+                  <StatusPill tone="brand" className="px-1.5 py-0 font-mono">
                     {selectedCount}
-                  </Badge>
+                  </StatusPill>
                 )}
               </button>
               {isOpen && (
@@ -202,11 +206,12 @@ export function PermissionScopeTree({
                             type="checkbox"
                             disabled={disabled}
                             checked={!!sel}
+                            className="size-3.5 accent-brand"
                             onChange={(e) => toggle(it, e.target.checked)}
                           />
                           <span className="font-mono text-xs">{it.name}</span>
                           {!it.bounds.national && (
-                            <span className="text-[10px] text-muted-foreground">
+                            <span className="text-xs text-ink-3">
                               (facility-scoped)
                             </span>
                           )}

@@ -1,14 +1,8 @@
-import {useEffect, useState} from "react";
-import {Plus, RefreshCw, Trash2} from "lucide-react";
-import {
-  Button,
-  Card,
-  CardContent,
-  CardDescription,
-  CardHeader,
-  CardTitle,
-  Input,
-} from "@ois/ui";
+import {useEffect, useMemo, useState} from "react";
+import {Plus, RefreshCw, Server, Trash2} from "lucide-react";
+import {Button, Card, cn, EmptyState, Input, QueryState, Select, Textarea} from "@ois/ui";
+
+import {usePageHeader} from "@/components/shell/page-meta";
 
 import {
   type DiscordGuildSnapshot,
@@ -33,6 +27,9 @@ const KNOWN_CHANNELS: { name: string; hint: string }[] = [
   { name: "region-west", hint: "DCC threads for West hosts (ZAN/HCF/ZLA/ZLC/ZOA/ZSE)" },
   { name: "events", hint: "Fallback DCC-thread channel when a region has none" },
 ];
+
+const SUBTITLE =
+  "Map logical names to real channels/roles per server. Add both the DCC and VATUSA servers; each feature posts to whichever server has its channel mapped.";
 
 /** Logical role names the backend resolves. */
 const KNOWN_ROLES: { name: string; hint: string }[] = [
@@ -86,16 +83,16 @@ function MapEditor({
   const missing = suggestions.filter((s) => !entries.some((e) => e.name.trim() === s.name));
 
   return (
-    <div className="flex flex-col gap-2.5">
+    <section className="flex flex-col gap-2.5 border-t border-line pt-5">
       <div className="flex items-center justify-between">
-        <h4 className="text-sm font-semibold">{label}</h4>
+        <h3 className="text-sm font-semibold">{label}</h3>
         <Button type="button" variant="outline" size="sm" onClick={() => add()}>
           <Plus className="size-4" /> Add
         </Button>
       </div>
 
       {entries.length === 0 ? (
-        <p className="text-sm text-muted-foreground">None mapped.</p>
+        <p className="text-sm text-ink-3">None mapped.</p>
       ) : (
         <div className="flex flex-col gap-2">
           {entries.map((e, i) => (
@@ -107,12 +104,12 @@ function MapEditor({
                 onChange={(ev) => update(i, { name: ev.target.value })}
                 className="flex-1 font-mono"
               />
-              <span className="text-muted-foreground">→</span>
-              <select
+              <span className="text-ink-3">→</span>
+              <Select
                 aria-label={`${label} target`}
                 value={e.id}
                 onChange={(ev) => update(i, { id: ev.target.value })}
-                className="h-9 flex-1 rounded-md border border-input bg-background px-2 text-sm"
+                wrapperClassName="min-w-0 flex-1"
               >
                 <option value="">— pick —</option>
                 {options.map((o) => (
@@ -123,7 +120,7 @@ function MapEditor({
                 {e.id && !options.some((o) => o.id === e.id) && (
                   <option value={e.id}>{e.id} (not in server)</option>
                 )}
-              </select>
+              </Select>
               <Button
                 type="button"
                 variant="ghost"
@@ -139,20 +136,20 @@ function MapEditor({
       )}
 
       {options.length === 0 && (
-        <p className="text-xs text-muted-foreground">
+        <p className="text-xs text-ink-3">
           No {label.toLowerCase()} yet — set this server above and click “Refresh from Discord”.
         </p>
       )}
 
       {missing.length > 0 && (
-        <div className="rounded-md border border-dashed p-2.5 text-xs text-muted-foreground">
-          <p className="mb-1 font-medium">Used by features but not mapped yet:</p>
+        <div className="rounded-md border border-dashed border-line p-2.5 text-xs text-ink-2">
+          <p className="mb-1.5 font-semibold">Used by features but not mapped yet:</p>
           <ul className="flex flex-col gap-1">
             {missing.map((s) => (
               <li key={s.name} className="flex items-center gap-2">
                 <button
                   type="button"
-                  className="rounded bg-muted px-1.5 py-0.5 font-mono text-foreground hover:bg-accent"
+                  className="rounded-full border border-line bg-chip px-2 py-0.5 font-mono text-ink hover:bg-panel-2"
                   onClick={() => add(s.name)}
                 >
                   {s.name}
@@ -163,7 +160,7 @@ function MapEditor({
           </ul>
         </div>
       )}
-    </div>
+    </section>
   );
 }
 
@@ -187,125 +184,121 @@ function GuildCard({
   const roleOpts = roleOptions(snapshot);
 
   return (
-    <Card>
-      <CardHeader className="flex-row items-start justify-between gap-3 space-y-0">
+    <Card className="flex flex-col gap-5 p-5">
+      <div className="flex items-start justify-between gap-3">
         <div className="flex flex-col gap-1">
-          <CardTitle>{guild.name.trim() || "New server"}</CardTitle>
-          <CardDescription>
+          <h2 className="text-xl font-bold">{guild.name.trim() || "New server"}</h2>
+          <p className="text-sm text-ink-2">
             The Discord server this maps to. Pick it from the bot’s servers, then map channels + roles.
-          </CardDescription>
+          </p>
         </div>
         <Button type="button" variant="ghost" size="sm" onClick={onRemove}>
           <Trash2 className="size-4" /> Remove
         </Button>
-      </CardHeader>
-      <CardContent className="flex flex-col gap-6">
-        <div className="grid gap-4 sm:grid-cols-2">
-          <label className="flex flex-col gap-1.5 text-sm">
-            <span className="font-medium">Label</span>
+      </div>
+      <div className="grid gap-4 sm:grid-cols-2">
+        <label className="flex flex-col gap-1.5 text-sm">
+          <span className="font-semibold">Label</span>
+          <Input
+            placeholder="DCC"
+            value={guild.name}
+            onChange={(e) => set({ name: e.target.value })}
+          />
+        </label>
+        <label className="flex flex-col gap-1.5 text-sm">
+          <span className="font-semibold">Server</span>
+          {botGuilds.length > 0 ? (
+            <Select
+              value={guild.guild_id}
+              onChange={(e) => {
+                const gid = e.target.value;
+                const g = botGuilds.find((b) => b.guild_id === gid);
+                set({ guild_id: gid, name: guild.name.trim() || (g?.name ?? "") });
+              }}
+              wrapperClassName="w-full"
+            >
+              <option value="">— pick a server —</option>
+              {botGuilds.map((g) => (
+                <option key={g.guild_id} value={g.guild_id}>
+                  {g.name}
+                </option>
+              ))}
+              {guild.guild_id && !botGuilds.some((g) => g.guild_id === guild.guild_id) && (
+                <option value={guild.guild_id}>{guild.guild_id} (bot not in server)</option>
+              )}
+            </Select>
+          ) : (
             <Input
-              placeholder="DCC"
-              value={guild.name}
-              onChange={(e) => set({ name: e.target.value })}
+              placeholder="123456789012345678"
+              value={guild.guild_id}
+              inputMode="numeric"
+              className="font-mono"
+              onChange={(e) => set({ guild_id: e.target.value })}
             />
-          </label>
-          <label className="flex flex-col gap-1.5 text-sm">
-            <span className="font-medium">Server</span>
-            {botGuilds.length > 0 ? (
-              <select
-                value={guild.guild_id}
-                onChange={(e) => {
-                  const gid = e.target.value;
-                  const g = botGuilds.find((b) => b.guild_id === gid);
-                  set({ guild_id: gid, name: guild.name.trim() || (g?.name ?? "") });
-                }}
-                className="h-9 rounded-md border border-input bg-background px-2 text-sm"
-              >
-                <option value="">— pick a server —</option>
-                {botGuilds.map((g) => (
-                  <option key={g.guild_id} value={g.guild_id}>
-                    {g.name}
-                  </option>
-                ))}
-                {guild.guild_id && !botGuilds.some((g) => g.guild_id === guild.guild_id) && (
-                  <option value={guild.guild_id}>{guild.guild_id} (bot not in server)</option>
+          )}
+        </label>
+      </div>
+
+      {guild.guild_id && !snapshot && (
+        <p className="rounded-md border border-line bg-warning-soft px-3 py-2 text-xs text-ink-2">
+          The bot hasn’t reported this server’s channels/roles yet. Make sure the bot is in it, then
+          click “Refresh from Discord”.
+        </p>
+      )}
+
+      <section className="flex flex-col gap-1.5 border-t border-line pt-5">
+        <h3 className="text-sm font-semibold">Facilities served</h3>
+        <p className="text-xs text-ink-2">
+          If another server maps the same logical channel/role name, the one whose facilities
+          include the relevant ARTCC wins that name here — otherwise the first-configured server
+          still wins, as before.
+        </p>
+        <div className="flex flex-wrap gap-1.5">
+          {artccs.map((a) => {
+            const active = guild.facilities.includes(a);
+            return (
+              <button
+                key={a}
+                type="button"
+                aria-pressed={active}
+                onClick={() =>
+                  set({
+                    facilities: active
+                      ? guild.facilities.filter((f) => f !== a)
+                      : [...guild.facilities, a],
+                  })
+                }
+                className={cn(
+                  "rounded-full border px-2.5 py-0.5 font-mono text-xs font-semibold transition-colors",
+                  active
+                    ? "border-brand/40 bg-brand-soft text-brand-ink"
+                    : "border-line bg-panel-2 text-ink-2 hover:bg-chip hover:text-ink",
                 )}
-              </select>
-            ) : (
-              <Input
-                placeholder="123456789012345678"
-                value={guild.guild_id}
-                inputMode="numeric"
-                className="font-mono"
-                onChange={(e) => set({ guild_id: e.target.value })}
-              />
-            )}
-          </label>
+              >
+                {a}
+              </button>
+            );
+          })}
         </div>
+      </section>
 
-        {guild.guild_id && !snapshot && (
-          <p className="rounded-md border border-amber-500/40 bg-amber-500/5 px-3 py-2 text-xs text-muted-foreground">
-            The bot hasn’t reported this server’s channels/roles yet. Make sure the bot is in it, then
-            click “Refresh from Discord”.
-          </p>
-        )}
-
-        <div className="flex flex-col gap-1.5">
-          <span className="text-sm font-medium">Facilities served</span>
-          <p className="text-xs text-muted-foreground">
-            If another server maps the same logical channel/role name, the one whose facilities
-            include the relevant ARTCC wins that name here — otherwise the first-configured server
-            still wins, as before.
-          </p>
-          <div className="flex flex-wrap gap-1.5">
-            {artccs.map((a) => {
-              const active = guild.facilities.includes(a);
-              return (
-                <button
-                  key={a}
-                  type="button"
-                  aria-pressed={active}
-                  onClick={() =>
-                    set({
-                      facilities: active
-                        ? guild.facilities.filter((f) => f !== a)
-                        : [...guild.facilities, a],
-                    })
-                  }
-                  className={`rounded-md border px-2 py-1 text-xs font-mono ${
-                    active
-                      ? "border-primary/60 bg-primary/15 text-primary"
-                      : "bg-background/95 hover:bg-muted"
-                  }`}
-                >
-                  {a}
-                </button>
-              );
-            })}
-          </div>
-        </div>
-
-        <MapEditor
-          label="Channels"
-          entries={guild.channels}
-          options={chOpts}
-          onChange={(channels) => set({ channels })}
-          suggestions={KNOWN_CHANNELS}
-        />
-        <MapEditor
-          label="Roles"
-          entries={guild.roles}
-          options={roleOpts}
-          onChange={(roles) => set({ roles })}
-          suggestions={KNOWN_ROLES}
-        />
-      </CardContent>
+      <MapEditor
+        label="Channels"
+        entries={guild.channels}
+        options={chOpts}
+        onChange={(channels) => set({ channels })}
+        suggestions={KNOWN_CHANNELS}
+      />
+      <MapEditor
+        label="Roles"
+        entries={guild.roles}
+        options={roleOpts}
+        onChange={(roles) => set({ roles })}
+        suggestions={KNOWN_ROLES}
+      />
     </Card>
   );
 }
-
-const TEXTAREA_CLASS =
-  "min-h-48 w-full rounded-md border border-input bg-background px-3 py-2 font-mono text-sm shadow-sm transition-colors placeholder:text-muted-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring";
 
 /** The event-thread message body template, edited independently of the guild list above (separate
  * endpoint, separate save action). */
@@ -320,40 +313,39 @@ function ThreadTemplateCard() {
   }, [loaded]);
 
   return (
-    <Card>
-      <CardHeader>
-        <CardTitle>Event-thread message template</CardTitle>
-        <CardDescription>
+    <Card className="flex flex-col gap-4 p-5">
+      <div className="flex flex-col gap-1">
+        <h2 className="text-xl font-bold">Event-thread message template</h2>
+        <p className="text-sm text-ink-2">
           Posted at the top of every event planning thread. Placeholders:{" "}
           <code>{"{{title}}"}</code>, <code>{"{{date_line}}"}</code>,{" "}
           <code>{"{{facility_lines}}"}</code>, <code>{"{{ntmo_ping}}"}</code>,{" "}
           <code>{"{{dcc_ping}}"}</code>.
-        </CardDescription>
-      </CardHeader>
-      <CardContent className="flex flex-col gap-3">
-        {query.isError ? (
-          <p className="text-sm text-muted-foreground">Couldn&apos;t load the template.</p>
-        ) : !loaded ? (
-          <p className="text-sm text-muted-foreground">Loading…</p>
-        ) : (
-          <>
-            <textarea
-              className={TEXTAREA_CLASS}
-              value={body}
-              onChange={(e) => setBody(e.target.value)}
-            />
-            <div className="flex justify-end">
-              <Button
-                size="sm"
-                disabled={!body.trim() || save.isPending}
-                onClick={() => save.mutate({ body })}
-              >
-                {save.isPending ? "Saving…" : "Save template"}
-              </Button>
-            </div>
-          </>
-        )}
-      </CardContent>
+        </p>
+      </div>
+      <QueryState
+        isLoading={!loaded && !query.isError}
+        isError={query.isError}
+        error="Couldn't load the template."
+        onRetry={() => query.refetch()}
+      >
+        <div className="flex flex-col gap-3">
+          <Textarea
+            className="min-h-48 font-mono"
+            value={body}
+            onChange={(e) => setBody(e.target.value)}
+          />
+          <div className="flex justify-end">
+            <Button
+              size="sm"
+              disabled={!body.trim() || save.isPending}
+              onClick={() => save.mutate({ body })}
+            >
+              {save.isPending ? "Saving…" : "Save template"}
+            </Button>
+          </div>
+        </div>
+      </QueryState>
     </Card>
   );
 }
@@ -412,48 +404,37 @@ export function AdminDiscord() {
     setGuilds((gs) => gs.map((g, idx) => (idx === i ? next : g)));
   const removeGuild = (i: number) => setGuilds((gs) => gs.filter((_, idx) => idx !== i));
 
+  const refreshing = refresh.isPending;
+  const refreshNow = refresh.mutate;
+  const actions = useMemo(
+    () => (
+      <Button type="button" variant="outline" onClick={() => refreshNow()} disabled={refreshing}>
+        <RefreshCw className={cn("size-4", refreshing && "animate-spin")} />
+        Refresh from Discord
+      </Button>
+    ),
+    [refreshing, refreshNow],
+  );
+  usePageHeader({ subtitle: SUBTITLE, count: loaded ? loaded.guilds.length : null, actions });
+
   return (
     <div className="flex flex-col gap-6">
-      <div className="flex flex-wrap items-start justify-between gap-3">
-        <div>
-          <h1 className="text-2xl font-semibold tracking-tight">Discord Integration</h1>
-          <p className="text-muted-foreground">
-            Map logical names to real channels/roles per server. Add both the DCC and VATUSA servers;
-            each feature posts to whichever server has its channel mapped.
-          </p>
-        </div>
-        <Button
-          type="button"
-          variant="outline"
-          onClick={() => refresh.mutate()}
-          disabled={refresh.isPending}
-        >
-          <RefreshCw className={`size-4 ${refresh.isPending ? "animate-spin" : ""}`} />
-          Refresh from Discord
-        </Button>
-      </div>
-
-      <ThreadTemplateCard />
-
-      {query.isError ? (
+      {query.isError || !loaded ? (
         <Card>
-          <CardContent className="py-10 text-center text-sm text-muted-foreground">
-            Couldn&apos;t load the Discord configuration.
-          </CardContent>
-        </Card>
-      ) : !loaded ? (
-        <Card>
-          <CardContent className="py-10 text-center text-sm text-muted-foreground">
-            Loading…
-          </CardContent>
+          <QueryState
+            isLoading={!loaded && !query.isError}
+            isError={query.isError}
+            error="Couldn't load the Discord configuration."
+            onRetry={() => query.refetch()}
+          />
         </Card>
       ) : (
         <>
           {guilds.length === 0 && (
             <Card>
-              <CardContent className="py-10 text-center text-sm text-muted-foreground">
-                No servers configured yet. Add one to get started.
-              </CardContent>
+              <EmptyState icon={Server} title="No servers configured yet">
+                Add one to get started.
+              </EmptyState>
             </Card>
           )}
 
@@ -475,7 +456,7 @@ export function AdminDiscord() {
             </Button>
             <div className="flex items-center gap-3">
               {!canSave && (
-                <span className="text-xs text-muted-foreground">
+                <span className="text-xs text-ink-3">
                   Every server needs a label and a selected server.
                 </span>
               )}
@@ -486,6 +467,8 @@ export function AdminDiscord() {
           </div>
         </>
       )}
+
+      <ThreadTemplateCard />
     </div>
   );
 }

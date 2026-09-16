@@ -1,11 +1,13 @@
 import {useEffect, useState} from "react";
-import {Button, Card, CardContent, Input} from "@ois/ui";
+import {Button, FilterBar, Input} from "@ois/ui";
+import {Search} from "lucide-react";
 
 import {AuditTable} from "@/components/admin/audit-table";
-import {Pagination} from "@/components/pagination";
+import {usePageHeader} from "@/components/shell/page-meta";
 import {useAuditLog} from "@/lib/admin";
 
 const PAGE_SIZE = 50;
+const SUBTITLE = "Every recorded administrative action, most recent first.";
 
 export function AdminAudit() {
   const [page, setPage] = useState(1);
@@ -41,75 +43,72 @@ export function AdminAudit() {
 
   const audit = useAuditLog(page, PAGE_SIZE, filters);
 
+  usePageHeader({ subtitle: SUBTITLE, count: audit.data?.total ?? null });
+
   return (
-    <div className="flex flex-col gap-6">
-      <div>
-        <h1 className="text-2xl font-semibold tracking-tight">Audit Log</h1>
-        <p className="text-muted-foreground">
-          Every recorded administrative action, most recent first.
-        </p>
-      </div>
-      <Card>
-        <CardContent className="flex flex-col gap-4 pt-6">
-          <form
-            className="flex flex-wrap items-end gap-3"
-            onSubmit={(e) => {
-              e.preventDefault();
-              apply();
-            }}
-          >
-            <label className="flex flex-1 flex-col gap-1 text-xs font-medium text-muted-foreground">
-              Search
-              <Input
-                placeholder="Action, resource, reason, actor name or CID…"
-                value={qDraft}
-                onChange={(e) => setQDraft(e.target.value)}
-              />
-            </label>
-            <label className="flex flex-col gap-1 text-xs font-medium text-muted-foreground">
-              From
-              <Input
-                type="datetime-local"
-                value={fromDraft}
-                onChange={(e) => setFromDraft(e.target.value)}
-              />
-            </label>
-            <label className="flex flex-col gap-1 text-xs font-medium text-muted-foreground">
-              To
-              <Input
-                type="datetime-local"
-                value={toDraft}
-                onChange={(e) => setToDraft(e.target.value)}
-              />
-            </label>
-            <Button type="submit" size="sm">
-              Search
+    <div className="flex flex-col gap-4">
+      <form
+        onSubmit={(e) => {
+          e.preventDefault();
+          apply();
+        }}
+      >
+        <FilterBar>
+          <div className="relative min-w-56 flex-1">
+            <Search className="pointer-events-none absolute left-3 top-1/2 size-4 -translate-y-1/2 text-ink-3" />
+            <Input
+              aria-label="Search"
+              placeholder="Action, resource, reason, actor name or CID…"
+              value={qDraft}
+              onChange={(e) => setQDraft(e.target.value)}
+              className="rounded-full pl-9"
+            />
+          </div>
+          <label className="flex items-center gap-2 text-xs font-semibold text-ink-3">
+            From
+            <Input
+              type="datetime-local"
+              value={fromDraft}
+              onChange={(e) => setFromDraft(e.target.value)}
+              className="w-auto font-mono text-xs"
+            />
+          </label>
+          <label className="flex items-center gap-2 text-xs font-semibold text-ink-3">
+            To
+            <Input
+              type="datetime-local"
+              value={toDraft}
+              onChange={(e) => setToDraft(e.target.value)}
+              className="w-auto font-mono text-xs"
+            />
+          </label>
+          <Button type="submit" size="sm">
+            Search
+          </Button>
+          {hasFilters && (
+            <Button type="button" size="sm" variant="ghost" onClick={clear}>
+              Clear
             </Button>
-            {hasFilters && (
-              <Button type="button" size="sm" variant="ghost" onClick={clear}>
-                Clear
-              </Button>
-            )}
-          </form>
-          {audit.data ? (
-            <>
-              <AuditTable items={audit.data.items} />
-              <Pagination
-                page={audit.data.page}
-                pageSize={audit.data.page_size}
-                total={audit.data.total}
-                onPageChange={setPage}
-              />
-            </>
-          ) : audit.isError ? (
-            <p className="py-6 text-center text-sm text-muted-foreground">
-              Couldn&apos;t load the audit log.
-            </p>
-          ) : (
-            <p className="py-6 text-center text-sm text-muted-foreground">Loading…</p>
           )}
-        </CardContent>
-      </Card>
+        </FilterBar>
+      </form>
+
+      <AuditTable
+        items={audit.data?.items ?? []}
+        isLoading={audit.isLoading}
+        isError={audit.isError}
+        rowCap={PAGE_SIZE}
+        serverPagination={
+          audit.data
+            ? {
+                page: audit.data.page,
+                pageSize: audit.data.page_size,
+                total: audit.data.total,
+                onPageChange: setPage,
+              }
+            : undefined
+        }
+      />
     </div>
   );
 }
