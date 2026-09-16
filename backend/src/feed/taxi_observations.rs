@@ -180,6 +180,9 @@ struct Session {
     /// Whether this departure is known not to have pushed back, as opposed to one whose push we
     /// couldn't measure — the difference between a stored `0` and a stored NULL (#287).
     no_push: bool,
+    /// Whether the aircraft moved before the burst that became its taxi. Movement we saw but
+    /// couldn't confirm is how a real push hides, so it forfeits any claim of "never pushed" (#287).
+    stray_move: bool,
     /// Heading reported at the previous update: a step is judged by where the nose pointed when it
     /// began, not where it ended up.
     last_hdg: i64,
@@ -259,6 +262,11 @@ impl Session {
         }
 
         if moving == self.phase.is_moving() {
+            // A moving run that never confirmed, abandoned here: the aircraft moved and we can't
+            // say what that movement was.
+            if self.phase == Phase::Parked && self.run.is_some_and(|r| r.dist_m > 0.0) {
+                self.stray_move = true;
+            }
             if let (Phase::PushingBack, Some(stop)) = (self.phase, self.run) {
                 self.last_pause = Some((stop.start_ms, now_ms));
             }
@@ -308,7 +316,7 @@ impl Session {
                 // we failed to measure (#287); anything more equivocal stays unmeasured.
                 // Only reached from Parked with no push recorded, or from StartUp where the push
                 // was already measured and this flag goes unread.
-                self.no_push = run.rolled_out_nose_first();
+                self.no_push = run.rolled_out_nose_first() && !self.stray_move;
                 self.taxi_start_ms = Some(run.start_ms);
                 self.start_taxi(alt);
             }
@@ -466,6 +474,7 @@ fn process(
                         last_pause: None,
                         push_by_direction: false,
                         no_push: false,
+                        stray_move: false,
                         last_hdg: p.heading,
                         fwd_flip: None,
                         base_alt: alt,
@@ -484,6 +493,22 @@ fn process(
         .retain(|cs, s| seen.contains(cs) && now_ms - s.first_seen_ms < SESSION_MAX_AGE_MS);
 
     out
+}
+
+/// A recorded zero says "this departure started at a stand and rolled straight out". Without a gate
+/// match we don't know it started at a stand — the session may have begun mid-departure, or the
+/// airport may have no gates on file — so the phases go back to unmeasured rather than voting a zero
+/// into the estimator's pool (#287). A measured push is kept either way.
+fn phases_at_stand(
+    pushback_sec: Option<i32>,
+    startup_sec: Option<i32>,
+    known_stand: bool,
+) -> (Option<i32>, Option<i32>) {
+    if known_stand || pushback_sec != Some(0) {
+        (pushback_sec, startup_sec)
+    } else {
+        (None, None)
+    }
 }
 
 /// Spawn the taxi-observation collector (DB-gated). Reuses OIS's shared feed snapshot, exactly
@@ -525,15 +550,22 @@ pub fn spawn_collector(
             let mut rows = Vec::with_capacity(raw.len());
             for r in raw {
                 let gates_here = by_icao.get(&r.airport).unwrap_or(&empty_gates);
+                let gate_id = super::flow::nearest_gate(gates_here, r.lat, r.lon);
+                // A recorded zero says "this departure started at a stand and rolled straight out".
+                // Without a gate match we don't know it started at a stand — it may be a session
+                // that began mid-departure, or an airport we hold no gates for — so the phases go
+                // back to unmeasured rather than voting zero (#287).
+                let (pushback_sec, startup_sec) =
+                    phases_at_stand(r.pushback_sec, r.startup_sec, gate_id.is_some());
                 rows.push(TaxiObservationRow {
                     airport: r.airport,
-                    gate_id: super::flow::nearest_gate(gates_here, r.lat, r.lon),
                     aircraft: r.aircraft,
                     runway: r.runway,
-                    pushback_sec: r.pushback_sec,
-                    startup_sec: r.startup_sec,
+                    pushback_sec,
+                    startup_sec,
                     taxi_sec: r.taxi_sec,
                     observed_at: r.observed_at,
+                    gate_id,
                 });
             }
             if let Err(e) = repo::insert_taxi_observations(&pool, &rows).await {
@@ -703,8 +735,9 @@ mod tests {
         );
 
         assert_eq!(obs.len(), 1);
-        assert_eq!(obs[0].pushback_sec, Some(0)); // rolled forward out of the stand: a real zero (#287)
-        assert_eq!(obs[0].startup_sec, Some(0));
+        // It shuffled before it taxied: movement we couldn't confirm, so no claim either way (#287).
+        assert_eq!(obs[0].pushback_sec, None);
+        assert_eq!(obs[0].startup_sec, None);
         assert_eq!(obs[0].taxi_sec, 150); // 135 → 285
     }
 
@@ -1280,7 +1313,8 @@ mod tests {
         );
 
         assert_eq!(obs.len(), 1);
-        assert_eq!(obs[0].pushback_sec, Some(0)); // rolled forward out of the stand: a real zero (#287)
+        // It shuffled before it taxied: movement we couldn't confirm, so no claim either way (#287).
+        assert_eq!(obs[0].pushback_sec, None);
         assert_eq!(obs[0].taxi_sec, 150); // 105 → 255
     }
 
@@ -1463,5 +1497,18 @@ mod tests {
 
         assert_eq!(obs[0].pushback_sec, None);
         assert_eq!(obs[0].startup_sec, None);
+    }
+
+    #[test]
+    fn a_zero_needs_a_stand_to_stand_on() {
+        // Away from a known gate, a zero is not evidence of anything — it goes back to unmeasured.
+        assert_eq!(phases_at_stand(Some(0), Some(0), false), (None, None));
+        assert_eq!(phases_at_stand(Some(0), Some(0), true), (Some(0), Some(0)));
+        // A measured push is kept wherever it was seen, and NULL stays NULL.
+        assert_eq!(
+            phases_at_stand(Some(90), Some(60), false),
+            (Some(90), Some(60))
+        );
+        assert_eq!(phases_at_stand(None, None, true), (None, None));
     }
 }
