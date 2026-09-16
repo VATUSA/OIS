@@ -1,4 +1,4 @@
-import {Input} from "@ois/ui";
+import {Input, Select} from "@ois/ui";
 
 import {
   AIRCRAFT,
@@ -12,13 +12,10 @@ import {
   SPEED_OPS,
 } from "@/lib/ntml";
 
-const sel =
-  "h-9 rounded-md border border-input bg-background px-2 text-sm outline-none focus-visible:ring-2 focus-visible:ring-ring";
-
 function Field({ label, children }: { label: string; children: React.ReactNode }) {
   return (
-    <label className="flex flex-col gap-1 text-xs">
-      <span className="text-muted-foreground">{label}</span>
+    <label className="flex flex-col gap-1 text-xs font-semibold text-ink-2">
+      {label}
       {children}
     </label>
   );
@@ -39,13 +36,13 @@ export function NtmlEditor({ value, onChange }: { value: Ntml; onChange: (n: Ntm
           <Input placeholder="JFK / EWR,LGA" value={value.element} onChange={(e) => set({ element: e.target.value })} />
         </Field>
         <Field label="Direction">
-          <select className={sel} value={value.direction} onChange={(e) => set({ direction: e.target.value })}>
+          <Select wrapperClassName="w-full" value={value.direction} onChange={(e) => set({ direction: e.target.value })}>
             {DIRECTIONS.map((d) => (
               <option key={d} value={d}>
                 {d}
               </option>
             ))}
-          </select>
+          </Select>
         </Field>
         <Field label="Via (fix/airway)">
           <Input
@@ -55,13 +52,13 @@ export function NtmlEditor({ value, onChange }: { value: Ntml; onChange: (n: Ntm
           />
         </Field>
         <Field label="Type">
-          <select className={sel} value={kind} onChange={(e) => set({ kind: e.target.value })}>
+          <Select wrapperClassName="w-full" value={kind} onChange={(e) => set({ kind: e.target.value })}>
             {KINDS.map((k) => (
               <option key={k} value={k}>
                 {k}
               </option>
             ))}
-          </select>
+          </Select>
         </Field>
 
         {showValue && (
@@ -80,28 +77,29 @@ export function NtmlEditor({ value, onChange }: { value: Ntml; onChange: (n: Ntm
         )}
 
         <Field label="Qualifier">
-          <select className={sel} value={value.qualifier ?? ""} onChange={(e) => set({ qualifier: e.target.value || null })}>
+          <Select wrapperClassName="w-full" value={value.qualifier ?? ""} onChange={(e) => set({ qualifier: e.target.value || null })}>
             {QUALIFIERS.map((q) => (
               <option key={q} value={q}>
                 {q || "—"}
               </option>
             ))}
-          </select>
+          </Select>
         </Field>
         <Field label="Aircraft">
-          <select className={sel} value={value.aircraft ?? ""} onChange={(e) => set({ aircraft: e.target.value || null })}>
+          <Select wrapperClassName="w-full" value={value.aircraft ?? ""} onChange={(e) => set({ aircraft: e.target.value || null })}>
             {AIRCRAFT.map((a) => (
               <option key={a} value={a}>
                 {a || "—"}
               </option>
             ))}
-          </select>
+          </Select>
         </Field>
 
         <Field label="Speed (kt)">
           <div className="flex gap-1">
-            <select
-              className={sel + " w-14"}
+            <Select
+              className="font-mono"
+              wrapperClassName="w-16 shrink-0"
               value={value.speed?.op ?? ""}
               onChange={(e) =>
                 set({ speed: e.target.value ? { op: e.target.value, value: value.speed?.value ?? 250 } : null })
@@ -113,7 +111,7 @@ export function NtmlEditor({ value, onChange }: { value: Ntml; onChange: (n: Ntm
                   {o}
                 </option>
               ))}
-            </select>
+            </Select>
             {value.speed && (
               <Input
                 type="number"
@@ -126,8 +124,9 @@ export function NtmlEditor({ value, onChange }: { value: Ntml; onChange: (n: Ntm
         </Field>
         <Field label="Altitude (FL)">
           <div className="flex gap-1">
-            <select
-              className={sel + " w-16"}
+            <Select
+              className="font-mono"
+              wrapperClassName="w-16 shrink-0"
               value={value.altitude?.op ?? ""}
               onChange={(e) =>
                 set({ altitude: e.target.value ? { op: e.target.value, value: value.altitude?.value ?? 100 } : null })
@@ -139,7 +138,7 @@ export function NtmlEditor({ value, onChange }: { value: Ntml; onChange: (n: Ntm
                   {o}
                 </option>
               ))}
-            </select>
+            </Select>
             {value.altitude && (
               <Input
                 type="number"
@@ -176,16 +175,14 @@ export function NtmlEditor({ value, onChange }: { value: Ntml; onChange: (n: Ntm
         </Field>
       </div>
 
-      <div className="rounded-md border bg-muted/30 p-3">
+      <div className="rounded-sm border border-line bg-panel-2 p-3">
         <div className="flex gap-2">
-          <span className="w-16 shrink-0 text-xs font-medium uppercase tracking-wide text-muted-foreground">Raw</span>
-          <span className="font-mono text-sm">{encodeNtml(value) || "—"}</span>
+          <span className="w-16 shrink-0 text-xs font-semibold text-ink-3">Raw</span>
+          <span className="font-mono text-sm text-ink">{encodeNtml(value) || "—"}</span>
         </div>
         <div className="mt-1.5 flex gap-2">
-          <span className="w-16 shrink-0 text-xs font-medium uppercase tracking-wide text-muted-foreground">
-            Decoded
-          </span>
-          <span className="text-sm text-muted-foreground">{decodeNtml(value)}</span>
+          <span className="w-16 shrink-0 text-xs font-semibold text-ink-3">Decoded</span>
+          <span className="text-sm text-ink-2">{decodeNtml(value)}</span>
         </div>
       </div>
     </div>

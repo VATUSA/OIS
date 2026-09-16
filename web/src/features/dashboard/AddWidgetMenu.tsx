@@ -139,7 +139,7 @@ export function AddWidgetMenu({ onAdd }: { onAdd: (widget: Widget) => void }) {
         {DATA_SOURCES.map((s) => (
           <DropdownMenuItem key={s.id} onSelect={() => void addTable(s.id, s.needsIcao)}>
             {s.label}
-            {s.needsIcao && <span className="ml-auto text-xs text-muted-foreground">airport</span>}
+            {s.needsIcao && <span className="ml-auto text-xs text-ink-3">airport</span>}
           </DropdownMenuItem>
         ))}
         <DropdownMenuSeparator />
@@ -147,30 +147,30 @@ export function AddWidgetMenu({ onAdd }: { onAdd: (widget: Widget) => void }) {
         {DATA_SOURCES.filter((s) => s.fields.some((f) => f.type === "number")).map((s) => (
           <DropdownMenuItem key={s.id} onSelect={() => void addChart(s.id, s.needsIcao)}>
             {s.label}
-            {s.needsIcao && <span className="ml-auto text-xs text-muted-foreground">airport</span>}
+            {s.needsIcao && <span className="ml-auto text-xs text-ink-3">airport</span>}
           </DropdownMenuItem>
         ))}
         <DropdownMenuItem onSelect={() => void addAadc()}>
           Arrival demand chart (AADC)
-          <span className="ml-auto text-xs text-muted-foreground">airport</span>
+          <span className="ml-auto text-xs text-ink-3">airport</span>
         </DropdownMenuItem>
         <DropdownMenuSeparator />
         <DropdownMenuLabel>Facilities (ARTCC / TRACON)</DropdownMenuLabel>
         {AIRPORT_SOURCES.map((s) => (
           <DropdownMenuItem key={`fac-t-${s.id}`} onSelect={() => setFacAction({ type: "table", source: s.id })}>
             {s.label}
-            <span className="ml-auto text-xs text-muted-foreground">table</span>
+            <span className="ml-auto text-xs text-ink-3">table</span>
           </DropdownMenuItem>
         ))}
         {AIRPORT_SOURCES.filter((s) => s.fields.some((f) => f.type === "number")).map((s) => (
           <DropdownMenuItem key={`fac-c-${s.id}`} onSelect={() => setFacAction({ type: "chart", source: s.id })}>
             {s.label} — compare
-            <span className="ml-auto text-xs text-muted-foreground">chart</span>
+            <span className="ml-auto text-xs text-ink-3">chart</span>
           </DropdownMenuItem>
         ))}
         <DropdownMenuItem onSelect={() => setFacAction({ type: "atc" })}>
           Online ATC positions
-          <span className="ml-auto text-xs text-muted-foreground">atc</span>
+          <span className="ml-auto text-xs text-ink-3">atc</span>
         </DropdownMenuItem>
         <DropdownMenuSeparator />
         <DropdownMenuLabel>Map</DropdownMenuLabel>
@@ -179,7 +179,7 @@ export function AddWidgetMenu({ onAdd }: { onAdd: (widget: Widget) => void }) {
         </DropdownMenuItem>
         <DropdownMenuItem onSelect={() => setFacAction({ type: "facility_map" })}>
           Facility map
-          <span className="ml-auto text-xs text-muted-foreground">ARTCC</span>
+          <span className="ml-auto text-xs text-ink-3">ARTCC</span>
         </DropdownMenuItem>
         <DropdownMenuSeparator />
         <DropdownMenuLabel>Layout</DropdownMenuLabel>
@@ -194,13 +194,13 @@ export function AddWidgetMenu({ onAdd }: { onAdd: (widget: Widget) => void }) {
           onSelect={() => onAdd({ id: newId(), kind: "divider", orientation: "horizontal" })}
         >
           Divider
-          <span className="ml-auto text-xs text-muted-foreground">horizontal</span>
+          <span className="ml-auto text-xs text-ink-3">horizontal</span>
         </DropdownMenuItem>
         <DropdownMenuItem
           onSelect={() => onAdd({ id: newId(), kind: "divider", orientation: "vertical" })}
         >
           Divider
-          <span className="ml-auto text-xs text-muted-foreground">vertical</span>
+          <span className="ml-auto text-xs text-ink-3">vertical</span>
         </DropdownMenuItem>
       </DropdownMenuContent>
     </DropdownMenu>

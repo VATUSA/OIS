@@ -1,8 +1,21 @@
-import {useState} from "react";
-import {Badge, Button, Card, CardContent, ConfirmButton, Input, useToast} from "@ois/ui";
-import {Plus} from "lucide-react";
+import {useMemo, useState} from "react";
+import {
+  Button,
+  Card,
+  ConfirmButton,
+  type DataColumn,
+  DataTable,
+  FilterBar,
+  Input,
+  SegmentedControl,
+  Select,
+  StatusPill,
+  useToast,
+} from "@ois/ui";
+import {CircleDot, Clock, Plus, ShieldAlert, User} from "lucide-react";
 
 import {hasPermission} from "@/lib/permissions";
+import {toneOf} from "@/lib/status";
 import {formatZulu, parseZulu} from "@/lib/time";
 import {useMe} from "@/lib/auth";
 import {
@@ -17,26 +30,15 @@ import {
 import {NtmlEditor} from "@/components/ntml-editor";
 import {EMPTY_NTML, KINDS, type Ntml} from "@/lib/ntml";
 
-const SELECT_CLASS =
-  "h-9 rounded-md border border-input bg-background px-2 text-sm outline-none focus-visible:ring-2 focus-visible:ring-ring";
 const STATUSES = ["draft", "published", "expired", "cancelled"] as const;
-
-function statusVariant(
-  status: string,
-): "secondary" | "success" | "destructive" | "outline" {
-  if (status === "published") return "success";
-  if (status === "cancelled") return "destructive";
-  if (status === "expired") return "outline";
-  return "secondary";
-}
 
 type FormState = { requesting: string; providing: string; restriction: string; start: string; stop: string };
 const EMPTY: FormState = { requesting: "", providing: "", restriction: "", start: "", stop: "" };
 
 function Labeled({ label, children }: { label: string; children: React.ReactNode }) {
   return (
-    <label className="flex flex-col gap-1 text-xs">
-      <span className="text-muted-foreground">{label}</span>
+    <label className="flex flex-col gap-1 text-xs font-semibold text-ink-2">
+      {label}
       {children}
     </label>
   );
@@ -94,62 +96,58 @@ function CreateForm() {
   }
 
   return (
-    <Card>
-      <CardContent className="flex flex-col gap-4 pt-6">
-        <div className="flex flex-wrap items-end gap-3">
-          <div className="flex overflow-hidden rounded-md border">
-            {(["structured", "raw"] as const).map((m) => (
-              <button
-                key={m}
-                type="button"
-                onClick={() => setMode(m)}
-                className={
-                  "px-3 py-1.5 text-sm font-medium transition-colors " +
-                  (mode === m ? "bg-primary text-primary-foreground" : "hover:bg-accent/40")
-                }
-              >
-                {m === "structured" ? "Structured" : "Raw"}
-              </button>
-            ))}
-          </div>
-          <Labeled label="Requesting">
-            <Input className="w-32" placeholder="ARTCC/TRACON" value={form.requesting} onChange={(e) => set("requesting", e.target.value)} />
-          </Labeled>
-          <Labeled label="Providing">
-            <Input className="w-32" placeholder="ARTCC/TRACON" value={form.providing} onChange={(e) => set("providing", e.target.value)} />
-          </Labeled>
-          <Labeled label="Start time">
-            <Input className="w-28" placeholder="DD/HHMMz" value={form.start} onChange={(e) => set("start", e.target.value)} />
-          </Labeled>
-          <Labeled label="Stop time">
-            <Input className="w-28" placeholder="DD/HHMMz" value={form.stop} onChange={(e) => set("stop", e.target.value)} />
-          </Labeled>
-        </div>
+    <Card className="flex flex-col gap-4 p-4">
+      <div className="flex flex-wrap items-center justify-between gap-3">
+        <h2 className="text-xl font-bold">New restriction</h2>
+        <SegmentedControl
+          aria-label="Entry mode"
+          value={mode}
+          onChange={setMode}
+          options={[
+            { value: "structured", label: "Structured" },
+            { value: "raw", label: "Raw" },
+          ]}
+        />
+      </div>
+      <div className="flex flex-wrap items-end gap-3">
+        <Labeled label="Requesting">
+          <Input className="w-32 font-mono uppercase" placeholder="ARTCC/TRACON" value={form.requesting} onChange={(e) => set("requesting", e.target.value)} />
+        </Labeled>
+        <Labeled label="Providing">
+          <Input className="w-32 font-mono uppercase" placeholder="ARTCC/TRACON" value={form.providing} onChange={(e) => set("providing", e.target.value)} />
+        </Labeled>
+        <Labeled label="Start time">
+          <Input className="w-28 font-mono" placeholder="DD/HHMMz" value={form.start} onChange={(e) => set("start", e.target.value)} />
+        </Labeled>
+        <Labeled label="Stop time">
+          <Input className="w-28 font-mono" placeholder="DD/HHMMz" value={form.stop} onChange={(e) => set("stop", e.target.value)} />
+        </Labeled>
+      </div>
 
-        {mode === "raw" ? (
-          <Labeled label="Restriction (raw NTML line)">
-            <Input
-              placeholder="e.g. JFK arrivals via CAMRN 20MIT NO STACKS TYPE:ALL"
-              value={form.restriction}
-              onChange={(e) => set("restriction", e.target.value)}
-            />
-          </Labeled>
-        ) : (
-          <NtmlEditor value={ntml} onChange={setNtml} />
-        )}
+      {mode === "raw" ? (
+        <Labeled label="Restriction (raw NTML line)">
+          <Input
+            className="font-mono"
+            placeholder="e.g. JFK arrivals via CAMRN 20MIT NO STACKS TYPE:ALL"
+            value={form.restriction}
+            onChange={(e) => set("restriction", e.target.value)}
+          />
+        </Labeled>
+      ) : (
+        <NtmlEditor value={ntml} onChange={setNtml} />
+      )}
 
-        <div className="flex justify-end">
-          <Button disabled={create.isPending} onClick={submit}>
-            <Plus />
-            Add restriction
-          </Button>
-        </div>
-      </CardContent>
+      <div className="flex justify-end">
+        <Button disabled={create.isPending} onClick={submit}>
+          <Plus />
+          Add restriction
+        </Button>
+      </div>
     </Card>
   );
 }
 
-function TmiRow({
+function TmiActions({
   tmi,
   canPublish,
   canDelete,
@@ -163,58 +161,23 @@ function TmiRow({
   const del = useDeleteTmi();
 
   return (
-    <tr className="border-t">
-      <td className="py-2 pr-3">
-        <Badge variant={statusVariant(tmi.status)}>{tmi.status}</Badge>
-      </td>
-      <td className="py-2 pr-3 font-mono text-xs">{tmi.requesting}</td>
-      <td className="py-2 pr-3 font-mono text-xs">{tmi.providing}</td>
-      <td className="py-2 pr-3">
-        <div className="font-mono text-xs">{tmi.restriction}</div>
-        {tmi.decoded && <div className="text-xs text-muted-foreground">{tmi.decoded}</div>}
-      </td>
-      <td className="py-2 pr-3 font-mono text-xs text-muted-foreground">
-        {formatZulu(tmi.start_time)}
-      </td>
-      <td className="py-2 pr-3 font-mono text-xs text-muted-foreground">
-        {formatZulu(tmi.stop_time)}
-      </td>
-      <td className="py-2 pr-3 text-muted-foreground">{tmi.author ?? "—"}</td>
-      <td className="py-2 text-right">
-        <div className="flex justify-end gap-1">
-          {canPublish && tmi.status === "draft" && (
-            <Button
-              size="sm"
-              variant="secondary"
-              disabled={publish.isPending}
-              onClick={() => publish.mutate(tmi.id)}
-            >
-              Publish
-            </Button>
-          )}
-          {canPublish &&
-            (tmi.status === "draft" || tmi.status === "published") && (
-              <Button
-                size="sm"
-                variant="ghost"
-                disabled={cancel.isPending}
-                onClick={() => cancel.mutate(tmi.id)}
-              >
-                Cancel
-              </Button>
-            )}
-          {canDelete && (
-            <ConfirmButton
-              size="sm"
-              onConfirm={() => del.mutate(tmi.id)}
-              warn="Delete this restriction?"
-            >
-              Delete
-            </ConfirmButton>
-          )}
-        </div>
-      </td>
-    </tr>
+    <div className="flex justify-end gap-1">
+      {canPublish && tmi.status === "draft" && (
+        <Button size="sm" variant="secondary" disabled={publish.isPending} onClick={() => publish.mutate(tmi.id)}>
+          Publish
+        </Button>
+      )}
+      {canPublish && (tmi.status === "draft" || tmi.status === "published") && (
+        <Button size="sm" variant="ghost" disabled={cancel.isPending} onClick={() => cancel.mutate(tmi.id)}>
+          Cancel
+        </Button>
+      )}
+      {canDelete && (
+        <ConfirmButton size="sm" onConfirm={() => del.mutate(tmi.id)} warn="Delete this restriction?">
+          Delete
+        </ConfirmButton>
+      )}
+    </div>
   );
 }
 
@@ -232,7 +195,8 @@ function toFilters(d: Draft): TmiFilters {
   };
 }
 
-function FilterBar({ onChange }: { onChange: (f: TmiFilters) => void }) {
+/** Server-side filters — applied on submit, since each change is a new query. */
+function RestrictionFilters({ onChange }: { onChange: (f: TmiFilters) => void }) {
   const [draft, setDraft] = useState<Draft>(EMPTY_DRAFT);
   const set = <K extends keyof Draft>(key: K, value: string) =>
     setDraft((d) => ({ ...d, [key]: value }));
@@ -240,58 +204,56 @@ function FilterBar({ onChange }: { onChange: (f: TmiFilters) => void }) {
 
   return (
     <form
-      className="flex flex-wrap items-end gap-3"
       onSubmit={(e) => {
         e.preventDefault();
         onChange(toFilters(draft));
       }}
     >
-      <label className="flex flex-col gap-1 text-xs text-muted-foreground">
-        Status
-        <select className={SELECT_CLASS} value={draft.status} onChange={(e) => set("status", e.target.value)}>
-          <option value="">Any</option>
+      <FilterBar>
+        <Select size="sm" aria-label="Status" value={draft.status} onChange={(e) => set("status", e.target.value)}>
+          <option value="">Any status</option>
           {STATUSES.map((s) => (
             <option key={s} value={s}>{s}</option>
           ))}
-        </select>
-      </label>
-      <label className="flex flex-col gap-1 text-xs text-muted-foreground">
-        Type
-        <select className={SELECT_CLASS} value={draft.type} onChange={(e) => set("type", e.target.value)}>
-          <option value="">Any</option>
+        </Select>
+        <Select size="sm" aria-label="Type" value={draft.type} onChange={(e) => set("type", e.target.value)}>
+          <option value="">Any type</option>
           {KINDS.map((k) => (
             <option key={k} value={k}>{k}</option>
           ))}
-        </select>
-      </label>
-      <label className="flex flex-col gap-1 text-xs text-muted-foreground">
-        Facility
-        <Input className="w-32" placeholder="ARTCC/TRACON" value={draft.facility} onChange={(e) => set("facility", e.target.value)} />
-      </label>
-      <label className="flex flex-col gap-1 text-xs text-muted-foreground">
-        Active from
-        <Input type="datetime-local" value={draft.from} onChange={(e) => set("from", e.target.value)} />
-      </label>
-      <label className="flex flex-col gap-1 text-xs text-muted-foreground">
-        Active to
-        <Input type="datetime-local" value={draft.to} onChange={(e) => set("to", e.target.value)} />
-      </label>
-      <Button type="submit" size="sm">
-        Filter
-      </Button>
-      {active && (
-        <Button
-          type="button"
-          size="sm"
-          variant="ghost"
-          onClick={() => {
-            setDraft(EMPTY_DRAFT);
-            onChange({});
-          }}
-        >
-          Clear
+        </Select>
+        <Input
+          aria-label="Facility"
+          className="h-8 w-36 font-mono uppercase"
+          placeholder="ARTCC/TRACON"
+          value={draft.facility}
+          onChange={(e) => set("facility", e.target.value)}
+        />
+        <label className="flex items-center gap-1.5 text-xs text-ink-3">
+          Active from
+          <Input className="h-8 w-auto font-mono text-xs" type="datetime-local" value={draft.from} onChange={(e) => set("from", e.target.value)} />
+        </label>
+        <label className="flex items-center gap-1.5 text-xs text-ink-3">
+          to
+          <Input className="h-8 w-auto font-mono text-xs" type="datetime-local" value={draft.to} onChange={(e) => set("to", e.target.value)} />
+        </label>
+        <Button type="submit" size="sm" variant="outline">
+          Filter
         </Button>
-      )}
+        {active && (
+          <Button
+            type="button"
+            size="sm"
+            variant="ghost"
+            onClick={() => {
+              setDraft(EMPTY_DRAFT);
+              onChange({});
+            }}
+          >
+            Clear
+          </Button>
+        )}
+      </FilterBar>
     </form>
   );
 }
@@ -305,55 +267,75 @@ export function RestrictionsTab() {
   const canDelete = hasPermission(me, "tmu.tmi.delete");
   const filtered = Object.values(filters).some(Boolean);
 
+  const columns = useMemo<DataColumn<Tmi>[]>(
+    () => [
+      {
+        accessorKey: "status",
+        header: "Status",
+        icon: CircleDot,
+        cell: (c) => <StatusPill tone={toneOf("publish", c.getValue<string>())}>{c.getValue<string>()}</StatusPill>,
+      },
+      { accessorKey: "requesting", header: "Requesting", mono: true },
+      { accessorKey: "providing", header: "Providing", mono: true },
+      {
+        accessorKey: "restriction",
+        header: "Restriction",
+        icon: ShieldAlert,
+        cell: (c) => (
+          <div className="min-w-64">
+            <div className="font-mono text-[13px]">{c.getValue<string>()}</div>
+            {c.row.original.decoded && <div className="text-xs text-ink-3">{c.row.original.decoded}</div>}
+          </div>
+        ),
+      },
+      {
+        accessorKey: "start_time",
+        header: "Start",
+        icon: Clock,
+        mono: true,
+        cell: (c) => <span className="whitespace-nowrap text-ink-2">{formatZulu(c.getValue<string>())}</span>,
+      },
+      {
+        accessorKey: "stop_time",
+        header: "Stop",
+        mono: true,
+        cell: (c) => <span className="whitespace-nowrap text-ink-2">{formatZulu(c.getValue<string>())}</span>,
+      },
+      {
+        accessorKey: "author",
+        header: "Author",
+        icon: User,
+        cell: (c) => <span className="text-ink-2">{c.getValue<string>() ?? "—"}</span>,
+      },
+      {
+        id: "actions",
+        header: "",
+        enableSorting: false,
+        align: "right",
+        cell: (c) => <TmiActions tmi={c.row.original} canPublish={canPublish} canDelete={canDelete} />,
+      },
+    ],
+    [canPublish, canDelete],
+  );
+
   return (
     <div className="flex flex-col gap-6">
-      {canCreate && <CreateForm />}
+      <div className="flex flex-col gap-3">
+        <RestrictionFilters onChange={setFilters} />
+        <DataTable
+          label="Restrictions"
+          columns={columns}
+          data={tmis.data ?? []}
+          getRowId={(t) => t.id}
+          rowCap={25}
+          isLoading={!tmis.data}
+          isError={tmis.isError}
+          onRetry={() => tmis.refetch()}
+          empty={filtered ? "No restrictions match these filters." : "No restrictions yet."}
+        />
+      </div>
 
-      <Card>
-        <CardContent className="flex flex-col gap-4 pt-6">
-          <FilterBar onChange={setFilters} />
-          {tmis.isError ? (
-            <p className="py-8 text-center text-sm text-muted-foreground">
-              Couldn&apos;t load restrictions.
-            </p>
-          ) : !tmis.data ? (
-            <p className="py-8 text-center text-sm text-muted-foreground">
-              Loading…
-            </p>
-          ) : tmis.data.length === 0 ? (
-            <p className="py-8 text-center text-sm text-muted-foreground">
-              {filtered ? "No restrictions match these filters." : "No restrictions yet."}
-            </p>
-          ) : (
-            <div className="overflow-x-auto">
-              <table className="w-full text-sm">
-                <thead>
-                  <tr className="text-left text-xs uppercase tracking-wide text-muted-foreground">
-                    <th className="pb-2 pr-3 font-medium">Status</th>
-                    <th className="pb-2 pr-3 font-medium">Requesting</th>
-                    <th className="pb-2 pr-3 font-medium">Providing</th>
-                    <th className="pb-2 pr-3 font-medium">Restriction</th>
-                    <th className="pb-2 pr-3 font-medium">Start</th>
-                    <th className="pb-2 pr-3 font-medium">Stop</th>
-                    <th className="pb-2 pr-3 font-medium">Author</th>
-                    <th className="pb-2" />
-                  </tr>
-                </thead>
-                <tbody>
-                  {tmis.data.map((tmi) => (
-                    <TmiRow
-                      key={tmi.id}
-                      tmi={tmi}
-                      canPublish={canPublish}
-                      canDelete={canDelete}
-                    />
-                  ))}
-                </tbody>
-              </table>
-            </div>
-          )}
-        </CardContent>
-      </Card>
+      {canCreate && <CreateForm />}
     </div>
   );
 }

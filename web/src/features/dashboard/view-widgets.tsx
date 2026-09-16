@@ -1,5 +1,5 @@
 import {useMemo, useState} from "react";
-import {Card, CardContent, Input} from "@ois/ui";
+import {cn, EmptyState, Input} from "@ois/ui";
 import {Filter} from "lucide-react";
 
 import {AircraftView, DemandView, LadderView, SummaryView, summaryGateName} from "@/pages/airport";
@@ -20,11 +20,7 @@ const LADDER_STATUSES = ["airborne", "ground", "proposed"] as const;
 
 function Notice({ children }: { children: React.ReactNode }) {
   return (
-    <Card>
-      <CardContent className="py-8 text-center text-sm text-muted-foreground">
-        {children}
-      </CardContent>
-    </Card>
+    <EmptyState>{children}</EmptyState>
   );
 }
 
@@ -37,12 +33,11 @@ function AirportFlowView({ icao, view }: { icao: string; view: keyof typeof AIRP
   return <View flow={flow.data} />;
 }
 
+/** A toggle chip (multi-select, so chips rather than a SegmentedControl). */
 function chipClass(active: boolean): string {
-  return (
-    "rounded border px-2 py-0.5 font-mono transition-colors " +
-    (active
-      ? "border-primary bg-primary/15 text-foreground"
-      : "border-border text-muted-foreground hover:text-foreground")
+  return cn(
+    "rounded-full border px-2.5 py-0.5 font-mono transition-colors",
+    active ? "border-brand/40 bg-brand-soft text-ink" : "border-line bg-panel-2 text-ink-2 hover:text-ink",
   );
 }
 
@@ -80,24 +75,24 @@ function LadderFilterBar({
   };
 
   return (
-    <div className="rounded-md border bg-muted/30 text-xs">
+    <div className="rounded-sm border border-line bg-panel-2 text-xs">
       <div className="flex items-center gap-2 px-2 py-1.5">
         <button
           type="button"
           onClick={() => setOpen((o) => !o)}
-          className="flex items-center gap-1.5 font-medium text-foreground"
+          className="flex items-center gap-1.5 font-semibold text-ink"
         >
           <Filter className="size-3.5" />
           Filters
           {activeCount > 0 && (
-            <span className="rounded bg-primary/20 px-1.5 text-primary">{activeCount}</span>
+            <span className="rounded-full bg-brand-soft px-1.5 font-mono text-brand-ink">{activeCount}</span>
           )}
         </button>
         {activeCount > 0 && (
           <button
             type="button"
             onClick={() => onChange({})}
-            className="ml-auto text-muted-foreground hover:text-foreground"
+            className="ml-auto text-ink-3 hover:text-ink"
           >
             Clear
           </button>
@@ -105,9 +100,9 @@ function LadderFilterBar({
       </div>
 
       {open && (
-        <div className="flex flex-col gap-2.5 border-t p-2">
+        <div className="flex flex-col gap-2.5 border-t border-line p-2">
           <div>
-            <div className="mb-1 text-muted-foreground">Status</div>
+            <div className="mb-1 font-semibold text-ink-2">Status</div>
             <div className="flex flex-wrap gap-1">
               {LADDER_STATUSES.map((s) => (
                 <button
@@ -123,9 +118,9 @@ function LadderFilterBar({
           </div>
 
           <div>
-            <div className="mb-1 text-muted-foreground">Arrival gate</div>
+            <div className="mb-1 font-semibold text-ink-2">Arrival gate</div>
             {gates.length === 0 ? (
-              <span className="text-muted-foreground/70">none in current data</span>
+              <span className="text-ink-3">none in current data</span>
             ) : (
               <div className="flex flex-wrap gap-1">
                 {gates.map((g) => (
@@ -144,7 +139,7 @@ function LadderFilterBar({
 
           <div className="flex gap-2">
             <label className="flex-1">
-              <div className="mb-1 text-muted-foreground">Origin (ICAO)</div>
+              <div className="mb-1 font-semibold text-ink-2">Origin (ICAO)</div>
               <Input
                 key={`o-${(filters.origins ?? []).join(",")}`}
                 defaultValue={(filters.origins ?? []).join(", ")}
@@ -154,7 +149,7 @@ function LadderFilterBar({
               />
             </label>
             <label className="flex-1">
-              <div className="mb-1 text-muted-foreground">Aircraft type</div>
+              <div className="mb-1 font-semibold text-ink-2">Aircraft type</div>
               <Input
                 key={`t-${(filters.types ?? []).join(",")}`}
                 defaultValue={(filters.types ?? []).join(", ")}

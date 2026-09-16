@@ -1,5 +1,5 @@
 import {useMemo, useState} from "react";
-import {Badge, Button, Input, Sheet} from "@ois/ui";
+import {Button, Input, QueryState, Sheet, StatusPill, toneText, type Tone} from "@ois/ui";
 
 import {closestCenter, DndContext, type DragEndEvent, PointerSensor, useSensor, useSensors,} from "@dnd-kit/core";
 import {arrayMove, SortableContext, useSortable, verticalListSortingStrategy,} from "@dnd-kit/sortable";
@@ -7,17 +7,15 @@ import {CSS} from "@dnd-kit/utilities";
 import {GripVertical, RotateCcw, X} from "lucide-react";
 
 import {type Fca, type FcaFlight, useClearRelease, useMarkRelease, useReorderFca,} from "@/lib/fca";
+import {FLIGHT_STATE_LABEL, toneOf} from "@/lib/status";
 import {hhmmZulu} from "@/lib/time";
 import {ArrivalLadder} from "@/components/ladder/ArrivalLadder";
 
-const STATUS = {
-  airborne: { label: "AIR", color: "#22c55e", text: "text-emerald-500" },
-  ground: { label: "GND", color: "#f59e0b", text: "text-amber-500" },
-  proposed: { label: "PROP", color: "#38bdf8", text: "text-sky-400" },
-} as const;
-
-function statusOf(s: string) {
-  return STATUS[s as keyof typeof STATUS] ?? STATUS.ground;
+/** A crossing flight's state tone, label and CSS colour (unknown states read as ground). */
+function statusOf(s: string): { tone: Tone; label: string; color: string } {
+  const known = toneOf("flight", s) !== "neutral";
+  const state = known ? s : "ground";
+  return { tone: toneOf("flight", state), label: FLIGHT_STATE_LABEL[state], color: `var(--flight-${state})` };
 }
 
 function minutesUntil(iso: string | null | undefined, now: number): number | null {
@@ -56,7 +54,7 @@ const LADDER_CH = 7; // ≈ px per monospace/tabular char at text-xs
  * text (seq + callsign + "HH:MMz"-ish time). Mirrors `airport.tsx`'s `stripW`. */
 function measureTagWidth(f: FcaFlight): number {
   const chars = String(f.seq).length + f.callsign.length + 5;
-  return 12 /* connector tick */ + 30 /* pill padding + border + gaps */ + chars * LADDER_CH;
+  return 12 /* connector tick */ + 42 /* pill padding + border + dot + gaps */ + chars * LADDER_CH;
 }
 
 /** Metering ladder — plots each flight by its metered crossing time (now at bottom). */
@@ -85,13 +83,11 @@ function Ladder({ flights, now }: { flights: FcaFlight[]; now: number }) {
       renderTag={(f) => {
         const st = statusOf(f.status);
         return (
-          <span
-            className="flex items-center gap-1.5 rounded border border-border/70 bg-muted/40 py-0.5 pl-1.5 pr-2 text-xs"
-            style={{ borderLeftWidth: 3, borderLeftColor: st.color }}
-          >
-            <span className="tabular-nums text-muted-foreground">{f.seq}</span>
-            <span className="font-mono font-medium">{f.callsign}</span>
-            <span className="font-mono text-muted-foreground">{hhmmZulu(f.cross_time)}</span>
+          <span className="flex items-center gap-1.5 rounded-xs border border-line bg-panel-2 py-0.5 pl-1.5 pr-2 text-xs">
+            <span className="size-1.5 shrink-0 rounded-full" style={{ background: st.color }} />
+            <span className="font-mono text-ink-3">{f.seq}</span>
+            <span className="font-mono font-semibold">{f.callsign}</span>
+            <span className="font-mono text-ink-2">{hhmmZulu(f.cross_time)}</span>
           </span>
         );
       }}
@@ -121,70 +117,69 @@ function Strip({
     transform: CSS.Transform.toString(transform),
     transition,
     opacity: isDragging ? 0.5 : 1,
-    borderLeftWidth: 3,
-    borderLeftStyle: "solid" as const,
-    borderLeftColor: delayed ? "#ef4444" : st.color,
   };
 
   return (
-    <li ref={setNodeRef} style={style} className="border-b bg-background px-3 py-2 text-sm">
+    <li ref={setNodeRef} style={style} className="relative border-b border-line-soft bg-panel px-3 py-2 text-sm">
+      <span
+        aria-hidden="true"
+        className="absolute inset-y-1 left-0 w-1 rounded-full"
+        style={{ background: delayed ? "var(--danger)" : st.color }}
+      />
       <div className="flex items-center justify-between gap-2">
         <span className="flex items-center gap-1.5">
           {canEdit && (
             <button
               type="button"
-              className="cursor-grab text-muted-foreground/60 hover:text-foreground"
+              aria-label={`Reorder ${f.callsign}`}
+              className="cursor-grab text-ink-3 hover:text-ink"
               {...attributes}
               {...listeners}
             >
               <GripVertical className="size-3.5" />
             </button>
           )}
-          <span className="w-4 text-right tabular-nums text-muted-foreground">
-            {f.seq}
-          </span>
-          <span
-            className="rounded px-1 text-[10px] font-semibold"
-            style={{ color: st.color, border: `1px solid ${st.color}` }}
-          >
+          <span className="w-4 text-right font-mono text-xs text-ink-3">{f.seq}</span>
+          <StatusPill tone={st.tone} className="px-1.5 text-[10px] leading-4">
             {f.released ? "CFR" : st.label}
-          </span>
+          </StatusPill>
           <span className="font-mono font-semibold">{f.callsign}</span>
-          <span className="text-xs text-muted-foreground">{f.aircraft_type}</span>
+          <span className="font-mono text-xs text-ink-3">{f.aircraft_type}</span>
         </span>
         <span className="text-right font-mono leading-tight">
-          <span className={delayed ? "text-foreground" : st.text}>
+          <span className={delayed ? "text-ink" : toneText[st.tone]}>
             {hhmmZulu(f.cross_time)}
           </span>
           <span
-            className={`block text-xs ${delayed ? "text-destructive" : "text-emerald-500"}`}
+            className={`block text-xs ${delayed ? "text-danger" : "text-success"}`}
           >
             {delayed ? `${delayTag(f)} +${fmtDelaySec(f.delay_sec)}` : "on time"}
           </span>
         </span>
       </div>
 
-      <div className="mt-0.5 flex items-center gap-2 pl-6 text-xs text-muted-foreground">
+      <div className="mt-0.5 flex items-center gap-2 pl-6 text-xs text-ink-3">
         <span className="font-mono">
           {f.dep}→{f.arr}
         </span>
-        <span>{Math.round(f.distance_nm)}nm to line</span>
-        {f.altitude > 0 && <span>FL{Math.round(f.altitude / 100)}</span>}
-        {delayed && f.delay_nm > 0 && (
-          <span className="text-destructive">+{f.delay_nm}nm</span>
-        )}
+        <span className="font-mono">{Math.round(f.distance_nm)}nm to line</span>
+        {f.altitude > 0 && <span className="font-mono">FL{Math.round(f.altitude / 100)}</span>}
+        {delayed && f.delay_nm > 0 && <span className="font-mono text-danger">+{f.delay_nm}nm</span>}
       </div>
 
       {canCfr && (
         <div className="mt-1.5 flex items-center gap-1.5 pl-6">
           {f.released ? (
             <>
-              <Badge variant="success">RLSD {hhmmZulu(f.edct)}z</Badge>
+              <StatusPill tone="good" className="font-mono">
+                RLSD {hhmmZulu(f.edct)}z
+              </StatusPill>
               <button
                 type="button"
                 title="Clear release"
                 onClick={() => onClear(f.callsign)}
-                className="text-muted-foreground transition-colors hover:text-destructive"
+                aria-label="Clear release"
+                className="text-ink-3 transition-colors hover:text-danger"
               >
                 <X className="size-3.5" />
               </button>
@@ -200,7 +195,7 @@ function Strip({
               />
               <Button
                 size="sm"
-                variant="secondary"
+                variant="outline"
                 disabled={hhmm.trim().length < 4}
                 onClick={() => onRelease(f.callsign, hhmm.trim())}
               >
@@ -215,9 +210,9 @@ function Strip({
       )}
 
       {f.debug && (
-        <div className="mt-1 ml-6 rounded border border-dashed border-amber-500/40 bg-amber-500/5 px-2 py-1 font-mono text-[10px] leading-relaxed text-muted-foreground">
+        <div className="mt-1 ml-6 rounded-xs border border-dashed border-line bg-warning-soft px-2 py-1 font-mono text-[10px] leading-relaxed text-ink-2">
           <span>
-            profile <span className="text-amber-600 dark:text-amber-400">{f.debug.profile}</span>
+            profile <span className="text-warning">{f.debug.profile}</span>
           </span>
           {" · "}
           <span>{Math.round(f.debug.cruise_tas)}kt TAS @ FL{Math.round(f.debug.cruise_alt / 100)}</span>
@@ -230,7 +225,7 @@ function Strip({
             </>
           )}
           {f.debug.unresolved.length > 0 && (
-            <div className="text-destructive">
+            <div className="text-danger">
               unresolved: {f.debug.unresolved.join(" ")}
             </div>
           )}
@@ -292,22 +287,23 @@ export function FcaDetail({
 
   return (
     <Sheet
-      className="h-full w-96 shrink-0 border-l"
+      className="h-full w-96 shrink-0 border-l border-line"
       onClose={onClose}
       initialFraction={0.45}
     >
-      <div className="flex items-center gap-2 border-b px-4 py-3">
+      <div className="flex items-center gap-2 border-b border-line px-4 py-3">
+        {/* The FCA's colour is user data. */}
         <span className="size-3 rounded-full" style={{ background: fca.color }} />
         <span className="font-mono font-semibold">{fca.name}</span>
-        <Badge variant="secondary">
+        <StatusPill tone="neutral" className="font-mono">
           {fca.mode === "mit" ? `${fca.mit} MIT` : `${fca.rate}/hr`}
-        </Badge>
+        </StatusPill>
         {fca.manual_seq && (
           <button
             type="button"
             title="Reset to automatic sequencing"
             onClick={() => reorder.mutate([])}
-            className="ml-auto flex items-center gap-1 text-xs text-muted-foreground hover:text-foreground"
+            className="ml-auto flex items-center gap-1 text-xs text-ink-3 hover:text-ink"
           >
             <RotateCcw className="size-3" /> manual
           </button>
@@ -316,44 +312,24 @@ export function FcaDetail({
         <span className="w-6 shrink-0 md:hidden" />
       </div>
 
-      <div className="flex flex-wrap gap-x-4 gap-y-1 border-b px-4 py-2 text-xs">
-        <span>
-          <span className="text-muted-foreground">crossing </span>
-          <span className="font-semibold tabular-nums">{stats.total}</span>
-        </span>
-        <span>
-          <span className="text-muted-foreground">air </span>
-          <span className="font-semibold tabular-nums text-emerald-500">
-            {stats.air}
-          </span>
-        </span>
-        <span>
-          <span className="text-muted-foreground">ground </span>
-          <span className="font-semibold tabular-nums text-amber-500">
-            {stats.grd}
-          </span>
-        </span>
-        <span>
-          <span className="text-muted-foreground">Σdelay </span>
-          <span
-            className={
-              "font-semibold tabular-nums " +
-              (stats.delay > 0 ? "text-destructive" : "")
-            }
-          >
-            {stats.delay > 0 ? fmtDelay(stats.delay) : "—"}
-          </span>
-        </span>
+      <div className="grid grid-cols-4 border-b border-line text-xs">
+        {[
+          { label: "Crossing", value: stats.total, cls: "text-ink" },
+          { label: "Air", value: stats.air, cls: "text-flight-airborne" },
+          { label: "Ground", value: stats.grd, cls: "text-flight-ground" },
+          { label: "Σ delay", value: stats.delay > 0 ? fmtDelay(stats.delay) : "—", cls: stats.delay > 0 ? "text-danger" : "text-ink" },
+        ].map((m) => (
+          <div key={m.label} className="flex flex-col gap-0.5 px-4 py-2">
+            <span className="text-ink-3">{m.label}</span>
+            <span className={`font-mono text-base font-bold ${m.cls}`}>{m.value}</span>
+          </div>
+        ))}
       </div>
 
-      {!flights ? (
-        <p className="p-4 text-sm text-muted-foreground">Loading…</p>
-      ) : (
+      <QueryState isLoading={!flights}>
         <div className="flex-1 overflow-y-auto">
-          <div className="border-b p-3">
-            <div className="mb-2 text-[10px] font-medium uppercase tracking-wide text-muted-foreground">
-              Metering ladder · metered crossing
-            </div>
+          <div className="border-b border-line p-3">
+            <div className="mb-2 text-xs font-semibold text-ink-2">Metering ladder · metered crossing</div>
             <Ladder flights={list} now={now} />
           </div>
 
@@ -382,7 +358,7 @@ export function FcaDetail({
             </SortableContext>
           </DndContext>
         </div>
-      )}
+      </QueryState>
     </Sheet>
   );
 }

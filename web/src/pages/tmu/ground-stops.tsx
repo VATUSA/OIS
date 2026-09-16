@@ -1,9 +1,10 @@
-import {useState} from "react";
-import {Badge, Button, Card, CardContent, ConfirmButton, Input, useToast} from "@ois/ui";
-import {Plus} from "lucide-react";
+import {useMemo, useState} from "react";
+import {Button, ConfirmButton, type DataColumn, DataTable, Input, StatusPill, useToast} from "@ois/ui";
+import {CircleDot, Clock, Plane, Plus, Radar} from "lucide-react";
 
 import {useMe} from "@/lib/auth";
 import {hasPermission} from "@/lib/permissions";
+import {toneOf} from "@/lib/status";
 import {formatZulu} from "@/lib/time";
 import {
   type CreateGroundStop,
@@ -15,25 +16,7 @@ import {
   usePublishGroundStop,
 } from "@/lib/tmu";
 
-function statusVariant(
-  status: string,
-): "secondary" | "success" | "destructive" | "outline" {
-  if (status === "published") return "success";
-  if (status === "cancelled") return "destructive";
-  if (status === "expired") return "outline";
-  return "secondary";
-}
-
-const COLS =
-  "grid grid-cols-[minmax(0,1fr)_minmax(0,2fr)_minmax(0,1fr)_auto] items-end gap-3";
-
-function Head({ children }: { children: React.ReactNode }) {
-  return (
-    <span className="text-xs font-medium uppercase tracking-wide text-muted-foreground">
-      {children}
-    </span>
-  );
-}
+const LABEL = "flex flex-col gap-1 text-xs font-semibold text-ink-2";
 
 const EMPTY: CreateGroundStop = { airport: "", scope: "", until: "" };
 
@@ -59,54 +42,50 @@ function CreateForm() {
   }
 
   return (
-    <Card>
-      <CardContent className="flex flex-col gap-3 pt-6">
-        <p className="text-sm text-muted-foreground">
-          Holds GROUND departures into the named airport that originate inside the
-          scoped ARTCC/FIR(s). Leave SCOPE blank for a field-wide stop.
-        </p>
-        <div className="overflow-x-auto">
-          <div className={`${COLS} min-w-[680px]`}>
-            <Head>Airport</Head>
-            <Head>Scope (ARTCC/FIR)</Head>
-            <Head>Until (Zxxxx)</Head>
-            <span />
-
-            <Input
-              className="font-mono uppercase"
-              maxLength={4}
-              placeholder="KDCA"
-              value={form.airport}
-              onChange={(e) => set("airport", e.target.value)}
-            />
-            <Input
-              className="font-mono uppercase"
-              placeholder="ZTL ZJX"
-              value={form.scope ?? ""}
-              onChange={(e) => set("scope", e.target.value)}
-            />
-            <Input
-              className="font-mono"
-              placeholder="0200z"
-              value={form.until ?? ""}
-              onChange={(e) => set("until", e.target.value)}
-            />
-            <Button
-              className="whitespace-nowrap"
-              disabled={create.isPending}
-              onClick={submit}
-            >
-              <Plus />
-              Add ground stop
-            </Button>
-          </div>
-        </div>
-      </CardContent>
-    </Card>
+    <div className="flex flex-col gap-2">
+      <div className="flex flex-wrap items-end gap-3">
+        <label className={LABEL}>
+          Airport
+          <Input
+            className="w-24 font-mono uppercase"
+            maxLength={4}
+            placeholder="KDCA"
+            value={form.airport}
+            onChange={(e) => set("airport", e.target.value)}
+          />
+        </label>
+        <label className={LABEL}>
+          Scope (ARTCC/FIR)
+          <Input
+            className="w-48 font-mono uppercase"
+            placeholder="ZTL ZJX"
+            value={form.scope ?? ""}
+            onChange={(e) => set("scope", e.target.value)}
+          />
+        </label>
+        <label className={LABEL}>
+          Until (Zxxxx)
+          <Input
+            className="w-24 font-mono"
+            placeholder="0200z"
+            value={form.until ?? ""}
+            onChange={(e) => set("until", e.target.value)}
+          />
+        </label>
+        <Button className="whitespace-nowrap" disabled={create.isPending} onClick={submit}>
+          <Plus />
+          Add ground stop
+        </Button>
+      </div>
+      <p className="text-xs text-ink-3">
+        Holds GROUND departures into the named airport that originate inside the scoped ARTCC/FIR(s).
+        Leave SCOPE blank for a field-wide stop.
+      </p>
+    </div>
   );
 }
 
-function GroundStopRow({
+function GroundStopActions({
   gs,
   canPublish,
   canDelete,
@@ -120,56 +99,23 @@ function GroundStopRow({
   const del = useDeleteGroundStop();
 
   return (
-    <tr className="border-t">
-      <td className="py-2 pr-3">
-        <Badge variant={statusVariant(gs.status)}>{gs.status}</Badge>
-      </td>
-      <td className="py-2 pr-3 font-mono font-medium">{gs.airport}</td>
-      <td className="py-2 pr-3 font-mono text-xs">
-        {gs.scope ? gs.scope : <span className="text-muted-foreground">All departures</span>}
-      </td>
-      <td className="py-2 pr-3 font-mono text-xs">
-        {gs.until ? `${gs.until}z` : <span className="text-muted-foreground">UFN</span>}
-      </td>
-      <td className="py-2 pr-3 font-mono text-xs text-muted-foreground">
-        {formatZulu(gs.updated_at)}
-        {gs.updated_by ? ` · ${gs.updated_by}` : ""}
-      </td>
-      <td className="py-2 text-right">
-        <div className="flex justify-end gap-1">
-          {canPublish && gs.status === "draft" && (
-            <Button
-              size="sm"
-              variant="secondary"
-              disabled={publish.isPending}
-              onClick={() => publish.mutate(gs.id)}
-            >
-              Publish
-            </Button>
-          )}
-          {canPublish &&
-            (gs.status === "draft" || gs.status === "published") && (
-              <Button
-                size="sm"
-                variant="ghost"
-                disabled={cancel.isPending}
-                onClick={() => cancel.mutate(gs.id)}
-              >
-                Cancel
-              </Button>
-            )}
-          {canDelete && (
-            <ConfirmButton
-              size="sm"
-              onConfirm={() => del.mutate(gs.id)}
-              warn={`Delete the ${gs.airport} ground stop?`}
-            >
-              Delete
-            </ConfirmButton>
-          )}
-        </div>
-      </td>
-    </tr>
+    <div className="flex justify-end gap-1">
+      {canPublish && gs.status === "draft" && (
+        <Button size="sm" variant="secondary" disabled={publish.isPending} onClick={() => publish.mutate(gs.id)}>
+          Publish
+        </Button>
+      )}
+      {canPublish && (gs.status === "draft" || gs.status === "published") && (
+        <Button size="sm" variant="ghost" disabled={cancel.isPending} onClick={() => cancel.mutate(gs.id)}>
+          Cancel
+        </Button>
+      )}
+      {canDelete && (
+        <ConfirmButton size="sm" onConfirm={() => del.mutate(gs.id)} warn={`Delete the ${gs.airport} ground stop?`}>
+          Delete
+        </ConfirmButton>
+      )}
+    </div>
   );
 }
 
@@ -180,50 +126,72 @@ export function GroundStopsTab() {
   const canPublish = hasPermission(me, "tmu.groundstop.publish");
   const canDelete = hasPermission(me, "tmu.groundstop.delete");
 
+  const columns = useMemo<DataColumn<GroundStop>[]>(
+    () => [
+      {
+        accessorKey: "status",
+        header: "Status",
+        icon: CircleDot,
+        cell: (c) => <StatusPill tone={toneOf("publish", c.getValue<string>())}>{c.getValue<string>()}</StatusPill>,
+      },
+      {
+        accessorKey: "airport",
+        header: "Airport",
+        icon: Plane,
+        mono: true,
+        cell: (c) => <span className="font-semibold">{c.getValue<string>()}</span>,
+      },
+      {
+        accessorKey: "scope",
+        header: "Scope (ARTCC/FIR)",
+        icon: Radar,
+        mono: true,
+        cell: (c) => c.getValue<string>() || <span className="font-sans text-ink-3">All departures</span>,
+      },
+      {
+        accessorKey: "until",
+        header: "Until (Zxxxx)",
+        icon: Clock,
+        mono: true,
+        cell: (c) => (c.getValue<string>() ? `${c.getValue<string>()}z` : <span className="text-ink-3">UFN</span>),
+      },
+      {
+        accessorKey: "updated_at",
+        header: "Updated",
+        mono: true,
+        cell: (c) => (
+          <span className="whitespace-nowrap text-ink-3">
+            {formatZulu(c.getValue<string>())}
+            {c.row.original.updated_by ? ` · ${c.row.original.updated_by}` : ""}
+          </span>
+        ),
+      },
+      {
+        id: "actions",
+        header: "",
+        enableSorting: false,
+        align: "right",
+        cell: (c) => <GroundStopActions gs={c.row.original} canPublish={canPublish} canDelete={canDelete} />,
+      },
+    ],
+    [canPublish, canDelete],
+  );
+
   return (
     <div className="flex flex-col gap-6">
       {canCreate && <CreateForm />}
 
-      <Card>
-        <CardContent className="pt-6">
-          {stops.isError ? (
-            <p className="py-8 text-center text-sm text-muted-foreground">
-              Couldn&apos;t load ground stops.
-            </p>
-          ) : !stops.data ? (
-            <p className="py-8 text-center text-sm text-muted-foreground">Loading…</p>
-          ) : stops.data.length === 0 ? (
-            <p className="py-8 text-center text-sm text-muted-foreground">
-              No active ground stops.
-            </p>
-          ) : (
-            <div className="overflow-x-auto">
-              <table className="w-full text-sm">
-                <thead>
-                  <tr className="text-left text-xs uppercase tracking-wide text-muted-foreground">
-                    <th className="pb-2 pr-3 font-medium">Status</th>
-                    <th className="pb-2 pr-3 font-medium">Airport</th>
-                    <th className="pb-2 pr-3 font-medium">Scope (ARTCC/FIR)</th>
-                    <th className="pb-2 pr-3 font-medium">Until (Zxxxx)</th>
-                    <th className="pb-2 pr-3 font-medium">Updated</th>
-                    <th className="pb-2" />
-                  </tr>
-                </thead>
-                <tbody>
-                  {stops.data.map((gs) => (
-                    <GroundStopRow
-                      key={gs.id}
-                      gs={gs}
-                      canPublish={canPublish}
-                      canDelete={canDelete}
-                    />
-                  ))}
-                </tbody>
-              </table>
-            </div>
-          )}
-        </CardContent>
-      </Card>
+      <DataTable
+        label="Ground stops"
+        columns={columns}
+        data={stops.data ?? []}
+        getRowId={(gs) => gs.id}
+        rowCap={25}
+        isLoading={!stops.data}
+        isError={stops.isError}
+        onRetry={() => stops.refetch()}
+        empty="No active ground stops."
+      />
     </div>
   );
 }

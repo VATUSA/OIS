@@ -1,5 +1,6 @@
-import {useEffect, useState} from "react";
-import {Card, CardContent} from "@ois/ui";
+import {useEffect, useMemo, useState} from "react";
+import {type DataColumn, DataTable, MetricCard, StatusPill} from "@ois/ui";
+import {Plane, Timer} from "lucide-react";
 
 import {useHistoricalAt} from "@/lib/historical-context";
 import {type TaxiActive, useTaxiStats} from "@/lib/taxi";
@@ -22,54 +23,41 @@ function fmtClock(secs: number) {
 
 type Row = TaxiActive & { field: string };
 
-function Stat({ label, value, tone }: { label: string; value: string; tone?: string }) {
-  return (
-    <div className="flex items-baseline gap-2">
-      <span className="text-xs font-medium uppercase tracking-wide text-muted-foreground">
-        {label}
-      </span>
-      <span className={"text-lg font-semibold tabular-nums " + (tone ?? "")}>
-        {value}
-      </span>
-    </div>
-  );
+function TaxiTimer({ row, now }: { row: Row; now: number }) {
+  if (row.phase !== "rolling" || !row.rolling_since) return <span className="text-ink-3">—</span>;
+  return <span className="text-warning">{fmtClock((now - new Date(row.rolling_since).getTime()) / 1000)}</span>;
 }
 
-function TaxiRow({ row, now }: { row: Row; now: number }) {
-  const rolling = row.phase === "rolling";
-  const elapsed =
-    rolling && row.rolling_since
-      ? (now - new Date(row.rolling_since).getTime()) / 1000
-      : null;
-
-  return (
-    <tr className="border-t border-border/60">
-      <td className="py-2 pr-4 font-mono font-semibold">{row.field}</td>
-      <td className="py-2 pr-4 font-mono font-semibold">{row.callsign}</td>
-      <td className="py-2 pr-4 font-mono text-muted-foreground">
-        {row.dest || "—"}
-      </td>
-      <td className="py-2 pr-4 text-right tabular-nums">{row.gs}</td>
-      <td className="py-2 pr-4 text-right tabular-nums">{row.alt}</td>
-      <td className="py-2 pr-4">
-        <span
-          className={
-            "font-mono text-xs uppercase tracking-wide " +
-            (rolling ? "text-amber-500" : "text-sky-400")
-          }
-        >
-          {row.phase}
-        </span>
-      </td>
-      <td className="py-2 text-right font-mono tabular-nums">
-        {elapsed != null ? (
-          <span className="text-amber-500">{fmtClock(elapsed)}</span>
-        ) : (
-          <span className="text-muted-foreground">—</span>
-        )}
-      </td>
-    </tr>
-  );
+function taxiColumns(now: number): DataColumn<Row>[] {
+  return [
+    { accessorKey: "field", header: "Field", mono: true, cellClassName: "font-semibold" },
+    { accessorKey: "callsign", header: "Callsign", icon: Plane, mono: true, cellClassName: "font-semibold" },
+    {
+      id: "dest",
+      accessorFn: (r) => r.dest || "",
+      header: "Dest",
+      mono: true,
+      cell: (c) => <span className="text-ink-2">{c.row.original.dest || "—"}</span>,
+    },
+    { accessorKey: "gs", header: "GS", mono: true, align: "right" },
+    { accessorKey: "alt", header: "Alt", mono: true, align: "right" },
+    {
+      accessorKey: "phase",
+      header: "Phase",
+      cell: (c) => (
+        <StatusPill tone={c.row.original.phase === "rolling" ? "warn" : "brand"}>{c.row.original.phase}</StatusPill>
+      ),
+    },
+    {
+      id: "taxi",
+      header: "Taxi time",
+      icon: Timer,
+      mono: true,
+      align: "right",
+      enableSorting: false,
+      cell: (c) => <TaxiTimer row={c.row.original} now={now} />,
+    },
+  ];
 }
 
 /**
@@ -83,7 +71,11 @@ export function TaxiView({ icao }: { icao: string }) {
   const now = at != null ? at * 1000 : liveNow;
   const stats = useTaxiStats(icao);
 
-  const rows: Row[] = (stats.data?.active ?? []).map((a) => ({ ...a, field: icao }));
+  const rows: Row[] = useMemo(
+    () => (stats.data?.active ?? []).map((a) => ({ ...a, field: icao })),
+    [stats.data, icao],
+  );
+  const columns = useMemo(() => taxiColumns(now), [now]);
   const summary = {
     rolling: rows.filter((r) => r.phase === "rolling").length,
     watching: rows.filter((r) => r.phase === "watching").length,
@@ -92,57 +84,29 @@ export function TaxiView({ icao }: { icao: string }) {
   };
 
   return (
-    <Card>
-      <CardContent className="flex flex-col gap-4 pt-6">
-        <div className="flex flex-wrap items-center gap-x-8 gap-y-3 border-b border-border/60 pb-4">
-          <Stat
-            label="Rolling"
-            value={String(summary.rolling)}
-            tone={summary.rolling > 0 ? "text-amber-500" : ""}
-          />
-          <Stat
-            label="Watching"
-            value={String(summary.watching)}
-            tone={summary.watching > 0 ? "text-sky-400" : ""}
-          />
-          <Stat
-            label="Avg today"
-            value={summary.avg != null ? `${summary.avg}m` : "—"}
-          />
-          <Stat label="Samples" value={String(summary.samples)} />
-          <span className="ml-auto text-xs text-muted-foreground">
-            {at != null ? "replay" : "live · updates every 15s"}
-          </span>
-        </div>
+    <div className="flex flex-col gap-4">
+      <div className="grid grid-cols-2 gap-3 lg:grid-cols-4">
+        <MetricCard label="Rolling" value={summary.rolling} tone={summary.rolling > 0 ? "warn" : undefined} />
+        <MetricCard label="Watching" value={summary.watching} tone={summary.watching > 0 ? "brand" : undefined} />
+        <MetricCard label="Avg today" value={summary.avg != null ? `${summary.avg}m` : "—"} />
+        <MetricCard
+          label="Samples"
+          value={summary.samples}
+          sub={at != null ? "replay" : "live · updates every 15s"}
+        />
+      </div>
 
-        {rows.length === 0 ? (
-          <p className="py-8 text-center text-sm text-muted-foreground">
-            No departures taxiing out of {icao} right now. Rows appear as aircraft push and
-            roll.
-          </p>
-        ) : (
-          <div className="overflow-x-auto">
-            <table className="w-full min-w-[640px] text-sm">
-              <thead>
-                <tr className="text-left text-xs uppercase tracking-wide text-muted-foreground">
-                  <th className="pb-2 pr-4 font-medium">Field</th>
-                  <th className="pb-2 pr-4 font-medium">Callsign</th>
-                  <th className="pb-2 pr-4 font-medium">Dest</th>
-                  <th className="pb-2 pr-4 text-right font-medium">GS</th>
-                  <th className="pb-2 pr-4 text-right font-medium">Alt</th>
-                  <th className="pb-2 pr-4 font-medium">Phase</th>
-                  <th className="pb-2 text-right font-medium">Taxi time</th>
-                </tr>
-              </thead>
-              <tbody>
-                {rows.map((row) => (
-                  <TaxiRow key={`${row.field}-${row.callsign}`} row={row} now={now} />
-                ))}
-              </tbody>
-            </table>
-          </div>
-        )}
-      </CardContent>
-    </Card>
+      <DataTable
+        label={`Taxiing out of ${icao}`}
+        columns={columns}
+        data={rows}
+        getRowId={(r) => `${r.field}-${r.callsign}`}
+        rowCap={25}
+        isLoading={stats.isLoading}
+        isError={stats.isError}
+        onRetry={() => stats.refetch()}
+        empty={`No departures taxiing out of ${icao} right now. Rows appear as aircraft push and roll.`}
+      />
+    </div>
   );
 }

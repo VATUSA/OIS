@@ -1,10 +1,25 @@
 import {useMemo, useState} from "react";
 import {useSearch} from "@tanstack/react-router";
-import {Button, Card, CardContent, Input} from "@ois/ui";
-import {Filter, Lock} from "lucide-react";
+import {
+  Bars,
+  Button,
+  Card,
+  type DataColumn,
+  DataTable,
+  Donut,
+  EmptyState,
+  Input,
+  MetricCard,
+  QueryState,
+  StatusPill,
+  Tabs,
+} from "@ois/ui";
+import {Clock, Filter, Lock, Plane, PlaneLanding, PlaneTakeoff} from "lucide-react";
 
+import {usePageHeader} from "@/components/shell/page-meta";
 import type {LadderFilters} from "@/features/dashboard/types";
 import {type Flow, type FlowFlight, useAirportFlow} from "@/lib/feed";
+import {toneOf} from "@/lib/status";
 import {hhmmZulu} from "@/lib/time";
 import {DeparturesView} from "@/pages/departures";
 import {TaxiView} from "@/pages/taxi";
@@ -12,15 +27,13 @@ import {ArrivalLadder} from "@/components/ladder/ArrivalLadder";
 
 type Sub = "summary" | "aircraft" | "ladder" | "demand" | "departures" | "taxi";
 
-const STATUS_STYLE: Record<
-  string,
-  { dot: string; text: string; color: string; label: string }
-> = {
-  airborne: { dot: "bg-emerald-500", text: "text-emerald-500", color: "#10b981", label: "Airborne" },
-  ground: { dot: "bg-amber-500", text: "text-amber-500", color: "#f59e0b", label: "Ground" },
-  proposed: { dot: "bg-sky-500", text: "text-sky-500", color: "#0ea5e9", label: "Proposed" },
-  arrived: { dot: "bg-muted-foreground", text: "text-muted-foreground", color: "#71717a", label: "Arrived" },
-};
+const cap = (s: string) => s.charAt(0).toUpperCase() + s.slice(1);
+
+/** A flight state's CSS colour (unknown states read as arrived). */
+function flightColor(status: string): string {
+  const tone = toneOf("flight", status);
+  return `var(--flight-${tone === "neutral" ? "arrived" : tone})`;
+}
 
 function minutesUntil(iso: string | null | undefined, now: number): number | null {
   if (!iso) return null;
@@ -28,16 +41,6 @@ function minutesUntil(iso: string | null | undefined, now: number): number | nul
   if (Number.isNaN(t)) return null;
   return (t - now) / 60000;
 }
-
-const GATE_PALETTE = [
-  "#54b8e8",
-  "#57d98a",
-  "#f5a83d",
-  "#c792ea",
-  "#f07178",
-  "#38bdf8",
-  "#fbbf24",
-];
 
 /** Drop the STAR revision digit so OZZZI1 / OZZZI2 group as OZZZI. */
 export function summaryGateName(gate: string | null | undefined): string | null {
@@ -58,27 +61,33 @@ function gateCounts(flights: FlowFlight[]): [string, number][] {
   return Object.entries(counts).sort((a, b) => b[1] - a[1] || a[0].localeCompare(b[0]));
 }
 
-function gateColorMap(flights: FlowFlight[]): Record<string, string> {
+/** Gate → series token name (`series-1` … `series-8`), busiest gate first. */
+function gateTokenMap(flights: FlowFlight[]): Record<string, string> {
   const map: Record<string, string> = {};
   gateCounts(flights).forEach(([g], i) => {
-    map[g] = GATE_PALETTE[i % GATE_PALETTE.length];
+    map[g] = `series-${(i % 8) + 1}`;
   });
   return map;
 }
 
+function delayClass(min: number): string {
+  if (min >= 15) return "text-level-over";
+  if (min > 0) return "text-level-watch";
+  return "text-ink-3";
+}
+
 // --- Summary ---
 
-function StatusBar({ flow }: { flow: Flow }) {
-  const total = flow.airborne + flow.ground + flow.proposed;
+/** Share of inbound traffic by state, as one thin segmented meter. */
+function StatusMeter({ flow }: { flow: Flow }) {
+  const total = Math.max(flow.airborne + flow.ground + flow.proposed, 1);
   const seg = (n: number, cls: string) =>
-    n > 0 ? (
-      <div className={cls} style={{ width: `${(n / Math.max(total, 1)) * 100}%` }} />
-    ) : null;
+    n > 0 ? <div className={cls} style={{ width: `${(n / total) * 100}%` }} /> : null;
   return (
-    <div className="flex h-2 overflow-hidden rounded-full bg-muted">
-      {seg(flow.airborne, "bg-emerald-500")}
-      {seg(flow.ground, "bg-amber-500")}
-      {seg(flow.proposed, "bg-sky-500")}
+    <div className="flex h-1.5 overflow-hidden rounded-full bg-chip" aria-hidden="true">
+      {seg(flow.airborne, "bg-flight-airborne")}
+      {seg(flow.ground, "bg-flight-ground")}
+      {seg(flow.proposed, "bg-flight-proposed")}
     </div>
   );
 }
@@ -86,53 +95,40 @@ function StatusBar({ flow }: { flow: Flow }) {
 function DemandRing({ flow }: { flow: Flow }) {
   const aar = flow.aar ?? 0;
   const pct = aar > 0 ? Math.min(100, Math.round((flow.demand_60min / aar) * 100)) : 0;
-  const r = 46;
-  const circ = 2 * Math.PI * r;
-  const offset = circ * (1 - pct / 100);
   const over = !!flow.over_capacity;
-  const color = over ? "text-destructive" : "text-emerald-500";
 
   return (
-    <div className="flex items-center gap-4">
-      <div className="relative size-28 shrink-0">
-        <svg viewBox="0 0 120 120" className="size-full -rotate-90">
-          <circle cx="60" cy="60" r={r} className="fill-none stroke-muted" strokeWidth="10" />
-          {aar > 0 && (
-            <circle
-              cx="60"
-              cy="60"
-              r={r}
-              className={`fill-none ${color} transition-all`}
-              stroke="currentColor"
-              strokeWidth="10"
-              strokeLinecap="round"
-              strokeDasharray={circ}
-              strokeDashoffset={offset}
-            />
-          )}
-        </svg>
-        <div className="absolute inset-0 flex flex-col items-center justify-center">
-          {aar > 0 ? (
-            <>
-              <span className="text-xl font-semibold">{pct}%</span>
-              <span className="text-[10px] uppercase tracking-wide text-muted-foreground">
-                of AAR
-              </span>
-            </>
+    <div className="flex items-center gap-5">
+      <Donut
+        size={112}
+        thickness={0.2}
+        label={aar > 0 ? `Demand ${pct}% of AAR` : `Demand ${flow.demand_60min}`}
+        slices={
+          aar > 0
+            ? [
+                { label: "Demand", value: pct, color: over ? "level-over" : "level-ok" },
+                { label: "Headroom", value: 100 - pct, color: "chip" },
+              ]
+            : []
+        }
+        center={
+          aar > 0 ? (
+            <div className="flex flex-col items-center">
+              <span className="font-mono text-xl font-bold">{pct}%</span>
+              <span className="text-[10px] text-ink-3">of AAR</span>
+            </div>
           ) : (
-            <span className="text-3xl font-semibold">{flow.demand_60min}</span>
-          )}
-        </div>
-      </div>
-      <div>
-        <div className="text-xs uppercase tracking-wide text-muted-foreground">
-          Demand / AAR · 60 min
-        </div>
-        <div className={`text-2xl font-semibold ${over ? "text-destructive" : ""}`}>
+            <span className="font-mono text-2xl font-bold">{flow.demand_60min}</span>
+          )
+        }
+      />
+      <div className="min-w-0">
+        <div className="text-xs text-ink-2">Demand / AAR · 60 min</div>
+        <div className={`mt-1 font-mono text-2xl font-bold ${over ? "text-level-over" : ""}`}>
           {flow.demand_60min}
           {aar > 0 ? ` / ${aar}` : ""}
         </div>
-        <div className="mt-1 max-w-xs text-sm text-muted-foreground">
+        <div className="mt-1 max-w-xs text-sm text-ink-2">
           {aar <= 0
             ? "No program — set a rate on the TMU tab to meter this field."
             : over
@@ -144,132 +140,65 @@ function DemandRing({ flow }: { flow: Flow }) {
   );
 }
 
-function Metric({ label, value, cls }: { label: string; value: number; cls: string }) {
-  return (
-    <div className="flex flex-col gap-1">
-      <span className="text-xs uppercase tracking-wide text-muted-foreground">{label}</span>
-      <span className={`text-2xl font-semibold ${cls}`}>{value}</span>
-    </div>
-  );
-}
-
 export function SummaryView({ flow }: { flow: Flow }) {
+  const arrived = flow.flights.filter((f) => f.status === "arrived").length;
   return (
-    <Card>
-      <CardContent className="flex flex-col gap-6 pt-6">
-        <div className="flex items-end justify-between">
-          <div>
-            <div className="font-mono text-2xl font-semibold">{flow.icao}</div>
-            <div className="text-sm text-muted-foreground">Arrival summary</div>
-          </div>
-          <div className="text-right">
-            <div className="text-3xl font-semibold">{flow.inbound}</div>
-            <div className="text-xs uppercase tracking-wide text-muted-foreground">
-              Inbound total
-            </div>
-          </div>
-        </div>
+    <div className="flex flex-col gap-4">
+      <div className="grid grid-cols-2 gap-3 md:grid-cols-3 xl:grid-cols-5">
+        <MetricCard
+          className="col-span-2 md:col-span-3 xl:col-span-1"
+          label="Inbound total"
+          icon={PlaneLanding}
+          value={flow.inbound}
+          sub={<StatusMeter flow={flow} />}
+        />
+        <MetricCard label="Airborne" value={flow.airborne} tone="airborne" />
+        <MetricCard label="Ground" value={flow.ground} tone="ground" />
+        <MetricCard label="Proposed" value={flow.proposed} tone="proposed" />
+        <MetricCard label="Arrived" value={arrived} tone="arrived" />
+      </div>
 
-        <StatusBar flow={flow} />
-
-        <div className="grid grid-cols-2 gap-4 sm:grid-cols-4">
-          <Metric label="Airborne" value={flow.airborne} cls="text-emerald-500" />
-          <Metric label="Ground" value={flow.ground} cls="text-amber-500" />
-          <Metric label="Proposed" value={flow.proposed} cls="text-sky-500" />
-          <Metric
-            label="Arrived"
-            value={flow.flights.filter((f) => f.status === "arrived").length}
-            cls="text-muted-foreground"
-          />
-        </div>
-
-        <div className="border-t pt-6">
+      <div className="grid gap-4 lg:grid-cols-2">
+        <Card className="p-4">
+          <h2 className="mb-4 text-xl font-bold">Demand vs AAR</h2>
           <DemandRing flow={flow} />
-        </div>
-
+        </Card>
         <GateBreakdown flow={flow} />
-      </CardContent>
-    </Card>
+      </div>
+    </div>
   );
 }
 
 function GateBreakdown({ flow }: { flow: Flow }) {
-  const gates = gateCounts(flow.flights);
-  const colors = gateColorMap(flow.flights);
-  const max = gates.length ? gates[0][1] : 1;
+  const gates = useMemo(() => gateCounts(flow.flights), [flow.flights]);
+  const tokens = useMemo(() => gateTokenMap(flow.flights), [flow.flights]);
 
   return (
-    <div className="border-t pt-6">
-      <div className="mb-3 text-xs font-medium uppercase tracking-wide text-muted-foreground">
-        Aircraft by arrival gate
-        <span className="ml-2 normal-case text-muted-foreground/70">
-          · STAR revisions grouped (PARCH3/4 → PARCH)
-        </span>
-      </div>
+    <Card className="p-4">
+      <h2 className="text-xl font-bold">Aircraft by arrival gate</h2>
+      <p className="mb-3 text-xs text-ink-3">STAR revisions grouped (PARCH3/4 → PARCH)</p>
       {gates.length === 0 ? (
-        <p className="text-sm text-muted-foreground">
-          No gated arrivals in the metered stream right now.
-        </p>
+        <EmptyState className="py-6">No gated arrivals in the metered stream right now.</EmptyState>
       ) : (
-        <div className="flex flex-col gap-2">
-          {gates.map(([g, n]) => (
-            <div key={g} className="flex items-center gap-3">
-              <span
-                className="w-16 shrink-0 font-mono text-sm font-medium"
-                style={{ color: colors[g] }}
-              >
-                {g}
-              </span>
-              <div className="h-2 flex-1 overflow-hidden rounded-full bg-muted">
-                <div
-                  className="h-full rounded-full"
-                  style={{ width: `${(n / max) * 100}%`, backgroundColor: colors[g] }}
-                />
-              </div>
-              <span className="w-6 shrink-0 text-right text-sm tabular-nums">{n}</span>
-            </div>
-          ))}
-        </div>
+        <Bars
+          horizontal
+          label="Aircraft by arrival gate"
+          data={gates}
+          category={(d) => d[0]}
+          value={(d) => d[1]}
+          color={(d) => tokens[d[0]]}
+          height={Math.max(96, gates.length * 28 + 32)}
+          valueFormat={(v) => (Number.isInteger(v) ? String(v) : "")}
+        />
       )}
-    </div>
+    </Card>
   );
 }
 
 // --- Aircraft list ---
 
-type ColKey =
-  | "seq"
-  | "callsign"
-  | "aircraft_type"
-  | "dep"
-  | "gate"
-  | "status"
-  | "distance_nm"
-  | "eta"
-  | "sta"
-  | "delay_min"
-  | "cfr";
-const COLUMNS: { key: ColKey; label: string; num?: boolean; right?: boolean }[] = [
-  { key: "seq", label: "#", num: true },
-  { key: "callsign", label: "Callsign" },
-  { key: "aircraft_type", label: "Type" },
-  { key: "dep", label: "Dep" },
-  { key: "gate", label: "Gate" },
-  { key: "status", label: "Status" },
-  { key: "distance_nm", label: "Dist", num: true, right: true },
-  { key: "eta", label: "ETA", right: true },
-  { key: "sta", label: "STA", right: true },
-  { key: "delay_min", label: "Delay", num: true, right: true },
-  { key: "cfr", label: "CFR", right: true },
-];
-const DATE_KEYS = new Set<ColKey>(["eta", "sta", "cfr"]);
-const NUM_KEYS = new Set<ColKey>(["seq", "distance_nm", "delay_min"]);
-
-function delayClass(min: number): string {
-  if (min >= 15) return "text-destructive";
-  if (min > 0) return "text-amber-500";
-  return "text-muted-foreground";
-}
+/** Nulls sort last, like the original hand-sorted table. */
+const timeKey = (iso: string | null | undefined) => (iso ? new Date(iso).getTime() : Infinity);
 
 /**
  * CFR cell. An *issued* CFR is a locked wheels-up actually given to a pilot (matching
@@ -277,149 +206,141 @@ function delayClass(min: number): string {
  * merely the scheduler's proposed slot renders faint, so controllers can tell them apart.
  */
 function CfrCell({ f, now }: { f: FlowFlight; now: number }) {
-  if (!f.cfr) {
-    return (
-      <td className="py-1.5 text-right font-mono text-xs tabular-nums text-muted-foreground">
-        —
-      </td>
-    );
-  }
+  if (!f.cfr) return <span className="text-ink-3">—</span>;
   const imminent = new Date(f.cfr).getTime() <= now + 60000;
   if (f.cfr_issued) {
     return (
-      <td className="py-1.5 text-right font-mono text-xs tabular-nums">
-        <span
-          className={`inline-flex items-center justify-end gap-1 font-semibold ${imminent ? "text-emerald-500" : "text-foreground"}`}
-          title="Call-for-release issued — locked wheels-up"
-        >
-          <Lock className="size-3" />
-          {hhmmZulu(f.cfr)}
-        </span>
-      </td>
+      <span
+        className={`inline-flex items-center justify-end gap-1 font-semibold ${imminent ? "text-success" : "text-ink"}`}
+        title="Call-for-release issued — locked wheels-up"
+      >
+        <Lock className="size-3" />
+        {hhmmZulu(f.cfr)}
+      </span>
     );
   }
   return (
-    <td className="py-1.5 text-right font-mono text-xs tabular-nums">
-      <span
-        className="text-muted-foreground/60"
-        title="Proposed wheels-up — auto-slotted, not yet issued"
-      >
-        {hhmmZulu(f.cfr)}
-      </span>
-    </td>
+    <span className="text-ink-3" title="Proposed wheels-up — auto-slotted, not yet issued">
+      {hhmmZulu(f.cfr)}
+    </span>
   );
 }
 
+function aircraftColumns(tokens: Record<string, string>, now: number): DataColumn<FlowFlight>[] {
+  return [
+    {
+      id: "seq",
+      accessorFn: (f) => f.seq ?? Infinity,
+      header: "#",
+      mono: true,
+      align: "right",
+      sortDescFirst: false,
+      cell: (c) => <span className="text-ink-3">{c.row.original.seq ?? "—"}</span>,
+    },
+    {
+      accessorKey: "callsign",
+      header: "Callsign",
+      icon: Plane,
+      mono: true,
+      cell: (c) => <span className="font-semibold">{c.row.original.callsign}</span>,
+    },
+    { id: "aircraft_type", accessorFn: (f) => f.aircraft_type ?? "", header: "Type", mono: true },
+    { id: "dep", accessorFn: (f) => f.dep ?? "", header: "Dep", mono: true },
+    {
+      id: "gate",
+      accessorFn: (f) => f.gate ?? "",
+      header: "Gate",
+      mono: true,
+      cell: (c) => {
+        const f = c.row.original;
+        const token = f.gate ? tokens[summaryGateName(f.gate)!] : undefined;
+        return <span style={token ? { color: `var(--${token})` } : undefined}>{f.gate ?? "—"}</span>;
+      },
+    },
+    {
+      accessorKey: "status",
+      header: "Status",
+      cell: (c) => (
+        <StatusPill tone={toneOf("flight", c.row.original.status)}>{cap(c.row.original.status)}</StatusPill>
+      ),
+    },
+    {
+      id: "distance_nm",
+      accessorFn: (f) => f.distance_nm ?? Infinity,
+      header: "Dist",
+      mono: true,
+      align: "right",
+      sortDescFirst: false,
+      cell: (c) => (c.row.original.distance_nm == null ? "—" : Math.round(c.row.original.distance_nm)),
+    },
+    {
+      id: "eta",
+      accessorFn: (f) => timeKey(f.eta),
+      header: "ETA",
+      icon: Clock,
+      mono: true,
+      align: "right",
+      sortDescFirst: false,
+      cell: (c) => <span className="text-ink-2">{hhmmZulu(c.row.original.eta)}</span>,
+    },
+    {
+      id: "sta",
+      accessorFn: (f) => timeKey(f.sta),
+      header: "STA",
+      mono: true,
+      align: "right",
+      sortDescFirst: false,
+      cell: (c) => hhmmZulu(c.row.original.sta),
+    },
+    {
+      id: "delay_min",
+      accessorFn: (f) => f.delay_min,
+      header: "Delay",
+      mono: true,
+      align: "right",
+      sortDescFirst: false,
+      cell: (c) => {
+        const d = c.row.original.delay_min;
+        return <span className={delayClass(d)}>{d > 0 ? `+${d}` : "—"}</span>;
+      },
+    },
+    {
+      id: "cfr",
+      accessorFn: (f) => timeKey(f.cfr),
+      header: "CFR",
+      icon: PlaneTakeoff,
+      mono: true,
+      align: "right",
+      sortDescFirst: false,
+      cell: (c) => <CfrCell f={c.row.original} now={now} />,
+    },
+  ];
+}
+
 export function AircraftView({ flow }: { flow: Flow }) {
-  const [sortKey, setSortKey] = useState<ColKey>("seq");
-  const [dir, setDir] = useState<1 | -1>(1);
-  const now = Date.now();
-
-  const rows = useMemo(() => {
-    const val = (f: FlowFlight, k: ColKey): number | string => {
-      const v = f[k];
-      if (DATE_KEYS.has(k)) return v == null ? Infinity : new Date(v as string).getTime();
-      if (NUM_KEYS.has(k)) return v == null ? Infinity : (v as number);
-      return v == null ? "" : (v as string);
-    };
-    return [...flow.flights].sort((a, b) => {
-      const va = val(a, sortKey);
-      const vb = val(b, sortKey);
-      if (va < vb) return -1 * dir;
-      if (va > vb) return 1 * dir;
-      return 0;
-    });
-  }, [flow.flights, sortKey, dir]);
-
-  function clickSort(k: ColKey) {
-    if (k === sortKey) setDir((d) => (d === 1 ? -1 : 1));
-    else {
-      setSortKey(k);
-      setDir(1);
-    }
-  }
-
-  if (!flow.flights.length) {
-    return (
-      <Card>
-        <CardContent className="py-10 text-center text-sm text-muted-foreground">
-          No traffic filed to {flow.icao} right now.
-        </CardContent>
-      </Card>
-    );
-  }
-
-  const gateColors = gateColorMap(flow.flights);
+  const tokens = useMemo(() => gateTokenMap(flow.flights), [flow.flights]);
+  // `now` only drives the CFR "due" highlight; each flow refresh rebuilds the columns with a fresh one.
+  const columns = useMemo(() => aircraftColumns(tokens, Date.now()), [tokens]);
 
   return (
-    <Card>
-      <CardContent className="pt-6">
-        <div className="overflow-x-auto">
-          <table className="w-full text-sm">
-            <thead>
-              <tr className="text-xs uppercase tracking-wide text-muted-foreground">
-                {COLUMNS.map((c) => (
-                  <th
-                    key={c.key}
-                    onClick={() => clickSort(c.key)}
-                    className={`cursor-pointer select-none pb-2 pr-3 font-medium ${c.right ? "text-right" : "text-left"} ${c.key === sortKey ? "text-foreground" : ""}`}
-                  >
-                    {c.label}
-                    {c.key === sortKey ? (dir === 1 ? " ▴" : " ▾") : ""}
-                  </th>
-                ))}
-              </tr>
-            </thead>
-            <tbody>
-              {rows.map((f) => {
-                const st = STATUS_STYLE[f.status] ?? STATUS_STYLE.arrived;
-                return (
-                  <tr
-                    key={f.callsign}
-                    className={`border-t ${f.excluded ? "opacity-45" : ""}`}
-                  >
-                    <td className="py-1.5 pr-3 text-right tabular-nums text-muted-foreground">
-                      {f.seq ?? "—"}
-                    </td>
-                    <td className="py-1.5 pr-3 font-mono font-medium">{f.callsign}</td>
-                    <td className="py-1.5 pr-3">{f.aircraft_type}</td>
-                    <td className="py-1.5 pr-3 font-mono text-xs">{f.dep}</td>
-                    <td
-                      className="py-1.5 pr-3 font-mono text-xs"
-                      style={{ color: f.gate ? gateColors[summaryGateName(f.gate)!] : undefined }}
-                    >
-                      {f.gate ?? "—"}
-                    </td>
-                    <td className={`py-1.5 pr-3 ${st.text}`}>{st.label}</td>
-                    <td className="py-1.5 pr-3 text-right tabular-nums">
-                      {f.distance_nm == null ? "—" : Math.round(f.distance_nm)}
-                    </td>
-                    <td className="py-1.5 pr-3 text-right font-mono text-xs tabular-nums text-muted-foreground">
-                      {hhmmZulu(f.eta)}
-                    </td>
-                    <td className="py-1.5 pr-3 text-right font-mono text-xs tabular-nums">
-                      {hhmmZulu(f.sta)}
-                    </td>
-                    <td
-                      className={`py-1.5 pr-3 text-right tabular-nums ${delayClass(f.delay_min)}`}
-                    >
-                      {f.delay_min > 0 ? `+${f.delay_min}` : "—"}
-                    </td>
-                    <CfrCell f={f} now={now} />
-                  </tr>
-                );
-              })}
-            </tbody>
-          </table>
-        </div>
-        {flow.flights.some((f) => f.cfr_issued) && (
-          <p className="mt-3 flex items-center gap-1.5 text-xs text-muted-foreground">
-            <Lock className="size-3" /> issued CFR — a locked wheels-up given to the
-            pilot; faint times are proposed slots.
-          </p>
-        )}
-      </CardContent>
-    </Card>
+    <div className="flex flex-col gap-2">
+      <DataTable
+        label={`Traffic filed to ${flow.icao}`}
+        columns={columns}
+        data={flow.flights}
+        getRowId={(f) => f.callsign}
+        initialSort={[{ id: "seq", desc: false }]}
+        rowCap={25}
+        rowClassName={(f) => (f.excluded ? "opacity-45" : undefined)}
+        empty={`No traffic filed to ${flow.icao} right now.`}
+      />
+      {flow.flights.some((f) => f.cfr_issued) && (
+        <p className="flex items-center gap-1.5 text-xs text-ink-3">
+          <Lock className="size-3" /> issued CFR — a locked wheels-up given to the pilot; faint times are
+          proposed slots.
+        </p>
+      )}
+    </div>
   );
 }
 
@@ -442,20 +363,24 @@ function passesLadderFilters(f: FlowFlight, filters: LadderFilters | undefined):
 
 const LADDER_CH = 7.5; // ≈ px per monospace char at text-xs
 
-/** Estimated rendered pixel width of one arrival tag — connector + pill padding/border/gaps +
+/** Estimated rendered pixel width of one arrival tag — connector + pill padding/border + dot + gaps +
  * text (callsign + "HHMMz" time + optional gate). */
 function measureTagWidth(f: FlowFlight): number {
   const gate = f.gate ? String(f.gate) : "";
   const chars = f.callsign.length + 5 /* HHMMz */ + gate.length;
-  const gaps = (gate ? 2 : 1) * 8; // gap-2 between the mono spans
-  return 12 /* connector tick */ + 24 /* pill padding + border */ + gaps + chars * LADDER_CH;
+  const gaps = (gate ? 3 : 2) * 8; // gap-2 between the dot and the mono spans
+  return 12 /* connector tick */ + 24 /* pill padding + border */ + 6 /* dot */ + gaps + chars * LADDER_CH;
 }
 
 export function LadderView({ flow, filters }: { flow: Flow; filters?: LadderFilters }) {
   const [win, setWin] = useState(60);
   const now = Date.now();
   const step = win <= 90 ? 10 : win <= 180 ? 15 : 30;
-  const gateColors = gateColorMap(flow.flights);
+  const tokens = gateTokenMap(flow.flights);
+  const colorOf = (f: FlowFlight) => {
+    const gname = summaryGateName(f.gate);
+    return gname && tokens[gname] ? `var(--${tokens[gname]})` : flightColor(f.status);
+  };
 
   // Position by metered STA when available, else raw ETA.
   const timeOf = (f: FlowFlight) => f.sta ?? f.eta;
@@ -471,68 +396,59 @@ export function LadderView({ flow, filters }: { flow: Flow; filters?: LadderFilt
     (filters.gates?.length || filters.statuses?.length || filters.origins?.length || filters.types?.length);
 
   return (
-    <Card>
-      <CardContent className="pt-6">
-        <div className="mb-3 flex items-center justify-between">
-          <span className="flex items-center gap-1.5 text-xs font-medium uppercase tracking-wide text-muted-foreground">
-            Arrival ladder · {win} min · {flow.aar != null ? "metered STA" : "ETA"} · now
-            at bottom
-            {noMatch && <Filter className="size-3.5 shrink-0" />}
-          </span>
-          <div className="flex gap-1">
-            <Button
-              size="sm"
-              variant="secondary"
-              disabled={win <= 30}
-              onClick={() => setWin((w) => Math.max(30, w - 30))}
-            >
-              −30
-            </Button>
-            <Button
-              size="sm"
-              variant="secondary"
-              disabled={win >= 240}
-              onClick={() => setWin((w) => Math.min(240, w + 30))}
-            >
-              +30
-            </Button>
-          </div>
+    <Card className="p-4">
+      <div className="mb-3 flex flex-wrap items-center justify-between gap-2">
+        <span className="flex items-center gap-1.5 text-xs text-ink-2">
+          <span className="font-mono">{win} min</span> · {flow.aar != null ? "metered STA" : "ETA"} · now at
+          bottom
+          {noMatch && <Filter className="size-3.5 shrink-0" aria-label="Filtered" />}
+        </span>
+        <div className="flex gap-1">
+          <Button
+            size="sm"
+            variant="outline"
+            className="font-mono"
+            disabled={win <= 30}
+            onClick={() => setWin((w) => Math.max(30, w - 30))}
+          >
+            −30
+          </Button>
+          <Button
+            size="sm"
+            variant="outline"
+            className="font-mono"
+            disabled={win >= 240}
+            onClick={() => setWin((w) => Math.min(240, w + 30))}
+          >
+            +30
+          </Button>
         </div>
-        <ArrivalLadder
-          items={items}
-          now={now}
-          win={win}
-          pxPerMin={7}
-          gutter={46}
-          step={step}
-          rowGap={26}
-          minGap={13}
-          pad={12}
-          autoFitWidth
-          emptyMessage={noMatch ? "No matching arrivals" : "No ETAs in window"}
-          measureTagWidth={measureTagWidth}
-          connectorColor={(f) => {
-            const st = STATUS_STYLE[f.status] ?? STATUS_STYLE.arrived;
-            const gname = summaryGateName(f.gate);
-            return (gname && gateColors[gname]) || st.color;
-          }}
-          renderTag={(f) => {
-            const st = STATUS_STYLE[f.status] ?? STATUS_STYLE.arrived;
-            const gname = summaryGateName(f.gate);
-            const color = (gname && gateColors[gname]) || st.color;
-            return (
-              <span
-                className={`flex items-center gap-2 rounded-md border border-border/70 bg-muted/40 py-1 pl-2 pr-2.5 text-xs ${f.status === "proposed" ? "opacity-75" : ""}`}
-                style={{ borderLeftWidth: 3, borderLeftColor: color }}
-              >
-                <span className="font-mono font-medium">{f.callsign}</span>
-                <span className="font-mono text-muted-foreground">{hhmmZulu(timeOf(f))}</span>
-                {f.gate && <span className="font-mono text-muted-foreground/80">{f.gate}</span>}
-              </span>
-            );
-          }}
-        />
-      </CardContent>
+      </div>
+      <ArrivalLadder
+        items={items}
+        now={now}
+        win={win}
+        pxPerMin={7}
+        gutter={46}
+        step={step}
+        rowGap={26}
+        minGap={13}
+        pad={12}
+        autoFitWidth
+        emptyMessage={noMatch ? "No matching arrivals" : "No ETAs in window"}
+        measureTagWidth={measureTagWidth}
+        connectorColor={colorOf}
+        renderTag={(f) => (
+          <span
+            className={`flex items-center gap-2 rounded-xs border border-line bg-panel-2 py-1 pl-2 pr-2.5 text-xs ${f.status === "proposed" ? "opacity-75" : ""}`}
+          >
+            <span className="size-1.5 shrink-0 rounded-full" style={{ background: colorOf(f) }} />
+            <span className="font-mono font-semibold">{f.callsign}</span>
+            <span className="font-mono text-ink-2">{hhmmZulu(timeOf(f))}</span>
+            {f.gate && <span className="font-mono text-ink-3">{f.gate}</span>}
+          </span>
+        )}
+      />
     </Card>
   );
 }
@@ -544,77 +460,54 @@ export function DemandView({ flow }: { flow: Flow }) {
   const BIN = 15;
   const BINS = 8;
   const aar = flow.aar ?? 0;
-  const cap = aar > 0 ? Math.max(1, Math.round(aar / (60 / BIN))) : 0;
+  const binCap = aar > 0 ? Math.max(1, Math.round(aar / (60 / BIN))) : 0;
 
-  const counts = new Array(BINS).fill(0);
+  const counts = new Array<number>(BINS).fill(0);
   for (const f of flow.flights) {
     if (f.status === "arrived" || f.excluded) continue;
     const m = minutesUntil(f.eta, now);
     if (m == null || m < 0 || m >= BINS * BIN) continue;
     counts[Math.floor(m / BIN)]++;
   }
-  const max = Math.max(...counts, cap, 1);
-  const H = 160;
+  const bins = counts.map((n, i) => ({
+    label: hhmmZulu(new Date(now + i * BIN * 60000).toISOString()),
+    n,
+    over: binCap > 0 && n > binCap,
+  }));
 
   return (
-    <Card>
-      <CardContent className="pt-6">
-        <div className="mb-4 text-xs font-medium uppercase tracking-wide text-muted-foreground">
-          Demand vs AAR — 15 min bins · next {(BINS * BIN) / 60} h
-        </div>
-        <div className="relative overflow-x-auto">
-          <div className="flex items-end gap-2" style={{ height: H }}>
-            {counts.map((n, i) => {
-              const over = cap > 0 && n > cap;
-              return (
-                <div key={i} className="flex flex-1 flex-col items-center justify-end gap-1">
-                  <span className="text-xs tabular-nums text-muted-foreground">{n || ""}</span>
-                  <div
-                    className={`w-full rounded-t ${over ? "bg-destructive" : "bg-emerald-500/80"}`}
-                    style={{ height: Math.max(2, (n / max) * (H - 24)) }}
-                  />
-                </div>
-              );
-            })}
-          </div>
-          {cap > 0 && (
-            <div
-              className="pointer-events-none absolute inset-x-0 border-t-2 border-dashed border-amber-400"
-              style={{ bottom: 24 + (cap / max) * (H - 24) }}
-            >
-              <span className="absolute -top-4 right-0 text-[10px] font-medium text-amber-400">
-                cap {cap}/bin
-              </span>
-            </div>
-          )}
-        </div>
-        <div className="mt-2 flex gap-2 text-[10px] font-mono text-muted-foreground">
-          {counts.map((_, i) => (
-            <span key={i} className="flex-1 text-center">
-              {hhmmZulu(new Date(now + i * BIN * 60000).toISOString())}
-            </span>
-          ))}
-        </div>
-        <p className="mt-3 text-sm text-muted-foreground">
-          {aar > 0
-            ? `Olive is at or below capacity (${cap}/bin from AAR ${aar}/hr). Red is over capacity.`
-            : "No program — bars show raw arrival demand by ETA. Set an AAR on the TMU tab for capacity metering."}
-        </p>
-      </CardContent>
+    <Card className="p-4">
+      <div className="mb-3 flex flex-wrap items-center justify-between gap-2 text-xs text-ink-2">
+        <span>15 min bins · next {(BINS * BIN) / 60} h</span>
+        {binCap > 0 && (
+          <span className="font-mono text-warning">
+            AAR {aar}/hr → cap {binCap}/bin
+          </span>
+        )}
+      </div>
+      <Bars
+        label={`${flow.icao} arrival demand by 15-minute bin`}
+        data={bins}
+        category={(d) => d.label}
+        value={(d) => d.n}
+        color={(d) => (d.over ? "level-over" : "level-ok")}
+        cap={binCap > 0 ? binCap : undefined}
+        valueFormat={(v) => (Number.isInteger(v) ? String(v) : "")}
+        height={200}
+      />
+      <p className="mt-3 text-sm text-ink-2">
+        {aar > 0
+          ? `Green is at or below capacity (${binCap}/bin from AAR ${aar}/hr). Red is over capacity.`
+          : "No program — bars show raw arrival demand by ETA. Set an AAR on the TMU tab for capacity metering."}
+      </p>
     </Card>
   );
 }
 
 // --- page shell ---
 
-const SUBS: { id: Sub; label: string }[] = [
-  { id: "summary", label: "Summary" },
-  { id: "aircraft", label: "Aircraft list" },
-  { id: "ladder", label: "Arrival ladder" },
-  { id: "demand", label: "Demand vs AAR" },
-  { id: "departures", label: "Departures" },
-  { id: "taxi", label: "Taxi" },
-];
+const SUBTITLE =
+  "The whole picture for any airport — arrival demand and sequence, departures and CFRs, and live taxi-out times.";
 
 export function AirportPage() {
   // `?icao=` (⌘K, deep links) preselects the airport.
@@ -624,87 +517,67 @@ export function AirportPage() {
   const [sub, setSub] = useState<Sub>("summary");
   const flow = useAirportFlow(icao);
 
+  usePageHeader({ subtitle: SUBTITLE, title: icao ? `Airport · ${icao}` : undefined });
+
   function load() {
     const clean = query.replace(/[^a-zA-Z0-9]/g, "").toUpperCase();
     if (clean.length >= 3) setIcao(clean);
   }
 
+  const tabs = [
+    { value: "summary" as const, label: "Summary" },
+    { value: "aircraft" as const, label: "Aircraft", count: flow.data?.flights.length },
+    { value: "ladder" as const, label: "Ladder" },
+    { value: "demand" as const, label: "Demand" },
+    { value: "departures" as const, label: "Departures" },
+    { value: "taxi" as const, label: "Taxi" },
+  ];
+
   return (
-    <div className="flex flex-col gap-6">
-      <div>
-        <h1 className="text-2xl font-semibold tracking-tight">Airport dashboard</h1>
-        <p className="text-muted-foreground">
-          The whole picture for any airport — arrival demand and sequence, departures and
-          CFRs, and live taxi-out times.
-        </p>
+    <div className="flex flex-col gap-4">
+      <div className="flex flex-wrap items-center gap-2">
+        <Input
+          aria-label="Airport"
+          className="w-28 font-mono uppercase"
+          maxLength={4}
+          placeholder="KJFK"
+          value={query}
+          onChange={(e) => setQuery(e.target.value)}
+          onKeyDown={(e) => e.key === "Enter" && load()}
+        />
+        <Button onClick={load}>Load</Button>
+        {icao && flow.data && (
+          <span className="ml-auto text-xs text-ink-3">
+            {flow.isFetching ? "refreshing…" : "live · updates every 20s"}
+          </span>
+        )}
       </div>
 
-      <Card>
-        <CardContent className="flex flex-wrap items-end gap-3 pt-6">
-          <label className="flex flex-col gap-1 text-xs font-medium uppercase tracking-wide text-muted-foreground">
-            Airport
-            <Input
-              className="w-32 font-mono uppercase"
-              maxLength={4}
-              placeholder="KJFK"
-              value={query}
-              onChange={(e) => setQuery(e.target.value)}
-              onKeyDown={(e) => e.key === "Enter" && load()}
-            />
-          </label>
-          <Button onClick={load}>Load</Button>
-          {icao && flow.data && (
-            <span className="ml-auto text-xs text-muted-foreground">
-              {flow.isFetching ? "refreshing…" : "live · updates every 20s"}
-            </span>
-          )}
-        </CardContent>
-      </Card>
-
       {!icao ? (
-        <Card>
-          <CardContent className="py-12 text-center text-sm text-muted-foreground">
-            Enter an arrival airport above to see its live flow.
-          </CardContent>
-        </Card>
-      ) : flow.isError ? (
-        <Card>
-          <CardContent className="py-12 text-center text-sm text-muted-foreground">
-            Couldn&apos;t load flow for {icao}.
-          </CardContent>
-        </Card>
-      ) : !flow.data ? (
-        <Card>
-          <CardContent className="py-12 text-center text-sm text-muted-foreground">
-            Loading {icao}…
-          </CardContent>
-        </Card>
+        <EmptyState icon={PlaneLanding} className="rounded-md border border-line py-12">
+          Enter an arrival airport above to see its live flow.
+        </EmptyState>
       ) : (
-        <>
-          <div className="flex gap-1 border-b">
-            {SUBS.map((s) => (
-              <button
-                key={s.id}
-                type="button"
-                onClick={() => setSub(s.id)}
-                className={
-                  "-mb-px border-b-2 px-4 py-2 text-sm font-medium transition-colors " +
-                  (sub === s.id
-                    ? "border-primary text-foreground"
-                    : "border-transparent text-muted-foreground hover:text-foreground")
-                }
-              >
-                {s.label}
-              </button>
-            ))}
-          </div>
-          {sub === "summary" && <SummaryView flow={flow.data} />}
-          {sub === "aircraft" && <AircraftView flow={flow.data} />}
-          {sub === "ladder" && <LadderView flow={flow.data} />}
-          {sub === "demand" && <DemandView flow={flow.data} />}
-          {sub === "departures" && <DeparturesView icao={icao} />}
-          {sub === "taxi" && <TaxiView icao={icao} />}
-        </>
+        <QueryState
+          isLoading={!flow.data && !flow.isError}
+          isError={flow.isError}
+          loading={`Loading ${icao}…`}
+          error={`Couldn't load flow for ${icao}.`}
+          onRetry={() => flow.refetch()}
+          className="rounded-md border border-line py-12"
+        >
+          {flow.data && (
+            <>
+              <Tabs value={sub} onChange={setSub} items={tabs} />
+              {sub === "summary" && <SummaryView flow={flow.data} />}
+              {sub === "aircraft" && <AircraftView flow={flow.data} />}
+              {sub === "ladder" && <LadderView flow={flow.data} />}
+              {sub === "demand" && <DemandView flow={flow.data} />}
+              {sub === "departures" && <DeparturesView icao={icao} />}
+              {sub === "taxi" && <TaxiView icao={icao} />}
+            </>
+          )}
+        </QueryState>
       )}
     </div>
   );

@@ -1,10 +1,24 @@
 import {useMemo, useState} from "react";
-import {Button, ConfirmButton, Input, Sheet, usePrompt} from "@ois/ui";
-import {SlidersHorizontal} from "lucide-react";
+import {
+  Bars,
+  Button,
+  Card,
+  ConfirmButton,
+  type DataColumn,
+  DataTable,
+  EmptyState,
+  Input,
+  Select,
+  Sheet,
+  StatusPill,
+  usePrompt,
+} from "@ois/ui";
+import {Lock, PlaneLanding, SlidersHorizontal, X} from "lucide-react";
 
 import {ZuluClock} from "@/components/zulu-clock";
 import {useMe} from "@/lib/auth";
 import {hasPermission} from "@/lib/permissions";
+import {toneOf} from "@/lib/status";
 import {
   type RunwayArrival,
   type RunwayEnd,
@@ -17,17 +31,19 @@ import {
 
 const BIN_MAX = 5;
 const PRESET_HDG: Record<string, number> = { W: 270, E: 90, N: 360, S: 180 };
-const LEVEL_COLOR: Record<string, string> = {
-  green: "#4caf7a",
-  yellow: "#e8a838",
-  red: "#d45c5c",
+/** Balancer load level → level token (unknown reads as ok, like the original bins). */
+const LEVEL_TOKEN: Record<string, string> = {
+  green: "level-ok",
+  yellow: "level-watch",
+  red: "level-over",
 };
-const CAT_COLOR: Record<string, string> = {
-  VFR: "#22c55e",
-  MVFR: "#3b82f6",
-  IFR: "#ef4444",
-  LIFR: "#d946ef",
-};
+const PRESETS = [
+  { id: "W", label: "West" },
+  { id: "E", label: "East" },
+  { id: "N", label: "North" },
+  { id: "S", label: "South" },
+  { id: "OFF", label: "None" },
+];
 
 function angleDiff(a: number, b: number): number {
   return Math.abs((((a - b) % 360) + 540) % 360 - 180);
@@ -184,9 +200,9 @@ export function RunwayPage() {
 
   if (!canRead) {
     return (
-      <div className="flex h-full items-center justify-center text-sm text-muted-foreground">
+      <EmptyState icon={Lock} className="h-full">
         You don&apos;t have flow access.
-      </div>
+      </EmptyState>
     );
   }
 
@@ -196,13 +212,11 @@ export function RunwayPage() {
   const customIds = new Set((b?.custom_ends ?? []).map((c) => c.id));
 
   return (
-    <div className="flex h-full flex-col">
-      {/* Header */}
-      <div className="flex flex-wrap items-center gap-x-4 gap-y-2 border-b px-4 py-2.5 text-sm sm:px-5">
-        <span className="font-semibold uppercase tracking-wider">
-          Runway <span className="text-primary">Balancer</span>
-        </span>
+    <div className="flex h-full flex-col bg-panel">
+      {/* Control row */}
+      <div className="flex flex-wrap items-center gap-x-3 gap-y-2 border-b border-line px-4 py-2.5 text-sm sm:px-5">
         <Input
+          aria-label="Airport"
           value={field}
           onChange={(e) => setField(e.target.value)}
           onKeyDown={(e) => e.key === "Enter" && load()}
@@ -213,301 +227,257 @@ export function RunwayPage() {
           Load
         </Button>
         {icao && (
-          <Button
-            size="sm"
-            variant="outline"
-            onClick={() => setConfigOpen(true)}
-            className="gap-1.5 md:hidden"
-          >
-            <SlidersHorizontal className="size-3.5" />
+          <Button size="sm" variant="outline" onClick={() => setConfigOpen(true)} className="md:hidden">
+            <SlidersHorizontal />
             Config
           </Button>
         )}
-        {!canEdit && (
-          <span className="rounded border border-amber-500/50 bg-amber-500/10 px-2 py-0.5 text-xs text-amber-700 dark:text-amber-200">
-            View only — sign in with VATSIM to edit.
-          </span>
-        )}
+        {!canEdit && <StatusPill tone="warn">View only — sign in with VATSIM to edit.</StatusPill>}
         {b?.metar && (
           <span className="flex min-w-0 items-center gap-2 font-mono text-xs">
             {b.flight_category && (
-              <span
-                className="rounded px-1.5 py-0.5 font-semibold"
-                style={{
-                  color: CAT_COLOR[b.flight_category] ?? "#888",
-                  background: `${CAT_COLOR[b.flight_category] ?? "#888"}22`,
-                }}
-              >
-                {b.flight_category}
-              </span>
+              <StatusPill tone={toneOf("category", b.flight_category)}>{b.flight_category}</StatusPill>
             )}
-            {b.wind && <span className="text-foreground">{b.wind}</span>}
-            <span
-              className="hidden truncate text-muted-foreground lg:inline"
-              title={b.metar}
-            >
+            {b.wind && <span className="text-ink">{b.wind}</span>}
+            <span className="hidden truncate text-ink-3 lg:inline" title={b.metar}>
               {b.metar}
             </span>
           </span>
         )}
-        <ZuluClock className="ml-auto rounded-md border bg-muted/40 px-2 py-1 font-mono text-muted-foreground" />
+        {/* The top bar carries the clock from `sm` up. */}
+        <ZuluClock className="ml-auto rounded-full border border-line bg-panel-2 px-2.5 py-1 text-xs text-ink-2 sm:hidden" />
       </div>
 
       {!icao ? (
-        <div className="flex flex-1 items-center justify-center text-sm text-muted-foreground">
+        <EmptyState icon={PlaneLanding} className="flex-1">
           Load an airport to balance its arrival runways.
-        </div>
+        </EmptyState>
       ) : (
         <div className="relative flex min-h-0 flex-1">
           {/* Config — a fixed side column on desktop, a bottom drawer on mobile. */}
           <Sheet
             open={configOpen}
             onClose={() => setConfigOpen(false)}
-            className="w-80 shrink-0 border-r"
+            className="w-80 shrink-0 border-r border-line"
             initialFraction={0.55}
           >
-            <div className="flex flex-1 flex-col gap-4 overflow-y-auto p-4">
-            <section>
-              <h2 className="mb-2 text-xs font-semibold uppercase tracking-wide text-muted-foreground">
-                Landing runways
-              </h2>
-              {canEdit && (
-                <div className="mb-2 flex items-center gap-1">
-                  <select
-                    value={selectedCfg}
-                    onChange={(e) => applyConfig(e.target.value)}
-                    className="h-7 flex-1 rounded border border-input bg-background px-2 text-xs outline-none"
-                  >
-                    <option value="">— saved configs —</option>
-                    {(configs.data ?? []).map((c) => (
-                      <option key={c.name} value={c.name}>
-                        {c.name}
-                      </option>
-                    ))}
-                  </select>
-                  <Button
-                    size="sm"
-                    variant="outline"
-                    onClick={saveCurrentConfig}
-                    className="h-7 px-2 text-xs"
-                  >
-                    Save
-                  </Button>
-                  <ConfirmButton
-                    size="icon"
-                    className="size-7"
-                    disabled={!selectedCfg}
-                    aria-label="Delete saved config"
-                    onConfirm={deleteSelectedConfig}
-                    warn={
-                      selectedCfg
-                        ? `Delete the “${selectedCfg}” config?`
-                        : "Delete this config?"
-                    }
-                  >
-                    ×
-                  </ConfirmButton>
-                </div>
-              )}
-              <div className="mb-2 flex flex-wrap gap-1.5">
-                {["W", "E", "N", "S", "OFF"].map((p) => (
-                  <button
-                    key={p}
-                    type="button"
-                    disabled={!canEdit}
-                    onClick={() => applyPreset(p)}
-                    className="rounded border px-2 py-1 text-xs font-medium hover:bg-accent disabled:opacity-50"
-                  >
-                    {{ W: "WEST", E: "EAST", N: "NORTH", S: "SOUTH", OFF: "NONE" }[p]}
-                  </button>
-                ))}
-              </div>
-              <div className="flex flex-col gap-1.5">
-                {pairs.length === 0 && (
-                  <p className="text-xs text-muted-foreground">
-                    No runway data for {b?.icao}.
-                  </p>
+            <div className="flex flex-1 flex-col gap-5 overflow-y-auto p-4">
+              <section className="flex flex-col gap-2">
+                <h2 className="text-sm font-semibold">Landing runways</h2>
+                {canEdit && (
+                  <div className="flex items-center gap-1">
+                    <Select
+                      size="sm"
+                      aria-label="Saved configs"
+                      wrapperClassName="flex-1 min-w-0"
+                      className="text-xs"
+                      value={selectedCfg}
+                      onChange={(e) => applyConfig(e.target.value)}
+                    >
+                      <option value="">— saved configs —</option>
+                      {(configs.data ?? []).map((c) => (
+                        <option key={c.name} value={c.name}>
+                          {c.name}
+                        </option>
+                      ))}
+                    </Select>
+                    <Button size="sm" variant="outline" onClick={saveCurrentConfig}>
+                      Save
+                    </Button>
+                    <ConfirmButton
+                      size="icon"
+                      className="size-8"
+                      disabled={!selectedCfg}
+                      aria-label="Delete saved config"
+                      onConfirm={deleteSelectedConfig}
+                      warn={selectedCfg ? `Delete the “${selectedCfg}” config?` : "Delete this config?"}
+                    >
+                      <X />
+                    </ConfirmButton>
+                  </div>
                 )}
-                {pairs.map(([pair, ends]) => (
-                  <div key={pair} className="flex items-center gap-1.5">
-                    {ends.map((e) => (
+                <div className="flex flex-wrap gap-1.5">
+                  {PRESETS.map((p) => (
+                    <Button
+                      key={p.id}
+                      size="sm"
+                      variant="outline"
+                      className="h-7 px-2.5 text-xs"
+                      disabled={!canEdit}
+                      onClick={() => applyPreset(p.id)}
+                    >
+                      {p.label}
+                    </Button>
+                  ))}
+                </div>
+                <div className="flex flex-col gap-1.5">
+                  {pairs.length === 0 && <p className="text-xs text-ink-3">No runway data for {b?.icao}.</p>}
+                  {pairs.map(([pair, ends]) => (
+                    <div key={pair} className="flex items-center gap-1.5">
+                      {ends.map((e) => (
+                        <button
+                          key={e.id}
+                          type="button"
+                          aria-pressed={e.active}
+                          disabled={!canEdit}
+                          onClick={() => toggleEnd(e.id)}
+                          className={`flex-1 rounded-xs border px-2 py-1 text-left font-mono text-xs transition-colors disabled:opacity-60 ${
+                            e.active ? "border-brand bg-brand-soft text-ink" : "border-line text-ink-2 hover:bg-panel-2"
+                          }`}
+                        >
+                          <span className="font-semibold">{e.id}</span>
+                          <span className="ml-1 text-[10px] text-ink-3">{String(e.hdg).padStart(3, "0")}°</span>
+                        </button>
+                      ))}
+                      <span className="w-14 shrink-0 text-right font-mono text-[10px] text-ink-3">
+                        {ends.length === 1 && customIds.has(ends[0].id) && canEdit ? (
+                          <button
+                            type="button"
+                            onClick={() => removeEnd(ends[0].id)}
+                            className="hover:text-danger"
+                            aria-label="Remove end"
+                          >
+                            × remove
+                          </button>
+                        ) : ends[0].len ? (
+                          `${ends[0].len}ft`
+                        ) : (
+                          ""
+                        )}
+                      </span>
+                    </div>
+                  ))}
+                </div>
+                {canEdit && (
+                  <div className="flex items-center gap-1">
+                    <Input
+                      aria-label="Runway end"
+                      value={newEndId}
+                      onChange={(e) => setNewEndId(e.target.value)}
+                      placeholder="RWY"
+                      className="h-8 w-16 font-mono text-xs uppercase"
+                    />
+                    <Input
+                      aria-label="Heading"
+                      value={newEndHdg}
+                      onChange={(e) => setNewEndHdg(e.target.value)}
+                      onKeyDown={(e) => e.key === "Enter" && addEnd()}
+                      placeholder="HDG"
+                      inputMode="numeric"
+                      className="h-8 w-16 font-mono text-xs"
+                    />
+                    <Button
+                      size="sm"
+                      variant="outline"
+                      onClick={addEnd}
+                      disabled={!newEndId.trim() || !newEndHdg.trim()}
+                    >
+                      Add end
+                    </Button>
+                  </div>
+                )}
+                <p className="text-[11px] leading-snug text-ink-3">
+                  Presets pick ends by final-approach direction (WEST = landing westbound, 270 ± 65°). Add End
+                  covers fields missing runway data.
+                </p>
+              </section>
+
+              <section className="flex flex-col gap-2 border-t border-line pt-4">
+                <h2 className="text-sm font-semibold">STAR → runway rules</h2>
+                <div className="flex flex-col gap-1.5">
+                  {Object.entries(b?.star_rules ?? {}).map(([star, rwy]) => (
+                    <div key={star} className="flex items-center gap-2 text-xs">
+                      <span className="flex-1 font-mono font-semibold">{star}</span>
+                      <Select
+                        size="sm"
+                        aria-label={`Runway for ${star}`}
+                        className="font-mono text-xs"
+                        disabled={!canEdit}
+                        value={rwy}
+                        onChange={(e) => saveRules({ ...(b?.star_rules ?? {}), [star]: e.target.value })}
+                      >
+                        {activeIds.map((id) => (
+                          <option key={id} value={id}>
+                            {id}
+                          </option>
+                        ))}
+                      </Select>
                       <button
-                        key={e.id}
                         type="button"
                         disabled={!canEdit}
-                        onClick={() => toggleEnd(e.id)}
-                        className={`flex-1 rounded border px-2 py-1 text-left font-mono text-xs transition-colors disabled:opacity-60 ${
-                          e.active
-                            ? "border-primary bg-primary/15 text-foreground"
-                            : "text-muted-foreground hover:bg-accent"
-                        }`}
+                        onClick={() => removeRule(star)}
+                        className="text-ink-3 hover:text-danger disabled:opacity-50"
+                        aria-label="Remove rule"
                       >
-                        <span className="font-semibold">{e.id}</span>
-                        <span className="ml-1 text-[10px] text-muted-foreground">
-                          {String(e.hdg).padStart(3, "0")}°
-                        </span>
+                        <X className="size-3.5" />
                       </button>
-                    ))}
-                    <span className="w-14 shrink-0 text-right font-mono text-[10px] text-muted-foreground">
-                      {ends.length === 1 &&
-                      customIds.has(ends[0].id) &&
-                      canEdit ? (
-                        <button
-                          type="button"
-                          onClick={() => removeEnd(ends[0].id)}
-                          className="hover:text-destructive"
-                          aria-label="Remove end"
-                        >
-                          × remove
-                        </button>
-                      ) : ends[0].len ? (
-                        `${ends[0].len}ft`
-                      ) : (
-                        ""
-                      )}
-                    </span>
-                  </div>
-                ))}
-              </div>
-              {canEdit && (
-                <div className="mt-2 flex items-center gap-1">
-                  <Input
-                    value={newEndId}
-                    onChange={(e) => setNewEndId(e.target.value)}
-                    placeholder="RWY"
-                    className="h-7 w-16 font-mono text-xs uppercase"
-                  />
-                  <Input
-                    value={newEndHdg}
-                    onChange={(e) => setNewEndHdg(e.target.value)}
-                    onKeyDown={(e) => e.key === "Enter" && addEnd()}
-                    placeholder="HDG"
-                    inputMode="numeric"
-                    className="h-7 w-16 font-mono text-xs"
-                  />
-                  <Button
-                    size="sm"
-                    variant="outline"
-                    onClick={addEnd}
-                    disabled={!newEndId.trim() || !newEndHdg.trim()}
-                    className="h-7 px-2 text-xs"
-                  >
-                    Add end
-                  </Button>
+                    </div>
+                  ))}
+                  {Object.keys(b?.star_rules ?? {}).length === 0 && (
+                    <p className="text-[11px] text-ink-3">No rules — arrivals auto-balance.</p>
+                  )}
                 </div>
-              )}
-              <p className="mt-2 text-[11px] leading-snug text-muted-foreground">
-                Presets pick ends by final-approach direction (WEST = landing
-                westbound, 270 ± 65°). Add End covers fields missing runway data.
-              </p>
-            </section>
-
-            <section>
-              <h2 className="mb-2 text-xs font-semibold uppercase tracking-wide text-muted-foreground">
-                STAR → runway rules
-              </h2>
-              <div className="flex flex-col gap-1.5">
-                {Object.entries(b?.star_rules ?? {}).map(([star, rwy]) => (
-                  <div key={star} className="flex items-center gap-2 text-xs">
-                    <span className="flex-1 font-mono font-semibold">{star}</span>
-                    <select
-                      disabled={!canEdit}
-                      value={rwy}
-                      onChange={(e) =>
-                        saveRules({ ...(b?.star_rules ?? {}), [star]: e.target.value })
-                      }
-                      className="h-7 rounded border border-input bg-background px-1 font-mono text-xs outline-none disabled:opacity-50"
+                {canEdit && (
+                  <div className="flex items-center gap-1">
+                    <Input
+                      aria-label="STAR"
+                      value={newStar}
+                      onChange={(e) => setNewStar(e.target.value)}
+                      onKeyDown={(e) => e.key === "Enter" && addRule()}
+                      placeholder="STAR e.g. CAMRN"
+                      className="h-8 min-w-0 flex-1 font-mono text-xs uppercase"
+                    />
+                    <Select
+                      size="sm"
+                      aria-label="Runway"
+                      className="font-mono text-xs"
+                      value={newRwy}
+                      onChange={(e) => setNewRwy(e.target.value)}
                     >
+                      <option value="">rwy</option>
                       {activeIds.map((id) => (
                         <option key={id} value={id}>
                           {id}
                         </option>
                       ))}
-                    </select>
-                    <button
-                      type="button"
-                      disabled={!canEdit}
-                      onClick={() => removeRule(star)}
-                      className="text-muted-foreground hover:text-destructive disabled:opacity-50"
-                      aria-label="Remove rule"
-                    >
-                      ×
-                    </button>
+                    </Select>
+                    <Button size="sm" variant="outline" onClick={addRule} disabled={!newStar.trim() || !newRwy}>
+                      Pin
+                    </Button>
                   </div>
-                ))}
-                {Object.keys(b?.star_rules ?? {}).length === 0 && (
-                  <p className="text-[11px] text-muted-foreground">
-                    No rules — arrivals auto-balance.
-                  </p>
                 )}
-              </div>
-              {canEdit && (
-                <div className="mt-2 flex items-center gap-1">
-                  <Input
-                    value={newStar}
-                    onChange={(e) => setNewStar(e.target.value)}
-                    onKeyDown={(e) => e.key === "Enter" && addRule()}
-                    placeholder="STAR e.g. CAMRN"
-                    className="h-7 flex-1 font-mono text-xs uppercase"
-                  />
-                  <select
-                    value={newRwy}
-                    onChange={(e) => setNewRwy(e.target.value)}
-                    className="h-7 rounded border border-input bg-background px-1 font-mono text-xs outline-none"
+                <p className="text-[11px] leading-snug text-ink-3">
+                  A rule sends every arrival on that STAR to one runway. Aircraft overrides beat rules.
+                </p>
+              </section>
+
+              <section className="flex flex-col gap-2 border-t border-line pt-4">
+                <h2 className="text-sm font-semibold">Settings</h2>
+                <label className="flex items-center gap-2 text-xs">
+                  <span className="text-ink-2">Horizon</span>
+                  <Select
+                    size="sm"
+                    disabled={!canEdit}
+                    value={b?.window_min ?? 90}
+                    onChange={(e) => setWindow(Number(e.target.value))}
                   >
-                    <option value="">rwy</option>
-                    {activeIds.map((id) => (
-                      <option key={id} value={id}>
-                        {id}
+                    {[60, 90, 120, 180].map((w) => (
+                      <option key={w} value={w}>
+                        {w} min
                       </option>
                     ))}
-                  </select>
-                  <Button
-                    size="sm"
-                    variant="outline"
-                    onClick={addRule}
-                    disabled={!newStar.trim() || !newRwy}
-                    className="h-7 px-2 text-xs"
-                  >
-                    Pin
-                  </Button>
-                </div>
-              )}
-              <p className="mt-2 text-[11px] leading-snug text-muted-foreground">
-                A rule sends every arrival on that STAR to one runway. Aircraft
-                overrides beat rules.
-              </p>
-            </section>
-
-            <section>
-              <h2 className="mb-2 text-xs font-semibold uppercase tracking-wide text-muted-foreground">
-                Settings
-              </h2>
-              <label className="flex items-center gap-2 text-xs">
-                <span className="text-muted-foreground">horizon</span>
-                <select
-                  disabled={!canEdit}
-                  value={b?.window_min ?? 90}
-                  onChange={(e) => setWindow(Number(e.target.value))}
-                  className="h-8 rounded-md border border-input bg-background px-2 text-sm outline-none disabled:opacity-50"
-                >
-                  {[60, 90, 120, 180].map((w) => (
-                    <option key={w} value={w}>
-                      {w} min
-                    </option>
-                  ))}
-                </select>
-              </label>
-              <p className="mt-2 text-[11px] leading-snug text-muted-foreground">
-                Config, rules, and assignments are shared across controllers. ETAs
-                use a climb-profile + winds model.
-              </p>
-            </section>
+                  </Select>
+                </label>
+                <p className="text-[11px] leading-snug text-ink-3">
+                  Config, rules, and assignments are shared across controllers. ETAs use a climb-profile + winds
+                  model.
+                </p>
+              </section>
             </div>
           </Sheet>
 
           {/* Main — demand + arrivals */}
-          <div className="min-w-0 flex-1 overflow-y-auto p-4">
+          <div className="flex min-w-0 flex-1 flex-col gap-6 overflow-y-auto p-4 sm:p-5">
             <DemandChart demand={b?.demand ?? []} bins={b?.bins ?? 9} />
             <ArrivalsByRunway
               ends={(b?.ends ?? []).filter((e) => e.active)}
@@ -533,6 +503,8 @@ function groupPairs(ends: RunwayEnd[]): [string, RunwayEnd[]][] {
   return [...map.entries()];
 }
 
+type Bin = { label: string; n: number; level: string };
+
 function DemandChart({
   demand,
   bins,
@@ -540,70 +512,131 @@ function DemandChart({
   demand: { id: string; bins: number[]; levels: string[] }[];
   bins: number;
 }) {
+  const rows = useMemo(
+    () =>
+      demand.map((row) => ({
+        id: row.id,
+        total: row.bins.reduce((a, c) => a + c, 0),
+        data: Array.from({ length: bins }, (_, i): Bin => ({
+          label: `+${i * 10}m`,
+          n: row.bins[i] ?? 0,
+          level: row.levels[i],
+        })),
+      })),
+    [demand, bins],
+  );
+
   if (demand.length === 0) {
     return (
-      <div className="mb-6 rounded-lg border border-dashed p-8 text-center text-sm text-muted-foreground">
+      <EmptyState className="rounded-md border border-dashed border-line">
         Select active landing runways to see arrival demand.
-      </div>
+      </EmptyState>
     );
   }
   return (
-    <div className="mb-6">
-      <h2 className="mb-3 text-xs font-semibold uppercase tracking-wide text-muted-foreground">
-        Demand — current &amp; anticipated · 10-min bins · max {BIN_MAX}/bin
-      </h2>
-      <div className="flex flex-col gap-2">
-        {demand.map((row) => {
-          const total = row.bins.reduce((a, c) => a + c, 0);
-          return (
-            <div key={row.id} className="flex items-center gap-3">
-              <div className="w-24 shrink-0">
-                <div className="font-mono text-lg font-bold">{row.id}</div>
-                <div className="text-[11px] text-muted-foreground">
-                  {total} in window
-                </div>
-              </div>
-              <div className="flex flex-1 gap-1">
-                {Array.from({ length: bins }, (_, i) => {
-                  const n = row.bins[i] ?? 0;
-                  const h = Math.min(n, BIN_MAX) / BIN_MAX;
-                  return (
-                    <div
-                      key={i}
-                      className="relative flex h-14 flex-1 items-end rounded border border-border/40 bg-muted/10"
-                      title={`+${i * 10}–${i * 10 + 10} min: ${n}`}
-                    >
-                      {n > 0 && (
-                        <div
-                          className="w-full rounded-b"
-                          style={{
-                            height: `${Math.max(h * 100, 8)}%`,
-                            background: LEVEL_COLOR[row.levels[i]] ?? LEVEL_COLOR.green,
-                          }}
-                        />
-                      )}
-                      {n > 0 && (
-                        <span className="absolute inset-x-0 top-1 text-center font-mono text-[11px] font-semibold">
-                          {n}
-                        </span>
-                      )}
-                    </div>
-                  );
-                })}
-              </div>
-            </div>
-          );
-        })}
+    <section className="flex flex-col gap-3">
+      <div className="flex flex-wrap items-baseline justify-between gap-2">
+        <h2 className="text-xl font-bold">Demand</h2>
+        <span className="text-xs text-ink-3">current &amp; anticipated · 10-min bins · max {BIN_MAX}/bin</span>
       </div>
-      <div className="mt-1 flex gap-1 pl-[6.75rem] font-mono text-[10px] text-muted-foreground">
-        {Array.from({ length: bins }, (_, i) => (
-          <span key={i} className="flex-1">
-            {i % 3 === 0 ? `+${i * 10}m` : ""}
-          </span>
+      <div className="grid gap-3 md:grid-cols-2 2xl:grid-cols-3">
+        {rows.map((row) => (
+          <Card key={row.id} className="p-3">
+            <div className="mb-1 flex items-baseline justify-between">
+              <span className="font-mono text-lg font-bold">{row.id}</span>
+              <span className="font-mono text-xs text-ink-3">{row.total} in window</span>
+            </div>
+            <Bars
+              label={`${row.id} arrival demand, 10-minute bins`}
+              data={row.data}
+              category={(d) => d.label}
+              value={(d) => d.n}
+              color={(d) => LEVEL_TOKEN[d.level] ?? "level-ok"}
+              cap={BIN_MAX}
+              valueFormat={(v) => (Number.isInteger(v) ? String(v) : "")}
+              height={120}
+            />
+          </Card>
         ))}
       </div>
-    </div>
+    </section>
   );
+}
+
+type Group = { id: string; hdg?: number; list: RunwayArrival[] };
+
+function arrivalColumns(
+  activeIds: string[],
+  recMap: Map<string, { to_rwy: string; level: string }>,
+  onOverride: (cs: string, rwy: string) => void,
+  canEdit: boolean,
+): DataColumn<RunwayArrival>[] {
+  return [
+    { accessorKey: "cs", header: "Callsign", mono: true, cellClassName: "px-2 font-semibold" },
+    {
+      id: "route",
+      accessorFn: (a) => `${a.dep} ${a.star ?? ""}`,
+      header: "Route",
+      mono: true,
+      cellClassName: "px-2 text-xs text-ink-2",
+      cell: (c) => (
+        <span className="whitespace-nowrap">
+          {c.row.original.dep} · {c.row.original.star ?? "—"}
+        </span>
+      ),
+    },
+    {
+      accessorKey: "eta",
+      header: "ETA",
+      mono: true,
+      cellClassName: "px-2 text-xs",
+      cell: (c) => (
+        <span className="whitespace-nowrap">
+          {zulu(c.row.original.eta)} <span className="text-ink-3">+{minsFromNow(c.row.original.eta)}</span>
+        </span>
+      ),
+    },
+    {
+      id: "assign",
+      header: "Assignment",
+      align: "right",
+      enableSorting: false,
+      cellClassName: "px-2",
+      cell: (c) => {
+        const a = c.row.original;
+        const rec = recMap.get(a.cs);
+        return (
+          <div className="flex items-center justify-end gap-1.5">
+            {rec && (
+              <span title={`Rebalance: move to ${rec.to_rwy}`}>
+                <StatusPill tone={toneOf("level", rec.level)} className="px-1.5 font-mono text-[10px] leading-4">
+                  → {rec.to_rwy}
+                </StatusPill>
+              </span>
+            )}
+            <StatusPill tone={a.src === "man" ? "brand" : "neutral"} className="px-1.5 font-mono text-[10px] uppercase leading-4">
+              {a.src}
+            </StatusPill>
+            <Select
+              size="sm"
+              aria-label={`Runway override for ${a.cs}`}
+              className="h-7 font-mono text-[11px]"
+              disabled={!canEdit}
+              value={a.src === "man" ? (a.rwy ?? "AUTO") : "AUTO"}
+              onChange={(e) => onOverride(a.cs, e.target.value)}
+            >
+              <option value="AUTO">AUTO</option>
+              {activeIds.map((id) => (
+                <option key={id} value={id}>
+                  {id}
+                </option>
+              ))}
+            </Select>
+          </div>
+        );
+      },
+    },
+  ];
 }
 
 function ArrivalsByRunway({
@@ -621,113 +654,43 @@ function ArrivalsByRunway({
   onOverride: (cs: string, rwy: string) => void;
   canEdit: boolean;
 }) {
-  const groups: { id: string; hdg?: number; list: RunwayArrival[] }[] = ends.map(
-    (e) => ({
-      id: e.id,
-      hdg: e.hdg,
-      list: arrivals.filter((a) => a.rwy === e.id),
-    }),
-  );
+  const groups: Group[] = ends.map((e) => ({
+    id: e.id,
+    hdg: e.hdg,
+    list: arrivals.filter((a) => a.rwy === e.id),
+  }));
   const unassigned = arrivals.filter((a) => !a.rwy || !ends.some((e) => e.id === a.rwy));
   if (unassigned.length) groups.push({ id: "unassigned", list: unassigned });
+  const columns = arrivalColumns(activeIds, recMap, onOverride, canEdit);
 
   return (
-    <div>
-      <h2 className="mb-3 text-xs font-semibold uppercase tracking-wide text-muted-foreground">
-        Arrivals by runway
-      </h2>
-      <div className="grid grid-cols-1 gap-3 md:grid-cols-2 xl:grid-cols-3">
+    <section className="flex flex-col gap-3">
+      <h2 className="text-xl font-bold">Arrivals by runway</h2>
+      <div className="grid grid-cols-1 gap-4 lg:grid-cols-2 2xl:grid-cols-3">
         {groups.map((g) => (
-          <div key={g.id} className="rounded-lg border">
-            <div className="flex items-center justify-between border-b px-3 py-2">
+          <div key={g.id} className="flex min-w-0 flex-col gap-2">
+            <div className="flex items-baseline justify-between px-1">
               <span className="font-mono text-sm font-bold">
                 {g.id === "unassigned" ? "UNASSIGNED" : g.id}
                 {g.hdg != null && (
-                  <span className="ml-1.5 text-[10px] font-normal text-muted-foreground">
-                    {String(g.hdg).padStart(3, "0")}°
-                  </span>
+                  <span className="ml-1.5 text-[10px] font-normal text-ink-3">{String(g.hdg).padStart(3, "0")}°</span>
                 )}
               </span>
-              <span className="font-mono text-xs text-muted-foreground">
-                {g.list.length}
-              </span>
+              <span className="font-mono text-xs text-ink-3">{g.list.length}</span>
             </div>
-            {g.list.length === 0 ? (
-              <div className="px-3 py-4 text-center text-xs text-muted-foreground">
-                No arrivals
-              </div>
-            ) : (
-              <div className="overflow-x-auto">
-              <table className="w-full text-xs">
-                <tbody>
-                  {g.list.map((a) => {
-                    const rec = recMap.get(a.cs);
-                    return (
-                      <tr
-                        key={a.cs}
-                        className={`border-b last:border-0 ${rec ? "bg-amber-500/5" : ""}`}
-                      >
-                        <td className="px-3 py-1.5 font-mono font-semibold">{a.cs}</td>
-                        <td className="py-1.5 font-mono text-muted-foreground">{a.dep}</td>
-                        <td className="py-1.5 font-mono text-muted-foreground">
-                          {a.star ?? "—"}
-                        </td>
-                        <td className="py-1.5 font-mono">
-                          {zulu(a.eta)}{" "}
-                          <span className="text-muted-foreground">
-                            +{minsFromNow(a.eta)}
-                          </span>
-                        </td>
-                        <td className="px-3 py-1.5">
-                          <div className="flex items-center justify-end gap-1.5">
-                            {rec && (
-                              <span
-                                className="rounded px-1 py-0.5 font-mono text-[10px] font-semibold"
-                                title={`Rebalance: move to ${rec.to_rwy}`}
-                                style={{
-                                  color: LEVEL_COLOR[rec.level] ?? "#888",
-                                  background: `${LEVEL_COLOR[rec.level] ?? "#888"}22`,
-                                }}
-                              >
-                                → {rec.to_rwy}
-                              </span>
-                            )}
-                            <span
-                              className={`rounded px-1 py-0.5 font-mono text-[10px] uppercase ${
-                                a.src === "man"
-                                  ? "bg-sky-500/15 text-sky-500"
-                                  : a.src === "star"
-                                    ? "bg-violet-500/15 text-violet-500"
-                                    : "bg-muted text-muted-foreground"
-                              }`}
-                            >
-                              {a.src}
-                            </span>
-                            <select
-                              disabled={!canEdit}
-                              value={a.src === "man" ? (a.rwy ?? "AUTO") : "AUTO"}
-                              onChange={(e) => onOverride(a.cs, e.target.value)}
-                              className="h-6 rounded border border-input bg-background px-1 font-mono text-[10px] outline-none disabled:opacity-50"
-                            >
-                              <option value="AUTO">AUTO</option>
-                              {activeIds.map((id) => (
-                                <option key={id} value={id}>
-                                  {id}
-                                </option>
-                              ))}
-                            </select>
-                          </div>
-                        </td>
-                      </tr>
-                    );
-                  })}
-                </tbody>
-              </table>
-              </div>
-            )}
+            <DataTable
+              label={`Arrivals for ${g.id}`}
+              columns={columns}
+              data={g.list}
+              getRowId={(a) => a.cs}
+              hideHeader
+              rowCap={25}
+              rowClassName={(a) => (recMap.has(a.cs) ? "bg-warning-soft" : undefined)}
+              empty="No arrivals"
+            />
           </div>
         ))}
       </div>
-    </div>
+    </section>
   );
 }

@@ -1,4 +1,4 @@
-import {Button, Modal, useChartTheme, usePrompt} from "@ois/ui";
+import {Button, Input, Modal, Select as UiSelect, useChartTheme, usePrompt} from "@ois/ui";
 import {Plus, X} from "lucide-react";
 
 import {AGGREGATES, CHART_TYPES, labelOf, type Series, TOP_OPTIONS} from "./chart-shared";
@@ -8,9 +8,7 @@ import type {ChartWidget as ChartWidgetT} from "./types";
 function Section({ title, children }: { title: string; children: React.ReactNode }) {
   return (
     <div className="mb-5">
-      <h3 className="mb-2 text-xs font-semibold uppercase tracking-wide text-muted-foreground">
-        {title}
-      </h3>
+      <h3 className="mb-2 text-sm font-semibold text-ink">{title}</h3>
       <div className="flex flex-col gap-3">{children}</div>
     </div>
   );
@@ -19,7 +17,7 @@ function Section({ title, children }: { title: string; children: React.ReactNode
 function Field({ label, children }: { label: string; children: React.ReactNode }) {
   return (
     <div className="flex flex-col gap-1">
-      <span className="text-xs text-muted-foreground">{label}</span>
+      <span className="text-xs font-semibold text-ink-2">{label}</span>
       {children}
     </div>
   );
@@ -35,13 +33,9 @@ function Select({
   children: React.ReactNode;
 }) {
   return (
-    <select
-      value={value}
-      onChange={(e) => onChange(e.target.value)}
-      className="h-8 rounded-md border border-input bg-background px-2 text-sm capitalize outline-none focus-visible:ring-2 focus-visible:ring-ring"
-    >
+    <UiSelect size="sm" value={value} onChange={(e) => onChange(e.target.value)} className="capitalize">
       {children}
-    </select>
+    </UiSelect>
   );
 }
 
@@ -127,13 +121,13 @@ export function ChartConfigPanel({
                   {icaos.map((ic) => (
                     <span
                       key={ic}
-                      className="flex items-center gap-1 rounded border bg-muted/40 px-2 py-0.5 font-mono text-xs"
+                      className="flex items-center gap-1 rounded-full border border-line bg-chip py-0.5 pl-2.5 pr-1.5 font-mono text-xs"
                     >
                       {ic}
                       <button
                         type="button"
                         onClick={() => removeAirport(ic)}
-                        className="text-muted-foreground hover:text-destructive"
+                        className="text-ink-3 hover:text-danger"
                         aria-label={`Remove ${ic}`}
                       >
                         <X className="size-3" />
@@ -187,6 +181,7 @@ export function ChartConfigPanel({
                       <label key={f.key} className="flex items-center gap-2 text-sm">
                         <input
                           type="checkbox"
+                          className="size-3.5 accent-brand"
                           checked={ySet.has(f.key)}
                           onChange={() => toggleY(f.key)}
                         />
@@ -240,7 +235,7 @@ export function ChartConfigPanel({
                         type="color"
                         value={widget.colors?.[s.key] ?? seriesAt(i)}
                         onChange={(e) => set({ colors: { ...widget.colors, [s.key]: e.target.value } })}
-                        className="h-6 w-8 cursor-pointer rounded border bg-transparent"
+                        className="h-6 w-8 cursor-pointer rounded-xs border border-line bg-transparent"
                         aria-label={`Colour for ${s.label}`}
                       />
                       <span className="truncate">{s.label}</span>
@@ -259,7 +254,7 @@ export function ChartConfigPanel({
                         type="color"
                         value={categoryColors[cat] ?? seriesAt(i)}
                         onChange={(e) => setCategoryColor(cat, e.target.value)}
-                        className="h-6 w-8 cursor-pointer rounded border bg-transparent"
+                        className="h-6 w-8 cursor-pointer rounded-xs border border-line bg-transparent"
                         aria-label={`Colour for ${cat}`}
                       />
                       <span className="truncate">{cat}</span>
@@ -267,7 +262,7 @@ export function ChartConfigPanel({
                         <button
                           type="button"
                           onClick={() => clearCategoryColor(cat)}
-                          className="ml-auto text-muted-foreground hover:text-destructive"
+                          className="ml-auto text-ink-3 hover:text-danger"
                           aria-label={`Reset ${cat} to its series colour`}
                         >
                           <X className="size-3.5" />
@@ -282,28 +277,28 @@ export function ChartConfigPanel({
 
           <Section title="Thresholds">
             {widget.normalize ? (
-              <p className="text-xs text-muted-foreground">Not available while normalized.</p>
+              <p className="text-xs text-ink-3">Not available while normalized.</p>
             ) : (
               <div className="flex flex-col gap-1.5">
                 {thresholds.map((t, i) => (
                   <div key={i} className="flex items-center gap-2">
-                    <input
+                    <Input
                       type="number"
                       value={t.value}
                       onChange={(e) => setThreshold(i, { value: Number(e.target.value) })}
-                      className="h-8 w-24 rounded-md border border-input bg-background px-2 text-sm outline-none focus-visible:ring-2 focus-visible:ring-ring"
+                      className="h-8 w-24 font-mono"
                     />
                     <input
                       type="color"
                       value={t.color}
                       onChange={(e) => setThreshold(i, { color: e.target.value })}
-                      className="h-8 w-8 cursor-pointer rounded border bg-transparent"
+                      className="h-8 w-8 cursor-pointer rounded-xs border border-line bg-transparent"
                       aria-label="Threshold colour"
                     />
                     <button
                       type="button"
                       onClick={() => removeThreshold(i)}
-                      className="ml-auto text-muted-foreground hover:text-destructive"
+                      className="ml-auto text-ink-3 hover:text-danger"
                       aria-label="Remove threshold"
                     >
                       <X className="size-4" />

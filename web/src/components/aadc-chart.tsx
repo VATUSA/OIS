@@ -118,7 +118,7 @@ export function AadcChart({
       <div className="flex flex-wrap gap-x-3 gap-y-1 text-xs text-ink-2">
         {keys.map((k) => (
           <span key={k.key} className="flex items-center gap-1">
-            <span className="inline-block size-2 rounded-[2px]" style={{ background: `var(--${k.color})` }} />
+            <span className="inline-block size-2 rounded-full" style={{ background: `var(--${k.color})` }} />
             {k.label}
           </span>
         ))}

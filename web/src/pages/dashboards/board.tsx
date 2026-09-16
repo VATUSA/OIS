@@ -1,7 +1,9 @@
+import {useMemo, useRef} from "react";
 import {useNavigate, useParams} from "@tanstack/react-router";
-import {Badge, Button, ConfirmButton, usePrompt, useToast} from "@ois/ui";
-import {ChevronLeft, Share2, Trash2} from "lucide-react";
+import {Button, ConfirmButton, StatusPill, usePrompt, useToast} from "@ois/ui";
+import {Share2, Trash2} from "lucide-react";
 
+import {usePageHeader} from "@/components/shell/page-meta";
 import {Dashboard} from "@/features/dashboard/Dashboard";
 import {
   useDashboard,
@@ -45,54 +47,46 @@ export function BoardViewPage() {
     navigate({ to: "/ops/my" });
   }
 
-  return (
-    <div className="flex flex-col gap-4">
+  // Header actions re-render only when the share state changes; handlers are read via a ref.
+  const handlers = useRef({ doRename, doShare, doDelete, unshare: () => unshare.mutate(boardId) });
+  handlers.current = { doRename, doShare, doDelete, unshare: () => unshare.mutate(boardId) };
+  const shared = !!board?.share_slug;
+  const actions = useMemo(
+    () => (
       <div className="flex flex-wrap items-center gap-2">
-        <Button
-          variant="ghost"
-          size="sm"
-          className="shrink-0"
-          onClick={() => navigate({ to: "/ops/my" })}
-        >
-          <ChevronLeft />
-          Boards
-        </Button>
-        <h1 className="min-w-0 flex-1 truncate text-xl font-semibold tracking-tight">
-          {board?.name ?? "…"}
-        </h1>
-        {board?.share_slug && (
-          <Badge variant="secondary" className="shrink-0 gap-1">
+        {shared && (
+          <StatusPill tone="brand">
             <Share2 className="size-3" />
             Shared
-          </Badge>
+          </StatusPill>
         )}
-        {/* Full-width action row on phones, inline on ≥sm. */}
-        <div className="flex w-full items-center gap-2 sm:w-auto">
-          <Button variant="secondary" size="sm" onClick={doRename}>
-            Rename
+        <Button variant="outline" size="sm" onClick={() => void handlers.current.doRename()}>
+          Rename
+        </Button>
+        <Button variant="outline" size="sm" onClick={() => void handlers.current.doShare()}>
+          <Share2 />
+          {shared ? "Copy link" : "Share"}
+        </Button>
+        {shared && (
+          <Button variant="ghost" size="sm" onClick={() => handlers.current.unshare()}>
+            Unshare
           </Button>
-          <Button variant="secondary" size="sm" onClick={doShare}>
-            <Share2 />
-            {board?.share_slug ? "Copy link" : "Share"}
-          </Button>
-          {board?.share_slug && (
-            <Button variant="ghost" size="sm" onClick={() => unshare.mutate(boardId)}>
-              Unshare
-            </Button>
-          )}
-          <ConfirmButton
-            size="icon"
-            variant="ghost"
-            className="ml-auto shrink-0 text-muted-foreground hover:text-destructive sm:ml-0"
-            warn="Delete this board?"
-            onConfirm={doDelete}
-          >
-            <Trash2 className="size-4" />
-          </ConfirmButton>
-        </div>
+        )}
+        <ConfirmButton
+          size="icon"
+          variant="ghost"
+          className="shrink-0 text-ink-3 hover:text-danger"
+          warn="Delete this board?"
+          aria-label="Delete board"
+          onConfirm={() => void handlers.current.doDelete()}
+        >
+          <Trash2 className="size-4" />
+        </ConfirmButton>
       </div>
-
-      <Dashboard boardId={boardId} />
-    </div>
+    ),
+    [shared],
   );
+  usePageHeader({ title: board?.name ?? "…", actions });
+
+  return <Dashboard boardId={boardId} />;
 }

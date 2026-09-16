@@ -43,7 +43,7 @@ export function WidgetBody({
       return <DividerWidgetView widget={widget} editing={editing} onChange={onUpdate} />;
     default:
       return (
-        <div className="p-4 text-sm text-muted-foreground">
+        <div className="p-4 text-sm text-ink-3">
           This widget type isn&apos;t available yet.
         </div>
       );
