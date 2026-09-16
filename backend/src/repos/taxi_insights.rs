@@ -527,8 +527,8 @@ mod tests {
     async fn fallback_tier_filter_matches_a_combo_by_its_startup_tier_alone(pool: PgPool) {
         let now = Utc::now();
         let gate = seed_gate(&pool, "KAAA").await;
-        // Pushback and taxi resolve at GateTypeRunway, but no sample carries a start-up figure (e.g.
-        // no-tug departures), so only start-up falls to Default.
+        // Pushback and taxi resolve at GateTypeRunway, but no sample carries a start-up figure —
+        // the observer couldn't measure it (#287) — so only start-up falls all the way to Default.
         let rows: Vec<TaxiObservationRow> = (0..5)
             .map(|i| TaxiObservationRow {
                 startup_sec: None,
@@ -542,7 +542,7 @@ mod tests {
             ..empty_est_filters("KAAA")
         };
         let (page, total) = fetch_taxi_estimates(&pool, &default_tier).await.unwrap();
-        assert_eq!(total, 1);
+        assert_eq!(total, 1, "matched by its start-up tier alone");
         assert_eq!(page[0].pushback_tier, EstimateTier::GateTypeRunway.as_str());
         assert_eq!(page[0].startup_tier, EstimateTier::Default.as_str());
     }

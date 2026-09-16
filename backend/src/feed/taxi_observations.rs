@@ -11,7 +11,8 @@
 //! [`CONFIRM_UPDATES`] consecutive updates contradict the current phase (plus [`BURST_MIN_M`] of
 //! accumulated travel for a movement burst, rejecting position jitter). At the ~15 s feed cadence a
 //! boundary resolves to the update it was first seen on; a push and start-up that both complete
-//! inside one poll can collapse into the taxi figure (the estimator's defaults cover that).
+//! inside one poll records both as unmeasured (`NULL`) rather than as zero — the estimator skips
+//! those rows, since roughly half of real pushes go undetected at this cadence (#287).
 //!
 //! A push is the first burst while it stays below [`GS_START`] and runs *against* the reported
 //! heading — a tug pushes the aircraft backwards, taxi runs along the nose (#285). Steps vote by
@@ -81,6 +82,10 @@ const PUSH_MAX_M: f64 = 150.0;
 /// How far a step's track must run from the reported heading to count as moving backwards (a tug
 /// push) rather than forwards (taxi). Well clear of 90°, which is where a nose-swinging push sits.
 const BACKWARDS_DEG: f64 = 120.0;
+/// How close to the reported heading a step must run to count as rolling out nose-first. Stricter
+/// than "not backwards": a sideways tow is neither a push nor a gate-out, so it proves nothing
+/// either way (#287).
+const FORWARDS_DEG: f64 = 60.0;
 /// Consecutive forward steps that end a push (the nose has turned into the taxi).
 const FLIP_CONFIRM_UPDATES: u32 = 2;
 /// Distance a step must cover to vote on ending a push — the per-step distance a confirmed burst
@@ -123,6 +128,9 @@ struct Run {
     /// a [`MOVE_M`] jitter step shouldn't outvote a tug step an order of magnitude longer.
     back_m: f64,
     fwd_m: f64,
+    /// Forward travel running close to the nose (within [`FORWARDS_DEG`]), as opposed to merely
+    /// "not backwards" (#287).
+    nose_first_m: f64,
 }
 
 impl Run {
@@ -134,17 +142,27 @@ impl Run {
         let margin = self.back_m - self.fwd_m;
         (margin.abs() > MOVE_M).then_some(margin > 0.0)
     }
+
+    /// Whether this burst is the aircraft rolling out of a stand under its own nose — the positive
+    /// evidence a recorded zero needs (#287). "Not a push" isn't enough: a burst we simply couldn't
+    /// classify, or one dragged sideways, says nothing about whether a tug was ever attached.
+    fn rolled_out_nose_first(&self) -> bool {
+        self.backwards() == Some(false) && self.nose_first_m > self.back_m
+    }
 }
 
-/// Whether a step from `from` to `to` runs against `hdg` — the aircraft moving backwards. `hdg` is
-/// the heading at the *start* of the step: sampling the end biases every comparison of a turning
-/// aircraft by roughly half the turn.
-fn moved_backwards(from: (f64, f64), to: (f64, f64), hdg: i64) -> bool {
+/// How far a step from `from` to `to` ran off `hdg`, folded onto 0..=180 so a heading either side of
+/// north compares correctly (e.g. 350 vs 000). `hdg` is the heading at the *start* of the step:
+/// sampling the end biases every comparison of a turning aircraft by roughly half the turn.
+fn off_heading_deg(from: (f64, f64), to: (f64, f64), hdg: i64) -> f64 {
     let track = bearing_deg([from.0, from.1], [to.0, to.1]);
     let off = (track - hdg as f64).abs() % 360.0;
-    // Fold onto 0..=180 so a heading either side of north compares correctly (e.g. 350 vs 000).
-    let off = if off > 180.0 { 360.0 - off } else { off };
-    off > BACKWARDS_DEG
+    if off > 180.0 { 360.0 - off } else { off }
+}
+
+/// Whether a step runs against the nose — the aircraft moving backwards.
+fn moved_backwards(from: (f64, f64), to: (f64, f64), hdg: i64) -> bool {
+    off_heading_deg(from, to, hdg) > BACKWARDS_DEG
 }
 
 struct Session {
@@ -171,6 +189,15 @@ struct Session {
     /// `(first forward step, how many have followed)` while pushing back — the candidate end of the
     /// push, confirmed at [`FLIP_CONFIRM_UPDATES`].
     fwd_flip: Option<(i64, u32)>,
+    /// A push happened (or may have) but its boundaries are unknown, so the phases are recorded as
+    /// unmeasured rather than as a real zero (#287).
+    push_missed: bool,
+    /// Whether this departure is *known* not to have pushed back, as opposed to one whose push we
+    /// couldn't measure — the difference between a stored `0` and a stored NULL (#287).
+    no_push: bool,
+    /// Whether the aircraft moved before the burst that became its taxi. Movement we saw but
+    /// couldn't confirm is how a real push hides, so it forfeits any claim of "never pushed".
+    stray_move: bool,
     base_alt: i64,
 }
 
@@ -179,8 +206,8 @@ impl Session {
     fn advance(&mut self, now_ms: i64, lat: f64, lon: f64, gs: i64, alt: i64, hdg: i64) {
         let step_m = gc_dist(self.last_lat, self.last_lon, lat, lon) * M_PER_NM;
         let moving = step_m >= MOVE_M;
-        let backwards =
-            moving && moved_backwards((self.last_lat, self.last_lon), (lat, lon), self.last_hdg);
+        let (prev_lat, prev_lon, step_hdg) = (self.last_lat, self.last_lon, self.last_hdg);
+        let backwards = moving && moved_backwards((prev_lat, prev_lon), (lat, lon), step_hdg);
         (self.last_lat, self.last_lon) = (lat, lon);
         self.last_hdg = hdg;
         let from_stand_m = gc_dist(self.first_lat, self.first_lon, lat, lon) * M_PER_NM;
@@ -223,6 +250,9 @@ impl Session {
         };
         let left_the_push = gs > GS_START || outran_push;
         if self.phase == Phase::PushingBack && left_the_push {
+            // A bound firing means the heading misled us for the whole burst; nothing it produced
+            // is trustworthy as a measurement (#287).
+            self.push_missed |= outran_push;
             // A stop still pending, or a recent one, says where the push ended; a stale one would
             // truncate it and book the rest of the push as taxi (#285).
             let pause = self
@@ -241,7 +271,12 @@ impl Session {
                     self.push_stop_ms = Some(now_ms);
                     self.taxi_start_ms = Some(now_ms);
                 }
-                None => self.taxi_start_ms = self.push_start_ms.take(),
+                // The burst was the taxi all along, or a bound fired on a push we can't trust: its
+                // phases are unknown, not zero.
+                None => {
+                    self.taxi_start_ms = self.push_start_ms.take();
+                    self.push_missed = true;
+                }
             }
             self.start_taxi(alt);
             return;
@@ -251,6 +286,11 @@ impl Session {
         }
 
         if moving == self.phase.is_moving() {
+            // A moving run abandoned before it confirmed: the aircraft moved and we can't say what
+            // that movement was, so it can no longer claim it never pushed (#287).
+            if self.phase == Phase::Parked && self.run.is_some_and(|r| r.dist_m > 0.0) {
+                self.stray_move = true;
+            }
             if let (Phase::PushingBack, Some(stop)) = (self.phase, self.run) {
                 self.last_pause = Some((stop.start_ms, now_ms));
             }
@@ -264,6 +304,7 @@ impl Session {
             peak_gs: 0,
             back_m: 0.0,
             fwd_m: 0.0,
+            nose_first_m: 0.0,
         });
         run.updates += 1;
         run.dist_m += step_m;
@@ -273,6 +314,9 @@ impl Session {
                 run.back_m += step_m;
             } else {
                 run.fwd_m += step_m;
+                if off_heading_deg((prev_lat, prev_lon), (lat, lon), step_hdg) < FORWARDS_DEG {
+                    run.nose_first_m += step_m;
+                }
             }
         }
         if run.updates < CONFIRM_UPDATES || (moving && run.dist_m < BURST_MIN_M) {
@@ -291,6 +335,10 @@ impl Session {
                 self.push_by_direction = run.backwards().is_some();
             }
             Phase::Parked | Phase::StartUp => {
+                // Rolling out nose-first from a stand, with nothing unexplained before it, is a
+                // departure that genuinely never pushed — the one shape that earns a stored zero.
+                // (From StartUp the push is already measured and this flag goes unread.)
+                self.no_push = run.rolled_out_nose_first() && !self.stray_move;
                 self.taxi_start_ms = Some(run.start_ms);
                 self.start_taxi(alt);
             }
@@ -329,11 +377,22 @@ impl Session {
         .or(self.push_stop_ms)
         .unwrap_or(self.first_seen_ms);
         let secs = |from: i64, to: i64| ((to - from) / 1000) as i32;
-        let pushback_sec = self
+        let measured = self
             .push_start_ms
             .zip(self.push_stop_ms)
-            .map(|(a, b)| secs(a, b));
-        let startup_sec = self.push_stop_ms.map(|stop| secs(stop, taxi_start));
+            .map(|(a, b)| (secs(a, b), secs(b, taxi_start)));
+        // A stored zero needs evidence the aircraft rolled out of a stand under its own nose, not
+        // merely the absence of a confirmed push — inferring it turned 36 of 44 live airliner
+        // departures into "no pushback" (#287).
+        let no_push = self.no_push && self.push_start_ms.is_none();
+        // A bound that fired says the heading misled us for this whole burst, so even boundaries it
+        // produced aren't a measurement.
+        let (pushback_sec, startup_sec) = match (measured, no_push) {
+            _ if self.push_missed => (None, None),
+            (Some((push, startup)), _) => (Some(push), Some(startup)),
+            (None, true) => (Some(0), Some(0)),
+            (None, false) => (None, None),
+        };
         (pushback_sec, startup_sec, (now_ms - taxi_start) / 1000)
     }
 }
@@ -388,17 +447,19 @@ fn process(
                 s.advance(now_ms, p.latitude, p.longitude, gs, alt, p.heading);
                 continue;
             }
-            let (pushback_sec, startup_sec, dur) = s.timings(now_ms);
-            // An implausible phase duration means the machine misread the session, so the whole
-            // observation goes rather than a metric being nulled: the estimator excludes a null
-            // from that metric's median, which would quietly keep the bad taxi figure.
+            let (mut pushback_sec, mut startup_sec, dur) = s.timings(now_ms);
+            // An implausible phase duration (e.g. a real push then a flow hold past the start-up
+            // bound) means those two phases were misread, so they're recorded as unmeasured — the
+            // taxi figure is still good, and `None` is exactly the signal the estimator skips.
             let in_bounds = |v: Option<i32>, (lo, hi): (f64, f64)| {
                 v.is_none_or(|v| (lo..=hi).contains(&(v as f64)))
             };
-            if (MIN_TAXI_SEC..=MAX_TAXI_SEC).contains(&dur)
-                && in_bounds(pushback_sec, PUSHBACK_BOUNDS_SEC)
-                && in_bounds(startup_sec, STARTUP_BOUNDS_SEC)
+            if !in_bounds(pushback_sec, PUSHBACK_BOUNDS_SEC)
+                || !in_bounds(startup_sec, STARTUP_BOUNDS_SEC)
             {
+                (pushback_sec, startup_sec) = (None, None);
+            }
+            if (MIN_TAXI_SEC..=MAX_TAXI_SEC).contains(&dur) {
                 out.push(RawObservation {
                     airport: dep.clone(),
                     lat: s.first_lat,
@@ -447,6 +508,9 @@ fn process(
                         push_by_direction: false,
                         last_hdg: p.heading,
                         fwd_flip: None,
+                        push_missed: false,
+                        no_push: false,
+                        stray_move: false,
                         base_alt: alt,
                     },
                 );
@@ -463,6 +527,23 @@ fn process(
         .retain(|cs, s| seen.contains(cs) && now_ms - s.first_seen_ms < SESSION_MAX_AGE_MS);
 
     out
+}
+
+/// A recorded zero says "this departure started at a stand and rolled straight out". Without a gate
+/// match we don't know it started at a stand — the session may have begun mid-departure (a restart,
+/// or a pilot connecting at the hold short), or the airport may have no gates on file — so the
+/// phases go back to unmeasured rather than voting a zero into the estimator's pool (#287). A
+/// measured push is kept either way.
+fn phases_at_stand(
+    pushback_sec: Option<i32>,
+    startup_sec: Option<i32>,
+    known_stand: bool,
+) -> (Option<i32>, Option<i32>) {
+    if known_stand || pushback_sec != Some(0) {
+        (pushback_sec, startup_sec)
+    } else {
+        (None, None)
+    }
 }
 
 /// Spawn the taxi-observation collector (DB-gated). Reuses OIS's shared feed snapshot, exactly
@@ -504,13 +585,16 @@ pub fn spawn_collector(
             let mut rows = Vec::with_capacity(raw.len());
             for r in raw {
                 let gates_here = by_icao.get(&r.airport).unwrap_or(&empty_gates);
+                let gate_id = super::flow::nearest_gate(gates_here, r.lat, r.lon);
+                let (pushback_sec, startup_sec) =
+                    phases_at_stand(r.pushback_sec, r.startup_sec, gate_id.is_some());
                 rows.push(TaxiObservationRow {
                     airport: r.airport,
-                    gate_id: super::flow::nearest_gate(gates_here, r.lat, r.lon),
+                    gate_id,
                     aircraft: r.aircraft,
                     runway: r.runway,
-                    pushback_sec: r.pushback_sec,
-                    startup_sec: r.startup_sec,
+                    pushback_sec,
+                    startup_sec,
                     taxi_sec: r.taxi_sec,
                     observed_at: r.observed_at,
                 });
@@ -682,6 +766,8 @@ mod tests {
         );
 
         assert_eq!(obs.len(), 1);
+        // The jitter never confirmed a burst, so we can't claim this departure never pushed:
+        // unexplained movement forfeits the zero (#287).
         assert_eq!(obs[0].pushback_sec, None);
         assert_eq!(obs[0].startup_sec, None);
         assert_eq!(obs[0].taxi_sec, 150); // 135 → 285
@@ -708,8 +794,8 @@ mod tests {
         );
 
         assert_eq!(obs.len(), 1);
-        assert_eq!(obs[0].pushback_sec, None);
-        assert_eq!(obs[0].startup_sec, None);
+        assert_eq!(obs[0].pushback_sec, Some(0));
+        assert_eq!(obs[0].startup_sec, Some(0));
         assert_eq!(obs[0].taxi_sec, 120); // 15 → 135
     }
 
@@ -879,7 +965,7 @@ mod tests {
         );
 
         assert_eq!(obs.len(), 1);
-        assert_eq!(obs[0].pushback_sec, None);
+        assert_eq!(obs[0].pushback_sec, Some(0));
         assert_eq!(obs[0].taxi_sec, 135); // 15 → 150
     }
 
@@ -902,7 +988,7 @@ mod tests {
         );
 
         assert_eq!(obs.len(), 1);
-        assert_eq!(obs[0].pushback_sec, None);
+        assert_eq!(obs[0].pushback_sec, Some(0));
         assert_eq!(obs[0].taxi_sec, 135);
     }
 
@@ -967,6 +1053,41 @@ mod tests {
     }
 
     #[test]
+    fn a_cap_firing_after_a_pause_still_records_the_phases_as_unmeasured() {
+        let mut st = TaxiObsState::default();
+        // A "push" that paused briefly and then ran 840 m: the pause gives boundaries, but the cap
+        // says the heading misled us for the whole burst, so nothing it produced is a measurement.
+        let mut track: Vec<(i64, f64, i64, i64, i64)> = vec![
+            (0, 0.0, 0, 0, 180),
+            (15, 60.0, 5, 0, 180),
+            (30, 120.0, 5, 0, 180),
+        ];
+        track.push((45, 180.0, 5, 0, 180));
+        track.push((60, 180.0, 0, 0, 180)); // brief stop, too short to confirm
+        for i in 1..=11 {
+            track.push((60 + i * 15, 180.0 + i as f64 * 60.0, 5, 0, 180));
+        }
+        for i in 0..3 {
+            track.push((240 + i * 15, 840.0, 0, 0, 180));
+        }
+        track.extend([
+            (300, 940.0, 12, 0, 0),
+            (315, 1040.0, 15, 0, 0),
+            (330, 1140.0, 15, 0, 0),
+            (500, 2500.0, 80, 400, 0),
+        ]);
+
+        let obs = run_track(&mut st, &track);
+
+        assert_eq!(obs.len(), 1);
+        assert_eq!(
+            obs[0].pushback_sec, None,
+            "a capped burst is never a measured push"
+        );
+        assert_eq!(obs[0].startup_sec, None);
+    }
+
+    #[test]
     fn a_push_that_never_ends_is_bounded_and_read_as_taxi() {
         let mut st = TaxiObsState::default();
         // A stale heading would otherwise hold the session in PushingBack for hours: PUSH_MAX_SEC
@@ -995,11 +1116,11 @@ mod tests {
     }
 
     #[test]
-    fn an_implausible_pushback_drops_the_whole_observation() {
+    fn an_implausible_pushback_is_recorded_as_unmeasured() {
         let mut st = TaxiObsState::default();
         // A burst the heading can't classify (alternating steps) stays a push on the distance proxy,
         // which has no duration cap — so it can shuffle on the stand for 23 minutes. The resulting
-        // pushback is past PUSHBACK_BOUNDS_SEC, so the observation goes rather than being nulled.
+        // pushback is past PUSHBACK_BOUNDS_SEC, so both phases are recorded as unmeasured.
         let mut track: Vec<(i64, f64, i64, i64, i64)> = vec![
             (0, 0.0, 0, 0, 0),
             (15, 6.0, 2, 0, 180),
@@ -1023,17 +1144,18 @@ mod tests {
 
         let obs = run_track(&mut st, &track);
 
-        assert!(
-            obs.is_empty(),
-            "a >1200 s pushback is not a believable observation"
-        );
+        // The row survives for its taxi figure, with the phases recorded as unmeasured — `None` is
+        // exactly what the estimator skips, where a zero would be a lie (#287).
+        assert_eq!(obs.len(), 1);
+        assert_eq!(obs[0].pushback_sec, None);
+        assert_eq!(obs[0].startup_sec, None);
     }
 
     #[test]
-    fn an_implausible_start_up_drops_the_whole_observation() {
+    fn an_implausible_start_up_is_recorded_as_unmeasured() {
         let mut st = TaxiObsState::default();
-        // A push, then a 20-minute wait before taxiing — past STARTUP_BOUNDS_SEC. Nulling the metric
-        // would read as "no push at all" to the estimator (#287), so the row goes instead.
+        // A push, then a 20-minute flow hold before taxiing — past STARTUP_BOUNDS_SEC, so both
+        // phases are unmeasurable even though the push itself was real.
         let mut track: Vec<(i64, f64, i64, i64, i64)> = vec![
             (0, 0.0, 0, 0, 180),
             (15, 20.0, 2, 0, 180),
@@ -1052,10 +1174,9 @@ mod tests {
 
         let obs = run_track(&mut st, &track);
 
-        assert!(
-            obs.is_empty(),
-            "a >900 s start-up is not a believable observation"
-        );
+        assert_eq!(obs.len(), 1);
+        assert_eq!(obs[0].pushback_sec, None);
+        assert_eq!(obs[0].startup_sec, None);
     }
 
     #[test]
@@ -1257,8 +1378,8 @@ mod tests {
         let obs = run_track(&mut st, &track);
 
         assert_eq!(obs.len(), 1);
-        assert_eq!(obs[0].pushback_sec, None);
-        assert_eq!(obs[0].startup_sec, None);
+        assert_eq!(obs[0].pushback_sec, Some(0));
+        assert_eq!(obs[0].startup_sec, Some(0));
         assert_eq!(obs[0].taxi_sec, 330); // 15 → 345, run-up included
     }
 
@@ -1284,8 +1405,8 @@ mod tests {
         );
 
         assert_eq!(obs.len(), 1);
-        assert_eq!(obs[0].pushback_sec, None);
-        assert_eq!(obs[0].startup_sec, None);
+        assert_eq!(obs[0].pushback_sec, Some(0));
+        assert_eq!(obs[0].startup_sec, Some(0));
         assert_eq!(obs[0].taxi_sec, 120); // 15 → 135
     }
 
@@ -1333,8 +1454,8 @@ mod tests {
         );
 
         assert_eq!(obs.len(), 1);
-        assert_eq!(obs[0].pushback_sec, None);
-        assert_eq!(obs[0].startup_sec, None);
+        assert_eq!(obs[0].pushback_sec, Some(0));
+        assert_eq!(obs[0].startup_sec, Some(0));
         assert_eq!(obs[0].taxi_sec, 105); // 15 → 120, the hold included
     }
 
@@ -1416,6 +1537,8 @@ mod tests {
         );
 
         assert_eq!(obs.len(), 1);
+        // The shuffle is movement we saw but couldn't classify, so the phases stay unmeasured
+        // rather than claiming a real zero (#287).
         assert_eq!(obs[0].pushback_sec, None);
         assert_eq!(obs[0].taxi_sec, 150); // 105 → 255
     }
@@ -1477,6 +1600,127 @@ mod tests {
         let obs = run_track(&mut st, &[(180, 900.0, 80, 600, 0)]);
         assert_eq!(obs.len(), 1);
         assert_eq!(obs[0].taxi_sec, 165); // 15 → 180
+    }
+
+    #[test]
+    fn a_sideways_tow_is_not_evidence_of_a_gate_out() {
+        let mut st = TaxiObsState::default();
+        // #287: dragged 90° across the nose — neither a push nor a roll-out, so it proves nothing
+        // and the phases stay unmeasured. Inferring "no push" from "not a push" recorded a zero
+        // for 36 of 44 live airliner departures.
+        let obs = run_track(
+            &mut st,
+            &[
+                (0, 0.0, 0, 0, 90),
+                (15, 40.0, 5, 0, 90),
+                (30, 80.0, 5, 0, 90),
+                (45, 120.0, 5, 0, 90),
+                (150, 900.0, 80, 400, 90),
+            ],
+        );
+
+        assert_eq!(obs.len(), 1);
+        assert_eq!(obs[0].pushback_sec, None);
+        assert_eq!(obs[0].startup_sec, None);
+    }
+
+    #[test]
+    fn movement_we_could_not_confirm_forfeits_the_zero() {
+        let mut st = TaxiObsState::default();
+        // #287 QA: two moving updates then a stop is below CONFIRM_UPDATES, so no push is recorded
+        // — but the tug did push. That departure must not then claim it never pushed.
+        let obs = run_track(
+            &mut st,
+            &[
+                (0, 0.0, 0, 0, 180),
+                (15, 20.0, 2, 0, 180),
+                (30, 40.0, 2, 0, 180),
+                (45, 40.0, 0, 0, 180),
+                (60, 40.0, 0, 0, 180),
+                (75, 40.0, 0, 0, 0),
+                // Rolls out nose-first, which on its own would have looked like a gate-out.
+                (90, 100.0, 8, 0, 0),
+                (105, 180.0, 12, 0, 0),
+                (120, 260.0, 15, 0, 0),
+                (300, 1500.0, 80, 400, 0),
+            ],
+        );
+
+        assert_eq!(obs.len(), 1);
+        assert_eq!(
+            obs[0].pushback_sec, None,
+            "a push we saw but couldn't measure is not a zero"
+        );
+        assert_eq!(obs[0].startup_sec, None);
+    }
+
+    #[test]
+    fn a_zero_needs_a_gate_but_a_measured_push_does_not() {
+        // #287: without a gate match we don't know the departure began at a stand — it may have
+        // started mid-departure — so a zero goes back to unmeasured. Anything measured is kept.
+        assert_eq!(phases_at_stand(Some(0), Some(0), true), (Some(0), Some(0)));
+        assert_eq!(phases_at_stand(Some(0), Some(0), false), (None, None));
+        assert_eq!(
+            phases_at_stand(Some(90), Some(45), false),
+            (Some(90), Some(45))
+        );
+        assert_eq!(phases_at_stand(None, None, false), (None, None));
+    }
+
+    #[test]
+    fn a_missed_push_and_a_real_no_push_are_recorded_differently() {
+        // #287: the estimator must be able to tell "this departure didn't push" (a real zero it can
+        // learn from) from "we couldn't measure a push" (skip this row). Only ~45% of real pushes
+        // are detected at the feed's cadence, so conflating them teaches a hub that nobody pushes.
+        let mut no_push = TaxiObsState::default();
+        let gate_out = run_track(
+            &mut no_push,
+            &[
+                (0, 0.0, 0, 0, 0),
+                (15, 40.0, 6, 0, 0),
+                (30, 80.0, 6, 0, 0),
+                (45, 120.0, 6, 0, 0),
+                (150, 900.0, 80, 400, 0),
+            ],
+        );
+        assert_eq!(
+            gate_out[0].pushback_sec,
+            Some(0),
+            "a real gate-out did not push"
+        );
+        assert_eq!(gate_out[0].startup_sec, Some(0));
+
+        // A push reclassified as taxi: a push may well have happened, but its boundaries are gone.
+        let mut reclassified = TaxiObsState::default();
+        let missed = run_track(
+            &mut reclassified,
+            &[
+                (0, 0.0, 0, 0, 0),
+                (15, 6.0, 2, 0, 180),
+                (30, 12.0, 2, 0, 0),
+                (45, 18.0, 2, 0, 180),
+                (60, 24.0, 2, 0, 0),
+                (75, 80.0, 12, 0, 0),
+                (180, 900.0, 80, 400, 0),
+            ],
+        );
+        assert_eq!(
+            missed[0].pushback_sec, None,
+            "a reclassified burst is unmeasured, not zero"
+        );
+        assert_eq!(missed[0].startup_sec, None);
+
+        // Airborne before any burst confirmed (push and start-up collapsed inside one poll).
+        let mut collapsed = TaxiObsState::default();
+        let quick = run_track(
+            &mut collapsed,
+            &[(0, 0.0, 0, 0, 0), (50, 900.0, 80, 400, 0)],
+        );
+        assert_eq!(
+            quick[0].pushback_sec, None,
+            "a one-poll departure is unmeasured"
+        );
+        assert_eq!(quick[0].startup_sec, None);
     }
 
     #[test]

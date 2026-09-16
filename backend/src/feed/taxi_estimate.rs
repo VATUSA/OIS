@@ -12,7 +12,13 @@ pub struct TaxiSample {
     pub gate_id: Option<String>,
     pub aircraft: Option<String>,
     pub runway: Option<String>,
+    /// `Some(0)` is a departure that genuinely did not push back — a no-tug gate-out, powerback or
+    /// GA departure — and counts toward the median. `None` means the observer couldn't measure the
+    /// phase (a push reclassified as taxi, one that collapsed inside a single poll, or a bound that
+    /// fired), so the row doesn't vote on it: only ~45% of real pushes are detected at the feed's
+    /// cadence, and counting those as zero would teach a hub that nobody pushes (#287).
     pub pushback_sec: Option<i32>,
+    /// `Some(0)`/`None` for the same reasons as [`Self::pushback_sec`].
     pub startup_sec: Option<i32>,
     pub taxi_sec: i32,
 }
@@ -106,8 +112,11 @@ fn clamp(value: f64, (min, max): (f64, f64)) -> f64 {
 }
 
 /// Walk the fallback ladder for one metric (`extract` pulls that metric's value out of a sample,
-/// `None` when the sample doesn't carry it), returning the first tier with `>= MIN_SAMPLES` values,
-/// median-and-bounds-clamped, or `default` if even the airport-wide tier is too sparse.
+/// `None` only when the sample can't speak to it at all), returning the first tier with
+/// `>= MIN_SAMPLES` values, median-and-bounds-clamped, or `default` if even the airport-wide tier is
+/// too sparse. A departure that genuinely didn't push stores a real `0` (#287), so an airport whose
+/// aircraft never push back learns that rather than falling back to the flat default; a push the
+/// observer merely *missed* is `None`, and that row doesn't vote.
 fn estimate_metric(
     samples: &[TaxiSample],
     gate_id: Option<&str>,
@@ -311,8 +320,8 @@ mod tests {
 
     #[test]
     fn pushback_and_taxi_walk_the_ladder_independently() {
-        // Enough taxi_sec values at the exact key, but only 1 of them carries a pushback figure —
-        // pushback should fall back on its own, while taxi still uses the specific tier.
+        // Enough taxi_sec values at the exact key, but only 1 carries a pushback figure (the rest
+        // were unmeasured, #287) — pushback falls back on its own while taxi stays specific.
         let mut samples: Vec<TaxiSample> = (0..MIN_SAMPLES)
             .map(|i| sample("A1", "B738", "27L", None, 85 + i as i32))
             .collect();
@@ -327,8 +336,8 @@ mod tests {
 
     #[test]
     fn startup_walks_the_ladder_independently_and_sums_into_the_allowance() {
-        // Every sample at the exact key carries push and taxi, but none carries a start-up figure
-        // (e.g. no-tug departures) — start-up alone falls to the airport-runway tier.
+        // Every sample at the exact key carries push and taxi, but none carries a start-up figure —
+        // start-up alone falls to the airport-runway tier, and the allowance sums all three.
         let mut samples: Vec<TaxiSample> = (0..MIN_SAMPLES)
             .map(|_| TaxiSample {
                 startup_sec: None,
@@ -342,5 +351,55 @@ mod tests {
         assert_eq!(est.startup.tier, EstimateTier::AirportRunway);
         assert_eq!(est.startup.value_sec, 90.0);
         assert_eq!(ground_allowance_sec(&est), 60.0 + 90.0 + 200.0);
+    }
+
+    /// #287: a no-tug field's observations all carry NULL push/start-up. Dropping them left the
+    /// estimator on its flat defaults forever, adding ~300 s of ground time nobody spends.
+    #[test]
+    fn an_airport_where_nothing_pushes_back_learns_zero_not_the_default() {
+        let samples: Vec<TaxiSample> = (0..MIN_SAMPLES + 3)
+            .map(|i| TaxiSample {
+                pushback_sec: Some(0),
+                startup_sec: Some(0),
+                ..sample("A1", "C172", "27L", None, 200 + i as i32)
+            })
+            .collect();
+
+        let est = estimate(&samples, Some("A1"), Some("C172"), Some("27L"));
+        assert_eq!(est.pushback.tier, EstimateTier::GateTypeRunway);
+        assert_eq!(est.pushback.value_sec, 0.0);
+        assert_eq!(est.startup.tier, EstimateTier::GateTypeRunway);
+        assert_eq!(est.startup.value_sec, 0.0);
+        // The whole ground allowance is the taxi figure — no phantom push or start-up.
+        assert_eq!(ground_allowance_sec(&est), est.taxi.value_sec);
+    }
+
+    /// #287: at a GA field the no-push answer is the majority, so it wins the median. The GA rows
+    /// use a different type from the pushing airliners, because the broader ladder tiers drop the
+    /// aircraft filter — that's where a wrong zero would do its damage.
+    #[test]
+    fn a_no_push_majority_outvotes_the_pushing_minority() {
+        let mut samples: Vec<TaxiSample> = (0..9)
+            .map(|_| TaxiSample {
+                pushback_sec: Some(0),
+                startup_sec: Some(0),
+                ..sample("A1", "C172", "27L", None, 200)
+            })
+            .collect();
+        samples.extend((0..4).map(|_| sample("B2", "B738", "27L", Some(150), 400)));
+
+        // The GA gate resolves its own tier: the majority there genuinely doesn't push.
+        let ga = estimate(&samples, Some("A1"), Some("C172"), Some("27L"));
+        assert_eq!(ga.pushback.tier, EstimateTier::GateTypeRunway);
+        assert_eq!(ga.pushback.value_sec, 0.0);
+        assert_eq!(ga.startup.value_sec, 0.0);
+        assert_eq!(ga.pushback.sample_count, 9);
+
+        // The airline gate is one sample short of its own tier, so it falls to the type-agnostic
+        // runway tier — where those 9 zeros are real observations of aircraft that don't push, not
+        // artifacts of undetected pushes, so the median may legitimately sit at 0.
+        let airline = estimate(&samples, Some("B2"), Some("B738"), Some("27L"));
+        assert_eq!(airline.pushback.tier, EstimateTier::AirportRunway);
+        assert_eq!(airline.pushback.sample_count, 13);
     }
 }
