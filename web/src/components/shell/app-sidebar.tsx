@@ -4,6 +4,7 @@ import {
   Avatar,
   AvatarFallback,
   Button,
+  ConfirmButton,
   DropdownMenu,
   DropdownMenuContent,
   DropdownMenuItem,
@@ -166,9 +167,16 @@ function UserGroup() {
           <Link to="/api-keys" />
         </SidebarItem>
       )}
-      <SidebarItem asChild icon={LogOut} label="Sign out" className="w-full text-left">
-        <button type="button" onClick={() => logout.mutate()} />
-      </SidebarItem>
+      {/* Confirms in place like a delete: first click arms it, a second click signs out. */}
+      <ConfirmButton
+        onConfirm={() => logout.mutate()}
+        warn="Sign out of OIS?"
+        title="Sign out"
+        className="h-auto w-full justify-start gap-2.5 rounded-sm px-2.5 py-2 text-[13px] font-normal [&_svg]:size-[17px] group-data-[collapsed]/sidebar:justify-center group-data-[collapsed]/sidebar:px-0"
+      >
+        <LogOut />
+        <span className="group-data-[collapsed]/sidebar:sr-only">Sign out</span>
+      </ConfirmButton>
     </SidebarGroup>
   );
 }
