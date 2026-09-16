@@ -20,10 +20,19 @@ export interface SurfaceDraft {
   extraRings?: LatLng[][];
 }
 
+/** Example name for each kind, shown as the name field's placeholder. */
+const NAME_HINT: Record<SurfaceKind, string> = {
+  gate: "A1",
+  taxiway: "Alpha",
+  ramp: "North apron",
+  runway: "01/19",
+};
+
 const HINT: Record<SurfaceKind, string> = {
   gate: "Click the map to place the gate.",
   taxiway: "Click to add corners of the taxiway pavement outline, then Close shape once you have at least 3.",
   ramp: "Click to add corners of the ramp/apron boundary, then Close shape once you have at least 3.",
+  runway: "Click to add corners of the runway pavement outline, then Close shape once you have at least 3.",
 };
 
 /**
@@ -81,7 +90,7 @@ export function SurfaceEditorPanel({
           autoFocus
           value={draft.name}
           onChange={(e) => onNameChange(e.target.value)}
-          placeholder={draft.kind === "gate" ? "A1" : draft.kind === "taxiway" ? "Alpha" : "North apron"}
+          placeholder={NAME_HINT[draft.kind]}
         />
       </label>
       {draft.kind === "ramp" && (

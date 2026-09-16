@@ -19,9 +19,9 @@ use crate::{
     errors::ApiError,
     handlers::events::{normalize_icao, owning_artcc},
     models::{
-        AirportGateBody, AirportRampAreaBody, AirportSurfaceBody, AirportTaxiwayBody,
-        FaaRepullResult, UpsertAirportGateRequest, UpsertAirportRampAreaRequest,
-        UpsertAirportTaxiwayRequest,
+        AirportGateBody, AirportRampAreaBody, AirportRunwayBody, AirportSurfaceBody,
+        AirportTaxiwayBody, FaaRepullResult, UpsertAirportGateRequest,
+        UpsertAirportRampAreaRequest, UpsertAirportRunwayRequest, UpsertAirportTaxiwayRequest,
     },
     repos::airport_surface as surface_repo,
     repos::faa_surface_seed as faa_surface_seed_repo,
@@ -63,9 +63,17 @@ fn validate_taxiway(req: &UpsertAirportTaxiwayRequest) -> Result<(), ApiError> {
     Ok(())
 }
 
-/// A polygon (ramp area or taxiway pavement): at least one ring, each with at least 3 points, every
-/// one of them a real `[lat, lon]`. An out-of-range point survives to the editor's `fitBounds` and
-/// parks that airport's map on a garbage viewport for everyone.
+/// A runway needs its designator (e.g. `01/19`) as the name, like a ramp area's name.
+fn validate_runway(req: &UpsertAirportRunwayRequest) -> Result<(), ApiError> {
+    if req.name.trim().is_empty() || req.name.len() > 64 || !valid_rings(&req.rings) {
+        return Err(ApiError::BadRequest);
+    }
+    Ok(())
+}
+
+/// A polygon (ramp area, taxiway or runway pavement): at least one ring, each with at least 3
+/// points, every one of them a real `[lat, lon]`. An out-of-range point survives to the editor's
+/// `fitBounds` and parks that airport's map on a garbage viewport for everyone.
 fn valid_rings(rings: &[Vec<[f64; 2]>]) -> bool {
     !rings.is_empty()
         && rings.iter().all(|r| {
@@ -120,6 +128,7 @@ pub async fn get_airport_surface(
     let mut gates = surface_repo::list_gates(pool, &icao).await?;
     let mut ramp_areas = surface_repo::list_ramp_areas(pool, &icao).await?;
     let mut taxiways = surface_repo::list_taxiways(pool, &icao).await?;
+    let mut runways = surface_repo::list_runways(pool, &icao).await?;
     for g in &mut gates {
         g.editable = editable;
     }
@@ -129,10 +138,14 @@ pub async fn get_airport_surface(
     for t in &mut taxiways {
         t.editable = editable;
     }
+    for r in &mut runways {
+        r.editable = editable;
+    }
     Ok(Json(AirportSurfaceBody {
         gates,
         ramp_areas,
         taxiways,
+        runways,
     }))
 }
 
@@ -367,6 +380,82 @@ pub async fn delete_airport_taxiway(
     }
 }
 
+// ---- runways -----------------------------------------------------------------
+
+#[utoipa::path(
+    post, path = "/api/v1/airports/{icao}/runways", tag = "events",
+    params(("icao" = String, Path)), request_body = UpsertAirportRunwayRequest,
+    responses((status = 200, body = AirportRunwayBody), (status = 400), (status = 401), (status = 403))
+)]
+pub async fn create_airport_runway(
+    State(state): State<AppState>,
+    _permission: RequirePermission<FlowSurfaceDataUpdate>,
+    Extension(current_user): Extension<Option<CurrentUser>>,
+    Extension(current_api_key): Extension<Option<CurrentApiKey>>,
+    Path(icao): Path<String>,
+    Json(req): Json<UpsertAirportRunwayRequest>,
+) -> Result<Json<AirportRunwayBody>, ApiError> {
+    let principal = Principal::require(current_user.as_ref(), current_api_key.as_ref())?;
+    let pool = state.db.as_ref().ok_or(ApiError::ServiceUnavailable)?;
+    let icao = normalize_icao(&icao).ok_or(ApiError::BadRequest)?;
+    validate_runway(&req)?;
+    require_edit(&state, &principal, &icao).await?;
+
+    let mut row = surface_repo::create_runway(pool, &icao, &req, principal.user_id()).await?;
+    row.editable = true;
+    Ok(Json(row))
+}
+
+#[utoipa::path(
+    put, path = "/api/v1/airports/{icao}/runways/{id}", tag = "events",
+    params(("icao" = String, Path), ("id" = String, Path)), request_body = UpsertAirportRunwayRequest,
+    responses((status = 200, body = AirportRunwayBody), (status = 400), (status = 401), (status = 403), (status = 404))
+)]
+pub async fn update_airport_runway(
+    State(state): State<AppState>,
+    _permission: RequirePermission<FlowSurfaceDataUpdate>,
+    Extension(current_user): Extension<Option<CurrentUser>>,
+    Extension(current_api_key): Extension<Option<CurrentApiKey>>,
+    Path((icao, id)): Path<(String, String)>,
+    Json(req): Json<UpsertAirportRunwayRequest>,
+) -> Result<Json<AirportRunwayBody>, ApiError> {
+    let principal = Principal::require(current_user.as_ref(), current_api_key.as_ref())?;
+    let pool = state.db.as_ref().ok_or(ApiError::ServiceUnavailable)?;
+    let icao = normalize_icao(&icao).ok_or(ApiError::BadRequest)?;
+    validate_runway(&req)?;
+    require_edit(&state, &principal, &icao).await?;
+
+    let mut row = surface_repo::update_runway(pool, &id, &icao, &req, principal.user_id())
+        .await?
+        .ok_or(ApiError::NotFound)?;
+    row.editable = true;
+    Ok(Json(row))
+}
+
+#[utoipa::path(
+    delete, path = "/api/v1/airports/{icao}/runways/{id}", tag = "events",
+    params(("icao" = String, Path), ("id" = String, Path)),
+    responses((status = 204), (status = 401), (status = 403), (status = 404))
+)]
+pub async fn delete_airport_runway(
+    State(state): State<AppState>,
+    _permission: RequirePermission<FlowSurfaceDataUpdate>,
+    Extension(current_user): Extension<Option<CurrentUser>>,
+    Extension(current_api_key): Extension<Option<CurrentApiKey>>,
+    Path((icao, id)): Path<(String, String)>,
+) -> Result<StatusCode, ApiError> {
+    let principal = Principal::require(current_user.as_ref(), current_api_key.as_ref())?;
+    let pool = state.db.as_ref().ok_or(ApiError::ServiceUnavailable)?;
+    let icao = normalize_icao(&icao).ok_or(ApiError::BadRequest)?;
+    require_edit(&state, &principal, &icao).await?;
+
+    if surface_repo::delete_runway(pool, &id, &icao).await? {
+        Ok(StatusCode::NO_CONTENT)
+    } else {
+        Err(ApiError::NotFound)
+    }
+}
+
 // ---- FAA re-pull (#232) ------------------------------------------------------
 
 #[utoipa::path(
@@ -393,6 +482,7 @@ pub async fn repull_faa_surface(
     Ok(Json(FaaRepullResult {
         taxiways_inserted: summary.taxiways_inserted,
         ramps_inserted: summary.ramps_inserted,
+        runways_inserted: summary.runways_inserted,
         osm_taxiways_retired: summary.osm_taxiways_retired,
         osm_ramps_retired: summary.osm_ramps_retired,
     }))
@@ -583,6 +673,91 @@ mod tests {
             surface_repo::delete_taxiway(&pool, &created.id, "KTST")
                 .await
                 .unwrap()
+        );
+    }
+
+    #[test]
+    fn a_runway_needs_a_designator_and_a_polygon() {
+        let ring = vec![vec![[38.85, -77.04], [38.86, -77.05], [38.85, -77.05]]];
+        let runway = |name: &str, rings: Vec<Vec<[f64; 2]>>| UpsertAirportRunwayRequest {
+            name: name.to_string(),
+            rings,
+        };
+        assert!(validate_runway(&runway("01/19", ring.clone())).is_ok());
+        assert!(validate_runway(&runway("  ", ring)).is_err());
+        assert!(
+            validate_runway(&runway(
+                "01/19",
+                vec![vec![[38.85, -77.04], [38.86, -77.05]]]
+            ))
+            .is_err()
+        );
+    }
+
+    #[sqlx::test]
+    async fn runway_crud_round_trip(pool: PgPool) {
+        let user = seed_user(&pool).await;
+        let mut req = UpsertAirportRunwayRequest {
+            name: "01/19".to_string(),
+            rings: vec![vec![
+                [38.85, -77.04],
+                [38.86, -77.05],
+                [38.85, -77.05],
+                [38.85, -77.04],
+            ]],
+        };
+        let created = surface_repo::create_runway(&pool, "KTST", &req, &user)
+            .await
+            .unwrap();
+        assert_eq!(created.rings.0, req.rings);
+        assert_eq!(created.source, "manual");
+
+        req.name = "01L/19R".to_string();
+        let updated = surface_repo::update_runway(&pool, &created.id, "KTST", &req, &user)
+            .await
+            .unwrap()
+            .expect("the runway exists");
+        assert_eq!(updated.name, "01L/19R");
+        // Scoped by airport: the same id under another ICAO isn't found.
+        assert!(
+            surface_repo::update_runway(&pool, &created.id, "KXXX", &req, &user)
+                .await
+                .unwrap()
+                .is_none()
+        );
+
+        assert_eq!(
+            surface_repo::list_runways(&pool, "KTST")
+                .await
+                .unwrap()
+                .len(),
+            1
+        );
+        // Also scoped by airport on delete: knowing the id isn't enough to remove another
+        // airport's runway, which is all an editor at KXXX would hold.
+        assert!(
+            !surface_repo::delete_runway(&pool, &created.id, "KXXX")
+                .await
+                .unwrap()
+        );
+        assert_eq!(
+            surface_repo::list_runways(&pool, "KTST")
+                .await
+                .unwrap()
+                .len(),
+            1
+        );
+
+        assert!(
+            surface_repo::delete_runway(&pool, &created.id, "KTST")
+                .await
+                .unwrap()
+        );
+        assert!(
+            surface_repo::list_runways(&pool, "KTST")
+                .await
+                .unwrap()
+                .is_empty()
         );
     }
 

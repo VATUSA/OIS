@@ -39,7 +39,7 @@ function RepullFaaButton({ icao }: { icao: string }) {
     const ok = await confirm({
       title: `Re-pull ${icao} from FAA?`,
       description:
-        "Replaces every FAA-sourced taxiway and ramp at this airport with the bundled FAA data. Edits made to those rows are lost, and any you deleted come back. Hand-drawn (manual) geometry isn’t touched.",
+        "Replaces every FAA-sourced taxiway, ramp and runway at this airport with the bundled FAA data. Edits made to those rows are lost, and any you deleted come back. Hand-drawn (manual) geometry isn’t touched.",
       confirmText: "Re-pull",
     });
     if (ok) repull.mutate();
@@ -73,7 +73,12 @@ function AirportSurfaceEditor({ icao }: { icao: string }) {
     );
   }
 
-  const rows = [...surface.data.gates, ...surface.data.ramp_areas, ...surface.data.taxiways];
+  const rows = [
+    ...surface.data.gates,
+    ...surface.data.ramp_areas,
+    ...surface.data.taxiways,
+    ...surface.data.runways,
+  ];
   const editable = rows[0]?.editable ?? hasPermission(me, "flow.surface_data.update");
 
   return (
@@ -122,8 +127,9 @@ export function AirportSurfacePage() {
       <div>
         <h1 className="text-2xl font-semibold tracking-tight">Airport surface data</h1>
         <p className="text-muted-foreground">
-          Draw and label gates/parking positions, ramp/apron areas, and taxiways for an airport.
-          Runways are shown read-only here — edit those on the runway balancer.
+          Draw and label gates/parking positions, ramp/apron areas, taxiways, and runway pavement for
+          an airport. Runway <em>ends</em> — headings, lengths and balancer configuration — live on
+          the runway balancer, not here.
         </p>
       </div>
       <div className="flex flex-wrap items-end gap-3">

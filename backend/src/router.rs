@@ -276,7 +276,7 @@ pub fn build_router(state: AppState) -> Router {
             "/api/v1/forecast/{icao}",
             get(airport_configs::forecast_wind),
         )
-        // Editable airport surface geometry (gates, ramp/apron areas, taxiways) for the #164 epic
+        // Editable airport surface geometry (gates, ramp/apron areas, taxiways, runways) for #164
         .route(
             "/api/v1/airports/{icao}/surface",
             get(airport_surface::get_airport_surface),
@@ -306,6 +306,15 @@ pub fn build_router(state: AppState) -> Router {
             "/api/v1/airports/{icao}/taxiways/{id}",
             put(airport_surface::update_airport_taxiway)
                 .delete(airport_surface::delete_airport_taxiway),
+        )
+        .route(
+            "/api/v1/airports/{icao}/runways",
+            post(airport_surface::create_airport_runway),
+        )
+        .route(
+            "/api/v1/airports/{icao}/runways/{id}",
+            put(airport_surface::update_airport_runway)
+                .delete(airport_surface::delete_airport_runway),
         )
         .route(
             "/api/v1/airports/{icao}/surface/repull-faa",
