@@ -128,7 +128,8 @@ function IdentitySwitcher({ collapsed }: { collapsed: boolean }) {
           )}
         </button>
       </DropdownMenuTrigger>
-      <DropdownMenuContent align="start">
+      {/* Expanded, the menu matches the sidebar's width; collapsed, it keeps its natural width. */}
+      <DropdownMenuContent align="start" className={collapsed ? undefined : "w-[var(--radix-dropdown-menu-trigger-width)]"}>
         <UserMenuItems me={me} />
       </DropdownMenuContent>
     </DropdownMenu>
