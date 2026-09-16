@@ -607,5 +607,7 @@ declare module "@tanstack/react-router" {
     router: typeof router;
   }
   /** Per-route shell meta read by the AppShell (width tier, title, subtitle, icon, views). */
+  // An empty interface is the only way to merge RouteMeta into the router's declared type.
+  // eslint-disable-next-line @typescript-eslint/no-empty-object-type
   interface StaticDataRouteOption extends RouteMeta {}
 }

@@ -10,7 +10,8 @@
     "preview": "vite preview --port 4173",
     "typecheck": "tsc --noEmit && tsc -p tsconfig.node.json --noEmit",
     "test": "vitest run",
-    "codegen": "pnpm --filter @ois/api-client codegen"
+    "codegen": "pnpm --filter @ois/api-client codegen",
+    "lint": "eslint src"
   },
   "devDependencies": {
     "@tailwindcss/vite": "^4.3.3",

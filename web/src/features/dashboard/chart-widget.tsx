@@ -8,7 +8,7 @@ import {scaleBand, scaleLinear, scalePoint} from "d3-scale";
 import {Settings2} from "lucide-react";
 
 import {ChartConfigPanel} from "./chart-config-panel";
-import {AGGREGATES, type ChartType, labelOf, type Series} from "./chart-shared";
+import {type ChartType, labelOf, type Series} from "./chart-shared";
 import {facilityAirports, useFacilityDirectory} from "@/lib/facilities";
 import {AIRPORT_KEY, type DataSource, DATA_SOURCES_BY_ID, type Row} from "./sources";
 import type {ChartAggregate, ChartThreshold, ChartWidget as ChartWidgetT} from "./types";

@@ -97,7 +97,6 @@ function useTaggedRows<T>(
   pick: (data: T) => readonly unknown[],
 ): Row[] {
   const sig = `${list.join(",")}|${qs.map((q) => q?.dataUpdatedAt ?? 0).join(",")}`;
-  // eslint-disable-next-line react-hooks/exhaustive-deps
   return useMemo(
     () =>
       list.flatMap((ic, i) => {

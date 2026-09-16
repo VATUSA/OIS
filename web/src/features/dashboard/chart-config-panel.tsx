@@ -1,7 +1,7 @@
 import {Button, Input, Modal, Select as UiSelect, useChartTheme, usePrompt} from "@ois/ui";
 import {Plus, X} from "lucide-react";
 
-import {AGGREGATES, CHART_TYPES, labelOf, type Series, TOP_OPTIONS} from "./chart-shared";
+import {AGGREGATES, CHART_TYPES, type Series, TOP_OPTIONS} from "./chart-shared";
 import {AIRPORT_KEY, type DataSource} from "./sources";
 import type {ChartWidget as ChartWidgetT} from "./types";
 

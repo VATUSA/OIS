@@ -68,7 +68,6 @@ export function FacilityCombobox({
   return (
     <div className={cn("relative w-72", className)}>
       <Input
-        // eslint-disable-next-line jsx-a11y/no-autofocus
         autoFocus={autoFocus}
         className={cn("font-mono uppercase", inputClassName)}
         placeholder={placeholder}

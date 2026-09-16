@@ -33,6 +33,7 @@
     "vitest": "^4.1.11"
   },
   "scripts": {
-    "test": "vitest run"
+    "test": "vitest run",
+    "lint": "eslint src"
   }
 }

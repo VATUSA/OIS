@@ -101,7 +101,6 @@ export function RoutePopup({
     place();
     window.addEventListener("resize", place);
     return () => window.removeEventListener("resize", place);
-    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [minimized]);
 
   if (minimized) {
