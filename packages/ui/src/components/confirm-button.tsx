@@ -17,7 +17,7 @@ export type ConfirmButtonProps = Omit<ButtonProps, "onClick"> & {
 
 /**
  * A destructive button that confirms in place instead of via a browser popup: the first click
- * arms it (turns amber + fires a warning toast), a second click within `timeoutMs` runs the
+ * arms it (turns warning-toned + fires a warning toast), a second click within `timeoutMs` runs the
  * action (button flashes red), and no second click reverts it to its default look. Drop-in for
  * any delete/remove control — the surrounding mutation still shows the final success/error toast.
  */
@@ -67,7 +67,7 @@ export function ConfirmButton({
         className,
         // Applied last so the armed cue wins over any caller className.
         state === "armed" &&
-          "border-amber-500 text-amber-600 hover:bg-amber-500/10 dark:text-amber-400",
+          "border-warning text-warning hover:bg-warning-soft",
       )}
       {...rest}
     >

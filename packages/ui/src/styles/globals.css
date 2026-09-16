@@ -13,8 +13,8 @@
         border-line, text-brand, rounded-lg, …).
 
    Rules (see DESIGN.md): one brand accent, no gradients, no chrome shadows, hairlines,
-   continuous corners, 400/600/700 type ladder, mono for data. Fonts are loaded by the app
-   entry (Inter for UI, JetBrains Mono for data). */
+   continuous corners, 400/600/700 type ladder, mono for data. Fonts are self-hosted via
+   @fontsource and imported by the app entry (Inter for UI, JetBrains Mono for data). */
 
 @custom-variant dark (&:is(.dark *));
 
@@ -45,6 +45,18 @@
   --success: #1f9d63; --success-soft: rgb(31 157 99 / 0.12);
   --warning: #a9740a; --warning-soft: rgb(169 116 10 / 0.12);
   --danger:  #d64545; --danger-soft:  rgb(214 69 69 / 0.12);
+
+  /* domain colours (DESIGN.md § Domain tokens) — aviation meaning, not decoration */
+  --flight-airborne: #1f9d63; --flight-ground: #a9740a; --flight-proposed: #1b8fb0; --flight-arrived: #9898a2;
+  --cat-vfr: #1f9d63; --cat-mvfr: #3565d6; --cat-ifr: #d64545; --cat-lifr: #b14fcf;
+  --level-ok: var(--success); --level-watch: var(--warning); --level-over: var(--danger);
+  --series-1: #1b8fb0; --series-2: #1f9d63; --series-3: #b7791f; --series-4: #8e5bd0;
+  --series-5: #d0556b; --series-6: #3565d6; --series-7: #c2621a; --series-8: #5f8f2a;
+  --map-aircraft: #283c5a; --map-highlight: #0e8fc2; --map-route: #7c5cd6;
+  --map-boundary: rgb(90 100 120 / 0.47); --map-label: #141923;
+  --map-label-bg: rgb(255 255 255 / 0.75); --map-waypoint-bg: rgb(255 255 255 / 0.82);
+  --map-apron: #e3e7ee; --map-taxiway: #c4cad4; --map-runway: #98a1b2;
+  --atc-del: #3565d6; --atc-gnd: #1f9d63; --atc-twr: #d64545; --atc-app: #c2621a; --atc-ctr: #13958a; --atc-atis: #a9740a;
 
   /* --- shadcn/ui semantic mapping (every component reads these) --- */
   --background: var(--ground);
@@ -90,6 +102,17 @@
   --warning: #efc14d; --warning-soft: rgb(239 193 77 / 0.13);
   --danger:  #fb6b6b; --danger-soft:  rgb(251 107 107 / 0.13);
 
+  --flight-airborne: #43d089; --flight-ground: #efc14d; --flight-proposed: #5ec8e5; --flight-arrived: #6b6b74;
+  --cat-vfr: #43d089; --cat-mvfr: #7b9dff; --cat-ifr: #fb6b6b; --cat-lifr: #d77cf0;
+  --level-ok: var(--success); --level-watch: var(--warning); --level-over: var(--danger);
+  --series-1: #5ec8e5; --series-2: #43d089; --series-3: #efc14d; --series-4: #c792ea;
+  --series-5: #f07178; --series-6: #7b9dff; --series-7: #f5a83d; --series-8: #a3d977;
+  --map-aircraft: #ffbe46; --map-highlight: #38bdf8; --map-route: #a78bfa;
+  --map-boundary: rgb(130 140 160 / 0.43); --map-label: #e6ebf5;
+  --map-label-bg: rgb(10 12 16 / 0.71); --map-waypoint-bg: rgb(10 12 16 / 0.78);
+  --map-apron: #20242e; --map-taxiway: #4a5162; --map-runway: #8a93a6;
+  --atc-del: #60a5fa; --atc-gnd: #4ade80; --atc-twr: #f87171; --atc-app: #fb923c; --atc-ctr: #2dd4bf; --atc-atis: #facc15;
+
   --background: var(--ground);
   --foreground: var(--ink);
   --card-foreground: var(--ink);
@@ -121,7 +144,7 @@
   --radius-lg: 16px;
   --radius-xl: 20px;
 
-  --font-sans: "Inter", system-ui, -apple-system, sans-serif;
+  --font-sans: "Inter Variable", "Inter", system-ui, -apple-system, sans-serif;
   --font-mono: "JetBrains Mono", ui-monospace, monospace;
 
   /* shadcn semantic colours */
@@ -166,6 +189,43 @@
   --color-warning-soft: var(--warning-soft);
   --color-danger: var(--danger);
   --color-danger-soft: var(--danger-soft);
+
+  /* domain colours */
+  --color-flight-airborne: var(--flight-airborne);
+  --color-flight-ground: var(--flight-ground);
+  --color-flight-proposed: var(--flight-proposed);
+  --color-flight-arrived: var(--flight-arrived);
+  --color-cat-vfr: var(--cat-vfr);
+  --color-cat-mvfr: var(--cat-mvfr);
+  --color-cat-ifr: var(--cat-ifr);
+  --color-cat-lifr: var(--cat-lifr);
+  --color-level-ok: var(--level-ok);
+  --color-level-watch: var(--level-watch);
+  --color-level-over: var(--level-over);
+  --color-series-1: var(--series-1);
+  --color-series-2: var(--series-2);
+  --color-series-3: var(--series-3);
+  --color-series-4: var(--series-4);
+  --color-series-5: var(--series-5);
+  --color-series-6: var(--series-6);
+  --color-series-7: var(--series-7);
+  --color-series-8: var(--series-8);
+  --color-map-aircraft: var(--map-aircraft);
+  --color-map-highlight: var(--map-highlight);
+  --color-map-route: var(--map-route);
+  --color-map-boundary: var(--map-boundary);
+  --color-map-label: var(--map-label);
+  --color-map-label-bg: var(--map-label-bg);
+  --color-map-waypoint-bg: var(--map-waypoint-bg);
+  --color-map-apron: var(--map-apron);
+  --color-map-taxiway: var(--map-taxiway);
+  --color-map-runway: var(--map-runway);
+  --color-atc-del: var(--atc-del);
+  --color-atc-gnd: var(--atc-gnd);
+  --color-atc-twr: var(--atc-twr);
+  --color-atc-app: var(--atc-app);
+  --color-atc-ctr: var(--atc-ctr);
+  --color-atc-atis: var(--atc-atis);
 }
 
 @layer base {
@@ -177,5 +237,9 @@
     color: var(--color-foreground);
     font-family: var(--font-sans);
     -webkit-font-smoothing: antialiased;
+  }
+  /* DESIGN.md rule 7: data is mono with tabular figures so columns line up. */
+  .font-mono {
+    font-variant-numeric: tabular-nums;
   }
 }

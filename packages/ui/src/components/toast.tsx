@@ -25,18 +25,18 @@ const ToastContext = React.createContext<ToastContextValue | null>(null);
 
 const VARIANTS: Record<
   ToastVariant,
-  { icon: React.ComponentType<{ className?: string }>; accent: string; icon_color: string }
+  { icon: React.ComponentType<{ className?: string }>; icon_color: string }
 > = {
-  success: { icon: CheckCircle2, accent: "border-l-emerald-500", icon_color: "text-emerald-500" },
-  error: { icon: XCircle, accent: "border-l-destructive", icon_color: "text-destructive" },
-  warning: { icon: AlertTriangle, accent: "border-l-amber-500", icon_color: "text-amber-500" },
-  info: { icon: Info, accent: "border-l-sky-500", icon_color: "text-sky-500" },
+  success: { icon: CheckCircle2, icon_color: "text-success" },
+  error: { icon: XCircle, icon_color: "text-danger" },
+  warning: { icon: AlertTriangle, icon_color: "text-warning" },
+  info: { icon: Info, icon_color: "text-brand-ink" },
 };
 
 function ToastCard({ t, onDismiss }: { t: Toast; onDismiss: (id: string) => void }) {
   const [shown, setShown] = React.useState(false);
   const timer = React.useRef<number | undefined>(undefined);
-  const { icon: Icon, accent, icon_color } = VARIANTS[t.variant];
+  const { icon: Icon, icon_color } = VARIANTS[t.variant];
 
   const close = React.useCallback(() => {
     window.clearTimeout(timer.current);
@@ -58,14 +58,13 @@ function ToastCard({ t, onDismiss }: { t: Toast; onDismiss: (id: string) => void
     <div
       role="status"
       className={cn(
-        "pointer-events-auto flex w-80 max-w-[90vw] items-start gap-3 rounded-lg border border-l-4 bg-background p-3 shadow-lg transition-all duration-200",
-        accent,
+        "pointer-events-auto flex w-80 max-w-[90vw] items-start gap-3 rounded-md border border-line bg-panel-2 p-3 transition-all duration-200",
         shown ? "translate-x-0 opacity-100" : "translate-x-4 opacity-0",
       )}
     >
       <Icon className={cn("mt-0.5 size-5 shrink-0", icon_color)} />
       <div className="min-w-0 flex-1">
-        <p className="text-sm font-medium text-foreground">{t.title}</p>
+        <p className="text-sm font-semibold text-foreground">{t.title}</p>
         {t.description && (
           <p className="mt-0.5 text-sm text-muted-foreground">{t.description}</p>
         )}

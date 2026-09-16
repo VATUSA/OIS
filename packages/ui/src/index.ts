@@ -43,3 +43,11 @@ export {
 } from "./components/toast";
 export { ThemeProvider, useTheme } from "./theme/theme-provider";
 export { ThemeToggle } from "./theme/theme-toggle";
+export {
+  readToken,
+  parseColor,
+  tokenRgba,
+  useTokens,
+  useTokenRgba,
+  type Rgba,
+} from "./lib/tokens";

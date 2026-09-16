@@ -103,7 +103,7 @@ export function DialogProvider({ children }: { children: React.ReactNode }) {
             role="dialog"
             aria-modal="true"
             aria-label={request.opts.title}
-            className="relative w-full max-w-sm rounded-lg border bg-background p-5 shadow-xl"
+            className="relative w-full max-w-sm rounded-lg border border-line bg-panel p-5"
           >
             <h2 className="text-base font-semibold text-foreground">
               {request.opts.title}
@@ -116,7 +116,7 @@ export function DialogProvider({ children }: { children: React.ReactNode }) {
             {request.kind === "prompt" && (
               <div className="mt-3 flex flex-col gap-1">
                 {request.opts.label && (
-                  <label className="text-xs font-medium uppercase tracking-wide text-muted-foreground">
+                  <label className="text-xs font-semibold uppercase tracking-wide text-muted-foreground">
                     {request.opts.label}
                   </label>
                 )}
