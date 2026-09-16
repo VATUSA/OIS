@@ -14,6 +14,7 @@ import {
   Sidebar,
   SidebarGroup,
   SidebarItem,
+  SidebarTooltip,
   ThemeToggle,
   Tooltip,
   TooltipContent,
@@ -129,9 +130,10 @@ function Identity({ collapsed }: { collapsed: boolean }) {
     );
   }
   return (
+    <SidebarTooltip label={`${me.display_name} · CID ${me.cid}${me.rating ? ` · ${me.rating}` : ""}`}>
     <div
-      className="flex items-center gap-2.5 border-b border-line-soft px-1.5 pb-3 pt-1 group-data-[collapsed]/sidebar:justify-center"
-      title={collapsed ? me.display_name : undefined}
+      tabIndex={collapsed ? 0 : undefined}
+      className="flex items-center gap-2.5 border-b border-line-soft px-1.5 pb-3 pt-1 outline-none focus-visible:ring-2 focus-visible:ring-ring group-data-[collapsed]/sidebar:justify-center"
     >
       <Avatar className="size-[30px] rounded-sm">
         <AvatarFallback className="rounded-sm">{initials(me.display_name)}</AvatarFallback>
@@ -146,6 +148,7 @@ function Identity({ collapsed }: { collapsed: boolean }) {
         </span>
       )}
     </div>
+    </SidebarTooltip>
   );
 }
 
@@ -168,15 +171,16 @@ function UserGroup() {
         </SidebarItem>
       )}
       {/* Confirms in place like a delete: first click arms it, a second click signs out. */}
+      <SidebarTooltip label="Sign out">
       <ConfirmButton
         onConfirm={() => logout.mutate()}
         warn="Sign out of OIS?"
-        title="Sign out"
         className="h-auto w-full justify-start gap-2.5 rounded-sm px-2.5 py-2 text-[13px] font-normal [&_svg]:size-[17px] group-data-[collapsed]/sidebar:justify-center group-data-[collapsed]/sidebar:px-0"
       >
         <LogOut />
         <span className="group-data-[collapsed]/sidebar:sr-only">Sign out</span>
       </ConfirmButton>
+      </SidebarTooltip>
     </SidebarGroup>
   );
 }
@@ -246,7 +250,11 @@ function SidebarFooter({ collapsed }: { collapsed: boolean }) {
           <BookOpen />
         </ChromeButton>
       )}
-      <ThemeToggle />
+      <SidebarTooltip label="Theme">
+        <span className="inline-flex">
+          <ThemeToggle />
+        </span>
+      </SidebarTooltip>
       {!collapsed && <ZuluClock className="ml-auto rounded-full border border-line bg-panel-2 px-2.5 py-1 font-mono text-xs text-ink-2" />}
     </div>
   );

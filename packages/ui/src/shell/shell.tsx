@@ -3,6 +3,7 @@ import {Slot} from "@radix-ui/react-slot";
 import {ChevronRight, type LucideIcon} from "lucide-react";
 
 import {cn} from "../lib/utils";
+import {Tooltip, TooltipContent, TooltipTrigger} from "../components/tooltip";
 
 /**
  * The console shell (DESIGN.md "The shell"): one full-height rounded frame on `--ground` holding the
@@ -71,6 +72,25 @@ export function ShellContent({
   );
 }
 
+const SidebarContext = React.createContext({ collapsed: false });
+
+/**
+ * In a collapsed sidebar, labels are hidden — wrap an icon-only control so hovering or focusing it
+ * shows its name to the right. Renders the child untouched when the sidebar is expanded.
+ */
+export function SidebarTooltip({ label, children }: { label: React.ReactNode; children: React.ReactElement }) {
+  const { collapsed } = React.useContext(SidebarContext);
+  if (!collapsed) return children;
+  return (
+    <Tooltip>
+      <TooltipTrigger asChild>{children}</TooltipTrigger>
+      <TooltipContent side="right" sideOffset={10}>
+        {label}
+      </TooltipContent>
+    </Tooltip>
+  );
+}
+
 export function Sidebar({
   collapsed = false,
   header,
@@ -86,6 +106,7 @@ export function Sidebar({
   className?: string;
 }) {
   return (
+    <SidebarContext.Provider value={{ collapsed }}>
     <aside
       data-collapsed={collapsed || undefined}
       className={cn(
@@ -98,6 +119,7 @@ export function Sidebar({
       <nav className="flex min-h-0 flex-1 flex-col gap-3 overflow-y-auto px-2.5 pb-3">{children}</nav>
       {footer && <div className="border-t border-line-soft px-2.5 py-2">{footer}</div>}
     </aside>
+    </SidebarContext.Provider>
   );
 }
 
@@ -138,9 +160,9 @@ export const SidebarItem = React.forwardRef<
 >(({ asChild, icon: Icon, label, count, className, children, ...props }, ref) => {
   const Comp = asChild ? Slot : "a";
   return (
+    <SidebarTooltip label={label}>
     <Comp
       ref={ref}
-      title={typeof label === "string" ? label : undefined}
       className={cn(
         "group/item flex items-center gap-2.5 rounded-sm px-2.5 py-2 text-[13px] text-ink-2 transition-colors hover:bg-panel-2 hover:text-ink",
         "aria-[current=page]:bg-panel-2 aria-[current=page]:text-ink data-[status=active]:bg-panel-2 data-[status=active]:text-ink [&.active]:bg-panel-2 [&.active]:text-ink",
@@ -159,6 +181,7 @@ export const SidebarItem = React.forwardRef<
         <ItemInner icon={Icon} label={label} count={count} />
       )}
     </Comp>
+    </SidebarTooltip>
   );
 });
 SidebarItem.displayName = "SidebarItem";

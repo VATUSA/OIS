@@ -86,6 +86,7 @@ export {
   Sidebar,
   SidebarGroup,
   SidebarItem,
+  SidebarTooltip,
   Breadcrumbs,
   type Crumb,
 } from "./shell/shell";
