@@ -347,7 +347,6 @@ export function AceSection({
   return (
     <section className="flex flex-col gap-4">
       <SectionHeader
-        title="ACE support"
         description="Request live coverage; the ACE team claims slots with their availability."
       />
       {body}

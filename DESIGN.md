@@ -131,17 +131,20 @@ content's left edge and rounding only that inner corner — not by rounding the 
 
 ## The shell (build this first)
 
-The single highest-leverage primitive. One rounded container, `--ground` base, holds:
+The single highest-leverage primitive. One full-height rounded frame on `--ground` (a thin gutter to
+the window, the system's only shadow beneath it) holds:
 
-- **Sidebar** (`--panel`, collapsible): window chrome row (traffic lights / back·forward·history /
-  collapse toggle — desktop-ready), a workspace switcher (logo tile + name + mono ID + chevron), a
-  pill **⌘K** search, then grouped nav.
-- **Main** (`--panel`, rounded top-left corner): a top bar with **breadcrumbs** (muted parent, bright
-  current crumb with its page icon), then the page header (large 700 title + count chip + subtitle,
-  with a segmented **Table/Board/List** view switch), then the content.
+- **Sidebar** (`--panel`, collapsible): a chrome row (back · forward · recent pages / collapse), the
+  identity switcher (avatar + name + mono CID), a pill **⌘K** search, then **every section the user
+  can use** — Home, Advisories, Operations, Planning, Historical, Admin — and Docs / theme / Zulu clock
+  at the foot. It is the only navigation: there is no top bar.
+- **Main**: a breadcrumb row (muted parents, bright current crumb with its icon), then the page's
+  **content panel** — inset and rounded on all four corners, with no divider between it and the
+  sidebar. Inside: the page header (700 title + count chip + subtitle, with a segmented view switch)
+  and the content. Don't repeat the page's name in section headings.
 
-Every page renders inside this frame. Getting this one component right fixes most of the cohesion
-problem on its own.
+Every signed-in page renders inside this frame. The only page outside it is the signed-out homepage,
+which keeps the public landing and the site footer (the footer appears nowhere else).
 
 ## Components (one each, tokens only)
 

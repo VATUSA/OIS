@@ -167,7 +167,6 @@ export function EventFcasSection({ eventId }: { eventId: number }) {
   return (
     <section className="flex flex-col gap-4">
       <SectionHeader
-        title="FCAs"
         description="FCAs planned for this event. They stay off every live map until published (manually, or automatically 30 min before start), and are archived when the event ends."
         actions={builderLink}
       />

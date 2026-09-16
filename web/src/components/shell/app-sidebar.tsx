@@ -1,3 +1,4 @@
+import {useState} from "react";
 import {Link, useRouter} from "@tanstack/react-router";
 import {
   Avatar,
@@ -8,17 +9,21 @@ import {
   DropdownMenuItem,
   DropdownMenuLabel,
   DropdownMenuTrigger,
+  Modal,
   Sidebar,
   SidebarGroup,
   SidebarItem,
+  ThemeToggle,
   Tooltip,
   TooltipContent,
   TooltipTrigger,
 } from "@ois/ui";
-import {ChevronDown, ChevronLeft, ChevronRight, History, LogIn, PanelLeft, Search} from "lucide-react";
+import {BookOpen, ChevronDown, ChevronLeft, ChevronRight, History, Home, LogIn, Menu, PanelLeft, Search} from "lucide-react";
 
+import {ZuluClock} from "@/components/zulu-clock";
+import {DOCS_URL} from "@/lib/api";
 import {login, useMe} from "@/lib/auth";
-import {ADMIN_HOME, type NavArea, visibleGroups} from "@/lib/nav";
+import {ADMIN_HOME, AREAS, visibleGroups} from "@/lib/nav";
 
 import {openCommandSearch} from "./command-search";
 import {useRecentPages} from "./recent-pages";
@@ -153,18 +158,55 @@ function SearchPill({ collapsed }: { collapsed: boolean }) {
   );
 }
 
-/** The current area's sidebar: chrome row, identity, ⌘K, then the area's permission-gated links. */
-export function AreaSidebar({
-  area,
-  collapsed,
-  onToggle,
-}: {
-  area: NavArea;
-  collapsed: boolean;
-  onToggle: () => void;
-}) {
+/**
+ * Every section the user can use, grouped: Home, then Advisories, Operations, Planning, Historical and
+ * Admin (its landing first). Shared by the desktop sidebar and the phone drawer.
+ */
+function NavGroups() {
   const { data: me } = useMe();
-  const groups = visibleGroups(me, area);
+  const groups = AREAS.flatMap((area) =>
+    visibleGroups(me, area).map((g) => ({
+      key: `${area.id}-${g.label ?? ""}`,
+      label: g.label ?? area.label,
+      items: area.id === "admin" && g.label === "Admin" ? [ADMIN_HOME, ...g.items] : g.items,
+    })),
+  );
+  return (
+    <>
+      <SidebarGroup>
+        <SidebarItem asChild icon={Home} label="Home">
+          <Link to="/" activeOptions={{ exact: true }} />
+        </SidebarItem>
+      </SidebarGroup>
+      {groups.map((g) => (
+        <SidebarGroup key={g.key} label={g.label}>
+          {g.items.map((item) => (
+            <SidebarItem key={item.to} asChild icon={item.icon} label={item.label}>
+              <Link to={item.to} activeOptions={{ exact: item.exact }} />
+            </SidebarItem>
+          ))}
+        </SidebarGroup>
+      ))}
+    </>
+  );
+}
+
+function SidebarFooter({ collapsed }: { collapsed: boolean }) {
+  return (
+    <div className={collapsed ? "flex flex-col items-center gap-1" : "flex items-center gap-1"}>
+      {DOCS_URL && (
+        <ChromeButton label="Docs" onClick={() => window.open(DOCS_URL, "_blank", "noreferrer")}>
+          <BookOpen />
+        </ChromeButton>
+      )}
+      <ThemeToggle />
+      {!collapsed && <ZuluClock className="ml-auto rounded-full border border-line bg-panel-2 px-2.5 py-1 font-mono text-xs text-ink-2" />}
+    </div>
+  );
+}
+
+/** The one global sidebar: chrome row, identity, ⌘K, every permitted section, then Docs/theme/clock. */
+export function AppSidebar({ collapsed, onToggle }: { collapsed: boolean; onToggle: () => void }) {
   return (
     <Sidebar
       collapsed={collapsed}
@@ -175,28 +217,30 @@ export function AreaSidebar({
           <SearchPill collapsed={collapsed} />
         </>
       }
+      footer={<SidebarFooter collapsed={collapsed} />}
     >
-      {area.id === "admin" && groups.length > 0 && (
-        <SidebarGroup>
-          <SidebarItem asChild icon={ADMIN_HOME.icon} label={ADMIN_HOME.label}>
-            <Link to={ADMIN_HOME.to} activeOptions={{ exact: true }} />
-          </SidebarItem>
-        </SidebarGroup>
-      )}
-      {groups.map((g, i) => (
-        <SidebarGroup
-          key={g.label ?? i}
-          label={g.label}
-          // The Admin group sits at the bottom of the Admin sidebar.
-          className={area.id === "admin" && g.label === "Admin" ? "mt-auto" : undefined}
-        >
-          {g.items.map((item) => (
-            <SidebarItem key={item.to} asChild icon={item.icon} label={item.label}>
-              <Link to={item.to} activeOptions={{ exact: item.exact }} />
-            </SidebarItem>
-          ))}
-        </SidebarGroup>
-      ))}
+      <NavGroups />
     </Sidebar>
+  );
+}
+
+/** Phones: the sidebar's contents in a left drawer, opened from the breadcrumb row. */
+export function MobileNavButton() {
+  const [open, setOpen] = useState(false);
+  const close = () => setOpen(false);
+  return (
+    <>
+      <Button size="icon" variant="ghost" aria-label="Menu" className="size-8 md:hidden" onClick={() => setOpen(true)}>
+        <Menu className="size-5" />
+      </Button>
+      <Modal open={open} onClose={close} placement="left" title="OIS">
+        <nav className="flex flex-col gap-3" onClick={(e) => (e.target as HTMLElement).closest("a") && close()}>
+          <IdentitySwitcher collapsed={false} />
+          <SearchPill collapsed={false} />
+          <NavGroups />
+          <SidebarFooter collapsed={false} />
+        </nav>
+      </Modal>
+    </>
   );
 }

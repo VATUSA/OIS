@@ -5,46 +5,36 @@ import {ChevronRight, type LucideIcon} from "lucide-react";
 import {cn} from "../lib/utils";
 
 /**
- * The console shell (DESIGN.md "The shell"): a top bar over one rounded container on `--ground`
- * that holds an optional collapsible sidebar and the main area. The main area has a breadcrumb row;
- * with a sidebar, the content's top-left corner curves where the two dividers meet. The only shadow
- * in the system sits under this container.
+ * The console shell (DESIGN.md "The shell"): one full-height rounded frame on `--ground` holding the
+ * collapsible sidebar and the main area. The main area is a breadcrumb row over the page's content
+ * panel, inset and rounded on all four corners. The only shadow in the system sits under the frame.
  */
 export function Shell({
-  topBar,
   sidebar,
   breadcrumbs,
+  leading,
   children,
   className,
 }: {
-  topBar: React.ReactNode;
-  /** A `<Sidebar>`; omit for pages outside an area (home, account). */
+  /** A `<Sidebar>` (hidden below `md`; pass a menu button as `leading` for phones). */
   sidebar?: React.ReactNode;
   breadcrumbs?: React.ReactNode;
+  /** Sits before the breadcrumbs (e.g. the phone menu button). */
+  leading?: React.ReactNode;
   children: React.ReactNode;
   className?: string;
 }) {
   return (
-    <div className={cn("flex h-dvh flex-col bg-ground text-ink", className)}>
-      {topBar}
-      <div className="flex min-h-0 flex-1 px-2 pb-2 sm:px-3 sm:pb-3">
-        <div className="flex min-h-0 min-w-0 flex-1 overflow-hidden rounded-xl border border-line bg-panel shadow-[0_30px_80px_-40px_rgb(0_0_0/0.9)]">
-          {sidebar}
-          <div className="flex min-w-0 flex-1 flex-col">
-            {breadcrumbs && (
-              <div className={cn("flex h-11 shrink-0 items-center px-5", sidebar && "border-l border-line")}>
-                {breadcrumbs}
-              </div>
-            )}
-            <div
-              className={cn(
-                "relative flex min-h-0 flex-1 flex-col",
-                breadcrumbs && "border-t border-line",
-                sidebar && "border-l border-line md:rounded-tl-[24px]",
-              )}
-            >
-              {children}
-            </div>
+    <div className={cn("flex h-dvh bg-ground p-2 text-ink sm:p-3", className)}>
+      <div className="flex min-h-0 min-w-0 flex-1 overflow-hidden rounded-xl border border-line bg-panel shadow-[0_30px_80px_-40px_rgb(0_0_0/0.9)]">
+        {sidebar}
+        <div className="flex min-w-0 flex-1 flex-col">
+          <div className="flex h-11 shrink-0 items-center gap-2 px-3 md:px-5">
+            {leading}
+            {breadcrumbs}
+          </div>
+          <div className="relative mx-2 mb-2 flex min-h-0 flex-1 flex-col overflow-hidden rounded-lg border border-line md:ml-0">
+            {children}
           </div>
         </div>
       </div>
@@ -56,13 +46,11 @@ export function Shell({
 export function ShellContent({
   layout = "default",
   header,
-  footer,
   children,
 }: {
   /** `full` = edge-to-edge (maps), `wide` = full width, `default` = readable column. */
   layout?: "default" | "wide" | "full";
   header?: React.ReactNode;
-  footer?: React.ReactNode;
   children: React.ReactNode;
 }) {
   if (layout === "full") {
@@ -79,7 +67,6 @@ export function ShellContent({
         {header}
         {children}
       </div>
-      {footer}
     </div>
   );
 }

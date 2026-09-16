@@ -238,6 +238,34 @@
     font-family: var(--font-sans);
     -webkit-font-smoothing: antialiased;
   }
+  /* Native form widgets (date/time pickers, scrollbars, checkboxes) follow the theme. */
+  :root {
+    color-scheme: light;
+  }
+  .dark {
+    color-scheme: dark;
+  }
+  input[type="date"],
+  input[type="time"],
+  input[type="datetime-local"] {
+    font-family: var(--font-mono);
+    font-variant-numeric: tabular-nums;
+    accent-color: var(--brand);
+  }
+  input::-webkit-calendar-picker-indicator {
+    cursor: pointer;
+    opacity: 0.55;
+  }
+  input::-webkit-calendar-picker-indicator:hover {
+    opacity: 1;
+  }
+  input::-webkit-datetime-edit-fields-wrapper {
+    color: var(--ink);
+  }
+  input:invalid::-webkit-datetime-edit,
+  input[value=""]::-webkit-datetime-edit {
+    color: var(--ink-3);
+  }
   /* DESIGN.md rule 7: data is mono with tabular figures so columns line up. */
   .font-mono {
     font-variant-numeric: tabular-nums;

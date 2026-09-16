@@ -296,7 +296,6 @@ export function AirportRatesSection({ eventId, eventStart }: { eventId: number; 
   return (
     <section className="flex flex-col gap-4">
       <SectionHeader
-        title="Airports & rates"
         description="Forecast wind at event start picks a config; override any airport. Facility staff edit only their own airports."
       />
 

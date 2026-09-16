@@ -219,7 +219,6 @@ export function FacilitySupportSection({ eventId, eventStart }: { eventId: numbe
   return (
     <section className="flex flex-col gap-4">
       <SectionHeader
-        title="Facility support"
         description="Auto-derived from the host, configured airports, and ACE requests. Confirm a level or adjust; facility staff edit only their own row."
       />
 

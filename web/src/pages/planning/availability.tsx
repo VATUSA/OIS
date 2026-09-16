@@ -42,7 +42,6 @@ export function AvailabilitySection({ eventId }: { eventId: number }) {
   return (
     <section className="flex flex-col gap-4">
       <SectionHeader
-        title="Availability"
         description="Who’s reacted on the DCC thread. NTMOs respond for NOM; DCC trainees for shadowing."
       />
 

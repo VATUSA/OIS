@@ -15,34 +15,43 @@ const COMMIT = /^[0-9a-f]{7,40}$/.test(VERSION.split("-").pop() ?? "")
   : "";
 const VERSION_HREF = COMMIT ? `${GITHUB_URL}/commit/${COMMIT}` : GITHUB_URL;
 
-const linkClass = "inline-flex items-center gap-1.5 transition-colors hover:text-ink";
+const linkClass = "transition-colors hover:text-foreground";
 
-/** The quiet hairline-topped footer at the bottom of every scrolling page. */
 export function Footer() {
   const year = new Date().getFullYear();
 
   return (
-    <footer className="border-t border-line px-4 py-4 text-xs text-ink-3 sm:px-6">
-      <div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:gap-4">
-        <div className="flex min-w-0 flex-wrap items-center gap-x-2 gap-y-1">
-          <img src={vatusaLogo} alt="" className="size-3.5" />
-          <span className="font-semibold text-ink-2">OIS</span>
-          <span className="hidden md:inline">· VATUSA Events · Operational Information System</span>
+    <footer className="border-t bg-background">
+      <div className="mx-auto flex w-full max-w-7xl flex-col gap-4 px-4 py-6 text-sm text-muted-foreground sm:flex-row sm:items-center">
+        <div className="flex items-center gap-2">
+          <img src={vatusaLogo} alt="" className="size-4" />
+          <span className="font-semibold text-foreground">OIS</span>
+          <span className="hidden sm:inline">· VATUSA Events · Operational Information System</span>
         </div>
 
-        <nav className="flex flex-wrap items-center gap-x-4 gap-y-2 font-semibold sm:ml-auto">
+        <nav className="flex flex-wrap items-center gap-x-4 gap-y-2 sm:ml-auto">
           <Link to="/privacy" className={linkClass}>
             Privacy
           </Link>
           <a href={LICENSE_URL} target="_blank" rel="noreferrer" className={linkClass}>
             License · MIT
           </a>
-          <a href={GITHUB_URL} target="_blank" rel="noreferrer" className={linkClass}>
+          <a
+            href={GITHUB_URL}
+            target="_blank"
+            rel="noreferrer"
+            className={"inline-flex items-center gap-1.5 " + linkClass}
+          >
             <Code2 className="size-3.5" />
             GitHub
           </a>
           {DOCS_URL && (
-            <a href={DOCS_URL} target="_blank" rel="noreferrer" className={linkClass}>
+            <a
+              href={DOCS_URL}
+              target="_blank"
+              rel="noreferrer"
+              className={"inline-flex items-center gap-1.5 " + linkClass}
+            >
               <BookOpen className="size-3.5" />
               Docs
             </a>
@@ -51,17 +60,18 @@ export function Footer() {
             href={VERSION_HREF}
             target="_blank"
             rel="noreferrer"
-            className={"font-mono font-normal " + linkClass}
+            className={"font-mono text-xs " + linkClass}
             title={COMMIT ? `Build commit ${COMMIT}` : "Source on GitHub"}
           >
             v{VERSION}
           </a>
         </nav>
       </div>
-      <p className="mt-2">
+
+      <div className="mx-auto w-full max-w-7xl px-4 pb-6 text-xs text-muted-foreground">
         © {year} VATUSA. Not affiliated with any government or aviation authority — for use on the
         VATSIM network only.
-      </p>
+      </div>
     </footer>
   );
 }

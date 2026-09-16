@@ -3,20 +3,19 @@ import {Link, useNavigate, useRouterState} from "@tanstack/react-router";
 import {Breadcrumbs, type Crumb, PageHeader, Shell, ShellContent, useLocalStorage} from "@ois/ui";
 import {Home} from "lucide-react";
 
-import {Footer} from "@/components/footer";
 import {useMe} from "@/lib/auth";
 import {areaForPath, groupForPath, itemForPath, visibleGroups} from "@/lib/nav";
 
-import {AreaSidebar} from "./area-sidebar";
+import {AppSidebar, MobileNavButton} from "./app-sidebar";
 import {CommandSearch} from "./command-search";
 import {PageMetaProvider, usePageHeaderOverride, useRouteMeta, useView} from "./page-meta";
 import {recordVisit} from "./recent-pages";
-import {TopNav} from "./top-nav";
 
 function useCrumbs(title: string | undefined): Crumb[] {
   const { data: me } = useMe();
   const pathname = useRouterState({ select: (s) => s.location.pathname });
   const area = areaForPath(pathname);
+  if (pathname === "/") return [{ label: "Home", icon: Home }];
   if (!area) return title ? [{ label: "Home", icon: Home, link: (c) => <Link to="/">{c}</Link> }, { label: title }] : [];
   const first = visibleGroups(me, area)[0]?.items[0];
   const hit = itemForPath(pathname);
@@ -58,10 +57,7 @@ function Frame({ children }: { children: React.ReactNode }) {
   const meta = useRouteMeta();
   const override = usePageHeaderOverride();
   const pathname = useRouterState({ select: (s) => s.location.pathname });
-  const { data: me } = useMe();
   const [collapsed, setCollapsed] = useLocalStorage("ois.sidebar.collapsed", false);
-  const area = areaForPath(pathname);
-  const showSidebar = area != null && visibleGroups(me, area).length > 0;
   const title = override.title ?? meta.title ?? itemForPath(pathname)?.item.label;
   const crumbs = useCrumbs(title);
 
@@ -71,11 +67,11 @@ function Frame({ children }: { children: React.ReactNode }) {
 
   return (
     <Shell
-      topBar={<TopNav />}
-      sidebar={showSidebar && area ? <AreaSidebar area={area} collapsed={collapsed} onToggle={() => setCollapsed(!collapsed)} /> : undefined}
+      sidebar={<AppSidebar collapsed={collapsed} onToggle={() => setCollapsed(!collapsed)} />}
+      leading={<MobileNavButton />}
       breadcrumbs={crumbs.length > 0 ? <Breadcrumbs items={crumbs} /> : undefined}
     >
-      <ShellContent layout={meta.layout} header={<Header />} footer={<Footer />}>
+      <ShellContent layout={meta.layout} header={<Header />}>
         {children}
       </ShellContent>
     </Shell>

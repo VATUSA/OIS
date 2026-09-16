@@ -412,7 +412,6 @@ export function TmiPackagesSection({ eventId }: { eventId: number }) {
   return (
     <section className="flex flex-col gap-4">
       <SectionHeader
-        title="TMI packages"
         description="Draft the programs, restrictions, and ground stops, then activate them live for the event."
       />
 

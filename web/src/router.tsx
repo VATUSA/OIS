@@ -23,6 +23,7 @@ import {FacilityMapIndexPage, FacilityMapPage} from "@/pages/facility-map";
 import {RunwayPage} from "@/pages/runway";
 import {AadcPage} from "@/pages/aadc";
 import {DashboardPage} from "@/pages/dashboard";
+import {LandingPage} from "@/pages/landing";
 import {BoardViewPage} from "@/pages/dashboards/board";
 import {BoardLibraryPage} from "@/pages/dashboards/library";
 import {SharedBoardPage} from "@/pages/dashboards/shared";
@@ -66,6 +67,7 @@ function RootLayout() {
   // that case every data-gated page would otherwise sit on "Loading…" forever, so show a clear
   // retrying state instead — the query keeps probing and recovers on its own when the API returns.
   const me = useMe();
+  const pathname = useRouterState({ select: (s) => s.location.pathname });
   if (me.isError) {
     return (
       <div className="flex min-h-dvh flex-col items-center justify-center gap-4 bg-ground px-6 text-center text-ink">
@@ -80,6 +82,9 @@ function RootLayout() {
       </div>
     );
   }
+
+  // Signed-out visitors land on the public homepage — no app shell, with the site footer.
+  if (pathname === "/" && !me.isLoading && me.data === null) return <LandingPage />;
 
   if (embed) {
     return (
