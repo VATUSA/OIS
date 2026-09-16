@@ -196,6 +196,22 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/v1/admin/summary": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get: operations["get_admin_summary"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/v1/admin/users": {
         parameters: {
             query?: never;
@@ -2941,6 +2957,16 @@ export interface components {
             kind: string;
             payload: Record<string, never>;
         };
+        /**
+         * @description The Admin page's landing summary. Each field is present only when the caller holds the
+         *     permission for the page it summarises (`audit.logs.read`, `access.users.read`,
+         *     `system.jobs.read`); a caller with none of them gets an all-null body.
+         */
+        AdminSummaryBody: {
+            audit_events?: null | components["schemas"]["DailySeries"];
+            jobs?: null | components["schemas"]["JobsHealth"];
+            new_users?: null | components["schemas"]["DailySeries"];
+        };
         /** @description A page of the access-admin user browser. */
         AdminUserPage: {
             items: components["schemas"]["AdminUserRow"][];
@@ -3465,6 +3491,28 @@ export interface components {
             id: string;
             /** Format: int32 */
             len?: number;
+        };
+        /** @description One day's count in a [`DailySeries`]. */
+        DailyCount: {
+            /** Format: int64 */
+            count: number;
+            /**
+             * Format: date
+             * @description UTC calendar day.
+             */
+            day: string;
+        };
+        /**
+         * @description Per-day counts over a trailing window, oldest day first, zero-filled (a day with no rows is
+         *     present with `count: 0`, so a sparkline has one point per day).
+         */
+        DailySeries: {
+            points: components["schemas"]["DailyCount"][];
+            /**
+             * Format: int64
+             * @description Sum of `points`.
+             */
+            total: number;
         };
         /** @description A full dashboard, including its opaque client-owned DashboardState `data`. */
         DashboardBody: {
@@ -4531,6 +4579,16 @@ export interface components {
             runs: number;
             /** @description Whether the admin viewer may trigger an immediate run. */
             triggerable: boolean;
+        };
+        /** @description Live background-job health from the in-memory job registry. */
+        JobsHealth: {
+            /**
+             * Format: int64
+             * @description Jobs whose most recent completed run failed.
+             */
+            failing: number;
+            /** Format: int64 */
+            total: number;
         };
         KeyCountBody: {
             /** Format: int64 */
@@ -6065,6 +6123,31 @@ export interface operations {
                 content?: never;
             };
             404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+        };
+    };
+    get_admin_summary: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["AdminSummaryBody"];
+                };
+            };
+            401: {
                 headers: {
                     [name: string]: unknown;
                 };

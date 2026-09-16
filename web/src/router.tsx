@@ -469,7 +469,7 @@ const statsTaxiRoute = createRoute({
 const adminIndexRoute = createRoute({
   getParentRoute: () => adminRoute,
   path: "/",
-  staticData: { title: "Overview" },
+  staticData: { title: "Overview", subtitle: "Planning, historical data and server administration at a glance." },
   component: AdminOverview,
 });
 
