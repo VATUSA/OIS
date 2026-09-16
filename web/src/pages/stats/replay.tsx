@@ -1,7 +1,21 @@
 import {useEffect, useMemo, useRef, useState} from "react";
-import {Button, usePrompt, useTheme} from "@ois/ui";
-import {Link, useNavigate, useSearch} from "@tanstack/react-router";
-import {ArrowLeft, Pause, Play, SkipBack, SlidersHorizontal, TriangleAlert, X} from "lucide-react";
+import {
+  Button,
+  DataTable,
+  type DataColumn,
+  EmptyState,
+  FilterBar,
+  FilterChip,
+  Input,
+  QueryState,
+  SegmentedControl,
+  Select,
+  usePrompt,
+} from "@ois/ui";
+import {useNavigate, useSearch} from "@tanstack/react-router";
+import {Clock, Gauge, Lock, MapPin, MountainSnow, Pause, Play, SkipBack, SlidersHorizontal, TriangleAlert, X} from "lucide-react";
+
+import {usePageHeader} from "@/components/shell/page-meta";
 
 import {useMe} from "@/lib/auth";
 import {hasPermission} from "@/lib/permissions";
@@ -18,10 +32,11 @@ import {formatZuluFull} from "@/lib/time";
 import boundariesGeo from "@/assets/artcc-boundaries.json";
 import {TrafficMap} from "@/components/map/TrafficMap";
 import {US_HOME} from "@/components/map/lib/constants";
-import {aircraftColor, HIGHLIGHT} from "@/components/map/lib/colors";
+import {useMapPalette} from "@/components/map/lib/colors";
 import type {AtcData} from "@/components/map/layers/atc";
 
 const SPEEDS = [1, 2, 4, 8, 16, 32, 64];
+const SPEED_OPTIONS = SPEEDS.map((sp) => ({ value: String(sp), label: `${sp}×` }));
 /** Below this groundspeed an aircraft is treated as on the ground (taxi/parked). */
 const GROUND_KT = 30;
 
@@ -125,10 +140,38 @@ function Toggle({
 }) {
   return (
     <label className="flex cursor-pointer items-center gap-2 text-sm">
-      <input type="checkbox" checked={checked} onChange={(e) => onChange(e.target.checked)} />
+      <input type="checkbox" className="accent-brand" checked={checked} onChange={(e) => onChange(e.target.checked)} />
       {children}
     </label>
   );
+}
+
+/** Track-log columns over raw samples `[t, lat, lon, alt, hdg, gs]`; times offset from `base`. */
+function sampleColumns(base: string): DataColumn<number[]>[] {
+  return [
+    {
+      id: "t",
+      accessorFn: (p) => p[0],
+      header: "Time",
+      icon: Clock,
+      mono: true,
+      cell: (c) => zulu(base, c.row.original[0]),
+    },
+    { id: "alt", accessorFn: (p) => p[3], header: "Alt", icon: MountainSnow, mono: true, align: "right" },
+    { id: "gs", accessorFn: (p) => p[5], header: "GS", icon: Gauge, mono: true, align: "right" },
+    {
+      id: "pos",
+      header: "Position",
+      icon: MapPin,
+      mono: true,
+      enableSorting: false,
+      cell: (c) => (
+        <span className="whitespace-nowrap text-ink-2">
+          {c.row.original[1].toFixed(2)}, {c.row.original[2].toFixed(2)}
+        </span>
+      ),
+    },
+  ];
 }
 
 /** How far ahead of the clock (seconds of replay time) to keep positions preloaded. */
@@ -143,7 +186,7 @@ function ReplayMap({
   loadedUntil: number;
   ensureLoaded: (untilSec: number) => void;
 }) {
-  const { resolvedTheme } = useTheme();
+  const palette = useMapPalette();
   // deck.gl needs WebGL2; iOS Lockdown Mode disables it (black map). Checked once on mount.
   const [mapAvailable] = useState(webgl2Available);
   // The options panel overlays the map, so on small screens it's hidden behind a toggle button.
@@ -254,6 +297,8 @@ function ReplayMap({
     }
     return out;
   }, [showTrails, showDisconnected, tracks, clock, aircraft, hideGround, passesFilters]);
+
+  const logColumns = useMemo(() => sampleColumns(replay.window_start), [replay.window_start]);
 
   // Log rows: samples flown so far (the history).
   const flownRows = useMemo(
@@ -445,21 +490,21 @@ function ReplayMap({
   if (!mapAvailable) {
     return (
       <div
-        className="flex w-full flex-col items-center justify-center gap-3 rounded-lg border px-6 py-16 text-center"
+        className="flex w-full flex-col items-center justify-center gap-3 rounded-lg border border-line px-6 py-16 text-center"
         style={{ minHeight: "50vh" }}
       >
-        <TriangleAlert className="h-8 w-8 text-muted-foreground" />
+        <TriangleAlert className="size-8 text-ink-3" />
         <div className="text-lg font-semibold">Map can&apos;t be drawn here</div>
-        <p className="max-w-md text-sm text-muted-foreground">
+        <p className="max-w-md text-sm text-ink-2">
           The replay map needs WebGL, which this browser has disabled. On iPhone and iPad this is
-          almost always <span className="font-medium text-foreground">Lockdown Mode</span> — it turns
+          almost always <span className="font-semibold text-ink">Lockdown Mode</span> — it turns
           WebGL off, so the map paints black.
         </p>
-        <p className="max-w-md text-sm text-muted-foreground">
+        <p className="max-w-md text-sm text-ink-2">
           To view it, turn Lockdown Mode off for this site: tap{" "}
-          <span className="font-medium text-foreground">ᴀA</span> in Safari&apos;s address bar →{" "}
-          <span className="font-medium text-foreground">Website Settings</span> →{" "}
-          <span className="font-medium text-foreground">Lockdown Mode → Off</span>, then reload.
+          <span className="font-semibold text-ink">ᴀA</span> in Safari&apos;s address bar →{" "}
+          <span className="font-semibold text-ink">Website Settings</span> →{" "}
+          <span className="font-semibold text-ink">Lockdown Mode → Off</span>, then reload.
         </p>
       </div>
     );
@@ -468,10 +513,10 @@ function ReplayMap({
   return (
     <div className="flex flex-col gap-3">
       <TrafficMap
-        className="relative h-[70vh] w-full overflow-hidden rounded-lg border"
+        className="relative h-[70vh] w-full overflow-hidden rounded-lg border border-line"
         initialViewState={US_HOME}
         aircraft={shown}
-        getAircraftColor={(d) => (d.id === selectedId ? HIGHLIGHT : aircraftColor(resolvedTheme))}
+        getAircraftColor={(d) => (d.id === selectedId ? palette.highlight : palette.aircraft)}
         getAircraftSize={(d) => (d.id === selectedId ? 34 : 26)}
         selectedAircraftId={selectedId}
         labels={labels}
@@ -484,19 +529,17 @@ function ReplayMap({
         atc={showAtc ? ((atc.data as AtcData | undefined) ?? null) : null}
         onAircraftClick={(id) => setSelectedId((prev) => (prev === id ? null : id))}
       >
-        <div className="pointer-events-none absolute left-3 top-3 z-10 rounded-md bg-background/80 px-3 py-1.5 text-sm shadow backdrop-blur">
-          <span className="font-mono font-medium">{zulu(replay.window_start, clock)}</span>
-          <span className="ml-2 text-muted-foreground">{shown.length} aircraft</span>
-          {clock > loadedUntil && (
-            <span className="ml-2 text-amber-500">· buffering…</span>
-          )}
+        <div className="pointer-events-none absolute left-3 top-3 z-10 rounded-md border border-line bg-panel px-3 py-1.5 text-sm">
+          <span className="font-mono font-semibold">{zulu(replay.window_start, clock)}</span>
+          <span className="ml-2 font-mono text-ink-2">{shown.length} aircraft</span>
+          {clock > loadedUntil && <span className="ml-2 text-warning">· buffering…</span>}
         </div>
 
         <div className="absolute right-3 top-3 z-10 flex flex-col items-end gap-2">
           <button
             type="button"
             onClick={() => setControlsOpen((o) => !o)}
-            className="flex items-center gap-1.5 rounded-md border bg-background/85 px-2.5 py-1.5 text-sm shadow backdrop-blur transition-colors hover:bg-accent md:hidden"
+            className="flex items-center gap-1.5 rounded-md border border-line bg-panel px-2.5 py-1.5 text-sm transition-colors hover:bg-panel-2 md:hidden"
             aria-expanded={controlsOpen}
             aria-label="Map options"
           >
@@ -504,7 +547,7 @@ function ReplayMap({
             Options
           </button>
           <div
-            className={`${controlsOpen ? "flex" : "hidden"} max-h-[calc(70vh-4rem)] w-56 max-w-[calc(100vw-1.5rem)] flex-col gap-1.5 overflow-auto rounded-md border bg-background/85 px-3 py-2.5 shadow backdrop-blur md:flex md:max-h-[calc(70vh-1.5rem)]`}
+            className={`${controlsOpen ? "flex" : "hidden"} max-h-[calc(70vh-4rem)] w-56 max-w-[calc(100vw-1.5rem)] flex-col gap-1.5 overflow-auto rounded-md border border-line bg-panel px-3 py-2.5 md:flex md:max-h-[calc(70vh-1.5rem)]`}
           >
             <Toggle checked={hideGround} onChange={setHideGround}>
               Hide aircraft on ground
@@ -513,9 +556,10 @@ function ReplayMap({
               Show history trails
             </Toggle>
             {showTrails && (
-              <label className="ml-5 flex cursor-pointer items-center gap-2 text-sm text-muted-foreground">
+              <label className="ml-5 flex cursor-pointer items-center gap-2 text-sm text-ink-2">
                 <input
                   type="checkbox"
+                  className="accent-brand"
                   checked={showDisconnected}
                   onChange={(e) => setShowDisconnected(e.target.checked)}
                 />
@@ -528,26 +572,26 @@ function ReplayMap({
             <Toggle checked={showAtc} onChange={setShowAtc}>
               Show ATC
             </Toggle>
-            <div className="my-0.5 h-px bg-border" />
+            <div className="my-0.5 h-px bg-line" />
 
             <Toggle checked={rings} onChange={setRings}>
               Range rings
             </Toggle>
             {rings && (
-              <label className="ml-5 flex items-center gap-2 text-sm text-muted-foreground">
-                <input
+              <label className="ml-5 flex items-center gap-2 text-sm text-ink-2">
+                <Input
                   type="number"
                   min={1}
                   max={500}
                   value={ringNm}
                   onChange={(e) => setRingNm(Math.max(1, Math.min(500, Number(e.target.value) || 0)))}
-                  className="h-7 w-16 rounded border bg-background px-1.5 text-right tabular-nums"
+                  className="h-7 w-16 px-1.5 text-right font-mono"
                 />
                 NM radius
               </label>
             )}
-            <div className="my-0.5 h-px bg-border" />
-            <span className="text-xs font-medium text-muted-foreground">Labels</span>
+            <div className="my-0.5 h-px bg-line" />
+            <span className="text-xs font-semibold text-ink-2">Labels</span>
             <Toggle checked={labels.callsign} onChange={(v) => setLabels((l) => ({ ...l, callsign: v }))}>
               Callsign
             </Toggle>
@@ -561,52 +605,40 @@ function ReplayMap({
               Groundspeed
             </Toggle>
 
-            <div className="my-0.5 h-px bg-border" />
-            <span className="text-xs font-medium text-muted-foreground">
-              Filter dep → arr <span className="font-normal">(* = any)</span>
+            <div className="my-0.5 h-px bg-line" />
+            <span className="text-xs font-semibold text-ink-2">
+              Filter dep → arr <span className="font-normal text-ink-3">(* = any)</span>
             </span>
             <div className="flex items-center gap-1">
-              <input
+              <Input
                 value={depDraft}
                 onChange={(e) => setDepDraft(e.target.value)}
                 onKeyDown={(e) => e.key === "Enter" && addFilter()}
                 placeholder="dep"
-                className="h-7 w-full min-w-0 rounded border bg-background px-1.5 font-mono text-xs uppercase"
+                className="h-7 min-w-0 px-1.5 font-mono text-xs uppercase"
               />
-              <span className="text-muted-foreground">→</span>
-              <input
+              <span className="text-ink-3">→</span>
+              <Input
                 value={arrDraft}
                 onChange={(e) => setArrDraft(e.target.value)}
                 onKeyDown={(e) => e.key === "Enter" && addFilter()}
                 placeholder="arr"
-                className="h-7 w-full min-w-0 rounded border bg-background px-1.5 font-mono text-xs uppercase"
+                className="h-7 min-w-0 px-1.5 font-mono text-xs uppercase"
               />
-              <button
-                type="button"
-                onClick={addFilter}
-                className="rounded border px-2 py-1 text-xs hover:bg-accent"
-                aria-label="Add filter"
-              >
+              <Button size="sm" variant="secondary" className="h-7 px-2" onClick={addFilter} aria-label="Add filter">
                 +
-              </button>
+              </Button>
             </div>
             {filters.length > 0 && (
               <div className="flex flex-wrap gap-1">
                 {filters.map((f, i) => (
-                  <span
+                  <FilterChip
                     key={`${f.dep}-${f.arr}-${i}`}
-                    className="flex items-center gap-1 rounded border bg-muted/40 px-1.5 py-0.5 font-mono text-xs"
-                  >
-                    {f.dep} → {f.arr}
-                    <button
-                      type="button"
-                      onClick={() => setFilters((prev) => prev.filter((_, j) => j !== i))}
-                      className="text-muted-foreground hover:text-foreground"
-                      aria-label="Remove filter"
-                    >
-                      <X className="size-3" />
-                    </button>
-                  </span>
+                    active
+                    className="font-mono"
+                    label={`${f.dep} → ${f.arr}`}
+                    onClear={() => setFilters((prev) => prev.filter((_, j) => j !== i))}
+                  />
                 ))}
               </div>
             )}
@@ -614,13 +646,13 @@ function ReplayMap({
         </div>
 
         {selectedTrack && (
-          <div className="absolute bottom-3 left-3 right-3 z-10 flex max-h-[46%] flex-col overflow-hidden rounded-md border bg-background/90 shadow backdrop-blur sm:right-auto sm:w-80">
-            <div className="flex items-center justify-between gap-2 border-b px-3 py-2">
+          <div className="absolute bottom-3 left-3 right-3 z-10 flex max-h-[46%] flex-col overflow-hidden rounded-md border border-line bg-panel sm:right-auto sm:w-96">
+            <div className="flex items-center justify-between gap-2 border-b border-line px-3 py-2">
               <div className="flex flex-col">
-                <span className="font-mono font-semibold" style={{ color: "rgb(56,189,248)" }}>
+                <span className="font-mono font-semibold" style={{ color: "var(--map-highlight)" }}>
                   {selectedTrack.callsign}
                 </span>
-                <span className="text-xs text-muted-foreground">
+                <span className="font-mono text-xs text-ink-2">
                   {selPlan?.dep || "????"} → {selPlan?.arr || "????"} ·{" "}
                   {selPlan?.actype || "—"} · {flownRows.length}/{selectedTrack.s.length} pts
                 </span>
@@ -628,97 +660,70 @@ function ReplayMap({
               <button
                 type="button"
                 onClick={() => setSelectedId(null)}
-                className="text-muted-foreground transition-colors hover:text-foreground"
+                className="text-ink-3 transition-colors hover:text-ink"
                 aria-label="Close track log"
               >
                 <X className="size-4" />
               </button>
             </div>
             {selectedTrack.plans.length > 1 && (
-              <div className="border-b px-3 py-1.5 text-xs">
-                <span className="text-muted-foreground">Plan amendments</span>
+              <div className="border-b border-line px-3 py-1.5 text-xs">
+                <span className="text-ink-2">Plan amendments</span>
                 <div className="mt-0.5 flex flex-col gap-0.5">
                   {selectedTrack.plans.map((pl, i) => (
                     <div
                       key={i}
-                      className={`flex items-baseline gap-2 ${pl === selPlan ? "text-foreground" : "text-muted-foreground/60"}`}
+                      className={`flex items-baseline gap-2 ${pl === selPlan ? "text-ink" : "text-ink-3"}`}
                     >
                       <span className="font-mono">{zulu(replay.window_start, pl.t)}</span>
                       <span className="font-mono">
                         {pl.dep || "????"}→{pl.arr || "????"}
                       </span>
-                      <span className="opacity-70">{i === 0 ? "filed" : "amended"}</span>
-                      {pl === selPlan && <span className="ml-auto text-primary">● now</span>}
+                      <span className="text-ink-3">{i === 0 ? "filed" : "amended"}</span>
+                      {pl === selPlan && <span className="ml-auto text-brand-ink">● now</span>}
                     </div>
                   ))}
                 </div>
               </div>
             )}
-            <div className="overflow-auto">
-              <table className="w-full text-xs">
-                <thead className="sticky top-0 bg-background/95 text-left text-muted-foreground">
-                  <tr>
-                    <th className="px-3 py-1 font-medium">Time</th>
-                    <th className="py-1 pr-2 font-medium">Alt</th>
-                    <th className="py-1 pr-2 font-medium">GS</th>
-                    <th className="py-1 pr-3 font-medium">Position</th>
-                  </tr>
-                </thead>
-                <tbody className="font-mono">
-                  {flownRows.length === 0 ? (
-                    <tr>
-                      <td colSpan={4} className="px-3 py-2 text-muted-foreground">
-                        No history yet at this time — press play or scrub forward.
-                      </td>
-                    </tr>
-                  ) : (
-                    flownRows.map((p, i) => (
-                      <tr key={i} className="border-t border-border/50">
-                        <td className="px-3 py-0.5">{zulu(replay.window_start, p[0])}</td>
-                        <td className="py-0.5 pr-2 tabular-nums">{p[3]}</td>
-                        <td className="py-0.5 pr-2 tabular-nums">{p[5]}</td>
-                        <td className="py-0.5 pr-3 tabular-nums text-muted-foreground">
-                          {p[1].toFixed(2)}, {p[2].toFixed(2)}
-                        </td>
-                      </tr>
-                    ))
-                  )}
-                </tbody>
-              </table>
+            <div className="min-h-0 overflow-auto p-2">
+              <DataTable
+                label="Track log"
+                columns={logColumns}
+                data={flownRows}
+                getRowId={(p) => String(p[0])}
+                rowCap={25}
+                stickyHeader
+                empty="No history yet at this time — press play or scrub forward."
+              />
             </div>
           </div>
         )}
       </TrafficMap>
 
       <div className="flex flex-wrap items-center gap-3">
-        <Button size="icon" variant="secondary" title="Restart" onClick={() => scrub(0)}>
+        <Button size="icon" variant="secondary" title="Restart" aria-label="Restart" onClick={() => scrub(0)}>
           <SkipBack className="size-4" />
         </Button>
-        <Button size="icon" onClick={toggle} title={playing ? "Pause" : "Play"}>
+        <Button size="icon" onClick={toggle} title={playing ? "Pause" : "Play"} aria-label={playing ? "Pause" : "Play"}>
           {playing ? <Pause className="size-4" /> : <Play className="size-4" />}
         </Button>
         <input
           type="range"
-          className="h-2 min-w-[200px] flex-1 cursor-pointer accent-primary"
+          aria-label="Replay clock"
+          className="h-2 min-w-48 flex-1 cursor-pointer accent-brand"
           min={0}
           max={Math.floor(duration)}
           step={1}
           value={Math.floor(clock)}
           onChange={(e) => scrub(Number(e.target.value))}
         />
-        <div className="flex items-center gap-1">
-          {SPEEDS.map((sp) => (
-            <Button
-              key={sp}
-              size="sm"
-              variant={speed === sp ? "default" : "secondary"}
-              className="h-7 px-2 tabular-nums"
-              onClick={() => setSpd(sp)}
-            >
-              {sp}×
-            </Button>
-          ))}
-        </div>
+        <SegmentedControl
+          aria-label="Playback speed"
+          value={String(speed)}
+          onChange={(v) => setSpd(Number(v))}
+          options={SPEED_OPTIONS}
+        />
       </div>
     </div>
   );
@@ -818,124 +823,113 @@ export function CaptureReplayPage() {
   const replay = useProgressiveReplay(resolved?.from ?? null, resolved?.to ?? null);
   const selectionKey = usingCapture ? captureId : `${win.from}-${win.to}`;
 
+  usePageHeader({
+    subtitle: "Pick a saved capture or a time window, then play back the recorded traffic on the map.",
+    count: replay.data?.flights.length ?? null,
+  });
+
+  if (!canRead) {
+    return <EmptyState icon={Lock}>You don&apos;t have access to network statistics.</EmptyState>;
+  }
+
   return (
-    // Full-width so the map uses the whole (ultrawide) container; the header + picker stay readable.
+    // Full-width so the map uses the whole (ultrawide) container.
     <div className="flex w-full flex-col gap-4">
-      <Link
-        to="/admin/historical"
-        className="flex w-fit items-center gap-1 text-sm text-muted-foreground transition-colors hover:text-foreground"
+      <FilterBar>
+        <Select
+          size="sm"
+          aria-label="Capture"
+          wrapperClassName="min-w-0 max-w-full"
+          value={captureId}
+          onChange={(e) => {
+            const v = e.target.value;
+            setCaptureId(v);
+            if (v) patch({ capture: v, from: undefined, to: undefined });
+            else {
+              const w = defaultWindow();
+              setWin(w);
+              patch({ capture: undefined, from: w.from, to: w.to });
+            }
+          }}
+        >
+          <option value="">— custom time window —</option>
+          {(captures.data ?? []).map((c) => (
+            <option key={c.id} value={c.id}>
+              {(c.event_title || c.label || "Capture") +
+                ` · ${formatZuluFull(c.start_time)}` +
+                (c.status === "open" ? " (recording)" : "")}
+            </option>
+          ))}
+        </Select>
+
+        {!usingCapture && (
+          <>
+            <label className="flex items-center gap-1.5 text-xs text-ink-2">
+              From (Zulu)
+              <Input
+                type="datetime-local"
+                className="h-8 w-auto font-mono"
+                value={toLocalInput(win.from)}
+                onChange={(e) => {
+                  const from = fromLocalInput(e.target.value);
+                  if (from != null) {
+                    setWin((w) => ({ from, to: w.to }));
+                    patch({ from, to: win.to, capture: undefined });
+                  }
+                }}
+              />
+            </label>
+            <label className="flex items-center gap-1.5 text-xs text-ink-2">
+              To (Zulu)
+              <Input
+                type="datetime-local"
+                className="h-8 w-auto font-mono"
+                value={toLocalInput(win.to)}
+                onChange={(e) => {
+                  const to = fromLocalInput(e.target.value);
+                  if (to != null) {
+                    setWin((w) => ({ from: w.from, to }));
+                    patch({ from: win.from, to, capture: undefined });
+                  }
+                }}
+              />
+            </label>
+            {canSaveCapture && (
+              <Button
+                size="sm"
+                variant="secondary"
+                onClick={() => void saveAsCapture()}
+                disabled={saveCapture.isPending}
+              >
+                Save as capture…
+              </Button>
+            )}
+          </>
+        )}
+
+        {replay.data && (
+          <span className="ml-auto font-mono text-xs text-ink-3">
+            {replay.data.flights.length} flights · {zulu(replay.data.window_start, 0)} –{" "}
+            {zulu(replay.data.window_end, 0)}
+          </span>
+        )}
+      </FilterBar>
+
+      <QueryState
+        isLoading={!replay.data && !replay.isError}
+        isError={replay.isError}
+        loading="Loading replay…"
+        error="That replay isn't available."
       >
-        <ArrowLeft className="size-4" /> Network statistics
-      </Link>
-      <div>
-        <h1 className="text-2xl font-semibold tracking-tight">Replay map</h1>
-        <p className="text-muted-foreground">
-          {replay.data
-            ? `${replay.data.flights.length} flights · ${zulu(replay.data.window_start, 0)} – ${zulu(
-                replay.data.window_end,
-                0,
-              )}`
-            : "Pick a saved capture or a time window, then play back the recorded traffic on the map."}
-        </p>
-      </div>
-
-      {!canRead ? (
-        <p className="py-16 text-center text-sm text-muted-foreground">
-          You don&apos;t have access to network statistics.
-        </p>
-      ) : (
-        <>
-          <div className="flex max-w-5xl flex-col gap-3 rounded-lg border bg-muted/20 p-4">
-            <div className="grid gap-3 md:grid-cols-2">
-              <label className="flex flex-col gap-1 text-sm">
-                <span className="text-muted-foreground">Capture</span>
-                <select
-                  className="h-9 rounded-md border bg-background px-2"
-                  value={captureId}
-                  onChange={(e) => {
-                    const v = e.target.value;
-                    setCaptureId(v);
-                    if (v) patch({ capture: v, from: undefined, to: undefined });
-                    else {
-                      const w = defaultWindow();
-                      setWin(w);
-                      patch({ capture: undefined, from: w.from, to: w.to });
-                    }
-                  }}
-                >
-                  <option value="">— custom time window —</option>
-                  {(captures.data ?? []).map((c) => (
-                    <option key={c.id} value={c.id}>
-                      {(c.event_title || c.label || "Capture") +
-                        ` · ${formatZuluFull(c.start_time)}` +
-                        (c.status === "open" ? " (recording)" : "")}
-                    </option>
-                  ))}
-                </select>
-              </label>
-
-              {!usingCapture && (
-                <div className="flex flex-col gap-3 sm:flex-row sm:items-end">
-                  <label className="flex flex-1 flex-col gap-1 text-xs">
-                    <span className="text-muted-foreground">From (Zulu)</span>
-                    <input
-                      type="datetime-local"
-                      className="h-9 w-full rounded-md border bg-background px-2 text-sm"
-                      value={toLocalInput(win.from)}
-                      onChange={(e) => {
-                        const from = fromLocalInput(e.target.value);
-                        if (from != null) {
-                          setWin((w) => ({ from, to: w.to }));
-                          patch({ from, to: win.to, capture: undefined });
-                        }
-                      }}
-                    />
-                  </label>
-                  <label className="flex flex-1 flex-col gap-1 text-xs">
-                    <span className="text-muted-foreground">To (Zulu)</span>
-                    <input
-                      type="datetime-local"
-                      className="h-9 w-full rounded-md border bg-background px-2 text-sm"
-                      value={toLocalInput(win.to)}
-                      onChange={(e) => {
-                        const to = fromLocalInput(e.target.value);
-                        if (to != null) {
-                          setWin((w) => ({ from: w.from, to }));
-                          patch({ from: win.from, to, capture: undefined });
-                        }
-                      }}
-                    />
-                  </label>
-                  {canSaveCapture && (
-                    <Button
-                      variant="outline"
-                      onClick={() => void saveAsCapture()}
-                      disabled={saveCapture.isPending}
-                    >
-                      Save as capture…
-                    </Button>
-                  )}
-                </div>
-              )}
-            </div>
-          </div>
-
-          {replay.isError ? (
-            <p className="py-16 text-center text-sm text-muted-foreground">
-              That replay isn&apos;t available.
-            </p>
-          ) : !replay.data ? (
-            <p className="py-16 text-center text-sm text-muted-foreground">Loading replay…</p>
-          ) : (
-            <ReplayMap
-              key={selectionKey}
-              replay={replay.data}
-              loadedUntil={replay.loadedUntil}
-              ensureLoaded={replay.ensureLoaded}
-            />
-          )}
-        </>
-      )}
+        {replay.data && (
+          <ReplayMap
+            key={selectionKey}
+            replay={replay.data}
+            loadedUntil={replay.loadedUntil}
+            ensureLoaded={replay.ensureLoaded}
+          />
+        )}
+      </QueryState>
     </div>
   );
 }

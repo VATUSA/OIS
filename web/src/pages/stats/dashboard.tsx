@@ -1,8 +1,9 @@
 import {useCallback, useEffect, useMemo, useRef, useState} from "react";
-import {Badge, Button, Card, CardContent, useToast} from "@ois/ui";
+import {Button, Card, EmptyState, FilterBar, QueryState, SegmentedControl, Select, StatusPill, useToast} from "@ois/ui";
 import {useNavigate, useSearch} from "@tanstack/react-router";
-import {Link2, Pause, Play, Rewind} from "lucide-react";
+import {Link2, Lock, Pause, Play, Rewind} from "lucide-react";
 
+import {usePageHeader} from "@/components/shell/page-meta";
 import {ZuluDateTime} from "@/components/zulu-datetime";
 import {DashboardGrid} from "@/features/dashboard/DashboardGrid";
 import {HistoricalProvider} from "@/features/dashboard/historical";
@@ -26,6 +27,7 @@ interface DashboardSearch {
  * per-instant reconstructions cache and revisiting a time is instant. */
 const SNAP_S = 30;
 const SPEEDS = [1, 2, 4, 8, 16] as const;
+const SPEED_OPTIONS = SPEEDS.map((s) => ({ value: String(s), label: `${s}×` }));
 /** Real-time ms between play steps. */
 const TICK_MS = 700;
 
@@ -40,7 +42,6 @@ function normalize(raw: unknown): DashboardState {
 
 const zulu = (unixS: number) =>
   new Date(unixS * 1000).toISOString().slice(11, 16) + "Z";
-
 
 interface Win {
   from: number;
@@ -134,77 +135,61 @@ function Replay({
     onCommitRef.current?.(committed);
   }, [committed]);
 
-  const pct = ((scrub - win.from) / span) * 100;
-
   return (
     <div className="flex flex-col gap-4">
-      <Card>
-        <CardContent className="flex flex-col gap-3 pt-6">
-          <div className="flex items-center gap-3">
-            <Button
-              size="sm"
-              variant={playing ? "default" : "secondary"}
-              onClick={() => setPlaying((p) => !p)}
-            >
-              {playing ? <Pause className="size-4" /> : <Play className="size-4" />}
-              {playing ? "Pause" : "Play"}
-            </Button>
-            <Button
-              size="sm"
-              variant="ghost"
-              onClick={() => {
-                setPlaying(false);
-                setScrub(win.from);
-              }}
-              title="Back to start"
-            >
-              <Rewind className="size-4" />
-            </Button>
-            <div className="flex items-center gap-1">
-              {SPEEDS.map((s) => (
-                <Button
-                  key={s}
-                  size="sm"
-                  variant={speed === s ? "default" : "secondary"}
-                  className="h-7 px-2 tabular-nums"
-                  onClick={() => setSpeed(s)}
-                >
-                  {s}×
-                </Button>
-              ))}
-            </div>
-            <div className="ml-auto flex items-center gap-3">
-              <CopyLink />
-              <span className="font-mono text-lg tabular-nums">{zulu(scrub)}</span>
-            </div>
-          </div>
-          <input
-            type="range"
-            min={win.from}
-            max={win.to}
-            step={SNAP_S}
-            value={scrub}
-            onChange={(e) => {
+      <Card className="flex flex-col gap-3 p-4">
+        <div className="flex flex-wrap items-center gap-3">
+          <Button size="sm" variant={playing ? "default" : "secondary"} onClick={() => setPlaying((p) => !p)}>
+            {playing ? <Pause className="size-4" /> : <Play className="size-4" />}
+            {playing ? "Pause" : "Play"}
+          </Button>
+          <Button
+            size="sm"
+            variant="ghost"
+            onClick={() => {
               setPlaying(false);
-              setScrub(Number(e.target.value));
+              setScrub(win.from);
             }}
-            className="w-full accent-primary"
-            style={{ background: `linear-gradient(to right, var(--primary) ${pct}%, var(--border) ${pct}%)` }}
+            title="Back to start"
+            aria-label="Back to start"
+          >
+            <Rewind className="size-4" />
+          </Button>
+          <SegmentedControl
+            aria-label="Playback speed"
+            value={String(speed)}
+            onChange={(v) => setSpeed(Number(v))}
+            options={SPEED_OPTIONS}
           />
-          <div className="flex justify-between text-[11px] text-muted-foreground">
-            <span>{formatZuluFull(new Date(win.from * 1000).toISOString())}</span>
-            <span>{formatZuluFull(new Date(win.to * 1000).toISOString())}</span>
+          <div className="ml-auto flex items-center gap-3">
+            <CopyLink />
+            <span className="font-mono text-lg font-semibold tabular-nums">{zulu(scrub)}</span>
           </div>
-        </CardContent>
+        </div>
+        <input
+          type="range"
+          aria-label="Replay instant"
+          min={win.from}
+          max={win.to}
+          step={SNAP_S}
+          value={scrub}
+          onChange={(e) => {
+            setPlaying(false);
+            setScrub(Number(e.target.value));
+          }}
+          className="w-full accent-brand"
+        />
+        <div className="flex justify-between font-mono text-[11px] text-ink-3">
+          <span>{formatZuluFull(new Date(win.from * 1000).toISOString())}</span>
+          <span>{formatZuluFull(new Date(win.to * 1000).toISOString())}</span>
+        </div>
       </Card>
 
       {state.widgets.length === 0 ? (
-        <Card>
-          <CardContent className="py-12 text-center text-sm text-muted-foreground">
-            This board has no widgets. Add table or chart widgets on it (arrivals, departures,
-            traffic) — those replay historically.
-          </CardContent>
-        </Card>
+        <EmptyState>
+          This board has no widgets. Add table or chart widgets on it (arrivals, departures, traffic) — those
+          replay historically.
+        </EmptyState>
       ) : (
         <HistoricalProvider value={{ from: win.from, to: win.to, t: committed }}>
           <DashboardGrid
@@ -226,6 +211,11 @@ export function HistoricalDashboardPage() {
 
   const captures = useCaptures();
   const boards = useDashboards();
+
+  usePageHeader({
+    subtitle:
+      "Replay one of your dashboards over a past event capture or time window — the same widgets, recomputed at a scrubber instant.",
+  });
 
   // The current selection lives in the URL, so a replay is a shareable link (validated on the
   // route). State is seeded from the URL once; the handlers below keep both in sync.
@@ -277,120 +267,92 @@ export function HistoricalDashboardPage() {
   }, [captureId, captures.data, custom]);
 
   if (!canRead) {
-    return (
-      <Card>
-        <CardContent className="py-16 text-center text-sm text-muted-foreground">
-          You don&apos;t have access to network statistics.
-        </CardContent>
-      </Card>
-    );
+    return <EmptyState icon={Lock}>You don&apos;t have access to network statistics.</EmptyState>;
   }
 
   const boardList = boards.data?.dashboards ?? [];
 
   return (
-    <div className="mx-auto flex w-full max-w-6xl flex-col gap-6">
-      <div>
-        <h1 className="text-2xl font-semibold tracking-tight">Historical dashboard</h1>
-        <p className="text-muted-foreground">
-          Replay one of your dashboards over a past event capture or time window — the same widgets,
-          recomputed at a scrubber instant.
-        </p>
-      </div>
+    <div className="flex w-full flex-col gap-6">
+      <FilterBar>
+        <Select
+          size="sm"
+          aria-label="Capture window"
+          wrapperClassName="min-w-0 max-w-full"
+          value={captureId}
+          onChange={(e) => {
+            const v = e.target.value;
+            setCaptureId(v);
+            if (v) {
+              patchSearch({ capture: v, from: undefined, to: undefined, t: undefined });
+            } else {
+              const w = defaultWindow();
+              setCustom(w);
+              patchSearch({ capture: undefined, from: w.from, to: w.to, t: undefined });
+            }
+          }}
+        >
+          <option value="">— custom time window —</option>
+          {(captures.data ?? []).map((c) => (
+            <option key={c.id} value={c.id}>
+              {(c.event_title || c.label || "Capture") +
+                ` · ${formatZuluFull(c.start_time)}` +
+                (c.status === "open" ? " (recording)" : "")}
+            </option>
+          ))}
+        </Select>
 
-      <Card>
-        <CardContent className="flex flex-col gap-4 pt-6">
-          <div className="grid gap-4 md:grid-cols-2">
-            <label className="flex flex-col gap-1 text-sm">
-              <span className="text-muted-foreground">Capture window</span>
-              <select
-                className="h-9 rounded-md border bg-background px-2"
-                value={captureId}
-                onChange={(e) => {
-                  const v = e.target.value;
-                  setCaptureId(v);
-                  if (v) {
-                    patchSearch({ capture: v, from: undefined, to: undefined, t: undefined });
-                  } else {
-                    const w = defaultWindow();
-                    setCustom(w);
-                    patchSearch({ capture: undefined, from: w.from, to: w.to, t: undefined });
-                  }
+        <Select
+          size="sm"
+          aria-label="Board"
+          wrapperClassName="min-w-0 max-w-full"
+          value={boardId}
+          onChange={(e) => {
+            setBoardId(e.target.value);
+            patchSearch({ board: e.target.value || undefined });
+          }}
+        >
+          <option value="">— select a board —</option>
+          {boardList.map((b) => (
+            <option key={b.id} value={b.id}>
+              {b.name}
+            </option>
+          ))}
+        </Select>
+
+        {!captureId && (
+          <>
+            <label className="flex items-center gap-1.5 text-xs text-ink-2">
+              From (Zulu)
+              <ZuluDateTime
+                value={custom.from}
+                onChange={(from) => {
+                  setCustom((c) => ({ from, to: c.to }));
+                  patchSearch({ from, to: custom.to, capture: undefined, t: undefined });
                 }}
-              >
-                <option value="">— custom time window —</option>
-                {(captures.data ?? []).map((c) => (
-                  <option key={c.id} value={c.id}>
-                    {(c.event_title || c.label || "Capture") +
-                      ` · ${formatZuluFull(c.start_time)}` +
-                      (c.status === "open" ? " (recording)" : "")}
-                  </option>
-                ))}
-              </select>
+              />
             </label>
-
-            <label className="flex flex-col gap-1 text-sm">
-              <span className="text-muted-foreground">Board</span>
-              <select
-                className="h-9 rounded-md border bg-background px-2"
-                value={boardId}
-                onChange={(e) => {
-                  setBoardId(e.target.value);
-                  patchSearch({ board: e.target.value || undefined });
+            <label className="flex items-center gap-1.5 text-xs text-ink-2">
+              To (Zulu)
+              <ZuluDateTime
+                value={custom.to}
+                onChange={(to) => {
+                  setCustom((c) => ({ from: c.from, to }));
+                  patchSearch({ from: custom.from, to, capture: undefined, t: undefined });
                 }}
-              >
-                <option value="">— select a board —</option>
-                {boardList.map((b) => (
-                  <option key={b.id} value={b.id}>
-                    {b.name}
-                  </option>
-                ))}
-              </select>
+              />
             </label>
-          </div>
-
-          {!captureId && (
-            <div className="flex flex-wrap items-end gap-3">
-              <label className="flex flex-col gap-1 text-xs">
-                <span className="text-muted-foreground">From (Zulu)</span>
-                <ZuluDateTime
-                  value={custom.from}
-                  onChange={(from) => {
-                    setCustom((c) => ({ from, to: c.to }));
-                    patchSearch({ from, to: custom.to, capture: undefined, t: undefined });
-                  }}
-                />
-              </label>
-              <label className="flex flex-col gap-1 text-xs">
-                <span className="text-muted-foreground">To (Zulu)</span>
-                <ZuluDateTime
-                  value={custom.to}
-                  onChange={(to) => {
-                    setCustom((c) => ({ from: c.from, to }));
-                    patchSearch({ from: custom.from, to, capture: undefined, t: undefined });
-                  }}
-                />
-              </label>
-              <Badge variant="outline">retained ~14 days</Badge>
-            </div>
-          )}
-        </CardContent>
-      </Card>
+            <StatusPill tone="neutral">retained ~14 days</StatusPill>
+          </>
+        )}
+      </FilterBar>
 
       {!win ? (
-        <Card>
-          <CardContent className="py-12 text-center text-sm text-muted-foreground">
-            Pick a capture (or a custom window) to begin.
-          </CardContent>
-        </Card>
+        <EmptyState>Pick a capture (or a custom window) to begin.</EmptyState>
       ) : !boardId ? (
-        <Card>
-          <CardContent className="py-12 text-center text-sm text-muted-foreground">
-            Select one of your boards to replay over this window.
-          </CardContent>
-        </Card>
+        <EmptyState>Select one of your boards to replay over this window.</EmptyState>
       ) : !state ? (
-        <p className="py-12 text-center text-sm text-muted-foreground">Loading board…</p>
+        <QueryState isLoading loading="Loading board…" />
       ) : (
         <Replay
           win={win}
