@@ -2,7 +2,7 @@ import {PathLayer, ScatterplotLayer} from "@deck.gl/layers";
 import {PathStyleExtension} from "@deck.gl/extensions";
 import type {Layer} from "@deck.gl/core";
 
-import {hexToRgb} from "../lib/colors";
+import {hexToRgb, type MapPalette, readMapPalette} from "../lib/colors";
 import {toDeckPath, type LatLng} from "../lib/geo";
 import type {RGBA} from "../lib/types";
 
@@ -17,7 +17,7 @@ export interface DraftLine {
  * pickable ScatterplotLayer (id "draft-vertices") so deck picking can identify which vertex a drag
  * grabbed (info.index).
  */
-export function buildDraftLayers(draft: DraftLine): Layer[] {
+export function buildDraftLayers(draft: DraftLine, palette: MapPalette = readMapPalette()): Layer[] {
   const [r, g, b] = hexToRgb(draft.color);
   const path = toDeckPath(draft.points);
   const layers: Layer[] = [];
@@ -45,7 +45,7 @@ export function buildDraftLayers(draft: DraftLine): Layer[] {
       data: path.map((pos) => ({ pos })),
       pickable: true,
       getPosition: (d) => d.pos,
-      getFillColor: [255, 255, 255, 255],
+      getFillColor: [...palette.ink, 255] as RGBA,
       stroked: true,
       getLineColor: [r, g, b, 255] as RGBA,
       getLineWidth: 2,
@@ -54,7 +54,7 @@ export function buildDraftLayers(draft: DraftLine): Layer[] {
       getRadius: 6,
       radiusUnits: "pixels",
       radiusMinPixels: 5,
-      updateTriggers: { getLineColor: [draft.color] },
+      updateTriggers: { getLineColor: [draft.color], getFillColor: [palette] },
     }),
   );
 

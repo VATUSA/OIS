@@ -1,14 +1,13 @@
 import {PathLayer, ScatterplotLayer, TextLayer} from "@deck.gl/layers";
 
-import type {Theme} from "../lib/constants";
-import {aircraftColor, HIGHLIGHT, ROUTE, waypointBackground} from "../lib/colors";
+import {type MapPalette, readMapPalette} from "../lib/colors";
 import type {NormAircraft, PathDatum, RGBA} from "../lib/types";
 
 type Waypoint = { name: string; lat: number; lon: number };
 
 /** Faint flown-trail polylines behind every shown aircraft. */
-export function buildTrailLayer(data: PathDatum[], theme: Theme) {
-  const c = aircraftColor(theme);
+export function buildTrailLayer(data: PathDatum[], palette: MapPalette = readMapPalette()) {
+  const c = palette.aircraft;
   return new PathLayer<PathDatum>({
     id: "all-trails",
     data,
@@ -17,17 +16,17 @@ export function buildTrailLayer(data: PathDatum[], theme: Theme) {
     getWidth: 1.4,
     widthUnits: "pixels",
     widthMinPixels: 1,
-    updateTriggers: { getColor: [theme] },
+    updateTriggers: { getColor: [palette] },
   });
 }
 
 /** Filed-route polylines for every shown flight (violet, faint). */
-export function buildRouteOverlayLayer(data: PathDatum[]) {
+export function buildRouteOverlayLayer(data: PathDatum[], palette: MapPalette = readMapPalette()) {
   return new PathLayer<PathDatum>({
     id: "routes-all",
     data,
     getPath: (d) => d.path,
-    getColor: [...ROUTE, 90] as RGBA,
+    getColor: [...palette.route, 90] as RGBA,
     getWidth: 1.2,
     widthUnits: "pixels",
     widthMinPixels: 1,
@@ -35,8 +34,8 @@ export function buildRouteOverlayLayer(data: PathDatum[]) {
 }
 
 /** Range rings around each shown aircraft (radius in NM). */
-export function buildRingLayer(data: NormAircraft[], nm: number, theme: Theme) {
-  const c = aircraftColor(theme);
+export function buildRingLayer(data: NormAircraft[], nm: number, palette: MapPalette = readMapPalette()) {
+  const c = palette.aircraft;
   return new ScatterplotLayer<NormAircraft>({
     id: "range-rings",
     data,
@@ -49,17 +48,17 @@ export function buildRingLayer(data: NormAircraft[], nm: number, theme: Theme) {
     lineWidthUnits: "pixels",
     getLineWidth: 1.1,
     lineWidthMinPixels: 1,
-    updateTriggers: { getRadius: [nm], getLineColor: [theme] },
+    updateTriggers: { getRadius: [nm], getLineColor: [palette] },
   });
 }
 
 /** The selected flight's flown-so-far history trail (highlighted). */
-export function buildSelectedTrackLayer(data: PathDatum[]) {
+export function buildSelectedTrackLayer(data: PathDatum[], palette: MapPalette = readMapPalette()) {
   return new PathLayer<PathDatum>({
     id: "selected-track",
     data,
     getPath: (d) => d.path,
-    getColor: [...HIGHLIGHT, 220] as RGBA,
+    getColor: [...palette.highlight, 220] as RGBA,
     getWidth: 2,
     widthUnits: "pixels",
     widthMinPixels: 2,
@@ -69,12 +68,12 @@ export function buildSelectedTrackLayer(data: PathDatum[]) {
 }
 
 /** The selected/plotted flight's filed route (violet). */
-export function buildSelectedRouteLayer(data: PathDatum[]) {
+export function buildSelectedRouteLayer(data: PathDatum[], palette: MapPalette = readMapPalette()) {
   return new PathLayer<PathDatum>({
     id: "selected-route",
     data,
     getPath: (d) => d.path,
-    getColor: [...ROUTE, 230] as RGBA,
+    getColor: [...palette.route, 230] as RGBA,
     getWidth: 2,
     widthUnits: "pixels",
     widthMinPixels: 2,
@@ -84,20 +83,20 @@ export function buildSelectedRouteLayer(data: PathDatum[]) {
 }
 
 /** Named-waypoint labels along the plotted filed route. */
-export function buildWaypointLayer(data: Waypoint[], theme: Theme) {
+export function buildWaypointLayer(data: Waypoint[], palette: MapPalette = readMapPalette()) {
   return new TextLayer<Waypoint>({
     id: "selected-route-waypoints",
     data,
     getPosition: (d) => [d.lon, d.lat],
     getText: (d) => d.name,
-    getColor: [...ROUTE, 255] as RGBA,
+    getColor: [...palette.route, 255] as RGBA,
     getSize: 10,
     getPixelOffset: [0, -10],
     getTextAnchor: "middle",
     getAlignmentBaseline: "bottom",
     background: true,
-    getBackgroundColor: waypointBackground(theme),
+    getBackgroundColor: palette.waypointBg,
     backgroundPadding: [2, 1],
-    updateTriggers: { getColor: [theme], getBackgroundColor: [theme] },
+    updateTriggers: { getColor: [palette], getBackgroundColor: [palette] },
   });
 }

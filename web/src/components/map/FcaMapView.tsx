@@ -1,5 +1,5 @@
 import {useEffect, useMemo, useRef, useState} from "react";
-import {Button, ConfirmButton, Input, Switch, useTheme, useToast} from "@ois/ui";
+import {Button, cn, ConfirmButton, Input, QueryState, Select, Switch, useToast} from "@ois/ui";
 import {closestCenter, DndContext, type DragEndEvent, PointerSensor, useSensor, useSensors} from "@dnd-kit/core";
 import {arrayMove, SortableContext, useSortable, verticalListSortingStrategy} from "@dnd-kit/sortable";
 import {CSS} from "@dnd-kit/utilities";
@@ -36,7 +36,8 @@ import boundariesGeo from "@/assets/artcc-boundaries.json";
 import {TrafficMap} from "./TrafficMap";
 import {useMapCamera} from "./hooks/useMapCamera";
 import {usePersistedOrder} from "./hooks/usePersistedOrder";
-import {aircraftColor, HIGHLIGHT} from "./lib/colors";
+import {useFcaColors, useMapPalette, useRouteColors} from "./lib/colors";
+import {MAP_BUTTON, MAP_BUTTON_ON, MAP_PANEL} from "./lib/overlay";
 import {US_HOME} from "./lib/constants";
 import {haversine, normPoints, toDeckPath, type LatLng} from "./lib/geo";
 import type {NormAircraft} from "./lib/types";
@@ -106,11 +107,11 @@ function FcaRow({
     <li
       ref={setNodeRef}
       style={style}
-      className={"flex items-center gap-2 border-b px-3 py-2 text-sm " + (selected ? "bg-accent/40" : "")}
+      className={cn("flex items-center gap-2 border-b border-line-soft px-3 py-2 text-sm", selected && "bg-brand-soft")}
     >
       <button
         type="button"
-        className="cursor-grab text-muted-foreground/60 hover:text-foreground"
+        className="cursor-grab text-ink-3 hover:text-ink"
         {...attributes}
         {...listeners}
       >
@@ -123,13 +124,13 @@ function FcaRow({
       />
       <button type="button" onClick={onSelect} className="flex-1 truncate text-left font-mono">
         {fca.name}
-        {fca.artcc && <span className="ml-1.5 text-xs text-muted-foreground">{fca.artcc}</span>}
+        {fca.artcc && <span className="ml-1.5 text-xs text-ink-3">{fca.artcc}</span>}
       </button>
       <span
-        className={
-          "shrink-0 rounded px-1.5 text-xs font-medium tabular-nums " +
-          (count > 0 ? "bg-primary/15 text-primary" : "text-muted-foreground/50")
-        }
+        className={cn(
+          "shrink-0 rounded-full px-1.5 font-mono text-xs font-semibold",
+          count > 0 ? "bg-brand-soft text-brand-ink" : "text-ink-3",
+        )}
       >
         {count}
       </span>
@@ -147,7 +148,7 @@ function FcaRow({
         </span>
       )}
       {canEdit && (
-        <button type="button" title="Edit" onClick={onEdit} className="text-muted-foreground hover:text-foreground">
+        <button type="button" title="Edit" onClick={onEdit} className="text-ink-3 hover:text-ink">
           <Pencil className="size-3.5" />
         </button>
       )}
@@ -201,15 +202,15 @@ function RouteRow({
     <li
       ref={setNodeRef}
       style={style}
-      className={
-        "flex items-center gap-2 rounded px-2 py-1.5 text-sm " +
-        (selected ? "bg-accent/40 " : "") +
-        (hidden ? "opacity-50" : "")
-      }
+      className={cn(
+        "flex items-center gap-2 rounded-xs px-2 py-1.5 text-sm",
+        selected && "bg-brand-soft",
+        hidden && "opacity-50",
+      )}
     >
       <button
         type="button"
-        className="cursor-grab text-muted-foreground/60 hover:text-foreground"
+        className="cursor-grab text-ink-3 hover:text-ink"
         {...attributes}
         {...listeners}
       >
@@ -219,7 +220,7 @@ function RouteRow({
       <button type="button" title={r.route} onClick={onSelect} className="flex-1 truncate text-left font-mono">
         {r.name}
         {r.unresolved.length > 0 && (
-          <span className="ml-1.5 text-xs text-amber-500" title={`Unresolved: ${r.unresolved.join(" ")}`}>
+          <span className="ml-1.5 text-xs text-warning" title={`Unresolved: ${r.unresolved.join(" ")}`}>
             ⚠{r.unresolved.length}
           </span>
         )}
@@ -228,7 +229,7 @@ function RouteRow({
         type="button"
         title={hidden ? "Show route" : "Hide route"}
         onClick={onToggleVisibility}
-        className="text-muted-foreground hover:text-foreground"
+        className="text-ink-3 hover:text-ink"
       >
         {hidden ? <EyeOff className="size-3.5" /> : <Eye className="size-3.5" />}
       </button>
@@ -236,12 +237,12 @@ function RouteRow({
         type="button"
         title={labeled ? "Hide fix names" : "Show fix names"}
         onClick={onToggleFixes}
-        className={"transition-colors " + (labeled ? "text-primary" : "text-muted-foreground hover:text-foreground")}
+        className={cn("transition-colors", labeled ? "text-brand-ink" : "text-ink-3 hover:text-ink")}
       >
         <Tag className="size-3.5" />
       </button>
       {canEditRoute && (
-        <button type="button" title="Edit" onClick={onEdit} className="text-muted-foreground hover:text-foreground">
+        <button type="button" title="Edit" onClick={onEdit} className="text-ink-3 hover:text-ink">
           <Pencil className="size-3.5" />
         </button>
       )}
@@ -288,7 +289,9 @@ export function FcaMapView({
 }) {
   const { data: me } = useMe();
   const toast = useToast();
-  const { resolvedTheme } = useTheme();
+  const palette = useMapPalette();
+  const fcaColors = useFcaColors();
+  const routeColors = useRouteColors();
   const eventMode = eventId != null;
   const canRead = readOnly || hasPermission(me, eventMode ? "events.plan.read" : "flow.fca.read");
   const canEdit = !readOnly && hasPermission(me, eventMode ? "events.plan.update" : "flow.fca.update");
@@ -483,7 +486,7 @@ export function FcaMapView({
   const startNew = () => {
     setSelectedId(null);
     setRouteCallsign(null);
-    setDraft(blankDraft(fcas.data?.length ?? 0));
+    setDraft(blankDraft(fcas.data?.length ?? 0, fcaColors));
     setPhase("draw");
   };
   const startEdit = (fca: Fca) => {
@@ -528,7 +531,7 @@ export function FcaMapView({
 
   const startNewRoute = () => {
     setSelectedRouteId(null);
-    setRouteForm(blankRouteForm(routes.data?.length ?? 0));
+    setRouteForm(blankRouteForm(routes.data?.length ?? 0, routeColors));
   };
   const startEditRoute = (r: MapRoute) => {
     setSelectedRouteId(null);
@@ -734,7 +737,7 @@ export function FcaMapView({
   if (!canRead) {
     return (
       <div
-        className={`flex items-center justify-center text-sm text-muted-foreground ${
+        className={`flex items-center justify-center text-sm text-ink-2 ${
           embedded ? "h-full" : "h-full"
         }`}
       >
@@ -748,35 +751,35 @@ export function FcaMapView({
     // paint over app chrome (nav dropdowns, toasts, dialogs), which portal to the body above it.
     <div className={`relative isolate flex ${embedded ? "h-full" : "h-full"}`}>
       {!embedded && mobileList && (
-        <div className="absolute inset-0 z-[650] bg-black/40 md:hidden" onClick={() => setMobileList(false)} />
+        <div className="absolute inset-0 z-[650] bg-ground/60 md:hidden" onClick={() => setMobileList(false)} />
       )}
 
       {!embedded && (
         <aside
           className={
-            "flex w-80 shrink-0 flex-col border-r bg-background max-md:absolute max-md:inset-y-0 max-md:left-0 max-md:z-[700] max-md:w-[85%] max-md:max-w-xs max-md:shadow-2xl max-md:transition-transform " +
+            "flex w-80 shrink-0 flex-col border-r border-line bg-panel max-md:absolute max-md:inset-y-0 max-md:left-0 max-md:z-[700] max-md:w-[85%] max-md:max-w-xs max-md:transition-transform " +
             (mobileList ? "max-md:translate-x-0" : "max-md:-translate-x-full")
           }
         >
-          <div className="flex items-center gap-2 border-b px-4 py-3">
+          <div className="flex items-center gap-2 border-b border-line px-4 py-3">
             {eventMode && (
               <Link
                 to="/admin/planning/events/$eventId"
                 params={{ eventId: String(eventId) }}
                 title="Back to the event"
-                className="text-muted-foreground transition-colors hover:text-foreground"
+                className="text-ink-3 transition-colors hover:text-ink"
               >
                 <ArrowLeft className="size-4" />
               </Link>
             )}
-            <span className="text-sm font-semibold uppercase tracking-wide">
+            <span className="text-xs font-semibold uppercase tracking-wide text-ink-2">
               {eventMode ? "Event FCAs" : "Flow Constrained Areas"}
             </span>
             <button
               type="button"
               aria-label="Close list"
               onClick={() => setMobileList(false)}
-              className="ml-auto text-muted-foreground hover:text-foreground md:hidden"
+              className="ml-auto text-ink-3 hover:text-ink md:hidden"
             >
               <X className="size-4" />
             </button>
@@ -797,7 +800,7 @@ export function FcaMapView({
           ) : (
             <>
               {canEdit && (
-                <div className="border-b p-3">
+                <div className="border-b border-line p-3">
                   {drawing ? (
                     <Button variant="secondary" className="w-full" onClick={cancel}>
                       Cancel drawing
@@ -810,11 +813,12 @@ export function FcaMapView({
                   )}
                 </div>
               )}
-              <div className="flex flex-col gap-2 border-b p-3">
-                <select
+              <div className="flex flex-col gap-2 border-b border-line p-3">
+                <Select
+                  aria-label="ARTCC"
                   value={artccFilter}
                   onChange={(e) => setArtccFilter(e.target.value)}
-                  className="h-9 w-full rounded-md border border-input bg-background px-2 text-sm outline-none focus-visible:ring-2 focus-visible:ring-ring"
+                  wrapperClassName="w-full"
                 >
                   <option value="">ALL ARTCCs</option>
                   {artccOptions.map((a) => (
@@ -822,18 +826,16 @@ export function FcaMapView({
                       {a}
                     </option>
                   ))}
-                </select>
+                </Select>
                 <Input placeholder="filter — name or fix…" value={filter} onChange={(e) => setFilter(e.target.value)} />
               </div>
 
               <div className="flex-1 overflow-y-auto">
-                {!fcas.data ? (
-                  <p className="p-4 text-sm text-muted-foreground">Loading…</p>
-                ) : shown.length === 0 ? (
-                  <p className="p-4 text-sm text-muted-foreground">
-                    No FCAs.{canEdit && " Draw one with “New FCA”."}
-                  </p>
-                ) : (
+                <QueryState
+                  isLoading={!fcas.data}
+                  isEmpty={shown.length === 0}
+                  empty={<>No FCAs.{canEdit && " Draw one with “New FCA”."}</>}
+                >
                   <DndContext
                     sensors={fcaDragSensors}
                     collisionDetection={closestCenter}
@@ -858,10 +860,10 @@ export function FcaMapView({
                       </ul>
                     </SortableContext>
                   </DndContext>
-                )}
+                </QueryState>
               </div>
 
-              <div className="flex flex-col border-t">
+              <div className="flex flex-col border-t border-line">
                 {routeForm ? (
                   <RouteEditor
                     form={routeForm}
@@ -873,14 +875,14 @@ export function FcaMapView({
                 ) : (
                   <>
                     <div className="flex items-center justify-between px-3 pt-3">
-                      <span className="text-xs font-semibold uppercase tracking-wide text-muted-foreground">Routes</span>
+                      <span className="text-xs font-semibold uppercase tracking-wide text-ink-3">Routes</span>
                       <div className="flex items-center gap-3">
                         {routes.data && routes.data.length > 0 && (
                           <button
                             type="button"
                             title={allRoutesHidden ? "Show all routes" : "Hide all routes"}
                             onClick={toggleAllRoutesVisibility}
-                            className="text-muted-foreground hover:text-foreground"
+                            className="text-ink-3 hover:text-ink"
                           >
                             {allRoutesHidden ? (
                               <EyeOff className="size-3.5" />
@@ -893,7 +895,7 @@ export function FcaMapView({
                           <button
                             type="button"
                             onClick={startNewRoute}
-                            className="flex items-center gap-1 text-xs text-primary hover:underline"
+                            className="flex items-center gap-1 text-xs font-semibold text-brand-ink hover:underline"
                           >
                             <Plus className="size-3.5" />
                             New route
@@ -929,7 +931,7 @@ export function FcaMapView({
                         </SortableContext>
                       </DndContext>
                     ) : (
-                      <p className="px-3 py-3 text-xs text-muted-foreground">
+                      <p className="px-3 py-3 text-xs text-ink-3">
                         No routes yet.{canEditRoute && " Add one with “New route”."}
                       </p>
                     )}
@@ -939,22 +941,22 @@ export function FcaMapView({
             </>
           )}
 
-          <div className="border-t px-4 py-2 text-xs">
+          <div className="border-t border-line px-4 py-2 text-xs">
             {dataStatus.data ? (
               <div className="min-w-0">
                 <div className="flex items-center gap-1.5 font-mono">
-                  <span className={`size-1.5 shrink-0 rounded-full ${navStale ? "bg-amber-500" : "bg-emerald-500"}`} />
+                  <span className={`size-1.5 shrink-0 rounded-full ${navStale ? "bg-warning" : "bg-success"}`} />
                   <span>NASR {dataStatus.data.nav_cycle}</span>
                   {cycleAge != null && (
-                    <span className={navStale ? "text-amber-500" : "text-muted-foreground"}> · {cycleAge}d</span>
+                    <span className={navStale ? "text-warning" : "text-ink-3"}> · {cycleAge}d</span>
                   )}
                 </div>
-                <div className="truncate text-muted-foreground">
+                <div className="truncate text-ink-3">
                   {dataStatus.data.winds_stations} winds · {traffic.data?.length ?? 0} traffic
                 </div>
               </div>
             ) : (
-              <span className="text-muted-foreground">
+              <span className="font-mono text-ink-3">
                 {traffic.data ? `traffic ${traffic.data.length}` : "traffic…"}
               </span>
             )}
@@ -971,7 +973,7 @@ export function FcaMapView({
         aircraftStyle={planeIcons ? "silhouette" : "triangle"}
         selectedAircraftId={routeCallsign}
         getAircraftColor={(a) =>
-          a.id.toUpperCase() === routeCallsign ? HIGHLIGHT : aircraftColor(resolvedTheme)
+          a.id.toUpperCase() === routeCallsign ? palette.highlight : palette.aircraft
         }
         boundaries={BOUNDARIES}
         fcas={mapFcas}
@@ -1000,9 +1002,9 @@ export function FcaMapView({
               type="button"
               onClick={() => setMobileList(true)}
               title="Show the FCA list"
-              className="flex items-center gap-1.5 rounded-lg border bg-background/95 px-2.5 py-1.5 text-xs font-medium shadow-lg backdrop-blur transition-colors hover:bg-muted md:hidden"
+              className={cn(MAP_BUTTON, "md:hidden")}
             >
-              <Menu className="size-3.5 text-muted-foreground" />
+              <Menu />
               List
             </button>
           )}
@@ -1010,18 +1012,18 @@ export function FcaMapView({
             type="button"
             onClick={() => camera.home()}
             title="Center on the United States"
-            className="flex items-center gap-1.5 rounded-lg border bg-background/95 px-2.5 py-1.5 text-xs font-medium shadow-lg backdrop-blur transition-colors hover:bg-muted"
+            className={MAP_BUTTON}
           >
-            <Home className="size-3.5 text-muted-foreground" />
+            <Home />
             Home
           </button>
           <button
             type="button"
             onClick={() => setPlaneIcons((v) => !v)}
             title={planeIcons ? "Live traffic: aircraft-type silhouettes" : "Live traffic: plain triangles"}
-            className="flex items-center gap-1.5 rounded-lg border bg-background/95 px-2.5 py-1.5 text-xs font-medium shadow-lg backdrop-blur transition-colors hover:bg-muted"
+            className={MAP_BUTTON}
           >
-            <Plane className={`size-3.5 ${planeIcons ? "text-primary" : "text-muted-foreground"}`} />
+            <Plane className={planeIcons ? "text-brand-ink" : undefined} />
             {planeIcons ? "Aircraft icons" : "Triangles"}
           </button>
           <button
@@ -1029,11 +1031,9 @@ export function FcaMapView({
             onClick={() => setShowAtc((v) => !v)}
             title="Toggle online ATC (positions, approach & center areas)"
             aria-pressed={showAtc}
-            className={`flex items-center gap-1.5 rounded-lg border px-2.5 py-1.5 text-xs font-medium shadow-lg backdrop-blur transition-colors ${
-              showAtc ? "border-primary/60 bg-primary/15 text-primary" : "bg-background/95 hover:bg-muted"
-            }`}
+            className={cn(MAP_BUTTON, showAtc && MAP_BUTTON_ON)}
           >
-            <RadioTower className={`size-3.5 ${showAtc ? "text-primary" : "text-muted-foreground"}`} />
+            <RadioTower className={showAtc ? "text-brand-ink" : undefined} />
             ATC
           </button>
           <FlightSearch
@@ -1046,8 +1046,8 @@ export function FcaMapView({
 
         {predictionScrubberEnabled && (
           <div className="absolute inset-x-0 bottom-3 z-[500] flex justify-center px-3">
-            <div className="flex w-full max-w-xl items-center gap-3 rounded-lg border bg-background/95 px-3 py-2 text-xs shadow-lg backdrop-blur">
-              <span className="shrink-0 font-medium text-muted-foreground">
+            <div className={cn(MAP_PANEL, "flex w-full max-w-xl items-center gap-3 px-3 py-2 text-xs")}>
+              <span className="w-12 shrink-0 font-mono font-semibold text-ink-2">
                 {offsetSec === 0 ? "Live" : `T+${Math.round(offsetSec / 60)}m`}
               </span>
               <input
@@ -1057,14 +1057,14 @@ export function FcaMapView({
                 step={30}
                 value={offsetSec}
                 onChange={(e) => setOffsetSec(Number(e.target.value))}
-                className="flex-1"
+                className="flex-1 accent-brand"
                 aria-label="Prediction scrubber — minutes ahead"
               />
               <button
                 type="button"
                 onClick={() => setOffsetSec(0)}
                 disabled={offsetSec === 0}
-                className="shrink-0 rounded-md border px-2 py-1 font-medium transition-colors hover:bg-muted disabled:opacity-50"
+                className="shrink-0 rounded-full border border-line px-2.5 py-1 font-semibold text-ink-2 transition-colors hover:bg-panel-2 hover:text-ink disabled:opacity-50"
               >
                 Reset
               </button>
@@ -1074,7 +1074,7 @@ export function FcaMapView({
 
         {navStale && (
           <div className="pointer-events-none absolute inset-x-0 top-3 z-[500] flex justify-center">
-            <div className="pointer-events-auto flex items-center gap-2 rounded-lg border border-amber-500/50 bg-amber-500/10 px-3 py-1.5 text-xs text-amber-700 shadow-lg backdrop-blur dark:text-amber-200">
+            <div className="pointer-events-auto flex items-center gap-2 rounded-full border border-warning/40 bg-warning-soft px-3 py-1.5 text-xs font-semibold text-warning">
               <span>
                 NASR data is {cycleAge} days old ({dataStatus.data?.nav_cycle}).
               </span>
@@ -1084,17 +1084,17 @@ export function FcaMapView({
 
         {drawing && draft && (
           <div className="pointer-events-none absolute inset-x-0 bottom-6 z-[500] flex justify-center">
-            <div className="pointer-events-auto flex items-center gap-2.5 rounded-lg border border-primary/60 bg-background/95 px-5 py-3 text-sm shadow-lg backdrop-blur">
-              <span className="font-medium">Click to add points</span>
+            <div className={cn(MAP_PANEL, "pointer-events-auto flex items-center gap-2.5 border-brand/40 px-5 py-3 text-sm")}>
+              <span className="font-semibold">Click to add points</span>
               <Kbd>⌫</Kbd>
-              <span className="text-muted-foreground">undo</span>
+              <span className="text-ink-2">undo</span>
               <Kbd>dbl-click</Kbd>
-              <span className="text-muted-foreground">or</span>
+              <span className="text-ink-2">or</span>
               <Kbd>↵</Kbd>
-              <span className="text-muted-foreground">finish</span>
+              <span className="text-ink-2">finish</span>
               <Kbd>esc</Kbd>
-              <span className="text-muted-foreground">cancel</span>
-              <span className="ml-1 border-l pl-3 font-mono text-xs text-muted-foreground">
+              <span className="text-ink-2">cancel</span>
+              <span className="ml-1 border-l border-line pl-3 font-mono text-xs text-ink-3">
                 {draft.points.length} pts
               </span>
             </div>

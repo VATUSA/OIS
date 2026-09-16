@@ -4,7 +4,7 @@ import type {Layer} from "@deck.gl/core";
 import {aircraftIconUrl} from "@/lib/aircraft-icons";
 import {aircraftTypeScale} from "@/lib/aircraft-icon-size";
 import {clampGlyphSize} from "./aircraft";
-import {hexToRgb} from "../lib/colors";
+import {hexToRgb, type MapPalette, readMapPalette} from "../lib/colors";
 import {toDeckPath, type LatLng} from "../lib/geo";
 import {TRIANGLE_ICON} from "../lib/icons";
 import type {RGBA} from "../lib/types";
@@ -29,7 +29,7 @@ export interface MatchedFlight {
 
 /**
  * Matched (crossing) traffic for the selected FCA, tinted the FCA color and numbered by crossing
- * sequence: a faint trail to the crossing, a white crossing-point dot, the plane glyph, and a seq
+ * sequence: a faint trail to the crossing, a contrasting crossing-point dot, the plane glyph, and a seq
  * badge. The glyph is pickable so clicking it plots the route (layer id "matched").
  */
 export function buildMatchedLayers(
@@ -40,6 +40,7 @@ export function buildMatchedLayers(
   // Suffix appended to every layer id so several FCAs' matched traffic can coexist (overview mode).
   // The pickable glyph layer's id always starts with "matched" (see the click handler in TrafficMap).
   keySuffix = "",
+  palette: MapPalette = readMapPalette(),
 ): Layer[] {
   const [r, g, b] = hexToRgb(colorHex);
   const tint: RGBA = [r, g, b, 255];
@@ -66,10 +67,11 @@ export function buildMatchedLayers(
     id: `matched-cross${keySuffix}`,
     data: matched,
     getPosition: (f) => [f.cross_lon, f.cross_lat],
-    getFillColor: [255, 255, 255, 230],
+    getFillColor: [...palette.ink, 230] as RGBA,
     getRadius: 3,
     radiusUnits: "pixels",
     radiusMinPixels: 2,
+    updateTriggers: { getFillColor: [palette] },
   });
 
   const glyphs = new IconLayer<MatchedFlight>({
@@ -98,7 +100,7 @@ export function buildMatchedLayers(
     data: withPos,
     getPosition: (f) => [f.lon, f.lat],
     getText: (f) => String(f.seq),
-    getColor: [10, 10, 10, 255],
+    getColor: [...palette.halo, 255] as RGBA,
     getSize: 10,
     getPixelOffset: [11, -8],
     getTextAnchor: "middle",
@@ -107,7 +109,7 @@ export function buildMatchedLayers(
     getBackgroundColor: tint,
     backgroundPadding: [3, 1],
     fontWeight: 700,
-    updateTriggers: { getBackgroundColor: [colorHex] },
+    updateTriggers: { getColor: [palette], getBackgroundColor: [colorHex] },
   });
 
   return [trails, crossDots, glyphs, badges];

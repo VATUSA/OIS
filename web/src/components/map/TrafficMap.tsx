@@ -1,10 +1,10 @@
 import {useCallback, useMemo, useRef, useState} from "react";
 import type {Layer, MapViewState, PickingInfo} from "@deck.gl/core";
-import {useTheme} from "@ois/ui";
 
 import {useSetting} from "@/lib/settings";
 import {MapCanvas} from "./MapCanvas";
 import {US_HOME} from "./lib/constants";
+import {useMapPalette} from "./lib/colors";
 import {zoomAircraftScale} from "./lib/aircraft-scale";
 import {buildBoundaryLayer} from "./layers/boundaries";
 import {buildAircraftLayer, buildLabelLayer, type LabelFlags} from "./layers/aircraft";
@@ -129,7 +129,7 @@ export function TrafficMap({
   mapChildren,
   children,
 }: TrafficMapProps) {
-  const { resolvedTheme } = useTheme();
+  const palette = useMapPalette();
   const dragIndex = useRef<number | null>(null);
   const [draggingVertex, setDraggingVertex] = useState(false);
   const lastClickT = useRef(0);
@@ -170,27 +170,27 @@ export function TrafficMap({
 
   const layers: Layer[] = useMemo(() => {
     const out: Layer[] = [];
-    if (boundaries) out.push(buildBoundaryLayer(boundaries, resolvedTheme, boundaryEmphasis));
-    if (atc && centerBoundaries) out.push(...buildAtcLayers(atc, centerBoundaries));
+    if (boundaries) out.push(buildBoundaryLayer(boundaries, palette, boundaryEmphasis));
+    if (atc && centerBoundaries) out.push(...buildAtcLayers(atc, centerBoundaries, palette));
     if (atcAnchors.length) out.push(buildAtcHoverLayer(atcAnchors));
-    if (trails?.length) out.push(buildTrailLayer(trails, resolvedTheme));
-    if (routeOverlays?.length) out.push(buildRouteOverlayLayer(routeOverlays));
+    if (trails?.length) out.push(buildTrailLayer(trails, palette));
+    if (routeOverlays?.length) out.push(buildRouteOverlayLayer(routeOverlays, palette));
     if (namedRoutes?.length)
-      out.push(...buildNamedRouteLayers(namedRoutes, selectedRouteId, labeledRouteIds ?? EMPTY_SET));
-    if (rings?.data.length) out.push(buildRingLayer(rings.data, rings.nm, resolvedTheme));
-    if (fcas?.length) out.push(...buildFcaLayers(fcas, selectedFcaId));
+      out.push(...buildNamedRouteLayers(namedRoutes, selectedRouteId, labeledRouteIds ?? EMPTY_SET, palette));
+    if (rings?.data.length) out.push(buildRingLayer(rings.data, rings.nm, palette));
+    if (fcas?.length) out.push(...buildFcaLayers(fcas, selectedFcaId, palette));
     if (matched?.length && matchedColor)
-      out.push(...buildMatchedLayers(matched, matchedColor, aircraftStyle ?? "silhouette", sizeScale));
+      out.push(...buildMatchedLayers(matched, matchedColor, aircraftStyle ?? "silhouette", sizeScale, "", palette));
     for (const group of matchedGroups ?? [])
       if (group.flights.length)
         out.push(
-          ...buildMatchedLayers(group.flights, group.color, aircraftStyle ?? "silhouette", sizeScale, `-${group.id}`),
+          ...buildMatchedLayers(group.flights, group.color, aircraftStyle ?? "silhouette", sizeScale, `-${group.id}`, palette),
         );
-    if (selectedTrack?.length) out.push(buildSelectedTrackLayer(selectedTrack));
-    if (selectedRoutePath.length) out.push(buildSelectedRouteLayer(selectedRoutePath));
+    if (selectedTrack?.length) out.push(buildSelectedTrackLayer(selectedTrack, palette));
+    if (selectedRoutePath.length) out.push(buildSelectedRouteLayer(selectedRoutePath, palette));
     out.push(
       buildAircraftLayer(aircraft, {
-        theme: resolvedTheme,
+        palette,
         style: aircraftStyle,
         getColor: getAircraftColor,
         getSize: getAircraftSize,
@@ -198,13 +198,13 @@ export function TrafficMap({
         highlightKey: selectedAircraftId,
       }),
     );
-    if (anyLabel && labels) out.push(buildLabelLayer(aircraft, labels, resolvedTheme));
-    if (filedRoute?.waypoints.length) out.push(buildWaypointLayer(filedRoute.waypoints, resolvedTheme));
-    if (draft) out.push(...buildDraftLayers(draft));
+    if (anyLabel && labels) out.push(buildLabelLayer(aircraft, labels, palette));
+    if (filedRoute?.waypoints.length) out.push(buildWaypointLayer(filedRoute.waypoints, palette));
+    if (draft) out.push(...buildDraftLayers(draft, palette));
     return out;
   }, [
     boundaries,
-    resolvedTheme,
+    palette,
     boundaryEmphasis,
     atc,
     centerBoundaries,
@@ -298,7 +298,7 @@ export function TrafficMap({
       onResize={camera?.onResize}
       controller={controller}
       layers={layers}
-      getTooltip={mapTooltip(resolvedTheme)}
+      getTooltip={TOOLTIP}
       onClick={handleClick}
       onDragStart={handleDragStart}
       onDrag={handleDrag}
@@ -317,6 +317,7 @@ export function TrafficMap({
 }
 
 const EMPTY_SET: Set<string> = new Set();
+const TOOLTIP = mapTooltip();
 
 /** Re-scale glyphs only when zoom moves at least this much, so panning doesn't churn the layers. */
 const ZOOM_STEP = 0.1;

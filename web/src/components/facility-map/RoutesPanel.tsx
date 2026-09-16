@@ -1,7 +1,8 @@
 import {useState} from "react";
-import {Button, ConfirmButton} from "@ois/ui";
+import {Button, ConfirmButton, EmptyState} from "@ois/ui";
 import {Pencil, Plus, Trash2, X} from "lucide-react";
 
+import {useRouteColors} from "@/components/map/lib/colors";
 import {
   RouteEditor,
   blankRouteForm,
@@ -37,6 +38,7 @@ export function FacilityRoutesPanel({
   const update = useUpdateRoute();
   const remove = useDeleteRoute();
   const [form, setForm] = useState<RouteForm | null>(null);
+  const routeColors = useRouteColors();
 
   const own = (routes.data ?? []).filter((r) => r.artcc === facilityId);
   const global = (routes.data ?? []).filter((r) => !r.artcc);
@@ -57,14 +59,16 @@ export function FacilityRoutesPanel({
   };
 
   return (
-    <div className="absolute right-3 top-3 z-[600] flex max-h-[calc(100%-1.5rem)] w-80 flex-col overflow-hidden rounded-lg border bg-background/95 shadow-xl backdrop-blur">
-      <div className="flex items-center justify-between border-b px-3 py-2">
-        <span className="text-sm font-semibold">Routes · {facilityId}</span>
+    <div className="absolute right-3 top-3 z-[600] flex max-h-[calc(100%-1.5rem)] w-80 flex-col overflow-hidden rounded-md border border-line bg-panel">
+      <div className="flex items-center justify-between border-b border-line px-3 py-2">
+        <span className="text-sm font-semibold">
+          Routes · <span className="font-mono">{facilityId}</span>
+        </span>
         <button
           type="button"
           onClick={onClose}
           title="Close"
-          className="rounded p-1 text-muted-foreground transition-colors hover:bg-muted hover:text-foreground"
+          className="rounded-full p-1 text-ink-3 transition-colors hover:bg-panel-2 hover:text-ink"
         >
           <X className="size-4" />
         </button>
@@ -80,28 +84,26 @@ export function FacilityRoutesPanel({
         />
       ) : (
         <div className="flex flex-col gap-2 overflow-y-auto p-3">
-          <Button size="sm" className="self-start" onClick={() => setForm(blankRouteForm(own.length))}>
-            <Plus className="mr-1 size-4" /> New route
+          <Button size="sm" className="self-start" onClick={() => setForm(blankRouteForm(own.length, routeColors))}>
+            <Plus /> New route
           </Button>
 
           {own.length === 0 ? (
-            <p className="py-2 text-center text-xs text-muted-foreground">
-              No routes for {facilityId} yet.
-            </p>
+            <EmptyState className="py-4">No routes for {facilityId} yet.</EmptyState>
           ) : (
             <ul className="flex flex-col gap-1">
               {own.map((r) => (
-                <li key={r.id} className="flex items-center gap-2 rounded-md border bg-muted/20 p-2">
+                <li key={r.id} className="flex items-center gap-2 rounded-xs border border-line bg-panel-2 p-2">
                   <span
                     className="size-3 shrink-0 rounded-full"
                     style={{ backgroundColor: r.color }}
                   />
-                  <span className="flex-1 truncate text-sm">{r.name || "(unnamed)"}</span>
+                  <span className="flex-1 truncate font-mono text-sm">{r.name || "(unnamed)"}</span>
                   <button
                     type="button"
                     onClick={() => setForm(routeFormFrom(r))}
                     title="Edit route"
-                    className="rounded p-1 text-muted-foreground transition-colors hover:bg-muted hover:text-foreground"
+                    className="rounded-full p-1 text-ink-3 transition-colors hover:bg-panel-2 hover:text-ink"
                   >
                     <Pencil className="size-3.5" />
                   </button>
@@ -122,15 +124,15 @@ export function FacilityRoutesPanel({
           )}
 
           {global.length > 0 && (
-            <div className="mt-1 border-t pt-2">
-              <div className="mb-1 text-xs font-medium text-muted-foreground">
+            <div className="mt-1 border-t border-line pt-2">
+              <div className="mb-1 text-xs font-semibold text-ink-3">
                 Global routes · edit on the flow map
               </div>
               <ul className="flex flex-col gap-0.5">
                 {global.map((r) => (
                   <li
                     key={r.id}
-                    className="flex items-center gap-2 px-1 py-0.5 text-sm text-muted-foreground"
+                    className="flex items-center gap-2 px-1 py-0.5 font-mono text-sm text-ink-2"
                   >
                     <span
                       className="size-2.5 shrink-0 rounded-full"

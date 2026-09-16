@@ -1,10 +1,7 @@
-import {Button, Input} from "@ois/ui";
+import {Button, Input, Select} from "@ois/ui";
 
 import type {LatLng} from "../lib/geo";
 import {MIN_SURFACE_POINTS, isPolygonKind, type SurfaceKind} from "./layers";
-
-const SELECT_CLASS =
-  "h-9 rounded-md border border-input bg-background px-2 text-sm outline-none focus-visible:ring-2 focus-visible:ring-ring";
 
 /** The shape being drawn or edited. `points` never carries a polygon's closing duplicate — that's
  * added only when building the save request. */
@@ -64,9 +61,9 @@ export function SurfaceEditorPanel({
   if (phase === "draw") {
     const canFinish = draft.points.length >= MIN_SURFACE_POINTS[draft.kind];
     return (
-      <div className="flex flex-col gap-3 rounded-md border bg-background/95 p-3 shadow-lg">
-        <p className="text-sm text-muted-foreground">{HINT[draft.kind]}</p>
-        <p className="text-xs text-muted-foreground">{draft.points.length} point(s) placed</p>
+      <div className="flex flex-col gap-3 rounded-md border border-line bg-panel p-3">
+        <p className="text-sm text-ink-2">{HINT[draft.kind]}</p>
+        <p className="text-xs text-ink-3"><span className="font-mono">{draft.points.length}</span> point(s) placed</p>
         <div className="flex items-center justify-end gap-2">
           <Button variant="ghost" size="sm" onClick={onCancel}>
             Cancel
@@ -83,9 +80,9 @@ export function SurfaceEditorPanel({
   }
 
   return (
-    <div className="flex flex-col gap-3 rounded-md border bg-background/95 p-3 shadow-lg">
+    <div className="flex flex-col gap-3 rounded-md border border-line bg-panel p-3">
       <label className="flex flex-col gap-1 text-xs">
-        <span className="text-muted-foreground">Name</span>
+        <span className="text-ink-2">Name</span>
         <Input
           autoFocus
           value={draft.name}
@@ -95,20 +92,19 @@ export function SurfaceEditorPanel({
       </label>
       {draft.kind === "ramp" && (
         <label className="flex flex-col gap-1 text-xs">
-          <span className="text-muted-foreground">Kind</span>
-          <select
-            className={SELECT_CLASS}
+          <span className="text-ink-2">Kind</span>
+          <Select
             value={draft.rampKind}
             onChange={(e) => onRampKindChange(e.target.value as "ramp" | "apron")}
           >
             <option value="ramp">Ramp</option>
             <option value="apron">Apron</option>
-          </select>
+          </Select>
         </label>
       )}
       <div className="flex items-center justify-between gap-2">
         {onDelete ? (
-          <Button variant="ghost" size="sm" className="text-destructive" onClick={onDelete} disabled={pending}>
+          <Button variant="ghost" size="sm" className="text-danger" onClick={onDelete} disabled={pending}>
             Delete
           </Button>
         ) : (

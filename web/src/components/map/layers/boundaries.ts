@@ -1,11 +1,7 @@
 import {GeoJsonLayer} from "@deck.gl/layers";
 
-import type {Theme} from "../lib/constants";
-import {boundaryColor} from "../lib/colors";
-
-/** Faint interior fill for an emphasized (single-facility) boundary. */
-const boundaryFill = (theme: Theme): [number, number, number, number] =>
-  theme === "dark" ? [120, 140, 170, 18] : [80, 100, 140, 14];
+import {type MapPalette, readMapPalette} from "../lib/colors";
+import type {RGBA} from "../lib/types";
 
 /**
  * ARTCC boundary outlines (non-interactive). `emphasis` draws a bolder line + faint fill — used by the
@@ -13,23 +9,26 @@ const boundaryFill = (theme: Theme): [number, number, number, number] =>
  */
 export function buildBoundaryLayer(
   data: GeoJSON.FeatureCollection,
-  theme: Theme,
+  palette: MapPalette = readMapPalette(),
   emphasis = false,
 ) {
+  const [r, g, b] = palette.boundary;
+  // Faint interior fill for an emphasized (single-facility) boundary.
+  const fill: RGBA = [r, g, b, 16];
   return new GeoJsonLayer({
     id: "artcc-boundaries",
     data,
     stroked: true,
     filled: emphasis,
-    getFillColor: emphasis ? boundaryFill(theme) : [0, 0, 0, 0],
-    getLineColor: boundaryColor(theme),
+    getFillColor: emphasis ? fill : [r, g, b, 0],
+    getLineColor: palette.boundary,
     getLineWidth: emphasis ? 2 : 1,
     lineWidthUnits: "pixels",
     lineWidthMinPixels: emphasis ? 2 : 1,
     updateTriggers: {
-      getLineColor: [theme],
+      getLineColor: [palette],
       getLineWidth: [emphasis],
-      getFillColor: [theme, emphasis],
+      getFillColor: [palette, emphasis],
     },
   });
 }

@@ -1,7 +1,7 @@
 import {GeoJsonLayer, PolygonLayer, ScatterplotLayer} from "@deck.gl/layers";
 import type {Layer} from "@deck.gl/core";
 
-import {ATC_COLORS, hexToRgb} from "../lib/colors";
+import {ATC_COLORS, type MapPalette, readMapPalette} from "../lib/colors";
 import {toDeckPath, toDeckPoint, type LatLng} from "../lib/geo";
 import type {RGBA} from "../lib/types";
 
@@ -28,9 +28,6 @@ export interface AtcPositionLite {
   atis_code?: string | null;
 }
 
-const CTR = hexToRgb(ATC_COLORS.CTR);
-const APP = hexToRgb(ATC_COLORS.APP);
-
 /** A single lat/lon (or lon/lat) coordinate pair with both values finite. */
 function isValidPoint(p: number[] | null | undefined): p is number[] {
   return (
@@ -53,7 +50,13 @@ function isValidRing(ring: number[][]): boolean {
  * matched SimAware rings shaded orange, or a ~25 NM circle fallback. Badges + area id labels are HTML
  * markers (see the markers/ components), not drawn here.
  */
-export function buildAtcLayers(atc: AtcData, boundaries: GeoJSON.FeatureCollection): Layer[] {
+export function buildAtcLayers(
+  atc: AtcData,
+  boundaries: GeoJSON.FeatureCollection,
+  palette: MapPalette = readMapPalette(),
+): Layer[] {
+  const CTR = palette.atc.CTR;
+  const APP = palette.atc.APP;
   const layers: Layer[] = [];
 
   // Center (ARTCC) areas — filter the bundled boundaries to the online centers.

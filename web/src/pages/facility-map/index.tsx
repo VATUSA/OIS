@@ -1,7 +1,7 @@
 import {useCallback, useEffect, useMemo, useRef, useState} from "react";
 import {WebMercatorViewport, type MapViewState} from "@deck.gl/core";
 import {useNavigate, useParams, useSearch} from "@tanstack/react-router";
-import {useTheme, useToast} from "@ois/ui";
+import {cn, Select, useTheme, useToast} from "@ois/ui";
 import {Code2, Maximize2, Pencil, RadioTower, Route, Tag} from "lucide-react";
 
 import {useFacilities} from "@/lib/admin";
@@ -27,7 +27,9 @@ import {toDeckPath, type LatLng} from "@/components/map/lib/geo";
 import type {AtcData} from "@/components/map/layers/atc";
 import type {NamedRoute} from "@/components/map/layers/routes";
 import {useMapCamera} from "@/components/map/hooks/useMapCamera";
-import {aircraftColor} from "@/components/map/lib/colors";
+import {useMapPalette} from "@/components/map/lib/colors";
+import {MAP_BUTTON, MAP_BUTTON_ON, MAP_PANEL} from "@/components/map/lib/overlay";
+import {usePageHeader} from "@/components/shell/page-meta";
 import {US_HOME} from "@/components/map/lib/constants";
 import type {NormAircraft} from "@/components/map/lib/types";
 
@@ -95,6 +97,7 @@ export function FacilityMapIndexPage() {
 export function FacilityMapPage() {
   const { facilityId } = useParams({ from: "/facility-map/$facilityId" });
   const { embed, atc, routes, fixes, theme } = useSearch({ from: "/facility-map/$facilityId" });
+  usePageHeader({ title: `${facilityId.toUpperCase()} facility map` });
   return (
     <FacilityMapView
       id={facilityId.toUpperCase()}
@@ -135,7 +138,8 @@ export function FacilityMapView({
   initialFixes?: boolean;
   forceTheme?: "light" | "dark";
 }) {
-  const { resolvedTheme, setTheme } = useTheme();
+  const { setTheme } = useTheme();
+  const palette = useMapPalette();
   const navigate = useNavigate();
   const toast = useToast();
 
@@ -274,8 +278,8 @@ export function FacilityMapView({
   );
 
   const getAircraftColor = useMemo(
-    () => buildColorFn(activeConfig, aircraftColor(resolvedTheme)),
-    [activeConfig, resolvedTheme],
+    () => buildColorFn(activeConfig, palette.aircraft),
+    [activeConfig, palette],
   );
 
   // ARTCCs that have both a VATUSA directory entry and a boundary polygon, sorted by id.
@@ -328,13 +332,15 @@ export function FacilityMapView({
         <div className="absolute left-3 top-3 z-[500] flex flex-wrap items-center gap-2">
           {/* Facility picker navigates the whole page, so only on the standalone page (not embedded). */}
           {!fill && (
-          <select
+          <Select
+            size="sm"
+            aria-label="Facility"
             value={id ?? ""}
             onChange={(e) =>
               navigate({ to: "/facility-map/$facilityId", params: { facilityId: e.target.value } })
             }
             title="Select a facility"
-            className="rounded-lg border bg-background/95 px-2.5 py-1.5 text-xs font-medium shadow-lg backdrop-blur outline-none"
+            className="rounded-full bg-panel pl-3 text-xs font-semibold"
           >
             <option value="" disabled>
               Select a facility…
@@ -345,7 +351,7 @@ export function FacilityMapView({
                 {f.id} — {f.name}
               </option>
             ))}
-          </select>
+          </Select>
           )}
           <button
             type="button"
@@ -356,9 +362,9 @@ export function FacilityMapView({
               })
             }
             title={feature ? "Recenter on the facility" : "Recenter on the CONUS"}
-            className="flex items-center gap-1.5 rounded-lg border bg-background/95 px-2.5 py-1.5 text-xs font-medium shadow-lg backdrop-blur transition-colors hover:bg-muted"
+            className={MAP_BUTTON}
           >
-            <Maximize2 className="size-3.5 text-muted-foreground" />
+            <Maximize2 />
             Recenter
           </button>
           <button
@@ -366,11 +372,9 @@ export function FacilityMapView({
             onClick={() => setAtcPref((v) => !v)}
             title="Toggle online ATC (positions, approach & center areas)"
             aria-pressed={showAtc}
-            className={`flex items-center gap-1.5 rounded-lg border px-2.5 py-1.5 text-xs font-medium shadow-lg backdrop-blur transition-colors ${
-              showAtc ? "border-primary/60 bg-primary/15 text-primary" : "bg-background/95 hover:bg-muted"
-            }`}
+            className={cn(MAP_BUTTON, showAtc && MAP_BUTTON_ON)}
           >
-            <RadioTower className={`size-3.5 ${showAtc ? "text-primary" : "text-muted-foreground"}`} />
+            <RadioTower className={showAtc ? "text-brand-ink" : undefined} />
             ATC
           </button>
           <button
@@ -378,11 +382,9 @@ export function FacilityMapView({
             onClick={() => setRoutesPref((v) => !v)}
             title="Toggle saved routes"
             aria-pressed={showRoutes}
-            className={`flex items-center gap-1.5 rounded-lg border px-2.5 py-1.5 text-xs font-medium shadow-lg backdrop-blur transition-colors ${
-              showRoutes ? "border-primary/60 bg-primary/15 text-primary" : "bg-background/95 hover:bg-muted"
-            }`}
+            className={cn(MAP_BUTTON, showRoutes && MAP_BUTTON_ON)}
           >
-            <Route className={`size-3.5 ${showRoutes ? "text-primary" : "text-muted-foreground"}`} />
+            <Route className={showRoutes ? "text-brand-ink" : undefined} />
             Routes
           </button>
           {showRoutes && (
@@ -391,11 +393,9 @@ export function FacilityMapView({
               onClick={() => setFixesPref((v) => !v)}
               title="Toggle fix names along routes"
               aria-pressed={showFixes}
-              className={`flex items-center gap-1.5 rounded-lg border px-2.5 py-1.5 text-xs font-medium shadow-lg backdrop-blur transition-colors ${
-                showFixes ? "border-primary/60 bg-primary/15 text-primary" : "bg-background/95 hover:bg-muted"
-              }`}
+              className={cn(MAP_BUTTON, showFixes && MAP_BUTTON_ON)}
             >
-              <Tag className={`size-3.5 ${showFixes ? "text-primary" : "text-muted-foreground"}`} />
+              <Tag className={showFixes ? "text-brand-ink" : undefined} />
               Fixes
             </button>
           )}
@@ -404,9 +404,9 @@ export function FacilityMapView({
               type="button"
               onClick={() => setEditingRoutes(true)}
               title="Add or edit this facility's routes"
-              className="flex items-center gap-1.5 rounded-lg border bg-background/95 px-2.5 py-1.5 text-xs font-medium shadow-lg backdrop-blur transition-colors hover:bg-muted"
+              className={MAP_BUTTON}
             >
-              <Pencil className="size-3.5 text-muted-foreground" />
+              <Pencil />
               Edit routes
             </button>
           )}
@@ -415,9 +415,9 @@ export function FacilityMapView({
               type="button"
               onClick={() => setEditing(true)}
               title="Edit this facility's color rules"
-              className="flex items-center gap-1.5 rounded-lg border bg-background/95 px-2.5 py-1.5 text-xs font-medium shadow-lg backdrop-blur transition-colors hover:bg-muted"
+              className={MAP_BUTTON}
             >
-              <Pencil className="size-3.5 text-muted-foreground" />
+              <Pencil />
               Edit rules
             </button>
           )}
@@ -426,9 +426,9 @@ export function FacilityMapView({
               type="button"
               onClick={copyEmbed}
               title="Copy an <iframe> snippet to embed this map (current layers included)"
-              className="flex items-center gap-1.5 rounded-lg border bg-background/95 px-2.5 py-1.5 text-xs font-medium shadow-lg backdrop-blur transition-colors hover:bg-muted"
+              className={MAP_BUTTON}
             >
-              <Code2 className="size-3.5 text-muted-foreground" />
+              <Code2 />
               Embed
             </button>
           )}
@@ -437,17 +437,19 @@ export function FacilityMapView({
 
         {/* Legend */}
         {legendRules.length > 0 && (
-          <div className="absolute bottom-3 left-3 z-[500] max-w-[16rem] rounded-lg border bg-background/95 p-3 text-xs shadow-lg backdrop-blur">
-            <div className="mb-1.5 font-semibold">{id} coloring</div>
+          <div className={cn(MAP_PANEL, "absolute bottom-3 left-3 z-[500] max-w-[16rem] p-3 text-xs")}>
+            <div className="mb-1.5 font-semibold">
+              <span className="font-mono">{id}</span> coloring
+            </div>
             <ul className="flex flex-col gap-1">
               {legendRules.map((r) => (
                 <li key={r.id} className="flex items-center gap-2">
                   <span
-                    className="inline-block size-3 shrink-0 rounded-sm"
+                    className="inline-block size-3 shrink-0 rounded-full"
                     style={{ backgroundColor: r.color }}
                     title={colorLabel(r.color)}
                   />
-                  <span className="truncate">{r.label || colorLabel(r.color)}</span>
+                  <span className="truncate text-ink-2">{r.label || colorLabel(r.color)}</span>
                 </li>
               ))}
             </ul>
@@ -457,8 +459,8 @@ export function FacilityMapView({
         {/* Unknown facility id in the URL (the hint points at the picker, so skip it when there's none) */}
         {id && !feature && !fill && (
           <div className="pointer-events-none absolute inset-x-0 top-20 z-[400] flex justify-center">
-            <div className="rounded-lg border bg-background/95 px-4 py-2 text-sm shadow-lg backdrop-blur">
-              No boundary on file for <span className="font-semibold">{id}</span> — pick a facility above.
+            <div className={cn(MAP_PANEL, "px-4 py-2 text-sm text-ink-2")}>
+              No boundary on file for <span className="font-mono font-semibold text-ink">{id}</span> — pick a facility above.
             </div>
           </div>
         )}

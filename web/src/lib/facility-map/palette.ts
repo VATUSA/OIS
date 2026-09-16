@@ -1,7 +1,10 @@
+import {useMemo} from "react";
+import {parseColor, readToken, useTokens} from "@ois/ui";
+
 /**
- * The shared color palette for facility-map aircraft coloring. A fixed, named set (à la VATUSA's
- * legacy TMU map buckets) so rule colors are consistent, legible on both basemaps, and shareable as
- * plain hex. Rules store the hex; the map/legend look up the label.
+ * The swatches offered for facility-map aircraft coloring: a fixed, named set drawn from the
+ * `--series-*` tokens (plus a neutral grey), resolved to hex. Rules store the hex; the map/legend look
+ * up the label, which also recognises the other theme's values and the pre-token palette.
  */
 
 export interface PaletteColor {
@@ -9,25 +12,88 @@ export interface PaletteColor {
   label: string;
 }
 
-export const PALETTE: PaletteColor[] = [
-  { hex: "#e5484d", label: "Red" },
-  { hex: "#f76b15", label: "Orange" },
-  { hex: "#e3b341", label: "Amber" },
-  { hex: "#57ab5a", label: "Green" },
-  { hex: "#39c5cf", label: "Cyan" },
-  { hex: "#4c8dff", label: "Blue" },
-  { hex: "#8b5cf6", label: "Purple" },
-  { hex: "#e668c6", label: "Pink" },
-  { hex: "#a0785a", label: "Brown" },
-  { hex: "#8b949e", label: "Gray" },
-];
+const SWATCHES = [
+  { token: "series-5", label: "Red" },
+  { token: "series-7", label: "Orange" },
+  { token: "series-3", label: "Amber" },
+  { token: "series-8", label: "Lime" },
+  { token: "series-2", label: "Green" },
+  { token: "series-1", label: "Cyan" },
+  { token: "series-6", label: "Blue" },
+  { token: "series-4", label: "Purple" },
+  { token: "ink-3", label: "Gray" },
+] as const;
 
-const LABEL_BY_HEX = new Map(PALETTE.map((c) => [c.hex.toLowerCase(), c.label]));
+const TOKENS = SWATCHES.map((s) => s.token);
 
-/** Human label for a palette hex (falls back to the hex itself for custom/legacy colors). */
-export function colorLabel(hex: string): string {
-  return LABEL_BY_HEX.get(hex.toLowerCase()) ?? hex;
+/** Hex rules were saved with before the swatches came from tokens — kept so saved colours keep their names. */
+const LEGACY_LABELS: Record<string, string> = {
+  "#e5484d": "Red",
+  "#f76b15": "Orange",
+  "#e3b341": "Amber",
+  "#57ab5a": "Green",
+  "#39c5cf": "Cyan",
+  "#4c8dff": "Blue",
+  "#8b5cf6": "Purple",
+  "#e668c6": "Pink",
+  "#a0785a": "Brown",
+  "#8b949e": "Gray",
+};
+
+function toHex(value: string): string {
+  const [r, g, b] = parseColor(value);
+  return `#${[r, g, b].map((c) => c.toString(16).padStart(2, "0")).join("")}`;
+}
+
+const build = (values: Record<string, string>): PaletteColor[] =>
+  SWATCHES.map((s) => ({ hex: toHex(values[s.token]), label: s.label }));
+
+/** The rule swatches for the current theme, re-read on a theme switch. */
+export function useRulePalette(): PaletteColor[] {
+  const values = useTokens(TOKENS);
+  return useMemo(() => build(values), [values]);
+}
+
+/** The rule swatches for the current theme, read now. */
+export function readRulePalette(): PaletteColor[] {
+  return build(Object.fromEntries(TOKENS.map((t) => [t, readToken(t)])));
 }
 
 /** The default swatch offered for a new rule. */
-export const DEFAULT_RULE_COLOR = PALETTE[0].hex;
+export const defaultRuleColor = (palette: PaletteColor[] = readRulePalette()) => palette[0].hex;
+
+/** Every theme's declared value of each swatch token (from the loaded stylesheets), hex → label. */
+function tokenLabelsAllThemes(): Map<string, string> {
+  const out = new Map<string, string>();
+  const visit = (rules: CSSRuleList) => {
+    for (const rule of Array.from(rules)) {
+      if (rule instanceof CSSStyleRule) {
+        for (const s of SWATCHES) {
+          const v = rule.style.getPropertyValue(`--${s.token}`).trim();
+          if (v) out.set(toHex(v), s.label);
+        }
+      } else if ("cssRules" in rule) {
+        visit((rule as CSSGroupingRule).cssRules);
+      }
+    }
+  };
+  if (typeof document !== "undefined") {
+    for (const sheet of Array.from(document.styleSheets)) {
+      try {
+        visit(sheet.cssRules);
+      } catch {
+        // A cross-origin sheet can't be read; the app's own tokens are same-origin.
+      }
+    }
+  }
+  return out;
+}
+
+let labels: Map<string, string> | null = null;
+
+/** Human label for a rule hex (falls back to the hex itself for custom colors). */
+export function colorLabel(hex: string): string {
+  const key = hex.toLowerCase();
+  if (!labels || labels.size === 0) labels = tokenLabelsAllThemes();
+  return labels.get(key) ?? LEGACY_LABELS[key] ?? readRulePalette().find((c) => c.hex === key)?.label ?? hex;
+}
