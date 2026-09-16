@@ -1,8 +1,22 @@
-import {useState} from "react";
-import {Badge, Button, Card, CardContent, ConfirmButton, Input, Switch, useConfirm} from "@ois/ui";
-import {Archive, Gauge, Layers, Play, Plus, X} from "lucide-react";
+import {useMemo, useState} from "react";
+import {
+  Button,
+  Card,
+  ConfirmButton,
+  type DataColumn,
+  DataTable,
+  FilterBar,
+  Input,
+  QueryState,
+  SegmentedControl,
+  StatusPill,
+  Switch,
+  useConfirm,
+} from "@ois/ui";
+import {Archive, Gauge, Play, Plus, X} from "lucide-react";
 
 import {useMe} from "@/lib/auth";
+import {toneOf} from "@/lib/status";
 import {
   type AirportRate,
   type TmiPackage,
@@ -21,6 +35,7 @@ import {hasPermission} from "@/lib/permissions";
 import {NtmlEditor} from "@/components/ntml-editor";
 import {EMPTY_NTML, type Ntml} from "@/lib/ntml";
 import {formatZulu, parseZulu} from "@/lib/time";
+import {SectionHeader} from "@/pages/planning/section-header";
 
 /** ICAOs already covered by a program item in a package. */
 function programIcaos(pkg: TmiPackage): Set<string> {
@@ -39,6 +54,11 @@ const KINDS: { value: Kind; label: string }[] = [
   { value: "ground_stop", label: "Ground stop" },
 ];
 
+const ENTRY_MODES = [
+  { value: "free", label: "Free text" },
+  { value: "structured", label: "Structured" },
+] as const;
+
 const kindLabel = (k: string) => KINDS.find((x) => x.value === k)?.label ?? k;
 
 /** One-line summary of an item from its kind + payload. */
@@ -46,10 +66,7 @@ function itemSummary(item: TmiPackageItem): string {
   const p = item.payload as unknown as Record<string, unknown>;
   const s = (k: string) => (p[k] == null ? "" : String(p[k]));
   if (item.kind === "program") {
-    const extra = [
-      Number(p.trail) > 0 ? `${p.trail} MINIT` : "",
-      Number(p.mit) > 0 ? `${p.mit} MIT` : "",
-    ]
+    const extra = [Number(p.trail) > 0 ? `${p.trail} MINIT` : "", Number(p.mit) > 0 ? `${p.mit} MIT` : ""]
       .filter(Boolean)
       .join(" · ");
     return `${s("icao")} · AAR ${s("aar")}${extra ? ` · ${extra}` : ""}`;
@@ -60,13 +77,7 @@ function itemSummary(item: TmiPackageItem): string {
   return `${s("airport")} · ${s("scope") || "all"} · ${s("until") ? `${s("until")}z` : "UFN"}`;
 }
 
-function AddItemForm({
-  eventId,
-  packageId,
-}: {
-  eventId: number;
-  packageId: string;
-}) {
+function AddItemForm({ eventId, packageId }: { eventId: number; packageId: string }) {
   const add = useAddPackageItem(eventId);
   const rates = useAirportRates(eventId);
   const [kind, setKind] = useState<Kind>("program");
@@ -121,6 +132,7 @@ function AddItemForm({
     <Input
       className={cls}
       placeholder={placeholder}
+      aria-label={title ?? placeholder}
       title={title}
       value={f[key] ?? ""}
       onChange={(e) => set(key, e.target.value)}
@@ -129,28 +141,22 @@ function AddItemForm({
   );
 
   return (
-    <div className="flex flex-col gap-2 rounded-md border border-dashed p-3">
-      <div className="flex flex-wrap gap-1">
-        {KINDS.map((k) => (
-          <Button
-            key={k.value}
-            type="button"
-            size="sm"
-            variant={kind === k.value ? "default" : "secondary"}
-            onClick={() => {
-              setKind(k.value);
-              setF({});
-              setStructured(false);
-              setNtml(EMPTY_NTML);
-            }}
-          >
-            {k.label}
-          </Button>
-        ))}
-      </div>
+    <div className="flex flex-col gap-3 border-t border-line pt-3">
+      <SegmentedControl
+        aria-label="Item kind"
+        className="self-start"
+        value={kind}
+        onChange={(k) => {
+          setKind(k);
+          setF({});
+          setStructured(false);
+          setNtml(EMPTY_NTML);
+        }}
+        options={KINDS}
+      />
       {kind === "program" && (rates.data?.length ?? 0) > 0 && (
         <div className="flex flex-wrap items-center gap-1">
-          <span className="text-xs text-muted-foreground">From rates:</span>
+          <span className="text-xs text-ink-3">From rates:</span>
           {rates.data!.map((r) => (
             <Button
               key={r.icao}
@@ -171,9 +177,9 @@ function AddItemForm({
         {kind === "program" && (
           <>
             {field("icao", "ICAO", "w-24 font-mono uppercase")}
-            {field("aar", "AAR", "w-16")}
-            {field("trail", "MINIT", "w-16", "Minutes in trail")}
-            {field("mit", "MIT", "w-16", "Miles in trail")}
+            {field("aar", "AAR", "w-16 font-mono")}
+            {field("trail", "MINIT", "w-16 font-mono", "Minutes in trail")}
+            {field("mit", "MIT", "w-16 font-mono", "Miles in trail")}
           </>
         )}
         {kind === "restriction" && (
@@ -181,15 +187,15 @@ function AddItemForm({
             <div className="flex flex-wrap items-center gap-2">
               {field("requesting", "requesting", "w-28 font-mono uppercase")}
               {field("providing", "providing", "w-28 font-mono uppercase")}
-              {field("start", "start DD/HHMMz", "w-32")}
-              {field("stop", "stop DD/HHMMz", "w-32")}
-              <button
-                type="button"
-                onClick={() => setStructured((v) => !v)}
-                className="rounded-md border px-2.5 py-1.5 text-xs font-medium hover:bg-accent/40"
-              >
-                {structured ? "Structured ✓" : "Structured"}
-              </button>
+              {field("start", "start DD/HHMMz", "w-32 font-mono")}
+              {field("stop", "stop DD/HHMMz", "w-32 font-mono")}
+              <SegmentedControl
+                aria-label="Restriction entry"
+                size="sm"
+                value={structured ? "structured" : "free"}
+                onChange={(v) => setStructured(v === "structured")}
+                options={ENTRY_MODES}
+              />
             </div>
             {structured ? (
               <NtmlEditor value={ntml} onChange={setNtml} />
@@ -202,7 +208,7 @@ function AddItemForm({
           <>
             {field("airport", "airport", "w-24 font-mono uppercase")}
             {field("scope", "scope (blank=all)", "w-36 uppercase")}
-            {field("until", "until HHMM", "w-24")}
+            {field("until", "until HHMM", "w-24 font-mono")}
           </>
         )}
         <Button size="sm" onClick={submit} disabled={add.isPending}>
@@ -214,17 +220,9 @@ function AddItemForm({
   );
 }
 
-function PackageCard({
-  eventId,
-  pkg,
-  canEdit,
-}: {
-  eventId: number;
-  pkg: TmiPackage;
-  canEdit: boolean;
-}) {
+function PackageCard({ eventId, pkg, canEdit }: { eventId: number; pkg: TmiPackage; canEdit: boolean }) {
   const del = useDeletePackage(eventId);
-  const removeItem = useDeletePackageItem(eventId);
+  const { mutate: removeItem } = useDeletePackageItem(eventId);
   const addItem = useAddPackageItem(eventId);
   const activate = useActivatePackage(eventId);
   const deactivate = useDeactivatePackage(eventId);
@@ -234,8 +232,6 @@ function PackageCard({
   const draft = pkg.status === "draft";
   const activated = pkg.status === "activated";
   const editable = canEdit && draft;
-
-  const badgeVariant = draft ? "secondary" : activated ? "success" : "outline";
 
   // Bulk-add a program per configured airport rate that isn't already covered.
   async function programsFromRates() {
@@ -254,25 +250,61 @@ function PackageCard({
     (r: AirportRate) => !programIcaos(pkg).has(r.icao.toUpperCase()),
   ).length;
 
+  const itemColumns = useMemo<DataColumn<TmiPackageItem>[]>(
+    () => [
+      {
+        accessorKey: "kind",
+        header: "Kind",
+        cell: (c) => <StatusPill tone="neutral">{kindLabel(c.getValue<string>())}</StatusPill>,
+      },
+      {
+        id: "summary",
+        header: "Item",
+        mono: true,
+        enableSorting: false,
+        cell: (c) => itemSummary(c.row.original),
+      },
+      {
+        id: "actions",
+        header: () => <span className="sr-only">Actions</span>,
+        enableSorting: false,
+        align: "right",
+        cell: (c) =>
+          editable && (
+            <ConfirmButton
+              size="icon"
+              title="Remove item"
+              aria-label="Remove item"
+              onConfirm={() => removeItem({ packageId: pkg.id, itemId: c.row.original.id })}
+              warn="Remove this item from the package?"
+            >
+              <X className="size-4" />
+            </ConfirmButton>
+          ),
+      },
+    ],
+    [editable, pkg.id, removeItem],
+  );
+
   return (
-    <div className="rounded-lg border">
-      <div className="flex items-center justify-between gap-2 border-b px-4 py-2.5">
-        <div className="flex items-center gap-2">
+    <Card className="flex flex-col gap-3 p-4">
+      <div className="flex flex-wrap items-center justify-between gap-2">
+        <div className="flex flex-wrap items-center gap-2">
           <span className="font-semibold">{pkg.name}</span>
-          <Badge variant={badgeVariant}>{pkg.status}</Badge>
+          <StatusPill tone={toneOf("tmiPackage", pkg.status)}>{pkg.status}</StatusPill>
           {activated && pkg.activated_at && (
-            <span className="text-xs text-muted-foreground">
-              activated {formatZulu(pkg.activated_at)}
+            <span className="text-xs text-ink-3">
+              activated <span className="font-mono">{formatZulu(pkg.activated_at)}</span>
             </span>
           )}
           {pkg.status === "archived" && pkg.archived_at && (
-            <span className="text-xs text-muted-foreground">
-              archived {formatZulu(pkg.archived_at)}
+            <span className="text-xs text-ink-3">
+              archived <span className="font-mono">{formatZulu(pkg.archived_at)}</span>
             </span>
           )}
         </div>
         {canEdit && (
-          <div className="flex items-center gap-2">
+          <div className="flex flex-wrap items-center gap-2">
             {draft && missingRateCount > 0 && (
               <Button
                 size="sm"
@@ -287,7 +319,7 @@ function PackageCard({
             )}
             {draft && (
               <label
-                className="flex items-center gap-1.5 text-xs text-muted-foreground"
+                className="flex items-center gap-1.5 text-xs text-ink-2"
                 title="Automatically activate this package 30 minutes before the event starts"
               >
                 <Switch
@@ -319,12 +351,11 @@ function PackageCard({
             {activated && (
               <Button
                 size="sm"
-                variant="secondary"
+                variant="outline"
                 onClick={async () => {
                   const ok = await confirm({
                     title: `Deactivate “${pkg.name}”?`,
-                    description:
-                      "This cancels the live TMIs this package created and archives it as a record.",
+                    description: "This cancels the live TMIs this package created and archives it as a record.",
                     confirmText: "Deactivate",
                   });
                   if (ok) deactivate.mutate(pkg.id);
@@ -350,41 +381,17 @@ function PackageCard({
         )}
       </div>
 
-      <div className="flex flex-col gap-3 p-4">
-        {pkg.items.length === 0 ? (
-          <p className="text-sm text-muted-foreground">No items yet.</p>
-        ) : (
-          <ul className="flex flex-col divide-y divide-border/60">
-            {pkg.items.map((item) => (
-              <li
-                key={item.id}
-                className="flex items-center justify-between gap-2 py-2 text-sm"
-              >
-                <span className="flex items-center gap-2">
-                  <Badge variant="outline">{kindLabel(item.kind)}</Badge>
-                  <span className="font-mono text-xs">{itemSummary(item)}</span>
-                </span>
-                {editable && (
-                  <ConfirmButton
-                    size="icon"
-                    title="Remove item"
-                    aria-label="Remove item"
-                    onConfirm={() =>
-                      removeItem.mutate({ packageId: pkg.id, itemId: item.id })
-                    }
-                    warn="Remove this item from the package?"
-                  >
-                    <X className="size-4" />
-                  </ConfirmButton>
-                )}
-              </li>
-            ))}
-          </ul>
-        )}
+      <DataTable
+        label={`${pkg.name} items`}
+        columns={itemColumns}
+        data={pkg.items}
+        getRowId={(i) => i.id}
+        rowCap={25}
+        empty="No items yet."
+      />
 
-        {editable && <AddItemForm eventId={eventId} packageId={pkg.id} />}
-      </div>
-    </div>
+      {editable && <AddItemForm eventId={eventId} packageId={pkg.id} />}
+    </Card>
   );
 }
 
@@ -403,56 +410,43 @@ export function TmiPackagesSection({ eventId }: { eventId: number }) {
   const rows = packages.data ?? [];
 
   return (
-    <Card>
-      <CardContent className="flex flex-col gap-4 pt-6">
-        <div className="flex items-center gap-2">
-          <span className="flex size-8 items-center justify-center rounded-md bg-primary/10 text-primary">
-            <Layers className="size-4" />
-          </span>
-          <div className="flex flex-col">
-            <span className="font-semibold">TMI packages</span>
-            <span className="text-xs text-muted-foreground">
-              Draft the programs, restrictions, and ground stops, then activate
-              them live for the event.
-            </span>
-          </div>
+    <section className="flex flex-col gap-4">
+      <SectionHeader
+        title="TMI packages"
+        description="Draft the programs, restrictions, and ground stops, then activate them live for the event."
+      />
+
+      {canEdit && (
+        <FilterBar>
+          <Input
+            aria-label="New package name"
+            className="w-64"
+            placeholder="New package name — e.g. FNO kickoff"
+            value={name}
+            onChange={(e) => setName(e.target.value)}
+            onKeyDown={(e) => e.key === "Enter" && add()}
+          />
+          <Button size="sm" onClick={add} disabled={create.isPending}>
+            <Plus />
+            New package
+          </Button>
+        </FilterBar>
+      )}
+
+      <QueryState
+        isLoading={packages.isLoading}
+        isError={packages.isError}
+        onRetry={() => packages.refetch()}
+        isEmpty={rows.length === 0}
+        empty="No TMI packages yet."
+        className="rounded-md border border-line"
+      >
+        <div className="flex flex-col gap-4">
+          {rows.map((pkg) => (
+            <PackageCard key={pkg.id} eventId={eventId} pkg={pkg} canEdit={canEdit} />
+          ))}
         </div>
-
-        {canEdit && (
-          <div className="flex flex-wrap items-center gap-2">
-            <Input
-              className="w-64"
-              placeholder="New package name — e.g. FNO kickoff"
-              value={name}
-              onChange={(e) => setName(e.target.value)}
-              onKeyDown={(e) => e.key === "Enter" && add()}
-            />
-            <Button onClick={add} disabled={create.isPending}>
-              <Plus />
-              New package
-            </Button>
-          </div>
-        )}
-
-        {!packages.data ? (
-          <p className="py-2 text-sm text-muted-foreground">Loading…</p>
-        ) : rows.length === 0 ? (
-          <p className="py-2 text-sm text-muted-foreground">
-            No TMI packages yet.
-          </p>
-        ) : (
-          <div className="flex flex-col gap-4">
-            {rows.map((pkg) => (
-              <PackageCard
-                key={pkg.id}
-                eventId={eventId}
-                pkg={pkg}
-                canEdit={canEdit}
-              />
-            ))}
-          </div>
-        )}
-      </CardContent>
-    </Card>
+      </QueryState>
+    </section>
   );
 }

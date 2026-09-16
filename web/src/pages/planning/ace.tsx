@@ -1,10 +1,12 @@
 import {useState} from "react";
-import {Badge, Button, Card, CardContent, ConfirmButton, Input} from "@ois/ui";
-import {LifeBuoy, Plus, Users} from "lucide-react";
+import {Button, Card, ConfirmButton, Input, QueryState, StatusPill, Textarea} from "@ois/ui";
+import {LifeBuoy, Plus} from "lucide-react";
 
 import {useMe} from "@/lib/auth";
 import {hasPermission} from "@/lib/permissions";
+import {toneOf} from "@/lib/status";
 import {hhmmZulu, timeAgo} from "@/lib/time";
+import {SectionHeader} from "@/pages/planning/section-header";
 import {
   type AceRequest,
   useClaimEventAce,
@@ -25,12 +27,6 @@ const fromLocalInput = (v: string): string | null => {
   const ms = Date.parse(v + "Z");
   return Number.isFinite(ms) ? new Date(ms).toISOString() : null;
 };
-
-function statusVariant(s: string): "secondary" | "success" | "outline" | "destructive" {
-  if (s === "completed") return "outline";
-  if (s === "cancelled") return "destructive";
-  return "secondary";
-}
 
 function CreateForm({ eventId }: { eventId: number }) {
   const create = useCreateEventAce(eventId);
@@ -57,32 +53,31 @@ function CreateForm({ eventId }: { eventId: number }) {
   };
 
   return (
-    <div className="flex flex-col gap-3 rounded-lg border bg-muted/20 p-4">
+    <Card className="flex flex-col gap-3 p-4">
       <div className="flex items-center gap-2">
-        <LifeBuoy className="size-4 text-primary" />
+        <LifeBuoy className="size-4 text-brand-ink" />
         <span className="font-semibold">Request ACE support</span>
       </div>
       <div className="grid gap-3 sm:grid-cols-3">
         <div className="flex flex-col gap-1">
-          <label className="text-xs font-medium text-muted-foreground">Slots</label>
+          <label className="text-xs font-semibold text-ink-2">Slots</label>
           <Input
             type="number"
             min={1}
             max={99}
             value={slots}
             onChange={(e) => setSlots(e.target.value)}
-            className="tabular-nums"
+            className="font-mono"
           />
         </div>
         <div className="flex flex-col gap-1 sm:col-span-2">
-          <label className="text-xs font-medium text-muted-foreground">Position (optional)</label>
+          <label className="text-xs font-semibold text-ink-2">Position (optional)</label>
           <Input value={position} onChange={(e) => setPosition(e.target.value)} placeholder="DCA_APP" />
         </div>
       </div>
       <div className="flex flex-col gap-1">
-        <label className="text-xs font-medium text-muted-foreground">Details</label>
-        <textarea
-          className="min-h-20 w-full rounded-md border border-input bg-background px-3 py-2 text-sm shadow-sm transition-colors placeholder:text-muted-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
+        <label className="text-xs font-semibold text-ink-2">Details</label>
+        <Textarea
           value={details}
           onChange={(e) => setDetails(e.target.value)}
           placeholder="What coverage do you need, and when?"
@@ -90,10 +85,10 @@ function CreateForm({ eventId }: { eventId: number }) {
       </div>
       <div>
         <Button disabled={details.trim().length === 0 || create.isPending} onClick={submit}>
-          <Plus className="mr-1 size-4" /> Submit request
+          <Plus className="size-4" /> Submit request
         </Button>
       </div>
-    </div>
+    </Card>
   );
 }
 
@@ -137,9 +132,9 @@ function ClaimForm({
   };
 
   return (
-    <div className="flex flex-col gap-2 rounded-md border border-dashed p-3">
+    <div className="flex flex-col gap-2 border-t border-line-soft pt-3">
       <div className="flex flex-col gap-1">
-        <label className="text-xs font-medium text-muted-foreground">Notes (optional)</label>
+        <label className="text-xs font-semibold text-ink-2">Notes (optional)</label>
         <Input
           className="h-8"
           value={notes}
@@ -149,7 +144,7 @@ function ClaimForm({
       </div>
       <div className="grid gap-2 sm:grid-cols-2">
         <div className="flex flex-col gap-1">
-          <label className="text-xs font-medium text-muted-foreground">Available from (Zulu)</label>
+          <label className="text-xs font-semibold text-ink-2">Available from (Zulu)</label>
           <Input
             className="h-8"
             type="datetime-local"
@@ -160,7 +155,7 @@ function ClaimForm({
           />
         </div>
         <div className="flex flex-col gap-1">
-          <label className="text-xs font-medium text-muted-foreground">Available to (Zulu)</label>
+          <label className="text-xs font-semibold text-ink-2">Available to (Zulu)</label>
           <Input
             className="h-8"
             type="datetime-local"
@@ -205,39 +200,42 @@ function RequestCard({
   const iClaimed = myCid != null && r.claims.some((c) => c.cid === myCid);
 
   return (
-    <div className="flex flex-col gap-2 rounded-lg border bg-muted/20 p-4">
+    <Card className="flex flex-col gap-2 p-4">
       <div className="flex flex-wrap items-center justify-between gap-2">
         <div className="flex items-center gap-2">
           <span className="font-mono font-semibold">{r.position || "—"}</span>
-          <Badge variant={statusVariant(r.status)}>{r.status}</Badge>
-          <Badge variant={filled ? "success" : "secondary"}>
-            {r.claims_count} / {r.slots} claimed
-          </Badge>
+          <StatusPill tone={toneOf("ace", r.status)}>{r.status}</StatusPill>
+          <StatusPill tone={filled ? "good" : "neutral"}>
+            <span className="font-mono">
+              {r.claims_count} / {r.slots}
+            </span>
+            claimed
+          </StatusPill>
         </div>
-        <span className="text-xs text-muted-foreground">{timeAgo(r.created_at)}</span>
+        <span className="text-xs text-ink-3">{timeAgo(r.created_at)}</span>
       </div>
 
       <p className="whitespace-pre-wrap text-sm">{r.details}</p>
 
-      <div className="flex flex-wrap gap-x-4 gap-y-1 text-xs text-muted-foreground">
+      <div className="flex flex-wrap gap-x-4 gap-y-1 text-xs text-ink-3">
         <span>
           by {r.requested_by_name ?? "?"}
-          {r.requested_by_cid ? ` (${r.requested_by_cid})` : ""}
+          {r.requested_by_cid ? <span className="font-mono"> ({r.requested_by_cid})</span> : null}
         </span>
         {r.decided_by_name && <span>closed by {r.decided_by_name}</span>}
       </div>
 
       {r.claims.length > 0 && (
-        <ul className="flex flex-col gap-1 border-t pt-2 text-sm">
+        <ul className="flex flex-col gap-1 border-t border-line-soft pt-2 text-sm">
           {r.claims.map((c) => (
             <li key={c.cid} className="flex flex-wrap items-baseline gap-x-2">
-              <span className="font-medium">{c.display_name}</span>
+              <span className="font-semibold">{c.display_name}</span>
               {(c.start_time || c.end_time) && (
-                <span className="font-mono text-xs text-muted-foreground">
+                <span className="font-mono text-xs text-ink-3">
                   {hhmmZulu(c.start_time)}–{hhmmZulu(c.end_time)}
                 </span>
               )}
-              {c.notes && <span className="text-xs text-muted-foreground">{c.notes}</span>}
+              {c.notes && <span className="text-xs text-ink-2">{c.notes}</span>}
             </li>
           ))}
         </ul>
@@ -261,7 +259,7 @@ function RequestCard({
       )}
 
       {canDecide && (
-        <div className="flex flex-wrap gap-1.5 border-t pt-2">
+        <div className="flex flex-wrap gap-1.5 border-t border-line-soft pt-2">
           {r.status === "open" && (
             <>
               <ConfirmButton
@@ -292,7 +290,7 @@ function RequestCard({
           </ConfirmButton>
         </div>
       )}
-    </div>
+    </Card>
   );
 }
 
@@ -317,15 +315,17 @@ export function AceSection({
     <>
       {canCreate && <CreateForm eventId={eventId} />}
 
-      {requests.isError ? (
-        <p className="py-6 text-center text-sm text-muted-foreground">Couldn’t load the requests.</p>
-      ) : !requests.data ? (
-        <p className="py-6 text-center text-sm text-muted-foreground">Loading…</p>
-      ) : requests.data.length === 0 ? (
-        <p className="py-6 text-center text-sm text-muted-foreground">No ACE requests yet.</p>
-      ) : (
+      <QueryState
+        isLoading={requests.isLoading}
+        isError={requests.isError}
+        onRetry={() => requests.refetch()}
+        isEmpty={(requests.data?.length ?? 0) === 0}
+        error="Couldn’t load the requests."
+        empty="No ACE requests yet."
+        className="rounded-md border border-line"
+      >
         <div className="flex flex-col gap-2">
-          {requests.data.map((r) => (
+          {requests.data?.map((r) => (
             <RequestCard
               key={r.id}
               eventId={eventId}
@@ -338,28 +338,19 @@ export function AceSection({
             />
           ))}
         </div>
-      )}
+      </QueryState>
     </>
   );
 
   if (bare) return <div className="flex flex-col gap-4">{body}</div>;
 
   return (
-    <Card>
-      <CardContent className="flex flex-col gap-4 pt-6">
-        <div className="flex items-center gap-2">
-          <span className="flex size-8 items-center justify-center rounded-md bg-primary/10 text-primary">
-            <Users className="size-4" />
-          </span>
-          <div className="flex flex-col">
-            <span className="font-semibold">ACE support</span>
-            <span className="text-xs text-muted-foreground">
-              Request live coverage; the ACE team claims slots with their availability.
-            </span>
-          </div>
-        </div>
-        {body}
-      </CardContent>
-    </Card>
+    <section className="flex flex-col gap-4">
+      <SectionHeader
+        title="ACE support"
+        description="Request live coverage; the ACE team claims slots with their availability."
+      />
+      {body}
+    </section>
   );
 }

@@ -1,11 +1,12 @@
 import {useEffect, useState} from "react";
-import {Badge, Button, Card, CardContent} from "@ois/ui";
-import {Radio} from "lucide-react";
+import {Button, Card, QueryState, SegmentedControl, StatusPill, Textarea} from "@ois/ui";
 
 import {useMe} from "@/lib/auth";
 import {useDcc, useUpdateDcc} from "@/lib/events";
 import {hasPermission} from "@/lib/permissions";
+import {toneOf} from "@/lib/status";
 import {formatZulu} from "@/lib/time";
+import {SectionHeader} from "@/pages/planning/section-header";
 
 type Status = "not_needed" | "requested" | "confirmed";
 
@@ -14,12 +15,6 @@ const OPTIONS: { value: Status; label: string }[] = [
   { value: "requested", label: "Requested" },
   { value: "confirmed", label: "Confirmed" },
 ];
-
-function statusVariant(status: string): "secondary" | "success" | "outline" {
-  if (status === "confirmed") return "success";
-  if (status === "requested") return "secondary";
-  return "outline";
-}
 
 function statusLabel(status: string): string {
   return OPTIONS.find((o) => o.value === status)?.label ?? status;
@@ -42,60 +37,22 @@ export function DccSection({ eventId, bare = false }: { eventId: number; bare?: 
     }
   }, [dcc.data]);
 
-  const dirty =
-    !!dcc.data && (status !== dcc.data.status || notes !== dcc.data.notes);
-
-  function Header() {
-    return (
-      <div className="flex items-center justify-between gap-3">
-        <div className="flex items-center gap-2">
-          <span className="flex size-8 items-center justify-center rounded-md bg-primary/10 text-primary">
-            <Radio className="size-4" />
-          </span>
-          <div className="flex flex-col">
-            <span className="font-semibold">DCC support</span>
-            <span className="text-xs text-muted-foreground">
-              Does this event need national DCC coverage?
-            </span>
-          </div>
-        </div>
-        {dcc.data && (
-          <Badge variant={statusVariant(dcc.data.status)}>
-            {statusLabel(dcc.data.status)}
-          </Badge>
-        )}
-      </div>
-    );
-  }
+  const dirty = !!dcc.data && (status !== dcc.data.status || notes !== dcc.data.notes);
 
   const body = !dcc.data ? (
-    <p className="py-2 text-sm text-muted-foreground">Loading…</p>
+    <QueryState isLoading={!dcc.isError} isError={dcc.isError} onRetry={() => dcc.refetch()} />
   ) : !canEdit ? (
     <div className="flex flex-col gap-2 text-sm">
-      {dcc.data.notes ? (
-        <p className="whitespace-pre-line text-muted-foreground">{dcc.data.notes}</p>
-      ) : (
-        <p className="text-muted-foreground">No notes.</p>
-      )}
+      <div>
+        <StatusPill tone={toneOf("dcc", dcc.data.status)}>{statusLabel(dcc.data.status)}</StatusPill>
+      </div>
+      <p className="whitespace-pre-line text-ink-2">{dcc.data.notes || "No notes."}</p>
     </div>
   ) : (
     <div className="flex flex-col gap-3">
-      <div className="flex flex-wrap gap-1">
-        {OPTIONS.map((o) => (
-          <Button
-            key={o.value}
-            type="button"
-            size="sm"
-            variant={status === o.value ? "default" : "secondary"}
-            onClick={() => setStatus(o.value)}
-          >
-            {o.label}
-          </Button>
-        ))}
-      </div>
+      <SegmentedControl aria-label="DCC status" value={status} onChange={setStatus} options={OPTIONS} className="self-start" />
 
-      <textarea
-        className="min-h-20 w-full rounded-md border border-input bg-background px-3 py-2 text-sm shadow-sm transition-colors placeholder:text-muted-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
+      <Textarea
         placeholder="Notes — who's coordinating, what's requested, etc."
         value={notes}
         onChange={(e) => setNotes(e.target.value)}
@@ -106,8 +63,8 @@ export function DccSection({ eventId, bare = false }: { eventId: number; bare?: 
           Save
         </Button>
         {dcc.data.updated_at && (
-          <span className="text-xs text-muted-foreground">
-            Last set {formatZulu(dcc.data.updated_at)}
+          <span className="text-xs text-ink-3">
+            Last set <span className="font-mono">{formatZulu(dcc.data.updated_at)}</span>
             {dcc.data.updated_by ? ` by ${dcc.data.updated_by}` : ""}
           </span>
         )}
@@ -118,11 +75,15 @@ export function DccSection({ eventId, bare = false }: { eventId: number; bare?: 
   if (bare) return <div className="flex flex-col gap-4">{body}</div>;
 
   return (
-    <Card>
-      <CardContent className="flex flex-col gap-4 pt-6">
-        <Header />
-        {body}
-      </CardContent>
+    <Card className="flex flex-col gap-4 p-4">
+      <SectionHeader
+        title="DCC support"
+        description="Does this event need national DCC coverage?"
+        actions={
+          dcc.data && <StatusPill tone={toneOf("dcc", dcc.data.status)}>{statusLabel(dcc.data.status)}</StatusPill>
+        }
+      />
+      {body}
     </Card>
   );
 }

@@ -1,6 +1,17 @@
-import {useEffect, useMemo, useState} from "react";
-import {Badge, Button, Card, CardContent, ConfirmButton, Input, useConfirm} from "@ois/ui";
-import {Network, Plane, Users, Waypoints, X} from "lucide-react";
+import {type ReactNode, useEffect, useMemo, useState} from "react";
+import {
+  Button,
+  Card,
+  ConfirmButton,
+  type DataColumn,
+  DataTable,
+  FilterBar,
+  Input,
+  SegmentedControl,
+  StatusPill,
+  useConfirm,
+} from "@ois/ui";
+import {Building2, Gauge, Network, NotebookPen, Plane, Users, Waypoints, X} from "lucide-react";
 
 import {useMe} from "@/lib/auth";
 import {useFacilities} from "@/lib/admin";
@@ -13,7 +24,9 @@ import {
   useUpsertFacilitySupport,
 } from "@/lib/events";
 import {hasPermission} from "@/lib/permissions";
+import {toneOf} from "@/lib/status";
 import {isFridayUtc} from "@/lib/time";
+import {SectionHeader} from "@/pages/planning/section-header";
 
 type Level = "required" | "preferred" | "not_required";
 
@@ -23,151 +36,98 @@ const LEVELS: { value: Level; label: string }[] = [
   { value: "not_required", label: "Not req." },
 ];
 
-function levelVariant(level: string): "success" | "secondary" | "outline" {
-  if (level === "required") return "success";
-  if (level === "preferred") return "secondary";
-  return "outline";
-}
-
 function levelLabel(level: string): string {
   return LEVELS.find((l) => l.value === level)?.label ?? level;
 }
 
-/** Badges explaining why a facility surfaced in the list. */
+/** Pills explaining why a facility surfaced in the list. */
 function WhyCell({ row }: { row: FacilitySupport }) {
-  const parts: React.ReactNode[] = [];
+  const parts: ReactNode[] = [];
   if (row.is_host)
     parts.push(
-      <Badge key="host" variant="default">
+      <StatusPill key="host" tone="brand">
         Host
-      </Badge>,
+      </StatusPill>,
     );
   if (row.airports.length > 0)
     parts.push(
-      <Badge key="apts" variant="secondary" className="gap-1 font-mono">
+      <StatusPill key="apts" tone="neutral" className="font-mono">
         <Plane className="size-3" />
         {row.airports.join(", ")}
-      </Badge>,
+      </StatusPill>,
     );
   if (row.has_staffing)
     parts.push(
-      <Badge key="ace" variant="secondary" className="gap-1">
+      <StatusPill key="ace" tone="neutral">
         <Users className="size-3" />
         ACE
-      </Badge>,
+      </StatusPill>,
     );
   if (parts.length === 0)
     parts.push(
-      <span key="added" className="text-xs text-muted-foreground">
+      <span key="added" className="text-xs text-ink-3">
         added manually
       </span>,
     );
   return <div className="flex flex-wrap items-center gap-1">{parts}</div>;
 }
 
-function FacilityRow({
-  eventId,
-  row,
-  name,
-}: {
-  eventId: number;
-  row: FacilitySupport;
-  name?: string;
-}) {
+function LevelCell({ eventId, row }: { eventId: number; row: FacilitySupport }) {
   const upsert = useUpsertFacilitySupport(eventId);
-  const remove = useRemoveFacilitySupport(eventId);
-  const [notes, setNotes] = useState(row.notes);
-
-  useEffect(() => setNotes(row.notes), [row.notes]);
-
-  const FacilityCell = (
-    <td className="py-2 pr-3 align-top">
-      <span className="font-mono font-medium">{row.facility}</span>
-      {name && <span className="ml-2 text-xs text-muted-foreground">{name}</span>}
-      {!row.stored && (
-        <span className="ml-2 text-[10px] uppercase tracking-wide text-muted-foreground">
-          suggested
-        </span>
-      )}
-    </td>
-  );
-
   if (!row.editable) {
-    return (
-      <tr className="border-t">
-        {FacilityCell}
-        <td className="py-2 pr-3 align-top">
-          <WhyCell row={row} />
-        </td>
-        <td className="py-2 pr-3 align-top">
-          <Badge variant={levelVariant(row.level)}>{levelLabel(row.level)}</Badge>
-        </td>
-        <td className="py-2 align-top text-muted-foreground">{row.notes || "—"}</td>
-        <td className="py-2" />
-      </tr>
-    );
+    return <StatusPill tone={toneOf("support", row.level)}>{levelLabel(row.level)}</StatusPill>;
   }
-
+  // An unsaved suggestion shows no selected level until one is picked.
   return (
-    <tr className={"border-t align-top" + (row.stored ? "" : " text-muted-foreground")}>
-      {FacilityCell}
-      <td className="py-2 pr-3">
-        <WhyCell row={row} />
-      </td>
-      <td className="py-2 pr-3">
-        <div className="flex flex-wrap gap-1">
-          {LEVELS.map((l) => (
-            <Button
-              key={l.value}
-              type="button"
-              size="sm"
-              variant={row.level === l.value && row.stored ? "default" : "secondary"}
-              onClick={() =>
-                upsert.mutate({ facility: row.facility, body: { level: l.value, notes } })
-              }
-            >
-              {l.label}
-            </Button>
-          ))}
-        </div>
-      </td>
-      <td className="py-2 pr-3">
-        <Input
-          className="h-8"
-          placeholder="notes"
-          value={notes}
-          onChange={(e) => setNotes(e.target.value)}
-          onBlur={() => {
-            if (notes !== row.notes) {
-              upsert.mutate({ facility: row.facility, body: { level: row.level, notes } });
-            }
-          }}
-        />
-      </td>
-      <td className="py-2 text-right">
-        {row.stored && (
-          <ConfirmButton
-            size="icon"
-            title={`Clear ${row.facility}`}
-            aria-label={`Clear ${row.facility}`}
-            onConfirm={() => remove.mutate(row.facility)}
-            warn={`Clear the saved support level for ${row.facility}?`}
-          >
-            <X className="size-4" />
-          </ConfirmButton>
-        )}
-      </td>
-    </tr>
+    <SegmentedControl<Level | "">
+      aria-label={`${row.facility} support level`}
+      size="sm"
+      value={row.stored ? (row.level as Level) : ""}
+      onChange={(level) => level && upsert.mutate({ facility: row.facility, body: { level, notes: row.notes } })}
+      options={LEVELS}
+    />
   );
 }
 
-export function FacilitySupportSection({
-  eventId,
-  eventStart,
-}: {
-  eventId: number;
-  eventStart: string;
-}) {
+function NotesCell({ eventId, row }: { eventId: number; row: FacilitySupport }) {
+  const upsert = useUpsertFacilitySupport(eventId);
+  const [notes, setNotes] = useState(row.notes);
+  useEffect(() => setNotes(row.notes), [row.notes]);
+
+  if (!row.editable) return <span className="text-ink-2">{row.notes || "—"}</span>;
+  return (
+    <Input
+      aria-label={`${row.facility} notes`}
+      className="h-8 min-w-40"
+      placeholder="notes"
+      value={notes}
+      onChange={(e) => setNotes(e.target.value)}
+      onBlur={() => {
+        if (notes !== row.notes) {
+          upsert.mutate({ facility: row.facility, body: { level: row.level, notes } });
+        }
+      }}
+    />
+  );
+}
+
+function ClearCell({ eventId, row }: { eventId: number; row: FacilitySupport }) {
+  const remove = useRemoveFacilitySupport(eventId);
+  if (!row.editable || !row.stored) return null;
+  return (
+    <ConfirmButton
+      size="icon"
+      title={`Clear ${row.facility}`}
+      aria-label={`Clear ${row.facility}`}
+      onConfirm={() => remove.mutate(row.facility)}
+      warn={`Clear the saved support level for ${row.facility}?`}
+    >
+      <X className="size-4" />
+    </ConfirmButton>
+  );
+}
+
+export function FacilitySupportSection({ eventId, eventStart }: { eventId: number; eventStart: string }) {
   const { data: me } = useMe();
   const canAdd = hasPermission(me, "events.support.update");
   const support = useFacilitySupport(eventId);
@@ -186,88 +146,105 @@ export function FacilitySupportSection({
     if (ok) generateTier1.mutate();
   };
 
-  const nameById = useMemo(
-    () => new Map((facilities.data ?? []).map((f) => [f.id, f.name])),
-    [facilities.data],
-  );
+  const nameById = useMemo(() => new Map((facilities.data ?? []).map((f) => [f.id, f.name])), [facilities.data]);
 
   const rows = support.data ?? [];
 
+  const columns = useMemo<DataColumn<FacilitySupport>[]>(
+    () => [
+      {
+        accessorKey: "facility",
+        header: "Facility",
+        icon: Building2,
+        cell: (c) => {
+          const row = c.row.original;
+          const name = nameById.get(row.facility);
+          return (
+            <span className={row.editable && !row.stored ? "whitespace-nowrap text-ink-2" : "whitespace-nowrap"}>
+              <span className="font-mono font-semibold">{row.facility}</span>
+              {name && <span className="ml-2 text-xs text-ink-3">{name}</span>}
+              {!row.stored && (
+                <StatusPill tone="neutral" className="ml-2">
+                  suggested
+                </StatusPill>
+              )}
+            </span>
+          );
+        },
+      },
+      {
+        id: "involvement",
+        header: "Involvement",
+        icon: Waypoints,
+        enableSorting: false,
+        cell: (c) => <WhyCell row={c.row.original} />,
+      },
+      {
+        accessorKey: "level",
+        header: "Level",
+        icon: Gauge,
+        cell: (c) => <LevelCell eventId={eventId} row={c.row.original} />,
+      },
+      {
+        accessorKey: "notes",
+        header: "Notes",
+        icon: NotebookPen,
+        enableSorting: false,
+        cell: (c) => <NotesCell eventId={eventId} row={c.row.original} />,
+      },
+      {
+        id: "actions",
+        header: () => <span className="sr-only">Actions</span>,
+        enableSorting: false,
+        align: "right",
+        cell: (c) => <ClearCell eventId={eventId} row={c.row.original} />,
+      },
+    ],
+    [eventId, nameById],
+  );
+
   return (
-    <Card>
-      <CardContent className="flex flex-col gap-4 pt-6">
-        <div className="flex items-center gap-2">
-          <span className="flex size-8 items-center justify-center rounded-md bg-primary/10 text-primary">
-            <Waypoints className="size-4" />
-          </span>
-          <div className="flex flex-col">
-            <span className="font-semibold">Facility support</span>
-            <span className="text-xs text-muted-foreground">
-              Auto-derived from the host, configured airports, and ACE requests. Confirm a level or
-              adjust; facility staff edit only their own row.
+    <section className="flex flex-col gap-4">
+      <SectionHeader
+        title="Facility support"
+        description="Auto-derived from the host, configured airports, and ACE requests. Confirm a level or adjust; facility staff edit only their own row."
+      />
+
+      {canAdd && isFridayUtc(eventStart) && (
+        <Card className="flex flex-wrap items-center justify-between gap-2 p-3">
+          <div className="flex items-center gap-2 text-sm">
+            <Network className="size-4 text-brand-ink" />
+            <span>
+              <span className="font-semibold">Friday Night Ops.</span> Fan out support requests to the host’s
+              Tier-1 neighbours.
             </span>
           </div>
-        </div>
+          <Button size="sm" variant="outline" onClick={runTier1} disabled={generateTier1.isPending}>
+            Generate Tier-1 requests
+          </Button>
+        </Card>
+      )}
 
-        {canAdd && isFridayUtc(eventStart) && (
-          <div className="flex flex-wrap items-center justify-between gap-2 rounded-lg border border-dashed bg-muted/20 p-3">
-            <div className="flex items-center gap-2 text-sm">
-              <Network className="size-4 text-primary" />
-              <span>
-                <span className="font-medium">Friday Night Ops.</span> Fan out support requests to the
-                host’s Tier-1 neighbours.
-              </span>
-            </div>
-            <Button
-              size="sm"
-              variant="outline"
-              onClick={runTier1}
-              disabled={generateTier1.isPending}
-            >
-              Generate Tier-1 requests
-            </Button>
-          </div>
-        )}
-
-        {canAdd && (
+      {canAdd && (
+        <FilterBar>
           <ArtccCombobox
             exclude={rows.map((r) => r.facility)}
             onSelect={(id) => upsert.mutate({ facility: id, body: { level: "required" } })}
           />
-        )}
+        </FilterBar>
+      )}
 
-        {!support.data ? (
-          <p className="py-2 text-sm text-muted-foreground">Loading…</p>
-        ) : rows.length === 0 ? (
-          <p className="py-2 text-sm text-muted-foreground">
-            No facilities involved yet — add airports or ACE requests, or add one below.
-          </p>
-        ) : (
-          <div className="overflow-x-auto">
-            <table className="w-full text-sm">
-              <thead>
-                <tr className="text-left text-xs uppercase tracking-wide text-muted-foreground">
-                  <th className="pb-2 pr-3 font-medium">Facility</th>
-                  <th className="pb-2 pr-3 font-medium">Involvement</th>
-                  <th className="pb-2 pr-3 font-medium">Level</th>
-                  <th className="pb-2 pr-3 font-medium">Notes</th>
-                  <th className="pb-2" />
-                </tr>
-              </thead>
-              <tbody>
-                {rows.map((row) => (
-                  <FacilityRow
-                    key={row.facility}
-                    eventId={eventId}
-                    row={row}
-                    name={nameById.get(row.facility)}
-                  />
-                ))}
-              </tbody>
-            </table>
-          </div>
-        )}
-      </CardContent>
-    </Card>
+      <DataTable
+        label="Facility support"
+        columns={columns}
+        data={rows}
+        getRowId={(r) => r.facility}
+        rowCap={25}
+        isLoading={support.isLoading}
+        isError={support.isError}
+        onRetry={() => support.refetch()}
+        empty="No facilities involved yet — add airports or ACE requests, or add one above."
+      />
+    </section>
   );
 }
