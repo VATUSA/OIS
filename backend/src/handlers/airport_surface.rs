@@ -558,6 +558,56 @@ mod tests {
         );
     }
 
+    /// `require_edit` authorises the ICAO in the *path*, so the `and icao = $2` in the taxiway
+    /// update/delete SQL is the only thing keeping a facility scoped to one airport from reaching a
+    /// row that belongs to another. `delete_gate` has had this test; the taxiway pair did not.
+    #[sqlx::test]
+    async fn a_taxiway_cannot_be_reached_through_another_airports_path(pool: PgPool) {
+        let user = seed_user(&pool).await;
+        let rings = vec![vec![
+            [38.85, -77.04],
+            [38.86, -77.05],
+            [38.85, -77.05],
+            [38.85, -77.04],
+        ]];
+        let victim = surface_repo::create_taxiway(
+            &pool,
+            "KJFK",
+            &UpsertAirportTaxiwayRequest {
+                name: "A".to_string(),
+                rings: rings.clone(),
+            },
+            &user,
+        )
+        .await
+        .unwrap();
+
+        // A KDCA-scoped editor clears require_edit("KDCA"), then aims at the KJFK row's id.
+        let updated = surface_repo::update_taxiway(
+            &pool,
+            &victim.id,
+            "KDCA",
+            &UpsertAirportTaxiwayRequest {
+                name: "HIJACKED".to_string(),
+                rings,
+            },
+            &user,
+        )
+        .await
+        .unwrap();
+        assert!(updated.is_none(), "cross-airport update matched a row");
+        assert!(
+            !surface_repo::delete_taxiway(&pool, &victim.id, "KDCA")
+                .await
+                .unwrap(),
+            "cross-airport delete matched a row"
+        );
+
+        let still = surface_repo::list_taxiways(&pool, "KJFK").await.unwrap();
+        assert_eq!(still.len(), 1);
+        assert_eq!(still[0].name, "A");
+    }
+
     #[sqlx::test]
     async fn taxiway_crud_round_trip(pool: PgPool) {
         let user = seed_user(&pool).await;
