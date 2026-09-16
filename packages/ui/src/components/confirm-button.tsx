@@ -33,13 +33,19 @@ export function ConfirmButton({
   disabled,
   ...rest
 }: ConfirmButtonProps) {
+  // A wrapping trigger (e.g. a tooltip via Slot) may inject its own onClick; run it alongside ours
+  // instead of letting the spread below replace the arm/confirm handler.
+  const { onClick: injectedClick, ...buttonProps } = rest as typeof rest & {
+    onClick?: React.MouseEventHandler<HTMLButtonElement>;
+  };
   const toast = useToast();
   const [state, setState] = React.useState<"idle" | "armed" | "firing">("idle");
   const timer = React.useRef<number | undefined>(undefined);
 
   React.useEffect(() => () => window.clearTimeout(timer.current), []);
 
-  const onClick = () => {
+  const onClick = (e: React.MouseEvent<HTMLButtonElement>) => {
+    injectedClick?.(e);
     window.clearTimeout(timer.current);
     if (state === "idle") {
       setState("armed");
@@ -69,7 +75,7 @@ export function ConfirmButton({
         state === "armed" &&
           "border-warning text-warning hover:bg-warning-soft",
       )}
-      {...rest}
+      {...buttonProps}
     >
       {children}
     </Button>
