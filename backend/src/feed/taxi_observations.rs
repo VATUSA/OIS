@@ -81,6 +81,10 @@ const PUSH_MAX_M: f64 = 150.0;
 /// How far a step's track must run from the reported heading to count as moving backwards (a tug
 /// push) rather than forwards (taxi). Well clear of 90°, which is where a nose-swinging push sits.
 const BACKWARDS_DEG: f64 = 120.0;
+/// How close to the nose a step must run to count as evidence the aircraft rolled *out* of the
+/// stand under its own power — the positive evidence behind a recorded zero pushback (#287). Steps
+/// between this and [`BACKWARDS_DEG`] run across the nose and say nothing either way.
+const FORWARDS_DEG: f64 = 60.0;
 /// Consecutive forward steps that end a push (the nose has turned into the taxi).
 const FLIP_CONFIRM_UPDATES: u32 = 2;
 /// Backstops on a push the heading classified: past either, the burst is taxi however it reads.
@@ -114,6 +118,9 @@ struct Run {
     /// a [`MOVE_M`] jitter step shouldn't outvote a tug step an order of magnitude longer.
     back_m: f64,
     fwd_m: f64,
+    /// Travel running close to the nose (within [`FORWARDS_DEG`]), as opposed to merely "not
+    /// backwards" — a sideways tow is neither a push nor a gate-out (#287).
+    nose_first_m: f64,
 }
 
 impl Run {
@@ -125,6 +132,20 @@ impl Run {
         let margin = self.back_m - self.fwd_m;
         (margin.abs() > MOVE_M).then_some(margin > 0.0)
     }
+
+    /// Whether this burst is positive evidence of a departure that never pushed: most of its travel
+    /// ran nose-first out of the stand (#287). A burst that merely wasn't backwards — a sideways
+    /// tow, or one the heading couldn't call — is not evidence of anything.
+    fn rolled_out_nose_first(&self) -> bool {
+        self.backwards() == Some(false) && self.nose_first_m > self.back_m
+    }
+}
+
+/// How far a step from `from` to `to` ran off `hdg`, folded onto 0..=180.
+fn off_heading_deg(from: (f64, f64), to: (f64, f64), hdg: i64) -> f64 {
+    let track = bearing_deg([from.0, from.1], [to.0, to.1]);
+    let off = (track - hdg as f64).abs() % 360.0;
+    if off > 180.0 { 360.0 - off } else { off }
 }
 
 /// Whether a step from `from` to `to` runs against `hdg` — the aircraft moving backwards. `hdg` is
@@ -156,6 +177,9 @@ struct Session {
     /// Whether the push was classified by heading rather than the distance fallback — a tow can then
     /// run past [`PUSH_MAX_M`] and stay a push (#285).
     push_by_direction: bool,
+    /// Whether this departure is known not to have pushed back, as opposed to one whose push we
+    /// couldn't measure — the difference between a stored `0` and a stored NULL (#287).
+    no_push: bool,
     /// Heading reported at the previous update: a step is judged by where the nose pointed when it
     /// began, not where it ended up.
     last_hdg: i64,
@@ -170,8 +194,8 @@ impl Session {
     fn advance(&mut self, now_ms: i64, lat: f64, lon: f64, gs: i64, alt: i64, hdg: i64) {
         let step_m = gc_dist(self.last_lat, self.last_lon, lat, lon) * M_PER_NM;
         let moving = step_m >= MOVE_M;
-        let backwards =
-            moving && moved_backwards((self.last_lat, self.last_lon), (lat, lon), self.last_hdg);
+        let (prev_lat, prev_lon, step_hdg) = (self.last_lat, self.last_lon, self.last_hdg);
+        let backwards = moving && moved_backwards((prev_lat, prev_lon), (lat, lon), step_hdg);
         (self.last_lat, self.last_lon) = (lat, lon);
         self.last_hdg = hdg;
         let from_stand_m = gc_dist(self.first_lat, self.first_lon, lat, lon) * M_PER_NM;
@@ -248,6 +272,7 @@ impl Session {
             peak_gs: 0,
             back_m: 0.0,
             fwd_m: 0.0,
+            nose_first_m: 0.0,
         });
         run.updates += 1;
         run.dist_m += step_m;
@@ -257,6 +282,9 @@ impl Session {
                 run.back_m += step_m;
             } else {
                 run.fwd_m += step_m;
+                if off_heading_deg((prev_lat, prev_lon), (lat, lon), step_hdg) < FORWARDS_DEG {
+                    run.nose_first_m += step_m;
+                }
             }
         }
         if run.updates < CONFIRM_UPDATES || (moving && run.dist_m < BURST_MIN_M) {
@@ -275,6 +303,12 @@ impl Session {
                 self.push_by_direction = run.backwards().is_some();
             }
             Phase::Parked | Phase::StartUp => {
+                // Rolling forward out of the stand is positive evidence that this departure never
+                // pushed — a gate-out, powerback or GA departure. That's a real zero, not a phase
+                // we failed to measure (#287); anything more equivocal stays unmeasured.
+                // Only reached from Parked with no push recorded, or from StartUp where the push
+                // was already measured and this flag goes unread.
+                self.no_push = run.rolled_out_nose_first();
                 self.taxi_start_ms = Some(run.start_ms);
                 self.start_taxi(alt);
             }
@@ -313,6 +347,13 @@ impl Session {
             .zip(self.push_stop_ms)
             .map(|(a, b)| secs(a, b));
         let startup_sec = self.push_stop_ms.map(|stop| secs(stop, taxi_start));
+        // A departure that demonstrably never pushed reports zeros; one whose push went unmeasured
+        // (reclassified, collapsed inside a poll, or capped) reports nothing at all, so the
+        // estimator can tell the two apart (#287).
+        let (pushback_sec, startup_sec) = match (pushback_sec, startup_sec) {
+            (None, None) if self.no_push => (Some(0), Some(0)),
+            measured => measured,
+        };
         (pushback_sec, startup_sec, (now_ms - taxi_start) / 1000)
     }
 }
@@ -424,6 +465,7 @@ fn process(
                         taxi_start_ms: None,
                         last_pause: None,
                         push_by_direction: false,
+                        no_push: false,
                         last_hdg: p.heading,
                         fwd_flip: None,
                         base_alt: alt,
@@ -661,8 +703,8 @@ mod tests {
         );
 
         assert_eq!(obs.len(), 1);
-        assert_eq!(obs[0].pushback_sec, None);
-        assert_eq!(obs[0].startup_sec, None);
+        assert_eq!(obs[0].pushback_sec, Some(0)); // rolled forward out of the stand: a real zero (#287)
+        assert_eq!(obs[0].startup_sec, Some(0));
         assert_eq!(obs[0].taxi_sec, 150); // 135 → 285
     }
 
@@ -687,8 +729,8 @@ mod tests {
         );
 
         assert_eq!(obs.len(), 1);
-        assert_eq!(obs[0].pushback_sec, None);
-        assert_eq!(obs[0].startup_sec, None);
+        assert_eq!(obs[0].pushback_sec, Some(0)); // rolled forward out of the stand: a real zero (#287)
+        assert_eq!(obs[0].startup_sec, Some(0));
         assert_eq!(obs[0].taxi_sec, 120); // 15 → 135
     }
 
@@ -858,7 +900,7 @@ mod tests {
         );
 
         assert_eq!(obs.len(), 1);
-        assert_eq!(obs[0].pushback_sec, None);
+        assert_eq!(obs[0].pushback_sec, Some(0)); // rolled forward out of the stand: a real zero (#287)
         assert_eq!(obs[0].taxi_sec, 135); // 15 → 150
     }
 
@@ -881,7 +923,7 @@ mod tests {
         );
 
         assert_eq!(obs.len(), 1);
-        assert_eq!(obs[0].pushback_sec, None);
+        assert_eq!(obs[0].pushback_sec, Some(0)); // rolled forward out of the stand: a real zero (#287)
         assert_eq!(obs[0].taxi_sec, 135);
     }
 
@@ -906,8 +948,8 @@ mod tests {
         );
 
         assert_eq!(obs.len(), 1);
-        assert_eq!(obs[0].pushback_sec, None);
-        assert_eq!(obs[0].startup_sec, None);
+        assert_eq!(obs[0].pushback_sec, Some(0)); // rolled forward out of the stand: a real zero (#287)
+        assert_eq!(obs[0].startup_sec, Some(0));
         assert_eq!(obs[0].taxi_sec, 150); // 15 → 165
     }
 
@@ -1079,8 +1121,8 @@ mod tests {
         let obs = run_track(&mut st, &track);
 
         assert_eq!(obs.len(), 1);
-        assert_eq!(obs[0].pushback_sec, None);
-        assert_eq!(obs[0].startup_sec, None);
+        assert_eq!(obs[0].pushback_sec, Some(0)); // rolled forward out of the stand: a real zero (#287)
+        assert_eq!(obs[0].startup_sec, Some(0));
         assert_eq!(obs[0].taxi_sec, 330); // 15 → 345, run-up included
     }
 
@@ -1106,8 +1148,8 @@ mod tests {
         );
 
         assert_eq!(obs.len(), 1);
-        assert_eq!(obs[0].pushback_sec, None);
-        assert_eq!(obs[0].startup_sec, None);
+        assert_eq!(obs[0].pushback_sec, Some(0)); // rolled forward out of the stand: a real zero (#287)
+        assert_eq!(obs[0].startup_sec, Some(0));
         assert_eq!(obs[0].taxi_sec, 120); // 15 → 135
     }
 
@@ -1155,8 +1197,8 @@ mod tests {
         );
 
         assert_eq!(obs.len(), 1);
-        assert_eq!(obs[0].pushback_sec, None);
-        assert_eq!(obs[0].startup_sec, None);
+        assert_eq!(obs[0].pushback_sec, Some(0)); // rolled forward out of the stand: a real zero (#287)
+        assert_eq!(obs[0].startup_sec, Some(0));
         assert_eq!(obs[0].taxi_sec, 105); // 15 → 120, the hold included
     }
 
@@ -1238,7 +1280,7 @@ mod tests {
         );
 
         assert_eq!(obs.len(), 1);
-        assert_eq!(obs[0].pushback_sec, None);
+        assert_eq!(obs[0].pushback_sec, Some(0)); // rolled forward out of the stand: a real zero (#287)
         assert_eq!(obs[0].taxi_sec, 150); // 105 → 255
     }
 
@@ -1356,5 +1398,70 @@ mod tests {
         );
 
         assert!(st.dep.is_empty());
+    }
+
+    /// #287: the two shapes the estimator must tell apart. A gate-out that rolls forward out of the
+    /// stand demonstrably didn't push and stores a real zero; a push that was seen but couldn't be
+    /// measured stores nothing, so it sits the metric out instead of voting zero.
+    #[test]
+    fn a_measured_no_push_stores_zero_while_an_unmeasured_push_stores_nothing() {
+        let mut gate_out = TaxiObsState::default();
+        let rolled_forward = run_track(
+            &mut gate_out,
+            &[
+                (0, 0.0, 0, 0, 0),
+                (15, 40.0, 6, 0, 0),
+                (30, 80.0, 6, 0, 0),
+                (45, 120.0, 6, 0, 0),
+                (60, 120.0, 0, 0, 0),
+                (75, 120.0, 0, 0, 0),
+                (90, 120.0, 0, 0, 0),
+                (105, 900.0, 80, 400, 0),
+            ],
+        );
+        assert_eq!(rolled_forward[0].pushback_sec, Some(0));
+        assert_eq!(rolled_forward[0].startup_sec, Some(0));
+
+        // A burst the heading couldn't call, which the distance proxy took for a push, then reached
+        // taxi speed: that push was never measured, so the row says nothing rather than zero.
+        let mut missed = TaxiObsState::default();
+        let guessed = run_track(
+            &mut missed,
+            &[
+                (0, 0.0, 0, 0, 90),
+                (15, 30.0, 2, 0, 90),
+                (30, 60.0, 2, 0, 90),
+                (45, 90.0, 2, 0, 90),
+                (60, 200.0, 12, 0, 90),
+                (75, 320.0, 15, 0, 90),
+                (180, 900.0, 80, 400, 90),
+            ],
+        );
+        assert_eq!(guessed[0].pushback_sec, None);
+        assert_eq!(guessed[0].startup_sec, None);
+    }
+
+    /// A burst the heading couldn't classify says nothing either way, so it must not be mistaken for
+    /// a measured no-push (#287).
+    #[test]
+    fn a_burst_the_heading_could_not_classify_stores_nothing() {
+        let mut st = TaxiObsState::default();
+        // Nose east, tracking north: every step is across the nose, so no direction verdict.
+        let obs = run_track(
+            &mut st,
+            &[
+                (0, 0.0, 0, 0, 90),
+                (15, 60.0, 5, 0, 90),
+                (30, 120.0, 5, 0, 90),
+                (45, 180.0, 5, 0, 90),
+                (60, 180.0, 0, 0, 90),
+                (75, 180.0, 0, 0, 90),
+                (90, 180.0, 0, 0, 90),
+                (105, 900.0, 80, 400, 90),
+            ],
+        );
+
+        assert_eq!(obs[0].pushback_sec, None);
+        assert_eq!(obs[0].startup_sec, None);
     }
 }

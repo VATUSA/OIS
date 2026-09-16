@@ -524,43 +524,26 @@ mod tests {
     }
 
     #[sqlx::test]
-    async fn a_no_tug_combo_reports_a_real_zero_at_the_same_tier_as_its_other_metrics(
-        pool: PgPool,
-    ) {
+    async fn fallback_tier_filter_matches_a_combo_by_its_startup_tier_alone(pool: PgPool) {
         let now = Utc::now();
         let gate = seed_gate(&pool, "KAAA").await;
-        // No sample carries a push or start-up figure (a no-tug field). Since #287 those NULLs are
-        // real zeros rather than missing values, so every metric draws on the same pool and resolves
-        // at the same tier — the filter can no longer single a combo out by its start-up tier, and
-        // the `startup_tier` arm of the fallback filter stays only as a guard.
+        // Pushback and taxi resolve at GateTypeRunway, but no sample carries a start-up figure (e.g.
+        // no-tug departures), so only start-up falls to Default.
         let rows: Vec<TaxiObservationRow> = (0..5)
             .map(|i| TaxiObservationRow {
-                pushback_sec: None,
                 startup_sec: None,
-                ..row("KAAA", Some(&gate), "B738", "27L", None, 200 + i, now)
+                ..row("KAAA", Some(&gate), "B738", "27L", Some(60), 200 + i, now)
             })
             .collect();
         insert_taxi_observations(&pool, &rows).await.unwrap();
 
-        let gate_tier = EstimateFilters {
-            fallback_tier: Some(EstimateTier::GateTypeRunway),
-            ..empty_est_filters("KAAA")
-        };
-        let (page, total) = fetch_taxi_estimates(&pool, &gate_tier).await.unwrap();
-        assert_eq!(total, 1);
-        assert_eq!(page[0].startup_tier, EstimateTier::GateTypeRunway.as_str());
-        assert_eq!(page[0].pushback_tier, page[0].startup_tier);
-        assert_eq!(page[0].pushback_sec, 0.0);
-        assert_eq!(page[0].startup_sec, 0.0);
-
-        // A tier nothing resolved at matches nothing, so the filter still discriminates.
         let default_tier = EstimateFilters {
             fallback_tier: Some(EstimateTier::Default),
             ..empty_est_filters("KAAA")
         };
-        assert_eq!(
-            fetch_taxi_estimates(&pool, &default_tier).await.unwrap().1,
-            0
-        );
+        let (page, total) = fetch_taxi_estimates(&pool, &default_tier).await.unwrap();
+        assert_eq!(total, 1);
+        assert_eq!(page[0].pushback_tier, EstimateTier::GateTypeRunway.as_str());
+        assert_eq!(page[0].startup_tier, EstimateTier::Default.as_str());
     }
 }

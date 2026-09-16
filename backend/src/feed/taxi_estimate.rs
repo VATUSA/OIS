@@ -12,11 +12,12 @@ pub struct TaxiSample {
     pub gate_id: Option<String>,
     pub aircraft: Option<String>,
     pub runway: Option<String>,
-    /// `None` means the departure did not push back — a no-tug gate-out, powerback or GA departure
-    /// (#277). Every stored row comes from a completed phase machine (one first seen already moving
-    /// is never recorded), so this counts as a real zero in the estimate, not a missing value (#287).
+    /// `Some(0)` means the departure demonstrably did not push back — a no-tug gate-out, powerback
+    /// or GA departure, which the observer records as a real zero (#287). `None` means the phase
+    /// went unmeasured: the push was reclassified, collapsed inside one poll, or was rejected, so
+    /// the sample can't speak to this metric and the ladder skips it.
     pub pushback_sec: Option<i32>,
-    /// `None` for the same reason as [`Self::pushback_sec`]: no push, so no start-up gap after one.
+    /// `Some(0)`/`None` for the same reasons as [`Self::pushback_sec`].
     pub startup_sec: Option<i32>,
     pub taxi_sec: i32,
 }
@@ -112,8 +113,9 @@ fn clamp(value: f64, (min, max): (f64, f64)) -> f64 {
 /// Walk the fallback ladder for one metric (`extract` pulls that metric's value out of a sample,
 /// `None` only when the sample can't speak to it at all), returning the first tier with
 /// `>= MIN_SAMPLES` values, median-and-bounds-clamped, or `default` if even the airport-wide tier is
-/// too sparse. A no-push departure is not silent: its pushback/start-up count as `0.0` (#287), so an
-/// airport whose aircraft never push back learns that instead of falling back to the flat default.
+/// too sparse. A no-push departure is not silent — the observer stores it as a real `0` (#287) — so
+/// an airport whose aircraft never push back learns that instead of falling back to the flat
+/// default, while a phase nobody could measure still sits the tier out.
 fn estimate_metric(
     samples: &[TaxiSample],
     gate_id: Option<&str>,
@@ -186,7 +188,7 @@ pub fn estimate(
             gate_id,
             aircraft,
             runway,
-            |s| Some(s.pushback_sec.unwrap_or(0) as f64),
+            |s| s.pushback_sec.map(|v| v as f64),
             PUSHBACK_BOUNDS_SEC,
             DEFAULT_PUSHBACK_SEC,
         ),
@@ -195,7 +197,7 @@ pub fn estimate(
             gate_id,
             aircraft,
             runway,
-            |s| Some(s.startup_sec.unwrap_or(0) as f64),
+            |s| s.startup_sec.map(|v| v as f64),
             STARTUP_BOUNDS_SEC,
             DEFAULT_STARTUP_SEC,
         ),
@@ -317,42 +319,48 @@ mod tests {
 
     #[test]
     fn pushback_and_taxi_walk_the_ladder_independently() {
-        // One sample short of MIN_SAMPLES at the exact key for pushback (the tier needs 5), but the
-        // runway tier has plenty — pushback falls back on its own while taxi stays specific. NULLs
-        // no longer thin a pool (#287), so the fallback is forced by count, not by missing values.
-        let mut samples: Vec<TaxiSample> = (0..MIN_SAMPLES - 1)
-            .map(|i| sample("A1", "B738", "27L", Some(40), 85 + i as i32))
+        // Enough taxi_sec values at the exact key, but only 1 of them carries a pushback figure —
+        // pushback should fall back on its own, while taxi still uses the specific tier.
+        let mut samples: Vec<TaxiSample> = (0..MIN_SAMPLES)
+            .map(|i| sample("A1", "B738", "27L", None, 85 + i as i32))
             .collect();
+        samples[0].pushback_sec = Some(40);
         samples.extend((0..MIN_SAMPLES).map(|_| sample("A2", "A320", "27L", Some(70), 200)));
 
         let est = estimate(&samples, Some("A1"), Some("B738"), Some("27L"));
-        assert_eq!(est.taxi.tier, EstimateTier::AirportRunway);
+        assert_eq!(est.taxi.tier, EstimateTier::GateTypeRunway);
         assert_eq!(est.pushback.tier, EstimateTier::AirportRunway);
         assert_eq!(est.pushback.value_sec, 70.0);
     }
 
     #[test]
     fn startup_walks_the_ladder_independently_and_sums_into_the_allowance() {
-        // Every metric resolves at the exact key here; the allowance is the three medians summed.
-        let samples: Vec<TaxiSample> = (0..MIN_SAMPLES)
-            .map(|_| sample("A1", "B738", "27L", Some(60), 200))
+        // Every sample at the exact key carries push and taxi, but none carries a start-up figure
+        // (e.g. no-tug departures) — start-up alone falls to the airport-runway tier.
+        let mut samples: Vec<TaxiSample> = (0..MIN_SAMPLES)
+            .map(|_| TaxiSample {
+                startup_sec: None,
+                ..sample("A1", "B738", "27L", Some(60), 200)
+            })
             .collect();
+        samples.extend((0..MIN_SAMPLES).map(|_| sample("A2", "A320", "27L", Some(60), 200)));
 
         let est = estimate(&samples, Some("A1"), Some("B738"), Some("27L"));
         assert_eq!(est.pushback.tier, EstimateTier::GateTypeRunway);
-        assert_eq!(est.startup.tier, EstimateTier::GateTypeRunway);
+        assert_eq!(est.startup.tier, EstimateTier::AirportRunway);
         assert_eq!(est.startup.value_sec, 90.0);
         assert_eq!(ground_allowance_sec(&est), 60.0 + 90.0 + 200.0);
     }
 
-    /// #287: a no-tug field's observations all carry NULL push/start-up. Dropping them left the
-    /// estimator on its flat defaults forever, adding ~300 s of ground time nobody spends.
+    /// #287: a no-tug field's observations record an explicit zero push and start-up. Those count,
+    /// so the estimator learns the field instead of sitting on its flat defaults forever, adding
+    /// ~300 s of ground time nobody spends.
     #[test]
     fn an_airport_where_nothing_pushes_back_learns_zero_not_the_default() {
         let samples: Vec<TaxiSample> = (0..MIN_SAMPLES + 3)
             .map(|i| TaxiSample {
-                pushback_sec: None,
-                startup_sec: None,
+                pushback_sec: Some(0),
+                startup_sec: Some(0),
                 ..sample("A1", "C172", "27L", None, 200 + i as i32)
             })
             .collect();
@@ -372,8 +380,8 @@ mod tests {
     fn a_no_push_majority_outvotes_the_pushing_minority() {
         let mut samples: Vec<TaxiSample> = (0..9)
             .map(|_| TaxiSample {
-                pushback_sec: None,
-                startup_sec: None,
+                pushback_sec: Some(0),
+                startup_sec: Some(0),
                 ..sample("A1", "C172", "27L", None, 200)
             })
             .collect();
@@ -384,7 +392,7 @@ mod tests {
         assert_eq!(est.startup.value_sec, 0.0);
         assert_eq!(
             est.pushback.sample_count, 14,
-            "every observation counts, NULL included"
+            "every observation counts, the zeros included"
         );
         // Taxi is untouched: it's never NULL, and its median still spans both groups.
         assert_eq!(est.taxi.value_sec, 200.0);
