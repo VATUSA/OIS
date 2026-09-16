@@ -172,7 +172,7 @@ function Strip({
           {f.released ? (
             <>
               <StatusPill tone="good" className="font-mono">
-                RLSD {hhmmZulu(f.edct)}z
+                RLSD {hhmmZulu(f.edct)}
               </StatusPill>
               <button
                 type="button"

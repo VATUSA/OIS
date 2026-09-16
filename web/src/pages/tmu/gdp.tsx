@@ -325,7 +325,7 @@ function FlightsTable({
         cell: (c) => <span className="font-semibold">{c.getValue<string>()}</span>,
       },
       { accessorKey: "dep", header: "From", mono: true, cell: (c) => c.getValue<string>() || "—" },
-      { accessorKey: "eta", header: "ETA", icon: Clock, mono: true, cell: (c) => `${hhmmZulu(c.getValue<string>())}z` },
+      { accessorKey: "eta", header: "ETA", icon: Clock, mono: true, cell: (c) => hhmmZulu(c.getValue<string>()) },
     ];
     if (exempt) {
       cols.push({
@@ -335,13 +335,13 @@ function FlightsTable({
       });
     } else {
       cols.push(
-        { accessorKey: "cta", header: "CTA", mono: true, cell: (c) => `${hhmmZulu(c.getValue<string>())}z` },
+        { accessorKey: "cta", header: "CTA", mono: true, cell: (c) => hhmmZulu(c.getValue<string>()) },
         {
           accessorKey: "edct",
           header: "EDCT",
           icon: Timer,
           mono: true,
-          cell: (c) => (c.getValue<string>() ? `${hhmmZulu(c.getValue<string>())}z` : "—"),
+          cell: (c) => (c.getValue<string>() ? hhmmZulu(c.getValue<string>()) : "—"),
         },
         {
           accessorKey: "delay_min",
@@ -585,7 +585,7 @@ function BoardView({
           <span className="font-mono text-xs text-ink-2">
             AAR {b.aar}/hr
             {b.aar_steps.map((s) => ` → ${s.aar} @${s.start_time}z`).join("")} ·{" "}
-            {hhmmZulu(b.window_start)}z–{hhmmZulu(b.window_end)}z
+            {hhmmZulu(b.window_start)}–{hhmmZulu(b.window_end)}
             {b.scope ? ` · ${b.scope}` : ""}
             {b.max_enroute_min ? ` · ≤${b.max_enroute_min}m` : ""}
           </span>
