@@ -1,7 +1,7 @@
-import {Button, Modal, usePrompt} from "@ois/ui";
+import {Button, Modal, useChartTheme, usePrompt} from "@ois/ui";
 import {Plus, X} from "lucide-react";
 
-import {AGGREGATES, CHART_TYPES, colorAt, labelOf, type Series, TOP_OPTIONS} from "./chart-shared";
+import {AGGREGATES, CHART_TYPES, labelOf, type Series, TOP_OPTIONS} from "./chart-shared";
 import {AIRPORT_KEY, type DataSource} from "./sources";
 import type {ChartWidget as ChartWidgetT} from "./types";
 
@@ -45,6 +45,8 @@ function Select({
   );
 }
 
+const DANGER = ["danger"];
+
 export function ChartConfigPanel({
   source,
   widget,
@@ -64,6 +66,8 @@ export function ChartConfigPanel({
   onClose: () => void;
 }) {
   const prompt = usePrompt();
+  // Colour inputs need concrete hex, so defaults come from the resolved theme tokens.
+  const { seriesAt, color } = useChartTheme(DANGER);
   const set = (patch: Record<string, unknown>) => onChange(widget.id, patch);
 
   const aggregate = widget.aggregate ?? "none";
@@ -110,7 +114,7 @@ export function ChartConfigPanel({
   };
   const setThreshold = (i: number, patch: { value?: number; color?: string }) =>
     set({ thresholds: thresholds.map((t, idx) => (idx === i ? { ...t, ...patch } : t)) });
-  const addThreshold = () => set({ thresholds: [...thresholds, { value: 0, color: "#f87171" }] });
+  const addThreshold = () => set({ thresholds: [...thresholds, { value: 0, color: color("danger") }] });
   const removeThreshold = (i: number) =>
     set({ thresholds: thresholds.filter((_, idx) => idx !== i) });
 
@@ -234,7 +238,7 @@ export function ChartConfigPanel({
                     <div key={s.key} className="flex items-center gap-2 text-sm">
                       <input
                         type="color"
-                        value={widget.colors?.[s.key] ?? colorAt(i)}
+                        value={widget.colors?.[s.key] ?? seriesAt(i)}
                         onChange={(e) => set({ colors: { ...widget.colors, [s.key]: e.target.value } })}
                         className="h-6 w-8 cursor-pointer rounded border bg-transparent"
                         aria-label={`Colour for ${s.label}`}
@@ -253,7 +257,7 @@ export function ChartConfigPanel({
                     <div key={cat} className="flex items-center gap-2 text-sm">
                       <input
                         type="color"
-                        value={categoryColors[cat] ?? colorAt(i)}
+                        value={categoryColors[cat] ?? seriesAt(i)}
                         onChange={(e) => setCategoryColor(cat, e.target.value)}
                         className="h-6 w-8 cursor-pointer rounded border bg-transparent"
                         aria-label={`Colour for ${cat}`}

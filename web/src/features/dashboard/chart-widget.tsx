@@ -1,5 +1,5 @@
-import {useEffect, useMemo, useRef, useState} from "react";
-import {Button} from "@ois/ui";
+import {useMemo, useState} from "react";
+import {Button, ChartTooltip, useElementSize, Donut, EmptyState, formatCompact, useChartTheme} from "@ois/ui";
 import {areaY, barY, type ChartValue, defineChart, dot, lineY, ruleY} from "@tanstack/charts";
 import {tooltip} from "@tanstack/charts/tooltip";
 // The /tooltip entry is the same Chart with the built-in hover crosshair/focus enabled.
@@ -8,26 +8,13 @@ import {scaleBand, scaleLinear, scalePoint} from "d3-scale";
 import {Settings2} from "lucide-react";
 
 import {ChartConfigPanel} from "./chart-config-panel";
-import {
-  AGGREGATES,
-  type ChartType,
-  colorAt,
-  labelOf,
-  type Series,
-} from "./chart-shared";
+import {AGGREGATES, type ChartType, labelOf, type Series} from "./chart-shared";
 import {facilityAirports, useFacilityDirectory} from "@/lib/facilities";
 import {AIRPORT_KEY, type DataSource, DATA_SOURCES_BY_ID, type Row} from "./sources";
 import type {ChartAggregate, ChartThreshold, ChartWidget as ChartWidgetT} from "./types";
 import {useReportWidgetStatus} from "./widget-status";
 
 const COUNT_KEY = "__count";
-
-const compactFmt = new Intl.NumberFormat("en", { notation: "compact", maximumFractionDigits: 1 });
-/** Compact axis numbers: 40000 → "40K", 1_500_000 → "1.5M", small values as-is. */
-function fmtNumber(v: number): string {
-  if (!Number.isFinite(v)) return "";
-  return Math.abs(v) >= 1000 ? compactFmt.format(v) : String(Math.round(v * 100) / 100);
-}
 
 /** A sensible line-first, aggregated starting config for a chart bound to a source. */
 export function defaultChartConfig(source: DataSource): {
@@ -49,29 +36,6 @@ export function defaultChartConfig(source: DataSource): {
     aggregate: "count",
     topN: 15,
   };
-}
-
-function useSize() {
-  const ref = useRef<HTMLDivElement>(null);
-  const [size, setSize] = useState({ w: 0, h: 0 });
-  useEffect(() => {
-    const el = ref.current;
-    if (!el) return;
-    // Keep the SAME object when the box hasn't actually changed, so a spurious ResizeObserver
-    // notification (the chart drawing into its own container can trigger one) doesn't force a
-    // re-render → redraw → observe → … loop.
-    const measure = () =>
-      setSize((prev) =>
-        prev.w === el.clientWidth && prev.h === el.clientHeight
-          ? prev
-          : { w: el.clientWidth, h: el.clientHeight },
-      );
-    const ro = new ResizeObserver(measure);
-    ro.observe(el);
-    measure();
-    return () => ro.disconnect();
-  }, []);
-  return [ref, size] as const;
 }
 
 const xAccessor = (key: string) => (d: Row): ChartValue => {
@@ -229,6 +193,7 @@ function buildDefinition(
   categoryColors: Record<string, string>,
   normalized: boolean,
   thresholds: ChartThreshold[],
+  theme: ReturnType<typeof useChartTheme>["theme"],
 ) {
   const x = xAccessor(xKey);
   // Bar/scatter render one discrete mark per datum, so a category override can recolor a single
@@ -274,13 +239,14 @@ function buildDefinition(
   const yLabel = normalized ? "% of max" : series.length === 1 ? series[0].label : undefined;
   const yFormat = normalized
     ? (v: ChartValue) => `${Math.round(Number(v))}%`
-    : (v: ChartValue) => fmtNumber(Number(v));
+    : (v: ChartValue) => formatCompact(Number(v));
   return defineChart({
     marks: [...seriesMarks, ...thresholdMarks],
     scales: {
       x: { scale: xScale, axis: { label: xLabel } },
       y: { scale: scaleLinear, axis: { label: yLabel, ticks: { format: yFormat } } },
     },
+    theme,
     tooltip,
   });
 }
@@ -297,7 +263,7 @@ function Legend({
   onColor: (key: string, hex: string) => void;
 }) {
   return (
-    <div className="flex flex-wrap items-center gap-x-4 gap-y-1 px-1 text-xs text-muted-foreground">
+    <div className="flex flex-wrap items-center gap-x-4 gap-y-1 px-1 text-xs text-ink-2">
       {series.map((s, i) => {
         const color = colorFor(s.key, i);
         return (
@@ -321,20 +287,7 @@ function Legend({
   );
 }
 
-/** SVG path for a pie wedge from `a0`→`a1` (radians, 0 = 12 o'clock, clockwise). */
-function wedgePath(cx: number, cy: number, r: number, a0: number, a1: number): string {
-  const p = (a: number) => [cx + r * Math.sin(a), cy - r * Math.cos(a)];
-  const [x0, y0] = p(a0);
-  const [x1, y1] = p(a1);
-  const large = a1 - a0 > Math.PI ? 1 : 0;
-  return `M${cx} ${cy} L${x0} ${y0} A${r} ${r} 0 ${large} 1 ${x1} ${y1} Z`;
-}
-
-/**
- * Hand-rendered pie/share chart. The grammar-of-graphics `pie()` is a polar transform needing polar
- * coordinate + arc marks the alpha lib doesn't ergonomically expose, so we draw wedges directly from
- * the already-shaped category→value rows. Slices = x groups; value = the first series.
- */
+/** Pie/share chart on the shared `Donut` (full pie). Slices = x groups; value = the first series. */
 function PieChart({
   data,
   xKey,
@@ -356,39 +309,14 @@ function PieChart({
     .map((r) => ({ label: String(r[xKey] ?? ""), value: Math.max(0, Number(r[valueKey]) || 0) }))
     .filter((s) => s.value > 0);
   const total = slices.reduce((a, s) => a + s.value, 0);
-  if (total <= 0) return <p className="pt-6 text-center text-sm text-muted-foreground">No data.</p>;
+  if (total <= 0) return <EmptyState>No data.</EmptyState>;
 
   const d = Math.max(60, Math.min(size.h, size.w * 0.62));
-  const r = d / 2 - 2;
-  const cx = d / 2;
-  const cy = d / 2;
-
-  let a0 = 0;
-  const arcs = slices.map((s, i) => {
-    const frac = s.value / total;
-    const a1 = a0 + frac * 2 * Math.PI;
-    const arc = { label: s.label, value: s.value, frac, color: colorFor(s.label, i), start: a0, end: a1 };
-    a0 = a1;
-    return arc;
-  });
+  const arcs = slices.map((s, i) => ({ label: s.label, value: s.value, frac: s.value / total, color: colorFor(s.label, i) }));
 
   return (
     <div className="flex h-full items-center gap-3 p-2">
-      <svg width={d} height={d} viewBox={`0 0 ${d} ${d}`} className="shrink-0" role="img">
-        {arcs.length === 1 ? (
-          <circle cx={cx} cy={cy} r={r} fill={arcs[0].color} />
-        ) : (
-          arcs.map((a) => (
-            <path
-              key={a.label}
-              d={wedgePath(cx, cy, r, a.start, a.end)}
-              fill={a.color}
-              stroke="var(--card, #fff)"
-              strokeWidth={1}
-            />
-          ))
-        )}
-      </svg>
+      <Donut size={d} thickness={1} label="Share" slices={arcs.map((a) => ({ label: a.label, value: a.value, color: a.color }))} />
       <div className="flex max-h-full min-w-0 flex-col gap-1 overflow-auto text-xs">
         {arcs.map((a) => (
           <span key={a.label} className="inline-flex items-center gap-1.5">
@@ -406,8 +334,8 @@ function PieChart({
                 />
               )}
             </span>
-            <span className="truncate text-foreground">{a.label || "—"}</span>
-            <span className="ml-auto shrink-0 tabular-nums text-muted-foreground">
+            <span className="truncate text-ink">{a.label || "—"}</span>
+            <span className="ml-auto shrink-0 font-mono text-ink-2">
               {Math.round(a.frac * 100)}%
             </span>
           </span>
@@ -439,7 +367,7 @@ function ChartInner({
         : [];
   const { rows, isLoading, isError, isFetching, dataUpdatedAt, refetch } = source.useRows({ icaos });
   useReportWidgetStatus(isFetching, dataUpdatedAt, refetch);
-  const [ref, size] = useSize();
+  const [ref, size] = useElementSize<HTMLDivElement>();
   const [configuring, setConfiguring] = useState(false);
 
   const isPie = widget.chartType === "pie";
@@ -466,7 +394,8 @@ function ChartInner({
   );
 
   const colors = widget.colors ?? {};
-  const colorFor = (key: string, i: number) => colors[key] ?? colorAt(i);
+  const chartTheme = useChartTheme();
+  const colorFor = (key: string, i: number) => colors[key] ?? chartTheme.seriesAt(i);
   const setColor = (key: string, hex: string) =>
     onChange(widget.id, { colors: { ...colors, [key]: hex } });
 
@@ -492,10 +421,10 @@ function ChartInner({
         categoryColors,
         normalize,
         thresholds,
+        chartTheme.theme,
       ),
-    // colorFor closes over `colors`; recompute when colors/categoryColors/thresholds change.
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-    [shaped, widget.chartType, widget.x, xLabel, colors, categoryColors, normalize, thresholds],
+    // colorFor closes over `colors` + the theme; recompute when either (or thresholds) change.
+    [shaped, widget.chartType, widget.x, xLabel, colors, categoryColors, normalize, thresholds, chartTheme],
   );
   // ChartPoint.markId === the series' `key` (set via `id:` in buildDefinition's marks) — this maps
   // a tooltip point back to its real, human series label instead of the mark's raw generated id.
@@ -520,15 +449,13 @@ function ChartInner({
       )}
       <div ref={ref} className="min-h-0 flex-1">
         {isError ? (
-          <p className="pt-6 text-center text-sm text-muted-foreground">Couldn&apos;t load data.</p>
+          <EmptyState>Couldn&apos;t load data.</EmptyState>
         ) : !ready ? (
-          <p className="pt-6 text-center text-sm text-muted-foreground">
-            Open Configure and pick a group-by field.
-          </p>
+          <EmptyState>Open Configure and pick a group-by field.</EmptyState>
         ) : isLoading && empty ? (
-          <p className="pt-6 text-center text-sm text-muted-foreground">Loading…</p>
+          <EmptyState>Loading…</EmptyState>
         ) : empty ? (
-          <p className="pt-6 text-center text-sm text-muted-foreground">No data.</p>
+          <EmptyState>No data.</EmptyState>
         ) : size.w <= 0 || size.h <= 0 ? null : isPie ? (
           <PieChart
             data={shaped.data}
@@ -545,33 +472,18 @@ function ChartInner({
             ariaLabel={source.label}
             width={size.w}
             height={size.h}
-            renderTooltipBody={(ctx) => {
-              const pts = ctx.points;
-              if (!pts.length) return null;
-              return (
-                <div className="pointer-events-none rounded-md border bg-popover px-2 py-1 text-xs shadow-md">
-                  <div className="mb-0.5 font-medium text-foreground">{String(pts[0].xValue)}</div>
-                  <div className="flex flex-col gap-0.5">
-                    {pts.map((p, i) => {
-                      const label = shaped.series.length > 1 ? labelByMarkId.get(p.markId) : undefined;
-                      return (
-                        <div key={i} className="flex items-center gap-1.5">
-                          <span
-                            className="inline-block size-2 rounded-sm"
-                            style={{ background: p.color }}
-                          />
-                          {label && <span className="text-muted-foreground">{label}</span>}
-                          <span className="ml-auto tabular-nums text-foreground">
-                            {fmtNumber(Number(p.yValue))}
-                            {normalize ? "%" : ""}
-                          </span>
-                        </div>
-                      );
-                    })}
-                  </div>
-                </div>
-              );
-            }}
+            renderTooltipBody={(ctx) =>
+              ctx.points.length ? (
+                <ChartTooltip
+                  title={String(ctx.points[0].xValue)}
+                  rows={ctx.points.map((p) => ({
+                    color: p.color ?? "",
+                    label: shaped.series.length > 1 ? labelByMarkId.get(p.markId) : undefined,
+                    value: `${formatCompact(Number(p.yValue))}${normalize ? "%" : ""}`,
+                  }))}
+                />
+              ) : null
+            }
           />
         )}
       </div>
@@ -604,7 +516,7 @@ export function ChartWidget({
 }) {
   const source = DATA_SOURCES_BY_ID[widget.source];
   if (!source) {
-    return <div className="p-4 text-sm text-muted-foreground">Unknown data source.</div>;
+    return <EmptyState>Unknown data source.</EmptyState>;
   }
   return (
     <ChartInner key={source.id} source={source} widget={widget} editing={editing} onChange={onChange} />

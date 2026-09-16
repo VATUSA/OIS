@@ -72,3 +72,11 @@ export {
   type Selection,
 } from "./components/data-table";
 export type { SortingState } from "@tanstack/react-table";
+export { Sparkline } from "./charts/sparkline";
+export { Donut, type DonutSlice } from "./charts/donut";
+export { ChartTooltip, formatCompact, type TooltipRow } from "./charts/chart-tooltip";
+export { useChartTheme, tokenNames, type ChartColor } from "./charts/theme";
+export { useElementSize } from "./charts/use-size";
+export { ChartFrame } from "./charts/frame";
+export { TimeSeries, type TimeSeriesSeries, type Threshold } from "./charts/time-series";
+export { Bars, StackedBars, type StackKey } from "./charts/bars";

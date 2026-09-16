@@ -1,5 +1,5 @@
 import {useMemo, useState} from "react";
-import {Badge, Button, buttonVariants, Card, CardContent, Input} from "@ois/ui";
+import {Badge, Button, buttonVariants, Card, CardContent, EmptyState, Input, TimeSeries} from "@ois/ui";
 import {Link} from "@tanstack/react-router";
 import {ArrowDownToLine, ArrowUpFromLine, Film, Plane, TrendingUp} from "lucide-react";
 
@@ -24,51 +24,26 @@ type RangeId = (typeof RANGES)[number]["id"];
 
 const normIcao = (s: string) => s.replace(/[^a-zA-Z0-9]/g, "").toUpperCase().slice(0, 4);
 
-/** Compact inline SVG: avg-pilots area + peak-pilots line over the window. */
+const NETWORK_SERIES = [
+  { key: "avg", label: "Avg pilots", value: (p: NetworkPoint) => p.avg_pilots ?? 0, color: "series-1" },
+  { key: "peak", label: "Peak pilots", value: (p: NetworkPoint) => p.peak_pilots ?? 0, color: "series-6" },
+];
+const hourOf = (p: NetworkPoint) => new Date(p.hour);
+
+/** Average (area) and peak (line) pilots per hour over the window. */
 function NetworkChart({ points }: { points: NetworkPoint[] }) {
-  const W = 820;
-  const H = 220;
-  const PAD = 28;
-
-  const path = useMemo(() => {
-    if (points.length < 2) return null;
-    const maxY = Math.max(1, ...points.map((p) => p.peak_pilots ?? p.avg_pilots ?? 0));
-    const n = points.length;
-    const x = (i: number) => PAD + (i / (n - 1)) * (W - 2 * PAD);
-    const y = (v: number) => H - PAD - (v / maxY) * (H - 2 * PAD);
-    const avg = points.map((p, i) => `${x(i)},${y(p.avg_pilots ?? 0)}`);
-    const peak = points.map((p, i) => `${x(i)},${y(p.peak_pilots ?? 0)}`);
-    const area = `M ${x(0)},${H - PAD} L ${avg.join(" L ")} L ${x(n - 1)},${H - PAD} Z`;
-    return { area, avgLine: `M ${avg.join(" L ")}`, peakLine: `M ${peak.join(" L ")}`, maxY };
-  }, [points]);
-
-  if (!path)
-    return (
-      <div className="flex h-40 items-center justify-center text-sm text-muted-foreground">
-        Not enough data yet — collection accrues from now forward.
-      </div>
-    );
-
-  const first = points[0]?.hour;
-  const last = points[points.length - 1]?.hour;
-
+  if (points.length < 2)
+    return <EmptyState>Not enough data yet — collection accrues from now forward.</EmptyState>;
   return (
-    <div className="flex flex-col gap-1">
-      <svg viewBox={`0 0 ${W} ${H}`} className="w-full" role="img" aria-label="Network pilots over time">
-        <line x1={PAD} y1={H - PAD} x2={W - PAD} y2={H - PAD} className="stroke-border" strokeWidth={1} />
-        <path d={path.area} className="fill-primary/15" />
-        <path d={path.peakLine} className="stroke-primary/40" strokeWidth={1.5} fill="none" />
-        <path d={path.avgLine} className="stroke-primary" strokeWidth={2} fill="none" />
-        <text x={PAD} y={PAD - 10} className="fill-muted-foreground text-[11px]">
-          peak {path.maxY}
-        </text>
-      </svg>
-      <div className="flex justify-between px-6 text-[11px] text-muted-foreground">
-        <span>{first ? formatZulu(first) : ""}</span>
-        <span>avg pilots (solid) · peak (faint)</span>
-        <span>{last ? formatZulu(last) : ""}</span>
-      </div>
-    </div>
+    <TimeSeries
+      label="Network pilots over time"
+      data={points}
+      x={hourOf}
+      series={NETWORK_SERIES}
+      kind="area"
+      xFormat={(v) => formatZulu(new Date(v).toISOString())}
+      height={220}
+    />
   );
 }
 

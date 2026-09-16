@@ -17,19 +17,6 @@ export const AGGREGATES: { id: ChartAggregate; label: string }[] = [
 
 export const TOP_OPTIONS = [0, 5, 10, 15, 20, 30];
 
-/** Categorical series palette, tuned for the dark card background. */
-export const PALETTE = [
-  "#60a5fa",
-  "#34d399",
-  "#f59e0b",
-  "#f472b6",
-  "#a78bfa",
-  "#f87171",
-  "#22d3ee",
-  "#a3e635",
-];
-export const colorAt = (i: number) => PALETTE[i % PALETTE.length];
-
 export interface Series {
   key: string;
   label: string;
