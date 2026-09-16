@@ -35,7 +35,8 @@ pub struct TmiFilters {
 
 /// Shared WHERE + ordering for `list_tmis`. Bind order: `$1` status, `$2` kind, `$3` facility,
 /// `$4` range end (`to`), `$5` range start (`from`).
-const TMI_WHERE: &str = " where ($1::text is null or t.status = $1) \
+const TMI_WHERE: &str = " where t.dismissed_at is null \
+       and ($1::text is null or t.status = $1) \
        and ($2::text is null or upper(t.structured->>'kind') = upper($2)) \
        and ($3::text is null or upper(t.requesting) = upper($3) or upper(t.providing) = upper($3)) \
        and ($4::timestamptz is null or t.start_time <= $4) \
@@ -173,9 +174,10 @@ pub async fn delete_tmi(pool: &PgPool, id: &str) -> Result<bool, ApiError> {
 
 /// Delete for the published-history entities (TMIs / ground stops / GDPs): a row that was NEVER
 /// published (a draft dropped without going live) is hard-deleted and never appears in replay; a
-/// row that was ever published is KEPT — cancelled (with `ended_at` stamped if still active) so the
-/// historical dashboard can still show it during the window it was live. `table` is a trusted
-/// internal literal, never user input. Returns whether a row with that id existed.
+/// row that was ever published is KEPT for the historical dashboard — cancelled (with `ended_at`
+/// stamped) if still active, and always marked `dismissed_at` so the TMU lists stop showing it
+/// (#304: an already-expired row used to be left untouched while the delete reported success).
+/// `table` is a trusted internal literal, never user input. Returns whether a row with that id existed.
 pub(crate) async fn delete_or_retain(
     pool: &PgPool,
     table: &str,
@@ -195,7 +197,8 @@ pub(crate) async fn delete_or_retain(
         "update {table} set \
             status = case when status in ('draft', 'published') then 'cancelled' else status end, \
             ended_at = case when status in ('draft', 'published') then coalesce(ended_at, now()) \
-                            else ended_at end \
+                            else ended_at end, \
+            dismissed_at = coalesce(dismissed_at, now()) \
          where id = $1"
     ))
     .bind(id)
@@ -277,10 +280,12 @@ const GS_SELECT: &str = "select g.id, g.airport, g.scope, g.until, g.status, \
     from tmu.ground_stops g left join identity.users u on u.id = g.updated_by";
 
 pub async fn list_ground_stops(pool: &PgPool) -> Result<Vec<GroundStopBody>, ApiError> {
-    sqlx::query_as::<_, GroundStopBody>(&format!("{GS_SELECT} order by g.updated_at desc"))
-        .fetch_all(pool)
-        .await
-        .map_err(|_| ApiError::Internal)
+    sqlx::query_as::<_, GroundStopBody>(&format!(
+        "{GS_SELECT} where g.dismissed_at is null order by g.updated_at desc"
+    ))
+    .fetch_all(pool)
+    .await
+    .map_err(|_| ApiError::Internal)
 }
 
 /// Ground stops that were live at instant `at` (for historical replay).
@@ -639,5 +644,158 @@ mod tests {
         assert_eq!(built.restriction, encoded);
         assert!(built.structured.is_some());
         assert!(built.decoded.is_some());
+    }
+
+    // --- #304: deleting a published (kept-for-history) row takes it off the TMU list ---
+
+    async fn raw_tmi(pool: &PgPool, user: &str) -> String {
+        create_tmi(
+            pool,
+            &CreateTmiRequest {
+                requesting: "ZDC".to_string(),
+                providing: "ZNY".to_string(),
+                restriction: "ZDC ZNY 20MIT".to_string(),
+                structured: None,
+                start_time: None,
+                stop_time: None,
+            },
+            user,
+        )
+        .await
+        .unwrap()
+    }
+
+    /// Mark `id` in `table` as published 2h ago and ended (expired) 1h ago, like `run_cleanup` leaves it.
+    async fn publish_then_expire(pool: &PgPool, table: &str, id: &str) {
+        sqlx::query(&format!(
+            "update {table} set status = 'expired', published_at = now() - interval '2 hours' \
+             where id = $1"
+        ))
+        .bind(id)
+        .execute(pool)
+        .await
+        .unwrap();
+    }
+
+    async fn row_exists(pool: &PgPool, table: &str, id: &str) -> bool {
+        sqlx::query_scalar::<_, bool>(&format!(
+            "select exists(select 1 from {table} where id = $1)"
+        ))
+        .bind(id)
+        .fetch_one(pool)
+        .await
+        .unwrap()
+    }
+
+    async fn listed_tmi_ids(pool: &PgPool) -> Vec<String> {
+        list_tmis(pool, &TmiFilters::default())
+            .await
+            .unwrap()
+            .into_iter()
+            .map(|t| t.id)
+            .collect()
+    }
+
+    #[sqlx::test]
+    async fn deleting_an_expired_published_tmi_removes_it_from_the_list_but_keeps_its_history(
+        pool: PgPool,
+    ) {
+        let user = seed_user(&pool).await;
+        let id = raw_tmi(&pool, &user).await;
+        sqlx::query(
+            "update tmu.tmis set stop_time = now() - interval '1 hour', start_time = now() - interval '3 hours' \
+             where id = $1",
+        )
+        .bind(&id)
+        .execute(&pool)
+        .await
+        .unwrap();
+        publish_then_expire(&pool, "tmu.tmis", &id).await;
+        assert!(listed_tmi_ids(&pool).await.contains(&id));
+
+        assert!(delete_tmi(&pool, &id).await.unwrap());
+
+        assert!(!listed_tmi_ids(&pool).await.contains(&id));
+        assert!(row_exists(&pool, "tmu.tmis", &id).await);
+        let live_then = list_tmis_at(&pool, Utc::now() - chrono::Duration::minutes(90))
+            .await
+            .unwrap();
+        assert!(
+            live_then.iter().any(|t| t.id == id),
+            "replay still shows it while it was live"
+        );
+    }
+
+    #[sqlx::test]
+    async fn deleting_an_active_published_tmi_cancels_it_and_removes_it_from_the_list(
+        pool: PgPool,
+    ) {
+        let user = seed_user(&pool).await;
+        let id = raw_tmi(&pool, &user).await;
+        sqlx::query("update tmu.tmis set status = 'published', published_at = now() where id = $1")
+            .bind(&id)
+            .execute(&pool)
+            .await
+            .unwrap();
+
+        assert!(delete_tmi(&pool, &id).await.unwrap());
+
+        let row = get_tmi(&pool, &id).await.unwrap().unwrap();
+        assert_eq!(row.status, "cancelled");
+        assert!(!listed_tmi_ids(&pool).await.contains(&id));
+    }
+
+    #[sqlx::test]
+    async fn deleting_a_draft_tmi_still_hard_deletes(pool: PgPool) {
+        let user = seed_user(&pool).await;
+        let id = raw_tmi(&pool, &user).await;
+
+        assert!(delete_tmi(&pool, &id).await.unwrap());
+
+        assert!(!row_exists(&pool, "tmu.tmis", &id).await);
+    }
+
+    #[sqlx::test]
+    async fn deleting_an_unknown_id_reports_not_found(pool: PgPool) {
+        assert!(
+            !delete_tmi(&pool, "00000000-0000-0000-0000-000000000000")
+                .await
+                .unwrap()
+        );
+    }
+
+    #[sqlx::test]
+    async fn deleting_an_expired_published_ground_stop_removes_it_from_the_list(pool: PgPool) {
+        let id = sqlx::query_scalar::<_, String>(
+            "insert into tmu.ground_stops (airport) values ('KEWR') returning id",
+        )
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        publish_then_expire(&pool, "tmu.ground_stops", &id).await;
+
+        assert!(delete_ground_stop(&pool, &id).await.unwrap());
+
+        let listed = list_ground_stops(&pool).await.unwrap();
+        assert!(!listed.iter().any(|g| g.id == id));
+        assert!(row_exists(&pool, "tmu.ground_stops", &id).await);
+    }
+
+    #[sqlx::test]
+    async fn deleting_an_expired_published_gdp_removes_it_from_the_list(pool: PgPool) {
+        let id = sqlx::query_scalar::<_, String>(
+            "insert into tmu.gdp (airport, aar, start_time, end_time) \
+             values ('KATL', 30, '1800', '2000') returning id",
+        )
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        publish_then_expire(&pool, "tmu.gdp", &id).await;
+
+        assert!(crate::repos::gdp::delete_gdp(&pool, &id).await.unwrap());
+
+        let listed = crate::repos::gdp::list_gdps(&pool).await.unwrap();
+        assert!(!listed.iter().any(|g| g.id == id));
+        assert!(row_exists(&pool, "tmu.gdp", &id).await);
     }
 }

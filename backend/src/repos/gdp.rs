@@ -15,10 +15,12 @@ const GDP_SELECT: &str = "select g.id, g.airport, g.aar, g.scope, g.start_time, 
     from tmu.gdp g left join identity.users u on u.id = g.updated_by";
 
 pub async fn list_gdps(pool: &PgPool) -> Result<Vec<GdpBody>, ApiError> {
-    sqlx::query_as::<_, GdpBody>(&format!("{GDP_SELECT} order by g.updated_at desc"))
-        .fetch_all(pool)
-        .await
-        .map_err(|_| ApiError::Internal)
+    sqlx::query_as::<_, GdpBody>(&format!(
+        "{GDP_SELECT} where g.dismissed_at is null order by g.updated_at desc"
+    ))
+    .fetch_all(pool)
+    .await
+    .map_err(|_| ApiError::Internal)
 }
 
 pub async fn get_gdp(pool: &PgPool, id: &str) -> Result<Option<GdpBody>, ApiError> {
