@@ -43,7 +43,7 @@ function Header() {
       count={override.count}
       subtitle={override.subtitle ?? meta.subtitle}
       actions={override.actions}
-      views={meta.views}
+      views={override.views === null ? undefined : meta.views}
       view={view}
       onViewChange={(v) =>
         void navigate({ to: ".", search: (prev: Record<string, unknown>) => ({ ...prev, view: v }) } as never)

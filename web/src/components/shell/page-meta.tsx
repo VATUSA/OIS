@@ -19,6 +19,8 @@ export type PageHeaderOverride = {
   subtitle?: ReactNode;
   count?: number | null;
   actions?: ReactNode;
+  /** `null` hides the route's view switch on this page state (e.g. a tab it doesn't apply to). */
+  views?: null;
 };
 
 type Ctx = { override: PageHeaderOverride; set: (o: PageHeaderOverride) => void };
@@ -45,7 +47,7 @@ export function usePageHeader(o: PageHeaderOverride) {
   const set = ctx?.set;
   useLayoutEffect(() => {
     set?.(o);
-  }, [set, o.title, o.subtitle, o.count, o.actions]);
+  }, [set, o.title, o.subtitle, o.count, o.actions, o.views]);
 }
 
 /** The deepest matched route's value for each meta key (a parent can set it for its children). */

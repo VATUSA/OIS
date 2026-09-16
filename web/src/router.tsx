@@ -1,5 +1,6 @@
 import {createRootRoute, createRoute, createRouter, lazyRouteComponent, Outlet, redirect, useRouterState,} from "@tanstack/react-router";
 import {Button} from "@ois/ui";
+import {LayoutGrid, List, Rows3} from "lucide-react";
 
 import {FeedWatcher} from "@/components/feed-watcher";
 import {AppShell} from "@/components/shell/app-shell";
@@ -147,7 +148,7 @@ const tmuRoute = createRoute({
   getParentRoute: () => opsRoute,
   path: "tmu",
   component: TmuPage,
-  staticData: { layout: "wide", title: "TMU" },
+  staticData: { layout: "wide", title: "TMU", views: [{ value: "board", label: "Board", icon: LayoutGrid }, { value: "table", label: "Table", icon: Rows3 }] },
   // Which tab is active — permission-gated fallback (if the user can't see this tab) happens in
   // the component, since that depends on auth state this route-level validator doesn't have.
   validateSearch: (search: Record<string, unknown>): { tab?: TmuTabId } => ({
@@ -166,7 +167,7 @@ const myRoute = createRoute({
 const myIndexRoute = createRoute({
   getParentRoute: () => myRoute,
   path: "/",
-  staticData: { title: "My dashboards" },
+  staticData: { title: "My dashboards", views: [{ value: "grid", label: "Grid", icon: LayoutGrid }, { value: "list", label: "List", icon: List }] },
   component: BoardLibraryPage,
 });
 const sharedBoardRoute = createRoute({
@@ -343,14 +344,14 @@ const planningIndexRoute = createRoute({
 const planningEventsRoute = createRoute({
   getParentRoute: () => planningRoute,
   path: "events",
-  staticData: { title: "Events" },
+  staticData: { title: "Events", views: [{ value: "table", label: "Table", icon: Rows3 }, { value: "board", label: "Board", icon: LayoutGrid }] },
   component: PlanningEventsPage,
 });
 
 const planningAirportConfigsRoute = createRoute({
   getParentRoute: () => planningRoute,
   path: "airport-configs",
-  staticData: { title: "Airport configs" },
+  staticData: { title: "Airport configs", views: [{ value: "grouped", label: "By airport", icon: LayoutGrid }, { value: "list", label: "List", icon: List }] },
   component: AirportConfigsPage,
 });
 
