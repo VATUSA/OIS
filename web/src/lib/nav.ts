@@ -79,7 +79,7 @@ export const AREAS: readonly NavArea[] = [
         items: [
           { label: "Airport", to: "/ops/airport", icon: Plane, permission: "tmu.program.read" },
           { label: "TMU", to: "/ops/tmu", icon: Gauge, anyOf: OPS_ANY },
-          { label: "My", to: "/ops/my", icon: LayoutDashboard, permission: "tmu.program.read" },
+          { label: "My Dashboard", to: "/ops/my", icon: LayoutDashboard, permission: "tmu.program.read" },
           { label: "FCA", to: "/ops/fca", icon: Waypoints, permission: "flow.fca.read" },
           { label: "IDST", to: "/ops/idst", icon: Timer, permission: "flow.fca.read" },
           { label: "Runway", to: "/ops/runway", icon: Split, permission: "flow.runway.read" },
