@@ -330,7 +330,10 @@ impl Session {
             && self.push_start_ms.is_none()
             && !self.push_missed
             && self.taxi_start_ms.is_some();
+        // A bound that fired says the heading misled us for this whole burst, so even boundaries it
+        // produced aren't a measurement.
         let (pushback_sec, startup_sec) = match (measured, no_push) {
+            _ if self.push_missed => (None, None),
             (Some((push, startup)), _) => (Some(push), Some(startup)),
             (None, true) => (Some(0), Some(0)),
             (None, false) => (None, None),
@@ -994,6 +997,41 @@ mod tests {
         assert_eq!(obs[0].pushback_sec, None);
         assert_eq!(obs[0].startup_sec, None);
         assert_eq!(obs[0].taxi_sec, 485); // 15 → 500
+    }
+
+    #[test]
+    fn a_cap_firing_after_a_pause_still_records_the_phases_as_unmeasured() {
+        let mut st = TaxiObsState::default();
+        // A "push" that paused briefly and then ran 840 m: the pause gives boundaries, but the cap
+        // says the heading misled us for the whole burst, so nothing it produced is a measurement.
+        let mut track: Vec<(i64, f64, i64, i64, i64)> = vec![
+            (0, 0.0, 0, 0, 180),
+            (15, 60.0, 5, 0, 180),
+            (30, 120.0, 5, 0, 180),
+        ];
+        track.push((45, 180.0, 5, 0, 180));
+        track.push((60, 180.0, 0, 0, 180)); // brief stop, too short to confirm
+        for i in 1..=11 {
+            track.push((60 + i * 15, 180.0 + i as f64 * 60.0, 5, 0, 180));
+        }
+        for i in 0..3 {
+            track.push((240 + i * 15, 840.0, 0, 0, 180));
+        }
+        track.extend([
+            (300, 940.0, 12, 0, 0),
+            (315, 1040.0, 15, 0, 0),
+            (330, 1140.0, 15, 0, 0),
+            (500, 2500.0, 80, 400, 0),
+        ]);
+
+        let obs = run_track(&mut st, &track);
+
+        assert_eq!(obs.len(), 1);
+        assert_eq!(
+            obs[0].pushback_sec, None,
+            "a capped burst is never a measured push"
+        );
+        assert_eq!(obs[0].startup_sec, None);
     }
 
     #[test]
