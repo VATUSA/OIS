@@ -340,6 +340,38 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/v1/airports/{icao}/runways": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        post: operations["create_airport_runway"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/airports/{icao}/runways/{id}": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put: operations["update_airport_runway"];
+        post?: never;
+        delete: operations["delete_airport_runway"];
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/v1/airports/{icao}/surface": {
         parameters: {
             query?: never;
@@ -3105,6 +3137,22 @@ export interface components {
             updated_at: string;
             updated_by?: string | null;
         };
+        /**
+         * @description An airport runway's pavement outline (#279) — display geometry, independent of the Runway
+         *     Balancer's `data/runways.json`. `name` is the designator (e.g. `01/19`); `rings` has the same
+         *     shape and editor semantics as [`AirportTaxiwayBody::rings`].
+         */
+        AirportRunwayBody: {
+            editable: boolean;
+            icao: string;
+            id: string;
+            name: string;
+            rings: number[][][];
+            /** @description `manual` | `osm` | `crc` | `faa`. */
+            source: string;
+            /** Format: date-time */
+            updated_at: string;
+        };
         /** @description Debrief stats for one featured (configured) event airport over the capture window. */
         AirportStatBody: {
             /** Format: int64 */
@@ -3129,15 +3177,20 @@ export interface components {
         AirportSurfaceBody: {
             gates: components["schemas"]["AirportGateBody"][];
             ramp_areas: components["schemas"]["AirportRampAreaBody"][];
+            runways: components["schemas"]["AirportRunwayBody"][];
             taxiways: components["schemas"]["AirportTaxiwayBody"][];
         };
-        /** @description An airport taxiway centerline. `points` is an ordered array of `[lat, lon]`. */
+        /**
+         * @description An airport taxiway's pavement outline (#278). `rings` has the same shape and editor semantics as
+         *     [`AirportRampAreaBody::rings`]: an array of rings, each an array of `[lat, lon]`, the first being
+         *     the outer boundary.
+         */
         AirportTaxiwayBody: {
             editable: boolean;
             icao: string;
             id: string;
             name: string;
-            points: number[][];
+            rings: number[][][];
             /** @description `manual` | `osm` | `crc`. */
             source: string;
             /** Format: date-time */
@@ -3800,6 +3853,7 @@ export interface components {
             osm_ramps_retired: number;
             osm_taxiways_retired: number;
             ramps_inserted: number;
+            runways_inserted: number;
             taxiways_inserted: number;
         };
         /** @description A VATUSA facility (ARTCC). `artcc_id` scope values reference `id`. */
@@ -5154,7 +5208,7 @@ export interface components {
             rolling_since?: string | null;
         };
         /**
-         * @description How a departure's pushback+taxi allowance was derived (#164 sub-issue F): the matched
+         * @description How a departure's pushback/start-up/taxi allowance was derived (#164 sub-issue F): the matched
          *     gate/runway (if any) and each metric's fallback-ladder tier + sample count.
          */
         TaxiEstimateDebug: {
@@ -5171,6 +5225,12 @@ export interface components {
             pushback_tier: string;
             /** @description The matched departure runway, if the aircraft was rolling. */
             runway?: string | null;
+            /** Format: int64 */
+            startup_samples: number;
+            /** Format: int64 */
+            startup_sec: number;
+            /** @description Same tier labels as `pushback_tier`, for the start-up gap after the push (#277). */
+            startup_tier: string;
             /** Format: int64 */
             taxi_samples: number;
             /** Format: int64 */
@@ -5192,6 +5252,11 @@ export interface components {
             pushback_sec: number;
             pushback_tier: string;
             runway?: string | null;
+            /** Format: int64 */
+            startup_sample_count: number;
+            /** Format: double */
+            startup_sec: number;
+            startup_tier: string;
             /** Format: int64 */
             taxi_sample_count: number;
             /** Format: double */
@@ -5220,7 +5285,7 @@ export interface components {
             trend: string;
             volume: number;
         };
-        /** @description One raw pushback+taxi observation (#164 sub-issue C). */
+        /** @description One raw pushback/start-up/taxi observation (#164 sub-issue C, #277). */
         TaxiObservationEntry: {
             aircraft?: string | null;
             airport: string;
@@ -5237,6 +5302,8 @@ export interface components {
             /** Format: int32 */
             pushback_sec?: number | null;
             runway?: string | null;
+            /** Format: int32 */
+            startup_sec?: number | null;
             /** Format: int32 */
             taxi_sec: number;
         };
@@ -5466,9 +5533,13 @@ export interface components {
             /** @description `predicted` or `override`; defaults to `override` when omitted. */
             source?: string | null;
         };
+        UpsertAirportRunwayRequest: {
+            name: string;
+            rings: number[][][];
+        };
         UpsertAirportTaxiwayRequest: {
             name: string;
-            points: number[][];
+            rings: number[][][];
         };
         UpsertDiscordConfigRequest: {
             guilds: components["schemas"]["DiscordGuildConfigInput"][];
@@ -6528,6 +6599,137 @@ export interface operations {
         };
     };
     delete_airport_ramp_area: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                icao: string;
+                id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            204: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+        };
+    };
+    create_airport_runway: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                icao: string;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["UpsertAirportRunwayRequest"];
+            };
+        };
+        responses: {
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["AirportRunwayBody"];
+                };
+            };
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+        };
+    };
+    update_airport_runway: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                icao: string;
+                id: string;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["UpsertAirportRunwayRequest"];
+            };
+        };
+        responses: {
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["AirportRunwayBody"];
+                };
+            };
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+        };
+    };
+    delete_airport_runway: {
         parameters: {
             query?: never;
             header?: never;
@@ -11886,7 +12088,7 @@ export interface operations {
                 to?: string;
                 /** @description Include out-of-bounds samples in the estimate's input (default true) */
                 include_outliers?: boolean;
-                /** @description Only combos where pushback or taxi resolved at this ladder tier */
+                /** @description Only combos where pushback, start-up, or taxi resolved at this ladder tier */
                 fallback_tier?: string;
                 /** @description 1-based page (default 1) */
                 page?: number;

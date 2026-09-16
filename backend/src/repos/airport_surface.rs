@@ -1,5 +1,5 @@
-//! Editable airport surface geometry: gates/parking positions (points), ramp/apron areas
-//! (polygons), taxiways (lines) — see migration 0067. Writes are facility-scoped in the handler;
+//! Editable airport surface geometry: gates/parking positions (points), ramp/apron areas, taxiway
+//! and runway pavement (polygons) — see migrations 0067, 0076, 0077. Writes are facility-scoped in the handler;
 //! the repo is unscoped. Explicit per-type functions, mirroring `airport_configs`/
 //! `facility_documents` — no generic CRUD abstraction over the three geometry kinds.
 
@@ -10,8 +10,9 @@ use sqlx::PgPool;
 use crate::{
     errors::ApiError,
     models::{
-        AirportGateBody, AirportRampAreaBody, AirportTaxiwayBody, UpsertAirportGateRequest,
-        UpsertAirportRampAreaRequest, UpsertAirportTaxiwayRequest,
+        AirportGateBody, AirportRampAreaBody, AirportRunwayBody, AirportTaxiwayBody,
+        UpsertAirportGateRequest, UpsertAirportRampAreaRequest, UpsertAirportRunwayRequest,
+        UpsertAirportTaxiwayRequest,
     },
 };
 
@@ -201,7 +202,7 @@ pub async fn delete_ramp_area(pool: &PgPool, id: &str, icao: &str) -> Result<boo
 // ---- taxiways ---------------------------------------------------------------
 
 const TAXIWAY_SELECT: &str =
-    "select id, icao, name, points, source, updated_at from flow.airport_taxiway";
+    "select id, icao, name, rings, source, updated_at from flow.airport_taxiway";
 
 pub async fn list_taxiways(pool: &PgPool, icao: &str) -> Result<Vec<AirportTaxiwayBody>, ApiError> {
     sqlx::query_as::<_, AirportTaxiwayBody>(&format!(
@@ -227,14 +228,14 @@ pub async fn create_taxiway(
     req: &UpsertAirportTaxiwayRequest,
     actor: &str,
 ) -> Result<AirportTaxiwayBody, ApiError> {
-    let points = sqlx::types::Json(&req.points);
+    let rings = sqlx::types::Json(&req.rings);
     let id: String = sqlx::query_scalar(
-        "insert into flow.airport_taxiway (icao, name, points, source, updated_by) \
+        "insert into flow.airport_taxiway (icao, name, rings, source, updated_by) \
          values ($1, $2, $3, 'manual', $4) returning id",
     )
     .bind(icao)
     .bind(&req.name)
-    .bind(points)
+    .bind(rings)
     .bind(actor)
     .fetch_one(pool)
     .await
@@ -249,15 +250,15 @@ pub async fn update_taxiway(
     req: &UpsertAirportTaxiwayRequest,
     actor: &str,
 ) -> Result<Option<AirportTaxiwayBody>, ApiError> {
-    let points = sqlx::types::Json(&req.points);
+    let rings = sqlx::types::Json(&req.rings);
     let r = sqlx::query(
-        "update flow.airport_taxiway set name = $3, points = $4, updated_by = $5 \
+        "update flow.airport_taxiway set name = $3, rings = $4, updated_by = $5 \
          where id = $1 and icao = $2",
     )
     .bind(id)
     .bind(icao)
     .bind(&req.name)
-    .bind(points)
+    .bind(rings)
     .bind(actor)
     .execute(pool)
     .await
@@ -270,6 +271,86 @@ pub async fn update_taxiway(
 
 pub async fn delete_taxiway(pool: &PgPool, id: &str, icao: &str) -> Result<bool, ApiError> {
     let r = sqlx::query("delete from flow.airport_taxiway where id = $1 and icao = $2")
+        .bind(id)
+        .bind(icao)
+        .execute(pool)
+        .await
+        .map_err(|_| ApiError::Internal)?;
+    Ok(r.rows_affected() > 0)
+}
+
+// ---- runways ---------------------------------------------------------------
+
+const RUNWAY_SELECT: &str =
+    "select id, icao, name, rings, source, updated_at from flow.airport_runway";
+
+pub async fn list_runways(pool: &PgPool, icao: &str) -> Result<Vec<AirportRunwayBody>, ApiError> {
+    sqlx::query_as::<_, AirportRunwayBody>(&format!(
+        "{RUNWAY_SELECT} where icao = $1 order by name"
+    ))
+    .bind(icao)
+    .fetch_all(pool)
+    .await
+    .map_err(|_| ApiError::Internal)
+}
+
+pub async fn get_runway(pool: &PgPool, id: &str) -> Result<Option<AirportRunwayBody>, ApiError> {
+    sqlx::query_as::<_, AirportRunwayBody>(&format!("{RUNWAY_SELECT} where id = $1"))
+        .bind(id)
+        .fetch_optional(pool)
+        .await
+        .map_err(|_| ApiError::Internal)
+}
+
+pub async fn create_runway(
+    pool: &PgPool,
+    icao: &str,
+    req: &UpsertAirportRunwayRequest,
+    actor: &str,
+) -> Result<AirportRunwayBody, ApiError> {
+    let rings = sqlx::types::Json(&req.rings);
+    let id: String = sqlx::query_scalar(
+        "insert into flow.airport_runway (icao, name, rings, source, updated_by) \
+         values ($1, $2, $3, 'manual', $4) returning id",
+    )
+    .bind(icao)
+    .bind(&req.name)
+    .bind(rings)
+    .bind(actor)
+    .fetch_one(pool)
+    .await
+    .map_err(|_| ApiError::Internal)?;
+    get_runway(pool, &id).await?.ok_or(ApiError::Internal)
+}
+
+pub async fn update_runway(
+    pool: &PgPool,
+    id: &str,
+    icao: &str,
+    req: &UpsertAirportRunwayRequest,
+    actor: &str,
+) -> Result<Option<AirportRunwayBody>, ApiError> {
+    let rings = sqlx::types::Json(&req.rings);
+    let r = sqlx::query(
+        "update flow.airport_runway set name = $3, rings = $4, updated_by = $5 \
+         where id = $1 and icao = $2",
+    )
+    .bind(id)
+    .bind(icao)
+    .bind(&req.name)
+    .bind(rings)
+    .bind(actor)
+    .execute(pool)
+    .await
+    .map_err(|_| ApiError::Internal)?;
+    if r.rows_affected() == 0 {
+        return Ok(None);
+    }
+    get_runway(pool, id).await
+}
+
+pub async fn delete_runway(pool: &PgPool, id: &str, icao: &str) -> Result<bool, ApiError> {
+    let r = sqlx::query("delete from flow.airport_runway where id = $1 and icao = $2")
         .bind(id)
         .bind(icao)
         .execute(pool)

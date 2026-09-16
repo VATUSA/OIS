@@ -188,7 +188,7 @@ pub struct AuditLogPage {
 
 // --- taxi insights (#183): browsable history over raw observations + derived estimates ---
 
-/// One raw pushback+taxi observation (#164 sub-issue C).
+/// One raw pushback/start-up/taxi observation (#164 sub-issue C, #277).
 #[derive(Debug, Serialize, ToSchema, sqlx::FromRow)]
 pub struct TaxiObservationEntry {
     pub id: i64,
@@ -197,6 +197,7 @@ pub struct TaxiObservationEntry {
     pub aircraft: Option<String>,
     pub runway: Option<String>,
     pub pushback_sec: Option<i32>,
+    pub startup_sec: Option<i32>,
     pub taxi_sec: i32,
     pub observed_at: DateTime<Utc>,
     /// True when this row falls outside `taxi_estimate`'s own sanity-clamp bounds — computed at
@@ -224,6 +225,9 @@ pub struct TaxiEstimateEntry {
     pub pushback_sec: f64,
     pub pushback_tier: String,
     pub pushback_sample_count: i64,
+    pub startup_sec: f64,
+    pub startup_tier: String,
+    pub startup_sample_count: i64,
     pub taxi_sec: f64,
     pub taxi_tier: String,
     pub taxi_sample_count: i64,
@@ -725,14 +729,16 @@ pub struct UpsertAirportRampAreaRequest {
     pub rings: Vec<Vec<[f64; 2]>>,
 }
 
-/// An airport taxiway centerline. `points` is an ordered array of `[lat, lon]`.
+/// An airport taxiway's pavement outline (#278). `rings` has the same shape and editor semantics as
+/// [`AirportRampAreaBody::rings`]: an array of rings, each an array of `[lat, lon]`, the first being
+/// the outer boundary.
 #[derive(Debug, Serialize, ToSchema, sqlx::FromRow)]
 pub struct AirportTaxiwayBody {
     pub id: String,
     pub icao: String,
     pub name: String,
-    #[schema(value_type = Vec<Vec<f64>>)]
-    pub points: sqlx::types::Json<Vec<[f64; 2]>>,
+    #[schema(value_type = Vec<Vec<Vec<f64>>>)]
+    pub rings: sqlx::types::Json<Vec<Vec<[f64; 2]>>>,
     /// `manual` | `osm` | `crc`.
     pub source: String,
     pub updated_at: DateTime<Utc>,
@@ -743,7 +749,30 @@ pub struct AirportTaxiwayBody {
 #[derive(Debug, Deserialize, ToSchema)]
 pub struct UpsertAirportTaxiwayRequest {
     pub name: String,
-    pub points: Vec<[f64; 2]>,
+    pub rings: Vec<Vec<[f64; 2]>>,
+}
+
+/// An airport runway's pavement outline (#279) — display geometry, independent of the Runway
+/// Balancer's `data/runways.json`. `name` is the designator (e.g. `01/19`); `rings` has the same
+/// shape and editor semantics as [`AirportTaxiwayBody::rings`].
+#[derive(Debug, Serialize, ToSchema, sqlx::FromRow)]
+pub struct AirportRunwayBody {
+    pub id: String,
+    pub icao: String,
+    pub name: String,
+    #[schema(value_type = Vec<Vec<Vec<f64>>>)]
+    pub rings: sqlx::types::Json<Vec<Vec<[f64; 2]>>>,
+    /// `manual` | `osm` | `crc` | `faa`.
+    pub source: String,
+    pub updated_at: DateTime<Utc>,
+    #[sqlx(default)]
+    pub editable: bool,
+}
+
+#[derive(Debug, Deserialize, ToSchema)]
+pub struct UpsertAirportRunwayRequest {
+    pub name: String,
+    pub rings: Vec<Vec<[f64; 2]>>,
 }
 
 /// An airport's full surface geometry, combined for one read.
@@ -752,6 +781,7 @@ pub struct AirportSurfaceBody {
     pub gates: Vec<AirportGateBody>,
     pub ramp_areas: Vec<AirportRampAreaBody>,
     pub taxiways: Vec<AirportTaxiwayBody>,
+    pub runways: Vec<AirportRunwayBody>,
 }
 
 /// The result of re-pulling one airport's `source='faa'` surface geometry from the bundled FAA
@@ -760,6 +790,7 @@ pub struct AirportSurfaceBody {
 pub struct FaaRepullResult {
     pub taxiways_inserted: usize,
     pub ramps_inserted: usize,
+    pub runways_inserted: usize,
     pub osm_taxiways_retired: usize,
     pub osm_ramps_retired: usize,
 }
@@ -1645,7 +1676,7 @@ pub struct FcaFlightDebug {
     pub taxi_estimate: Option<TaxiEstimateDebug>,
 }
 
-/// How a departure's pushback+taxi allowance was derived (#164 sub-issue F): the matched
+/// How a departure's pushback/start-up/taxi allowance was derived (#164 sub-issue F): the matched
 /// gate/runway (if any) and each metric's fallback-ladder tier + sample count.
 #[derive(Debug, Serialize, ToSchema)]
 pub struct TaxiEstimateDebug {
@@ -1658,6 +1689,10 @@ pub struct TaxiEstimateDebug {
     /// "airport", or "default".
     pub pushback_tier: String,
     pub pushback_samples: i64,
+    pub startup_sec: i64,
+    /// Same tier labels as `pushback_tier`, for the start-up gap after the push (#277).
+    pub startup_tier: String,
+    pub startup_samples: i64,
     pub taxi_sec: i64,
     /// Same tier labels as `pushback_tier`, for the taxi-out metric.
     pub taxi_tier: String,

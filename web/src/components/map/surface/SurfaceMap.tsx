@@ -7,12 +7,15 @@ import {
   type AirportSurface,
   useCreateAirportGate,
   useCreateAirportRampArea,
+  useCreateAirportRunway,
   useCreateAirportTaxiway,
   useDeleteAirportGate,
   useDeleteAirportRampArea,
+  useDeleteAirportRunway,
   useDeleteAirportTaxiway,
   useUpdateAirportGate,
   useUpdateAirportRampArea,
+  useUpdateAirportRunway,
   useUpdateAirportTaxiway,
 } from "@/lib/airport-surface";
 
@@ -26,16 +29,18 @@ const KINDS: { kind: SurfaceKind; label: string }[] = [
   { kind: "gate", label: "Add gate" },
   { kind: "taxiway", label: "Add taxiway" },
   { kind: "ramp", label: "Add ramp/apron" },
+  { kind: "runway", label: "Add runway" },
 ];
 
 function layerIdToKind(id: string | undefined): SurfaceKind | null {
   if (id === "surface-gates") return "gate";
   if (id === "surface-taxiways") return "taxiway";
   if (id === "surface-ramp-areas") return "ramp";
+  if (id === "surface-runways") return "runway";
   return null;
 }
 
-/** The airport surface data editor's map: draws/edits gates, taxiways, and ramp/apron areas over
+/** The airport surface data editor's map: draws/edits gates, taxiways, runways, and ramp/apron areas over
  * the OSM airport-layout basemap. Built directly on the generic `MapCanvas` shell (not
  * `TrafficMap`, which drags in unrelated traffic/ATC props) — the draw state machine mirrors the
  * FCA polyline editor (`FcaMapView.tsx`'s `Draft`/`Phase`), extended to point and polygon shapes. */
@@ -66,6 +71,9 @@ export function SurfaceMap({
   const createTaxiway = useCreateAirportTaxiway(icao);
   const updateTaxiway = useUpdateAirportTaxiway(icao);
   const deleteTaxiway = useDeleteAirportTaxiway(icao);
+  const createRunway = useCreateAirportRunway(icao);
+  const updateRunway = useUpdateAirportRunway(icao);
+  const deleteRunway = useDeleteAirportRunway(icao);
 
   const pending =
     createGate.isPending ||
@@ -76,7 +84,10 @@ export function SurfaceMap({
     deleteRamp.isPending ||
     createTaxiway.isPending ||
     updateTaxiway.isPending ||
-    deleteTaxiway.isPending;
+    deleteTaxiway.isPending ||
+    createRunway.isPending ||
+    updateRunway.isPending ||
+    deleteRunway.isPending;
 
   // No airport-lookup source exists to center the map on `icao` directly (runway ends have no
   // lat/lon anywhere in this codebase). Once, on first load, fly to the loaded geometry's bounds
@@ -86,8 +97,9 @@ export function SurfaceMap({
     if (centered.current) return;
     const pts: [number, number][] = [
       ...toDeckPath(surface.gates.map((g): LatLng => [g.lat, g.lon])),
-      ...surface.taxiways.flatMap((t) => toDeckPath(t.points as LatLng[])),
-      ...surface.ramp_areas.flatMap((r) => r.rings.flatMap((ring) => toDeckPath(ring as LatLng[]))),
+      ...[...surface.taxiways, ...surface.runways, ...surface.ramp_areas].flatMap((p) =>
+        p.rings.flatMap((ring) => toDeckPath(ring as LatLng[])),
+      ),
     ];
     if (pts.length > 0) {
       centered.current = true;
@@ -111,12 +123,13 @@ export function SurfaceMap({
       const g = surface.gates.find((x) => x.id === id);
       if (!g) return;
       setDraft({ kind, id, name: g.name, rampKind: "apron", points: [[g.lat, g.lon]] });
-    } else if (kind === "taxiway") {
-      const t = surface.taxiways.find((x) => x.id === id);
-      if (!t) return;
-      setDraft({ kind, id, name: t.name, rampKind: "apron", points: t.points as LatLng[] });
     } else {
-      const r = surface.ramp_areas.find((x) => x.id === id);
+      const r =
+        kind === "taxiway"
+          ? surface.taxiways.find((x) => x.id === id)
+          : kind === "runway"
+            ? surface.runways.find((x) => x.id === id)
+            : surface.ramp_areas.find((x) => x.id === id);
       if (!r) return;
       const outer = r.rings[0] ?? [];
       // Strip the closing duplicate — the draft never carries it (see layers.ts).
@@ -130,7 +143,7 @@ export function SurfaceMap({
         kind,
         id,
         name: r.name,
-        rampKind: r.kind === "ramp" ? "ramp" : "apron",
+        rampKind: "kind" in r && r.kind === "ramp" ? "ramp" : "apron",
         points: open as LatLng[],
         extraRings,
       });
@@ -179,20 +192,23 @@ export function SurfaceMap({
       const body = { name: draft.name.trim(), lat: points[0][0], lon: points[0][1] };
       if (draft.id) updateGate.mutate({ id: draft.id, body }, { onSuccess: onDone });
       else createGate.mutate(body, { onSuccess: onDone });
-    } else if (draft.kind === "taxiway") {
-      const body = { name: draft.name.trim(), points };
-      if (draft.id) updateTaxiway.mutate({ id: draft.id, body }, { onSuccess: onDone });
-      else createTaxiway.mutate(body, { onSuccess: onDone });
     } else {
       // Any rings beyond the outer one (e.g. a hole) came from an existing row this editor doesn't
       // draw — resend them unchanged rather than silently dropping them (see startEditExisting).
-      const body = {
-        name: draft.name.trim(),
-        kind: draft.rampKind,
-        rings: [[...points, points[0]], ...(draft.extraRings ?? [])],
-      };
-      if (draft.id) updateRamp.mutate({ id: draft.id, body }, { onSuccess: onDone });
-      else createRamp.mutate(body, { onSuccess: onDone });
+      const rings = [[...points, points[0]], ...(draft.extraRings ?? [])];
+      if (draft.kind === "taxiway") {
+        const body = { name: draft.name.trim(), rings };
+        if (draft.id) updateTaxiway.mutate({ id: draft.id, body }, { onSuccess: onDone });
+        else createTaxiway.mutate(body, { onSuccess: onDone });
+      } else if (draft.kind === "runway") {
+        const body = { name: draft.name.trim(), rings };
+        if (draft.id) updateRunway.mutate({ id: draft.id, body }, { onSuccess: onDone });
+        else createRunway.mutate(body, { onSuccess: onDone });
+      } else {
+        const body = { name: draft.name.trim(), kind: draft.rampKind, rings };
+        if (draft.id) updateRamp.mutate({ id: draft.id, body }, { onSuccess: onDone });
+        else createRamp.mutate(body, { onSuccess: onDone });
+      }
     }
   };
 
@@ -201,6 +217,7 @@ export function SurfaceMap({
     const onDone = () => setDraft(null);
     if (draft.kind === "gate") deleteGate.mutate(draft.id, { onSuccess: onDone });
     else if (draft.kind === "taxiway") deleteTaxiway.mutate(draft.id, { onSuccess: onDone });
+    else if (draft.kind === "runway") deleteRunway.mutate(draft.id, { onSuccess: onDone });
     else deleteRamp.mutate(draft.id, { onSuccess: onDone });
   };
 

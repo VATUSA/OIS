@@ -1,4 +1,4 @@
-//! Staff-browsable history over raw taxi/pushback observations (`stats.taxi_observation`, #164
+//! Staff-browsable history over raw taxi/start-up/pushback observations (`stats.taxi_observation`, #164
 //! sub-issue C) and their derived per-(gate,aircraft,runway) estimates (sub-issue D) — #183.
 //! Read-only; the only interaction with the live estimator (`feed::taxi_estimate`) is calling its
 //! pure `estimate()` fn against a filtered sample pool fetched here.
@@ -8,7 +8,7 @@ use sqlx::PgPool;
 
 use crate::errors::ApiError;
 use crate::feed::taxi_estimate::{
-    self, EstimateTier, PUSHBACK_BOUNDS_SEC, TAXI_BOUNDS_SEC, TaxiSample,
+    self, EstimateTier, PUSHBACK_BOUNDS_SEC, STARTUP_BOUNDS_SEC, TAXI_BOUNDS_SEC, TaxiSample,
 };
 use crate::models::{TaxiEstimateEntry, TaxiObservationEntry};
 
@@ -23,11 +23,14 @@ fn db(e: sqlx::Error) -> ApiError {
 fn outlier_expr() -> String {
     format!(
         "(taxi_sec < {tmin} or taxi_sec > {tmax} \
-          or (pushback_sec is not null and (pushback_sec < {pmin} or pushback_sec > {pmax})))",
+          or (pushback_sec is not null and (pushback_sec < {pmin} or pushback_sec > {pmax})) \
+          or (startup_sec is not null and (startup_sec < {smin} or startup_sec > {smax})))",
         tmin = TAXI_BOUNDS_SEC.0,
         tmax = TAXI_BOUNDS_SEC.1,
         pmin = PUSHBACK_BOUNDS_SEC.0,
         pmax = PUSHBACK_BOUNDS_SEC.1,
+        smin = STARTUP_BOUNDS_SEC.0,
+        smax = STARTUP_BOUNDS_SEC.1,
     )
 }
 
@@ -88,7 +91,7 @@ pub async fn fetch_taxi_observations(
         format!(" and not {}", outlier_expr())
     };
     let sql = format!(
-        "select id, airport, gate_id, aircraft, runway, pushback_sec, taxi_sec, observed_at, \
+        "select id, airport, gate_id, aircraft, runway, pushback_sec, startup_sec, taxi_sec, observed_at, \
                 {expr} as is_outlier \
          from stats.taxi_observation where {base}{outlier_clause} \
          order by observed_at desc limit $7 offset $8",
@@ -145,7 +148,7 @@ async fn sample_pool(
         format!(" and not {}", outlier_expr())
     };
     let sql = format!(
-        "select gate_id, aircraft, runway, pushback_sec, taxi_sec from stats.taxi_observation \
+        "select gate_id, aircraft, runway, pushback_sec, startup_sec, taxi_sec from stats.taxi_observation \
          where airport = $1 and ($2::timestamptz is null or observed_at >= $2) \
            and ($3::timestamptz is null or observed_at <= $3){outlier_clause}"
     );
@@ -209,14 +212,23 @@ pub async fn fetch_taxi_estimates(
                 pushback_sec: est.pushback.value_sec,
                 pushback_tier: est.pushback.tier.as_str().to_string(),
                 pushback_sample_count: est.pushback.sample_count as i64,
+                startup_sec: est.startup.value_sec,
+                startup_tier: est.startup.tier.as_str().to_string(),
+                startup_sample_count: est.startup.sample_count as i64,
                 taxi_sec: est.taxi.value_sec,
                 taxi_tier: est.taxi.tier.as_str().to_string(),
                 taxi_sample_count: est.taxi.sample_count as i64,
             }
         })
         .filter(|e| {
-            f.fallback_tier
-                .is_none_or(|t| e.taxi_tier == t.as_str() || e.pushback_tier == t.as_str())
+            f.fallback_tier.is_none_or(|t| {
+                [
+                    e.pushback_tier.as_str(),
+                    e.startup_tier.as_str(),
+                    e.taxi_tier.as_str(),
+                ]
+                .contains(&t.as_str())
+            })
         })
         .collect();
 
@@ -263,6 +275,7 @@ mod tests {
             aircraft: Some(aircraft.to_string()),
             runway: Some(runway.to_string()),
             pushback_sec,
+            startup_sec: pushback_sec.map(|_| 90),
             taxi_sec,
             observed_at,
         }
@@ -370,6 +383,11 @@ mod tests {
                 row("KAAA", None, "B738", "27L", Some(60), 5000, now),
                 // pushback_sec above PUSHBACK_BOUNDS_SEC.1 (1200).
                 row("KAAA", None, "B738", "27L", Some(2000), 300, now),
+                // startup_sec above STARTUP_BOUNDS_SEC.1 (900).
+                TaxiObservationRow {
+                    startup_sec: Some(1000),
+                    ..row("KAAA", None, "B738", "27L", Some(60), 300, now)
+                },
             ],
         )
         .await
@@ -378,11 +396,11 @@ mod tests {
         let all = fetch_taxi_observations(&pool, &empty_obs_filters())
             .await
             .unwrap();
-        assert_eq!(all.len(), 3);
+        assert_eq!(all.len(), 4);
         let flagged: Vec<bool> = all.iter().map(|o| o.is_outlier).collect();
         assert_eq!(
             flagged.iter().filter(|&&f| f).count(),
-            2,
+            3,
             "flagged: {flagged:?}"
         );
 
@@ -435,6 +453,7 @@ mod tests {
                 aircraft: Some("B738".to_string()),
                 runway: Some("27L".to_string()),
                 pushback_sec: Some(60),
+                startup_sec: Some(90),
                 taxi_sec: 200 + i,
             })
             .collect();
@@ -442,6 +461,8 @@ mod tests {
         assert_eq!(page[0].taxi_tier, direct.taxi.tier.as_str());
         assert_eq!(page[0].taxi_sec, direct.taxi.value_sec);
         assert_eq!(page[0].taxi_sample_count, direct.taxi.sample_count as i64);
+        assert_eq!(page[0].startup_tier, direct.startup.tier.as_str());
+        assert_eq!(page[0].startup_sec, direct.startup.value_sec);
     }
 
     #[sqlx::test]
@@ -500,5 +521,29 @@ mod tests {
             .unwrap();
         assert_eq!(total, 1);
         assert_eq!(page[0].aircraft.as_deref(), Some("A320"));
+    }
+
+    #[sqlx::test]
+    async fn fallback_tier_filter_matches_a_combo_by_its_startup_tier_alone(pool: PgPool) {
+        let now = Utc::now();
+        let gate = seed_gate(&pool, "KAAA").await;
+        // Pushback and taxi resolve at GateTypeRunway, but no sample carries a start-up figure —
+        // the observer couldn't measure it (#287) — so only start-up falls all the way to Default.
+        let rows: Vec<TaxiObservationRow> = (0..5)
+            .map(|i| TaxiObservationRow {
+                startup_sec: None,
+                ..row("KAAA", Some(&gate), "B738", "27L", Some(60), 200 + i, now)
+            })
+            .collect();
+        insert_taxi_observations(&pool, &rows).await.unwrap();
+
+        let default_tier = EstimateFilters {
+            fallback_tier: Some(EstimateTier::Default),
+            ..empty_est_filters("KAAA")
+        };
+        let (page, total) = fetch_taxi_estimates(&pool, &default_tier).await.unwrap();
+        assert_eq!(total, 1, "matched by its start-up tier alone");
+        assert_eq!(page[0].pushback_tier, EstimateTier::GateTypeRunway.as_str());
+        assert_eq!(page[0].startup_tier, EstimateTier::Default.as_str());
     }
 }

@@ -143,6 +143,13 @@ generated `ois` client. shadcn/ui components live in `packages/ui` (`@ois/ui`). 
 are declarative: add an entry to `web/src/lib/settings/registry.ts` and it appears on `/settings`;
 read it anywhere with `useSetting(key, default).value`.
 
+**Design language — read [`DESIGN.md`](DESIGN.md) before building or restyling any UI.** OIS has one
+system (a quiet dark operator console: one accent, no gradients, no chrome shadows, hairlines,
+continuous corners, a 400/600/700 type ladder, tokens only). `DESIGN.md` is the concrete app spec; its
+principles come from the Apple-inspired skill at `.claude/skills/claude-apple-design-system/`. Build the
+shell + shared components once (in `packages/ui`) and render every screen through them — don't hand-style
+one-offs.
+
 ---
 
 ## Working rules
