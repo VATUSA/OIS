@@ -13,6 +13,7 @@ import {
   DropdownMenuSeparator,
   DropdownMenuTrigger,
   usePrompt,
+  Modal,
 } from "@ois/ui";
 import {ChevronDown, Folder, FolderPlus, LayoutDashboard, Plus, Share2, Trash2} from "lucide-react";
 
@@ -322,18 +323,16 @@ export function BoardLibraryPage() {
         </div>
       )}
 
-      {facTemplate && (
-        <div
-          className="fixed inset-0 z-[900] flex items-start justify-center bg-black/40 pt-32"
-          onClick={() => setFacTemplate(null)}
-        >
-          <div className="w-80 rounded-lg border bg-background p-4 shadow-2xl" onClick={(e) => e.stopPropagation()}>
-            <div className="mb-1 text-sm font-semibold">{facTemplate.name}</div>
-            <p className="mb-3 text-xs text-muted-foreground">Pick an ARTCC or TRACON.</p>
-            <FacilityCombobox autoFocus onSelect={onFacilityTemplate} />
-          </div>
-        </div>
-      )}
+      <Modal
+        open={facTemplate != null}
+        onClose={() => setFacTemplate(null)}
+        title={facTemplate?.name}
+        description="Pick an ARTCC or TRACON."
+        size="sm"
+        placement="top"
+      >
+        <FacilityCombobox autoFocus onSelect={onFacilityTemplate} />
+      </Modal>
     </div>
   );
 }

@@ -2,6 +2,7 @@ import * as React from "react";
 
 import {Button} from "./button";
 import {Input} from "./input";
+import {Modal} from "./modal";
 
 export type ConfirmOptions = {
   title: string;
@@ -69,54 +70,37 @@ export function DialogProvider({ children }: { children: React.ReactNode }) {
     });
   };
 
-  // Escape cancels; focus the input (prompt) or the confirm button (confirm) on open.
+  // Focus the input (prompt) or the confirm button (confirm) on open. Modal handles Escape.
   React.useEffect(() => {
     if (!request) return;
-    const onKey = (e: KeyboardEvent) => {
-      if (e.key === "Escape") cancel();
-    };
-    window.addEventListener("keydown", onKey);
     const raf = requestAnimationFrame(() => {
       if (request.kind === "prompt") inputRef.current?.focus();
       else confirmRef.current?.focus();
     });
-    return () => {
-      window.removeEventListener("keydown", onKey);
-      cancelAnimationFrame(raf);
-    };
-  }, [request, cancel]);
+    return () => cancelAnimationFrame(raf);
+  }, [request]);
 
   const ctx = React.useMemo(() => ({ confirm, prompt }), [confirm, prompt]);
 
   return (
     <DialogContext.Provider value={ctx}>
       {children}
-      {request && (
-        <div className="fixed inset-0 z-[110] flex items-center justify-center p-4">
-          <div
-            className="absolute inset-0 bg-black/50 backdrop-blur-[1px]"
-            onClick={cancel}
-            aria-hidden="true"
-          />
-          <form
-            onSubmit={submit}
-            role="dialog"
-            aria-modal="true"
-            aria-label={request.opts.title}
-            className="relative w-full max-w-sm rounded-lg border border-line bg-panel p-5"
-          >
-            <h2 className="text-base font-semibold text-foreground">
-              {request.opts.title}
-            </h2>
+      <Modal
+        open={request != null}
+        onClose={cancel}
+        size="sm"
+        aria-label={request?.opts.title}
+      >
+        {request && (
+          <form onSubmit={submit} className="p-5">
+            <h2 className="text-base font-bold text-ink">{request.opts.title}</h2>
             {request.opts.description && (
-              <p className="mt-1.5 text-sm text-muted-foreground">
-                {request.opts.description}
-              </p>
+              <p className="mt-1.5 text-sm text-ink-2">{request.opts.description}</p>
             )}
             {request.kind === "prompt" && (
               <div className="mt-3 flex flex-col gap-1">
                 {request.opts.label && (
-                  <label className="text-xs font-semibold uppercase tracking-wide text-muted-foreground">
+                  <label className="text-xs font-semibold uppercase tracking-wide text-ink-2">
                     {request.opts.label}
                   </label>
                 )}
@@ -143,8 +127,8 @@ export function DialogProvider({ children }: { children: React.ReactNode }) {
               </Button>
             </div>
           </form>
-        </div>
-      )}
+        )}
+      </Modal>
     </DialogContext.Provider>
   );
 }

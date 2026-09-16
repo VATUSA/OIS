@@ -1,9 +1,9 @@
+import {Modal} from "@ois/ui";
 import {useEffect, useRef, useState} from "react";
 
 import {useMe} from "@/lib/auth";
 import {CHANGELOG, shouldSeed, unseenEntries} from "@/lib/changelog";
 import {usePreferences, useSavePreferences} from "@/lib/preferences";
-import {Modal} from "@/components/modal";
 
 const NAMESPACE = "changelog";
 

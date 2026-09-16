@@ -1,5 +1,4 @@
-import {createPortal} from "react-dom";
-import {Button, usePrompt} from "@ois/ui";
+import {Button, Modal, usePrompt} from "@ois/ui";
 import {Plus, X} from "lucide-react";
 
 import {AGGREGATES, CHART_TYPES, colorAt, labelOf, type Series, TOP_OPTIONS} from "./chart-shared";
@@ -115,23 +114,8 @@ export function ChartConfigPanel({
   const removeThreshold = (i: number) =>
     set({ thresholds: thresholds.filter((_, idx) => idx !== i) });
 
-  return createPortal(
-    <div className="fixed inset-0 z-[1000]" role="dialog" aria-label="Chart settings">
-      <div className="absolute inset-0 bg-black/40" onClick={onClose} />
-      <div className="absolute right-0 top-0 flex h-full w-80 max-w-[90vw] flex-col border-l bg-card shadow-2xl">
-        <div className="flex items-center justify-between border-b px-4 py-3">
-          <span className="text-sm font-semibold">Chart settings</span>
-          <button
-            type="button"
-            onClick={onClose}
-            className="text-muted-foreground transition-colors hover:text-foreground"
-            aria-label="Close"
-          >
-            <X className="size-4" />
-          </button>
-        </div>
-
-        <div className="flex-1 overflow-y-auto p-4">
+  return (
+    <Modal open onClose={onClose} title="Chart settings" placement="right">
           <Section title="Data">
             {source.needsIcao && (
               <Field label="Airports">
@@ -329,9 +313,6 @@ export function ChartConfigPanel({
               </div>
             )}
           </Section>
-        </div>
-      </div>
-    </div>,
-    document.body,
+    </Modal>
   );
 }

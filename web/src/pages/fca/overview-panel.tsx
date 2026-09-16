@@ -1,8 +1,7 @@
 import {useState} from "react";
-import {Badge} from "@ois/ui";
+import {Badge, Sheet} from "@ois/ui";
 import {ChevronDown, ChevronRight} from "lucide-react";
 
-import {BottomSheet} from "@/components/bottom-sheet";
 import {type Fca, type FcaFlight} from "@/lib/fca";
 import {hhmmZulu} from "@/lib/time";
 
@@ -57,7 +56,7 @@ export function FcaOverviewPanel({
     });
 
   return (
-    <BottomSheet desktopClassName="h-full w-96 shrink-0 border-l" onClose={onClose} initialFraction={0.5}>
+    <Sheet className="h-full w-96 shrink-0 border-l" onClose={onClose} initialFraction={0.5}>
       <div className="flex items-center gap-2 border-b px-4 py-3">
         <span className="font-mono text-sm font-semibold uppercase tracking-wide">Strips · {artcc}</span>
         <div className="ml-auto flex items-center gap-1">
@@ -135,7 +134,7 @@ export function FcaOverviewPanel({
           })
         )}
       </div>
-    </BottomSheet>
+    </Sheet>
   );
 }
 

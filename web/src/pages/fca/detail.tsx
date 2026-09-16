@@ -1,7 +1,6 @@
 import {useMemo, useState} from "react";
-import {Badge, Button, Input} from "@ois/ui";
+import {Badge, Button, Input, Sheet} from "@ois/ui";
 
-import {BottomSheet} from "@/components/bottom-sheet";
 import {closestCenter, DndContext, type DragEndEvent, PointerSensor, useSensor, useSensors,} from "@dnd-kit/core";
 import {arrayMove, SortableContext, useSortable, verticalListSortingStrategy,} from "@dnd-kit/sortable";
 import {CSS} from "@dnd-kit/utilities";
@@ -292,8 +291,8 @@ export function FcaDetail({
   }
 
   return (
-    <BottomSheet
-      desktopClassName="h-full w-96 shrink-0 border-l"
+    <Sheet
+      className="h-full w-96 shrink-0 border-l"
       onClose={onClose}
       initialFraction={0.45}
     >
@@ -384,6 +383,6 @@ export function FcaDetail({
           </DndContext>
         </div>
       )}
-    </BottomSheet>
+    </Sheet>
   );
 }

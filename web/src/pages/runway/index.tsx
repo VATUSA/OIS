@@ -1,8 +1,7 @@
 import {useMemo, useState} from "react";
-import {Button, ConfirmButton, Input, usePrompt} from "@ois/ui";
+import {Button, ConfirmButton, Input, Sheet, usePrompt} from "@ois/ui";
 import {SlidersHorizontal} from "lucide-react";
 
-import {BottomSheet} from "@/components/bottom-sheet";
 import {ZuluClock} from "@/components/zulu-clock";
 import {useMe} from "@/lib/auth";
 import {hasPermission} from "@/lib/permissions";
@@ -261,10 +260,10 @@ export function RunwayPage() {
       ) : (
         <div className="relative flex min-h-0 flex-1">
           {/* Config — a fixed side column on desktop, a bottom drawer on mobile. */}
-          <BottomSheet
+          <Sheet
             open={configOpen}
             onClose={() => setConfigOpen(false)}
-            desktopClassName="w-80 shrink-0 border-r"
+            className="w-80 shrink-0 border-r"
             initialFraction={0.55}
           >
             <div className="flex flex-1 flex-col gap-4 overflow-y-auto p-4">
@@ -505,7 +504,7 @@ export function RunwayPage() {
               </p>
             </section>
             </div>
-          </BottomSheet>
+          </Sheet>
 
           {/* Main — demand + arrivals */}
           <div className="min-w-0 flex-1 overflow-y-auto p-4">

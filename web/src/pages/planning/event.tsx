@@ -1,10 +1,9 @@
 import {useState} from "react";
-import {Badge, Button, buttonVariants, Card, CardContent} from "@ois/ui";
+import {Badge, Button, buttonVariants, Card, CardContent, Modal} from "@ois/ui";
 import {Link, useParams} from "@tanstack/react-router";
 import {ArrowLeft, BarChart3, CalendarClock, ExternalLink, MessageSquare, Radio} from "lucide-react";
 
 import {Markdown} from "@/components/markdown";
-import {Modal} from "@/components/modal";
 import {useMe} from "@/lib/auth";
 import {eventBodyText, useDcc, useEvent, usePublishEventDiscord, vatusaEditUrl} from "@/lib/events";
 import {hasPermission} from "@/lib/permissions";

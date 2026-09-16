@@ -8,8 +8,9 @@ import {
   DropdownMenuSeparator,
   DropdownMenuTrigger,
   usePrompt,
+  Modal,
 } from "@ois/ui";
-import {Plus, X} from "lucide-react";
+import {Plus} from "lucide-react";
 
 import {FacilityCombobox, type FacilityPick} from "@/components/facility-combobox";
 import {defaultChartConfig} from "./chart-widget";
@@ -204,33 +205,16 @@ export function AddWidgetMenu({ onAdd }: { onAdd: (widget: Widget) => void }) {
       </DropdownMenuContent>
     </DropdownMenu>
 
-    {facAction && (
-      <div
-        className="fixed inset-0 z-[900] flex items-start justify-center bg-black/40 pt-32"
-        onClick={() => setFacAction(null)}
-      >
-        <div
-          className="w-80 rounded-lg border bg-background p-4 shadow-2xl"
-          onClick={(e) => e.stopPropagation()}
-        >
-          <div className="mb-3 flex items-center justify-between">
-            <span className="text-sm font-semibold">Add for a facility</span>
-            <button
-              type="button"
-              aria-label="Cancel"
-              onClick={() => setFacAction(null)}
-              className="text-muted-foreground hover:text-foreground"
-            >
-              <X className="size-4" />
-            </button>
-          </div>
-          <FacilityCombobox autoFocus onSelect={onFacilitySelect} />
-          <p className="mt-2 text-xs text-muted-foreground">
-            Covers every airport in the ARTCC or TRACON.
-          </p>
-        </div>
-      </div>
-    )}
+    <Modal
+      open={facAction != null}
+      onClose={() => setFacAction(null)}
+      title="Add for a facility"
+      description="Covers every airport in the ARTCC or TRACON."
+      size="sm"
+      placement="top"
+    >
+      <FacilityCombobox autoFocus onSelect={onFacilitySelect} />
+    </Modal>
     </>
   );
 }

@@ -51,3 +51,16 @@ export {
   useTokenRgba,
   type Rgba,
 } from "./lib/tokens";
+export { Modal, type ModalProps } from "./components/modal";
+export { Sheet } from "./components/sheet";
+export { SegmentedControl, type SegmentOption } from "./components/segmented-control";
+export { Tabs, type TabItem } from "./components/tabs";
+export { StatusPill, toneText, toneBg, type Tone } from "./components/status-pill";
+export { FilterChip, AddFilter, FilterBar } from "./components/filter-chip";
+export { MetricCard, type Trend } from "./components/metric-card";
+export { QueryState, EmptyState } from "./components/query-state";
+export { Select } from "./components/select";
+export { PageHeader } from "./components/page-header";
+export { CommandPalette, type CommandItem, type CommandGroup } from "./components/command-palette";
+export { useLocalStorage } from "./hooks/use-local-storage";
+export { useIsMobile } from "./hooks/use-is-mobile";
