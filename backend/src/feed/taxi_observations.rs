@@ -13,8 +13,10 @@
 //! boundary resolves to the update it was first seen on; a push and start-up that both complete
 //! inside one poll can collapse into the taxi figure (the estimator's defaults cover that).
 //!
-//! A push is the first burst while it stays below [`GS_START`] and within [`PUSH_MAX_M`] of where
-//! the aircraft was parked. A burst that breaks either limit is taxi — a powerback, a no-tug
+//! A push is the first burst while it stays below [`GS_START`] and runs *against* the reported
+//! heading — a tug pushes the aircraft backwards, taxi runs along the nose (#285). Where the
+//! heading gives no answer (no moving step, or an even split) the older distance proxy decides:
+//! within [`PUSH_MAX_M`] of where the aircraft was parked. A burst that breaks those limits is taxi — a powerback, a no-tug
 //! gate-out, or a slow GA taxi — unless it paused first: then the push ended at that pause and the
 //! taxi started where movement resumed (a short start-up the stop confirmation couldn't catch).
 //! Without a pause, pushback and start-up are `None`. Once taxiing, stops (hold short, queues)
@@ -42,6 +44,7 @@ use sqlx::PgPool;
 use super::FeedState;
 use super::airports::AirportDb;
 use super::delays::nearest_runway;
+use super::fca::bearing_deg;
 use super::flow::gc_dist;
 use super::runway_db::RunwayDb;
 use super::vatsim::VatsimData;
@@ -64,8 +67,12 @@ const MOVE_M: f64 = 2.0;
 const BURST_MIN_M: f64 = 20.0;
 /// Consecutive contradicting updates that confirm a phase change (">2 updates").
 const CONFIRM_UPDATES: u32 = 3;
-/// Farthest a pushback moves from where the aircraft was parked; beyond it the burst is taxi.
+/// Farthest a pushback moves from where the aircraft was parked; beyond it the burst is taxi. Only
+/// consulted when the heading can't classify the burst (see [`Session::advance`]).
 const PUSH_MAX_M: f64 = 150.0;
+/// How far a step's track must run from the reported heading to count as moving backwards (a tug
+/// push) rather than forwards (taxi).
+const BACKWARDS_DEG: f64 = 90.0;
 const M_PER_NM: f64 = 1852.0;
 
 #[derive(Clone, Copy, PartialEq, Debug)]
@@ -90,6 +97,26 @@ struct Run {
     start_ms: i64,
     dist_m: f64,
     peak_gs: i64,
+    /// Moving steps running against the reported heading, and along it (#285).
+    back_steps: u32,
+    fwd_steps: u32,
+}
+
+impl Run {
+    /// Whether this burst is a push by direction: most of its moving steps run against the heading.
+    /// `None` when the steps can't say (none counted, or an even split) — the caller falls back to
+    /// the distance proxy.
+    fn backwards(&self) -> Option<bool> {
+        (self.back_steps != self.fwd_steps).then_some(self.back_steps > self.fwd_steps)
+    }
+}
+
+/// Whether a step from `from` to `to` runs against `hdg` — the aircraft moving backwards.
+fn moved_backwards(from: (f64, f64), to: (f64, f64), hdg: i64) -> bool {
+    let track = bearing_deg([from.0, from.1], [to.0, to.1]);
+    let off = (track - hdg as f64).abs() % 360.0;
+    let off = if off > 180.0 { 360.0 - off } else { off };
+    off > BACKWARDS_DEG
 }
 
 struct Session {
@@ -107,19 +134,29 @@ struct Session {
     /// `(stop start, resume)` of the latest brief stop inside a push — too short to confirm as the
     /// push stop, but where the push ended if the burst turns out to continue as taxi.
     last_pause: Option<(i64, i64)>,
+    /// Whether the push was classified by heading rather than the distance fallback — a tow can then
+    /// run past [`PUSH_MAX_M`] and stay a push (#285).
+    push_by_direction: bool,
     base_alt: i64,
 }
 
 impl Session {
     /// Feed one on-ground update into the phase machine.
-    fn advance(&mut self, now_ms: i64, lat: f64, lon: f64, gs: i64, alt: i64) {
+    fn advance(&mut self, now_ms: i64, lat: f64, lon: f64, gs: i64, alt: i64, hdg: i64) {
         let step_m = gc_dist(self.last_lat, self.last_lon, lat, lon) * M_PER_NM;
+        let moving = step_m >= MOVE_M;
+        let backwards = moving && moved_backwards((self.last_lat, self.last_lon), (lat, lon), hdg);
         (self.last_lat, self.last_lon) = (lat, lon);
         let from_stand_m = gc_dist(self.first_lat, self.first_lon, lat, lon) * M_PER_NM;
 
-        // A "push" that reaches taxi speed or travels too far is taxiing: it split at its last pause
-        // (a stop still pending now, or an earlier brief one), else the whole burst was the taxi.
-        if self.phase == Phase::PushingBack && (gs > GS_START || from_stand_m > PUSH_MAX_M) {
+        // A "push" that reaches taxi speed, starts moving forwards (the taxi has begun — this is
+        // what ends a tow), or, when only the distance proxy classified it, travels too far, is
+        // taxiing: it splits at its last pause (a stop still pending now, or an earlier brief one),
+        // else the whole burst was the taxi.
+        let left_the_push = gs > GS_START
+            || (moving && !backwards)
+            || (!self.push_by_direction && from_stand_m > PUSH_MAX_M);
+        if self.phase == Phase::PushingBack && left_the_push {
             let pause = self.run.map(|r| (r.start_ms, now_ms)).or(self.last_pause);
             match pause {
                 Some((stop, resume)) => {
@@ -135,7 +172,6 @@ impl Session {
             return;
         }
 
-        let moving = step_m >= MOVE_M;
         if moving == self.phase.is_moving() {
             if let (Phase::PushingBack, Some(stop)) = (self.phase, self.run) {
                 self.last_pause = Some((stop.start_ms, now_ms));
@@ -148,10 +184,19 @@ impl Session {
             start_ms: now_ms,
             dist_m: 0.0,
             peak_gs: 0,
+            back_steps: 0,
+            fwd_steps: 0,
         });
         run.updates += 1;
         run.dist_m += step_m;
         run.peak_gs = run.peak_gs.max(gs);
+        if moving {
+            if backwards {
+                run.back_steps += 1;
+            } else {
+                run.fwd_steps += 1;
+            }
+        }
         if run.updates < CONFIRM_UPDATES || (moving && run.dist_m < BURST_MIN_M) {
             return;
         }
@@ -159,9 +204,13 @@ impl Session {
         let run = *run;
         self.run = None;
         match self.phase {
-            Phase::Parked if run.peak_gs <= GS_START && from_stand_m <= PUSH_MAX_M => {
+            Phase::Parked
+                if run.peak_gs <= GS_START
+                    && run.backwards().unwrap_or(from_stand_m <= PUSH_MAX_M) =>
+            {
                 self.phase = Phase::PushingBack;
                 self.push_start_ms = Some(run.start_ms);
+                self.push_by_direction = run.backwards().is_some();
             }
             Phase::Parked | Phase::StartUp => {
                 self.taxi_start_ms = Some(run.start_ms);
@@ -179,6 +228,7 @@ impl Session {
         self.phase = Phase::Taxiing;
         self.run = None;
         self.last_pause = None;
+        self.push_by_direction = false;
         self.base_alt = alt;
     }
 
@@ -250,7 +300,7 @@ fn process(
             let airborne =
                 gs > GS_STOP || (s.phase == Phase::Taxiing && alt >= s.base_alt + ALT_CLIMB_FT);
             if !airborne {
-                s.advance(now_ms, p.latitude, p.longitude, gs, alt);
+                s.advance(now_ms, p.latitude, p.longitude, gs, alt, p.heading);
                 continue;
             }
             let (pushback_sec, startup_sec, dur) = s.timings(now_ms);
@@ -300,6 +350,7 @@ fn process(
                         push_stop_ms: None,
                         taxi_start_ms: None,
                         last_pause: None,
+                        push_by_direction: false,
                         base_alt: alt,
                     },
                 );
@@ -385,6 +436,10 @@ mod tests {
     }
 
     fn one(lat: f64, gs: i64, alt: i64, dep: &str) -> VatsimData {
+        one_hdg(lat, gs, alt, dep, 0)
+    }
+
+    fn one_hdg(lat: f64, gs: i64, alt: i64, dep: &str, hdg: i64) -> VatsimData {
         VatsimData {
             pilots: vec![Pilot {
                 callsign: "AAL1".into(),
@@ -392,7 +447,7 @@ mod tests {
                 longitude: -74.0,
                 altitude: alt,
                 groundspeed: gs,
-                heading: 0,
+                heading: hdg,
                 flight_plan: Some(FlightPlan {
                     departure: dep.into(),
                     arrival: "KBBB".into(),
@@ -443,12 +498,23 @@ mod tests {
         40.0 + m / 111_195.0
     }
 
-    /// Feed `(t, metres north, gs, alt)` updates in order; returns whatever the last tick recorded.
-    fn run_track(st: &mut TaxiObsState, track: &[(i64, f64, i64, i64)]) -> Vec<RawObservation> {
+    /// Feed `(t, metres north, gs, alt, heading)` updates in order; returns whatever the last tick
+    /// recorded. Every track moves north, so heading 180 is moving backwards (a tug push) and
+    /// heading 0 is moving forwards (taxi) — see #285.
+    fn run_track(
+        st: &mut TaxiObsState,
+        track: &[(i64, f64, i64, i64, i64)],
+    ) -> Vec<RawObservation> {
         let (ap, rw) = (airports(), RunwayDb::default());
         let mut obs = Vec::new();
-        for &(secs, m, gs, alt) in track {
-            obs = process(st, &ap, &rw, &one(north(m), gs, alt, "KAAA"), t(secs));
+        for &(secs, m, gs, alt, hdg) in track {
+            obs = process(
+                st,
+                &ap,
+                &rw,
+                &one_hdg(north(m), gs, alt, "KAAA", hdg),
+                t(secs),
+            );
         }
         obs
     }
@@ -459,29 +525,29 @@ mod tests {
         let obs = run_track(
             &mut st,
             &[
-                (0, 0.0, 0, 0),
+                (0, 0.0, 0, 0, 0),
                 // A 2 kt tug push — never crosses the 7 kt taxi threshold. Onset at t=15, confirmed
                 // at t=45 once three moving updates have covered 20 m.
-                (15, 7.0, 2, 0),
-                (30, 14.0, 2, 0),
-                (45, 21.0, 2, 0),
-                (60, 28.0, 2, 0),
+                (15, 7.0, 2, 0, 180),
+                (30, 14.0, 2, 0, 180),
+                (45, 21.0, 2, 0, 180),
+                (60, 28.0, 2, 0, 180),
                 // Push stops at t=75 (confirmed after 3 still updates), then start-up to t=180.
-                (75, 28.0, 0, 0),
-                (90, 28.5, 0, 0),
-                (105, 28.5, 0, 0),
-                (150, 28.5, 0, 0),
-                (180, 28.5, 0, 0),
+                (75, 28.0, 0, 0, 180),
+                (90, 28.5, 0, 0, 180),
+                (105, 28.5, 0, 0, 180),
+                (150, 28.5, 0, 0, 180),
+                (180, 28.5, 0, 0, 180),
                 // Taxi burst from t=195.
-                (195, 60.0, 10, 0),
-                (210, 120.0, 15, 0),
-                (225, 180.0, 15, 0),
+                (195, 60.0, 10, 0, 0),
+                (210, 120.0, 15, 0, 0),
+                (225, 180.0, 15, 0, 0),
                 // Hold short — still taxi.
-                (240, 180.0, 0, 0),
-                (285, 180.0, 0, 0),
-                (300, 180.0, 0, 0),
+                (240, 180.0, 0, 0, 0),
+                (285, 180.0, 0, 0, 0),
+                (300, 180.0, 0, 0, 0),
                 // Wheels-up.
-                (345, 900.0, 80, 400),
+                (345, 900.0, 80, 400, 0),
             ],
         );
 
@@ -500,22 +566,22 @@ mod tests {
         let obs = run_track(
             &mut st,
             &[
-                (0, 0.0, 0, 0),
+                (0, 0.0, 0, 0, 0),
                 // Sub-2 m jitter, many updates.
-                (15, 1.0, 0, 0),
-                (30, 0.0, 0, 0),
-                (45, 1.5, 0, 0),
-                (60, 0.5, 0, 0),
+                (15, 1.0, 0, 0, 0),
+                (30, 0.0, 0, 0, 0),
+                (45, 1.5, 0, 0, 0),
+                (60, 0.5, 0, 0, 0),
                 // Three moving updates, but only 9 m in total — then still again.
-                (75, 3.5, 1, 0),
-                (90, 6.5, 1, 0),
-                (105, 9.5, 1, 0),
-                (120, 9.5, 0, 0),
+                (75, 3.5, 1, 0, 0),
+                (90, 6.5, 1, 0, 0),
+                (105, 9.5, 1, 0, 0),
+                (120, 9.5, 0, 0, 0),
                 // The real departure: straight to taxi, then airborne.
-                (135, 60.0, 12, 0),
-                (150, 130.0, 15, 0),
-                (165, 200.0, 15, 0),
-                (285, 900.0, 80, 400),
+                (135, 60.0, 12, 0, 0),
+                (150, 130.0, 15, 0, 0),
+                (165, 200.0, 15, 0, 0),
+                (285, 900.0, 80, 400, 0),
             ],
         );
 
@@ -531,17 +597,17 @@ mod tests {
         let obs = run_track(
             &mut st,
             &[
-                (0, 0.0, 0, 0),
+                (0, 0.0, 0, 0, 0),
                 // Powerback/gate-out at taxi speed — the first burst is the taxi.
-                (15, 30.0, 8, 0),
-                (30, 90.0, 12, 0),
-                (45, 150.0, 12, 0),
+                (15, 30.0, 8, 0, 0),
+                (30, 90.0, 12, 0, 0),
+                (45, 150.0, 12, 0, 0),
                 // A long hold-short stop must not read as push stop + start-up.
-                (60, 150.0, 0, 0),
-                (75, 150.0, 0, 0),
-                (90, 150.0, 0, 0),
-                (120, 150.0, 0, 0),
-                (135, 900.0, 80, 400),
+                (60, 150.0, 0, 0, 0),
+                (75, 150.0, 0, 0, 0),
+                (90, 150.0, 0, 0, 0),
+                (120, 150.0, 0, 0, 0),
+                (135, 900.0, 80, 400, 0),
             ],
         );
 
@@ -557,18 +623,18 @@ mod tests {
         let obs = run_track(
             &mut st,
             &[
-                (0, 0.0, 0, 0),
-                // Confirmed as a push (peak 6 kt) at t=45 ...
-                (15, 5.0, 3, 0),
-                (30, 12.0, 5, 0),
-                (45, 22.0, 6, 0),
+                (0, 0.0, 0, 0, 0),
+                // Confirmed as a push (peak 6 kt, moving backwards) at t=45 ...
+                (15, 5.0, 3, 0, 180),
+                (30, 12.0, 5, 0, 180),
+                (45, 22.0, 6, 0, 180),
                 // ... but it keeps accelerating past 7 kt without stopping: it was the taxi.
-                (60, 60.0, 12, 0),
+                (60, 60.0, 12, 0, 0),
                 // A hold-short stop long enough to confirm a push stop, had the burst stayed a push.
-                (75, 60.0, 0, 0),
-                (90, 60.0, 0, 0),
-                (105, 60.0, 0, 0),
-                (180, 900.0, 80, 400),
+                (75, 60.0, 0, 0, 0),
+                (90, 60.0, 0, 0, 0),
+                (105, 60.0, 0, 0, 0),
+                (180, 900.0, 80, 400, 0),
             ],
         );
 
@@ -584,19 +650,19 @@ mod tests {
         let obs = run_track(
             &mut st,
             &[
-                (0, 0.0, 0, 0),
+                (0, 0.0, 0, 0, 0),
                 // Tug push t=15..75 (confirmed at t=45).
-                (15, 7.0, 2, 0),
-                (30, 14.0, 2, 0),
-                (45, 21.0, 2, 0),
-                (60, 28.0, 2, 0),
+                (15, 7.0, 2, 0, 180),
+                (30, 14.0, 2, 0, 180),
+                (45, 21.0, 2, 0, 180),
+                (60, 28.0, 2, 0, 180),
                 // Only two still updates — too short to confirm the push stop ...
-                (75, 28.0, 0, 0),
-                (90, 28.0, 0, 0),
+                (75, 28.0, 0, 0, 180),
+                (90, 28.0, 0, 0, 180),
                 // ... then off at taxi speed.
-                (105, 60.0, 12, 0),
-                (120, 150.0, 15, 0),
-                (300, 900.0, 80, 400),
+                (105, 60.0, 12, 0, 0),
+                (120, 150.0, 15, 0, 0),
+                (300, 900.0, 80, 400, 0),
             ],
         );
 
@@ -612,19 +678,19 @@ mod tests {
         let obs = run_track(
             &mut st,
             &[
-                (0, 0.0, 0, 0),
-                (15, 7.0, 2, 0),
-                (30, 14.0, 2, 0),
-                (45, 21.0, 2, 0),
-                (60, 28.0, 2, 0),
-                (75, 28.0, 0, 0),
-                (90, 28.0, 0, 0),
+                (0, 0.0, 0, 0, 0),
+                (15, 7.0, 2, 0, 180),
+                (30, 14.0, 2, 0, 180),
+                (45, 21.0, 2, 0, 180),
+                (60, 28.0, 2, 0, 180),
+                (75, 28.0, 0, 0, 180),
+                (90, 28.0, 0, 0, 180),
                 // A 4 kt taxi — never taxi speed, but it leaves the stand's push radius.
-                (105, 60.0, 4, 0),
-                (120, 90.0, 4, 0),
-                (135, 120.0, 4, 0),
-                (150, 155.0, 4, 0),
-                (300, 900.0, 80, 400),
+                (105, 60.0, 4, 0, 0),
+                (120, 90.0, 4, 0, 0),
+                (135, 120.0, 4, 0, 0),
+                (150, 155.0, 4, 0, 0),
+                (300, 900.0, 80, 400, 0),
             ],
         );
 
@@ -638,14 +704,14 @@ mod tests {
     fn a_slow_ga_taxi_with_a_run_up_is_not_a_push() {
         let mut st = TaxiObsState::default();
         // 5 kt (~39 m per update) for 4 minutes, a 90 s run-up, then departure.
-        let mut track: Vec<(i64, f64, i64, i64)> = vec![(0, 0.0, 0, 0)];
+        let mut track: Vec<(i64, f64, i64, i64, i64)> = vec![(0, 0.0, 0, 0, 0)];
         for i in 1..=16 {
-            track.push((i * 15, i as f64 * 39.0, 5, 0));
+            track.push((i * 15, i as f64 * 39.0, 5, 0, 0)); // forward: a taxi, not a push
         }
         for i in 1..=6 {
-            track.push((240 + i * 15, 624.0, 0, 0));
+            track.push((240 + i * 15, 624.0, 0, 0, 0));
         }
-        track.push((345, 1500.0, 80, 400));
+        track.push((345, 1500.0, 80, 400, 0));
 
         let obs = run_track(&mut st, &track);
 
@@ -658,21 +724,21 @@ mod tests {
     #[test]
     fn a_burst_already_past_the_push_radius_when_confirmed_is_taxi() {
         let mut st = TaxiObsState::default();
-        // 7 kt — at or below GS_START, but 54 m per update, so the three confirming updates already
-        // cover more than PUSH_MAX_M. The hold-short stop would otherwise confirm a push stop.
+        // 7 kt — at or below GS_START, but moving forwards, so it's a taxi however far it goes
+        // (#285). The hold-short stop would otherwise confirm a push stop.
         let obs = run_track(
             &mut st,
             &[
-                (0, 0.0, 0, 0),
-                (15, 54.0, 7, 0),
-                (30, 108.0, 7, 0),
-                (45, 162.0, 7, 0),
-                (60, 162.0, 0, 0),
-                (75, 162.0, 0, 0),
-                (90, 162.0, 0, 0),
-                (105, 162.0, 0, 0),
-                (120, 400.0, 30, 0),
-                (135, 1200.0, 90, 300),
+                (0, 0.0, 0, 0, 0),
+                (15, 54.0, 7, 0, 0),
+                (30, 108.0, 7, 0, 0),
+                (45, 162.0, 7, 0, 0),
+                (60, 162.0, 0, 0, 0),
+                (75, 162.0, 0, 0, 0),
+                (90, 162.0, 0, 0, 0),
+                (105, 162.0, 0, 0, 0),
+                (120, 400.0, 30, 0, 0),
+                (135, 1200.0, 90, 300, 0),
             ],
         );
 
@@ -690,11 +756,11 @@ mod tests {
         let obs = run_track(
             &mut st,
             &[
-                (0, 0.0, 0, 0),
-                (15, 7.0, 2, 0),
-                (30, 14.0, 2, 0),
-                (45, 21.0, 2, 0),
-                (60, 300.0, 65, 0),
+                (0, 0.0, 0, 0, 0),
+                (15, 7.0, 2, 0, 180),
+                (30, 14.0, 2, 0, 180),
+                (45, 21.0, 2, 0, 180),
+                (60, 300.0, 65, 0, 0),
             ],
         );
 
@@ -705,23 +771,106 @@ mod tests {
     }
 
     #[test]
+    fn a_no_tug_gate_out_within_the_push_radius_is_taxi_not_a_pushback() {
+        let mut st = TaxiObsState::default();
+        // #285: a GA aircraft taxis forward 6 kt to a nearby hold short — inside PUSH_MAX_M and
+        // under GS_START, so the old distance rule called it a push, a hold, and a 15 s taxi.
+        let obs = run_track(
+            &mut st,
+            &[
+                (0, 0.0, 0, 0, 0),
+                (15, 40.0, 6, 0, 0),
+                (30, 80.0, 6, 0, 0),
+                (45, 120.0, 6, 0, 0),
+                // Waiting at the hold short.
+                (60, 120.0, 0, 0, 0),
+                (75, 120.0, 0, 0, 0),
+                (90, 120.0, 0, 0, 0),
+                (105, 120.0, 0, 0, 0),
+                (120, 900.0, 80, 400, 0),
+            ],
+        );
+
+        assert_eq!(obs.len(), 1);
+        assert_eq!(obs[0].pushback_sec, None);
+        assert_eq!(obs[0].startup_sec, None);
+        assert_eq!(obs[0].taxi_sec, 105); // 15 → 120, the hold included
+    }
+
+    #[test]
+    fn a_remote_stand_tow_past_the_push_radius_is_still_a_pushback() {
+        let mut st = TaxiObsState::default();
+        // #285: a 420 m tow runs against the heading the whole way, so distance no longer ends it.
+        let mut track: Vec<(i64, f64, i64, i64, i64)> = vec![(0, 0.0, 0, 0, 0)];
+        for i in 1..=14 {
+            track.push((i * 15, i as f64 * 30.0, 3, 0, 180));
+        }
+        // Tug disconnect at t=225, then a forward taxi from t=270.
+        for i in 0..3 {
+            track.push((225 + i * 15, 420.0, 0, 0, 180));
+        }
+        track.extend([
+            (270, 500.0, 12, 0, 0),
+            (285, 600.0, 15, 0, 0),
+            (300, 700.0, 15, 0, 0),
+            (390, 1500.0, 80, 400, 0),
+        ]);
+
+        let obs = run_track(&mut st, &track);
+
+        assert_eq!(obs.len(), 1);
+        assert_eq!(obs[0].pushback_sec, Some(210)); // 15 → 225, the whole tow
+        assert_eq!(obs[0].startup_sec, Some(45)); // 225 → 270
+        assert_eq!(obs[0].taxi_sec, 120); // 270 → 390
+    }
+
+    #[test]
+    fn an_evenly_split_burst_falls_back_to_the_push_radius() {
+        let mut st = TaxiObsState::default();
+        // #285: steps alternate backwards/forwards (a shuffle on the stand), so the heading can't
+        // classify the burst and the distance proxy decides — here, inside PUSH_MAX_M, a push.
+        let obs = run_track(
+            &mut st,
+            &[
+                (0, 0.0, 0, 0, 0),
+                (15, 6.0, 2, 0, 180),
+                (30, 12.0, 2, 0, 0),
+                (45, 18.0, 2, 0, 180),
+                (60, 24.0, 2, 0, 0),
+                (75, 24.0, 0, 0, 0),
+                (90, 24.0, 0, 0, 0),
+                (105, 24.0, 0, 0, 0),
+                (120, 100.0, 12, 0, 0),
+                (135, 200.0, 15, 0, 0),
+                (150, 300.0, 15, 0, 0),
+                (270, 1500.0, 80, 400, 0),
+            ],
+        );
+
+        assert_eq!(obs.len(), 1);
+        assert_eq!(obs[0].pushback_sec, Some(60)); // 15 → 75
+        assert_eq!(obs[0].startup_sec, Some(45)); // 75 → 120
+        assert_eq!(obs[0].taxi_sec, 150); // 120 → 270
+    }
+
+    #[test]
     fn a_two_update_shuffle_is_not_a_confirmed_push() {
         let mut st = TaxiObsState::default();
         let obs = run_track(
             &mut st,
             &[
-                (0, 0.0, 0, 0),
+                (0, 0.0, 0, 0, 0),
                 // Two moving updates covering 30 m — one short of confirmation.
-                (15, 15.0, 2, 0),
-                (30, 30.0, 2, 0),
-                (45, 30.0, 0, 0),
-                (60, 30.0, 0, 0),
-                (75, 30.0, 0, 0),
-                (90, 30.0, 0, 0),
-                (105, 80.0, 12, 0),
-                (120, 150.0, 15, 0),
-                (135, 220.0, 15, 0),
-                (255, 900.0, 80, 400),
+                (15, 15.0, 2, 0, 0),
+                (30, 30.0, 2, 0, 0),
+                (45, 30.0, 0, 0, 0),
+                (60, 30.0, 0, 0, 0),
+                (75, 30.0, 0, 0, 0),
+                (90, 30.0, 0, 0, 0),
+                (105, 80.0, 12, 0, 0),
+                (120, 150.0, 15, 0, 0),
+                (135, 220.0, 15, 0, 0),
+                (255, 900.0, 80, 400, 0),
             ],
         );
 
@@ -735,7 +884,11 @@ mod tests {
         let mut st = TaxiObsState::default();
         let obs = run_track(
             &mut st,
-            &[(0, 0.0, 0, 0), (15, 0.0, 0, 150), (30, 0.0, 0, 200)],
+            &[
+                (0, 0.0, 0, 0, 0),
+                (15, 0.0, 0, 150, 0),
+                (30, 0.0, 0, 200, 0),
+            ],
         );
 
         assert!(obs.is_empty());
@@ -748,12 +901,12 @@ mod tests {
         let obs = run_track(
             &mut st,
             &[
-                (0, 0.0, 0, 0),
-                (15, 0.0, 0, 0),
+                (0, 0.0, 0, 0, 0),
+                (15, 0.0, 0, 0, 0),
                 // Two moving updates — the taxi burst isn't confirmed yet when it lifts off.
-                (30, 40.0, 10, 0),
-                (45, 120.0, 20, 0),
-                (60, 900.0, 80, 400),
+                (30, 40.0, 10, 0, 0),
+                (45, 120.0, 20, 0, 0),
+                (60, 900.0, 80, 400, 0),
             ],
         );
 
@@ -767,12 +920,12 @@ mod tests {
         let taxiing = run_track(
             &mut st,
             &[
-                (0, 0.0, 0, 0),
+                (0, 0.0, 0, 0, 0),
                 // The taxi burst reports 150 ft above the first-seen altitude (sloped field).
-                (15, 60.0, 12, 150),
-                (30, 130.0, 15, 150),
-                (45, 200.0, 15, 150),
-                (60, 270.0, 15, 160),
+                (15, 60.0, 12, 150, 0),
+                (30, 130.0, 15, 150, 0),
+                (45, 200.0, 15, 150, 0),
+                (60, 270.0, 15, 160, 0),
             ],
         );
         assert!(
@@ -780,7 +933,7 @@ mod tests {
             "a 10 ft change while taxiing isn't a takeoff"
         );
 
-        let obs = run_track(&mut st, &[(180, 900.0, 80, 600)]);
+        let obs = run_track(&mut st, &[(180, 900.0, 80, 600, 0)]);
         assert_eq!(obs.len(), 1);
         assert_eq!(obs[0].taxi_sec, 165); // 15 → 180
     }
