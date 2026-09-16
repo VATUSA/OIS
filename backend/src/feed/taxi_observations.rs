@@ -83,6 +83,10 @@ const PUSH_MAX_M: f64 = 150.0;
 const BACKWARDS_DEG: f64 = 120.0;
 /// Consecutive forward steps that end a push (the nose has turned into the taxi).
 const FLIP_CONFIRM_UPDATES: u32 = 2;
+/// Travel a step must carry to vote on ending a push. `MOVE_M` is only "not stationary"; a burst
+/// needs [`BURST_MIN_M`] over [`CONFIRM_UPDATES`] steps to confirm, so hold a flip step to the same
+/// per-step share and GPS wobble can't close a push (#285).
+const FLIP_MIN_STEP_M: f64 = BURST_MIN_M / CONFIRM_UPDATES as f64;
 /// Backstops on a push the heading classified: past either, the burst is taxi however it reads.
 const PUSH_FAR_M: f64 = 800.0;
 const PUSH_MAX_SEC: i64 = 20 * 60;
@@ -176,10 +180,27 @@ impl Session {
         self.last_hdg = hdg;
         let from_stand_m = gc_dist(self.first_lat, self.first_lon, lat, lon) * M_PER_NM;
 
+        // A push that carries on backwards after a brief stop has left that stop behind: it is no
+        // longer where the push ended, and splitting there would book minutes of real pushing as
+        // taxi (#285). Both consumers of `last_pause` — the flip below and the speed/bounds exit —
+        // then only ever see a pause the push actually finished at. The resume step itself is
+        // exempt: it is judged against the heading from before the stop.
+        if self.phase == Phase::PushingBack
+            && backwards
+            && step_m >= FLIP_MIN_STEP_M
+            && self.last_pause.is_some_and(|(_, resume)| resume != now_ms)
+        {
+            self.last_pause = None;
+        }
+
         // The nose has turned into the taxi: confirmed forward movement ends the push *here* rather
-        // than discarding it, so a curved push or a push-and-pull keeps its pushback (#285).
+        // than discarding it, so a curved push or a push-and-pull keeps its pushback (#285). Only a
+        // step carrying real distance votes — `Run::backwards()` already refuses to let a `MOVE_M`
+        // wobble outvote a tug step, and ending a push is at least as consequential as classifying
+        // one: two jitter steps while the tug is disconnecting must not close the push and charge
+        // the whole start-up to taxi.
         if self.phase == Phase::PushingBack && self.push_by_direction {
-            let flip = match (moving && !backwards, self.fwd_flip) {
+            let flip = match (step_m >= FLIP_MIN_STEP_M && !backwards, self.fwd_flip) {
                 (true, Some((start, seen))) => Some((start, seen + 1)),
                 (true, None) => Some((now_ms, 1)),
                 (false, _) => None,
@@ -189,7 +210,9 @@ impl Session {
                 && seen >= FLIP_CONFIRM_UPDATES
             {
                 // A brief stop before the nose turned is the real push end, with the start-up gap
-                // after it; without one, the push ran straight into the taxi at the flip.
+                // after it; without one, the push ran straight into the taxi at the flip. A pause
+                // the push then carried on past has already been cleared below, so whatever is here
+                // is still the end of the push.
                 let (stop, resume) = self.last_pause.unwrap_or((start, start));
                 self.push_stop_ms = Some(stop);
                 self.taxi_start_ms = Some(resume);
@@ -281,7 +304,6 @@ impl Session {
             Phase::PushingBack => {
                 self.phase = Phase::StartUp;
                 self.push_stop_ms = Some(run.start_ms);
-                self.fwd_flip = None;
             }
             Phase::Taxiing => unreachable!("returned above"),
         }
@@ -839,6 +861,169 @@ mod tests {
         assert_eq!(obs[0].taxi_sec, 210); // 90 → 300
     }
 
+    /// A push that carries on backwards past a brief stop did not end at that stop. Before #285's
+    /// rework the flip split there anyway, booking minutes of real pushing as taxi: this track
+    /// recorded `45 / 15 / 625` instead of the push it actually flew.
+    #[test]
+    fn a_push_that_carries_on_past_a_brief_stop_is_not_split_there() {
+        let mut track: Vec<(i64, f64, i64, i64, i64)> = vec![(0, 0.0, 0, 0, 0)];
+        let mut m = 0.0;
+        // Push confirms t=15..45.
+        for i in 1..=3 {
+            m += 25.0;
+            track.push((15 * i, m, 2, 0, 180));
+        }
+        // One-poll hesitation — too short to confirm a stop.
+        track.push((60, m, 0, 0, 180));
+        // ... and the tug keeps pushing for another two and a half minutes.
+        for i in 5..=15 {
+            m += 25.0;
+            track.push((15 * i, m, 2, 0, 180));
+        }
+        // The nose finally swings into the taxi.
+        for i in 0..5 {
+            m += 20.0;
+            track.push((240 + 15 * i, m, 2, 0, 20));
+        }
+        for i in 0..3 {
+            track.push((330 + 15 * i, m, 0, 0, 20));
+        }
+        track.push((375, m + 160.0, 15, 0, 20));
+        track.push((700, m + 2500.0, 80, 400, 20));
+
+        let mut st = TaxiObsState::default();
+        let obs = run_track(&mut st, &track);
+        assert_eq!(obs.len(), 1);
+        // The push ran to the flip at t=255, not to the stale hesitation at t=60.
+        assert_eq!(obs[0].pushback_sec, Some(240));
+    }
+
+    /// GPS wobble while the tug disconnects must not end the push: two `MOVE_M`-sized steps that
+    /// happen to read forward used to close it and charge the whole start-up to taxi (`45 / 15 /
+    /// 525` on this track).
+    #[test]
+    fn jitter_after_the_tug_stops_does_not_end_the_push() {
+        let mut track: Vec<(i64, f64, i64, i64, i64)> = vec![
+            (0, 0.0, 0, 0, 0),
+            (15, 20.0, 2, 0, 180),
+            (30, 40.0, 2, 0, 180),
+            (45, 60.0, 2, 0, 180),
+            (60, 60.0, 0, 0, 180), // tug stops
+            (75, 57.5, 0, 0, 180), // 2.5 m of wobble that reads "forward"
+            (90, 55.0, 0, 0, 180), // and again — two in a row
+        ];
+        // Genuinely stationary for four minutes: engine start and tug disconnect.
+        let mut secs = 105;
+        while secs <= 300 {
+            track.push((secs, 55.0, 0, 0, 180));
+            secs += 15;
+        }
+        track.push((315, 215.0, 15, 0, 0));
+        track.push((330, 375.0, 15, 0, 0));
+        track.push((600, 2000.0, 80, 400, 0));
+
+        let mut st = TaxiObsState::default();
+        let obs = run_track(&mut st, &track);
+        assert_eq!(obs.len(), 1);
+        // The start-up gap is measured, not swallowed by the taxi.
+        assert_eq!(obs[0].startup_sec, Some(210));
+        assert_eq!(obs[0].taxi_sec, 285);
+    }
+
+    /// `BACKWARDS_DEG` sits at 120°, not the 90° a pivoting push's geometry hovers around. These
+    /// steps track 105° off the nose — forward at 120, backwards at 90 — so the threshold's value is
+    /// pinned, not merely its existence. At 90 this records `90 / 45 / 150`.
+    #[test]
+    fn a_step_across_the_nose_is_not_backwards_at_the_120_degree_threshold() {
+        let mut st = TaxiObsState::default();
+        let obs = run_track(
+            &mut st,
+            &[
+                (0, 0.0, 0, 0, 0),
+                (15, 25.0, 2, 0, 180),
+                (30, 50.0, 2, 0, 180),
+                (45, 75.0, 2, 0, 105),
+                (60, 100.0, 2, 0, 105),
+                (75, 125.0, 2, 0, 105),
+                (90, 150.0, 2, 0, 105),
+                (105, 150.0, 0, 0, 105),
+                (120, 150.0, 0, 0, 105),
+                (135, 150.0, 0, 0, 105),
+                (150, 280.0, 15, 0, 0),
+                (165, 420.0, 15, 0, 0),
+                (300, 1400.0, 80, 400, 0),
+            ],
+        );
+
+        assert_eq!(obs.len(), 1);
+        assert_eq!(obs[0].pushback_sec, Some(45));
+        assert_eq!(obs[0].taxi_sec, 240);
+    }
+
+    /// The forward-flip exit is gated on `push_by_direction`: a burst the heading could not classify
+    /// was guessed at by the distance proxy, so a heading signal must not end it either. Without the
+    /// gate this records `60 / 0 / 225`.
+    #[test]
+    fn forward_steps_do_not_end_a_push_the_distance_proxy_classified() {
+        let mut st = TaxiObsState::default();
+        let obs = run_track(
+            &mut st,
+            &[
+                (0, 0.0, 0, 0, 0),
+                // Alternating headings: back and forward travel tie, so the vote abstains and the
+                // distance proxy confirms the push (inside PUSH_MAX_M).
+                (15, 6.0, 2, 0, 180),
+                (30, 12.0, 2, 0, 0),
+                (45, 18.0, 2, 0, 180),
+                (60, 24.0, 2, 0, 0),
+                // Two unambiguous forward steps — they must NOT end this push.
+                (75, 50.0, 2, 0, 0),
+                (90, 76.0, 2, 0, 0),
+                (105, 100.0, 2, 0, 0),
+                (120, 100.0, 0, 0, 0),
+                (135, 100.0, 0, 0, 0),
+                (150, 100.0, 0, 0, 0),
+                (165, 260.0, 15, 0, 0),
+                (300, 1400.0, 80, 400, 0),
+            ],
+        );
+
+        assert_eq!(obs.len(), 1);
+        assert_eq!(obs[0].pushback_sec, Some(105)); // ended by the stop, not the flip
+        assert_eq!(obs[0].startup_sec, Some(45));
+        assert_eq!(obs[0].taxi_sec, 135);
+    }
+
+    /// Push-and-pull: the tug pushes the aircraft back, then pulls it forward to line it up before
+    /// disconnecting. The confirmed forward run ends the push there rather than discarding it.
+    #[test]
+    fn a_push_and_pull_keeps_its_pushback() {
+        let mut st = TaxiObsState::default();
+        let obs = run_track(
+            &mut st,
+            &[
+                (0, 0.0, 0, 0, 0),
+                (15, 25.0, 2, 0, 180),
+                (30, 50.0, 2, 0, 180),
+                (45, 75.0, 2, 0, 180),
+                (60, 100.0, 2, 0, 180),
+                // Pulled forward again to line up: the track now runs along the nose.
+                (75, 80.0, 2, 0, 180),
+                (90, 60.0, 2, 0, 180),
+                (105, 40.0, 2, 0, 180),
+                (120, 40.0, 0, 0, 0),
+                (135, 40.0, 0, 0, 0),
+                (150, 40.0, 0, 0, 0),
+                (165, 200.0, 15, 0, 0),
+                (300, 1400.0, 80, 400, 0),
+            ],
+        );
+
+        assert_eq!(obs.len(), 1);
+        assert_eq!(obs[0].pushback_sec, Some(60)); // kept, and ended at the flip
+        assert!(obs[0].startup_sec.is_some());
+    }
+
     #[test]
     fn a_taxi_slightly_off_its_heading_is_not_a_push() {
         let mut st = TaxiObsState::default();
@@ -886,10 +1071,14 @@ mod tests {
     }
 
     #[test]
-    fn an_evenly_split_burst_past_the_push_radius_is_taxi() {
+    fn a_burst_running_mostly_along_the_nose_is_taxi_not_a_push() {
         let mut st = TaxiObsState::default();
-        // Pins the tie-break: the heading can't classify this burst, so the distance proxy decides,
-        // and 60 m steps leave PUSH_MAX_M behind. "Ties count as backwards" would call it a push.
+        // The reported heading alternates, but each step is judged against the heading at its
+        // *start*, so the burst confirms with 120 m along the nose against 60 m into it: the vote
+        // reads forward and the burst is taxi. It does not tie, and the distance proxy is never
+        // consulted — a genuine tie means balanced travel, which leaves the aircraft back near the
+        // stand and so inside PUSH_MAX_M (that case is `an_evenly_split_burst_falls_back_to_the_
+        // push_radius`).
         let obs = run_track(
             &mut st,
             &[
