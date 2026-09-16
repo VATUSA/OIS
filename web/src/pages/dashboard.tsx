@@ -1,12 +1,17 @@
-import {Badge, Button, Card, CardContent} from "@ois/ui";
-import {Link} from "@tanstack/react-router";
+import {Button, buttonVariants, Card, EmptyState, MetricCard, QueryState, StatusPill} from "@ois/ui";
+import {Link, type LinkProps} from "@tanstack/react-router";
 import {
   ArrowRight,
+  ArrowUpRight,
+  BookOpen,
   CalendarClock,
   Gauge,
   type LucideIcon,
+  Map as MapIcon,
+  Megaphone,
   OctagonX,
   Plane,
+  PlaneTakeoff,
   Radar,
   Split,
   Timer,
@@ -15,6 +20,8 @@ import {
   Wind,
 } from "lucide-react";
 
+import vatusaLogo from "@/assets/vatusa-logo.png";
+import {DOCS_URL} from "@/lib/api";
 import {login, useMe} from "@/lib/auth";
 import {useUpcomingEvents} from "@/lib/events";
 import {useFeedStatus} from "@/lib/feed";
@@ -22,219 +29,200 @@ import {hasPermission} from "@/lib/permissions";
 import {useGroundStops, usePrograms, useTmis} from "@/lib/tmu";
 import {formatZuluFull, hhmmZulu} from "@/lib/time";
 
-/** A tinted icon-chip accent — background + matching icon color, paired so they always read as one. */
-type Accent = { bg: string; icon: string };
+type Entry = { icon: LucideIcon; title: string; body: string; to: LinkProps["to"] };
 
-const ACCENT = {
-  teal: { bg: "bg-teal-500/15", icon: "text-teal-500" },
-  indigo: { bg: "bg-indigo-500/15", icon: "text-indigo-500" },
-  amber: { bg: "bg-amber-500/15", icon: "text-amber-500" },
-  rose: { bg: "bg-rose-500/15", icon: "text-rose-500" },
-  emerald: { bg: "bg-emerald-500/15", icon: "text-emerald-500" },
-  violet: { bg: "bg-violet-500/15", icon: "text-violet-500" },
-} as const satisfies Record<string, Accent>;
+/** Public pages — open without signing in. */
+const PUBLIC: Entry[] = [
+  {
+    icon: Megaphone,
+    title: "Advisories",
+    body: "Published ground stops, delay programs, and restrictions across the network.",
+    to: "/advisories",
+  },
+  {
+    icon: Waypoints,
+    title: "FCAs",
+    body: "Active flow constrained areas on a live map, with the flights crossing them.",
+    to: "/advisories/fcas",
+  },
+  {
+    icon: Radar,
+    title: "Facility map",
+    body: "A per-facility TMU map of live traffic, controllers, and routes.",
+    to: "/facility-map",
+  },
+  {
+    icon: PlaneTakeoff,
+    title: "Pilot",
+    body: "Look up how active traffic management is affecting a flight.",
+    to: "/pilot",
+  },
+];
 
-function chipClass({ bg, icon }: Accent): string {
-  return `flex size-9 shrink-0 items-center justify-center rounded-md ${bg} ${icon}`;
-}
-
-const FEATURES: { icon: LucideIcon; title: string; body: string; to: string; accent: Accent }[] = [
+/** Staff tools — need a VATSIM sign-in and the matching permissions. */
+const TOOLS: Entry[] = [
   {
     icon: Gauge,
     title: "Traffic management",
     body: "Metering programs, ground stops, and restrictions — issued, tracked, and shared live.",
     to: "/ops/tmu",
-    accent: ACCENT.teal,
   },
   {
     icon: Waypoints,
     title: "Flow constrained areas",
     body: "Draw FCAs, sequence crossing traffic, and issue CFR releases against the live network.",
     to: "/ops/fca",
-    accent: ACCENT.indigo,
   },
   {
     icon: CalendarClock,
     title: "Event planning",
     body: "Per-event airport rates, facility support, staffing, and TMI packages that go live on cue.",
     to: "/admin/planning/events",
-    accent: ACCENT.amber,
   },
   {
     icon: Wind,
     title: "Runway balancer",
     body: "Assign arrivals to runways from live demand, with a rolling 10-minute board.",
     to: "/ops/runway",
-    accent: ACCENT.rose,
   },
   {
-    icon: Radar,
+    icon: MapIcon,
     title: "Facility maps",
     body: "A public, per-facility TMU map of live traffic with staff-editable color rules.",
     to: "/facility-map",
-    accent: ACCENT.emerald,
   },
   {
     icon: TrendingUp,
     title: "Historical replay",
     body: "Scrub a past event or window and replay your dashboards at any instant.",
     to: "/admin/historical",
-    accent: ACCENT.violet,
   },
 ];
 
-/** A navigable tool/feature card: icon chip + title + one-liner + arrow. Shared between the
- * signed-out landing grid and (in principle) any future signed-in launchpad card grid, so the two
- * states read as one visual system. */
-function FeatureCard({
-  to,
-  icon: Icon,
-  accent,
-  title,
-  body,
-}: {
-  to: string;
-  icon: LucideIcon;
-  accent: Accent;
-  title: string;
-  body: string;
-}) {
+const tileClass =
+  "group flex items-start gap-3 rounded-md border border-line bg-card p-4 transition-colors hover:bg-panel-2 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring";
+
+function TileBody({ icon: Icon, title, body, external }: Omit<Entry, "to"> & { external?: boolean }) {
+  const Arrow = external ? ArrowUpRight : ArrowRight;
   return (
-    <Link
-      to={to as "/"}
-      className="group flex items-start gap-3 rounded-lg border p-4 transition-colors hover:bg-accent/40 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
-    >
-      <span className={chipClass(accent)}>
-        <Icon className="size-5" />
+    <>
+      <span className="flex size-9 shrink-0 items-center justify-center rounded-sm bg-chip text-ink-2 transition-colors group-hover:text-brand-ink">
+        <Icon className="size-[18px]" />
       </span>
-      <div className="flex min-w-0 flex-1 flex-col gap-0.5">
-        <span className="font-semibold">{title}</span>
-        <span className="text-sm text-muted-foreground">{body}</span>
-      </div>
-      <ArrowRight className="mt-1 size-4 shrink-0 text-muted-foreground transition-transform group-hover:translate-x-0.5" />
+      <span className="flex min-w-0 flex-1 flex-col gap-0.5">
+        <span className="text-sm font-semibold text-ink">{title}</span>
+        <span className="text-sm text-ink-2">{body}</span>
+      </span>
+      <Arrow className="mt-0.5 size-4 shrink-0 text-ink-3 transition-transform group-hover:translate-x-0.5" />
+    </>
+  );
+}
+
+/** A navigable entry-point card: icon tile + title + one-liner + arrow. */
+function EntryCard({ entry }: { entry: Entry }) {
+  return (
+    <Link to={entry.to} className={tileClass}>
+      <TileBody icon={entry.icon} title={entry.title} body={entry.body} />
     </Link>
   );
 }
 
 function SignedOut() {
   return (
-    <div className="flex flex-col gap-12 py-10">
-      {/* Hero */}
-      <div className="flex flex-col items-center gap-5 text-center">
-        <Radar className="size-10 text-primary" />
-        <h1 className="max-w-2xl text-4xl font-semibold tracking-tight sm:text-5xl">
-          OIS
-        </h1>
-        <p className="max-w-xl text-muted-foreground">
-          VATUSA's traffic-management and event-planning platform.
-        </p>
-        <Button size="lg" onClick={login}>
-          Sign in with VATSIM
-        </Button>
-        <span className="text-xs text-muted-foreground">
-          Or browse{" "}
-          <Link to="/advisories" className="underline underline-offset-2 hover:text-foreground">
-            advisories
-          </Link>{" "}
-          and{" "}
-          <Link to="/facility-map" className="underline underline-offset-2 hover:text-foreground">
-            facility maps
-          </Link>{" "}
-          without signing in.
+    <div className="flex flex-col gap-12 py-6 sm:py-10">
+      <section className="flex flex-col items-start gap-5">
+        <span className="flex items-center gap-2 rounded-full border border-line bg-panel-2 px-3 py-1 text-xs font-semibold text-ink-2">
+          <img src={vatusaLogo} alt="" className="size-3.5" />
+          VATUSA · Operational Information System
         </span>
-      </div>
+        <h1 className="max-w-3xl text-[28px] font-bold leading-tight tracking-[-0.02em] text-ink sm:text-4xl">
+          Traffic management and event planning for the VATUSA network.
+        </h1>
+        <p className="max-w-2xl text-[15px] leading-relaxed text-ink-2">
+          OIS is where VATUSA controllers issue ground stops, metering programs, and restrictions,
+          plan events, and watch live demand. Advisories, FCAs, facility maps, and pilot lookups are
+          open to everyone.
+        </p>
+        <div className="flex flex-wrap items-center gap-2">
+          <Button size="lg" onClick={login}>
+            Sign in with VATSIM
+          </Button>
+          <Link to="/advisories" className={buttonVariants({ variant: "outline", size: "lg" })}>
+            Browse advisories
+          </Link>
+        </div>
+      </section>
 
-      {/* Feature grid */}
-      <div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-3">
-        {FEATURES.map((f) => (
-          <FeatureCard
-            key={f.title}
-            to={f.to}
-            icon={f.icon}
-            accent={f.accent}
-            title={f.title}
-            body={f.body}
-          />
-        ))}
-      </div>
+      <section className="flex flex-col gap-3">
+        <div className="flex flex-col gap-0.5">
+          <h2 className="text-xl font-bold text-ink">Open to everyone</h2>
+          <p className="text-sm text-ink-2">No sign-in needed.</p>
+        </div>
+        <div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-3">
+          {PUBLIC.map((e) => (
+            <EntryCard key={e.title} entry={e} />
+          ))}
+          {DOCS_URL && (
+            <a href={DOCS_URL} target="_blank" rel="noreferrer" className={tileClass}>
+              <TileBody
+                icon={BookOpen}
+                title="Docs"
+                body="Guides for controllers and staff, and the OIS API reference."
+                external
+              />
+            </a>
+          )}
+        </div>
+      </section>
+
+      <section className="flex flex-col gap-3">
+        <div className="flex flex-col gap-0.5">
+          <h2 className="text-xl font-bold text-ink">For controllers and staff</h2>
+          <p className="text-sm text-ink-2">Sign in with VATSIM — what you can open follows your access.</p>
+        </div>
+        <div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-3">
+          {TOOLS.map((e) => (
+            <EntryCard key={e.title} entry={e} />
+          ))}
+        </div>
+      </section>
     </div>
   );
 }
 
-function StatTile({
-  icon: Icon,
-  label,
-  value,
-  accent,
-}: {
-  icon: LucideIcon;
-  label: string;
-  value: string | number;
-  accent: Accent;
-}) {
-  return (
-    <Card>
-      <CardContent className="flex items-center gap-3 pt-6">
-        <span className={chipClass(accent)}>
-          <Icon className="size-5" />
-        </span>
-        <div className="flex flex-col">
-          <span className="text-2xl font-semibold tabular-nums leading-none">
-            {value}
-          </span>
-          <span className="text-xs uppercase tracking-wide text-muted-foreground">
-            {label}
-          </span>
-        </div>
-      </CardContent>
-    </Card>
-  );
-}
-
-/** A card that frames one operational list, with a header and a "view all" link. */
+/** A card that frames one operational summary list, with a header and a "view all" link. */
 function Section({
   title,
   count,
-  to,
-  search,
+  link,
   children,
 }: {
   title: string;
   count: number;
-  to: string;
-  search?: Record<string, string>;
+  link: React.ReactNode;
   children: React.ReactNode;
 }) {
   return (
-    <Card className="flex flex-col">
-      <CardContent className="flex flex-1 flex-col gap-3 pt-6">
-        <div className="flex items-center justify-between">
-          <span className="text-sm font-semibold">
-            {title}
-            <span className="ml-2 text-muted-foreground">{count}</span>
-          </span>
-          <Link
-            to={to}
-            search={search}
-            className="flex items-center gap-1 text-xs text-muted-foreground transition-colors hover:text-foreground"
-          >
-            View all <ArrowRight className="size-3.5" />
-          </Link>
-        </div>
-        {children}
-      </CardContent>
+    <Card className="flex flex-col gap-2 p-5">
+      <div className="flex items-center justify-between gap-2">
+        <h2 className="flex items-center gap-2 text-xl font-bold text-ink">
+          {title}
+          <span className="rounded-full bg-chip px-2 py-0.5 font-mono text-xs font-semibold text-ink-2">{count}</span>
+        </h2>
+        {link}
+      </div>
+      {children}
     </Card>
   );
 }
+
+const viewAllClass = buttonVariants({ variant: "ghost", size: "sm" });
+const rowClass = "flex items-center justify-between gap-2 border-b border-line-soft py-2 text-sm last:border-b-0";
 
 function spacing(trail: number, mit: number): string {
   if (mit > 0) return `${mit} MIT`;
   if (trail > 0) return `${trail} MINIT`;
   return "no spacing";
-}
-
-function Empty({ children }: { children: React.ReactNode }) {
-  return <p className="py-6 text-center text-sm text-muted-foreground">{children}</p>;
 }
 
 /** A coarse "in Xd Yh" / "Xh Ym" / "Ym" from a millisecond delta. */
@@ -269,17 +257,14 @@ function FeaturedEvent() {
   if (!events.data) {
     return (
       <Card>
-        <CardContent className="py-10 text-center text-sm text-muted-foreground">Loading events…</CardContent>
+        <QueryState isLoading loading="Loading events…" />
       </Card>
     );
   }
   if (!featured) {
     return (
       <Card>
-        <CardContent className="flex items-center gap-3 py-8 text-sm text-muted-foreground">
-          <CalendarClock className="size-5" />
-          No events on the calendar right now.
-        </CardContent>
+        <EmptyState icon={CalendarClock}>No events on the calendar right now.</EmptyState>
       </Card>
     );
   }
@@ -290,27 +275,24 @@ function FeaturedEvent() {
 
   return (
     <Card className="overflow-hidden">
-      <div className="flex flex-col gap-5 p-6 sm:flex-row">
+      <div className="flex flex-col gap-5 p-5 sm:flex-row">
         {featured.banner_image_url && (
           <img
             src={featured.banner_image_url}
             alt=""
-            className="h-32 w-full rounded-md object-cover sm:h-auto sm:w-56"
+            className="h-32 w-full rounded-sm object-cover sm:h-auto sm:w-56"
           />
         )}
         <div className="flex min-w-0 flex-1 flex-col gap-3">
           <div className="flex flex-wrap items-center gap-2">
             {live ? (
-              <span className="flex items-center gap-1.5 rounded-full bg-emerald-500/15 px-2 py-0.5 text-xs font-semibold uppercase tracking-wide text-emerald-500">
-                <span className="size-1.5 animate-pulse rounded-full bg-emerald-500" />
+              <StatusPill tone="good" dot>
                 Live now
-              </span>
+              </StatusPill>
             ) : (
-              <Badge variant="secondary" className="uppercase tracking-wide">
-                Next event
-              </Badge>
+              <StatusPill tone="brand">Next event</StatusPill>
             )}
-            <span className="text-sm font-medium text-muted-foreground">
+            <span className="font-mono text-xs text-ink-2">
               {live ? `ends in ${countdown(end - now)}` : `starts in ${countdown(start - now)}`}
             </span>
           </div>
@@ -318,37 +300,33 @@ function FeaturedEvent() {
           <Link
             to="/admin/planning/events/$eventId"
             params={{ eventId: String(featured.id) }}
-            className="text-2xl font-semibold tracking-tight hover:text-primary"
+            className="text-2xl font-bold tracking-tight text-ink transition-colors hover:text-brand-ink"
           >
             {featured.title}
           </Link>
 
-          <div className="flex flex-wrap items-center gap-x-3 gap-y-1 text-sm text-muted-foreground">
-            {featured.facility && (
-              <span className="font-mono font-medium text-foreground">{featured.facility}</span>
-            )}
-            <span className="flex items-center gap-1.5">
-              <CalendarClock className="size-3.5" />
+          <div className="flex flex-wrap items-center gap-x-3 gap-y-1 text-sm text-ink-2">
+            {featured.facility && <span className="font-mono font-semibold text-ink">{featured.facility}</span>}
+            <span className="flex items-center gap-1.5 font-mono text-[13px]">
+              <CalendarClock className="size-3.5 text-ink-3" />
               {formatZuluFull(featured.start_time)} – {formatZuluFull(featured.end_time)}
             </span>
           </div>
 
           {alsoUpcoming.length > 0 && (
-            <div className="mt-1 flex flex-col gap-1 border-t pt-3 text-sm">
-              <span className="text-xs font-medium uppercase tracking-wide text-muted-foreground">
-                Also coming up
-              </span>
+            <div className="mt-1 flex flex-col gap-1 border-t border-line-soft pt-3 text-sm">
+              <span className="text-xs font-semibold text-ink-3">Also coming up</span>
               {alsoUpcoming.map((e) => (
                 <Link
                   key={e.id}
                   to="/admin/planning/events/$eventId"
                   params={{ eventId: String(e.id) }}
-                  className="flex items-center justify-between gap-2 hover:text-primary"
+                  className="flex items-center justify-between gap-2 py-0.5 text-ink transition-colors hover:text-brand-ink"
                 >
                   <span className="min-w-0 truncate">{e.title}</span>
-                  <span className="flex shrink-0 items-center gap-2 text-muted-foreground">
-                    {e.facility && <span className="font-mono text-xs">{e.facility}</span>}
-                    <span className="text-xs">{formatZuluFull(e.start_time)}</span>
+                  <span className="flex shrink-0 items-center gap-3 font-mono text-xs text-ink-2">
+                    {e.facility && <span>{e.facility}</span>}
+                    <span>{formatZuluFull(e.start_time)}</span>
                   </span>
                 </Link>
               ))}
@@ -377,137 +355,135 @@ function Overview() {
   const gsList = (canGroundStops ? (groundStops.data ?? []) : []).filter(
     (g) => g.status !== "cancelled" && g.status !== "expired",
   );
-  const tmiList = (canTmis ? (tmis.data ?? []) : []).filter(
-    (t) => t.status === "published",
-  );
+  const tmiList = (canTmis ? (tmis.data ?? []) : []).filter((t) => t.status === "published");
 
   return (
     <div className="flex flex-col gap-6">
       {/* Headline: the current or next event */}
       {canPlan && <FeaturedEvent />}
 
-      {/* Live snapshot tiles */}
-      <div className="grid gap-4 sm:grid-cols-2 lg:grid-cols-4">
-        <StatTile
+      {/* Live snapshot */}
+      <div className="grid grid-cols-2 gap-3 lg:grid-cols-4">
+        <MetricCard
           icon={Plane}
           label="Pilots online"
           value={feed ? feed.pilots : "—"}
-          accent={feed?.healthy ? ACCENT.emerald : { bg: "bg-muted", icon: "text-muted-foreground" }}
+          sub={
+            feed && (
+              <StatusPill tone={feed.healthy ? "good" : "bad"} dot>
+                {feed.healthy ? "Feed healthy" : "Feed unhealthy"}
+              </StatusPill>
+            )
+          }
         />
-        {canPrograms && (
-          <StatTile icon={Gauge} label="Metering programs" value={progList.length} accent={ACCENT.teal} />
-        )}
+        {canPrograms && <MetricCard icon={Gauge} label="Metering programs" value={progList.length} />}
         {canGroundStops && (
-          <StatTile
+          <MetricCard
             icon={OctagonX}
             label="Ground stops"
             value={gsList.length}
-            accent={
-              gsList.length > 0
-                ? { bg: "bg-destructive/15", icon: "text-destructive" }
-                : { bg: "bg-muted", icon: "text-muted-foreground" }
-            }
+            tone={gsList.length > 0 ? "bad" : undefined}
           />
         )}
-        {canTmis && (
-          <StatTile icon={Split} label="Restrictions" value={tmiList.length} accent={ACCENT.rose} />
-        )}
+        {canTmis && <MetricCard icon={Split} label="Restrictions" value={tmiList.length} />}
       </div>
 
-      {/* Operational lists */}
-      <div className="grid gap-4 lg:grid-cols-3">
-        {canPrograms && (
-          <Section title="Metering programs" count={progList.length} to="/ops/tmu">
-            {progList.length === 0 ? (
-              <Empty>No active programs.</Empty>
-            ) : (
-              <ul className="flex flex-col divide-y divide-border/60">
-                {progList.slice(0, 6).map((p) => (
-                  <li
-                    key={p.icao}
-                    className="flex items-center justify-between gap-2 py-2 text-sm"
-                  >
-                    <span className="font-mono font-semibold">{p.icao}</span>
-                    <span className="flex items-center gap-2 text-muted-foreground">
-                      <Badge variant="secondary">AAR {p.aar}</Badge>
-                      <span className="text-xs">{spacing(p.trail, p.mit)}</span>
-                      {p.active_until && (
-                        <span className="text-xs">· {hhmmZulu(p.active_until)}</span>
-                      )}
-                    </span>
-                  </li>
-                ))}
-              </ul>
-            )}
-          </Section>
-        )}
-
-        {canGroundStops && (
-          <Section
-            title="Ground stops"
-            count={gsList.length}
-            to="/ops/tmu"
-            search={{ tab: "ground-stops" }}
-          >
-            {gsList.length === 0 ? (
-              <Empty>No ground stops.</Empty>
-            ) : (
-              <ul className="flex flex-col divide-y divide-border/60">
-                {gsList.slice(0, 6).map((gs) => (
-                  <li
-                    key={gs.id}
-                    className="flex items-center justify-between gap-2 py-2 text-sm"
-                  >
-                    <span className="font-mono font-semibold">{gs.airport}</span>
-                    <span className="flex items-center gap-2 text-muted-foreground">
-                      <span className="text-xs">
-                        {gs.scope ? gs.scope : "all departures"}
+      {/* Operational summaries */}
+      {(canPrograms || canGroundStops || canTmis) && (
+        <div className="grid gap-3 lg:grid-cols-3">
+          {canPrograms && (
+            <Section
+              title="Metering programs"
+              count={progList.length}
+              link={
+                <Link to="/ops/tmu" className={viewAllClass}>
+                  View all <ArrowRight />
+                </Link>
+              }
+            >
+              {progList.length === 0 ? (
+                <EmptyState icon={Gauge}>No active programs.</EmptyState>
+              ) : (
+                <ul className="flex flex-col">
+                  {progList.slice(0, 6).map((p) => (
+                    <li key={p.icao} className={rowClass}>
+                      <span className="font-mono font-semibold text-ink">{p.icao}</span>
+                      <span className="flex items-center gap-2 font-mono text-xs text-ink-2">
+                        <StatusPill>AAR {p.aar}</StatusPill>
+                        <span>{spacing(p.trail, p.mit)}</span>
+                        {p.active_until && <span>· {hhmmZulu(p.active_until)}</span>}
                       </span>
-                      <Badge variant="outline">
-                        {gs.until ? `${gs.until}z` : "UFN"}
-                      </Badge>
-                    </span>
-                  </li>
-                ))}
-              </ul>
-            )}
-          </Section>
-        )}
+                    </li>
+                  ))}
+                </ul>
+              )}
+            </Section>
+          )}
 
-        {canTmis && (
-          <Section
-            title="Restrictions"
-            count={tmiList.length}
-            to="/ops/tmu"
-            search={{ tab: "restrictions" }}
-          >
-            {tmiList.length === 0 ? (
-              <Empty>No published restrictions.</Empty>
-            ) : (
-              <ul className="flex flex-col divide-y divide-border/60">
-                {tmiList.slice(0, 6).map((t) => (
-                  <li key={t.id} className="flex flex-col gap-0.5 py-2 text-sm">
-                    <span className="flex items-center gap-1.5 font-mono text-xs text-muted-foreground">
-                      {t.requesting}
-                      <ArrowRight className="size-3" />
-                      {t.providing}
-                    </span>
-                    <span className="truncate">{t.restriction}</span>
-                  </li>
-                ))}
-              </ul>
-            )}
-          </Section>
-        )}
-      </div>
+          {canGroundStops && (
+            <Section
+              title="Ground stops"
+              count={gsList.length}
+              link={
+                <Link to="/ops/tmu" search={{ tab: "ground-stops" }} className={viewAllClass}>
+                  View all <ArrowRight />
+                </Link>
+              }
+            >
+              {gsList.length === 0 ? (
+                <EmptyState icon={OctagonX}>No ground stops.</EmptyState>
+              ) : (
+                <ul className="flex flex-col">
+                  {gsList.slice(0, 6).map((gs) => (
+                    <li key={gs.id} className={rowClass}>
+                      <span className="font-mono font-semibold text-ink">{gs.airport}</span>
+                      <span className="flex min-w-0 items-center gap-2 text-ink-2">
+                        <span className="truncate text-xs">{gs.scope ? gs.scope : "all departures"}</span>
+                        <StatusPill className="font-mono">{gs.until ? `${gs.until}z` : "UFN"}</StatusPill>
+                      </span>
+                    </li>
+                  ))}
+                </ul>
+              )}
+            </Section>
+          )}
+
+          {canTmis && (
+            <Section
+              title="Restrictions"
+              count={tmiList.length}
+              link={
+                <Link to="/ops/tmu" search={{ tab: "restrictions" }} className={viewAllClass}>
+                  View all <ArrowRight />
+                </Link>
+              }
+            >
+              {tmiList.length === 0 ? (
+                <EmptyState icon={Split}>No published restrictions.</EmptyState>
+              ) : (
+                <ul className="flex flex-col">
+                  {tmiList.slice(0, 6).map((t) => (
+                    <li key={t.id} className="flex flex-col gap-0.5 border-b border-line-soft py-2 text-sm last:border-b-0">
+                      <span className="flex items-center gap-1.5 font-mono text-xs text-ink-2">
+                        {t.requesting}
+                        <ArrowRight className="size-3 text-ink-3" />
+                        {t.providing}
+                      </span>
+                      <span className="truncate text-ink">{t.restriction}</span>
+                    </li>
+                  ))}
+                </ul>
+              )}
+            </Section>
+          )}
+        </div>
+      )}
 
       {!canPrograms && !canGroundStops && !canTmis && !canPlan && (
         <Card>
-          <CardContent className="flex items-center gap-3 py-8 text-sm text-muted-foreground">
-            <Timer className="size-5" />
-            You don&apos;t have traffic-management access yet. Ask an ARTCC admin
-            to grant TMU permissions.
-          </CardContent>
+          <EmptyState icon={Timer} title="No traffic-management access yet">
+            Ask an ARTCC admin to grant TMU permissions.
+          </EmptyState>
         </Card>
       )}
     </div>
@@ -517,18 +493,16 @@ function Overview() {
 export function DashboardPage() {
   const { data: me, isLoading } = useMe();
 
-  if (isLoading) {
-    return <div className="py-24 text-center text-muted-foreground">Loading…</div>;
-  }
+  if (isLoading) return <QueryState isLoading className="py-24" />;
   if (!me) return <SignedOut />;
 
   return (
-    <div className="flex flex-col gap-8">
+    <div className="flex flex-col gap-6">
       <div className="flex flex-col gap-1">
-        <h1 className="text-2xl font-semibold tracking-tight">
+        <h1 className="text-[28px] font-bold leading-tight tracking-[-0.02em] text-ink">
           Welcome, {me.display_name}
         </h1>
-        <p className="text-muted-foreground">
+        <p className="text-[15px] text-ink-2">
           {me.server_admin ? "Server admin" : me.role_names.join(", ") || "Controller"}
           {me.rating ? ` · ${me.rating}` : ""}
         </p>

@@ -1,4 +1,5 @@
 import {useEffect, useMemo, useRef, useState} from "react";
+import {cn, toneBg, toneText, type Tone} from "@ois/ui";
 import {AlertOctagon, X} from "lucide-react";
 
 import {useMe} from "@/lib/auth";
@@ -13,23 +14,23 @@ const ALERT_MS = 15_000;
 interface RestrictionAlert {
   key: string;
   kind: string;
-  color: string;
+  tone: Tone;
   title: string;
   lines: string[];
 }
 
-const COLORS = {
-  groundStop: "#ef4444",
-  gdp: "#f59e0b",
-  program: "#3b82f6",
-  tmi: "#8b5cf6",
-} as const;
+const TONES = {
+  groundStop: "bad",
+  gdp: "warn",
+  program: "brand",
+  tmi: "neutral",
+} as const satisfies Record<string, Tone>;
 
 function groundStopAlert(g: GroundStop): RestrictionAlert {
   return {
     key: `gs:${g.id}`,
     kind: "Ground Stop",
-    color: COLORS.groundStop,
+    tone: TONES.groundStop,
     title: g.airport,
     lines: [
       g.scope.trim() ? `Scope: ${g.scope.trim()}` : "Field-wide (all departures)",
@@ -42,7 +43,7 @@ function gdpAlert(g: Gdp): RestrictionAlert {
   return {
     key: `gdp:${g.id}`,
     kind: "Ground Delay Program",
-    color: COLORS.gdp,
+    tone: TONES.gdp,
     title: g.airport,
     lines: [
       `AAR ${g.aar}`,
@@ -56,7 +57,7 @@ function tmiAlert(t: Tmi): RestrictionAlert {
   return {
     key: `tmi:${t.id}`,
     kind: "Restriction",
-    color: COLORS.tmi,
+    tone: TONES.tmi,
     title: `${t.requesting} → ${t.providing}`,
     lines: [t.decoded || t.restriction],
   };
@@ -71,7 +72,7 @@ function programAlert(p: Program): RestrictionAlert {
   return {
     key: `prog:${p.icao}`,
     kind: "Metering Program",
-    color: COLORS.program,
+    tone: TONES.program,
     title: p.icao,
     lines: bits.length ? [bits.join(" · ")] : ["Metering active"],
   };
@@ -161,41 +162,35 @@ function AlertCard({ alert, onClose }: { alert: RestrictionAlert; onClose: () =>
 
   return (
     <div
-      className="pointer-events-auto w-full max-w-sm overflow-hidden rounded-lg border bg-background/95 shadow-2xl backdrop-blur"
-      style={{ borderLeft: `4px solid ${alert.color}` }}
+      className="pointer-events-auto w-full max-w-sm overflow-hidden rounded-md border border-line bg-panel"
       role="alert"
     >
       <div className="flex items-start gap-3 p-3">
-        <AlertOctagon className="mt-0.5 size-5 shrink-0" style={{ color: alert.color }} />
+        <AlertOctagon className={cn("mt-0.5 size-5 shrink-0", toneText[alert.tone])} />
         <div className="min-w-0 flex-1">
           <div className="flex items-center justify-between gap-2">
-            <span
-              className="text-xs font-semibold uppercase tracking-wide"
-              style={{ color: alert.color }}
-            >
-              {alert.kind} initiated
-            </span>
+            <span className={cn("text-xs font-semibold", toneText[alert.tone])}>{alert.kind} initiated</span>
             <button
               type="button"
               aria-label="Dismiss"
               onClick={onClose}
-              className="text-muted-foreground hover:text-foreground"
+              className="rounded-xs text-ink-3 transition-colors hover:text-ink"
             >
               <X className="size-4" />
             </button>
           </div>
-          <div className="mt-0.5 font-semibold">{alert.title}</div>
+          <div className="mt-0.5 font-mono font-semibold text-ink">{alert.title}</div>
           {alert.lines.map((l, i) => (
-            <div key={i} className="text-sm text-muted-foreground">
+            <div key={i} className="text-sm text-ink-2">
               {l}
             </div>
           ))}
         </div>
       </div>
-      <div className="h-1 w-full bg-muted">
+      <div className="h-0.5 w-full bg-line-soft">
         <div
-          className="h-full"
-          style={{ width, backgroundColor: alert.color, transition: `width ${ALERT_MS}ms linear` }}
+          className={cn("h-full", toneBg[alert.tone])}
+          style={{ width, transition: `width ${ALERT_MS}ms linear` }}
         />
       </div>
     </div>

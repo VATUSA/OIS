@@ -246,7 +246,7 @@ export function PermissionPicker({
 
   if (grantable.length === 0) {
     return (
-      <p className="rounded-md border border-dashed p-4 text-center text-sm text-muted-foreground">
+      <p className="rounded-md border border-line bg-panel-2 p-4 text-center text-sm text-ink-2">
         You don&apos;t hold any permissions that can be delegated to a key.
       </p>
     );

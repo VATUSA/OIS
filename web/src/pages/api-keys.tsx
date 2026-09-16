@@ -1,10 +1,24 @@
-import {useState} from "react";
-import {Badge, Button, ConfirmButton, Card, CardContent, Input, useToast} from "@ois/ui";
-import {Check, Copy, KeyRound, Plus, X} from "lucide-react";
+import {useMemo, useState} from "react";
+import {
+  Button,
+  Card,
+  ConfirmButton,
+  type DataColumn,
+  DataTable,
+  EmptyState,
+  Input,
+  Modal,
+  QueryState,
+  StatusPill,
+  useToast,
+} from "@ois/ui";
+import {Activity, CalendarClock, Check, Clock, Copy, KeyRound, Lock, Plus, ShieldCheck, X} from "lucide-react";
 
+import {usePageHeader} from "@/components/shell/page-meta";
 import {useMe} from "@/lib/auth";
 import {hasPermission} from "@/lib/permissions";
 import {useFacilities} from "@/lib/admin";
+import {toneOf} from "@/lib/status";
 import {timeAgo} from "@/lib/time";
 import {
   type ApiKey,
@@ -26,19 +40,20 @@ import {
   selectionIsValid,
 } from "@/components/api-keys/permission-picker";
 
-/** ISO string ↔ the value of a <input type="datetime-local">. */
-function toLocalInput(iso: string | null | undefined): string {
-  if (!iso) return "";
-  const d = new Date(iso);
-  const pad = (n: number) => String(n).padStart(2, "0");
-  return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}T${pad(d.getHours())}:${pad(d.getMinutes())}`;
+const SUBTITLE =
+  "Personal access tokens for integrating with the OIS API. A key can never do more than you can — it's capped by your live permissions.";
+
+/** The key's displayed state: disabled wins, then expired (derived from `expires_at`), else active. */
+function keyState(k: ApiKey): "active" | "disabled" | "expired" {
+  if (k.status !== "active") return "disabled";
+  if (k.expires_at != null && new Date(k.expires_at).getTime() < Date.now()) return "expired";
+  return "active";
 }
 
+/** A key's state as a status pill. */
 export function StatusBadge({ k }: { k: ApiKey }) {
-  const expired = k.expires_at != null && new Date(k.expires_at).getTime() < Date.now();
-  if (k.status !== "active") return <Badge variant="secondary">disabled</Badge>;
-  if (expired) return <Badge variant="destructive">expired</Badge>;
-  return <Badge variant="success">active</Badge>;
+  const s = keyState(k);
+  return <StatusPill tone={toneOf("apiKey", s)}>{s}</StatusPill>;
 }
 
 /** The one-time token reveal — the plaintext is only ever available here. */
@@ -51,89 +66,87 @@ function TokenReveal({ token, onDismiss }: { token: ApiKeyToken; onDismiss: () =
     toast.success("Token copied", { description: "Store it now — it won't be shown again." });
   };
   return (
-    <Card className="border-primary/50">
-      <CardContent className="flex flex-col gap-3 pt-6">
-        <div className="flex items-start justify-between gap-3">
-          <div>
-            <div className="font-medium">Your new token for “{token.key.name}”</div>
-            <p className="text-sm text-muted-foreground">
-              Copy it now — for your security, it will <strong>never be shown again</strong>.
-            </p>
-          </div>
-          <button type="button" onClick={onDismiss} className="text-muted-foreground hover:text-foreground" title="Dismiss">
-            <X className="size-4" />
-          </button>
+    <Card className="flex flex-col gap-3 border-brand p-5" role="status">
+      <div className="flex items-start justify-between gap-3">
+        <div className="flex flex-col gap-1">
+          <h2 className="text-xl font-bold text-ink">Your new token for “{token.key.name}”</h2>
+          <p className="text-sm text-ink-2">
+            Copy it now — for your security, it will <strong className="font-bold text-ink">never be shown again</strong>.
+          </p>
         </div>
-        <div className="flex gap-2">
-          <Input readOnly value={token.token} className="font-mono text-xs" onFocus={(e) => e.target.select()} />
-          <Button variant="secondary" onClick={copy}>
-            {copied ? <Check className="mr-1 size-4" /> : <Copy className="mr-1 size-4" />}
-            {copied ? "Copied" : "Copy"}
-          </Button>
-        </div>
-        <p className="text-xs text-muted-foreground">
-          Use it as a bearer token: <span className="font-mono">Authorization: Bearer {token.key.prefix}…</span>
-        </p>
-      </CardContent>
+        <button
+          type="button"
+          onClick={onDismiss}
+          className="rounded-xs p-1 text-ink-3 transition-colors hover:bg-panel-2 hover:text-ink"
+          title="Dismiss"
+          aria-label="Dismiss"
+        >
+          <X className="size-4" />
+        </button>
+      </div>
+      <div className="flex gap-2">
+        <Input readOnly value={token.token} className="font-mono text-xs" onFocus={(e) => e.target.select()} />
+        <Button onClick={copy}>
+          {copied ? <Check /> : <Copy />}
+          {copied ? "Copied" : "Copy"}
+        </Button>
+      </div>
+      <p className="text-xs text-ink-3">
+        Use it as a bearer token:{" "}
+        <span className="font-mono text-ink-2">Authorization: Bearer {token.key.prefix}…</span>
+      </p>
     </Card>
   );
 }
 
-function PermSummary({ k }: { k: ApiKey }) {
-  if (k.permissions.length === 0) {
-    return <span className="text-xs text-muted-foreground">no permissions</span>;
-  }
-  return (
-    <div className="flex flex-wrap gap-1">
-      {k.permissions.slice(0, 6).map((p, i) => (
-        <span key={i} className="rounded bg-muted px-1.5 py-0.5 font-mono text-[10px]">
-          {p.permission}
-          {p.artcc_id ? `@${p.artcc_id}` : ""}
-        </span>
-      ))}
-      {k.permissions.length > 6 && (
-        <span className="text-[10px] text-muted-foreground">+{k.permissions.length - 6} more</span>
-      )}
-    </div>
-  );
-}
-
+/** A key's audit activity, a page of the API at a time. Shared with the admin keys page. */
 export function KeyActivity({ id }: { id: string }) {
   const [page, setPage] = useState(1);
   const audit = useKeyAudit(id, page);
-  if (audit.isLoading) return <p className="text-xs text-muted-foreground">Loading activity…</p>;
-  const items = audit.data?.items ?? [];
-  if (items.length === 0) return <p className="text-xs text-muted-foreground">No recorded activity yet.</p>;
-  const total = audit.data?.total ?? 0;
-  const pages = Math.max(1, Math.ceil(total / (audit.data?.page_size ?? 50)));
+  type Entry = NonNullable<typeof audit.data>["items"][number];
+  const columns = useMemo<DataColumn<Entry>[]>(
+    () => [
+      {
+        accessorKey: "created_at",
+        header: "When",
+        icon: Clock,
+        mono: true,
+        cell: (c) => <span className="whitespace-nowrap text-ink-2">{timeAgo(c.getValue<string>())}</span>,
+      },
+      {
+        accessorKey: "action",
+        header: "Action",
+        cell: (c) => <span className="font-semibold">{c.getValue<string>()}</span>,
+      },
+      {
+        id: "resource",
+        accessorFn: (e) => `${e.resource_type}${e.resource_id ? ` ${e.resource_id}` : ""}`,
+        header: "Resource",
+        cell: (c) => <span className="text-ink-2">{c.getValue<string>()}</span>,
+      },
+    ],
+    [],
+  );
   return (
-    <div className="flex flex-col gap-1">
-      <ul className="flex flex-col divide-y">
-        {items.map((e) => (
-          <li key={e.id} className="flex flex-wrap items-baseline gap-x-2 py-1 text-xs">
-            <span className="font-mono text-muted-foreground">{timeAgo(e.created_at)}</span>
-            <span className="font-medium">{e.action}</span>
-            <span className="text-muted-foreground">
-              {e.resource_type}
-              {e.resource_id ? ` ${e.resource_id}` : ""}
-            </span>
-          </li>
-        ))}
-      </ul>
-      {pages > 1 && (
-        <div className="flex items-center gap-2 text-xs">
-          <Button size="sm" variant="ghost" disabled={page <= 1} onClick={() => setPage((p) => p - 1)}>
-            Prev
-          </Button>
-          <span className="text-muted-foreground">
-            {page} / {pages}
-          </span>
-          <Button size="sm" variant="ghost" disabled={page >= pages} onClick={() => setPage((p) => p + 1)}>
-            Next
-          </Button>
-        </div>
-      )}
-    </div>
+    <DataTable
+      label="Key activity"
+      columns={columns}
+      data={audit.data?.items ?? []}
+      getRowId={(e) => String(e.id)}
+      rowCap={50}
+      isLoading={audit.isLoading}
+      isError={audit.isError}
+      onRetry={() => audit.refetch()}
+      empty="No recorded activity yet."
+      serverPagination={
+        audit.data && {
+          page,
+          pageSize: audit.data.page_size ?? 50,
+          total: audit.data.total ?? 0,
+          onPageChange: setPage,
+        }
+      }
+    />
   );
 }
 
@@ -144,112 +157,34 @@ function EditPermissions({ k, onDone }: { k: ApiKey; onDone: () => void }) {
   const [selection, setSelection] = useState<PermSelection>(() => selectionFromPermissions(k.permissions));
 
   const save = () => {
-    setPerms.mutate(
-      { id: k.id, body: { permissions: buildPermissionInputs(selection) } },
-      { onSuccess: onDone },
-    );
+    setPerms.mutate({ id: k.id, body: { permissions: buildPermissionInputs(selection) } }, { onSuccess: onDone });
   };
 
   return (
-    <div className="mt-2 flex flex-col gap-2 rounded-md border bg-muted/20 p-3">
-      <div className="text-xs font-semibold uppercase tracking-wide text-muted-foreground">Edit permissions</div>
+    <Modal
+      open
+      onClose={onDone}
+      title={`Permissions · ${k.name}`}
+      description={<span className="font-mono">{k.prefix}…</span>}
+      size="xl"
+      footer={
+        <>
+          <Button variant="ghost" onClick={onDone}>
+            Cancel
+          </Button>
+          <Button disabled={!selectionIsValid(selection) || setPerms.isPending} onClick={save}>
+            Save permissions
+          </Button>
+        </>
+      }
+    >
       <PermissionPicker
         grantable={grantable.data ?? []}
         facilities={facilities.data ?? []}
         selection={selection}
         onChange={setSelection}
       />
-      <div className="flex gap-2">
-        <Button
-          size="sm"
-          disabled={!selectionIsValid(selection) || setPerms.isPending}
-          onClick={save}
-        >
-          Save permissions
-        </Button>
-        <Button size="sm" variant="ghost" onClick={onDone}>
-          Cancel
-        </Button>
-      </div>
-    </div>
-  );
-}
-
-function KeyCard({ k }: { k: ApiKey }) {
-  const rotate = useRotateKey();
-  const disable = useDisableKey();
-  const del = useDeleteKey();
-  const [panel, setPanel] = useState<"activity" | "edit" | null>(null);
-  const [rotated, setRotated] = useState<ApiKeyToken | null>(null);
-
-  return (
-    <Card>
-      <CardContent className="flex flex-col gap-3 pt-6">
-        <div className="flex flex-wrap items-start justify-between gap-3">
-          <div className="min-w-0">
-            <div className="flex items-center gap-2">
-              <KeyRound className="size-4 text-muted-foreground" />
-              <span className="font-medium">{k.name}</span>
-              <StatusBadge k={k} />
-            </div>
-            <p className="mt-0.5 font-mono text-xs text-muted-foreground">{k.prefix}…</p>
-            {k.description && <p className="mt-1 text-sm text-muted-foreground">{k.description}</p>}
-          </div>
-          <div className="flex flex-wrap gap-1.5">
-            <Button size="sm" variant="ghost" onClick={() => setPanel(panel === "activity" ? null : "activity")}>
-              Activity
-            </Button>
-            {k.status === "active" && (
-              <Button size="sm" variant="outline" onClick={() => setPanel(panel === "edit" ? null : "edit")}>
-                Permissions
-              </Button>
-            )}
-            {k.status === "active" && (
-              <ConfirmButton
-                size="sm"
-                variant="outline"
-                warn="Rotate the secret? The current token stops working."
-                onConfirm={() => rotate.mutate(k.id, { onSuccess: (t) => setRotated(t) })}
-              >
-                Rotate
-              </ConfirmButton>
-            )}
-            {k.status === "active" && (
-              <ConfirmButton
-                size="sm"
-                variant="outline"
-                warn="Disable this key? It stops working immediately."
-                onConfirm={() => disable.mutate(k.id)}
-              >
-                Disable
-              </ConfirmButton>
-            )}
-            <ConfirmButton
-              size="sm"
-              variant="destructive"
-              warn="Delete this key permanently?"
-              onConfirm={() => del.mutate(k.id)}
-            >
-              Delete
-            </ConfirmButton>
-          </div>
-        </div>
-
-        <PermSummary k={k} />
-
-        <div className="flex flex-wrap gap-x-4 gap-y-1 text-xs text-muted-foreground">
-          <span>
-            {k.permissions.length} permission{k.permissions.length === 1 ? "" : "s"}
-          </span>
-          {k.expires_at && <span>expires {new Date(k.expires_at).toLocaleDateString()}</span>}
-          <span>{k.last_used_at ? `last used ${timeAgo(k.last_used_at)}` : "never used"}</span>
-        </div>
-
-        {rotated && <TokenReveal token={rotated} onDismiss={() => setRotated(null)} />}
-        {panel === "activity" && <KeyActivity id={k.id} />}
-        {panel === "edit" && <EditPermissions k={k} onDone={() => setPanel(null)} />}
-      </CardContent>
-    </Card>
+    </Modal>
   );
 }
 
@@ -279,49 +214,42 @@ function CreateForm({ onCreated, onCancel }: { onCreated: (t: ApiKeyToken) => vo
   };
 
   const canSubmit = name.trim().length > 0 && selectionIsValid(selection) && !create.isPending;
+  const labelClass = "text-xs font-semibold text-ink-2";
 
   return (
-    <Card className="border-primary/40">
-      <CardContent className="flex flex-col gap-4 pt-6">
-        <div className="text-sm font-semibold">New API key</div>
-        <div className="grid gap-3 sm:grid-cols-2">
-          <div className="flex flex-col gap-1">
-            <label className="text-xs font-medium text-muted-foreground">Name</label>
-            <Input value={name} onChange={(e) => setName(e.target.value)} placeholder="My integration" />
-          </div>
-          <div className="flex flex-col gap-1">
-            <label className="text-xs font-medium text-muted-foreground">Expires (optional)</label>
-            <Input type="datetime-local" value={expiresAt} onChange={(e) => setExpiresAt(e.target.value)} />
-          </div>
-        </div>
-        <div className="flex flex-col gap-1">
-          <label className="text-xs font-medium text-muted-foreground">Description (optional)</label>
-          <Input
-            value={description}
-            onChange={(e) => setDescription(e.target.value)}
-            placeholder="What this key is for"
-          />
-        </div>
-        <div className="flex flex-col gap-1">
-          <label className="text-xs font-medium text-muted-foreground">
-            Permissions — a key can only be granted what you currently hold
-          </label>
-          <PermissionPicker
-            grantable={grantable.data ?? []}
-            facilities={facilities.data ?? []}
-            selection={selection}
-            onChange={setSelection}
-          />
-        </div>
-        <div className="flex gap-2">
-          <Button disabled={!canSubmit} onClick={submit}>
-            Create key
-          </Button>
-          <Button variant="ghost" onClick={onCancel}>
-            Cancel
-          </Button>
-        </div>
-      </CardContent>
+    <Card className="flex flex-col gap-4 p-5">
+      <h2 className="text-xl font-bold text-ink">New API key</h2>
+      <div className="grid gap-3 sm:grid-cols-2">
+        <label className="flex flex-col gap-1">
+          <span className={labelClass}>Name</span>
+          <Input value={name} onChange={(e) => setName(e.target.value)} placeholder="My integration" />
+        </label>
+        <label className="flex flex-col gap-1">
+          <span className={labelClass}>Expires (optional)</span>
+          <Input type="datetime-local" value={expiresAt} onChange={(e) => setExpiresAt(e.target.value)} />
+        </label>
+      </div>
+      <label className="flex flex-col gap-1">
+        <span className={labelClass}>Description (optional)</span>
+        <Input value={description} onChange={(e) => setDescription(e.target.value)} placeholder="What this key is for" />
+      </label>
+      <div className="flex flex-col gap-1">
+        <span className={labelClass}>Permissions — a key can only be granted what you currently hold</span>
+        <PermissionPicker
+          grantable={grantable.data ?? []}
+          facilities={facilities.data ?? []}
+          selection={selection}
+          onChange={setSelection}
+        />
+      </div>
+      <div className="flex gap-2">
+        <Button disabled={!canSubmit} onClick={submit}>
+          Create key
+        </Button>
+        <Button variant="ghost" onClick={onCancel}>
+          Cancel
+        </Button>
+      </div>
     </Card>
   );
 }
@@ -329,42 +257,160 @@ function CreateForm({ onCreated, onCancel }: { onCreated: (t: ApiKeyToken) => vo
 export function ApiKeysPage() {
   const { data: me, isLoading } = useMe();
   const keys = useMyKeys();
+  const rotate = useRotateKey().mutate;
+  const disable = useDisableKey().mutate;
+  const del = useDeleteKey().mutate;
   const [creating, setCreating] = useState(false);
   const [revealed, setRevealed] = useState<ApiKeyToken | null>(null);
+  const [activityFor, setActivityFor] = useState<ApiKey | null>(null);
+  const [editing, setEditing] = useState<ApiKey | null>(null);
+  const canCreate = hasPermission(me, "api_keys.key.create");
 
-  if (isLoading) {
-    return <p className="py-10 text-center text-sm text-muted-foreground">Loading…</p>;
-  }
-  if (!hasPermission(me, "api_keys.key.create")) {
+  const actions = useMemo(
+    () =>
+      canCreate && !creating ? (
+        <Button onClick={() => setCreating(true)}>
+          <Plus /> New key
+        </Button>
+      ) : undefined,
+    [canCreate, creating],
+  );
+  usePageHeader({ subtitle: SUBTITLE, count: canCreate ? (keys.data?.length ?? null) : null, actions });
+
+  const columns = useMemo<DataColumn<ApiKey>[]>(
+    () => [
+      {
+        accessorKey: "name",
+        header: "Key",
+        icon: KeyRound,
+        cell: (c) => {
+          const k = c.row.original;
+          return (
+            <div className="min-w-40">
+              <div className="font-semibold">{k.name}</div>
+              <div className="font-mono text-xs text-ink-3">{k.prefix}…</div>
+              {k.description && <div className="mt-0.5 text-xs text-ink-2">{k.description}</div>}
+            </div>
+          );
+        },
+      },
+      {
+        id: "status",
+        accessorFn: keyState,
+        header: "Status",
+        cell: (c) => <StatusBadge k={c.row.original} />,
+      },
+      {
+        id: "permissions",
+        accessorFn: (k) => k.permissions.length,
+        header: "Permissions",
+        icon: ShieldCheck,
+        cell: (c) => {
+          const perms = c.row.original.permissions;
+          if (perms.length === 0) return <span className="text-xs text-ink-3">no permissions</span>;
+          return (
+            <div className="flex max-w-md flex-wrap gap-1">
+              {perms.slice(0, 6).map((p, i) => (
+                <StatusPill key={i} className="font-mono font-normal">
+                  {p.permission}
+                  {p.artcc_id ? `@${p.artcc_id}` : ""}
+                </StatusPill>
+              ))}
+              {perms.length > 6 && (
+                <span className="self-center font-mono text-xs text-ink-3">+{perms.length - 6} more</span>
+              )}
+            </div>
+          );
+        },
+      },
+      {
+        accessorKey: "last_used_at",
+        header: "Last used",
+        icon: Clock,
+        mono: true,
+        cell: (c) => {
+          const v = c.getValue<string | null>();
+          return <span className="whitespace-nowrap text-ink-2">{v ? timeAgo(v) : "never"}</span>;
+        },
+      },
+      {
+        accessorKey: "expires_at",
+        header: "Expires",
+        icon: CalendarClock,
+        mono: true,
+        cell: (c) => {
+          const v = c.getValue<string | null>();
+          return <span className="whitespace-nowrap text-ink-2">{v ? new Date(v).toLocaleDateString() : "—"}</span>;
+        },
+      },
+      {
+        id: "actions",
+        header: "",
+        enableSorting: false,
+        align: "right",
+        cell: (c) => {
+          const k = c.row.original;
+          return (
+            <div className="flex justify-end gap-1.5">
+              <Button size="sm" variant="ghost" onClick={() => setActivityFor(k)}>
+                <Activity />
+                Activity
+              </Button>
+              {k.status === "active" && (
+                <Button size="sm" variant="outline" onClick={() => setEditing(k)}>
+                  Permissions
+                </Button>
+              )}
+              {k.status === "active" && (
+                <ConfirmButton
+                  size="sm"
+                  variant="outline"
+                  warn="Rotate the secret? The current token stops working."
+                  onConfirm={() => rotate(k.id, { onSuccess: (t) => setRevealed(t) })}
+                >
+                  Rotate
+                </ConfirmButton>
+              )}
+              {k.status === "active" && (
+                <ConfirmButton
+                  size="sm"
+                  variant="outline"
+                  warn="Disable this key? It stops working immediately."
+                  onConfirm={() => disable(k.id)}
+                >
+                  Disable
+                </ConfirmButton>
+              )}
+              <ConfirmButton
+                size="sm"
+                variant="destructive"
+                warn="Delete this key permanently?"
+                onConfirm={() => del(k.id)}
+              >
+                Delete
+              </ConfirmButton>
+            </div>
+          );
+        },
+      },
+    ],
+    [rotate, disable, del],
+  );
+
+  if (isLoading) return <QueryState isLoading />;
+  if (!canCreate) {
     return (
-      <div className="mx-auto w-full max-w-3xl">
-        <Card>
-          <CardContent className="py-16 text-center text-sm text-muted-foreground">
-            You don&apos;t have permission to create API keys. Ask an administrator to grant you
-            <span className="font-mono"> api_keys.key.create</span>.
-          </CardContent>
-        </Card>
-      </div>
+      <Card>
+        <EmptyState icon={Lock} title="No access">
+          You don&apos;t have permission to create API keys. Ask an administrator to grant you
+          <span className="font-mono"> api_keys.key.create</span>.
+        </EmptyState>
+      </Card>
     );
   }
 
   return (
-    <div className="mx-auto flex w-full max-w-3xl flex-col gap-6">
-      <div className="flex flex-wrap items-center justify-between gap-3">
-        <div>
-          <h1 className="text-2xl font-semibold tracking-tight">API keys</h1>
-          <p className="text-muted-foreground">
-            Personal access tokens for integrating with the OIS API. A key can never do more than you
-            can — it&apos;s capped by your live permissions.
-          </p>
-        </div>
-        {!creating && (
-          <Button onClick={() => setCreating(true)}>
-            <Plus className="mr-1 size-4" /> New key
-          </Button>
-        )}
-      </div>
-
+    <div className="flex flex-col gap-4">
       {revealed && <TokenReveal token={revealed} onDismiss={() => setRevealed(null)} />}
 
       {creating && (
@@ -377,27 +423,29 @@ export function ApiKeysPage() {
         />
       )}
 
-      {keys.isError ? (
-        <Card>
-          <CardContent className="py-10 text-center text-sm text-muted-foreground">
-            Couldn&apos;t load your keys.
-          </CardContent>
-        </Card>
-      ) : !keys.data ? (
-        <p className="py-6 text-center text-sm text-muted-foreground">Loading keys…</p>
-      ) : keys.data.length === 0 ? (
-        <Card>
-          <CardContent className="py-10 text-center text-sm text-muted-foreground">
-            No API keys yet. Create one to start integrating.
-          </CardContent>
-        </Card>
-      ) : (
-        <div className="flex flex-col gap-3">
-          {keys.data.map((k) => (
-            <KeyCard key={k.id} k={k} />
-          ))}
-        </div>
-      )}
+      <DataTable
+        label="Your API keys"
+        columns={columns}
+        data={keys.data ?? []}
+        getRowId={(k) => k.id}
+        rowCap={25}
+        isLoading={!keys.data && !keys.isError}
+        isError={keys.isError}
+        onRetry={() => keys.refetch()}
+        empty="No API keys yet. Create one to start integrating."
+      />
+
+      <Modal
+        open={activityFor != null}
+        onClose={() => setActivityFor(null)}
+        title={activityFor ? `Activity · ${activityFor.name}` : undefined}
+        description={activityFor ? <span className="font-mono">{activityFor.prefix}…</span> : undefined}
+        placement="right"
+      >
+        {activityFor && <KeyActivity id={activityFor.id} />}
+      </Modal>
+
+      {editing && <EditPermissions k={editing} onDone={() => setEditing(null)} />}
     </div>
   );
 }

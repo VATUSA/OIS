@@ -1,43 +1,31 @@
-import {Card, CardContent, CardHeader, CardTitle, Switch} from "@ois/ui";
+import {Card, EmptyState, QueryState, Select, Switch} from "@ois/ui";
+import {LogIn} from "lucide-react";
 
+import {usePageHeader} from "@/components/shell/page-meta";
 import {useMe} from "@/lib/auth";
 import {SETTINGS, type SettingDef} from "@/lib/settings";
 import {useSetting} from "@/lib/settings";
-
-const SELECT_CLASS =
-  "h-9 rounded-md border border-input bg-background px-2 text-sm outline-none focus-visible:ring-2 focus-visible:ring-ring";
 
 /** One settings row — its own component so the `useSetting` hook is called once per setting. */
 function SettingRow({ def }: { def: SettingDef }) {
   const { value, setValue } = useSetting(def.key, def.control.default);
   return (
-    <div className="flex items-center justify-between gap-4 py-3">
+    <div className="flex items-center justify-between gap-4 border-b border-line-soft py-3 last:border-b-0">
       <div className="min-w-0">
-        <div className="text-sm font-medium">{def.label}</div>
-        {def.description && (
-          <p className="mt-0.5 text-xs leading-snug text-muted-foreground">{def.description}</p>
-        )}
+        <div className="text-sm font-semibold text-ink">{def.label}</div>
+        {def.description && <p className="mt-0.5 text-xs leading-snug text-ink-2">{def.description}</p>}
       </div>
       <div className="shrink-0">
         {def.control.kind === "toggle" ? (
-          <Switch
-            checked={value as boolean}
-            onCheckedChange={(v) => setValue(v)}
-            aria-label={def.label}
-          />
+          <Switch checked={value as boolean} onCheckedChange={(v) => setValue(v)} aria-label={def.label} />
         ) : (
-          <select
-            className={SELECT_CLASS}
-            value={value as string}
-            onChange={(e) => setValue(e.target.value)}
-            aria-label={def.label}
-          >
+          <Select value={value as string} onChange={(e) => setValue(e.target.value)} aria-label={def.label}>
             {def.control.options.map((o) => (
               <option key={o.value} value={o.value}>
                 {o.label}
               </option>
             ))}
-          </select>
+          </Select>
         )}
       </div>
     </div>
@@ -46,15 +34,10 @@ function SettingRow({ def }: { def: SettingDef }) {
 
 export function SettingsPage() {
   const { data: me, isLoading } = useMe();
+  usePageHeader({ subtitle: "Preferences saved to your account." });
 
-  if (isLoading) {
-    return <p className="py-10 text-center text-sm text-muted-foreground">Loading…</p>;
-  }
-  if (!me) {
-    return (
-      <p className="py-10 text-center text-sm text-muted-foreground">Sign in to change your settings.</p>
-    );
-  }
+  if (isLoading) return <QueryState isLoading />;
+  if (!me) return <EmptyState icon={LogIn}>Sign in to change your settings.</EmptyState>;
 
   // Group settings by `group`, preserving first-seen order.
   const groups: { name: string; defs: SettingDef[] }[] = [];
@@ -68,21 +51,15 @@ export function SettingsPage() {
   }
 
   return (
-    <div className="mx-auto flex w-full max-w-3xl flex-col gap-6">
-      <div>
-        <h1 className="text-2xl font-semibold">Settings</h1>
-        <p className="text-sm text-muted-foreground">Preferences saved to your account.</p>
-      </div>
+    <div className="flex w-full max-w-3xl flex-col gap-4">
       {groups.map((g) => (
-        <Card key={g.name}>
-          <CardHeader>
-            <CardTitle className="text-base">{g.name}</CardTitle>
-          </CardHeader>
-          <CardContent className="divide-y pt-0">
+        <Card key={g.name} className="flex flex-col gap-1 p-5">
+          <h2 className="text-xl font-bold text-ink">{g.name}</h2>
+          <div className="flex flex-col">
             {g.defs.map((def) => (
               <SettingRow key={def.key} def={def} />
             ))}
-          </CardContent>
+          </div>
         </Card>
       ))}
     </div>

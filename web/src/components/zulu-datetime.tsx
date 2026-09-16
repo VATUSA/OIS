@@ -39,11 +39,11 @@ export function ZuluDateTime({
         type="date"
         value={date}
         onChange={(e) => e.target.value && commit(e.target.value, time)}
-        className="h-9 rounded-md border bg-background px-2 text-sm outline-none focus-visible:ring-2 focus-visible:ring-ring [color-scheme:light] dark:[color-scheme:dark]"
+        className="h-9 rounded-xs border border-line bg-panel-2 px-2 font-mono text-[13px] text-ink outline-none focus-visible:ring-2 focus-visible:ring-ring [color-scheme:light] dark:[color-scheme:dark]"
         aria-label="Date (Zulu)"
       />
       <TimeField value={time} onChange={(t) => commit(date, t)} />
-      <span className="text-xs text-muted-foreground">Z</span>
+      <span className="font-mono text-xs text-ink-3">Z</span>
     </div>
   );
 }
@@ -81,7 +81,7 @@ function TimeField({ value, onChange }: { value: string; onChange: (time: string
       placeholder="HH:MM"
       maxLength={5}
       aria-label="Time (24-hour, Zulu)"
-      className="h-9 w-[4.5rem] rounded-md border bg-background px-2 text-center text-sm tabular-nums outline-none focus-visible:ring-2 focus-visible:ring-ring"
+      className="h-9 w-[4.5rem] rounded-xs border border-line bg-panel-2 px-2 text-center font-mono text-[13px] tabular-nums text-ink placeholder:text-ink-3 outline-none focus-visible:ring-2 focus-visible:ring-ring"
     />
   );
 }
