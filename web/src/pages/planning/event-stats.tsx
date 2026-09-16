@@ -120,7 +120,7 @@ function CaptureConfig({ eventId }: { eventId: number }) {
             </p>
             {cap.capture_id && (
               <Link
-                to="/historical/replay"
+                to="/admin/historical/replay"
                 search={{ capture: cap.capture_id }}
                 className={buttonVariants({ variant: "outline", size: "sm" }) + " gap-1"}
               >

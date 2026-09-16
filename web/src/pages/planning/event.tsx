@@ -101,7 +101,7 @@ function ActionBar({
 }
 
 export function EventPlanningPage() {
-  const { eventId } = useParams({ from: "/planning/events/$eventId" });
+  const { eventId } = useParams({ from: "/admin/planning/events/$eventId" });
   const { data: me } = useMe();
   const canPlan = hasPermission(me, "events.plan.read");
   const id = Number(eventId);
@@ -110,7 +110,7 @@ export function EventPlanningPage() {
 
   const backLink = (
     <Link
-      to="/planning/events"
+      to="/admin/planning/events"
       className="flex w-fit items-center gap-1 text-sm text-muted-foreground transition-colors hover:text-foreground"
     >
       <ArrowLeft className="size-4" /> All events

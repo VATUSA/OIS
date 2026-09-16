@@ -80,3 +80,12 @@ export { useElementSize } from "./charts/use-size";
 export { ChartFrame } from "./charts/frame";
 export { TimeSeries, type TimeSeriesSeries, type Threshold } from "./charts/time-series";
 export { Bars, StackedBars, type StackKey } from "./charts/bars";
+export {
+  Shell,
+  ShellContent,
+  Sidebar,
+  SidebarGroup,
+  SidebarItem,
+  Breadcrumbs,
+  type Crumb,
+} from "./shell/shell";

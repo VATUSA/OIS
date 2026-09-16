@@ -27,8 +27,9 @@ export function vatusaEditUrl(event: Pick<EventSummary, "id" | "facility">): str
 }
 
 /** Upcoming (and in-progress) VATUSA events, soonest first. */
-export function useUpcomingEvents() {
+export function useUpcomingEvents({ enabled = true }: { enabled?: boolean } = {}) {
   return useQuery({
+    enabled,
     queryKey: ["events"],
     queryFn: async () => {
       const { data, error } = await ois.GET("/api/v1/events");

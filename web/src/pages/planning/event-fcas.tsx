@@ -60,7 +60,7 @@ export function EventFcasSection({ eventId }: { eventId: number }) {
           automatically 30 min before start), and are archived when the event ends.
         </p>
         <Link
-          to="/planning/events/$eventId/fcas"
+          to="/admin/planning/events/$eventId/fcas"
           params={{ eventId: String(eventId) }}
           className={buttonVariants({ size: "sm" })}
         >
@@ -76,7 +76,7 @@ export function EventFcasSection({ eventId }: { eventId: number }) {
           <p className="text-sm text-muted-foreground">No FCAs planned for this event yet.</p>
           {canEdit && (
             <Link
-              to="/planning/events/$eventId/fcas"
+              to="/admin/planning/events/$eventId/fcas"
               params={{ eventId: String(eventId) }}
               className={buttonVariants({ variant: "outline", size: "sm" }) + " mt-3"}
             >
@@ -149,15 +149,15 @@ export function EventFcasSection({ eventId }: { eventId: number }) {
   );
 }
 
-/** Full-screen event FCA builder (`/planning/events/$eventId/fcas`) — the shared FcaMapView scoped to
+/** Full-screen event FCA builder (`/admin/planning/events/$eventId/fcas`) — the shared FcaMapView scoped to
  *  this event, so drawing/editing here creates event-only FCAs. */
 export function EventFcaBuilderPage() {
-  const { eventId } = useParams({ from: "/planning/events/$eventId/fcas" });
+  const { eventId } = useParams({ from: "/admin/planning/events/$eventId/fcas" });
   const id = Number(eventId);
   if (!Number.isFinite(id)) {
     return (
-      <div className="flex h-[calc(100vh-3.5rem)] items-center justify-center">
-        <Link to="/planning/events" className={buttonVariants({ variant: "outline", size: "sm" })}>
+      <div className="flex h-full items-center justify-center">
+        <Link to="/admin/planning/events" className={buttonVariants({ variant: "outline", size: "sm" })}>
           Back to events
         </Link>
       </div>

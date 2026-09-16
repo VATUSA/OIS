@@ -1,11 +1,13 @@
 import {createRootRoute, createRoute, createRouter, lazyRouteComponent, Outlet, redirect, useRouterState,} from "@tanstack/react-router";
+import {Button} from "@ois/ui";
 
 import {FeedWatcher} from "@/components/feed-watcher";
+import {AppShell} from "@/components/shell/app-shell";
+import type {RouteMeta} from "@/components/shell/page-meta";
 import {RestrictionAlerts} from "@/components/restriction-alerts";
 import {WhatsNew} from "@/components/whats-new";
-import {Footer} from "@/components/footer";
-import {Navbar} from "@/components/navbar";
 import {useMe} from "@/lib/auth";
+import {movedPath} from "@/lib/moved-paths";
 import {AdvisoriesPage} from "@/pages/advisories";
 import {AdvisoriesFcaPage} from "@/pages/advisories/fcas";
 import {PilotPage} from "@/pages/pilot";
@@ -49,83 +51,51 @@ import {AdminJobs} from "@/pages/admin/jobs";
 import {AdminApiKeys} from "@/pages/admin/api-keys";
 import {AdminDiscord} from "@/pages/admin/discord";
 
+const isTruthy = (v: unknown) => v === true || v === 1 || v === "1" || v === "true";
+
 function RootLayout() {
-  // A route can declare a width tier via `staticData.layout` (see the route definitions):
-  //   "full" — no wrapper, owns the viewport (the maps);
-  //   "wide" — full monitor width with padding, for data-dense pages (dashboards, replay, tables)
-  //            so ultrawide displays aren't boxed into a narrow column;
-  //   default — a readable centered column (forms, prose, detail views).
-  // Read the deepest match that sets a layout so a group parent can set it for all its children.
-  const layout = useRouterState({
-    select: (s) => {
-      for (let i = s.matches.length - 1; i >= 0; i--) {
-        const l = s.matches[i].staticData?.layout;
-        if (l) return l;
-      }
-      return undefined;
-    },
-  });
-  // `?embed=1` on any route strips the whole app shell (no nav, footer, or feed watcher) so the page
-  // fills an external `<iframe>`. The page itself reads the same param to show a minimal chrome.
+  // `?embed=1` on any route strips the whole app shell (no nav, sidebar, or feed watcher) so the page
+  // fills an external `<iframe>`. Read the URL directly as well as router state: router search can
+  // resolve a tick late, and flipping embed after mount would remount the page into a different tree
+  // (discarding e.g. a map's auto-fit).
   const embed = useRouterState({
-    select: (s) => {
-      const v = (s.location.search as Record<string, unknown> | undefined)?.embed;
-      return v === true || v === 1 || v === "1" || v === "true";
-    },
-  });
+    select: (s) => isTruthy((s.location.search as Record<string, unknown> | undefined)?.embed),
+  }) || isTruthy(new URLSearchParams(window.location.search).get("embed"));
   // `useMe` errors only when the backend is unreachable (a 401 resolves to `null`, not an error). In
   // that case every data-gated page would otherwise sit on "Loading…" forever, so show a clear
   // retrying state instead — the query keeps probing and recovers on its own when the API returns.
   const me = useMe();
   if (me.isError) {
     return (
-      <div className="flex min-h-screen flex-col items-center justify-center gap-4 bg-background px-6 text-center text-foreground">
-        <p className="text-lg font-semibold">Can’t reach OIS</p>
-        <p className="max-w-md text-sm text-muted-foreground">
+      <div className="flex min-h-dvh flex-col items-center justify-center gap-4 bg-ground px-6 text-center text-ink">
+        <p className="text-xl font-bold">Can’t reach OIS</p>
+        <p className="max-w-md text-sm text-ink-2">
           The server isn’t responding right now. This page keeps trying and will reconnect
           automatically.
         </p>
-        <button
-          type="button"
-          onClick={() => me.refetch()}
-          className="rounded-md border px-4 py-2 text-sm transition-colors hover:bg-accent"
-        >
+        <Button variant="secondary" onClick={() => me.refetch()}>
           Retry now
-        </button>
+        </Button>
       </div>
     );
   }
 
-  const mainClass =
-    layout === "wide"
-      ? "w-full flex-1 px-4 py-8 sm:px-6 2xl:px-10"
-      : "mx-auto w-full max-w-7xl flex-1 px-4 py-8";
-  // Keep `<Outlet>` at a stable child position across the embed/normal split — `embed` can flip from
-  // false→true on the first render (search resolves a tick late), and if the Outlet moved between
-  // branches React would remount the whole page (discarding e.g. a map's auto-fit).
-  return (
-    <div
-      className={
-        embed
-          ? "h-[100dvh] w-full bg-background text-foreground"
-          : "flex min-h-screen flex-col bg-background text-foreground"
-      }
-    >
-      {embed ? null : <FeedWatcher />}
-      {embed ? null : <RestrictionAlerts />}
-      {embed ? null : <WhatsNew />}
-      {embed ? null : <Navbar />}
-      {embed || layout === "full" ? (
+  if (embed) {
+    return (
+      <div className="h-dvh w-full bg-ground text-ink">
         <Outlet />
-      ) : (
-        <>
-          <main className={mainClass}>
-            <Outlet />
-          </main>
-          <Footer />
-        </>
-      )}
-    </div>
+      </div>
+    );
+  }
+  return (
+    <>
+      <FeedWatcher />
+      <RestrictionAlerts />
+      <WhatsNew />
+      <AppShell>
+        <Outlet />
+      </AppShell>
+    </>
   );
 }
 
@@ -157,7 +127,11 @@ const airportRoute = createRoute({
   getParentRoute: () => opsRoute,
   path: "airport",
   component: AirportPage,
-  staticData: { layout: "wide" },
+  staticData: { layout: "wide", title: "Airport" },
+  // `?icao=` deep-links an airport (the ⌘K search jumps here).
+  validateSearch: (search: Record<string, unknown>): { icao?: string } => ({
+    icao: typeof search.icao === "string" ? search.icao.toUpperCase() : undefined,
+  }),
 });
 
 const TMU_TAB_IDS = [
@@ -173,7 +147,7 @@ const tmuRoute = createRoute({
   getParentRoute: () => opsRoute,
   path: "tmu",
   component: TmuPage,
-  staticData: { layout: "wide" },
+  staticData: { layout: "wide", title: "TMU" },
   // Which tab is active — permission-gated fallback (if the user can't see this tab) happens in
   // the component, since that depends on auth state this route-level validator doesn't have.
   validateSearch: (search: Record<string, unknown>): { tab?: TmuTabId } => ({
@@ -192,16 +166,19 @@ const myRoute = createRoute({
 const myIndexRoute = createRoute({
   getParentRoute: () => myRoute,
   path: "/",
+  staticData: { title: "My dashboards" },
   component: BoardLibraryPage,
 });
 const sharedBoardRoute = createRoute({
   getParentRoute: () => myRoute,
   path: "shared/$slug",
+  staticData: { title: "Shared dashboard" },
   component: SharedBoardPage,
 });
 const boardRoute = createRoute({
   getParentRoute: () => myRoute,
   path: "$boardId",
+  staticData: { title: "Dashboard" },
   component: BoardViewPage,
 });
 
@@ -209,28 +186,28 @@ const fcaRoute = createRoute({
   getParentRoute: () => opsRoute,
   path: "fca",
   component: FcaPage,
-  staticData: { layout: "full" },
+  staticData: { layout: "full", title: "FCA flow" },
 });
 
 const runwayRoute = createRoute({
   getParentRoute: () => opsRoute,
   path: "runway",
   component: RunwayPage,
-  staticData: { layout: "full" },
+  staticData: { layout: "full", title: "Runway balancer" },
 });
 
 const idstRoute = createRoute({
   getParentRoute: () => opsRoute,
   path: "idst",
   component: IdstPage,
-  staticData: { layout: "wide" },
+  staticData: { layout: "wide", title: "IDST" },
 });
 
 const aadcRoute = createRoute({
   getParentRoute: () => opsRoute,
   path: "aadc",
   component: AadcPage,
-  staticData: { layout: "wide" },
+  staticData: { layout: "wide", title: "Arrival demand chart" },
 });
 
 // --- Advisories (public, read-only) ---
@@ -244,6 +221,7 @@ const advisoriesRoute = createRoute({
 const advisoriesIndexRoute = createRoute({
   getParentRoute: () => advisoriesRoute,
   path: "/",
+  staticData: { title: "Advisories" },
   component: AdvisoriesPage,
 });
 
@@ -251,7 +229,7 @@ const advisoriesFcaRoute = createRoute({
   getParentRoute: () => advisoriesRoute,
   path: "fcas",
   component: AdvisoriesFcaPage,
-  staticData: { layout: "full" },
+  staticData: { layout: "full", title: "FCAs" },
   validateSearch: (search: Record<string, unknown>): { flight?: string } => ({
     flight: typeof search.flight === "string" ? search.flight : undefined,
   }),
@@ -267,11 +245,13 @@ const facilityMapRoute = createRoute({
 const facilityMapIndexRoute = createRoute({
   getParentRoute: () => facilityMapRoute,
   path: "/",
+  staticData: { title: "Facility map" },
   component: FacilityMapIndexPage,
 });
 const facilityMapDetailRoute = createRoute({
   getParentRoute: () => facilityMapRoute,
   path: "$facilityId",
+  staticData: { title: "Facility map" },
   component: FacilityMapPage,
   // Embed controls: `?embed=1` → minimal chrome (map + aircraft + legend only); `atc`/`routes` turn
   // those layers on; `theme` forces light/dark for the host page.
@@ -300,18 +280,21 @@ const facilityMapDetailRoute = createRoute({
 const pilotRoute = createRoute({
   getParentRoute: () => rootRoute,
   path: "pilot",
+  staticData: { title: "Pilot" },
   component: PilotPage,
 });
 
 const profileRoute = createRoute({
   getParentRoute: () => rootRoute,
   path: "profile",
+  staticData: { title: "Profile" },
   component: ProfilePage,
 });
 
 const settingsRoute = createRoute({
   getParentRoute: () => rootRoute,
   path: "settings",
+  staticData: { title: "Settings" },
   component: SettingsPage,
 });
 
@@ -319,6 +302,7 @@ const settingsRoute = createRoute({
 const apiKeysRoute = createRoute({
   getParentRoute: () => rootRoute,
   path: "api-keys",
+  staticData: { title: "API keys" },
   component: ApiKeysPage,
 });
 
@@ -326,13 +310,23 @@ const apiKeysRoute = createRoute({
 const privacyRoute = createRoute({
   getParentRoute: () => rootRoute,
   path: "privacy",
+  staticData: { title: "Privacy" },
   component: PrivacyPage,
+});
+
+// --- Admin ---
+
+const adminRoute = createRoute({
+  getParentRoute: () => rootRoute,
+  path: "admin",
+  component: AdminLayout,
+  staticData: { layout: "wide" },
 });
 
 // --- Planning (pre-event) ---
 
 const planningRoute = createRoute({
-  getParentRoute: () => rootRoute,
+  getParentRoute: () => adminRoute,
   path: "planning",
   component: Outlet,
   staticData: { layout: "wide" },
@@ -342,43 +336,49 @@ const planningIndexRoute = createRoute({
   getParentRoute: () => planningRoute,
   path: "/",
   beforeLoad: () => {
-    throw redirect({ to: "/planning/events" });
+    throw redirect({ to: "/admin/planning/events" });
   },
 });
 
 const planningEventsRoute = createRoute({
   getParentRoute: () => planningRoute,
   path: "events",
+  staticData: { title: "Events" },
   component: PlanningEventsPage,
 });
 
 const planningAirportConfigsRoute = createRoute({
   getParentRoute: () => planningRoute,
   path: "airport-configs",
+  staticData: { title: "Airport configs" },
   component: AirportConfigsPage,
 });
 
 const planningFacilityDocumentsRoute = createRoute({
   getParentRoute: () => planningRoute,
   path: "facility-documents",
+  staticData: { title: "Facility documents" },
   component: FacilityDocumentsPage,
 });
 
 const planningAirportSurfaceRoute = createRoute({
   getParentRoute: () => planningRoute,
   path: "airport-surface",
+  staticData: { title: "Airport surface" },
   component: AirportSurfacePage,
 });
 
 const planningAircraftProfilesRoute = createRoute({
   getParentRoute: () => planningRoute,
   path: "aircraft-profiles",
+  staticData: { title: "Aircraft profiles" },
   component: AircraftProfilesPage,
 });
 
 const planningEventRoute = createRoute({
   getParentRoute: () => planningRoute,
   path: "events/$eventId",
+  staticData: { title: "Event" },
   component: EventPlanningPage,
 });
 
@@ -386,13 +386,13 @@ const planningEventFcasRoute = createRoute({
   getParentRoute: () => planningRoute,
   path: "events/$eventId/fcas",
   component: EventFcaBuilderPage,
-  staticData: { layout: "full" },
+  staticData: { layout: "full", title: "Event FCAs" },
 });
 
 // --- Historical (persisted network statistics, replay + dashboard) ---
 
 const statsRoute = createRoute({
-  getParentRoute: () => rootRoute,
+  getParentRoute: () => adminRoute,
   path: "historical",
   component: Outlet,
   staticData: { layout: "wide" },
@@ -401,12 +401,14 @@ const statsRoute = createRoute({
 const statsIndexRoute = createRoute({
   getParentRoute: () => statsRoute,
   path: "/",
+  staticData: { title: "Network stats" },
   component: StatsPage,
 });
 
 const statsFlightRoute = createRoute({
   getParentRoute: () => statsRoute,
   path: "flights/$flightId",
+  staticData: { title: "Flight" },
   component: StatsFlightPage,
 });
 
@@ -415,6 +417,7 @@ const statsFlightRoute = createRoute({
 const statsReplayRoute = createRoute({
   getParentRoute: () => statsRoute,
   path: "replay",
+  staticData: { title: "Replay" },
   component: CaptureReplayPage,
   validateSearch: (
     search: Record<string, unknown>,
@@ -432,6 +435,7 @@ const statsReplayRoute = createRoute({
 const statsDashboardRoute = createRoute({
   getParentRoute: () => statsRoute,
   path: "dashboard",
+  staticData: { title: "Dashboard replay" },
   component: HistoricalDashboardPage,
   // Deep-link a replay: a capture (or a custom from/to window), a board, and the scrubber instant.
   validateSearch: (
@@ -451,45 +455,42 @@ const statsDashboardRoute = createRoute({
 const statsDelaysRoute = createRoute({
   getParentRoute: () => statsRoute,
   path: "delays",
+  staticData: { title: "Delays" },
   component: DelaysPage,
 });
 
 const statsTaxiRoute = createRoute({
   getParentRoute: () => statsRoute,
   path: "taxi",
+  staticData: { title: "Taxi insights" },
   component: TaxiInsightsPage,
-});
-
-// --- Admin ---
-
-const adminRoute = createRoute({
-  getParentRoute: () => rootRoute,
-  path: "/admin",
-  component: AdminLayout,
-  staticData: { layout: "wide" },
 });
 
 const adminIndexRoute = createRoute({
   getParentRoute: () => adminRoute,
   path: "/",
+  staticData: { title: "Overview" },
   component: AdminOverview,
 });
 
 const adminAccessRoute = createRoute({
   getParentRoute: () => adminRoute,
   path: "access",
+  staticData: { title: "Access" },
   component: AdminAccessControl,
 });
 
 const adminAuditRoute = createRoute({
   getParentRoute: () => adminRoute,
   path: "audit",
+  staticData: { title: "Audit log" },
   component: AdminAudit,
 });
 
 const adminJobsRoute = createRoute({
   getParentRoute: () => adminRoute,
   path: "jobs",
+  staticData: { title: "Background jobs" },
   component: AdminJobs,
 });
 
@@ -497,16 +498,18 @@ const adminJobsRoute = createRoute({
 const adminApiKeysRoute = createRoute({
   getParentRoute: () => adminRoute,
   path: "api-keys",
+  staticData: { title: "API keys" },
   component: AdminApiKeys,
 });
 
 const adminDiscordRoute = createRoute({
   getParentRoute: () => adminRoute,
   path: "discord",
+  staticData: { title: "Discord" },
   component: AdminDiscord,
 });
 
-// --- Legacy path redirects (old flat routes → /ops/*) ---
+// --- Legacy path redirects ---
 
 const legacyRedirects = (
   [
@@ -529,6 +532,19 @@ const legacyRedirects = (
   }),
 );
 
+const movedRedirects = ["planning", "historical"].flatMap((base) =>
+  [base, `${base}/$`].map((path) =>
+    createRoute({
+      getParentRoute: () => rootRoute,
+      path,
+      beforeLoad: ({ location }) => {
+        const href = movedPath(location.pathname, location.searchStr);
+        if (href) throw redirect({ href });
+      },
+    }),
+  ),
+);
+
 const routeTree = rootRoute.addChildren([
   indexRoute,
   opsRoute.addChildren([
@@ -548,24 +564,6 @@ const routeTree = rootRoute.addChildren([
   settingsRoute,
   apiKeysRoute,
   privacyRoute,
-  planningRoute.addChildren([
-    planningIndexRoute,
-    planningEventsRoute,
-    planningAirportConfigsRoute,
-    planningFacilityDocumentsRoute,
-    planningAirportSurfaceRoute,
-    planningAircraftProfilesRoute,
-    planningEventRoute,
-    planningEventFcasRoute,
-  ]),
-  statsRoute.addChildren([
-    statsIndexRoute,
-    statsFlightRoute,
-    statsReplayRoute,
-    statsDashboardRoute,
-    statsDelaysRoute,
-    statsTaxiRoute,
-  ]),
   adminRoute.addChildren([
     adminIndexRoute,
     adminAccessRoute,
@@ -573,8 +571,27 @@ const routeTree = rootRoute.addChildren([
     adminJobsRoute,
     adminApiKeysRoute,
     adminDiscordRoute,
+    planningRoute.addChildren([
+      planningIndexRoute,
+      planningEventsRoute,
+      planningAirportConfigsRoute,
+      planningFacilityDocumentsRoute,
+      planningAirportSurfaceRoute,
+      planningAircraftProfilesRoute,
+      planningEventRoute,
+      planningEventFcasRoute,
+    ]),
+    statsRoute.addChildren([
+      statsIndexRoute,
+      statsFlightRoute,
+      statsReplayRoute,
+      statsDashboardRoute,
+      statsDelaysRoute,
+      statsTaxiRoute,
+    ]),
   ]),
   ...legacyRedirects,
+  ...movedRedirects,
 ]);
 
 export const router = createRouter({ routeTree });
@@ -583,8 +600,6 @@ declare module "@tanstack/react-router" {
   interface Register {
     router: typeof router;
   }
-  /** Per-route width tier read by RootLayout. Omit for the default readable column. */
-  interface StaticDataRouteOption {
-    layout?: "full" | "wide";
-  }
+  /** Per-route shell meta read by the AppShell (width tier, title, subtitle, icon, views). */
+  interface StaticDataRouteOption extends RouteMeta {}
 }

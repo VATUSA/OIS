@@ -234,7 +234,7 @@ export function HistoricalDashboardPage() {
   const patchSearch = useCallback(
     (patch: Partial<DashboardSearch>) => {
       void navigate({
-        to: "/historical/dashboard",
+        to: "/admin/historical/dashboard",
         search: (prev) => ({ ...prev, ...patch }),
         replace: true,
         // Keep the URL in sync as the scrubber advances without yanking the page back to the top.

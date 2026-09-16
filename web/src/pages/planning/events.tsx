@@ -68,7 +68,7 @@ function EventActions({ event }: { event: EventSummary }) {
         size="sm"
         onClick={(e) => {
           e.stopPropagation();
-          navigate({ to: "/planning/events/$eventId", params: { eventId: String(event.id) } });
+          navigate({ to: "/admin/planning/events/$eventId", params: { eventId: String(event.id) } });
         }}
       >
         <SlidersHorizontal className="size-3.5" />

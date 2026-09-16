@@ -15,8 +15,8 @@ export type ModalProps = {
   size?: keyof typeof SIZE;
   /** Sticks to the bottom of the panel, outside the scrolling body. */
   footer?: React.ReactNode;
-  /** `center` (default); `top` pins it high (pickers, palettes); `right` is a full-height side drawer. */
-  placement?: "center" | "top" | "right";
+  /** `center` (default); `top` pins it high (pickers, palettes); `left`/`right` are full-height side drawers. */
+  placement?: "center" | "top" | "left" | "right";
   className?: string;
   "aria-label"?: string;
   children: React.ReactNode;
@@ -56,6 +56,7 @@ export function Modal({
         placement === "center" && "items-center justify-center p-4",
         placement === "top" && "items-start justify-center p-4 pt-[12vh]",
         placement === "right" && "justify-end",
+        placement === "left" && "justify-start",
       )}
       role="dialog"
       aria-modal="true"
@@ -65,8 +66,8 @@ export function Modal({
       <div
         className={cn(
           "relative flex w-full flex-col overflow-hidden border-line bg-panel",
-          placement === "right"
-            ? "h-full max-w-[90vw] border-l sm:max-w-sm"
+          placement === "right" || placement === "left"
+            ? cn("h-full max-w-[90vw] sm:max-w-sm", placement === "right" ? "border-l" : "border-r")
             : cn("max-h-[85vh] rounded-lg border", SIZE[size]),
           className,
         )}

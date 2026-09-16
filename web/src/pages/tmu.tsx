@@ -45,7 +45,7 @@ export function TmuPage() {
 
   if (tabs.length === 0) {
     return (
-      <div className="flex h-[calc(100vh-3.5rem)] items-center justify-center text-sm text-muted-foreground">
+      <div className="flex h-full items-center justify-center text-sm text-muted-foreground">
         You don&apos;t have traffic-management access.
       </div>
     );

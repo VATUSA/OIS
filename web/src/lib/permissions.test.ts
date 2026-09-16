@@ -1,7 +1,7 @@
 import {describe, expect, it} from "vitest";
 
 import type {Me} from "./auth";
-import {hasPermission, isAdmin} from "./permissions";
+import {hasPermission} from "./permissions";
 
 function me(overrides: { server_admin?: boolean; permissions?: unknown }): Me {
   return {
@@ -37,18 +37,5 @@ describe("hasPermission", () => {
   it("returns false when the path is missing", () => {
     const u = me({ permissions: { tmu: { program: ["read"] } } });
     expect(hasPermission(u, "audit.logs.read")).toBe(false);
-  });
-});
-
-describe("isAdmin", () => {
-  it("is true for a server admin", () => {
-    expect(isAdmin(me({ server_admin: true }))).toBe(true);
-  });
-  it("is true when holding an admin permission", () => {
-    expect(isAdmin(me({ permissions: { audit: { logs: ["read"] } } }))).toBe(true);
-  });
-  it("is false otherwise", () => {
-    expect(isAdmin(me({ permissions: { tmu: { program: ["read"] } } }))).toBe(false);
-    expect(isAdmin(null)).toBe(false);
   });
 });

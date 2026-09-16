@@ -735,7 +735,7 @@ export function FcaMapView({
     return (
       <div
         className={`flex items-center justify-center text-sm text-muted-foreground ${
-          embedded ? "h-full" : "h-[calc(100vh-3.5rem)]"
+          embedded ? "h-full" : "h-full"
         }`}
       >
         You don&apos;t have flow access.
@@ -746,7 +746,7 @@ export function FcaMapView({
   return (
     // `isolate` keeps the map's high internal z-indexes in their own stacking context so they don't
     // paint over app chrome (nav dropdowns, toasts, dialogs), which portal to the body above it.
-    <div className={`relative isolate flex ${embedded ? "h-full" : "h-[calc(100vh-3.5rem)]"}`}>
+    <div className={`relative isolate flex ${embedded ? "h-full" : "h-full"}`}>
       {!embedded && mobileList && (
         <div className="absolute inset-0 z-[650] bg-black/40 md:hidden" onClick={() => setMobileList(false)} />
       )}
@@ -761,7 +761,7 @@ export function FcaMapView({
           <div className="flex items-center gap-2 border-b px-4 py-3">
             {eventMode && (
               <Link
-                to="/planning/events/$eventId"
+                to="/admin/planning/events/$eventId"
                 params={{ eventId: String(eventId) }}
                 title="Back to the event"
                 className="text-muted-foreground transition-colors hover:text-foreground"

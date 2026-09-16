@@ -57,7 +57,7 @@ const FEATURES: { icon: LucideIcon; title: string; body: string; to: string; acc
     icon: CalendarClock,
     title: "Event planning",
     body: "Per-event airport rates, facility support, staffing, and TMI packages that go live on cue.",
-    to: "/planning/events",
+    to: "/admin/planning/events",
     accent: ACCENT.amber,
   },
   {
@@ -78,7 +78,7 @@ const FEATURES: { icon: LucideIcon; title: string; body: string; to: string; acc
     icon: TrendingUp,
     title: "Historical replay",
     body: "Scrub a past event or window and replay your dashboards at any instant.",
-    to: "/historical",
+    to: "/admin/historical",
     accent: ACCENT.violet,
   },
 ];
@@ -316,7 +316,7 @@ function FeaturedEvent() {
           </div>
 
           <Link
-            to="/planning/events/$eventId"
+            to="/admin/planning/events/$eventId"
             params={{ eventId: String(featured.id) }}
             className="text-2xl font-semibold tracking-tight hover:text-primary"
           >
@@ -341,7 +341,7 @@ function FeaturedEvent() {
               {alsoUpcoming.map((e) => (
                 <Link
                   key={e.id}
-                  to="/planning/events/$eventId"
+                  to="/admin/planning/events/$eventId"
                   params={{ eventId: String(e.id) }}
                   className="flex items-center justify-between gap-2 hover:text-primary"
                 >

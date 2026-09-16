@@ -1,4 +1,5 @@
 import {useMemo, useState} from "react";
+import {useSearch} from "@tanstack/react-router";
 import {Button, Card, CardContent, Input} from "@ois/ui";
 import {Filter, Lock} from "lucide-react";
 
@@ -616,8 +617,10 @@ const SUBS: { id: Sub; label: string }[] = [
 ];
 
 export function AirportPage() {
-  const [query, setQuery] = useState("");
-  const [icao, setIcao] = useState("");
+  // `?icao=` (⌘K, deep links) preselects the airport.
+  const initial = useSearch({ from: "/ops/airport" }).icao ?? "";
+  const [query, setQuery] = useState(initial);
+  const [icao, setIcao] = useState(initial);
   const [sub, setSub] = useState<Sub>("summary");
   const flow = useAirportFlow(icao);
 

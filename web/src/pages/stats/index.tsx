@@ -170,7 +170,7 @@ function AirportLookup({ icao, onPick }: { icao: string | null; onPick: (icao: s
                         <tr key={String(m.session_id)} className="border-t">
                           <td className="py-1.5 pr-3 font-mono font-medium">
                             <Link
-                              to="/historical/flights/$flightId"
+                              to="/admin/historical/flights/$flightId"
                               params={{ flightId: String(m.session_id) }}
                               className="hover:underline"
                             >
@@ -384,7 +384,7 @@ function SavedCaptures() {
                     </td>
                     <td className="py-2 text-right">
                       <Link
-                        to="/historical/replay"
+                        to="/admin/historical/replay"
                         search={{ capture: c.id }}
                         className={buttonVariants({ variant: "outline", size: "sm" }) + " gap-1"}
                       >

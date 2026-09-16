@@ -767,7 +767,7 @@ export function CaptureReplayPage() {
   const navigate = useNavigate();
   const patch = (p: Partial<ReplaySearch>) =>
     void navigate({
-      to: "/historical/replay",
+      to: "/admin/historical/replay",
       search: (prev) => ({ ...prev, ...p }),
       replace: true,
       resetScroll: false,
@@ -822,7 +822,7 @@ export function CaptureReplayPage() {
     // Full-width so the map uses the whole (ultrawide) container; the header + picker stay readable.
     <div className="flex w-full flex-col gap-4">
       <Link
-        to="/historical"
+        to="/admin/historical"
         className="flex w-fit items-center gap-1 text-sm text-muted-foreground transition-colors hover:text-foreground"
       >
         <ArrowLeft className="size-4" /> Network statistics

@@ -184,7 +184,7 @@ export function RunwayPage() {
 
   if (!canRead) {
     return (
-      <div className="flex h-[calc(100vh-3.5rem)] items-center justify-center text-sm text-muted-foreground">
+      <div className="flex h-full items-center justify-center text-sm text-muted-foreground">
         You don&apos;t have flow access.
       </div>
     );
@@ -196,7 +196,7 @@ export function RunwayPage() {
   const customIds = new Set((b?.custom_ends ?? []).map((c) => c.id));
 
   return (
-    <div className="flex h-[calc(100vh-3.5rem)] flex-col">
+    <div className="flex h-full flex-col">
       {/* Header */}
       <div className="flex flex-wrap items-center gap-x-4 gap-y-2 border-b px-4 py-2.5 text-sm sm:px-5">
         <span className="font-semibold uppercase tracking-wider">
