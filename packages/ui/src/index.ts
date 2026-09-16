@@ -64,3 +64,11 @@ export { PageHeader } from "./components/page-header";
 export { CommandPalette, type CommandItem, type CommandGroup } from "./components/command-palette";
 export { useLocalStorage } from "./hooks/use-local-storage";
 export { useIsMobile } from "./hooks/use-is-mobile";
+export {
+  DataTable,
+  type DataColumn,
+  type DataTableProps,
+  type ServerPagination,
+  type Selection,
+} from "./components/data-table";
+export type { SortingState } from "@tanstack/react-table";
