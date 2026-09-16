@@ -23,7 +23,7 @@ function RefreshControl({ status }: { status: WidgetStatus }) {
       disabled={status.isFetching}
       title={status.isFetching ? "Refreshing…" : `${agoLabel(status.updatedAt)} · click to refresh`}
       aria-label="Refresh data"
-      className="text-muted-foreground transition-colors hover:text-foreground disabled:opacity-60"
+      className="text-ink-3 transition-colors hover:text-ink disabled:opacity-60"
     >
       <RefreshCw className={"size-3.5 " + (status.isFetching ? "animate-spin" : "")} />
     </button>
@@ -64,10 +64,10 @@ export function WidgetFrame({
     return (
       <div className="group relative h-full">
         {editing && (
-          <div className="absolute right-1 top-1 z-10 flex items-center gap-1 rounded border bg-card/90 px-1 py-0.5 opacity-0 shadow-sm transition-opacity group-hover:opacity-100">
+          <div className="absolute right-1 top-1 z-10 flex items-center gap-1 rounded-xs border border-line bg-panel px-1 py-0.5 opacity-0 transition-opacity group-hover:opacity-100">
             {draggable && (
               <span
-                className="widget-drag-handle cursor-move text-muted-foreground hover:text-foreground"
+                className="widget-drag-handle cursor-move text-ink-3 hover:text-ink"
                 title="Drag to move"
               >
                 <GripVertical className="size-4" />
@@ -76,7 +76,7 @@ export function WidgetFrame({
             <ConfirmButton
               size="icon"
               variant="ghost"
-              className="size-6 text-muted-foreground hover:text-destructive"
+              className="size-6 text-ink-3 hover:text-danger"
               warn="Remove this widget?"
               onConfirm={onRemove}
             >
@@ -90,24 +90,24 @@ export function WidgetFrame({
   }
 
   return (
-    <div className="flex h-full flex-col overflow-hidden rounded-lg border bg-card shadow-sm">
-      <div className="flex items-center gap-2 border-b px-3 py-1.5">
+    <div className="flex h-full flex-col overflow-hidden rounded-md border border-line bg-card">
+      <div className="flex items-center gap-2 border-b border-line px-3 py-1.5">
         {editing && draggable && (
           <span
-            className="widget-drag-handle -ml-1 cursor-move text-muted-foreground hover:text-foreground"
+            className="widget-drag-handle -ml-1 cursor-move text-ink-3 hover:text-ink"
             title="Drag to move"
           >
             <GripVertical className="size-4" />
           </span>
         )}
-        <span className="truncate text-sm font-medium">{title}</span>
+        <span className="truncate text-sm font-semibold">{title}</span>
         <div className="ml-auto flex items-center gap-1.5">
           {status && <RefreshControl status={status} />}
           {editing && (
             <ConfirmButton
               size="icon"
               variant="ghost"
-              className="size-7 text-muted-foreground hover:text-destructive"
+              className="size-7 text-ink-3 hover:text-danger"
               warn="Remove this widget?"
               onConfirm={onRemove}
             >

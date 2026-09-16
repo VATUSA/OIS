@@ -177,6 +177,43 @@ pub struct AuditLogEntry {
     pub created_at: DateTime<Utc>,
 }
 
+/// One day's count in a [`DailySeries`].
+#[derive(Debug, Serialize, ToSchema)]
+pub struct DailyCount {
+    /// UTC calendar day.
+    pub day: chrono::NaiveDate,
+    pub count: i64,
+}
+
+/// Per-day counts over a trailing window, oldest day first, zero-filled (a day with no rows is
+/// present with `count: 0`, so a sparkline has one point per day).
+#[derive(Debug, Serialize, ToSchema)]
+pub struct DailySeries {
+    /// Sum of `points`.
+    pub total: i64,
+    pub points: Vec<DailyCount>,
+}
+
+/// Live background-job health from the in-memory job registry.
+#[derive(Debug, Serialize, ToSchema)]
+pub struct JobsHealth {
+    pub total: i64,
+    /// Jobs whose most recent completed run failed.
+    pub failing: i64,
+}
+
+/// The Admin page's landing summary. Each field is present only when the caller holds the
+/// permission for the page it summarises (`audit.logs.read`, `access.users.read`,
+/// `system.jobs.read`); a caller with none of them gets an all-null body.
+#[derive(Debug, Serialize, ToSchema)]
+pub struct AdminSummaryBody {
+    /// Audit-log entries per day, last 30 days.
+    pub audit_events: Option<DailySeries>,
+    /// Users created per day, last 30 days.
+    pub new_users: Option<DailySeries>,
+    pub jobs: Option<JobsHealth>,
+}
+
 /// A page of audit-log entries.
 #[derive(Debug, Serialize, ToSchema)]
 pub struct AuditLogPage {

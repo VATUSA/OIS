@@ -1,5 +1,8 @@
 import {useNavigate, useSearch} from "@tanstack/react-router";
+import {EmptyState, Tabs} from "@ois/ui";
+import {Calculator, Clock, Gauge, OctagonPause, ShieldAlert} from "lucide-react";
 
+import {usePageHeader} from "@/components/shell/page-meta";
 import {useMe} from "@/lib/auth";
 import {hasPermission} from "@/lib/permissions";
 import {GdpTab} from "@/pages/tmu/gdp";
@@ -15,6 +18,8 @@ type Tab =
   | "gdp"
   | "rate-calculator";
 
+type TabDef = { value: Tab; label: string; icon: typeof Gauge };
+
 export function TmuPage() {
   const { data: me } = useMe();
   const canPrograms = hasPermission(me, "tmu.program.read");
@@ -22,17 +27,23 @@ export function TmuPage() {
   const canGroundStops = hasPermission(me, "tmu.groundstop.read");
   const canGdp = hasPermission(me, "tmu.gdp.read");
 
-  const tabs: { id: Tab; label: string }[] = [
-    canPrograms && { id: "programs" as const, label: "Programs" },
-    canRestrictions && { id: "restrictions" as const, label: "Restrictions" },
-    canGroundStops && { id: "ground-stops" as const, label: "Ground stops" },
-    canGdp && { id: "gdp" as const, label: "Ground delay" },
-    canPrograms && { id: "rate-calculator" as const, label: "Rate calculator" },
-  ].filter(Boolean) as { id: Tab; label: string }[];
+  const tabs = [
+    canPrograms && { value: "programs", label: "Programs", icon: Gauge },
+    canRestrictions && { value: "restrictions", label: "Restrictions", icon: ShieldAlert },
+    canGroundStops && { value: "ground-stops", label: "Ground stops", icon: OctagonPause },
+    canGdp && { value: "gdp", label: "Ground delay", icon: Clock },
+    canPrograms && { value: "rate-calculator", label: "Rate calculator", icon: Calculator },
+  ].filter(Boolean) as TabDef[];
 
   const { tab: requestedTab } = useSearch({ strict: false }) as { tab?: Tab };
   const navigate = useNavigate();
-  const active = tabs.some((t) => t.id === requestedTab) ? requestedTab : tabs[0]?.id;
+  const active = tabs.some((t) => t.value === requestedTab) ? requestedTab : tabs[0]?.value;
+
+  // The board/table view switch only applies to the Programs tab.
+  usePageHeader({
+    subtitle: "Airport rate programs and inter-facility restrictions.",
+    views: active === "programs" ? undefined : null,
+  });
 
   function selectTab(id: Tab) {
     void navigate({
@@ -45,41 +56,16 @@ export function TmuPage() {
 
   if (tabs.length === 0) {
     return (
-      <div className="flex h-[calc(100vh-3.5rem)] items-center justify-center text-sm text-muted-foreground">
+      <EmptyState icon={ShieldAlert} className="h-full">
         You don&apos;t have traffic-management access.
-      </div>
+      </EmptyState>
     );
   }
 
   return (
     <div className="flex flex-col gap-6">
-      <div>
-        <h1 className="text-2xl font-semibold tracking-tight">
-          Traffic Management
-        </h1>
-        <p className="text-muted-foreground">
-          Airport rate programs and inter-facility restrictions.
-        </p>
-      </div>
-
-      {tabs.length > 1 && (
-        <div className="-mx-4 flex gap-1 overflow-x-auto border-b px-4 sm:mx-0 sm:px-0">
-          {tabs.map((t) => (
-            <button
-              key={t.id}
-              type="button"
-              onClick={() => selectTab(t.id)}
-              className={
-                "-mb-px shrink-0 whitespace-nowrap border-b-2 px-4 py-2 text-sm font-medium transition-colors " +
-                (active === t.id
-                  ? "border-primary text-foreground"
-                  : "border-transparent text-muted-foreground hover:text-foreground")
-              }
-            >
-              {t.label}
-            </button>
-          ))}
-        </div>
+      {tabs.length > 1 && active && (
+        <Tabs value={active} onChange={selectTab} items={tabs} />
       )}
 
       {active === "programs" && <ProgramsTab />}

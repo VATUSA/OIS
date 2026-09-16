@@ -1,4 +1,6 @@
-import {AEROWAY_COLORS, type Theme} from "./constants";
+import {readToken} from "@ois/ui";
+
+import type {Theme} from "./constants";
 
 /** Minimal MapLibre surface we touch — avoids depending on maplibre-gl's exported types. */
 export interface StyleMap {
@@ -13,10 +15,11 @@ export interface StyleMap {
  * visible layers instead. Free, no extra requests, appears once you zoom into a field (z≥10).
  * Idempotent: safe to call on every `styledata` (re-added after a theme swap wipes the style).
  */
-export function ensureAeroway(map: StyleMap, theme: Theme): void {
+export function ensureAeroway(map: StyleMap, _theme?: Theme): void {
   try {
     if (!map.getSource("carto") || map.getLayer("ois-aeroway-fill")) return;
-    const c = AEROWAY_COLORS[theme];
+    // Read at call time: the style loads after the theme class has switched.
+    const c = { fill: readToken("map-apron"), taxiway: readToken("map-taxiway"), runway: readToken("map-runway") };
     const base = { source: "carto", "source-layer": "aeroway" } as const;
     map.addLayer({
       ...base,

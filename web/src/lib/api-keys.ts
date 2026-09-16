@@ -57,6 +57,18 @@ export function useCreateKey() {
   });
 }
 
+/**
+ * Add a just-issued token to the on-screen reveals, newest first. A token is shown only once, so
+ * another key's reveal is never dropped; a key rotated again replaces its own (now dead) token.
+ */
+export function withReveal(reveals: readonly ApiKeyToken[], token: ApiKeyToken): ApiKeyToken[] {
+  return [token, ...reveals.filter((t) => t.key.id !== token.key.id)];
+}
+
+export function withoutReveal(reveals: readonly ApiKeyToken[], keyId: string): ApiKeyToken[] {
+  return reveals.filter((t) => t.key.id !== keyId);
+}
+
 /** Rotate a key's secret. Returns the new token once. */
 export function useRotateKey() {
   const qc = useQueryClient();

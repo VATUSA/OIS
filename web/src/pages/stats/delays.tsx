@@ -1,7 +1,21 @@
-import {useEffect, useState} from "react";
-import {Badge, Button, Card, CardContent, Switch} from "@ois/ui";
-import {ArrowLeft, ChevronLeft, ChevronRight} from "lucide-react";
+import {useEffect, useMemo, useState} from "react";
+import {
+  Button,
+  Card,
+  DataTable,
+  type DataColumn,
+  EmptyState,
+  FilterBar,
+  MetricCard,
+  QueryState,
+  SegmentedControl,
+  Select,
+  StatusPill,
+  Switch,
+} from "@ois/ui";
+import {ArrowLeft, Clock, Hash, Lock, Plane, Timer} from "lucide-react";
 
+import {usePageHeader} from "@/components/shell/page-meta";
 import {useMe} from "@/lib/auth";
 import {hasPermission} from "@/lib/permissions";
 import {useDelaySummary, type DelayGroup} from "@/lib/stats";
@@ -13,10 +27,16 @@ const WINDOWS: { h: number; label: string }[] = [
   { h: 168, label: "7d" },
   { h: 720, label: "30d" },
 ];
+const WINDOW_OPTIONS = WINDOWS.map((w) => ({ value: String(w.h), label: w.label }));
 
-const GREEN = "#22c55e";
-const YELLOW = "#f59e0b";
-const RED = "#ef4444";
+const KIND_OPTIONS = [
+  { value: "departure", label: "Departures" },
+  { value: "arrival", label: "Arrivals" },
+] as const;
+
+type Level = "ok" | "watch" | "over";
+const LEVEL_BG: Record<Level, string> = { ok: "bg-level-ok", watch: "bg-level-watch", over: "bg-level-over" };
+const LEVEL_TEXT: Record<Level, string> = { ok: "text-level-ok", watch: "text-level-watch", over: "text-level-over" };
 
 /** Seconds → `M:SS`. */
 function fmtDur(sec: number): string {
@@ -26,67 +46,94 @@ function fmtDur(sec: number): string {
 }
 
 /**
- * Color a median. Normalized: relative to the airport baseline (≤1.1× green, ≤1.4× yellow, else red).
- * Fixed: green ≤20 min, yellow ≤40 min, red beyond.
+ * Level a median. Normalized: relative to the airport baseline (≤1.1× ok, ≤1.4× watch, else over).
+ * Fixed: ok ≤20 min, watch ≤40 min, over beyond.
  */
-function colorFor(median: number, baseline: number | null, normalize: boolean): string {
+function levelFor(median: number, baseline: number | null, normalize: boolean): Level {
   if (normalize && baseline && baseline > 0) {
     const r = median / baseline;
-    return r <= 1.1 ? GREEN : r <= 1.4 ? YELLOW : RED;
+    return r <= 1.1 ? "ok" : r <= 1.4 ? "watch" : "over";
   }
-  return median <= 1200 ? GREEN : median <= 2400 ? YELLOW : RED;
+  return median <= 1200 ? "ok" : median <= 2400 ? "watch" : "over";
 }
 
-function GroupList({
+/** Ranked groups: key (clickable to drill when `onPick`), a median meter, median, n and p90. */
+function groupColumns({
+  keyHeader,
   groups,
   baseline,
   normalize,
   onPick,
 }: {
+  keyHeader: string;
   groups: DelayGroup[];
   baseline: number | null;
   normalize: boolean;
   onPick?: (key: string) => void;
-}) {
+}): DataColumn<DelayGroup>[] {
   const max = Math.max(1, ...groups.map((g) => g.median_sec));
-  return (
-    <ul className="flex flex-col divide-y divide-border/60">
-      {groups.map((g) => {
-        const color = colorFor(g.median_sec, baseline, normalize);
+  return [
+    {
+      accessorKey: "key",
+      header: keyHeader,
+      icon: Plane,
+      mono: true,
+      cell: (c) =>
+        onPick ? (
+          <button
+            type="button"
+            onClick={() => onPick(c.getValue<string>())}
+            className="font-semibold text-brand-ink hover:underline"
+          >
+            {c.getValue<string>()}
+          </button>
+        ) : (
+          <span className="font-semibold">{c.getValue<string>()}</span>
+        ),
+    },
+    {
+      id: "meter",
+      header: "",
+      enableSorting: false,
+      headerClassName: "w-full",
+      cell: (c) => {
+        const g = c.row.original;
         return (
-          <li key={g.key} className="flex items-center gap-3 py-2 text-sm">
-            {onPick ? (
-              <button
-                type="button"
-                onClick={() => onPick(g.key)}
-                className="w-16 shrink-0 text-left font-mono font-medium hover:text-primary"
-              >
-                {g.key}
-              </button>
-            ) : (
-              <span className="w-16 shrink-0 font-mono font-medium">{g.key}</span>
-            )}
-            <div className="flex-1">
-              <div
-                className="h-2 rounded"
-                style={{ width: `${(g.median_sec / max) * 100}%`, minWidth: 4, background: color }}
-              />
-            </div>
-            <span className="w-12 shrink-0 text-right font-mono font-semibold" style={{ color }}>
-              {fmtDur(g.median_sec)}
-            </span>
-            <span className="w-28 shrink-0 text-right text-xs tabular-nums text-muted-foreground">
-              n {g.count} · p90 {fmtDur(g.p90_sec)}
-            </span>
-          </li>
+          <div className="h-1.5 min-w-24 rounded-full bg-line-soft">
+            <div
+              className={`h-full rounded-full ${LEVEL_BG[levelFor(g.median_sec, baseline, normalize)]}`}
+              style={{ width: `${(g.median_sec / max) * 100}%`, minWidth: 4 }}
+            />
+          </div>
         );
-      })}
-    </ul>
-  );
+      },
+    },
+    {
+      accessorKey: "median_sec",
+      header: "Median",
+      icon: Timer,
+      mono: true,
+      align: "right",
+      cell: (c) => {
+        const g = c.row.original;
+        return (
+          <span className={`font-semibold ${LEVEL_TEXT[levelFor(g.median_sec, baseline, normalize)]}`}>
+            {fmtDur(g.median_sec)}
+          </span>
+        );
+      },
+    },
+    { accessorKey: "count", header: "n", icon: Hash, mono: true, align: "right" },
+    {
+      accessorKey: "p90_sec",
+      header: "p90",
+      icon: Clock,
+      mono: true,
+      align: "right",
+      cell: (c) => <span className="text-ink-2">{fmtDur(c.getValue<number>())}</span>,
+    },
+  ];
 }
-
-const selectClass =
-  "h-9 rounded-md border border-input bg-background px-2 text-sm outline-none focus-visible:ring-2 focus-visible:ring-ring";
 
 export function DelaysPage() {
   const { data: me } = useMe();
@@ -99,6 +146,11 @@ export function DelaysPage() {
   const [hours, setHours] = useState(24);
   const [normalize, setNormalize] = useState(false);
   const [page, setPage] = useState(1);
+
+  usePageHeader({
+    subtitle:
+      "Taxi-out and arrival transit times from live radar. Color by fixed thresholds, or normalized to each airport's baseline.",
+  });
 
   // A filter change invalidates whatever page was showing (the by-airport list underneath it
   // shifts) — start back at the first page.
@@ -116,19 +168,10 @@ export function DelaysPage() {
     pageSize: 25,
   });
 
-  if (!canRead) {
-    return (
-      <Card>
-        <CardContent className="py-16 text-center text-sm text-muted-foreground">
-          You don&apos;t have access to network statistics.
-        </CardContent>
-      </Card>
-    );
-  }
-
   const d = summary.data;
   const baseline = d?.overall.median_sec ?? null; // the airport's overall median (when filtered)
   const metric = kind === "departure" ? "taxi-out" : "arrival transit";
+  const procLabel = kind === "departure" ? "SID" : "STAR";
 
   const pickAirport = (a: string) => {
     setAirport(a);
@@ -136,185 +179,143 @@ export function DelaysPage() {
     setProcedure("");
   };
 
+  // Column sets close over each list's max (for the meter) — rebuilt only when their data changes.
+  const airportColumns = useMemo(
+    () => groupColumns({ keyHeader: "Airport", groups: d?.by_airport ?? [], baseline: null, normalize: false, onPick: pickAirport }),
+    // eslint-disable-next-line react-hooks/exhaustive-deps -- pickAirport only calls stable setters
+    [d?.by_airport],
+  );
+  const runwayColumns = useMemo(
+    () => groupColumns({ keyHeader: "Runway", groups: d?.by_runway ?? [], baseline, normalize }),
+    [d?.by_runway, baseline, normalize],
+  );
+  const procedureColumns = useMemo(
+    () => groupColumns({ keyHeader: procLabel, groups: d?.by_procedure ?? [], baseline, normalize }),
+    [d?.by_procedure, baseline, normalize, procLabel],
+  );
+
+  if (!canRead) {
+    return <EmptyState icon={Lock}>You don&apos;t have access to network statistics.</EmptyState>;
+  }
+
   return (
     <div className="flex flex-col gap-6">
-      <div className="flex flex-col gap-1">
-        <h1 className="text-2xl font-semibold tracking-tight">Delays</h1>
-        <p className="text-muted-foreground">
-          Average {metric} times from live radar, over the last{" "}
-          {WINDOWS.find((w) => w.h === hours)?.label ?? `${hours}h`}. Color by fixed thresholds, or
-          normalized to each airport&apos;s baseline.
-        </p>
-      </div>
+      <FilterBar>
+        <SegmentedControl aria-label="Direction" value={kind} onChange={setKind} options={KIND_OPTIONS} />
+        <SegmentedControl
+          aria-label="Window"
+          value={String(hours)}
+          onChange={(v) => setHours(Number(v))}
+          options={WINDOW_OPTIONS}
+        />
 
-      {/* Controls */}
-      <Card>
-        <CardContent className="flex flex-wrap items-center gap-x-4 gap-y-3 pt-6">
-          <div className="flex overflow-hidden rounded-md border">
-            {(["departure", "arrival"] as const).map((k) => (
-              <button
-                key={k}
-                type="button"
-                onClick={() => setKind(k)}
-                className={
-                  "px-3 py-1.5 text-sm font-medium transition-colors " +
-                  (kind === k ? "bg-primary text-primary-foreground" : "hover:bg-accent/40")
-                }
-              >
-                {k === "departure" ? "Departures" : "Arrivals"}
-              </button>
-            ))}
-          </div>
+        {airport ? (
+          <>
+            <Button size="sm" variant="ghost" onClick={() => pickAirport("")}>
+              <ArrowLeft className="size-4" /> All airports
+            </Button>
+            <StatusPill tone="brand" className="font-mono">
+              {airport}
+            </StatusPill>
+            {d && d.by_runway.length > 0 && (
+              <Select size="sm" aria-label="Runway" value={runway} onChange={(e) => setRunway(e.target.value)}>
+                <option value="">All runways</option>
+                {d.by_runway.map((g) => (
+                  <option key={g.key} value={g.key}>
+                    Rwy {g.key}
+                  </option>
+                ))}
+              </Select>
+            )}
+            {d && d.by_procedure.length > 0 && (
+              <Select size="sm" aria-label={procLabel} value={procedure} onChange={(e) => setProcedure(e.target.value)}>
+                <option value="">All {procLabel}s</option>
+                {d.by_procedure.map((g) => (
+                  <option key={g.key} value={g.key}>
+                    {g.key}
+                  </option>
+                ))}
+              </Select>
+            )}
+          </>
+        ) : (
+          <span className="text-xs text-ink-3">Pick an airport below to drill in.</span>
+        )}
 
-          <label className="flex items-center gap-1.5 text-xs text-muted-foreground">
-            Window
-            <select value={hours} onChange={(e) => setHours(Number(e.target.value))} className={selectClass}>
-              {WINDOWS.map((w) => (
-                <option key={w.h} value={w.h}>
-                  {w.label}
-                </option>
-              ))}
-            </select>
-          </label>
+        <label className="ml-auto flex items-center gap-2 text-xs text-ink-2">
+          <Switch checked={normalize} onCheckedChange={setNormalize} />
+          Normalize per airport
+        </label>
+      </FilterBar>
 
-          {airport ? (
-            <>
-              <button
-                type="button"
-                onClick={() => pickAirport("")}
-                className="flex items-center gap-1 text-sm font-medium hover:text-primary"
-              >
-                <ArrowLeft className="size-4" /> All airports
-              </button>
-              <span className="font-mono font-semibold">{airport}</span>
-              {d && d.by_runway.length > 0 && (
-                <select value={runway} onChange={(e) => setRunway(e.target.value)} className={selectClass}>
-                  <option value="">All runways</option>
-                  {d.by_runway.map((g) => (
-                    <option key={g.key} value={g.key}>
-                      Rwy {g.key}
-                    </option>
-                  ))}
-                </select>
-              )}
-              {d && d.by_procedure.length > 0 && (
-                <select
-                  value={procedure}
-                  onChange={(e) => setProcedure(e.target.value)}
-                  className={selectClass}
-                >
-                  <option value="">All {kind === "departure" ? "SIDs" : "STARs"}</option>
-                  {d.by_procedure.map((g) => (
-                    <option key={g.key} value={g.key}>
-                      {g.key}
-                    </option>
-                  ))}
-                </select>
-              )}
-            </>
-          ) : (
-            <span className="text-xs text-muted-foreground">Pick an airport below to drill in.</span>
-          )}
-
-          <label className="ml-auto flex items-center gap-1.5 text-xs text-muted-foreground">
-            <Switch checked={normalize} onCheckedChange={setNormalize} className="scale-[0.68]" />
-            Normalize per airport
-          </label>
-        </CardContent>
-      </Card>
-
-      {/* Overall */}
-      {d && (
-        <div className="flex flex-wrap items-center gap-x-6 gap-y-1 px-1 text-sm">
-          <span>
-            <span className="text-muted-foreground">Median </span>
-            <span className="font-mono text-lg font-semibold">{fmtDur(d.overall.median_sec)}</span>
-          </span>
-          <span className="text-muted-foreground">avg {fmtDur(d.overall.avg_sec)}</span>
-          <span className="text-muted-foreground">p90 {fmtDur(d.overall.p90_sec)}</span>
-          <span className="text-muted-foreground">{d.overall.count} legs</span>
-        </div>
-      )}
-
-      {/* Content */}
-      {!d ? (
-        <Card>
-          <CardContent className="py-12 text-center text-sm text-muted-foreground">Loading…</CardContent>
-        </Card>
-      ) : d.overall.count === 0 ? (
-        <Card>
-          <CardContent className="py-12 text-center text-sm text-muted-foreground">
-            No {metric} data in this window yet — the collector builds it from live traffic.
-          </CardContent>
-        </Card>
-      ) : !airport ? (
-        <Card>
-          <CardContent className="pt-6">
-            <div className="mb-2 flex items-center justify-between">
-              <span className="text-[10px] font-medium uppercase tracking-wide text-muted-foreground">
-                By airport · median {metric}
-              </span>
-              <span className="text-xs text-muted-foreground">{d.by_airport_total} airports</span>
+      <QueryState isLoading={!d && !summary.isError} isError={!d && summary.isError} onRetry={() => summary.refetch()}>
+        {d && (
+          <>
+            <div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-4">
+              <MetricCard label={`Median ${metric}`} icon={Timer} value={fmtDur(d.overall.median_sec)} />
+              <MetricCard label="Average" icon={Clock} value={fmtDur(d.overall.avg_sec)} />
+              <MetricCard label="p90" icon={Clock} value={fmtDur(d.overall.p90_sec)} />
+              <MetricCard label="Legs" icon={Hash} value={d.overall.count} />
             </div>
-            <GroupList groups={d.by_airport} baseline={null} normalize={false} onPick={pickAirport} />
-            {d.by_airport_total > d.page_size && (
-              <div className="mt-3 flex items-center justify-end gap-2">
-                <span className="text-xs text-muted-foreground">
-                  Page {d.page} of {Math.max(1, Math.ceil(d.by_airport_total / d.page_size))}
-                </span>
-                <Button
-                  size="sm"
-                  variant="outline"
-                  className="h-7 px-2"
-                  disabled={d.page <= 1}
-                  onClick={() => setPage((p) => Math.max(1, p - 1))}
-                >
-                  <ChevronLeft className="size-3.5" />
-                </Button>
-                <Button
-                  size="sm"
-                  variant="outline"
-                  className="h-7 px-2"
-                  disabled={d.page * d.page_size >= d.by_airport_total}
-                  onClick={() => setPage((p) => p + 1)}
-                >
-                  <ChevronRight className="size-3.5" />
-                </Button>
+
+            {d.overall.count === 0 ? (
+              <EmptyState>No {metric} data in this window yet — the collector builds it from live traffic.</EmptyState>
+            ) : !airport ? (
+              <section className="flex flex-col gap-3">
+                <div className="flex items-baseline justify-between gap-2">
+                  <h2 className="text-xl font-bold">By airport · median {metric}</h2>
+                  <span className="font-mono text-xs text-ink-3">{d.by_airport_total} airports</span>
+                </div>
+                <DataTable
+                  label={`By airport, median ${metric}`}
+                  columns={airportColumns}
+                  data={d.by_airport}
+                  getRowId={(g) => g.key}
+                  rowCap={25}
+                  serverPagination={{
+                    page: d.page,
+                    pageSize: d.page_size,
+                    total: d.by_airport_total,
+                    onPageChange: setPage,
+                  }}
+                />
+              </section>
+            ) : (
+              <div className="grid gap-4 lg:grid-cols-2">
+                <Card className="flex min-w-0 flex-col gap-3 p-5">
+                  <div className="flex items-center justify-between gap-2">
+                    <h2 className="text-xl font-bold">By runway</h2>
+                    {normalize && (
+                      <StatusPill tone="neutral" className="font-mono">
+                        vs {fmtDur(baseline ?? 0)}
+                      </StatusPill>
+                    )}
+                  </div>
+                  <DataTable
+                    label="By runway"
+                    columns={runwayColumns}
+                    data={d.by_runway}
+                    getRowId={(g) => g.key}
+                    rowCap={25}
+                    empty="No runway data."
+                  />
+                </Card>
+                <Card className="flex min-w-0 flex-col gap-3 p-5">
+                  <h2 className="text-xl font-bold">By {procLabel}</h2>
+                  <DataTable
+                    label={`By ${procLabel}`}
+                    columns={procedureColumns}
+                    data={d.by_procedure}
+                    getRowId={(g) => g.key}
+                    rowCap={25}
+                    empty="No procedure data."
+                  />
+                </Card>
               </div>
             )}
-          </CardContent>
-        </Card>
-      ) : (
-        <div className="grid gap-4 lg:grid-cols-2">
-          <Card>
-            <CardContent className="pt-6">
-              <div className="mb-2 flex items-center justify-between">
-                <span className="text-[10px] font-medium uppercase tracking-wide text-muted-foreground">
-                  By runway
-                </span>
-                {normalize && <Badge variant="outline">vs {fmtDur(baseline ?? 0)}</Badge>}
-              </div>
-              {d.by_runway.length === 0 ? (
-                <p className="py-6 text-center text-xs text-muted-foreground">No runway data.</p>
-              ) : (
-                <GroupList groups={d.by_runway} baseline={baseline} normalize={normalize} />
-              )}
-            </CardContent>
-          </Card>
-          <Card>
-            <CardContent className="pt-6">
-              <div className="mb-2 text-[10px] font-medium uppercase tracking-wide text-muted-foreground">
-                By {kind === "departure" ? "SID" : "STAR"}
-              </div>
-              {d.by_procedure.length === 0 ? (
-                <p className="py-6 text-center text-xs text-muted-foreground">No procedure data.</p>
-              ) : (
-                <GroupList groups={d.by_procedure} baseline={baseline} normalize={normalize} />
-              )}
-            </CardContent>
-          </Card>
-        </div>
-      )}
+          </>
+        )}
+      </QueryState>
     </div>
   );
 }

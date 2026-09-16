@@ -92,11 +92,11 @@ export function FlightSearch<T extends SearchableAircraft>({
         className={cn(
           "flex items-center gap-1.5",
           overlay
-            ? "rounded-lg border bg-background/95 px-2 shadow-lg backdrop-blur focus-within:ring-2 focus-within:ring-ring"
-            : "h-10 rounded-md border bg-background px-3 focus-within:ring-2 focus-within:ring-ring",
+            ? "h-8 rounded-full border border-line bg-panel px-3 focus-within:ring-2 focus-within:ring-ring"
+            : "h-9 rounded-full border border-line bg-panel-2 px-3.5 focus-within:ring-2 focus-within:ring-ring",
         )}
       >
-        <Search className="size-3.5 shrink-0 text-muted-foreground" />
+        <Search className="size-3.5 shrink-0 text-ink-3" />
         <input
           value={query}
           onChange={(e) => {
@@ -112,8 +112,8 @@ export function FlightSearch<T extends SearchableAircraft>({
           aria-autocomplete="list"
           autoFocus={autoFocus}
           className={cn(
-            "w-full bg-transparent font-mono uppercase outline-none placeholder:normal-case placeholder:text-muted-foreground",
-            overlay ? "h-8 w-32 text-xs" : "text-sm",
+            "w-full bg-transparent font-mono uppercase text-ink outline-none placeholder:normal-case placeholder:font-sans placeholder:text-ink-3",
+            overlay ? "h-full w-32 text-xs" : "text-sm",
           )}
         />
       </div>
@@ -122,7 +122,7 @@ export function FlightSearch<T extends SearchableAircraft>({
         <ul
           role="listbox"
           className={cn(
-            "absolute z-[1000] mt-1 max-h-72 min-w-56 overflow-auto rounded-lg border bg-popover p-1 text-popover-foreground shadow-xl",
+            "absolute z-[1000] mt-1 max-h-72 min-w-56 overflow-auto rounded-sm border border-line bg-panel p-1 text-ink",
             overlay ? "right-0" : "w-full",
           )}
         >
@@ -136,14 +136,14 @@ export function FlightSearch<T extends SearchableAircraft>({
                   choose(h.ac.callsign);
                 }}
                 className={cn(
-                  "flex w-full items-center justify-between gap-3 rounded-md px-2 py-1.5 text-left",
-                  i === active ? "bg-accent text-accent-foreground" : "hover:bg-muted",
+                  "flex w-full items-center justify-between gap-3 rounded-xs px-2 py-1.5 text-left",
+                  i === active ? "bg-brand-soft text-ink" : "hover:bg-panel-2",
                 )}
               >
                 <span className="font-mono text-xs font-semibold tracking-wide">
                   <Highlight text={h.ac.callsign} positions={h.positions} />
                 </span>
-                <span className="shrink-0 font-mono text-[10px] text-muted-foreground">
+                <span className="shrink-0 font-mono text-[10px] text-ink-3">
                   {h.ac.dep || "?"}→{h.ac.arr || "?"}
                   {h.ac.actype ? ` · ${h.ac.actype}` : ""}
                 </span>
@@ -163,7 +163,7 @@ function Highlight({text, positions}: {text: string; positions: number[]}) {
   return (
     <>
       {text.split("").map((ch, i) => (
-        <span key={i} className={set.has(i) ? "text-primary" : undefined}>
+        <span key={i} className={set.has(i) ? "text-brand-ink" : undefined}>
           {ch}
         </span>
       ))}

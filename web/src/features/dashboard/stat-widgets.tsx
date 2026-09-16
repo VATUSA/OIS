@@ -1,4 +1,5 @@
 import type {ComponentType} from "react";
+import {cn, toneText, type Tone} from "@ois/ui";
 
 import {useFcas} from "@/lib/fca";
 import {useFeedStatus} from "@/lib/feed";
@@ -9,6 +10,7 @@ import {useGroundStops, usePrograms, useTmis} from "@/lib/tmu";
 
 import type {StatMetricId} from "./types";
 
+/** A stat tile — the MetricCard type ramp (label · big 700 mono number · sub) inside the widget frame. */
 function Tile({
   label,
   value,
@@ -18,15 +20,15 @@ function Tile({
   label: string;
   value: number | string;
   sub?: string;
-  tone?: string;
+  tone?: Tone;
 }) {
   return (
-    <div className="flex h-full flex-col justify-center gap-1 px-1">
-      <span className={"text-4xl font-semibold tabular-nums " + (tone ?? "")}>{value}</span>
-      <span className="text-xs font-medium uppercase tracking-wide text-muted-foreground">
-        {label}
+    <div className="flex h-full flex-col justify-center gap-1.5 px-1">
+      <span className="text-xs text-ink-2">{label}</span>
+      <span className={cn("font-mono text-4xl font-bold leading-none tracking-tight", tone ? toneText[tone] : "text-ink")}>
+        {value}
       </span>
-      {sub && <span className="text-xs text-muted-foreground/80">{sub}</span>}
+      {sub && <span className="text-xs text-ink-3">{sub}</span>}
     </div>
   );
 }
@@ -37,7 +39,7 @@ function Tile({
 /** Config metrics (programs/TMIs/ground stops/GDPs/FCAs) have no point-in-time historical form —
  * config history is out of scope — so they read "n/a" in replay rather than showing current config. */
 function NaTile({ label }: { label: string }) {
-  return <Tile label={label} value="—" sub="n/a in replay" tone="text-muted-foreground" />;
+  return <Tile label={label} value="—" sub="n/a in replay" tone="neutral" />;
 }
 
 function PilotsStat() {
@@ -46,7 +48,7 @@ function PilotsStat() {
   const hist = useHistPilotCount(at);
   if (at != null) {
     return (
-      <Tile label="Pilots online" value={hist.data ?? "—"} sub="in replay" tone="text-sky-400" />
+      <Tile label="Pilots online" value={hist.data ?? "—"} sub="in replay" tone="brand" />
     );
   }
   const data = live.data;
@@ -55,7 +57,7 @@ function PilotsStat() {
       label="Pilots online"
       value={data?.pilots ?? "—"}
       sub={data ? (data.healthy ? "feed live" : "feed down") : "connecting…"}
-      tone={data && !data.healthy ? "text-muted-foreground" : "text-emerald-500"}
+      tone={data && !data.healthy ? "neutral" : "good"}
     />
   );
 }
@@ -73,14 +75,14 @@ function ProgramsStat() {
 function TmisStat() {
   const { data } = useTmis();
   const n = data?.length ?? 0;
-  return <Tile label="Active TMIs" value={data ? n : "—"} tone={n > 0 ? "text-amber-500" : ""} />;
+  return <Tile label="Active TMIs" value={data ? n : "—"} tone={n > 0 ? "warn" : undefined} />;
 }
 
 function GroundStopsStat() {
   const { data } = useGroundStops();
   const n = data?.length ?? 0;
   return (
-    <Tile label="Ground stops" value={data ? n : "—"} tone={n > 0 ? "text-destructive" : ""} />
+    <Tile label="Ground stops" value={data ? n : "—"} tone={n > 0 ? "bad" : undefined} />
   );
 }
 
@@ -88,7 +90,7 @@ function GdpsStat() {
   const { data } = useGdps();
   const n = data?.length ?? 0;
   return (
-    <Tile label="Ground delay programs" value={data ? n : "—"} tone={n > 0 ? "text-amber-500" : ""} />
+    <Tile label="Ground delay programs" value={data ? n : "—"} tone={n > 0 ? "warn" : undefined} />
   );
 }
 

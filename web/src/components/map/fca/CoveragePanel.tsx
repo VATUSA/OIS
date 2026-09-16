@@ -10,19 +10,19 @@ export function CoveragePanel() {
   const c = coverage.data;
   if (!c || c.pilots_with_route === 0) return null;
   const pct = c.resolved_pct;
-  const tone = pct >= 90 ? "text-emerald-500" : pct >= 75 ? "text-amber-500" : "text-red-500";
+  const tone = pct >= 90 ? "text-success" : pct >= 75 ? "text-warning" : "text-danger";
   return (
-    <div className="border-t px-4 py-2 text-xs">
+    <div className="border-t border-line px-4 py-2 text-xs">
       <button
         type="button"
         onClick={() => setOpen((o) => !o)}
         className="flex w-full items-center justify-between gap-2 text-left"
         title="Share of live filed routes the nav engine fully resolves"
       >
-        <span className="text-muted-foreground">Route coverage</span>
+        <span className="text-ink-3">Route coverage</span>
         <span className="font-mono tabular-nums">
           <span className={tone}>{pct.toFixed(0)}%</span>
-          <span className="text-muted-foreground">
+          <span className="text-ink-3">
             {" "}
             ({c.fully_resolved}/{c.pilots_with_route})
           </span>
@@ -30,15 +30,15 @@ export function CoveragePanel() {
         </span>
       </button>
       {open && c.top_unresolved.length > 0 && (
-        <div className="mt-1.5 max-h-40 overflow-y-auto rounded border bg-muted/20 p-1.5">
-          <div className="mb-1 text-[10px] uppercase tracking-wide text-muted-foreground">
+        <div className="mt-1.5 max-h-40 overflow-y-auto rounded-xs border border-line bg-panel-2 p-1.5">
+          <div className="mb-1 text-[10px] font-semibold uppercase tracking-wide text-ink-3">
             Top unresolved tokens
           </div>
           <div className="grid grid-cols-2 gap-x-3 gap-y-0.5 font-mono">
             {c.top_unresolved.slice(0, 20).map((u) => (
               <div key={u.token} className="flex justify-between gap-2">
                 <span className="truncate">{u.token}</span>
-                <span className="shrink-0 text-muted-foreground">{u.count}</span>
+                <span className="shrink-0 text-ink-3">{u.count}</span>
               </div>
             ))}
           </div>

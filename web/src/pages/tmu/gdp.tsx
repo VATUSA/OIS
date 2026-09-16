@@ -1,9 +1,22 @@
-import {useState} from "react";
-import {Badge, Button, Card, CardContent, ConfirmButton, Input, useToast} from "@ois/ui";
-import {Pencil, Plus} from "lucide-react";
+import {useMemo, useState} from "react";
+import {
+  Bars,
+  Button,
+  Card,
+  ConfirmButton,
+  type DataColumn,
+  DataTable,
+  Input,
+  MetricCard,
+  QueryState,
+  StatusPill,
+  useToast,
+} from "@ois/ui";
+import {CircleDot, Clock, Gauge, Pencil, Plane, Plus, Radar, Timer} from "lucide-react";
 
 import {useMe} from "@/lib/auth";
 import {hasPermission} from "@/lib/permissions";
+import {toneOf} from "@/lib/status";
 import {formatZulu, hhmmZulu} from "@/lib/time";
 import {
   type AarStep,
@@ -24,20 +37,15 @@ import {
   useUnlockSlot,
 } from "@/lib/gdp";
 
-function statusVariant(
-  status: string,
-): "secondary" | "success" | "destructive" | "outline" {
-  if (status === "published") return "success";
-  if (status === "cancelled") return "destructive";
-  if (status === "expired") return "outline";
-  return "secondary";
-}
-
-const LEVEL_BG: Record<string, string> = {
-  green: "bg-emerald-500/70",
-  yellow: "bg-amber-500/80",
-  red: "bg-red-500/80",
+/** A demand bin's load level → its chart colour token. */
+const LEVEL_COLOR: Record<string, string> = {
+  green: "level-ok",
+  yellow: "level-watch",
+  red: "level-over",
 };
+
+const LABEL = "flex flex-col gap-1 text-xs font-semibold text-ink-2";
+const SECTION = "mb-2 text-xs font-semibold text-ink-2";
 
 const EMPTY: CreateGdp = {
   airport: "",
@@ -73,49 +81,42 @@ function StepsEditor({
   };
   return (
     <div className="flex flex-col gap-1">
-      <span className="text-xs font-medium uppercase tracking-wide text-muted-foreground">
-        Rate steps (optional)
-      </span>
+      <span className="text-xs font-semibold text-ink-2">Rate steps (optional)</span>
       <div className="flex flex-wrap items-center gap-1.5">
         {steps.map((s) => (
           <span
             key={s.start_time}
-            className="flex items-center gap-1 rounded border bg-muted/40 px-1.5 py-1 font-mono text-xs"
+            className="flex items-center gap-1 rounded-full border border-line bg-chip py-0.5 pl-2.5 pr-1.5 font-mono text-xs"
           >
             @{s.start_time}z {s.aar}/hr
             <button
               type="button"
               aria-label="Remove step"
               onClick={() => onChange(steps.filter((x) => x.start_time !== s.start_time))}
-              className="text-muted-foreground hover:text-destructive"
+              className="text-ink-3 hover:text-danger"
             >
               ×
             </button>
           </span>
         ))}
         <Input
-          className="w-16 font-mono text-xs"
+          className="h-8 w-16 font-mono text-xs"
           placeholder="HHMM"
           maxLength={4}
           value={time}
           onChange={(e) => setTime(e.target.value)}
         />
         <Input
-          className="w-14 font-mono text-xs"
+          className="h-8 w-14 font-mono text-xs"
           placeholder="AAR"
           inputMode="numeric"
           value={rate}
           onChange={(e) => setRate(e.target.value)}
           onKeyDown={(e) => e.key === "Enter" && add()}
         />
-        <Button
-          size="sm"
-          variant="outline"
-          className="h-8 px-2 text-xs"
-          onClick={add}
-          disabled={!time.trim() || !rate.trim()}
-        >
-          + step
+        <Button size="sm" variant="outline" onClick={add} disabled={!time.trim() || !rate.trim()}>
+          <Plus />
+          step
         </Button>
       </div>
     </div>
@@ -162,225 +163,136 @@ function CreateForm({ onCreated }: { onCreated: (id: string) => void }) {
   }
 
   return (
-    <Card>
-      <CardContent className="flex flex-col gap-3 pt-6">
-        <p className="text-sm text-muted-foreground">
-          Meters inbound demand to a constrained airport down to its AAR, assigning frozen
-          EDCTs to not-yet-departed flights via Ration-By-Schedule. Airborne traffic is exempt.
-        </p>
-        <div className="flex flex-wrap items-end gap-3">
-          <label className="flex flex-col gap-1">
-            <span className="text-xs font-medium uppercase tracking-wide text-muted-foreground">
-              Airport
-            </span>
-            <Input
-              className="w-24 font-mono uppercase"
-              maxLength={4}
-              placeholder="KSFO"
-              value={form.airport}
-              onChange={(e) => setForm((f) => ({ ...f, airport: e.target.value }))}
-            />
-          </label>
-          <label className="flex flex-col gap-1">
-            <span className="text-xs font-medium uppercase tracking-wide text-muted-foreground">
-              AAR /hr
-            </span>
-            <Input
-              className="w-20 font-mono"
-              inputMode="numeric"
-              value={form.aar ?? ""}
-              onChange={(e) =>
-                setForm((f) => ({ ...f, aar: Number(e.target.value) || 0 }))
-              }
-            />
-          </label>
-          <label className="flex flex-col gap-1">
-            <span className="text-xs font-medium uppercase tracking-wide text-muted-foreground">
-              Start (Z)
-            </span>
-            <Input
-              className="w-20 font-mono"
-              placeholder="1800"
-              maxLength={4}
-              value={form.start_time}
-              onChange={(e) => setForm((f) => ({ ...f, start_time: e.target.value }))}
-            />
-          </label>
-          <label className="flex flex-col gap-1">
-            <span className="text-xs font-medium uppercase tracking-wide text-muted-foreground">
-              End (Z)
-            </span>
-            <Input
-              className="w-20 font-mono"
-              placeholder="2000"
-              maxLength={4}
-              value={form.end_time}
-              onChange={(e) => setForm((f) => ({ ...f, end_time: e.target.value }))}
-            />
-          </label>
-          <label className="flex flex-col gap-1">
-            <span className="text-xs font-medium uppercase tracking-wide text-muted-foreground">
-              Scope (ARTCC)
-            </span>
-            <Input
-              className="w-32 font-mono uppercase"
-              placeholder="all"
-              value={form.scope ?? ""}
-              onChange={(e) => setForm((f) => ({ ...f, scope: e.target.value }))}
-            />
-          </label>
-          <label className="flex flex-col gap-1">
-            <span className="text-xs font-medium uppercase tracking-wide text-muted-foreground">
-              Max enroute (min)
-            </span>
-            <Input
-              className="w-28 font-mono"
-              inputMode="numeric"
-              placeholder="none"
-              value={form.max_enroute_min ?? ""}
-              onChange={(e) =>
-                setForm((f) => ({
-                  ...f,
-                  max_enroute_min: e.target.value ? Number(e.target.value) : undefined,
-                }))
-              }
-            />
-          </label>
-          <label className="flex items-center gap-2 pb-2 text-sm">
-            <input
-              type="checkbox"
-              className="size-4"
-              checked={form.exempt_airborne}
-              onChange={(e) =>
-                setForm((f) => ({ ...f, exempt_airborne: e.target.checked }))
-              }
-            />
-            Exempt airborne
-          </label>
-          <Button
-            className="whitespace-nowrap"
-            disabled={create.isPending}
-            onClick={submit}
-          >
-            <Plus />
-            Create GDP
-          </Button>
-        </div>
-        <StepsEditor
-          steps={form.aar_steps ?? []}
-          onChange={(s) => setForm((f) => ({ ...f, aar_steps: s }))}
-        />
-      </CardContent>
-    </Card>
+    <div className="flex flex-col gap-3">
+      <div className="flex flex-wrap items-end gap-3">
+        <label className={LABEL}>
+          Airport
+          <Input
+            className="w-24 font-mono uppercase"
+            maxLength={4}
+            placeholder="KSFO"
+            value={form.airport}
+            onChange={(e) => setForm((f) => ({ ...f, airport: e.target.value }))}
+          />
+        </label>
+        <label className={LABEL}>
+          AAR /hr
+          <Input
+            className="w-20 font-mono"
+            inputMode="numeric"
+            value={form.aar ?? ""}
+            onChange={(e) => setForm((f) => ({ ...f, aar: Number(e.target.value) || 0 }))}
+          />
+        </label>
+        <label className={LABEL}>
+          Start (Z)
+          <Input
+            className="w-20 font-mono"
+            placeholder="1800"
+            maxLength={4}
+            value={form.start_time}
+            onChange={(e) => setForm((f) => ({ ...f, start_time: e.target.value }))}
+          />
+        </label>
+        <label className={LABEL}>
+          End (Z)
+          <Input
+            className="w-20 font-mono"
+            placeholder="2000"
+            maxLength={4}
+            value={form.end_time}
+            onChange={(e) => setForm((f) => ({ ...f, end_time: e.target.value }))}
+          />
+        </label>
+        <label className={LABEL}>
+          Scope (ARTCC)
+          <Input
+            className="w-32 font-mono uppercase"
+            placeholder="all"
+            value={form.scope ?? ""}
+            onChange={(e) => setForm((f) => ({ ...f, scope: e.target.value }))}
+          />
+        </label>
+        <label className={LABEL}>
+          Max enroute (min)
+          <Input
+            className="w-28 font-mono"
+            inputMode="numeric"
+            placeholder="none"
+            value={form.max_enroute_min ?? ""}
+            onChange={(e) =>
+              setForm((f) => ({
+                ...f,
+                max_enroute_min: e.target.value ? Number(e.target.value) : undefined,
+              }))
+            }
+          />
+        </label>
+        <label className="flex items-center gap-2 pb-2 text-sm">
+          <input
+            type="checkbox"
+            className="size-3.5 accent-brand"
+            checked={form.exempt_airborne}
+            onChange={(e) => setForm((f) => ({ ...f, exempt_airborne: e.target.checked }))}
+          />
+          Exempt airborne
+        </label>
+        <Button className="whitespace-nowrap" disabled={create.isPending} onClick={submit}>
+          <Plus />
+          Create GDP
+        </Button>
+      </div>
+      <StepsEditor
+        steps={form.aar_steps ?? []}
+        onChange={(s) => setForm((f) => ({ ...f, aar_steps: s }))}
+      />
+      <p className="text-xs text-ink-3">
+        Meters inbound demand to a constrained airport down to its AAR, assigning frozen EDCTs to
+        not-yet-departed flights via Ration-By-Schedule. Airborne traffic is exempt.
+      </p>
+    </div>
   );
 }
 
-function GdpRow({
-  gdp,
-  selected,
-  onSelect,
-  canPublish,
-  canDelete,
-}: {
-  gdp: Gdp;
-  selected: boolean;
-  onSelect: () => void;
-  canPublish: boolean;
-  canDelete: boolean;
-}) {
+function GdpActions({ gdp, canPublish, canDelete }: { gdp: Gdp; canPublish: boolean; canDelete: boolean }) {
   const cancel = useCancelGdp();
   const del = useDeleteGdp();
 
   return (
-    <tr
-      className={"cursor-pointer border-t " + (selected ? "bg-muted/50" : "hover:bg-muted/30")}
-      onClick={onSelect}
-    >
-      <td className="py-2 pr-3">
-        <Badge variant={statusVariant(gdp.status)}>{gdp.status}</Badge>
-      </td>
-      <td className="py-2 pr-3 font-mono font-medium">{gdp.airport}</td>
-      <td className="py-2 pr-3 font-mono text-xs">{gdp.aar}/hr</td>
-      <td className="py-2 pr-3 font-mono text-xs">
-        {gdp.start_time}z–{gdp.end_time}z
-      </td>
-      <td className="py-2 pr-3 font-mono text-xs">
-        {gdp.scope ? gdp.scope : <span className="text-muted-foreground">All</span>}
-      </td>
-      <td className="py-2 pr-3 font-mono text-xs text-muted-foreground">
-        {gdp.max_enroute_min ? `≤${gdp.max_enroute_min}m` : "—"}
-      </td>
-      <td className="py-2 pr-3 font-mono text-xs text-muted-foreground">
-        {formatZulu(gdp.updated_at)}
-        {gdp.updated_by ? ` · ${gdp.updated_by}` : ""}
-      </td>
-      <td className="py-2 text-right" onClick={(e) => e.stopPropagation()}>
-        <div className="flex justify-end gap-1">
-          {canPublish && (gdp.status === "draft" || gdp.status === "published") && (
-            <Button
-              size="sm"
-              variant="ghost"
-              disabled={cancel.isPending}
-              onClick={() => cancel.mutate(gdp.id)}
-            >
-              Cancel
-            </Button>
-          )}
-          {canDelete && (
-            <ConfirmButton
-              size="sm"
-              onConfirm={() => del.mutate(gdp.id)}
-              warn={`Delete the GDP for ${gdp.airport}?`}
-            >
-              Delete
-            </ConfirmButton>
-          )}
-        </div>
-      </td>
-    </tr>
+    <div className="flex justify-end gap-1" onClick={(e) => e.stopPropagation()}>
+      {canPublish && (gdp.status === "draft" || gdp.status === "published") && (
+        <Button size="sm" variant="ghost" disabled={cancel.isPending} onClick={() => cancel.mutate(gdp.id)}>
+          Cancel
+        </Button>
+      )}
+      {canDelete && (
+        <ConfirmButton size="sm" onConfirm={() => del.mutate(gdp.id)} warn={`Delete the GDP for ${gdp.airport}?`}>
+          Delete
+        </ConfirmButton>
+      )}
+    </div>
   );
 }
 
+type DemandBin = GdpBoard["demand"][number];
+const binLabel = (b: DemandBin) => hhmmZulu(b.start);
+const binCount = (b: DemandBin) => b.count;
+const binColor = (b: DemandBin) => LEVEL_COLOR[b.level] ?? "ink-3";
+
+const binCap = (b: DemandBin) => b.cap;
+
+/** Demand per bin against that bin's own cap (AAR steps make the cap vary bin to bin). */
 function DemandChart({ demand }: { demand: GdpBoard["demand"] }) {
-  const max = Math.max(1, ...demand.map((b) => Math.max(b.count, b.cap)));
   return (
-    <div className="flex flex-col gap-1">
-      <div className="flex items-end gap-1" style={{ height: 96 }}>
-        {demand.map((b, i) => (
-          <div
-            key={i}
-            className="relative flex flex-1 items-end"
-            title={`${hhmmZulu(b.start)}z · ${b.count}/${b.cap}`}
-          >
-            {/* capacity line */}
-            <div
-              className="absolute left-0 right-0 border-t border-dashed border-muted-foreground/50"
-              style={{ bottom: `${(b.cap / max) * 100}%` }}
-            />
-            <div
-              className={"w-full rounded-t " + (LEVEL_BG[b.level] ?? "bg-muted")}
-              style={{ height: `${(b.count / max) * 100}%`, minHeight: b.count ? 2 : 0 }}
-            />
-          </div>
-        ))}
-      </div>
-      <div className="flex gap-1 text-[10px] text-muted-foreground">
-        {demand.map((b, i) => (
-          <span key={i} className="flex-1 text-center font-mono">
-            {i % 2 === 0 ? `${hhmmZulu(b.start)}` : ""}
-          </span>
-        ))}
-      </div>
-    </div>
-  );
-}
-
-function Stat({ label, value }: { label: string; value: string | number }) {
-  return (
-    <div className="flex flex-col">
-      <span className="text-lg font-semibold tabular-nums">{value}</span>
-      <span className="text-xs text-muted-foreground">{label}</span>
-    </div>
+    <Bars
+      data={demand}
+      category={binLabel}
+      value={binCount}
+      color={binColor}
+      capOf={binCap}
+      height={160}
+      label="Demand vs AAR"
+    />
   );
 }
 
@@ -402,105 +314,108 @@ function FlightsTable({
   // Lock/unlock only make sense for the controlled table of a published program.
   const showActions = !exempt && published && !!canPublish && !!gdpId;
 
-  if (rows.length === 0) {
-    return (
-      <p className="py-6 text-center text-sm text-muted-foreground">
-        {exempt ? "No exempt inbounds." : "No controlled flights."}
-      </p>
-    );
-  }
-  return (
-    <div className="overflow-x-auto">
-      <table className="w-full text-sm">
-        <thead>
-          <tr className="text-left text-xs uppercase tracking-wide text-muted-foreground">
-            <th className="pb-2 pr-3 font-medium">Callsign</th>
-            <th className="pb-2 pr-3 font-medium">From</th>
-            <th className="pb-2 pr-3 font-medium">ETA</th>
-            {exempt ? (
-              <th className="pb-2 pr-3 font-medium">Reason</th>
+  const columns = useMemo<DataColumn<GdpFlightView>[]>(() => {
+    const cols: DataColumn<GdpFlightView>[] = [
+      {
+        accessorKey: "cs",
+        header: "Callsign",
+        icon: Plane,
+        mono: true,
+        cell: (c) => <span className="font-semibold">{c.getValue<string>()}</span>,
+      },
+      { accessorKey: "dep", header: "From", mono: true, cell: (c) => c.getValue<string>() || "—" },
+      { accessorKey: "eta", header: "ETA", icon: Clock, mono: true, cell: (c) => hhmmZulu(c.getValue<string>()) },
+    ];
+    if (exempt) {
+      cols.push({
+        accessorKey: "exempt_reason",
+        header: "Reason",
+        cell: (c) => <span className="text-xs text-ink-2">{c.getValue<string>() ?? "—"}</span>,
+      });
+    } else {
+      cols.push(
+        { accessorKey: "cta", header: "CTA", mono: true, cell: (c) => hhmmZulu(c.getValue<string>()) },
+        {
+          accessorKey: "edct",
+          header: "EDCT",
+          icon: Timer,
+          mono: true,
+          cell: (c) => (c.getValue<string>() ? hhmmZulu(c.getValue<string>()) : "—"),
+        },
+        {
+          accessorKey: "delay_min",
+          header: "Delay",
+          mono: true,
+          align: "right",
+          cell: (c) =>
+            c.getValue<number>() > 0 ? (
+              <span className="text-warning">+{c.getValue<number>()}m</span>
             ) : (
-              <>
-                <th className="pb-2 pr-3 font-medium">CTA</th>
-                <th className="pb-2 pr-3 font-medium">EDCT</th>
-                <th className="pb-2 pr-3 font-medium">Delay</th>
-              </>
-            )}
-            <th className="pb-2 pr-3 font-medium">Status</th>
-            {showActions && <th className="pb-2" />}
-          </tr>
-        </thead>
-        <tbody>
-          {rows.map((f) => {
-            const popup = published && !exempt && !f.frozen;
-            return (
-              <tr key={f.cs} className="border-t">
-                <td className="py-1.5 pr-3 font-mono font-medium">{f.cs}</td>
-                <td className="py-1.5 pr-3 font-mono text-xs">{f.dep || "—"}</td>
-                <td className="py-1.5 pr-3 font-mono text-xs">{hhmmZulu(f.eta)}z</td>
-                {exempt ? (
-                  <td className="py-1.5 pr-3 text-xs text-muted-foreground">
-                    {f.exempt_reason ?? "—"}
-                  </td>
-                ) : (
-                  <>
-                    <td className="py-1.5 pr-3 font-mono text-xs">{hhmmZulu(f.cta)}z</td>
-                    <td className="py-1.5 pr-3 font-mono text-xs">
-                      {f.edct ? `${hhmmZulu(f.edct)}z` : "—"}
-                    </td>
-                    <td className="py-1.5 pr-3 font-mono text-xs">
-                      {f.delay_min > 0 ? (
-                        <span className="text-amber-600 dark:text-amber-400">
-                          +{f.delay_min}m
-                        </span>
-                      ) : (
-                        <span className="text-muted-foreground">on time</span>
-                      )}
-                    </td>
-                  </>
-                )}
-                <td className="py-1.5 pr-3 text-xs">
-                  <span className="text-muted-foreground">{f.status}</span>
-                  {f.frozen && (
-                    <Badge variant="success" className="ml-2">
-                      frozen
-                    </Badge>
-                  )}
-                  {popup && (
-                    <Badge variant="outline" className="ml-2">
-                      pop-up
-                    </Badge>
-                  )}
-                </td>
-                {showActions && (
-                  <td className="py-1.5 text-right">
-                    {f.frozen ? (
-                      <Button
-                        size="sm"
-                        variant="ghost"
-                        disabled={unlock.isPending}
-                        onClick={() => unlock.mutate({ id: gdpId!, callsign: f.cs })}
-                      >
-                        Unlock
-                      </Button>
-                    ) : (
-                      <Button
-                        size="sm"
-                        variant="secondary"
-                        disabled={lock.isPending}
-                        onClick={() => lock.mutate({ id: gdpId!, callsign: f.cs })}
-                      >
-                        Lock
-                      </Button>
-                    )}
-                  </td>
-                )}
-              </tr>
-            );
-          })}
-        </tbody>
-      </table>
-    </div>
+              <span className="font-sans text-ink-3">on time</span>
+            ),
+        },
+      );
+    }
+    cols.push({
+      accessorKey: "status",
+      header: "Status",
+      icon: CircleDot,
+      cell: (c) => {
+        const f = c.row.original;
+        const popup = published && !exempt && !f.frozen;
+        return (
+          <span className="flex items-center gap-2 whitespace-nowrap text-xs">
+            <span className="text-ink-2">{f.status}</span>
+            {f.frozen && <StatusPill tone="good">frozen</StatusPill>}
+            {popup && <StatusPill tone="neutral">pop-up</StatusPill>}
+          </span>
+        );
+      },
+    });
+    if (showActions) {
+      cols.push({
+        id: "actions",
+        header: "",
+        enableSorting: false,
+        align: "right",
+        cell: (c) => {
+          const f = c.row.original;
+          return f.frozen ? (
+            <Button
+              size="sm"
+              variant="ghost"
+              disabled={unlock.isPending}
+              onClick={() => unlock.mutate({ id: gdpId!, callsign: f.cs })}
+            >
+              Unlock
+            </Button>
+          ) : (
+            <Button
+              size="sm"
+              variant="secondary"
+              disabled={lock.isPending}
+              onClick={() => lock.mutate({ id: gdpId!, callsign: f.cs })}
+            >
+              Lock
+            </Button>
+          );
+        },
+      });
+    }
+    return cols;
+  }, [exempt, published, showActions, gdpId, lock, unlock]);
+
+  return (
+    <DataTable
+      label={exempt ? "Exempt inbounds" : "Controlled flights"}
+      columns={columns}
+      data={rows}
+      getRowId={(f) => f.cs}
+      // Live ops list: always pages, never hides rows behind "Show all".
+      rowCap={Infinity}
+      pageSize={25}
+      empty={exempt ? "No exempt inbounds." : "No controlled flights."}
+    />
   );
 }
 
@@ -544,35 +459,30 @@ function ReviseForm({ board, onDone }: { board: GdpBoard; onDone: () => void }) 
     );
   }
 
-  const field = "flex flex-col gap-1";
-  const lbl =
-    "text-xs font-medium uppercase tracking-wide text-muted-foreground";
   return (
-    <div className="flex flex-col gap-3 rounded-md border bg-muted/30 p-3">
-      <div className="flex items-center gap-2 text-sm font-medium">
-        <Pencil className="size-3.5" />
-        Revise {board.airport}
+    <div className="flex flex-col gap-3 rounded-sm border border-line bg-panel-2 p-3">
+      <div className="flex items-center gap-2 text-sm font-semibold">
+        <Pencil className="size-3.5 text-ink-3" />
+        Revise <span className="font-mono">{board.airport}</span>
       </div>
       {board.status === "published" && (
-        <p className="rounded bg-amber-500/10 px-2 py-1 text-xs text-amber-700 dark:text-amber-300">
-          This program is live — saving re-rations off the current feed and
-          reissues EDCTs to controlled flights.
+        <p className="rounded-xs bg-warning-soft px-2 py-1 text-xs text-warning">
+          This program is live — saving re-rations off the current feed and reissues EDCTs to
+          controlled flights.
         </p>
       )}
       <div className="flex flex-wrap items-end gap-3">
-        <label className={field}>
-          <span className={lbl}>AAR /hr</span>
+        <label className={LABEL}>
+          AAR /hr
           <Input
             className="w-20 font-mono"
             inputMode="numeric"
             value={form.aar ?? ""}
-            onChange={(e) =>
-              setForm((f) => ({ ...f, aar: Number(e.target.value) || 0 }))
-            }
+            onChange={(e) => setForm((f) => ({ ...f, aar: Number(e.target.value) || 0 }))}
           />
         </label>
-        <label className={field}>
-          <span className={lbl}>Start (Z)</span>
+        <label className={LABEL}>
+          Start (Z)
           <Input
             className="w-20 font-mono"
             maxLength={4}
@@ -580,8 +490,8 @@ function ReviseForm({ board, onDone }: { board: GdpBoard; onDone: () => void }) 
             onChange={(e) => setForm((f) => ({ ...f, start_time: e.target.value }))}
           />
         </label>
-        <label className={field}>
-          <span className={lbl}>End (Z)</span>
+        <label className={LABEL}>
+          End (Z)
           <Input
             className="w-20 font-mono"
             maxLength={4}
@@ -589,8 +499,8 @@ function ReviseForm({ board, onDone }: { board: GdpBoard; onDone: () => void }) 
             onChange={(e) => setForm((f) => ({ ...f, end_time: e.target.value }))}
           />
         </label>
-        <label className={field}>
-          <span className={lbl}>Scope (ARTCC)</span>
+        <label className={LABEL}>
+          Scope (ARTCC)
           <Input
             className="w-32 font-mono uppercase"
             placeholder="all"
@@ -598,8 +508,8 @@ function ReviseForm({ board, onDone }: { board: GdpBoard; onDone: () => void }) 
             onChange={(e) => setForm((f) => ({ ...f, scope: e.target.value }))}
           />
         </label>
-        <label className={field}>
-          <span className={lbl}>Max enroute (min)</span>
+        <label className={LABEL}>
+          Max enroute (min)
           <Input
             className="w-28 font-mono"
             inputMode="numeric"
@@ -616,11 +526,9 @@ function ReviseForm({ board, onDone }: { board: GdpBoard; onDone: () => void }) 
         <label className="flex items-center gap-2 pb-2 text-sm">
           <input
             type="checkbox"
-            className="size-4"
+            className="size-3.5 accent-brand"
             checked={form.exempt_airborne}
-            onChange={(e) =>
-              setForm((f) => ({ ...f, exempt_airborne: e.target.checked }))
-            }
+            onChange={(e) => setForm((f) => ({ ...f, exempt_airborne: e.target.checked }))}
           />
           Exempt airborne
         </label>
@@ -656,117 +564,93 @@ function BoardView({
   const [editing, setEditing] = useState(false);
   const b = board.data;
 
-  if (board.isError) {
-    return (
-      <Card>
-        <CardContent className="py-8 text-center text-sm text-muted-foreground">
-          Couldn&apos;t load the GDP board.
-        </CardContent>
-      </Card>
-    );
-  }
   if (!b) {
     return (
       <Card>
-        <CardContent className="py-8 text-center text-sm text-muted-foreground">
-          Loading…
-        </CardContent>
+        <QueryState
+          isLoading
+          isError={board.isError}
+          onRetry={() => board.refetch()}
+          error="Couldn't load the GDP board."
+        />
       </Card>
     );
   }
 
   return (
-    <Card>
-      <CardContent className="flex flex-col gap-5 pt-6">
-        <div className="flex flex-wrap items-center justify-between gap-3">
-          <div className="flex items-center gap-3">
-            <h3 className="font-mono text-lg font-semibold">{b.airport}</h3>
-            <Badge variant={statusVariant(b.status)}>{b.status}</Badge>
-            <span className="font-mono text-sm text-muted-foreground">
-              AAR {b.aar}/hr
-              {b.aar_steps.map((s) => ` → ${s.aar} @${s.start_time}z`).join("")} ·{" "}
-              {hhmmZulu(b.window_start)}z–{hhmmZulu(b.window_end)}z
-              {b.scope ? ` · ${b.scope}` : ""}
-              {b.max_enroute_min ? ` · ≤${b.max_enroute_min}m` : ""}
-            </span>
-          </div>
-          <div className="flex gap-2">
-            {canRevise &&
-              (b.status === "draft" || b.status === "published") &&
-              !editing && (
-                <Button variant="outline" onClick={() => setEditing(true)}>
-                  <Pencil />
-                  Revise
-                </Button>
-              )}
-            {canPublish && b.status === "draft" && (
-              <Button
-                disabled={publish.isPending}
-                onClick={() => publish.mutate(b.id)}
-              >
-                Publish &amp; freeze EDCTs
-              </Button>
-            )}
-            {canPublish && b.status === "published" && (
-              <Button
-                variant="secondary"
-                disabled={compress.isPending}
-                onClick={() => compress.mutate(b.id)}
-                title="Reclaim capacity freed by departed/cancelled flights — pulls EDCTs earlier"
-              >
-                Compress
-              </Button>
-            )}
-          </div>
+    <Card className="flex flex-col gap-5 p-4">
+      <div className="flex flex-wrap items-center justify-between gap-3">
+        <div className="flex flex-wrap items-center gap-3">
+          <h2 className="font-mono text-xl font-bold">{b.airport}</h2>
+          <StatusPill tone={toneOf("publish", b.status)}>{b.status}</StatusPill>
+          <span className="font-mono text-xs text-ink-2">
+            AAR {b.aar}/hr
+            {b.aar_steps.map((s) => ` → ${s.aar} @${s.start_time}z`).join("")} ·{" "}
+            {hhmmZulu(b.window_start)}–{hhmmZulu(b.window_end)}
+            {b.scope ? ` · ${b.scope}` : ""}
+            {b.max_enroute_min ? ` · ≤${b.max_enroute_min}m` : ""}
+          </span>
         </div>
-
-        {editing && (
-          <ReviseForm key={b.id} board={b} onDone={() => setEditing(false)} />
-        )}
-
-        {b.status === "draft" && !editing && (
-          <p className="rounded-md bg-muted/50 px-3 py-2 text-xs text-muted-foreground">
-            Draft preview — control times are advisory and recompute live. Publish to freeze
-            EDCTs so they hold.
-          </p>
-        )}
-
-        <div className="flex flex-wrap gap-8">
-          <Stat label="controlled" value={b.stats.controlled} />
-          <Stat label="exempt" value={b.stats.exempt} />
-          <Stat label="avg delay" value={`${b.stats.avg_delay_min}m`} />
-          <Stat label="max delay" value={`${b.stats.max_delay_min}m`} />
-          <Stat label="total delay" value={`${b.stats.total_delay_min}m`} />
+        <div className="flex gap-2">
+          {canRevise && (b.status === "draft" || b.status === "published") && !editing && (
+            <Button variant="outline" onClick={() => setEditing(true)}>
+              <Pencil />
+              Revise
+            </Button>
+          )}
+          {canPublish && b.status === "draft" && (
+            <Button disabled={publish.isPending} onClick={() => publish.mutate(b.id)}>
+              Publish &amp; freeze EDCTs
+            </Button>
+          )}
+          {canPublish && b.status === "published" && (
+            <Button
+              variant="secondary"
+              disabled={compress.isPending}
+              onClick={() => compress.mutate(b.id)}
+              title="Reclaim capacity freed by departed/cancelled flights — pulls EDCTs earlier"
+            >
+              Compress
+            </Button>
+          )}
         </div>
+      </div>
 
+      {editing && <ReviseForm key={b.id} board={b} onDone={() => setEditing(false)} />}
+
+      {b.status === "draft" && !editing && (
+        <p className="rounded-xs bg-panel-2 px-3 py-2 text-xs text-ink-2">
+          Draft preview — control times are advisory and recompute live. Publish to freeze EDCTs so
+          they hold.
+        </p>
+      )}
+
+      <div className="grid grid-cols-2 gap-3 sm:grid-cols-3 lg:grid-cols-5">
+        <MetricCard label="Controlled" icon={Plane} value={b.stats.controlled} />
+        <MetricCard label="Exempt" value={b.stats.exempt} />
+        <MetricCard label="Avg delay" icon={Timer} value={`${b.stats.avg_delay_min}m`} />
+        <MetricCard label="Max delay" value={`${b.stats.max_delay_min}m`} />
+        <MetricCard label="Total delay" value={`${b.stats.total_delay_min}m`} />
+      </div>
+
+      <div>
+        <p className={SECTION}>
+          Demand vs AAR (<span className="font-mono">15</span>-min bins)
+        </p>
+        <DemandChart demand={b.demand} />
+      </div>
+
+      <div>
+        <p className={SECTION}>Controlled flights</p>
+        <FlightsTable rows={b.flights} published={b.published} gdpId={b.id} canPublish={canPublish} />
+      </div>
+
+      {b.exempt.length > 0 && (
         <div>
-          <p className="mb-2 text-xs font-medium uppercase tracking-wide text-muted-foreground">
-            Demand vs AAR ({15}-min bins)
-          </p>
-          <DemandChart demand={b.demand} />
+          <p className={SECTION}>Exempt inbounds</p>
+          <FlightsTable rows={b.exempt} published={b.published} exempt />
         </div>
-
-        <div>
-          <p className="mb-2 text-xs font-medium uppercase tracking-wide text-muted-foreground">
-            Controlled flights
-          </p>
-          <FlightsTable
-            rows={b.flights}
-            published={b.published}
-            gdpId={b.id}
-            canPublish={canPublish}
-          />
-        </div>
-
-        {b.exempt.length > 0 && (
-          <div>
-            <p className="mb-2 text-xs font-medium uppercase tracking-wide text-muted-foreground">
-              Exempt inbounds
-            </p>
-            <FlightsTable rows={b.exempt} published={b.published} exempt />
-          </div>
-        )}
-      </CardContent>
+      )}
     </Card>
   );
 }
@@ -779,63 +663,92 @@ export function GdpTab() {
   const canDelete = hasPermission(me, "tmu.gdp.delete");
   const [selected, setSelected] = useState<string | null>(null);
 
+  const columns = useMemo<DataColumn<Gdp>[]>(
+    () => [
+      {
+        accessorKey: "status",
+        header: "Status",
+        icon: CircleDot,
+        cell: (c) => <StatusPill tone={toneOf("publish", c.getValue<string>())}>{c.getValue<string>()}</StatusPill>,
+      },
+      {
+        accessorKey: "airport",
+        header: "Airport",
+        icon: Plane,
+        mono: true,
+        cell: (c) => <span className="font-semibold">{c.getValue<string>()}</span>,
+      },
+      { accessorKey: "aar", header: "AAR", icon: Gauge, mono: true, align: "right", cell: (c) => `${c.getValue<number>()}/hr` },
+      {
+        id: "window",
+        accessorFn: (g) => g.start_time,
+        header: "Window",
+        icon: Clock,
+        mono: true,
+        cell: (c) => (
+          <span className="whitespace-nowrap">
+            {c.row.original.start_time}z–{c.row.original.end_time}z
+          </span>
+        ),
+      },
+      {
+        accessorKey: "scope",
+        header: "Scope",
+        icon: Radar,
+        mono: true,
+        cell: (c) => c.getValue<string>() || <span className="text-ink-3">All</span>,
+      },
+      {
+        accessorKey: "max_enroute_min",
+        header: "Tier",
+        mono: true,
+        cell: (c) => (
+          <span className="text-ink-2">{c.getValue<number>() ? `≤${c.getValue<number>()}m` : "—"}</span>
+        ),
+      },
+      {
+        accessorKey: "updated_at",
+        header: "Updated",
+        mono: true,
+        cell: (c) => (
+          <span className="whitespace-nowrap text-ink-3">
+            {formatZulu(c.getValue<string>())}
+            {c.row.original.updated_by ? ` · ${c.row.original.updated_by}` : ""}
+          </span>
+        ),
+      },
+      {
+        id: "actions",
+        header: "",
+        enableSorting: false,
+        align: "right",
+        cell: (c) => <GdpActions gdp={c.row.original} canPublish={canPublish} canDelete={canDelete} />,
+      },
+    ],
+    [canPublish, canDelete],
+  );
+
   return (
     <div className="flex flex-col gap-6">
       {canCreate && <CreateForm onCreated={setSelected} />}
 
-      <Card>
-        <CardContent className="pt-6">
-          {gdps.isError ? (
-            <p className="py-8 text-center text-sm text-muted-foreground">
-              Couldn&apos;t load GDPs.
-            </p>
-          ) : !gdps.data ? (
-            <p className="py-8 text-center text-sm text-muted-foreground">Loading…</p>
-          ) : gdps.data.length === 0 ? (
-            <p className="py-8 text-center text-sm text-muted-foreground">
-              No ground delay programs.
-            </p>
-          ) : (
-            <div className="overflow-x-auto">
-              <table className="w-full text-sm">
-                <thead>
-                  <tr className="text-left text-xs uppercase tracking-wide text-muted-foreground">
-                    <th className="pb-2 pr-3 font-medium">Status</th>
-                    <th className="pb-2 pr-3 font-medium">Airport</th>
-                    <th className="pb-2 pr-3 font-medium">AAR</th>
-                    <th className="pb-2 pr-3 font-medium">Window</th>
-                    <th className="pb-2 pr-3 font-medium">Scope</th>
-                    <th className="pb-2 pr-3 font-medium">Tier</th>
-                    <th className="pb-2 pr-3 font-medium">Updated</th>
-                    <th className="pb-2" />
-                  </tr>
-                </thead>
-                <tbody>
-                  {gdps.data.map((gdp) => (
-                    <GdpRow
-                      key={gdp.id}
-                      gdp={gdp}
-                      selected={selected === gdp.id}
-                      onSelect={() => setSelected(gdp.id)}
-                      canPublish={canPublish}
-                      canDelete={canDelete}
-                    />
-                  ))}
-                </tbody>
-              </table>
-            </div>
-          )}
-        </CardContent>
-      </Card>
+      <DataTable
+        label="Ground delay programs"
+        columns={columns}
+        data={gdps.data ?? []}
+        getRowId={(g) => g.id}
+        // Live ops list: always pages, never hides rows behind "Show all".
+        rowCap={Infinity}
+        pageSize={25}
+        // Clicking the selected row keeps it open (the board only changes on another row).
+        selection={{ mode: "single", selected, onChange: (id) => id && setSelected(id) }}
+        isLoading={!gdps.data}
+        isError={gdps.isError}
+        onRetry={() => gdps.refetch()}
+        empty="No ground delay programs."
+      />
 
-      {selected && (
-        <BoardView
-          key={selected}
-          id={selected}
-          canPublish={canPublish}
-          canRevise={canCreate}
-        />
-      )}
+      {selected && <BoardView key={selected} id={selected} canPublish={canPublish} canRevise={canCreate} />}
     </div>
   );
 }

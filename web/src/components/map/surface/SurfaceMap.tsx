@@ -21,6 +21,7 @@ import {
 
 import {MapCanvas} from "../MapCanvas";
 import {useMapCamera} from "../hooks/useMapCamera";
+import {useMapPalette} from "../lib/colors";
 import {haversine, normPoints, toDeckPath, type LatLng} from "../lib/geo";
 import {SurfaceEditorPanel, type SurfaceDraft} from "./editor-panel";
 import {MIN_SURFACE_POINTS, buildSurfaceDraftLayers, buildSurfaceLayers, type SurfaceKind} from "./layers";
@@ -54,6 +55,7 @@ export function SurfaceMap({
   editable: boolean;
 }) {
   const camera = useMapCamera();
+  const palette = useMapPalette();
   const [draft, setDraft] = useState<SurfaceDraft | null>(null);
   const [phase, setPhase] = useState<"draw" | "edit">("draw");
   const dragIndex = useRef<number | null>(null);
@@ -242,8 +244,8 @@ export function SurfaceMap({
   }, [draft, phase]);
 
   const layers = [
-    ...buildSurfaceLayers(surface, draft?.id ? { kind: draft.kind, id: draft.id } : null),
-    ...(draft ? buildSurfaceDraftLayers(draft.kind, draft.points, phase) : []),
+    ...buildSurfaceLayers(surface, draft?.id ? { kind: draft.kind, id: draft.id } : null, palette),
+    ...(draft ? buildSurfaceDraftLayers(draft.kind, draft.points, phase, palette) : []),
   ];
 
   const handleClick = (info: PickingInfo, event: unknown) => {
@@ -298,7 +300,7 @@ export function SurfaceMap({
     : true;
 
   return (
-    <div className="relative h-[70vh] w-full overflow-hidden rounded-md border">
+    <div className="relative h-[70vh] w-full overflow-hidden rounded-md border border-line">
       <MapCanvas
         viewState={camera.viewState}
         onViewStateChange={camera.onViewStateChange}

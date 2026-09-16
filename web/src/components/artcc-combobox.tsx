@@ -70,23 +70,25 @@ export function ArtccCombobox({
           if (e.key === "Enter" && matches[0]) {
             e.preventDefault();
             pick(matches[0].id);
-          } else if (e.key === "Escape") {
+          } else if (e.key === "Escape" && open) {
+            // Closing the list shouldn't also close an enclosing Modal.
+            e.preventDefault();
             setOpen(false);
           }
         }}
       />
       {open && matches.length > 0 && (
-        <ul className="absolute z-20 mt-1 max-h-64 w-full overflow-auto rounded-md border bg-popover p-1 shadow-md">
+        <ul className="absolute z-20 mt-1 max-h-64 w-full overflow-auto rounded-sm border border-line bg-panel-2 p-1">
           {matches.map((a) => (
             <li key={a.id}>
               <button
                 type="button"
                 onMouseDown={(e) => e.preventDefault()}
                 onClick={() => pick(a.id)}
-                className="flex w-full items-center gap-2 rounded-sm px-2 py-1.5 text-left text-sm transition-colors hover:bg-accent hover:text-accent-foreground"
+                className="flex w-full items-center gap-2 rounded-xs px-2 py-1.5 text-left text-sm text-ink transition-colors hover:bg-chip"
               >
-                <span className="w-10 shrink-0 font-mono font-medium">{a.id}</span>
-                <span className="truncate text-muted-foreground">{a.name}</span>
+                <span className="w-10 shrink-0 font-mono font-semibold">{a.id}</span>
+                <span className="truncate text-ink-2">{a.name}</span>
               </button>
             </li>
           ))}

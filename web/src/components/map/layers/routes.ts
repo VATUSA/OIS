@@ -1,7 +1,7 @@
 import {PathLayer, ScatterplotLayer, TextLayer} from "@deck.gl/layers";
 import type {Layer} from "@deck.gl/core";
 
-import {hexToRgb} from "../lib/colors";
+import {hexToRgb, type MapPalette, readMapPalette} from "../lib/colors";
 import {midpointOf, toDeckPath, type LatLng} from "../lib/geo";
 import type {RGB, RGBA} from "../lib/types";
 
@@ -19,7 +19,9 @@ export function buildNamedRouteLayers(
   routes: NamedRoute[],
   selectedRouteId: string | null | undefined,
   labeled: Set<string>,
+  palette: MapPalette = readMapPalette(),
 ): Layer[] {
+  const halo = [...palette.halo, 220] as RGBA;
   const valid = routes.filter((r) => r.points.length >= 2);
   if (valid.length === 0) return [];
 
@@ -70,7 +72,7 @@ export function buildNamedRouteLayers(
     getAlignmentBaseline: "bottom",
     fontWeight: 700,
     outlineWidth: 2,
-    outlineColor: [0, 0, 0, 220],
+    outlineColor: halo,
     fontSettings: { sdf: true },
   });
 
@@ -105,7 +107,7 @@ export function buildNamedRouteLayers(
         getAlignmentBaseline: "center",
         fontWeight: 600,
         outlineWidth: 2,
-        outlineColor: [0, 0, 0, 220],
+        outlineColor: halo,
         fontSettings: { sdf: true },
       }),
     );

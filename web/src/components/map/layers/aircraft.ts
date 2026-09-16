@@ -2,13 +2,13 @@ import {IconLayer, TextLayer} from "@deck.gl/layers";
 
 import {aircraftIconUrl} from "@/lib/aircraft-icons";
 import {aircraftTypeScale} from "@/lib/aircraft-icon-size";
-import type {Theme} from "../lib/constants";
-import {aircraftColor, labelBackground, labelColor} from "../lib/colors";
+import {type MapPalette, readMapPalette} from "../lib/colors";
 import {TRIANGLE_ICON} from "../lib/icons";
 import type {NormAircraft, RGB} from "../lib/types";
 
 export interface AircraftLayerOptions {
-  theme: Theme;
+  /** Token colours (`useMapPalette()`); read now when omitted. */
+  palette?: MapPalette;
   /** Per-aircraft glyph color (defaults to the theme aircraft color). */
   getColor?: (a: NormAircraft) => RGB;
   /** Per-aircraft glyph size in pixels (default 26). */
@@ -28,7 +28,8 @@ export function clampGlyphSize(px: number): number {
 
 /** Heading-rotated aircraft glyphs (VATSIM-Radar type silhouettes, masked so they take `getColor`). */
 export function buildAircraftLayer(data: NormAircraft[], opts: AircraftLayerOptions) {
-  const base = aircraftColor(opts.theme);
+  const palette = opts.palette ?? readMapPalette();
+  const base = palette.aircraft;
   const triangle = opts.style === "triangle";
   const scale = opts.sizeScale ?? 1;
   return new IconLayer<NormAircraft>({
@@ -52,7 +53,7 @@ export function buildAircraftLayer(data: NormAircraft[], opts: AircraftLayerOpti
     sizeUnits: "pixels",
     billboard: false,
     updateTriggers: {
-      getColor: [opts.theme, opts.highlightKey],
+      getColor: [palette, opts.highlightKey],
       getSize: [opts.highlightKey, triangle, scale],
       getIcon: [triangle],
     },
@@ -67,7 +68,7 @@ export interface LabelFlags {
 }
 
 /** Aircraft text labels (callsign/type/alt/gs), stacked under each glyph. */
-export function buildLabelLayer(data: NormAircraft[], labels: LabelFlags, theme: Theme) {
+export function buildLabelLayer(data: NormAircraft[], labels: LabelFlags, palette: MapPalette = readMapPalette()) {
   return new TextLayer<NormAircraft>({
     id: "labels",
     data,
@@ -80,18 +81,18 @@ export function buildLabelLayer(data: NormAircraft[], labels: LabelFlags, theme:
       if (labels.speed) lines.push(`${d.gs}kt`);
       return lines.join("\n");
     },
-    getColor: labelColor(theme),
+    getColor: palette.label,
     getSize: 11,
     getPixelOffset: [0, 16],
     getTextAnchor: "middle",
     getAlignmentBaseline: "top",
     background: true,
-    getBackgroundColor: labelBackground(theme),
+    getBackgroundColor: palette.labelBg,
     backgroundPadding: [3, 1],
     updateTriggers: {
       getText: [labels.callsign, labels.type, labels.alt, labels.speed],
-      getColor: [theme],
-      getBackgroundColor: [theme],
+      getColor: [palette],
+      getBackgroundColor: [palette],
     },
   });
 }

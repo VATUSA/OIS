@@ -18,13 +18,13 @@ export function AadcWidgetView({
 
   if (aadc.isError) {
     return (
-      <div className="p-4 text-sm text-muted-foreground">
-        Couldn&apos;t load AADC data for {widget.icao}.
+      <div className="p-4 text-sm text-ink-3">
+        Couldn&apos;t load AADC data for <span className="font-mono">{widget.icao}</span>.
       </div>
     );
   }
   if (!aadc.data) {
-    return <div className="p-4 text-sm text-muted-foreground">Loading {widget.icao}…</div>;
+    return <div className="p-4 text-sm text-ink-3">Loading <span className="font-mono">{widget.icao}</span>…</div>;
   }
 
   return (

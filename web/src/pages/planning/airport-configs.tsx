@@ -1,7 +1,21 @@
 import {useMemo, useState} from "react";
-import {Badge, Button, Card, CardContent, ConfirmButton, Input} from "@ois/ui";
-import {ArrowLeft, Plus, Wind, X} from "lucide-react";
+import {
+  Button,
+  Card,
+  ConfirmButton,
+  type DataColumn,
+  DataTable,
+  EmptyState,
+  FilterBar,
+  Input,
+  QueryState,
+  Select,
+  StatusPill,
+  Switch,
+} from "@ois/ui";
+import {ArrowLeft, Building2, Gauge, Lock, Plane, Plus, Settings2, Wind, X} from "lucide-react";
 
+import {usePageHeader, useView} from "@/components/shell/page-meta";
 import {useMe} from "@/lib/auth";
 import {useFacilities} from "@/lib/admin";
 import {
@@ -18,8 +32,9 @@ import {hasPermission} from "@/lib/permissions";
 const clampRate = (n: number) => Math.max(0, Math.min(200, Math.round(n)));
 const clampDeg = (n: number) => Math.max(0, Math.min(360, Math.round(n)));
 const normIcao = (s: string) => s.replace(/[^a-zA-Z0-9]/g, "").toUpperCase().slice(0, 4);
-const SELECT_CLASS =
-  "h-9 rounded-md border border-input bg-background px-2 text-sm outline-none focus-visible:ring-2 focus-visible:ring-ring";
+
+const SUBTITLE =
+  "Default runway configurations per airport. During event planning the forecast wind picks a config to predict the arrival rate (which you can override on the event).";
 
 const BLANK: UpsertAirportConfig = {
   name: "",
@@ -30,6 +45,15 @@ const BLANK: UpsertAirportConfig = {
   wind_to_deg: 360,
   calm_default: false,
 };
+
+function Field({ label, className, children }: { label: string; className?: string; children: React.ReactNode }) {
+  return (
+    <label className={`flex flex-col gap-1 text-xs ${className ?? ""}`}>
+      <span className="font-semibold text-ink-2">{label}</span>
+      {children}
+    </label>
+  );
+}
 
 function ConfigForm({
   initial,
@@ -57,62 +81,58 @@ function ConfigForm({
   const save = () => onSave({ ...f, landing_runways: parseRunways(runwaysText) });
 
   return (
-    <div className="flex flex-col gap-3 rounded-md border bg-muted/30 p-3">
+    <Card className="flex flex-col gap-3 p-4">
+      <h2 className="text-xl font-bold">{editingId ? "Edit config" : "New config"}</h2>
       <div className="grid grid-cols-2 gap-3 sm:grid-cols-4">
-        <label className="col-span-2 flex flex-col gap-1 text-xs">
-          <span className="text-muted-foreground">Name</span>
+        <Field label="Name" className="col-span-2">
           <Input value={f.name} onChange={(e) => set({ name: e.target.value })} placeholder="South Flow" />
-        </label>
-        <label className="flex flex-col gap-1 text-xs">
-          <span className="text-muted-foreground">AAR</span>
+        </Field>
+        <Field label="AAR">
           <Input
             type="number"
+            className="font-mono"
             value={f.aar}
             onChange={(e) => set({ aar: clampRate(Number(e.target.value) || 0) })}
           />
-        </label>
-        <label className="flex flex-col gap-1 text-xs">
-          <span className="text-muted-foreground">ADR</span>
+        </Field>
+        <Field label="ADR">
           <Input
             type="number"
+            className="font-mono"
             value={f.adr}
             onChange={(e) => set({ adr: clampRate(Number(e.target.value) || 0) })}
           />
-        </label>
+        </Field>
       </div>
       <div className="grid grid-cols-2 gap-3 sm:grid-cols-4">
-        <label className="col-span-2 flex flex-col gap-1 text-xs">
-          <span className="text-muted-foreground">Landing runways</span>
+        <Field label="Landing runways" className="col-span-2">
           <Input
+            className="font-mono"
             value={runwaysText}
             onChange={(e) => setRunwaysText(e.target.value)}
             placeholder="26L, 27R, 28"
           />
-        </label>
-        <label className="flex flex-col gap-1 text-xs">
-          <span className="text-muted-foreground">Wind from °</span>
+        </Field>
+        <Field label="Wind from °">
           <Input
             type="number"
+            className="font-mono"
             value={f.wind_from_deg}
             onChange={(e) => set({ wind_from_deg: clampDeg(Number(e.target.value) || 0) })}
           />
-        </label>
-        <label className="flex flex-col gap-1 text-xs">
-          <span className="text-muted-foreground">Wind to °</span>
+        </Field>
+        <Field label="Wind to °">
           <Input
             type="number"
+            className="font-mono"
             value={f.wind_to_deg}
             onChange={(e) => set({ wind_to_deg: clampDeg(Number(e.target.value) || 0) })}
           />
-        </label>
+        </Field>
       </div>
-      <div className="flex items-center justify-between gap-3">
+      <div className="flex flex-wrap items-center justify-between gap-3">
         <label className="flex items-center gap-2 text-sm">
-          <input
-            type="checkbox"
-            checked={f.calm_default}
-            onChange={(e) => set({ calm_default: e.target.checked })}
-          />
+          <Switch checked={!!f.calm_default} onCheckedChange={(v) => set({ calm_default: v })} />
           Use when wind is calm / no rule matches
         </label>
         <div className="flex items-center gap-2">
@@ -124,7 +144,7 @@ function ConfigForm({
           </Button>
         </div>
       </div>
-    </div>
+    </Card>
   );
 }
 
@@ -133,31 +153,55 @@ function windLabel(c: AirportConfig): string {
   return `${String(c.wind_from_deg).padStart(3, "0")}–${String(c.wind_to_deg).padStart(3, "0")}°`;
 }
 
-function AirportConfigs({ icao }: { icao: string }) {
+/** The config columns shared by every table on this page. */
+const CONFIG_COLUMNS: DataColumn<AirportConfig>[] = [
+  {
+    accessorKey: "name",
+    header: "Config",
+    icon: Settings2,
+    cell: (c) => (
+      <span className="flex items-center gap-2 whitespace-nowrap">
+        <span className="font-semibold">{c.row.original.name}</span>
+        {c.row.original.calm_default && <StatusPill tone="neutral">calm default</StatusPill>}
+      </span>
+    ),
+  },
+  {
+    id: "wind",
+    accessorFn: (c) => (c.calm_default ? 999 : c.wind_from_deg),
+    header: "Wind",
+    icon: Wind,
+    mono: true,
+    cell: (c) => windLabel(c.row.original),
+  },
+  {
+    id: "runways",
+    accessorFn: (c) => c.landing_runways.join(", "),
+    header: "Runways",
+    mono: true,
+    enableSorting: false,
+    cell: (c) => <span className="text-ink-2">{c.getValue<string>() || "—"}</span>,
+  },
+  {
+    accessorKey: "aar",
+    header: "AAR / ADR",
+    icon: Gauge,
+    mono: true,
+    cell: (c) => `${c.row.original.aar} / ${c.row.original.adr}`,
+  },
+];
+
+function AirportConfigs({ icao, onBack }: { icao: string; onBack: () => void }) {
   const { data: me } = useMe();
   const canEdit = hasPermission(me, "events.config.update");
   const configs = useAirportConfigs(icao);
   const create = useCreateAirportConfig(icao);
   const update = useUpdateAirportConfig(icao);
-  const del = useDeleteAirportConfig(icao);
+  const { mutate: del } = useDeleteAirportConfig(icao);
   const [form, setForm] = useState<null | { id: string | null; initial: UpsertAirportConfig }>(null);
 
   const rows = configs.data ?? [];
   const editable = rows[0]?.editable ?? canEdit;
-
-  const startEdit = (c: AirportConfig) =>
-    setForm({
-      id: c.id,
-      initial: {
-        name: c.name,
-        aar: c.aar,
-        adr: c.adr,
-        landing_runways: c.landing_runways,
-        wind_from_deg: c.wind_from_deg,
-        wind_to_deg: c.wind_to_deg,
-        calm_default: c.calm_default,
-      },
-    });
 
   const save = (body: UpsertAirportConfig) => {
     const done = () => setForm(null);
@@ -165,110 +209,120 @@ function AirportConfigs({ icao }: { icao: string }) {
     else create.mutate(body, { onSuccess: done });
   };
 
+  const columns = useMemo<DataColumn<AirportConfig>[]>(
+    () =>
+      editable
+        ? [
+            ...CONFIG_COLUMNS,
+            {
+              id: "actions",
+              header: () => <span className="sr-only">Actions</span>,
+              enableSorting: false,
+              align: "right",
+              cell: (c) => {
+                const cfg = c.row.original;
+                return (
+                  <div className="flex items-center justify-end gap-1">
+                    <Button
+                      size="sm"
+                      variant="ghost"
+                      className="h-7 px-2"
+                      onClick={() =>
+                        setForm({
+                          id: cfg.id,
+                          initial: {
+                            name: cfg.name,
+                            aar: cfg.aar,
+                            adr: cfg.adr,
+                            landing_runways: cfg.landing_runways,
+                            wind_from_deg: cfg.wind_from_deg,
+                            wind_to_deg: cfg.wind_to_deg,
+                            calm_default: cfg.calm_default,
+                          },
+                        })
+                      }
+                    >
+                      Edit
+                    </Button>
+                    <ConfirmButton
+                      size="icon"
+                      variant="ghost"
+                      className="size-7 text-ink-3 hover:text-danger"
+                      aria-label={`Delete ${cfg.name}`}
+                      warn={`Delete "${cfg.name}"?`}
+                      onConfirm={() => del(cfg.id)}
+                    >
+                      <X className="size-4" />
+                    </ConfirmButton>
+                  </div>
+                );
+              },
+            },
+          ]
+        : CONFIG_COLUMNS,
+    [editable, del],
+  );
+
   return (
-    <Card>
-      <CardContent className="flex flex-col gap-4 pt-6">
-        <div className="flex items-center justify-between gap-2">
-          <div className="flex items-center gap-2">
-            <span className="flex size-8 items-center justify-center rounded-md bg-primary/10 text-primary">
-              <Wind className="size-4" />
-            </span>
-            <div className="flex flex-col">
-              <span className="font-semibold">{icao} configurations</span>
-              <span className="text-xs text-muted-foreground">
-                Named runway configs with a favored-wind rule and AAR/ADR.
-              </span>
-            </div>
-          </div>
-          {editable && !form && (
-            <Button size="sm" onClick={() => setForm({ id: null, initial: BLANK })}>
-              <Plus className="size-3.5" />
-              Add config
-            </Button>
-          )}
-        </div>
-
-        {form && (
-          <ConfigForm
-            initial={form.initial}
-            editingId={form.id}
-            onCancel={() => setForm(null)}
-            onSave={save}
-            pending={create.isPending || update.isPending}
-          />
+    <div className="flex flex-col gap-4">
+      <FilterBar>
+        <Button variant="ghost" size="sm" onClick={onBack}>
+          <ArrowLeft className="size-4" />
+          All airports
+        </Button>
+        {editable && !form && (
+          <Button size="sm" className="ml-auto" onClick={() => setForm({ id: null, initial: BLANK })}>
+            <Plus className="size-3.5" />
+            Add config
+          </Button>
         )}
+      </FilterBar>
 
-        {!configs.data ? (
-          <p className="py-2 text-sm text-muted-foreground">Loading…</p>
-        ) : rows.length === 0 ? (
-          <p className="py-2 text-sm text-muted-foreground">
-            No configurations for {icao} yet{editable ? " — add one above." : "."}
-          </p>
-        ) : (
-          <div className="overflow-x-auto">
-            <table className="w-full text-sm">
-              <thead>
-                <tr className="text-left text-xs uppercase tracking-wide text-muted-foreground">
-                  <th className="pb-2 pr-3 font-medium">Config</th>
-                  <th className="pb-2 pr-3 font-medium">Wind</th>
-                  <th className="pb-2 pr-3 font-medium">Runways</th>
-                  <th className="pb-2 pr-3 font-medium">AAR / ADR</th>
-                  {editable && <th className="pb-2" />}
-                </tr>
-              </thead>
-              <tbody>
-                {rows.map((c) => (
-                  <tr key={c.id} className="border-t">
-                    <td className="py-2 pr-3">
-                      <span className="font-medium">{c.name}</span>
-                      {c.calm_default && (
-                        <Badge variant="secondary" className="ml-2">
-                          calm default
-                        </Badge>
-                      )}
-                    </td>
-                    <td className="py-2 pr-3 font-mono text-xs">{windLabel(c)}</td>
-                    <td className="py-2 pr-3 font-mono text-xs text-muted-foreground">
-                      {c.landing_runways.join(", ") || "—"}
-                    </td>
-                    <td className="py-2 pr-3 tabular-nums">
-                      {c.aar} / {c.adr}
-                    </td>
-                    {editable && (
-                      <td className="py-2 text-right">
-                        <div className="flex items-center justify-end gap-1">
-                          <Button size="sm" variant="ghost" className="h-7 px-2" onClick={() => startEdit(c)}>
-                            Edit
-                          </Button>
-                          <ConfirmButton
-                            size="icon"
-                            variant="ghost"
-                            className="size-7 text-muted-foreground hover:text-destructive"
-                            warn={`Delete "${c.name}"?`}
-                            onConfirm={() => del.mutate(c.id)}
-                          >
-                            <X className="size-4" />
-                          </ConfirmButton>
-                        </div>
-                      </td>
-                    )}
-                  </tr>
-                ))}
-              </tbody>
-            </table>
-          </div>
-        )}
-      </CardContent>
-    </Card>
+      {form && (
+        <ConfigForm
+          initial={form.initial}
+          editingId={form.id}
+          onCancel={() => setForm(null)}
+          onSave={save}
+          pending={create.isPending || update.isPending}
+        />
+      )}
+
+      <DataTable
+        label={`${icao} configurations`}
+        columns={columns}
+        data={rows}
+        getRowId={(c) => c.id}
+        rowCap={25}
+        isLoading={configs.isLoading}
+        isError={!configs.data && configs.isError}
+        onRetry={() => configs.refetch()}
+        empty={`No configurations for ${icao} yet${editable ? " — add one above." : "."}`}
+      />
+    </div>
   );
 }
 
-/** Every airport's configs, grouped by ICAO, with a click-through to the per-airport editor. */
-function AllConfigsList({
+const OPEN_COLUMN = (onOpen: (icao: string) => void): DataColumn<AirportConfig> => ({
+  id: "open",
+  header: () => <span className="sr-only">Open</span>,
+  enableSorting: false,
+  align: "right",
+  cell: (c) => (
+    <Button size="sm" variant="ghost" className="h-7 px-2" onClick={() => onOpen(c.row.original.icao)}>
+      Open
+    </Button>
+  ),
+});
+
+/** Every airport's configs — grouped by ICAO (one table per airport) or as one flat list. */
+function AllConfigs({
   artcc,
+  grouped,
   onOpen,
 }: {
   artcc: string | null;
+  grouped: boolean;
   onOpen: (icao: string) => void;
 }) {
   const all = useAllAirportConfigs(artcc);
@@ -283,79 +337,78 @@ function AllConfigsList({
     return [...m.entries()].sort(([a], [b]) => a.localeCompare(b));
   }, [all.data]);
 
-  if (all.isError) {
+  const listColumns = useMemo<DataColumn<AirportConfig>[]>(
+    () => [
+      { accessorKey: "icao", header: "Airport", icon: Plane, mono: true, cellClassName: "font-semibold" },
+      {
+        accessorKey: "artcc",
+        header: "ARTCC",
+        icon: Building2,
+        mono: true,
+        cell: (c) => <span className="text-ink-2">{c.getValue<string>() || "—"}</span>,
+      },
+      ...CONFIG_COLUMNS,
+      OPEN_COLUMN(onOpen),
+    ],
+    [onOpen],
+  );
+  const groupColumns = useMemo(() => [...CONFIG_COLUMNS, OPEN_COLUMN(onOpen)], [onOpen]);
+
+  const empty = artcc ? `No configs for ${artcc}.` : "No airport configs yet.";
+
+  if (!grouped) {
     return (
-      <p className="py-8 text-center text-sm text-muted-foreground">Couldn&apos;t load configs.</p>
-    );
-  }
-  if (!all.data) {
-    return <p className="py-8 text-center text-sm text-muted-foreground">Loading…</p>;
-  }
-  if (groups.length === 0) {
-    return (
-      <p className="py-8 text-center text-sm text-muted-foreground">
-        {artcc ? `No configs for ${artcc}.` : "No airport configs yet."}
-      </p>
+      <DataTable
+        label="Airport configs"
+        columns={listColumns}
+        data={all.data ?? []}
+        getRowId={(c) => c.id}
+        initialSort={[{ id: "icao", desc: false }]}
+        rowCap={25}
+        isLoading={all.isLoading}
+        isError={!all.data && all.isError}
+        onRetry={() => all.refetch()}
+        empty={empty}
+      />
     );
   }
 
   return (
-    <div className="flex flex-col gap-3">
-      {groups.map(([icao, configs]) => (
-        <div key={icao} className="rounded-lg border p-3">
-          <div className="mb-2 flex items-center justify-between gap-2">
-            <div className="flex items-baseline gap-2">
-              <span className="font-mono font-semibold">{icao}</span>
-              <span className="text-xs text-muted-foreground">
-                {configs[0].artcc || "—"} · {configs.length} config
-                {configs.length === 1 ? "" : "s"}
-              </span>
+    <QueryState
+      isLoading={all.isLoading}
+      isError={!all.data && all.isError}
+      onRetry={() => all.refetch()}
+      isEmpty={groups.length === 0}
+      error="Couldn't load configs."
+      empty={empty}
+      className="rounded-md border border-line"
+    >
+      <div className="flex flex-col gap-6">
+        {groups.map(([icao, configs]) => (
+          <section key={icao} className="flex flex-col gap-2">
+            <div className="flex items-center justify-between gap-2">
+              <div className="flex items-baseline gap-2">
+                <h2 className="font-mono text-xl font-bold">{icao}</h2>
+                <span className="text-xs text-ink-3">
+                  <span className="font-mono">{configs[0].artcc || "—"}</span> ·{" "}
+                  <span className="font-mono">{configs.length}</span> config{configs.length === 1 ? "" : "s"}
+                </span>
+              </div>
+              <Button size="sm" variant="outline" onClick={() => onOpen(icao)}>
+                Open
+              </Button>
             </div>
-            <Button
-              size="sm"
-              variant="ghost"
-              className="h-7 px-2"
-              onClick={() => onOpen(icao)}
-            >
-              Open
-            </Button>
-          </div>
-          <div className="overflow-x-auto">
-            <table className="w-full text-sm">
-              <thead>
-                <tr className="text-left text-xs uppercase tracking-wide text-muted-foreground">
-                  <th className="pb-1 pr-3 font-medium">Config</th>
-                  <th className="pb-1 pr-3 font-medium">Wind</th>
-                  <th className="pb-1 pr-3 font-medium">Runways</th>
-                  <th className="pb-1 font-medium">AAR / ADR</th>
-                </tr>
-              </thead>
-              <tbody>
-                {configs.map((c) => (
-                  <tr key={c.id} className="border-t">
-                    <td className="py-1.5 pr-3">
-                      {c.name}
-                      {c.calm_default && (
-                        <Badge variant="secondary" className="ml-2">
-                          calm default
-                        </Badge>
-                      )}
-                    </td>
-                    <td className="py-1.5 pr-3 font-mono text-xs">{windLabel(c)}</td>
-                    <td className="py-1.5 pr-3 font-mono text-xs text-muted-foreground">
-                      {c.landing_runways.join(", ") || "—"}
-                    </td>
-                    <td className="py-1.5 tabular-nums">
-                      {c.aar} / {c.adr}
-                    </td>
-                  </tr>
-                ))}
-              </tbody>
-            </table>
-          </div>
-        </div>
-      ))}
-    </div>
+            <DataTable
+              label={`${icao} configurations`}
+              columns={groupColumns}
+              data={configs}
+              getRowId={(c) => c.id}
+              rowCap={25}
+            />
+          </section>
+        ))}
+      </div>
+    </QueryState>
   );
 }
 
@@ -363,30 +416,23 @@ export function AirportConfigsPage() {
   const { data: me } = useMe();
   const canRead = hasPermission(me, "events.plan.read");
   const facilities = useFacilities();
+  const view = useView();
   const [icao, setIcao] = useState("");
   const [entry, setEntry] = useState("");
   const [artcc, setArtcc] = useState("");
 
+  usePageHeader({
+    title: icao ? `${icao} configurations` : undefined,
+    subtitle: icao ? "Named runway configs with a favored-wind rule and AAR/ADR." : SUBTITLE,
+    views: icao || !canRead ? null : undefined,
+  });
+
   if (!canRead) {
-    return (
-      <Card>
-        <CardContent className="py-16 text-center text-sm text-muted-foreground">
-          You don&apos;t have event planning access yet.
-        </CardContent>
-      </Card>
-    );
+    return <EmptyState icon={Lock}>You don&apos;t have event planning access yet.</EmptyState>;
   }
 
   if (icao) {
-    return (
-      <div className="mx-auto flex w-full max-w-4xl flex-col gap-6">
-        <Button variant="ghost" className="w-fit px-2" onClick={() => setIcao("")}>
-          <ArrowLeft className="size-4" />
-          All airports
-        </Button>
-        <AirportConfigs key={icao} icao={icao} />
-      </div>
-    );
+    return <AirportConfigs key={icao} icao={icao} onBack={() => setIcao("")} />;
   }
 
   const artccs = (facilities.data ?? [])
@@ -395,55 +441,38 @@ export function AirportConfigsPage() {
     .sort();
 
   return (
-    <div className="mx-auto flex w-full max-w-4xl flex-col gap-6">
-      <div>
-        <h1 className="text-2xl font-semibold tracking-tight">Airport configs</h1>
-        <p className="text-muted-foreground">
-          Default runway configurations per airport. During event planning the forecast wind picks a
-          config to predict the arrival rate (which you can override on the event).
-        </p>
-      </div>
-
-      <div className="flex flex-wrap items-end gap-3">
-        <label className="flex flex-col gap-1 text-xs">
-          <span className="text-muted-foreground">ARTCC</span>
-          <select
-            className={SELECT_CLASS}
-            value={artcc}
-            onChange={(e) => setArtcc(e.target.value)}
-          >
-            <option value="">All</option>
-            {artccs.map((id) => (
-              <option key={id} value={id}>
-                {id}
-              </option>
-            ))}
-          </select>
-        </label>
+    <div className="flex flex-col gap-4">
+      <FilterBar>
+        <Select aria-label="ARTCC" size="sm" value={artcc} onChange={(e) => setArtcc(e.target.value)}>
+          <option value="">All ARTCCs</option>
+          {artccs.map((id) => (
+            <option key={id} value={id}>
+              {id}
+            </option>
+          ))}
+        </Select>
         <form
-          className="flex items-end gap-2"
+          className="flex items-center gap-2"
           onSubmit={(e) => {
             e.preventDefault();
             const v = normIcao(entry);
             if (v.length >= 3) setIcao(v);
           }}
         >
-          <label className="flex flex-col gap-1 text-xs">
-            <span className="text-muted-foreground">Open airport (ICAO)</span>
-            <Input
-              className="w-40 font-mono uppercase"
-              value={entry}
-              onChange={(e) => setEntry(normIcao(e.target.value))}
-              placeholder="KATL"
-            />
-          </label>
-          <Button type="submit" disabled={normIcao(entry).length < 3}>
+          <Input
+            aria-label="Open airport (ICAO)"
+            className="h-8 w-40 font-mono uppercase placeholder:normal-case"
+            value={entry}
+            onChange={(e) => setEntry(normIcao(e.target.value))}
+            placeholder="ICAO, e.g. KATL"
+          />
+          <Button type="submit" size="sm" disabled={normIcao(entry).length < 3}>
             Open
           </Button>
         </form>
-      </div>
+      </FilterBar>
 
-      <AllConfigsList artcc={artcc || null} onOpen={setIcao} />
+      <AllConfigs artcc={artcc || null} grouped={view !== "list"} onOpen={setIcao} />
     </div>
   );
 }

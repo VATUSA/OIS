@@ -1,7 +1,7 @@
 import {PathLayer, ScatterplotLayer, TextLayer} from "@deck.gl/layers";
 import {PathStyleExtension} from "@deck.gl/extensions";
 
-import {hexToRgb} from "../lib/colors";
+import {hexToRgb, type MapPalette, readMapPalette} from "../lib/colors";
 import {midpointOf, toDeckPath, type LatLng} from "../lib/geo";
 import type {RGBA} from "../lib/types";
 
@@ -25,7 +25,11 @@ interface FcaDatum {
  * Saved FCAs as dashed, clickable polylines (not closed polygons) tinted their own color, plus
  * endpoint dots. The midpoint name label is an HTML marker (see FcaLabelMarker), not drawn here.
  */
-export function buildFcaLayers(fcas: MapFca[], selectedId: string | null | undefined) {
+export function buildFcaLayers(
+  fcas: MapFca[],
+  selectedId: string | null | undefined,
+  palette: MapPalette = readMapPalette(),
+) {
   // Disabled FCAs are hidden on the map (they stay in the list) — except the selected one, so it can
   // still be inspected, edited, and re-enabled.
   const visible = fcas.filter((f) => f.points.length >= 2 && (f.enabled || f.id === selectedId));
@@ -86,7 +90,7 @@ export function buildFcaLayers(fcas: MapFca[], selectedId: string | null | undef
     getAlignmentBaseline: "bottom",
     fontWeight: 700,
     outlineWidth: 2,
-    outlineColor: [0, 0, 0, 230],
+    outlineColor: [...palette.halo, 230] as RGBA,
     fontSettings: { sdf: true },
   });
 

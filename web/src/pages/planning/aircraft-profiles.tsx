@@ -1,7 +1,8 @@
-import {useState} from "react";
-import {Badge, Button, Card, CardContent, ConfirmButton, Input} from "@ois/ui";
-import {Plane, Plus, X} from "lucide-react";
+import {useMemo, useState} from "react";
+import {Button, Card, ConfirmButton, type DataColumn, DataTable, EmptyState, Input, QueryState} from "@ois/ui";
+import {ArrowDownRight, ArrowUpRight, Gauge, Lock, MoveUp, Plane, Plus, X} from "lucide-react";
 
+import {usePageHeader} from "@/components/shell/page-meta";
 import {useMe} from "@/lib/auth";
 import {
   type AircraftProfile,
@@ -96,7 +97,7 @@ function Field({
 }) {
   return (
     <label className={`flex flex-col gap-1 text-xs ${wide ? "col-span-2" : ""}`}>
-      <span className="text-muted-foreground">{label}</span>
+      <span className="font-semibold text-ink-2">{label}</span>
       {children}
     </label>
   );
@@ -128,7 +129,8 @@ function ProfileForm({
   const invalid = !toBody(f) || (isNewType && normType(typeKey).length < 2);
 
   return (
-    <div className="flex flex-col gap-3 rounded-md border bg-muted/30 p-3">
+    <Card className="flex flex-col gap-3 p-4">
+      <h2 className="text-xl font-bold">{isNewType ? "New aircraft type" : "Edit profile"}</h2>
       <div className="grid grid-cols-2 gap-3 sm:grid-cols-4">
         {isNewType && (
           <Field label="ICAO type">
@@ -155,14 +157,15 @@ function ProfileForm({
           />
         </Field>
         <Field label="Climb rate < 10k (fpm)">
-          <Input type="number" value={f.climb_fpm_lo} onChange={(e) => set({ climb_fpm_lo: numeric(e.target.value) })} />
+          <Input type="number" className="font-mono" value={f.climb_fpm_lo} onChange={(e) => set({ climb_fpm_lo: numeric(e.target.value) })} />
         </Field>
         <Field label="Climb rate > 10k (fpm)">
-          <Input type="number" value={f.climb_fpm_hi} onChange={(e) => set({ climb_fpm_hi: numeric(e.target.value) })} />
+          <Input type="number" className="font-mono" value={f.climb_fpm_hi} onChange={(e) => set({ climb_fpm_hi: numeric(e.target.value) })} />
         </Field>
         <Field label="Service ceiling (ft)">
           <Input
             type="number"
+            className="font-mono"
             value={f.service_ceiling_ft}
             onChange={(e) => set({ service_ceiling_ft: numeric(e.target.value) })}
           />
@@ -171,10 +174,11 @@ function ProfileForm({
 
       <div className="grid grid-cols-2 gap-3 sm:grid-cols-4">
         <Field label="Cruise TAS (kt, optional)">
-          <Input type="number" value={f.cruise_tas} onChange={(e) => set({ cruise_tas: e.target.value })} placeholder="—" />
+          <Input type="number" className="font-mono" value={f.cruise_tas} onChange={(e) => set({ cruise_tas: e.target.value })} placeholder="—" />
         </Field>
         <Field label="Cruise Mach (optional)">
           <Input
+            className="font-mono"
             value={f.cruise_mach}
             onChange={(e) => set({ cruise_mach: e.target.value })}
             placeholder="0.78"
@@ -189,7 +193,7 @@ function ProfileForm({
           />
         </Field>
         <Field label="Descent rate (fpm)">
-          <Input type="number" value={f.desc_fpm} onChange={(e) => set({ desc_fpm: numeric(e.target.value) })} />
+          <Input type="number" className="font-mono" value={f.desc_fpm} onChange={(e) => set({ desc_fpm: numeric(e.target.value) })} />
         </Field>
       </div>
 
@@ -201,58 +205,58 @@ function ProfileForm({
           Save
         </Button>
       </div>
-    </div>
+    </Card>
   );
 }
 
-function ProfileRow({
-  p,
-  editable,
-  onEdit,
-  onDelete,
-}: {
-  p: AircraftProfile;
-  editable: boolean;
-  onEdit: () => void;
-  onDelete: () => void;
-}) {
-  return (
-    <tr className="border-t">
-      <td className="py-2 pr-3">
-        <span className="font-medium">{profileLabel(p)}</span>
-        {p.name && p.kind === "type" && (
-          <span className="ml-2 text-xs text-muted-foreground">{p.name}</span>
+const cruiseLabel = (p: AircraftProfile) =>
+  p.cruise_mach != null
+    ? `M${String(p.cruise_mach).replace(/^0/, "")}`
+    : p.cruise_tas != null
+      ? `${Math.round(p.cruise_tas)} kt`
+      : "filed";
+
+const PROFILE_COLUMNS: DataColumn<AircraftProfile>[] = [
+  {
+    id: "profile",
+    accessorFn: (p) => profileLabel(p),
+    header: "Profile",
+    icon: Plane,
+    cell: (c) => (
+      <span className="whitespace-nowrap">
+        <span className="font-semibold">{c.getValue<string>()}</span>
+        {c.row.original.name && c.row.original.kind === "type" && (
+          <span className="ml-2 text-xs text-ink-3">{c.row.original.name}</span>
         )}
-      </td>
-      <td className="py-2 pr-3 font-mono text-xs">{formatClimb(p)}</td>
-      <td className="py-2 pr-3 font-mono text-xs">{formatDescent(p)}</td>
-      <td className="py-2 pr-3 tabular-nums text-xs text-muted-foreground">
-        {p.cruise_mach != null ? `M${String(p.cruise_mach).replace(/^0/, "")}` : p.cruise_tas != null ? `${Math.round(p.cruise_tas)} kt` : "filed"}
-      </td>
-      <td className="py-2 pr-3 tabular-nums">{Math.round(p.service_ceiling_ft).toLocaleString()}</td>
-      {editable && (
-        <td className="py-2 text-right">
-          <div className="flex items-center justify-end gap-1">
-            <Button size="sm" variant="ghost" className="h-7 px-2" onClick={onEdit}>
-              Edit
-            </Button>
-            {p.kind !== "default" && (
-              <ConfirmButton
-                size="icon"
-                variant="ghost"
-                className="size-7 text-muted-foreground hover:text-destructive"
-                warn={`Delete "${profileLabel(p)}"?`}
-                onConfirm={onDelete}
-              >
-                <X className="size-4" />
-              </ConfirmButton>
-            )}
-          </div>
-        </td>
-      )}
-    </tr>
-  );
-}
+      </span>
+    ),
+  },
+  { id: "climb", accessorFn: (p) => formatClimb(p), header: "Climb", icon: ArrowUpRight, mono: true, enableSorting: false },
+  { id: "descent", accessorFn: (p) => formatDescent(p), header: "Descent", icon: ArrowDownRight, mono: true, enableSorting: false },
+  {
+    id: "cruise",
+    accessorFn: (p) => cruiseLabel(p),
+    header: "Cruise",
+    icon: Gauge,
+    mono: true,
+    enableSorting: false,
+    cell: (c) => <span className="text-ink-2">{c.getValue<string>()}</span>,
+  },
+  {
+    accessorKey: "service_ceiling_ft",
+    header: "Ceiling",
+    icon: MoveUp,
+    mono: true,
+    align: "right",
+    cell: (c) => Math.round(c.getValue<number>()).toLocaleString(),
+  },
+];
+
+const GROUPS: [string, string][] = [
+  ["default", "Default"],
+  ["wake", "Wake classes"],
+  ["type", "Aircraft types"],
+];
 
 export function AircraftProfilesPage() {
   const { data: me } = useMe();
@@ -260,28 +264,74 @@ export function AircraftProfilesPage() {
   const canEdit = hasPermission(me, "flow.aircraft_profiles.update");
   const profiles = useAircraftProfiles();
   const upsert = useUpsertAircraftProfile();
-  const del = useDeleteAircraftProfile();
+  const { mutate: del } = useDeleteAircraftProfile();
   // `edit` holds the row being edited (kind+key + form), or a sentinel for a new type.
-  const [edit, setEdit] = useState<
-    null | { kind: string; key: string; isNew: boolean; initial: FormState }
-  >(null);
+  const [edit, setEdit] = useState<null | { kind: string; key: string; isNew: boolean; initial: FormState }>(null);
+
+  const actions = useMemo(
+    () =>
+      canEdit && !edit ? (
+        <Button size="sm" onClick={() => setEdit({ kind: "type", key: "", isNew: true, initial: BLANK })}>
+          <Plus className="size-3.5" />
+          Add type
+        </Button>
+      ) : undefined,
+    [canEdit, edit],
+  );
+  usePageHeader({
+    subtitle: "Fine-grained aircraft performance mapping (climb, cruise, and descent) for the ETA and flow model.",
+    count: canRead ? (profiles.data?.length ?? null) : null,
+    actions: canRead ? actions : undefined,
+  });
+
+  const columns = useMemo<DataColumn<AircraftProfile>[]>(
+    () =>
+      canEdit
+        ? [
+            ...PROFILE_COLUMNS,
+            {
+              id: "actions",
+              header: () => <span className="sr-only">Actions</span>,
+              enableSorting: false,
+              align: "right",
+              cell: (c) => {
+                const p = c.row.original;
+                return (
+                  <div className="flex items-center justify-end gap-1">
+                    <Button
+                      size="sm"
+                      variant="ghost"
+                      className="h-7 px-2"
+                      onClick={() => setEdit({ kind: p.kind, key: p.key, isNew: false, initial: fromProfile(p) })}
+                    >
+                      Edit
+                    </Button>
+                    {p.kind !== "default" && (
+                      <ConfirmButton
+                        size="icon"
+                        variant="ghost"
+                        className="size-7 text-ink-3 hover:text-danger"
+                        aria-label={`Delete ${profileLabel(p)}`}
+                        warn={`Delete "${profileLabel(p)}"?`}
+                        onConfirm={() => del({ kind: p.kind, key: p.key })}
+                      >
+                        <X className="size-4" />
+                      </ConfirmButton>
+                    )}
+                  </div>
+                );
+              },
+            },
+          ]
+        : PROFILE_COLUMNS,
+    [canEdit, del],
+  );
 
   if (!canRead) {
-    return (
-      <Card>
-        <CardContent className="py-16 text-center text-sm text-muted-foreground">
-          You don&apos;t have access to aircraft performance profiles.
-        </CardContent>
-      </Card>
-    );
+    return <EmptyState icon={Lock}>You don&apos;t have access to aircraft performance profiles.</EmptyState>;
   }
 
   const rows = profiles.data ?? [];
-  const groups: [string, AircraftProfile[]][] = [
-    ["Default", rows.filter((p) => p.kind === "default")],
-    ["Wake classes", rows.filter((p) => p.kind === "wake")],
-    ["Aircraft types", rows.filter((p) => p.kind === "type")],
-  ];
 
   const save = (body: UpsertAircraftProfile, typeKey?: string) => {
     if (!edit) return;
@@ -290,85 +340,42 @@ export function AircraftProfilesPage() {
   };
 
   return (
-    <div className="mx-auto flex w-full max-w-5xl flex-col gap-6">
-      <div className="flex items-start justify-between gap-3">
-        <div>
-          <h1 className="text-2xl font-semibold tracking-tight">Aircraft profiles</h1>
-          <p className="text-muted-foreground">
-            Fine-grained aircraft performance mapping (climb, cruise, and descent) for the ETA and
-            flow model.
-          </p>
-        </div>
-        {canEdit && !edit && (
-          <Button size="sm" onClick={() => setEdit({ kind: "type", key: "", isNew: true, initial: BLANK })}>
-            <Plus className="size-3.5" />
-            Add type
-          </Button>
-        )}
-      </div>
-
+    <div className="flex flex-col gap-6">
       {edit && (
-        <Card>
-          <CardContent className="pt-6">
-            <ProfileForm
-              initial={edit.initial}
-              isNewType={edit.isNew}
-              onCancel={() => setEdit(null)}
-              onSave={save}
-              pending={upsert.isPending}
-            />
-          </CardContent>
-        </Card>
+        <ProfileForm
+          initial={edit.initial}
+          isNewType={edit.isNew}
+          onCancel={() => setEdit(null)}
+          onSave={save}
+          pending={upsert.isPending}
+        />
       )}
 
-      {!profiles.data ? (
-        <p className="py-2 text-sm text-muted-foreground">Loading…</p>
-      ) : (
-        <Card>
-          <CardContent className="flex flex-col gap-6 pt-6">
-            {groups.map(([title, list]) =>
-              list.length === 0 ? null : (
-                <div key={title} className="flex flex-col gap-2">
-                  <div className="flex items-center gap-2">
-                    <span className="flex size-7 items-center justify-center rounded-md bg-primary/10 text-primary">
-                      <Plane className="size-4" />
-                    </span>
-                    <span className="font-semibold">{title}</span>
-                    <Badge variant="secondary">{list.length}</Badge>
-                  </div>
-                  <div className="overflow-x-auto">
-                    <table className="w-full text-sm">
-                      <thead>
-                        <tr className="text-left text-xs uppercase tracking-wide text-muted-foreground">
-                          <th className="pb-2 pr-3 font-medium">Profile</th>
-                          <th className="pb-2 pr-3 font-medium">Climb</th>
-                          <th className="pb-2 pr-3 font-medium">Descent</th>
-                          <th className="pb-2 pr-3 font-medium">Cruise</th>
-                          <th className="pb-2 pr-3 font-medium">Ceiling</th>
-                          {canEdit && <th className="pb-2" />}
-                        </tr>
-                      </thead>
-                      <tbody>
-                        {list.map((p) => (
-                          <ProfileRow
-                            key={`${p.kind}/${p.key}`}
-                            p={p}
-                            editable={canEdit}
-                            onEdit={() =>
-                              setEdit({ kind: p.kind, key: p.key, isNew: false, initial: fromProfile(p) })
-                            }
-                            onDelete={() => del.mutate({ kind: p.kind, key: p.key })}
-                          />
-                        ))}
-                      </tbody>
-                    </table>
-                  </div>
-                </div>
-              ),
-            )}
-          </CardContent>
-        </Card>
-      )}
+      <QueryState
+        isLoading={profiles.isLoading}
+        isError={profiles.isError}
+        onRetry={() => profiles.refetch()}
+        className="rounded-md border border-line"
+      >
+        {GROUPS.map(([kind, title]) => {
+          const list = rows.filter((p) => p.kind === kind);
+          return list.length === 0 ? null : (
+            <section key={kind} className="flex flex-col gap-2">
+              <h2 className="flex items-baseline gap-2 text-xl font-bold">
+                {title}
+                <span className="font-mono text-sm font-normal text-ink-3">{list.length}</span>
+              </h2>
+              <DataTable
+                label={title}
+                columns={columns}
+                data={list}
+                getRowId={(p) => `${p.kind}/${p.key}`}
+                rowCap={kind === "type" ? 25 : 10}
+              />
+            </section>
+          );
+        })}
+      </QueryState>
     </div>
   );
 }

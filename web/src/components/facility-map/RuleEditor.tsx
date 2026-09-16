@@ -1,8 +1,8 @@
 import {useEffect, useState} from "react";
-import {Button, ConfirmButton, Input, Switch} from "@ois/ui";
+import {Button, cn, ConfirmButton, Input, Select, Switch} from "@ois/ui";
 import {ChevronDown, ChevronUp, Plus, Save, Trash2, X} from "lucide-react";
 
-import {PALETTE} from "@/lib/facility-map/palette";
+import {colorLabel, defaultRuleColor, useRulePalette} from "@/lib/facility-map/palette";
 import {RULE_FIELDS, isNumericField, type ColorRule, type RuleCondition} from "@/lib/facility-map/rules";
 import {
   useSaveFacilityMapConfig,
@@ -41,22 +41,31 @@ function valueHint(op: string): string {
   return "KIAD, KBWI";
 }
 
-/** A small palette swatch row; clicking one sets the color. */
+/** A small palette swatch row; clicking one sets the color. A saved colour outside the palette still shows. */
 function ColorSwatches({ value, onPick }: { value: string; onPick: (hex: string) => void }) {
+  const palette = useRulePalette();
+  const known = !value || palette.some((c) => c.hex === value.toLowerCase());
+  const swatches = known ? palette : [...palette, { hex: value, label: colorLabel(value) }];
   return (
     <div className="flex flex-wrap gap-1">
-      {PALETTE.map((c) => (
-        <button
-          key={c.hex}
-          type="button"
-          title={c.label}
-          onClick={() => onPick(c.hex)}
-          className={`size-5 rounded-sm border transition-transform hover:scale-110 ${
-            value.toLowerCase() === c.hex.toLowerCase() ? "ring-2 ring-foreground ring-offset-1 ring-offset-background" : ""
-          }`}
-          style={{ backgroundColor: c.hex }}
-        />
-      ))}
+      {swatches.map((c) => {
+        const on = value.toLowerCase() === c.hex.toLowerCase();
+        return (
+          <button
+            key={c.hex}
+            type="button"
+            title={c.label}
+            aria-label={c.label}
+            aria-pressed={on}
+            onClick={() => onPick(c.hex)}
+            className={cn(
+              "size-5 rounded-xs border border-line transition-transform hover:scale-110",
+              on && "ring-2 ring-ink ring-offset-1 ring-offset-panel",
+            )}
+            style={{ backgroundColor: c.hex }}
+          />
+        );
+      })}
     </div>
   );
 }
@@ -73,7 +82,10 @@ function ConditionRow({
   const ops = opsFor(cond.field);
   return (
     <div className="flex items-center gap-1.5">
-      <select
+      <Select
+        size="sm"
+        wrapperClassName="min-w-0 shrink"
+        aria-label="Field"
         value={cond.field}
         onChange={(e) => {
           const field = e.target.value;
@@ -81,25 +93,28 @@ function ConditionRow({
           const op = opsFor(field)[0].value;
           onChange({ field, op, values: [] });
         }}
-        className="rounded border bg-background px-1.5 py-1 text-xs outline-none"
+        className="h-7 text-xs"
       >
         {RULE_FIELDS.map((f) => (
           <option key={f.value} value={f.value}>
             {f.label}
           </option>
         ))}
-      </select>
-      <select
+      </Select>
+      <Select
+        size="sm"
+        wrapperClassName="min-w-0 shrink"
+        aria-label="Operator"
         value={cond.op}
         onChange={(e) => onChange({ ...cond, op: e.target.value })}
-        className="rounded border bg-background px-1.5 py-1 text-xs outline-none"
+        className="h-7 text-xs"
       >
         {ops.map((o) => (
           <option key={o.value} value={o.value}>
             {o.label}
           </option>
         ))}
-      </select>
+      </Select>
       <input
         // Uncontrolled + commit on blur so typing a comma list doesn't fight the array round-trip.
         key={`${cond.field}:${cond.op}`}
@@ -111,7 +126,7 @@ function ConditionRow({
             values: e.target.value.split(",").map((s) => s.trim()).filter(Boolean),
           })
         }
-        className="min-w-0 flex-1 rounded border bg-background px-1.5 py-1 text-xs outline-none"
+        className="h-7 min-w-20 flex-1 rounded-xs border border-line bg-panel-2 px-2 font-mono text-xs text-ink outline-none placeholder:text-ink-3 focus-visible:ring-2 focus-visible:ring-ring"
       />
       <ConfirmButton
         size="icon"
@@ -145,20 +160,20 @@ function RuleCard({
   const setCond = (i: number, c: RuleCondition) =>
     onChange({ ...rule, conditions: rule.conditions.map((x, j) => (j === i ? c : x)) });
   return (
-    <div className="rounded-lg border bg-background/60 p-2.5">
+    <div className="rounded-sm border border-line bg-panel-2 p-2.5">
       <div className="mb-2 flex items-center gap-2">
         <Switch checked={rule.enabled} onCheckedChange={(v) => onChange({ ...rule, enabled: v })} />
-        <span className="size-4 shrink-0 rounded-sm border" style={{ backgroundColor: rule.color }} />
+        <span className="size-4 shrink-0 rounded-xs border border-line" title={colorLabel(rule.color)} style={{ backgroundColor: rule.color }} />
         <Input
           value={rule.label}
           onChange={(e) => onChange({ ...rule, label: e.target.value })}
           placeholder="Rule name"
           className="h-7 flex-1 text-xs"
         />
-        <button type="button" disabled={index === 0} onClick={() => onMove(-1)} title="Move up" className="text-muted-foreground disabled:opacity-30 hover:text-foreground">
+        <button type="button" disabled={index === 0} onClick={() => onMove(-1)} title="Move up" className="text-ink-3 hover:text-ink disabled:opacity-30">
           <ChevronUp className="size-4" />
         </button>
-        <button type="button" disabled={index === count - 1} onClick={() => onMove(1)} title="Move down" className="text-muted-foreground disabled:opacity-30 hover:text-foreground">
+        <button type="button" disabled={index === count - 1} onClick={() => onMove(1)} title="Move down" className="text-ink-3 hover:text-ink disabled:opacity-30">
           <ChevronDown className="size-4" />
         </button>
         <ConfirmButton
@@ -187,7 +202,7 @@ function RuleCard({
         <button
           type="button"
           onClick={() => onChange({ ...rule, conditions: [...rule.conditions, blankCondition()] })}
-          className="self-start text-xs text-muted-foreground hover:text-foreground"
+          className="self-start text-xs font-semibold text-brand-ink hover:underline"
         >
           + condition
         </button>
@@ -214,6 +229,7 @@ export function RuleEditor({
   const [rules, setRules] = useState<ColorRule[]>(initial.rules);
   const [defaultColor, setDefaultColor] = useState(initial.default_color);
   const save = useSaveFacilityMapConfig(facilityId);
+  const palette = useRulePalette();
 
   // Stream the draft up for live preview.
   useEffect(() => {
@@ -233,17 +249,17 @@ export function RuleEditor({
   };
 
   return (
-    <div className="absolute right-0 top-0 z-[600] flex h-full w-[22rem] max-w-[calc(100vw-1rem)] flex-col border-l bg-background/95 shadow-xl backdrop-blur">
-      <div className="flex items-center justify-between border-b px-3 py-2">
+    <div className="absolute right-0 top-0 z-[600] flex h-full w-[22rem] max-w-[calc(100vw-1rem)] flex-col border-l border-line bg-panel">
+      <div className="flex items-center justify-between border-b border-line px-3 py-2">
         <div className="text-sm font-semibold">{facilityId} color rules</div>
-        <button type="button" onClick={onClose} title="Close" className="text-muted-foreground hover:text-foreground">
+        <button type="button" onClick={onClose} title="Close" className="rounded-full p-1 text-ink-3 hover:bg-panel-2 hover:text-ink">
           <X className="size-4" />
         </button>
       </div>
 
       <div className="flex-1 overflow-y-auto p-3">
-        <div className="mb-3 flex items-center justify-between gap-2 rounded-lg border bg-background/60 p-2.5">
-          <div className="text-xs font-medium">Default (unmatched)</div>
+        <div className="mb-3 flex items-center justify-between gap-2 rounded-sm border border-line bg-panel-2 p-2.5">
+          <div className="text-xs font-semibold">Default (unmatched)</div>
           <ColorSwatches value={defaultColor} onPick={setDefaultColor} />
         </div>
 
@@ -265,20 +281,20 @@ export function RuleEditor({
           variant="outline"
           size="sm"
           className="mt-3 w-full"
-          onClick={() => setRules([...rules, blankRule(PALETTE[rules.length % PALETTE.length].hex)])}
+          onClick={() => setRules([...rules, blankRule(palette[rules.length % palette.length]?.hex ?? defaultRuleColor(palette))])}
         >
-          <Plus className="mr-1 size-4" /> Add rule
+          <Plus /> Add rule
         </Button>
       </div>
 
-      <div className="flex items-center gap-2 border-t px-3 py-2">
+      <div className="flex items-center gap-2 border-t border-line px-3 py-2">
         <Button
           size="sm"
           className="flex-1"
           disabled={!dirty || save.isPending}
           onClick={() => save.mutate({ rules, default_color: defaultColor }, { onSuccess: onClose })}
         >
-          <Save className="mr-1 size-4" /> {save.isPending ? "Saving…" : "Save"}
+          <Save /> {save.isPending ? "Saving…" : "Save"}
         </Button>
         {dirty ? (
           <ConfirmButton

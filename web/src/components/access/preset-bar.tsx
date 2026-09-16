@@ -1,4 +1,4 @@
-import {ConfirmButton, cn} from "@ois/ui";
+import {ConfirmButton, cn, Select} from "@ois/ui";
 import {Wand2} from "lucide-react";
 
 import {type AccessPreset, ACCESS_PRESETS} from "@/lib/presets";
@@ -32,8 +32,7 @@ export function PresetBar({
 }) {
   const national = ACCESS_PRESETS.filter((p) => p.scope === "national");
   const facilityPresets = ACCESS_PRESETS.filter((p) => p.scope === "facility");
-  const btn =
-    size === "lg" ? "px-3 py-1.5 text-sm" : "px-2.5 py-1 text-xs";
+  const btn = size === "lg" ? "h-8 px-3 text-sm" : "h-7 px-2.5 text-xs";
 
   const Preset = ({ preset }: { preset: AccessPreset }) => {
     const needsFacility = preset.scope === "facility" && !facility;
@@ -53,11 +52,11 @@ export function PresetBar({
               : preset.description
         }
         className={cn(
-          "rounded-md border font-medium transition-colors",
+          "rounded-full border font-semibold transition-colors",
           btn,
           applied
-            ? "border-primary/60 bg-primary/15 text-primary"
-            : "bg-background hover:bg-accent",
+            ? "border-brand/40 bg-brand-soft text-brand-ink"
+            : "border-line bg-panel-2 text-ink-2 hover:bg-chip hover:text-ink",
           disabled && "cursor-not-allowed opacity-50",
         )}
       >
@@ -68,22 +67,24 @@ export function PresetBar({
   };
 
   return (
-    <div className="flex flex-col gap-2 rounded-md border bg-muted/20 p-2">
+    <div className="flex flex-col gap-2 rounded-md border border-line bg-panel p-2.5">
       <div className="flex flex-wrap items-center gap-2">
-        <span className="flex items-center gap-1 text-xs font-medium text-muted-foreground">
-          <Wand2 className="size-3.5 text-primary" /> Presets
+        <span className="flex items-center gap-1 text-xs font-semibold text-ink-2">
+          <Wand2 className="size-3.5 text-brand-ink" /> Presets
         </span>
-        <span className="text-[10px] uppercase tracking-wide text-muted-foreground">National</span>
+        <span className="text-xs font-semibold text-ink-3">National</span>
         {national.map((p) => (
           <Preset key={p.id} preset={p} />
         ))}
-        <span className="mx-0.5 h-5 w-px bg-border" />
-        <span className="text-[10px] uppercase tracking-wide text-muted-foreground">Facility</span>
-        <select
+        <span className="mx-0.5 h-5 w-px bg-line" />
+        <span className="text-xs font-semibold text-ink-3">Facility</span>
+        <Select
+          size="sm"
           value={facility}
           onChange={(e) => onFacility(e.target.value)}
           title="Facility for a facility-scoped preset"
-          className="h-7 rounded-md border border-input bg-background px-2 text-xs"
+          aria-label="Facility for a facility-scoped preset"
+          className="font-mono text-xs"
         >
           <option value="">Facility…</option>
           {facilities.map((f) => (
@@ -91,12 +92,17 @@ export function PresetBar({
               {f.id}
             </option>
           ))}
-        </select>
+        </Select>
         {facilityPresets.map((p) => (
           <Preset key={p.id} preset={p} />
         ))}
-        <span className="mx-0.5 h-5 w-px bg-border" />
-        <ConfirmButton size="sm" variant="ghost" warn={removeAllWarn} onConfirm={onRemoveAll}>
+        <ConfirmButton
+          size="sm"
+          variant="ghost"
+          className="ml-auto"
+          warn={removeAllWarn}
+          onConfirm={onRemoveAll}
+        >
           Remove all
         </ConfirmButton>
       </div>

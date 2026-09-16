@@ -6,6 +6,9 @@ import {DialogProvider, ThemeProvider, ToastProvider, TooltipProvider} from "@oi
 
 import {router} from "./router";
 import {RealtimeProvider} from "./components/realtime-provider";
+import "@fontsource-variable/inter";
+import "@fontsource/jetbrains-mono/400.css";
+import "@fontsource/jetbrains-mono/600.css";
 import "./index.css";
 
 const queryClient = new QueryClient();

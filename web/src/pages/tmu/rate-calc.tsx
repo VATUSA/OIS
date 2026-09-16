@@ -1,5 +1,6 @@
 import {useEffect, useState} from "react";
-import {Button, Card, CardContent, Input} from "@ois/ui";
+import {Button, Card, Input, MetricCard, Select, type Tone} from "@ois/ui";
+import {Gauge} from "lucide-react";
 
 import {useMe} from "@/lib/auth";
 import {hasPermission} from "@/lib/permissions";
@@ -7,8 +8,6 @@ import {POSITIONS, type Positions, recommendedAar, tierForIcao, type TierKey, TI
 import {usePrograms, useUpsertProgram} from "@/lib/tmu";
 
 const STORE_KEY = "ois.ratecalc";
-const SELECT =
-  "h-9 rounded-md border border-input bg-background px-2 text-sm focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring";
 
 type Stored = {
   icao: string;
@@ -52,7 +51,7 @@ function Field({
 }) {
   return (
     <label
-      className={`flex flex-col gap-1 text-xs font-medium uppercase tracking-wide text-muted-foreground ${width}`}
+      className={`flex flex-col gap-1 text-xs font-semibold text-ink-2 ${width}`}
     >
       {label}
       {children}
@@ -100,14 +99,8 @@ export function RateCalculatorTab() {
   });
 
   const validIcao = /^[A-Z0-9]{4}$/.test(s.icao);
-  const resultColor =
-    result.aar <= 0
-      ? "text-muted-foreground"
-      : result.pct >= 70
-        ? "text-emerald-500"
-        : result.pct >= 40
-          ? "text-amber-500"
-          : "text-destructive";
+  const resultTone: Tone | undefined =
+    result.aar <= 0 ? undefined : result.pct >= 70 ? "good" : result.pct >= 40 ? "warn" : "bad";
   const limitedTxt =
     result.limitedBy === "positions"
       ? "position mix"
@@ -145,160 +138,149 @@ export function RateCalculatorTab() {
 
   return (
     <div className="flex flex-col gap-6">
-      <Card>
-        <CardContent className="flex flex-col gap-4 pt-6">
-          <div className="flex flex-wrap items-end gap-3">
-            <Field label="Airport" width="w-28">
-              <Input
-                className="font-mono uppercase"
-                maxLength={4}
-                placeholder="KJFK"
-                value={s.icao}
-                onChange={(e) => onIcao(e.target.value)}
-              />
-            </Field>
-            <Field label="Tier" width="w-36">
-              <select
-                className={SELECT}
-                value={s.tier}
-                onChange={(e) => applyTier(e.target.value as TierKey)}
-              >
-                {Object.entries(TIERS).map(([k, t]) => (
-                  <option key={k} value={k}>
-                    {t.label} ({t.maxAar}/hr, {t.fullStaff} staff)
-                  </option>
-                ))}
-              </select>
-            </Field>
-            <Field label="Max AAR">
-              <Input
-                type="number"
-                min={1}
-                max={200}
-                value={s.maxAar}
-                onChange={(e) => set("maxAar", Number(e.target.value))}
-              />
-            </Field>
-            <Field label="Full staff" width="w-24">
-              <Input
-                type="number"
-                min={1}
-                max={20}
-                value={s.fullStaff}
-                onChange={(e) => set("fullStaff", Number(e.target.value))}
-              />
-            </Field>
-            <Field label="On duty" width="w-24">
-              <Input
-                type="number"
-                min={0}
-                max={20}
-                value={s.onDuty}
-                onChange={(e) => set("onDuty", Number(e.target.value))}
-              />
-            </Field>
-          </div>
-
-          <button
-            type="button"
-            onClick={() => set("advancedOpen", !s.advancedOpen)}
-            className="w-fit text-xs font-medium uppercase tracking-wide text-primary hover:underline"
-          >
+      {/* control row */}
+      <div className="flex flex-col gap-3">
+        <div className="flex flex-wrap items-end gap-3">
+          <Field label="Airport" width="w-28">
+            <Input
+              className="font-mono uppercase"
+              maxLength={4}
+              placeholder="KJFK"
+              value={s.icao}
+              onChange={(e) => onIcao(e.target.value)}
+            />
+          </Field>
+          <Field label="Tier" width="w-56">
+            <Select value={s.tier} onChange={(e) => applyTier(e.target.value as TierKey)}>
+              {Object.entries(TIERS).map(([k, t]) => (
+                <option key={k} value={k}>
+                  {t.label} ({t.maxAar}/hr, {t.fullStaff} staff)
+                </option>
+              ))}
+            </Select>
+          </Field>
+          <Field label="Max AAR">
+            <Input
+              className="font-mono"
+              type="number"
+              min={1}
+              max={200}
+              value={s.maxAar}
+              onChange={(e) => set("maxAar", Number(e.target.value))}
+            />
+          </Field>
+          <Field label="Full staff" width="w-24">
+            <Input
+              className="font-mono"
+              type="number"
+              min={1}
+              max={20}
+              value={s.fullStaff}
+              onChange={(e) => set("fullStaff", Number(e.target.value))}
+            />
+          </Field>
+          <Field label="On duty" width="w-24">
+            <Input
+              className="font-mono"
+              type="number"
+              min={0}
+              max={20}
+              value={s.onDuty}
+              onChange={(e) => set("onDuty", Number(e.target.value))}
+            />
+          </Field>
+          <Button variant="ghost" size="sm" className="mb-0.5" onClick={() => set("advancedOpen", !s.advancedOpen)}>
             {s.advancedOpen ? "▾ Hide" : "▸ Show"} position checklist
-          </button>
+          </Button>
+        </div>
 
-          {s.advancedOpen && (
-            <div className="flex flex-col gap-3 border-t pt-3">
-              <label className="flex w-fit items-center gap-2 text-sm">
+        {s.advancedOpen && (
+          <div className="flex flex-wrap items-center gap-x-6 gap-y-2 rounded-sm border border-line bg-panel-2 px-3 py-2">
+            <label className="flex w-fit items-center gap-2 text-sm font-semibold">
+              <input
+                type="checkbox"
+                className="size-3.5 accent-brand"
+                checked={s.usePositions}
+                onChange={(e) => set("usePositions", e.target.checked)}
+              />
+              Use position weights
+            </label>
+            {POSITIONS.map((p) => (
+              <label key={p.key} className="flex items-center gap-2 text-sm">
                 <input
                   type="checkbox"
-                  checked={s.usePositions}
-                  onChange={(e) => set("usePositions", e.target.checked)}
+                  className="size-3.5 accent-brand"
+                  disabled={!s.usePositions}
+                  checked={s.positions[p.key]}
+                  onChange={(e) => set("positions", { ...s.positions, [p.key]: e.target.checked })}
                 />
-                Use position weights
+                {p.label}
               </label>
-              <div className="flex flex-wrap gap-x-6 gap-y-2">
-                {POSITIONS.map((p) => (
-                  <label key={p.key} className="flex items-center gap-2 text-sm">
-                    <input
-                      type="checkbox"
-                      disabled={!s.usePositions}
-                      checked={s.positions[p.key]}
-                      onChange={(e) =>
-                        set("positions", { ...s.positions, [p.key]: e.target.checked })
-                      }
-                    />
-                    {p.label}
-                  </label>
-                ))}
-              </div>
-            </div>
-          )}
-        </CardContent>
-      </Card>
+            ))}
+          </div>
+        )}
+      </div>
 
-      <Card>
-        <CardContent className="flex flex-col gap-2 pt-6">
-          <span className="text-xs font-medium uppercase tracking-wide text-muted-foreground">
-            Recommended AAR
-          </span>
-          <div className={`text-5xl font-semibold ${resultColor}`}>
-            {result.aar > 0 ? (
+      {/* result */}
+      <div className="flex flex-col gap-3">
+        <MetricCard
+          label="Recommended AAR"
+          icon={Gauge}
+          tone={resultTone}
+          className="max-w-md"
+          value={
+            result.aar > 0 ? (
               <>
                 {result.aar}
-                <span className="text-2xl font-medium text-muted-foreground"> /hr</span>
+                <span className="text-base font-semibold text-ink-3"> /hr</span>
               </>
             ) : (
-              <span className="text-2xl">{result.warning ?? "—"}</span>
+              <span className="font-sans text-xl text-ink-2">{result.warning ?? "—"}</span>
+            )
+          }
+          sub={
+            result.aar > 0 ? (
+              <>
+                <span className="font-mono">{result.pct}%</span> of max capacity ·{" "}
+<span className="font-mono">{s.onDuty}</span> of <span className="font-mono">{s.fullStaff}</span>{" "}
+                controllers · limited by {limitedTxt}
+              </>
+            ) : undefined
+          }
+        />
+        {result.aar > 0 && (
+          <p className="font-mono text-xs text-ink-3">
+            maxAAR × (onDuty / fullStaff) = {s.maxAar} × ({s.onDuty} / {s.fullStaff}) = {result.aar}/hr
+          </p>
+        )}
+
+        {result.aar > 0 && validIcao && (
+          <div className="flex flex-wrap items-center gap-3">
+            {canApply ? (
+              <>
+                <Button disabled={upsert.isPending} onClick={apply}>
+                  Apply to <span className="font-mono">{s.icao}</span>
+                </Button>
+                <span className="text-xs text-ink-3">Sets the AAR on the Programs tab (keeps trail/MIT/gates).</span>
+              </>
+            ) : (
+              <span className="text-xs text-ink-3">View only — you can&apos;t set programs.</span>
             )}
           </div>
-          {result.aar > 0 && (
-            <>
-              <p className="text-sm text-muted-foreground">
-                {result.pct}% of max capacity · {s.onDuty} of {s.fullStaff} controllers ·
-                limited by {limitedTxt}
-              </p>
-              <p className="font-mono text-xs text-muted-foreground">
-                maxAAR × (onDuty / fullStaff) = {s.maxAar} × ({s.onDuty} / {s.fullStaff}) ={" "}
-                {result.aar}/hr
-              </p>
-            </>
-          )}
+        )}
+      </div>
 
-          {result.aar > 0 && validIcao && (
-            <div className="mt-3 flex flex-wrap items-center gap-3">
-              {canApply ? (
-                <>
-                  <Button disabled={upsert.isPending} onClick={apply}>
-                    Apply to {s.icao}
-                  </Button>
-                  <span className="text-xs text-muted-foreground">
-                    Sets the AAR on the Programs tab (keeps trail/MIT/gates).
-                  </span>
-                </>
-              ) : (
-                <span className="text-xs text-muted-foreground">
-                  View only — you can&apos;t set programs.
-                </span>
-              )}
-            </div>
-          )}
-        </CardContent>
-      </Card>
-
-      <Card>
-        <CardContent className="pt-6 text-sm text-muted-foreground">
-          <p className="mb-2 font-medium text-foreground">How it works</p>
-          <ul className="list-disc space-y-1 pl-5">
-            <li>Pick an airport tier to pre-fill max AAR and full staffing, or set your own.</li>
-            <li>Recommended AAR = max AAR × (controllers on duty ÷ full staffing).</li>
-            <li>A hub at 120/hr with 6 full positions and 2 on duty → 40/hr.</li>
-            <li>
-              Enable the position checklist to cap capacity when critical positions (APP,
-              TWR) aren&apos;t staffed.
-            </li>
-          </ul>
-        </CardContent>
+      <Card className="p-4 text-sm text-ink-2">
+        <h2 className="mb-2 text-xl font-bold text-ink">How it works</h2>
+        <ul className="list-disc space-y-1 pl-5">
+          <li>Pick an airport tier to pre-fill max AAR and full staffing, or set your own.</li>
+          <li>Recommended AAR = max AAR × (controllers on duty ÷ full staffing).</li>
+          <li>A hub at 120/hr with 6 full positions and 2 on duty → 40/hr.</li>
+          <li>
+            Enable the position checklist to cap capacity when critical positions (APP, TWR)
+            aren&apos;t staffed.
+          </li>
+        </ul>
       </Card>
     </div>
   );

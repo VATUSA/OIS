@@ -1,8 +1,20 @@
-import {useState} from "react";
+import {useMemo, useState} from "react";
 import {useQueryClient} from "@tanstack/react-query";
-import {Badge, Button, Input} from "@ois/ui";
-import {RefreshCw, X} from "lucide-react";
+import {
+  Button,
+  Card,
+  type DataColumn,
+  DataTable,
+  EmptyState,
+  FilterBar,
+  FilterChip,
+  Input,
+  MetricCard,
+  StatusPill,
+} from "@ois/ui";
+import {Clock, Plane, RefreshCw, Route} from "lucide-react";
 
+import {usePageHeader} from "@/components/shell/page-meta";
 import {useMe} from "@/lib/auth";
 import {hasPermission} from "@/lib/permissions";
 import {useClearRelease, useMarkRelease} from "@/lib/fca";
@@ -15,20 +27,6 @@ const keyOf = (f: IdstFlight) => `${f.fca_id}:${f.callsign}`;
 function hhmmZ(iso?: string | null): string {
   if (!iso) return "—";
   return `${new Date(iso).toISOString().slice(11, 16).replace(":", "")}z`;
-}
-
-/** A removable scope chip. */
-function Chip({ label, color, onRemove }: { label: string; color: string; onRemove: () => void }) {
-  return (
-    <span
-      className={`flex items-center gap-1 rounded border px-2 py-0.5 text-xs font-medium ${color}`}
-    >
-      {label}
-      <button type="button" onClick={onRemove} aria-label={`Remove ${label}`}>
-        <X className="size-3 opacity-70 hover:opacity-100" />
-      </button>
-    </span>
-  );
 }
 
 function ScopePanel({ scope, setScope }: { scope: IdstScope; setScope: (s: IdstScope) => void }) {
@@ -48,13 +46,16 @@ function ScopePanel({ scope, setScope }: { scope: IdstScope; setScope: (s: IdstS
     setScope({ ...scope, [list]: scope[list].filter((x) => x !== v) });
 
   return (
-    <aside className="flex flex-col gap-4 rounded-lg border p-3">
-      <div className="text-xs font-semibold uppercase tracking-wide text-muted-foreground">Working</div>
+    <Card className="flex flex-col gap-4 p-4">
+      <h2 className="text-xl font-bold">Working</h2>
 
       <div className="flex flex-col gap-1.5">
-        <label className="text-xs font-medium text-muted-foreground">Tower · Airport</label>
+        <label htmlFor="idst-airport" className="text-xs font-semibold text-ink-2">
+          Tower · Airport
+        </label>
         <div className="flex gap-1.5">
           <Input
+            id="idst-airport"
             value={airport}
             onChange={(e) => setAirport(e.target.value)}
             onKeyDown={(e) => e.key === "Enter" && addAirport()}
@@ -65,113 +66,124 @@ function ScopePanel({ scope, setScope }: { scope: IdstScope; setScope: (s: IdstS
             Add
           </Button>
         </div>
-        <div className="flex flex-wrap gap-1.5">
-          {scope.airports.map((a) => (
-            <Chip key={a} label={a} color="border-sky-500/40 text-sky-600 dark:text-sky-400" onRemove={() => remove("airports", a)} />
-          ))}
-        </div>
+        {scope.airports.length > 0 && (
+          <FilterBar className="gap-1.5">
+            {scope.airports.map((a) => (
+              <FilterChip key={a} label="Airport" value={a} active onClear={() => remove("airports", a)} />
+            ))}
+          </FilterBar>
+        )}
       </div>
 
       <div className="flex flex-col gap-1.5">
-        <label className="text-xs font-medium text-muted-foreground">Facility · TRACON / ARTCC</label>
+        <span className="text-xs font-semibold text-ink-2">Facility · TRACON / ARTCC</span>
         <FacilityCombobox
           onSelect={addFacility}
           placeholder="PCT, ZDC, N90…"
           className="w-full"
           inputClassName="h-8"
         />
-        <div className="flex flex-wrap gap-1.5">
-          {scope.tracons.map((t) => (
-            <Chip key={t} label={t} color="border-emerald-500/40 text-emerald-600 dark:text-emerald-400" onRemove={() => remove("tracons", t)} />
-          ))}
-          {scope.artccs.map((z) => (
-            <Chip key={z} label={z} color="border-violet-500/40 text-violet-600 dark:text-violet-400" onRemove={() => remove("artccs", z)} />
-          ))}
-        </div>
+        {scope.tracons.length + scope.artccs.length > 0 && (
+          <FilterBar className="gap-1.5">
+            {scope.tracons.map((t) => (
+              <FilterChip key={t} label="TRACON" value={t} active onClear={() => remove("tracons", t)} />
+            ))}
+            {scope.artccs.map((z) => (
+              <FilterChip key={z} label="ARTCC" value={z} active onClear={() => remove("artccs", z)} />
+            ))}
+          </FilterBar>
+        )}
       </div>
 
-      <p className="mt-auto text-xs text-muted-foreground">
+      <p className="mt-auto text-xs text-ink-3">
         Your scope syncs to your account. Only FCA-metered ground departures in scope appear in Flights to Work.
       </p>
-    </aside>
+    </Card>
   );
 }
 
-function FlightRow({
-  f,
-  selected,
-  onClick,
-}: {
-  f: IdstFlight;
-  selected: boolean;
-  onClick: () => void;
-}) {
-  return (
-    <button
-      type="button"
-      onClick={onClick}
-      className={`grid w-full grid-cols-[1fr_auto] items-center gap-2 border-b px-3 py-2 text-left text-sm last:border-0 hover:bg-accent ${
-        selected ? "bg-accent" : ""
-      }`}
-    >
-      <span className="min-w-0">
-        <span className="font-mono font-medium">{f.callsign}</span>
-        <span className="ml-2 text-xs text-muted-foreground">
-          {f.dep} → {f.arr} · {f.aircraft_type || "—"}
+const COLUMNS: DataColumn<IdstFlight>[] = [
+  {
+    accessorKey: "callsign",
+    header: "Callsign",
+    icon: Plane,
+    mono: true,
+    cellClassName: "font-semibold",
+  },
+  {
+    id: "route",
+    accessorFn: (f) => `${f.dep} ${f.arr}`,
+    header: "Route",
+    icon: Route,
+    cell: (c) => {
+      const f = c.row.original;
+      return (
+        <span className="whitespace-nowrap font-mono text-xs">
+          {f.dep} → {f.arr}
+          <span className="ml-1.5 text-ink-3">{f.aircraft_type || "—"}</span>
         </span>
-        <span className="ml-2">
-          <Badge variant="secondary" className="text-[10px]">{f.fca_name}</Badge>
+      );
+    },
+  },
+  {
+    accessorKey: "fca_name",
+    header: "FCA",
+    cell: (c) => <StatusPill tone="neutral">{c.row.original.fca_name}</StatusPill>,
+  },
+  {
+    id: "edct",
+    accessorFn: (f) => (f.edct ? new Date(f.edct).getTime() : Infinity),
+    header: "EDCT",
+    icon: Clock,
+    mono: true,
+    align: "right",
+    sortDescFirst: false,
+    cell: (c) => {
+      const f = c.row.original;
+      return f.released ? (
+        <span className="whitespace-nowrap text-success">RLSD {hhmmZ(f.edct)}</span>
+      ) : (
+        <span className="whitespace-nowrap text-ink-2">
+          EDCT {hhmmZ(f.edct)}
+          {f.delay_min > 0 ? ` · +${f.delay_min}m` : ""}
         </span>
-      </span>
-      <span className="whitespace-nowrap font-mono text-xs">
-        {f.released ? (
-          <span className="text-emerald-600 dark:text-emerald-400">RLSD {hhmmZ(f.edct)}</span>
-        ) : (
-          <span className="text-muted-foreground">
-            EDCT {hhmmZ(f.edct)}
-            {f.delay_min > 0 ? ` · +${f.delay_min}m` : ""}
-          </span>
-        )}
-      </span>
-    </button>
-  );
-}
+      );
+    },
+  },
+];
 
-function Column({
+function FlightTable({
   title,
-  count,
   flights,
   selKey,
   onSelect,
   empty,
-  accent,
 }: {
   title: string;
-  count: number;
   flights: IdstFlight[];
   selKey: string | null;
-  onSelect: (k: string) => void;
+  onSelect: (k: string | null) => void;
   empty: string;
-  accent: string;
 }) {
   return (
-    <div className="flex min-h-[16rem] flex-col rounded-lg border">
-      <div className="flex items-center justify-between border-b px-3 py-2">
-        <span className={`text-sm font-semibold ${accent}`}>{title}</span>
-        <span className="text-xs text-muted-foreground">{count}</span>
-      </div>
-      {flights.length === 0 ? (
-        <p className="flex flex-1 items-center justify-center p-6 text-center text-sm text-muted-foreground">
-          {empty}
-        </p>
-      ) : (
-        <div className="flex-1 overflow-y-auto">
-          {flights.map((f) => (
-            <FlightRow key={keyOf(f)} f={f} selected={selKey === keyOf(f)} onClick={() => onSelect(keyOf(f))} />
-          ))}
-        </div>
-      )}
-    </div>
+    <section className="flex flex-col gap-3">
+      <h2 className="flex items-baseline gap-2 text-xl font-bold">
+        {title}
+        <span className="font-mono text-sm font-normal text-ink-3">{flights.length}</span>
+      </h2>
+      <DataTable
+        label={title}
+        columns={COLUMNS}
+        data={flights}
+        getRowId={keyOf}
+        // Live ops list: always pages, never hides rows behind "Show all".
+        rowCap={Infinity}
+        pageSize={25}
+        // Clicking the working flight again keeps it selected (the CFR panel stays open), as before.
+        selection={{ mode: "single", selected: selKey, onChange: (k) => k && onSelect(k) }}
+        empty={empty}
+      />
+    </section>
   );
 }
 
@@ -183,40 +195,36 @@ function SelectedPanel({ selected, canEdit }: { selected: IdstFlight | null; can
   const invalidate = () => qc.invalidateQueries({ queryKey: ["idst"] });
 
   return (
-    <aside className="flex flex-col gap-3 rounded-lg border p-3">
-      <div className="text-xs font-semibold uppercase tracking-wide text-muted-foreground">Selected flight</div>
+    <Card className="flex flex-col gap-3 p-4">
+      <h2 className="text-xl font-bold">Selected flight</h2>
       {!selected ? (
-        <p className="text-sm text-muted-foreground">Select a flight to issue or cancel a CFR release.</p>
+        <p className="text-sm text-ink-2">Select a flight to issue or cancel a CFR release.</p>
       ) : (
         <>
           <div>
-            <div className="font-mono text-lg font-semibold">{selected.callsign}</div>
-            <div className="text-sm text-muted-foreground">
+            <div className="font-mono text-lg font-bold">{selected.callsign}</div>
+            <div className="font-mono text-sm text-ink-2">
               {selected.dep} → {selected.arr} · {selected.aircraft_type || "—"}
             </div>
-            <div className="mt-1 flex flex-wrap items-center gap-1.5 text-xs">
-              <Badge variant="secondary">{selected.fca_name}</Badge>
-              <span className="text-muted-foreground">seq {selected.seq}</span>
-              {selected.delay_min > 0 && <span className="text-amber-600 dark:text-amber-400">+{selected.delay_min}m delay</span>}
+            <div className="mt-1.5 flex flex-wrap items-center gap-1.5 text-xs">
+              <StatusPill tone="neutral">{selected.fca_name}</StatusPill>
+              <span className="font-mono text-ink-3">seq {selected.seq}</span>
+              {selected.delay_min > 0 && (
+                <span className="font-mono text-warning">+{selected.delay_min}m delay</span>
+              )}
             </div>
           </div>
 
-          <div className="rounded border bg-muted/30 p-2 text-sm">
-            <div className="flex justify-between">
-              <span className="text-muted-foreground">CTA (crossing)</span>
-              <span className="font-mono">{hhmmZ(selected.cross_time)}</span>
+          <dl className="divide-y divide-line-soft border-y border-line-soft text-sm">
+            <div className="flex justify-between py-1.5">
+              <dt className="text-ink-2">CTA (crossing)</dt>
+              <dd className="font-mono">{hhmmZ(selected.cross_time)}</dd>
             </div>
-            <div className="flex justify-between">
-              <span className="text-muted-foreground">
-                {selected.released ? "EDCT (wheels-up)" : "Proposed EDCT"}
-              </span>
-              <span
-                className={`font-mono ${selected.released ? "text-emerald-600 dark:text-emerald-400" : ""}`}
-              >
-                {hhmmZ(selected.edct)}
-              </span>
+            <div className="flex justify-between py-1.5">
+              <dt className="text-ink-2">{selected.released ? "EDCT (wheels-up)" : "Proposed EDCT"}</dt>
+              <dd className={`font-mono ${selected.released ? "text-success" : ""}`}>{hhmmZ(selected.edct)}</dd>
             </div>
-          </div>
+          </dl>
 
           {canEdit ? (
             selected.released ? (
@@ -231,6 +239,7 @@ function SelectedPanel({ selected, canEdit }: { selected: IdstFlight | null; can
               <div className="flex flex-col gap-2">
                 <div className="flex gap-1.5">
                   <Input
+                    aria-label="Ready time"
                     value={ready}
                     onChange={(e) => setReady(e.target.value)}
                     placeholder="HHMMz"
@@ -238,7 +247,7 @@ function SelectedPanel({ selected, canEdit }: { selected: IdstFlight | null; can
                     className="h-9 font-mono"
                   />
                   <Button
-                    variant="secondary"
+                    variant="outline"
                     disabled={ready.trim().length < 4 || mark.isPending}
                     onClick={() => mark.mutate({ callsign: selected.callsign, ready: ready.trim() }, { onSuccess: () => { setReady(""); invalidate(); } })}
                   >
@@ -254,11 +263,11 @@ function SelectedPanel({ selected, canEdit }: { selected: IdstFlight | null; can
               </div>
             )
           ) : (
-            <p className="text-xs text-muted-foreground">You don&apos;t have permission to issue releases.</p>
+            <p className="text-xs text-ink-3">You don&apos;t have permission to issue releases.</p>
           )}
         </>
       )}
-    </aside>
+    </Card>
   );
 }
 
@@ -274,48 +283,47 @@ export function IdstPage() {
   const released = idst.data?.released ?? [];
   const selected = [...unscheduled, ...released].find((f) => keyOf(f) === selKey) ?? null;
 
+  const { refetch, isFetching } = idst;
+  const actions = useMemo(
+    () => (
+      <Button size="sm" variant="outline" onClick={() => refetch()}>
+        <RefreshCw className={isFetching ? "animate-spin" : undefined} />
+        Refresh
+      </Button>
+    ),
+    [refetch, isFetching],
+  );
+  usePageHeader({ subtitle: "Integrated Departure Scheduling — FCA release timing.", actions });
+
   return (
     <div className="flex flex-col gap-4">
-      <div className="flex flex-wrap items-center justify-between gap-3">
-        <div>
-          <h1 className="text-2xl font-semibold tracking-tight">IDST</h1>
-          <p className="text-muted-foreground">Integrated Departure Scheduling — FCA release timing.</p>
-        </div>
-        <div className="flex items-center gap-3 text-sm text-muted-foreground">
-          <span>UNSCHED {unscheduled.length}</span>
-          <span>RELEASED {released.length}</span>
-          <span>METERED {idst.data?.metered_count ?? 0}</span>
-          <button type="button" onClick={() => idst.refetch()} title="Refresh" className="hover:text-foreground">
-            <RefreshCw className={`size-4 ${idst.isFetching ? "animate-spin" : ""}`} />
-          </button>
-        </div>
+      <div className="grid grid-cols-3 gap-3">
+        <MetricCard label="Unscheduled" value={unscheduled.length} />
+        <MetricCard label="Released" value={released.length} tone={released.length > 0 ? "good" : undefined} />
+        <MetricCard label="Metered" value={idst.data?.metered_count ?? 0} />
       </div>
 
-      <div className="grid gap-4 lg:grid-cols-[280px_1fr_320px]">
+      <div className="grid items-start gap-4 lg:grid-cols-[280px_minmax(0,1fr)_320px]">
         <ScopePanel scope={scope} setScope={setScope} />
         {scopeIsEmpty(scope) ? (
-          <div className="flex min-h-[16rem] items-center justify-center rounded-lg border text-sm text-muted-foreground lg:col-span-1">
+          <EmptyState className="min-h-[16rem] rounded-md border border-line">
             Set your scope to see FCA-metered ground departures.
-          </div>
+          </EmptyState>
         ) : (
-          <div className="grid gap-4 md:grid-cols-2">
-            <Column
+          <div className="flex min-w-0 flex-col gap-6">
+            <FlightTable
               title="Unscheduled"
-              count={unscheduled.length}
               flights={unscheduled}
               selKey={selKey}
               onSelect={setSelKey}
               empty="No unscheduled metered departures in scope"
-              accent=""
             />
-            <Column
+            <FlightTable
               title="Released"
-              count={released.length}
               flights={released}
               selKey={selKey}
               onSelect={setSelKey}
               empty="No frozen CFR releases in scope"
-              accent="text-emerald-600 dark:text-emerald-400"
             />
           </div>
         )}
