@@ -155,7 +155,12 @@ export function CommandPalette({
   );
 }
 
-/** The palette's scope row: one pill per scope, the active one tinted. Focus stays in the field. */
+/**
+ * The palette's scope row: one pill per scope, the active one tinted. Clicking keeps focus in the
+ * search field so the keyboard keeps working. A standard radiogroup otherwise — only the checked
+ * chip is tabbable and ←/→ move the selection — with a live region, since the field usually holds
+ * focus and a screen reader would otherwise never hear the scope change.
+ */
 export function ScopeChips({
   scopes,
   scope,
@@ -165,29 +170,50 @@ export function ScopeChips({
   scope: string;
   onScopeChange?: (scope: string) => void;
 }) {
+  const ref = React.useRef<HTMLDivElement>(null);
+  const active = scopes.find((s) => s.id === scope);
+
+  const move = (dir: 1 | -1) => {
+    const next = cycleScope(scopes.map((s) => s.id), scope, dir);
+    onScopeChange?.(next);
+    ref.current?.querySelector<HTMLElement>(`[data-scope="${next}"]`)?.focus();
+  };
+
   return (
-    <div role="radiogroup" aria-label="Search scope" className="flex flex-wrap gap-1.5 border-b border-line px-3 py-2">
-      {scopes.map((s) => {
-        const on = s.id === scope;
-        return (
-          <button
-            key={s.id}
-            type="button"
-            role="radio"
-            aria-checked={on}
-            tabIndex={-1}
-            // Keep focus in the search field so the keyboard keeps working after a click.
-            onMouseDown={(e) => e.preventDefault()}
-            onClick={() => onScopeChange?.(s.id)}
-            className={cn(
-              "inline-flex h-7 items-center rounded-full border px-2.5 text-xs",
-              on ? "border-brand/40 bg-brand-soft text-ink" : "border-line bg-panel-2 text-ink-2 hover:text-ink",
-            )}
-          >
-            {s.label}
-          </button>
-        );
-      })}
+    <div className="border-b border-line">
+      <div ref={ref} role="radiogroup" aria-label="Search scope" className="flex flex-wrap gap-1.5 px-3 py-2">
+        {scopes.map((s) => {
+          const on = s.id === scope;
+          return (
+            <button
+              key={s.id}
+              type="button"
+              role="radio"
+              aria-checked={on}
+              data-scope={s.id}
+              tabIndex={on ? 0 : -1}
+              // Keep focus in the search field so the keyboard keeps working after a click.
+              onMouseDown={(e) => e.preventDefault()}
+              onClick={() => onScopeChange?.(s.id)}
+              onKeyDown={(e) => {
+                if (e.key === "ArrowRight" || e.key === "ArrowLeft") {
+                  e.preventDefault();
+                  move(e.key === "ArrowRight" ? 1 : -1);
+                }
+              }}
+              className={cn(
+                "inline-flex h-7 items-center rounded-full border px-2.5 text-xs",
+                on ? "border-brand/40 bg-brand-soft text-ink" : "border-line bg-panel-2 text-ink-2 hover:text-ink",
+              )}
+            >
+              {s.label}
+            </button>
+          );
+        })}
+      </div>
+      <span className="sr-only" aria-live="polite">
+        {active ? `${active.label} scope` : ""}
+      </span>
     </div>
   );
 }

@@ -1,15 +1,19 @@
 import type {CommandScope} from "@ois/ui";
 
-/** The command-search scopes, in chip order; `all` (the default) blends every group. */
+/**
+ * The command-search scopes, in chip order; `all` (the default) blends every group. `label` is the
+ * chip and the group heading; `noun` is the same scope inside a sentence ("No TMIs match."), which
+ * is why it is written out rather than lower-cased from the label.
+ */
 export const SCOPES = [
-  { id: "all", label: "All" },
-  { id: "aircraft", label: "Aircraft" },
-  { id: "tmis", label: "TMIs" },
-  { id: "events", label: "Events" },
-  { id: "dashboards", label: "Dashboards" },
-  { id: "airports", label: "Airport data" },
-  { id: "pages", label: "Pages" },
-] as const satisfies readonly CommandScope[];
+  { id: "all", label: "All", noun: "results" },
+  { id: "aircraft", label: "Aircraft", noun: "aircraft" },
+  { id: "tmis", label: "TMIs", noun: "TMIs" },
+  { id: "events", label: "Events", noun: "events" },
+  { id: "dashboards", label: "Dashboards", noun: "dashboards" },
+  { id: "airports", label: "Airport data", noun: "airport data" },
+  { id: "pages", label: "Pages", noun: "pages" },
+] as const satisfies readonly (CommandScope & { noun: string })[];
 
 export type ScopeId = (typeof SCOPES)[number]["id"];
 
@@ -58,4 +62,9 @@ export function icaoRows(icao: string): IcaoRow[] {
     sublabel: p.sublabel,
     search: { icao },
   }));
+}
+
+/** Where a TMI row goes: the TMU restrictions tab, filtered to the TMI's requesting facility. */
+export function tmiRow(tmi: { requesting: string }) {
+  return { to: "/ops/tmu", search: { tab: "restrictions", facility: tmi.requesting } } as const;
 }

@@ -156,8 +156,10 @@ const tmuRoute = createRoute({
   staticData: { layout: "wide", title: "TMU", views: [{ value: "board", label: "Board", icon: LayoutGrid }, { value: "table", label: "Table", icon: Rows3 }] },
   // Which tab is active — permission-gated fallback (if the user can't see this tab) happens in
   // the component, since that depends on auth state this route-level validator doesn't have.
-  validateSearch: (search: Record<string, unknown>): { tab?: TmuTabId } => ({
+  // `?facility=` pre-filters the restrictions list (the ⌘K search jumps here for a TMI).
+  validateSearch: (search: Record<string, unknown>): { tab?: TmuTabId; facility?: string } => ({
     tab: TMU_TAB_IDS.includes(search.tab as TmuTabId) ? (search.tab as TmuTabId) : undefined,
+    facility: typeof search.facility === "string" ? search.facility.toUpperCase() : undefined,
   }),
 });
 

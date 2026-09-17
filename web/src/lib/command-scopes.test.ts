@@ -1,6 +1,6 @@
 import {describe, expect, it} from "vitest";
 
-import {SCOPES, icaoRows, parseScopePrefix} from "./command-scopes";
+import {SCOPES, icaoRows, parseScopePrefix, tmiRow} from "./command-scopes";
 
 describe("parseScopePrefix", () => {
   it("switches to a uniquely-prefixed scope and strips the prefix", () => {
@@ -49,5 +49,24 @@ describe("icaoRows", () => {
     expect(icaoRows("KD")).toEqual([]);
     expect(icaoRows("KDENVER")).toEqual([]);
     expect(icaoRows("")).toEqual([]);
+  });
+});
+
+describe("tmiRow", () => {
+  it("filters the restrictions tab to the TMI's facility", () => {
+    // Regression (#311): every TMI row navigated to the same unfiltered restrictions tab, so after
+    // picking one of up to 20 rows there was no sign of which one you picked.
+    expect(tmiRow({ requesting: "ZNY" })).toEqual({
+      to: "/ops/tmu",
+      search: { tab: "restrictions", facility: "ZNY" },
+    });
+  });
+});
+
+describe("SCOPES", () => {
+  it("gives every scope a sentence noun for the empty and loading copy", () => {
+    // Regression (#311): the copy lower-cased the chip label, rendering "No tmis match."
+    expect(SCOPES.find((s) => s.id === "tmis")?.noun).toBe("TMIs");
+    for (const s of SCOPES) expect(s.noun).not.toBe("");
   });
 });

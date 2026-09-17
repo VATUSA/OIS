@@ -17,7 +17,7 @@ import {
 } from "lucide-react";
 
 import {useMe} from "@/lib/auth";
-import {SCOPES, type ScopeId, icaoRows, parseScopePrefix} from "@/lib/command-scopes";
+import {SCOPES, type ScopeId, icaoRows, parseScopePrefix, tmiRow} from "@/lib/command-scopes";
 import {useDashboards} from "@/lib/dashboards";
 import {useUpcomingEvents} from "@/lib/events";
 import {useFacilityDirectory} from "@/lib/facilities";
@@ -188,7 +188,8 @@ function Palette({ onClose }: { onClose: () => void }) {
       onSelect: () => void navigate({ to: "/admin/planning/events/$eventId", params: { eventId: String(e.id) } }),
     }));
 
-  // TMIs have no page of their own: every row opens the TMU restrictions tab.
+  // TMIs have no page of their own: every row opens the TMU restrictions tab, filtered to the TMI's
+  // facility — otherwise every row of a 20-row list lands on the same unfiltered page.
   const tmiItems = (): CommandItem[] =>
     rank(q, tmis.data ?? [], (t) => `${t.requesting} ${t.providing} ${t.decoded ?? t.restriction} ${t.status}`, limit).map(
       (t) => ({
@@ -196,7 +197,7 @@ function Palette({ onClose }: { onClose: () => void }) {
         label: t.decoded ?? t.restriction,
         sublabel: `${t.requesting}→${t.providing} · ${t.status}`,
         icon: Megaphone,
-        onSelect: () => void navigate({ to: "/ops/tmu", search: { tab: "restrictions" } }),
+        onSelect: () => void navigate(tmiRow(t)),
       }),
     );
 
@@ -209,7 +210,7 @@ function Palette({ onClose }: { onClose: () => void }) {
       onSelect: () => void navigate({ to: "/ops/my/$boardId", params: { boardId: d.id } }),
     }));
 
-  const scopeLabel = SCOPES.find((s) => s.id === scope)!.label;
+  const { label: scopeLabel, noun: scopeNoun } = SCOPES.find((s) => s.id === scope)!;
   const groups: CommandGroup[] = [];
   let empty = "No results.";
   if (scope === "all") {
@@ -232,10 +233,10 @@ function Palette({ onClose }: { onClose: () => void }) {
     }[scope];
     groups.push({ label: scopeLabel, items: source.items() });
     empty = source.loading
-      ? `Loading ${scopeLabel.toLowerCase()}…`
+      ? `Loading ${scopeNoun}…`
       : scope === "aircraft" && !q
         ? "Type a callsign, route, or aircraft type."
-        : `No ${scopeLabel.toLowerCase()} match.`;
+        : `No ${scopeNoun} match.`;
   }
 
   return (

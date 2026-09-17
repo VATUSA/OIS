@@ -20,17 +20,27 @@ describe("cycleScope", () => {
 });
 
 describe("ScopeChips", () => {
+  const scopes = [
+    { id: "all", label: "All" },
+    { id: "tmis", label: "TMIs" },
+  ];
+
   it("marks only the active scope as checked", () => {
-    const html = renderToStaticMarkup(
-      <ScopeChips
-        scopes={[
-          { id: "all", label: "All" },
-          { id: "tmis", label: "TMIs" },
-        ]}
-        scope="tmis"
-      />,
-    );
+    const html = renderToStaticMarkup(<ScopeChips scopes={scopes} scope="tmis" />);
     expect(html).toMatch(new RegExp('aria-checked="true"[^>]*>TMIs<'));
     expect(html).toMatch(new RegExp('aria-checked="false"[^>]*>All<'));
+  });
+
+  // The search field normally holds focus, so without these a screen-reader user can neither reach
+  // the group nor hear the scope change (VATUSA/OIS#311).
+  it("makes only the checked chip tabbable, so the group is one tab stop", () => {
+    const html = renderToStaticMarkup(<ScopeChips scopes={scopes} scope="tmis" />);
+    expect(html).toMatch(new RegExp('tabindex="0"[^>]*>TMIs<'));
+    expect(html).toMatch(new RegExp('tabindex="-1"[^>]*>All<'));
+  });
+
+  it("announces the active scope in a live region", () => {
+    const html = renderToStaticMarkup(<ScopeChips scopes={scopes} scope="tmis" />);
+    expect(html).toMatch(new RegExp('aria-live="polite"[^>]*>TMIs scope<'));
   });
 });
