@@ -180,6 +180,8 @@ function featureCentroid(feat: GeoJSON.Feature): [number, number] | null {
 export function computeAtcAnchors(atc: AtcData, boundaries: GeoJSON.FeatureCollection): AtcAnchor[] {
   const anchors: AtcAnchor[] = [];
   for (const ap of atc.airports) {
+    // No DEL/GND/TWR/ATIS pill is drawn for it (`AtcBadge`), so a hover target would float over empty map.
+    if (atcBadgeKinds(ap.positions).length === 0) continue;
     anchors.push({ type: "airport", lat: ap.lat, lon: ap.lon, icao: ap.icao, positions: ap.positions });
   }
   const byId = new Map<string, GeoJSON.Feature>();

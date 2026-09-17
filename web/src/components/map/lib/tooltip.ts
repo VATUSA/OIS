@@ -1,8 +1,9 @@
 import type {PickingInfo} from "@deck.gl/core";
 
 import {RATINGS, onlineFor} from "@/lib/atc-format";
+import {DELAY_THRESHOLD_SEC, fmtDelaySec} from "@/lib/fca";
+import {hhmmZulu} from "@/lib/time";
 import {ATC_COLORS} from "./colors";
-import type {Theme} from "./constants";
 import type {NormAircraft} from "./types";
 import type {MatchedFlight} from "../layers/matched";
 import {anchorHeader, type AtcAnchor, type AtcPositionLite} from "../layers/atc";
@@ -30,8 +31,20 @@ function atcHtml(a: AtcAnchor): string {
   return `<div style="font:700 13px 'JetBrains Mono',ui-monospace,monospace">${esc(anchorHeader(a))}</div>${rows}`;
 }
 
-/** Hover cards for the map: aircraft glyphs, matched traffic, and ATC labels (position + controller). */
-export function mapTooltip(_theme?: Theme) {
+/** Metering line for an in-FCA aircraft: sequence, STA, ETA, and delay (same threshold as the FCA detail page). */
+function meteringHtml(f: MatchedFlight): string {
+  const delayed = f.delay_sec >= DELAY_THRESHOLD_SEC;
+  const delay = delayed
+    ? `<span style="color:var(--danger)">+${fmtDelaySec(f.delay_sec)}</span>`
+    : `<span style="color:var(--success)">on time</span>`;
+  return `<div style="font-family:'JetBrains Mono',ui-monospace,monospace">#${f.seq} · STA ${hhmmZulu(f.cross_time)} · ETA ${hhmmZulu(f.eta)} · ${delay}</div>`;
+}
+
+/**
+ * Hover cards for the map: aircraft glyphs, matched (in-FCA) traffic, and ATC labels (position +
+ * controller). `aircraft: false` drops the aircraft and matched cards, leaving ATC.
+ */
+export function mapTooltip({ aircraft = true }: { aircraft?: boolean } = {}) {
   const style = {
     background: "var(--panel)",
     color: "var(--ink)",
@@ -44,9 +57,12 @@ export function mapTooltip(_theme?: Theme) {
   };
   return (info: PickingInfo) => {
     const id = info.layer?.id;
-    if (id === "aircraft" || id === "matched") {
-      // The plain "aircraft" layer holds NormAircraft (actype/alt/gs); the "matched" (in-FCA) layer
-      // holds MatchedFlight (aircraft_type/altitude/groundspeed). Read whichever the object carries.
+    // Matched glyph layers are "matched" (one FCA) or "matched-<fcaId>" (overview); their sibling
+    // trail/dot/badge layers aren't pickable, so any "matched" pick is a glyph.
+    if (id === "aircraft" || id?.startsWith("matched")) {
+      if (!aircraft) return null;
+      // The plain "aircraft" layer holds NormAircraft (actype/alt/gs); the matched (in-FCA) layers
+      // hold MatchedFlight (aircraft_type/altitude/groundspeed + metering). Read whichever it carries.
       const d = info.object as (NormAircraft & Partial<MatchedFlight>) | undefined;
       if (!d) return null;
       const actype = d.actype || d.aircraft_type || "";
@@ -58,7 +74,8 @@ export function mapTooltip(_theme?: Theme) {
         html:
           `<div style="font-weight:600">${esc(d.callsign)}</div>` +
           `<div>${esc(d.dep || "????")} → ${esc(d.arr || "????")}</div>` +
-          `<div>${esc(actype || "—")} · ${num(alt, "ft")} · ${num(gs, "kt")}</div>`,
+          `<div>${esc(actype || "—")} · ${num(alt, "ft")} · ${num(gs, "kt")}</div>` +
+          (d.seq != null ? meteringHtml(d as MatchedFlight) : ""),
         style,
       };
     }

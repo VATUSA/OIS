@@ -17,6 +17,16 @@ export type AtcPosition = components["schemas"]["AtcPosition"];
 export type FcaFlight = components["schemas"]["FcaFlight"];
 export type FixValidation = components["schemas"]["FixValidationBody"];
 
+/** A metered delay of ~1 min or more is worth flagging (below that is rounding noise). */
+export const DELAY_THRESHOLD_SEC = 30;
+
+/** Delay as `M:SS` (e.g. 1268 → "21:08"). */
+export function fmtDelaySec(sec: number): string {
+  const m = Math.floor(sec / 60);
+  const s = sec % 60;
+  return `${m}:${String(s).padStart(2, "0")}`;
+}
+
 /**
  * Which of the given route-fix tokens aren't real nav fixes (typos that would silently exclude
  * traffic). Debounce `fixes` before passing it in. Needs `flow.fca.read`.

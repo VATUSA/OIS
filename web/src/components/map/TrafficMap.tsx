@@ -140,6 +140,8 @@ export function TrafficMap({
   const dynamicScale = useSetting("map.dynamicAircraftScale", true).value;
   // User-chosen base size (percent, e.g. "80"), independent of the zoom-driven scale above.
   const iconSizePct = useSetting("map.aircraftIconSize", "100").value;
+  const tooltipsOn = useSetting("map.tooltips", true).value;
+  const aircraftTooltipsOn = useSetting("map.aircraftTooltips", true).value;
   const [zoom, setZoom] = useState(
     () => initialViewState?.zoom ?? camera?.viewState.zoom ?? US_HOME.zoom,
   );
@@ -172,13 +174,15 @@ export function TrafficMap({
     const out: Layer[] = [];
     if (boundaries) out.push(buildBoundaryLayer(boundaries, palette, boundaryEmphasis));
     if (atc && centerBoundaries) out.push(...buildAtcLayers(atc, centerBoundaries, palette));
-    if (atcAnchors.length) out.push(buildAtcHoverLayer(atcAnchors));
     if (trails?.length) out.push(buildTrailLayer(trails, palette));
     if (routeOverlays?.length) out.push(buildRouteOverlayLayer(routeOverlays, palette));
     if (namedRoutes?.length)
       out.push(...buildNamedRouteLayers(namedRoutes, selectedRouteId, labeledRouteIds ?? EMPTY_SET, palette));
     if (rings?.data.length) out.push(buildRingLayer(rings.data, rings.nm, palette));
     if (fcas?.length) out.push(...buildFcaLayers(fcas, selectedFcaId, palette));
+    // ATC hover sits above FCA lines and routes (a pill wins over a line under it) but below aircraft
+    // glyphs, so traffic parked on a staffed airport's badge keeps its own hover card.
+    if (atcAnchors.length) out.push(buildAtcHoverLayer(atcAnchors));
     if (matched?.length && matchedColor)
       out.push(...buildMatchedLayers(matched, matchedColor, aircraftStyle ?? "silhouette", sizeScale, "", palette));
     for (const group of matchedGroups ?? [])
@@ -298,7 +302,7 @@ export function TrafficMap({
       onResize={camera?.onResize}
       controller={controller}
       layers={layers}
-      getTooltip={TOOLTIP}
+      getTooltip={!tooltipsOn ? undefined : aircraftTooltipsOn ? TOOLTIP : ATC_TOOLTIP}
       onClick={handleClick}
       onDragStart={handleDragStart}
       onDrag={handleDrag}
@@ -318,6 +322,7 @@ export function TrafficMap({
 
 const EMPTY_SET: Set<string> = new Set();
 const TOOLTIP = mapTooltip();
+const ATC_TOOLTIP = mapTooltip({ aircraft: false });
 
 /** Re-scale glyphs only when zoom moves at least this much, so panning doesn't churn the layers. */
 const ZOOM_STEP = 0.1;
