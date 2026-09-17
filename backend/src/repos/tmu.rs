@@ -717,6 +717,11 @@ mod tests {
 
         assert!(!listed_tmi_ids(&pool).await.contains(&id));
         assert!(row_exists(&pool, "tmu.tmis", &id).await);
+        assert_eq!(
+            get_tmi(&pool, &id).await.unwrap().unwrap().status,
+            "expired",
+            "history keeps its real status, not cancelled"
+        );
         let live_then = list_tmis_at(&pool, Utc::now() - chrono::Duration::minutes(90))
             .await
             .unwrap();
@@ -743,6 +748,14 @@ mod tests {
         let row = get_tmi(&pool, &id).await.unwrap().unwrap();
         assert_eq!(row.status, "cancelled");
         assert!(!listed_tmi_ids(&pool).await.contains(&id));
+        // No stop_time, so only the ended_at stamp stops replay showing it as live forever.
+        let live_after = list_tmis_at(&pool, Utc::now() + chrono::Duration::seconds(1))
+            .await
+            .unwrap();
+        assert!(
+            !live_after.iter().any(|t| t.id == id),
+            "replay ends it at the delete"
+        );
     }
 
     #[sqlx::test]
