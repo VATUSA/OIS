@@ -187,7 +187,7 @@ pub fn compute(
     taxi_samples: &HashMap<String, Vec<taxi_estimate::TaxiSample>>,
     now: DateTime<Utc>,
 ) -> Flow {
-    let arr = airports.get(icao).copied();
+    let arr = airports.get(icao).map(|a| (a.lat, a.lon));
     let mut flights: Vec<FlowFlight> = Vec::new();
     // Estimated departure time (ms) per flight, aligned with `flights`; used to back out
     // wheels-up (CFR) from the metered STA. None for airborne/arrived (already flying).
@@ -767,7 +767,7 @@ fn ground_estimate(
     let aircraft = (!fp.aircraft_short.is_empty()).then_some(fp.aircraft_short.as_str());
     let allowance =
         resolve_ground_allowance_sec(gates, runways, taxi_samples, dep, aircraft, pilot_pos);
-    match (airports.get(dep).copied(), arr) {
+    match (airports.get(dep).map(|a| (a.lat, a.lon)), arr) {
         (Some(dep_ll), Some(arr_ll)) => {
             let pred = predict::arrival_eta(
                 nav,
@@ -794,7 +794,13 @@ fn ground_estimate(
         }
         _ => {
             let vp = trajectory::VerticalProfile::build(
-                0.0, 300.0, 0.0, cruise, cruise_tas, profile, None,
+                0.0,
+                300.0,
+                super::airports::field_elevation_ft(airports, &fp.arrival),
+                cruise,
+                cruise_tas,
+                profile,
+                None,
             );
             let ft_min = vp.time_between(300.0, 0.0) / 60.0 + allowance / 60.0;
             (300.0, ft_min)
@@ -1038,6 +1044,7 @@ static ENGINE_REF: LazyLock<HashMap<&'static str, Engine>> = LazyLock::new(|| {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::feed::airports::Airport;
     use crate::feed::vatsim::{FlightPlan, Pilot, Prefile, VatsimData};
 
     // A fixed reference time so ETA/STA arithmetic is deterministic.
@@ -1087,8 +1094,8 @@ mod tests {
     fn airports() -> AirportDb {
         // KJFK and KBOS (lat, lon).
         HashMap::from([
-            ("KJFK".to_string(), (40.6413, -73.7781)),
-            ("KBOS".to_string(), (42.3656, -71.0096)),
+            ("KJFK".to_string(), Airport::at(40.6413, -73.7781)),
+            ("KBOS".to_string(), Airport::at(42.3656, -71.0096)),
         ])
     }
 
@@ -1515,8 +1522,8 @@ mod tests {
     #[test]
     fn ladder_and_runway_ete_agree_on_the_resolved_route() {
         let ap: AirportDb = HashMap::from([
-            ("KJFK".to_string(), (40.6413, -73.7781)),
-            ("KDCA".to_string(), (38.8521, -77.0377)),
+            ("KJFK".to_string(), Airport::at(40.6413, -73.7781)),
+            ("KDCA".to_string(), Airport::at(38.8521, -77.0377)),
         ]);
         let nav = NavData::load();
         let profiles = trajectory::ProfileTable::default();

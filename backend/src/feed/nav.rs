@@ -11,7 +11,7 @@ use std::collections::{HashMap, HashSet};
 
 use serde::Deserialize;
 
-use super::airports::AirportDb;
+use super::airports::{Airport, AirportDb};
 
 pub type Ll = [f64; 2];
 pub type CoordList = Vec<Ll>;
@@ -349,7 +349,7 @@ impl NavData {
         if id.len() < 2 || id == dep || id == arr {
             return None;
         }
-        if let Some(&(lat, lon)) = airports.get(&id) {
+        if let Some(&Airport { lat, lon, .. }) = airports.get(&id) {
             return Some(Anchor {
                 name: id,
                 ll: [lat, lon],
@@ -496,8 +496,12 @@ impl NavData {
     ) -> RouteResult {
         let dep = dep.to_ascii_uppercase();
         let arr = arr.to_ascii_uppercase();
-        let origin = airports.get(&dep).map(|&(a, b)| [a, b]);
-        let destination = airports.get(&arr).map(|&(a, b)| [a, b]);
+        let origin = airports
+            .get(&dep)
+            .map(|&Airport { lat: a, lon: b, .. }| [a, b]);
+        let destination = airports
+            .get(&arr)
+            .map(|&Airport { lat: a, lon: b, .. }| [a, b]);
         let route_str = self.maybe_preferred_route(airports, &dep, &arr, route);
         let tokens = Self::parse_tokens(&route_str);
         let intl = self.is_international_route(&arr, destination);
@@ -1085,8 +1089,8 @@ mod tests {
         // ABE|ACY has a preferred route "FJC ARD CYN"; a bare airport-to-airport filing
         // should pick it up (all three fixes resolve).
         let ap = HashMap::from([
-            ("KABE".to_string(), (40.65, -75.44)),
-            ("KACY".to_string(), (39.46, -74.58)),
+            ("KABE".to_string(), Airport::at(40.65, -75.44)),
+            ("KACY".to_string(), Airport::at(39.46, -74.58)),
         ]);
         // Preferred keys are 3-letter (FAA) codes; emulate with matching dep/arr.
         let res = nav.build_anchors(&ap, "ABE", "ACY", "");

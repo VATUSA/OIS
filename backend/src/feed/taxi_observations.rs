@@ -50,7 +50,7 @@ use chrono::{DateTime, Utc};
 use sqlx::PgPool;
 
 use super::FeedState;
-use super::airports::AirportDb;
+use super::airports::{Airport, AirportDb};
 use super::delays::nearest_runway;
 use super::fca::bearing_deg;
 use super::flow::gc_dist;
@@ -473,15 +473,24 @@ fn process(
                 });
             }
             done.push(p.callsign.clone());
-        } else if let Some(&(dlat, dlon)) = airports.get(&dep) {
+        } else if let Some(&Airport {
+            lat: dlat,
+            lon: dlon,
+            ..
+        }) = airports.get(&dep)
+        {
             // Exclude pattern work / touch-and-goes / short dep-arr hops: sitting at the field at
             // low speed while also near this same flight plan's arrival airport means we're
             // watching an arrival taxi-in (or a circuit), not a genuine pushback — matching
             // feed/delays.rs's departure half.
             let arriving_turnaround = gs <= GS_STOP
-                && airports.get(&arr).is_some_and(|&(alat, alon)| {
-                    gc_dist(p.latitude, p.longitude, alat, alon) < 5.0
-                });
+                && airports.get(&arr).is_some_and(
+                    |&Airport {
+                         lat: alat,
+                         lon: alon,
+                         ..
+                     }| { gc_dist(p.latitude, p.longitude, alat, alon) < 5.0 },
+                );
             // Only start watching an aircraft first seen below taxi speed. One already moving (a
             // backend restart mid-taxi, or the tick right after a recorded departure while still
             // near the field) has no knowable taxi start — recording it produced short, duplicate
@@ -641,14 +650,14 @@ mod tests {
     }
 
     fn airports() -> AirportDb {
-        HashMap::from([("KAAA".to_string(), (40.0, -74.0))])
+        HashMap::from([("KAAA".to_string(), Airport::at(40.0, -74.0))])
     }
 
     /// KAAA and KBBB co-located, for the arriving-turnaround test below.
     fn airports_with_arrival() -> AirportDb {
         HashMap::from([
-            ("KAAA".to_string(), (40.0, -74.0)),
-            ("KBBB".to_string(), (40.0, -74.0)),
+            ("KAAA".to_string(), Airport::at(40.0, -74.0)),
+            ("KBBB".to_string(), Airport::at(40.0, -74.0)),
         ])
     }
 

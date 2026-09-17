@@ -15,7 +15,7 @@ use chrono::{DateTime, Utc};
 use sqlx::PgPool;
 
 use super::FeedState;
-use super::airports::AirportDb;
+use super::airports::{Airport, AirportDb};
 use super::flow::{arrival_gate, gc_dist};
 use super::runway::star_base;
 use super::runway_db::RunwayDb;
@@ -166,12 +166,23 @@ pub fn process(
                     }
                     dep_done.push(p.callsign.clone());
                 }
-            } else if let Some(&(dlat, dlon)) = airports.get(&dep) {
+            } else if let Some(&Airport {
+                lat: dlat,
+                lon: dlon,
+                ..
+            }) = airports.get(&dep)
+            {
                 // Start a session only for a genuine departure sitting at its field.
                 let arriving_turnaround = gs <= GS_STOP
-                    && airports.get(&arr).is_some_and(|&(alat, alon)| {
-                        gc_dist(p.latitude, p.longitude, alat, alon) < 5.0
-                    });
+                    && airports.get(&arr).is_some_and(
+                        |&Airport {
+                             lat: alat,
+                             lon: alon,
+                             ..
+                         }| {
+                            gc_dist(p.latitude, p.longitude, alat, alon) < 5.0
+                        },
+                    );
                 if gc_dist(p.latitude, p.longitude, dlat, dlon) <= DEP_PROX_NM
                     && !(gs > GS_STOP && alt > 500)
                     && !arriving_turnaround
@@ -192,7 +203,12 @@ pub fn process(
         }
 
         // --- Arrival: time entry-ring crossing → touchdown at the destination field. ---
-        if let Some(&(alat, alon)) = airports.get(&arr) {
+        if let Some(&Airport {
+            lat: alat,
+            lon: alon,
+            ..
+        }) = airports.get(&arr)
+        {
             let dist = gc_dist(p.latitude, p.longitude, alat, alon);
             if let Some(s) = state.arr.get_mut(&p.callsign).filter(|s| s.arr == arr) {
                 seen_arr.insert(p.callsign.clone());
@@ -324,7 +340,7 @@ mod tests {
 
     // KAAA at (40.0, -74.0); ~60 nm of latitude ≈ 1°, so lat 40.0 + n/60 is ~n nm north.
     fn airports() -> AirportDb {
-        HashMap::from([("KAAA".to_string(), (40.0, -74.0))])
+        HashMap::from([("KAAA".to_string(), Airport::at(40.0, -74.0))])
     }
 
     #[test]

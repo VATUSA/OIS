@@ -854,4 +854,30 @@ mod tests {
         assert_eq!(anchored_time(34650.0, 495.0), raw_time(34650.0));
         assert!(anchored_time(34750.0, 495.0) < raw_time(34750.0));
     }
+
+    // ---- arrival-field elevation (#315) ----
+
+    #[test]
+    fn a_high_field_arrival_starts_its_descent_nearer_the_field() {
+        // Same cruise and route into a sea-level field and into DEN (5,431 ft).
+        let p = AircraftProfile::default();
+        let sea = VerticalProfile::build(35000.0, 300.0, 0.0, 35000.0, 450.0, &p, None);
+        let den = VerticalProfile::build(35000.0, 300.0, 5431.0, 35000.0, 450.0, &p, None);
+        // Top of descent: the furthest point out still below cruise.
+        let tod = |vp: &VerticalProfile| {
+            (0..=3000)
+                .map(|i| i as f64 / 10.0)
+                .rfind(|&d| vp.alt_at(d) < 35000.0 - 1.0)
+                .unwrap()
+        };
+        assert!(
+            tod(&den) < tod(&sea) - 10.0,
+            "DEN TOD {} nm should be well inside the sea-level TOD {} nm",
+            tod(&den),
+            tod(&sea)
+        );
+        // Both descents end at their own field.
+        assert!((den.alt_at(0.0) - 5431.0).abs() < 1.0);
+        assert!(sea.alt_at(0.0).abs() < 1.0);
+    }
 }
