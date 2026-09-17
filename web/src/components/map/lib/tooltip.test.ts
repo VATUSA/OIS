@@ -1,12 +1,22 @@
 import type {PickingInfo} from "@deck.gl/core";
 import {describe, expect, it} from "vitest";
 
+import {DELAY_THRESHOLD_SEC, fmtDelaySec} from "@/lib/fca";
 import type {AtcAnchor} from "../layers/atc";
 import type {MatchedFlight} from "../layers/matched";
 import {mapTooltip, tooltipFor} from "./tooltip";
 import type {NormAircraft} from "./types";
 
 const pick = (layerId: string, object: unknown) => ({ layer: { id: layerId }, object }) as unknown as PickingInfo;
+
+/** A pick on `layerId` with `under` sitting beneath it in another layer (deck re-pick reachable). */
+const pickOver = (layerId: string, object: unknown, under: unknown) =>
+  ({
+    x: 10,
+    y: 20,
+    object,
+    layer: { id: layerId, context: { deck: { pickObject: () => (under ? { object: under } : null) } } },
+  }) as unknown as PickingInfo;
 const html = (r: ReturnType<ReturnType<typeof mapTooltip>>) => (r ? r.html : null);
 
 const plane: NormAircraft = {
@@ -41,6 +51,16 @@ describe("mapTooltip", () => {
     expect(html(tooltip(pick("matched", { ...matched, delay_sec: 10 })))).toContain("on time");
   });
 
+  // Pins the boundary itself: a delay exactly at the threshold is flagged, one second under is not.
+  it("flags a delay exactly at the threshold but not one second below it", () => {
+    const at = html(tooltip(pick("matched", { ...matched, delay_sec: DELAY_THRESHOLD_SEC })));
+    expect(at).toContain(`+${fmtDelaySec(DELAY_THRESHOLD_SEC)}`);
+    expect(at).not.toContain("on time");
+    expect(
+      html(tooltip(pick("matched", { ...matched, delay_sec: DELAY_THRESHOLD_SEC - 1 }))),
+    ).toContain("on time");
+  });
+
   it("keeps plain traffic to the basic card", () => {
     const h = html(tooltip(pick("aircraft", plane)));
     expect(h).toContain("AAL1");
@@ -56,6 +76,16 @@ describe("mapTooltip", () => {
     expect(atcOnly(pick("aircraft", plane))).toBeNull();
     expect(atcOnly(pick("matched", matched))).toBeNull();
     expect(html(atcOnly(pick("atc-hover", tower)))).toContain("ORD_TWR");
+  });
+
+  // A plane parked on a staffed airport's badge wins the pick. With aircraft cards off, the pill
+  // underneath must still get its card rather than the hover going dead (#323, AC3).
+  it("still shows the ATC pill under a glyph when aircraft tooltips are off", () => {
+    const atcOnly = mapTooltip({ aircraft: false });
+    const overPill = pickOver("aircraft", plane, tower);
+    expect(html(atcOnly(overPill))).toContain("ORD_TWR");
+    // Nothing underneath — no card, rather than an empty one.
+    expect(atcOnly(pickOver("aircraft", plane, null))).toBeNull();
   });
 });
 

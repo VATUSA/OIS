@@ -4,6 +4,7 @@ import {RATINGS, onlineFor} from "@/lib/atc-format";
 import {DELAY_THRESHOLD_SEC, fmtDelaySec} from "@/lib/fca";
 import {hhmmZulu} from "@/lib/time";
 import {ATC_COLORS} from "./colors";
+import {objectUnder} from "./pick";
 import type {NormAircraft} from "./types";
 import type {MatchedFlight} from "../layers/matched";
 import {anchorHeader, type AtcAnchor, type AtcPositionLite} from "../layers/atc";
@@ -40,6 +41,11 @@ function meteringHtml(f: MatchedFlight): string {
   return `<div style="font-family:'JetBrains Mono',ui-monospace,monospace">#${f.seq} · STA ${hhmmZulu(f.cross_time)} · ETA ${hhmmZulu(f.eta)} · ${delay}</div>`;
 }
 
+/** An ATC hover card for `a`, or no card at all when there's no anchor there. */
+function atcCard(a: AtcAnchor | null | undefined, style: Record<string, string>) {
+  return a ? { html: atcHtml(a), style } : null;
+}
+
 /**
  * The hover-card renderer for the current settings, or `undefined` when tooltips are off entirely
  * (deck then draws no card). `map.aircraftTooltips` only narrows what `map.tooltips` allows, and
@@ -70,7 +76,10 @@ export function mapTooltip({ aircraft = true }: { aircraft?: boolean } = {}) {
     // Matched glyph layers are "matched" (one FCA) or "matched-<fcaId>" (overview); their sibling
     // trail/dot/badge layers aren't pickable, so any "matched" pick is a glyph.
     if (id === "aircraft" || id?.startsWith("matched")) {
-      if (!aircraft) return null;
+      // With aircraft cards off, look past the glyph for an ATC pill underneath: a plane parked on
+      // a staffed airport's badge wins the pick, and returning null here would blank the pill's
+      // card too, even though only *aircraft* tooltips were turned off (#323).
+      if (!aircraft) return atcCard(objectUnder(info, "atc-hover") as AtcAnchor | null, style);
       // The plain "aircraft" layer holds NormAircraft (actype/alt/gs); the matched (in-FCA) layers
       // hold MatchedFlight (aircraft_type/altitude/groundspeed + metering). Read whichever it carries.
       const d = info.object as (NormAircraft & Partial<MatchedFlight>) | undefined;
@@ -89,11 +98,7 @@ export function mapTooltip({ aircraft = true }: { aircraft?: boolean } = {}) {
         style,
       };
     }
-    if (id === "atc-hover") {
-      const a = info.object as AtcAnchor | undefined;
-      if (!a) return null;
-      return { html: atcHtml(a), style };
-    }
+    if (id === "atc-hover") return atcCard(info.object as AtcAnchor | undefined, style);
     return null;
   };
 }
