@@ -235,7 +235,8 @@ const HORIZ_STEP_NM: f64 = 3.0;
 const ANCHOR_MIN_GS_KT: f64 = 250.0;
 /// …and within this many feet of the profile's cruise altitude. A climbing departure is not anchored.
 const ANCHOR_ALT_TOLERANCE_FT: f64 = 300.0;
-/// The anchoring bias is clamped to ±this fraction, so one noisy `gs` sample can't throw the trajectory.
+/// The anchoring bias is clamped to ±this fraction, so one noisy `gs` sample can't throw the
+/// trajectory.
 const ANCHOR_MAX_BIAS: f64 = 0.15;
 
 /// A resolved vertical flight profile, anchored at the aircraft's current state and running
@@ -352,11 +353,11 @@ impl VerticalProfile {
         }
     }
 
-    /// Anchor the prediction to the aircraft's observed groundspeed (#313): when it is established at
-    /// cruise (see [`ANCHOR_MIN_GS_KT`] / [`ANCHOR_ALT_TOLERANCE_FT`]), every predicted groundspeed
-    /// is scaled by `observed / predicted-cruise-groundspeed`, clamped to ±[`ANCHOR_MAX_BIAS`]. Otherwise
-    /// the profile is returned unchanged. One multiplier for the whole remaining flight, derived from
-    /// the latest poll — nothing is stored between polls.
+    /// Anchor the prediction to the aircraft's observed groundspeed (#313): when it is established
+    /// at cruise (see [`ANCHOR_MIN_GS_KT`] / [`ANCHOR_ALT_TOLERANCE_FT`]), every predicted
+    /// groundspeed is scaled by `observed / predicted-cruise-groundspeed`, clamped to
+    /// ±[`ANCHOR_MAX_BIAS`]. Otherwise the profile is returned unchanged. One multiplier for the
+    /// whole remaining flight, derived from the latest poll — nothing is stored between polls.
     pub fn anchor_to_observed_gs(mut self, observed_gs_kt: f64) -> Self {
         let established = observed_gs_kt >= ANCHOR_MIN_GS_KT
             && (self.start_alt - self.cruise_alt).abs() <= ANCHOR_ALT_TOLERANCE_FT;
@@ -404,9 +405,9 @@ impl VerticalProfile {
     }
 
     /// Predicted ground speed (kt) at a distance-to-destination `d` — the phase-appropriate TAS
-    /// with wind (and any groundspeed anchoring) applied, floored at [`GS_FLOOR_KT`] exactly like [`Self::time_between`]'s
-    /// internal integration, so a displayed speed never reads below what the paired ETA in the
-    /// same row was actually timed against.
+    /// with wind (and any groundspeed anchoring) applied, floored at [`GS_FLOOR_KT`] exactly like
+    /// [`Self::time_between`]'s internal integration, so a displayed speed never reads below what
+    /// the paired ETA in the same row was actually timed against.
     pub fn ground_speed_at(&self, d_nm: f64) -> f64 {
         self.gs_at(d_nm)
     }
