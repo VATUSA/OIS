@@ -14,11 +14,22 @@ export type CommandItem = {
 
 export type CommandGroup = { label: string; items: CommandItem[] };
 
+/** A search scope the palette can narrow to (e.g. "Aircraft"); the first scope is the default. */
+export type CommandScope = { id: string; label: string };
+
+/** The scope `dir` steps (1 = next, -1 = previous) from `current`, wrapping at either end. */
+export function cycleScope(ids: readonly string[], current: string, dir: 1 | -1): string {
+  if (ids.length === 0) return current;
+  const i = Math.max(0, ids.indexOf(current));
+  return ids[(i + dir + ids.length) % ids.length];
+}
+
 /**
  * A keyboard-first picker in a top-aligned modal: a search field over grouped results. It is
  * controlled — the caller owns `query` and passes already-filtered, ranked `groups` (so each source
  * can match however suits it: fuzzy callsigns, a server search, a static page list).
- * ↑/↓ move, Enter selects, Escape closes.
+ * ↑/↓ move, Enter selects, Escape closes. With `scopes`, a chip row sits under the field: Tab /
+ * Shift+Tab cycle the scope and Backspace on an empty query returns to the first (default) scope.
  */
 export function CommandPalette({
   open,
@@ -29,6 +40,9 @@ export function CommandPalette({
   placeholder = "Search…",
   empty = "No results.",
   footer,
+  scopes,
+  scope,
+  onScopeChange,
 }: {
   open: boolean;
   onClose: () => void;
@@ -38,12 +52,15 @@ export function CommandPalette({
   placeholder?: string;
   empty?: React.ReactNode;
   footer?: React.ReactNode;
+  scopes?: readonly CommandScope[];
+  scope?: string;
+  onScopeChange?: (scope: string) => void;
 }) {
   const flat = React.useMemo(() => groups.flatMap((g) => g.items), [groups]);
   const [active, setActive] = React.useState(0);
   const listRef = React.useRef<HTMLDivElement>(null);
 
-  React.useEffect(() => setActive(0), [query, open]);
+  React.useEffect(() => setActive(0), [query, open, scope]);
 
   React.useEffect(() => {
     listRef.current?.querySelector<HTMLElement>(`[data-index="${active}"]`)?.scrollIntoView({ block: "nearest" });
@@ -65,6 +82,14 @@ export function CommandPalette({
     } else if (e.key === "Enter") {
       e.preventDefault();
       select(flat[active]);
+    } else if (scopes?.length && onScopeChange && scope != null) {
+      if (e.key === "Tab") {
+        e.preventDefault();
+        onScopeChange(cycleScope(scopes.map((s) => s.id), scope, e.shiftKey ? -1 : 1));
+      } else if (e.key === "Backspace" && query === "" && scope !== scopes[0].id) {
+        e.preventDefault();
+        onScopeChange(scopes[0].id);
+      }
     }
   };
 
@@ -83,6 +108,9 @@ export function CommandPalette({
         />
         <kbd className="rounded-[4px] border border-line px-1.5 font-mono text-[10px] text-ink-3">esc</kbd>
       </div>
+      {scopes && scopes.length > 0 && scope != null && (
+        <ScopeChips scopes={scopes} scope={scope} onScopeChange={onScopeChange} />
+      )}
       <div ref={listRef} className="max-h-[55vh] overflow-y-auto p-2">
         {flat.length === 0 ? (
           <p className="px-3 py-6 text-center text-sm text-ink-3">{empty}</p>
@@ -124,5 +152,40 @@ export function CommandPalette({
       </div>
       {footer && <div className="border-t border-line px-4 py-2 text-xs text-ink-3">{footer}</div>}
     </Modal>
+  );
+}
+
+/** The palette's scope row: one pill per scope, the active one tinted. Focus stays in the field. */
+export function ScopeChips({
+  scopes,
+  scope,
+  onScopeChange,
+}: {
+  scopes: readonly CommandScope[];
+  scope: string;
+  onScopeChange?: (scope: string) => void;
+}) {
+  return (
+    <div role="radiogroup" aria-label="Search scope" className="flex flex-wrap gap-1.5 border-b border-line px-3 py-2">
+      {scopes.map((s) => {
+        const on = s.id === scope;
+        return (
+          <button
+            key={s.id}
+            type="button"
+            role="radio"
+            aria-checked={on}
+            tabIndex={-1}
+            onClick={() => onScopeChange?.(s.id)}
+            className={cn(
+              "inline-flex h-7 items-center rounded-full border px-2.5 text-xs",
+              on ? "border-brand/40 bg-brand-soft text-ink" : "border-line bg-panel-2 text-ink-2 hover:text-ink",
+            )}
+          >
+            {s.label}
+          </button>
+        );
+      })}
+    </div>
   );
 }

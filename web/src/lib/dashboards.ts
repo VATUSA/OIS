@@ -17,8 +17,9 @@ type OpaqueJson = Record<string, never>;
 const asJson = (v: DashboardState): OpaqueJson => v as unknown as OpaqueJson;
 
 /** The caller's dashboards + collections. */
-export function useDashboards() {
+export function useDashboards({ enabled = true }: { enabled?: boolean } = {}) {
   return useQuery({
+    enabled,
     queryKey: ["dashboards"],
     queryFn: async (): Promise<DashboardLibrary> => {
       const { data, error } = await ois.GET("/api/v1/dashboards");
