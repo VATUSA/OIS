@@ -26,14 +26,15 @@ function WhatsNewInner() {
   const prefs = usePreferences<ChangelogPrefs>(NAMESPACE);
   const save = useSavePreferences<ChangelogPrefs>(NAMESPACE);
   const [open, setOpen] = useState(false);
-  // Runs the seed-or-show decision exactly once per mount, once the preference query settles —
-  // never flashes the panel while loading, and never re-opens it if `prefs.data` later refetches.
+  // Runs the seed-or-show decision exactly once per mount, once the preference query succeeds —
+  // never flashes the panel while loading, never re-seeds over a failed load, and never re-opens it
+  // if `prefs.data` later refetches.
   const decided = useRef(false);
 
   const newestId = CHANGELOG[0]?.id;
 
   useEffect(() => {
-    if (prefs.isLoading || decided.current || !newestId) return;
+    if (!prefs.isSuccess || decided.current || !newestId) return;
     decided.current = true;
     if (shouldSeed(prefs.data)) {
       // Brand-new user — seed to newest, don't show a backlog.
@@ -43,7 +44,7 @@ function WhatsNewInner() {
     if (unseenEntries(CHANGELOG, prefs.data?.lastSeenId).length > 0) {
       setOpen(true);
     }
-  }, [prefs.isLoading, prefs.data, newestId]);
+  }, [prefs.isSuccess, prefs.data, newestId]);
 
   const dismiss = () => {
     setOpen(false);
