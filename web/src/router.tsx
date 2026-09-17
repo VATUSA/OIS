@@ -358,6 +358,10 @@ const planningAirportConfigsRoute = createRoute({
   path: "airport-configs",
   staticData: { title: "Airport configs", views: [{ value: "grouped", label: "By airport", icon: LayoutGrid }, { value: "list", label: "List", icon: List }] },
   component: AirportConfigsPage,
+  // `?icao=` opens that airport's configs straight away (the ⌘K search jumps here).
+  validateSearch: (search: Record<string, unknown>): { icao?: string } => ({
+    icao: typeof search.icao === "string" ? search.icao.toUpperCase() : undefined,
+  }),
 });
 
 const planningFacilityDocumentsRoute = createRoute({
@@ -372,6 +376,10 @@ const planningAirportSurfaceRoute = createRoute({
   path: "airport-surface",
   staticData: { title: "Airport surface" },
   component: AirportSurfacePage,
+  // `?icao=` opens that airport's surface editor straight away (the ⌘K search jumps here).
+  validateSearch: (search: Record<string, unknown>): { icao?: string } => ({
+    icao: typeof search.icao === "string" ? search.icao.toUpperCase() : undefined,
+  }),
 });
 
 const planningAircraftProfilesRoute = createRoute({

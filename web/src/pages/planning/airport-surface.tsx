@@ -1,4 +1,5 @@
 import {useState} from "react";
+import {useSearch} from "@tanstack/react-router";
 import {ArrowLeft, Lock, MapPinned, RefreshCw} from "lucide-react";
 import {Button, Card, EmptyState, FilterBar, Input, QueryState, StatusPill, useConfirm} from "@ois/ui";
 
@@ -97,8 +98,10 @@ function AirportSurfaceEditor({ icao, onBack }: { icao: string; onBack: () => vo
 export function AirportSurfacePage() {
   const { data: me } = useMe();
   const canRead = hasPermission(me, "events.plan.read");
-  const [icao, setIcao] = useState("");
-  const [entry, setEntry] = useState("");
+  // `?icao=` (⌘K, deep links) opens that airport's editor straight away.
+  const initial = useSearch({ from: "/admin/planning/airport-surface" }).icao ?? "";
+  const [icao, setIcao] = useState(initial);
+  const [entry, setEntry] = useState(initial);
 
   usePageHeader({ title: icao ? `${icao} surface` : undefined, subtitle: SUBTITLE });
 

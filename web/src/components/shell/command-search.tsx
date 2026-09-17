@@ -17,7 +17,7 @@ import {
 } from "lucide-react";
 
 import {useMe} from "@/lib/auth";
-import {SCOPES, type ScopeId, parseScopePrefix} from "@/lib/command-scopes";
+import {SCOPES, type ScopeId, icaoRows, parseScopePrefix} from "@/lib/command-scopes";
 import {useDashboards} from "@/lib/dashboards";
 import {useUpcomingEvents} from "@/lib/events";
 import {useFacilityDirectory} from "@/lib/facilities";
@@ -68,6 +68,13 @@ function rank<T>(query: string, items: readonly T[], text: (t: T) => string, lim
 
 const NAV_ITEMS = AREAS.flatMap((a) => a.groups.flatMap((g) => g.items));
 const navItem = (to: string) => NAV_ITEMS.find((i) => i.to === to)!;
+
+/** The icon for each ICAO row, keyed by its destination (the rows themselves live in `lib`). */
+const ICAO_ROW_ICON: Record<string, typeof Plane> = {
+  "/ops/airport": Plane,
+  "/admin/planning/airport-configs": Wind,
+  "/admin/planning/airport-surface": MapPinned,
+};
 
 const PLACEHOLDER: Record<ScopeId, string> = {
   all: "Search pages, flights, airports, TMIs, events…",
@@ -143,21 +150,16 @@ function Palette({ onClose }: { onClose: () => void }) {
   // scope, so the blended view stays uncluttered — each gated like its nav link, then facility maps.
   const airportItems = (): CommandItem[] => {
     const icao = q.toUpperCase().replace(/[^A-Z0-9]/g, "");
-    const icaoPages: CommandItem[] = !/^[A-Z0-9]{3,4}$/.test(icao)
-      ? []
-      : [
-          { item: navItem("/ops/airport"), label: `${icao} airport`, sublabel: "Operations · Airport", icon: Plane, search: { icao } },
-          { item: navItem("/admin/planning/airport-configs"), label: `${icao} airport configs`, sublabel: "Planning", icon: Wind },
-          { item: navItem("/admin/planning/airport-surface"), label: `${icao} airport surface`, sublabel: "Planning", icon: MapPinned },
-        ]
-          .filter((p, i) => (i === 0 || scope === "airports") && canSeeItem(me, p.item))
-          .map((p) => ({
-            id: `airport:${p.item.to}:${icao}`,
-            label: p.label,
-            sublabel: p.sublabel,
-            icon: p.icon,
-            onSelect: () => void navigate({ to: p.item.to, search: p.search }),
-          }));
+    const icaoPages: CommandItem[] = icaoRows(icao)
+      .filter((p, i) => (i === 0 || scope === "airports") && canSeeItem(me, navItem(p.to)))
+      .map((p) => ({
+        id: `airport:${p.to}:${icao}`,
+        label: p.label,
+        sublabel: p.sublabel,
+        icon: ICAO_ROW_ICON[p.to],
+        // Each row names an airport, so each row opens that airport — not the page's empty picker.
+        onSelect: () => void navigate({ to: p.to, search: p.search }),
+      }));
     const facilityItems = rank(q, facilities.data ?? [], (f) => `${f.id} ${f.name ?? ""}`, limit).map((f) => ({
       id: `facility:${f.id}`,
       label: f.name ? `${f.id} · ${f.name}` : f.id,

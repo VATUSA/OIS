@@ -30,3 +30,32 @@ export function parseScopePrefix(
   );
   return hits.length === 1 ? { scope: hits[0].id, rest: m[2] } : null;
 }
+
+/** The pages an ICAO-shaped query offers, in row order; the first also shows in the blended view. */
+export const ICAO_ROW_PAGES = [
+  { to: "/ops/airport", suffix: "airport", sublabel: "Operations · Airport" },
+  { to: "/admin/planning/airport-configs", suffix: "airport configs", sublabel: "Planning" },
+  { to: "/admin/planning/airport-surface", suffix: "airport surface", sublabel: "Planning" },
+] as const;
+
+export type IcaoRow = {
+  to: (typeof ICAO_ROW_PAGES)[number]["to"];
+  label: string;
+  sublabel: string;
+  search: { icao: string };
+};
+
+/**
+ * The command-search rows for an ICAO-shaped query, or none when `icao` isn't one. Each row carries
+ * the airport in `search` — a row is labelled with an airport, so selecting it must open *that*
+ * airport rather than the page's empty picker (VATUSA/OIS#311).
+ */
+export function icaoRows(icao: string): IcaoRow[] {
+  if (!/^[A-Z0-9]{3,4}$/.test(icao)) return [];
+  return ICAO_ROW_PAGES.map((p) => ({
+    to: p.to,
+    label: `${icao} ${p.suffix}`,
+    sublabel: p.sublabel,
+    search: { icao },
+  }));
+}

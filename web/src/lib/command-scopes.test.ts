@@ -1,6 +1,6 @@
 import {describe, expect, it} from "vitest";
 
-import {SCOPES, parseScopePrefix} from "./command-scopes";
+import {SCOPES, icaoRows, parseScopePrefix} from "./command-scopes";
 
 describe("parseScopePrefix", () => {
   it("switches to a uniquely-prefixed scope and strips the prefix", () => {
@@ -26,5 +26,28 @@ describe("parseScopePrefix", () => {
   it("leaves plain queries alone", () => {
     expect(parseScopePrefix("DAL123", SCOPES)).toBeNull();
     expect(parseScopePrefix("@ nothing", SCOPES)).toBeNull();
+  });
+});
+
+describe("icaoRows", () => {
+  it("gives every row the airport it is named after", () => {
+    const rows = icaoRows("KDEN");
+    expect(rows.map((r) => r.to)).toEqual([
+      "/ops/airport",
+      "/admin/planning/airport-configs",
+      "/admin/planning/airport-surface",
+    ]);
+    // Regression (#311): the configs/surface rows used to navigate with no `?icao=`, landing the
+    // user on an empty airport picker after they picked a row that named KDEN.
+    for (const row of rows) {
+      expect(row.label).toContain("KDEN");
+      expect(row.search).toEqual({ icao: "KDEN" });
+    }
+  });
+
+  it("offers nothing for a query that isn't ICAO-shaped", () => {
+    expect(icaoRows("KD")).toEqual([]);
+    expect(icaoRows("KDENVER")).toEqual([]);
+    expect(icaoRows("")).toEqual([]);
   });
 });
