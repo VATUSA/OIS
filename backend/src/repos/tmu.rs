@@ -717,6 +717,11 @@ mod tests {
 
         assert!(!listed_tmi_ids(&pool).await.contains(&id));
         assert!(row_exists(&pool, "tmu.tmis", &id).await);
+        let row = get_tmi(&pool, &id).await.unwrap().unwrap();
+        assert_eq!(
+            row.status, "expired",
+            "history keeps the status it ended with"
+        );
         let live_then = list_tmis_at(&pool, Utc::now() - chrono::Duration::minutes(90))
             .await
             .unwrap();
@@ -737,12 +742,25 @@ mod tests {
             .execute(&pool)
             .await
             .unwrap();
+        assert!(replayed_shortly_after_now(&pool, &id).await);
 
         assert!(delete_tmi(&pool, &id).await.unwrap());
 
         let row = get_tmi(&pool, &id).await.unwrap().unwrap();
         assert_eq!(row.status, "cancelled");
         assert!(!listed_tmi_ids(&pool).await.contains(&id));
+        assert!(
+            !replayed_shortly_after_now(&pool, &id).await,
+            "the delete stamps ended_at, so replay stops showing it"
+        );
+    }
+
+    async fn replayed_shortly_after_now(pool: &PgPool, id: &str) -> bool {
+        list_tmis_at(pool, Utc::now() + chrono::Duration::seconds(2))
+            .await
+            .unwrap()
+            .iter()
+            .any(|t| t.id == id)
     }
 
     #[sqlx::test]
