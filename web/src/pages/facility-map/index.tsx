@@ -311,7 +311,7 @@ export function FacilityMapView({
   return (
     // `isolate` contains the map's high internal z-indexes so they don't paint over app chrome (nav
     // dropdowns, toasts, dialogs), which portal to the body and should sit above the map.
-    <div className={`relative isolate w-full ${fill ? "h-full" : "h-full"}`}>
+    <div className="relative isolate h-full w-full">
       <TrafficMap
         className="absolute inset-0"
         camera={camera}
