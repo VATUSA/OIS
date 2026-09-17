@@ -49,8 +49,9 @@ pub fn path_len_nm(path: &[[f64; 2]]) -> f64 {
 /// estimate, #164 sub-issue E — `feed::taxi_estimate::estimate` falls back to [`GROUND_TAXI_SEC`]
 /// itself when data is thin, so callers always have a value to pass here). Ignored when `airborne`
 /// is true. `arr_elev_ft` is the destination's field elevation (see
-/// [`crate::feed::airports::field_elevation_ft`]), where the descent ends. An airborne aircraft's prediction is anchored to `observed_gs_kt` when it is established
-/// at cruise ([`trajectory::VerticalProfile::anchor_to_observed_gs`]).
+/// [`crate::feed::airports::field_elevation_ft`]), where the descent ends. An airborne aircraft's
+/// prediction is anchored to `observed_gs_kt` when it is established at cruise
+/// ([`trajectory::VerticalProfile::anchor_to_observed_gs`]).
 #[allow(clippy::too_many_arguments)]
 pub fn eta_along_route(
     airborne: bool,

@@ -275,7 +275,8 @@ impl VerticalProfile {
         headwind: Option<f64>,
     ) -> Self {
         let arr_elev = arr_elev_ft.max(0.0);
-        let start_alt = start_alt_ft.max(arr_elev);
+        // A departure climbs from its own start altitude, even when the destination field is higher.
+        let start_alt = start_alt_ft.max(0.0);
         let cruise_alt = cruise_req_ft
             .min(profile.service_ceiling_ft)
             .max(start_alt.max(arr_elev));
@@ -879,5 +880,19 @@ mod tests {
         // Both descents end at their own field.
         assert!((den.alt_at(0.0) - 5431.0).abs() < 1.0);
         assert!(sea.alt_at(0.0).abs() < 1.0);
+    }
+
+    #[test]
+    fn a_departure_into_a_high_field_still_climbs_from_its_own_altitude() {
+        // A sea-level departure into DEN must not start its climb at DEN's elevation.
+        let p = AircraftProfile::default();
+        let from_sea_level = VerticalProfile::build(0.0, 300.0, 5431.0, 35000.0, 450.0, &p, None);
+        let from_field_height =
+            VerticalProfile::build(5431.0, 300.0, 5431.0, 35000.0, 450.0, &p, None);
+        assert!(from_sea_level.alt_at(300.0).abs() < 1.0);
+        assert!(
+            from_sea_level.time_between(300.0, 0.0) > from_field_height.time_between(300.0, 0.0),
+            "climbing the extra 5,431 ft must cost time"
+        );
     }
 }
