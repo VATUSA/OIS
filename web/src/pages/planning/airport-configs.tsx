@@ -1,4 +1,4 @@
-import {useMemo, useState} from "react";
+import {useEffect, useMemo, useState} from "react";
 import {useSearch} from "@tanstack/react-router";
 import {
   Button,
@@ -422,6 +422,11 @@ export function AirportConfigsPage() {
   const initial = useSearch({ from: "/admin/planning/airport-configs" }).icao ?? "";
   const [icao, setIcao] = useState(initial);
   const [entry, setEntry] = useState(initial);
+  // …and again when it changes, since ⌘K can land here while this page is already mounted.
+  useEffect(() => {
+    setIcao(initial);
+    setEntry(initial);
+  }, [initial]);
   const [artcc, setArtcc] = useState("");
 
   usePageHeader({

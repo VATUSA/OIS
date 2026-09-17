@@ -1,4 +1,4 @@
-import {useState} from "react";
+import {useEffect, useState} from "react";
 import {useSearch} from "@tanstack/react-router";
 import {ArrowLeft, Lock, MapPinned, RefreshCw} from "lucide-react";
 import {Button, Card, EmptyState, FilterBar, Input, QueryState, StatusPill, useConfirm} from "@ois/ui";
@@ -102,6 +102,11 @@ export function AirportSurfacePage() {
   const initial = useSearch({ from: "/admin/planning/airport-surface" }).icao ?? "";
   const [icao, setIcao] = useState(initial);
   const [entry, setEntry] = useState(initial);
+  // …and again when it changes, since ⌘K can land here while this page is already mounted.
+  useEffect(() => {
+    setIcao(initial);
+    setEntry(initial);
+  }, [initial]);
 
   usePageHeader({ title: icao ? `${icao} surface` : undefined, subtitle: SUBTITLE });
 

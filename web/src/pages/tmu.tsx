@@ -35,7 +35,7 @@ export function TmuPage() {
     canPrograms && { value: "rate-calculator", label: "Rate calculator", icon: Calculator },
   ].filter(Boolean) as TabDef[];
 
-  const { tab: requestedTab } = useSearch({ strict: false }) as { tab?: Tab };
+  const { tab: requestedTab, facility } = useSearch({ strict: false }) as { tab?: Tab; facility?: string };
   const navigate = useNavigate();
   const active = tabs.some((t) => t.value === requestedTab) ? requestedTab : tabs[0]?.value;
 
@@ -69,7 +69,8 @@ export function TmuPage() {
       )}
 
       {active === "programs" && <ProgramsTab />}
-      {active === "restrictions" && <RestrictionsTab />}
+      {/* Keyed on `?facility=` so arriving from ⌘K while already here re-seeds the filters. */}
+      {active === "restrictions" && <RestrictionsTab key={facility ?? ""} />}
       {active === "ground-stops" && <GroundStopsTab />}
       {active === "gdp" && <GdpTab />}
       {active === "rate-calculator" && <RateCalculatorTab />}
