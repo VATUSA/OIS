@@ -9,10 +9,16 @@ use serde::{Deserialize, Serialize};
 use super::airports::AirportDb;
 
 const R_NM: f64 = 3440.065;
-/// AWC FB "low level" tables cover the CONUS in these six regions.
+/// AWC FB tables cover the CONUS in these six regions.
 const REGIONS: [&str; 6] = ["bos", "mia", "chi", "dfw", "slc", "sfo"];
+/// FB table sets: `low` is 3,000–39,000 ft, `high` adds 45,000 and 53,000 ft.
+const TABLE_LEVELS: [&str; 2] = ["low", "high"];
 /// A station further than this from the query point contributes no wind (nm).
 const MAX_STATION_NM: f64 = 600.0;
+/// The wind at a point is an inverse-distance-squared blend of at most this many nearest stations.
+const BLEND_STATIONS: usize = 4;
+/// A query point this close to a station (nm) takes that station's wind outright.
+const ON_STATION_NM: f64 = 0.1;
 
 /// Wind at one forecast level: direction (deg true, None when calm) and speed (kt).
 #[derive(Clone, Copy, Serialize, Deserialize)]
@@ -21,12 +27,58 @@ pub struct WindLevel {
     pub spd: f64,
 }
 
+impl WindLevel {
+    /// The wind as a "from" vector `(east, north)` in kt, so winds can be averaged: calm is zero,
+    /// and the headwind along a course `c` is `u·sin c + v·cos c`.
+    fn uv(self) -> (f64, f64) {
+        match self.dir {
+            Some(dir) => {
+                let r = dir.to_radians();
+                (self.spd * r.sin(), self.spd * r.cos())
+            }
+            None => (0.0, 0.0),
+        }
+    }
+}
+
 #[derive(Serialize, Deserialize)]
 struct Station {
     lat: f64,
     lon: f64,
     /// `(altitude_ft, wind)` forecast levels.
     levels: Vec<(i32, WindLevel)>,
+}
+
+impl Station {
+    /// The wind vector at `alt_ft`, linearly interpolated between the bracketing forecast levels
+    /// (in any order); held at the nearest level outside the forecast range. None with no levels.
+    fn uv_at(&self, alt_ft: f64) -> Option<(f64, f64)> {
+        let below = self
+            .levels
+            .iter()
+            .filter(|(a, _)| *a as f64 <= alt_ft)
+            .max_by_key(|(a, _)| *a);
+        let above = self
+            .levels
+            .iter()
+            .filter(|(a, _)| *a as f64 >= alt_ft)
+            .min_by_key(|(a, _)| *a);
+        match (below, above) {
+            (Some(&(a0, w0)), Some(&(a1, w1))) if a1 > a0 => {
+                let t = (alt_ft - a0 as f64) / (a1 - a0) as f64;
+                let ((u0, v0), (u1, v1)) = (w0.uv(), w1.uv());
+                Some((u0 + t * (u1 - u0), v0 + t * (v1 - v0)))
+            }
+            (Some(&(_, w)), _) | (None, Some(&(_, w))) => Some(w.uv()),
+            (None, None) => None,
+        }
+    }
+}
+
+/// Headwind component (kt; `+` = headwind) of a `(u, v)` "from" wind along `course_deg`.
+fn headwind_along((u, v): (f64, f64), course_deg: f64) -> f64 {
+    let c = course_deg.to_radians();
+    u * c.sin() + v * c.cos()
 }
 
 /// The winds-aloft picture. Serializable so the stats collector can snapshot it for historical
@@ -45,29 +97,32 @@ impl Winds {
         self.stations.len()
     }
 
-    /// Nearest station's wind at the level closest to `alt_ft`, within [`MAX_STATION_NM`].
-    fn nearest_wind(&self, lat: f64, lon: f64, alt_ft: f64) -> Option<WindLevel> {
-        let mut best: Option<&Station> = None;
-        let mut bd = f64::MAX;
-        for s in &self.stations {
-            let d = gc_dist(lat, lon, s.lat, s.lon);
-            if d < bd {
-                bd = d;
-                best = Some(s);
-            }
-        }
-        let s = best?;
-        if bd > MAX_STATION_NM {
-            return None;
-        }
-        s.levels
+    /// The wind vector at a point: each of the [`BLEND_STATIONS`] nearest stations within
+    /// [`MAX_STATION_NM`] interpolated to `alt_ft`, blended by inverse distance squared. None when
+    /// no station covers the point (the caller flies still air).
+    fn wind_uv(&self, lat: f64, lon: f64, alt_ft: f64) -> Option<(f64, f64)> {
+        let mut near: Vec<(f64, (f64, f64))> = self
+            .stations
             .iter()
-            .min_by(|(a, _), (b, _)| {
-                (*a as f64 - alt_ft)
-                    .abs()
-                    .total_cmp(&(*b as f64 - alt_ft).abs())
+            .filter_map(|s| {
+                let d = gc_dist(lat, lon, s.lat, s.lon);
+                (d <= MAX_STATION_NM).then_some(d).zip(s.uv_at(alt_ft))
             })
-            .map(|(_, w)| *w)
+            .collect();
+        near.sort_by(|a, b| a.0.total_cmp(&b.0));
+        near.truncate(BLEND_STATIONS);
+        let &(nearest_d, nearest_uv) = near.first()?;
+        if nearest_d <= ON_STATION_NM {
+            return Some(nearest_uv);
+        }
+        let (mut u, mut v, mut wsum) = (0.0, 0.0, 0.0);
+        for (d, (su, sv)) in near {
+            let w = 1.0 / (d * d);
+            u += w * su;
+            v += w * sv;
+            wsum += w;
+        }
+        Some((u / wsum, v / wsum))
     }
 
     /// Mean headwind (kt; `+` = headwind, `-` = tailwind) along a `[lat, lon]` polyline at
@@ -82,16 +137,10 @@ impl Winds {
             let (a, b) = (seg[0], seg[1]);
             let course = bearing_deg(a[0], a[1], b[0], b[1]);
             let (mlat, mlon) = ((a[0] + b[0]) / 2.0, (a[1] + b[1]) / 2.0);
-            if let Some(w) = self.nearest_wind(mlat, mlon, alt_ft) {
-                match w.dir {
-                    Some(dir) if w.spd > 0.0 => {
-                        sum += w.spd * (dir - course).to_radians().cos();
-                        cnt += 1;
-                    }
-                    // Calm level (9900) counts as a zero-wind sample.
-                    _ if w.spd == 0.0 => cnt += 1,
-                    _ => {}
-                }
+            // A calm wind (9900) is a zero vector, so it still counts as a sample.
+            if let Some(uv) = self.wind_uv(mlat, mlon, alt_ft) {
+                sum += headwind_along(uv, course);
+                cnt += 1;
             }
         }
         (cnt > 0).then(|| sum / cnt as f64)
@@ -99,11 +148,8 @@ impl Winds {
 
     /// Headwind (kt) at a single point along `course_deg`.
     pub fn point_headwind(&self, lat: f64, lon: f64, course_deg: f64, alt_ft: f64) -> Option<f64> {
-        let w = self.nearest_wind(lat, lon, alt_ft)?;
-        match w.dir {
-            Some(dir) => Some(w.spd * (dir - course_deg).to_radians().cos()),
-            None => (w.spd == 0.0).then_some(0.0),
-        }
+        self.wind_uv(lat, lon, alt_ft)
+            .map(|uv| headwind_along(uv, course_deg))
     }
 }
 
@@ -111,28 +157,29 @@ impl Winds {
 /// result simply means the model flies still air until the next refresh.
 pub async fn fetch(client: &reqwest::Client, airports: &AirportDb) -> Winds {
     let mut merged: HashMap<String, Vec<(i32, WindLevel)>> = HashMap::new();
-    for reg in REGIONS {
-        let url = format!("https://aviationweather.gov/api/data/windtemp?region={reg}&level=low");
-        let text = match client
-            .get(&url)
-            .send()
-            .await
-            .and_then(|r| r.error_for_status())
-        {
-            Ok(resp) => match resp.text().await {
-                Ok(t) => t,
-                Err(_) => continue,
-            },
-            Err(e) => {
-                tracing::debug!(region = reg, error = %e, "winds region fetch failed");
+    for level in TABLE_LEVELS {
+        for reg in REGIONS {
+            let url =
+                format!("https://aviationweather.gov/api/data/windtemp?region={reg}&level={level}");
+            let text = match client
+                .get(&url)
+                .send()
+                .await
+                .and_then(|r| r.error_for_status())
+            {
+                Ok(resp) => match resp.text().await {
+                    Ok(t) => t,
+                    Err(_) => continue,
+                },
+                Err(e) => {
+                    tracing::debug!(region = reg, level, error = %e, "winds region fetch failed");
+                    continue;
+                }
+            };
+            if !text.contains("FT") {
                 continue;
             }
-        };
-        if !text.contains("FT") {
-            continue;
-        }
-        for (id, levels) in parse_windtemp(&text) {
-            merged.insert(id, levels);
+            merge_table(&mut merged, &text);
         }
     }
 
@@ -148,6 +195,14 @@ pub async fn fetch(client: &reqwest::Client, airports: &AirportDb) -> Winds {
         }
     }
     Winds { stations }
+}
+
+/// Add a table's station levels to `merged`, extending (never replacing) a station already seen —
+/// the high table's FL450/FL530 join the same station's low levels.
+fn merge_table(merged: &mut HashMap<String, Vec<(i32, WindLevel)>>, text: &str) {
+    for (id, levels) in parse_windtemp(text) {
+        merged.entry(id).or_default().extend(levels);
+    }
 }
 
 /// Parse an AWC FB table into `(station_id, levels)`. Columns are matched to their nearest
@@ -410,5 +465,131 @@ BRL 2013 2110+18 2308+12
             .route_headwind(&[[40.0, -89.5], [40.0, -90.5]], 35000.0)
             .unwrap();
         assert!(tw < -40.0, "expected strong tailwind, got {tw}");
+    }
+
+    // ---- interpolation + high-level merge (#314) ----
+
+    fn wind(dir: f64, spd: f64) -> WindLevel {
+        WindLevel {
+            dir: Some(dir),
+            spd,
+        }
+    }
+
+    fn station(lat: f64, lon: f64, levels: Vec<(i32, WindLevel)>) -> Station {
+        Station { lat, lon, levels }
+    }
+
+    /// Headwind at a point for a course of 360° (so a northerly wind reads as its full speed).
+    fn north_hw(w: &Winds, lat: f64, lon: f64, alt: f64) -> f64 {
+        w.point_headwind(lat, lon, 0.0, alt).unwrap()
+    }
+
+    #[test]
+    fn wind_between_two_levels_is_interpolated_and_clamped_outside() {
+        // 360° winds (straight headwinds on a 360° course): 20 kt at 34,000, 70 kt at 39,000.
+        let w = Winds {
+            stations: vec![station(
+                40.0,
+                -90.0,
+                vec![(39000, wind(360.0, 70.0)), (34000, wind(360.0, 20.0))],
+            )],
+        };
+        assert!((north_hw(&w, 40.0, -90.0, 37000.0) - 50.0).abs() < 1e-9);
+        assert!((north_hw(&w, 40.0, -90.0, 45000.0) - 70.0).abs() < 1e-9);
+        assert!((north_hw(&w, 40.0, -90.0, 10000.0) - 20.0).abs() < 1e-9);
+    }
+
+    #[test]
+    fn wind_between_stations_is_blended_by_inverse_distance() {
+        // Two stations 120 nm apart (2° of latitude), 10 kt and 50 kt northerlies.
+        let w = Winds {
+            stations: vec![
+                station(40.0, -90.0, vec![(35000, wind(360.0, 10.0))]),
+                station(42.0, -90.0, vec![(35000, wind(360.0, 50.0))]),
+            ],
+        };
+        // Midway: equal weights.
+        assert!((north_hw(&w, 41.0, -90.0, 35000.0) - 30.0).abs() < 1e-6);
+        // A quarter of the way: 1/d² weights 9:1 toward the near station → 14 kt.
+        assert!((north_hw(&w, 40.5, -90.0, 35000.0) - 14.0).abs() < 0.05);
+        // On a station: exactly its wind.
+        assert!((north_hw(&w, 42.0, -90.0, 35000.0) - 50.0).abs() < 1e-9);
+        // Beyond the station radius: no wind (still air).
+        assert!(w.point_headwind(60.0, -90.0, 0.0, 35000.0).is_none());
+    }
+
+    #[test]
+    fn only_the_nearest_stations_are_blended() {
+        // Four near 10 kt stations around the point and a fifth, further, 90 kt one: the fifth is
+        // outside the blend, so the result is exactly 10 kt.
+        let near = |lat, lon| station(lat, lon, vec![(35000, wind(360.0, 10.0))]);
+        let w = Winds {
+            stations: vec![
+                near(40.5, -90.0),
+                near(39.5, -90.0),
+                near(40.0, -89.5),
+                near(40.0, -90.5),
+                station(42.0, -90.0, vec![(35000, wind(360.0, 90.0))]),
+            ],
+        };
+        assert!((north_hw(&w, 40.0, -90.0, 35000.0) - 10.0).abs() < 1e-9);
+    }
+
+    #[test]
+    fn direction_interpolates_through_a_shear_as_a_vector() {
+        // 270°/50 kt at 30,000 and 360°/50 kt at 40,000: halfway is the vector mean — from 315° at
+        // ~35.4 kt — not a 50 kt wind, and not a naive 315°/50.
+        let w = Winds {
+            stations: vec![station(
+                40.0,
+                -90.0,
+                vec![(30000, wind(270.0, 50.0)), (40000, wind(360.0, 50.0))],
+            )],
+        };
+        let along = w.point_headwind(40.0, -90.0, 315.0, 35000.0).unwrap();
+        let across = w.point_headwind(40.0, -90.0, 45.0, 35000.0).unwrap();
+        assert!((along - 50.0 / 2f64.sqrt()).abs() < 1e-9, "got {along}");
+        assert!(across.abs() < 1e-9, "got {across}");
+    }
+
+    #[test]
+    fn calm_levels_count_as_zero_wind() {
+        let w = Winds {
+            stations: vec![station(
+                40.0,
+                -90.0,
+                vec![(
+                    35000,
+                    WindLevel {
+                        dir: None,
+                        spd: 0.0,
+                    },
+                )],
+            )],
+        };
+        let hw = w.route_headwind(&[[40.0, -90.5], [40.0, -89.5]], 35000.0);
+        assert_eq!(hw, Some(0.0));
+    }
+
+    #[test]
+    fn high_table_extends_a_stations_low_levels() {
+        let high = "\
+FT   45000  53000
+BRL 264663 263369
+";
+        let mut merged = HashMap::new();
+        merge_table(&mut merged, SAMPLE);
+        merge_table(&mut merged, high);
+        let brl = &merged["BRL"];
+        assert_eq!(brl.len(), 11, "nine low levels + two high levels");
+        let at = |alt| {
+            brl.iter()
+                .find(|(a, _)| *a == alt)
+                .map(|(_, w)| (w.dir, w.spd))
+        };
+        assert_eq!(at(3000), Some((Some(180.0), 17.0)), "low levels kept");
+        assert_eq!(at(45000), Some((Some(260.0), 46.0)));
+        assert_eq!(at(53000), Some((Some(260.0), 33.0)));
     }
 }
