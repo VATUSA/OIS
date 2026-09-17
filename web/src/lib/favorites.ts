@@ -25,7 +25,11 @@ export function toggleFavorite(items: readonly Favorite[], fav: Favorite): Favor
   return items.some((f) => favoriteKey(f) === key) ? items.filter((f) => favoriteKey(f) !== key) : [fav, ...items];
 }
 
-/** This user's favorites, with an optimistic toggle persisted to their preferences. */
+/**
+ * This user's favorites, with an optimistic toggle persisted to their preferences. `toggle` returns
+ * whether the entity is now a favorite, or `null` (and changes nothing) while the stored list is
+ * still loading — saving before then would overwrite it.
+ */
 export function useFavorites() {
   const queryClient = useQueryClient();
   const toast = useToast();
@@ -33,7 +37,8 @@ export function useFavorites() {
   const save = useSavePreferences<FavoritesPrefs>(NAMESPACE);
   const items = prefs.data?.items ?? [];
 
-  const toggle = (fav: Favorite): boolean => {
+  const toggle = (fav: Favorite): boolean | null => {
+    if (!prefs.isSuccess) return null;
     const previous = queryClient.getQueryData<FavoritesPrefs | null>(["preferences", NAMESPACE]) ?? null;
     const next = { items: toggleFavorite(previous?.items ?? [], fav) };
     queryClient.setQueryData(["preferences", NAMESPACE], next);

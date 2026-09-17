@@ -69,7 +69,7 @@ function FavoriteCurrentPage() {
       e.preventDefault();
       const label = itemForPath(location.pathname)?.item.label ?? document.title;
       const added = favorites.toggle({ kind: "page", id: location.pathname, label, href: location.href });
-      toast.success(added ? `Added ${label} to favorites` : `Removed ${label} from favorites`);
+      if (added != null) toast.success(added ? `Added ${label} to favorites` : `Removed ${label} from favorites`);
     };
     window.addEventListener("keydown", onKey);
     return () => window.removeEventListener("keydown", onKey);
