@@ -41,6 +41,16 @@ function meteringHtml(f: MatchedFlight): string {
 }
 
 /**
+ * The hover-card renderer for the current settings, or `undefined` when tooltips are off entirely
+ * (deck then draws no card). `map.aircraftTooltips` only narrows what `map.tooltips` allows, and
+ * with tooltips off the map also drops the invisible ATC hover targets (see `TrafficMap`).
+ */
+export function tooltipFor(settings: { tooltips: boolean; aircraft: boolean }) {
+  if (!settings.tooltips) return undefined;
+  return settings.aircraft ? ALL_TOOLTIP : ATC_ONLY_TOOLTIP;
+}
+
+/**
  * Hover cards for the map: aircraft glyphs, matched (in-FCA) traffic, and ATC labels (position +
  * controller). `aircraft: false` drops the aircraft and matched cards, leaving ATC.
  */
@@ -87,3 +97,6 @@ export function mapTooltip({ aircraft = true }: { aircraft?: boolean } = {}) {
     return null;
   };
 }
+
+const ALL_TOOLTIP = mapTooltip();
+const ATC_ONLY_TOOLTIP = mapTooltip({ aircraft: false });

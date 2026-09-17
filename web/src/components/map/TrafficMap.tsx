@@ -23,7 +23,8 @@ import {
 } from "./layers/replay";
 import {AtcMarkers} from "./markers/AtcMarkers";
 import type {MapCamera} from "./hooks/useMapCamera";
-import {mapTooltip} from "./lib/tooltip";
+import {fcaLineUnder} from "./lib/pick";
+import {tooltipFor} from "./lib/tooltip";
 import type {NormAircraft, PathDatum, RGB, RouteGeom} from "./lib/types";
 
 export interface TrafficMapProps {
@@ -181,8 +182,9 @@ export function TrafficMap({
     if (rings?.data.length) out.push(buildRingLayer(rings.data, rings.nm, palette));
     if (fcas?.length) out.push(...buildFcaLayers(fcas, selectedFcaId, palette));
     // ATC hover sits above FCA lines and routes (a pill wins over a line under it) but below aircraft
-    // glyphs, so traffic parked on a staffed airport's badge keeps its own hover card.
-    if (atcAnchors.length) out.push(buildAtcHoverLayer(atcAnchors));
+    // glyphs, so traffic parked on a staffed airport's badge keeps its own hover card. With tooltips
+    // off it isn't built at all — an invisible pick target that draws nothing would only eat clicks.
+    if (atcAnchors.length && tooltipsOn) out.push(buildAtcHoverLayer(atcAnchors));
     if (matched?.length && matchedColor)
       out.push(...buildMatchedLayers(matched, matchedColor, aircraftStyle ?? "silhouette", sizeScale, "", palette));
     for (const group of matchedGroups ?? [])
@@ -213,6 +215,7 @@ export function TrafficMap({
     atc,
     centerBoundaries,
     atcAnchors,
+    tooltipsOn,
     trails,
     routeOverlays,
     namedRoutes,
@@ -265,6 +268,11 @@ export function TrafficMap({
     } else if (info.layer?.id === "fca-lines") {
       const id = (info.object as { id: string } | undefined)?.id;
       if (id) onFcaClick?.(id);
+    } else if (info.layer?.id === "atc-hover") {
+      // The ATC hover target is invisible and sits above the FCA lines, so it must not swallow the
+      // click that selects the line running under a pill (#323) — look through it.
+      const id = fcaLineUnder(info);
+      if (id) onFcaClick?.(id);
     }
   };
 
@@ -302,7 +310,7 @@ export function TrafficMap({
       onResize={camera?.onResize}
       controller={controller}
       layers={layers}
-      getTooltip={!tooltipsOn ? undefined : aircraftTooltipsOn ? TOOLTIP : ATC_TOOLTIP}
+      getTooltip={tooltipFor({ tooltips: tooltipsOn, aircraft: aircraftTooltipsOn })}
       onClick={handleClick}
       onDragStart={handleDragStart}
       onDrag={handleDrag}
@@ -321,8 +329,6 @@ export function TrafficMap({
 }
 
 const EMPTY_SET: Set<string> = new Set();
-const TOOLTIP = mapTooltip();
-const ATC_TOOLTIP = mapTooltip({ aircraft: false });
 
 /** Re-scale glyphs only when zoom moves at least this much, so panning doesn't churn the layers. */
 const ZOOM_STEP = 0.1;

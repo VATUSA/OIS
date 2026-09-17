@@ -3,7 +3,7 @@ import {describe, expect, it} from "vitest";
 
 import type {AtcAnchor} from "../layers/atc";
 import type {MatchedFlight} from "../layers/matched";
-import {mapTooltip} from "./tooltip";
+import {mapTooltip, tooltipFor} from "./tooltip";
 import type {NormAircraft} from "./types";
 
 const pick = (layerId: string, object: unknown) => ({ layer: { id: layerId }, object }) as unknown as PickingInfo;
@@ -56,5 +56,25 @@ describe("mapTooltip", () => {
     expect(atcOnly(pick("aircraft", plane))).toBeNull();
     expect(atcOnly(pick("matched", matched))).toBeNull();
     expect(html(atcOnly(pick("atc-hover", tower)))).toContain("ORD_TWR");
+  });
+});
+
+describe("tooltipFor", () => {
+  it("has no renderer at all when map tooltips are off", () => {
+    expect(tooltipFor({ tooltips: false, aircraft: true })).toBeUndefined();
+    expect(tooltipFor({ tooltips: false, aircraft: false })).toBeUndefined();
+  });
+
+  it("keeps ATC but drops aircraft when only the aircraft toggle is off", () => {
+    const t = tooltipFor({ tooltips: true, aircraft: false })!;
+    expect(t(pick("aircraft", plane))).toBeNull();
+    expect(t(pick("matched", matched))).toBeNull();
+    expect(html(t(pick("atc-hover", tower)))).toContain("ORD_TWR");
+  });
+
+  it("renders both when both are on", () => {
+    const t = tooltipFor({ tooltips: true, aircraft: true })!;
+    expect(html(t(pick("aircraft", plane)))).toContain("AAL1");
+    expect(html(t(pick("atc-hover", tower)))).toContain("ORD_TWR");
   });
 });
