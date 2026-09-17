@@ -176,6 +176,8 @@ export function ScopeChips({
             role="radio"
             aria-checked={on}
             tabIndex={-1}
+            // Keep focus in the search field so the keyboard keeps working after a click.
+            onMouseDown={(e) => e.preventDefault()}
             onClick={() => onScopeChange?.(s.id)}
             className={cn(
               "inline-flex h-7 items-center rounded-full border px-2.5 text-xs",
