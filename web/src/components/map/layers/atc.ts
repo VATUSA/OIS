@@ -28,21 +28,40 @@ export interface AtcPositionLite {
   atis_code?: string | null;
 }
 
-/** A single lat/lon (or lon/lat) coordinate pair with both values finite. */
+/** A `[lat, lon]` pair with both values finite and on the globe (a transposed `[lon, lat]` for
+ * most of the US fails the latitude bound). */
 function isValidPoint(p: number[] | null | undefined): p is number[] {
   return (
     !!p &&
     p.length >= 2 &&
     Number.isFinite(p[0]) &&
-    Number.isFinite(p[1])
+    Number.isFinite(p[1]) &&
+    Math.abs(p[0]) <= 90 &&
+    Math.abs(p[1]) <= 180
   );
 }
 
-/** A polygon ring needs at least 3 distinct vertices, each finite — fewer (or a stray non-finite
- * value from partial/degenerate upstream data) triangulates into a huge stretched sliver instead
- * of failing visibly, which is exactly the "stretched boundary" glitch this guards against. */
+/** A vertex further than this (degrees, either axis) from its ring's median vertex is garbage: real
+ * TRACON boundaries span a few degrees at most (VATUSA/OIS#318). */
+const MAX_RING_OUTLIER_DEG = 5;
+
+function median(values: number[]): number {
+  const sorted = [...values].sort((a, b) => a - b);
+  return sorted[Math.floor(sorted.length / 2)];
+}
+
+/** A polygon ring needs at least 3 valid vertices and no outlier — fewer, a stray non-finite value,
+ * or one far-off vertex triangulates into a huge stretched wedge across the map instead of failing
+ * visibly, which is exactly the "stretched boundary" glitch this guards against. */
 function isValidRing(ring: number[][]): boolean {
-  return ring.length >= 3 && ring.every(isValidPoint);
+  if (ring.length < 3 || !ring.every(isValidPoint)) return false;
+  const [mlat, mlon] = ringMedian(ring);
+  return ring.every((p) => Math.abs(p[0] - mlat) <= MAX_RING_OUTLIER_DEG && Math.abs(p[1] - mlon) <= MAX_RING_OUTLIER_DEG);
+}
+
+/** The per-axis median `[lat, lon]` of a ring's vertices — where it really is, unmoved by one stray vertex. */
+function ringMedian(ring: number[][]): [number, number] {
+  return [median(ring.map((p) => p[0])), median(ring.map((p) => p[1]))];
 }
 
 /**
@@ -81,12 +100,14 @@ export function buildAtcLayers(
   }
 
   // TRACON polygon rings (rings are [lat, lon]; deck polygons want [lon, lat]). A malformed ring
-  // is dropped on its own — other valid rings on the same TRACON still render.
-  const ringPolys = atc.tracons
+  // is dropped on its own — other valid rings on the same TRACON still render; a TRACON left with
+  // none falls back to a circle at its label.
+  const polygonTracons = atc.tracons
     .filter((t) => !t.circle && t.rings.length > 0)
-    .flatMap((t) =>
-      t.rings.filter(isValidRing).map((ring) => ({ contour: toDeckPath(ring as LatLng[]) })),
-    );
+    .map((t) => ({ t, rings: t.rings.filter(isValidRing) }));
+  const ringPolys = polygonTracons.flatMap(({ rings }) =>
+    rings.map((ring) => ({ contour: toDeckPath(ring as LatLng[]) })),
+  );
   if (ringPolys.length > 0) {
     layers.push(
       new PolygonLayer<{ contour: number[][] }>({
@@ -105,9 +126,17 @@ export function buildAtcLayers(
   }
 
   // TRACON circle fallbacks (~25 NM).
-  const circles = atc.tracons
-    .filter((t) => isValidPoint(t.circle))
-    .map((t) => ({ pos: toDeckPoint(t.circle as LatLng) }));
+  // A TRACON whose rings were all dropped keeps a circle: at its label, else where its first ring
+  // really sits (its median vertex, which one stray vertex can't drag across the map).
+  const circleCenters = [
+    ...atc.tracons.map((t) => t.circle),
+    ...polygonTracons
+      .filter(({ rings }) => rings.length === 0)
+      .map(({ t }) => (isValidPoint(t.label) ? t.label : ringMedian(t.rings[0].filter(isValidPoint)))),
+  ];
+  const circles = circleCenters
+    .filter(isValidPoint)
+    .map((c) => ({ pos: toDeckPoint(c as LatLng) }));
   if (circles.length > 0) {
     layers.push(
       new ScatterplotLayer<{ pos: [number, number] }>({

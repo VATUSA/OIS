@@ -176,7 +176,7 @@ fn parse(src: &str) -> TraconData {
     let mut features = Vec::new();
     for f in fc.features {
         let Some(id) = f.properties.id else { continue };
-        let rings = outer_rings(&f.geometry);
+        let rings = outer_rings(&id, &f.geometry);
         if rings.is_empty() {
             continue;
         }
@@ -205,14 +205,15 @@ fn parse(src: &str) -> TraconData {
     TraconData::build(features)
 }
 
-/// Outer ring(s) as `[lat, lon]` from a Polygon or MultiPolygon (holes ignored).
-fn outer_rings(geom: &Geometry) -> Vec<Vec<[f64; 2]>> {
-    match geom.gtype.as_str() {
+/// Outer ring(s) as `[lat, lon]` from a Polygon or MultiPolygon (holes ignored), with off-globe
+/// vertices removed (see [`sanitize_ring`]).
+fn outer_rings(id: &str, geom: &Geometry) -> Vec<Vec<[f64; 2]>> {
+    let outers: Vec<Vec<[f64; 2]>> = match geom.gtype.as_str() {
         "Polygon" => serde_json::from_value::<Vec<Vec<[f64; 2]>>>(geom.coordinates.clone())
             .ok()
             .and_then(|rings| rings.into_iter().next())
-            .map(|outer| vec![to_latlon(outer)])
-            .unwrap_or_default(),
+            .into_iter()
+            .collect(),
         "MultiPolygon" => {
             serde_json::from_value::<Vec<Vec<Vec<[f64; 2]>>>>(geom.coordinates.clone())
                 .ok()
@@ -220,17 +221,49 @@ fn outer_rings(geom: &Geometry) -> Vec<Vec<[f64; 2]>> {
                     polys
                         .into_iter()
                         .filter_map(|rings| rings.into_iter().next())
-                        .map(to_latlon)
                         .collect()
                 })
                 .unwrap_or_default()
         }
         _ => Vec::new(),
-    }
+    };
+    outers
+        .into_iter()
+        .filter_map(|ring| sanitize_ring(id, ring))
+        .collect()
 }
 
-fn to_latlon(ring: Vec<[f64; 2]>) -> Vec<[f64; 2]> {
-    ring.into_iter().map(|[lon, lat]| [lat, lon]).collect()
+/// A GeoJSON `[lon, lat]` ring as `[lat, lon]`, keeping only finite, on-globe vertices — a stray
+/// bad vertex otherwise draws a map-spanning wedge (VATUSA/OIS#318). `None` when fewer than 3
+/// vertices survive. Anything dropped is logged with the TRACON id so dirty upstream features show.
+fn sanitize_ring(id: &str, ring: Vec<[f64; 2]>) -> Option<Vec<[f64; 2]>> {
+    let total = ring.len();
+    let kept: Vec<[f64; 2]> = ring
+        .into_iter()
+        .filter(|[lon, lat]| {
+            lon.is_finite() && lat.is_finite() && lon.abs() <= 180.0 && lat.abs() <= 90.0
+        })
+        .map(|[lon, lat]| [lat, lon])
+        .collect();
+    let dropped = total - kept.len();
+    if dropped > 0 {
+        tracing::warn!(
+            tracon = id,
+            dropped,
+            "tracon: dropped off-globe ring vertices"
+        );
+    }
+    if kept.len() < 3 {
+        if total > 0 {
+            tracing::warn!(
+                tracon = id,
+                vertices = kept.len(),
+                "tracon: dropped a ring with too few valid vertices"
+            );
+        }
+        return None;
+    }
+    Some(kept)
 }
 
 #[cfg(test)]
@@ -275,6 +308,31 @@ mod tests {
             .expect("SCT_APP matches generic SoCal");
         assert_eq!(m.id, "SCT");
         assert!(m.suffix.is_none());
+    }
+
+    #[test]
+    fn off_globe_vertices_are_dropped_and_a_ring_left_too_small_is_dropped() {
+        let src = r#"{"type":"FeatureCollection","features":[
+          {"type":"Feature","properties":{"id":"BAD","prefix":["BAD"]},
+           "geometry":{"type":"Polygon","coordinates":[[[-80.0,40.0],[-80.0,41.0],[-79.0,41.0],[-79.0,400.0],[-80.0,40.0]]]}},
+          {"type":"Feature","properties":{"id":"GONE","prefix":["GONE"]},
+           "geometry":{"type":"Polygon","coordinates":[[[-80.0,40.0],[500.0,41.0],[-79.0,95.0]]]}}
+        ]}"#;
+        let d = parse(src);
+        let bad = d
+            .match_callsign("BAD_APP")
+            .expect("BAD keeps its valid vertices");
+        assert_eq!(
+            bad.rings,
+            vec![vec![
+                [40.0, -80.0],
+                [41.0, -80.0],
+                [41.0, -79.0],
+                [40.0, -80.0]
+            ]]
+        );
+        // Only one valid vertex left: no ring, so the feature is skipped entirely.
+        assert!(d.match_callsign("GONE_APP").is_none());
     }
 
     #[test]
