@@ -1,5 +1,5 @@
 import * as React from "react";
-import {CornerDownLeft, Search, type LucideIcon} from "lucide-react";
+import {CornerDownLeft, Search, Star, type LucideIcon} from "lucide-react";
 
 import {cn} from "../lib/utils";
 import {Modal} from "./modal";
@@ -10,6 +10,9 @@ export type CommandItem = {
   sublabel?: React.ReactNode;
   icon?: LucideIcon;
   onSelect: () => void;
+  /** Whether the item is a favorite; with `onToggleStar`, the row shows a star (⌘⇧F toggles it). */
+  starred?: boolean;
+  onToggleStar?: () => void;
 };
 
 export type CommandGroup = { label: string; items: CommandItem[] };
@@ -30,6 +33,7 @@ export function cycleScope(ids: readonly string[], current: string, dir: 1 | -1)
  * can match however suits it: fuzzy callsigns, a server search, a static page list).
  * ↑/↓ move, Enter selects, Escape closes. With `scopes`, a chip row sits under the field: Tab /
  * Shift+Tab cycle the scope and Backspace on an empty query returns to the first (default) scope.
+ * Items with `onToggleStar` carry a favorite star; ⌘⇧F / Ctrl+Shift+F toggles the highlighted one.
  */
 export function CommandPalette({
   open,
@@ -73,7 +77,10 @@ export function CommandPalette({
   };
 
   const onKeyDown = (e: React.KeyboardEvent) => {
-    if (e.key === "ArrowDown") {
+    if ((e.metaKey || e.ctrlKey) && e.shiftKey && e.key.toLowerCase() === "f") {
+      e.preventDefault();
+      flat[active]?.onToggleStar?.();
+    } else if (e.key === "ArrowDown") {
       e.preventDefault();
       setActive((i) => Math.min(flat.length - 1, i + 1));
     } else if (e.key === "ArrowUp") {
@@ -142,6 +149,22 @@ export function CommandPalette({
                       {Icon && <Icon className={cn("size-4 shrink-0", on ? "text-brand-ink" : "text-ink-3")} />}
                       <span className="min-w-0 flex-1 truncate">{item.label}</span>
                       {item.sublabel && <span className="shrink-0 font-mono text-xs text-ink-3">{item.sublabel}</span>}
+                      {item.onToggleStar && (item.starred || on) && (
+                        <span
+                          role="button"
+                          tabIndex={-1}
+                          aria-label={item.starred ? "Remove from favorites" : "Add to favorites"}
+                          aria-pressed={!!item.starred}
+                          onMouseDown={(e) => e.preventDefault()}
+                          onClick={(e) => {
+                            e.stopPropagation();
+                            item.onToggleStar?.();
+                          }}
+                          className="shrink-0 rounded-sm p-0.5 text-ink-3 hover:text-ink"
+                        >
+                          <Star className={cn("size-3.5", item.starred && "fill-current text-brand-ink")} />
+                        </span>
+                      )}
                       {on && <CornerDownLeft className="size-3.5 shrink-0 text-ink-3" />}
                     </button>
                   );
