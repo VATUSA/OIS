@@ -27,6 +27,14 @@ const COVERAGE: [f64; 4] = [-90.0, -180.0, 90.0, 180.0];
 /// First NASR effective date we anchor the 28-day cycle math on (a known boundary).
 const CYCLE_ANCHOR: (i32, u32, u32) = (2026, 7, 9);
 
+/// `NavData::source()` for a dataset whose base fixes/navaids/cycle came from the live FAA NASR
+/// fetch — the only source the refresh job treats as healthy (VATUSA/OIS#317).
+pub const FAA_SOURCE: &str = "runtime fetch (faa)";
+
+fn source_label(source: &str) -> String {
+    format!("runtime fetch ({source})")
+}
+
 const SQUAWK_AIRWAYS: &str = "https://unpkg.com/@squawk/airway-data@0.5.10/data/airways.json.gz";
 const SQUAWK_PROCEDURES: &str =
     "https://unpkg.com/@squawk/procedure-data@0.7.8/data/procedures.json.gz";
@@ -50,6 +58,8 @@ pub async fn fetch_latest() -> Fetched<NavData> {
     let client = reqwest::Client::builder()
         .user_agent("ois-nav/1.0 (+https://vatusa.net)")
         .timeout(std::time::Duration::from_secs(90))
+        // Resolve A as well as AAAA ourselves, so a host with dead IPv6 still reaches the FAA.
+        .dns_resolver(super::nav_dns::NavDnsResolver::default())
         .build()?;
 
     // 1. Base fixes/navaids/preferred + cycle: FAA cycle → @squawk → bundle.
@@ -157,7 +167,7 @@ pub async fn fetch_latest() -> Fetched<NavData> {
     let navaids_json = serde_json::to_string(&navaids)?;
     let meta_json = serde_json::to_string(&OutMeta {
         nasr_cycle_date: cycle,
-        source: format!("runtime fetch ({source})"),
+        source: source_label(source),
         bbox: COVERAGE,
     })?;
 
@@ -238,6 +248,18 @@ pub(super) fn candidate_cycles() -> Vec<NaiveDate> {
         current - Duration::days(28),
         current - Duration::days(56),
     ]
+}
+
+/// The NASR cycle in effect today — what a healthy refresh should have loaded.
+pub fn current_cycle() -> NaiveDate {
+    candidate_cycles()[0]
+}
+
+/// How many whole 28-day cycles `loaded` (`YYYY-MM-DD`) trails `current`; `None` when `loaded`
+/// isn't a date. A cycle at or ahead of `current` is 0 behind.
+pub fn cycles_behind(loaded: &str, current: NaiveDate) -> Option<u32> {
+    let loaded = NaiveDate::parse_from_str(loaded, "%Y-%m-%d").ok()?;
+    Some(((current - loaded).num_days().max(0) / 28) as u32)
 }
 
 fn faa_url(date: NaiveDate, group: &str) -> String {
@@ -542,14 +564,17 @@ fn num(row: &[String], idx: Option<usize>) -> Option<f64> {
 // --- shared helpers ---
 
 pub(super) async fn download(client: &reqwest::Client, url: &str) -> Fetched<Vec<u8>> {
-    let bytes = client
-        .get(url)
-        .send()
-        .await?
-        .error_for_status()?
-        .bytes()
-        .await?;
-    Ok(bytes.to_vec())
+    // One retry for a transport failure (connect/DNS/reset); an HTTP error status is an answer, not
+    // a blip, so it isn't retried.
+    let resp = match client.get(url).send().await {
+        Ok(resp) => resp,
+        Err(e) => {
+            tracing::debug!(url, error = %e, "nav download failed; retrying once");
+            tokio::time::sleep(std::time::Duration::from_secs(2)).await;
+            client.get(url).send().await?
+        }
+    };
+    Ok(resp.error_for_status()?.bytes().await?.to_vec())
 }
 
 async fn fetch_gz_json<T: for<'de> Deserialize<'de>>(
@@ -795,6 +820,24 @@ mod tests {
         assert_eq!(strip_revision("DOTSS2"), "DOTSS");
         assert_eq!(strip_revision("LUCIT3"), "LUCIT");
         assert_eq!(strip_revision("KKISS1A"), "KKISS");
+    }
+
+    #[test]
+    fn cycles_behind_counts_whole_28_day_cycles() {
+        let current = NaiveDate::from_ymd_opt(2026, 9, 3).unwrap();
+        assert_eq!(cycles_behind("2026-09-03", current), Some(0));
+        assert_eq!(cycles_behind("2026-08-06", current), Some(1));
+        // The production incident: 2026-07-09 loaded while 2026-09-03 was current.
+        assert_eq!(cycles_behind("2026-07-09", current), Some(2));
+        // A newer-than-expected cycle (FAA posts early) is not behind.
+        assert_eq!(cycles_behind("2026-10-01", current), Some(0));
+        assert_eq!(cycles_behind("unknown", current), None);
+    }
+
+    #[test]
+    fn faa_source_label_matches_the_healthy_source_constant() {
+        assert_eq!(source_label("faa"), FAA_SOURCE);
+        assert_ne!(source_label("bundle"), FAA_SOURCE);
     }
 
     /// Live end-to-end fetch. Ignored by default (hits FAA + unpkg):

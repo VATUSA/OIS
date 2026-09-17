@@ -24,8 +24,8 @@ use crate::{
     errors::ApiError,
     feed::{
         airports::AirportDb, airspace::Boundaries, facilities, fca, flow as feed_flow,
-        nav::NavData, predict, runway_db::RunwayDb, taxi_estimate, trajectory, vatsim::FlightPlan,
-        vatsim::VatsimData, winds::Winds,
+        nav::NavData, nav_source, predict, runway_db::RunwayDb, taxi_estimate, trajectory,
+        vatsim::FlightPlan, vatsim::VatsimData, winds::Winds,
     },
     jobs,
     models::{
@@ -673,8 +673,11 @@ fn build_data_status(state: &AppState) -> DataStatus {
             .then(|| DateTime::from_timestamp_millis(ms))
             .flatten()
     };
+    let current = nav_source::current_cycle();
     DataStatus {
         nav_cycle: nav.cycle().to_string(),
+        nav_cycle_current: current.format("%Y-%m-%d").to_string(),
+        nav_cycles_behind: nav_source::cycles_behind(nav.cycle(), current),
         nav_source: nav.source().to_string(),
         fixes: nav.fix_count(),
         navaids: nav.navaid_count(),

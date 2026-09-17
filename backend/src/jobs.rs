@@ -90,10 +90,13 @@ const AIRPORTS_REFRESH_INTERVAL: Duration = Duration::from_secs(5 * 60);
 /// the way admin-edited gates do, so a slow poll is enough.
 const TAXI_ESTIMATE_SAMPLES_INTERVAL: Duration = Duration::from_secs(10 * 60);
 
-/// Fetch the latest NASR data once and hot-swap it in when the cycle (or point count)
-/// changes. Records the fetch time on success. Returns `Ok(true)` when the data changed,
-/// `Ok(false)` when it was already current, `Err` when the fetch failed or was empty. The
-/// existing data is always kept on failure.
+/// Fetch the latest NASR data once and hot-swap it in when it changes — but never for an older
+/// cycle than the one loaded, so a failed fetch's bundle fallback can't replace good live data.
+/// `Ok(true)`/`Ok(false)` (updated / already current) only for a **healthy** refresh: the live FAA
+/// source at the current cycle, which is also the only case that records the refresh time. A
+/// degraded result (a fallback source, or a cycle behind current) is `Err` with the reason, so the
+/// job shows failed on the Background Tasks page (VATUSA/OIS#317). Existing data is always kept on
+/// a fetch failure.
 pub async fn refresh_nav_once(
     nav: &Arc<ArcSwap<NavData>>,
     refreshed: &Arc<AtomicI64>,
@@ -105,18 +108,70 @@ pub async fn refresh_nav_once(
         return Err("nav fetch produced an empty database".into());
     }
     let current = nav.load();
-    let changed = fresh.cycle() != current.cycle() || fresh.len() != current.len();
-    if changed {
+    let swap = should_swap_nav(
+        (fresh.cycle(), fresh.len()),
+        (current.cycle(), current.len()),
+    );
+    if swap {
         tracing::info!(
             from_cycle = current.cycle(),
             to_cycle = fresh.cycle(),
             points = fresh.len(),
+            source = fresh.source(),
             "nav database refreshed"
         );
+    }
+    let expected = nav_source::current_cycle();
+    let health = nav_health(
+        fresh.source(),
+        fresh.cycle(),
+        nav_source::cycles_behind(fresh.cycle(), expected),
+        &expected.format("%Y-%m-%d").to_string(),
+    );
+    if swap {
         nav.store(Arc::new(fresh));
     }
-    refreshed.store(Utc::now().timestamp_millis(), Ordering::Relaxed);
-    Ok(changed)
+    match health {
+        Ok(()) => {
+            refreshed.store(Utc::now().timestamp_millis(), Ordering::Relaxed);
+            Ok(swap)
+        }
+        Err((detail, cycles_behind)) => {
+            if cycles_behind.is_none_or(|n| n >= 2) {
+                tracing::error!(detail, "nav refresh degraded");
+            } else {
+                tracing::warn!(detail, "nav refresh degraded");
+            }
+            Err(detail)
+        }
+    }
+}
+
+/// Whether fetched nav data `(cycle, points)` should replace the loaded data: it differs, and its
+/// cycle (`YYYY-MM-DD`, so string order is date order) is not older than the loaded one.
+fn should_swap_nav(fresh: (&str, usize), current: (&str, usize)) -> bool {
+    fresh != current && fresh.0 >= current.0
+}
+
+/// Whether a fetched nav dataset is a healthy refresh: the live FAA source, at the current cycle.
+/// Otherwise the reason, with how many cycles behind it is (`None` = the cycle couldn't be read).
+fn nav_health(
+    source: &str,
+    cycle: &str,
+    cycles_behind: Option<u32>,
+    current: &str,
+) -> Result<(), (String, Option<u32>)> {
+    match cycles_behind {
+        Some(0) if source == nav_source::FAA_SOURCE => Ok(()),
+        Some(n) => Err((
+            format!("degraded: {source}, cycle {cycle} is {n} cycle(s) behind current {current}"),
+            Some(n),
+        )),
+        None => Err((
+            format!("degraded: {source}, unreadable cycle {cycle:?} (current {current})"),
+            None,
+        )),
+    }
 }
 
 /// Fetch the airport coordinate database once and hot-swap it in (#216). The existing data is
@@ -744,4 +799,71 @@ async fn event_package_lifecycle_once(pool: &PgPool, events: &Events) -> Result<
     } else {
         "no changes".to_string()
     })
+}
+
+#[cfg(test)]
+mod nav_health_tests {
+    use super::{nav_health, should_swap_nav};
+
+    #[test]
+    fn a_newer_or_same_cycle_swaps_but_an_older_fallback_never_does() {
+        assert!(should_swap_nav(
+            ("2026-09-03", 90_000),
+            ("2026-08-06", 90_000)
+        ));
+        assert!(should_swap_nav(
+            ("2026-09-03", 91_000),
+            ("2026-09-03", 90_000)
+        ));
+        assert!(!should_swap_nav(
+            ("2026-09-03", 90_000),
+            ("2026-09-03", 90_000)
+        ));
+        // A failed fetch's bundle (older cycle) must not replace a live cycle.
+        assert!(!should_swap_nav(
+            ("2026-07-09", 80_000),
+            ("2026-09-03", 90_000)
+        ));
+    }
+    use crate::feed::nav_source::FAA_SOURCE;
+
+    #[test]
+    fn only_a_current_faa_cycle_is_healthy() {
+        assert!(nav_health(FAA_SOURCE, "2026-09-03", Some(0), "2026-09-03").is_ok());
+    }
+
+    #[test]
+    fn a_fallback_source_at_the_current_cycle_is_degraded() {
+        let (detail, behind) = nav_health(
+            "runtime fetch (squawk)",
+            "2026-09-03",
+            Some(0),
+            "2026-09-03",
+        )
+        .unwrap_err();
+        assert_eq!(behind, Some(0));
+        assert!(detail.contains("squawk"), "{detail}");
+    }
+
+    #[test]
+    fn a_behind_cycle_is_degraded_even_from_faa() {
+        // The production incident: the bundle's 2026-07-09 served while 2026-09-03 was current.
+        let (detail, behind) =
+            nav_health(FAA_SOURCE, "2026-07-09", Some(2), "2026-09-03").unwrap_err();
+        assert_eq!(behind, Some(2));
+        assert!(
+            detail.contains("2 cycle(s) behind current 2026-09-03"),
+            "{detail}"
+        );
+    }
+
+    #[test]
+    fn an_unreadable_cycle_is_degraded() {
+        assert_eq!(
+            nav_health(FAA_SOURCE, "?", None, "2026-09-03")
+                .unwrap_err()
+                .1,
+            None
+        );
+    }
 }

@@ -48,4 +48,6 @@ reqwest.workspace = true
 # --- nav data (runtime NASR fetch + hot-swap) ---
 flate2 = "1"
 zip = { version = "8", default-features = false, features = ["deflate"] }
+# Nav-fetch-only DNS resolver (A + AAAA itself, IPv4 first) — see feed/nav_dns.rs.
+hickory-resolver = { version = "0.26", features = ["tokio"] }
 arc-swap = "1"
