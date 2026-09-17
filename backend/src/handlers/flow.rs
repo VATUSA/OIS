@@ -1202,7 +1202,8 @@ pub(crate) fn project_traffic(
                 cruise_tas,
                 profile,
                 headwind,
-            );
+            )
+            .anchor_to_observed_gs(p.groundspeed as f64);
             let target_d = vp.distance_after(route_len_nm, offset_sec);
             let ahead_nm = (route_len_nm - target_d).max(0.0);
             let (pos, heading) = fca::point_and_heading_at(&path, ahead_nm);
@@ -1343,6 +1344,11 @@ fn fix_predictions(
     let vp = trajectory::VerticalProfile::build(
         start_alt, route_len, 0.0, cruise_alt, cruise_tas, profile, headwind,
     );
+    let vp = if airborne {
+        vp.anchor_to_observed_gs(gs as f64)
+    } else {
+        vp
+    };
 
     let arr_ll = airports
         .get(&fp.arrival.to_ascii_uppercase())
@@ -1570,6 +1576,7 @@ fn build_candidates(
             route_len,
             cross.along_nm,
             p.altitude as f64,
+            p.groundspeed as f64,
             cruise,
             cruise_tas,
             profile,
@@ -1662,6 +1669,7 @@ fn build_candidates(
             false,
             route_len,
             cross.along_nm,
+            0.0,
             0.0,
             cruise,
             cruise_tas,

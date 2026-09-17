@@ -48,13 +48,15 @@ pub fn path_len_nm(path: &[[f64; 2]]) -> f64 {
 /// from the surface and carry `ground_allowance_sec` (a learned per-gate/type/runway pushback+taxi
 /// estimate, #164 sub-issue E — `feed::taxi_estimate::estimate` falls back to [`GROUND_TAXI_SEC`]
 /// itself when data is thin, so callers always have a value to pass here). Ignored when `airborne`
-/// is true.
+/// is true. An airborne aircraft's prediction is anchored to `observed_gs_kt` when it is established
+/// at cruise ([`trajectory::VerticalProfile::anchor_to_observed_gs`]).
 #[allow(clippy::too_many_arguments)]
 pub fn eta_along_route(
     airborne: bool,
     route_len_nm: f64,
     along_nm: f64,
     cur_alt_ft: f64,
+    observed_gs_kt: f64,
     cruise_alt_ft: f64,
     cruise_tas: f64,
     profile: &AircraftProfile,
@@ -62,11 +64,11 @@ pub fn eta_along_route(
     ground_allowance_sec: f64,
     now: DateTime<Utc>,
 ) -> DateTime<Utc> {
-    let start_alt = if airborne { cur_alt_ft } else { 0.0 };
-    let vp = trajectory::VerticalProfile::build(
-        start_alt,
+    let vp = profile_from_here(
+        airborne,
         route_len_nm,
-        0.0, // arrival field elevation ≈ sea level (v1 approximation)
+        cur_alt_ft,
+        observed_gs_kt,
         cruise_alt_ft,
         cruise_tas,
         profile,
@@ -93,6 +95,7 @@ pub fn project_along_route(
     airborne: bool,
     route_len_nm: f64,
     cur_alt_ft: f64,
+    observed_gs_kt: f64,
     cruise_alt_ft: f64,
     cruise_tas: f64,
     profile: &AircraftProfile,
@@ -100,11 +103,11 @@ pub fn project_along_route(
     ground_allowance_sec: f64,
     elapsed_sec: f64,
 ) -> f64 {
-    let start_alt = if airborne { cur_alt_ft } else { 0.0 };
-    let vp = trajectory::VerticalProfile::build(
-        start_alt,
+    let vp = profile_from_here(
+        airborne,
         route_len_nm,
-        0.0,
+        cur_alt_ft,
+        observed_gs_kt,
         cruise_alt_ft,
         cruise_tas,
         profile,
@@ -118,6 +121,37 @@ pub fn project_along_route(
     let target_d = vp.distance_after(route_len_nm, flying_sec);
     // `target_d` is nm-to-destination; the caller wants nm-ahead-of-current-position.
     (route_len_nm - target_d).max(0.0)
+}
+
+/// The vertical profile [`eta_along_route`] and [`project_along_route`] share: airborne aircraft
+/// start from their current altitude, anchored to their observed groundspeed; ground aircraft climb
+/// from the surface on the raw profile.
+#[allow(clippy::too_many_arguments)]
+fn profile_from_here(
+    airborne: bool,
+    route_len_nm: f64,
+    cur_alt_ft: f64,
+    observed_gs_kt: f64,
+    cruise_alt_ft: f64,
+    cruise_tas: f64,
+    profile: &AircraftProfile,
+    headwind: Option<f64>,
+) -> trajectory::VerticalProfile {
+    let start_alt = if airborne { cur_alt_ft } else { 0.0 };
+    let vp = trajectory::VerticalProfile::build(
+        start_alt,
+        route_len_nm,
+        0.0, // arrival field elevation ≈ sea level (v1 approximation)
+        cruise_alt_ft,
+        cruise_tas,
+        profile,
+        headwind,
+    );
+    if airborne {
+        vp.anchor_to_observed_gs(observed_gs_kt)
+    } else {
+        vp
+    }
 }
 
 /// ETA to the destination field + the along-route distance still to fly.
@@ -191,6 +225,7 @@ pub fn arrival_eta(
         route_nm,
         route_nm,
         ac.alt_ft,
+        ac.gs as f64,
         ac.cruise_ft,
         ac.cruise_tas,
         profile,
@@ -305,6 +340,7 @@ mod tests {
             route_len,
             route_len,
             ac.alt_ft,
+            ac.gs as f64,
             ac.cruise_ft,
             ac.cruise_tas,
             &profile,
@@ -397,6 +433,7 @@ mod tests {
             300.0,
             300.0,
             35_000.0,
+            0.0,
             35_000.0,
             440.0,
             &profile,
@@ -409,6 +446,7 @@ mod tests {
             300.0,
             300.0,
             35_000.0,
+            0.0,
             35_000.0,
             440.0,
             &profile,
@@ -437,6 +475,7 @@ mod tests {
             300.0,
             300.0,
             0.0,
+            0.0,
             35_000.0,
             440.0,
             &profile,
@@ -448,6 +487,7 @@ mod tests {
             false,
             300.0,
             300.0,
+            0.0,
             0.0,
             35_000.0,
             440.0,
@@ -471,6 +511,7 @@ mod tests {
             true,
             300.0,
             35_000.0,
+            0.0,
             35_000.0,
             440.0,
             &profile,
@@ -484,15 +525,18 @@ mod tests {
     #[test]
     fn project_along_route_agrees_with_eta_along_route() {
         // If eta_along_route says a target `along_nm` ahead is reached at ETA `now + T`, then
-        // project_along_route(elapsed = T) must project the aircraft to that same `along_nm`.
+        // project_along_route(elapsed = T) must project the aircraft to that same `along_nm` —
+        // including when both are anchored to an observed groundspeed (#313).
         let profile = AircraftProfile::default();
         let route_len = 300.0;
         let along_nm = 120.0; // 120nm ahead of current position (180nm-to-destination target)
+        let observed_gs = 470.0; // at cruise and faster than the 440 kt profile → anchored
         let eta = eta_along_route(
             true,
             route_len,
             along_nm,
             35_000.0,
+            observed_gs,
             35_000.0,
             440.0,
             &profile,
@@ -502,7 +546,16 @@ mod tests {
         );
         let elapsed = (eta - now()).num_seconds() as f64;
         let projected = project_along_route(
-            true, route_len, 35_000.0, 35_000.0, 440.0, &profile, None, 0.0, elapsed,
+            true,
+            route_len,
+            35_000.0,
+            observed_gs,
+            35_000.0,
+            440.0,
+            &profile,
+            None,
+            0.0,
+            elapsed,
         );
         assert!(
             (projected - along_nm).abs() < 1.0,
@@ -514,7 +567,7 @@ mod tests {
     fn project_along_route_clamps_at_the_destination() {
         let profile = AircraftProfile::default();
         let ahead = project_along_route(
-            true, 300.0, 35_000.0, 35_000.0, 440.0, &profile, None, 0.0, 999_999.0,
+            true, 300.0, 35_000.0, 0.0, 35_000.0, 440.0, &profile, None, 0.0, 999_999.0,
         );
         assert_eq!(ahead, 300.0, "never projects past the destination itself");
     }
@@ -526,6 +579,7 @@ mod tests {
         let ahead = project_along_route(
             false,
             300.0,
+            0.0,
             0.0,
             35_000.0,
             440.0,
