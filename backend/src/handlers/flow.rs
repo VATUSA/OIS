@@ -2698,3 +2698,42 @@ mod prefile_fix_predictions_tests {
         assert!(prefile_fix_predictions(&st, &nav, &ap, &fp, now()).is_empty());
     }
 }
+
+#[cfg(test)]
+mod data_status_tests {
+    use std::sync::Arc;
+
+    use chrono::Duration;
+    use serde_json::json;
+
+    use super::build_data_status;
+    use crate::{
+        feed::{nav::NavData, nav_source},
+        state::AppState,
+    };
+
+    fn status_for_cycle(cycle: &str) -> crate::models::DataStatus {
+        let state = AppState::without_db();
+        let meta = json!({ "nasrCycleDate": cycle }).to_string();
+        state.nav.store(Arc::new(NavData::from_json(
+            "{}", "{}", "{}", "{}", "{}", &meta, "{}",
+        )));
+        build_data_status(&state)
+    }
+
+    #[test]
+    fn reports_how_many_cycles_the_loaded_nav_data_trails_current() {
+        let current = nav_source::current_cycle();
+        let two_behind = (current - Duration::days(56))
+            .format("%Y-%m-%d")
+            .to_string();
+        let status = status_for_cycle(&two_behind);
+        assert_eq!(status.nav_cycle, two_behind);
+        assert_eq!(
+            status.nav_cycle_current,
+            current.format("%Y-%m-%d").to_string()
+        );
+        assert_eq!(status.nav_cycles_behind, Some(2));
+        assert_eq!(status_for_cycle("unknown").nav_cycles_behind, None);
+    }
+}

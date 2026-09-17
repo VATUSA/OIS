@@ -12,7 +12,7 @@
 use std::collections::HashMap;
 use std::io::{Cursor, Read};
 
-use chrono::{Duration, NaiveDate, Utc};
+use chrono::{DateTime, Duration, NaiveDate, NaiveTime, Utc};
 use serde::{Deserialize, Serialize};
 
 use super::nav::{CoordList, NavData};
@@ -26,6 +26,8 @@ const COVERAGE: [f64; 4] = [-90.0, -180.0, 90.0, 180.0];
 
 /// First NASR effective date we anchor the 28-day cycle math on (a known boundary).
 const CYCLE_ANCHOR: (i32, u32, u32) = (2026, 7, 9);
+/// A cycle takes effect this long after midnight UTC on its effective date (0901Z).
+const CYCLE_EFFECTIVE_OFFSET: Duration = Duration::minutes(9 * 60 + 1);
 
 /// `NavData::source()` for a dataset whose base fixes/navaids/cycle came from the live FAA NASR
 /// fetch — the only source the refresh job treats as healthy (VATUSA/OIS#317).
@@ -237,12 +239,7 @@ async fn fetch_faa_cycle(client: &reqwest::Client, date: NaiveDate) -> Fetched<F
 
 /// The current 28-day cycle and the two before it (fallbacks when the newest isn't posted).
 pub(super) fn candidate_cycles() -> Vec<NaiveDate> {
-    let anchor = NaiveDate::from_ymd_opt(CYCLE_ANCHOR.0, CYCLE_ANCHOR.1, CYCLE_ANCHOR.2)
-        .expect("valid cycle anchor");
-    let today = Utc::now().date_naive();
-    let days = (today - anchor).num_days();
-    let n = if days >= 0 { days / 28 } else { 0 };
-    let current = anchor + Duration::days(28 * n);
+    let current = current_cycle();
     vec![
         current,
         current - Duration::days(28),
@@ -250,9 +247,28 @@ pub(super) fn candidate_cycles() -> Vec<NaiveDate> {
     ]
 }
 
-/// The NASR cycle in effect today — what a healthy refresh should have loaded.
+/// The NASR cycle in effect now — what a healthy refresh should have loaded.
 pub fn current_cycle() -> NaiveDate {
-    candidate_cycles()[0]
+    cycle_at(Utc::now())
+}
+
+/// The NASR cycle in effect at `now`. A cycle takes effect at 0901Z on its effective date, not at
+/// midnight, so the previous cycle is still current until then (VATUSA/OIS#317).
+pub fn cycle_at(now: DateTime<Utc>) -> NaiveDate {
+    let anchor = NaiveDate::from_ymd_opt(CYCLE_ANCHOR.0, CYCLE_ANCHOR.1, CYCLE_ANCHOR.2)
+        .expect("valid cycle anchor");
+    let effective_day = (now - CYCLE_EFFECTIVE_OFFSET).date_naive();
+    let days = (effective_day - anchor).num_days();
+    let n = if days >= 0 { days / 28 } else { 0 };
+    anchor + Duration::days(28 * n)
+}
+
+/// When the cycle after the one in effect at `now` takes effect.
+pub fn next_cycle_start(now: DateTime<Utc>) -> DateTime<Utc> {
+    (cycle_at(now) + Duration::days(28))
+        .and_time(NaiveTime::MIN)
+        .and_utc()
+        + CYCLE_EFFECTIVE_OFFSET
 }
 
 /// How many whole 28-day cycles `loaded` (`YYYY-MM-DD`) trails `current`; `None` when `loaded`
@@ -832,6 +848,32 @@ mod tests {
         // A newer-than-expected cycle (FAA posts early) is not behind.
         assert_eq!(cycles_behind("2026-10-01", current), Some(0));
         assert_eq!(cycles_behind("unknown", current), None);
+    }
+
+    fn utc(s: &str) -> DateTime<Utc> {
+        DateTime::parse_from_rfc3339(s).unwrap().to_utc()
+    }
+
+    #[test]
+    fn a_cycle_takes_effect_at_0901z_not_midnight() {
+        let prev = NaiveDate::from_ymd_opt(2026, 9, 3).unwrap();
+        let next = NaiveDate::from_ymd_opt(2026, 10, 1).unwrap();
+        assert_eq!(cycle_at(utc("2026-10-01T00:00:00Z")), prev);
+        assert_eq!(cycle_at(utc("2026-10-01T09:00:59Z")), prev);
+        assert_eq!(cycle_at(utc("2026-10-01T09:01:00Z")), next);
+        assert_eq!(cycle_at(utc("2026-10-28T23:59:59Z")), next);
+    }
+
+    #[test]
+    fn next_cycle_start_is_the_following_effective_date_at_0901z() {
+        assert_eq!(
+            next_cycle_start(utc("2026-10-01T09:00:59Z")),
+            utc("2026-10-01T09:01:00Z")
+        );
+        assert_eq!(
+            next_cycle_start(utc("2026-10-01T09:01:00Z")),
+            utc("2026-10-29T09:01:00Z")
+        );
     }
 
     #[test]

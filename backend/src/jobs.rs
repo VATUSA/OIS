@@ -5,7 +5,7 @@ use std::sync::atomic::{AtomicI64, Ordering};
 use std::time::Duration;
 
 use arc_swap::ArcSwap;
-use chrono::Utc;
+use chrono::{NaiveDate, Utc};
 use sqlx::PgPool;
 
 use serde_json::json;
@@ -61,6 +61,7 @@ const CAPTURE_SCHEDULER_INTERVAL: Duration = Duration::from_secs(60);
 
 /// How often to check the FAA/@squawk sources for a newer NASR cycle.
 const NAV_REFRESH_INTERVAL: Duration = Duration::from_secs(24 * 60 * 60);
+const NAV_REFRESH_JOB: &str = "nav_refresh";
 
 /// How often to refresh winds aloft (AWC FB tables update ~4×/day; hourly keeps us current).
 const WINDS_REFRESH_INTERVAL: Duration = Duration::from_secs(60 * 60);
@@ -104,6 +105,17 @@ pub async fn refresh_nav_once(
     let fresh = nav_source::fetch_latest()
         .await
         .map_err(|e| e.to_string())?;
+    apply_nav_refresh(nav, refreshed, fresh, nav_source::current_cycle())
+}
+
+/// [`refresh_nav_once`] after the network fetch: swap `fresh` in, judge its health against the
+/// `expected` cycle, and record the refresh time only when healthy.
+fn apply_nav_refresh(
+    nav: &ArcSwap<NavData>,
+    refreshed: &AtomicI64,
+    fresh: NavData,
+    expected: NaiveDate,
+) -> Result<bool, String> {
     if fresh.is_empty() {
         return Err("nav fetch produced an empty database".into());
     }
@@ -121,7 +133,6 @@ pub async fn refresh_nav_once(
             "nav database refreshed"
         );
     }
-    let expected = nav_source::current_cycle();
     let health = nav_health(
         fresh.source(),
         fresh.cycle(),
@@ -219,17 +230,29 @@ pub async fn refresh_winds_once(
     Some(n)
 }
 
-/// Keep the in-memory nav database current: refresh at startup and every 24h. On any
-/// failure the existing data is kept — the server always has a coherent dataset from the
-/// compile-time bundle seed.
+/// Keep the in-memory nav database current: refresh at startup, every 24h, and as each new
+/// cycle takes effect (so a healthy host isn't a cycle behind until its next 24h tick,
+/// VATUSA/OIS#317). On any failure the existing data is kept — the server always has a
+/// coherent dataset from the compile-time bundle seed.
 pub fn spawn_nav_refresh(
     reg: Arc<JobRegistry>,
     nav: Arc<ArcSwap<NavData>>,
     refreshed: Arc<AtomicI64>,
 ) {
+    let rollover_reg = reg.clone();
+    tokio::spawn(async move {
+        loop {
+            let now = Utc::now();
+            let wait = (nav_source::next_cycle_start(now) - now)
+                .to_std()
+                .unwrap_or_default();
+            tokio::time::sleep(wait).await;
+            rollover_reg.trigger(NAV_REFRESH_JOB);
+        }
+    });
     tokio::spawn(run_interval(
         reg,
-        "nav_refresh",
+        NAV_REFRESH_JOB,
         "Fetch the latest FAA NASR nav cycle",
         NAV_REFRESH_INTERVAL,
         move || {
@@ -803,7 +826,108 @@ async fn event_package_lifecycle_once(pool: &PgPool, events: &Events) -> Result<
 
 #[cfg(test)]
 mod nav_health_tests {
-    use super::{nav_health, should_swap_nav};
+    use std::sync::Arc;
+    use std::sync::atomic::{AtomicI64, Ordering};
+
+    use arc_swap::ArcSwap;
+    use chrono::NaiveDate;
+    use serde_json::json;
+
+    use super::{apply_nav_refresh, nav_health, should_swap_nav};
+    use crate::feed::nav::NavData;
+    use crate::feed::nav_source::FAA_SOURCE;
+
+    const BUNDLE: &str = "runtime fetch (bundle)";
+    const LAST_GOOD_MS: i64 = 1_000;
+
+    /// A tiny dataset with `points` fixes at `cycle` from `source`.
+    fn dataset(cycle: &str, source: &str, points: usize) -> NavData {
+        let fixes: serde_json::Map<_, _> = (0..points)
+            .map(|i| (format!("FIX{i}"), json!([[40.0, -75.0]])))
+            .collect();
+        let meta = json!({ "nasrCycleDate": cycle, "source": source });
+        NavData::from_json(
+            "{}",
+            &serde_json::Value::Object(fixes).to_string(),
+            "{}",
+            "{}",
+            "{}",
+            &meta.to_string(),
+            "{}",
+        )
+    }
+
+    /// Apply `fresh` over loaded `(cycle, source, points)` with 2026-09-03 current; returns the
+    /// result, the dataset left loaded, and the refresh timestamp afterwards.
+    fn apply(
+        loaded: (&str, &str, usize),
+        fresh: NavData,
+    ) -> (Result<bool, String>, Arc<NavData>, i64) {
+        let nav = ArcSwap::from_pointee(dataset(loaded.0, loaded.1, loaded.2));
+        let refreshed = AtomicI64::new(LAST_GOOD_MS);
+        let current = NaiveDate::from_ymd_opt(2026, 9, 3).unwrap();
+        let result = apply_nav_refresh(&nav, &refreshed, fresh, current);
+        (result, nav.load_full(), refreshed.load(Ordering::Relaxed))
+    }
+
+    #[test]
+    fn a_healthy_refresh_swaps_in_and_records_the_refresh_time() {
+        let (result, loaded, refreshed) = apply(
+            ("2026-08-06", FAA_SOURCE, 2),
+            dataset("2026-09-03", FAA_SOURCE, 3),
+        );
+        assert_eq!(result, Ok(true));
+        assert_eq!(loaded.cycle(), "2026-09-03");
+        assert!(refreshed > LAST_GOOD_MS);
+    }
+
+    #[test]
+    fn an_already_current_healthy_refresh_is_ok_without_a_swap() {
+        let (result, _, refreshed) = apply(
+            ("2026-09-03", FAA_SOURCE, 3),
+            dataset("2026-09-03", FAA_SOURCE, 3),
+        );
+        assert_eq!(result, Ok(false));
+        assert!(refreshed > LAST_GOOD_MS);
+    }
+
+    #[test]
+    fn an_older_bundle_fallback_fails_and_keeps_the_live_data_and_refresh_time() {
+        // The production incident: the fetch fell back to the 2026-07-09 bundle.
+        let (result, loaded, refreshed) = apply(
+            ("2026-09-03", FAA_SOURCE, 3),
+            dataset("2026-07-09", BUNDLE, 5),
+        );
+        let detail = result.unwrap_err();
+        assert!(detail.contains("2 cycle(s) behind"), "{detail}");
+        assert_eq!(
+            (loaded.cycle(), loaded.source()),
+            ("2026-09-03", FAA_SOURCE)
+        );
+        assert_eq!(refreshed, LAST_GOOD_MS);
+    }
+
+    #[test]
+    fn a_newer_fallback_swaps_in_but_is_still_degraded() {
+        let (result, loaded, refreshed) = apply(
+            ("2026-07-09", BUNDLE, 5),
+            dataset("2026-09-03", "runtime fetch (squawk)", 3),
+        );
+        assert!(result.unwrap_err().contains("squawk"));
+        assert_eq!(loaded.cycle(), "2026-09-03");
+        assert_eq!(refreshed, LAST_GOOD_MS);
+    }
+
+    #[test]
+    fn an_empty_fetch_fails_and_changes_nothing() {
+        let (result, loaded, refreshed) = apply(
+            ("2026-09-03", FAA_SOURCE, 3),
+            dataset("2026-09-03", FAA_SOURCE, 0),
+        );
+        assert!(result.is_err());
+        assert_eq!(loaded.len(), 3);
+        assert_eq!(refreshed, LAST_GOOD_MS);
+    }
 
     #[test]
     fn a_newer_or_same_cycle_swaps_but_an_older_fallback_never_does() {
@@ -825,7 +949,6 @@ mod nav_health_tests {
             ("2026-09-03", 90_000)
         ));
     }
-    use crate::feed::nav_source::FAA_SOURCE;
 
     #[test]
     fn only_a_current_faa_cycle_is_healthy() {
