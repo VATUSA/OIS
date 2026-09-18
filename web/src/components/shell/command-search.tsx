@@ -21,7 +21,7 @@ import {useMe} from "@/lib/auth";
 import {SCOPES, type ScopeId, icaoRows, parseScopePrefix, tmiRow} from "@/lib/command-scopes";
 import {useDashboards} from "@/lib/dashboards";
 import {useUpcomingEvents} from "@/lib/events";
-import {type Favorite, type FavoriteKind, useFavorites} from "@/lib/favorites";
+import {type Favorite, type FavoriteKind, favoriteHref, useFavorites} from "@/lib/favorites";
 import {useFacilityDirectory} from "@/lib/facilities";
 import {useTraffic} from "@/lib/fca";
 import {fuzzyMatch, rankAircraft} from "@/lib/fuzzy";
@@ -192,8 +192,9 @@ function Palette({ onClose }: { onClose: () => void }) {
             // Each row names an airport, so each row opens that airport — not the page's empty picker.
             onSelect: () => void navigate({ to: p.to, search: p.search }),
           },
-          // Every ICAO row carries its airport, so the favorite reopens the same airport too.
-          { kind: "airport", id: `${p.to}:${icao}`, label: p.label, href: `${p.to}?icao=${icao}` },
+          // Every ICAO row carries its airport, so the favorite reopens the same airport too —
+          // built from the row's own `search` so it can't drift from where the row lands.
+          { kind: "airport", id: `${p.to}:${icao}`, label: p.label, href: favoriteHref(p) },
         ),
       );
     const facilityItems = rank(q, facilities.data ?? [], (f) => `${f.id} ${f.name ?? ""}`, limit).map((f) => {
@@ -259,12 +260,7 @@ function Palette({ onClose }: { onClose: () => void }) {
             onSelect: () => void navigate(tmiRow(t)),
           },
           // The favorite reopens the same filtered tab the row lands on.
-          {
-            kind: "tmi",
-            id: t.id,
-            label: t.decoded ?? t.restriction,
-            href: `/ops/tmu?tab=restrictions&facility=${encodeURIComponent(t.requesting)}`,
-          },
+          { kind: "tmi", id: t.id, label: t.decoded ?? t.restriction, href: favoriteHref(tmiRow(t)) },
         ),
     );
 

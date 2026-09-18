@@ -15,6 +15,13 @@ type FavoritesPrefs = { items: Favorite[] };
 
 export const favoriteKey = (f: Pick<Favorite, "kind" | "id">) => `${f.kind}:${f.id}`;
 
+/**
+ * A favorite's `href` for a command-search row destination. Built from the row's own `to`/`search`
+ * so the favorite always reopens exactly what the row opens, even when that builder's params change.
+ */
+export const favoriteHref = ({ to, search }: { to: string; search: Record<string, string> }) =>
+  `${to}?${new URLSearchParams(search)}`;
+
 export function isFavorite(items: readonly Favorite[], kind: FavoriteKind, id: string): boolean {
   return items.some((f) => f.kind === kind && f.id === id);
 }
