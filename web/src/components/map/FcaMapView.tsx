@@ -19,6 +19,7 @@ import {
   useFcas,
   useFcaTraffic,
   useFcaTrafficMany,
+  useRefreshData,
   useTraffic,
   useUpdateFca,
   type Fca,
@@ -407,6 +408,10 @@ export function FcaMapView({
   const dataStatus = useDataStatus();
   const cycleAge = dataStatus.data ? cycleAgeDays(dataStatus.data.nav_cycle) : null;
   const navStale = cycleAge != null && cycleAge > 35;
+  // Nav staleness is global, so the refresh is always the flow permission — not `canEdit`, which
+  // resolves to the event permission in event mode.
+  const refreshData = useRefreshData();
+  const canRefresh = !readOnly && hasPermission(me, "flow.fca.update");
 
   const { value: persistView } = useSetting("map.persistView", true);
   const camera = useMapCamera(FCA_INITIAL, { persistKey, persist: persistView && !!persistKey });
@@ -1078,6 +1083,16 @@ export function FcaMapView({
               <span>
                 NASR data is {cycleAge} days old ({dataStatus.data?.nav_cycle}).
               </span>
+              {canRefresh && (
+                <button
+                  type="button"
+                  onClick={() => refreshData.mutate()}
+                  disabled={refreshData.isPending}
+                  className="rounded-full border border-warning/40 px-2 py-0.5 font-semibold text-warning transition-colors hover:bg-warning/15 disabled:opacity-50"
+                >
+                  {refreshData.isPending ? "Refreshing…" : "Refresh"}
+                </button>
+              )}
             </div>
           </div>
         )}
