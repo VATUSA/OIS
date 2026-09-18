@@ -6,7 +6,7 @@ use std::collections::HashMap;
 
 use serde::{Deserialize, Serialize};
 
-use super::airports::AirportDb;
+use super::airports::{Airport, AirportDb};
 
 const R_NM: f64 = 3440.065;
 /// AWC FB "low level" tables cover the CONUS in these six regions.
@@ -143,7 +143,7 @@ pub async fn fetch(client: &reqwest::Client, airports: &AirportDb) -> Winds {
             .get(&format!("K{id}"))
             .or_else(|| airports.get(&format!("P{id}")))
             .or_else(|| airports.get(&id));
-        if let Some(&(lat, lon)) = coord {
+        if let Some(&Airport { lat, lon, .. }) = coord {
             stations.push(Station { lat, lon, levels });
         }
     }

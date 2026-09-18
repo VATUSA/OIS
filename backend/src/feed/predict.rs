@@ -16,7 +16,7 @@
 
 use chrono::{DateTime, Duration, Utc};
 
-use super::airports::AirportDb;
+use super::airports::{AirportDb, field_elevation_ft};
 use super::fca;
 use super::flow::gc_dist;
 use super::nav::NavData;
@@ -48,8 +48,10 @@ pub fn path_len_nm(path: &[[f64; 2]]) -> f64 {
 /// from the surface and carry `ground_allowance_sec` (a learned per-gate/type/runway pushback+taxi
 /// estimate, #164 sub-issue E — `feed::taxi_estimate::estimate` falls back to [`GROUND_TAXI_SEC`]
 /// itself when data is thin, so callers always have a value to pass here). Ignored when `airborne`
-/// is true. An airborne aircraft's prediction is anchored to `observed_gs_kt` when it is established
-/// at cruise ([`trajectory::VerticalProfile::anchor_to_observed_gs`]).
+/// is true. `arr_elev_ft` is the destination's field elevation (see
+/// [`crate::feed::airports::field_elevation_ft`]), where the descent ends. An airborne aircraft's
+/// prediction is anchored to `observed_gs_kt` when it is established at cruise
+/// ([`trajectory::VerticalProfile::anchor_to_observed_gs`]).
 #[allow(clippy::too_many_arguments)]
 pub fn eta_along_route(
     airborne: bool,
@@ -59,6 +61,7 @@ pub fn eta_along_route(
     observed_gs_kt: f64,
     cruise_alt_ft: f64,
     cruise_tas: f64,
+    arr_elev_ft: f64,
     profile: &AircraftProfile,
     headwind: Option<f64>,
     ground_allowance_sec: f64,
@@ -71,6 +74,7 @@ pub fn eta_along_route(
         observed_gs_kt,
         cruise_alt_ft,
         cruise_tas,
+        arr_elev_ft,
         profile,
         headwind,
     );
@@ -98,6 +102,7 @@ pub fn project_along_route(
     observed_gs_kt: f64,
     cruise_alt_ft: f64,
     cruise_tas: f64,
+    arr_elev_ft: f64,
     profile: &AircraftProfile,
     headwind: Option<f64>,
     ground_allowance_sec: f64,
@@ -110,6 +115,7 @@ pub fn project_along_route(
         observed_gs_kt,
         cruise_alt_ft,
         cruise_tas,
+        arr_elev_ft,
         profile,
         headwind,
     );
@@ -134,6 +140,7 @@ fn profile_from_here(
     observed_gs_kt: f64,
     cruise_alt_ft: f64,
     cruise_tas: f64,
+    arr_elev_ft: f64,
     profile: &AircraftProfile,
     headwind: Option<f64>,
 ) -> trajectory::VerticalProfile {
@@ -141,7 +148,7 @@ fn profile_from_here(
     let vp = trajectory::VerticalProfile::build(
         start_alt,
         route_len_nm,
-        0.0, // arrival field elevation ≈ sea level (v1 approximation)
+        arr_elev_ft,
         cruise_alt_ft,
         cruise_tas,
         profile,
@@ -228,6 +235,7 @@ pub fn arrival_eta(
         ac.gs as f64,
         ac.cruise_ft,
         ac.cruise_tas,
+        field_elevation_ft(airports, ac.arr),
         profile,
         headwind,
         ground_allowance_sec,
@@ -239,13 +247,14 @@ pub fn arrival_eta(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::feed::airports::Airport;
     use crate::feed::taxi_estimate;
     use std::collections::HashMap;
 
     fn airports() -> AirportDb {
         HashMap::from([
-            ("KJFK".to_string(), (40.64, -73.78)),
-            ("KMIA".to_string(), (25.79, -80.29)),
+            ("KJFK".to_string(), Airport::at(40.64, -73.78)),
+            ("KMIA".to_string(), Airport::at(25.79, -80.29)),
         ])
     }
 
@@ -293,8 +302,8 @@ mod tests {
         let nav = NavData::load();
         let profile = AircraftProfile::default();
         let ap: AirportDb = HashMap::from([
-            ("KJFK".to_string(), (40.64, -73.78)),
-            ("KDCA".to_string(), (38.85, -77.04)),
+            ("KJFK".to_string(), Airport::at(40.64, -73.78)),
+            ("KDCA".to_string(), Airport::at(38.85, -77.04)),
         ]);
         // Airborne B738 just south of KJFK tracking SW down the coast, filed KJFK -> KDCA.
         let pos = [40.2, -74.0];
@@ -343,6 +352,7 @@ mod tests {
             ac.gs as f64,
             ac.cruise_ft,
             ac.cruise_tas,
+            0.0,
             &profile,
             hw,
             GROUND_TAXI_SEC,
@@ -436,6 +446,7 @@ mod tests {
             0.0,
             35_000.0,
             440.0,
+            0.0,
             &profile,
             None,
             0.0,
@@ -449,6 +460,7 @@ mod tests {
             0.0,
             35_000.0,
             440.0,
+            0.0,
             &profile,
             None,
             GROUND_TAXI_SEC * 10.0,
@@ -478,6 +490,7 @@ mod tests {
             0.0,
             35_000.0,
             440.0,
+            0.0,
             &profile,
             None,
             allowance,
@@ -491,6 +504,7 @@ mod tests {
             0.0,
             35_000.0,
             440.0,
+            0.0,
             &profile,
             None,
             GROUND_TAXI_SEC,
@@ -514,6 +528,7 @@ mod tests {
             0.0,
             35_000.0,
             440.0,
+            0.0,
             &profile,
             None,
             GROUND_TAXI_SEC,
@@ -539,6 +554,7 @@ mod tests {
             observed_gs,
             35_000.0,
             440.0,
+            0.0,
             &profile,
             None,
             0.0,
@@ -552,6 +568,7 @@ mod tests {
             observed_gs,
             35_000.0,
             440.0,
+            0.0,
             &profile,
             None,
             0.0,
@@ -567,7 +584,7 @@ mod tests {
     fn project_along_route_clamps_at_the_destination() {
         let profile = AircraftProfile::default();
         let ahead = project_along_route(
-            true, 300.0, 35_000.0, 0.0, 35_000.0, 440.0, &profile, None, 0.0, 999_999.0,
+            true, 300.0, 35_000.0, 0.0, 35_000.0, 440.0, 0.0, &profile, None, 0.0, 999_999.0,
         );
         assert_eq!(ahead, 300.0, "never projects past the destination itself");
     }
@@ -583,11 +600,62 @@ mod tests {
             0.0,
             35_000.0,
             440.0,
+            0.0,
             &profile,
             None,
             GROUND_TAXI_SEC,
             60.0,
         );
         assert_eq!(ahead, 0.0);
+    }
+
+    /// #315: the arrival ETA descends to the destination's real field elevation, and an unknown
+    /// destination is timed exactly as a sea-level field.
+    #[test]
+    fn arrival_eta_descends_to_the_destination_field_elevation() {
+        let at = |elevation_ft| {
+            let ap: AirportDb = HashMap::from([
+                ("KJFK".to_string(), Airport::at(40.64, -73.78)),
+                (
+                    "KMIA".to_string(),
+                    Airport {
+                        elevation_ft,
+                        ..Airport::at(25.79, -80.29)
+                    },
+                ),
+            ]);
+            arrival_eta(
+                &NavData::default(),
+                &ap,
+                &Winds::default(),
+                &AircraftProfile::default(),
+                &input([35.0, -77.0], 35_000.0, 450),
+                GROUND_TAXI_SEC,
+                now(),
+            )
+            .eta
+        };
+        let sea_level = at(0.0);
+        assert_ne!(
+            at(5431.0),
+            sea_level,
+            "the field elevation must reach the profile"
+        );
+
+        let unknown_dest = ArrivalInput {
+            arr: "ZZZZ",
+            ..input([35.0, -77.0], 35_000.0, 450)
+        };
+        let unknown = arrival_eta(
+            &NavData::default(),
+            &airports(),
+            &Winds::default(),
+            &AircraftProfile::default(),
+            &unknown_dest,
+            GROUND_TAXI_SEC,
+            now(),
+        )
+        .eta;
+        assert_eq!(unknown, sea_level);
     }
 }

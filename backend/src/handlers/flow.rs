@@ -23,9 +23,16 @@ use crate::{
     },
     errors::ApiError,
     feed::{
-        airports::AirportDb, airspace::Boundaries, facilities, fca, flow as feed_flow,
-        nav::NavData, predict, runway_db::RunwayDb, taxi_estimate, trajectory, vatsim::FlightPlan,
-        vatsim::VatsimData, winds::Winds,
+        airports::{Airport, AirportDb, field_elevation_ft},
+        airspace::Boundaries,
+        facilities, fca, flow as feed_flow,
+        nav::NavData,
+        predict,
+        runway_db::RunwayDb,
+        taxi_estimate, trajectory,
+        vatsim::FlightPlan,
+        vatsim::VatsimData,
+        winds::Winds,
     },
     jobs,
     models::{
@@ -58,7 +65,9 @@ async fn feed_view(state: &AppState) -> (Option<Arc<crate::feed::Snapshot>>, Arc
 /// *departure* anchor for an unresolvable `dep` — it still resolves the arrival and any enroute
 /// fixes) — the caller must skip that prefile, not guess its position.
 fn prefile_position(airports: &AirportDb, dep: &str) -> Option<(f64, f64)> {
-    airports.get(&dep.to_ascii_uppercase()).copied()
+    airports
+        .get(&dep.to_ascii_uppercase())
+        .map(|a| (a.lat, a.lon))
 }
 
 /// The polyline `aircraft_route` draws for a connected pilot (#213). `route_path`'s ground branch
@@ -1197,7 +1206,7 @@ pub(crate) fn project_traffic(
             let vp = trajectory::VerticalProfile::build(
                 p.altitude as f64,
                 route_len_nm,
-                0.0,
+                field_elevation_ft(airports, &fp.arrival),
                 cruise_ft,
                 cruise_tas,
                 profile,
@@ -1342,7 +1351,13 @@ fn fix_predictions(
 
     let start_alt = if airborne { cur_alt_ft } else { 0.0 };
     let vp = trajectory::VerticalProfile::build(
-        start_alt, route_len, 0.0, cruise_alt, cruise_tas, profile, headwind,
+        start_alt,
+        route_len,
+        field_elevation_ft(airports, &fp.arrival),
+        cruise_alt,
+        cruise_tas,
+        profile,
+        headwind,
     );
     let vp = if airborne {
         vp.anchor_to_observed_gs(gs as f64)
@@ -1350,9 +1365,11 @@ fn fix_predictions(
         vp
     };
 
-    let arr_ll = airports
-        .get(&fp.arrival.to_ascii_uppercase())
-        .map(|&(la, lo)| [la, lo]);
+    let arr_ll = airports.get(&fp.arrival.to_ascii_uppercase()).map(
+        |&Airport {
+             lat: la, lon: lo, ..
+         }| [la, lo],
+    );
     let mut out = Vec::with_capacity(named.len());
     for (i, (name, flat, flon, along_nm)) in named.iter().enumerate() {
         let (flat, flon, along_nm) = (*flat, *flon, *along_nm * route_scale);
@@ -1579,6 +1596,7 @@ fn build_candidates(
             p.groundspeed as f64,
             cruise,
             cruise_tas,
+            field_elevation_ft(airports, &fp.arrival),
             profile,
             headwind,
             allowance,
@@ -1673,6 +1691,7 @@ fn build_candidates(
             0.0,
             cruise,
             cruise_tas,
+            field_elevation_ft(airports, &fp.arrival),
             profile,
             headwind,
             allowance,
@@ -2225,6 +2244,7 @@ mod filed_altitude_tests {
 /// aircraft actually walks a resolved route rather than a synthetic one.
 #[cfg(test)]
 mod project_traffic_tests {
+    use crate::feed::airports::Airport;
     use std::collections::HashMap;
 
     use super::{VatsimData, project_traffic};
@@ -2233,10 +2253,10 @@ mod project_traffic_tests {
         winds::Winds,
     };
 
-    fn airports() -> HashMap<String, (f64, f64)> {
+    fn airports() -> crate::feed::airports::AirportDb {
         HashMap::from([
-            ("KJFK".to_string(), (40.64, -73.78)),
-            ("KDCA".to_string(), (38.85, -77.04)),
+            ("KJFK".to_string(), Airport::at(40.64, -73.78)),
+            ("KDCA".to_string(), Airport::at(38.85, -77.04)),
         ])
     }
 
@@ -2382,6 +2402,7 @@ mod project_traffic_tests {
 
 #[cfg(test)]
 mod prefile_position_tests {
+    use crate::feed::airports::Airport;
     use std::collections::HashMap;
 
     use super::prefile_position;
@@ -2394,7 +2415,7 @@ mod prefile_position_tests {
     #[test]
     fn resolves_the_real_departure_airport_not_null_island() {
         let airports: crate::feed::airports::AirportDb =
-            HashMap::from([("KJFK".to_string(), (40.64, -73.78))]);
+            HashMap::from([("KJFK".to_string(), Airport::at(40.64, -73.78))]);
         assert_eq!(prefile_position(&airports, "KJFK"), Some((40.64, -73.78)));
         // Case-insensitive, matching route_path's own uppercasing.
         assert_eq!(prefile_position(&airports, "kjfk"), Some((40.64, -73.78)));
@@ -2440,6 +2461,7 @@ mod route_display_points_tests {
 /// its use at the real call site, which is what a reverted `.unwrap_or((0.0, 0.0))` would break.
 #[cfg(test)]
 mod prefile_skip_integration_tests {
+    use crate::feed::airports::Airport;
     use std::collections::HashMap;
 
     use chrono::Utc;
@@ -2506,8 +2528,8 @@ mod prefile_skip_integration_tests {
     #[test]
     fn build_candidates_skips_a_prefile_whose_departure_does_not_resolve() {
         let nav = NavData::load();
-        let airports: HashMap<String, (f64, f64)> =
-            HashMap::from([("KDCA".to_string(), (38.85, -77.04))]); // no KJFK entry
+        let airports: crate::feed::airports::AirportDb =
+            HashMap::from([("KDCA".to_string(), Airport::at(38.85, -77.04))]); // no KJFK entry
         let fca = fca_crossing_the_corridor();
         let data = unresolvable_departure_prefile();
         let (flights, metas) = build_candidates(
@@ -2564,6 +2586,7 @@ mod ground_route_scale_tests {
 
 #[cfg(test)]
 mod prefile_fix_predictions_tests {
+    use crate::feed::airports::Airport;
     use std::collections::HashMap;
 
     use chrono::{DateTime, Utc};
@@ -2596,11 +2619,11 @@ mod prefile_fix_predictions_tests {
         }
     }
 
-    fn airports() -> HashMap<String, (f64, f64)> {
+    fn airports() -> crate::feed::airports::AirportDb {
         HashMap::from([
-            ("KJFK".to_string(), (40.64, -73.78)),
-            ("KDCA".to_string(), (38.85, -77.04)),
-            ("KIAD".to_string(), (38.95, -77.46)),
+            ("KJFK".to_string(), Airport::at(40.64, -73.78)),
+            ("KDCA".to_string(), Airport::at(38.85, -77.04)),
+            ("KIAD".to_string(), Airport::at(38.95, -77.46)),
         ])
     }
 
@@ -2608,7 +2631,7 @@ mod prefile_fix_predictions_tests {
     /// the departure airport) — what metering / airport-flow demand show for it.
     fn real_arrival(
         nav: &NavData,
-        ap: &HashMap<String, (f64, f64)>,
+        ap: &crate::feed::airports::AirportDb,
         fp: &FlightPlan,
     ) -> predict::ArrivalPrediction {
         let dep_ll = ap[&fp.departure];
@@ -2632,11 +2655,11 @@ mod prefile_fix_predictions_tests {
                 dep: &fp.departure,
                 arr: &fp.arrival,
                 route: &fp.route,
-                pos: [dep_ll.0, dep_ll.1],
+                pos: [dep_ll.lat, dep_ll.lon],
                 alt_ft: 0.0,
                 gs: 0,
                 hdg: 0,
-                arr_ll: [arr_ll.0, arr_ll.1],
+                arr_ll: [arr_ll.lat, arr_ll.lon],
                 cruise_ft,
                 cruise_tas: crate::feed::trajectory::capped_cruise_tas(440.0, cruise_ft, &profile),
             },
@@ -2698,7 +2721,7 @@ mod prefile_fix_predictions_tests {
     #[tokio::test]
     async fn a_prefile_whose_departure_does_not_resolve_gets_no_table() {
         let (st, nav) = (state(), NavData::load());
-        let ap = HashMap::from([("KDCA".to_string(), (38.85, -77.04))]); // no KJFK
+        let ap = HashMap::from([("KDCA".to_string(), Airport::at(38.85, -77.04))]); // no KJFK
         let fp = plan("KJFK", "KDCA", "RBV WHITE SIE");
         assert!(prefile_fix_predictions(&st, &nav, &ap, &fp, now()).is_empty());
     }

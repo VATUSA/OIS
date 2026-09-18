@@ -8,7 +8,7 @@ use axum::{Json, extract::State};
 use chrono::Utc;
 
 use crate::{
-    feed::airports::{AirportDb, IataMap},
+    feed::airports::{Airport, AirportDb, IataMap},
     feed::tracon::TraconData,
     feed::vatsim::VatsimData,
     models::{AtcAirport, AtcArea, AtcBoard, AtcCenter, AtcPosition, FlowFacility},
@@ -155,16 +155,18 @@ pub fn board_from(
     // US "K"+code convention.
     let resolve = |code: &str| -> Option<(String, f64, f64)> {
         let code = code.to_ascii_uppercase();
-        if let Some(&(lat, lon)) = airports.get(&code) {
+        if let Some(&Airport { lat, lon, .. }) = airports.get(&code) {
             return Some((code, lat, lon));
         }
         if let Some(icao) = iata.get(&code)
-            && let Some(&(lat, lon)) = airports.get(icao)
+            && let Some(&Airport { lat, lon, .. }) = airports.get(icao)
         {
             return Some((icao.clone(), lat, lon));
         }
         let k = format!("K{code}");
-        airports.get(&k).map(|&(lat, lon)| (k, lat, lon))
+        airports
+            .get(&k)
+            .map(|&Airport { lat, lon, .. }| (k, lat, lon))
     };
 
     // Airport ground stations (badges), keyed by ICAO.

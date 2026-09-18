@@ -275,7 +275,8 @@ impl VerticalProfile {
         headwind: Option<f64>,
     ) -> Self {
         let arr_elev = arr_elev_ft.max(0.0);
-        let start_alt = start_alt_ft.max(arr_elev);
+        // A departure climbs from its own start altitude, even when the destination field is higher.
+        let start_alt = start_alt_ft.max(0.0);
         let cruise_alt = cruise_req_ft
             .min(profile.service_ceiling_ft)
             .max(start_alt.max(arr_elev));
@@ -853,5 +854,45 @@ mod tests {
         // Just outside / inside the 300 ft cruise-altitude tolerance.
         assert_eq!(anchored_time(34650.0, 495.0), raw_time(34650.0));
         assert!(anchored_time(34750.0, 495.0) < raw_time(34750.0));
+    }
+
+    // ---- arrival-field elevation (#315) ----
+
+    #[test]
+    fn a_high_field_arrival_starts_its_descent_nearer_the_field() {
+        // Same cruise and route into a sea-level field and into DEN (5,431 ft).
+        let p = AircraftProfile::default();
+        let sea = VerticalProfile::build(35000.0, 300.0, 0.0, 35000.0, 450.0, &p, None);
+        let den = VerticalProfile::build(35000.0, 300.0, 5431.0, 35000.0, 450.0, &p, None);
+        // Top of descent: the furthest point out still below cruise.
+        let tod = |vp: &VerticalProfile| {
+            (0..=3000)
+                .map(|i| i as f64 / 10.0)
+                .rfind(|&d| vp.alt_at(d) < 35000.0 - 1.0)
+                .unwrap()
+        };
+        assert!(
+            tod(&den) < tod(&sea) - 10.0,
+            "DEN TOD {} nm should be well inside the sea-level TOD {} nm",
+            tod(&den),
+            tod(&sea)
+        );
+        // Both descents end at their own field.
+        assert!((den.alt_at(0.0) - 5431.0).abs() < 1.0);
+        assert!(sea.alt_at(0.0).abs() < 1.0);
+    }
+
+    #[test]
+    fn a_departure_into_a_high_field_still_climbs_from_its_own_altitude() {
+        // A sea-level departure into DEN must not start its climb at DEN's elevation.
+        let p = AircraftProfile::default();
+        let from_sea_level = VerticalProfile::build(0.0, 300.0, 5431.0, 35000.0, 450.0, &p, None);
+        let from_field_height =
+            VerticalProfile::build(5431.0, 300.0, 5431.0, 35000.0, 450.0, &p, None);
+        assert!(from_sea_level.alt_at(300.0).abs() < 1.0);
+        assert!(
+            from_sea_level.time_between(300.0, 0.0) > from_field_height.time_between(300.0, 0.0),
+            "climbing the extra 5,431 ft must cost time"
+        );
     }
 }
