@@ -17,6 +17,16 @@ export type AtcPosition = components["schemas"]["AtcPosition"];
 export type FcaFlight = components["schemas"]["FcaFlight"];
 export type FixValidation = components["schemas"]["FixValidationBody"];
 
+/** A metered delay of ~1 min or more is worth flagging (below that is rounding noise). */
+export const DELAY_THRESHOLD_SEC = 30;
+
+/** Delay as `M:SS` (e.g. 1268 → "21:08"). */
+export function fmtDelaySec(sec: number): string {
+  const m = Math.floor(sec / 60);
+  const s = sec % 60;
+  return `${m}:${String(s).padStart(2, "0")}`;
+}
+
 /**
  * Which of the given route-fix tokens aren't real nav fixes (typos that would silently exclude
  * traffic). Debounce `fixes` before passing it in. Needs `flow.fca.read`.
@@ -56,6 +66,14 @@ export function useRouteCoverage() {
   });
 }
 
+/** Age in days of a `YYYY-MM-DD` NASR cycle, or `null` if it doesn't parse. */
+export function cycleAgeDays(cycle: string): number | null {
+  const m = /^(\d{4})-(\d{2})-(\d{2})$/.exec(cycle);
+  if (!m) return null;
+  const d = Date.UTC(Number(m[1]), Number(m[2]) - 1, Number(m[3]));
+  return Math.floor((Date.now() - d) / 86_400_000);
+}
+
 /** Health of the runtime nav + winds data, refreshed every 60s. */
 export function useDataStatus() {
   return useQuery({
@@ -70,14 +88,43 @@ export function useDataStatus() {
   });
 }
 
+/**
+ * The toast a completed data refresh should raise. The endpoint answers 200 even when the nav fetch
+ * could only fall back to an older cycle — it keeps last-good rather than failing — so a stale or
+ * unreadable cycle must not read as success (VATUSA/OIS#317). Pressed from the stale banner (#332),
+ * this is the only evidence of what the refresh actually did.
+ */
+export function refreshToast(data: DataStatus): {
+  variant: "success" | "warning";
+  title: string;
+  description?: string;
+} {
+  const summary = `Nav ${data.nav_cycle} · ${data.winds_stations} wind stations`;
+  const behind = data.nav_cycles_behind;
+  if (behind == null)
+    return {
+      variant: "warning",
+      title: `NASR cycle ${data.nav_cycle} is unreadable`,
+      description: summary,
+    };
+  if (behind > 0)
+    return {
+      variant: "warning",
+      title: `NASR cycle ${data.nav_cycle} is ${behind} cycle${behind === 1 ? "" : "s"} behind`,
+      description: `${summary} · current ${data.nav_cycle_current}`,
+    };
+  return { variant: "success", title: summary };
+}
+
 /** Force an immediate nav + winds refresh (requires flow.fca.update). */
 export function useRefreshData() {
   const queryClient = useQueryClient();
   const toast = useToast();
   return useMutation({
     mutationFn: async () => {
-      const { data, error } = await ois.POST("/api/v1/flow/data-refresh");
-      if (error || !data) throw new Error("refresh failed");
+      const { data, error, response } = await ois.POST("/api/v1/flow/data-refresh");
+      if (response.status === 409) throw new Error("already");
+      if (error || !data) throw new Error("failed");
       return data;
     },
     onSuccess: (data) => {
@@ -85,9 +132,15 @@ export function useRefreshData() {
       // Freshly resolved routes may shift matches/ETAs.
       queryClient.invalidateQueries({ queryKey: ["fca-traffic"] });
       queryClient.invalidateQueries({ queryKey: ["aircraft-route"] });
-      toast.success(`Nav ${data.nav_cycle} · ${data.winds_stations} wind stations`);
+      const { variant, title, description } = refreshToast(data);
+      toast[variant](title, description ? { description } : undefined);
     },
-    onError: () => toast.error("Refresh failed"),
+    onError: (e) =>
+      toast.error(
+        e instanceof Error && e.message === "already"
+          ? "A refresh is already running — give it a moment."
+          : "Refresh failed",
+      ),
   });
 }
 

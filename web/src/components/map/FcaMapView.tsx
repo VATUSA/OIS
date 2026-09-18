@@ -16,9 +16,11 @@ import {
   useDataStatus,
   useDeleteFca,
   useFcaCounts,
+  cycleAgeDays,
   useFcas,
   useFcaTraffic,
   useFcaTrafficMany,
+  useRefreshData,
   useTraffic,
   useUpdateFca,
   type Fca,
@@ -65,13 +67,6 @@ import {
 const BOUNDARIES = boundariesGeo as GeoJSON.FeatureCollection;
 /** deck initial camera framing the CONUS (matches the legacy US_HOME zoom ~4.3 at zoom 3.9). */
 const FCA_INITIAL = { longitude: US_HOME.longitude, latitude: US_HOME.latitude, zoom: 3.9 };
-
-function cycleAgeDays(cycle: string): number | null {
-  const m = /^(\d{4})-(\d{2})-(\d{2})$/.exec(cycle);
-  if (!m) return null;
-  const d = Date.UTC(Number(m[1]), Number(m[2]) - 1, Number(m[3]));
-  return Math.floor((Date.now() - d) / 86_400_000);
-}
 
 /** One draggable row in the sidebar FCA list (see #109 — order is per-viewer, via `usePersistedOrder`). */
 function FcaRow({
@@ -406,7 +401,13 @@ export function FcaMapView({
   const aircraftRoute = useAircraftRoute(routeCallsign);
   const dataStatus = useDataStatus();
   const cycleAge = dataStatus.data ? cycleAgeDays(dataStatus.data.nav_cycle) : null;
-  const navStale = cycleAge != null && cycleAge > 35;
+  // Stale = the loaded NASR cycle trails the one in effect today (or its date can't be read).
+  const cyclesBehind = dataStatus.data?.nav_cycles_behind;
+  const navStale = dataStatus.data != null && (cyclesBehind == null || cyclesBehind >= 1);
+  // Nav staleness is global, so the refresh is always the flow permission — not `canEdit`, which
+  // resolves to the event permission in event mode.
+  const refreshData = useRefreshData();
+  const canRefresh = !readOnly && hasPermission(me, "flow.fca.update");
 
   const { value: persistView } = useSetting("map.persistView", true);
   const camera = useMapCamera(FCA_INITIAL, { persistKey, persist: persistView && !!persistKey });
@@ -567,7 +568,6 @@ export function FcaMapView({
     };
     window.addEventListener("keydown", onKey);
     return () => window.removeEventListener("keydown", onKey);
-    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [drawing]);
 
   const draftLine = useMemo(
@@ -736,11 +736,7 @@ export function FcaMapView({
 
   if (!canRead) {
     return (
-      <div
-        className={`flex items-center justify-center text-sm text-ink-2 ${
-          embedded ? "h-full" : "h-full"
-        }`}
-      >
+      <div className="flex h-full items-center justify-center text-sm text-ink-2">
         You don&apos;t have flow access.
       </div>
     );
@@ -749,7 +745,7 @@ export function FcaMapView({
   return (
     // `isolate` keeps the map's high internal z-indexes in their own stacking context so they don't
     // paint over app chrome (nav dropdowns, toasts, dialogs), which portal to the body above it.
-    <div className={`relative isolate flex ${embedded ? "h-full" : "h-full"}`}>
+    <div className="relative isolate flex h-full">
       {!embedded && mobileList && (
         <div className="absolute inset-0 z-[650] bg-ground/60 md:hidden" onClick={() => setMobileList(false)} />
       )}
@@ -1076,8 +1072,20 @@ export function FcaMapView({
           <div className="pointer-events-none absolute inset-x-0 top-3 z-[500] flex justify-center">
             <div className="pointer-events-auto flex items-center gap-2 rounded-full border border-warning/40 bg-warning-soft px-3 py-1.5 text-xs font-semibold text-warning">
               <span>
-                NASR data is {cycleAge} days old ({dataStatus.data?.nav_cycle}).
+                {cyclesBehind == null
+                  ? `NASR cycle ${dataStatus.data?.nav_cycle} is unreadable (current ${dataStatus.data?.nav_cycle_current}).`
+                  : `NASR cycle ${dataStatus.data?.nav_cycle} is ${cyclesBehind} cycle${cyclesBehind === 1 ? "" : "s"} behind (current ${dataStatus.data?.nav_cycle_current}).`}
               </span>
+              {canRefresh && (
+                <button
+                  type="button"
+                  onClick={() => refreshData.mutate()}
+                  disabled={refreshData.isPending}
+                  className="rounded-full border border-warning/40 px-2 py-0.5 font-semibold text-warning transition-colors hover:bg-warning/15 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-warning/60 disabled:opacity-50"
+                >
+                  {refreshData.isPending ? "Refreshing…" : "Refresh"}
+                </button>
+              )}
             </div>
           </div>
         )}

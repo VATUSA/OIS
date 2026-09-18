@@ -230,6 +230,14 @@ const GS_FLOOR_KT: f64 = 60.0;
 const VERT_STEP_FT: f64 = 500.0;
 /// Horizontal integration step (nm) for timing a distance span across the profile.
 const HORIZ_STEP_NM: f64 = 3.0;
+/// Groundspeed anchoring (#313) trusts the observed groundspeed only for an aircraft established at
+/// cruise: at least this fast…
+const ANCHOR_MIN_GS_KT: f64 = 250.0;
+/// …and within this many feet of the profile's cruise altitude. A climbing departure is not anchored.
+const ANCHOR_ALT_TOLERANCE_FT: f64 = 300.0;
+/// The anchoring bias is clamped to ±this fraction, so one noisy `gs` sample can't throw the
+/// trajectory.
+const ANCHOR_MAX_BIAS: f64 = 0.15;
 
 /// A resolved vertical flight profile, anchored at the aircraft's current state and running
 /// forward to the destination. Built once per aircraft, then queried for the altitude at, and
@@ -240,6 +248,12 @@ const HORIZ_STEP_NM: f64 = 3.0;
 /// achieved cruise altitude, cruise, then descend from top-of-descent to the field.
 pub struct VerticalProfile {
     headwind: Option<f64>,
+    /// Multiplier on every predicted groundspeed; `1.0` unless [`Self::anchor_to_observed_gs`] set it.
+    gs_bias: f64,
+    /// The aircraft's starting altitude, and the cruise altitude / TAS the profile flies there.
+    start_alt: f64,
+    cruise_alt: f64,
+    cruise_tas: f64,
     /// Samples of `(distance-to-destination, altitude, true-airspeed)` from the field (d=0) up the
     /// descent, through cruise, and out the climb, in increasing `d`. Monotonic in `d`. The TAS is
     /// the phase-appropriate speed (descent/cruise/climb schedule) at that point; wind is applied
@@ -261,7 +275,8 @@ impl VerticalProfile {
         headwind: Option<f64>,
     ) -> Self {
         let arr_elev = arr_elev_ft.max(0.0);
-        let start_alt = start_alt_ft.max(arr_elev);
+        // A departure climbs from its own start altitude, even when the destination field is higher.
+        let start_alt = start_alt_ft.max(0.0);
         let cruise_alt = cruise_req_ft
             .min(profile.service_ceiling_ft)
             .max(start_alt.max(arr_elev));
@@ -329,7 +344,38 @@ impl VerticalProfile {
         samples.sort_by(|a, b| a.0.partial_cmp(&b.0).unwrap_or(std::cmp::Ordering::Equal));
         samples.dedup_by(|a, b| (a.0 - b.0).abs() < 1e-6);
 
-        Self { headwind, samples }
+        Self {
+            headwind,
+            gs_bias: 1.0,
+            start_alt,
+            cruise_alt,
+            cruise_tas: cruise_tas_at(cruise_alt),
+            samples,
+        }
+    }
+
+    /// Anchor the prediction to the aircraft's observed groundspeed (#313): when it is established
+    /// at cruise (see [`ANCHOR_MIN_GS_KT`] / [`ANCHOR_ALT_TOLERANCE_FT`]), every predicted
+    /// groundspeed is scaled by `observed / predicted-cruise-groundspeed`, clamped to
+    /// ±[`ANCHOR_MAX_BIAS`]. Otherwise the profile is returned unchanged. One multiplier for the
+    /// whole remaining flight, derived from the latest poll — nothing is stored between polls.
+    pub fn anchor_to_observed_gs(mut self, observed_gs_kt: f64) -> Self {
+        let established = observed_gs_kt >= ANCHOR_MIN_GS_KT
+            && (self.start_alt - self.cruise_alt).abs() <= ANCHOR_ALT_TOLERANCE_FT;
+        if established {
+            // The cruise groundspeed, not the profile's speed at the exact start point: an aircraft a
+            // few hundred feet below cruise sits on the climb curve's (IAS-schedule) speed there.
+            let predicted = effective_gs(self.cruise_tas, self.headwind).max(GS_FLOOR_KT);
+            self.gs_bias =
+                (observed_gs_kt / predicted).clamp(1.0 - ANCHOR_MAX_BIAS, 1.0 + ANCHOR_MAX_BIAS);
+        }
+        self
+    }
+
+    /// The predicted groundspeed at `d`: interpolated TAS, wind-corrected, anchoring bias applied,
+    /// floored at [`GS_FLOOR_KT`].
+    fn gs_at(&self, d_nm: f64) -> f64 {
+        (effective_gs(self.interp(d_nm, |s| s.2), self.headwind) * self.gs_bias).max(GS_FLOOR_KT)
     }
 
     /// Interpolate a sample field (`.1` altitude or `.2` TAS) at distance-to-destination `d`.
@@ -360,11 +406,11 @@ impl VerticalProfile {
     }
 
     /// Predicted ground speed (kt) at a distance-to-destination `d` — the phase-appropriate TAS
-    /// with wind applied, floored at [`GS_FLOOR_KT`] exactly like [`Self::time_between`]'s
-    /// internal integration, so a displayed speed never reads below what the paired ETA in the
-    /// same row was actually timed against.
+    /// with wind (and any groundspeed anchoring) applied, floored at [`GS_FLOOR_KT`] exactly like
+    /// [`Self::time_between`]'s internal integration, so a displayed speed never reads below what
+    /// the paired ETA in the same row was actually timed against.
     pub fn ground_speed_at(&self, d_nm: f64) -> f64 {
-        effective_gs(self.interp(d_nm, |s| s.2), self.headwind).max(GS_FLOOR_KT)
+        self.gs_at(d_nm)
     }
 
     /// Seconds to fly from distance-to-destination `from_d` forward to `to_d` (`to_d < from_d`),
@@ -380,9 +426,7 @@ impl VerticalProfile {
         let mut secs = 0.0;
         for k in 0..n {
             let mid = hi - (k as f64 + 0.5) * step;
-            let tas = self.interp(mid, |s| s.2);
-            let gs = effective_gs(tas, self.headwind).max(GS_FLOOR_KT);
-            secs += step / gs * 3600.0;
+            secs += step / self.gs_at(mid) * 3600.0;
         }
         secs
     }
@@ -752,6 +796,103 @@ mod tests {
         assert!(
             climb_time > pure_cruise,
             "climb {climb_time} should exceed pure cruise {pure_cruise}"
+        );
+    }
+
+    // ---- groundspeed anchoring (#313) ----
+
+    /// Still-air Default profile established at FL350 cruising 450 kt TAS, 400 nm out.
+    fn at_cruise(start_alt: f64) -> VerticalProfile {
+        VerticalProfile::build(
+            start_alt,
+            400.0,
+            0.0,
+            35000.0,
+            450.0,
+            &AircraftProfile::default(),
+            None,
+        )
+    }
+
+    #[test]
+    fn anchoring_scales_the_prediction_to_the_observed_groundspeed() {
+        let raw = at_cruise(35000.0);
+        let anchored = at_cruise(35000.0).anchor_to_observed_gs(495.0); // 10% faster than profile
+        assert!((anchored.ground_speed_at(400.0) - 495.0).abs() < 1e-6);
+        let (t_raw, t_anchored) = (
+            raw.time_between(400.0, 0.0),
+            anchored.time_between(400.0, 0.0),
+        );
+        assert!(
+            (t_anchored - t_raw / 1.1).abs() < 1.0,
+            "anchored {t_anchored}s should be ~{}s",
+            t_raw / 1.1
+        );
+    }
+
+    #[test]
+    fn anchoring_bias_is_clamped_to_fifteen_percent() {
+        let fast = at_cruise(35000.0).anchor_to_observed_gs(450.0 * 1.4);
+        assert!((fast.ground_speed_at(400.0) - 450.0 * 1.15).abs() < 1e-6);
+        let slow = at_cruise(35000.0).anchor_to_observed_gs(450.0 * 0.6);
+        assert!((slow.ground_speed_at(400.0) - 450.0 * 0.85).abs() < 1e-6);
+    }
+
+    #[test]
+    fn anchoring_trusts_only_an_aircraft_established_at_cruise() {
+        let raw_time = |alt: f64| at_cruise(alt).time_between(400.0, 0.0);
+        let anchored_time = |alt: f64, gs: f64| {
+            at_cruise(alt)
+                .anchor_to_observed_gs(gs)
+                .time_between(400.0, 0.0)
+        };
+
+        // Climbing through FL240 at 400 kt: not established at cruise, flies the raw profile.
+        assert_eq!(anchored_time(24000.0, 400.0), raw_time(24000.0));
+        // At cruise but below the minimum trusted groundspeed.
+        assert_eq!(anchored_time(35000.0, 240.0), raw_time(35000.0));
+        // Just outside / inside the 300 ft cruise-altitude tolerance.
+        assert_eq!(anchored_time(34650.0, 495.0), raw_time(34650.0));
+        assert!(anchored_time(34750.0, 495.0) < raw_time(34750.0));
+    }
+
+    // ---- arrival-field elevation (#315) ----
+
+    #[test]
+    fn a_high_field_arrival_starts_its_descent_nearer_the_field() {
+        // Same cruise and route into a sea-level field and into DEN (5,431 ft).
+        let p = AircraftProfile::default();
+        let sea = VerticalProfile::build(35000.0, 300.0, 0.0, 35000.0, 450.0, &p, None);
+        let den = VerticalProfile::build(35000.0, 300.0, 5431.0, 35000.0, 450.0, &p, None);
+        // Top of descent: the furthest point out still below cruise.
+        let tod = |vp: &VerticalProfile| {
+            (0..=3000)
+                .map(|i| i as f64 / 10.0)
+                .rfind(|&d| vp.alt_at(d) < 35000.0 - 1.0)
+                .unwrap()
+        };
+        assert!(
+            tod(&den) < tod(&sea) - 10.0,
+            "DEN TOD {} nm should be well inside the sea-level TOD {} nm",
+            tod(&den),
+            tod(&sea)
+        );
+        // Both descents end at their own field.
+        assert!((den.alt_at(0.0) - 5431.0).abs() < 1.0);
+        assert!(sea.alt_at(0.0).abs() < 1.0);
+    }
+
+    #[test]
+    fn a_departure_into_a_high_field_still_climbs_from_its_own_altitude() {
+        // A sea-level departure into DEN must not start its climb at DEN's elevation.
+        let p = AircraftProfile::default();
+        let from_sea_level = VerticalProfile::build(0.0, 300.0, 5431.0, 35000.0, 450.0, &p, None);
+        let from_field_height =
+            VerticalProfile::build(5431.0, 300.0, 5431.0, 35000.0, 450.0, &p, None);
+        assert!(from_sea_level.alt_at(300.0).abs() < 1.0);
+        assert!(
+            from_sea_level.time_between(300.0, 0.0) > from_field_height.time_between(300.0, 0.0),
+            "climbing the extra 5,431 ft must cost time"
         );
     }
 }

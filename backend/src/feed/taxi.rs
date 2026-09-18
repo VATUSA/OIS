@@ -145,7 +145,7 @@ pub fn process(
         }
 
         // No session yet — only start one for a genuine departure sitting at its field.
-        let Some((dlat, dlon)) = airports.get(&dep).copied() else {
+        let Some((dlat, dlon)) = airports.get(&dep).map(|a| (a.lat, a.lon)) else {
             continue;
         };
         if gc_dist(p.latitude, p.longitude, dlat, dlon) > DEP_PROX_NM {
@@ -157,7 +157,7 @@ pub fn process(
         // Guard against a turnaround aircraft that's actually arriving at its destination.
         let dest = fp.arrival.to_ascii_uppercase();
         if gs <= GS_STOP
-            && let Some((alat, alon)) = airports.get(&dest).copied()
+            && let Some((alat, alon)) = airports.get(&dest).map(|a| (a.lat, a.lon))
             && gc_dist(p.latitude, p.longitude, alat, alon) < 5.0
         {
             continue;
@@ -312,6 +312,7 @@ pub fn field(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::feed::airports::Airport;
     use crate::feed::vatsim::{FlightPlan, Pilot, VatsimData};
 
     fn t(secs: i64) -> DateTime<Utc> {
@@ -339,7 +340,7 @@ mod tests {
     }
 
     fn airports() -> AirportDb {
-        HashMap::from([("KAAA".to_string(), (40.0, -74.0))])
+        HashMap::from([("KAAA".to_string(), Airport::at(40.0, -74.0))])
     }
 
     #[test]

@@ -64,6 +64,40 @@ describe("buildAtcLayers", () => {
     expect(tracons(layers)).toBeUndefined();
   });
 
+  // VATUSA/OIS#318: finite-but-bad vertices must not spike the fill.
+  it("drops a ring with an out-of-range vertex", () => {
+    const outOfRange: number[][] = [...validRing, [200, -80]];
+    const atc = { ...baseAtc(), tracons: [tracon({ rings: [outOfRange] })] };
+    expect(tracons(buildAtcLayers(atc, emptyBoundaries))).toBeUndefined();
+  });
+
+  it("drops a ring with a transposed [lon, lat] vertex", () => {
+    const transposed: number[][] = [...validRing, [-104.7, 39.9]];
+    const atc = { ...baseAtc(), tracons: [tracon({ rings: [transposed] })] };
+    expect(tracons(buildAtcLayers(atc, emptyBoundaries))).toBeUndefined();
+  });
+
+  it("drops a ring with one far outlier vertex but keeps a valid sibling ring", () => {
+    // A stray in-range vertex ~10° away (the Gulf) turns the fill into a map-spanning wedge.
+    const outlier: number[][] = [[40, -86], [40.5, -86], [29.5, -90], [40.5, -85.5], [40, -85.5]];
+    const atc = { ...baseAtc(), tracons: [tracon({ rings: [outlier, validRing] })] };
+    expect((tracons(buildAtcLayers(atc, emptyBoundaries))!.props.data as unknown[]).length).toBe(1);
+  });
+
+  it("falls back to a circle at the label when every ring is invalid", () => {
+    const outlier: number[][] = [[40, -86], [40.5, -86], [29.5, -90]];
+    const atc = { ...baseAtc(), tracons: [tracon({ rings: [outlier], label: [40.2, -86] })] };
+    const layers = buildAtcLayers(atc, emptyBoundaries);
+    expect(tracons(layers)).toBeUndefined();
+    expect((circles(layers)!.props.data as { pos: number[] }[])[0].pos).toEqual([-86, 40.2]);
+  });
+
+  it("without a label, falls back to a circle at the dropped ring's median vertex", () => {
+    const outlier: number[][] = [[40, -86], [40.5, -86], [29.5, -90], [40.5, -85.5], [40, -85.5]];
+    const atc = { ...baseAtc(), tracons: [tracon({ rings: [outlier] })] };
+    expect((circles(buildAtcLayers(atc, emptyBoundaries))!.props.data as { pos: number[] }[])[0].pos).toEqual([-86, 40]);
+  });
+
   it("excludes a TRACON with no circle (empty array) from the circle-fallback layer", () => {
     const atc = {
       ...baseAtc(),
@@ -103,5 +137,21 @@ describe("computeAtcAnchors", () => {
     expect(anchors).toHaveLength(1);
     expect(anchors[0].lat).toBeCloseTo((40 + 41 + 41) / 3);
     expect(anchors[0].lon).toBeCloseTo((-80 + -80 + -79) / 3);
+  });
+
+  // #323: `AtcBadge` draws nothing for an airport without a DEL/GND/TWR/ATIS position, so an anchor
+  // there would be an invisible hover target over empty map.
+  it("anchors only airports that draw a pill", () => {
+    const pos = (kind: string) => ({ callsign: `X_${kind}`, frequency: "118.000", kind, name: "", rating: 3, logon_time: "" });
+    const atc = {
+      ...baseAtc(),
+      airports: [
+        { icao: "KAPP", lat: 40, lon: -80, positions: [pos("APP")] },
+        { icao: "KTWR", lat: 41, lon: -79, positions: [pos("TWR"), pos("APP")] },
+      ],
+    };
+    expect(computeAtcAnchors(atc, emptyBoundaries)).toEqual([
+      expect.objectContaining({ type: "airport", icao: "KTWR" }),
+    ]);
   });
 });

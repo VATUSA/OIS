@@ -116,7 +116,8 @@ export function Sidebar({
       )}
     >
       {header && <div className="flex flex-col gap-2 px-2.5 pb-2 pt-3">{header}</div>}
-      <nav className="flex min-h-0 flex-1 flex-col gap-3 overflow-y-auto px-2.5 pb-3">{children}</nav>
+      {/* `relative` contains the collapsed labels (`sr-only` is absolute) so they can't lengthen the document. */}
+      <nav className="relative flex min-h-0 flex-1 flex-col gap-3 overflow-y-auto px-2.5 pb-3">{children}</nav>
       {footer && <div className="border-t border-line-soft px-2.5 py-2">{footer}</div>}
     </aside>
     </SidebarContext.Provider>

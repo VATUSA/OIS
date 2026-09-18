@@ -1381,7 +1381,10 @@ export interface paths {
         put?: never;
         /**
          * Force an immediate nav + winds refresh, then return the updated status. Failures are
-         *     logged and leave the current data in place.
+         *     logged and leave the current data in place — the response still carries the resulting status, so
+         *     the caller compares it (cycle age, wind-station count) to tell a real refresh from a fallback.
+         * @description One refresh at a time: a rebuild is a full upstream download and parse, and the control is global
+         *     to every flow controller, so a concurrent press gets a 409 instead of starting a second rebuild.
          */
         post: operations["data_refresh"];
         delete?: never;
@@ -3549,9 +3552,17 @@ export interface components {
             fixes: number;
             /** @description FAA NASR cycle date currently loaded (e.g. `2026-08-06`). */
             nav_cycle: string;
+            /** @description NASR cycle in effect today — what a healthy refresh should have loaded. */
+            nav_cycle_current: string;
+            /**
+             * Format: int32
+             * @description Whole 28-day cycles `nav_cycle` trails `nav_cycle_current` (0 = current; null = the loaded
+             *     cycle isn't a readable date).
+             */
+            nav_cycles_behind?: number | null;
             /**
              * Format: date-time
-             * @description Last successful runtime nav fetch (null = still on the compile-time bundle seed).
+             * @description Last healthy nav refresh — live FAA source at the current cycle (null = none since startup).
              */
             nav_refreshed?: string | null;
             /** @description Provenance of the loaded nav data (e.g. `runtime fetch (faa)` or the bundle). */
@@ -9823,6 +9834,12 @@ export interface operations {
                 };
             };
             401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            409: {
                 headers: {
                     [name: string]: unknown;
                 };

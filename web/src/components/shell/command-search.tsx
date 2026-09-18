@@ -1,17 +1,47 @@
 import {useEffect, useMemo, useState} from "react";
-import {useNavigate} from "@tanstack/react-router";
-import {CommandPalette, type CommandGroup} from "@ois/ui";
-import {CalendarClock, Home, KeyRound, Plane, PlaneTakeoff, Radar, Settings as SettingsIcon, User as UserIcon} from "lucide-react";
+import {useNavigate, useRouterState} from "@tanstack/react-router";
+import {CommandPalette, type CommandGroup, type CommandItem, useToast} from "@ois/ui";
+import {
+  CalendarClock,
+  Home,
+  KeyRound,
+  LayoutDashboard,
+  MapPinned,
+  Megaphone,
+  Plane,
+  PlaneTakeoff,
+  Radar,
+  Star,
+  Settings as SettingsIcon,
+  User as UserIcon,
+  Wind,
+} from "lucide-react";
 
 import {useMe} from "@/lib/auth";
+import {SCOPES, type ScopeId, icaoRows, parseScopePrefix, tmiRow} from "@/lib/command-scopes";
+import {useDashboards} from "@/lib/dashboards";
 import {useUpcomingEvents} from "@/lib/events";
+import {
+  type Favorite,
+  type FavoriteKind,
+  canSeeFavorite,
+  favoriteHref,
+  favoriteKey,
+  isFavoriteHotkey,
+  unavailable,
+  useFavorites,
+} from "@/lib/favorites";
 import {useFacilityDirectory} from "@/lib/facilities";
 import {useTraffic} from "@/lib/fca";
 import {fuzzyMatch, rankAircraft} from "@/lib/fuzzy";
 import {AREAS, type NavItem, canSeeItem, visibleGroups} from "@/lib/nav";
 import {hasPermission} from "@/lib/permissions";
+import {useTmis} from "@/lib/tmu";
+import {usePageTitle} from "./page-meta";
 
+/** Rows per group in the blended "All" view, and in a single focused scope. */
 const LIMIT = 6;
+const SCOPED_LIMIT = 20;
 
 /** Global ⌘K / Ctrl+K search. Mount once; open with the hotkey or `openCommandSearch()`. */
 export function CommandSearch() {
@@ -31,34 +61,93 @@ export function CommandSearch() {
       window.removeEventListener(OPEN_EVENT, onOpen);
     };
   }, []);
-  // Only mount the sources (live traffic, events) while the palette is open.
-  return open ? <Palette onClose={() => setOpen(false)} /> : null;
+  const { data: me } = useMe();
+  // Only mount the sources (live traffic, events, TMIs, dashboards) while the palette is open. While
+  // it's closed, ⌘⇧F favorites the current page instead (signed-in only: favorites are per user).
+  if (open) return <Palette onClose={() => setOpen(false)} />;
+  return me ? <FavoriteCurrentPage /> : null;
+}
+
+/** ⌘⇧F / Ctrl+Shift+F with the palette closed: toggle the current page as a favorite. */
+function FavoriteCurrentPage() {
+  const favorites = useFavorites();
+  const toast = useToast();
+  const location = useRouterState({ select: (s) => s.location });
+  // The title the page is actually showing. Nothing in this app assigns `document.title`, so reading
+  // that stored every deep page as "OIS" (VATUSA/OIS#312).
+  const title = usePageTitle();
+  useEffect(() => {
+    const onKey = (e: KeyboardEvent) => {
+      if (!isFavoriteHotkey(e)) return;
+      e.preventDefault();
+      const label = title ?? location.pathname;
+      // Keyed on the full href: several routes carry their identity in `search` (?icao=, ?facility=,
+      // ?flight=), so keying on the path alone made two airports one favorite that overwrote itself.
+      const added = favorites.toggle({ kind: "page", id: location.href, label, href: location.href });
+      if (added != null) toast.success(added ? `Added ${label} to favorites` : `Removed ${label} from favorites`);
+    };
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  }, [favorites, toast, location, title]);
+  return null;
 }
 
 const OPEN_EVENT = "ois:command-search";
 export const openCommandSearch = () => window.dispatchEvent(new Event(OPEN_EVENT));
 
-function rank<T>(query: string, items: readonly T[], text: (t: T) => string): T[] {
-  if (!query.trim()) return items.slice(0, LIMIT);
+function rank<T>(query: string, items: readonly T[], text: (t: T) => string, limit: number): T[] {
+  if (!query.trim()) return items.slice(0, limit);
   return items
     .map((t) => ({ t, m: fuzzyMatch(query, text(t)) }))
     .filter((x): x is { t: T; m: NonNullable<typeof x.m> } => x.m != null)
     .sort((a, b) => b.m.score - a.m.score)
-    .slice(0, LIMIT)
+    .slice(0, limit)
     .map((x) => x.t);
 }
+
+const NAV_ITEMS = AREAS.flatMap((a) => a.groups.flatMap((g) => g.items));
+const navItem = (to: string) => NAV_ITEMS.find((i) => i.to === to)!;
+
+/** The icon for each ICAO row, keyed by its destination (the rows themselves live in `lib`). */
+const ICAO_ROW_ICON: Record<string, typeof Plane> = {
+  "/ops/airport": Plane,
+  "/admin/planning/airport-configs": Wind,
+  "/admin/planning/airport-surface": MapPinned,
+};
+
+const PLACEHOLDER: Record<ScopeId, string> = {
+  all: "Search pages, flights, airports, TMIs, events…",
+  aircraft: "Search flights by callsign, route, or type…",
+  tmis: "Search TMIs by facility or restriction…",
+  events: "Search events…",
+  dashboards: "Search your dashboards…",
+  airports: "Search airports and facilities…",
+  pages: "Search pages…",
+};
 
 function Palette({ onClose }: { onClose: () => void }) {
   const navigate = useNavigate();
   const { data: me } = useMe();
   const [query, setQuery] = useState("");
+  const [scope, setScope] = useState<ScopeId>("all");
   const q = query.trim();
 
+  // A scope is offered only when its destination is reachable, and its source only fetches then.
+  const canTmis = hasPermission(me, "tmu.tmi.read");
   const canEvents = hasPermission(me, "events.plan.read");
+  const canDashboards = canSeeItem(me, navItem("/ops/my")) && hasPermission(me, "auth.profile.read");
+  const scopes = SCOPES.filter(
+    (s) =>
+      (s.id !== "tmis" || canTmis) && (s.id !== "events" || canEvents) && (s.id !== "dashboards" || canDashboards),
+  );
+
+  // Favorites are per user: signed out there is nothing to fetch, and nothing that could be saved.
+  const favorites = useFavorites(!!me);
   const traffic = useTraffic();
   const facilities = useFacilityDirectory();
   const events = useUpcomingEvents({ enabled: canEvents });
-  const airportItem = AREAS.flatMap((a) => a.groups.flatMap((g) => g.items)).find((i) => i.to === "/ops/airport")!;
+  const tmis = useTmis(undefined, { enabled: canTmis });
+  const dashboards = useDashboards({ enabled: canDashboards });
 
   const pages = useMemo(() => {
     const account: NavItem[] = me
@@ -76,67 +165,202 @@ function Palette({ onClose }: { onClose: () => void }) {
     return [{ label: "Home", to: "/", icon: Home, context: "" }, ...areaPages, ...account.map((i) => ({ ...i, context: "Account" }))];
   }, [me]);
 
-  const groups: CommandGroup[] = [
-    {
-      label: "Pages",
-      items: rank(q, pages, (p) => `${p.label} ${p.context}`).map((p) => ({
-        id: `page:${p.to}`,
-        label: p.label,
-        sublabel: p.context,
-        icon: p.icon,
-        onSelect: () => void navigate({ to: p.to }),
-      })),
-    },
-  ];
+  // `@tmi ` / `@airc ` jump straight to a scope and drop the prefix from the query.
+  const onQueryChange = (next: string) => {
+    const typed = parseScopePrefix(next, scopes);
+    if (typed) {
+      setScope(typed.scope as ScopeId);
+      setQuery(typed.rest);
+    } else {
+      setQuery(next);
+    }
+  };
 
-  if (q.length >= 2) {
+  const limit = scope === "all" ? LIMIT : SCOPED_LIMIT;
+
+  // Without `onToggleStar` the row shows no star — so a signed-out visitor is never offered one.
+  // `entityId` is what the pinned Favorites row and the source row it was starred from have in
+  // common, so un-starring moves the highlight to the twin instead of sliding (VATUSA/OIS#312).
+  const star = (item: CommandItem, fav: Favorite): CommandItem =>
+    me
+      ? {
+          ...item,
+          entityId: favoriteKey(fav),
+          starred: favorites.isFavorite(fav.kind, fav.id),
+          onToggleStar: () => favorites.toggle(fav),
+        }
+      : item;
+
+  const pageItems = (): CommandItem[] =>
+    rank(q, pages, (p) => `${p.label} ${p.context}`, limit).map((p) =>
+      star(
+        { id: `page:${p.to}`, label: p.label, sublabel: p.context, icon: p.icon, onSelect: () => void navigate({ to: p.to }) },
+        { kind: "page", id: p.to, label: p.label, href: p.to },
+      ),
+    );
+
+  // An ICAO-shaped query offers that airport's page — plus its planning pages inside the Airport data
+  // scope, so the blended view stays uncluttered — each gated like its nav link, then facility maps.
+  const airportItems = (): CommandItem[] => {
     const icao = q.toUpperCase().replace(/[^A-Z0-9]/g, "");
-    const airportItems =
-      /^[A-Z0-9]{3,4}$/.test(icao) && canSeeItem(me, airportItem)
-        ? [
-            {
-              id: `airport:${icao}`,
-              label: `${icao} airport`,
-              sublabel: "Operations · Airport",
-              icon: Plane,
-              onSelect: () => void navigate({ to: "/ops/airport", search: { icao } }),
-            },
-          ]
-        : [];
-    const facilityItems = rank(q, facilities.data ?? [], (f) => `${f.id} ${f.name ?? ""}`).map((f) => ({
-      id: `facility:${f.id}`,
-      label: f.name ? `${f.id} · ${f.name}` : f.id,
-      sublabel: `${f.kind.toUpperCase()} · facility map`,
-      icon: Radar,
-      onSelect: () => void navigate({ to: "/facility-map/$facilityId", params: { facilityId: f.id } }),
-    }));
-    groups.push({ label: "Airports & facilities", items: [...airportItems, ...facilityItems] });
-
-    const flights = rankAircraft(q, traffic.data ?? [], LIMIT);
-    groups.push({
-      label: "Flights",
-      items: flights.map(({ ac }) => ({
-        id: `flight:${ac.callsign}`,
-        label: ac.callsign,
-        sublabel: [ac.dep, ac.arr].filter(Boolean).join(" → "),
-        icon: PlaneTakeoff,
-        onSelect: () => void navigate({ to: "/advisories/fcas", search: { flight: ac.callsign } }),
-      })),
+    const icaoPages: CommandItem[] = icaoRows(icao)
+      .filter((p, i) => (i === 0 || scope === "airports") && canSeeItem(me, navItem(p.to)))
+      .map((p) =>
+        star(
+          {
+            id: `airport:${p.to}:${icao}`,
+            label: p.label,
+            sublabel: p.sublabel,
+            icon: ICAO_ROW_ICON[p.to],
+            // Each row names an airport, so each row opens that airport — not the page's empty picker.
+            onSelect: () => void navigate({ to: p.to, search: p.search }),
+          },
+          // Every ICAO row carries its airport, so the favorite reopens the same airport too —
+          // built from the row's own `search` so it can't drift from where the row lands.
+          { kind: "airport", id: `${p.to}:${icao}`, label: p.label, href: favoriteHref(p) },
+        ),
+      );
+    const facilityItems = rank(q, facilities.data ?? [], (f) => `${f.id} ${f.name ?? ""}`, limit).map((f) => {
+      const label = f.name ? `${f.id} · ${f.name}` : f.id;
+      return star(
+        {
+          id: `facility:${f.id}`,
+          label,
+          sublabel: `${f.kind.toUpperCase()} · facility map`,
+          icon: Radar,
+          onSelect: () => void navigate({ to: "/facility-map/$facilityId", params: { facilityId: f.id } }),
+        },
+        { kind: "airport", id: `facility:${f.id}`, label, href: `/facility-map/${f.id}` },
+      );
     });
+    return [...icaoPages, ...facilityItems];
+  };
 
-    if (canEvents) {
-      groups.push({
-        label: "Events",
-        items: rank(q, events.data ?? [], (e) => `${e.title} ${e.facility}`).map((e) => ({
+  const flightItems = (): CommandItem[] =>
+    rankAircraft(q, traffic.data ?? [], limit).map(({ ac }) =>
+      star(
+        {
+          id: `flight:${ac.callsign}`,
+          label: ac.callsign,
+          sublabel: [ac.dep, ac.arr].filter(Boolean).join(" → "),
+          icon: PlaneTakeoff,
+          onSelect: () => void navigate({ to: "/advisories/fcas", search: { flight: ac.callsign } }),
+        },
+        {
+          kind: "aircraft",
+          id: ac.callsign,
+          label: ac.callsign,
+          href: `/advisories/fcas?flight=${encodeURIComponent(ac.callsign)}`,
+        },
+      ),
+    );
+
+  const eventItems = (): CommandItem[] =>
+    rank(q, events.data ?? [], (e) => `${e.title} ${e.facility}`, limit).map((e) =>
+      star(
+        {
           id: `event:${e.id}`,
           label: e.title,
           sublabel: e.facility,
           icon: CalendarClock,
-          onSelect: () =>
-            void navigate({ to: "/admin/planning/events/$eventId", params: { eventId: String(e.id) } }),
-        })),
-      });
+          onSelect: () => void navigate({ to: "/admin/planning/events/$eventId", params: { eventId: String(e.id) } }),
+        },
+        { kind: "event", id: String(e.id), label: e.title, href: `/admin/planning/events/${e.id}` },
+      ),
+    );
+
+  // TMIs have no page of their own: every row opens the TMU restrictions tab, filtered to the TMI's
+  // facility — otherwise every row of a 20-row list lands on the same unfiltered page.
+  const tmiItems = (): CommandItem[] =>
+    rank(q, tmis.data ?? [], (t) => `${t.requesting} ${t.providing} ${t.decoded ?? t.restriction} ${t.status}`, limit).map(
+      (t) =>
+        star(
+          {
+            id: `tmi:${t.id}`,
+            label: t.decoded ?? t.restriction,
+            sublabel: `${t.requesting}→${t.providing} · ${t.status}`,
+            icon: Megaphone,
+            onSelect: () => void navigate(tmiRow(t)),
+          },
+          // The favorite reopens the same filtered tab the row lands on.
+          { kind: "tmi", id: t.id, label: t.decoded ?? t.restriction, href: favoriteHref(tmiRow(t)) },
+        ),
+    );
+
+  const dashboardItems = (): CommandItem[] =>
+    rank(q, dashboards.data?.dashboards ?? [], (d) => d.name, limit).map((d) =>
+      star(
+        {
+          id: `dashboard:${d.id}`,
+          label: d.name,
+          sublabel: "Dashboard",
+          icon: LayoutDashboard,
+          onSelect: () => void navigate({ to: "/ops/my/$boardId", params: { boardId: d.id } }),
+        },
+        { kind: "dashboard", id: d.id, label: d.name, href: `/ops/my/${d.id}` },
+      ),
+    );
+
+  const favoriteSources = {
+    aircraft: traffic.data,
+    tmis: tmis.data,
+    events: events.data,
+    dashboards: dashboards.data?.dashboards,
+  };
+
+  const FAVORITE_KIND: Record<ScopeId, FavoriteKind | null> = {
+    all: null,
+    aircraft: "aircraft",
+    tmis: "tmi",
+    events: "event",
+    dashboards: "dashboard",
+    airports: "airport",
+    pages: "page",
+  };
+  const favoriteItems = (): CommandItem[] => {
+    const kind = FAVORITE_KIND[scope];
+    const visible = favorites.items.filter((f) => (kind == null || f.kind === kind) && canSeeFavorite(me, f));
+    return rank(q, visible, (f) => f.label, visible.length).map((f) =>
+      star(
+        {
+          id: `favorite:${f.kind}:${f.id}`,
+          label: f.label,
+          sublabel: unavailable(f, favoriteSources) ? "Unavailable" : f.kind,
+          icon: Star,
+          onSelect: () => void navigate({ href: f.href }),
+        },
+        f,
+      ),
+    );
+  };
+
+  const { label: scopeLabel, noun: scopeNoun } = SCOPES.find((s) => s.id === scope)!;
+  const groups: CommandGroup[] = [{ label: "Favorites", items: favoriteItems() }];
+  let empty = "No results.";
+  if (scope === "all") {
+    groups.push({ label: "Pages", items: pageItems() });
+    if (q.length >= 2) {
+      groups.push({ label: "Airports & facilities", items: airportItems() });
+      groups.push({ label: "Flights", items: flightItems() });
+      if (canTmis) groups.push({ label: "TMIs", items: tmiItems() });
+      if (canEvents) groups.push({ label: "Events", items: eventItems() });
+      if (canDashboards) groups.push({ label: "Dashboards", items: dashboardItems() });
     }
+  } else {
+    const source = {
+      aircraft: { items: flightItems, loading: traffic.isLoading },
+      tmis: { items: tmiItems, loading: tmis.isLoading },
+      events: { items: eventItems, loading: events.isLoading },
+      dashboards: { items: dashboardItems, loading: dashboards.isLoading },
+      airports: { items: airportItems, loading: facilities.isLoading },
+      pages: { items: pageItems, loading: false },
+    }[scope];
+    groups.push({ label: scopeLabel, items: source.items() });
+    empty = source.loading
+      ? `Loading ${scopeNoun}…`
+      : scope === "aircraft" && !q
+        ? "Type a callsign, route, or aircraft type."
+        : `No ${scopeNoun} match.`;
   }
 
   return (
@@ -144,13 +368,17 @@ function Palette({ onClose }: { onClose: () => void }) {
       open
       onClose={onClose}
       query={query}
-      onQueryChange={setQuery}
+      onQueryChange={onQueryChange}
       groups={groups}
-      placeholder="Search pages, flights, airports, events…"
+      scopes={scopes}
+      scope={scope}
+      onScopeChange={(s) => setScope(s as ScopeId)}
+      placeholder={PLACEHOLDER[scope]}
+      empty={empty}
       footer={
         <span>
           <kbd className="font-mono">↑↓</kbd> move · <kbd className="font-mono">↵</kbd> open ·{" "}
-          <kbd className="font-mono">esc</kbd> close
+          <kbd className="font-mono">tab</kbd> scope · <kbd className="font-mono">esc</kbd> close
         </span>
       }
     />

@@ -2,7 +2,7 @@
 
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
-use std::sync::atomic::Ordering;
+use std::sync::atomic::{AtomicBool, Ordering};
 
 use axum::{
     Json,
@@ -23,9 +23,16 @@ use crate::{
     },
     errors::ApiError,
     feed::{
-        airports::AirportDb, airspace::Boundaries, facilities, fca, flow as feed_flow,
-        nav::NavData, predict, runway_db::RunwayDb, taxi_estimate, trajectory, vatsim::FlightPlan,
-        vatsim::VatsimData, winds::Winds,
+        airports::{Airport, AirportDb, field_elevation_ft},
+        airspace::Boundaries,
+        facilities, fca, flow as feed_flow,
+        nav::NavData,
+        nav_source, predict,
+        runway_db::RunwayDb,
+        taxi_estimate, trajectory,
+        vatsim::FlightPlan,
+        vatsim::VatsimData,
+        winds::Winds,
     },
     jobs,
     models::{
@@ -58,7 +65,9 @@ async fn feed_view(state: &AppState) -> (Option<Arc<crate::feed::Snapshot>>, Arc
 /// *departure* anchor for an unresolvable `dep` — it still resolves the arrival and any enroute
 /// fixes) — the caller must skip that prefile, not guess its position.
 fn prefile_position(airports: &AirportDb, dep: &str) -> Option<(f64, f64)> {
-    airports.get(&dep.to_ascii_uppercase()).copied()
+    airports
+        .get(&dep.to_ascii_uppercase())
+        .map(|a| (a.lat, a.lon))
 }
 
 /// The polyline `aircraft_route` draws for a connected pilot (#213). `route_path`'s ground branch
@@ -673,8 +682,11 @@ fn build_data_status(state: &AppState) -> DataStatus {
             .then(|| DateTime::from_timestamp_millis(ms))
             .flatten()
     };
+    let current = nav_source::current_cycle();
     DataStatus {
         nav_cycle: nav.cycle().to_string(),
+        nav_cycle_current: current.format("%Y-%m-%d").to_string(),
+        nav_cycles_behind: nav_source::cycles_behind(nav.cycle(), current),
         nav_source: nav.source().to_string(),
         fixes: nav.fix_count(),
         navaids: nav.navaid_count(),
@@ -992,18 +1004,46 @@ pub async fn validate_fixes(
     Json(FixValidationBody { unknown })
 }
 
+/// Holds the single-flight claim on a manual data refresh and releases it on drop, so a cancelled
+/// request (client disconnect), an early return or a panic can't latch the flag and lock the
+/// endpoint out for the rest of the process's life.
+struct DataRefreshClaim<'a>(&'a AtomicBool);
+
+impl<'a> DataRefreshClaim<'a> {
+    /// Claim the refresh slot, or `None` when one is already running.
+    fn acquire(flag: &'a AtomicBool) -> Option<Self> {
+        flag.compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
+            .ok()
+            .map(|_| Self(flag))
+    }
+}
+
+impl Drop for DataRefreshClaim<'_> {
+    fn drop(&mut self) {
+        self.0.store(false, Ordering::Release);
+    }
+}
+
 /// Force an immediate nav + winds refresh, then return the updated status. Failures are
-/// logged and leave the current data in place.
+/// logged and leave the current data in place — the response still carries the resulting status, so
+/// the caller compares it (cycle age, wind-station count) to tell a real refresh from a fallback.
+///
+/// One refresh at a time: a rebuild is a full upstream download and parse, and the control is global
+/// to every flow controller, so a concurrent press gets a 409 instead of starting a second rebuild.
 #[utoipa::path(
     post,
     path = "/api/v1/flow/data-refresh",
     tag = "flow",
-    responses((status = 200, body = DataStatus), (status = 401))
+    responses((status = 200, body = DataStatus), (status = 401), (status = 409))
 )]
 pub async fn data_refresh(
     State(state): State<AppState>,
     _permission: RequirePermission<FlowFcaUpdate>,
-) -> Json<DataStatus> {
+) -> Result<Json<DataStatus>, ApiError> {
+    let Some(_claim) = DataRefreshClaim::acquire(&state.data_refresh_in_flight) else {
+        tracing::info!("manual data refresh rejected: one is already running");
+        return Err(ApiError::Conflict);
+    };
     if let Err(e) = jobs::refresh_nav_once(&state.nav, &state.nav_refreshed).await {
         tracing::warn!(error = %e, "manual nav refresh failed");
     }
@@ -1017,7 +1057,7 @@ pub async fn data_refresh(
         None => tracing::warn!("manual winds refresh: airport database not loaded yet"),
         Some(n) => tracing::info!(stations = n, "manual winds refresh"),
     }
-    Json(build_data_status(&state))
+    Ok(Json(build_data_status(&state)))
 }
 
 #[utoipa::path(
@@ -1197,12 +1237,13 @@ pub(crate) fn project_traffic(
             let vp = trajectory::VerticalProfile::build(
                 p.altitude as f64,
                 route_len_nm,
-                0.0,
+                field_elevation_ft(airports, &fp.arrival),
                 cruise_ft,
                 cruise_tas,
                 profile,
                 headwind,
-            );
+            )
+            .anchor_to_observed_gs(p.groundspeed as f64);
             let target_d = vp.distance_after(route_len_nm, offset_sec);
             let ahead_nm = (route_len_nm - target_d).max(0.0);
             let (pos, heading) = fca::point_and_heading_at(&path, ahead_nm);
@@ -1341,12 +1382,25 @@ fn fix_predictions(
 
     let start_alt = if airborne { cur_alt_ft } else { 0.0 };
     let vp = trajectory::VerticalProfile::build(
-        start_alt, route_len, 0.0, cruise_alt, cruise_tas, profile, headwind,
+        start_alt,
+        route_len,
+        field_elevation_ft(airports, &fp.arrival),
+        cruise_alt,
+        cruise_tas,
+        profile,
+        headwind,
     );
+    let vp = if airborne {
+        vp.anchor_to_observed_gs(gs as f64)
+    } else {
+        vp
+    };
 
-    let arr_ll = airports
-        .get(&fp.arrival.to_ascii_uppercase())
-        .map(|&(la, lo)| [la, lo]);
+    let arr_ll = airports.get(&fp.arrival.to_ascii_uppercase()).map(
+        |&Airport {
+             lat: la, lon: lo, ..
+         }| [la, lo],
+    );
     let mut out = Vec::with_capacity(named.len());
     for (i, (name, flat, flon, along_nm)) in named.iter().enumerate() {
         let (flat, flon, along_nm) = (*flat, *flon, *along_nm * route_scale);
@@ -1570,8 +1624,10 @@ fn build_candidates(
             route_len,
             cross.along_nm,
             p.altitude as f64,
+            p.groundspeed as f64,
             cruise,
             cruise_tas,
+            field_elevation_ft(airports, &fp.arrival),
             profile,
             headwind,
             allowance,
@@ -1663,8 +1719,10 @@ fn build_candidates(
             route_len,
             cross.along_nm,
             0.0,
+            0.0,
             cruise,
             cruise_tas,
+            field_elevation_ft(airports, &fp.arrival),
             profile,
             headwind,
             allowance,
@@ -2217,6 +2275,7 @@ mod filed_altitude_tests {
 /// aircraft actually walks a resolved route rather than a synthetic one.
 #[cfg(test)]
 mod project_traffic_tests {
+    use crate::feed::airports::Airport;
     use std::collections::HashMap;
 
     use super::{VatsimData, project_traffic};
@@ -2225,10 +2284,10 @@ mod project_traffic_tests {
         winds::Winds,
     };
 
-    fn airports() -> HashMap<String, (f64, f64)> {
+    fn airports() -> crate::feed::airports::AirportDb {
         HashMap::from([
-            ("KJFK".to_string(), (40.64, -73.78)),
-            ("KDCA".to_string(), (38.85, -77.04)),
+            ("KJFK".to_string(), Airport::at(40.64, -73.78)),
+            ("KDCA".to_string(), Airport::at(38.85, -77.04)),
         ])
     }
 
@@ -2374,6 +2433,7 @@ mod project_traffic_tests {
 
 #[cfg(test)]
 mod prefile_position_tests {
+    use crate::feed::airports::Airport;
     use std::collections::HashMap;
 
     use super::prefile_position;
@@ -2386,7 +2446,7 @@ mod prefile_position_tests {
     #[test]
     fn resolves_the_real_departure_airport_not_null_island() {
         let airports: crate::feed::airports::AirportDb =
-            HashMap::from([("KJFK".to_string(), (40.64, -73.78))]);
+            HashMap::from([("KJFK".to_string(), Airport::at(40.64, -73.78))]);
         assert_eq!(prefile_position(&airports, "KJFK"), Some((40.64, -73.78)));
         // Case-insensitive, matching route_path's own uppercasing.
         assert_eq!(prefile_position(&airports, "kjfk"), Some((40.64, -73.78)));
@@ -2432,6 +2492,7 @@ mod route_display_points_tests {
 /// its use at the real call site, which is what a reverted `.unwrap_or((0.0, 0.0))` would break.
 #[cfg(test)]
 mod prefile_skip_integration_tests {
+    use crate::feed::airports::Airport;
     use std::collections::HashMap;
 
     use chrono::Utc;
@@ -2498,8 +2559,8 @@ mod prefile_skip_integration_tests {
     #[test]
     fn build_candidates_skips_a_prefile_whose_departure_does_not_resolve() {
         let nav = NavData::load();
-        let airports: HashMap<String, (f64, f64)> =
-            HashMap::from([("KDCA".to_string(), (38.85, -77.04))]); // no KJFK entry
+        let airports: crate::feed::airports::AirportDb =
+            HashMap::from([("KDCA".to_string(), Airport::at(38.85, -77.04))]); // no KJFK entry
         let fca = fca_crossing_the_corridor();
         let data = unresolvable_departure_prefile();
         let (flights, metas) = build_candidates(
@@ -2556,6 +2617,7 @@ mod ground_route_scale_tests {
 
 #[cfg(test)]
 mod prefile_fix_predictions_tests {
+    use crate::feed::airports::Airport;
     use std::collections::HashMap;
 
     use chrono::{DateTime, Utc};
@@ -2588,11 +2650,11 @@ mod prefile_fix_predictions_tests {
         }
     }
 
-    fn airports() -> HashMap<String, (f64, f64)> {
+    fn airports() -> crate::feed::airports::AirportDb {
         HashMap::from([
-            ("KJFK".to_string(), (40.64, -73.78)),
-            ("KDCA".to_string(), (38.85, -77.04)),
-            ("KIAD".to_string(), (38.95, -77.46)),
+            ("KJFK".to_string(), Airport::at(40.64, -73.78)),
+            ("KDCA".to_string(), Airport::at(38.85, -77.04)),
+            ("KIAD".to_string(), Airport::at(38.95, -77.46)),
         ])
     }
 
@@ -2600,7 +2662,7 @@ mod prefile_fix_predictions_tests {
     /// the departure airport) — what metering / airport-flow demand show for it.
     fn real_arrival(
         nav: &NavData,
-        ap: &HashMap<String, (f64, f64)>,
+        ap: &crate::feed::airports::AirportDb,
         fp: &FlightPlan,
     ) -> predict::ArrivalPrediction {
         let dep_ll = ap[&fp.departure];
@@ -2624,11 +2686,11 @@ mod prefile_fix_predictions_tests {
                 dep: &fp.departure,
                 arr: &fp.arrival,
                 route: &fp.route,
-                pos: [dep_ll.0, dep_ll.1],
+                pos: [dep_ll.lat, dep_ll.lon],
                 alt_ft: 0.0,
                 gs: 0,
                 hdg: 0,
-                arr_ll: [arr_ll.0, arr_ll.1],
+                arr_ll: [arr_ll.lat, arr_ll.lon],
                 cruise_ft,
                 cruise_tas: crate::feed::trajectory::capped_cruise_tas(440.0, cruise_ft, &profile),
             },
@@ -2690,8 +2752,85 @@ mod prefile_fix_predictions_tests {
     #[tokio::test]
     async fn a_prefile_whose_departure_does_not_resolve_gets_no_table() {
         let (st, nav) = (state(), NavData::load());
-        let ap = HashMap::from([("KDCA".to_string(), (38.85, -77.04))]); // no KJFK
+        let ap = HashMap::from([("KDCA".to_string(), Airport::at(38.85, -77.04))]); // no KJFK
         let fp = plan("KJFK", "KDCA", "RBV WHITE SIE");
         assert!(prefile_fix_predictions(&st, &nav, &ap, &fp, now()).is_empty());
+    }
+}
+
+#[cfg(test)]
+mod data_status_tests {
+    use std::sync::Arc;
+
+    use chrono::Duration;
+    use serde_json::json;
+
+    use super::build_data_status;
+    use crate::{
+        feed::{nav::NavData, nav_source},
+        state::AppState,
+    };
+
+    fn status_for_cycle(cycle: &str) -> crate::models::DataStatus {
+        let state = AppState::without_db();
+        let meta = json!({ "nasrCycleDate": cycle }).to_string();
+        state.nav.store(Arc::new(NavData::from_json(
+            "{}", "{}", "{}", "{}", "{}", &meta, "{}",
+        )));
+        build_data_status(&state)
+    }
+
+    #[test]
+    fn reports_how_many_cycles_the_loaded_nav_data_trails_current() {
+        let current = nav_source::current_cycle();
+        let two_behind = (current - Duration::days(56))
+            .format("%Y-%m-%d")
+            .to_string();
+        let status = status_for_cycle(&two_behind);
+        assert_eq!(status.nav_cycle, two_behind);
+        assert_eq!(
+            status.nav_cycle_current,
+            current.format("%Y-%m-%d").to_string()
+        );
+        assert_eq!(status.nav_cycles_behind, Some(2));
+        assert_eq!(status_for_cycle("unknown").nav_cycles_behind, None);
+    }
+}
+
+#[cfg(test)]
+mod data_refresh_claim_tests {
+    use std::sync::atomic::{AtomicBool, Ordering};
+
+    use super::DataRefreshClaim;
+
+    #[test]
+    fn a_second_claim_is_refused_while_the_first_is_held() {
+        let flag = AtomicBool::new(false);
+        let first = DataRefreshClaim::acquire(&flag).expect("first claim");
+        assert!(
+            DataRefreshClaim::acquire(&flag).is_none(),
+            "a concurrent refresh must be refused, not started alongside the running one"
+        );
+        drop(first);
+    }
+
+    /// The flag must clear on drop, not on the happy path: an early return, a client disconnect that
+    /// cancels the future, or a panic inside the fetch would otherwise latch it and wedge the
+    /// endpoint at 409 for the rest of the process's life.
+    #[test]
+    fn dropping_the_claim_releases_the_slot() {
+        let flag = AtomicBool::new(false);
+        drop(DataRefreshClaim::acquire(&flag).expect("first claim"));
+        assert!(!flag.load(Ordering::Acquire), "drop must clear the flag");
+        assert!(
+            DataRefreshClaim::acquire(&flag).is_some(),
+            "a refresh must be possible again once the previous one finished"
+        );
+    }
+
+    #[test]
+    fn a_claim_is_refused_when_the_flag_is_already_set() {
+        let flag = AtomicBool::new(true);
+        assert!(DataRefreshClaim::acquire(&flag).is_none());
     }
 }

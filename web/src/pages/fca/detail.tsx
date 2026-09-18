@@ -6,7 +6,7 @@ import {arrayMove, SortableContext, useSortable, verticalListSortingStrategy,} f
 import {CSS} from "@dnd-kit/utilities";
 import {GripVertical, RotateCcw, X} from "lucide-react";
 
-import {type Fca, type FcaFlight, useClearRelease, useMarkRelease, useReorderFca,} from "@/lib/fca";
+import {DELAY_THRESHOLD_SEC, type Fca, type FcaFlight, fmtDelaySec, useClearRelease, useMarkRelease, useReorderFca,} from "@/lib/fca";
 import {FLIGHT_STATE_LABEL, toneOf} from "@/lib/status";
 import {hhmmZulu} from "@/lib/time";
 import {ArrivalLadder} from "@/components/ladder/ArrivalLadder";
@@ -29,16 +29,6 @@ function fmtDelay(min: number): string {
   const h = Math.floor(min / 60);
   const m = min % 60;
   return h > 0 ? `${h}:${String(m).padStart(2, "0")}` : `${m}m`;
-}
-
-/** A metered delay of ~1 min or more is worth flagging (below that is rounding noise). */
-const DELAY_THRESHOLD_SEC = 30;
-
-/** Delay as `M:SS` (e.g. 1268 → "21:08"). */
-function fmtDelaySec(sec: number): string {
-  const m = Math.floor(sec / 60);
-  const s = sec % 60;
-  return `${m}:${String(s).padStart(2, "0")}`;
 }
 
 /** Short tag for who's being delayed: a released CFR, an airborne (needs vectors/speed), or ground. */

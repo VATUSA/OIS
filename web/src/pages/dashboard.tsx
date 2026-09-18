@@ -1,28 +1,8 @@
-import {Button, buttonVariants, Card, EmptyState, MetricCard, QueryState, StatusPill} from "@ois/ui";
-import {Link, type LinkProps} from "@tanstack/react-router";
-import {
-  ArrowRight,
-  ArrowUpRight,
-  BookOpen,
-  CalendarClock,
-  Gauge,
-  type LucideIcon,
-  Map as MapIcon,
-  Megaphone,
-  OctagonX,
-  Plane,
-  PlaneTakeoff,
-  Radar,
-  Split,
-  Timer,
-  TrendingUp,
-  Waypoints,
-  Wind,
-} from "lucide-react";
+import {buttonVariants, Card, EmptyState, MetricCard, QueryState, StatusPill} from "@ois/ui";
+import {Link} from "@tanstack/react-router";
+import {ArrowRight, CalendarClock, Gauge, OctagonX, Plane, Split, Timer} from "lucide-react";
 
-import vatusaLogo from "@/assets/vatusa-logo.png";
-import {DOCS_URL} from "@/lib/api";
-import {login, useMe} from "@/lib/auth";
+import {useMe} from "@/lib/auth";
 import {useUpcomingEvents} from "@/lib/events";
 import {useFeedStatus} from "@/lib/feed";
 import {hasPermission} from "@/lib/permissions";

@@ -568,13 +568,14 @@ pub(crate) fn point_and_heading_at(path: &[[f64; 2]], target_nm: f64) -> ([f64; 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::feed::airports::Airport;
     use std::collections::HashMap;
 
     fn airports() -> AirportDb {
         // KJFK (New York) and KIAD (Washington Dulles), roughly.
         HashMap::from([
-            ("KJFK".to_string(), (40.64, -73.78)),
-            ("KIAD".to_string(), (38.95, -77.46)),
+            ("KJFK".to_string(), Airport::at(40.64, -73.78)),
+            ("KIAD".to_string(), Airport::at(38.95, -77.46)),
         ])
     }
 
@@ -667,8 +668,8 @@ mod tests {
         // A JFK→DCA route down the NJ coast via real fixes; a line at lat 39.5 across
         // the corridor sits between WHITE (40.0) and SIE (39.1), so it must be crossed.
         let ap = HashMap::from([
-            ("KJFK".to_string(), (40.64, -73.78)),
-            ("KDCA".to_string(), (38.85, -77.04)),
+            ("KJFK".to_string(), Airport::at(40.64, -73.78)),
+            ("KDCA".to_string(), Airport::at(38.85, -77.04)),
         ]);
         let fca = [[39.5, -75.6], [39.5, -74.0]];
         let c = crossing_for(
@@ -694,8 +695,8 @@ mod tests {
     fn route_path_named_accumulates_distance_from_departure_when_on_the_ground() {
         let nav = NavData::load();
         let ap = HashMap::from([
-            ("KJFK".to_string(), (40.64, -73.78)),
-            ("KDCA".to_string(), (38.85, -77.04)),
+            ("KJFK".to_string(), Airport::at(40.64, -73.78)),
+            ("KDCA".to_string(), Airport::at(38.85, -77.04)),
         ]);
         // gs=0 takes the ground branch, positioned at the departure airport (as a prefile / parked
         // aircraft is) — trimming keeps the whole future route, measured from the field.
@@ -766,8 +767,8 @@ mod tests {
         // ETA against.
         let nav = NavData::load();
         let ap = HashMap::from([
-            ("KJFK".to_string(), (40.64, -73.78)),
-            ("KDCA".to_string(), (38.85, -77.04)),
+            ("KJFK".to_string(), Airport::at(40.64, -73.78)),
+            ("KDCA".to_string(), Airport::at(38.85, -77.04)),
         ]);
         let empty = HashMap::new();
         let white = nav.resolve("WHITE", &empty, None).expect("WHITE resolves");
@@ -825,8 +826,8 @@ mod tests {
     fn route_path_named_measures_from_current_position_when_airborne() {
         let nav = NavData::load();
         let ap = HashMap::from([
-            ("KJFK".to_string(), (40.64, -73.78)),
-            ("KDCA".to_string(), (38.85, -77.04)),
+            ("KJFK".to_string(), Airport::at(40.64, -73.78)),
+            ("KDCA".to_string(), Airport::at(38.85, -77.04)),
         ]);
         let empty = HashMap::new();
         let white = nav.resolve("WHITE", &empty, None).expect("WHITE resolves");

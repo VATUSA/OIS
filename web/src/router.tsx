@@ -156,8 +156,10 @@ const tmuRoute = createRoute({
   staticData: { layout: "wide", title: "TMU", views: [{ value: "board", label: "Board", icon: LayoutGrid }, { value: "table", label: "Table", icon: Rows3 }] },
   // Which tab is active — permission-gated fallback (if the user can't see this tab) happens in
   // the component, since that depends on auth state this route-level validator doesn't have.
-  validateSearch: (search: Record<string, unknown>): { tab?: TmuTabId } => ({
+  // `?facility=` pre-filters the restrictions list (the ⌘K search jumps here for a TMI).
+  validateSearch: (search: Record<string, unknown>): { tab?: TmuTabId; facility?: string } => ({
     tab: TMU_TAB_IDS.includes(search.tab as TmuTabId) ? (search.tab as TmuTabId) : undefined,
+    facility: typeof search.facility === "string" ? search.facility.toUpperCase() : undefined,
   }),
 });
 
@@ -358,6 +360,10 @@ const planningAirportConfigsRoute = createRoute({
   path: "airport-configs",
   staticData: { title: "Airport configs", views: [{ value: "grouped", label: "By airport", icon: LayoutGrid }, { value: "list", label: "List", icon: List }] },
   component: AirportConfigsPage,
+  // `?icao=` opens that airport's configs straight away (the ⌘K search jumps here).
+  validateSearch: (search: Record<string, unknown>): { icao?: string } => ({
+    icao: typeof search.icao === "string" ? search.icao.toUpperCase() : undefined,
+  }),
 });
 
 const planningFacilityDocumentsRoute = createRoute({
@@ -372,6 +378,10 @@ const planningAirportSurfaceRoute = createRoute({
   path: "airport-surface",
   staticData: { title: "Airport surface" },
   component: AirportSurfacePage,
+  // `?icao=` opens that airport's surface editor straight away (the ⌘K search jumps here).
+  validateSearch: (search: Record<string, unknown>): { icao?: string } => ({
+    icao: typeof search.icao === "string" ? search.icao.toUpperCase() : undefined,
+  }),
 });
 
 const planningAircraftProfilesRoute = createRoute({
@@ -607,5 +617,7 @@ declare module "@tanstack/react-router" {
     router: typeof router;
   }
   /** Per-route shell meta read by the AppShell (width tier, title, subtitle, icon, views). */
+  // An empty interface is the only way to merge RouteMeta into the router's declared type.
+  // eslint-disable-next-line @typescript-eslint/no-empty-object-type
   interface StaticDataRouteOption extends RouteMeta {}
 }

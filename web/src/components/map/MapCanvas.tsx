@@ -5,11 +5,11 @@ import type {Layer, MapViewState, PickingInfo} from "@deck.gl/core";
 import {Map as MapLibre} from "react-map-gl/maplibre";
 import "maplibre-gl/dist/maplibre-gl.css";
 import {useTheme} from "@ois/ui";
-import {TriangleAlert} from "lucide-react";
 
 import {CARTO_STYLE, US_HOME} from "./lib/constants";
 import {ensureAeroway, type StyleMap} from "./lib/aeroway";
 import {useWebglAvailable} from "./hooks/useWebglAvailable";
+import {MapFallback} from "./MapFallback";
 
 /** deck renders every visible world copy (matching MapLibre's renderWorldCopies) — replaces the old
  * Leaflet longitude-offset machinery. */
@@ -64,26 +64,6 @@ interface MapCanvasProps {
   fallback?: React.ReactNode;
 }
 
-function DefaultFallback() {
-  return (
-    <div className="flex h-full w-full flex-col items-center justify-center gap-3 px-6 py-16 text-center">
-      <TriangleAlert className="size-8 text-ink-3" />
-      <div className="text-lg font-semibold">Map can&apos;t be drawn here</div>
-      <p className="max-w-md text-sm text-ink-2">
-        This map needs WebGL, which this browser has disabled. On iPhone and iPad this is almost always{" "}
-        <span className="font-semibold text-ink">Lockdown Mode</span> — it turns WebGL off, so the
-        map paints black.
-      </p>
-      <p className="max-w-md text-sm text-ink-2">
-        To view it, turn Lockdown Mode off for this site: tap{" "}
-        <span className="font-semibold text-ink">ᴀA</span> in Safari&apos;s address bar →{" "}
-        <span className="font-semibold text-ink">Website Settings</span> →{" "}
-        <span className="font-semibold text-ink">Lockdown Mode → Off</span>, then reload.
-      </p>
-    </div>
-  );
-}
-
 /**
  * The dumb map shell: DeckGL (world-copy-repeating) with a MapLibre CARTO vector basemap + the aeroway
  * airport-layout overlay + a WebGL2-unavailable fallback. Knows nothing about aircraft/FCAs — it just
@@ -108,7 +88,7 @@ export function MapCanvas({
   fallback,
 }: MapCanvasProps) {
   const { resolvedTheme } = useTheme();
-  const available = useWebglAvailable();
+  const { ok: webglOk, retry } = useWebglAvailable();
 
   // Nudge deck.gl to re-measure once layout has settled (0-sized-at-mount safety).
   useEffect(() => {
@@ -116,8 +96,8 @@ export function MapCanvas({
     return () => clearTimeout(t);
   }, []);
 
-  if (!available) {
-    return <div className={className}>{fallback ?? <DefaultFallback />}</div>;
+  if (!webglOk) {
+    return <div className={className}>{fallback ?? <MapFallback onRetry={retry} />}</div>;
   }
 
   const controlled = viewState != null;

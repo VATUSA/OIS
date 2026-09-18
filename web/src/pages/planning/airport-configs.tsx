@@ -1,4 +1,5 @@
-import {useMemo, useState} from "react";
+import {useEffect, useMemo, useState} from "react";
+import {useSearch} from "@tanstack/react-router";
 import {
   Button,
   Card,
@@ -417,8 +418,15 @@ export function AirportConfigsPage() {
   const canRead = hasPermission(me, "events.plan.read");
   const facilities = useFacilities();
   const view = useView();
-  const [icao, setIcao] = useState("");
-  const [entry, setEntry] = useState("");
+  // `?icao=` (⌘K, deep links) opens that airport's configs straight away.
+  const initial = useSearch({ from: "/admin/planning/airport-configs" }).icao ?? "";
+  const [icao, setIcao] = useState(initial);
+  const [entry, setEntry] = useState(initial);
+  // …and again when it changes, since ⌘K can land here while this page is already mounted.
+  useEffect(() => {
+    setIcao(initial);
+    setEntry(initial);
+  }, [initial]);
   const [artcc, setArtcc] = useState("");
 
   usePageHeader({

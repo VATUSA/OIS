@@ -12,7 +12,7 @@
 use std::collections::HashMap;
 use std::io::{Cursor, Read};
 
-use chrono::{Duration, NaiveDate, Utc};
+use chrono::{DateTime, Duration, NaiveDate, NaiveTime, Utc};
 use serde::{Deserialize, Serialize};
 
 use super::nav::{CoordList, NavData};
@@ -26,6 +26,16 @@ const COVERAGE: [f64; 4] = [-90.0, -180.0, 90.0, 180.0];
 
 /// First NASR effective date we anchor the 28-day cycle math on (a known boundary).
 const CYCLE_ANCHOR: (i32, u32, u32) = (2026, 7, 9);
+/// A cycle takes effect this long after midnight UTC on its effective date (0901Z).
+const CYCLE_EFFECTIVE_OFFSET: Duration = Duration::minutes(9 * 60 + 1);
+
+/// `NavData::source()` for a dataset whose base fixes/navaids/cycle came from the live FAA NASR
+/// fetch — the only source the refresh job treats as healthy (VATUSA/OIS#317).
+pub const FAA_SOURCE: &str = "runtime fetch (faa)";
+
+fn source_label(source: &str) -> String {
+    format!("runtime fetch ({source})")
+}
 
 const SQUAWK_AIRWAYS: &str = "https://unpkg.com/@squawk/airway-data@0.5.10/data/airways.json.gz";
 const SQUAWK_PROCEDURES: &str =
@@ -50,6 +60,8 @@ pub async fn fetch_latest() -> Fetched<NavData> {
     let client = reqwest::Client::builder()
         .user_agent("ois-nav/1.0 (+https://vatusa.net)")
         .timeout(std::time::Duration::from_secs(90))
+        // Resolve A as well as AAAA ourselves, so a host with dead IPv6 still reaches the FAA.
+        .dns_resolver(super::nav_dns::NavDnsResolver::default())
         .build()?;
 
     // 1. Base fixes/navaids/preferred + cycle: FAA cycle → @squawk → bundle.
@@ -157,7 +169,7 @@ pub async fn fetch_latest() -> Fetched<NavData> {
     let navaids_json = serde_json::to_string(&navaids)?;
     let meta_json = serde_json::to_string(&OutMeta {
         nasr_cycle_date: cycle,
-        source: format!("runtime fetch ({source})"),
+        source: source_label(source),
         bbox: COVERAGE,
     })?;
 
@@ -227,17 +239,43 @@ async fn fetch_faa_cycle(client: &reqwest::Client, date: NaiveDate) -> Fetched<F
 
 /// The current 28-day cycle and the two before it (fallbacks when the newest isn't posted).
 pub(super) fn candidate_cycles() -> Vec<NaiveDate> {
-    let anchor = NaiveDate::from_ymd_opt(CYCLE_ANCHOR.0, CYCLE_ANCHOR.1, CYCLE_ANCHOR.2)
-        .expect("valid cycle anchor");
-    let today = Utc::now().date_naive();
-    let days = (today - anchor).num_days();
-    let n = if days >= 0 { days / 28 } else { 0 };
-    let current = anchor + Duration::days(28 * n);
+    let current = current_cycle();
     vec![
         current,
         current - Duration::days(28),
         current - Duration::days(56),
     ]
+}
+
+/// The NASR cycle in effect now — what a healthy refresh should have loaded.
+pub fn current_cycle() -> NaiveDate {
+    cycle_at(Utc::now())
+}
+
+/// The NASR cycle in effect at `now`. A cycle takes effect at 0901Z on its effective date, not at
+/// midnight, so the previous cycle is still current until then (VATUSA/OIS#317).
+pub fn cycle_at(now: DateTime<Utc>) -> NaiveDate {
+    let anchor = NaiveDate::from_ymd_opt(CYCLE_ANCHOR.0, CYCLE_ANCHOR.1, CYCLE_ANCHOR.2)
+        .expect("valid cycle anchor");
+    let effective_day = (now - CYCLE_EFFECTIVE_OFFSET).date_naive();
+    let days = (effective_day - anchor).num_days();
+    let n = if days >= 0 { days / 28 } else { 0 };
+    anchor + Duration::days(28 * n)
+}
+
+/// When the cycle after the one in effect at `now` takes effect.
+pub fn next_cycle_start(now: DateTime<Utc>) -> DateTime<Utc> {
+    (cycle_at(now) + Duration::days(28))
+        .and_time(NaiveTime::MIN)
+        .and_utc()
+        + CYCLE_EFFECTIVE_OFFSET
+}
+
+/// How many whole 28-day cycles `loaded` (`YYYY-MM-DD`) trails `current`; `None` when `loaded`
+/// isn't a date. A cycle at or ahead of `current` is 0 behind.
+pub fn cycles_behind(loaded: &str, current: NaiveDate) -> Option<u32> {
+    let loaded = NaiveDate::parse_from_str(loaded, "%Y-%m-%d").ok()?;
+    Some(((current - loaded).num_days().max(0) / 28) as u32)
 }
 
 fn faa_url(date: NaiveDate, group: &str) -> String {
@@ -542,14 +580,17 @@ fn num(row: &[String], idx: Option<usize>) -> Option<f64> {
 // --- shared helpers ---
 
 pub(super) async fn download(client: &reqwest::Client, url: &str) -> Fetched<Vec<u8>> {
-    let bytes = client
-        .get(url)
-        .send()
-        .await?
-        .error_for_status()?
-        .bytes()
-        .await?;
-    Ok(bytes.to_vec())
+    // One retry for a transport failure (connect/DNS/reset); an HTTP error status is an answer, not
+    // a blip, so it isn't retried.
+    let resp = match client.get(url).send().await {
+        Ok(resp) => resp,
+        Err(e) => {
+            tracing::debug!(url, error = %e, "nav download failed; retrying once");
+            tokio::time::sleep(std::time::Duration::from_secs(2)).await;
+            client.get(url).send().await?
+        }
+    };
+    Ok(resp.error_for_status()?.bytes().await?.to_vec())
 }
 
 async fn fetch_gz_json<T: for<'de> Deserialize<'de>>(
@@ -795,6 +836,50 @@ mod tests {
         assert_eq!(strip_revision("DOTSS2"), "DOTSS");
         assert_eq!(strip_revision("LUCIT3"), "LUCIT");
         assert_eq!(strip_revision("KKISS1A"), "KKISS");
+    }
+
+    #[test]
+    fn cycles_behind_counts_whole_28_day_cycles() {
+        let current = NaiveDate::from_ymd_opt(2026, 9, 3).unwrap();
+        assert_eq!(cycles_behind("2026-09-03", current), Some(0));
+        assert_eq!(cycles_behind("2026-08-06", current), Some(1));
+        // The production incident: 2026-07-09 loaded while 2026-09-03 was current.
+        assert_eq!(cycles_behind("2026-07-09", current), Some(2));
+        // A newer-than-expected cycle (FAA posts early) is not behind.
+        assert_eq!(cycles_behind("2026-10-01", current), Some(0));
+        assert_eq!(cycles_behind("unknown", current), None);
+    }
+
+    fn utc(s: &str) -> DateTime<Utc> {
+        DateTime::parse_from_rfc3339(s).unwrap().to_utc()
+    }
+
+    #[test]
+    fn a_cycle_takes_effect_at_0901z_not_midnight() {
+        let prev = NaiveDate::from_ymd_opt(2026, 9, 3).unwrap();
+        let next = NaiveDate::from_ymd_opt(2026, 10, 1).unwrap();
+        assert_eq!(cycle_at(utc("2026-10-01T00:00:00Z")), prev);
+        assert_eq!(cycle_at(utc("2026-10-01T09:00:59Z")), prev);
+        assert_eq!(cycle_at(utc("2026-10-01T09:01:00Z")), next);
+        assert_eq!(cycle_at(utc("2026-10-28T23:59:59Z")), next);
+    }
+
+    #[test]
+    fn next_cycle_start_is_the_following_effective_date_at_0901z() {
+        assert_eq!(
+            next_cycle_start(utc("2026-10-01T09:00:59Z")),
+            utc("2026-10-01T09:01:00Z")
+        );
+        assert_eq!(
+            next_cycle_start(utc("2026-10-01T09:01:00Z")),
+            utc("2026-10-29T09:01:00Z")
+        );
+    }
+
+    #[test]
+    fn faa_source_label_matches_the_healthy_source_constant() {
+        assert_eq!(source_label("faa"), FAA_SOURCE);
+        assert_ne!(source_label("bundle"), FAA_SOURCE);
     }
 
     /// Live end-to-end fetch. Ignored by default (hits FAA + unpkg):

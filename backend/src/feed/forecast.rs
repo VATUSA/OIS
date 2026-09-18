@@ -11,7 +11,7 @@ use std::{
 use chrono::{DateTime, TimeZone, Utc};
 use serde::Deserialize;
 
-use super::airports::AirportDb;
+use super::airports::{Airport, AirportDb};
 
 /// A single forecast hour's surface wind.
 #[derive(Debug, Clone)]
@@ -88,7 +88,7 @@ async fn fetch(lat: f64, lon: f64) -> Option<Series> {
 /// The forecast wind for `icao` nearest to `at`. Returns None when the airport isn't in the DB, the
 /// fetch fails, or `at` is outside the forecast window (caller can fall back to live METAR).
 pub async fn wind_at(airports: &AirportDb, icao: &str, at: DateTime<Utc>) -> Option<HourWind> {
-    let &(lat, lon) = airports.get(icao)?;
+    let &Airport { lat, lon, .. } = airports.get(icao)?;
     let now = Utc::now().timestamp_millis();
 
     // Serve from cache when fresh.

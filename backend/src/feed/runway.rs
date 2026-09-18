@@ -11,7 +11,7 @@ use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use utoipa::ToSchema;
 
-use super::airports::AirportDb;
+use super::airports::{Airport, AirportDb};
 use super::flow::{arrival_gate, gc_dist};
 use super::nav::NavData;
 use super::predict;
@@ -214,7 +214,12 @@ pub fn collect_arrivals(
     window_min: i64,
 ) -> Vec<Arrival> {
     let icao = icao.to_ascii_uppercase();
-    let Some(&(alat, alon)) = airports.get(&icao) else {
+    let Some(&Airport {
+        lat: alat,
+        lon: alon,
+        ..
+    }) = airports.get(&icao)
+    else {
         return Vec::new();
     };
     let mut out = Vec::new();

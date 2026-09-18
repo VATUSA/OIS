@@ -114,8 +114,8 @@ export function FacilityMapPage() {
 
 /**
  * The map body, shared by the standalone page, the external iframe embed, and the dashboard widget.
- * `fill` is layout (fill the container vs the standalone page height); `controls` is chrome (show the
- * toolbar vs minimal map + aircraft + legend). They're independent: the widget fills AND shows controls,
+ * `fill` marks an embedded host (widget / iframe: no page-navigating facility picker); `controls` is
+ * chrome (show the toolbar vs minimal map + aircraft + legend). They're independent: the widget fills AND shows controls,
  * the iframe embed fills but hides them.
  */
 export function FacilityMapView({
@@ -128,7 +128,7 @@ export function FacilityMapView({
   forceTheme,
 }: {
   id: string | null;
-  /** Fill the container height (widget / iframe) instead of the standalone page height. */
+  /** Embedded in a widget / iframe rather than the standalone page: hides the facility picker. */
   fill?: boolean;
   /** Show the toolbar (picker / layer toggles / edit routes / edit rules / embed). Off = minimal chrome:
    *  just the map, aircraft, and legend, with layers fixed by the `initial*` props. */
@@ -311,7 +311,7 @@ export function FacilityMapView({
   return (
     // `isolate` contains the map's high internal z-indexes so they don't paint over app chrome (nav
     // dropdowns, toasts, dialogs), which portal to the body and should sit above the map.
-    <div className={`relative isolate w-full ${fill ? "h-full" : "h-full"}`}>
+    <div className="relative isolate h-full w-full">
       <TrafficMap
         className="absolute inset-0"
         camera={camera}
