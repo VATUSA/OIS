@@ -239,14 +239,16 @@ export function CommandRow({
       data-index={index}
       onMouseMove={onActivate}
       className={cn(
-        "flex w-full items-center gap-2.5 rounded-sm pr-2.5 text-sm",
+        "flex w-full items-center rounded-sm text-sm",
         active ? "bg-panel-2 text-ink" : "text-ink-2",
       )}
     >
       <button
         type="button"
         onClick={onSelect}
-        className="flex min-w-0 flex-1 items-center gap-2.5 py-2 pl-2.5 text-left"
+        // The whole row bar the star selects, padding included — a gutter outside the button would
+        // be a strip of the row that highlights on hover but does nothing when clicked.
+        className="flex min-w-0 flex-1 items-center gap-2.5 px-2.5 py-2 text-left"
       >
         {Icon && <Icon className={cn("size-4 shrink-0", active ? "text-brand-ink" : "text-ink-3")} />}
         <span className="min-w-0 flex-1 truncate">{item.label}</span>
@@ -261,7 +263,7 @@ export function CommandRow({
           // Keep focus in the search field so the keyboard keeps working after a click.
           onMouseDown={(e) => e.preventDefault()}
           onClick={() => item.onToggleStar?.()}
-          className="shrink-0 rounded-sm p-0.5 text-ink-3 hover:text-ink"
+          className="mr-2.5 shrink-0 rounded-sm p-0.5 text-ink-3 hover:text-ink focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
         >
           <Star className={cn("size-3.5", item.starred && "fill-current text-brand-ink")} />
         </button>
