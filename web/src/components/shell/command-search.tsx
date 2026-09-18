@@ -1,6 +1,6 @@
 import {useEffect, useMemo, useState} from "react";
-import {useNavigate} from "@tanstack/react-router";
-import {CommandPalette, type CommandGroup, type CommandItem} from "@ois/ui";
+import {useNavigate, useRouterState} from "@tanstack/react-router";
+import {CommandPalette, type CommandGroup, type CommandItem, useToast} from "@ois/ui";
 import {
   CalendarClock,
   Home,
@@ -11,6 +11,7 @@ import {
   Plane,
   PlaneTakeoff,
   Radar,
+  Star,
   Settings as SettingsIcon,
   User as UserIcon,
   Wind,
@@ -20,10 +21,11 @@ import {useMe} from "@/lib/auth";
 import {SCOPES, type ScopeId, icaoRows, parseScopePrefix, tmiRow} from "@/lib/command-scopes";
 import {useDashboards} from "@/lib/dashboards";
 import {useUpcomingEvents} from "@/lib/events";
+import {type Favorite, type FavoriteKind, favoriteHref, useFavorites} from "@/lib/favorites";
 import {useFacilityDirectory} from "@/lib/facilities";
 import {useTraffic} from "@/lib/fca";
 import {fuzzyMatch, rankAircraft} from "@/lib/fuzzy";
-import {AREAS, type NavItem, canSeeItem, visibleGroups} from "@/lib/nav";
+import {AREAS, type NavItem, canOpenPath, canSeeItem, itemForPath, visibleGroups} from "@/lib/nav";
 import {hasPermission} from "@/lib/permissions";
 import {useTmis} from "@/lib/tmu";
 
@@ -49,8 +51,30 @@ export function CommandSearch() {
       window.removeEventListener(OPEN_EVENT, onOpen);
     };
   }, []);
-  // Only mount the sources (live traffic, events, TMIs, dashboards) while the palette is open.
-  return open ? <Palette onClose={() => setOpen(false)} /> : null;
+  const { data: me } = useMe();
+  // Only mount the sources (live traffic, events, TMIs, dashboards) while the palette is open. While
+  // it's closed, ⌘⇧F favorites the current page instead (signed-in only: favorites are per user).
+  if (open) return <Palette onClose={() => setOpen(false)} />;
+  return me ? <FavoriteCurrentPage /> : null;
+}
+
+/** ⌘⇧F / Ctrl+Shift+F with the palette closed: toggle the current page as a favorite. */
+function FavoriteCurrentPage() {
+  const favorites = useFavorites();
+  const toast = useToast();
+  const location = useRouterState({ select: (s) => s.location });
+  useEffect(() => {
+    const onKey = (e: KeyboardEvent) => {
+      if (!((e.metaKey || e.ctrlKey) && e.shiftKey && e.key.toLowerCase() === "f")) return;
+      e.preventDefault();
+      const label = itemForPath(location.pathname)?.item.label ?? document.title;
+      const added = favorites.toggle({ kind: "page", id: location.pathname, label, href: location.href });
+      if (added != null) toast.success(added ? `Added ${label} to favorites` : `Removed ${label} from favorites`);
+    };
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  }, [favorites, toast, location]);
+  return null;
 }
 
 const OPEN_EVENT = "ois:command-search";
@@ -102,6 +126,7 @@ function Palette({ onClose }: { onClose: () => void }) {
       (s.id !== "tmis" || canTmis) && (s.id !== "events" || canEvents) && (s.id !== "dashboards" || canDashboards),
   );
 
+  const favorites = useFavorites();
   const traffic = useTraffic();
   const facilities = useFacilityDirectory();
   const events = useUpcomingEvents({ enabled: canEvents });
@@ -137,14 +162,19 @@ function Palette({ onClose }: { onClose: () => void }) {
 
   const limit = scope === "all" ? LIMIT : SCOPED_LIMIT;
 
+  const star = (item: CommandItem, fav: Favorite): CommandItem => ({
+    ...item,
+    starred: favorites.isFavorite(fav.kind, fav.id),
+    onToggleStar: () => favorites.toggle(fav),
+  });
+
   const pageItems = (): CommandItem[] =>
-    rank(q, pages, (p) => `${p.label} ${p.context}`, limit).map((p) => ({
-      id: `page:${p.to}`,
-      label: p.label,
-      sublabel: p.context,
-      icon: p.icon,
-      onSelect: () => void navigate({ to: p.to }),
-    }));
+    rank(q, pages, (p) => `${p.label} ${p.context}`, limit).map((p) =>
+      star(
+        { id: `page:${p.to}`, label: p.label, sublabel: p.context, icon: p.icon, onSelect: () => void navigate({ to: p.to }) },
+        { kind: "page", id: p.to, label: p.label, href: p.to },
+      ),
+    );
 
   // An ICAO-shaped query offers that airport's page — plus its planning pages inside the Airport data
   // scope, so the blended view stays uncluttered — each gated like its nav link, then facility maps.
@@ -152,66 +182,159 @@ function Palette({ onClose }: { onClose: () => void }) {
     const icao = q.toUpperCase().replace(/[^A-Z0-9]/g, "");
     const icaoPages: CommandItem[] = icaoRows(icao)
       .filter((p, i) => (i === 0 || scope === "airports") && canSeeItem(me, navItem(p.to)))
-      .map((p) => ({
-        id: `airport:${p.to}:${icao}`,
-        label: p.label,
-        sublabel: p.sublabel,
-        icon: ICAO_ROW_ICON[p.to],
-        // Each row names an airport, so each row opens that airport — not the page's empty picker.
-        onSelect: () => void navigate({ to: p.to, search: p.search }),
-      }));
-    const facilityItems = rank(q, facilities.data ?? [], (f) => `${f.id} ${f.name ?? ""}`, limit).map((f) => ({
-      id: `facility:${f.id}`,
-      label: f.name ? `${f.id} · ${f.name}` : f.id,
-      sublabel: `${f.kind.toUpperCase()} · facility map`,
-      icon: Radar,
-      onSelect: () => void navigate({ to: "/facility-map/$facilityId", params: { facilityId: f.id } }),
-    }));
+      .map((p) =>
+        star(
+          {
+            id: `airport:${p.to}:${icao}`,
+            label: p.label,
+            sublabel: p.sublabel,
+            icon: ICAO_ROW_ICON[p.to],
+            // Each row names an airport, so each row opens that airport — not the page's empty picker.
+            onSelect: () => void navigate({ to: p.to, search: p.search }),
+          },
+          // Every ICAO row carries its airport, so the favorite reopens the same airport too —
+          // built from the row's own `search` so it can't drift from where the row lands.
+          { kind: "airport", id: `${p.to}:${icao}`, label: p.label, href: favoriteHref(p) },
+        ),
+      );
+    const facilityItems = rank(q, facilities.data ?? [], (f) => `${f.id} ${f.name ?? ""}`, limit).map((f) => {
+      const label = f.name ? `${f.id} · ${f.name}` : f.id;
+      return star(
+        {
+          id: `facility:${f.id}`,
+          label,
+          sublabel: `${f.kind.toUpperCase()} · facility map`,
+          icon: Radar,
+          onSelect: () => void navigate({ to: "/facility-map/$facilityId", params: { facilityId: f.id } }),
+        },
+        { kind: "airport", id: `facility:${f.id}`, label, href: `/facility-map/${f.id}` },
+      );
+    });
     return [...icaoPages, ...facilityItems];
   };
 
   const flightItems = (): CommandItem[] =>
-    rankAircraft(q, traffic.data ?? [], limit).map(({ ac }) => ({
-      id: `flight:${ac.callsign}`,
-      label: ac.callsign,
-      sublabel: [ac.dep, ac.arr].filter(Boolean).join(" → "),
-      icon: PlaneTakeoff,
-      onSelect: () => void navigate({ to: "/advisories/fcas", search: { flight: ac.callsign } }),
-    }));
+    rankAircraft(q, traffic.data ?? [], limit).map(({ ac }) =>
+      star(
+        {
+          id: `flight:${ac.callsign}`,
+          label: ac.callsign,
+          sublabel: [ac.dep, ac.arr].filter(Boolean).join(" → "),
+          icon: PlaneTakeoff,
+          onSelect: () => void navigate({ to: "/advisories/fcas", search: { flight: ac.callsign } }),
+        },
+        {
+          kind: "aircraft",
+          id: ac.callsign,
+          label: ac.callsign,
+          href: `/advisories/fcas?flight=${encodeURIComponent(ac.callsign)}`,
+        },
+      ),
+    );
 
   const eventItems = (): CommandItem[] =>
-    rank(q, events.data ?? [], (e) => `${e.title} ${e.facility}`, limit).map((e) => ({
-      id: `event:${e.id}`,
-      label: e.title,
-      sublabel: e.facility,
-      icon: CalendarClock,
-      onSelect: () => void navigate({ to: "/admin/planning/events/$eventId", params: { eventId: String(e.id) } }),
-    }));
+    rank(q, events.data ?? [], (e) => `${e.title} ${e.facility}`, limit).map((e) =>
+      star(
+        {
+          id: `event:${e.id}`,
+          label: e.title,
+          sublabel: e.facility,
+          icon: CalendarClock,
+          onSelect: () => void navigate({ to: "/admin/planning/events/$eventId", params: { eventId: String(e.id) } }),
+        },
+        { kind: "event", id: String(e.id), label: e.title, href: `/admin/planning/events/${e.id}` },
+      ),
+    );
 
   // TMIs have no page of their own: every row opens the TMU restrictions tab, filtered to the TMI's
   // facility — otherwise every row of a 20-row list lands on the same unfiltered page.
   const tmiItems = (): CommandItem[] =>
     rank(q, tmis.data ?? [], (t) => `${t.requesting} ${t.providing} ${t.decoded ?? t.restriction} ${t.status}`, limit).map(
-      (t) => ({
-        id: `tmi:${t.id}`,
-        label: t.decoded ?? t.restriction,
-        sublabel: `${t.requesting}→${t.providing} · ${t.status}`,
-        icon: Megaphone,
-        onSelect: () => void navigate(tmiRow(t)),
-      }),
+      (t) =>
+        star(
+          {
+            id: `tmi:${t.id}`,
+            label: t.decoded ?? t.restriction,
+            sublabel: `${t.requesting}→${t.providing} · ${t.status}`,
+            icon: Megaphone,
+            onSelect: () => void navigate(tmiRow(t)),
+          },
+          // The favorite reopens the same filtered tab the row lands on.
+          { kind: "tmi", id: t.id, label: t.decoded ?? t.restriction, href: favoriteHref(tmiRow(t)) },
+        ),
     );
 
   const dashboardItems = (): CommandItem[] =>
-    rank(q, dashboards.data?.dashboards ?? [], (d) => d.name, limit).map((d) => ({
-      id: `dashboard:${d.id}`,
-      label: d.name,
-      sublabel: "Dashboard",
-      icon: LayoutDashboard,
-      onSelect: () => void navigate({ to: "/ops/my/$boardId", params: { boardId: d.id } }),
-    }));
+    rank(q, dashboards.data?.dashboards ?? [], (d) => d.name, limit).map((d) =>
+      star(
+        {
+          id: `dashboard:${d.id}`,
+          label: d.name,
+          sublabel: "Dashboard",
+          icon: LayoutDashboard,
+          onSelect: () => void navigate({ to: "/ops/my/$boardId", params: { boardId: d.id } }),
+        },
+        { kind: "dashboard", id: d.id, label: d.name, href: `/ops/my/${d.id}` },
+      ),
+    );
+
+  // A favorite is listed only while its kind and destination are still permitted.
+  const canSeeFavorite = (f: Favorite) => {
+    if ((f.kind === "tmi" && !canTmis) || (f.kind === "event" && !canEvents) || (f.kind === "dashboard" && !canDashboards)) {
+      return false;
+    }
+    const path = f.href.split("?")[0];
+    if (path.startsWith("/admin")) return canOpenPath(me, path);
+    const hit = itemForPath(path);
+    return hit ? canSeeItem(me, hit.item) : true;
+  };
+
+  // Gone once its source has loaded without it; the row stays so it can still be unstarred.
+  const unavailable = (f: Favorite): boolean => {
+    const missing = <T,>(data: readonly T[] | undefined, id: (t: T) => string) =>
+      data != null && !data.some((t) => id(t) === f.id);
+    switch (f.kind) {
+      case "aircraft":
+        return missing(traffic.data, (a) => a.callsign);
+      case "tmi":
+        return missing(tmis.data, (t) => t.id);
+      case "event":
+        return missing(events.data, (e) => String(e.id));
+      case "dashboard":
+        return missing(dashboards.data?.dashboards, (d) => d.id);
+      default:
+        return false;
+    }
+  };
+
+  const FAVORITE_KIND: Record<ScopeId, FavoriteKind | null> = {
+    all: null,
+    aircraft: "aircraft",
+    tmis: "tmi",
+    events: "event",
+    dashboards: "dashboard",
+    airports: "airport",
+    pages: "page",
+  };
+  const favoriteItems = (): CommandItem[] => {
+    const kind = FAVORITE_KIND[scope];
+    const visible = favorites.items.filter((f) => (kind == null || f.kind === kind) && canSeeFavorite(f));
+    return rank(q, visible, (f) => f.label, visible.length).map((f) =>
+      star(
+        {
+          id: `favorite:${f.kind}:${f.id}`,
+          label: f.label,
+          sublabel: unavailable(f) ? "Unavailable" : f.kind,
+          icon: Star,
+          onSelect: () => void navigate({ href: f.href }),
+        },
+        f,
+      ),
+    );
+  };
 
   const { label: scopeLabel, noun: scopeNoun } = SCOPES.find((s) => s.id === scope)!;
-  const groups: CommandGroup[] = [];
+  const groups: CommandGroup[] = [{ label: "Favorites", items: favoriteItems() }];
   let empty = "No results.";
   if (scope === "all") {
     groups.push({ label: "Pages", items: pageItems() });
