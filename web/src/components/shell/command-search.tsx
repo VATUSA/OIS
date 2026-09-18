@@ -21,13 +21,25 @@ import {useMe} from "@/lib/auth";
 import {SCOPES, type ScopeId, icaoRows, parseScopePrefix, tmiRow} from "@/lib/command-scopes";
 import {useDashboards} from "@/lib/dashboards";
 import {useUpcomingEvents} from "@/lib/events";
-import {type Favorite, type FavoriteKind, favoriteHref, useFavorites} from "@/lib/favorites";
+import {
+  type Favorite,
+  type FavoriteKind,
+  type FavoriteScopes,
+  type FavoriteSources,
+  canSeeFavorite,
+  favoriteHref,
+  favoriteUnavailable,
+  useFavorites,
+  withPinnedFavorites,
+} from "@/lib/favorites";
 import {useFacilityDirectory} from "@/lib/facilities";
 import {useTraffic} from "@/lib/fca";
 import {fuzzyMatch, rankAircraft} from "@/lib/fuzzy";
-import {AREAS, type NavItem, canOpenPath, canSeeItem, itemForPath, visibleGroups} from "@/lib/nav";
+import {AREAS, type NavItem, canSeeItem, visibleGroups} from "@/lib/nav";
 import {hasPermission} from "@/lib/permissions";
 import {useTmis} from "@/lib/tmu";
+
+import {usePageTitle} from "./page-meta";
 
 /** Rows per group in the blended "All" view, and in a single focused scope. */
 const LIMIT = 6;
@@ -63,17 +75,21 @@ function FavoriteCurrentPage() {
   const favorites = useFavorites();
   const toast = useToast();
   const location = useRouterState({ select: (s) => s.location });
+  // The page's own title, not the nav link's: `itemForPath` is a prefix match, so it would label
+  // every event "Events" and every board "My Dashboard" — favorites that can't be told apart.
+  const title = usePageTitle();
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
       if (!((e.metaKey || e.ctrlKey) && e.shiftKey && e.key.toLowerCase() === "f")) return;
       e.preventDefault();
-      const label = itemForPath(location.pathname)?.item.label ?? document.title;
-      const added = favorites.toggle({ kind: "page", id: location.pathname, label, href: location.href });
+      const label = title ?? location.pathname;
+      // Keyed on the full href, so two airports' config pages are two favorites, not one.
+      const added = favorites.toggle({ kind: "page", id: location.href, label, href: location.href });
       if (added != null) toast.success(added ? `Added ${label} to favorites` : `Removed ${label} from favorites`);
     };
     window.addEventListener("keydown", onKey);
     return () => window.removeEventListener("keydown", onKey);
-  }, [favorites, toast, location]);
+  }, [favorites, toast, location, title]);
   return null;
 }
 
@@ -162,11 +178,18 @@ function Palette({ onClose }: { onClose: () => void }) {
 
   const limit = scope === "all" ? LIMIT : SCOPED_LIMIT;
 
-  const star = (item: CommandItem, fav: Favorite): CommandItem => ({
-    ...item,
-    starred: favorites.isFavorite(fav.kind, fav.id),
-    onToggleStar: () => favorites.toggle(fav),
-  });
+  // Favorites are per user and live in the signed-in preferences API. The shell (and so the palette)
+  // renders on every public path but `/`, so without this a signed-out visitor gets a star that
+  // 401s and toasts "Couldn't save favorites" — `FavoriteCurrentPage` is gated the same way.
+  const favoritesEnabled = me != null;
+  const star = (item: CommandItem, fav: Favorite): CommandItem =>
+    favoritesEnabled
+      ? {
+          ...item,
+          starred: favorites.isFavorite(fav.kind, fav.id),
+          onToggleStar: () => favorites.toggle(fav),
+        }
+      : item;
 
   const pageItems = (): CommandItem[] =>
     rank(q, pages, (p) => `${p.label} ${p.context}`, limit).map((p) =>
@@ -278,33 +301,14 @@ function Palette({ onClose }: { onClose: () => void }) {
       ),
     );
 
-  // A favorite is listed only while its kind and destination are still permitted.
-  const canSeeFavorite = (f: Favorite) => {
-    if ((f.kind === "tmi" && !canTmis) || (f.kind === "event" && !canEvents) || (f.kind === "dashboard" && !canDashboards)) {
-      return false;
-    }
-    const path = f.href.split("?")[0];
-    if (path.startsWith("/admin")) return canOpenPath(me, path);
-    const hit = itemForPath(path);
-    return hit ? canSeeItem(me, hit.item) : true;
-  };
-
-  // Gone once its source has loaded without it; the row stays so it can still be unstarred.
-  const unavailable = (f: Favorite): boolean => {
-    const missing = <T,>(data: readonly T[] | undefined, id: (t: T) => string) =>
-      data != null && !data.some((t) => id(t) === f.id);
-    switch (f.kind) {
-      case "aircraft":
-        return missing(traffic.data, (a) => a.callsign);
-      case "tmi":
-        return missing(tmis.data, (t) => t.id);
-      case "event":
-        return missing(events.data, (e) => String(e.id));
-      case "dashboard":
-        return missing(dashboards.data?.dashboards, (d) => d.id);
-      default:
-        return false;
-    }
+  // A favorite is listed only while its kind and destination are still permitted, and marked gone
+  // once its source has loaded without it — the row stays either way, so it can still be unstarred.
+  const favoriteScopes: FavoriteScopes = { tmis: canTmis, events: canEvents, dashboards: canDashboards };
+  const sources: FavoriteSources = {
+    aircraft: traffic.data,
+    tmis: tmis.data,
+    events: events.data,
+    dashboards: dashboards.data?.dashboards,
   };
 
   const FAVORITE_KIND: Record<ScopeId, FavoriteKind | null> = {
@@ -318,13 +322,13 @@ function Palette({ onClose }: { onClose: () => void }) {
   };
   const favoriteItems = (): CommandItem[] => {
     const kind = FAVORITE_KIND[scope];
-    const visible = favorites.items.filter((f) => (kind == null || f.kind === kind) && canSeeFavorite(f));
+    const visible = favorites.items.filter((f) => (kind == null || f.kind === kind) && canSeeFavorite(me, f, favoriteScopes));
     return rank(q, visible, (f) => f.label, visible.length).map((f) =>
       star(
         {
           id: `favorite:${f.kind}:${f.id}`,
           label: f.label,
-          sublabel: unavailable(f) ? "Unavailable" : f.kind,
+          sublabel: favoriteUnavailable(f, sources) ? "Unavailable" : f.kind,
           icon: Star,
           onSelect: () => void navigate({ href: f.href }),
         },
@@ -334,16 +338,16 @@ function Palette({ onClose }: { onClose: () => void }) {
   };
 
   const { label: scopeLabel, noun: scopeNoun } = SCOPES.find((s) => s.id === scope)!;
-  const groups: CommandGroup[] = [{ label: "Favorites", items: favoriteItems() }];
+  const scoped: CommandGroup[] = [];
   let empty = "No results.";
   if (scope === "all") {
-    groups.push({ label: "Pages", items: pageItems() });
+    scoped.push({ label: "Pages", items: pageItems() });
     if (q.length >= 2) {
-      groups.push({ label: "Airports & facilities", items: airportItems() });
-      groups.push({ label: "Flights", items: flightItems() });
-      if (canTmis) groups.push({ label: "TMIs", items: tmiItems() });
-      if (canEvents) groups.push({ label: "Events", items: eventItems() });
-      if (canDashboards) groups.push({ label: "Dashboards", items: dashboardItems() });
+      scoped.push({ label: "Airports & facilities", items: airportItems() });
+      scoped.push({ label: "Flights", items: flightItems() });
+      if (canTmis) scoped.push({ label: "TMIs", items: tmiItems() });
+      if (canEvents) scoped.push({ label: "Events", items: eventItems() });
+      if (canDashboards) scoped.push({ label: "Dashboards", items: dashboardItems() });
     }
   } else {
     const source = {
@@ -354,13 +358,14 @@ function Palette({ onClose }: { onClose: () => void }) {
       airports: { items: airportItems, loading: facilities.isLoading },
       pages: { items: pageItems, loading: false },
     }[scope];
-    groups.push({ label: scopeLabel, items: source.items() });
+    scoped.push({ label: scopeLabel, items: source.items() });
     empty = source.loading
       ? `Loading ${scopeNoun}…`
       : scope === "aircraft" && !q
         ? "Type a callsign, route, or aircraft type."
         : `No ${scopeNoun} match.`;
   }
+  const groups = withPinnedFavorites(favoritesEnabled, { label: "Favorites", items: favoriteItems() }, scoped);
 
   return (
     <CommandPalette

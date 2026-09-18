@@ -61,10 +61,29 @@ export function CommandPalette({
   onScopeChange?: (scope: string) => void;
 }) {
   const flat = React.useMemo(() => groups.flatMap((g) => g.items), [groups]);
-  const [active, setActive] = React.useState(0);
+  // The highlight is held as a row *id*, not an index. Toggling a star rebuilds `groups` with a row
+  // added to (or removed from) a pinned group, which shifts every index after it — an index would
+  // then point at whatever slid into that slot, so the next Enter opened a row the user never chose
+  // and the next ⌘⇧F starred a different entity (VATUSA/OIS#312).
+  const [activeId, setActiveId] = React.useState<string | null>(null);
+  const active = Math.max(
+    0,
+    flat.findIndex((i) => i.id === activeId),
+  );
   const listRef = React.useRef<HTMLDivElement>(null);
 
-  React.useEffect(() => setActive(0), [query, open, scope]);
+  React.useEffect(() => setActiveId(null), [query, open, scope]);
+
+  /** Move the highlight `delta` rows, clamped at both ends. Resolves off the committed id, so a
+   *  held arrow key can't step twice from the same stale index. */
+  const move = (delta: 1 | -1) =>
+    setActiveId((current) => {
+      const i = Math.max(
+        0,
+        flat.findIndex((it) => it.id === current),
+      );
+      return flat[Math.min(flat.length - 1, Math.max(0, i + delta))]?.id ?? null;
+    });
 
   React.useEffect(() => {
     listRef.current?.querySelector<HTMLElement>(`[data-index="${active}"]`)?.scrollIntoView({ block: "nearest" });
@@ -82,10 +101,10 @@ export function CommandPalette({
       flat[active]?.onToggleStar?.();
     } else if (e.key === "ArrowDown") {
       e.preventDefault();
-      setActive((i) => Math.min(flat.length - 1, i + 1));
+      move(1);
     } else if (e.key === "ArrowUp") {
       e.preventDefault();
-      setActive((i) => Math.max(0, i - 1));
+      move(-1);
     } else if (e.key === "Enter") {
       e.preventDefault();
       select(flat[active]);
@@ -139,7 +158,7 @@ export function CommandPalette({
                       key={item.id}
                       type="button"
                       data-index={i}
-                      onMouseMove={() => setActive(i)}
+                      onMouseMove={() => setActiveId(item.id)}
                       onClick={() => select(item)}
                       className={cn(
                         "flex w-full items-center gap-2.5 rounded-sm px-2.5 py-2 text-left text-sm",

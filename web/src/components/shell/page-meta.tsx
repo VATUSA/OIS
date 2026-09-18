@@ -2,6 +2,8 @@ import {createContext, type ReactNode, useCallback, useContext, useLayoutEffect,
 import {useRouterState} from "@tanstack/react-router";
 import type {LucideIcon} from "lucide-react";
 
+import {itemForPath} from "@/lib/nav";
+
 export type ViewOption = { value: string; label: string; icon?: LucideIcon };
 
 /** What a route declares about itself in `staticData` (typed in router.tsx). */
@@ -72,6 +74,18 @@ export function useRouteMeta(): RouteMeta {
       return meta;
     },
   });
+}
+
+/**
+ * This page's title, exactly as the shell shows it: what the page itself set (an event's name,
+ * "KDEN configurations"), else the route's declared title, else the nav link's label. The nav label
+ * is last because `itemForPath` is a *prefix* match, so on its own it names every event "Events".
+ */
+export function usePageTitle(): string | undefined {
+  const meta = useRouteMeta();
+  const override = usePageHeaderOverride();
+  const pathname = useRouterState({ select: (s) => s.location.pathname });
+  return override.title ?? meta.title ?? itemForPath(pathname)?.item.label;
 }
 
 /** The page's current view (`?view=`), defaulting to its first declared view. */
