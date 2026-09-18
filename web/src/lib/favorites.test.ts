@@ -1,4 +1,4 @@
-import {describe, expect, it} from "vitest";
+import {describe, expect, it, vi} from "vitest";
 
 import type {Me} from "./auth";
 import {
@@ -6,8 +6,8 @@ import {
   canSeeFavorite,
   favoriteHref,
   favoritePageLabel,
+  favoriteRow,
   isFavorite,
-  isFavoriteHotkey,
   toggleFavorite,
   unavailable,
 } from "./favorites";
@@ -138,41 +138,54 @@ describe("unavailable", () => {
   });
 });
 
-describe("isFavoriteHotkey", () => {
-  const key = (over: Partial<KeyboardEvent>) =>
-    ({ metaKey: false, ctrlKey: false, shiftKey: false, key: "f", ...over }) as KeyboardEvent;
-
-  it("matches ⌘⇧F and Ctrl+⇧F", () => {
-    expect(isFavoriteHotkey(key({ metaKey: true, shiftKey: true }))).toBe(true);
-    expect(isFavoriteHotkey(key({ ctrlKey: true, shiftKey: true }))).toBe(true);
-    expect(isFavoriteHotkey(key({ metaKey: true, shiftKey: true, key: "F" }))).toBe(true);
-  });
-
-  it("leaves browser find (⌘F) and find-next (⌘G) alone", () => {
-    expect(isFavoriteHotkey(key({ metaKey: true }))).toBe(false);
-    expect(isFavoriteHotkey(key({ ctrlKey: true }))).toBe(false);
-    expect(isFavoriteHotkey(key({ metaKey: true, shiftKey: true, key: "g" }))).toBe(false);
-  });
-
-  it("ignores a bare ⇧F and a bare f", () => {
-    expect(isFavoriteHotkey(key({ shiftKey: true }))).toBe(false);
-    expect(isFavoriteHotkey(key({}))).toBe(false);
-  });
-});
-
 describe("favoritePageLabel", () => {
-  it("names a page that is itself a nav item", () => {
-    expect(favoritePageLabel("/ops/tmu", "ignored")).toBe("TMU");
-  });
-
-  // `itemForPath` is a prefix match for breadcrumbs, so every event used to be stored as "Events".
-  it("falls back to the document title below a nav item, so detail pages stay distinct", () => {
+  // The title the shell shows wins, so a favorite can never be named something else on screen.
+  it("uses the page's own title, so detail pages stay distinct", () => {
     expect(favoritePageLabel("/admin/planning/events/4821", "Cross the Pond")).toBe("Cross the Pond");
     expect(favoritePageLabel("/admin/planning/events/9137", "Light the Night")).toBe("Light the Night");
     expect(favoritePageLabel("/facility-map/ZDV", "ZDV — Denver Center")).toBe("ZDV — Denver Center");
   });
 
-  it("falls back to the document title for a path under no nav item at all", () => {
-    expect(favoritePageLabel("/nowhere", "Some page")).toBe("Some page");
+  it("falls back to the nav item only when the page declares no title", () => {
+    expect(favoritePageLabel("/ops/tmu", undefined)).toBe("TMU");
+  });
+
+  it("falls back to the path when there is no title and no nav item either", () => {
+    expect(favoritePageLabel("/nowhere", undefined)).toBe("/nowhere");
+  });
+
+  // The old fallback was `document.title`, which nothing in this app ever sets — every detail page
+  // was stored as the literal "OIS" from index.html.
+  it("never names a page after the static document title", () => {
+    expect(favoritePageLabel("/admin/planning/events/4821", undefined)).not.toBe("OIS");
+  });
+});
+
+describe("favoriteRow", () => {
+  const item = { id: "tmi:t1", label: "20MIT", onSelect: () => {} };
+  const fav: Favorite = { kind: "tmi", id: "t1", label: "20MIT", href: "/ops/tmu" };
+  const store = (starred: boolean) => ({ isFavorite: () => starred, toggle: vi.fn(() => true) });
+
+  it("offers no star at all to a signed-out visitor", () => {
+    const favorites = store(false);
+    const row = favoriteRow(null, favorites, item, fav);
+    expect(row).toEqual(item);
+    expect(row.onToggleStar).toBeUndefined();
+    expect(row.starred).toBeUndefined();
+  });
+
+  it("stars a row for a signed-in user, reflecting whether it is already a favorite", () => {
+    expect(favoriteRow(holding(), store(false), item, fav).starred).toBe(false);
+    expect(favoriteRow(holding(), store(true), item, fav).starred).toBe(true);
+  });
+
+  it("toggles this row's favorite, and pairs the row with its pinned twin", () => {
+    const favorites = store(false);
+    const row = favoriteRow(holding(), favorites, item, fav);
+    row.onToggleStar!();
+    expect(favorites.toggle).toHaveBeenCalledWith(fav);
+    // The pinned Favorites row is built from the same favorite, so both carry the same entity.
+    expect(row.entity).toBe("tmi:t1");
+    expect(favoriteRow(holding(), favorites, { ...item, id: "favorite:tmi:t1" }, fav).entity).toBe(row.entity);
   });
 });

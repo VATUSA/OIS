@@ -1,6 +1,6 @@
 import {useEffect, useMemo, useState} from "react";
 import {useNavigate, useRouterState} from "@tanstack/react-router";
-import {CommandPalette, type CommandGroup, type CommandItem, useToast} from "@ois/ui";
+import {CommandPalette, type CommandGroup, type CommandItem, isFavoriteHotkey, useToast} from "@ois/ui";
 import {
   CalendarClock,
   Home,
@@ -27,7 +27,7 @@ import {
   canSeeFavorite,
   favoriteHref,
   favoritePageLabel,
-  isFavoriteHotkey,
+  favoriteRow,
   unavailable,
   useFavorites,
 } from "@/lib/favorites";
@@ -37,6 +37,7 @@ import {fuzzyMatch, rankAircraft} from "@/lib/fuzzy";
 import {AREAS, type NavItem, canSeeItem, visibleGroups} from "@/lib/nav";
 import {hasPermission} from "@/lib/permissions";
 import {useTmis} from "@/lib/tmu";
+import {usePageTitle} from "./page-meta";
 
 /** Rows per group in the blended "All" view, and in a single focused scope. */
 const LIMIT = 6;
@@ -72,17 +73,21 @@ function FavoriteCurrentPage() {
   const favorites = useFavorites();
   const toast = useToast();
   const location = useRouterState({ select: (s) => s.location });
+  const pageTitle = usePageTitle();
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
       if (!isFavoriteHotkey(e)) return;
       e.preventDefault();
-      const label = favoritePageLabel(location.pathname, document.title);
-      const added = favorites.toggle({ kind: "page", id: location.pathname, label, href: location.href });
+      const label = favoritePageLabel(location.pathname, pageTitle);
+      // Keyed on the full href, not the path: several pages carry their subject in `search`
+      // (`?icao=`, `?facility=`, `?flight=`), and on the path alone two airports would be one
+      // favorite — starring the second silently un-starred the first (VATUSA/OIS#312).
+      const added = favorites.toggle({ kind: "page", id: location.href, label, href: location.href });
       if (added != null) toast.success(added ? `Added ${label} to favorites` : `Removed ${label} from favorites`);
     };
     window.addEventListener("keydown", onKey);
     return () => window.removeEventListener("keydown", onKey);
-  }, [favorites, toast, location]);
+  }, [favorites, toast, location, pageTitle]);
   return null;
 }
 
@@ -135,8 +140,7 @@ function Palette({ onClose }: { onClose: () => void }) {
       (s.id !== "tmis" || canTmis) && (s.id !== "events" || canEvents) && (s.id !== "dashboards" || canDashboards),
   );
 
-  // Favorites are per user: signed out there is nothing to fetch, and nothing that could be saved.
-  const favorites = useFavorites(!!me);
+  const favorites = useFavorites();
   const traffic = useTraffic();
   const facilities = useFacilityDirectory();
   const events = useUpcomingEvents({ enabled: canEvents });
@@ -172,11 +176,7 @@ function Palette({ onClose }: { onClose: () => void }) {
 
   const limit = scope === "all" ? LIMIT : SCOPED_LIMIT;
 
-  // Without `onToggleStar` the row shows no star — so a signed-out visitor is never offered one.
-  const star = (item: CommandItem, fav: Favorite): CommandItem =>
-    me
-      ? { ...item, starred: favorites.isFavorite(fav.kind, fav.id), onToggleStar: () => favorites.toggle(fav) }
-      : item;
+  const star = (item: CommandItem, fav: Favorite): CommandItem => favoriteRow(me, favorites, item, fav);
 
   const pageItems = (): CommandItem[] =>
     rank(q, pages, (p) => `${p.label} ${p.context}`, limit).map((p) =>

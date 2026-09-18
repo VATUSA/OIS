@@ -13,12 +13,28 @@ export type CommandItem = {
   /** Whether the item is a favorite; with `onToggleStar`, the row shows a star (⌘⇧F toggles it). */
   starred?: boolean;
   onToggleStar?: () => void;
+  /**
+   * What this row is *about*, when one thing can appear as more than one row — a favorited TMI shows
+   * both in the pinned Favorites group and in TMIs. Rows sharing an `entity` are the same thing, so
+   * the highlight can follow it when the row it is on disappears (VATUSA/OIS#312).
+   */
+  entity?: string;
 };
 
 export type CommandGroup = { label: string; items: CommandItem[] };
 
 /** A search scope the palette can narrow to (e.g. "Aircraft"); the first scope is the default. */
 export type CommandScope = { id: string; label: string };
+
+/**
+ * Whether a keydown is the favorite hotkey, ⌘⇧F / Ctrl+Shift+F. Shift is what keeps it clear of the
+ * browser's own find (⌘F) and find-next (⌘G), so it is part of the match, not an afterthought. It
+ * lives here, beside the palette's own handler, so the app's global listener matches on the very same
+ * predicate rather than a second copy that can drift (VATUSA/OIS#312).
+ */
+export function isFavoriteHotkey(e: Pick<KeyboardEvent, "metaKey" | "ctrlKey" | "shiftKey" | "key">): boolean {
+  return (e.metaKey || e.ctrlKey) && e.shiftKey && e.key.toLowerCase() === "f";
+}
 
 /** The scope `dir` steps (1 = next, -1 = previous) from `current`, wrapping at either end. */
 export function cycleScope(ids: readonly string[], current: string, dir: 1 | -1): string {
@@ -28,14 +44,29 @@ export function cycleScope(ids: readonly string[], current: string, dir: 1 | -1)
 }
 
 /**
- * The index of the highlighted row: the one carrying `activeId`, else the first. The palette tracks
- * the highlighted *item* rather than a raw index, so rebuilding `groups` — starring a row prepends
- * one to the pinned Favorites group — keeps the highlight on the row the user is actually on
- * (VATUSA/OIS#312).
+ * The index of the highlighted row after `groups` is rebuilt. The palette tracks the highlighted
+ * *item*, not a raw index, because starring a row prepends one to the pinned Favorites group and an
+ * index would slide to the row above (VATUSA/OIS#312). Resolved in three steps:
+ *
+ * 1. the row carrying `activeId` — the ordinary case, the row simply moved;
+ * 2. failing that, another row for the same `entity` — un-starring a pinned favorite removes *that*
+ *    row, and the highlight should land on the same thing's row in its own group, so pressing ⌘⇧F
+ *    again undoes what the user just did instead of un-starring a neighbour;
+ * 3. failing that, `fallback` — the position the highlight already held, clamped. A row can vanish
+ *    with no user input at all (traffic refetches every 15s), and jumping to the top would open the
+ *    wrong row on the next Enter.
  */
-export function activeIndex(items: readonly { id: string }[], activeId: string | null): number {
-  if (activeId == null) return 0;
-  return Math.max(0, items.findIndex((i) => i.id === activeId));
+export function activeIndex(
+  items: readonly { id: string; entity?: string }[],
+  active: { id: string; entity?: string } | null,
+  fallback = 0,
+): number {
+  if (active == null) return 0;
+  const byId = items.findIndex((i) => i.id === active.id);
+  if (byId >= 0) return byId;
+  const byEntity = active.entity == null ? -1 : items.findIndex((i) => i.entity === active.entity);
+  if (byEntity >= 0) return byEntity;
+  return Math.min(Math.max(0, fallback), Math.max(0, items.length - 1));
 }
 
 /**
@@ -72,15 +103,25 @@ export function CommandPalette({
   onScopeChange?: (scope: string) => void;
 }) {
   const flat = React.useMemo(() => groups.flatMap((g) => g.items), [groups]);
-  const [activeId, setActiveId] = React.useState<string | null>(null);
-  const active = activeIndex(flat, activeId);
+  const [activeId, setActiveId] = React.useState<{ id: string; entity?: string } | null>(null);
+  // The position the highlight last resolved to, for a row that disappears out from under it. Written
+  // after paint, so during the render where the row vanished it still holds the previous index.
+  const lastIndex = React.useRef(0);
+  const active = activeIndex(flat, activeId, lastIndex.current);
   const listRef = React.useRef<HTMLDivElement>(null);
   // Highlight the row `step` away, by id — an index would go stale the next time `groups` changes.
   // Resolved from the previous id rather than `active` so batched keydowns don't both read one index.
   const move = (step: 1 | -1) =>
-    setActiveId((id) => flat[Math.min(flat.length - 1, Math.max(0, activeIndex(flat, id) + step))]?.id ?? null);
+    setActiveId((prev) => {
+      const next = flat[Math.min(flat.length - 1, Math.max(0, activeIndex(flat, prev, lastIndex.current) + step))];
+      return next ? { id: next.id, entity: next.entity } : null;
+    });
 
   React.useEffect(() => setActiveId(null), [query, open, scope]);
+
+  React.useEffect(() => {
+    lastIndex.current = active;
+  }, [active]);
 
   React.useEffect(() => {
     listRef.current?.querySelector<HTMLElement>(`[data-index="${active}"]`)?.scrollIntoView({ block: "nearest" });
@@ -93,7 +134,7 @@ export function CommandPalette({
   };
 
   const onKeyDown = (e: React.KeyboardEvent) => {
-    if ((e.metaKey || e.ctrlKey) && e.shiftKey && e.key.toLowerCase() === "f") {
+    if (isFavoriteHotkey(e)) {
       e.preventDefault();
       flat[active]?.onToggleStar?.();
     } else if (e.key === "ArrowDown") {
@@ -154,7 +195,7 @@ export function CommandPalette({
                       item={item}
                       index={i}
                       active={i === active}
-                      onHighlight={() => setActiveId(item.id)}
+                      onHighlight={() => setActiveId({ id: item.id, entity: item.entity })}
                       onSelect={() => select(item)}
                     />
                   );

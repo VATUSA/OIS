@@ -1,7 +1,7 @@
-import {useToast} from "@ois/ui";
+import {type CommandItem, useToast} from "@ois/ui";
 import {useQueryClient} from "@tanstack/react-query";
 
-import type {Me} from "./auth";
+import {type Me, useMe} from "./auth";
 import {canOpenPath, canSeeItem, itemForPath} from "./nav";
 import {hasPermission} from "./permissions";
 import {usePreferences, useSavePreferences} from "./preferences";
@@ -76,21 +76,37 @@ export function unavailable(f: Favorite, sources: FavoriteSources): boolean {
 }
 
 /**
- * Whether a keydown is the favorite hotkey, ⌘⇧F / Ctrl+Shift+F. Shift is what keeps it clear of the
- * browser's own find (⌘F) and find-next (⌘G), so it is part of the match, not an afterthought.
+ * What to call the current page when favoriting it: the title the shell is showing for it
+ * (`usePageTitle`), which is what a page sets for itself — an event's name, a facility's. Only when a
+ * page declares nothing does this fall back to its nav item, and `itemForPath` is a *prefix* match
+ * built for breadcrumbs, so that last resort can name a detail page after its parent ("Events").
+ *
+ * It deliberately does **not** fall back to `document.title`: nothing in this app ever sets it, so
+ * that path stored the literal "OIS" for every detail page (VATUSA/OIS#312).
  */
-export function isFavoriteHotkey(e: Pick<KeyboardEvent, "metaKey" | "ctrlKey" | "shiftKey" | "key">): boolean {
-  return (e.metaKey || e.ctrlKey) && e.shiftKey && e.key.toLowerCase() === "f";
+export function favoritePageLabel(pathname: string, pageTitle: string | undefined): string {
+  return pageTitle ?? itemForPath(pathname)?.item.label ?? pathname;
 }
 
 /**
- * What to call the current page when favoriting it. `itemForPath` is a *prefix* match built for
- * breadcrumbs, so a detail page resolves to its parent nav item — every event would be stored as
- * "Events". Only an exact hit names the page; anything deeper falls back to the document title.
+ * A command-palette row with its favorite star attached. Signed out the row is returned untouched —
+ * favorites are per user, so there is nothing to star and a toggle could only 401. `entity` pairs the
+ * row with its twin in the pinned Favorites group, so the palette's highlight can follow the thing
+ * itself when one of the two rows disappears.
  */
-export function favoritePageLabel(pathname: string, documentTitle: string): string {
-  const hit = itemForPath(pathname);
-  return hit && hit.item.to === pathname ? hit.item.label : documentTitle;
+export function favoriteRow(
+  me: Me | null | undefined,
+  favorites: Pick<ReturnType<typeof useFavorites>, "isFavorite" | "toggle">,
+  item: CommandItem,
+  fav: Favorite,
+): CommandItem {
+  if (me == null) return item;
+  return {
+    ...item,
+    entity: favoriteKey(fav),
+    starred: favorites.isFavorite(fav.kind, fav.id),
+    onToggleStar: () => void favorites.toggle(fav),
+  };
 }
 
 export function isFavorite(items: readonly Favorite[], kind: FavoriteKind, id: string): boolean {
@@ -106,13 +122,15 @@ export function toggleFavorite(items: readonly Favorite[], fav: Favorite): Favor
 /**
  * This user's favorites, with an optimistic toggle persisted to their preferences. `toggle` returns
  * whether the entity is now a favorite, or `null` (and changes nothing) while the stored list is
- * still loading — saving before then would overwrite it. Pass `enabled: false` when signed out:
- * favorites are per user, so there is nothing to fetch and nothing that could be saved.
+ * still loading — saving before then would overwrite it. Favorites are per user, so signed out it
+ * fetches nothing and holds nothing: that is read from the session here rather than passed in, so no
+ * caller can wire it up to fetch a signed-out visitor's preferences and collect a 401 per palette.
  */
-export function useFavorites(enabled = true) {
+export function useFavorites() {
+  const { data: me } = useMe();
   const queryClient = useQueryClient();
   const toast = useToast();
-  const prefs = usePreferences<FavoritesPrefs>(NAMESPACE, { enabled });
+  const prefs = usePreferences<FavoritesPrefs>(NAMESPACE, { enabled: me != null });
   const save = useSavePreferences<FavoritesPrefs>(NAMESPACE);
   const items = prefs.data?.items ?? [];
 

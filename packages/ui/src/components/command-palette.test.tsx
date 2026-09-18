@@ -2,7 +2,7 @@ import * as React from "react";
 import {renderToStaticMarkup} from "react-dom/server";
 import {describe, expect, it} from "vitest";
 
-import {CommandRow, ScopeChips, activeIndex, cycleScope} from "./command-palette";
+import {CommandRow, ScopeChips, activeIndex, cycleScope, isFavoriteHotkey} from "./command-palette";
 
 describe("cycleScope", () => {
   const ids = ["all", "aircraft", "tmis"];
@@ -53,12 +53,7 @@ describe("activeIndex", () => {
   });
 
   it("finds the highlighted row", () => {
-    expect(activeIndex(rows, "b")).toBe(1);
-  });
-
-  it("falls back to the first row when the highlighted one is gone", () => {
-    expect(activeIndex(rows, "vanished")).toBe(0);
-    expect(activeIndex([], "b")).toBe(0);
+    expect(activeIndex(rows, { id: "b" })).toBe(1);
   });
 
   // VATUSA/OIS#312: starring prepends a row to the pinned Favorites group. Holding a raw index here
@@ -66,15 +61,56 @@ describe("activeIndex", () => {
   // one. The highlight must follow the *item* across the rebuild.
   it("keeps the highlight on the same row when a favorite is prepended", () => {
     const before = [{ id: "page:/ops/advisories" }, { id: "page:/ops/tmu" }];
-    const highlighted = before[1].id;
+    const highlighted = { id: "page:/ops/tmu" };
     expect(activeIndex(before, highlighted)).toBe(1);
 
     const afterStarring = [{ id: "favorite:page:/ops/tmu" }, ...before];
-    expect(activeIndex(afterStarring, highlighted)).toBe(2);
     expect(afterStarring[activeIndex(afterStarring, highlighted)].id).toBe("page:/ops/tmu");
+  });
 
-    // Un-starring removes it again; the highlight is still the row the user arrowed to.
-    expect(afterStarring.slice(1)[activeIndex(before, highlighted)].id).toBe("page:/ops/tmu");
+  // Un-starring a pinned favorite removes the very row the highlight is on. Landing on the same
+  // thing's row in its own group is what makes a second ⌘⇧F undo the first rather than hit a
+  // neighbour.
+  it("follows the entity when the highlighted row is gone", () => {
+    const after = [{ id: "favorite:page:/ops/tmu", entity: "page:/ops/tmu" }, { id: "page:/ops/advisories", entity: "page:/ops/advisories" }, { id: "page:/ops/tmu", entity: "page:/ops/tmu" }];
+    const highlighted = { id: "favorite:page:/ops/airport", entity: "page:/ops/airport" };
+    // Airport is gone entirely — nothing to follow, so it holds its position instead of jumping.
+    expect(activeIndex(after, highlighted, 2)).toBe(2);
+    // TMU's pinned row is gone but its Pages row remains: follow it.
+    expect(activeIndex(after.slice(1), { id: "favorite:page:/ops/tmu", entity: "page:/ops/tmu" }, 0)).toBe(1);
+  });
+
+  it("holds the position it had when the row vanishes, clamped to the list", () => {
+    expect(activeIndex(rows, { id: "vanished" }, 2)).toBe(2);
+    expect(activeIndex(rows, { id: "vanished" }, 9)).toBe(2);
+    expect(activeIndex(rows, { id: "vanished" }, -1)).toBe(0);
+    expect(activeIndex([], { id: "b" }, 3)).toBe(0);
+  });
+
+  it("without a remembered position, a vanished row still falls back to the first", () => {
+    expect(activeIndex(rows, { id: "vanished" })).toBe(0);
+  });
+});
+
+describe("isFavoriteHotkey", () => {
+  const key = (over: Partial<KeyboardEvent>) =>
+    ({ metaKey: false, ctrlKey: false, shiftKey: false, key: "f", ...over }) as KeyboardEvent;
+
+  it("matches ⌘⇧F and Ctrl+⇧F", () => {
+    expect(isFavoriteHotkey(key({ metaKey: true, shiftKey: true }))).toBe(true);
+    expect(isFavoriteHotkey(key({ ctrlKey: true, shiftKey: true }))).toBe(true);
+    expect(isFavoriteHotkey(key({ metaKey: true, shiftKey: true, key: "F" }))).toBe(true);
+  });
+
+  it("leaves browser find (⌘F) and find-next (⌘G) alone", () => {
+    expect(isFavoriteHotkey(key({ metaKey: true }))).toBe(false);
+    expect(isFavoriteHotkey(key({ ctrlKey: true }))).toBe(false);
+    expect(isFavoriteHotkey(key({ metaKey: true, shiftKey: true, key: "g" }))).toBe(false);
+  });
+
+  it("ignores a bare ⇧F and a bare f", () => {
+    expect(isFavoriteHotkey(key({ shiftKey: true }))).toBe(false);
+    expect(isFavoriteHotkey(key({}))).toBe(false);
   });
 });
 

@@ -2,6 +2,8 @@ import {createContext, type ReactNode, useCallback, useContext, useLayoutEffect,
 import {useRouterState} from "@tanstack/react-router";
 import type {LucideIcon} from "lucide-react";
 
+import {itemForPath} from "@/lib/nav";
+
 export type ViewOption = { value: string; label: string; icon?: LucideIcon };
 
 /** What a route declares about itself in `staticData` (typed in router.tsx). */
@@ -72,6 +74,28 @@ export function useRouteMeta(): RouteMeta {
       return meta;
     },
   });
+}
+
+/**
+ * What this page is called: what the page set at runtime, else what its route declares, else the nav
+ * item it *is*. One home for the expression, so the header, the breadcrumbs and a page favorited with
+ * ⌘⇧F can't disagree about a page's name (VATUSA/OIS#312). Note this is not `document.title` — nothing
+ * in the app sets that; it is the static "OIS" from `index.html`.
+ */
+export function usePageTitle(): string | undefined {
+  const meta = useRouteMeta();
+  const override = usePageHeaderOverride();
+  const pathname = useRouterState({ select: (s) => s.location.pathname });
+  return pageTitle(override, meta, pathname);
+}
+
+/** `usePageTitle`'s rule, without the hooks, so it can be asserted on directly. */
+export function pageTitle(
+  override: Pick<PageHeaderOverride, "title">,
+  meta: Pick<RouteMeta, "title">,
+  pathname: string,
+): string | undefined {
+  return override.title ?? meta.title ?? itemForPath(pathname)?.item.label;
 }
 
 /** The page's current view (`?view=`), defaulting to its first declared view. */
