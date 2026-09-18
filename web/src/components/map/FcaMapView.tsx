@@ -16,6 +16,8 @@ import {
   useDataStatus,
   useDeleteFca,
   useFcaCounts,
+  cycleAgeDays,
+  STALE_CYCLE_DAYS,
   useFcas,
   useFcaTraffic,
   useFcaTrafficMany,
@@ -66,13 +68,6 @@ import {
 const BOUNDARIES = boundariesGeo as GeoJSON.FeatureCollection;
 /** deck initial camera framing the CONUS (matches the legacy US_HOME zoom ~4.3 at zoom 3.9). */
 const FCA_INITIAL = { longitude: US_HOME.longitude, latitude: US_HOME.latitude, zoom: 3.9 };
-
-function cycleAgeDays(cycle: string): number | null {
-  const m = /^(\d{4})-(\d{2})-(\d{2})$/.exec(cycle);
-  if (!m) return null;
-  const d = Date.UTC(Number(m[1]), Number(m[2]) - 1, Number(m[3]));
-  return Math.floor((Date.now() - d) / 86_400_000);
-}
 
 /** One draggable row in the sidebar FCA list (see #109 — order is per-viewer, via `usePersistedOrder`). */
 function FcaRow({
@@ -407,7 +402,7 @@ export function FcaMapView({
   const aircraftRoute = useAircraftRoute(routeCallsign);
   const dataStatus = useDataStatus();
   const cycleAge = dataStatus.data ? cycleAgeDays(dataStatus.data.nav_cycle) : null;
-  const navStale = cycleAge != null && cycleAge > 35;
+  const navStale = cycleAge != null && cycleAge > STALE_CYCLE_DAYS;
   // Nav staleness is global, so the refresh is always the flow permission — not `canEdit`, which
   // resolves to the event permission in event mode.
   const refreshData = useRefreshData();
@@ -1088,7 +1083,7 @@ export function FcaMapView({
                   type="button"
                   onClick={() => refreshData.mutate()}
                   disabled={refreshData.isPending}
-                  className="rounded-full border border-warning/40 px-2 py-0.5 font-semibold text-warning transition-colors hover:bg-warning/15 disabled:opacity-50"
+                  className="rounded-full border border-warning/40 px-2 py-0.5 font-semibold text-warning transition-colors hover:bg-warning/15 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-warning/60 disabled:opacity-50"
                 >
                   {refreshData.isPending ? "Refreshing…" : "Refresh"}
                 </button>
