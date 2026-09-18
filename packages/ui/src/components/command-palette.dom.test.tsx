@@ -1,0 +1,175 @@
+// @vitest-environment jsdom
+import * as React from "react";
+import {act} from "react";
+import {createRoot} from "react-dom/client";
+import {afterEach, beforeAll, describe, expect, it} from "vitest";
+
+import {CommandPalette} from "./command-palette";
+
+// `renderToStaticMarkup` can assert a row's markup but not the palette's wiring, and the wiring is
+// where every #312 bug lived — a raw-index revert used to pass the whole static suite. These drive
+// the real component through real keydowns (VATUSA/OIS#312).
+declare global {
+  var IS_REACT_ACT_ENVIRONMENT: boolean;
+}
+
+beforeAll(() => {
+  // jsdom has no layout.
+  Element.prototype.scrollIntoView = () => {};
+  globalThis.IS_REACT_ACT_ENVIRONMENT = true;
+});
+
+const roots: { root: ReturnType<typeof createRoot>; host: HTMLElement }[] = [];
+afterEach(() => {
+  // The palette portals to document.body — tear every mount down or the next test keys into this one.
+  for (const { root, host } of roots.splice(0)) {
+    act(() => root.unmount());
+    host.remove();
+  }
+  document.body.innerHTML = "";
+});
+
+/** Mounts the palette with the same group-rebuild behaviour as command-search.tsx. */
+function mountPalette() {
+  const host = document.createElement("div");
+  document.body.appendChild(host);
+  const opened: string[] = [];
+  let favorites: string[] = [];
+
+  function Harness() {
+    const [, force] = React.useState(0);
+    const toggle = (id: string) => {
+      favorites = favorites.includes(id) ? favorites.filter((f) => f !== id) : [id, ...favorites];
+      force((n) => n + 1);
+    };
+    const pages = [
+      { id: "page:/ops/advisories", label: "Advisories" },
+      { id: "page:/ops/tmu", label: "TMU" },
+      { id: "page:/ops/airport", label: "Airport" },
+    ];
+    const groups = [
+      {
+        label: "Favorites",
+        items: favorites.map((f) => ({
+          id: `favorite:${f}`,
+          entityId: f,
+          label: pages.find((p) => p.id === f)!.label,
+          onSelect: () => opened.push(`fav:${f}`),
+          starred: true,
+          onToggleStar: () => toggle(f),
+        })),
+      },
+      {
+        label: "Pages",
+        items: pages.map((p) => ({
+          id: p.id,
+          entityId: p.id,
+          label: p.label,
+          onSelect: () => opened.push(p.id),
+          starred: favorites.includes(p.id),
+          onToggleStar: () => toggle(p.id),
+        })),
+      },
+    ];
+    return (
+      <CommandPalette
+        open
+        onClose={() => {}}
+        query=""
+        onQueryChange={() => {}}
+        groups={groups}
+        placeholder="search"
+        empty="none"
+      />
+    );
+  }
+
+  const root = createRoot(host);
+  roots.push({ root, host });
+  act(() => root.render(<Harness />));
+  const input = () => document.querySelector("input")!;
+  const key = (init: KeyboardEventInit) =>
+    act(() => void input().dispatchEvent(new KeyboardEvent("keydown", { bubbles: true, ...init })));
+  // `data-index` sits on the row container, which is a <div> once the star is its own button — match
+  // the attribute, not the element, so this holds either way.
+  const rows = () => Array.from(document.querySelectorAll("[data-index]"));
+  const highlighted = () => rows().find((r) => r.className.includes("bg-panel-2"))?.textContent;
+  const starOf = (label: string) =>
+    rows()
+      .find((r) => r.textContent?.includes(label))
+      ?.querySelector<HTMLButtonElement>("button[aria-pressed]");
+  return { key, rows, highlighted, starOf, favs: () => favorites, opened };
+}
+
+describe("⌘⇧F must not move the highlight (VATUSA/OIS#312)", () => {
+  it("keeps the highlight on the arrowed-to row after starring", () => {
+    const p = mountPalette();
+    p.key({ key: "ArrowDown" });
+    expect(p.highlighted()).toContain("TMU");
+    p.key({ key: "f", metaKey: true, shiftKey: true });
+    expect(p.favs()).toEqual(["page:/ops/tmu"]);
+    expect(p.highlighted()).toContain("TMU");
+  });
+
+  it("re-stars the same row when the undo press follows", () => {
+    const p = mountPalette();
+    p.key({ key: "f", metaKey: true, shiftKey: true });
+    expect(p.favs()).toEqual(["page:/ops/advisories"]);
+    p.key({ key: "f", metaKey: true, shiftKey: true });
+    expect(p.favs()).toEqual([]);
+    p.key({ key: "f", metaKey: true, shiftKey: true });
+    expect(p.favs()).toEqual(["page:/ops/advisories"]);
+  });
+
+  it("with two favorites, undoing the second does not unstar the first", () => {
+    const p = mountPalette();
+    p.key({ key: "ArrowDown" });
+    p.key({ key: "ArrowDown" });
+    p.key({ key: "f", metaKey: true, shiftKey: true });
+    p.key({ key: "ArrowUp" });
+    expect(p.highlighted()).toContain("TMU");
+    p.key({ key: "f", metaKey: true, shiftKey: true });
+    expect(new Set(p.favs())).toEqual(new Set(["page:/ops/airport", "page:/ops/tmu"]));
+    p.key({ key: "f", metaKey: true, shiftKey: true });
+    expect(p.favs()).toEqual(["page:/ops/airport"]);
+    p.key({ key: "f", metaKey: true, shiftKey: true });
+    expect(p.favs()).toEqual(["page:/ops/tmu", "page:/ops/airport"]);
+  });
+
+  it("un-starring a row arrowed to INSIDE the Favorites group holds the highlight", () => {
+    const p = mountPalette();
+    p.key({ key: "ArrowDown" });
+    p.key({ key: "ArrowDown" });
+    p.key({ key: "f", metaKey: true, shiftKey: true }); // Airport
+    p.key({ key: "ArrowUp" });
+    p.key({ key: "f", metaKey: true, shiftKey: true }); // TMU
+    expect(p.favs()).toEqual(["page:/ops/tmu", "page:/ops/airport"]);
+    p.key({ key: "ArrowUp" });
+    p.key({ key: "ArrowUp" });
+    expect(p.highlighted()).toContain("Airport");
+    p.key({ key: "f", metaKey: true, shiftKey: true }); // remove Airport
+    expect(p.favs()).toEqual(["page:/ops/tmu"]);
+    // The undo press must put *Airport* back and leave TMU alone. Removing the pinned row moved the
+    // highlight to the Pages row for the same entity, which is what makes that reachable; toggling
+    // prepends, so the restored favorite is first.
+    p.key({ key: "f", metaKey: true, shiftKey: true }); // undo
+    expect(p.favs()).toEqual(["page:/ops/airport", "page:/ops/tmu"]);
+  });
+
+  it("leaves browser find (⌘F) and find-next (⌘⇧G) alone", () => {
+    const p = mountPalette();
+    p.key({ key: "f", metaKey: true });
+    p.key({ key: "g", metaKey: true, shiftKey: true });
+    expect(p.favs()).toEqual([]);
+  });
+
+  // M14: the star is its own button beside the row, so activating it cannot select the row.
+  it("clicking the star toggles the favorite without opening the row", () => {
+    const p = mountPalette();
+    const star = p.starOf("Advisories");
+    expect(star).toBeTruthy();
+    act(() => star!.click());
+    expect(p.favs()).toEqual(["page:/ops/advisories"]);
+    expect(p.opened).toEqual([]);
+  });
+});

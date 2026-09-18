@@ -13,9 +13,26 @@ export type CommandItem = {
   /** Whether the item is a favorite; with `onToggleStar`, the row shows a star (⌘⇧F toggles it). */
   starred?: boolean;
   onToggleStar?: () => void;
+  /**
+   * What this row *is*, when more than one row can stand for the same thing — a pinned Favorites row
+   * and the source row it was starred from share an `entityId` but not an `id`. Un-starring removes
+   * the pinned row, and this is what lets the highlight land on its twin instead of sliding
+   * (VATUSA/OIS#312).
+   */
+  entityId?: string;
 };
 
 export type CommandGroup = { label: string; items: CommandItem[] };
+
+/**
+ * Whether a keydown is the favorite hotkey, ⌘⇧F / Ctrl+Shift+F. Shift is what keeps it clear of the
+ * browser's own find (⌘F) and find-next (⌘G), so it is part of the match, not an afterthought.
+ * It lives here, with the palette that fires it, so the open-palette and closed-palette paths cannot
+ * drift — `web` imports this one rather than keeping a second copy (VATUSA/OIS#312).
+ */
+export function isFavoriteHotkey(e: Pick<KeyboardEvent, "metaKey" | "ctrlKey" | "shiftKey" | "key">): boolean {
+  return (e.metaKey || e.ctrlKey) && e.shiftKey && e.key.toLowerCase() === "f";
+}
 
 /** A search scope the palette can narrow to (e.g. "Aircraft"); the first scope is the default. */
 export type CommandScope = { id: string; label: string };
@@ -28,14 +45,34 @@ export function cycleScope(ids: readonly string[], current: string, dir: 1 | -1)
 }
 
 /**
- * The index of the highlighted row: the one carrying `activeId`, else the first. The palette tracks
- * the highlighted *item* rather than a raw index, so rebuilding `groups` — starring a row prepends
- * one to the pinned Favorites group — keeps the highlight on the row the user is actually on
- * (VATUSA/OIS#312).
+ * The index of the highlighted row. The palette tracks the highlighted *item* rather than a raw
+ * index, so rebuilding `groups` — starring a row prepends one to the pinned Favorites group — keeps
+ * the highlight on the row the user is actually on (VATUSA/OIS#312).
+ *
+ * When the highlighted row has *gone* the answer matters just as much, because ⌘⇧F is a toggle and
+ * the reflex after one is to press it again. Resolving in three steps:
+ *
+ *   1. the row carrying `activeId`;
+ *   2. else a row standing for the same thing — un-starring drops the pinned Favorites row, so the
+ *      highlight moves to the source row it was starred from and the undo press puts it back;
+ *   3. else `fallback`, the index last resolved, clamped — hold position rather than teleporting to
+ *      the top. A row can vanish with no user input at all (traffic refetches every 15s), and
+ *      collapsing to 0 pointed the next Enter at a flight nobody picked.
  */
-export function activeIndex(items: readonly { id: string }[], activeId: string | null): number {
+export function activeIndex(
+  items: readonly { id: string; entityId?: string }[],
+  activeId: string | null,
+  // What the highlight last resolved to. The vanished row is, by definition, no longer in `items`,
+  // so its entity and position have to be remembered rather than looked up.
+  last: { index: number; entityId?: string } = { index: 0 },
+): number {
+  if (items.length === 0) return 0;
   if (activeId == null) return 0;
-  return Math.max(0, items.findIndex((i) => i.id === activeId));
+  const exact = items.findIndex((i) => i.id === activeId);
+  if (exact >= 0) return exact;
+  const twin = last.entityId == null ? -1 : items.findIndex((i) => i.entityId === last.entityId);
+  if (twin >= 0) return twin;
+  return Math.min(Math.max(0, last.index), items.length - 1);
 }
 
 /**
@@ -73,12 +110,19 @@ export function CommandPalette({
 }) {
   const flat = React.useMemo(() => groups.flatMap((g) => g.items), [groups]);
   const [activeId, setActiveId] = React.useState<string | null>(null);
-  const active = activeIndex(flat, activeId);
+  // Written from an effect, so during the render where the highlighted row vanishes this still holds
+  // where it was and what it stood for — which is exactly what `activeIndex` falls back to.
+  const last = React.useRef<{ index: number; entityId?: string }>({ index: 0 });
+  const active = activeIndex(flat, activeId, last.current);
   const listRef = React.useRef<HTMLDivElement>(null);
   // Highlight the row `step` away, by id — an index would go stale the next time `groups` changes.
   // Resolved from the previous id rather than `active` so batched keydowns don't both read one index.
   const move = (step: 1 | -1) =>
     setActiveId((id) => flat[Math.min(flat.length - 1, Math.max(0, activeIndex(flat, id) + step))]?.id ?? null);
+
+  React.useEffect(() => {
+    last.current = { index: active, entityId: flat[active]?.entityId };
+  }, [active, flat]);
 
   React.useEffect(() => setActiveId(null), [query, open, scope]);
 
@@ -93,7 +137,7 @@ export function CommandPalette({
   };
 
   const onKeyDown = (e: React.KeyboardEvent) => {
-    if ((e.metaKey || e.ctrlKey) && e.shiftKey && e.key.toLowerCase() === "f") {
+    if (isFavoriteHotkey(e)) {
       e.preventDefault();
       flat[active]?.onToggleStar?.();
     } else if (e.key === "ArrowDown") {
@@ -154,7 +198,7 @@ export function CommandPalette({
                       item={item}
                       index={i}
                       active={i === active}
-                      onHighlight={() => setActiveId(item.id)}
+                      onActivate={() => setActiveId(item.id)}
                       onSelect={() => select(item)}
                     />
                   );
@@ -169,57 +213,60 @@ export function CommandPalette({
 }
 
 /**
- * One result row: icon, label, sublabel, the favorite star and the ↵ hint. Its own component so it
- * can be rendered — and asserted on — without the palette's portal (VATUSA/OIS#312). The star shows
- * while the row is starred *or* highlighted, so a favorite stays marked as the highlight moves on.
+ * One result row: the selection button and the favorite star side by side. The star is a **sibling**
+ * of the row button, never a descendant — a nested interactive role has no defined behaviour, so
+ * assistive tech may expose one control, the wrong one, or neither (VATUSA/OIS#336). Being siblings
+ * is also what keeps a star click from selecting the row. The active tint sits on the container so
+ * the star stays inside the highlight, and the Enter hint sits inside the selection button so the
+ * whole row minus the star still selects.
  */
 export function CommandRow({
   item,
   index,
   active,
-  onHighlight,
+  onActivate,
   onSelect,
 }: {
   item: CommandItem;
   index: number;
   active: boolean;
-  onHighlight?: () => void;
-  onSelect?: () => void;
+  onActivate: () => void;
+  onSelect: () => void;
 }) {
   const Icon = item.icon;
   return (
-    <button
-      type="button"
+    <div
       data-index={index}
-      onMouseMove={onHighlight}
-      onClick={onSelect}
+      onMouseMove={onActivate}
       className={cn(
-        "flex w-full items-center gap-2.5 rounded-sm px-2.5 py-2 text-left text-sm",
+        "flex w-full items-center gap-2.5 rounded-sm pr-2.5 text-sm",
         active ? "bg-panel-2 text-ink" : "text-ink-2",
       )}
     >
-      {Icon && <Icon className={cn("size-4 shrink-0", active ? "text-brand-ink" : "text-ink-3")} />}
-      <span className="min-w-0 flex-1 truncate">{item.label}</span>
-      {item.sublabel && <span className="shrink-0 font-mono text-xs text-ink-3">{item.sublabel}</span>}
+      <button
+        type="button"
+        onClick={onSelect}
+        className="flex min-w-0 flex-1 items-center gap-2.5 py-2 pl-2.5 text-left"
+      >
+        {Icon && <Icon className={cn("size-4 shrink-0", active ? "text-brand-ink" : "text-ink-3")} />}
+        <span className="min-w-0 flex-1 truncate">{item.label}</span>
+        {item.sublabel && <span className="shrink-0 font-mono text-xs text-ink-3">{item.sublabel}</span>}
+        {active && <CornerDownLeft className="size-3.5 shrink-0 text-ink-3" />}
+      </button>
       {item.onToggleStar && (item.starred || active) && (
-        <span
-          role="button"
-          tabIndex={-1}
+        <button
+          type="button"
           aria-label={item.starred ? "Remove from favorites" : "Add to favorites"}
           aria-pressed={!!item.starred}
+          // Keep focus in the search field so the keyboard keeps working after a click.
           onMouseDown={(e) => e.preventDefault()}
-          onClick={(e) => {
-            // The star sits inside the row button: without this the row would navigate as well.
-            e.stopPropagation();
-            item.onToggleStar?.();
-          }}
+          onClick={() => item.onToggleStar?.()}
           className="shrink-0 rounded-sm p-0.5 text-ink-3 hover:text-ink"
         >
           <Star className={cn("size-3.5", item.starred && "fill-current text-brand-ink")} />
-        </span>
+        </button>
       )}
-      {active && <CornerDownLeft className="size-3.5 shrink-0 text-ink-3" />}
-    </button>
+    </div>
   );
 }
 

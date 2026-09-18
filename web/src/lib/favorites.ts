@@ -6,6 +6,10 @@ import {canOpenPath, canSeeItem, itemForPath} from "./nav";
 import {hasPermission} from "./permissions";
 import {usePreferences, useSavePreferences} from "./preferences";
 
+// ⌘⇧F is matched in one place, next to the palette that also fires it — re-exported here so this
+// module stays the one import for everything favorites (VATUSA/OIS#312).
+export { isFavoriteHotkey } from "@ois/ui";
+
 const NAMESPACE = "favorites";
 
 export type FavoriteKind = "aircraft" | "tmi" | "event" | "dashboard" | "airport" | "page";
@@ -73,24 +77,6 @@ export function unavailable(f: Favorite, sources: FavoriteSources): boolean {
     default:
       return false;
   }
-}
-
-/**
- * Whether a keydown is the favorite hotkey, ⌘⇧F / Ctrl+Shift+F. Shift is what keeps it clear of the
- * browser's own find (⌘F) and find-next (⌘G), so it is part of the match, not an afterthought.
- */
-export function isFavoriteHotkey(e: Pick<KeyboardEvent, "metaKey" | "ctrlKey" | "shiftKey" | "key">): boolean {
-  return (e.metaKey || e.ctrlKey) && e.shiftKey && e.key.toLowerCase() === "f";
-}
-
-/**
- * What to call the current page when favoriting it. `itemForPath` is a *prefix* match built for
- * breadcrumbs, so a detail page resolves to its parent nav item — every event would be stored as
- * "Events". Only an exact hit names the page; anything deeper falls back to the document title.
- */
-export function favoritePageLabel(pathname: string, documentTitle: string): string {
-  const hit = itemForPath(pathname);
-  return hit && hit.item.to === pathname ? hit.item.label : documentTitle;
 }
 
 export function isFavorite(items: readonly Favorite[], kind: FavoriteKind, id: string): boolean {

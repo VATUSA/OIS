@@ -5,7 +5,6 @@ import {
   type Favorite,
   canSeeFavorite,
   favoriteHref,
-  favoritePageLabel,
   isFavorite,
   isFavoriteHotkey,
   toggleFavorite,
@@ -157,22 +156,5 @@ describe("isFavoriteHotkey", () => {
   it("ignores a bare ⇧F and a bare f", () => {
     expect(isFavoriteHotkey(key({ shiftKey: true }))).toBe(false);
     expect(isFavoriteHotkey(key({}))).toBe(false);
-  });
-});
-
-describe("favoritePageLabel", () => {
-  it("names a page that is itself a nav item", () => {
-    expect(favoritePageLabel("/ops/tmu", "ignored")).toBe("TMU");
-  });
-
-  // `itemForPath` is a prefix match for breadcrumbs, so every event used to be stored as "Events".
-  it("falls back to the document title below a nav item, so detail pages stay distinct", () => {
-    expect(favoritePageLabel("/admin/planning/events/4821", "Cross the Pond")).toBe("Cross the Pond");
-    expect(favoritePageLabel("/admin/planning/events/9137", "Light the Night")).toBe("Light the Night");
-    expect(favoritePageLabel("/facility-map/ZDV", "ZDV — Denver Center")).toBe("ZDV — Denver Center");
-  });
-
-  it("falls back to the document title for a path under no nav item at all", () => {
-    expect(favoritePageLabel("/nowhere", "Some page")).toBe("Some page");
   });
 });

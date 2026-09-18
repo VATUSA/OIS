@@ -26,7 +26,7 @@ import {
   type FavoriteKind,
   canSeeFavorite,
   favoriteHref,
-  favoritePageLabel,
+  favoriteKey,
   isFavoriteHotkey,
   unavailable,
   useFavorites,
@@ -37,6 +37,7 @@ import {fuzzyMatch, rankAircraft} from "@/lib/fuzzy";
 import {AREAS, type NavItem, canSeeItem, visibleGroups} from "@/lib/nav";
 import {hasPermission} from "@/lib/permissions";
 import {useTmis} from "@/lib/tmu";
+import {usePageTitle} from "./page-meta";
 
 /** Rows per group in the blended "All" view, and in a single focused scope. */
 const LIMIT = 6;
@@ -72,17 +73,22 @@ function FavoriteCurrentPage() {
   const favorites = useFavorites();
   const toast = useToast();
   const location = useRouterState({ select: (s) => s.location });
+  // The title the page is actually showing. Nothing in this app assigns `document.title`, so reading
+  // that stored every deep page as "OIS" (VATUSA/OIS#312).
+  const title = usePageTitle();
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
       if (!isFavoriteHotkey(e)) return;
       e.preventDefault();
-      const label = favoritePageLabel(location.pathname, document.title);
-      const added = favorites.toggle({ kind: "page", id: location.pathname, label, href: location.href });
+      const label = title ?? location.pathname;
+      // Keyed on the full href: several routes carry their identity in `search` (?icao=, ?facility=,
+      // ?flight=), so keying on the path alone made two airports one favorite that overwrote itself.
+      const added = favorites.toggle({ kind: "page", id: location.href, label, href: location.href });
       if (added != null) toast.success(added ? `Added ${label} to favorites` : `Removed ${label} from favorites`);
     };
     window.addEventListener("keydown", onKey);
     return () => window.removeEventListener("keydown", onKey);
-  }, [favorites, toast, location]);
+  }, [favorites, toast, location, title]);
   return null;
 }
 
@@ -173,9 +179,16 @@ function Palette({ onClose }: { onClose: () => void }) {
   const limit = scope === "all" ? LIMIT : SCOPED_LIMIT;
 
   // Without `onToggleStar` the row shows no star — so a signed-out visitor is never offered one.
+  // `entityId` is what the pinned Favorites row and the source row it was starred from have in
+  // common, so un-starring moves the highlight to the twin instead of sliding (VATUSA/OIS#312).
   const star = (item: CommandItem, fav: Favorite): CommandItem =>
     me
-      ? { ...item, starred: favorites.isFavorite(fav.kind, fav.id), onToggleStar: () => favorites.toggle(fav) }
+      ? {
+          ...item,
+          entityId: favoriteKey(fav),
+          starred: favorites.isFavorite(fav.kind, fav.id),
+          onToggleStar: () => favorites.toggle(fav),
+        }
       : item;
 
   const pageItems = (): CommandItem[] =>

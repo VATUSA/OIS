@@ -61,7 +61,13 @@ export { MetricCard, type Trend } from "./components/metric-card";
 export { QueryState, EmptyState } from "./components/query-state";
 export { Select } from "./components/select";
 export { PageHeader } from "./components/page-header";
-export { CommandPalette, type CommandItem, type CommandGroup, type CommandScope } from "./components/command-palette";
+export {
+  CommandPalette,
+  isFavoriteHotkey,
+  type CommandItem,
+  type CommandGroup,
+  type CommandScope,
+} from "./components/command-palette";
 export { useLocalStorage } from "./hooks/use-local-storage";
 export { useIsMobile } from "./hooks/use-is-mobile";
 export {
