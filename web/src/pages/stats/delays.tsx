@@ -182,7 +182,7 @@ export function DelaysPage() {
   // Column sets close over each list's max (for the meter) — rebuilt only when their data changes.
   const airportColumns = useMemo(
     () => groupColumns({ keyHeader: "Airport", groups: d?.by_airport ?? [], baseline: null, normalize: false, onPick: pickAirport }),
-    // eslint-disable-next-line react-hooks/exhaustive-deps -- pickAirport only calls stable setters
+    // pickAirport only calls stable setters, so the groups are the only dependency.
     [d?.by_airport],
   );
   const runwayColumns = useMemo(

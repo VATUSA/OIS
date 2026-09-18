@@ -396,7 +396,6 @@ function ReplayMap({
     };
     raf = requestAnimationFrame(loop);
     return () => cancelAnimationFrame(raf);
-    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [duration]);
 
   // Ground + dep/arr filters applied once; icons, labels, rings + routes all share the result.
