@@ -138,4 +138,20 @@ describe("computeAtcAnchors", () => {
     expect(anchors[0].lat).toBeCloseTo((40 + 41 + 41) / 3);
     expect(anchors[0].lon).toBeCloseTo((-80 + -80 + -79) / 3);
   });
+
+  // #323: `AtcBadge` draws nothing for an airport without a DEL/GND/TWR/ATIS position, so an anchor
+  // there would be an invisible hover target over empty map.
+  it("anchors only airports that draw a pill", () => {
+    const pos = (kind: string) => ({ callsign: `X_${kind}`, frequency: "118.000", kind, name: "", rating: 3, logon_time: "" });
+    const atc = {
+      ...baseAtc(),
+      airports: [
+        { icao: "KAPP", lat: 40, lon: -80, positions: [pos("APP")] },
+        { icao: "KTWR", lat: 41, lon: -79, positions: [pos("TWR"), pos("APP")] },
+      ],
+    };
+    expect(computeAtcAnchors(atc, emptyBoundaries)).toEqual([
+      expect.objectContaining({ type: "airport", icao: "KTWR" }),
+    ]);
+  });
 });

@@ -17,6 +17,7 @@ const flight = (over: Partial<MatchedFlight>): MatchedFlight => ({
   altitude: 35000,
   groundspeed: 420,
   distance_nm: 50,
+  delay_sec: 0,
   ...over,
 });
 

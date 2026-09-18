@@ -69,6 +69,21 @@ export const SETTINGS: SettingDef[] = [
     },
   },
   {
+    key: "map.tooltips",
+    group: "Map",
+    label: "Show map tooltips",
+    description: "Show a details card when hovering aircraft and ATC labels on the map. Off hides every map hover card.",
+    control: { kind: "toggle", default: true },
+  },
+  {
+    key: "map.aircraftTooltips",
+    group: "Map",
+    label: "Aircraft hover tooltips",
+    description:
+      "Show a details card when hovering an aircraft, including metering times for traffic in an FCA. ATC hover cards follow “Show map tooltips” only.",
+    control: { kind: "toggle", default: true },
+  },
+  {
     key: "debug.enabled",
     group: "Advanced",
     label: "Debug mode",

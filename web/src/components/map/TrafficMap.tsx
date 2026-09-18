@@ -23,7 +23,8 @@ import {
 } from "./layers/replay";
 import {AtcMarkers} from "./markers/AtcMarkers";
 import type {MapCamera} from "./hooks/useMapCamera";
-import {mapTooltip} from "./lib/tooltip";
+import {fcaLineUnder} from "./lib/pick";
+import {tooltipFor} from "./lib/tooltip";
 import type {NormAircraft, PathDatum, RGB, RouteGeom} from "./lib/types";
 
 export interface TrafficMapProps {
@@ -140,6 +141,8 @@ export function TrafficMap({
   const dynamicScale = useSetting("map.dynamicAircraftScale", true).value;
   // User-chosen base size (percent, e.g. "80"), independent of the zoom-driven scale above.
   const iconSizePct = useSetting("map.aircraftIconSize", "100").value;
+  const tooltipsOn = useSetting("map.tooltips", true).value;
+  const aircraftTooltipsOn = useSetting("map.aircraftTooltips", true).value;
   const [zoom, setZoom] = useState(
     () => initialViewState?.zoom ?? camera?.viewState.zoom ?? US_HOME.zoom,
   );
@@ -172,13 +175,16 @@ export function TrafficMap({
     const out: Layer[] = [];
     if (boundaries) out.push(buildBoundaryLayer(boundaries, palette, boundaryEmphasis));
     if (atc && centerBoundaries) out.push(...buildAtcLayers(atc, centerBoundaries, palette));
-    if (atcAnchors.length) out.push(buildAtcHoverLayer(atcAnchors));
     if (trails?.length) out.push(buildTrailLayer(trails, palette));
     if (routeOverlays?.length) out.push(buildRouteOverlayLayer(routeOverlays, palette));
     if (namedRoutes?.length)
       out.push(...buildNamedRouteLayers(namedRoutes, selectedRouteId, labeledRouteIds ?? EMPTY_SET, palette));
     if (rings?.data.length) out.push(buildRingLayer(rings.data, rings.nm, palette));
     if (fcas?.length) out.push(...buildFcaLayers(fcas, selectedFcaId, palette));
+    // ATC hover sits above FCA lines and routes (a pill wins over a line under it) but below aircraft
+    // glyphs, so traffic parked on a staffed airport's badge keeps its own hover card. With tooltips
+    // off it isn't built at all — an invisible pick target that draws nothing would only eat clicks.
+    if (atcAnchors.length && tooltipsOn) out.push(buildAtcHoverLayer(atcAnchors));
     if (matched?.length && matchedColor)
       out.push(...buildMatchedLayers(matched, matchedColor, aircraftStyle ?? "silhouette", sizeScale, "", palette));
     for (const group of matchedGroups ?? [])
@@ -209,6 +215,7 @@ export function TrafficMap({
     atc,
     centerBoundaries,
     atcAnchors,
+    tooltipsOn,
     trails,
     routeOverlays,
     namedRoutes,
@@ -261,6 +268,11 @@ export function TrafficMap({
     } else if (info.layer?.id === "fca-lines") {
       const id = (info.object as { id: string } | undefined)?.id;
       if (id) onFcaClick?.(id);
+    } else if (info.layer?.id === "atc-hover") {
+      // The ATC hover target is invisible and sits above the FCA lines, so it must not swallow the
+      // click that selects the line running under a pill (#323) — look through it.
+      const id = fcaLineUnder(info);
+      if (id) onFcaClick?.(id);
     }
   };
 
@@ -298,7 +310,7 @@ export function TrafficMap({
       onResize={camera?.onResize}
       controller={controller}
       layers={layers}
-      getTooltip={TOOLTIP}
+      getTooltip={tooltipFor({ tooltips: tooltipsOn, aircraft: aircraftTooltipsOn })}
       onClick={handleClick}
       onDragStart={handleDragStart}
       onDrag={handleDrag}
@@ -317,7 +329,6 @@ export function TrafficMap({
 }
 
 const EMPTY_SET: Set<string> = new Set();
-const TOOLTIP = mapTooltip();
 
 /** Re-scale glyphs only when zoom moves at least this much, so panning doesn't churn the layers. */
 const ZOOM_STEP = 0.1;

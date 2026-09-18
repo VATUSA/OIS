@@ -25,6 +25,10 @@ export interface MatchedFlight {
   altitude: number;
   groundspeed: number;
   distance_nm: number;
+  /** Metered crossing time (STA), unmetered ETA, and the metering delay — shown in the hover card. */
+  cross_time?: string | null;
+  eta?: string | null;
+  delay_sec: number;
 }
 
 /**
