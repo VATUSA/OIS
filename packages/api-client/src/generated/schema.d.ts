@@ -1381,7 +1381,10 @@ export interface paths {
         put?: never;
         /**
          * Force an immediate nav + winds refresh, then return the updated status. Failures are
-         *     logged and leave the current data in place.
+         *     logged and leave the current data in place — the response still carries the resulting status, so
+         *     the caller compares it (cycle age, wind-station count) to tell a real refresh from a fallback.
+         * @description One refresh at a time: a rebuild is a full upstream download and parse, and the control is global
+         *     to every flow controller, so a concurrent press gets a 409 instead of starting a second rebuild.
          */
         post: operations["data_refresh"];
         delete?: never;
@@ -9823,6 +9826,12 @@ export interface operations {
                 };
             };
             401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            409: {
                 headers: {
                     [name: string]: unknown;
                 };

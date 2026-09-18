@@ -8,7 +8,7 @@
 use std::collections::HashMap;
 use std::sync::Arc;
 use std::sync::Mutex;
-use std::sync::atomic::AtomicI64;
+use std::sync::atomic::{AtomicBool, AtomicI64};
 
 use arc_swap::ArcSwap;
 use sqlx::PgPool;
@@ -44,6 +44,7 @@ pub(crate) fn test_state(pool: PgPool, facilities: HashMap<String, Facility>) ->
         aircraft_profiles: Arc::new(ArcSwap::from_pointee(ProfileTable::default())),
         nav_refreshed: Arc::new(AtomicI64::new(0)),
         winds_refreshed: Arc::new(AtomicI64::new(0)),
+        data_refresh_in_flight: Arc::new(AtomicBool::new(false)),
         metar_cache: Arc::new(Mutex::new(HashMap::new())),
         events: tokio::sync::broadcast::channel(256).0,
         jobs: Arc::new(crate::job_registry::JobRegistry::new()),
