@@ -28,6 +28,17 @@ export function cycleScope(ids: readonly string[], current: string, dir: 1 | -1)
 }
 
 /**
+ * The index of the highlighted row: the one carrying `activeId`, else the first. The palette tracks
+ * the highlighted *item* rather than a raw index, so rebuilding `groups` — starring a row prepends
+ * one to the pinned Favorites group — keeps the highlight on the row the user is actually on
+ * (VATUSA/OIS#312).
+ */
+export function activeIndex(items: readonly { id: string }[], activeId: string | null): number {
+  if (activeId == null) return 0;
+  return Math.max(0, items.findIndex((i) => i.id === activeId));
+}
+
+/**
  * A keyboard-first picker in a top-aligned modal: a search field over grouped results. It is
  * controlled — the caller owns `query` and passes already-filtered, ranked `groups` (so each source
  * can match however suits it: fuzzy callsigns, a server search, a static page list).
@@ -61,10 +72,15 @@ export function CommandPalette({
   onScopeChange?: (scope: string) => void;
 }) {
   const flat = React.useMemo(() => groups.flatMap((g) => g.items), [groups]);
-  const [active, setActive] = React.useState(0);
+  const [activeId, setActiveId] = React.useState<string | null>(null);
+  const active = activeIndex(flat, activeId);
   const listRef = React.useRef<HTMLDivElement>(null);
+  // Highlight the row `step` away, by id — an index would go stale the next time `groups` changes.
+  // Resolved from the previous id rather than `active` so batched keydowns don't both read one index.
+  const move = (step: 1 | -1) =>
+    setActiveId((id) => flat[Math.min(flat.length - 1, Math.max(0, activeIndex(flat, id) + step))]?.id ?? null);
 
-  React.useEffect(() => setActive(0), [query, open, scope]);
+  React.useEffect(() => setActiveId(null), [query, open, scope]);
 
   React.useEffect(() => {
     listRef.current?.querySelector<HTMLElement>(`[data-index="${active}"]`)?.scrollIntoView({ block: "nearest" });
@@ -82,10 +98,10 @@ export function CommandPalette({
       flat[active]?.onToggleStar?.();
     } else if (e.key === "ArrowDown") {
       e.preventDefault();
-      setActive((i) => Math.min(flat.length - 1, i + 1));
+      move(1);
     } else if (e.key === "ArrowUp") {
       e.preventDefault();
-      setActive((i) => Math.max(0, i - 1));
+      move(-1);
     } else if (e.key === "Enter") {
       e.preventDefault();
       select(flat[active]);
@@ -132,41 +148,15 @@ export function CommandPalette({
                 {g.items.map((item) => {
                   index += 1;
                   const i = index;
-                  const on = i === active;
-                  const Icon = item.icon;
                   return (
-                    <button
+                    <CommandRow
                       key={item.id}
-                      type="button"
-                      data-index={i}
-                      onMouseMove={() => setActive(i)}
-                      onClick={() => select(item)}
-                      className={cn(
-                        "flex w-full items-center gap-2.5 rounded-sm px-2.5 py-2 text-left text-sm",
-                        on ? "bg-panel-2 text-ink" : "text-ink-2",
-                      )}
-                    >
-                      {Icon && <Icon className={cn("size-4 shrink-0", on ? "text-brand-ink" : "text-ink-3")} />}
-                      <span className="min-w-0 flex-1 truncate">{item.label}</span>
-                      {item.sublabel && <span className="shrink-0 font-mono text-xs text-ink-3">{item.sublabel}</span>}
-                      {item.onToggleStar && (item.starred || on) && (
-                        <span
-                          role="button"
-                          tabIndex={-1}
-                          aria-label={item.starred ? "Remove from favorites" : "Add to favorites"}
-                          aria-pressed={!!item.starred}
-                          onMouseDown={(e) => e.preventDefault()}
-                          onClick={(e) => {
-                            e.stopPropagation();
-                            item.onToggleStar?.();
-                          }}
-                          className="shrink-0 rounded-sm p-0.5 text-ink-3 hover:text-ink"
-                        >
-                          <Star className={cn("size-3.5", item.starred && "fill-current text-brand-ink")} />
-                        </span>
-                      )}
-                      {on && <CornerDownLeft className="size-3.5 shrink-0 text-ink-3" />}
-                    </button>
+                      item={item}
+                      index={i}
+                      active={i === active}
+                      onHighlight={() => setActiveId(item.id)}
+                      onSelect={() => select(item)}
+                    />
                   );
                 })}
               </div>
@@ -175,6 +165,61 @@ export function CommandPalette({
       </div>
       {footer && <div className="border-t border-line px-4 py-2 text-xs text-ink-3">{footer}</div>}
     </Modal>
+  );
+}
+
+/**
+ * One result row: icon, label, sublabel, the favorite star and the ↵ hint. Its own component so it
+ * can be rendered — and asserted on — without the palette's portal (VATUSA/OIS#312). The star shows
+ * while the row is starred *or* highlighted, so a favorite stays marked as the highlight moves on.
+ */
+export function CommandRow({
+  item,
+  index,
+  active,
+  onHighlight,
+  onSelect,
+}: {
+  item: CommandItem;
+  index: number;
+  active: boolean;
+  onHighlight?: () => void;
+  onSelect?: () => void;
+}) {
+  const Icon = item.icon;
+  return (
+    <button
+      type="button"
+      data-index={index}
+      onMouseMove={onHighlight}
+      onClick={onSelect}
+      className={cn(
+        "flex w-full items-center gap-2.5 rounded-sm px-2.5 py-2 text-left text-sm",
+        active ? "bg-panel-2 text-ink" : "text-ink-2",
+      )}
+    >
+      {Icon && <Icon className={cn("size-4 shrink-0", active ? "text-brand-ink" : "text-ink-3")} />}
+      <span className="min-w-0 flex-1 truncate">{item.label}</span>
+      {item.sublabel && <span className="shrink-0 font-mono text-xs text-ink-3">{item.sublabel}</span>}
+      {item.onToggleStar && (item.starred || active) && (
+        <span
+          role="button"
+          tabIndex={-1}
+          aria-label={item.starred ? "Remove from favorites" : "Add to favorites"}
+          aria-pressed={!!item.starred}
+          onMouseDown={(e) => e.preventDefault()}
+          onClick={(e) => {
+            // The star sits inside the row button: without this the row would navigate as well.
+            e.stopPropagation();
+            item.onToggleStar?.();
+          }}
+          className="shrink-0 rounded-sm p-0.5 text-ink-3 hover:text-ink"
+        >
+          <Star className={cn("size-3.5", item.starred && "fill-current text-brand-ink")} />
+        </span>
+      )}
+      {active && <CornerDownLeft className="size-3.5 shrink-0 text-ink-3" />}
+    </button>
   );
 }
 

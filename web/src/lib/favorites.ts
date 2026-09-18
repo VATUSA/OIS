@@ -1,6 +1,9 @@
 import {useToast} from "@ois/ui";
 import {useQueryClient} from "@tanstack/react-query";
 
+import type {Me} from "./auth";
+import {canOpenPath, canSeeItem, itemForPath} from "./nav";
+import {hasPermission} from "./permissions";
 import {usePreferences, useSavePreferences} from "./preferences";
 
 const NAMESPACE = "favorites";
@@ -22,6 +25,74 @@ export const favoriteKey = (f: Pick<Favorite, "kind" | "id">) => `${f.kind}:${f.
 export const favoriteHref = ({ to, search }: { to: string; search: Record<string, string> }) =>
   `${to}?${new URLSearchParams(search)}`;
 
+/** The permission a favorite's kind needs before it is worth listing; the rest are gated by destination. */
+const KIND_PERMISSION: Partial<Record<FavoriteKind, string>> = {
+  tmi: "tmu.tmi.read",
+  event: "events.plan.read",
+  dashboard: "auth.profile.read",
+};
+
+/**
+ * Whether `me` may still see a stored favorite: its kind's permission, then its destination gated
+ * exactly like the nav link that reaches it. A favorite the user has lost access to stays in storage
+ * but drops out of the list.
+ */
+export function canSeeFavorite(me: Me | null | undefined, f: Favorite): boolean {
+  const permission = KIND_PERMISSION[f.kind];
+  if (permission && !hasPermission(me, permission)) return false;
+  const path = f.href.split("?")[0];
+  if (path.startsWith("/admin")) return canOpenPath(me, path);
+  const hit = itemForPath(path);
+  return hit ? canSeeItem(me, hit.item) : true;
+}
+
+/** The live entities a favorite can be checked against; `undefined` means that source hasn't loaded. */
+export type FavoriteSources = {
+  aircraft?: readonly { callsign: string }[];
+  tmis?: readonly { id: string }[];
+  events?: readonly { id: number | string }[];
+  dashboards?: readonly { id: string }[];
+};
+
+/**
+ * Whether a favorite's entity is gone — its source has loaded and doesn't hold it. Pages and airports
+ * have no source to go missing from. The row stays listed either way, so it can still be unstarred.
+ */
+export function unavailable(f: Favorite, sources: FavoriteSources): boolean {
+  const missing = <T,>(data: readonly T[] | undefined, id: (t: T) => string) =>
+    data != null && !data.some((t) => id(t) === f.id);
+  switch (f.kind) {
+    case "aircraft":
+      return missing(sources.aircraft, (a) => a.callsign);
+    case "tmi":
+      return missing(sources.tmis, (t) => t.id);
+    case "event":
+      return missing(sources.events, (e) => String(e.id));
+    case "dashboard":
+      return missing(sources.dashboards, (d) => d.id);
+    default:
+      return false;
+  }
+}
+
+/**
+ * Whether a keydown is the favorite hotkey, ⌘⇧F / Ctrl+Shift+F. Shift is what keeps it clear of the
+ * browser's own find (⌘F) and find-next (⌘G), so it is part of the match, not an afterthought.
+ */
+export function isFavoriteHotkey(e: Pick<KeyboardEvent, "metaKey" | "ctrlKey" | "shiftKey" | "key">): boolean {
+  return (e.metaKey || e.ctrlKey) && e.shiftKey && e.key.toLowerCase() === "f";
+}
+
+/**
+ * What to call the current page when favoriting it. `itemForPath` is a *prefix* match built for
+ * breadcrumbs, so a detail page resolves to its parent nav item — every event would be stored as
+ * "Events". Only an exact hit names the page; anything deeper falls back to the document title.
+ */
+export function favoritePageLabel(pathname: string, documentTitle: string): string {
+  const hit = itemForPath(pathname);
+  return hit && hit.item.to === pathname ? hit.item.label : documentTitle;
+}
+
 export function isFavorite(items: readonly Favorite[], kind: FavoriteKind, id: string): boolean {
   return items.some((f) => f.kind === kind && f.id === id);
 }
@@ -35,12 +106,13 @@ export function toggleFavorite(items: readonly Favorite[], fav: Favorite): Favor
 /**
  * This user's favorites, with an optimistic toggle persisted to their preferences. `toggle` returns
  * whether the entity is now a favorite, or `null` (and changes nothing) while the stored list is
- * still loading — saving before then would overwrite it.
+ * still loading — saving before then would overwrite it. Pass `enabled: false` when signed out:
+ * favorites are per user, so there is nothing to fetch and nothing that could be saved.
  */
-export function useFavorites() {
+export function useFavorites(enabled = true) {
   const queryClient = useQueryClient();
   const toast = useToast();
-  const prefs = usePreferences<FavoritesPrefs>(NAMESPACE);
+  const prefs = usePreferences<FavoritesPrefs>(NAMESPACE, { enabled });
   const save = useSavePreferences<FavoritesPrefs>(NAMESPACE);
   const items = prefs.data?.items ?? [];
 
