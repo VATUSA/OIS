@@ -70,6 +70,33 @@ export function useDataStatus() {
   });
 }
 
+/**
+ * The toast a completed data refresh should raise. The endpoint answers 200 even when the nav fetch
+ * could only fall back to an older cycle — it keeps last-good rather than failing — so a stale or
+ * unreadable cycle must not read as success (VATUSA/OIS#317).
+ */
+export function refreshToast(data: DataStatus): {
+  variant: "success" | "warning";
+  title: string;
+  description?: string;
+} {
+  const summary = `Nav ${data.nav_cycle} · ${data.winds_stations} wind stations`;
+  const behind = data.nav_cycles_behind;
+  if (behind == null)
+    return {
+      variant: "warning",
+      title: `NASR cycle ${data.nav_cycle} is unreadable`,
+      description: summary,
+    };
+  if (behind > 0)
+    return {
+      variant: "warning",
+      title: `NASR cycle ${data.nav_cycle} is ${behind} cycle${behind === 1 ? "" : "s"} behind`,
+      description: `${summary} · current ${data.nav_cycle_current}`,
+    };
+  return { variant: "success", title: summary };
+}
+
 /** Force an immediate nav + winds refresh (requires flow.fca.update). */
 export function useRefreshData() {
   const queryClient = useQueryClient();
@@ -85,7 +112,8 @@ export function useRefreshData() {
       // Freshly resolved routes may shift matches/ETAs.
       queryClient.invalidateQueries({ queryKey: ["fca-traffic"] });
       queryClient.invalidateQueries({ queryKey: ["aircraft-route"] });
-      toast.success(`Nav ${data.nav_cycle} · ${data.winds_stations} wind stations`);
+      const { variant, title, description } = refreshToast(data);
+      toast[variant](title, description ? { description } : undefined);
     },
     onError: () => toast.error("Refresh failed"),
   });

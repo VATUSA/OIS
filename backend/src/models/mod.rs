@@ -1874,7 +1874,12 @@ pub struct DataStatus {
     pub navaids: usize,
     pub airways: usize,
     pub procedures: usize,
-    /// Last successful runtime nav fetch (null = still on the compile-time bundle seed).
+    /// NASR cycle in effect today — what a healthy refresh should have loaded.
+    pub nav_cycle_current: String,
+    /// Whole 28-day cycles `nav_cycle` trails `nav_cycle_current` (0 = current; null = the loaded
+    /// cycle isn't a readable date).
+    pub nav_cycles_behind: Option<u32>,
+    /// Last healthy nav refresh — live FAA source at the current cycle (null = none since startup).
     pub nav_refreshed: Option<DateTime<Utc>>,
     pub winds_stations: usize,
     /// Last successful winds fetch (null = still air, not yet fetched).

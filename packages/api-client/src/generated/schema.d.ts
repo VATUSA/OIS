@@ -3549,9 +3549,17 @@ export interface components {
             fixes: number;
             /** @description FAA NASR cycle date currently loaded (e.g. `2026-08-06`). */
             nav_cycle: string;
+            /** @description NASR cycle in effect today — what a healthy refresh should have loaded. */
+            nav_cycle_current: string;
+            /**
+             * Format: int32
+             * @description Whole 28-day cycles `nav_cycle` trails `nav_cycle_current` (0 = current; null = the loaded
+             *     cycle isn't a readable date).
+             */
+            nav_cycles_behind?: number | null;
             /**
              * Format: date-time
-             * @description Last successful runtime nav fetch (null = still on the compile-time bundle seed).
+             * @description Last healthy nav refresh — live FAA source at the current cycle (null = none since startup).
              */
             nav_refreshed?: string | null;
             /** @description Provenance of the loaded nav data (e.g. `runtime fetch (faa)` or the bundle). */

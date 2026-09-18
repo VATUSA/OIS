@@ -406,7 +406,9 @@ export function FcaMapView({
   const aircraftRoute = useAircraftRoute(routeCallsign);
   const dataStatus = useDataStatus();
   const cycleAge = dataStatus.data ? cycleAgeDays(dataStatus.data.nav_cycle) : null;
-  const navStale = cycleAge != null && cycleAge > 35;
+  // Stale = the loaded NASR cycle trails the one in effect today (or its date can't be read).
+  const cyclesBehind = dataStatus.data?.nav_cycles_behind;
+  const navStale = dataStatus.data != null && (cyclesBehind == null || cyclesBehind >= 1);
 
   const { value: persistView } = useSetting("map.persistView", true);
   const camera = useMapCamera(FCA_INITIAL, { persistKey, persist: persistView && !!persistKey });
@@ -1075,7 +1077,9 @@ export function FcaMapView({
           <div className="pointer-events-none absolute inset-x-0 top-3 z-[500] flex justify-center">
             <div className="pointer-events-auto flex items-center gap-2 rounded-full border border-warning/40 bg-warning-soft px-3 py-1.5 text-xs font-semibold text-warning">
               <span>
-                NASR data is {cycleAge} days old ({dataStatus.data?.nav_cycle}).
+                {cyclesBehind == null
+                  ? `NASR cycle ${dataStatus.data?.nav_cycle} is unreadable (current ${dataStatus.data?.nav_cycle_current}).`
+                  : `NASR cycle ${dataStatus.data?.nav_cycle} is ${cyclesBehind} cycle${cyclesBehind === 1 ? "" : "s"} behind (current ${dataStatus.data?.nav_cycle_current}).`}
               </span>
             </div>
           </div>
