@@ -2,7 +2,7 @@ import * as React from "react";
 import {renderToStaticMarkup} from "react-dom/server";
 import {describe, expect, it} from "vitest";
 
-import {ScopeChips, cycleScope} from "./command-palette";
+import {CommandRow, ScopeChips, cycleScope} from "./command-palette";
 
 describe("cycleScope", () => {
   const ids = ["all", "aircraft", "tmis"];
@@ -42,5 +42,57 @@ describe("ScopeChips", () => {
   it("announces the active scope in a live region", () => {
     const html = renderToStaticMarkup(<ScopeChips scopes={scopes} scope="tmis" />);
     expect(html).toMatch(new RegExp('aria-live="polite"[^>]*>TMIs scope<'));
+  });
+});
+
+// The star used to render as a `span role="button"` *inside* the row button. `role="button"` nested
+// in `role=button` is not a valid accessibility tree, so assistive tech could expose one control,
+// the wrong one, or neither (VATUSA/OIS#336). These pin the two controls apart.
+describe("CommandRow", () => {
+  const item = { id: "kdca", label: "KDCA", onSelect: () => {} };
+  const row = (props: Partial<React.ComponentProps<typeof CommandRow>> = {}) =>
+    renderToStaticMarkup(
+      <CommandRow item={item} index={0} active={false} onActivate={() => {}} onSelect={() => {}} {...props} />,
+    );
+
+  it("renders the star as a sibling of the row button, not inside it", () => {
+    const html = row({ item: { ...item, starred: true, onToggleStar: () => {} } });
+    const rowButtonEnd = html.indexOf("</button>");
+    expect(rowButtonEnd).toBeGreaterThan(-1);
+    expect(html.indexOf("aria-pressed")).toBeGreaterThan(rowButtonEnd);
+    // …and the row button's own markup holds no second control (only its own opening tag).
+    expect(html.slice(0, rowButtonEnd).match(/<button/g)).toHaveLength(1);
+  });
+
+  it("exposes both controls as real buttons, with no nested role", () => {
+    const html = row({ active: true, item: { ...item, onToggleStar: () => {} } });
+    expect(html.match(/<button/g)).toHaveLength(2);
+    expect(html).not.toContain('role="button"');
+  });
+
+  // Splitting the row button must not carve the Enter hint out of the click target: the whole row
+  // bar the star still selects, as it did when the row was one button.
+  it("keeps the Enter hint inside the selection button", () => {
+    const html = row({ active: true, item: { ...item, starred: true, onToggleStar: () => {} } });
+    expect(html.indexOf("lucide-corner-down-left")).toBeLessThan(html.indexOf("</button>"));
+    expect(html.indexOf("lucide-star")).toBeGreaterThan(html.indexOf("</button>"));
+  });
+
+  it("labels the star by what activating it will do", () => {
+    expect(row({ item: { ...item, starred: true, onToggleStar: () => {} } })).toContain(
+      'aria-label="Remove from favorites"',
+    );
+    expect(row({ active: true, item: { ...item, onToggleStar: () => {} } })).toContain(
+      'aria-label="Add to favorites"',
+    );
+  });
+
+  it("shows the star on a starred row and on the active row, and nowhere else", () => {
+    const starrable = { ...item, onToggleStar: () => {} };
+    expect(row({ item: { ...starrable, starred: true } })).toContain("aria-pressed");
+    expect(row({ item: starrable, active: true })).toContain("aria-pressed");
+    expect(row({ item: starrable })).not.toContain("aria-pressed");
+    // An item the caller never made favoritable stays starless even when active.
+    expect(row({ item, active: true })).not.toContain("aria-pressed");
   });
 });

@@ -132,41 +132,15 @@ export function CommandPalette({
                 {g.items.map((item) => {
                   index += 1;
                   const i = index;
-                  const on = i === active;
-                  const Icon = item.icon;
                   return (
-                    <button
+                    <CommandRow
                       key={item.id}
-                      type="button"
-                      data-index={i}
-                      onMouseMove={() => setActive(i)}
-                      onClick={() => select(item)}
-                      className={cn(
-                        "flex w-full items-center gap-2.5 rounded-sm px-2.5 py-2 text-left text-sm",
-                        on ? "bg-panel-2 text-ink" : "text-ink-2",
-                      )}
-                    >
-                      {Icon && <Icon className={cn("size-4 shrink-0", on ? "text-brand-ink" : "text-ink-3")} />}
-                      <span className="min-w-0 flex-1 truncate">{item.label}</span>
-                      {item.sublabel && <span className="shrink-0 font-mono text-xs text-ink-3">{item.sublabel}</span>}
-                      {item.onToggleStar && (item.starred || on) && (
-                        <span
-                          role="button"
-                          tabIndex={-1}
-                          aria-label={item.starred ? "Remove from favorites" : "Add to favorites"}
-                          aria-pressed={!!item.starred}
-                          onMouseDown={(e) => e.preventDefault()}
-                          onClick={(e) => {
-                            e.stopPropagation();
-                            item.onToggleStar?.();
-                          }}
-                          className="shrink-0 rounded-sm p-0.5 text-ink-3 hover:text-ink"
-                        >
-                          <Star className={cn("size-3.5", item.starred && "fill-current text-brand-ink")} />
-                        </span>
-                      )}
-                      {on && <CornerDownLeft className="size-3.5 shrink-0 text-ink-3" />}
-                    </button>
+                      item={item}
+                      index={i}
+                      active={i === active}
+                      onActivate={() => setActive(i)}
+                      onSelect={() => select(item)}
+                    />
                   );
                 })}
               </div>
@@ -175,6 +149,64 @@ export function CommandPalette({
       </div>
       {footer && <div className="border-t border-line px-4 py-2 text-xs text-ink-3">{footer}</div>}
     </Modal>
+  );
+}
+
+/**
+ * One result row: the selection button and the favorite star side by side. The star is a **sibling**
+ * of the row button, never a descendant — a nested interactive role has no defined behaviour, so
+ * assistive tech may expose one control, the wrong one, or neither (VATUSA/OIS#336). Being siblings
+ * is also what keeps a star click from selecting the row. The active tint sits on the container so
+ * the star stays inside the highlight, and the Enter hint sits inside the selection button so the
+ * whole row minus the star still selects.
+ */
+export function CommandRow({
+  item,
+  index,
+  active,
+  onActivate,
+  onSelect,
+}: {
+  item: CommandItem;
+  index: number;
+  active: boolean;
+  onActivate: () => void;
+  onSelect: () => void;
+}) {
+  const Icon = item.icon;
+  return (
+    <div
+      data-index={index}
+      onMouseMove={onActivate}
+      className={cn(
+        "flex w-full items-center gap-2.5 rounded-sm pr-2.5 text-sm",
+        active ? "bg-panel-2 text-ink" : "text-ink-2",
+      )}
+    >
+      <button
+        type="button"
+        onClick={onSelect}
+        className="flex min-w-0 flex-1 items-center gap-2.5 py-2 pl-2.5 text-left"
+      >
+        {Icon && <Icon className={cn("size-4 shrink-0", active ? "text-brand-ink" : "text-ink-3")} />}
+        <span className="min-w-0 flex-1 truncate">{item.label}</span>
+        {item.sublabel && <span className="shrink-0 font-mono text-xs text-ink-3">{item.sublabel}</span>}
+        {active && <CornerDownLeft className="size-3.5 shrink-0 text-ink-3" />}
+      </button>
+      {item.onToggleStar && (item.starred || active) && (
+        <button
+          type="button"
+          aria-label={item.starred ? "Remove from favorites" : "Add to favorites"}
+          aria-pressed={!!item.starred}
+          // Keep focus in the search field so the keyboard keeps working after a click.
+          onMouseDown={(e) => e.preventDefault()}
+          onClick={() => item.onToggleStar?.()}
+          className="shrink-0 rounded-sm p-0.5 text-ink-3 hover:text-ink"
+        >
+          <Star className={cn("size-3.5", item.starred && "fill-current text-brand-ink")} />
+        </button>
+      )}
+    </div>
   );
 }
 
