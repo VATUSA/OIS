@@ -23,7 +23,7 @@ export type TmiFilters = {
   to?: string;
 };
 
-export function useTmis(filters?: TmiFilters) {
+export function useTmis(filters?: TmiFilters, { enabled = true }: { enabled?: boolean } = {}) {
   const at = useHistoricalAt();
   // Drop blank values so an empty filter bar is a plain unfiltered list. Filters don't apply in
   // historical-replay mode (the hist endpoint takes none).
@@ -35,6 +35,7 @@ export function useTmis(filters?: TmiFilters) {
   }
   const hasFilters = Object.keys(query).length > 0;
   return useQuery({
+    enabled,
     queryKey:
       at != null ? ["hist-tmis", at] : hasFilters ? ["tmis", query] : ["tmis"],
     queryFn: async () => {

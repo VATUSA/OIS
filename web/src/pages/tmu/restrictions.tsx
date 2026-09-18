@@ -1,4 +1,5 @@
 import {useMemo, useState} from "react";
+import {useSearch} from "@tanstack/react-router";
 import {
   Button,
   Card,
@@ -198,8 +199,14 @@ function toFilters(d: Draft): TmiFilters {
 }
 
 /** Server-side filters — applied on submit, since each change is a new query. */
-function RestrictionFilters({ onChange }: { onChange: (f: TmiFilters) => void }) {
-  const [draft, setDraft] = useState<Draft>(EMPTY_DRAFT);
+function RestrictionFilters({
+  initialFacility = "",
+  onChange,
+}: {
+  initialFacility?: string;
+  onChange: (f: TmiFilters) => void;
+}) {
+  const [draft, setDraft] = useState<Draft>({ ...EMPTY_DRAFT, facility: initialFacility });
   const set = <K extends keyof Draft>(key: K, value: Draft[K]) =>
     setDraft((d) => ({ ...d, [key]: value }));
   const active = Object.values(draft).some((v) => v != null && v !== "");
@@ -262,7 +269,10 @@ function RestrictionFilters({ onChange }: { onChange: (f: TmiFilters) => void })
 
 export function RestrictionsTab() {
   const { data: me } = useMe();
-  const [filters, setFilters] = useState<TmiFilters>({});
+  // `?facility=` (the ⌘K search jumping to a TMI, deep links) opens the list already filtered, and
+  // seeds the bar so the applied filter is visible and clearable.
+  const initialFacility = useSearch({ from: "/ops/tmu" }).facility ?? "";
+  const [filters, setFilters] = useState<TmiFilters>(initialFacility ? { facility: initialFacility } : {});
   const tmis = useTmis(filters);
   const canCreate = hasPermission(me, "tmu.tmi.create");
   const canPublish = hasPermission(me, "tmu.tmi.publish");
@@ -323,7 +333,7 @@ export function RestrictionsTab() {
   return (
     <div className="flex flex-col gap-6">
       <div className="flex flex-col gap-3">
-        <RestrictionFilters onChange={setFilters} />
+        <RestrictionFilters initialFacility={initialFacility} onChange={setFilters} />
         <DataTable
           label="Restrictions"
           columns={columns}
