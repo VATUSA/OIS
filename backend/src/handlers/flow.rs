@@ -2,7 +2,7 @@
 
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
-use std::sync::atomic::Ordering;
+use std::sync::atomic::{AtomicBool, Ordering};
 
 use axum::{
     Json,
@@ -1004,18 +1004,46 @@ pub async fn validate_fixes(
     Json(FixValidationBody { unknown })
 }
 
+/// Holds the single-flight claim on a manual data refresh and releases it on drop, so a cancelled
+/// request (client disconnect), an early return or a panic can't latch the flag and lock the
+/// endpoint out for the rest of the process's life.
+struct DataRefreshClaim<'a>(&'a AtomicBool);
+
+impl<'a> DataRefreshClaim<'a> {
+    /// Claim the refresh slot, or `None` when one is already running.
+    fn acquire(flag: &'a AtomicBool) -> Option<Self> {
+        flag.compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
+            .ok()
+            .map(|_| Self(flag))
+    }
+}
+
+impl Drop for DataRefreshClaim<'_> {
+    fn drop(&mut self) {
+        self.0.store(false, Ordering::Release);
+    }
+}
+
 /// Force an immediate nav + winds refresh, then return the updated status. Failures are
-/// logged and leave the current data in place.
+/// logged and leave the current data in place — the response still carries the resulting status, so
+/// the caller compares it (cycle age, wind-station count) to tell a real refresh from a fallback.
+///
+/// One refresh at a time: a rebuild is a full upstream download and parse, and the control is global
+/// to every flow controller, so a concurrent press gets a 409 instead of starting a second rebuild.
 #[utoipa::path(
     post,
     path = "/api/v1/flow/data-refresh",
     tag = "flow",
-    responses((status = 200, body = DataStatus), (status = 401))
+    responses((status = 200, body = DataStatus), (status = 401), (status = 409))
 )]
 pub async fn data_refresh(
     State(state): State<AppState>,
     _permission: RequirePermission<FlowFcaUpdate>,
-) -> Json<DataStatus> {
+) -> Result<Json<DataStatus>, ApiError> {
+    let Some(_claim) = DataRefreshClaim::acquire(&state.data_refresh_in_flight) else {
+        tracing::info!("manual data refresh rejected: one is already running");
+        return Err(ApiError::Conflict);
+    };
     if let Err(e) = jobs::refresh_nav_once(&state.nav, &state.nav_refreshed).await {
         tracing::warn!(error = %e, "manual nav refresh failed");
     }
@@ -1029,7 +1057,7 @@ pub async fn data_refresh(
         None => tracing::warn!("manual winds refresh: airport database not loaded yet"),
         Some(n) => tracing::info!(stations = n, "manual winds refresh"),
     }
-    Json(build_data_status(&state))
+    Ok(Json(build_data_status(&state)))
 }
 
 #[utoipa::path(
@@ -2766,5 +2794,43 @@ mod data_status_tests {
         );
         assert_eq!(status.nav_cycles_behind, Some(2));
         assert_eq!(status_for_cycle("unknown").nav_cycles_behind, None);
+    }
+}
+
+#[cfg(test)]
+mod data_refresh_claim_tests {
+    use std::sync::atomic::{AtomicBool, Ordering};
+
+    use super::DataRefreshClaim;
+
+    #[test]
+    fn a_second_claim_is_refused_while_the_first_is_held() {
+        let flag = AtomicBool::new(false);
+        let first = DataRefreshClaim::acquire(&flag).expect("first claim");
+        assert!(
+            DataRefreshClaim::acquire(&flag).is_none(),
+            "a concurrent refresh must be refused, not started alongside the running one"
+        );
+        drop(first);
+    }
+
+    /// The flag must clear on drop, not on the happy path: an early return, a client disconnect that
+    /// cancels the future, or a panic inside the fetch would otherwise latch it and wedge the
+    /// endpoint at 409 for the rest of the process's life.
+    #[test]
+    fn dropping_the_claim_releases_the_slot() {
+        let flag = AtomicBool::new(false);
+        drop(DataRefreshClaim::acquire(&flag).expect("first claim"));
+        assert!(!flag.load(Ordering::Acquire), "drop must clear the flag");
+        assert!(
+            DataRefreshClaim::acquire(&flag).is_some(),
+            "a refresh must be possible again once the previous one finished"
+        );
+    }
+
+    #[test]
+    fn a_claim_is_refused_when_the_flag_is_already_set() {
+        let flag = AtomicBool::new(true);
+        assert!(DataRefreshClaim::acquire(&flag).is_none());
     }
 }

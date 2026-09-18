@@ -1,7 +1,7 @@
 use std::collections::HashMap;
 use std::sync::Arc;
 use std::sync::Mutex;
-use std::sync::atomic::AtomicI64;
+use std::sync::atomic::{AtomicBool, AtomicI64};
 
 use arc_swap::ArcSwap;
 use sqlx::{PgPool, postgres::PgPoolOptions};
@@ -54,6 +54,10 @@ pub struct AppState {
     /// Epoch-ms of the last successful nav / winds fetch (0 = not yet fetched at runtime).
     pub nav_refreshed: Arc<AtomicI64>,
     pub winds_refreshed: Arc<AtomicI64>,
+    /// Single-flight claim for the manual nav + winds refresh (`POST /flow/data-refresh`). A refresh
+    /// is a full upstream download and parse, and the control that triggers it is global to every
+    /// flow controller, so concurrent presses must not fan out into concurrent rebuilds.
+    pub data_refresh_in_flight: Arc<AtomicBool>,
     /// Per-airport METAR cache `(info, fetched_ms)` for the runway board (server-side fetch).
     pub metar_cache: Arc<Mutex<HashMap<String, (feed::metar::MetarInfo, i64)>>>,
     /// Realtime push hub: mutation handlers publish a topic here; connected websockets fan it out to
@@ -86,6 +90,7 @@ impl AppState {
         let taxi_estimate_samples = Arc::new(ArcSwap::from_pointee(HashMap::new()));
         let nav_refreshed = Arc::new(AtomicI64::new(0));
         let winds_refreshed = Arc::new(AtomicI64::new(0));
+        let data_refresh_in_flight = Arc::new(AtomicBool::new(false));
         let metar_cache = Arc::new(Mutex::new(HashMap::new()));
         let events = broadcast::channel(256).0;
         let jobs = Arc::new(crate::job_registry::JobRegistry::new());
@@ -125,6 +130,7 @@ impl AppState {
                 taxi_estimate_samples,
                 nav_refreshed,
                 winds_refreshed,
+                data_refresh_in_flight,
                 metar_cache,
                 events,
                 jobs,
@@ -145,6 +151,7 @@ impl AppState {
             taxi_estimate_samples,
             nav_refreshed,
             winds_refreshed,
+            data_refresh_in_flight,
             metar_cache,
             events,
             jobs,
@@ -166,6 +173,7 @@ impl AppState {
             taxi_estimate_samples: Arc::new(ArcSwap::from_pointee(HashMap::new())),
             nav_refreshed: Arc::new(AtomicI64::new(0)),
             winds_refreshed: Arc::new(AtomicI64::new(0)),
+            data_refresh_in_flight: Arc::new(AtomicBool::new(false)),
             metar_cache: Arc::new(Mutex::new(HashMap::new())),
             events: broadcast::channel(256).0,
             jobs: Arc::new(crate::job_registry::JobRegistry::new()),

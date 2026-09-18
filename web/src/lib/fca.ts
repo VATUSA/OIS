@@ -66,6 +66,14 @@ export function useRouteCoverage() {
   });
 }
 
+/** Age in days of a `YYYY-MM-DD` NASR cycle, or `null` if it doesn't parse. */
+export function cycleAgeDays(cycle: string): number | null {
+  const m = /^(\d{4})-(\d{2})-(\d{2})$/.exec(cycle);
+  if (!m) return null;
+  const d = Date.UTC(Number(m[1]), Number(m[2]) - 1, Number(m[3]));
+  return Math.floor((Date.now() - d) / 86_400_000);
+}
+
 /** Health of the runtime nav + winds data, refreshed every 60s. */
 export function useDataStatus() {
   return useQuery({
@@ -83,7 +91,8 @@ export function useDataStatus() {
 /**
  * The toast a completed data refresh should raise. The endpoint answers 200 even when the nav fetch
  * could only fall back to an older cycle — it keeps last-good rather than failing — so a stale or
- * unreadable cycle must not read as success (VATUSA/OIS#317).
+ * unreadable cycle must not read as success (VATUSA/OIS#317). Pressed from the stale banner (#332),
+ * this is the only evidence of what the refresh actually did.
  */
 export function refreshToast(data: DataStatus): {
   variant: "success" | "warning";
@@ -113,8 +122,9 @@ export function useRefreshData() {
   const toast = useToast();
   return useMutation({
     mutationFn: async () => {
-      const { data, error } = await ois.POST("/api/v1/flow/data-refresh");
-      if (error || !data) throw new Error("refresh failed");
+      const { data, error, response } = await ois.POST("/api/v1/flow/data-refresh");
+      if (response.status === 409) throw new Error("already");
+      if (error || !data) throw new Error("failed");
       return data;
     },
     onSuccess: (data) => {
@@ -125,7 +135,12 @@ export function useRefreshData() {
       const { variant, title, description } = refreshToast(data);
       toast[variant](title, description ? { description } : undefined);
     },
-    onError: () => toast.error("Refresh failed"),
+    onError: (e) =>
+      toast.error(
+        e instanceof Error && e.message === "already"
+          ? "A refresh is already running — give it a moment."
+          : "Refresh failed",
+      ),
   });
 }
 
