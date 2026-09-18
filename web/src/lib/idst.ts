@@ -15,12 +15,18 @@ export function scopeIsEmpty(s: IdstScope): boolean {
   return s.airports.length + s.tracons.length + s.artccs.length === 0;
 }
 
-/** The user's IDST scope (airports/TRACONs/ARTCCs), persisted server-side so it follows the account. */
+/**
+ * The user's IDST scope (airports/TRACONs/ARTCCs), persisted server-side so it follows the account.
+ * `setScope` does nothing until the stored scope has loaded, so an edit can't overwrite it.
+ */
 export function useIdstScope() {
-  const { data } = usePreferences<IdstScope>(SCOPE_NS);
+  const prefs = usePreferences<IdstScope>(SCOPE_NS);
   const save = useSavePreferences<IdstScope>(SCOPE_NS);
-  const scope: IdstScope = { ...EMPTY_SCOPE, ...(data ?? {}) };
-  return { scope, setScope: (s: IdstScope) => save.mutate(s) };
+  const scope: IdstScope = { ...EMPTY_SCOPE, ...(prefs.data ?? {}) };
+  const setScope = (s: IdstScope) => {
+    if (prefs.isSuccess) save.mutate(s);
+  };
+  return { scope, setScope };
 }
 
 /** FCA-metered ground departures in scope, split into unscheduled / released. Polls while in scope. */
