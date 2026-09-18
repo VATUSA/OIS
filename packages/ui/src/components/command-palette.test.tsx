@@ -87,6 +87,15 @@ describe("CommandRow", () => {
     );
   });
 
+  // A toggle button's state *is* `aria-pressed` — asserting only that the attribute exists would let
+  // it be hard-coded, which is the one thing this issue is about.
+  it("reports the favorite state through aria-pressed", () => {
+    expect(row({ item: { ...item, starred: true, onToggleStar: () => {} } })).toContain('aria-pressed="true"');
+    expect(row({ active: true, item: { ...item, starred: false, onToggleStar: () => {} } })).toContain(
+      'aria-pressed="false"',
+    );
+  });
+
   it("shows the star on a starred row and on the active row, and nowhere else", () => {
     const starrable = { ...item, onToggleStar: () => {} };
     expect(row({ item: { ...starrable, starred: true } })).toContain("aria-pressed");
@@ -94,5 +103,21 @@ describe("CommandRow", () => {
     expect(row({ item: starrable })).not.toContain("aria-pressed");
     // An item the caller never made favoritable stays starless even when active.
     expect(row({ item, active: true })).not.toContain("aria-pressed");
+  });
+
+  // The palette scrolls the highlighted row into view with `[data-index="…"]`; splitting the row in
+  // two moved that attribute onto the wrapper, so pin it where the query can still find it.
+  it("carries data-index on the element wrapping both controls", () => {
+    expect(row({ index: 4, item: { ...item, starred: true, onToggleStar: () => {} } })).toMatch(
+      /^<div data-index="4"/,
+    );
+  });
+
+  // The row's padding belongs to the selection button: a gutter outside it is a strip of the row
+  // that tints on hover and does nothing when clicked.
+  it("leaves no unclickable gutter between the selection button and the row edge", () => {
+    const html = row({ item, active: true });
+    expect(html).not.toMatch(/<div[^>]*class="[^"]*\bpr-2\.5\b/);
+    expect(html).toMatch(/<button[^>]*class="[^"]*\bpx-2\.5\b/);
   });
 });
