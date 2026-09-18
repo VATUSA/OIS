@@ -1,6 +1,40 @@
 import {describe, expect, it} from "vitest";
 
-import {type Favorite, favoriteHref, isFavorite, toggleFavorite} from "./favorites";
+import type {Me} from "./auth";
+import {
+  type Favorite,
+  canSeeFavorite,
+  favoriteHref,
+  favoritePageLabel,
+  isFavorite,
+  isFavoriteHotkey,
+  toggleFavorite,
+  unavailable,
+} from "./favorites";
+
+/** A permission tree holding exactly `names` (dotted `segments.action`), as in `nav.test.ts`. */
+function holding(...names: string[]): Me {
+  const tree: Record<string, unknown> = {};
+  for (const name of names) {
+    const parts = name.split(".");
+    const action = parts.pop()!;
+    let node = tree;
+    for (const [i, seg] of parts.entries()) {
+      if (i === parts.length - 1) node[seg] = [...((node[seg] as string[]) ?? []), action];
+      else node = (node[seg] ??= {}) as Record<string, unknown>;
+    }
+  }
+  return {
+    id: "u1",
+    cid: 1,
+    email: "a@b.c",
+    display_name: "Tester",
+    rating: null,
+    server_admin: false,
+    role_names: [],
+    permissions: tree as Me["permissions"],
+  } as Me;
+}
 
 const tmi: Favorite = { kind: "tmi", id: "t1", label: "KJFK 20MIT", href: "/ops/tmu?tab=restrictions" };
 const page: Favorite = { kind: "page", id: "/ops/tmu", label: "TMU", href: "/ops/tmu" };
@@ -40,5 +74,105 @@ describe("favoriteHref", () => {
 
   it("escapes a param that isn't URL-safe", () => {
     expect(favoriteHref({ to: "/advisories/fcas", search: { flight: "N1 2A" } })).toBe("/advisories/fcas?flight=N1+2A");
+  });
+});
+
+describe("canSeeFavorite", () => {
+  const tmiFav: Favorite = { kind: "tmi", id: "t1", label: "20MIT", href: "/ops/tmu?tab=restrictions&facility=ZDV" };
+  const eventFav: Favorite = { kind: "event", id: "9", label: "Cross the Pond", href: "/admin/planning/events/9" };
+  const fcaPage: Favorite = { kind: "page", id: "/advisories/fcas", label: "FCAs", href: "/advisories/fcas" };
+
+  it("drops a favorite whose kind permission is gone", () => {
+    expect(canSeeFavorite(holding("tmu.tmi.read", "tmu.program.read"), tmiFav)).toBe(true);
+    expect(canSeeFavorite(holding("tmu.program.read"), tmiFav)).toBe(false);
+  });
+
+  it("drops an admin favorite whose destination is no longer reachable", () => {
+    expect(canSeeFavorite(holding("events.plan.read"), eventFav)).toBe(true);
+    expect(canSeeFavorite(holding("tmu.tmi.read"), eventFav)).toBe(false);
+  });
+
+  it("keeps a public page for a user holding nothing, and drops everything for a signed-out visitor", () => {
+    expect(canSeeFavorite(holding(), fcaPage)).toBe(true);
+    expect(canSeeFavorite(null, tmiFav)).toBe(false);
+    expect(canSeeFavorite(null, eventFav)).toBe(false);
+  });
+
+  it("ignores the query string when gating the destination", () => {
+    const withQuery: Favorite = { ...fcaPage, href: "/advisories/fcas?flight=UAL1" };
+    expect(canSeeFavorite(holding(), withQuery)).toBe(true);
+  });
+});
+
+describe("unavailable", () => {
+  const tmiFav: Favorite = { kind: "tmi", id: "t1", label: "20MIT", href: "/ops/tmu" };
+
+  it("is false while the source hasn't loaded, so nothing is wrongly marked gone", () => {
+    expect(unavailable(tmiFav, {})).toBe(false);
+  });
+
+  it("is true once the loaded source doesn't hold it", () => {
+    expect(unavailable(tmiFav, { tmis: [{ id: "other" }] })).toBe(true);
+    expect(unavailable(tmiFav, { tmis: [] })).toBe(true);
+  });
+
+  it("is false while the entity is still there", () => {
+    expect(unavailable(tmiFav, { tmis: [{ id: "t1" }] })).toBe(false);
+  });
+
+  it("matches each kind against its own source", () => {
+    const flight: Favorite = { kind: "aircraft", id: "UAL1", label: "UAL1", href: "/advisories/fcas" };
+    const event: Favorite = { kind: "event", id: "9", label: "CTP", href: "/admin/planning/events/9" };
+    const board: Favorite = { kind: "dashboard", id: "b1", label: "Board", href: "/ops/my/b1" };
+    expect(unavailable(flight, { aircraft: [{ callsign: "UAL1" }] })).toBe(false);
+    expect(unavailable(flight, { aircraft: [{ callsign: "DAL2" }] })).toBe(true);
+    expect(unavailable(event, { events: [{ id: 9 }] })).toBe(false);
+    expect(unavailable(board, { dashboards: [{ id: "other" }] })).toBe(true);
+  });
+
+  it("never marks a page or airport gone — they have no source", () => {
+    const page: Favorite = { kind: "page", id: "/ops/tmu", label: "TMU", href: "/ops/tmu" };
+    const airport: Favorite = { kind: "airport", id: "/ops/airport:KDEN", label: "KDEN", href: "/ops/airport?icao=KDEN" };
+    expect(unavailable(page, { tmis: [] })).toBe(false);
+    expect(unavailable(airport, { tmis: [] })).toBe(false);
+  });
+});
+
+describe("isFavoriteHotkey", () => {
+  const key = (over: Partial<KeyboardEvent>) =>
+    ({ metaKey: false, ctrlKey: false, shiftKey: false, key: "f", ...over }) as KeyboardEvent;
+
+  it("matches ⌘⇧F and Ctrl+⇧F", () => {
+    expect(isFavoriteHotkey(key({ metaKey: true, shiftKey: true }))).toBe(true);
+    expect(isFavoriteHotkey(key({ ctrlKey: true, shiftKey: true }))).toBe(true);
+    expect(isFavoriteHotkey(key({ metaKey: true, shiftKey: true, key: "F" }))).toBe(true);
+  });
+
+  it("leaves browser find (⌘F) and find-next (⌘G) alone", () => {
+    expect(isFavoriteHotkey(key({ metaKey: true }))).toBe(false);
+    expect(isFavoriteHotkey(key({ ctrlKey: true }))).toBe(false);
+    expect(isFavoriteHotkey(key({ metaKey: true, shiftKey: true, key: "g" }))).toBe(false);
+  });
+
+  it("ignores a bare ⇧F and a bare f", () => {
+    expect(isFavoriteHotkey(key({ shiftKey: true }))).toBe(false);
+    expect(isFavoriteHotkey(key({}))).toBe(false);
+  });
+});
+
+describe("favoritePageLabel", () => {
+  it("names a page that is itself a nav item", () => {
+    expect(favoritePageLabel("/ops/tmu", "ignored")).toBe("TMU");
+  });
+
+  // `itemForPath` is a prefix match for breadcrumbs, so every event used to be stored as "Events".
+  it("falls back to the document title below a nav item, so detail pages stay distinct", () => {
+    expect(favoritePageLabel("/admin/planning/events/4821", "Cross the Pond")).toBe("Cross the Pond");
+    expect(favoritePageLabel("/admin/planning/events/9137", "Light the Night")).toBe("Light the Night");
+    expect(favoritePageLabel("/facility-map/ZDV", "ZDV — Denver Center")).toBe("ZDV — Denver Center");
+  });
+
+  it("falls back to the document title for a path under no nav item at all", () => {
+    expect(favoritePageLabel("/nowhere", "Some page")).toBe("Some page");
   });
 });

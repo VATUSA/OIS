@@ -8,8 +8,9 @@ import {ois} from "./api";
  * the backend never inspects it. A failed load is a query error — never `null` — so callers that
  * write must wait for `isSuccess`, or they'd overwrite what's stored with a value built from nothing.
  */
-export function usePreferences<T>(namespace: string) {
+export function usePreferences<T>(namespace: string, options?: { enabled?: boolean }) {
   return useQuery({
+    enabled: options?.enabled ?? true,
     queryKey: ["preferences", namespace],
     queryFn: async (): Promise<T | null> => {
       const { data, response } = await ois.GET("/api/v1/me/preferences/{namespace}", {
