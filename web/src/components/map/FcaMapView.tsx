@@ -737,11 +737,7 @@ export function FcaMapView({
 
   if (!canRead) {
     return (
-      <div
-        className={`flex items-center justify-center text-sm text-ink-2 ${
-          embedded ? "h-full" : "h-full"
-        }`}
-      >
+      <div className="flex h-full items-center justify-center text-sm text-ink-2">
         You don&apos;t have flow access.
       </div>
     );
@@ -750,7 +746,7 @@ export function FcaMapView({
   return (
     // `isolate` keeps the map's high internal z-indexes in their own stacking context so they don't
     // paint over app chrome (nav dropdowns, toasts, dialogs), which portal to the body above it.
-    <div className={`relative isolate flex ${embedded ? "h-full" : "h-full"}`}>
+    <div className="relative isolate flex h-full">
       {!embedded && mobileList && (
         <div className="absolute inset-0 z-[650] bg-ground/60 md:hidden" onClick={() => setMobileList(false)} />
       )}
