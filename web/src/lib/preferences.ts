@@ -7,8 +7,9 @@ import {ois} from "./api";
  * (see backend migration 0034). The value shape is owned by the caller, so pass a type param;
  * the backend never inspects it. GET yields `null` when unset (the API returns `{}`).
  */
-export function usePreferences<T>(namespace: string) {
+export function usePreferences<T>(namespace: string, options?: { enabled?: boolean }) {
   return useQuery({
+    enabled: options?.enabled ?? true,
     queryKey: ["preferences", namespace],
     queryFn: async (): Promise<T | null> => {
       const { data, error } = await ois.GET("/api/v1/me/preferences/{namespace}", {
