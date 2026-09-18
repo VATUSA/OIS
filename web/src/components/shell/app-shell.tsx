@@ -8,7 +8,7 @@ import {areaForPath, groupForPath, itemForPath, visibleGroups} from "@/lib/nav";
 
 import {AppSidebar, MobileNavButton} from "./app-sidebar";
 import {CommandSearch} from "./command-search";
-import {PageMetaProvider, usePageHeaderOverride, useRouteMeta, useView} from "./page-meta";
+import {PageMetaProvider, usePageHeaderOverride, usePageTitle, useRouteMeta, useView} from "./page-meta";
 import {recordVisit} from "./recent-pages";
 
 /** The signed-in user's own pages (the sidebar's User group). */
@@ -59,10 +59,11 @@ function Header() {
 
 function Frame({ children }: { children: React.ReactNode }) {
   const meta = useRouteMeta();
-  const override = usePageHeaderOverride();
   const pathname = useRouterState({ select: (s) => s.location.pathname });
   const [collapsed, setCollapsed] = useLocalStorage("ois.sidebar.collapsed", false);
-  const title = override.title ?? meta.title ?? itemForPath(pathname)?.item.label;
+  // Shared with whatever else names this page — favoriting it, the recents list — so a stored label
+  // cannot drift from the title on screen (VATUSA/OIS#312).
+  const title = usePageTitle();
   const crumbs = useCrumbs(title);
 
   useEffect(() => {

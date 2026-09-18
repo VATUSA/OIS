@@ -21,13 +21,23 @@ import {useMe} from "@/lib/auth";
 import {SCOPES, type ScopeId, icaoRows, parseScopePrefix, tmiRow} from "@/lib/command-scopes";
 import {useDashboards} from "@/lib/dashboards";
 import {useUpcomingEvents} from "@/lib/events";
-import {type Favorite, type FavoriteKind, favoriteHref, useFavorites} from "@/lib/favorites";
+import {
+  type Favorite,
+  type FavoriteKind,
+  canSeeFavorite,
+  favoriteHref,
+  favoriteKey,
+  isFavoriteHotkey,
+  unavailable,
+  useFavorites,
+} from "@/lib/favorites";
 import {useFacilityDirectory} from "@/lib/facilities";
 import {useTraffic} from "@/lib/fca";
 import {fuzzyMatch, rankAircraft} from "@/lib/fuzzy";
-import {AREAS, type NavItem, canOpenPath, canSeeItem, itemForPath, visibleGroups} from "@/lib/nav";
+import {AREAS, type NavItem, canSeeItem, visibleGroups} from "@/lib/nav";
 import {hasPermission} from "@/lib/permissions";
 import {useTmis} from "@/lib/tmu";
+import {usePageTitle} from "./page-meta";
 
 /** Rows per group in the blended "All" view, and in a single focused scope. */
 const LIMIT = 6;
@@ -63,17 +73,22 @@ function FavoriteCurrentPage() {
   const favorites = useFavorites();
   const toast = useToast();
   const location = useRouterState({ select: (s) => s.location });
+  // The title the page is actually showing. Nothing in this app assigns `document.title`, so reading
+  // that stored every deep page as "OIS" (VATUSA/OIS#312).
+  const title = usePageTitle();
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
-      if (!((e.metaKey || e.ctrlKey) && e.shiftKey && e.key.toLowerCase() === "f")) return;
+      if (!isFavoriteHotkey(e)) return;
       e.preventDefault();
-      const label = itemForPath(location.pathname)?.item.label ?? document.title;
-      const added = favorites.toggle({ kind: "page", id: location.pathname, label, href: location.href });
+      const label = title ?? location.pathname;
+      // Keyed on the full href: several routes carry their identity in `search` (?icao=, ?facility=,
+      // ?flight=), so keying on the path alone made two airports one favorite that overwrote itself.
+      const added = favorites.toggle({ kind: "page", id: location.href, label, href: location.href });
       if (added != null) toast.success(added ? `Added ${label} to favorites` : `Removed ${label} from favorites`);
     };
     window.addEventListener("keydown", onKey);
     return () => window.removeEventListener("keydown", onKey);
-  }, [favorites, toast, location]);
+  }, [favorites, toast, location, title]);
   return null;
 }
 
@@ -126,7 +141,8 @@ function Palette({ onClose }: { onClose: () => void }) {
       (s.id !== "tmis" || canTmis) && (s.id !== "events" || canEvents) && (s.id !== "dashboards" || canDashboards),
   );
 
-  const favorites = useFavorites();
+  // Favorites are per user: signed out there is nothing to fetch, and nothing that could be saved.
+  const favorites = useFavorites(!!me);
   const traffic = useTraffic();
   const facilities = useFacilityDirectory();
   const events = useUpcomingEvents({ enabled: canEvents });
@@ -162,11 +178,18 @@ function Palette({ onClose }: { onClose: () => void }) {
 
   const limit = scope === "all" ? LIMIT : SCOPED_LIMIT;
 
-  const star = (item: CommandItem, fav: Favorite): CommandItem => ({
-    ...item,
-    starred: favorites.isFavorite(fav.kind, fav.id),
-    onToggleStar: () => favorites.toggle(fav),
-  });
+  // Without `onToggleStar` the row shows no star — so a signed-out visitor is never offered one.
+  // `entityId` is what the pinned Favorites row and the source row it was starred from have in
+  // common, so un-starring moves the highlight to the twin instead of sliding (VATUSA/OIS#312).
+  const star = (item: CommandItem, fav: Favorite): CommandItem =>
+    me
+      ? {
+          ...item,
+          entityId: favoriteKey(fav),
+          starred: favorites.isFavorite(fav.kind, fav.id),
+          onToggleStar: () => favorites.toggle(fav),
+        }
+      : item;
 
   const pageItems = (): CommandItem[] =>
     rank(q, pages, (p) => `${p.label} ${p.context}`, limit).map((p) =>
@@ -278,33 +301,11 @@ function Palette({ onClose }: { onClose: () => void }) {
       ),
     );
 
-  // A favorite is listed only while its kind and destination are still permitted.
-  const canSeeFavorite = (f: Favorite) => {
-    if ((f.kind === "tmi" && !canTmis) || (f.kind === "event" && !canEvents) || (f.kind === "dashboard" && !canDashboards)) {
-      return false;
-    }
-    const path = f.href.split("?")[0];
-    if (path.startsWith("/admin")) return canOpenPath(me, path);
-    const hit = itemForPath(path);
-    return hit ? canSeeItem(me, hit.item) : true;
-  };
-
-  // Gone once its source has loaded without it; the row stays so it can still be unstarred.
-  const unavailable = (f: Favorite): boolean => {
-    const missing = <T,>(data: readonly T[] | undefined, id: (t: T) => string) =>
-      data != null && !data.some((t) => id(t) === f.id);
-    switch (f.kind) {
-      case "aircraft":
-        return missing(traffic.data, (a) => a.callsign);
-      case "tmi":
-        return missing(tmis.data, (t) => t.id);
-      case "event":
-        return missing(events.data, (e) => String(e.id));
-      case "dashboard":
-        return missing(dashboards.data?.dashboards, (d) => d.id);
-      default:
-        return false;
-    }
+  const favoriteSources = {
+    aircraft: traffic.data,
+    tmis: tmis.data,
+    events: events.data,
+    dashboards: dashboards.data?.dashboards,
   };
 
   const FAVORITE_KIND: Record<ScopeId, FavoriteKind | null> = {
@@ -318,13 +319,13 @@ function Palette({ onClose }: { onClose: () => void }) {
   };
   const favoriteItems = (): CommandItem[] => {
     const kind = FAVORITE_KIND[scope];
-    const visible = favorites.items.filter((f) => (kind == null || f.kind === kind) && canSeeFavorite(f));
+    const visible = favorites.items.filter((f) => (kind == null || f.kind === kind) && canSeeFavorite(me, f));
     return rank(q, visible, (f) => f.label, visible.length).map((f) =>
       star(
         {
           id: `favorite:${f.kind}:${f.id}`,
           label: f.label,
-          sublabel: unavailable(f) ? "Unavailable" : f.kind,
+          sublabel: unavailable(f, favoriteSources) ? "Unavailable" : f.kind,
           icon: Star,
           onSelect: () => void navigate({ href: f.href }),
         },

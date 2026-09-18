@@ -2,6 +2,8 @@ import {createContext, type ReactNode, useCallback, useContext, useLayoutEffect,
 import {useRouterState} from "@tanstack/react-router";
 import type {LucideIcon} from "lucide-react";
 
+import {itemForPath} from "@/lib/nav";
+
 export type ViewOption = { value: string; label: string; icon?: LucideIcon };
 
 /** What a route declares about itself in `staticData` (typed in router.tsx). */
@@ -72,6 +74,19 @@ export function useRouteMeta(): RouteMeta {
       return meta;
     },
   });
+}
+
+/**
+ * The title this page is showing — a page override, else its route's, else the nav link's. The same
+ * expression `Frame` renders, so anything naming a page from outside the header (favoriting it, the
+ * recents list) cannot drift from what the user is looking at. `itemForPath` alone is a *prefix*
+ * match built for breadcrumbs, so on its own it would call every event "Events" (VATUSA/OIS#312).
+ */
+export function usePageTitle(): string | undefined {
+  const meta = useRouteMeta();
+  const override = usePageHeaderOverride();
+  const pathname = useRouterState({ select: (s) => s.location.pathname });
+  return override.title ?? meta.title ?? itemForPath(pathname)?.item.label;
 }
 
 /** The page's current view (`?view=`), defaulting to its first declared view. */
