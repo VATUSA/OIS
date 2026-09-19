@@ -300,6 +300,14 @@ fn resolve_route_body(nav: &NavData, airports: &AirportDb, row: flow_repo::Route
 const ROUTE_UPDATE_PERM: &str = "flow.route.update";
 const ROUTE_DELETE_PERM: &str = "flow.route.delete";
 
+/// Protective margin added to the separation when **issuing** a release (#356).
+///
+/// A release is a commitment made now against *predicted* crossing times, so it should not take a
+/// slot that only just fits — residual ETA drift then squeezes it. ~1.2 nm of extra in-trail at a
+/// 280 kt crossing speed. Applied only on the release path: the ladder's own metering is unchanged,
+/// so the crossing times controllers see don't shift.
+const RELEASE_MARGIN_MS: i64 = 15_000;
+
 #[derive(Deserialize)]
 pub struct RoutesQuery {
     /// Scope to one ARTCC's routes (plus the global ones). Omit for every route (the national view).
@@ -1771,18 +1779,50 @@ fn build_candidates(
     (flights, metas)
 }
 
+/// The controller's manual crossing order as candidate indices, when the FCA is in manual sequence.
+/// `None` means auto — `fca::meter` sequences by time itself.
+///
+/// Shared by [`finalize`] and `mark_release` so a release is metered against exactly the sequence the
+/// ladder resolves, rather than a second, subtly different derivation of it (#356).
+fn manual_order(fca: &FcaBody, flights: &[FcaFlight]) -> Option<Vec<usize>> {
+    (fca.manual_seq && !fca.manual_order.is_empty()).then(|| {
+        fca.manual_order
+            .iter()
+            .filter_map(|cs| flights.iter().position(|f| &f.callsign == cs))
+            .collect()
+    })
+}
+
+/// The crossing times a newly released aircraft must be spaced clear of: every **other** pinned
+/// crossing — airborne, or an already-issued CFR — at its **metered** time, not its raw ETA.
+///
+/// The distinction is the whole of #356. `fca::meter` pushes an airborne arrival later than its ETA
+/// whenever it still owes spacing to the aircraft ahead of it, so spacing a release against raw ETAs
+/// hands the departure a gap that closes as soon as that arrival takes its own spacing. Unpinned
+/// ground traffic is excluded: it has no committed time to conflict with and floats around the
+/// release itself.
+fn committed_crossings(
+    metas: &[fca::MeterInput],
+    metered: &[fca::MeterOutput],
+    releasing: usize,
+) -> Vec<i64> {
+    metas
+        .iter()
+        .zip(metered)
+        .enumerate()
+        .filter(|(j, _)| *j != releasing)
+        .filter(|(_, (m, _))| m.airborne || m.frozen_ms.is_some())
+        .map(|(_, (_, out))| out.sched_ms)
+        .collect()
+}
+
 /// Meter the candidates (auto, or the FCA's manual order) and finalize sequence/delay.
 fn finalize(
     fca: &FcaBody,
     mut flights: Vec<FcaFlight>,
     metas: &[fca::MeterInput],
 ) -> Vec<FcaFlight> {
-    let order: Option<Vec<usize>> = (fca.manual_seq && !fca.manual_order.is_empty()).then(|| {
-        fca.manual_order
-            .iter()
-            .filter_map(|cs| flights.iter().position(|f| &f.callsign == cs))
-            .collect()
-    });
+    let order = manual_order(fca, &flights);
     let metered = fca::meter(metas, &fca.mode, fca.rate, fca.mit, order.as_deref());
     for ((f, m), input) in flights.iter_mut().zip(&metered).zip(metas) {
         f.cross_time = DateTime::from_timestamp_millis(m.sched_ms);
@@ -2111,19 +2151,12 @@ pub async fn mark_release(
         .ok_or(ApiError::NotFound)?; // not currently crossing
     let eta_ms = metas[ti].eta_ms;
 
-    // Committed = every other pinned crossing (airborne ETA or an existing frozen CTA).
-    let committed: Vec<i64> = metas
-        .iter()
-        .enumerate()
-        .filter(|(j, _)| *j != ti)
-        .filter_map(|(_, m)| {
-            if m.airborne {
-                Some(m.eta_ms)
-            } else {
-                m.frozen_ms
-            }
-        })
-        .collect();
+    // Space the release against the crossing times the ladder actually resolves, not raw ETAs: an
+    // airborne arrival that still owes spacing to the aircraft ahead of it gets metered later, so a
+    // gap measured at its ETA closes under the departure we just released (#356).
+    let order = manual_order(&fca, &flights);
+    let metered = fca::meter(&metas, &fca.mode, fca.rate, fca.mit, order.as_deref());
+    let committed = committed_crossings(&metas, &metered, ti);
     let sep_ms = if fca.mode == "mit" {
         ((fca.mit as f64 / metas[ti].cross_speed.max(60.0)) * 3600.0 * 1000.0) as i64
     } else if fca.rate > 0 {
@@ -2135,8 +2168,9 @@ pub async fn mark_release(
     let cta = match payload.ready.as_deref().filter(|s| !s.trim().is_empty()) {
         // SET: pin the crossing so wheels-up lands on the requested time.
         Some(ready) => parse_hhmm_z(ready, now).ok_or(ApiError::BadRequest)? + (eta_ms - now_ms),
-        // RDY: earliest metered slot.
-        None => fca::earliest_slot(eta_ms, &committed, sep_ms),
+        // RDY: earliest metered slot, plus the protective margin (#356) — a release is a commitment
+        // made now against predicted crossings, so it doesn't take a slot that only just fits.
+        None => fca::earliest_slot(eta_ms, &committed, sep_ms + RELEASE_MARGIN_MS),
     };
     let edct = cta - (eta_ms - now_ms);
     flow_repo::upsert_release(pool, &id, &callsign, cta, edct, &user.id).await?;
@@ -2832,5 +2866,110 @@ mod data_refresh_claim_tests {
     fn a_claim_is_refused_when_the_flag_is_already_set() {
         let flag = AtomicBool::new(true);
         assert!(DataRefreshClaim::acquire(&flag).is_none());
+    }
+}
+
+#[cfg(test)]
+mod release_spacing_tests {
+    use super::{RELEASE_MARGIN_MS, committed_crossings};
+    use crate::feed::fca::{self, MeterInput};
+
+    const SEP_MS: i64 = 120_000;
+
+    fn cand(eta_ms: i64, airborne: bool, frozen_ms: Option<i64>) -> MeterInput {
+        MeterInput {
+            eta_ms,
+            airborne,
+            cross_speed: 300.0,
+            frozen_ms,
+        }
+    }
+
+    /// #356, the reported scenario. A leader arrival crosses at 0s; arrival A's ETA is 60s but it
+    /// still owes the leader its spacing, so the ladder meters A to 120s. A departure released
+    /// against A's *ETA* lands at 180s — only 60s behind A's real 120s crossing, half the required
+    /// separation. Spacing against the metered sequence puts it a full separation behind instead.
+    #[test]
+    fn a_release_is_spaced_behind_an_arrivals_metered_time_not_its_eta() {
+        // index 0 = leader arrival, 1 = arrival A (owes spacing), 2 = the ground departure released.
+        let metas = vec![
+            cand(0, true, None),
+            cand(60_000, true, None),
+            cand(180_000, false, None),
+        ];
+        let metered = fca::meter(&metas, "rate", 30, 0, None); // 30/hr -> 120s separation
+        let a_sta = metered[1].sched_ms;
+        assert_eq!(
+            a_sta, 120_000,
+            "the ladder must push A back to earn its own spacing behind the leader"
+        );
+
+        let committed = committed_crossings(&metas, &metered, 2);
+        assert_eq!(
+            committed,
+            vec![0, 120_000],
+            "the release must see A at its metered crossing time, not its 60s ETA"
+        );
+
+        // What the bug did: space against raw ETAs.
+        let eta_based = fca::earliest_slot(180_000, &[0, 60_000], SEP_MS);
+        assert!(
+            eta_based - a_sta < SEP_MS,
+            "regression guard: ETA-based spacing leaves only {}s behind A",
+            (eta_based - a_sta) / 1000
+        );
+
+        // The fix: space against the metered sequence.
+        let sta_based = fca::earliest_slot(180_000, &committed, SEP_MS);
+        assert!(
+            sta_based - a_sta >= SEP_MS,
+            "the release must sit a full separation behind A's metered crossing, got {}s",
+            (sta_based - a_sta) / 1000
+        );
+    }
+
+    /// The protective margin is applied on top of the separation, so a release never takes a slot
+    /// that only just fits.
+    #[test]
+    fn the_release_margin_reserves_more_than_the_bare_separation() {
+        let metas = vec![
+            cand(0, true, None),
+            cand(60_000, true, None),
+            cand(180_000, false, None),
+        ];
+        let metered = fca::meter(&metas, "rate", 30, 0, None);
+        let committed = committed_crossings(&metas, &metered, 2);
+        let a_sta = metered[1].sched_ms;
+
+        let with_margin = fca::earliest_slot(180_000, &committed, SEP_MS + RELEASE_MARGIN_MS);
+        assert_eq!(
+            with_margin - a_sta,
+            SEP_MS + RELEASE_MARGIN_MS,
+            "the margin must sit on top of the full separation"
+        );
+    }
+
+    /// `committed_crossings` selects exactly the pinned crossings, excluding the aircraft being
+    /// released: unreleased ground traffic has no commitment and floats around the release.
+    #[test]
+    fn committed_crossings_skips_the_releasing_aircraft_and_unpinned_ground() {
+        let metas = vec![
+            cand(0, true, None),               // 0 airborne -> committed
+            cand(50_000, false, None),         // 1 unreleased ground -> not committed
+            cand(90_000, false, Some(90_000)), // 2 issued CFR -> committed
+            cand(180_000, false, None),        // 3 the one being released -> excluded
+        ];
+        let metered = fca::meter(&metas, "rate", 30, 0, None);
+
+        let committed = committed_crossings(&metas, &metered, 3);
+        assert_eq!(
+            committed,
+            vec![metered[0].sched_ms, metered[2].sched_ms],
+            "only the airborne crossing and the issued CFR are commitments"
+        );
+        assert!(
+            !committed.contains(&metered[3].sched_ms),
+            "the aircraft being released must not be spaced against itself"
+        );
     }
 }
