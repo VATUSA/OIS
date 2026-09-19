@@ -5,7 +5,7 @@ members = [
     "discord",
     "crates/ois-core",
     "crates/ois-client",
-    # "desktop/src-tauri",  # added in Phase 5
+    "desktop/src-tauri",
 ]
 
 [workspace.package]
@@ -48,6 +48,12 @@ utoipa-swagger-ui = { version = "9.0.2", features = ["axum"] }
 
 # --- config ---
 dotenvy = "0.15.7"
+
+# --- desktop shell ---
+# The Tauri window around the web SPA (desktop/src-tauri). Pulled into the workspace so it shares
+# one lockfile and target dir, and so cargo-deny covers Tauri's dependency tree with everything else.
+tauri = { version = "2.11", features = [] }
+tauri-build = { version = "2.6", features = [] }
 
 # --- discord bot ---
 serenity = { version = "0.12", default-features = false, features = ["client", "gateway", "native_tls_backend", "model"] }
