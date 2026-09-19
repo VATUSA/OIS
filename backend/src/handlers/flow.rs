@@ -1619,7 +1619,7 @@ fn build_candidates(
             ))
         };
         let allowance = ground_taxi.as_ref().map(|b| b.total_sec()).unwrap_or(0.0);
-        let eta = predict::eta_along_route(
+        let pred = predict::eta_along_route(
             airborne,
             route_len,
             cross.along_nm,
@@ -1633,11 +1633,15 @@ fn build_candidates(
             allowance,
             now,
         );
+        let eta = pred.eta;
         let rel = releases.get(&p.callsign);
         metas.push(fca::MeterInput {
             eta_ms: eta.timestamp_millis(),
             airborne,
-            cross_speed: trajectory::effective_gs(cruise_tas, headwind).max(120.0),
+            // MIT is a distance *at the crossing fix*, so the gap must be sized with the speed the
+            // aircraft actually crosses at. Cruise groundspeed under-provisions every descending
+            // arrival — a 20 MIT flow over a low fix realized ~12 nm (#355).
+            cross_speed: pred.gs_kt.max(120.0),
             frozen_ms: rel.map(|(cta, _)| *cta),
         });
         let mut flight = fca_flight(
@@ -1714,7 +1718,7 @@ fn build_candidates(
         let ground_taxi =
             feed_flow::resolve_ground_allowance(gates, runways, taxi_samples, &dep, aircraft, None);
         let allowance = ground_taxi.total_sec();
-        let eta = predict::eta_along_route(
+        let pred = predict::eta_along_route(
             false,
             route_len,
             cross.along_nm,
@@ -1728,11 +1732,13 @@ fn build_candidates(
             allowance,
             now,
         );
+        let eta = pred.eta;
         let rel = releases.get(&pf.callsign);
         metas.push(fca::MeterInput {
             eta_ms: eta.timestamp_millis(),
             airborne: false,
-            cross_speed: trajectory::effective_gs(cruise_tas, headwind).max(120.0),
+            // Crossing speed, not cruise — see the airborne/ground site above (#355).
+            cross_speed: pred.gs_kt.max(120.0),
             frozen_ms: rel.map(|(cta, _)| *cta),
         });
         let mut flight = fca_flight(

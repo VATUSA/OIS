@@ -322,7 +322,10 @@ pub struct MeterInput {
     /// from one another — an airborne crossing is pushed later only when it would conflict with an
     /// earlier committed crossing, so two aircraft never share a slot.
     pub airborne: bool,
-    /// Predicted crossing groundspeed (kt) — used for MIT spacing.
+    /// Predicted groundspeed (kt) **at the crossing fix** — used for MIT spacing. Must be the
+    /// descent-aware speed from `predict::AlongRouteEta::gs_kt`, not the filed cruise speed: the
+    /// time gap is frozen when an aircraft is released, so sizing it with a speed the aircraft no
+    /// longer has by the fix realizes well under the configured MIT (#355).
     pub cross_speed: f64,
     /// A frozen (issued-CFR) metered crossing time; pins this aircraft like an airborne one.
     pub frozen_ms: Option<i64>,
@@ -863,6 +866,55 @@ mod tests {
         assert!(
             sie_d < 30.0,
             "expected SIE within ~30nm of current position, got {sie_d}"
+        );
+    }
+
+    /// #355: MIT is a distance **at the crossing fix**, so the time gap must be sized with the
+    /// speed the aircraft actually crosses at. A pair fed the descent-aware crossing speed ends up
+    /// a true MIT apart; fed cruise speed instead, the same 20 MIT realizes only ~13 nm, because
+    /// the gap is frozen at release and the aircraft flies it at its real (slower) crossing speed.
+    #[test]
+    fn mit_spacing_realizes_the_configured_distance_at_the_crossing_speed() {
+        const MIT: i32 = 20;
+        // What `predict::AlongRouteEta::gs_kt` reports 20 nm from the field on the descent, versus
+        // the cruise groundspeed this used to be given.
+        const CROSSING_GS: f64 = 282.5;
+        const CRUISE_GS: f64 = 440.0;
+
+        let pair = |gs: f64| {
+            vec![
+                MeterInput {
+                    eta_ms: 0,
+                    airborne: true,
+                    cross_speed: gs,
+                    frozen_ms: None,
+                },
+                MeterInput {
+                    eta_ms: 0, // same ETA → the follower is spaced by exactly one gap
+                    airborne: false,
+                    cross_speed: gs,
+                    frozen_ms: None,
+                },
+            ]
+        };
+        // Distance the follower actually covers in the gap it was given, at its real crossing speed.
+        let realized_nm = |gs: f64| {
+            let out = meter(&pair(gs), "mit", 0, MIT, None);
+            let gap_sec = (out[1].sched_ms - out[0].sched_ms) as f64 / 1000.0;
+            gap_sec / 3600.0 * CROSSING_GS
+        };
+
+        let correct = realized_nm(CROSSING_GS);
+        assert!(
+            (correct - MIT as f64).abs() < 0.5,
+            "crossing speed must realize the configured {MIT} MIT, got {correct:.1} nm"
+        );
+
+        // The regression this guards: cruise speed under-provisions by ~36%.
+        let regressed = realized_nm(CRUISE_GS);
+        assert!(
+            regressed < 14.0,
+            "cruise-sized gap should realize well under {MIT} MIT, got {regressed:.1} nm"
         );
     }
 
