@@ -176,6 +176,42 @@ fn passes_filters(fca: &FcaBody, fp: &FlightPlan, cur_alt_ft: Option<i64>) -> bo
     )
 }
 
+/// **The** decision of whether a flight is in an FCA, and where it crosses (#360).
+///
+/// Four surfaces have to agree on this: the metering board (`build_candidates`, both its live-pilot
+/// and prefile loops), the per-FCA badge counts (`fca_counts`), and the per-flight advisory
+/// (`build_flight_advisory`). They used to restate the decision — manual exclusion, then
+/// [`passes_filters`], then [`fca::crosses`], then [`passes_scope`] — in their own shape, so a new
+/// condition had to be added in three places by hand and a miss showed up as the board, the badge
+/// and the advisory quietly disagreeing about the same aircraft. #342 added its callsign check to
+/// all of them one at a time, which is what prompted this.
+///
+/// Returns the crossing when the flight is included, so the one caller that needs the geometry
+/// (`build_candidates`, for `along_nm` and the crossing position) gets it from the same call that
+/// decides inclusion, while the count and advisory paths just ask `.is_some()`.
+///
+/// `path` stays a parameter: how each caller resolves the route legitimately differs (live position,
+/// prefile departure field, or a route already resolved once for a cheap pre-filter), and that is
+/// not part of the inclusion rule.
+fn fca_crossing_for(
+    fca: &FcaBody,
+    airspace: &Boundaries,
+    exclusions: &ExclusionSet,
+    callsign: &str,
+    fp: &FlightPlan,
+    cur_alt_ft: Option<i64>,
+    path: &[[f64; 2]],
+) -> Option<fca::FcaCrossing> {
+    if is_manually_excluded(exclusions, Some(&fca.artcc), callsign) {
+        return None;
+    }
+    if !passes_filters(fca, fp, cur_alt_ft) {
+        return None;
+    }
+    let cross = fca::crosses(path, &fca.points.0)?;
+    passes_scope(fca, airspace, cross.lat, cross.lon).then_some(cross)
+}
+
 /// Whether an aircraft's altitude qualifies for an FCA band. Matches if **either** the filed cruise
 /// or the current altitude sits within `[min_fl, max_fl]` (either bound may be open). When neither
 /// altitude is known, it isn't excluded on altitude. No band at all ⇒ always matches.
@@ -534,17 +570,10 @@ pub async fn fca_counts(
                     return;
                 };
                 for f in &active {
-                    // Manually dropped as bogus for this FCA's facility (#342) — the badge count must
-                    // agree with the metering board, which skips it in `build_candidates`.
-                    if is_manually_excluded(exclusions, Some(&f.artcc), callsign) {
-                        continue;
-                    }
-                    if !passes_filters(f, fp, Some(alt)) {
-                        continue;
-                    }
-                    // Match the metering board: only count crossings within the FCA's ARTCC scope.
-                    if let Some(cross) = fca::crosses(&path, &f.points.0)
-                        && passes_scope(f, airspace, cross.lat, cross.lon)
+                    // Same inclusion decision the metering board makes, so a badge count can never
+                    // disagree with the board it labels (#360).
+                    if fca_crossing_for(f, airspace, exclusions, callsign, fp, Some(alt), &path)
+                        .is_some()
                         && let Some(c) = counts.get_mut(&f.id)
                     {
                         *c += 1;
@@ -910,24 +939,19 @@ pub(crate) async fn build_flight_advisory(
             .into_iter()
             .filter(|f| f.enabled && f.points.0.len() >= 2)
         {
-            // Manually dropped as bogus for this FCA's facility (#342) — keep this advisory in
-            // step with the metering board and the badge counts, which also skip it.
-            if is_manually_excluded(
-                state.flight_exclusions.load().as_ref(),
-                Some(&fca.artcc),
-                &cs,
-            ) {
-                continue;
-            }
-            // Same predicate build_candidates uses to include this flight: filters + a scoped
-            // crossing. If it doesn't cross, metering this FCA can't produce a slot for it.
+            // Same inclusion decision as the metering board and the badge counts (#360). If it
+            // doesn't cross, metering this FCA can't produce a slot for it.
             let crosses = match (&path, &fp) {
-                (Some(p), Some(plan)) => {
-                    passes_filters(&fca, plan, Some(altitude))
-                        && fca::crosses(p, &fca.points.0).is_some_and(|c| {
-                            passes_scope(&fca, state.airspace.as_ref(), c.lat, c.lon)
-                        })
-                }
+                (Some(p), Some(plan)) => fca_crossing_for(
+                    &fca,
+                    state.airspace.as_ref(),
+                    state.flight_exclusions.load().as_ref(),
+                    &cs,
+                    plan,
+                    Some(altitude),
+                    p,
+                )
+                .is_some(),
                 _ => false,
             };
             if !crosses {
@@ -1627,21 +1651,12 @@ fn build_candidates(
     now: DateTime<Utc>,
     debug: bool,
 ) -> (Vec<FcaFlight>, Vec<fca::MeterInput>) {
-    let pts = fca.points.0.clone();
     let mut flights = Vec::new();
     let mut metas = Vec::new();
 
     for p in &data.pilots {
         let Some(fp) = &p.flight_plan else { continue };
-        // Manually dropped as bogus (#342) — skipped before either push, since `metas` and
-        // `flights` are positionally coupled and `finalize` consumes them as parallel slices.
-        if is_manually_excluded(exclusions, Some(&fca.artcc), &p.callsign) {
-            continue;
-        }
         let airborne = p.groundspeed >= 50;
-        if !passes_filters(fca, fp, Some(p.altitude)) {
-            continue;
-        }
         let Some(path) = fca::route_path(
             nav,
             airports,
@@ -1655,12 +1670,20 @@ fn build_candidates(
         ) else {
             continue;
         };
-        let Some(cross) = fca::crosses(&path, &pts) else {
+        // One decision, shared with the badge counts and the advisory (#360). Skipping here is
+        // before either push, which matters: `metas` and `flights` are positionally coupled and
+        // `finalize` consumes them as parallel slices.
+        let Some(cross) = fca_crossing_for(
+            fca,
+            airspace,
+            exclusions,
+            &p.callsign,
+            fp,
+            Some(p.altitude),
+            &path,
+        ) else {
             continue;
         };
-        if !passes_scope(fca, airspace, cross.lat, cross.lon) {
-            continue;
-        }
         let (ty, wake) = fp.aircraft_type_wake();
         let profile = profiles.resolve(&ty, &wake);
         let cruise = trajectory::parse_alt_ft(&fp.altitude);
@@ -1741,12 +1764,6 @@ fn build_candidates(
 
     for pf in &data.prefiles {
         let Some(fp) = &pf.flight_plan else { continue };
-        if is_manually_excluded(exclusions, Some(&fca.artcc), &pf.callsign) {
-            continue;
-        }
-        if !passes_filters(fca, fp, None) {
-            continue;
-        }
         let Some((dep_lat, dep_lon)) = prefile_position(airports, &fp.departure) else {
             continue;
         };
@@ -1763,12 +1780,13 @@ fn build_candidates(
         ) else {
             continue;
         };
-        let Some(cross) = fca::crosses(&path, &pts) else {
+        // Same shared decision as the live-pilot loop above (#360); a prefile has no live
+        // altitude, so it qualifies on its filed cruise alone.
+        let Some(cross) =
+            fca_crossing_for(fca, airspace, exclusions, &pf.callsign, fp, None, &path)
+        else {
             continue;
         };
-        if !passes_scope(fca, airspace, cross.lat, cross.lon) {
-            continue;
-        }
         let (ty, wake) = fp.aircraft_type_wake();
         let profile = profiles.resolve(&ty, &wake);
         let cruise = trajectory::parse_alt_ft(&fp.altitude);
@@ -3117,5 +3135,222 @@ mod manual_exclusion_tests {
             HashSet::from(["BOGUS1".to_string(), "BOGUS2".to_string()])
         );
         assert!(all_excluded_callsigns(&ExclusionSet::new()).is_empty());
+    }
+}
+
+/// #360: the FCA inclusion decision lives in exactly one place. The metering board, the badge
+/// counts and the per-flight advisory used to restate it separately and could drift apart.
+#[cfg(test)]
+mod fca_inclusion_tests {
+    use std::collections::{HashMap, HashSet};
+
+    use chrono::Utc;
+
+    use super::{ExclusionSet, ReleaseMap, build_candidates, fca_crossing_for};
+    use crate::feed::airports::{Airport, AirportDb};
+    use crate::feed::{
+        airspace::Boundaries,
+        fca,
+        nav::NavData,
+        runway_db::RunwayDb,
+        trajectory::ProfileTable,
+        vatsim::{FlightPlan, Pilot, VatsimData},
+        winds::Winds,
+    };
+    use crate::models::FcaBody;
+
+    fn fca_at(lon_lo: f64, lon_hi: f64) -> FcaBody {
+        FcaBody {
+            id: "t".into(),
+            name: "t".into(),
+            color: "#fff".into(),
+            artcc: "ZDC".into(),
+            points: sqlx::types::Json(vec![[39.5, lon_lo], [39.5, lon_hi]]),
+            dests: vec![],
+            origins: vec![],
+            fixes: vec![],
+            scope: vec![],
+            min_fl: None,
+            max_fl: None,
+            dir: "any".into(),
+            mode: "rate".into(),
+            rate: 30,
+            mit: 0,
+            enabled: true,
+            manual_order: vec![],
+            manual_seq: false,
+            updated_at: Utc::now(),
+            updated_by: None,
+            event_id: None,
+            event_status: None,
+            auto_publish: false,
+        }
+    }
+
+    fn plan() -> FlightPlan {
+        FlightPlan {
+            departure: "KJFK".into(),
+            arrival: "KDCA".into(),
+            route: "".into(),
+            altitude: "35000".into(),
+            cruise_tas: "440".into(),
+            ..Default::default()
+        }
+    }
+
+    fn airports() -> AirportDb {
+        HashMap::from([
+            ("KJFK".to_string(), Airport::at(40.64, -73.78)),
+            ("KDCA".to_string(), Airport::at(38.85, -77.04)),
+        ])
+    }
+
+    fn data() -> VatsimData {
+        VatsimData {
+            pilots: vec![Pilot {
+                callsign: "AAL1".into(),
+                latitude: 40.5,
+                longitude: -74.2,
+                altitude: 35_000,
+                groundspeed: 440,
+                heading: 220,
+                flight_plan: Some(plan()),
+                ..Default::default()
+            }],
+            ..Default::default()
+        }
+    }
+
+    fn path(nav: &NavData, ap: &AirportDb) -> Vec<[f64; 2]> {
+        let fp = plan();
+        fca::route_path(
+            nav,
+            ap,
+            &fp.departure,
+            &fp.arrival,
+            &fp.route,
+            40.5,
+            -74.2,
+            220,
+            440,
+        )
+        .expect("the JFK->DCA corridor must resolve")
+    }
+
+    /// Every reason a flight is left out is one function's answer, so adding a condition can't
+    /// reach one surface and miss another.
+    #[test]
+    fn the_decision_covers_exclusion_filters_crossing_and_scope() {
+        let nav = NavData::load();
+        let ap = airports();
+        let path = path(&nav, &ap);
+        let empty = ExclusionSet::new();
+        let fp = plan();
+        let cross = |fca: &FcaBody, ex: &ExclusionSet, alt: Option<i64>| {
+            fca_crossing_for(fca, &Boundaries::default(), ex, "AAL1", &fp, alt, &path)
+        };
+
+        // Baseline: an ordinary crossing is included, and the geometry comes back with it.
+        let hit = cross(&fca_at(-76.5, -73.0), &empty, Some(35_000))
+            .expect("the corridor FCA must include this flight");
+        assert!(
+            hit.along_nm > 0.0,
+            "the decision must hand back the crossing, not just a bool"
+        );
+
+        // Manually excluded for this FCA's facility (#342).
+        let excluded =
+            ExclusionSet::from([("ZDC".to_string(), HashSet::from(["AAL1".to_string()]))]);
+        assert!(
+            cross(&fca_at(-76.5, -73.0), &excluded, Some(35_000)).is_none(),
+            "a manually excluded callsign must be left out"
+        );
+        // …but another facility's removal must not affect a ZDC FCA.
+        let other = ExclusionSet::from([("ZNY".to_string(), HashSet::from(["AAL1".to_string()]))]);
+        assert!(
+            cross(&fca_at(-76.5, -73.0), &other, Some(35_000)).is_some(),
+            "another facility's removal must not touch this FCA"
+        );
+
+        // Membership filters: a destination this flight doesn't match.
+        let mut wrong_dest = fca_at(-76.5, -73.0);
+        wrong_dest.dests = vec!["KBOS".into()];
+        assert!(
+            cross(&wrong_dest, &empty, Some(35_000)).is_none(),
+            "a flight failing the membership filters must be left out"
+        );
+
+        // Altitude band it sits outside of, on both filed and current.
+        let mut wrong_band = fca_at(-76.5, -73.0);
+        wrong_band.min_fl = Some(400);
+        assert!(
+            cross(&wrong_band, &empty, Some(35_000)).is_none(),
+            "a flight outside the altitude band must be left out"
+        );
+
+        // Geometry: a line the route never reaches.
+        assert!(
+            cross(&fca_at(-60.0, -59.0), &empty, Some(35_000)).is_none(),
+            "a line the route doesn't cross must be left out"
+        );
+    }
+
+    /// The metering board and the shared decision cannot disagree: `build_candidates` includes
+    /// exactly the flights `fca_crossing_for` accepts, and at the same crossing distance.
+    #[test]
+    fn the_metering_board_matches_the_shared_decision() {
+        let nav = NavData::load();
+        let ap = airports();
+        let path = path(&nav, &ap);
+        let fp = plan();
+        let empty = ExclusionSet::new();
+
+        for (label, fca) in [
+            ("crossed", fca_at(-76.5, -73.0)),
+            ("not crossed", fca_at(-60.0, -59.0)),
+        ] {
+            let decision = fca_crossing_for(
+                &fca,
+                &Boundaries::default(),
+                &empty,
+                "AAL1",
+                &fp,
+                Some(35_000),
+                &path,
+            );
+            let (flights, _) = build_candidates(
+                &fca,
+                &data(),
+                &ap,
+                &nav,
+                &Boundaries::default(),
+                &Winds::default(),
+                &ProfileTable::default(),
+                &ReleaseMap::new(),
+                &HashMap::new(),
+                &RunwayDb::default(),
+                &HashMap::new(),
+                &empty,
+                Utc::now(),
+                false,
+            );
+            assert_eq!(
+                decision.is_some(),
+                !flights.is_empty(),
+                "{label}: the board and the shared decision must agree on inclusion"
+            );
+            // Guard against agreeing vacuously: the "crossed" case must actually be included.
+            assert_eq!(
+                decision.is_some(),
+                label == "crossed",
+                "{label}: fixture no longer exercises what it claims to"
+            );
+            if let Some(c) = decision {
+                assert!(
+                    (flights[0].distance_nm as f64 - c.along_nm).abs() < 1.0,
+                    "{label}: the board must meter the crossing the decision returned"
+                );
+            }
+        }
     }
 }
