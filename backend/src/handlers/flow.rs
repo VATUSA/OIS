@@ -3237,6 +3237,67 @@ mod fca_inclusion_tests {
         .expect("the JFK->DCA corridor must resolve")
     }
 
+    /// The `passes_scope` arm, with **real** ARTCC boundaries (#360 rework).
+    ///
+    /// `passes_scope` short-circuits to `true` when `fca.scope` is empty, and every other fixture
+    /// here leaves it empty — so the arm never executed and deleting it from `fca_crossing_for`
+    /// kept the whole suite green. For a refactor whose product is "one function owns every reason
+    /// a flight is left out", that one reason has to be under test too.
+    ///
+    /// The fixture gate crosses the JFK→DCA corridor at lat 39.5, which the bundled boundaries put
+    /// inside **ZDC**. Scoping the FCA to ZDC must include the flight; scoping it to an ARTCC the
+    /// crossing is nowhere near must exclude it.
+    #[test]
+    fn a_scoped_fca_only_matches_a_crossing_inside_its_airspace() {
+        let nav = NavData::load();
+        let ap = airports();
+        let path = path(&nav, &ap);
+        let airspace = Boundaries::load();
+        assert!(
+            !airspace.is_empty(),
+            "sanity: real boundaries must load, or passes_scope short-circuits and proves nothing"
+        );
+
+        let scoped_to = |zone: &str| {
+            let mut fca = fca_at(-76.5, -73.0);
+            fca.scope = vec![zone.to_string()];
+            fca_crossing_for(
+                &fca,
+                &airspace,
+                &ExclusionSet::new(),
+                "AAL1",
+                &plan(),
+                Some(35_000),
+                &path,
+            )
+        };
+
+        // Sanity: the crossing really is in ZDC, so an unscoped FCA matches it.
+        assert!(
+            fca_crossing_for(
+                &fca_at(-76.5, -73.0),
+                &airspace,
+                &ExclusionSet::new(),
+                "AAL1",
+                &plan(),
+                Some(35_000),
+                &path,
+            )
+            .is_some(),
+            "sanity: the corridor crossing must be included when no scope is set"
+        );
+
+        assert!(
+            scoped_to("ZDC").is_some(),
+            "an FCA scoped to the ARTCC its crossing lies in must include the flight"
+        );
+        assert!(
+            scoped_to("ZLA").is_none(),
+            "an FCA scoped to an ARTCC the crossing is outside must exclude the flight — if this \
+             passes, `passes_scope` is not being consulted"
+        );
+    }
+
     /// Every reason a flight is left out is one function's answer, so adding a condition can't
     /// reach one surface and miss another.
     #[test]
