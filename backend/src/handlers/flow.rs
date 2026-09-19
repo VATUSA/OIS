@@ -2409,6 +2409,73 @@ mod project_traffic_tests {
         assert!((out[0].lon - -74.0).abs() < 1e-9);
     }
 
+    /// Regression (#342): the exclusion must be applied *at the call site*, not merely available.
+    /// Every other test here passes an **empty** exclusion map, so neutralising the filter in
+    /// `project_traffic` / `traffic_from` changes nothing they assert — the whole feature could be
+    /// removed from production with the suite still green. These drive a **populated** set.
+    #[test]
+    fn a_manually_excluded_callsign_is_dropped_from_projected_traffic() {
+        let data = VatsimData {
+            pilots: vec![airborne_pilot()],
+            ..Default::default()
+        };
+        let excluded: super::ExclusionSet = HashMap::from([(
+            "ZDC".to_string(),
+            std::collections::HashSet::from(["TEST1".to_string()]),
+        )]);
+
+        let kept = project_traffic(
+            &data,
+            &NavData::load(),
+            &airports(),
+            &ProfileTable::default(),
+            &Winds::default(),
+            &HashMap::new(),
+            0,
+        );
+        assert_eq!(
+            kept.len(),
+            1,
+            "sanity: the aircraft is there when nothing is excluded"
+        );
+
+        let dropped = project_traffic(
+            &data,
+            &NavData::load(),
+            &airports(),
+            &ProfileTable::default(),
+            &Winds::default(),
+            &excluded,
+            0,
+        );
+        assert!(
+            dropped.is_empty(),
+            "a manually excluded callsign must not appear in projected traffic, got {:?}",
+            dropped.iter().map(|a| &a.callsign).collect::<Vec<_>>()
+        );
+    }
+
+    /// The live-traffic sibling of the above, and the endpoint the controller actually watches
+    /// clear. Also pins the cross-facility semantics: this surface carries no facility context, so
+    /// *any* facility's removal hides the aircraft for everyone.
+    #[test]
+    fn a_manually_excluded_callsign_is_dropped_from_live_traffic() {
+        let data = VatsimData {
+            pilots: vec![airborne_pilot()],
+            ..Default::default()
+        };
+        assert_eq!(super::traffic_from(&data, &HashMap::new()).len(), 1);
+
+        let excluded_elsewhere: super::ExclusionSet = HashMap::from([(
+            "ZNY".to_string(),
+            std::collections::HashSet::from(["TEST1".to_string()]),
+        )]);
+        assert!(
+            super::traffic_from(&data, &excluded_elsewhere).is_empty(),
+            "the global traffic surface hides a callsign any facility removed"
+        );
+    }
+
     #[test]
     fn an_airborne_aircraft_moves_forward_over_time() {
         let data = VatsimData {
@@ -2620,6 +2687,24 @@ mod prefile_skip_integration_tests {
     /// A prefile whose departure ICAO isn't in the (tiny, test) airport cache, but whose arrival
     /// and real enroute fixes (RBV/WHITE/SIE, via the bundled nav db) resolve on their own — the
     /// exact shape `nav::build_anchors` produces ≥2 anchors for without ever needing the departure.
+    /// The same shape, but with a departure the tiny test airport cache *does* resolve, so the
+    /// prefile is a real candidate — the baseline the #342 exclusion test filters against.
+    fn unresolvable_departure_prefile_with_resolvable_departure() -> VatsimData {
+        VatsimData {
+            prefiles: vec![Prefile {
+                callsign: "TEST1".into(),
+                flight_plan: Some(FlightPlan {
+                    departure: "KJFK".into(),
+                    arrival: "KDCA".into(),
+                    route: "RBV WHITE SIE".into(),
+                    ..Default::default()
+                }),
+                ..Default::default()
+            }],
+            ..Default::default()
+        }
+    }
+
     fn unresolvable_departure_prefile() -> VatsimData {
         VatsimData {
             prefiles: vec![Prefile {
@@ -2634,6 +2719,66 @@ mod prefile_skip_integration_tests {
             }],
             ..Default::default()
         }
+    }
+
+    /// Regression (#342): the FCA crossing list must consult the exclusion set too. Scoped by the
+    /// FCA's own ARTCC here (unlike the global traffic surfaces), so a removal by a *different*
+    /// facility must leave the flight on this FCA's board.
+    #[test]
+    fn build_candidates_drops_a_manually_excluded_prefile_for_its_own_artcc() {
+        let nav = NavData::load();
+        let airports: crate::feed::airports::AirportDb = HashMap::from([
+            ("KJFK".to_string(), Airport::at(40.64, -73.78)),
+            ("KDCA".to_string(), Airport::at(38.85, -77.04)),
+        ]);
+        let fca = fca_crossing_the_corridor(); // artcc: "ZDC"
+        let data = unresolvable_departure_prefile_with_resolvable_departure();
+
+        let candidates = |ex: &super::ExclusionSet| {
+            let (flights, _) = build_candidates(
+                &fca,
+                &data,
+                &airports,
+                &nav,
+                &Boundaries::default(),
+                &Winds::default(),
+                &ProfileTable::default(),
+                &ReleaseMap::new(),
+                &HashMap::new(),
+                &RunwayDb::default(),
+                &HashMap::new(),
+                ex,
+                Utc::now(),
+                false,
+            );
+            flights.len()
+        };
+
+        assert_eq!(
+            candidates(&HashMap::new()),
+            1,
+            "sanity: TEST1 crosses this FCA"
+        );
+
+        let other_facility: super::ExclusionSet = HashMap::from([(
+            "ZNY".to_string(),
+            std::collections::HashSet::from(["TEST1".to_string()]),
+        )]);
+        assert_eq!(
+            candidates(&other_facility),
+            1,
+            "another facility's removal must not clear this ZDC FCA's board"
+        );
+
+        let own_facility: super::ExclusionSet = HashMap::from([(
+            "ZDC".to_string(),
+            std::collections::HashSet::from(["TEST1".to_string()]),
+        )]);
+        assert_eq!(
+            candidates(&own_facility),
+            0,
+            "the owning facility's removal must drop the flight from the crossing list"
+        );
     }
 
     #[test]
