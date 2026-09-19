@@ -5,21 +5,28 @@
 //! `web/`'s Vite output), so `@ois/ui`, `@ois/api-client` and all of `web/src` ship unchanged and
 //! the desktop app is literally the same app.
 //!
-//! It is deliberately bare. The pieces that make it *desktop* arrive in later issues and each one
-//! adds its own plugins, commands and capability entries:
+//! What it adds beyond the window is authentication (see [`auth`]): the desktop app can't carry the
+//! website's session cookie, so it holds a session token in the OS keychain and sends it as a
+//! bearer. The remaining desktop features arrive in later issues, each adding its own commands and
+//! capability entries:
 //!
-//! - platform capability layer / IPC conventions — #345
-//! - keychain-stored auth token — #346
 //! - distribution + signed auto-update — #347
-//!
-//! Until then: one window, no commands, no plugins.
+//! - notifications, tray, hotkeys and the rest — #348-#354
 
 // Release builds on Windows are GUI apps, so suppress the console window that would otherwise
 // appear behind them. Debug builds keep it — that's where our logs go.
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
+mod auth;
+
 fn main() {
     tauri::Builder::default()
+        .invoke_handler(tauri::generate_handler![
+            auth::store_token,
+            auth::get_token,
+            auth::delete_token,
+            auth::begin_login,
+        ])
         .run(tauri::generate_context!())
         .expect("failed to start the OIS desktop shell");
 }

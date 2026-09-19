@@ -13,3 +13,5 @@ tauri-build.workspace = true
 
 [dependencies]
 tauri.workspace = true
+keyring.workspace = true
+open.workspace = true

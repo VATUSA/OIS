@@ -54,6 +54,13 @@ dotenvy = "0.15.7"
 # one lockfile and target dir, and so cargo-deny covers Tauri's dependency tree with everything else.
 tauri = { version = "2.11", features = [] }
 tauri-build = { version = "2.6", features = [] }
+# Desktop auth (#346): the session token lives in the real OS keychain (macOS Keychain, Windows
+# Credential Manager, Linux Secret Service), and sign-in opens the SYSTEM browser so the app never
+# sees the user's VATSIM credentials.
+# zbus (pure Rust) rather than the dbus/libsecret backend on Linux, so no system library is needed
+# to build — the CI desktop job stays as it is.
+keyring = { version = "4.2", features = ["apple-native-keyring-store", "windows-native-keyring-store", "zbus-secret-service-keyring-store"] }
+open = "5.4"
 
 # --- discord bot ---
 serenity = { version = "0.12", default-features = false, features = ["client", "gateway", "native_tls_backend", "model"] }

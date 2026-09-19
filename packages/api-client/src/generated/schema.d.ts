@@ -564,6 +564,53 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/v1/auth/desktop/exchange": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Trades the one-time code from the OAuth callback for a desktop session token.
+         * @description Public, like the OAuth callback itself — the code *is* the credential, and it is single-use and
+         *     short-lived. Unknown, expired and already-consumed codes are all reported identically so a probe
+         *     learns nothing from which it hit.
+         */
+        post: operations["desktop_exchange"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/auth/desktop/refresh": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Rotates the caller's desktop session, returning a new token and extending the expiry.
+         * @description Authenticated by the token being rotated — no permission gate, because holding a live desktop
+         *     session is the whole claim being made. Rotation means a token that leaked stops working as soon
+         *     as the app next refreshes.
+         *
+         *     Only `kind = 'desktop'` rows rotate: a stolen browser cookie cannot be traded up for a
+         *     long-lived keychain credential.
+         */
+        post: operations["desktop_refresh"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/v1/auth/logout": {
         parameters: {
             query?: never;
@@ -3708,6 +3755,22 @@ export interface components {
             /** @description How many departures are bound for a metered destination. */
             to_metered: number;
             total: number;
+        };
+        /** @description What the desktop app posts to trade its one-time OAuth code for a session token (#346). */
+        DesktopExchangeRequest: {
+            /** @description The single-use code the OAuth callback handed to the app's loopback listener. */
+            code: string;
+        };
+        /**
+         * @description A desktop session token and when it stops working.
+         *
+         *     Sent as `Authorization: Bearer <token>`; the app keeps it in the OS keychain. `expires_at` lets
+         *     it refresh ahead of time rather than waiting to be surprised by a 401.
+         */
+        DesktopSessionBody: {
+            /** Format: date-time */
+            expires_at: string;
+            token: string;
         };
         /**
          * @description Bot interaction callback: a Discord user submitted the claim modal on an ACE request. The backend
@@ -7448,6 +7511,64 @@ export interface operations {
                 content?: never;
             };
             404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+        };
+    };
+    desktop_exchange: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["DesktopExchangeRequest"];
+            };
+        };
+        responses: {
+            /** @description A desktop session token */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["DesktopSessionBody"];
+                };
+            };
+            /** @description Unknown, expired, or already-used code */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+        };
+    };
+    desktop_refresh: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description A rotated desktop session token */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["DesktopSessionBody"];
+                };
+            };
+            /** @description Not a live desktop session */
+            401: {
                 headers: {
                     [name: string]: unknown;
                 };
