@@ -3420,7 +3420,7 @@ mod mit_cross_speed_wiring_tests {
 
     use chrono::Utc;
 
-    use super::{ReleaseMap, build_candidates};
+    use super::{ExclusionSet, ReleaseMap, build_candidates};
     use crate::feed::airports::{Airport, AirportDb};
     use crate::feed::{
         airspace::Boundaries,
@@ -3524,6 +3524,7 @@ mod mit_cross_speed_wiring_tests {
             &HashMap::new(),
             &RunwayDb::default(),
             &HashMap::new(),
+            &ExclusionSet::new(),
             Utc::now(),
             false,
         );
@@ -3615,6 +3616,7 @@ mod mit_cross_speed_wiring_tests {
             &HashMap::new(),
             &RunwayDb::default(),
             &HashMap::new(),
+            &ExclusionSet::new(),
             Utc::now(),
             false,
         );
@@ -3669,6 +3671,7 @@ mod mit_cross_speed_wiring_tests {
             &HashMap::new(),
             &RunwayDb::default(),
             &HashMap::new(),
+            &ExclusionSet::new(),
             Utc::now(),
             true, // debug on
         );
