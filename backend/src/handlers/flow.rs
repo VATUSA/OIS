@@ -1517,6 +1517,7 @@ fn fca_debug(
     ty: &str,
     wake: &str,
     cruise_tas: f64,
+    cross_speed: f64,
     cruise_alt: f64,
     headwind: Option<f64>,
     nav: &NavData,
@@ -1530,6 +1531,7 @@ fn fca_debug(
     crate::models::FcaFlightDebug {
         profile: profiles.resolve_label(ty, wake),
         cruise_tas: cruise_tas.round() as i64,
+        cross_speed: cross_speed.round() as i64,
         cruise_alt: cruise_alt.round() as i64,
         headwind: headwind.map(|h| h.round() as i64),
         unresolved,
@@ -1634,14 +1636,16 @@ fn build_candidates(
             now,
         );
         let eta = pred.eta;
+        // MIT is a distance *at the crossing fix*, so the gap must be sized with the speed the
+        // aircraft actually crosses at. Cruise groundspeed under-provisions every descending
+        // arrival — a 20 MIT flow over a low fix realized ~12 nm (#355). Bound once so the metered
+        // gap and the debug view that explains it can never disagree about the floor.
+        let cross_speed = pred.gs_kt.max(120.0);
         let rel = releases.get(&p.callsign);
         metas.push(fca::MeterInput {
             eta_ms: eta.timestamp_millis(),
             airborne,
-            // MIT is a distance *at the crossing fix*, so the gap must be sized with the speed the
-            // aircraft actually crosses at. Cruise groundspeed under-provisions every descending
-            // arrival — a 20 MIT flow over a low fix realized ~12 nm (#355).
-            cross_speed: pred.gs_kt.max(120.0),
+            cross_speed,
             frozen_ms: rel.map(|(cta, _)| *cta),
         });
         let mut flight = fca_flight(
@@ -1664,6 +1668,7 @@ fn build_candidates(
                 &ty,
                 &wake,
                 cruise_tas,
+                cross_speed,
                 cruise,
                 headwind,
                 nav,
@@ -1733,12 +1738,13 @@ fn build_candidates(
             now,
         );
         let eta = pred.eta;
+        // Crossing speed, not cruise — see the airborne/ground site above (#355).
+        let cross_speed = pred.gs_kt.max(120.0);
         let rel = releases.get(&pf.callsign);
         metas.push(fca::MeterInput {
             eta_ms: eta.timestamp_millis(),
             airborne: false,
-            // Crossing speed, not cruise — see the airborne/ground site above (#355).
-            cross_speed: pred.gs_kt.max(120.0),
+            cross_speed,
             frozen_ms: rel.map(|(cta, _)| *cta),
         });
         let mut flight = fca_flight(
@@ -1761,6 +1767,7 @@ fn build_candidates(
                 &ty,
                 &wake,
                 cruise_tas,
+                cross_speed,
                 cruise,
                 headwind,
                 nav,
@@ -3019,6 +3026,113 @@ mod mit_cross_speed_wiring_tests {
             assert!(
                 gs <= FILED_TAS + 1.0,
                 "{site}: must not read above the {FILED_TAS:.0} kt cruise groundspeed, got {gs:.0} kt"
+            );
+        }
+    }
+
+    /// **A departure/climb gate is metered on its climb speed, and that is intended.**
+    ///
+    /// Raised at review as an unremarked consequence of #355: a 20 MIT gate shortly after departure
+    /// used to be sized at cruise (163.6 s) and is now sized at the climb speed the aircraft
+    /// actually crosses at (259.9 s here) — a large throughput reduction at departure gates.
+    ///
+    /// Confirmed as intended. MIT is a distance *at the fix*: a departure climbing through it at
+    /// ~277 kt genuinely needs the longer gap to end up 20 nm in trail. The old 163.6 s under-spaced
+    /// departure gates for exactly the same reason it under-spaced arrivals — this is the same bug,
+    /// not a new one. Pinned as a test so the decision travels with the code, and so anyone who
+    /// later reads the throughput drop as a regression finds the reasoning attached to it.
+    #[test]
+    fn a_departure_gate_is_metered_on_its_climb_speed_by_design() {
+        // A gate ~20 nm west of KJFK. Only the prefile crosses it — the live pilot is already past.
+        let nav = NavData::load();
+        let (flights, metas) = build_candidates(
+            &mit_fca_at_lon(-74.05, 38.0, 41.5),
+            &arrival_at_cruise(),
+            &airports(),
+            &nav,
+            &Boundaries::default(),
+            &Winds::default(),
+            &ProfileTable::default(),
+            &ReleaseMap::new(),
+            &HashMap::new(),
+            &RunwayDb::default(),
+            &HashMap::new(),
+            Utc::now(),
+            false,
+        );
+        let i = flights
+            .iter()
+            .position(|f| f.callsign == "AAL2")
+            .expect("the departing prefile must cross a gate just off its departure field");
+        let climb = metas[i].cross_speed;
+
+        assert!(
+            climb < FILED_TAS,
+            "a departure gate must be sized on the climb speed it is crossed at, not the \
+             {FILED_TAS:.0} kt filed cruise, got {climb:.0} kt"
+        );
+
+        // The throughput change that was flagged, asserted rather than described. Both figures use
+        // `mit / speed * 3600` — the same formula `fca::meter`'s `sep_ms` applies.
+        let gap = |gs: f64| 20.0 / gs * 3600.0;
+        let (cruise_sized, climb_sized) = (gap(FILED_TAS), gap(climb));
+        assert!(
+            climb_sized > cruise_sized * 1.4,
+            "expected a materially longer gap at a departure gate: cruise-sized {cruise_sized:.1}s \
+             vs climb-sized {climb_sized:.1}s"
+        );
+
+        // And it is the *correct* longer gap: a departure released into it ends up the configured
+        // 20 MIT in trail at the speed it is actually doing. That is the whole point of #355.
+        let realized_nm = climb_sized / 3600.0 * climb;
+        assert!(
+            (realized_nm - 20.0).abs() < 0.5,
+            "a departure released into this gap must end up the configured 20 MIT in trail, got \
+             {realized_nm:.1} nm"
+        );
+    }
+
+    /// The debug view has to be able to explain the gap. Since #355 the gap is a function of the
+    /// crossing speed, not `cruise_tas`, so `FcaFlightDebug` reports both — and the reported
+    /// `cross_speed` must be the *same* number the metering used, floor included.
+    #[test]
+    fn the_debug_view_reports_the_crossing_speed_that_sized_the_gap() {
+        let fca = mit_fca_at_lon(-76.75, 38.5, 39.5); // low arrival gate
+        let nav = NavData::load();
+        let (flights, metas) = build_candidates(
+            &fca,
+            &arrival_at_cruise(),
+            &airports(),
+            &nav,
+            &Boundaries::default(),
+            &Winds::default(),
+            &ProfileTable::default(),
+            &ReleaseMap::new(),
+            &HashMap::new(),
+            &RunwayDb::default(),
+            &HashMap::new(),
+            Utc::now(),
+            true, // debug on
+        );
+
+        for (f, m) in flights.iter().zip(&metas) {
+            let dbg = f
+                .debug
+                .as_ref()
+                .unwrap_or_else(|| panic!("{}: debug requested but absent", f.callsign));
+            assert_eq!(
+                dbg.cross_speed,
+                m.cross_speed.round() as i64,
+                "{}: the debug view must report the crossing speed metering actually used",
+                f.callsign
+            );
+            assert!(
+                dbg.cross_speed < dbg.cruise_tas,
+                "{}: at a low arrival fix the crossing speed ({} kt) should be below cruise ({} kt) \
+                 — reporting only cruise is what made the gap unexplainable",
+                f.callsign,
+                dbg.cross_speed,
+                dbg.cruise_tas
             );
         }
     }

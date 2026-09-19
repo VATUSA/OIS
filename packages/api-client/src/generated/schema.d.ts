@@ -4092,6 +4092,14 @@ export interface components {
         FcaFlightDebug: {
             /**
              * Format: int64
+             * @description Predicted groundspeed (kt) **at the crossing fix** — the number MIT spacing is actually
+             *     sized with since #355. Reported alongside `cruise_tas` because the gap is no longer a
+             *     function of cruise: without this the debug view can't explain the gap it exists to explain
+             *     (e.g. ~282 kt at a low arrival fix against a 440 kt cruise).
+             */
+            cross_speed: number;
+            /**
+             * Format: int64
              * @description Filed cruise altitude (ft) used.
              */
             cruise_alt: number;
