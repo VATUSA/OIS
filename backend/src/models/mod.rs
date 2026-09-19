@@ -1700,6 +1700,11 @@ pub struct FcaFlightDebug {
     pub profile: String,
     /// Cruise TAS (kt) used for the ETA, after the profile cap.
     pub cruise_tas: i64,
+    /// Predicted groundspeed (kt) **at the crossing fix** — the number MIT spacing is actually
+    /// sized with since #355. Reported alongside `cruise_tas` because the gap is no longer a
+    /// function of cruise: without this the debug view can't explain the gap it exists to explain
+    /// (e.g. ~282 kt at a low arrival fix against a 440 kt cruise).
+    pub cross_speed: i64,
     /// Filed cruise altitude (ft) used.
     pub cruise_alt: i64,
     /// Mean route headwind (kt) applied (+ head / − tail); null = still air.
@@ -2456,4 +2461,52 @@ pub struct ShareResponse {
 #[derive(Debug, Serialize, ToSchema)]
 pub struct CopyResponse {
     pub id: String,
+}
+
+/// A manually excluded ("bogus") flight — one VATSIM callsign a controller has dropped from the flow
+/// picture because its data is garbage (issue #342). Scoped to the removing controller's ARTCC.
+///
+/// Distinct from `FlowFlight::excluded`, which is program-wide by wake/type and keeps the flight
+/// shown; this removes one specific callsign from the map, FCA crossings, metering, counts and AADC
+/// demand.
+#[derive(Debug, Serialize, ToSchema, sqlx::FromRow)]
+pub struct FlightExclusionBody {
+    pub id: String,
+    pub callsign: String,
+    pub artcc: String,
+    /// Optional controller note on why the flight was dropped.
+    pub reason: String,
+    pub created_at: DateTime<Utc>,
+    pub created_by: Option<String>,
+    /// TTL backstop: the exclusion stops applying after this instant even if the callsign never
+    /// cleanly leaves the feed.
+    pub expires_at: DateTime<Utc>,
+    /// Display name of the controller who removed the flight, when still resolvable.
+    #[sqlx(default)]
+    pub created_by_name: Option<String>,
+}
+
+/// One FCA's manual exclusions, plus whether **this caller** may change them (#342).
+///
+/// `editable` exists because the write endpoints are ARTCC-scoped while the client's permission
+/// blob has no ARTCC dimension — `hasPermission(me, "flow.fca.update")` cannot tell whether the
+/// caller's grant covers *this* FCA's facility. Without it the UI offers a ✕ the server answers
+/// with 403.
+///
+/// It sits on the envelope rather than on each row (the shape `airport_configs` uses) because the
+/// control has to render when the list is **empty** — that is precisely the first removal.
+#[derive(Debug, Serialize, ToSchema)]
+pub struct FlightExclusionsBody {
+    /// Whether the caller holds `flow.fca.update` for this FCA's ARTCC (nationally or scoped).
+    pub editable: bool,
+    /// The live exclusions for this FCA's ARTCC, newest first.
+    pub exclusions: Vec<FlightExclusionBody>,
+}
+
+/// Body for manually excluding a flight. The callsign comes from the path; only the note is optional
+/// input — the ARTCC is resolved from the FCA being worked, never taken from the client.
+#[derive(Debug, Deserialize, ToSchema)]
+pub struct ExcludeFlightRequest {
+    #[serde(default)]
+    pub reason: String,
 }

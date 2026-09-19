@@ -13,6 +13,7 @@ pub mod events;
 pub mod faa_surface_seed;
 pub mod facility_documents;
 pub mod facility_map;
+pub mod flight_exclusions;
 pub mod flow;
 pub mod gdp;
 pub mod integration;

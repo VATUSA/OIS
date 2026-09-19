@@ -41,9 +41,25 @@ pub fn path_len_nm(path: &[[f64; 2]]) -> f64 {
         .sum()
 }
 
+/// An ETA to a point along the route, and the groundspeed the profile predicts **at that point**.
+///
+/// Both come from the same [`trajectory::VerticalProfile`], so they always describe the same
+/// aircraft in the same phase of flight. They are returned together deliberately: MIT spacing is a
+/// *distance* at the crossing fix, and sizing that gap with cruise speed under-provisions every
+/// aircraft crossing on descent (#355 — a 20 MIT flow over a low arrival fix realized ~12 nm).
+pub struct AlongRouteEta {
+    pub eta: DateTime<Utc>,
+    /// Predicted groundspeed (kt) at the target point — the phase-appropriate (descent/cruise/climb)
+    /// TAS with wind and any observed-GS anchoring applied, via
+    /// [`trajectory::VerticalProfile::ground_speed_at`]. This is the speed the paired `eta` was
+    /// integrated against, not the filed cruise speed.
+    pub gs_kt: f64,
+}
+
 /// ETA to a point `along_nm` along the route ahead of the aircraft's current position, timed with
-/// the shared vertical-profile + winds model. The profile is built over the whole remaining route
-/// to the destination (so descent is modeled when the target is near the field); the target sits
+/// the shared vertical-profile + winds model, together with the predicted groundspeed there. The
+/// profile is built over the whole remaining route to the destination (so descent is modeled when
+/// the target is near the field); the target sits
 /// `along_nm` ahead. Airborne aircraft start from their current altitude; ground aircraft climb
 /// from the surface and carry `ground_allowance_sec` (a learned per-gate/type/runway pushback+taxi
 /// estimate, #164 sub-issue E — `feed::taxi_estimate::estimate` falls back to [`GROUND_TAXI_SEC`]
@@ -66,7 +82,7 @@ pub fn eta_along_route(
     headwind: Option<f64>,
     ground_allowance_sec: f64,
     now: DateTime<Utc>,
-) -> DateTime<Utc> {
+) -> AlongRouteEta {
     let vp = profile_from_here(
         airborne,
         route_len_nm,
@@ -85,7 +101,10 @@ pub fn eta_along_route(
     if !airborne {
         sec += ground_allowance_sec;
     }
-    now + Duration::seconds(sec as i64)
+    AlongRouteEta {
+        eta: now + Duration::seconds(sec as i64),
+        gs_kt: vp.ground_speed_at(target_d),
+    }
 }
 
 /// Inverse of [`eta_along_route`] (#226's forward prediction scrubber): the along-route distance
@@ -240,7 +259,8 @@ pub fn arrival_eta(
         headwind,
         ground_allowance_sec,
         now,
-    );
+    )
+    .eta;
     ArrivalPrediction { eta, route_nm }
 }
 
@@ -359,7 +379,7 @@ mod tests {
             now(),
         );
         assert_eq!(
-            pred.eta, fca_eta,
+            pred.eta, fca_eta.eta,
             "ladder ETA must equal the FCA crossing-at-field ETA"
         );
     }
@@ -466,7 +486,7 @@ mod tests {
             GROUND_TAXI_SEC * 10.0,
             now(),
         );
-        assert_eq!(low, high);
+        assert_eq!(low.eta, high.eta);
     }
 
     /// #164 sub-issue E, AC #3: a thin-data airport/gate — no observations at all — must still
@@ -512,8 +532,8 @@ mod tests {
         );
         // No panic, a sane (later, not wildly-off) ETA, and it matches the old flat-8-min-only
         // behavior plus the ladder's default pushback figure.
-        assert!(eta > now());
-        assert!(eta >= flat);
+        assert!(eta.eta > now());
+        assert!(eta.eta >= flat.eta);
     }
 
     // ---- project_along_route: eta_along_route's inverse, for #226's forward prediction scrubber ----
@@ -560,7 +580,7 @@ mod tests {
             0.0,
             now(),
         );
-        let elapsed = (eta - now()).num_seconds() as f64;
+        let elapsed = (eta.eta - now()).num_seconds() as f64;
         let projected = project_along_route(
             true,
             route_len,
@@ -657,5 +677,95 @@ mod tests {
         )
         .eta;
         assert_eq!(unknown, sea_level);
+    }
+
+    /// #355: `eta_along_route` must report the groundspeed **at the target fix**, not cruise.
+    /// FCA metering converts a MIT distance into a time gap with this number and then freezes it at
+    /// release, so a cruise-speed figure under-provisions every arrival that crosses on descent.
+    /// A low metering fix (20 nm from the field, on the descent) must come back far below cruise.
+    #[test]
+    fn eta_along_route_reports_the_descent_speed_at_a_low_crossing_fix() {
+        let profile = AircraftProfile::default();
+        let cruise_tas = 440.0;
+        let route_len = 300.0;
+        let cruise_gs = trajectory::effective_gs(cruise_tas, None);
+
+        // Target 280 nm ahead of an aircraft 300 nm out = a fix 20 nm from the field, well down
+        // the descent.
+        let at_fix = eta_along_route(
+            true,
+            route_len,
+            280.0,
+            35_000.0,
+            0.0,
+            35_000.0,
+            cruise_tas,
+            0.0,
+            &profile,
+            None,
+            0.0,
+            now(),
+        );
+
+        assert!(
+            at_fix.gs_kt < cruise_gs * 0.8,
+            "crossing speed {:.0} kt must be well below cruise {cruise_gs:.0} kt, not cruise itself",
+            at_fix.gs_kt
+        );
+        assert!(
+            (150.0..=350.0).contains(&at_fix.gs_kt),
+            "crossing speed {:.0} kt should sit in a plausible arrival band",
+            at_fix.gs_kt
+        );
+
+        // The bug in one assertion: spacing 20 MIT with the cruise figure realizes ~13 nm at the
+        // fix, because the aircraft covers the frozen gap at its actual crossing speed.
+        let realized_with_cruise = 20.0 * (at_fix.gs_kt / cruise_gs);
+        assert!(
+            realized_with_cruise < 15.0,
+            "cruise-sized 20 MIT would realize only {realized_with_cruise:.1} nm"
+        );
+    }
+
+    /// The companion to the above: the speed is genuinely position-dependent, so a fix still at
+    /// cruise reports a cruise-like speed. Guards against "always return a slow number" passing
+    /// the descent assertion for the wrong reason.
+    #[test]
+    fn eta_along_route_still_reports_cruise_speed_at_an_enroute_fix() {
+        let profile = AircraftProfile::default();
+        let at_cruise = eta_along_route(
+            true,
+            300.0,
+            150.0,
+            35_000.0,
+            0.0,
+            35_000.0,
+            440.0,
+            0.0,
+            &profile,
+            None,
+            0.0,
+            now(),
+        );
+        let at_fix = eta_along_route(
+            true,
+            300.0,
+            280.0,
+            35_000.0,
+            0.0,
+            35_000.0,
+            440.0,
+            0.0,
+            &profile,
+            None,
+            0.0,
+            now(),
+        );
+        assert!(
+            at_cruise.gs_kt > at_fix.gs_kt + 100.0,
+            "enroute {:.0} kt should far exceed the descent fix {:.0} kt",
+            at_cruise.gs_kt,
+            at_fix.gs_kt
+        );
     }
 }

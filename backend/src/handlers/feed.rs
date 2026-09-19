@@ -114,6 +114,8 @@ pub(crate) async fn flow_from_data(
     let gates = state.gates.load_full();
     let runways = state.runways.clone();
     let taxi_estimate_samples = state.taxi_estimate_samples.load_full();
+    let manual_exclusions =
+        crate::handlers::flow::all_excluded_callsigns(state.flight_exclusions.load().as_ref());
     let icao = icao.to_owned();
     // `compute` resolves every arrival's filed route — pure CPU, no `.await`. Push it onto the
     // blocking pool (matching the FCA `metered_flights` handler) so a burst of polling clients
@@ -131,6 +133,7 @@ pub(crate) async fn flow_from_data(
             gates.as_ref(),
             runways.as_ref(),
             taxi_estimate_samples.as_ref(),
+            &manual_exclusions,
             now,
         )
     })
@@ -456,6 +459,9 @@ pub async fn issue_cfr(
                     let taxi_estimate_samples = state.taxi_estimate_samples.load_full();
                     let airport = airport.clone();
                     let callsign = callsign.clone();
+                    let manual_exclusions = crate::handlers::flow::all_excluded_callsigns(
+                        state.flight_exclusions.load().as_ref(),
+                    );
                     // Route-resolving CPU — keep it off the async runtime (see `flow_from_data`).
                     tokio::task::spawn_blocking(move || {
                         flow::ready_time_slot(
@@ -470,6 +476,7 @@ pub async fn issue_cfr(
                             gates.as_ref(),
                             runways.as_ref(),
                             taxi_estimate_samples.as_ref(),
+                            &manual_exclusions,
                             &callsign,
                             ready,
                             Utc::now(),

@@ -185,6 +185,10 @@ pub fn compute(
     gates: &HashMap<String, Vec<AirportGateBody>>,
     runways: &RunwayDb,
     taxi_samples: &HashMap<String, Vec<taxi_estimate::TaxiSample>>,
+    // Callsigns manually dropped as bogus by any facility (#342). Airport flow has no single
+    // facility context, and a flight with garbage data is garbage on every scope, so a removal
+    // anywhere keeps it out of demand / AADC / metering here.
+    manual_exclusions: &HashSet<String>,
     now: DateTime<Utc>,
 ) -> Flow {
     let arr = airports.get(icao).map(|a| (a.lat, a.lon));
@@ -202,7 +206,8 @@ pub fn compute(
         let profile = profiles.resolve(&ty, &wake);
         let dep = fp.departure.to_ascii_uppercase();
         let gate = arrival_gate(&fp.route, icao);
-        let excluded = program.is_some_and(|pg| is_excluded(&ty, &wake, pg));
+        let excluded = program.is_some_and(|pg| is_excluded(&ty, &wake, pg))
+            || manual_exclusions.contains(&p.callsign);
 
         let dist_to_arr = arr.map(|(alat, alon)| gc_dist(p.latitude, p.longitude, alat, alon));
         let airborne = p.groundspeed > 60 && p.altitude > 300;
@@ -314,7 +319,8 @@ pub fn compute(
         let profile = profiles.resolve(&ty, &wake);
         let dep = fp.departure.to_ascii_uppercase();
         let gate = arrival_gate(&fp.route, icao);
-        let excluded = program.is_some_and(|pg| is_excluded(&ty, &wake, pg));
+        let excluded = program.is_some_and(|pg| is_excluded(&ty, &wake, pg))
+            || manual_exclusions.contains(&pf.callsign);
         // A prefile has no live position — gate/runway matching is skipped (`ground_estimate`
         // passes `None`), falling to the airport/default tier.
         let (route_nm, ft_min) = ground_estimate(
@@ -688,6 +694,9 @@ pub fn ready_time_slot(
     gates: &HashMap<String, Vec<AirportGateBody>>,
     runways: &RunwayDb,
     taxi_samples: &HashMap<String, Vec<taxi_estimate::TaxiSample>>,
+    // Threaded through so the slot search sees the same flow picture as every other surface —
+    // a manually excluded bogus flight (#342) must not block a real CFR slot.
+    manual_exclusions: &HashSet<String>,
     callsign: &str,
     ready: DateTime<Utc>,
     now: DateTime<Utc>,
@@ -704,6 +713,7 @@ pub fn ready_time_slot(
         gates,
         runways,
         taxi_samples,
+        manual_exclusions,
         now,
     );
     let target = flow.flights.iter().find(|f| f.callsign == callsign)?;
@@ -1352,6 +1362,7 @@ mod tests {
             &HashMap::new(),
             &RunwayDb::default(),
             &HashMap::new(),
+            &HashSet::new(),
             t0(),
         );
 
@@ -1505,6 +1516,7 @@ mod tests {
             &HashMap::new(),
             &RunwayDb::default(),
             &HashMap::new(),
+            &HashSet::new(),
             "GRD1",
             ready,
             t0(),
@@ -1553,6 +1565,7 @@ mod tests {
             &HashMap::new(),
             &RunwayDb::default(),
             &HashMap::new(),
+            &HashSet::new(),
             t0(),
         );
         let arrivals = crate::feed::runway::collect_arrivals(

@@ -107,6 +107,39 @@ fn passes_scope(fca: &FcaBody, airspace: &Boundaries, lat: f64, lon: f64) -> boo
     fca.scope.iter().any(|z| airspace.contains(z, lat, lon))
 }
 
+/// A snapshot of the manually excluded ("bogus") callsigns, keyed by ARTCC (#342) — read straight
+/// from `AppState::flight_exclusions`, which the refresh job and the write handler keep current.
+pub(crate) type ExclusionSet = std::collections::HashMap<String, std::collections::HashSet<String>>;
+
+/// True when this callsign has been manually dropped as bogus (#342).
+///
+/// `artcc` scopes the check to one facility's removals — that is how the FCA surfaces (crossings,
+/// metering, counts) filter, since an FCA belongs to an ARTCC. `None` means "excluded by **any**
+/// facility", which is what the global traffic endpoints use: they carry no facility context, and a
+/// flight with garbage data is garbage on every scope, so hiding it everywhere is what makes the
+/// removal actually clear the map for every viewer.
+///
+/// Callsigns are stored upper-cased by the write handler; callers pass the raw feed callsign, which
+/// VATSIM already emits upper-case.
+pub(crate) fn is_manually_excluded(
+    exclusions: &ExclusionSet,
+    artcc: Option<&str>,
+    callsign: &str,
+) -> bool {
+    match artcc {
+        Some(a) => exclusions.get(a).is_some_and(|set| set.contains(callsign)),
+        None => exclusions.values().any(|set| set.contains(callsign)),
+    }
+}
+
+/// Every manually excluded callsign, across all facilities (#342) — the flat form
+/// `feed::flow::compute` takes, since airport flow has no single facility context.
+pub(crate) fn all_excluded_callsigns(
+    exclusions: &ExclusionSet,
+) -> std::collections::HashSet<String> {
+    exclusions.values().flatten().cloned().collect()
+}
+
 /// Filed cruise altitude in feet, or `None` when unfiled/unparseable — used for altitude membership
 /// so an aircraft whose plan omits an altitude isn't excluded on that basis. Values ≤ 600 are read as
 /// flight levels (×100), matching how pilots file `"350"` for FL350.
@@ -141,6 +174,42 @@ fn passes_filters(fca: &FcaBody, fp: &FlightPlan, cur_alt_ft: Option<i64>) -> bo
         fca.min_fl,
         fca.max_fl,
     )
+}
+
+/// **The** decision of whether a flight is in an FCA, and where it crosses (#360).
+///
+/// Four surfaces have to agree on this: the metering board (`build_candidates`, both its live-pilot
+/// and prefile loops), the per-FCA badge counts (`fca_counts`), and the per-flight advisory
+/// (`build_flight_advisory`). They used to restate the decision — manual exclusion, then
+/// [`passes_filters`], then [`fca::crosses`], then [`passes_scope`] — in their own shape, so a new
+/// condition had to be added in three places by hand and a miss showed up as the board, the badge
+/// and the advisory quietly disagreeing about the same aircraft. #342 added its callsign check to
+/// all of them one at a time, which is what prompted this.
+///
+/// Returns the crossing when the flight is included, so the one caller that needs the geometry
+/// (`build_candidates`, for `along_nm` and the crossing position) gets it from the same call that
+/// decides inclusion, while the count and advisory paths just ask `.is_some()`.
+///
+/// `path` stays a parameter: how each caller resolves the route legitimately differs (live position,
+/// prefile departure field, or a route already resolved once for a cheap pre-filter), and that is
+/// not part of the inclusion rule.
+fn fca_crossing_for(
+    fca: &FcaBody,
+    airspace: &Boundaries,
+    exclusions: &ExclusionSet,
+    callsign: &str,
+    fp: &FlightPlan,
+    cur_alt_ft: Option<i64>,
+    path: &[[f64; 2]],
+) -> Option<fca::FcaCrossing> {
+    if is_manually_excluded(exclusions, Some(&fca.artcc), callsign) {
+        return None;
+    }
+    if !passes_filters(fca, fp, cur_alt_ft) {
+        return None;
+    }
+    let cross = fca::crosses(path, &fca.points.0)?;
+    passes_scope(fca, airspace, cross.lat, cross.lon).then_some(cross)
 }
 
 /// Whether an aircraft's altitude qualifies for an FCA band. Matches if **either** the filed cruise
@@ -299,6 +368,14 @@ fn resolve_route_body(nav: &NavData, airports: &AirportDb, row: flow_repo::Route
 /// Permission names for route edit/delete scope checks (the caller must hold these for the route's ARTCC).
 const ROUTE_UPDATE_PERM: &str = "flow.route.update";
 const ROUTE_DELETE_PERM: &str = "flow.route.delete";
+
+/// Protective margin added to the separation when **issuing** a release (#356).
+///
+/// A release is a commitment made now against *predicted* crossing times, so it should not take a
+/// slot that only just fits — residual ETA drift then squeezes it. ~1.2 nm of extra in-trail at a
+/// 280 kt crossing speed. Applied only on the release path: the ladder's own metering is unchanged,
+/// so the crossing times controllers see don't shift.
+const RELEASE_MARGIN_MS: i64 = 15_000;
 
 #[derive(Deserialize)]
 pub struct RoutesQuery {
@@ -468,6 +545,7 @@ pub async fn fca_counts(
     };
     let nav = state.nav.load_full();
     let airspace = state.airspace.clone();
+    let exclusions = state.flight_exclusions.load_full();
 
     let counts = tokio::task::spawn_blocking(move || {
         let mut counts: HashMap<String, i64> = fcas.iter().map(|f| (f.id.clone(), 0)).collect();
@@ -483,37 +561,38 @@ pub async fn fca_counts(
         let airspace = airspace.as_ref();
 
         // Resolve each aircraft's route once, then test it against every active FCA.
-        let mut tally = |fp: &FlightPlan, lat: f64, lon: f64, hdg: i64, gs: i64, alt: i64| {
-            let Some(path) = fca::route_path(
-                nav,
-                airports,
-                &fp.departure,
-                &fp.arrival,
-                &fp.route,
-                lat,
-                lon,
-                hdg,
-                gs,
-            ) else {
-                return;
+        let exclusions = exclusions.as_ref();
+        let mut tally =
+            |callsign: &str, fp: &FlightPlan, lat: f64, lon: f64, hdg: i64, gs: i64, alt: i64| {
+                let Some(path) = fca::route_path(
+                    nav,
+                    airports,
+                    &fp.departure,
+                    &fp.arrival,
+                    &fp.route,
+                    lat,
+                    lon,
+                    hdg,
+                    gs,
+                ) else {
+                    return;
+                };
+                for f in &active {
+                    // Same inclusion decision the metering board makes, so a badge count can never
+                    // disagree with the board it labels (#360).
+                    if fca_crossing_for(f, airspace, exclusions, callsign, fp, Some(alt), &path)
+                        .is_some()
+                        && let Some(c) = counts.get_mut(&f.id)
+                    {
+                        *c += 1;
+                    }
+                }
             };
-            for f in &active {
-                if !passes_filters(f, fp, Some(alt)) {
-                    continue;
-                }
-                // Match the metering board: only count crossings within the FCA's ARTCC scope.
-                if let Some(cross) = fca::crosses(&path, &f.points.0)
-                    && passes_scope(f, airspace, cross.lat, cross.lon)
-                    && let Some(c) = counts.get_mut(&f.id)
-                {
-                    *c += 1;
-                }
-            }
-        };
 
         for p in &snap.data.pilots {
             if let Some(fp) = &p.flight_plan {
                 tally(
+                    &p.callsign,
                     fp,
                     p.latitude,
                     p.longitude,
@@ -527,7 +606,7 @@ pub async fn fca_counts(
             if let Some(fp) = &pf.flight_plan
                 && let Some((lat, lon)) = prefile_position(airports, &fp.departure)
             {
-                tally(fp, lat, lon, 0, 0, 0);
+                tally(&pf.callsign, fp, lat, lon, 0, 0, 0);
             }
         }
         counts
@@ -868,15 +947,19 @@ pub(crate) async fn build_flight_advisory(
             .into_iter()
             .filter(|f| f.enabled && f.points.0.len() >= 2)
         {
-            // Same predicate build_candidates uses to include this flight: filters + a scoped
-            // crossing. If it doesn't cross, metering this FCA can't produce a slot for it.
+            // Same inclusion decision as the metering board and the badge counts (#360). If it
+            // doesn't cross, metering this FCA can't produce a slot for it.
             let crosses = match (&path, &fp) {
-                (Some(p), Some(plan)) => {
-                    passes_filters(&fca, plan, Some(altitude))
-                        && fca::crosses(p, &fca.points.0).is_some_and(|c| {
-                            passes_scope(&fca, state.airspace.as_ref(), c.lat, c.lon)
-                        })
-                }
+                (Some(p), Some(plan)) => fca_crossing_for(
+                    &fca,
+                    state.airspace.as_ref(),
+                    state.flight_exclusions.load().as_ref(),
+                    &cs,
+                    plan,
+                    Some(altitude),
+                    p,
+                )
+                .is_some(),
                 _ => false,
             };
             if !crosses {
@@ -1068,9 +1151,10 @@ pub async fn data_refresh(
 )]
 pub async fn list_traffic(State(state): State<AppState>) -> Json<Vec<TrafficAircraft>> {
     let snapshot = state.feed.read().await.snapshot.clone();
+    let exclusions = state.flight_exclusions.load_full();
     let aircraft = snapshot
         .as_ref()
-        .map(|snap| traffic_from(&snap.data))
+        .map(|snap| traffic_from(&snap.data, exclusions.as_ref()))
         .unwrap_or_default();
     Json(aircraft)
 }
@@ -1102,6 +1186,7 @@ pub async fn projected_traffic(
     let nav = state.nav.load_full();
     let profiles = state.aircraft_profiles.load_full();
     let winds = state.winds.load_full();
+    let exclusions = state.flight_exclusions.load_full();
     let aircraft = tokio::task::spawn_blocking(move || {
         project_traffic(
             &snap.data,
@@ -1109,6 +1194,7 @@ pub async fn projected_traffic(
             airports.as_ref(),
             profiles.as_ref(),
             winds.as_ref(),
+            exclusions.as_ref(),
             q.offset_sec,
         )
     })
@@ -1119,10 +1205,14 @@ pub async fn projected_traffic(
 
 /// Map a snapshot's pilots to the lightweight map-traffic shape (drops position-less aircraft).
 /// Pure of the live feed so the historical replay can reuse it against a reconstructed snapshot.
-pub(crate) fn traffic_from(data: &VatsimData) -> Vec<TrafficAircraft> {
+pub(crate) fn traffic_from(data: &VatsimData, exclusions: &ExclusionSet) -> Vec<TrafficAircraft> {
     data.pilots
         .iter()
         .filter(|p| p.latitude != 0.0 || p.longitude != 0.0)
+        // Manually dropped as bogus (#342). This endpoint carries no facility context, so a
+        // callsign any facility removed is hidden — which is what clears it off the map for
+        // every viewer.
+        .filter(|p| !is_manually_excluded(exclusions, None, &p.callsign))
         .map(|p| {
             let fp = p.flight_plan.as_ref();
             let arr = fp.map(|f| f.arrival.clone()).unwrap_or_default();
@@ -1173,12 +1263,14 @@ pub(crate) fn project_traffic(
     airports: &AirportDb,
     profiles: &trajectory::ProfileTable,
     winds: &Winds,
+    exclusions: &ExclusionSet,
     offset_sec: i64,
 ) -> Vec<TrafficAircraft> {
     let offset_sec = offset_sec as f64;
     data.pilots
         .iter()
         .filter(|p| p.latitude != 0.0 || p.longitude != 0.0)
+        .filter(|p| !is_manually_excluded(exclusions, None, &p.callsign))
         .filter_map(|p| {
             let fp = p.flight_plan.as_ref()?;
             let arr = fp.arrival.clone();
@@ -1517,6 +1609,7 @@ fn fca_debug(
     ty: &str,
     wake: &str,
     cruise_tas: f64,
+    cross_speed: f64,
     cruise_alt: f64,
     headwind: Option<f64>,
     nav: &NavData,
@@ -1530,6 +1623,7 @@ fn fca_debug(
     crate::models::FcaFlightDebug {
         profile: profiles.resolve_label(ty, wake),
         cruise_tas: cruise_tas.round() as i64,
+        cross_speed: cross_speed.round() as i64,
         cruise_alt: cruise_alt.round() as i64,
         headwind: headwind.map(|h| h.round() as i64),
         unresolved,
@@ -1563,19 +1657,16 @@ fn build_candidates(
     gates: &HashMap<String, Vec<AirportGateBody>>,
     runways: &RunwayDb,
     taxi_samples: &HashMap<String, Vec<taxi_estimate::TaxiSample>>,
+    exclusions: &ExclusionSet,
     now: DateTime<Utc>,
     debug: bool,
 ) -> (Vec<FcaFlight>, Vec<fca::MeterInput>) {
-    let pts = fca.points.0.clone();
     let mut flights = Vec::new();
     let mut metas = Vec::new();
 
     for p in &data.pilots {
         let Some(fp) = &p.flight_plan else { continue };
         let airborne = p.groundspeed >= 50;
-        if !passes_filters(fca, fp, Some(p.altitude)) {
-            continue;
-        }
         let Some(path) = fca::route_path(
             nav,
             airports,
@@ -1589,12 +1680,20 @@ fn build_candidates(
         ) else {
             continue;
         };
-        let Some(cross) = fca::crosses(&path, &pts) else {
+        // One decision, shared with the badge counts and the advisory (#360). Skipping here is
+        // before either push, which matters: `metas` and `flights` are positionally coupled and
+        // `finalize` consumes them as parallel slices.
+        let Some(cross) = fca_crossing_for(
+            fca,
+            airspace,
+            exclusions,
+            &p.callsign,
+            fp,
+            Some(p.altitude),
+            &path,
+        ) else {
             continue;
         };
-        if !passes_scope(fca, airspace, cross.lat, cross.lon) {
-            continue;
-        }
         let (ty, wake) = fp.aircraft_type_wake();
         let profile = profiles.resolve(&ty, &wake);
         let cruise = trajectory::parse_alt_ft(&fp.altitude);
@@ -1619,7 +1718,7 @@ fn build_candidates(
             ))
         };
         let allowance = ground_taxi.as_ref().map(|b| b.total_sec()).unwrap_or(0.0);
-        let eta = predict::eta_along_route(
+        let pred = predict::eta_along_route(
             airborne,
             route_len,
             cross.along_nm,
@@ -1633,11 +1732,17 @@ fn build_candidates(
             allowance,
             now,
         );
+        let eta = pred.eta;
+        // MIT is a distance *at the crossing fix*, so the gap must be sized with the speed the
+        // aircraft actually crosses at. Cruise groundspeed under-provisions every descending
+        // arrival — a 20 MIT flow over a low fix realized ~12 nm (#355). Bound once so the metered
+        // gap and the debug view that explains it can never disagree about the floor.
+        let cross_speed = pred.gs_kt.max(120.0);
         let rel = releases.get(&p.callsign);
         metas.push(fca::MeterInput {
             eta_ms: eta.timestamp_millis(),
             airborne,
-            cross_speed: trajectory::effective_gs(cruise_tas, headwind).max(120.0),
+            cross_speed,
             frozen_ms: rel.map(|(cta, _)| *cta),
         });
         let mut flight = fca_flight(
@@ -1660,6 +1765,7 @@ fn build_candidates(
                 &ty,
                 &wake,
                 cruise_tas,
+                cross_speed,
                 cruise,
                 headwind,
                 nav,
@@ -1675,9 +1781,6 @@ fn build_candidates(
 
     for pf in &data.prefiles {
         let Some(fp) = &pf.flight_plan else { continue };
-        if !passes_filters(fca, fp, None) {
-            continue;
-        }
         let Some((dep_lat, dep_lon)) = prefile_position(airports, &fp.departure) else {
             continue;
         };
@@ -1694,12 +1797,13 @@ fn build_candidates(
         ) else {
             continue;
         };
-        let Some(cross) = fca::crosses(&path, &pts) else {
+        // Same shared decision as the live-pilot loop above (#360); a prefile has no live
+        // altitude, so it qualifies on its filed cruise alone.
+        let Some(cross) =
+            fca_crossing_for(fca, airspace, exclusions, &pf.callsign, fp, None, &path)
+        else {
             continue;
         };
-        if !passes_scope(fca, airspace, cross.lat, cross.lon) {
-            continue;
-        }
         let (ty, wake) = fp.aircraft_type_wake();
         let profile = profiles.resolve(&ty, &wake);
         let cruise = trajectory::parse_alt_ft(&fp.altitude);
@@ -1714,7 +1818,7 @@ fn build_candidates(
         let ground_taxi =
             feed_flow::resolve_ground_allowance(gates, runways, taxi_samples, &dep, aircraft, None);
         let allowance = ground_taxi.total_sec();
-        let eta = predict::eta_along_route(
+        let pred = predict::eta_along_route(
             false,
             route_len,
             cross.along_nm,
@@ -1728,11 +1832,14 @@ fn build_candidates(
             allowance,
             now,
         );
+        let eta = pred.eta;
+        // Crossing speed, not cruise — see the airborne/ground site above (#355).
+        let cross_speed = pred.gs_kt.max(120.0);
         let rel = releases.get(&pf.callsign);
         metas.push(fca::MeterInput {
             eta_ms: eta.timestamp_millis(),
             airborne: false,
-            cross_speed: trajectory::effective_gs(cruise_tas, headwind).max(120.0),
+            cross_speed,
             frozen_ms: rel.map(|(cta, _)| *cta),
         });
         let mut flight = fca_flight(
@@ -1755,6 +1862,7 @@ fn build_candidates(
                 &ty,
                 &wake,
                 cruise_tas,
+                cross_speed,
                 cruise,
                 headwind,
                 nav,
@@ -1771,18 +1879,95 @@ fn build_candidates(
     (flights, metas)
 }
 
+/// The controller's manual crossing order as candidate indices, when the FCA is in manual sequence.
+/// `None` means auto — `fca::meter` sequences by time itself.
+///
+/// Shared by [`finalize`] and `mark_release` so a release is metered against exactly the sequence the
+/// ladder resolves, rather than a second, subtly different derivation of it (#356).
+fn manual_order(fca: &FcaBody, flights: &[FcaFlight]) -> Option<Vec<usize>> {
+    (fca.manual_seq && !fca.manual_order.is_empty()).then(|| {
+        fca.manual_order
+            .iter()
+            .filter_map(|cs| flights.iter().position(|f| &f.callsign == cs))
+            .collect()
+    })
+}
+
+/// The crossing times a newly released aircraft must be spaced clear of: every **other** pinned
+/// crossing — airborne, or an already-issued CFR — at its **metered** time, not its raw ETA.
+///
+/// The distinction is the whole of #356. `fca::meter` pushes an airborne arrival later than its ETA
+/// whenever it still owes spacing to the aircraft ahead of it, so spacing a release against raw ETAs
+/// hands the departure a gap that closes as soon as that arrival takes its own spacing. Unpinned
+/// ground traffic is excluded: it has no committed time to conflict with and floats around the
+/// release itself.
+fn committed_crossings(
+    metas: &[fca::MeterInput],
+    metered: &[fca::MeterOutput],
+    releasing: usize,
+) -> Vec<i64> {
+    metas
+        .iter()
+        .zip(metered)
+        .enumerate()
+        .filter(|(j, _)| *j != releasing)
+        .filter(|(_, (m, _))| m.airborne || m.frozen_ms.is_some())
+        .map(|(_, (_, out))| out.sched_ms)
+        .collect()
+}
+
+/// The separation a crossing must hold at this FCA, in ms — MIT converted at the aircraft's own
+/// crossing speed, or the flat rate interval.
+fn separation_ms(fca: &FcaBody, cross_speed: f64) -> i64 {
+    if fca.mode == "mit" {
+        ((fca.mit as f64 / cross_speed.max(60.0)) * 3600.0 * 1000.0) as i64
+    } else if fca.rate > 0 {
+        (3600.0 / fca.rate as f64 * 1000.0) as i64
+    } else {
+        0
+    }
+}
+
+/// The crossing time to pin when a controller marks an aircraft ready (#356).
+///
+/// This is the whole of the RDY decision — `mark_release` only chooses between it and an explicit
+/// SET time. It is pure so that decision is testable without a pool, auth or a feed snapshot:
+/// asserting `earliest_slot`'s arithmetic against hand-built arguments proves nothing about what
+/// the handler actually does.
+///
+/// **Auto:** the earliest slot clear of every other pinned crossing at its **metered** time, not
+/// its raw ETA — an airborne arrival that still owes spacing to the aircraft ahead of it is metered
+/// later, so a gap measured at its ETA closes under the departure we just released.
+///
+/// **Manual:** the controller's order *is* the sequence, so the release takes the slot the ladder
+/// already assigned it. Re-running `earliest_slot` here would space it against crossings it pushed
+/// later **itself** — in manual mode `meter` chains every aircraft, so the releasing ground
+/// aircraft moves everything behind it — which lands the release behind an aircraft the controller
+/// explicitly ordered it ahead of, and does not even converge: re-metering moves them again.
+///
+/// Both carry [`RELEASE_MARGIN_MS`] on top, so a release never takes a slot that only just fits.
+fn rdy_slot(
+    fca: &FcaBody,
+    metas: &[fca::MeterInput],
+    metered: &[fca::MeterOutput],
+    ti: usize,
+    manual: bool,
+) -> i64 {
+    let sep_ms = separation_ms(fca, metas[ti].cross_speed);
+    if manual {
+        return metered[ti].sched_ms + RELEASE_MARGIN_MS;
+    }
+    let committed = committed_crossings(metas, metered, ti);
+    fca::earliest_slot(metas[ti].eta_ms, &committed, sep_ms + RELEASE_MARGIN_MS)
+}
+
 /// Meter the candidates (auto, or the FCA's manual order) and finalize sequence/delay.
 fn finalize(
     fca: &FcaBody,
     mut flights: Vec<FcaFlight>,
     metas: &[fca::MeterInput],
 ) -> Vec<FcaFlight> {
-    let order: Option<Vec<usize>> = (fca.manual_seq && !fca.manual_order.is_empty()).then(|| {
-        fca.manual_order
-            .iter()
-            .filter_map(|cs| flights.iter().position(|f| &f.callsign == cs))
-            .collect()
-    });
+    let order = manual_order(fca, &flights);
     let metered = fca::meter(metas, &fca.mode, fca.rate, fca.mit, order.as_deref());
     for ((f, m), input) in flights.iter_mut().zip(&metered).zip(metas) {
         f.cross_time = DateTime::from_timestamp_millis(m.sched_ms);
@@ -1832,6 +2017,7 @@ async fn metered_flights(
     let gates = state.gates.load_full();
     let runways = state.runways.clone();
     let taxi_estimate_samples = state.taxi_estimate_samples.load_full();
+    let flight_exclusions = state.flight_exclusions.load_full();
     tokio::task::spawn_blocking(move || {
         let (flights, metas) = build_candidates(
             &fca,
@@ -1845,6 +2031,7 @@ async fn metered_flights(
             gates.as_ref(),
             runways.as_ref(),
             taxi_estimate_samples.as_ref(),
+            flight_exclusions.as_ref(),
             now,
             debug,
         );
@@ -1974,6 +2161,7 @@ pub async fn list_idst(
     let gates = state.gates.load_full();
     let runways = state.runways.clone();
     let taxi_estimate_samples = state.taxi_estimate_samples.load_full();
+    let flight_exclusions = state.flight_exclusions.load_full();
 
     let (mut unscheduled, mut released) = tokio::task::spawn_blocking(move || {
         let mut unscheduled: Vec<IdstFlight> = Vec::new();
@@ -1992,6 +2180,7 @@ pub async fn list_idst(
                 gates.as_ref(),
                 runways.as_ref(),
                 taxi_estimate_samples.as_ref(),
+                flight_exclusions.as_ref(),
                 now,
                 false,
             );
@@ -2098,6 +2287,7 @@ pub async fn mark_release(
             state.gates.load_full().as_ref(),
             state.runways.as_ref(),
             state.taxi_estimate_samples.load_full().as_ref(),
+            state.flight_exclusions.load_full().as_ref(),
             now,
             false,
         )
@@ -2111,32 +2301,14 @@ pub async fn mark_release(
         .ok_or(ApiError::NotFound)?; // not currently crossing
     let eta_ms = metas[ti].eta_ms;
 
-    // Committed = every other pinned crossing (airborne ETA or an existing frozen CTA).
-    let committed: Vec<i64> = metas
-        .iter()
-        .enumerate()
-        .filter(|(j, _)| *j != ti)
-        .filter_map(|(_, m)| {
-            if m.airborne {
-                Some(m.eta_ms)
-            } else {
-                m.frozen_ms
-            }
-        })
-        .collect();
-    let sep_ms = if fca.mode == "mit" {
-        ((fca.mit as f64 / metas[ti].cross_speed.max(60.0)) * 3600.0 * 1000.0) as i64
-    } else if fca.rate > 0 {
-        (3600.0 / fca.rate as f64 * 1000.0) as i64
-    } else {
-        0
-    };
+    let order = manual_order(&fca, &flights);
+    let metered = fca::meter(&metas, &fca.mode, fca.rate, fca.mit, order.as_deref());
 
     let cta = match payload.ready.as_deref().filter(|s| !s.trim().is_empty()) {
         // SET: pin the crossing so wheels-up lands on the requested time.
         Some(ready) => parse_hhmm_z(ready, now).ok_or(ApiError::BadRequest)? + (eta_ms - now_ms),
-        // RDY: earliest metered slot.
-        None => fca::earliest_slot(eta_ms, &committed, sep_ms),
+        // RDY: the metered slot. Every part of that decision lives in `rdy_slot`.
+        None => rdy_slot(&fca, &metas, &metered, ti, order.is_some()),
     };
     let edct = cta - (eta_ms - now_ms);
     flow_repo::upsert_release(pool, &id, &callsign, cta, edct, &user.id).await?;
@@ -2189,6 +2361,7 @@ pub async fn clear_release(
             state.gates.load_full().as_ref(),
             state.runways.as_ref(),
             state.taxi_estimate_samples.load_full().as_ref(),
+            state.flight_exclusions.load_full().as_ref(),
             now,
             false,
         )
@@ -2326,11 +2499,79 @@ mod project_traffic_tests {
             &airports(),
             &ProfileTable::default(),
             &Winds::default(),
+            &HashMap::new(),
             0,
         );
         assert_eq!(out.len(), 1);
         assert!((out[0].lat - 40.2).abs() < 1e-9);
         assert!((out[0].lon - -74.0).abs() < 1e-9);
+    }
+
+    /// Regression (#342): the exclusion must be applied *at the call site*, not merely available.
+    /// Every other test here passes an **empty** exclusion map, so neutralising the filter in
+    /// `project_traffic` / `traffic_from` changes nothing they assert — the whole feature could be
+    /// removed from production with the suite still green. These drive a **populated** set.
+    #[test]
+    fn a_manually_excluded_callsign_is_dropped_from_projected_traffic() {
+        let data = VatsimData {
+            pilots: vec![airborne_pilot()],
+            ..Default::default()
+        };
+        let excluded: super::ExclusionSet = HashMap::from([(
+            "ZDC".to_string(),
+            std::collections::HashSet::from(["TEST1".to_string()]),
+        )]);
+
+        let kept = project_traffic(
+            &data,
+            &NavData::load(),
+            &airports(),
+            &ProfileTable::default(),
+            &Winds::default(),
+            &HashMap::new(),
+            0,
+        );
+        assert_eq!(
+            kept.len(),
+            1,
+            "sanity: the aircraft is there when nothing is excluded"
+        );
+
+        let dropped = project_traffic(
+            &data,
+            &NavData::load(),
+            &airports(),
+            &ProfileTable::default(),
+            &Winds::default(),
+            &excluded,
+            0,
+        );
+        assert!(
+            dropped.is_empty(),
+            "a manually excluded callsign must not appear in projected traffic, got {:?}",
+            dropped.iter().map(|a| &a.callsign).collect::<Vec<_>>()
+        );
+    }
+
+    /// The live-traffic sibling of the above, and the endpoint the controller actually watches
+    /// clear. Also pins the cross-facility semantics: this surface carries no facility context, so
+    /// *any* facility's removal hides the aircraft for everyone.
+    #[test]
+    fn a_manually_excluded_callsign_is_dropped_from_live_traffic() {
+        let data = VatsimData {
+            pilots: vec![airborne_pilot()],
+            ..Default::default()
+        };
+        assert_eq!(super::traffic_from(&data, &HashMap::new()).len(), 1);
+
+        let excluded_elsewhere: super::ExclusionSet = HashMap::from([(
+            "ZNY".to_string(),
+            std::collections::HashSet::from(["TEST1".to_string()]),
+        )]);
+        assert!(
+            super::traffic_from(&data, &excluded_elsewhere).is_empty(),
+            "the global traffic surface hides a callsign any facility removed"
+        );
     }
 
     #[test]
@@ -2345,6 +2586,7 @@ mod project_traffic_tests {
             &airports(),
             &ProfileTable::default(),
             &Winds::default(),
+            &HashMap::new(),
             20 * 60,
         );
         assert_eq!(out.len(), 1);
@@ -2370,6 +2612,7 @@ mod project_traffic_tests {
             &airports(),
             &ProfileTable::default(),
             &Winds::default(),
+            &HashMap::new(),
             30 * 60,
         );
         assert_eq!(out.len(), 1);
@@ -2395,6 +2638,7 @@ mod project_traffic_tests {
             &HashMap::new(),
             &ProfileTable::default(),
             &Winds::default(),
+            &HashMap::new(),
             20 * 60,
         );
         assert!(
@@ -2425,6 +2669,7 @@ mod project_traffic_tests {
             &airports(),
             &ProfileTable::default(),
             &Winds::default(),
+            &HashMap::new(),
             600,
         );
         assert!(out.is_empty());
@@ -2540,6 +2785,24 @@ mod prefile_skip_integration_tests {
     /// A prefile whose departure ICAO isn't in the (tiny, test) airport cache, but whose arrival
     /// and real enroute fixes (RBV/WHITE/SIE, via the bundled nav db) resolve on their own — the
     /// exact shape `nav::build_anchors` produces ≥2 anchors for without ever needing the departure.
+    /// The same shape, but with a departure the tiny test airport cache *does* resolve, so the
+    /// prefile is a real candidate — the baseline the #342 exclusion test filters against.
+    fn unresolvable_departure_prefile_with_resolvable_departure() -> VatsimData {
+        VatsimData {
+            prefiles: vec![Prefile {
+                callsign: "TEST1".into(),
+                flight_plan: Some(FlightPlan {
+                    departure: "KJFK".into(),
+                    arrival: "KDCA".into(),
+                    route: "RBV WHITE SIE".into(),
+                    ..Default::default()
+                }),
+                ..Default::default()
+            }],
+            ..Default::default()
+        }
+    }
+
     fn unresolvable_departure_prefile() -> VatsimData {
         VatsimData {
             prefiles: vec![Prefile {
@@ -2554,6 +2817,66 @@ mod prefile_skip_integration_tests {
             }],
             ..Default::default()
         }
+    }
+
+    /// Regression (#342): the FCA crossing list must consult the exclusion set too. Scoped by the
+    /// FCA's own ARTCC here (unlike the global traffic surfaces), so a removal by a *different*
+    /// facility must leave the flight on this FCA's board.
+    #[test]
+    fn build_candidates_drops_a_manually_excluded_prefile_for_its_own_artcc() {
+        let nav = NavData::load();
+        let airports: crate::feed::airports::AirportDb = HashMap::from([
+            ("KJFK".to_string(), Airport::at(40.64, -73.78)),
+            ("KDCA".to_string(), Airport::at(38.85, -77.04)),
+        ]);
+        let fca = fca_crossing_the_corridor(); // artcc: "ZDC"
+        let data = unresolvable_departure_prefile_with_resolvable_departure();
+
+        let candidates = |ex: &super::ExclusionSet| {
+            let (flights, _) = build_candidates(
+                &fca,
+                &data,
+                &airports,
+                &nav,
+                &Boundaries::default(),
+                &Winds::default(),
+                &ProfileTable::default(),
+                &ReleaseMap::new(),
+                &HashMap::new(),
+                &RunwayDb::default(),
+                &HashMap::new(),
+                ex,
+                Utc::now(),
+                false,
+            );
+            flights.len()
+        };
+
+        assert_eq!(
+            candidates(&HashMap::new()),
+            1,
+            "sanity: TEST1 crosses this FCA"
+        );
+
+        let other_facility: super::ExclusionSet = HashMap::from([(
+            "ZNY".to_string(),
+            std::collections::HashSet::from(["TEST1".to_string()]),
+        )]);
+        assert_eq!(
+            candidates(&other_facility),
+            1,
+            "another facility's removal must not clear this ZDC FCA's board"
+        );
+
+        let own_facility: super::ExclusionSet = HashMap::from([(
+            "ZDC".to_string(),
+            std::collections::HashSet::from(["TEST1".to_string()]),
+        )]);
+        assert_eq!(
+            candidates(&own_facility),
+            0,
+            "the owning facility's removal must drop the flight from the crossing list"
+        );
     }
 
     #[test]
@@ -2574,6 +2897,7 @@ mod prefile_skip_integration_tests {
             &ReleaseMap::new(),
             &HashMap::new(),
             &RunwayDb::default(),
+            &HashMap::new(),
             &HashMap::new(),
             Utc::now(),
             false,
@@ -2832,5 +3156,882 @@ mod data_refresh_claim_tests {
     fn a_claim_is_refused_when_the_flag_is_already_set() {
         let flag = AtomicBool::new(true);
         assert!(DataRefreshClaim::acquire(&flag).is_none());
+    }
+}
+
+#[cfg(test)]
+mod release_spacing_tests {
+    use super::{RELEASE_MARGIN_MS, committed_crossings, rdy_slot, separation_ms};
+    use crate::feed::fca::{self, MeterInput};
+    use crate::models::FcaBody;
+    use chrono::Utc;
+
+    const SEP_MS: i64 = 120_000; // 30/hr
+
+    fn cand(eta_ms: i64, airborne: bool, frozen_ms: Option<i64>) -> MeterInput {
+        MeterInput {
+            eta_ms,
+            airborne,
+            cross_speed: 300.0,
+            frozen_ms,
+        }
+    }
+
+    fn rate_fca(manual_order: Vec<String>) -> FcaBody {
+        FcaBody {
+            id: "t".into(),
+            name: "t".into(),
+            color: "#fff".into(),
+            artcc: "ZDC".into(),
+            points: sqlx::types::Json(vec![[39.5, -75.6], [39.5, -74.0]]),
+            dests: vec![],
+            origins: vec![],
+            fixes: vec![],
+            scope: vec![],
+            min_fl: None,
+            max_fl: None,
+            dir: "any".into(),
+            mode: "rate".into(),
+            rate: 30,
+            mit: 0,
+            enabled: true,
+            manual_seq: !manual_order.is_empty(),
+            manual_order,
+            updated_at: Utc::now(),
+            updated_by: None,
+            event_id: None,
+            event_status: None,
+            auto_publish: false,
+        }
+    }
+
+    /// Leader arrival at 0s; arrival A's ETA is 60s but it owes the leader its spacing, so the
+    /// ladder meters A to 120s; a ground departure is released behind them.
+    fn leader_arrival_and_departure() -> Vec<MeterInput> {
+        vec![
+            cand(0, true, None),
+            cand(60_000, true, None),
+            cand(180_000, false, None),
+        ]
+    }
+
+    /// **#355 and #356 together** — the reconciliation this branch exists to prove.
+    ///
+    /// Both bugs under-space a released departure and they **compound**, because `rdy_slot` sizes
+    /// its gap from `metas[ti].cross_speed` (#355's value) and measures it against the committed
+    /// crossings (#356's set):
+    ///
+    /// - **#355** — the gap was `MIT ÷ cruise`, so it was too *short* for the speed the aircraft
+    ///   actually crosses at.
+    /// - **#356** — the gap was measured from arrivals' raw ETAs, so it started from the *wrong
+    ///   place* and closed once those arrivals took their own spacing.
+    ///
+    /// Fixing either alone still leaves a squeezed release, which is why they were asked to be
+    /// tested together. Here a 20 MIT flow over a low arrival fix (282.5 kt crossing, not the
+    /// 440 kt filed cruise) shows both corrections live at once.
+    #[test]
+    fn the_crossing_speed_gap_and_the_metered_sta_baseline_compound() {
+        const CROSSING_GS: f64 = 282.5; // what #355 feeds in at a low arrival fix
+        const CRUISE_GS: f64 = 440.0; // what it used to feed in
+        const MIT: i32 = 20;
+
+        let mut fca = rate_fca(vec![]);
+        fca.mode = "mit".into();
+        fca.rate = 0;
+        fca.mit = MIT;
+
+        // #355: the gap is sized on the crossing speed, so it is materially longer than the
+        // cruise-sized one it replaced.
+        let gap = separation_ms(&fca, CROSSING_GS);
+        let cruise_gap = separation_ms(&fca, CRUISE_GS);
+        assert!(
+            gap > cruise_gap,
+            "#355: a crossing-speed gap ({gap} ms) must exceed the cruise-sized one ({cruise_gap} ms)"
+        );
+        // It is the gap that actually delivers the configured distance at that speed.
+        let realized_nm = gap as f64 / 1000.0 / 3600.0 * CROSSING_GS;
+        assert!(
+            (realized_nm - MIT as f64).abs() < 0.5,
+            "#355: the gap must realize the configured {MIT} MIT, got {realized_nm:.1} nm"
+        );
+
+        // #356: and that gap is measured from the arrivals' *metered* crossings.
+        let metas: Vec<MeterInput> = leader_arrival_and_departure()
+            .into_iter()
+            .map(|m| MeterInput {
+                cross_speed: CROSSING_GS,
+                ..m
+            })
+            .collect();
+        let metered = fca::meter(&metas, &fca.mode, fca.rate, fca.mit, None);
+        let a_sta = metered[1].sched_ms;
+        assert!(
+            a_sta > metas[1].eta_ms,
+            "the scenario needs an arrival the ladder pushes back; got STA {a_sta} = ETA"
+        );
+
+        let cta = rdy_slot(&fca, &metas, &metered, 2, false);
+
+        // The combined guarantee: a full crossing-speed-sized gap behind A's *real* crossing.
+        assert!(
+            cta - a_sta >= gap,
+            "combined: the release must sit a full crossing-speed gap ({gap} ms) behind the \
+             arrival's metered crossing, got {} ms",
+            cta - a_sta
+        );
+
+        // Neither fix alone would have got here. Sizing on cruise (pre-#355) would have reserved a
+        // shorter gap; measuring from A's ETA (pre-#356) would have started from an earlier point.
+        assert!(
+            cta - a_sta > cruise_gap,
+            "pre-#355 sizing would have left only a cruise-sized gap behind the metered crossing"
+        );
+        assert!(
+            cta > metas[1].eta_ms + gap,
+            "pre-#356 baselining would have measured the gap from A's ETA, not its metered crossing"
+        );
+    }
+
+    /// #356, the reported scenario, asserted through the **real decision function**. A release
+    /// spaced against A's *ETA* would land 60s behind A's true 120s crossing — half the required
+    /// separation. Reverting `rdy_slot` to ETA-based spacing fails here.
+    #[test]
+    fn a_release_is_spaced_behind_an_arrivals_metered_time_not_its_eta() {
+        let metas = leader_arrival_and_departure();
+        let metered = fca::meter(&metas, "rate", 30, 0, None);
+        let a_sta = metered[1].sched_ms;
+        assert_eq!(
+            a_sta, 120_000,
+            "the ladder must push A back to earn its own spacing behind the leader"
+        );
+
+        let cta = rdy_slot(&rate_fca(vec![]), &metas, &metered, 2, false);
+        assert!(
+            cta - a_sta >= SEP_MS,
+            "the release must sit a full separation behind A's metered crossing, got {}s",
+            (cta - a_sta) / 1000
+        );
+
+        // What the bug did, for contrast: spacing against raw ETAs leaves less than separation.
+        let eta_based = fca::earliest_slot(180_000, &[0, 60_000], SEP_MS);
+        assert!(eta_based - a_sta < SEP_MS);
+    }
+
+    /// The protective margin is part of the decision, not something a caller adds. Dropping
+    /// `+ RELEASE_MARGIN_MS` inside `rdy_slot` fails here.
+    #[test]
+    fn the_release_slot_reserves_the_margin_on_top_of_separation() {
+        let metas = leader_arrival_and_departure();
+        let metered = fca::meter(&metas, "rate", 30, 0, None);
+        let cta = rdy_slot(&rate_fca(vec![]), &metas, &metered, 2, false);
+        assert_eq!(
+            cta - metered[1].sched_ms,
+            SEP_MS + RELEASE_MARGIN_MS,
+            "the margin must sit on top of the full separation"
+        );
+    }
+
+    /// Regression (#356 rework): in **manual** sequence `meter` chains every crossing, so the
+    /// releasing ground aircraft pushes the ones behind it later. Spacing the release against those
+    /// pushed times is circular — it lands behind an aircraft the controller explicitly ordered it
+    /// ahead of. Manual order here is Leader -> Dep -> Trailer, so Dep must keep its slot.
+    #[test]
+    fn a_manual_release_keeps_the_controllers_order_and_is_not_pushed_by_its_own_wake() {
+        let metas = vec![
+            cand(0, true, None),        // Leader, airborne
+            cand(100_000, false, None), // Dep, ground — the one being released
+            cand(110_000, true, None),  // Trailer, airborne, ordered behind Dep
+        ];
+        let order = vec![0usize, 1, 2];
+        let metered = fca::meter(&metas, "rate", 30, 0, Some(&order));
+        let (dep_slot, trailer_slot) = (metered[1].sched_ms, metered[2].sched_ms);
+        assert_eq!(
+            (dep_slot, trailer_slot),
+            (120_000, 240_000),
+            "sanity: the manual chain pushes Trailer back because Dep sits ahead of it"
+        );
+
+        let fca = rate_fca(vec!["LEAD".into(), "DEP".into(), "TRAIL".into()]);
+        let cta = rdy_slot(&fca, &metas, &metered, 1, true);
+
+        assert!(
+            cta < trailer_slot,
+            "the release must stay ahead of the Trailer the controller ordered behind it, got \
+             {cta} vs Trailer at {trailer_slot}"
+        );
+        assert_eq!(
+            cta,
+            dep_slot + RELEASE_MARGIN_MS,
+            "a manual release takes the slot the ladder already assigned it, plus the margin"
+        );
+    }
+
+    /// `committed_crossings` selects exactly the pinned crossings, excluding the aircraft being
+    /// released: unreleased ground traffic has no commitment and floats around the release.
+    #[test]
+    fn committed_crossings_skips_the_releasing_aircraft_and_unpinned_ground() {
+        let metas = vec![
+            cand(0, true, None),               // 0 airborne -> committed
+            cand(50_000, false, None),         // 1 unreleased ground -> not committed
+            cand(90_000, false, Some(90_000)), // 2 issued CFR -> committed
+            cand(180_000, false, None),        // 3 the one being released -> excluded
+        ];
+        let metered = fca::meter(&metas, "rate", 30, 0, None);
+
+        let committed = committed_crossings(&metas, &metered, 3);
+        assert_eq!(
+            committed,
+            vec![metered[0].sched_ms, metered[2].sched_ms],
+            "only the airborne crossing and the issued CFR are commitments"
+        );
+        assert!(
+            !committed.contains(&metered[3].sched_ms),
+            "the aircraft being released must not be spaced against itself"
+        );
+    }
+
+    /// `separation_ms` covers both FCA modes, including the `cross_speed` floor.
+    #[test]
+    fn separation_follows_the_fca_mode() {
+        let mut fca = rate_fca(vec![]);
+        assert_eq!(separation_ms(&fca, 300.0), SEP_MS);
+
+        fca.mode = "mit".into();
+        fca.mit = 20;
+        assert_eq!(separation_ms(&fca, 300.0), 240_000); // 20nm / 300kt = 4 min
+
+        fca.mode = "rate".into();
+        fca.rate = 0;
+        assert_eq!(separation_ms(&fca, 300.0), 0, "no rate set -> no spacing");
+    }
+}
+
+/// Regression (#355): the FCA metering wiring — not just the primitives. `MeterInput.cross_speed`
+/// must be the descent-aware groundspeed `predict::eta_along_route` predicts **at the crossing
+/// fix**, because `fca::meter` turns it into a frozen time gap (`MIT ÷ cross_speed`) that the
+/// aircraft then flies at its real crossing speed. `predict`'s own tests prove `gs_kt` is
+/// position-dependent and `fca`'s prove `meter` divides by whatever it is handed; only this one
+/// proves `build_candidates` hands it the right number. Reverting **either** candidate-build site
+/// to `trajectory::effective_gs(cruise_tas, headwind)` passes every other test in the repo — so
+/// both are covered here: the live-pilot loop via `pilots`, and the prefile loop via `prefiles`.
+#[cfg(test)]
+mod mit_cross_speed_wiring_tests {
+    use std::collections::HashMap;
+
+    use chrono::Utc;
+
+    use super::{ExclusionSet, ReleaseMap, build_candidates};
+    use crate::feed::airports::{Airport, AirportDb};
+    use crate::feed::{
+        airspace::Boundaries,
+        nav::NavData,
+        runway_db::RunwayDb,
+        trajectory::ProfileTable,
+        vatsim::{FlightPlan, Pilot, Prefile, VatsimData},
+        winds::Winds,
+    };
+    use crate::models::FcaBody;
+
+    /// Filed cruise TAS. `capped_cruise_tas(440.0, 35_000.0, &AircraftProfile::default())` returns
+    /// exactly this (the default profile sets neither `cruise_tas` nor `cruise_mach`), and
+    /// `VerticalProfile::ground_speed_at` caps the cruise band at it, so it *is* the cruise
+    /// groundspeed here — not merely a conservative stand-in for one.
+    const FILED_TAS: f64 = 440.0;
+
+    /// A 20 MIT FCA whose gate is the vertical line `lon`, spanning `lat_lo..lat_hi`.
+    fn mit_fca_at_lon(lon: f64, lat_lo: f64, lat_hi: f64) -> FcaBody {
+        FcaBody {
+            id: "t".into(),
+            name: "t".into(),
+            color: "#fff".into(),
+            artcc: "ZDC".into(),
+            points: sqlx::types::Json(vec![[lat_lo, lon], [lat_hi, lon]]),
+            dests: vec![],
+            origins: vec![],
+            fixes: vec![],
+            scope: vec![],
+            min_fl: None,
+            max_fl: None,
+            dir: "any".into(),
+            mode: "mit".into(),
+            rate: 0,
+            mit: 20,
+            enabled: true,
+            manual_order: vec![],
+            manual_seq: false,
+            updated_at: Utc::now(),
+            updated_by: None,
+            event_id: None,
+            event_status: None,
+            auto_publish: false,
+        }
+    }
+
+    fn jfk_dca_plan() -> FlightPlan {
+        FlightPlan {
+            departure: "KJFK".into(),
+            arrival: "KDCA".into(),
+            route: "".into(),
+            altitude: "35000".into(),
+            cruise_tas: "440".into(),
+            ..Default::default()
+        }
+    }
+
+    /// One airborne jet established at FL350 direct KJFK→KDCA (~164 nm out), **and** a prefile on
+    /// the same route. `build_candidates` has two separate candidate-build loops with their own
+    /// `cross_speed` assignment; a fixture with only `pilots` leaves the prefile one unexercised,
+    /// so a revert there would pass unnoticed.
+    fn arrival_at_cruise() -> VatsimData {
+        VatsimData {
+            pilots: vec![Pilot {
+                callsign: "AAL1".into(),
+                latitude: 40.5,
+                longitude: -74.2,
+                altitude: 35_000,
+                groundspeed: 440,
+                heading: 220,
+                flight_plan: Some(jfk_dca_plan()),
+                ..Default::default()
+            }],
+            prefiles: vec![Prefile {
+                callsign: "AAL2".into(),
+                flight_plan: Some(jfk_dca_plan()),
+                ..Default::default()
+            }],
+            ..Default::default()
+        }
+    }
+
+    fn airports() -> AirportDb {
+        HashMap::from([
+            ("KJFK".to_string(), Airport::at(40.64, -73.78)),
+            ("KDCA".to_string(), Airport::at(38.85, -77.04)),
+        ])
+    }
+
+    fn cross_speed_for(fca: &FcaBody) -> (f64, f64) {
+        let nav = NavData::load();
+        let (flights, metas) = build_candidates(
+            fca,
+            &arrival_at_cruise(),
+            &airports(),
+            &nav,
+            &Boundaries::default(),
+            &Winds::default(),
+            &ProfileTable::default(),
+            &ReleaseMap::new(),
+            &HashMap::new(),
+            &RunwayDb::default(),
+            &HashMap::new(),
+            &ExclusionSet::new(),
+            Utc::now(),
+            false,
+        );
+        assert_eq!(
+            flights.len(),
+            2,
+            "both the live pilot and the prefile must cross this FCA, got {:?}",
+            flights.iter().map(|f| &f.callsign).collect::<Vec<_>>()
+        );
+        // (live-pilot loop, prefile loop) — the two independent `cross_speed` sites.
+        let idx = |cs: &str| flights.iter().position(|f| f.callsign == cs).unwrap();
+        (
+            metas[idx("AAL1")].cross_speed,
+            metas[idx("AAL2")].cross_speed,
+        )
+    }
+
+    #[test]
+    fn cross_speed_at_a_low_arrival_fix_is_the_descent_speed_not_cruise() {
+        // Gate ~17 nm from KDCA — deep in the descent.
+        let (near, near_prefile) = cross_speed_for(&mit_fca_at_lon(-76.75, 38.5, 39.5));
+        for (site, near) in [("live pilot", near), ("prefile", near_prefile)] {
+            assert!(
+                near < FILED_TAS * 0.8,
+                "{site}: crossing speed at a low arrival fix was {near:.0} kt — not well below the \
+             {FILED_TAS:.0} kt cruise groundspeed, so the gap is being sized with a speed the \
+             aircraft no longer has by the fix, under-provisioning every crossing (#355)"
+            );
+            // …and it is a plausible arrival speed, not merely "some smaller number".
+            assert!(
+                (120.0..=350.0).contains(&near),
+                "{site}: crossing speed {near:.0} kt is outside a plausible arrival band"
+            );
+        }
+    }
+
+    #[test]
+    fn cross_speed_at_an_enroute_fix_is_still_cruise() {
+        // Gate ~53 nm along the KJFK→KDCA route. The live pilot is already past it at FL350, so
+        // it must report cruise. The prefile has not left KJFK, so the same gate sits in its
+        // *climb* — a legitimately lower speed, and the reason the two sites are asserted apart
+        // rather than lumped together.
+        let (far, far_prefile) = cross_speed_for(&mit_fca_at_lon(-74.6, 39.5, 41.0));
+
+        assert!(
+            far > FILED_TAS * 0.9,
+            "live pilot: an enroute crossing must still be sized at cruise, got {far:.0} kt"
+        );
+        assert!(
+            (150.0..FILED_TAS).contains(&far_prefile),
+            "prefile: a gate this close to its departure is a climb crossing, so it should sit \
+             below the {FILED_TAS:.0} kt cruise but in a plausible climb band, got {far_prefile:.0} kt"
+        );
+
+        // #355 follow-up, both sites: never *above* cruise. The profile's cruise-band TAS ramp
+        // used to read ~508 kt here, which under-provisions a 20 MIT fix to 17.3 real nm.
+        for (site, gs) in [("live pilot", far), ("prefile", far_prefile)] {
+            assert!(
+                gs <= FILED_TAS + 1.0,
+                "{site}: must not read above the {FILED_TAS:.0} kt cruise groundspeed, got {gs:.0} kt"
+            );
+        }
+    }
+
+    /// **A departure/climb gate is metered on its climb speed, and that is intended.**
+    ///
+    /// Raised at review as an unremarked consequence of #355: a 20 MIT gate shortly after departure
+    /// used to be sized at cruise (163.6 s) and is now sized at the climb speed the aircraft
+    /// actually crosses at (259.9 s here) — a large throughput reduction at departure gates.
+    ///
+    /// Confirmed as intended. MIT is a distance *at the fix*: a departure climbing through it at
+    /// ~277 kt genuinely needs the longer gap to end up 20 nm in trail. The old 163.6 s under-spaced
+    /// departure gates for exactly the same reason it under-spaced arrivals — this is the same bug,
+    /// not a new one. Pinned as a test so the decision travels with the code, and so anyone who
+    /// later reads the throughput drop as a regression finds the reasoning attached to it.
+    #[test]
+    fn a_departure_gate_is_metered_on_its_climb_speed_by_design() {
+        // A gate ~20 nm west of KJFK. Only the prefile crosses it — the live pilot is already past.
+        let nav = NavData::load();
+        let (flights, metas) = build_candidates(
+            &mit_fca_at_lon(-74.05, 38.0, 41.5),
+            &arrival_at_cruise(),
+            &airports(),
+            &nav,
+            &Boundaries::default(),
+            &Winds::default(),
+            &ProfileTable::default(),
+            &ReleaseMap::new(),
+            &HashMap::new(),
+            &RunwayDb::default(),
+            &HashMap::new(),
+            &ExclusionSet::new(),
+            Utc::now(),
+            false,
+        );
+        let i = flights
+            .iter()
+            .position(|f| f.callsign == "AAL2")
+            .expect("the departing prefile must cross a gate just off its departure field");
+        let climb = metas[i].cross_speed;
+
+        assert!(
+            climb < FILED_TAS,
+            "a departure gate must be sized on the climb speed it is crossed at, not the \
+             {FILED_TAS:.0} kt filed cruise, got {climb:.0} kt"
+        );
+
+        // The throughput change that was flagged, asserted rather than described. Both figures use
+        // `mit / speed * 3600` — the same formula `fca::meter`'s `sep_ms` applies.
+        let gap = |gs: f64| 20.0 / gs * 3600.0;
+        let (cruise_sized, climb_sized) = (gap(FILED_TAS), gap(climb));
+        assert!(
+            climb_sized > cruise_sized * 1.4,
+            "expected a materially longer gap at a departure gate: cruise-sized {cruise_sized:.1}s \
+             vs climb-sized {climb_sized:.1}s"
+        );
+
+        // And it is the *correct* longer gap: a departure released into it ends up the configured
+        // 20 MIT in trail at the speed it is actually doing. That is the whole point of #355.
+        let realized_nm = climb_sized / 3600.0 * climb;
+        assert!(
+            (realized_nm - 20.0).abs() < 0.5,
+            "a departure released into this gap must end up the configured 20 MIT in trail, got \
+             {realized_nm:.1} nm"
+        );
+    }
+
+    /// The debug view has to be able to explain the gap. Since #355 the gap is a function of the
+    /// crossing speed, not `cruise_tas`, so `FcaFlightDebug` reports both — and the reported
+    /// `cross_speed` must be the *same* number the metering used, floor included.
+    #[test]
+    fn the_debug_view_reports_the_crossing_speed_that_sized_the_gap() {
+        let fca = mit_fca_at_lon(-76.75, 38.5, 39.5); // low arrival gate
+        let nav = NavData::load();
+        let (flights, metas) = build_candidates(
+            &fca,
+            &arrival_at_cruise(),
+            &airports(),
+            &nav,
+            &Boundaries::default(),
+            &Winds::default(),
+            &ProfileTable::default(),
+            &ReleaseMap::new(),
+            &HashMap::new(),
+            &RunwayDb::default(),
+            &HashMap::new(),
+            &ExclusionSet::new(),
+            Utc::now(),
+            true, // debug on
+        );
+
+        for (f, m) in flights.iter().zip(&metas) {
+            let dbg = f
+                .debug
+                .as_ref()
+                .unwrap_or_else(|| panic!("{}: debug requested but absent", f.callsign));
+            assert_eq!(
+                dbg.cross_speed,
+                m.cross_speed.round() as i64,
+                "{}: the debug view must report the crossing speed metering actually used",
+                f.callsign
+            );
+            assert!(
+                dbg.cross_speed < dbg.cruise_tas,
+                "{}: at a low arrival fix the crossing speed ({} kt) should be below cruise ({} kt) \
+                 — reporting only cruise is what made the gap unexplainable",
+                f.callsign,
+                dbg.cross_speed,
+                dbg.cruise_tas
+            );
+        }
+    }
+}
+
+#[cfg(test)]
+mod manual_exclusion_tests {
+    use super::{ExclusionSet, all_excluded_callsigns, is_manually_excluded};
+    use std::collections::HashSet;
+
+    fn exclusions() -> ExclusionSet {
+        ExclusionSet::from([
+            ("ZDC".to_string(), HashSet::from(["BOGUS1".to_string()])),
+            ("ZNY".to_string(), HashSet::from(["BOGUS2".to_string()])),
+        ])
+    }
+
+    /// #342: the FCA surfaces (crossings, metering, badge counts) scope the check to the FCA's own
+    /// ARTCC, so one facility's removal doesn't silently edit another facility's board.
+    #[test]
+    fn an_artcc_scoped_check_only_sees_that_facilitys_removals() {
+        let ex = exclusions();
+        assert!(is_manually_excluded(&ex, Some("ZDC"), "BOGUS1"));
+        assert!(
+            !is_manually_excluded(&ex, Some("ZDC"), "BOGUS2"),
+            "ZNY's removal must not apply to a ZDC FCA"
+        );
+        assert!(!is_manually_excluded(&ex, Some("ZDC"), "UAL123"));
+        assert!(
+            !is_manually_excluded(&ex, Some("ZAB"), "BOGUS1"),
+            "a facility with no removals excludes nothing"
+        );
+    }
+
+    /// The global traffic endpoints carry no facility context, so they ask "excluded anywhere?" —
+    /// that is what actually clears a bogus flight off the map for every viewer.
+    #[test]
+    fn an_unscoped_check_sees_every_facilitys_removals() {
+        let ex = exclusions();
+        assert!(is_manually_excluded(&ex, None, "BOGUS1"));
+        assert!(is_manually_excluded(&ex, None, "BOGUS2"));
+        assert!(!is_manually_excluded(&ex, None, "UAL123"));
+    }
+
+    #[test]
+    fn an_empty_set_excludes_nothing() {
+        let ex = ExclusionSet::new();
+        assert!(!is_manually_excluded(&ex, Some("ZDC"), "BOGUS1"));
+        assert!(!is_manually_excluded(&ex, None, "BOGUS1"));
+    }
+
+    /// `feed::flow::compute` takes the flat form, since airport flow / AADC demand has no single
+    /// facility context.
+    #[test]
+    fn flattening_collects_every_facilitys_callsigns() {
+        let flat = all_excluded_callsigns(&exclusions());
+        assert_eq!(
+            flat,
+            HashSet::from(["BOGUS1".to_string(), "BOGUS2".to_string()])
+        );
+        assert!(all_excluded_callsigns(&ExclusionSet::new()).is_empty());
+    }
+}
+
+/// #360: the FCA inclusion decision lives in exactly one place. The metering board, the badge
+/// counts and the per-flight advisory used to restate it separately and could drift apart.
+#[cfg(test)]
+mod fca_inclusion_tests {
+    use std::collections::{HashMap, HashSet};
+
+    use chrono::Utc;
+
+    use super::{ExclusionSet, ReleaseMap, build_candidates, fca_crossing_for};
+    use crate::feed::airports::{Airport, AirportDb};
+    use crate::feed::{
+        airspace::Boundaries,
+        fca,
+        nav::NavData,
+        runway_db::RunwayDb,
+        trajectory::ProfileTable,
+        vatsim::{FlightPlan, Pilot, VatsimData},
+        winds::Winds,
+    };
+    use crate::models::FcaBody;
+
+    fn fca_at(lon_lo: f64, lon_hi: f64) -> FcaBody {
+        FcaBody {
+            id: "t".into(),
+            name: "t".into(),
+            color: "#fff".into(),
+            artcc: "ZDC".into(),
+            points: sqlx::types::Json(vec![[39.5, lon_lo], [39.5, lon_hi]]),
+            dests: vec![],
+            origins: vec![],
+            fixes: vec![],
+            scope: vec![],
+            min_fl: None,
+            max_fl: None,
+            dir: "any".into(),
+            mode: "rate".into(),
+            rate: 30,
+            mit: 0,
+            enabled: true,
+            manual_order: vec![],
+            manual_seq: false,
+            updated_at: Utc::now(),
+            updated_by: None,
+            event_id: None,
+            event_status: None,
+            auto_publish: false,
+        }
+    }
+
+    fn plan() -> FlightPlan {
+        FlightPlan {
+            departure: "KJFK".into(),
+            arrival: "KDCA".into(),
+            route: "".into(),
+            altitude: "35000".into(),
+            cruise_tas: "440".into(),
+            ..Default::default()
+        }
+    }
+
+    fn airports() -> AirportDb {
+        HashMap::from([
+            ("KJFK".to_string(), Airport::at(40.64, -73.78)),
+            ("KDCA".to_string(), Airport::at(38.85, -77.04)),
+        ])
+    }
+
+    fn data() -> VatsimData {
+        VatsimData {
+            pilots: vec![Pilot {
+                callsign: "AAL1".into(),
+                latitude: 40.5,
+                longitude: -74.2,
+                altitude: 35_000,
+                groundspeed: 440,
+                heading: 220,
+                flight_plan: Some(plan()),
+                ..Default::default()
+            }],
+            ..Default::default()
+        }
+    }
+
+    fn path(nav: &NavData, ap: &AirportDb) -> Vec<[f64; 2]> {
+        let fp = plan();
+        fca::route_path(
+            nav,
+            ap,
+            &fp.departure,
+            &fp.arrival,
+            &fp.route,
+            40.5,
+            -74.2,
+            220,
+            440,
+        )
+        .expect("the JFK->DCA corridor must resolve")
+    }
+
+    /// The `passes_scope` arm, with **real** ARTCC boundaries (#360 rework).
+    ///
+    /// `passes_scope` short-circuits to `true` when `fca.scope` is empty, and every other fixture
+    /// here leaves it empty — so the arm never executed and deleting it from `fca_crossing_for`
+    /// kept the whole suite green. For a refactor whose product is "one function owns every reason
+    /// a flight is left out", that one reason has to be under test too.
+    ///
+    /// The fixture gate crosses the JFK→DCA corridor at lat 39.5, which the bundled boundaries put
+    /// inside **ZDC**. Scoping the FCA to ZDC must include the flight; scoping it to an ARTCC the
+    /// crossing is nowhere near must exclude it.
+    #[test]
+    fn a_scoped_fca_only_matches_a_crossing_inside_its_airspace() {
+        let nav = NavData::load();
+        let ap = airports();
+        let path = path(&nav, &ap);
+        let airspace = Boundaries::load();
+        assert!(
+            !airspace.is_empty(),
+            "sanity: real boundaries must load, or passes_scope short-circuits and proves nothing"
+        );
+
+        let scoped_to = |zone: &str| {
+            let mut fca = fca_at(-76.5, -73.0);
+            fca.scope = vec![zone.to_string()];
+            fca_crossing_for(
+                &fca,
+                &airspace,
+                &ExclusionSet::new(),
+                "AAL1",
+                &plan(),
+                Some(35_000),
+                &path,
+            )
+        };
+
+        // Sanity: the crossing really is in ZDC, so an unscoped FCA matches it.
+        assert!(
+            fca_crossing_for(
+                &fca_at(-76.5, -73.0),
+                &airspace,
+                &ExclusionSet::new(),
+                "AAL1",
+                &plan(),
+                Some(35_000),
+                &path,
+            )
+            .is_some(),
+            "sanity: the corridor crossing must be included when no scope is set"
+        );
+
+        assert!(
+            scoped_to("ZDC").is_some(),
+            "an FCA scoped to the ARTCC its crossing lies in must include the flight"
+        );
+        assert!(
+            scoped_to("ZLA").is_none(),
+            "an FCA scoped to an ARTCC the crossing is outside must exclude the flight — if this \
+             passes, `passes_scope` is not being consulted"
+        );
+    }
+
+    /// Every reason a flight is left out is one function's answer, so adding a condition can't
+    /// reach one surface and miss another.
+    #[test]
+    fn the_decision_covers_exclusion_filters_crossing_and_scope() {
+        let nav = NavData::load();
+        let ap = airports();
+        let path = path(&nav, &ap);
+        let empty = ExclusionSet::new();
+        let fp = plan();
+        let cross = |fca: &FcaBody, ex: &ExclusionSet, alt: Option<i64>| {
+            fca_crossing_for(fca, &Boundaries::default(), ex, "AAL1", &fp, alt, &path)
+        };
+
+        // Baseline: an ordinary crossing is included, and the geometry comes back with it.
+        let hit = cross(&fca_at(-76.5, -73.0), &empty, Some(35_000))
+            .expect("the corridor FCA must include this flight");
+        assert!(
+            hit.along_nm > 0.0,
+            "the decision must hand back the crossing, not just a bool"
+        );
+
+        // Manually excluded for this FCA's facility (#342).
+        let excluded =
+            ExclusionSet::from([("ZDC".to_string(), HashSet::from(["AAL1".to_string()]))]);
+        assert!(
+            cross(&fca_at(-76.5, -73.0), &excluded, Some(35_000)).is_none(),
+            "a manually excluded callsign must be left out"
+        );
+        // …but another facility's removal must not affect a ZDC FCA.
+        let other = ExclusionSet::from([("ZNY".to_string(), HashSet::from(["AAL1".to_string()]))]);
+        assert!(
+            cross(&fca_at(-76.5, -73.0), &other, Some(35_000)).is_some(),
+            "another facility's removal must not touch this FCA"
+        );
+
+        // Membership filters: a destination this flight doesn't match.
+        let mut wrong_dest = fca_at(-76.5, -73.0);
+        wrong_dest.dests = vec!["KBOS".into()];
+        assert!(
+            cross(&wrong_dest, &empty, Some(35_000)).is_none(),
+            "a flight failing the membership filters must be left out"
+        );
+
+        // Altitude band it sits outside of, on both filed and current.
+        let mut wrong_band = fca_at(-76.5, -73.0);
+        wrong_band.min_fl = Some(400);
+        assert!(
+            cross(&wrong_band, &empty, Some(35_000)).is_none(),
+            "a flight outside the altitude band must be left out"
+        );
+
+        // Geometry: a line the route never reaches.
+        assert!(
+            cross(&fca_at(-60.0, -59.0), &empty, Some(35_000)).is_none(),
+            "a line the route doesn't cross must be left out"
+        );
+    }
+
+    /// The metering board and the shared decision cannot disagree: `build_candidates` includes
+    /// exactly the flights `fca_crossing_for` accepts, and at the same crossing distance.
+    #[test]
+    fn the_metering_board_matches_the_shared_decision() {
+        let nav = NavData::load();
+        let ap = airports();
+        let path = path(&nav, &ap);
+        let fp = plan();
+        let empty = ExclusionSet::new();
+
+        for (label, fca) in [
+            ("crossed", fca_at(-76.5, -73.0)),
+            ("not crossed", fca_at(-60.0, -59.0)),
+        ] {
+            let decision = fca_crossing_for(
+                &fca,
+                &Boundaries::default(),
+                &empty,
+                "AAL1",
+                &fp,
+                Some(35_000),
+                &path,
+            );
+            let (flights, _) = build_candidates(
+                &fca,
+                &data(),
+                &ap,
+                &nav,
+                &Boundaries::default(),
+                &Winds::default(),
+                &ProfileTable::default(),
+                &ReleaseMap::new(),
+                &HashMap::new(),
+                &RunwayDb::default(),
+                &HashMap::new(),
+                &empty,
+                Utc::now(),
+                false,
+            );
+            assert_eq!(
+                decision.is_some(),
+                !flights.is_empty(),
+                "{label}: the board and the shared decision must agree on inclusion"
+            );
+            // Guard against agreeing vacuously: the "crossed" case must actually be included.
+            assert_eq!(
+                decision.is_some(),
+                label == "crossed",
+                "{label}: fixture no longer exercises what it claims to"
+            );
+            if let Some(c) = decision {
+                assert!(
+                    (flights[0].distance_nm as f64 - c.along_nm).abs() < 1.0,
+                    "{label}: the board must meter the crossing the decision returned"
+                );
+            }
+        }
     }
 }

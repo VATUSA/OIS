@@ -722,7 +722,12 @@ pub async fn hist_traffic(
     let p = pool(&state)?;
     let at = parse_at(&q)?;
     let data = reconstruct_at(p, at).await?;
-    Ok(Json(flow_handlers::traffic_from(&data)))
+    // Historical replay: a *current* manual exclusion (#342) must not retroactively erase a flight
+    // from a past snapshot, so this path deliberately passes no exclusions.
+    Ok(Json(flow_handlers::traffic_from(
+        &data,
+        &std::collections::HashMap::new(),
+    )))
 }
 
 #[utoipa::path(

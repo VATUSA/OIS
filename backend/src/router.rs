@@ -11,8 +11,8 @@ use crate::{
     handlers::{
         access, ace, admin, aircraft_profiles, airport_configs, airport_surface, api_keys, atc,
         audit, auth, dashboards, docs, events, facilities, facility_documents, facility_map, feed,
-        flow, gdp, health, integration, jobs as jobs_handler, preferences, public, runway,
-        service_accounts, stats, taxi_insights, tmu, users, webhooks,
+        flight_exclusions, flow, gdp, health, integration, jobs as jobs_handler, preferences,
+        public, runway, service_accounts, stats, taxi_insights, tmu, users, webhooks,
     },
     openapi::ApiDoc,
     realtime,
@@ -397,6 +397,15 @@ pub fn build_router(state: AppState) -> Router {
         .route(
             "/api/v1/flow/fcas/{id}/release/{callsign}",
             post(flow::mark_release).delete(flow::clear_release),
+        )
+        // Manually drop a bogus flight from the flow picture (#342)
+        .route(
+            "/api/v1/flow/fcas/{id}/exclusions",
+            get(flight_exclusions::list_flight_exclusions),
+        )
+        .route(
+            "/api/v1/flow/fcas/{id}/exclusions/{callsign}",
+            post(flight_exclusions::exclude_flight).delete(flight_exclusions::restore_flight),
         )
         // Shared named map routes (polylines)
         .route(

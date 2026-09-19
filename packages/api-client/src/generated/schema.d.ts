@@ -1462,6 +1462,38 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/v1/flow/fcas/{id}/exclusions": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get: operations["list_flight_exclusions"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/flow/fcas/{id}/exclusions/{callsign}": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        post: operations["exclude_flight"];
+        delete: operations["restore_flight"];
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/v1/flow/fcas/{id}/order": {
         parameters: {
             query?: never;
@@ -3905,6 +3937,13 @@ export interface components {
             body: string;
         };
         /**
+         * @description Body for manually excluding a flight. The callsign comes from the path; only the note is optional
+         *     input — the ARTCC is resolved from the FCA being worked, never taken from the client.
+         */
+        ExcludeFlightRequest: {
+            reason?: string;
+        };
+        /**
          * @description The result of re-pulling one airport's `source='faa'` surface geometry from the bundled FAA
          *     extract (#232) — a permissioned, on-demand equivalent of #231's nationwide startup seed.
          */
@@ -4092,6 +4131,14 @@ export interface components {
         FcaFlightDebug: {
             /**
              * Format: int64
+             * @description Predicted groundspeed (kt) **at the crossing fix** — the number MIT spacing is actually
+             *     sized with since #355. Reported alongside `cruise_tas` because the gap is no longer a
+             *     function of cruise: without this the debug view can't explain the gap it exists to explain
+             *     (e.g. ~282 kt at a low arrival fix against a 440 kt cruise).
+             */
+            cross_speed: number;
+            /**
+             * Format: int64
              * @description Filed cruise altitude (ft) used.
              */
             cruise_alt: number;
@@ -4198,6 +4245,49 @@ export interface components {
              * @description The binding (worst) predicted delay across all applicable initiatives.
              */
             total_delay_min: number;
+        };
+        /**
+         * @description A manually excluded ("bogus") flight — one VATSIM callsign a controller has dropped from the flow
+         *     picture because its data is garbage (issue #342). Scoped to the removing controller's ARTCC.
+         *
+         *     Distinct from `FlowFlight::excluded`, which is program-wide by wake/type and keeps the flight
+         *     shown; this removes one specific callsign from the map, FCA crossings, metering, counts and AADC
+         *     demand.
+         */
+        FlightExclusionBody: {
+            artcc: string;
+            callsign: string;
+            /** Format: date-time */
+            created_at: string;
+            created_by?: string | null;
+            /** @description Display name of the controller who removed the flight, when still resolvable. */
+            created_by_name?: string | null;
+            /**
+             * Format: date-time
+             * @description TTL backstop: the exclusion stops applying after this instant even if the callsign never
+             *     cleanly leaves the feed.
+             */
+            expires_at: string;
+            id: string;
+            /** @description Optional controller note on why the flight was dropped. */
+            reason: string;
+        };
+        /**
+         * @description One FCA's manual exclusions, plus whether **this caller** may change them (#342).
+         *
+         *     `editable` exists because the write endpoints are ARTCC-scoped while the client's permission
+         *     blob has no ARTCC dimension — `hasPermission(me, "flow.fca.update")` cannot tell whether the
+         *     caller's grant covers *this* FCA's facility. Without it the UI offers a ✕ the server answers
+         *     with 403.
+         *
+         *     It sits on the envelope rather than on each row (the shape `airport_configs` uses) because the
+         *     control has to render when the list is **empty** — that is precisely the first removal.
+         */
+        FlightExclusionsBody: {
+            /** @description Whether the caller holds `flow.fca.update` for this FCA's ARTCC (nationally or scoped). */
+            editable: boolean;
+            /** @description The live exclusions for this FCA's ARTCC, newest first. */
+            exclusions: components["schemas"]["FlightExclusionBody"][];
         };
         /** @description An FCA a looked-up flight crosses, with its metered crossing. */
         FlightFcaCrossing: {
@@ -10014,6 +10104,121 @@ export interface operations {
                 content?: never;
             };
             401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+        };
+    };
+    list_flight_exclusions: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["FlightExclusionsBody"];
+                };
+            };
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+        };
+    };
+    exclude_flight: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                id: string;
+                callsign: string;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["ExcludeFlightRequest"];
+            };
+        };
+        responses: {
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["FlightExclusionBody"];
+                };
+            };
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+        };
+    };
+    restore_flight: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                id: string;
+                callsign: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            204: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            403: {
                 headers: {
                     [name: string]: unknown;
                 };
