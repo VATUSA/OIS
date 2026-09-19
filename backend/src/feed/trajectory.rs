@@ -286,6 +286,19 @@ impl VerticalProfile {
             Some(m) => cruise_tas.min(mach_to_tas(m, alt)),
             None => cruise_tas,
         };
+        // The descent schedule, never faster than the aircraft cruises at that altitude (#361).
+        //
+        // Without the cap, a profile with no `desc_mach` resolves its IAS schedule to a TAS well
+        // above cruise up high — the default profile's 290 KIAS is 521 kt TAS at FL350 against a
+        // 440 kt cruise. Since `build` assembles the descent curve first, its **top** sample sits
+        // at cruise altitude carrying that number, while the only cruise sample sits at
+        // top-of-climb carrying cruise TAS. `interp` then ramps between two different speeds at
+        // the *same* altitude across the whole cruise leg, so the profile reported an aircraft
+        // accelerating through cruise and `time_between` integrated it — enroute ETAs came out
+        // optimistic, and worse the longer the cruise.
+        //
+        // Capping makes the cruise leg genuinely flat and the whole profile monotonic: the descent
+        // schedule takes over naturally once it falls below cruise TAS lower down.
         let desc_tas = |alt: f64| {
             phase_tas(
                 profile.desc_ias_lo,
@@ -293,6 +306,7 @@ impl VerticalProfile {
                 profile.desc_mach,
                 alt,
             )
+            .min(cruise_tas_at(alt))
         };
 
         // Descent leg (field → cruise): integrate altitude up from the field, accumulating the
@@ -408,25 +422,16 @@ impl VerticalProfile {
     /// Predicted ground speed (kt) at a distance-to-destination `d` — the phase-appropriate TAS
     /// with wind (and any groundspeed anchoring) applied, floored at [`GS_FLOOR_KT`] exactly like
     /// [`Self::time_between`]'s internal integration, so a displayed speed never reads below what
-    /// the paired ETA in the same row was actually timed against, and capped at the cruise
-    /// groundspeed anywhere the profile is still at cruise altitude.
+    /// the paired ETA in the same row was actually timed against.
     ///
-    /// That cap is not cosmetic (#355). [`Self::build`] assembles the descent curve first, and its
-    /// **top** sample carries the *descent* schedule's TAS at cruise altitude — well above cruise
-    /// TAS. The only cruise sample sits at top-of-climb, so [`Self::interp`] ramps TAS between the
-    /// two across the whole cruise leg even though [`Self::alt_at`] is flat there. Un-capped, a fix
-    /// in the cruise band reads faster than the aircraft can fly, and FCA MIT spacing sized with it
-    /// under-provisions exactly the way cruise speed did at a descent fix. Capping here leaves
-    /// [`Self::time_between`] (and therefore every ETA) untouched — the samples themselves are
-    /// still wrong, which is a separate fix.
+    /// This used to cap the result at the cruise groundspeed wherever the profile was still at
+    /// cruise altitude, because [`Self::build`]'s samples made the cruise leg a TAS ramp (#355).
+    /// That cap was a workaround over wrong samples, and deliberately did not apply to
+    /// [`Self::time_between`], so ETAs stayed optimistic. #361 fixed the samples instead — the
+    /// cruise leg is genuinely flat now and the profile never exceeds cruise TAS — so the cap is
+    /// gone and this is simply the profile's own speed again.
     pub fn ground_speed_at(&self, d_nm: f64) -> f64 {
-        let gs = self.gs_at(d_nm);
-        if self.alt_at(d_nm) < self.cruise_alt - ANCHOR_ALT_TOLERANCE_FT {
-            return gs; // climbing or descending: the schedule TAS is the honest answer
-        }
-        let cruise_gs =
-            (effective_gs(self.cruise_tas, self.headwind) * self.gs_bias).max(GS_FLOOR_KT);
-        gs.min(cruise_gs)
+        self.gs_at(d_nm)
     }
 
     /// Seconds to fly from distance-to-destination `from_d` forward to `to_d` (`to_d < from_d`),
@@ -948,6 +953,92 @@ mod tests {
         assert!(
             from_sea_level.time_between(300.0, 0.0) > from_field_height.time_between(300.0, 0.0),
             "climbing the extra 5,431 ft must cost time"
+        );
+    }
+
+    // ---- #361: the cruise leg is flat ----------------------------------------------------------
+
+    /// The regression this fix exists for. `build` assembles the descent curve first, and with no
+    /// `desc_mach` the default profile's 290 KIAS schedule resolves to ~521 kt TAS at FL350 —
+    /// above the 440 kt cruise. That number used to land on the descent curve's **top** sample, at
+    /// cruise altitude, while the only cruise sample sat at top-of-climb with cruise TAS, so
+    /// `interp` ramped between two speeds at the *same* altitude for the whole cruise leg
+    /// (measured 440 → 462 → 485 → 508 → 519 kt at a flat 35,000 ft).
+    ///
+    /// Removing `.min(cruise_tas_at(alt))` from `desc_tas` restores that ramp and fails here.
+    #[test]
+    fn the_cruise_leg_is_flat_at_cruise_speed() {
+        let profile = AircraftProfile::default();
+        let cruise_tas = 440.0;
+        let vp = VerticalProfile::build(35_000.0, 300.0, 0.0, 35_000.0, cruise_tas, &profile, None);
+        let cruise_gs = effective_gs(cruise_tas, None);
+
+        // Every point still at cruise altitude must read exactly the cruise groundspeed.
+        for d in [300.0_f64, 250.0, 200.0, 150.0, 130.0, 126.0] {
+            assert!(
+                (vp.alt_at(d) - 35_000.0).abs() < 1.0,
+                "d={d} should still be at cruise altitude for this fixture, got {:.0} ft",
+                vp.alt_at(d)
+            );
+            assert!(
+                (vp.gs_at(d) - cruise_gs).abs() < 1.0,
+                "d={d}: the cruise leg must be flat at {cruise_gs:.0} kt, got {:.1} kt",
+                vp.gs_at(d)
+            );
+        }
+    }
+
+    /// The profile must never predict an aircraft flying faster than it cruises, at any point.
+    /// This is the invariant the old `ground_speed_at` cap enforced as a workaround; now it holds
+    /// in the samples themselves, so it is true for `time_between` (and therefore every ETA) too.
+    #[test]
+    fn the_profile_never_exceeds_cruise_speed() {
+        let profile = AircraftProfile::default();
+        let cruise_tas = 440.0;
+        let route = 300.0;
+        let vp = VerticalProfile::build(35_000.0, route, 0.0, 35_000.0, cruise_tas, &profile, None);
+        let cruise_gs = effective_gs(cruise_tas, None);
+
+        let mut d = route;
+        while d >= 0.0 {
+            assert!(
+                vp.gs_at(d) <= cruise_gs + 1.0,
+                "d={d:.0}: predicted {:.1} kt exceeds the {cruise_gs:.0} kt cruise groundspeed",
+                vp.gs_at(d)
+            );
+            d -= 5.0;
+        }
+
+        // And the implied average over the whole route is therefore physically possible, which it
+        // was not before: a 300 nm leg used to imply ~432 kt and a 1200 nm leg ~467 kt.
+        let secs = vp.time_between(route, 0.0);
+        let avg = route / (secs / 3600.0);
+        assert!(
+            avg <= cruise_gs,
+            "implied average {avg:.1} kt over {route:.0} nm exceeds cruise {cruise_gs:.0} kt"
+        );
+    }
+
+    /// The descent is still modelled — capping at cruise must not flatten the whole profile. Low
+    /// down, where the schedule is genuinely slower than cruise, it takes over unchanged. This is
+    /// also the value #355's MIT spacing depends on, so it is pinned here as well.
+    #[test]
+    fn the_descent_schedule_still_governs_below_cruise() {
+        let profile = AircraftProfile::default();
+        let vp = VerticalProfile::build(35_000.0, 300.0, 0.0, 35_000.0, 440.0, &profile, None);
+
+        let near_field = vp.gs_at(20.0);
+        assert!(
+            (250.0..320.0).contains(&near_field),
+            "a fix 20 nm out should read the arrival descent speed, got {near_field:.1} kt"
+        );
+        assert!(
+            vp.gs_at(20.0) < vp.gs_at(80.0) && vp.gs_at(80.0) < vp.gs_at(150.0),
+            "the descent must still slow monotonically toward the field: 20nm={:.1} 80nm={:.1} \
+             150nm={:.1}",
+            vp.gs_at(20.0),
+            vp.gs_at(80.0),
+            vp.gs_at(150.0)
         );
     }
 }
