@@ -15,6 +15,7 @@ pub mod facilities;
 pub mod facility_documents;
 pub mod facility_map;
 pub mod feed;
+pub mod flight_exclusions;
 pub mod flow;
 pub mod gdp;
 pub mod health;
