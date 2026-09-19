@@ -61,6 +61,11 @@ tauri-build = { version = "2.6", features = [] }
 # to build — the CI desktop job stays as it is.
 keyring = { version = "4.2", features = ["apple-native-keyring-store", "windows-native-keyring-store", "zbus-secret-service-keyring-store"] }
 open = "5.4"
+# Auto-update (#347). The updater plugin verifies a minisign signature against the public key in
+# tauri.conf.json and refuses anything that doesn't match, so package verification is its job
+# rather than a weaker hand-rolled check of ours. `process` is only for relaunch().
+tauri-plugin-updater = "2.11"
+tauri-plugin-process = "2.3"
 
 # --- discord bot ---
 serenity = { version = "0.12", default-features = false, features = ["client", "gateway", "native_tls_backend", "model"] }

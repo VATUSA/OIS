@@ -41,13 +41,22 @@ describe("capabilities", () => {
     }
   });
 
-  it("still reports a capability absent on desktop until its feature ships", () => {
-    // Every entry is false today; each is flipped on by the issue that implements it (#348-#354).
-    // A consumer written now against can("tray") is therefore correct both before and after.
+  it("reports a capability absent on desktop until its own feature ships", () => {
+    // A capability turns on only when the issue that implements it flips its flag — so a consumer
+    // written against can("tray") today is correct both before and after #351 lands. Updating this
+    // list is the deliberate cost of that: flipping a flag without noticing fails here.
     pretendDesktop();
+    const shipped: Capability[] = ["autoUpdate"]; // #347
     for (const [name, available] of Object.entries(capabilities())) {
-      expect(available, `${name} is not implemented yet`).toBe(false);
+      const expected = shipped.includes(name as Capability);
+      expect(available, `${name} availability on desktop`).toBe(expected);
     }
+  });
+
+  it("reports even a shipped capability absent on the web build", () => {
+    // autoUpdate is implemented, but there is nothing to update on a website — the platform gate
+    // still has to hold or web callers would take a desktop-only path.
+    expect(can("autoUpdate")).toBe(false);
   });
 
   it("hands back a frozen snapshot a caller can't corrupt for everyone else", () => {

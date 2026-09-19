@@ -40,6 +40,7 @@ export function platform(): Platform {
  * honestly rather than being a type error.
  */
 export type Capability =
+  | "autoUpdate"
   | "notifications"
   | "miniWindows"
   | "multiWindow"
@@ -56,6 +57,7 @@ export type Capability =
  * and starts working the day its feature lands — no caller changes needed.
  */
 const IMPLEMENTED: Readonly<Record<Capability, boolean>> = Object.freeze({
+  autoUpdate: true, // #347 — signed auto-update (shipped)
   notifications: false, // #348 — native OS notifications
   miniWindows: false, // #349 — pop-out always-on-top mini-windows
   multiWindow: false, // #350 — multi-window / multi-monitor

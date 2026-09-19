@@ -1,7 +1,13 @@
 {
   "$schema": "../gen/schemas/desktop-schema.json",
   "identifier": "default",
-  "description": "Base permissions for the OIS main window. Intentionally just Tauri's core defaults — desktop features add their own capability entries as they land (#345-#347).",
-  "windows": ["main"],
-  "permissions": ["core:default"]
+  "description": "Base permissions for the OIS main window: Tauri's core defaults plus what signed auto-update needs (#347). Desktop features add their own entries as they land (#348-#354).",
+  "windows": [
+    "main"
+  ],
+  "permissions": [
+    "core:default",
+    "updater:default",
+    "process:allow-restart"
+  ]
 }

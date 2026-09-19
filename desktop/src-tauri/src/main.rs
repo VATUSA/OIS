@@ -10,7 +10,6 @@
 //! bearer. The remaining desktop features arrive in later issues, each adding its own commands and
 //! capability entries:
 //!
-//! - distribution + signed auto-update — #347
 //! - notifications, tray, hotkeys and the rest — #348-#354
 
 // Release builds on Windows are GUI apps, so suppress the console window that would otherwise
@@ -21,6 +20,12 @@ mod auth;
 
 fn main() {
     tauri::Builder::default()
+        // Signed auto-update (#347). The plugin checks the endpoint in tauri.conf.json and will not
+        // apply a package whose signature doesn't verify against the configured public key; the
+        // frontend drives when that happens (`web/src/lib/desktop-update.ts`) so the app never
+        // restarts itself out from under someone mid-event.
+        .plugin(tauri_plugin_updater::Builder::new().build())
+        .plugin(tauri_plugin_process::init())
         .invoke_handler(tauri::generate_handler![
             auth::store_token,
             auth::get_token,
