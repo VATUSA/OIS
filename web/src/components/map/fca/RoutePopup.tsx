@@ -1,6 +1,6 @@
 import {useLayoutEffect, useRef, useState} from "react";
-import {type DataColumn, DataTable} from "@ois/ui";
-import {Maximize2, Minus, X} from "lucide-react";
+import {ConfirmButton, type DataColumn, DataTable} from "@ois/ui";
+import {Maximize2, Minus, Trash2, X} from "lucide-react";
 
 import type {AircraftRoute, Fca, FcaFlight} from "@/lib/fca";
 import {lineNm, type LatLng} from "@/components/map/lib/geo";
@@ -39,11 +39,17 @@ export function RoutePopup({
   route,
   fca,
   match,
+  canEdit = false,
+  onRemove,
   onClose,
 }: {
   route: AircraftRoute;
   fca: Fca | null | undefined;
   match: FcaFlight | undefined;
+  /** Whether the viewer may drop a bogus flight (#342) — `flow.fca.update`. */
+  canEdit?: boolean;
+  /** Drop this flight as bogus. Absent when there's no FCA context to scope it to. */
+  onRemove?: (callsign: string) => void;
   onClose: () => void;
 }) {
   const pts = route.points as LatLng[];
@@ -155,6 +161,20 @@ export function RoutePopup({
           )}
         </div>
         <div className="-mr-1 -mt-1 flex items-center gap-0.5">
+          {canEdit && onRemove && (
+            <ConfirmButton
+              size="icon"
+              className="size-7"
+              // Inside the drag header: without this the click starts a drag instead.
+              onPointerDown={stopPointer}
+              title="Remove bogus flight"
+              aria-label={`Remove ${route.callsign} as a bogus flight`}
+              warn={`Remove ${route.callsign} from the flow picture?`}
+              onConfirm={() => onRemove(route.callsign)}
+            >
+              <Trash2 className="size-4" />
+            </ConfirmButton>
+          )}
           <button
             type="button"
             onPointerDown={stopPointer}

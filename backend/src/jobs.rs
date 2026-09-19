@@ -23,6 +23,7 @@ use crate::repos::ace as ace_repo;
 use crate::repos::aircraft_profiles as aircraft_profiles_repo;
 use crate::repos::airport_surface as airport_surface_repo;
 use crate::repos::events as events_repo;
+use crate::repos::flight_exclusions as flight_exclusions_repo;
 use crate::repos::flow as flow_repo;
 use crate::repos::stats as stats_repo;
 use crate::repos::tmu as tmu_repo;
@@ -73,6 +74,11 @@ const AIRCRAFT_PROFILES_INTERVAL: Duration = Duration::from_secs(5 * 60);
 /// How often to reload airport surface gates from the DB (staff edits are rare, and the handler
 /// force-refreshes on write, so a slow poll is enough to catch out-of-band changes).
 const AIRPORT_GATES_INTERVAL: Duration = Duration::from_secs(5 * 60);
+
+/// How often to reload manually excluded ("bogus") flights and clear the ones whose callsign has
+/// left the feed (#342). The write handler force-refreshes, so this poll is only about the
+/// auto-clear — it wants to be brisk enough that a corrected flight reappears promptly.
+const FLIGHT_EXCLUSIONS_INTERVAL: Duration = Duration::from_secs(60);
 
 /// How often to run the FAA airport surface seed (#230/#231). The seed only fills airports that have
 /// no `faa` rows yet (existing rows — and facility edits to them — are never touched), so this
@@ -399,6 +405,57 @@ pub fn spawn_airport_gates_refresh(
                     Ok(by_icao) => {
                         gates.store(Arc::new(by_icao));
                         Ok("reloaded".to_string())
+                    }
+                    Err(e) => Err(format!("{e:?}")),
+                }
+            }
+        },
+    ));
+}
+
+/// Keep the manual flight-exclusion cache current for the DB-less flow surfaces (#342), and run the
+/// auto-clear: an exclusion whose callsign has left the VATSIM feed is deleted, so a corrected or
+/// returning flight is never hidden forever. `expires_at` is the TTL backstop for a callsign that
+/// never cleanly departs the feed; readers filter on it, so an expired row needs no deletion here.
+/// Fails safe — a failed load keeps the current map.
+pub fn spawn_flight_exclusions_refresh(
+    reg: Arc<JobRegistry>,
+    pool: PgPool,
+    feed: FeedState,
+    exclusions: Arc<ArcSwap<std::collections::HashMap<String, std::collections::HashSet<String>>>>,
+) {
+    tokio::spawn(run_interval(
+        reg,
+        "flight_exclusions_refresh",
+        "Reload manual flight exclusions and clear ones that left the feed",
+        FLIGHT_EXCLUSIONS_INTERVAL,
+        move || {
+            let (pool, feed, exclusions) = (pool.clone(), feed.clone(), exclusions.clone());
+            async move {
+                // Callsigns currently in the feed — pilots and prefiles alike, since a prefile can
+                // be just as bogus as a connected aircraft.
+                // Clone the Arc and drop the feed lock before touching the DB. An absent snapshot
+                // (feed not loaded yet) yields no callsigns, and `clear_departed` treats that as a
+                // no-op rather than deleting every exclusion.
+                let snapshot = feed.read().await.snapshot.clone();
+                let live: Vec<String> = snapshot
+                    .as_ref()
+                    .map(|s| {
+                        s.data
+                            .pilots
+                            .iter()
+                            .map(|p| p.callsign.clone())
+                            .chain(s.data.prefiles.iter().map(|p| p.callsign.clone()))
+                            .collect()
+                    })
+                    .unwrap_or_default();
+                let cleared = flight_exclusions_repo::clear_departed(&pool, &live)
+                    .await
+                    .map_err(|e| format!("{e:?}"))?;
+                match flight_exclusions_repo::load_all(&pool).await {
+                    Ok(by_artcc) => {
+                        exclusions.store(Arc::new(by_artcc));
+                        Ok(format!("reloaded, cleared {cleared}"))
                     }
                     Err(e) => Err(format!("{e:?}")),
                 }

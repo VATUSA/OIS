@@ -107,6 +107,39 @@ fn passes_scope(fca: &FcaBody, airspace: &Boundaries, lat: f64, lon: f64) -> boo
     fca.scope.iter().any(|z| airspace.contains(z, lat, lon))
 }
 
+/// A snapshot of the manually excluded ("bogus") callsigns, keyed by ARTCC (#342) — read straight
+/// from `AppState::flight_exclusions`, which the refresh job and the write handler keep current.
+pub(crate) type ExclusionSet = std::collections::HashMap<String, std::collections::HashSet<String>>;
+
+/// True when this callsign has been manually dropped as bogus (#342).
+///
+/// `artcc` scopes the check to one facility's removals — that is how the FCA surfaces (crossings,
+/// metering, counts) filter, since an FCA belongs to an ARTCC. `None` means "excluded by **any**
+/// facility", which is what the global traffic endpoints use: they carry no facility context, and a
+/// flight with garbage data is garbage on every scope, so hiding it everywhere is what makes the
+/// removal actually clear the map for every viewer.
+///
+/// Callsigns are stored upper-cased by the write handler; callers pass the raw feed callsign, which
+/// VATSIM already emits upper-case.
+pub(crate) fn is_manually_excluded(
+    exclusions: &ExclusionSet,
+    artcc: Option<&str>,
+    callsign: &str,
+) -> bool {
+    match artcc {
+        Some(a) => exclusions.get(a).is_some_and(|set| set.contains(callsign)),
+        None => exclusions.values().any(|set| set.contains(callsign)),
+    }
+}
+
+/// Every manually excluded callsign, across all facilities (#342) — the flat form
+/// `feed::flow::compute` takes, since airport flow has no single facility context.
+pub(crate) fn all_excluded_callsigns(
+    exclusions: &ExclusionSet,
+) -> std::collections::HashSet<String> {
+    exclusions.values().flatten().cloned().collect()
+}
+
 /// Filed cruise altitude in feet, or `None` when unfiled/unparseable — used for altitude membership
 /// so an aircraft whose plan omits an altitude isn't excluded on that basis. Values ≤ 600 are read as
 /// flight levels (×100), matching how pilots file `"350"` for FL350.
@@ -476,6 +509,7 @@ pub async fn fca_counts(
     };
     let nav = state.nav.load_full();
     let airspace = state.airspace.clone();
+    let exclusions = state.flight_exclusions.load_full();
 
     let counts = tokio::task::spawn_blocking(move || {
         let mut counts: HashMap<String, i64> = fcas.iter().map(|f| (f.id.clone(), 0)).collect();
@@ -491,37 +525,45 @@ pub async fn fca_counts(
         let airspace = airspace.as_ref();
 
         // Resolve each aircraft's route once, then test it against every active FCA.
-        let mut tally = |fp: &FlightPlan, lat: f64, lon: f64, hdg: i64, gs: i64, alt: i64| {
-            let Some(path) = fca::route_path(
-                nav,
-                airports,
-                &fp.departure,
-                &fp.arrival,
-                &fp.route,
-                lat,
-                lon,
-                hdg,
-                gs,
-            ) else {
-                return;
+        let exclusions = exclusions.as_ref();
+        let mut tally =
+            |callsign: &str, fp: &FlightPlan, lat: f64, lon: f64, hdg: i64, gs: i64, alt: i64| {
+                let Some(path) = fca::route_path(
+                    nav,
+                    airports,
+                    &fp.departure,
+                    &fp.arrival,
+                    &fp.route,
+                    lat,
+                    lon,
+                    hdg,
+                    gs,
+                ) else {
+                    return;
+                };
+                for f in &active {
+                    // Manually dropped as bogus for this FCA's facility (#342) — the badge count must
+                    // agree with the metering board, which skips it in `build_candidates`.
+                    if is_manually_excluded(exclusions, Some(&f.artcc), callsign) {
+                        continue;
+                    }
+                    if !passes_filters(f, fp, Some(alt)) {
+                        continue;
+                    }
+                    // Match the metering board: only count crossings within the FCA's ARTCC scope.
+                    if let Some(cross) = fca::crosses(&path, &f.points.0)
+                        && passes_scope(f, airspace, cross.lat, cross.lon)
+                        && let Some(c) = counts.get_mut(&f.id)
+                    {
+                        *c += 1;
+                    }
+                }
             };
-            for f in &active {
-                if !passes_filters(f, fp, Some(alt)) {
-                    continue;
-                }
-                // Match the metering board: only count crossings within the FCA's ARTCC scope.
-                if let Some(cross) = fca::crosses(&path, &f.points.0)
-                    && passes_scope(f, airspace, cross.lat, cross.lon)
-                    && let Some(c) = counts.get_mut(&f.id)
-                {
-                    *c += 1;
-                }
-            }
-        };
 
         for p in &snap.data.pilots {
             if let Some(fp) = &p.flight_plan {
                 tally(
+                    &p.callsign,
                     fp,
                     p.latitude,
                     p.longitude,
@@ -535,7 +577,7 @@ pub async fn fca_counts(
             if let Some(fp) = &pf.flight_plan
                 && let Some((lat, lon)) = prefile_position(airports, &fp.departure)
             {
-                tally(fp, lat, lon, 0, 0, 0);
+                tally(&pf.callsign, fp, lat, lon, 0, 0, 0);
             }
         }
         counts
@@ -876,6 +918,15 @@ pub(crate) async fn build_flight_advisory(
             .into_iter()
             .filter(|f| f.enabled && f.points.0.len() >= 2)
         {
+            // Manually dropped as bogus for this FCA's facility (#342) — keep this advisory in
+            // step with the metering board and the badge counts, which also skip it.
+            if is_manually_excluded(
+                state.flight_exclusions.load().as_ref(),
+                Some(&fca.artcc),
+                &cs,
+            ) {
+                continue;
+            }
             // Same predicate build_candidates uses to include this flight: filters + a scoped
             // crossing. If it doesn't cross, metering this FCA can't produce a slot for it.
             let crosses = match (&path, &fp) {
@@ -1076,9 +1127,10 @@ pub async fn data_refresh(
 )]
 pub async fn list_traffic(State(state): State<AppState>) -> Json<Vec<TrafficAircraft>> {
     let snapshot = state.feed.read().await.snapshot.clone();
+    let exclusions = state.flight_exclusions.load_full();
     let aircraft = snapshot
         .as_ref()
-        .map(|snap| traffic_from(&snap.data))
+        .map(|snap| traffic_from(&snap.data, exclusions.as_ref()))
         .unwrap_or_default();
     Json(aircraft)
 }
@@ -1110,6 +1162,7 @@ pub async fn projected_traffic(
     let nav = state.nav.load_full();
     let profiles = state.aircraft_profiles.load_full();
     let winds = state.winds.load_full();
+    let exclusions = state.flight_exclusions.load_full();
     let aircraft = tokio::task::spawn_blocking(move || {
         project_traffic(
             &snap.data,
@@ -1117,6 +1170,7 @@ pub async fn projected_traffic(
             airports.as_ref(),
             profiles.as_ref(),
             winds.as_ref(),
+            exclusions.as_ref(),
             q.offset_sec,
         )
     })
@@ -1127,10 +1181,14 @@ pub async fn projected_traffic(
 
 /// Map a snapshot's pilots to the lightweight map-traffic shape (drops position-less aircraft).
 /// Pure of the live feed so the historical replay can reuse it against a reconstructed snapshot.
-pub(crate) fn traffic_from(data: &VatsimData) -> Vec<TrafficAircraft> {
+pub(crate) fn traffic_from(data: &VatsimData, exclusions: &ExclusionSet) -> Vec<TrafficAircraft> {
     data.pilots
         .iter()
         .filter(|p| p.latitude != 0.0 || p.longitude != 0.0)
+        // Manually dropped as bogus (#342). This endpoint carries no facility context, so a
+        // callsign any facility removed is hidden — which is what clears it off the map for
+        // every viewer.
+        .filter(|p| !is_manually_excluded(exclusions, None, &p.callsign))
         .map(|p| {
             let fp = p.flight_plan.as_ref();
             let arr = fp.map(|f| f.arrival.clone()).unwrap_or_default();
@@ -1181,12 +1239,14 @@ pub(crate) fn project_traffic(
     airports: &AirportDb,
     profiles: &trajectory::ProfileTable,
     winds: &Winds,
+    exclusions: &ExclusionSet,
     offset_sec: i64,
 ) -> Vec<TrafficAircraft> {
     let offset_sec = offset_sec as f64;
     data.pilots
         .iter()
         .filter(|p| p.latitude != 0.0 || p.longitude != 0.0)
+        .filter(|p| !is_manually_excluded(exclusions, None, &p.callsign))
         .filter_map(|p| {
             let fp = p.flight_plan.as_ref()?;
             let arr = fp.arrival.clone();
@@ -1573,6 +1633,7 @@ fn build_candidates(
     gates: &HashMap<String, Vec<AirportGateBody>>,
     runways: &RunwayDb,
     taxi_samples: &HashMap<String, Vec<taxi_estimate::TaxiSample>>,
+    exclusions: &ExclusionSet,
     now: DateTime<Utc>,
     debug: bool,
 ) -> (Vec<FcaFlight>, Vec<fca::MeterInput>) {
@@ -1582,6 +1643,11 @@ fn build_candidates(
 
     for p in &data.pilots {
         let Some(fp) = &p.flight_plan else { continue };
+        // Manually dropped as bogus (#342) — skipped before either push, since `metas` and
+        // `flights` are positionally coupled and `finalize` consumes them as parallel slices.
+        if is_manually_excluded(exclusions, Some(&fca.artcc), &p.callsign) {
+            continue;
+        }
         let airborne = p.groundspeed >= 50;
         if !passes_filters(fca, fp, Some(p.altitude)) {
             continue;
@@ -1692,6 +1758,9 @@ fn build_candidates(
 
     for pf in &data.prefiles {
         let Some(fp) = &pf.flight_plan else { continue };
+        if is_manually_excluded(exclusions, Some(&fca.artcc), &pf.callsign) {
+            continue;
+        }
         if !passes_filters(fca, fp, None) {
             continue;
         }
@@ -1930,6 +1999,7 @@ async fn metered_flights(
     let gates = state.gates.load_full();
     let runways = state.runways.clone();
     let taxi_estimate_samples = state.taxi_estimate_samples.load_full();
+    let flight_exclusions = state.flight_exclusions.load_full();
     tokio::task::spawn_blocking(move || {
         let (flights, metas) = build_candidates(
             &fca,
@@ -1943,6 +2013,7 @@ async fn metered_flights(
             gates.as_ref(),
             runways.as_ref(),
             taxi_estimate_samples.as_ref(),
+            flight_exclusions.as_ref(),
             now,
             debug,
         );
@@ -2072,6 +2143,7 @@ pub async fn list_idst(
     let gates = state.gates.load_full();
     let runways = state.runways.clone();
     let taxi_estimate_samples = state.taxi_estimate_samples.load_full();
+    let flight_exclusions = state.flight_exclusions.load_full();
 
     let (mut unscheduled, mut released) = tokio::task::spawn_blocking(move || {
         let mut unscheduled: Vec<IdstFlight> = Vec::new();
@@ -2090,6 +2162,7 @@ pub async fn list_idst(
                 gates.as_ref(),
                 runways.as_ref(),
                 taxi_estimate_samples.as_ref(),
+                flight_exclusions.as_ref(),
                 now,
                 false,
             );
@@ -2196,6 +2269,7 @@ pub async fn mark_release(
             state.gates.load_full().as_ref(),
             state.runways.as_ref(),
             state.taxi_estimate_samples.load_full().as_ref(),
+            state.flight_exclusions.load_full().as_ref(),
             now,
             false,
         )
@@ -2269,6 +2343,7 @@ pub async fn clear_release(
             state.gates.load_full().as_ref(),
             state.runways.as_ref(),
             state.taxi_estimate_samples.load_full().as_ref(),
+            state.flight_exclusions.load_full().as_ref(),
             now,
             false,
         )
@@ -2406,11 +2481,79 @@ mod project_traffic_tests {
             &airports(),
             &ProfileTable::default(),
             &Winds::default(),
+            &HashMap::new(),
             0,
         );
         assert_eq!(out.len(), 1);
         assert!((out[0].lat - 40.2).abs() < 1e-9);
         assert!((out[0].lon - -74.0).abs() < 1e-9);
+    }
+
+    /// Regression (#342): the exclusion must be applied *at the call site*, not merely available.
+    /// Every other test here passes an **empty** exclusion map, so neutralising the filter in
+    /// `project_traffic` / `traffic_from` changes nothing they assert — the whole feature could be
+    /// removed from production with the suite still green. These drive a **populated** set.
+    #[test]
+    fn a_manually_excluded_callsign_is_dropped_from_projected_traffic() {
+        let data = VatsimData {
+            pilots: vec![airborne_pilot()],
+            ..Default::default()
+        };
+        let excluded: super::ExclusionSet = HashMap::from([(
+            "ZDC".to_string(),
+            std::collections::HashSet::from(["TEST1".to_string()]),
+        )]);
+
+        let kept = project_traffic(
+            &data,
+            &NavData::load(),
+            &airports(),
+            &ProfileTable::default(),
+            &Winds::default(),
+            &HashMap::new(),
+            0,
+        );
+        assert_eq!(
+            kept.len(),
+            1,
+            "sanity: the aircraft is there when nothing is excluded"
+        );
+
+        let dropped = project_traffic(
+            &data,
+            &NavData::load(),
+            &airports(),
+            &ProfileTable::default(),
+            &Winds::default(),
+            &excluded,
+            0,
+        );
+        assert!(
+            dropped.is_empty(),
+            "a manually excluded callsign must not appear in projected traffic, got {:?}",
+            dropped.iter().map(|a| &a.callsign).collect::<Vec<_>>()
+        );
+    }
+
+    /// The live-traffic sibling of the above, and the endpoint the controller actually watches
+    /// clear. Also pins the cross-facility semantics: this surface carries no facility context, so
+    /// *any* facility's removal hides the aircraft for everyone.
+    #[test]
+    fn a_manually_excluded_callsign_is_dropped_from_live_traffic() {
+        let data = VatsimData {
+            pilots: vec![airborne_pilot()],
+            ..Default::default()
+        };
+        assert_eq!(super::traffic_from(&data, &HashMap::new()).len(), 1);
+
+        let excluded_elsewhere: super::ExclusionSet = HashMap::from([(
+            "ZNY".to_string(),
+            std::collections::HashSet::from(["TEST1".to_string()]),
+        )]);
+        assert!(
+            super::traffic_from(&data, &excluded_elsewhere).is_empty(),
+            "the global traffic surface hides a callsign any facility removed"
+        );
     }
 
     #[test]
@@ -2425,6 +2568,7 @@ mod project_traffic_tests {
             &airports(),
             &ProfileTable::default(),
             &Winds::default(),
+            &HashMap::new(),
             20 * 60,
         );
         assert_eq!(out.len(), 1);
@@ -2450,6 +2594,7 @@ mod project_traffic_tests {
             &airports(),
             &ProfileTable::default(),
             &Winds::default(),
+            &HashMap::new(),
             30 * 60,
         );
         assert_eq!(out.len(), 1);
@@ -2475,6 +2620,7 @@ mod project_traffic_tests {
             &HashMap::new(),
             &ProfileTable::default(),
             &Winds::default(),
+            &HashMap::new(),
             20 * 60,
         );
         assert!(
@@ -2505,6 +2651,7 @@ mod project_traffic_tests {
             &airports(),
             &ProfileTable::default(),
             &Winds::default(),
+            &HashMap::new(),
             600,
         );
         assert!(out.is_empty());
@@ -2620,6 +2767,24 @@ mod prefile_skip_integration_tests {
     /// A prefile whose departure ICAO isn't in the (tiny, test) airport cache, but whose arrival
     /// and real enroute fixes (RBV/WHITE/SIE, via the bundled nav db) resolve on their own — the
     /// exact shape `nav::build_anchors` produces ≥2 anchors for without ever needing the departure.
+    /// The same shape, but with a departure the tiny test airport cache *does* resolve, so the
+    /// prefile is a real candidate — the baseline the #342 exclusion test filters against.
+    fn unresolvable_departure_prefile_with_resolvable_departure() -> VatsimData {
+        VatsimData {
+            prefiles: vec![Prefile {
+                callsign: "TEST1".into(),
+                flight_plan: Some(FlightPlan {
+                    departure: "KJFK".into(),
+                    arrival: "KDCA".into(),
+                    route: "RBV WHITE SIE".into(),
+                    ..Default::default()
+                }),
+                ..Default::default()
+            }],
+            ..Default::default()
+        }
+    }
+
     fn unresolvable_departure_prefile() -> VatsimData {
         VatsimData {
             prefiles: vec![Prefile {
@@ -2634,6 +2799,66 @@ mod prefile_skip_integration_tests {
             }],
             ..Default::default()
         }
+    }
+
+    /// Regression (#342): the FCA crossing list must consult the exclusion set too. Scoped by the
+    /// FCA's own ARTCC here (unlike the global traffic surfaces), so a removal by a *different*
+    /// facility must leave the flight on this FCA's board.
+    #[test]
+    fn build_candidates_drops_a_manually_excluded_prefile_for_its_own_artcc() {
+        let nav = NavData::load();
+        let airports: crate::feed::airports::AirportDb = HashMap::from([
+            ("KJFK".to_string(), Airport::at(40.64, -73.78)),
+            ("KDCA".to_string(), Airport::at(38.85, -77.04)),
+        ]);
+        let fca = fca_crossing_the_corridor(); // artcc: "ZDC"
+        let data = unresolvable_departure_prefile_with_resolvable_departure();
+
+        let candidates = |ex: &super::ExclusionSet| {
+            let (flights, _) = build_candidates(
+                &fca,
+                &data,
+                &airports,
+                &nav,
+                &Boundaries::default(),
+                &Winds::default(),
+                &ProfileTable::default(),
+                &ReleaseMap::new(),
+                &HashMap::new(),
+                &RunwayDb::default(),
+                &HashMap::new(),
+                ex,
+                Utc::now(),
+                false,
+            );
+            flights.len()
+        };
+
+        assert_eq!(
+            candidates(&HashMap::new()),
+            1,
+            "sanity: TEST1 crosses this FCA"
+        );
+
+        let other_facility: super::ExclusionSet = HashMap::from([(
+            "ZNY".to_string(),
+            std::collections::HashSet::from(["TEST1".to_string()]),
+        )]);
+        assert_eq!(
+            candidates(&other_facility),
+            1,
+            "another facility's removal must not clear this ZDC FCA's board"
+        );
+
+        let own_facility: super::ExclusionSet = HashMap::from([(
+            "ZDC".to_string(),
+            std::collections::HashSet::from(["TEST1".to_string()]),
+        )]);
+        assert_eq!(
+            candidates(&own_facility),
+            0,
+            "the owning facility's removal must drop the flight from the crossing list"
+        );
     }
 
     #[test]
@@ -2654,6 +2879,7 @@ mod prefile_skip_integration_tests {
             &ReleaseMap::new(),
             &HashMap::new(),
             &RunwayDb::default(),
+            &HashMap::new(),
             &HashMap::new(),
             Utc::now(),
             false,
@@ -3449,5 +3675,64 @@ mod mit_cross_speed_wiring_tests {
                 dbg.cruise_tas
             );
         }
+    }
+}
+
+#[cfg(test)]
+mod manual_exclusion_tests {
+    use super::{ExclusionSet, all_excluded_callsigns, is_manually_excluded};
+    use std::collections::HashSet;
+
+    fn exclusions() -> ExclusionSet {
+        ExclusionSet::from([
+            ("ZDC".to_string(), HashSet::from(["BOGUS1".to_string()])),
+            ("ZNY".to_string(), HashSet::from(["BOGUS2".to_string()])),
+        ])
+    }
+
+    /// #342: the FCA surfaces (crossings, metering, badge counts) scope the check to the FCA's own
+    /// ARTCC, so one facility's removal doesn't silently edit another facility's board.
+    #[test]
+    fn an_artcc_scoped_check_only_sees_that_facilitys_removals() {
+        let ex = exclusions();
+        assert!(is_manually_excluded(&ex, Some("ZDC"), "BOGUS1"));
+        assert!(
+            !is_manually_excluded(&ex, Some("ZDC"), "BOGUS2"),
+            "ZNY's removal must not apply to a ZDC FCA"
+        );
+        assert!(!is_manually_excluded(&ex, Some("ZDC"), "UAL123"));
+        assert!(
+            !is_manually_excluded(&ex, Some("ZAB"), "BOGUS1"),
+            "a facility with no removals excludes nothing"
+        );
+    }
+
+    /// The global traffic endpoints carry no facility context, so they ask "excluded anywhere?" —
+    /// that is what actually clears a bogus flight off the map for every viewer.
+    #[test]
+    fn an_unscoped_check_sees_every_facilitys_removals() {
+        let ex = exclusions();
+        assert!(is_manually_excluded(&ex, None, "BOGUS1"));
+        assert!(is_manually_excluded(&ex, None, "BOGUS2"));
+        assert!(!is_manually_excluded(&ex, None, "UAL123"));
+    }
+
+    #[test]
+    fn an_empty_set_excludes_nothing() {
+        let ex = ExclusionSet::new();
+        assert!(!is_manually_excluded(&ex, Some("ZDC"), "BOGUS1"));
+        assert!(!is_manually_excluded(&ex, None, "BOGUS1"));
+    }
+
+    /// `feed::flow::compute` takes the flat form, since airport flow / AADC demand has no single
+    /// facility context.
+    #[test]
+    fn flattening_collects_every_facilitys_callsigns() {
+        let flat = all_excluded_callsigns(&exclusions());
+        assert_eq!(
+            flat,
+            HashSet::from(["BOGUS1".to_string(), "BOGUS2".to_string()])
+        );
+        assert!(all_excluded_callsigns(&ExclusionSet::new()).is_empty());
     }
 }

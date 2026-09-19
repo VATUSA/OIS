@@ -63,6 +63,14 @@ pub async fn run() -> color_eyre::Result<()> {
         );
         // Airport surface gates, for feed::taxi_observations's gate matching (kept DB-less).
         jobs::spawn_airport_gates_refresh(state.jobs.clone(), pool.clone(), state.gates.clone());
+        // Manually excluded ("bogus") flights, for the DB-less flow surfaces (#342). Also runs the
+        // auto-clear once a callsign leaves the feed.
+        jobs::spawn_flight_exclusions_refresh(
+            state.jobs.clone(),
+            pool.clone(),
+            state.feed.clone(),
+            state.flight_exclusions.clone(),
+        );
         // Seed airport ramp/taxiway geometry from the bundled FAA AM extract (#230/#231).
         jobs::spawn_faa_surface_seed(state.jobs.clone(), pool.clone());
         // Learned taxi-observation samples, for feed::flow's ground-allowance estimate (#164

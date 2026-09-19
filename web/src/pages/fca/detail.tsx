@@ -1,12 +1,17 @@
 import {useMemo, useState} from "react";
-import {Button, Input, QueryState, Sheet, StatusPill, toneText, type Tone} from "@ois/ui";
+import {Button, ConfirmButton, Input, QueryState, Sheet, StatusPill, toneText, type Tone} from "@ois/ui";
 
 import {closestCenter, DndContext, type DragEndEvent, PointerSensor, useSensor, useSensors,} from "@dnd-kit/core";
 import {arrayMove, SortableContext, useSortable, verticalListSortingStrategy,} from "@dnd-kit/sortable";
 import {CSS} from "@dnd-kit/utilities";
-import {GripVertical, RotateCcw, X} from "lucide-react";
+import {GripVertical, RotateCcw, Trash2, X} from "lucide-react";
 
 import {DELAY_THRESHOLD_SEC, type Fca, type FcaFlight, fmtDelaySec, useClearRelease, useMarkRelease, useReorderFca,} from "@/lib/fca";
+import {
+  useExcludeFlight,
+  useFlightExclusions,
+  useRestoreFlight,
+} from "@/lib/flight-exclusions";
 import {FLIGHT_STATE_LABEL, toneOf} from "@/lib/status";
 import {hhmmZulu} from "@/lib/time";
 import {ArrivalLadder} from "@/components/ladder/ArrivalLadder";
@@ -88,13 +93,19 @@ function Ladder({ flights, now }: { flights: FcaFlight[]; now: number }) {
 function Strip({
   f,
   canEdit,
+  canRemove,
   onRelease,
   onClear,
+  onRemove,
 }: {
   f: FcaFlight;
   canEdit: boolean;
+  /** Whether the caller's `flow.fca.update` grant covers *this* FCA's ARTCC (#342). */
+  canRemove: boolean;
   onRelease: (callsign: string, ready?: string) => void;
   onClear: (callsign: string) => void;
+  /** Drop this flight as bogus (#342). */
+  onRemove: (callsign: string) => void;
 }) {
   const { attributes, listeners, setNodeRef, transform, transition, isDragging } =
     useSortable({ id: f.callsign });
@@ -135,6 +146,18 @@ function Strip({
           </StatusPill>
           <span className="font-mono font-semibold">{f.callsign}</span>
           <span className="font-mono text-xs text-ink-3">{f.aircraft_type}</span>
+          {canRemove && (
+            <ConfirmButton
+              size="icon"
+              className="size-6"
+              title="Remove bogus flight"
+              aria-label={`Remove ${f.callsign} as a bogus flight`}
+              warn={`Remove ${f.callsign} from the flow picture?`}
+              onConfirm={() => onRemove(f.callsign)}
+            >
+              <Trash2 className="size-3.5" />
+            </ConfirmButton>
+          )}
         </span>
         <span className="text-right font-mono leading-tight">
           <span className={delayed ? "text-ink" : toneText[st.tone]}>
@@ -254,6 +277,14 @@ export function FcaDetail({
   const markRelease = useMarkRelease(fca.id);
   const clearRelease = useClearRelease(fca.id);
   const reorder = useReorderFca(fca.id);
+  const exclusions = useFlightExclusions(fca.id);
+  const excludeFlight = useExcludeFlight(fca.id);
+  const restoreFlight = useRestoreFlight(fca.id);
+  const removed = exclusions.data?.exclusions ?? [];
+  // The server decides: `canEdit` only knows the caller holds `flow.fca.update` *somewhere*, and
+  // these endpoints are ARTCC-scoped (#342). Offering the control on a facility the caller's grant
+  // doesn't cover would just earn a 403.
+  const canRemove = canEdit && exclusions.data?.editable === true;
   const sensors = useSensors(
     useSensor(PointerSensor, { activationConstraint: { distance: 6 } }),
   );
@@ -342,11 +373,47 @@ export function FcaDetail({
                       markRelease.mutate({ callsign, ready })
                     }
                     onClear={(callsign) => clearRelease.mutate(callsign)}
+                    canRemove={canRemove}
+                    onRemove={(callsign) => excludeFlight.mutate({ callsign })}
                   />
                 ))}
               </ul>
             </SortableContext>
           </DndContext>
+
+          {canRemove && removed.length > 0 && (
+            <div className="border-t border-line-soft px-3 py-2">
+              <h3 className="mb-1.5 text-xs font-semibold text-ink-2">
+                Removed flights
+              </h3>
+              <ul className="flex flex-col gap-1">
+                {removed.map((x) => (
+                  <li
+                    key={x.callsign}
+                    className="flex items-center justify-between gap-2 text-sm"
+                  >
+                    <span className="flex min-w-0 items-baseline gap-1.5">
+                      <span className="font-mono font-semibold">
+                        {x.callsign}
+                      </span>
+                      {x.created_by_name && (
+                        <span className="truncate text-xs text-ink-3">
+                          {x.created_by_name}
+                        </span>
+                      )}
+                    </span>
+                    <Button
+                      size="sm"
+                      variant="outline"
+                      onClick={() => restoreFlight.mutate(x.callsign)}
+                    >
+                      Restore
+                    </Button>
+                  </li>
+                ))}
+              </ul>
+            </div>
+          )}
         </div>
       </QueryState>
     </Sheet>
