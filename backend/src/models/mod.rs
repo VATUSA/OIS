@@ -1700,6 +1700,11 @@ pub struct FcaFlightDebug {
     pub profile: String,
     /// Cruise TAS (kt) used for the ETA, after the profile cap.
     pub cruise_tas: i64,
+    /// Predicted groundspeed (kt) **at the crossing fix** — the number MIT spacing is actually
+    /// sized with since #355. Reported alongside `cruise_tas` because the gap is no longer a
+    /// function of cruise: without this the debug view can't explain the gap it exists to explain
+    /// (e.g. ~282 kt at a low arrival fix against a 440 kt cruise).
+    pub cross_speed: i64,
     /// Filed cruise altitude (ft) used.
     pub cruise_alt: i64,
     /// Mean route headwind (kt) applied (+ head / − tail); null = still air.
