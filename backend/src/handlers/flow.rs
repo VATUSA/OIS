@@ -2840,3 +2840,141 @@ mod data_refresh_claim_tests {
         assert!(DataRefreshClaim::acquire(&flag).is_none());
     }
 }
+
+/// Regression (#355): the FCA metering wiring — not just the primitives. `MeterInput.cross_speed`
+/// must be the descent-aware groundspeed `predict::eta_along_route` predicts **at the crossing
+/// fix**, because `fca::meter` turns it into a frozen time gap (`MIT ÷ cross_speed`) that the
+/// aircraft then flies at its real crossing speed. `predict`'s own tests prove `gs_kt` is
+/// position-dependent and `fca`'s prove `meter` divides by whatever it is handed; only this one
+/// proves `build_candidates` hands it the right number. Reverting either site to
+/// `trajectory::effective_gs(cruise_tas, headwind)` passes every other test in the repo.
+#[cfg(test)]
+mod mit_cross_speed_wiring_tests {
+    use std::collections::HashMap;
+
+    use chrono::Utc;
+
+    use super::{ReleaseMap, build_candidates};
+    use crate::feed::airports::{Airport, AirportDb};
+    use crate::feed::{
+        airspace::Boundaries,
+        nav::NavData,
+        runway_db::RunwayDb,
+        trajectory::ProfileTable,
+        vatsim::{FlightPlan, Pilot, VatsimData},
+        winds::Winds,
+    };
+    use crate::models::FcaBody;
+
+    /// Filed cruise TAS. `capped_cruise_tas` + the default profile resolve this to ~483 kt at
+    /// FL350, so both thresholds below are deliberately conservative against the *filed* figure.
+    const FILED_TAS: f64 = 440.0;
+
+    /// A 20 MIT FCA whose gate is the vertical line `lon`, spanning `lat_lo..lat_hi`.
+    fn mit_fca_at_lon(lon: f64, lat_lo: f64, lat_hi: f64) -> FcaBody {
+        FcaBody {
+            id: "t".into(),
+            name: "t".into(),
+            color: "#fff".into(),
+            artcc: "ZDC".into(),
+            points: sqlx::types::Json(vec![[lat_lo, lon], [lat_hi, lon]]),
+            dests: vec![],
+            origins: vec![],
+            fixes: vec![],
+            scope: vec![],
+            min_fl: None,
+            max_fl: None,
+            dir: "any".into(),
+            mode: "mit".into(),
+            rate: 0,
+            mit: 20,
+            enabled: true,
+            manual_order: vec![],
+            manual_seq: false,
+            updated_at: Utc::now(),
+            updated_by: None,
+            event_id: None,
+            event_status: None,
+            auto_publish: false,
+        }
+    }
+
+    /// One airborne jet established at FL350, direct KJFK→KDCA, ~164 nm out.
+    fn arrival_at_cruise() -> VatsimData {
+        VatsimData {
+            pilots: vec![Pilot {
+                callsign: "AAL1".into(),
+                latitude: 40.5,
+                longitude: -74.2,
+                altitude: 35_000,
+                groundspeed: 440,
+                heading: 220,
+                flight_plan: Some(FlightPlan {
+                    departure: "KJFK".into(),
+                    arrival: "KDCA".into(),
+                    route: "".into(),
+                    altitude: "35000".into(),
+                    cruise_tas: "440".into(),
+                    ..Default::default()
+                }),
+                ..Default::default()
+            }],
+            ..Default::default()
+        }
+    }
+
+    fn airports() -> AirportDb {
+        HashMap::from([
+            ("KJFK".to_string(), Airport::at(40.64, -73.78)),
+            ("KDCA".to_string(), Airport::at(38.85, -77.04)),
+        ])
+    }
+
+    fn cross_speed_for(fca: &FcaBody) -> f64 {
+        let nav = NavData::load();
+        let (flights, metas) = build_candidates(
+            fca,
+            &arrival_at_cruise(),
+            &airports(),
+            &nav,
+            &Boundaries::default(),
+            &Winds::default(),
+            &ProfileTable::default(),
+            &ReleaseMap::new(),
+            &HashMap::new(),
+            &RunwayDb::default(),
+            &HashMap::new(),
+            Utc::now(),
+            false,
+        );
+        assert_eq!(flights.len(), 1, "the arrival must cross this FCA");
+        metas[0].cross_speed
+    }
+
+    #[test]
+    fn cross_speed_at_a_low_arrival_fix_is_the_descent_speed_not_cruise() {
+        // Gate ~17 nm from KDCA — deep in the descent.
+        let near = cross_speed_for(&mit_fca_at_lon(-76.75, 38.5, 39.5));
+        assert!(
+            near < FILED_TAS * 0.8,
+            "crossing speed at a low arrival fix was {near:.0} kt — at or above the filed cruise \
+             {FILED_TAS:.0} kt, so the gap is being sized with a speed the aircraft no longer has \
+             by the fix, under-provisioning every crossing by that ratio (#355)"
+        );
+        // …and it is a plausible arrival speed, not merely "some smaller number".
+        assert!(
+            (120.0..=350.0).contains(&near),
+            "crossing speed {near:.0} kt is outside a plausible arrival band"
+        );
+    }
+
+    #[test]
+    fn cross_speed_at_an_enroute_fix_is_still_cruise() {
+        // Gate ~140 nm from KDCA — above top of descent, so the same wiring must report cruise.
+        let far = cross_speed_for(&mit_fca_at_lon(-74.6, 39.5, 41.0));
+        assert!(
+            far > FILED_TAS * 0.9,
+            "an enroute crossing must still be sized at cruise, got {far:.0} kt"
+        );
+    }
+}

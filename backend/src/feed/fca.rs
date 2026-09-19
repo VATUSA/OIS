@@ -869,12 +869,17 @@ mod tests {
         );
     }
 
-    /// #355: MIT is a distance **at the crossing fix**, so the time gap must be sized with the
-    /// speed the aircraft actually crosses at. A pair fed the descent-aware crossing speed ends up
-    /// a true MIT apart; fed cruise speed instead, the same 20 MIT realizes only ~13 nm, because
-    /// the gap is frozen at release and the aircraft flies it at its real (slower) crossing speed.
+    /// The only coverage of `sep_ms`'s `mode == "mit"` branch: the gap `meter` hands a follower is
+    /// `MIT ÷ cross_speed`, so the follower covers exactly `MIT` nm in it **at whatever speed it
+    /// was given**. That is the contract `MeterInput.cross_speed` has to be fed the crossing speed
+    /// to satisfy (#355).
+    ///
+    /// Note what this does **not** prove. Both arms are arithmetic over constants declared here, so
+    /// this test passes unchanged whatever `build_candidates` actually puts in `cross_speed` — it
+    /// cannot catch a revert to cruise speed. The regression guard for that lives at the wiring,
+    /// in `handlers::flow::mit_cross_speed_wiring_tests`.
     #[test]
-    fn mit_spacing_realizes_the_configured_distance_at_the_crossing_speed() {
+    fn mit_gap_lets_the_follower_cover_the_configured_distance_at_its_own_speed() {
         const MIT: i32 = 20;
         // What `predict::AlongRouteEta::gs_kt` reports 20 nm from the field on the descent, versus
         // the cruise groundspeed this used to be given.
@@ -910,7 +915,9 @@ mod tests {
             "crossing speed must realize the configured {MIT} MIT, got {correct:.1} nm"
         );
 
-        // The regression this guards: cruise speed under-provisions by ~36%.
+        // And the shape of the bug, for the record: a gap sized at cruise but flown at the real
+        // crossing speed comes up ~36% short. Guarding against that happening is the wiring test's
+        // job, not this one's.
         let regressed = realized_nm(CRUISE_GS);
         assert!(
             regressed < 14.0,
