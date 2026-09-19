@@ -24,6 +24,9 @@ fn main() {
         // apply a package whose signature doesn't verify against the configured public key; the
         // frontend drives when that happens (`web/src/lib/desktop-update.ts`) so the app never
         // restarts itself out from under someone mid-event.
+        // Native notifications (#348). The frontend decides what is worth notifying about and
+        // whether the user asked for it; this is delivery.
+        .plugin(tauri_plugin_notification::init())
         .plugin(tauri_plugin_updater::Builder::new().build())
         .plugin(tauri_plugin_process::init())
         .invoke_handler(tauri::generate_handler![

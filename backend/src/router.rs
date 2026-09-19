@@ -38,6 +38,9 @@ pub fn build_router(state: AppState) -> Router {
         )
         .route("/api/v1/auth/desktop/refresh", post(auth::desktop_refresh))
         .route("/api/v1/me", get(auth::me))
+        // The signed-in user's own ACE claims — lets a client tell whether a reminder nudge
+        // (`events.reminder`) is about them, since the socket carries no payload (#348).
+        .route("/api/v1/me/ace-claims", get(ace::my_ace_claims))
         // The signed-in pilot's own live flight (CID-matched against the feed snapshot).
         .route("/api/v1/me/flight", get(flow::my_flight))
         .route(

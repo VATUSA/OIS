@@ -20,6 +20,19 @@ pub struct MeBody {
     pub vatusa: Option<VatusaProfile>,
 }
 
+/// One ACE position the signed-in user has claimed, for an event still to come.
+///
+/// Exists so a client can answer "is this reminder about me?" — the realtime nudge that precedes it
+/// is payload-free by design, because it is broadcast to every signed-in client (#348).
+#[derive(Debug, Serialize, ToSchema, sqlx::FromRow)]
+pub struct MyAceClaim {
+    pub claim_id: String,
+    pub event_id: i64,
+    pub event_title: String,
+    pub start_time: DateTime<Utc>,
+    pub position: String,
+}
+
 /// What the desktop app posts to trade its one-time OAuth code for a session token (#346).
 #[derive(Debug, Deserialize, ToSchema)]
 pub struct DesktopExchangeRequest {

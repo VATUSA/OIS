@@ -1997,6 +1997,28 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/v1/me/ace-claims": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * The signed-in user's claimed ACE positions for events still to come.
+         * @description Gated on the existing claim permission — if you can claim a position, you can see the ones you
+         *     hold — so no new permission marker is introduced. Scoped to the session user; the request never
+         *     names whose claims to return.
+         */
+        get: operations["my_ace_claims"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/v1/me/discord": {
         parameters: {
             query?: never;
@@ -4772,6 +4794,21 @@ export interface components {
             role_names: string[];
             server_admin: boolean;
             vatusa?: null | components["schemas"]["VatusaProfile"];
+        };
+        /**
+         * @description One ACE position the signed-in user has claimed, for an event still to come.
+         *
+         *     Exists so a client can answer "is this reminder about me?" — the realtime nudge that precedes it
+         *     is payload-free by design, because it is broadcast to every signed-in client (#348).
+         */
+        MyAceClaim: {
+            claim_id: string;
+            /** Format: int64 */
+            event_id: number;
+            event_title: string;
+            position: string;
+            /** Format: date-time */
+            start_time: string;
         };
         /** @description A minimal `{ name }` body for creating/renaming collections + share responses. */
         NameRequest: {
@@ -11443,6 +11480,37 @@ export interface operations {
                 };
             };
             401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+        };
+    };
+    my_ace_claims: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["MyAceClaim"][];
+                };
+            };
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            403: {
                 headers: {
                     [name: string]: unknown;
                 };

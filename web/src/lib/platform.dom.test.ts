@@ -46,7 +46,7 @@ describe("capabilities", () => {
     // written against can("tray") today is correct both before and after #351 lands. Updating this
     // list is the deliberate cost of that: flipping a flag without noticing fails here.
     pretendDesktop();
-    const shipped: Capability[] = ["autoUpdate"]; // #347
+    const shipped: Capability[] = ["autoUpdate", "notifications"]; // #347, #348
     for (const [name, available] of Object.entries(capabilities())) {
       const expected = shipped.includes(name as Capability);
       expect(available, `${name} availability on desktop`).toBe(expected);
@@ -54,9 +54,10 @@ describe("capabilities", () => {
   });
 
   it("reports even a shipped capability absent on the web build", () => {
-    // autoUpdate is implemented, but there is nothing to update on a website — the platform gate
-    // still has to hold or web callers would take a desktop-only path.
+    // Both are implemented, but a website has nothing to update and no OS notification centre —
+    // the platform gate still has to hold or web callers would take a desktop-only path.
     expect(can("autoUpdate")).toBe(false);
+    expect(can("notifications")).toBe(false);
   });
 
   it("hands back a frozen snapshot a caller can't corrupt for everyone else", () => {

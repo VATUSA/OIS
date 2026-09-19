@@ -37,6 +37,13 @@ pub mod topic {
     pub const PROGRAM: &str = "tmu.program";
     pub const CFR: &str = "flow.cfr";
     pub const EVENT_AVAILABILITY: &str = "events.availability";
+    /// Someone's access changed. Payload-free like every topic here, so each client refetches its
+    /// own `/me` and works out whether anything it holds actually grew — the socket is broadcast to
+    /// everyone, so it must never carry who was granted what (#348).
+    pub const ACCESS_GRANTED: &str = "access.granted";
+    /// An ACE claim reminder came due. Mirrors the Discord DM the scheduler already sends, so the
+    /// desktop app is a second delivery channel for the same decision (#348).
+    pub const EVENT_REMINDER: &str = "events.reminder";
 }
 
 /// `GET /api/v1/ws` — upgrade to a websocket that streams realtime nudges. Requires an authenticated

@@ -58,7 +58,7 @@ export type Capability =
  */
 const IMPLEMENTED: Readonly<Record<Capability, boolean>> = Object.freeze({
   autoUpdate: true, // #347 — signed auto-update (shipped)
-  notifications: false, // #348 — native OS notifications
+  notifications: true, // #348 — native OS notifications (shipped)
   miniWindows: false, // #349 — pop-out always-on-top mini-windows
   multiWindow: false, // #350 — multi-window / multi-monitor
   tray: false, // #351 — system tray

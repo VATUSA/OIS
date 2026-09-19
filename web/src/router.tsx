@@ -6,6 +6,8 @@ import {FeedWatcher} from "@/components/feed-watcher";
 import {AppShell} from "@/components/shell/app-shell";
 import type {RouteMeta} from "@/components/shell/page-meta";
 import {RestrictionAlerts} from "@/components/restriction-alerts";
+import {NotificationClicks} from "@/components/notification-clicks";
+import {DesktopNotifiers} from "@/components/desktop-notifiers";
 import {WhatsNew} from "@/components/whats-new";
 import {useMe} from "@/lib/auth";
 import {movedPath} from "@/lib/moved-paths";
@@ -98,6 +100,8 @@ function RootLayout() {
     <>
       <FeedWatcher />
       <RestrictionAlerts />
+      <NotificationClicks />
+      <DesktopNotifiers />
       <WhatsNew />
       <AppShell>
         <Outlet />

@@ -15,6 +15,7 @@ tauri-build.workspace = true
 tauri.workspace = true
 keyring.workspace = true
 open.workspace = true
+tauri-plugin-notification.workspace = true
 tauri-plugin-updater.workspace = true
 tauri-plugin-process.workspace = true
 # `tauri::generate_context!` expands to serde_json calls once tauri.conf.json carries a plugins
