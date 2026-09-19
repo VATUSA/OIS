@@ -4264,6 +4264,23 @@ export interface components {
             /** @description Optional controller note on why the flight was dropped. */
             reason: string;
         };
+        /**
+         * @description One FCA's manual exclusions, plus whether **this caller** may change them (#342).
+         *
+         *     `editable` exists because the write endpoints are ARTCC-scoped while the client's permission
+         *     blob has no ARTCC dimension — `hasPermission(me, "flow.fca.update")` cannot tell whether the
+         *     caller's grant covers *this* FCA's facility. Without it the UI offers a ✕ the server answers
+         *     with 403.
+         *
+         *     It sits on the envelope rather than on each row (the shape `airport_configs` uses) because the
+         *     control has to render when the list is **empty** — that is precisely the first removal.
+         */
+        FlightExclusionsBody: {
+            /** @description Whether the caller holds `flow.fca.update` for this FCA's ARTCC (nationally or scoped). */
+            editable: boolean;
+            /** @description The live exclusions for this FCA's ARTCC, newest first. */
+            exclusions: components["schemas"]["FlightExclusionBody"][];
+        };
         /** @description An FCA a looked-up flight crosses, with its metered crossing. */
         FlightFcaCrossing: {
             color: string;
@@ -10108,7 +10125,7 @@ export interface operations {
                     [name: string]: unknown;
                 };
                 content: {
-                    "application/json": components["schemas"]["FlightExclusionBody"][];
+                    "application/json": components["schemas"]["FlightExclusionsBody"];
                 };
             };
             401: {

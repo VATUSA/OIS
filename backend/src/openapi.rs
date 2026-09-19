@@ -286,6 +286,7 @@ use utoipa::OpenApi;
         crate::models::UpsertAirportRateRequest,
         crate::models::AirportConfigBody,
         crate::models::FlightExclusionBody,
+        crate::models::FlightExclusionsBody,
         crate::models::ExcludeFlightRequest,
         crate::models::UpsertAirportConfigRequest,
         crate::models::AirportGateBody,

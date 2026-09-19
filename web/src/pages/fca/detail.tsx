@@ -93,12 +93,15 @@ function Ladder({ flights, now }: { flights: FcaFlight[]; now: number }) {
 function Strip({
   f,
   canEdit,
+  canRemove,
   onRelease,
   onClear,
   onRemove,
 }: {
   f: FcaFlight;
   canEdit: boolean;
+  /** Whether the caller's `flow.fca.update` grant covers *this* FCA's ARTCC (#342). */
+  canRemove: boolean;
   onRelease: (callsign: string, ready?: string) => void;
   onClear: (callsign: string) => void;
   /** Drop this flight as bogus (#342). */
@@ -143,7 +146,7 @@ function Strip({
           </StatusPill>
           <span className="font-mono font-semibold">{f.callsign}</span>
           <span className="font-mono text-xs text-ink-3">{f.aircraft_type}</span>
-          {canEdit && (
+          {canRemove && (
             <ConfirmButton
               size="icon"
               className="size-6"
@@ -277,7 +280,11 @@ export function FcaDetail({
   const exclusions = useFlightExclusions(fca.id);
   const excludeFlight = useExcludeFlight(fca.id);
   const restoreFlight = useRestoreFlight(fca.id);
-  const removed = exclusions.data ?? [];
+  const removed = exclusions.data?.exclusions ?? [];
+  // The server decides: `canEdit` only knows the caller holds `flow.fca.update` *somewhere*, and
+  // these endpoints are ARTCC-scoped (#342). Offering the control on a facility the caller's grant
+  // doesn't cover would just earn a 403.
+  const canRemove = canEdit && exclusions.data?.editable === true;
   const sensors = useSensors(
     useSensor(PointerSensor, { activationConstraint: { distance: 6 } }),
   );
@@ -366,6 +373,7 @@ export function FcaDetail({
                       markRelease.mutate({ callsign, ready })
                     }
                     onClear={(callsign) => clearRelease.mutate(callsign)}
+                    canRemove={canRemove}
                     onRemove={(callsign) => excludeFlight.mutate({ callsign })}
                   />
                 ))}
@@ -373,7 +381,7 @@ export function FcaDetail({
             </SortableContext>
           </DndContext>
 
-          {canEdit && removed.length > 0 && (
+          {canRemove && removed.length > 0 && (
             <div className="border-t border-line-soft px-3 py-2">
               <h3 className="mb-1.5 text-xs font-semibold text-ink-2">
                 Removed flights

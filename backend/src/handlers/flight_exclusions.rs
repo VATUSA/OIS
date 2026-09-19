@@ -22,7 +22,7 @@ use crate::{
         require_permission::RequirePermission,
     },
     errors::ApiError,
-    models::{ExcludeFlightRequest, FlightExclusionBody},
+    models::{ExcludeFlightRequest, FlightExclusionBody, FlightExclusionsBody},
     repos::{flight_exclusions as exclusions_repo, flow as flow_repo},
     state::AppState,
 };
@@ -66,29 +66,50 @@ async fn require_artcc_scope(
     principal: &Principal,
     artcc: &str,
 ) -> Result<(), ApiError> {
-    let scope = principal
-        .permission_scope(state, EXCLUSION_PERMISSION)
-        .await?;
-    if scope.allows(Some(artcc)) {
+    if may_edit_artcc(state, principal, artcc).await? {
         Ok(())
     } else {
         Err(ApiError::Forbidden)
     }
 }
 
+/// Whether `principal` may add or remove exclusions for `artcc` — the same question
+/// [`require_artcc_scope`] answers, as a value the client can render from.
+async fn may_edit_artcc(
+    state: &AppState,
+    principal: &Principal,
+    artcc: &str,
+) -> Result<bool, ApiError> {
+    Ok(principal
+        .permission_scope(state, EXCLUSION_PERMISSION)
+        .await?
+        .allows(Some(artcc)))
+}
+
 #[utoipa::path(
     get, path = "/api/v1/flow/fcas/{id}/exclusions", tag = "flow",
     params(("id" = String, Path)),
-    responses((status = 200, body = Vec<FlightExclusionBody>), (status = 401), (status = 404))
+    responses((status = 200, body = FlightExclusionsBody), (status = 401), (status = 404))
 )]
 pub async fn list_flight_exclusions(
     State(state): State<AppState>,
     _permission: RequirePermission<FlowFcaRead>,
+    Extension(current_user): Extension<Option<CurrentUser>>,
+    Extension(current_api_key): Extension<Option<CurrentApiKey>>,
     Path(id): Path<String>,
-) -> Result<Json<Vec<FlightExclusionBody>>, ApiError> {
+) -> Result<Json<FlightExclusionsBody>, ApiError> {
     let pool = state.db.as_ref().ok_or(ApiError::ServiceUnavailable)?;
     let artcc = fca_artcc(pool, &id).await?;
-    Ok(Json(exclusions_repo::list_by_artcc(pool, &artcc).await?))
+    // Read is gated on `flow.fca.read`, so a viewer without any write grant still gets the list —
+    // they just get `editable: false` with it.
+    let editable = match Principal::require(current_user.as_ref(), current_api_key.as_ref()) {
+        Ok(principal) => may_edit_artcc(&state, &principal, &artcc).await?,
+        Err(_) => false,
+    };
+    Ok(Json(FlightExclusionsBody {
+        editable,
+        exclusions: exclusions_repo::list_by_artcc(pool, &artcc).await?,
+    }))
 }
 
 #[utoipa::path(
@@ -160,7 +181,7 @@ pub async fn restore_flight(
 mod scope_tests {
     use sqlx::PgPool;
 
-    use super::require_artcc_scope;
+    use super::{may_edit_artcc, require_artcc_scope};
     use crate::scope_test_support::{self, artcc, grant, principal_for, test_state};
 
     fn state_with_zdc(pool: PgPool) -> crate::state::AppState {
@@ -205,6 +226,39 @@ mod scope_tests {
             matches!(err, crate::errors::ApiError::Forbidden),
             "expected 403 Forbidden, got {err:?}"
         );
+    }
+
+    /// The flag the UI renders the ✕ from must agree with the gate that answers the request —
+    /// otherwise the client offers a control the server refuses with 403 (#342 rework). They share
+    /// `may_edit_artcc` precisely so they cannot drift; this pins that they do.
+    #[sqlx::test]
+    async fn the_reported_editable_flag_matches_the_gate(pool: PgPool) {
+        let user = scope_test_support::seed_user(&pool).await;
+        grant(&pool, &user, "flow.fca.update", Some("ZDC")).await;
+        let principal = principal_for(&user);
+        let state = state_with_zdc(pool);
+
+        for artcc in ["ZDC", "ZNY"] {
+            let editable = may_edit_artcc(&state, &principal, artcc).await.unwrap();
+            let gated = require_artcc_scope(&state, &principal, artcc).await.is_ok();
+            assert_eq!(
+                editable, gated,
+                "{artcc}: editable={editable} but the write gate says {gated} — the UI would \
+                 offer a control the server refuses"
+            );
+        }
+    }
+
+    /// A facility-scoped controller viewing another facility's FCA must be told they cannot edit,
+    /// so the ✕ never renders for them in the first place.
+    #[sqlx::test]
+    async fn another_facilitys_fca_reports_not_editable(pool: PgPool) {
+        let user = scope_test_support::seed_user(&pool).await;
+        grant(&pool, &user, "flow.fca.update", Some("ZDC")).await;
+        let principal = principal_for(&user);
+        let state = state_with_zdc(pool);
+        assert!(may_edit_artcc(&state, &principal, "ZDC").await.unwrap());
+        assert!(!may_edit_artcc(&state, &principal, "ZNY").await.unwrap());
     }
 
     #[sqlx::test]

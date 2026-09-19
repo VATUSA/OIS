@@ -5,6 +5,7 @@ import {useToast} from "@ois/ui";
 import {ois} from "./api";
 
 export type FlightExclusion = components["schemas"]["FlightExclusionBody"];
+export type FlightExclusions = components["schemas"]["FlightExclusionsBody"];
 
 /** Query key for one FCA's active manual exclusions. */
 export function exclusionsKey(fcaId: string) {
@@ -12,9 +13,13 @@ export function exclusionsKey(fcaId: string) {
 }
 
 /**
- * The bogus flights this FCA's facility has currently dropped (#342). Backs the panel that makes a
- * removal reversible rather than a black hole — without it an excluded flight is simply gone, with
- * nowhere to notice or undo it.
+ * The bogus flights this FCA's facility has currently dropped (#342), and whether this caller may
+ * change them. Backs the panel that makes a removal reversible rather than a black hole — without it
+ * an excluded flight is simply gone, with nowhere to notice or undo it.
+ *
+ * `editable` comes from the server because the write endpoints are ARTCC-scoped and `me.permissions`
+ * has no ARTCC dimension: `hasPermission(me, "flow.fca.update")` is true for a controller scoped to
+ * a *different* facility, who would then be offered a ✕ the server answers with 403.
  */
 export function useFlightExclusions(fcaId: string | undefined) {
   return useQuery({

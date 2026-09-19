@@ -7,7 +7,7 @@ import {ArrowLeft, Eye, EyeOff, GripVertical, Home, Menu, Pencil, Plane, Plus, R
 import {Link} from "@tanstack/react-router";
 
 import {useMe} from "@/lib/auth";
-import {useExcludeFlight} from "@/lib/flight-exclusions";
+import {useExcludeFlight, useFlightExclusions} from "@/lib/flight-exclusions";
 import {hasPermission} from "@/lib/permissions";
 import {
   toUpsert,
@@ -421,6 +421,12 @@ export function FcaMapView({
   // Dropping a bogus flight is scoped to the FCA being worked (#342), so it's only offered when one
   // is selected — that's what resolves the owning facility.
   const excludeFlight = useExcludeFlight(selectedFca?.id ?? "");
+  // Scope-aware (#342): `canEdit` only knows the caller holds `flow.fca.update` somewhere, but the
+  // exclusion endpoints are ARTCC-scoped, so the server reports whether this FCA's facility is
+  // covered. Without it the popup offers a ✕ that 403s.
+  const selectedExclusions = useFlightExclusions(selectedFca?.id);
+  const canRemoveFromFca =
+    canEdit && selectedExclusions.data?.editable === true;
 
   // Locate a callsign in the live traffic, fly to it, and plot its route.
   const focusFlight = (callsign: string) => {
@@ -1119,7 +1125,7 @@ export function FcaMapView({
             route={aircraftRoute.data}
             fca={selectedFca}
             match={fcaTraffic.data?.find((f) => f.callsign === aircraftRoute.data!.callsign)}
-            canEdit={canEdit}
+            canEdit={canRemoveFromFca}
             onRemove={
               selectedFca
                 ? (callsign) => {

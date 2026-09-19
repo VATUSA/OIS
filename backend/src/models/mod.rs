@@ -2481,6 +2481,23 @@ pub struct FlightExclusionBody {
     pub created_by_name: Option<String>,
 }
 
+/// One FCA's manual exclusions, plus whether **this caller** may change them (#342).
+///
+/// `editable` exists because the write endpoints are ARTCC-scoped while the client's permission
+/// blob has no ARTCC dimension — `hasPermission(me, "flow.fca.update")` cannot tell whether the
+/// caller's grant covers *this* FCA's facility. Without it the UI offers a ✕ the server answers
+/// with 403.
+///
+/// It sits on the envelope rather than on each row (the shape `airport_configs` uses) because the
+/// control has to render when the list is **empty** — that is precisely the first removal.
+#[derive(Debug, Serialize, ToSchema)]
+pub struct FlightExclusionsBody {
+    /// Whether the caller holds `flow.fca.update` for this FCA's ARTCC (nationally or scoped).
+    pub editable: bool,
+    /// The live exclusions for this FCA's ARTCC, newest first.
+    pub exclusions: Vec<FlightExclusionBody>,
+}
+
 /// Body for manually excluding a flight. The callsign comes from the path; only the note is optional
 /// input — the ARTCC is resolved from the FCA being worked, never taken from the client.
 #[derive(Debug, Deserialize, ToSchema)]
