@@ -408,9 +408,25 @@ impl VerticalProfile {
     /// Predicted ground speed (kt) at a distance-to-destination `d` — the phase-appropriate TAS
     /// with wind (and any groundspeed anchoring) applied, floored at [`GS_FLOOR_KT`] exactly like
     /// [`Self::time_between`]'s internal integration, so a displayed speed never reads below what
-    /// the paired ETA in the same row was actually timed against.
+    /// the paired ETA in the same row was actually timed against, and capped at the cruise
+    /// groundspeed anywhere the profile is still at cruise altitude.
+    ///
+    /// That cap is not cosmetic (#355). [`Self::build`] assembles the descent curve first, and its
+    /// **top** sample carries the *descent* schedule's TAS at cruise altitude — well above cruise
+    /// TAS. The only cruise sample sits at top-of-climb, so [`Self::interp`] ramps TAS between the
+    /// two across the whole cruise leg even though [`Self::alt_at`] is flat there. Un-capped, a fix
+    /// in the cruise band reads faster than the aircraft can fly, and FCA MIT spacing sized with it
+    /// under-provisions exactly the way cruise speed did at a descent fix. Capping here leaves
+    /// [`Self::time_between`] (and therefore every ETA) untouched — the samples themselves are
+    /// still wrong, which is a separate fix.
     pub fn ground_speed_at(&self, d_nm: f64) -> f64 {
-        self.gs_at(d_nm)
+        let gs = self.gs_at(d_nm);
+        if self.alt_at(d_nm) < self.cruise_alt - ANCHOR_ALT_TOLERANCE_FT {
+            return gs; // climbing or descending: the schedule TAS is the honest answer
+        }
+        let cruise_gs =
+            (effective_gs(self.cruise_tas, self.headwind) * self.gs_bias).max(GS_FLOOR_KT);
+        gs.min(cruise_gs)
     }
 
     /// Seconds to fly from distance-to-destination `from_d` forward to `to_d` (`to_d < from_d`),
@@ -796,6 +812,45 @@ mod tests {
         assert!(
             climb_time > pure_cruise,
             "climb {climb_time} should exceed pure cruise {pure_cruise}"
+        );
+    }
+
+    /// Regression (#355): anywhere the profile is still at cruise altitude, `ground_speed_at` must
+    /// not read above the cruise groundspeed. `build` lays the descent curve down first and its top
+    /// sample carries the *descent* schedule's TAS at cruise altitude (~519 kt for this profile at
+    /// FL350 against a 440 kt cruise), while the only cruise sample sits at top-of-climb — so the
+    /// raw interpolation ramps TAS across a leg whose altitude is flat. FCA MIT spacing is sized
+    /// from this number, so an un-capped read under-provisions every enroute crossing: a 20 MIT fix
+    /// 150 nm out would get `20 / 508 * 3600 = 142 s`, which the aircraft flies at its real 440 kt
+    /// for 17.3 nm, not 20.
+    #[test]
+    fn ground_speed_at_never_reads_above_cruise_while_still_at_cruise_altitude() {
+        let profile = AircraftProfile::default();
+        let cruise_tas = 440.0;
+        let vp = VerticalProfile::build(35_000.0, 300.0, 0.0, 35_000.0, cruise_tas, &profile, None);
+        let cruise_gs = effective_gs(cruise_tas, None);
+
+        // Every point from the aircraft forward to top-of-descent is at cruise altitude.
+        for d in [300.0, 250.0, 200.0, 150.0, 130.0] {
+            assert!(
+                (vp.alt_at(d) - 35_000.0).abs() < 1.0,
+                "sanity: d={d} should still be at cruise altitude, got {:.0} ft",
+                vp.alt_at(d)
+            );
+            assert!(
+                vp.ground_speed_at(d) <= cruise_gs + 1e-6,
+                "d={d} reads {:.1} kt, above the {cruise_gs:.1} kt cruise groundspeed",
+                vp.ground_speed_at(d)
+            );
+        }
+
+        // The cap must not flatten the descent: below cruise altitude the schedule still governs,
+        // and the speed still falls away toward the field.
+        assert!(vp.alt_at(20.0) < 35_000.0);
+        assert!(
+            vp.ground_speed_at(20.0) < cruise_gs * 0.8,
+            "the descent must still slow down, got {:.1} kt",
+            vp.ground_speed_at(20.0)
         );
     }
 
