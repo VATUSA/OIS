@@ -175,6 +175,47 @@ const HOTKEY_SETTINGS: SettingDef[] = HOTKEY_ACTIONS.map(({settingKey, label}) =
   },
 }));
 
+const whenSounds = () => can("audioAlerts");
+
+/** The categories that can make a noise — the same ones that can notify (#348). */
+const SOUND_CATEGORIES: {key: string; label: string}[] = [
+  {key: "restrictions", label: "TMIs and ground stops"},
+  {key: "releases", label: "EDCT releases"},
+  {key: "metering", label: "Heavy metering delay"},
+  {key: "access", label: "Access granted"},
+  {key: "eventReminders", label: "Event reminders"},
+];
+
+/**
+ * A toggle and a volume per category.
+ *
+ * Every one is off by default: installing an update should never start making noise at someone.
+ */
+const SOUND_SETTINGS: SettingDef[] = SOUND_CATEGORIES.flatMap(({key, label}) => [
+  {
+    key: `sounds.${key}`,
+    group: "Sounds",
+    available: whenSounds,
+    label: `Play a sound for ${label.toLowerCase()}`,
+    control: {kind: "toggle", default: false},
+  },
+  {
+    key: `sounds.${key}.volume`,
+    group: "Sounds",
+    available: whenSounds,
+    label: `${label} volume`,
+    control: {
+      kind: "select",
+      default: "normal",
+      options: [
+        {value: "quiet", label: "Quiet"},
+        {value: "normal", label: "Normal"},
+        {value: "loud", label: "Loud"},
+      ],
+    },
+  },
+]);
+
 /** Every setting, in display order. Groups render in first-seen order. */
 export const SETTINGS: SettingDef[] = [
   {
@@ -252,6 +293,9 @@ export const SETTINGS: SettingDef[] = [
 
   // --- Shortcuts (#352) ---
   ...HOTKEY_SETTINGS,
+
+  // --- Sounds (#353) ---
+  ...SOUND_SETTINGS,
 ];
 
 /** The default value for a setting key (used before the server value loads, or when signed out). */

@@ -73,6 +73,25 @@ publish an update the installed app would reject.
 Without the Apple/Windows certificates the build still succeeds, but the OS warns on first launch.
 Those are about *installing*; the updater signature above is what gates an update **applying**.
 
+## Replacing the alert sounds
+
+Each alert category ships with a default `.wav`, but a facility can use its own without a rebuild.
+Drop a file of the same name into the app's data folder:
+
+```
+macOS    ~/Library/Application Support/net.vatusa.ois/sounds/
+Windows  %APPDATA%\net.vatusa.ois\sounds\
+Linux    ~/.local/share/net.vatusa.ois/sounds/
+```
+
+The names are the alert categories: `restrictions.wav`, `releases.wav`, `metering.wav`,
+`access.wav`, `eventReminders.wav`. A file that is missing or won't play falls back to the bundled
+default, so a bad replacement degrades to the standard sound rather than to silence — silence is
+indistinguishable from a broken feature.
+
+The asset-protocol scope in `tauri.conf.json` is deliberately `$APPDATA/sounds/*` and nothing
+wider: the webview can read a replaced alert sound and no other file on the machine.
+
 ## What isn't here yet
 
 The shell is deliberately bare — one window, no commands, no plugins. Desktop behaviour lands in

@@ -63,7 +63,7 @@ const IMPLEMENTED: Readonly<Record<Capability, boolean>> = Object.freeze({
   multiWindow: true, // #350 — multi-window / multi-monitor (shipped)
   tray: true, // #351 — system tray (shipped)
   globalHotkeys: true, // #352 — global hotkeys (shipped)
-  audioAlerts: false, // #353 — audio alerts
+  audioAlerts: true, // #353 — audio alerts (shipped)
   fileDialogs: false, // #354 — native export/import dialogs
 });
 

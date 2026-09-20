@@ -34,6 +34,10 @@ function useNewKeys(
   category: NotifyCategory,
   enabled: boolean,
 ) {
+  // Sound settings live beside the notification ones, so a category can notify silently or make a
+  // noise without a banner (#353).
+  const {value: soundOn} = useSetting<boolean>(`sounds.${category}`, false);
+  const {value: volume} = useSetting<string>(`sounds.${category}.volume`, "normal");
   const known = React.useRef<Set<string> | null>(null);
 
   React.useEffect(() => {
@@ -44,11 +48,11 @@ function useNewKeys(
     for (const [key, entry] of entries) {
       if (!known.current.has(key)) {
         known.current.add(key);
-        void notifyDesktop({category, ...entry}, enabled);
+        void notifyDesktop({category, ...entry}, enabled, {enabled: soundOn, volume});
       }
     }
     for (const key of [...known.current]) if (!entries.has(key)) known.current.delete(key);
-  }, [entries, settled, category, enabled]);
+  }, [entries, settled, category, enabled, soundOn, volume]);
 }
 
 /** EDCT releases and heavy metering delay, for one FCA. Both read the same traffic list. */

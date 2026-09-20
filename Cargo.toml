@@ -55,7 +55,10 @@ dotenvy = "0.15.7"
 # `tray-icon` is not on by default: without it the tray commands aren't compiled in at all and
 # every call fails at runtime with "plugin tray not found" (#351). `image-png` lets the tray take
 # the app icon, which is a PNG.
-tauri = { version = "2.11", features = ["tray-icon", "image-png"] }
+# `tray-icon` (#351) and `protocol-asset` (#353) are both off by default, and both fail in ways a
+# test never sees: without the first the tray commands aren't compiled in at all, and without the
+# second the build refuses outright because tauri.conf.json enables the asset protocol.
+tauri = { version = "2.11", features = ["tray-icon", "image-png", "protocol-asset"] }
 tauri-build = { version = "2.6", features = [] }
 # Desktop auth (#346): the session token lives in the real OS keychain (macOS Keychain, Windows
 # Credential Manager, Linux Secret Service), and sign-in opens the SYSTEM browser so the app never

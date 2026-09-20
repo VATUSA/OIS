@@ -42,6 +42,8 @@ function routeFor(key: string): string {
  */
 export function useRestrictionNotifier(): (alerts: NotifiableAlert[]) => void {
   const {value: enabled} = useSetting<boolean>("notifications.restrictions", false);
+  const {value: soundOn} = useSetting<boolean>("sounds.restrictions", false);
+  const {value: volume} = useSetting<string>("sounds.restrictions.volume", "normal");
 
   return React.useCallback(
     (alerts: NotifiableAlert[]) => {
@@ -56,9 +58,10 @@ export function useRestrictionNotifier(): (alerts: NotifiableAlert[]) => void {
             route: routeFor(alert.key),
           },
           enabled,
+          {enabled: soundOn, volume},
         );
       }
     },
-    [enabled],
+    [enabled, soundOn, volume],
   );
 }

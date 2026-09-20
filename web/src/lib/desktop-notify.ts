@@ -1,4 +1,5 @@
 import {can} from "@/lib/platform";
+import {playAlertSound} from "@/lib/sounds";
 
 /**
  * Native OS notifications for the desktop app (#348).
@@ -71,7 +72,13 @@ async function ensurePermission(): Promise<boolean> {
 export async function notifyDesktop(
   notification: Notification,
   enabled: boolean,
+  sound?: {enabled: boolean; volume?: string},
 ): Promise<boolean> {
+  // Sound is a second output of the same detection, with its own settings — a category can notify
+  // silently, or make a noise without a banner (#353). Fired before the permission check below,
+  // which is about *notifications* and has nothing to say about audio.
+  if (sound?.enabled) void playAlertSound(notification.category, sound);
+
   if (!enabled || !can("notifications")) return false;
   if (!(await ensurePermission())) return false;
 
