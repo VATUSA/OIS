@@ -44,14 +44,16 @@ export type SettingsBlob = Record<string, unknown>;
 /** Settings namespace for the preferences API (`/api/v1/me/preferences/settings`). */
 export const SETTINGS_NAMESPACE = "settings";
 
-/** Notifications are offered only where they can actually fire. */
-const onDesktop = () => can("notifications");
+// A switch the platform can't honour is worse than a missing one, so each desktop-only group is
+// gated on *its own* capability rather than on "is this the desktop build".
+const whenNotifications = () => can("notifications");
+const whenTray = () => can("tray");
 
 const NOTIFICATION_SETTINGS: SettingDef[] = [
   {
     key: "notifications.restrictions",
     group: "Notifications",
-    available: onDesktop,
+    available: whenNotifications,
     label: "TMIs and ground stops",
     description:
       "Notify when a TMI, ground stop, GDP or TMU program is published — the same events the in-app restriction alerts show.",
@@ -60,7 +62,7 @@ const NOTIFICATION_SETTINGS: SettingDef[] = [
   {
     key: "notifications.releases",
     group: "Notifications",
-    available: onDesktop,
+    available: whenNotifications,
     label: "EDCT releases",
     description: "Notify when a release time is issued for a flight crossing one of your FCAs.",
     control: { kind: "toggle", default: false },
@@ -68,7 +70,7 @@ const NOTIFICATION_SETTINGS: SettingDef[] = [
   {
     key: "notifications.metering",
     group: "Notifications",
-    available: onDesktop,
+    available: whenNotifications,
     label: "Heavy metering delay",
     description:
       "Notify when metering assigns a crossing more delay than the threshold below. Uses the same delay the ladder shows.",
@@ -77,7 +79,7 @@ const NOTIFICATION_SETTINGS: SettingDef[] = [
   {
     key: "notifications.meteringDelayMin",
     group: "Notifications",
-    available: onDesktop,
+    available: whenNotifications,
     label: "Delay threshold",
     description: "How much metering delay counts as worth interrupting you for.",
     control: {
@@ -94,7 +96,7 @@ const NOTIFICATION_SETTINGS: SettingDef[] = [
   {
     key: "notifications.access",
     group: "Notifications",
-    available: onDesktop,
+    available: whenNotifications,
     label: "Access granted",
     description: "Notify when someone grants you a new permission or role.",
     control: { kind: "toggle", default: false },
@@ -102,10 +104,39 @@ const NOTIFICATION_SETTINGS: SettingDef[] = [
   {
     key: "notifications.eventReminders",
     group: "Notifications",
-    available: onDesktop,
+    available: whenNotifications,
     label: "Event reminders",
     description:
       "Notify 24 hours and 6 hours before an event you have claimed an ACE position for — the same reminders the Discord bot sends.",
+    control: { kind: "toggle", default: false },
+  },
+];
+
+const TRAY_SETTINGS: SettingDef[] = [
+  {
+    key: "tray.show",
+    group: "Menu bar",
+    available: whenTray,
+    label: "Show OIS in the menu bar",
+    description:
+      "A menu-bar icon with pilots online, active TMIs and feed health, plus quick links into the app.",
+    control: { kind: "toggle", default: false },
+  },
+  {
+    key: "tray.closeToTray",
+    group: "Menu bar",
+    available: whenTray,
+    label: "Closing the window keeps OIS running",
+    description:
+      "Closing hides the window to the menu bar instead of quitting, so notifications keep arriving. Quit from the menu-bar icon.",
+    control: { kind: "toggle", default: false },
+  },
+  {
+    key: "tray.launchAtLogin",
+    group: "Menu bar",
+    available: whenTray,
+    label: "Launch at login",
+    description: "Start OIS automatically when you sign in to this computer.",
     control: { kind: "toggle", default: false },
   },
 ];
@@ -181,6 +212,9 @@ export const SETTINGS: SettingDef[] = [
   // there, so these would be dead switches. Every one defaults OFF — an operator opts in to being
   // interrupted, never the other way round.
   ...NOTIFICATION_SETTINGS,
+
+  // --- Menu bar (#351) ---
+  ...TRAY_SETTINGS,
 ];
 
 /** The default value for a setting key (used before the server value loads, or when signed out). */

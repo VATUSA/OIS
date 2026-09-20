@@ -26,6 +26,12 @@ fn main() {
         // restarts itself out from under someone mid-event.
         // Native notifications (#348). The frontend decides what is worth notifying about and
         // whether the user asked for it; this is delivery.
+        // Launch at login (#351). Registered always; whether it is *enabled* is the user's
+        // setting, toggled from the app.
+        .plugin(tauri_plugin_autostart::init(
+            tauri_plugin_autostart::MacosLauncher::LaunchAgent,
+            None,
+        ))
         .plugin(tauri_plugin_notification::init())
         .plugin(tauri_plugin_updater::Builder::new().build())
         .plugin(tauri_plugin_process::init())
@@ -35,6 +41,22 @@ fn main() {
             auth::delete_token,
             auth::begin_login,
         ])
-        .run(tauri::generate_context!())
-        .expect("failed to start the OIS desktop shell");
+        .build(tauri::generate_context!())
+        .expect("failed to start the OIS desktop shell")
+        .run(|_app, _event| {
+            // macOS keeps an app running with no windows, so closing the window (or hiding it to
+            // the menu bar) leaves it alive in the dock with no way back in — clicking the dock
+            // icon is the way back (#351).
+            //
+            // macOS-only in the literal sense: `RunEvent::Reopen` does not exist on Windows or
+            // Linux, so it must be compiled out there rather than merely skipped at runtime — a
+            // plain runtime check does not compile at all (caught by the 3-OS CI matrix).
+            #[cfg(target_os = "macos")]
+            if let tauri::RunEvent::Reopen { .. } = _event
+                && let Some(window) = tauri::Manager::get_webview_window(_app, "main")
+            {
+                let _ = window.show();
+                let _ = window.set_focus();
+            }
+        });
 }

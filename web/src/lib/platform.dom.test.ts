@@ -51,7 +51,8 @@ describe("capabilities", () => {
       "notifications",
       "miniWindows",
       "multiWindow",
-    ]; // #347-#350
+      "tray",
+    ]; // #347-#351
     for (const [name, available] of Object.entries(capabilities())) {
       const expected = shipped.includes(name as Capability);
       expect(available, `${name} availability on desktop`).toBe(expected);

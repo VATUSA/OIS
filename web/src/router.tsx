@@ -8,6 +8,7 @@ import type {RouteMeta} from "@/components/shell/page-meta";
 import {RestrictionAlerts} from "@/components/restriction-alerts";
 import {NotificationClicks} from "@/components/notification-clicks";
 import {DesktopNotifiers} from "@/components/desktop-notifiers";
+import {DesktopTray} from "@/components/desktop-tray";
 import {WhatsNew} from "@/components/whats-new";
 import {useMe} from "@/lib/auth";
 import {movedPath} from "@/lib/moved-paths";
@@ -103,6 +104,7 @@ function RootLayout() {
       <RestrictionAlerts />
       <NotificationClicks />
       <DesktopNotifiers />
+      <DesktopTray />
       <WhatsNew />
       <AppShell>
         <Outlet />
