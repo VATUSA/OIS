@@ -26,4 +26,29 @@ export default tseslint.config(
       ],
     },
   },
+  {
+    // The desktop app renders the web bundle inside a Tauri webview, so `@tauri-apps/api` is a
+    // real dependency of `web` — but a *static* import anywhere pulls it into the main bundle that
+    // every browser downloads. `web/src/lib/platform.ts` reaches it through a dynamic `import()`
+    // behind an `isTauri()` guard, which keeps it in a chunk the web build never loads.
+    //
+    // This rule only matches static imports, so platform.ts needs no exception — and deliberately
+    // doesn't get one, so that adding a static import *there* is caught too. Go through
+    // `invokeDesktop()` rather than importing Tauri directly (#345).
+    files: ["web/**/*.{ts,tsx}"],
+    rules: {
+      "no-restricted-imports": [
+        "error",
+        {
+          patterns: [
+            {
+              group: ["@tauri-apps/*"],
+              message:
+                "Import Tauri only via web/src/lib/platform.ts (invokeDesktop) — a static import here would bloat the web bundle.",
+            },
+          ],
+        },
+      ],
+    },
+  },
 );

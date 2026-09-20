@@ -7,7 +7,7 @@ use sqlx::{PgPool, Postgres, Transaction};
 
 use crate::{
     errors::ApiError,
-    models::{AceClaimBody, AceRequestBody},
+    models::{AceClaimBody, AceRequestBody, MyAceClaim},
 };
 
 /// The request row + its aggregated claims (json_agg) + a live claim count. `slots` and the count
@@ -248,6 +248,26 @@ pub struct DueReminder {
 /// reminder (labelled "24h") and a 6h-tier reminder back to back for an event that's actually only
 /// 3 hours out. Bounding each tier to its own slice ensures a claim only ever matches the tier whose
 /// window it's *actually* currently in.
+/// The signed-in user's claimed positions for events that haven't started yet.
+///
+/// Mirrors the join `claims_due_for_reminder` uses (cancelled requests excluded) so the two agree
+/// about what a live claim is; it just scopes to one user and drops the reminder-tier window.
+pub async fn my_upcoming_claims(pool: &PgPool, user_id: &str) -> Result<Vec<MyAceClaim>, ApiError> {
+    sqlx::query_as::<_, MyAceClaim>(
+        "select c.id as claim_id, e.id as event_id, e.title as event_title, \
+                e.start_time, r.position \
+         from ace.claims c \
+         join ace.requests r on r.id = c.request_id and r.status <> 'cancelled' \
+         join events.event e on e.id = r.event_id \
+         where c.claimed_by = $1 and e.start_time > now() \
+         order by e.start_time",
+    )
+    .bind(user_id)
+    .fetch_all(pool)
+    .await
+    .map_err(|_| ApiError::Internal)
+}
+
 pub async fn claims_due_for_reminder(
     pool: &PgPool,
     hours_after: i64,
@@ -530,5 +550,51 @@ mod tests {
         .await
         .unwrap();
         assert_eq!(count, 1, "exactly one row must exist, not two");
+    }
+
+    #[sqlx::test]
+    async fn my_claims_lists_only_my_own_upcoming_ones(pool: PgPool) {
+        let me = seed_user(&pool, "Claimer").await;
+        let someone_else = seed_user(&pool, "Other").await;
+        let requester = seed_user(&pool, "Requester").await;
+
+        let soon = seed_event(&pool, 9001, 5).await;
+        seed_claimed_request(&pool, soon, &requester, &me).await;
+
+        let also_soon = seed_event(&pool, 9002, 8).await;
+        seed_claimed_request(&pool, also_soon, &requester, &someone_else).await;
+
+        let mine = my_upcoming_claims(&pool, &me).await.unwrap();
+
+        assert_eq!(mine.len(), 1, "someone else's claim must not appear");
+        assert_eq!(mine[0].event_id, soon);
+        assert_eq!(mine[0].position, "DCA_APP");
+    }
+
+    #[sqlx::test]
+    async fn my_claims_drops_events_that_have_already_started(pool: PgPool) {
+        // A reminder for an event already underway is noise, not a reminder.
+        let me = seed_user(&pool, "Claimer").await;
+        let requester = seed_user(&pool, "Requester").await;
+
+        let past = seed_event(&pool, 9003, -2).await;
+        seed_claimed_request(&pool, past, &requester, &me).await;
+
+        assert!(my_upcoming_claims(&pool, &me).await.unwrap().is_empty());
+    }
+
+    #[sqlx::test]
+    async fn my_claims_are_ordered_soonest_first(pool: PgPool) {
+        let me = seed_user(&pool, "Claimer").await;
+        let requester = seed_user(&pool, "Requester").await;
+
+        let later = seed_event(&pool, 9005, 30).await;
+        seed_claimed_request(&pool, later, &requester, &me).await;
+        let sooner = seed_event(&pool, 9004, 3).await;
+        seed_claimed_request(&pool, sooner, &requester, &me).await;
+
+        let mine = my_upcoming_claims(&pool, &me).await.unwrap();
+        assert_eq!(mine.len(), 2);
+        assert_eq!(mine[0].event_id, sooner, "soonest first");
     }
 }

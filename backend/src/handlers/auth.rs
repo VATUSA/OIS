@@ -19,7 +19,7 @@ use crate::{
     },
     config::{configured_allowed_origins, configured_server_admin_cids, cookie_secure},
     errors::ApiError,
-    models::MeBody,
+    models::{DesktopExchangeRequest, DesktopSessionBody, MeBody},
     repos::{access as access_repo, auth as auth_repo, users as user_repo},
     state::AppState,
 };
@@ -30,6 +30,17 @@ const SESSION_COOKIE: &str = "ois_session";
 const OAUTH_STATE_TTL_SECS: i64 = 10 * 60;
 const SESSION_TTL_SECS: i64 = 60 * 60 * 24 * 30;
 const DEFAULT_LOGIN_REDIRECT: &str = "/api/v1/me";
+
+/// Set alongside the OAuth state when the desktop app starts the flow, so the callback knows to
+/// also mint a one-time code. A cookie rather than a round-trip through VATSIM's `state` because
+/// that is where the rest of this flow already keeps its per-attempt context.
+const OAUTH_DESKTOP_COOKIE: &str = "ois_oauth_desktop";
+
+/// Query parameter the callback appends to the desktop app's loopback redirect.
+const DESKTOP_CODE_PARAM: &str = "code";
+
+/// Marks a session token as belonging to the desktop app; `auth::middleware` dispatches on it.
+const DESKTOP_SESSION_TOKEN_PREFIX: &str = "ois_dsk_";
 
 /// Baseline self-service permissions every non-SERVER_ADMIN user is entitled to.
 /// Seeded on first login; every name here must exist in `access.permissions`.
@@ -44,6 +55,9 @@ const BASELINE_SELF_SERVICE_PERMISSIONS: &[&str] = &[
 #[derive(Deserialize)]
 pub struct LoginQuery {
     return_to: Option<String>,
+    /// Set by the desktop app. Makes the callback hand back a one-time code as well as the usual
+    /// cookie, which the app trades for a keychain-stored session token (#346).
+    desktop: Option<bool>,
 }
 
 #[derive(Deserialize)]
@@ -110,6 +124,17 @@ pub async fn vatsim_login(
             .max_age(time::Duration::seconds(OAUTH_STATE_TTL_SECS))
             .build();
         jar = jar.add(return_to_cookie);
+    }
+
+    if query.desktop.unwrap_or(false) {
+        let desktop_cookie = Cookie::build((OAUTH_DESKTOP_COOKIE, "1"))
+            .http_only(true)
+            .secure(cookie_secure())
+            .same_site(SameSite::Lax)
+            .path("/")
+            .max_age(time::Duration::seconds(OAUTH_STATE_TTL_SECS))
+            .build();
+        jar = jar.add(desktop_cookie);
     }
 
     Ok((jar, Redirect::temporary(&authorize_url)))
@@ -179,13 +204,27 @@ pub async fn vatsim_callback(
     let session_token = Uuid::new_v4().to_string();
     auth_repo::insert_session(pool, &session_token, &user_id).await?;
 
-    let redirect_target = jar
+    let mut redirect_target = jar
         .get(OAUTH_RETURN_TO_COOKIE)
         .map(|cookie| cookie.value().to_string())
         .filter(|value| !value.is_empty())
         .and_then(|value| validate_return_to(&value).ok())
         .unwrap_or_else(|| DEFAULT_LOGIN_REDIRECT.to_string());
 
+    // The desktop app is blocked on a loopback listener waiting for this redirect. Hand it a
+    // one-time code rather than the session token itself: a token in the URL would persist in
+    // browser history and in any referer, whereas the code is useless once exchanged.
+    if jar.get(OAUTH_DESKTOP_COOKIE).is_some() {
+        let code = format!("{}{}", Uuid::new_v4().simple(), Uuid::new_v4().simple());
+        auth_repo::insert_desktop_auth_code(pool, &access_repo::sha256_hex(&code), &user_id)
+            .await?;
+        redirect_target = append_query_param(&redirect_target, DESKTOP_CODE_PARAM, &code);
+    }
+
+    let clear_desktop = Cookie::build((OAUTH_DESKTOP_COOKIE, ""))
+        .path("/")
+        .max_age(time::Duration::seconds(0))
+        .build();
     let clear_state = Cookie::build((OAUTH_STATE_COOKIE, ""))
         .path("/")
         .max_age(time::Duration::seconds(0))
@@ -205,6 +244,7 @@ pub async fn vatsim_callback(
     Ok((
         jar.remove(clear_state)
             .remove(clear_return_to)
+            .remove(clear_desktop)
             .add(session_cookie),
         Redirect::to(&redirect_target),
     ))
@@ -232,6 +272,100 @@ pub async fn logout(
         .build();
 
     Ok((jar.remove(session_cookie), StatusCode::NO_CONTENT))
+}
+
+/// Appends a query parameter to an already-validated absolute URL, preserving whatever query the
+/// caller's `return_to` already carried.
+fn append_query_param(url: &str, key: &str, value: &str) -> String {
+    match Url::parse(url) {
+        Ok(mut parsed) => {
+            parsed.query_pairs_mut().append_pair(key, value);
+            parsed.to_string()
+        }
+        // `validate_return_to` already proved this parses; the fallback only exists so a future
+        // caller passing a bare path still produces something usable rather than panicking.
+        Err(_) => {
+            let separator = if url.contains('?') { '&' } else { '?' };
+            format!("{url}{separator}{key}={value}")
+        }
+    }
+}
+
+/// Mints a fresh desktop session token. The prefix is what `auth::middleware` dispatches on.
+fn new_desktop_session_token() -> String {
+    format!(
+        "{DESKTOP_SESSION_TOKEN_PREFIX}{}{}",
+        Uuid::new_v4().simple(),
+        Uuid::new_v4().simple()
+    )
+}
+
+#[utoipa::path(
+    post,
+    path = "/api/v1/auth/desktop/exchange",
+    tag = "auth",
+    request_body = DesktopExchangeRequest,
+    responses(
+        (status = 200, body = DesktopSessionBody, description = "A desktop session token"),
+        (status = 401, description = "Unknown, expired, or already-used code")
+    )
+)]
+/// Trades the one-time code from the OAuth callback for a desktop session token.
+///
+/// Public, like the OAuth callback itself — the code *is* the credential, and it is single-use and
+/// short-lived. Unknown, expired and already-consumed codes are all reported identically so a probe
+/// learns nothing from which it hit.
+pub async fn desktop_exchange(
+    State(state): State<AppState>,
+    Json(body): Json<DesktopExchangeRequest>,
+) -> Result<Json<DesktopSessionBody>, ApiError> {
+    let pool = state.db.as_ref().ok_or(ApiError::ServiceUnavailable)?;
+
+    let code = body.code.trim();
+    if code.is_empty() {
+        return Err(ApiError::Unauthorized);
+    }
+
+    let user_id = auth_repo::consume_desktop_auth_code(pool, &access_repo::sha256_hex(code))
+        .await?
+        .ok_or(ApiError::Unauthorized)?;
+
+    let token = new_desktop_session_token();
+    let expires_at = auth_repo::insert_desktop_session(pool, &token, &user_id).await?;
+
+    Ok(Json(DesktopSessionBody { token, expires_at }))
+}
+
+#[utoipa::path(
+    post,
+    path = "/api/v1/auth/desktop/refresh",
+    tag = "auth",
+    responses(
+        (status = 200, body = DesktopSessionBody, description = "A rotated desktop session token"),
+        (status = 401, description = "Not a live desktop session")
+    )
+)]
+/// Rotates the caller's desktop session, returning a new token and extending the expiry.
+///
+/// Authenticated by the token being rotated — no permission gate, because holding a live desktop
+/// session is the whole claim being made. Rotation means a token that leaked stops working as soon
+/// as the app next refreshes.
+///
+/// Only `kind = 'desktop'` rows rotate: a stolen browser cookie cannot be traded up for a
+/// long-lived keychain credential.
+pub async fn desktop_refresh(
+    State(state): State<AppState>,
+    Extension(SessionToken(session_token)): Extension<SessionToken>,
+) -> Result<Json<DesktopSessionBody>, ApiError> {
+    let pool = state.db.as_ref().ok_or(ApiError::ServiceUnavailable)?;
+    let old_token = session_token.ok_or(ApiError::Unauthorized)?;
+
+    let token = new_desktop_session_token();
+    let expires_at = auth_repo::rotate_desktop_session(pool, &old_token, &token)
+        .await?
+        .ok_or(ApiError::Unauthorized)?;
+
+    Ok(Json(DesktopSessionBody { token, expires_at }))
 }
 
 async fn build_me_body(state: &AppState, user: &CurrentUser) -> Result<MeBody, ApiError> {

@@ -692,20 +692,20 @@ const ACE_REMINDER_TIERS: &[(i64, i64, &str)] = &[
 /// construction: each tick re-queries live state (crossed the threshold, event still upcoming, not
 /// already reminded), so a released claim or a cancelled request simply stops matching — no
 /// separate "cancel the scheduled reminder" step is needed. Runs every 15 minutes.
-pub fn spawn_ace_reminder_scheduler(reg: Arc<JobRegistry>, pool: PgPool) {
+pub fn spawn_ace_reminder_scheduler(reg: Arc<JobRegistry>, pool: PgPool, events: Events) {
     tokio::spawn(run_interval(
         reg,
         "ace_reminder_scheduler",
         "DM ACE claimers a reminder at T-24h/T-6h before their event",
         ACE_REMINDER_INTERVAL,
         move || {
-            let pool = pool.clone();
-            async move { ace_reminder_scheduler_once(&pool).await }
+            let (pool, events) = (pool.clone(), events.clone());
+            async move { ace_reminder_scheduler_once(&pool, &events).await }
         },
     ));
 }
 
-async fn ace_reminder_scheduler_once(pool: &PgPool) -> Result<String, String> {
+async fn ace_reminder_scheduler_once(pool: &PgPool, events: &Events) -> Result<String, String> {
     let mut sent = 0u32;
     let mut tier_failed = false;
     // Each tier is queried and enqueued independently — a transient failure on one tier's query
@@ -746,6 +746,15 @@ async fn ace_reminder_scheduler_once(pool: &PgPool) -> Result<String, String> {
     // JobRegistry as a failure, even in a cycle where the *other* tier had genuine hits — masking
     // it behind `sent == 0` would hide an ongoing problem for as long as the healthy tier keeps
     // producing reminders.
+    // Nudge connected clients only when something was actually enqueued, so the desktop app can
+    // surface the same reminder natively (#348). Payload-free: each client refetches its own claims
+    // and decides whether any of them is the one that came due.
+    if sent > 0 {
+        let _ = events.send(WsEvent {
+            topic: topic::EVENT_REMINDER.to_string(),
+        });
+    }
+
     if tier_failed {
         return Err("one or more ace reminder tiers failed to query".to_string());
     }

@@ -5,6 +5,9 @@ import {RouterProvider} from "@tanstack/react-router";
 import {DialogProvider, ThemeProvider, ToastProvider, TooltipProvider} from "@ois/ui";
 
 import {router} from "./router";
+import {desktopRefresh} from "./lib/desktop-auth";
+import {restoreWindows} from "./lib/popout";
+import {isTauri} from "./lib/platform";
 import {RealtimeProvider} from "./components/realtime-provider";
 import "@fontsource-variable/inter";
 import "@fontsource/jetbrains-mono/400.css";
@@ -12,6 +15,17 @@ import "@fontsource/jetbrains-mono/600.css";
 import "./index.css";
 
 const queryClient = new QueryClient();
+
+// Desktop only: rotate the keychain-stored session on launch, which both proves it is still valid
+// and pushes its expiry out, so an app that's opened regularly never makes the user sign in again
+// (#346). Deliberately not awaited — the stored token stays valid meanwhile, so there is no reason
+// to hold up first paint, and a failure here just means the app starts signed out.
+if (isTauri()) void desktopRefresh();
+
+// Desktop only: reopen the route windows that were open last time, each at the position it was
+// left (#350). Guarded inside to the main window — otherwise every restored window would restore
+// the whole set again as it booted. Not awaited; a window failing to reopen must not delay paint.
+if (isTauri()) void restoreWindows();
 
 ReactDOM.createRoot(document.getElementById("root")!).render(
   <React.StrictMode>
