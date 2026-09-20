@@ -1,4 +1,4 @@
-import {Card, EmptyState, QueryState, Select, Switch} from "@ois/ui";
+import {Card, EmptyState, HotkeyInput, QueryState, Select, Switch} from "@ois/ui";
 import {LogIn} from "lucide-react";
 
 import {usePageHeader} from "@/components/shell/page-meta";
@@ -18,6 +18,13 @@ function SettingRow({ def }: { def: SettingDef }) {
       <div className="shrink-0">
         {def.control.kind === "toggle" ? (
           <Switch checked={value as boolean} onCheckedChange={(v) => setValue(v)} aria-label={def.label} />
+        ) : def.control.kind === "hotkey" ? (
+          <HotkeyInput
+            value={value as string}
+            placeholder={def.control.placeholder}
+            onChange={(v) => setValue(v)}
+            aria-label={def.label}
+          />
         ) : (
           <Select value={value as string} onChange={(e) => setValue(e.target.value)} aria-label={def.label}>
             {def.control.options.map((o) => (

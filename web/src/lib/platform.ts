@@ -62,7 +62,7 @@ const IMPLEMENTED: Readonly<Record<Capability, boolean>> = Object.freeze({
   miniWindows: true, // #349 — pop-out always-on-top mini-windows (shipped)
   multiWindow: true, // #350 — multi-window / multi-monitor (shipped)
   tray: true, // #351 — system tray (shipped)
-  globalHotkeys: false, // #352 — global hotkeys
+  globalHotkeys: true, // #352 — global hotkeys (shipped)
   audioAlerts: false, // #353 — audio alerts
   fileDialogs: false, // #354 — native export/import dialogs
 });

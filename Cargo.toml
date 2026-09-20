@@ -71,6 +71,9 @@ open = "5.4"
 # frontend, where the user's own permissions and settings already apply.
 # Launch at login (#351), toggled from the app's settings rather than assumed on.
 tauri-plugin-autostart = "2.5"
+# OS-level shortcuts that fire while another app is focused (#352). Unlike the tray this needs no
+# extra `tauri` feature — the plugin carries its own platform support.
+tauri-plugin-global-shortcut = "2.3"
 tauri-plugin-notification = "2.4"
 tauri-plugin-updater = "2.11"
 tauri-plugin-process = "2.3"

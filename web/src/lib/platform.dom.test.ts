@@ -52,7 +52,8 @@ describe("capabilities", () => {
       "miniWindows",
       "multiWindow",
       "tray",
-    ]; // #347-#351
+      "globalHotkeys",
+    ]; // #347-#352
     for (const [name, available] of Object.entries(capabilities())) {
       const expected = shipped.includes(name as Capability);
       expect(available, `${name} availability on desktop`).toBe(expected);

@@ -1,4 +1,5 @@
 import {can} from "@/lib/platform";
+import {HOTKEY_ACTIONS} from "@/lib/hotkeys";
 
 /**
  * The user-settings registry — the single place to define a setting. Add an entry here and it shows up
@@ -20,6 +21,18 @@ export interface SelectControl {
   options: { value: string; label: string }[];
 }
 
+/**
+ * A keyboard shortcut, recorded by pressing it.
+ *
+ * Not a text field: expecting someone to know that `CommandOrControl+Shift+O` is the literal string
+ * to type is a developer's mental model. Pressing the combination is what people actually do.
+ */
+export interface HotkeyControl {
+  kind: "hotkey";
+  default: string;
+  placeholder?: string;
+}
+
 export interface SettingDef {
   /** Stable storage key, dotted by area, e.g. "map.persistView". */
   key: string;
@@ -35,7 +48,7 @@ export interface SettingDef {
   group: string;
   label: string;
   description?: string;
-  control: ToggleControl | SelectControl;
+  control: ToggleControl | SelectControl | HotkeyControl;
 }
 
 /** The opaque per-user jsonb blob shape (key → value) stored under the "settings" namespace. */
@@ -141,6 +154,27 @@ const TRAY_SETTINGS: SettingDef[] = [
   },
 ];
 
+const whenHotkeys = () => can("globalHotkeys");
+
+/**
+ * One typed accelerator per action.
+ *
+ * Every one defaults to **empty**: a global shortcut takes a key combination away from every other
+ * application on the machine, and nobody should have that happen to them by installing an update.
+ */
+const HOTKEY_SETTINGS: SettingDef[] = HOTKEY_ACTIONS.map(({settingKey, label}) => ({
+  key: settingKey,
+  group: "Shortcuts",
+  available: whenHotkeys,
+  label,
+  description: undefined,
+  control: {
+    kind: "hotkey",
+    default: "",
+    placeholder: "Click, then press a shortcut",
+  },
+}));
+
 /** Every setting, in display order. Groups render in first-seen order. */
 export const SETTINGS: SettingDef[] = [
   {
@@ -215,6 +249,9 @@ export const SETTINGS: SettingDef[] = [
 
   // --- Menu bar (#351) ---
   ...TRAY_SETTINGS,
+
+  // --- Shortcuts (#352) ---
+  ...HOTKEY_SETTINGS,
 ];
 
 /** The default value for a setting key (used before the server value loads, or when signed out). */

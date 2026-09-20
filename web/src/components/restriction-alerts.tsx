@@ -1,4 +1,5 @@
 import {useEffect, useMemo, useRef, useState} from "react";
+import {onDismissAllAlerts} from "@/lib/alerts";
 import {useRestrictionNotifier} from "@/lib/notify-restrictions";
 import {cn, toneBg, toneText, type Tone} from "@ois/ui";
 import {AlertOctagon, X} from "lucide-react";
@@ -144,6 +145,10 @@ function RestrictionAlertsInner() {
   }, [live, settled, active, notifyRestrictions]);
 
   const dismiss = (key: string) => setAlerts((prev) => prev.filter((a) => a.key !== key));
+
+  // A global hotkey can clear everything showing, so an alert that fires while the controller is in
+  // CRC doesn't have to be chased around the screen (#352).
+  useEffect(() => onDismissAllAlerts(() => setAlerts([])), []);
 
   if (!alerts.length) return null;
   return (

@@ -9,6 +9,7 @@ import {RestrictionAlerts} from "@/components/restriction-alerts";
 import {NotificationClicks} from "@/components/notification-clicks";
 import {DesktopNotifiers} from "@/components/desktop-notifiers";
 import {DesktopTray} from "@/components/desktop-tray";
+import {DesktopHotkeys} from "@/components/desktop-hotkeys";
 import {WhatsNew} from "@/components/whats-new";
 import {useMe} from "@/lib/auth";
 import {movedPath} from "@/lib/moved-paths";
@@ -105,6 +106,7 @@ function RootLayout() {
       <NotificationClicks />
       <DesktopNotifiers />
       <DesktopTray />
+      <DesktopHotkeys />
       <WhatsNew />
       <AppShell>
         <Outlet />
