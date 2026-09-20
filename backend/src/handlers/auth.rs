@@ -17,7 +17,7 @@ use crate::{
         require_permission::RequirePermission,
         vatsim::{VatsimOAuthConfig, exchange_code_for_token, fetch_profile},
     },
-    config::{configured_allowed_origins, configured_server_admin_cids, cookie_secure},
+    config::{configured_return_to_origins, configured_server_admin_cids, cookie_secure},
     errors::ApiError,
     models::{DesktopExchangeRequest, DesktopSessionBody, MeBody},
     repos::{access as access_repo, auth as auth_repo, users as user_repo},
@@ -36,8 +36,13 @@ const DEFAULT_LOGIN_REDIRECT: &str = "/api/v1/me";
 /// that is where the rest of this flow already keeps its per-attempt context.
 const OAUTH_DESKTOP_COOKIE: &str = "ois_oauth_desktop";
 
-/// Query parameter the callback appends to the desktop app's loopback redirect.
+/// Query parameters the callback appends to the desktop app's loopback redirect.
 const DESKTOP_CODE_PARAM: &str = "code";
+const DESKTOP_STATE_PARAM: &str = "state";
+
+/// Upper bound on the nonce we will echo back, so a hostile `desktop_state` can't be used to build
+/// an unbounded redirect URL.
+const DESKTOP_STATE_MAX_LEN: usize = 128;
 
 /// Marks a session token as belonging to the desktop app; `auth::middleware` dispatches on it.
 const DESKTOP_SESSION_TOKEN_PREFIX: &str = "ois_dsk_";
@@ -58,6 +63,9 @@ pub struct LoginQuery {
     /// Set by the desktop app. Makes the callback hand back a one-time code as well as the usual
     /// cookie, which the app trades for a keychain-stored session token (#346).
     desktop: Option<bool>,
+    /// The desktop app's per-attempt nonce, echoed back on the loopback redirect so the app can
+    /// tell its own callback from one injected by anything else that can reach its port.
+    desktop_state: Option<String>,
 }
 
 #[derive(Deserialize)]
@@ -127,7 +135,18 @@ pub async fn vatsim_login(
     }
 
     if query.desktop.unwrap_or(false) {
-        let desktop_cookie = Cookie::build((OAUTH_DESKTOP_COOKIE, "1"))
+        // The cookie carries the app's nonce so the callback can echo it back. Empty when the app
+        // sent none — such a flow still works, it simply cannot be verified by the app.
+        let desktop_state = query
+            .desktop_state
+            .as_deref()
+            .map(str::trim)
+            .filter(|state| !state.is_empty() && state.len() <= DESKTOP_STATE_MAX_LEN)
+            .filter(|state| state.chars().all(|c| c.is_ascii_alphanumeric()))
+            .unwrap_or_default()
+            .to_string();
+
+        let desktop_cookie = Cookie::build((OAUTH_DESKTOP_COOKIE, desktop_state))
             .http_only(true)
             .secure(cookie_secure())
             .same_site(SameSite::Lax)
@@ -214,11 +233,24 @@ pub async fn vatsim_callback(
     // The desktop app is blocked on a loopback listener waiting for this redirect. Hand it a
     // one-time code rather than the session token itself: a token in the URL would persist in
     // browser history and in any referer, whereas the code is useless once exchanged.
-    if jar.get(OAUTH_DESKTOP_COOKIE).is_some() {
+    // Mint ONLY when the target is the app's loopback listener. Otherwise a flow whose `return_to`
+    // cookie went missing, or whose origin is no longer allowlisted, would fall back to
+    // DEFAULT_LOGIN_REDIRECT and send the browser to `/api/v1/me?code=<live credential>` — putting
+    // the credential in the address bar, history and any referer, which is the exact thing handing
+    // back a code instead of a token is supposed to avoid. It also stops `desktop=true` dropping a
+    // live code into the web app's URL for any other allowlisted origin.
+    if let Some(desktop_cookie) = jar.get(OAUTH_DESKTOP_COOKIE)
+        && is_loopback_redirect(&redirect_target)
+    {
         let code = format!("{}{}", Uuid::new_v4().simple(), Uuid::new_v4().simple());
         auth_repo::insert_desktop_auth_code(pool, &access_repo::sha256_hex(&code), &user_id)
             .await?;
         redirect_target = append_query_param(&redirect_target, DESKTOP_CODE_PARAM, &code);
+
+        let state = desktop_cookie.value();
+        if !state.is_empty() {
+            redirect_target = append_query_param(&redirect_target, DESKTOP_STATE_PARAM, state);
+        }
     }
 
     let clear_desktop = Cookie::build((OAUTH_DESKTOP_COOKIE, ""))
@@ -289,6 +321,21 @@ fn append_query_param(url: &str, key: &str, value: &str) -> String {
             format!("{url}{separator}{key}={value}")
         }
     }
+}
+
+/// Whether a redirect target is the desktop app's loopback listener — the only place a one-time
+/// code may be handed to.
+fn is_loopback_redirect(url: &str) -> bool {
+    let Ok(parsed) = Url::parse(url) else {
+        return false;
+    };
+    if parsed.scheme() != "http" {
+        return false;
+    }
+    matches!(
+        parsed.host_str(),
+        Some("127.0.0.1") | Some("localhost") | Some("::1")
+    )
 }
 
 /// Mints a fresh desktop session token. The prefix is what `auth::middleware` dispatches on.
@@ -461,8 +508,9 @@ async fn ensure_user_login_access(
     Ok(())
 }
 
-/// Validates a `return_to` target: absolute http(s) whose origin is in
-/// `CORS_ALLOWED_ORIGINS`. Prevents the login flow becoming an open redirect.
+/// Validates a `return_to` target: absolute http(s) whose origin is allowlisted for redirects
+/// (`CORS_ALLOWED_ORIGINS` plus `OAUTH_RETURN_TO_ORIGINS`). Prevents the login flow becoming an
+/// open redirect. Note the redirect-only list deliberately does not grant CORS.
 fn validate_return_to(raw: &str) -> Result<String, ApiError> {
     let trimmed = raw.trim();
     if trimmed.is_empty() {
@@ -473,11 +521,14 @@ fn validate_return_to(raw: &str) -> Result<String, ApiError> {
         return Err(ApiError::BadRequest);
     }
     let origin = url_origin(trimmed).ok_or(ApiError::BadRequest)?;
-    if !configured_allowed_origins()
+    if !configured_return_to_origins()
         .iter()
         .any(|allowed| allowed == &origin)
     {
-        tracing::warn!(origin, "return_to origin not in CORS_ALLOWED_ORIGINS");
+        tracing::warn!(
+            origin,
+            "return_to origin is not an allowlisted redirect target"
+        );
         return Err(ApiError::BadRequest);
     }
     Ok(trimmed.to_string())
@@ -535,5 +586,40 @@ fn url_origin(raw: &str) -> Option<String> {
         Some(format!("{scheme}://{host}"))
     } else {
         Some(format!("{scheme}://{host}:{port}"))
+    }
+}
+
+#[cfg(test)]
+mod desktop_redirect_tests {
+    use super::*;
+
+    /// A one-time code may only ever be handed to the desktop app's loopback listener. If the
+    /// `return_to` cookie is missing or its origin is no longer allowlisted, `redirect_target`
+    /// falls back to DEFAULT_LOGIN_REDIRECT — and appending a live credential to that would send
+    /// the browser to `/api/v1/me?code=…`, putting it in the address bar and history.
+    #[test]
+    fn only_a_loopback_target_may_carry_a_code() {
+        assert!(is_loopback_redirect("http://127.0.0.1:8765/callback"));
+        assert!(is_loopback_redirect("http://localhost:8765/callback"));
+
+        assert!(
+            !is_loopback_redirect(DEFAULT_LOGIN_REDIRECT),
+            "the fallback target must never be given a code"
+        );
+        assert!(!is_loopback_redirect("https://ois.vatusa.net/"));
+        assert!(
+            !is_loopback_redirect("https://127.0.0.1:8765/callback"),
+            "the loopback listener is plain http; https there is not it"
+        );
+        assert!(!is_loopback_redirect("not a url"));
+    }
+
+    #[test]
+    fn appending_the_code_to_the_fallback_would_expose_it() {
+        // Documents exactly what the gate above prevents.
+        assert_eq!(
+            append_query_param(DEFAULT_LOGIN_REDIRECT, DESKTOP_CODE_PARAM, "LIVE"),
+            "/api/v1/me?code=LIVE"
+        );
     }
 }

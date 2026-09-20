@@ -15,3 +15,4 @@ tauri-build.workspace = true
 tauri.workspace = true
 keyring.workspace = true
 open.workspace = true
+uuid.workspace = true

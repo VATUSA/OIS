@@ -331,5 +331,10 @@ The full list with dev defaults is in `.env.example`. The ones that gate functio
 - **VATUSA** (optional roster sync): `VATUSA_API_BASE`, `VATUSA_API_KEY`, `OIS_PUBLIC_URL`.
 - **Discord bot** (optional): `DISCORD_BOT_TOKEN`, `OIS_API_BASE`, `OIS_API_TOKEN`, `OIS_POLL_SECS`.
 - **Web/Vite dev**: `VITE_OIS_API_URL`, `OIS_OPENAPI_URL` (codegen source) — in `web/.env.local`.
+- **Origins** — two lists, deliberately separate. `CORS_ALLOWED_ORIGINS` grants *credentialed* CORS
+  (the web app, and the Tauri webview's `tauri://localhost` / `http://tauri.localhost`) and is also
+  accepted for OAuth `return_to`. `OAUTH_RETURN_TO_ORIGINS` is `return_to`-only, no CORS — the
+  desktop app's loopback listener (`http://127.0.0.1:8765`) belongs here, because that port is bound
+  only while sign-in runs and anything else that binds it must not inherit API access (#346).
 
 Never put secrets in the repo; `.env` / `web/.env.local` are gitignored.

@@ -38,8 +38,44 @@ pub fn configured_server_admin_cids() -> Vec<i64> {
         .collect()
 }
 
-/// Origins trusted for credentialed cross-origin requests. Reused as the allowlist
-/// for OAuth `return_to` redirect targets — same trust boundary.
+/// Origins that are valid OAuth `return_to` targets but must NOT be granted credentialed CORS.
+///
+/// The desktop app's loopback listener is the case this exists for: the backend has to be willing
+/// to redirect a browser to `http://127.0.0.1:8765/callback`, but that port is only bound while
+/// sign-in is in progress, so granting it CORS would let anything else that binds it serve a page
+/// making credentialed API calls with the user's cookie. Two different trust questions, two lists.
+pub fn configured_return_to_only_origins() -> Vec<String> {
+    parse_origin_list("OAUTH_RETURN_TO_ORIGINS")
+}
+
+/// Every origin acceptable as an OAuth `return_to` target: the CORS origins plus the
+/// redirect-only ones above.
+pub fn configured_return_to_origins() -> Vec<String> {
+    let mut origins = configured_allowed_origins();
+    origins.extend(configured_return_to_only_origins());
+    origins
+}
+
+fn parse_origin_list(var: &str) -> Vec<String> {
+    let Some(raw) = std::env::var(var)
+        .ok()
+        .map(|value| value.trim().to_string())
+        .filter(|value| !value.is_empty())
+    else {
+        return Vec::new();
+    };
+
+    raw.split(',')
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(normalize_origin)
+        .collect()
+}
+
+/// Origins trusted for credentialed cross-origin requests.
+///
+/// This is the CORS allowlist only. `return_to` targets are [`configured_return_to_origins`],
+/// which is this list plus the redirect-only entries.
 pub fn configured_allowed_origins() -> Vec<String> {
     let Some(raw) = std::env::var("CORS_ALLOWED_ORIGINS")
         .ok()

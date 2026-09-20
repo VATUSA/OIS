@@ -3473,6 +3473,7 @@ dependencies = [
  "open",
  "tauri",
  "tauri-build",
+ "uuid",
 ]
 
 [[package]]
