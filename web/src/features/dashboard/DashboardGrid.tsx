@@ -2,6 +2,7 @@ import {ResponsiveGridLayout, useContainerWidth, type Layout} from "react-grid-l
 import "react-grid-layout/css/styles.css";
 
 import {WidgetBody, widgetTitle} from "./render";
+import {openPopout} from "@/lib/popout";
 import {defaultCell, GRID_COLS, type DashboardState, type GridCell, type Widget} from "./types";
 import {WidgetFrame} from "./WidgetFrame";
 
@@ -23,12 +24,19 @@ const isFlush = (k: Widget["kind"]) => k === "map" || k === "facility_map" || k 
  * stacked column (drag/resize don't make sense on a phone).
  */
 export function DashboardGrid({
+  boardId,
   state,
   editing,
   onLayoutChange,
   onRemove,
   onUpdate,
 }: {
+  /**
+   * The board these widgets belong to. Optional because not every grid is a saved board — the
+   * shared read-only view is addressed by slug and the stats page isn't a board at all. Without
+   * it a widget has no stable address, so no pop-out is offered rather than one that can't reopen (#349).
+   */
+  boardId?: string;
   state: DashboardState;
   editing: boolean;
   onLayoutChange: (layout: GridCell[]) => void;
@@ -46,6 +54,16 @@ export function DashboardGrid({
       bare={isBare(w.kind)}
       flush={isFlush(w.kind)}
       onRemove={() => onRemove(w.id)}
+      onPopOut={
+        boardId
+          ? () =>
+              void openPopout({
+                id: `widget-${w.id}`,
+                title: widgetTitle(w),
+                route: `/popout/widget/${boardId}/${w.id}`,
+              })
+          : undefined
+      }
     >
       <WidgetBody widget={w} editing={editing} onUpdate={onUpdate} />
     </WidgetFrame>
