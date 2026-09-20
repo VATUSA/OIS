@@ -1,10 +1,11 @@
 {
   "$schema": "../gen/schemas/desktop-schema.json",
   "identifier": "default",
-  "description": "Permissions for the OIS main window and its pop-out mini-windows: Tauri's core defaults, signed auto-update (#347), native notifications plus the window controls a notification click needs (#348), and creating / placing / pinning the always-on-top pop-outs (#349).",
+  "description": "Permissions for the OIS main window and the windows it opens: Tauri's core defaults, signed auto-update (#347), native notifications plus the window controls a notification click needs (#348), and creating / placing / pinning pop-out panels (#349) and whole-route windows (#350).",
   "windows": [
     "main",
-    "popout-*"
+    "popout-*",
+    "window-*"
   ],
   "permissions": [
     "core:default",
@@ -17,6 +18,7 @@
     "core:webview:allow-create-webview-window",
     "core:window:allow-set-always-on-top",
     "core:window:allow-close",
+    "core:window:allow-destroy",
     "core:window:allow-set-position",
     "core:window:allow-set-size",
     "core:window:allow-outer-position",

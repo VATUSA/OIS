@@ -46,7 +46,12 @@ describe("capabilities", () => {
     // written against can("tray") today is correct both before and after #351 lands. Updating this
     // list is the deliberate cost of that: flipping a flag without noticing fails here.
     pretendDesktop();
-    const shipped: Capability[] = ["autoUpdate", "notifications", "miniWindows"]; // #347-#349
+    const shipped: Capability[] = [
+      "autoUpdate",
+      "notifications",
+      "miniWindows",
+      "multiWindow",
+    ]; // #347-#350
     for (const [name, available] of Object.entries(capabilities())) {
       const expected = shipped.includes(name as Capability);
       expect(available, `${name} availability on desktop`).toBe(expected);

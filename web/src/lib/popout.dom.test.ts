@@ -1,7 +1,7 @@
 // @vitest-environment jsdom
 import {afterEach, beforeEach, describe, expect, it, vi} from "vitest";
 
-import {openPopout, popoutLabel} from "./popout";
+import {openPopout, popoutLabel, restoreWindows, routeWindowLabel} from "./popout";
 
 const WebviewWindow = vi.fn();
 const getByLabel = vi.fn();
@@ -25,6 +25,7 @@ vi.mock("@tauri-apps/api/webviewWindow", () => ({
           handlers.resized = cb;
           return Promise.resolve(() => undefined);
         },
+        onCloseRequested: () => Promise.resolve(() => undefined),
         outerPosition: () => outerPosition(),
         outerSize: () => outerSize(),
       });
@@ -32,7 +33,11 @@ vi.mock("@tauri-apps/api/webviewWindow", () => ({
     {getByLabel: (l: string) => getByLabel(l)},
   ),
 }));
-vi.mock("@tauri-apps/api/window", () => ({availableMonitors: () => availableMonitors()}));
+const currentLabel = {value: "main"};
+vi.mock("@tauri-apps/api/window", () => ({
+  availableMonitors: () => availableMonitors(),
+  getCurrentWindow: () => ({label: currentLabel.value}),
+}));
 
 function pretendDesktop() {
   window.__TAURI_INTERNALS__ = {};
@@ -64,6 +69,7 @@ beforeEach(() => {
   installStorage();
   handlers.moved = undefined;
   handlers.resized = undefined;
+  currentLabel.value = "main";
   outerPosition.mockReset().mockResolvedValue({x: 300, y: 400});
   outerSize.mockReset().mockResolvedValue({width: 420, height: 640});
 });
@@ -121,7 +127,7 @@ describe("openPopout", () => {
   it("restores saved geometry when the screen it was on still exists", async () => {
     pretendDesktop();
     localStorage.setItem(
-      "ois.popout.fca-abc",
+      "ois.window.popout-fca-abc",
       JSON.stringify({x: 100, y: 120, width: 400, height: 600}),
     );
 
@@ -138,7 +144,7 @@ describe("openPopout", () => {
     // the window somewhere the user cannot reach.
     pretendDesktop();
     localStorage.setItem(
-      "ois.popout.fca-abc",
+      "ois.window.popout-fca-abc",
       JSON.stringify({x: 3000, y: 200, width: 400, height: 600}),
     );
 
@@ -151,7 +157,7 @@ describe("openPopout", () => {
 
   it("ignores corrupt stored geometry rather than failing to open", async () => {
     pretendDesktop();
-    localStorage.setItem("ois.popout.fca-abc", "not json");
+    localStorage.setItem("ois.window.popout-fca-abc", "not json");
 
     await expect(openPopout(SPEC)).resolves.toBe(true);
   });
@@ -177,11 +183,11 @@ describe("remembering where a window was put", () => {
       await openPopout(SPEC);
 
       for (let i = 0; i < 50; i++) handlers.moved?.();
-      expect(localStorage.getItem("ois.popout.fca-abc")).toBeNull();
+      expect(localStorage.getItem("ois.window.popout-fca-abc")).toBeNull();
 
       await vi.advanceTimersByTimeAsync(400);
       expect(outerPosition).toHaveBeenCalledTimes(1);
-      expect(JSON.parse(localStorage.getItem("ois.popout.fca-abc")!)).toEqual({
+      expect(JSON.parse(localStorage.getItem("ois.window.popout-fca-abc")!)).toEqual({
         x: 300,
         y: 400,
         width: 420,
@@ -201,9 +207,60 @@ describe("remembering where a window was put", () => {
       handlers.resized?.();
       await vi.advanceTimersByTimeAsync(400);
 
-      expect(localStorage.getItem("ois.popout.fca-abc")).not.toBeNull();
+      expect(localStorage.getItem("ois.window.popout-fca-abc")).not.toBeNull();
     } finally {
       vi.useRealTimers();
     }
+  });
+});
+
+describe("restoring windows on launch", () => {
+  const REMEMBERED = [
+    {id: "/ops/idst", route: "/ops/idst", title: "OIS · IDST"},
+    {id: "/facility-map", route: "/facility-map", title: "OIS · Map"},
+  ];
+
+  it("reopens the windows that were open last time", async () => {
+    pretendDesktop();
+    localStorage.setItem("ois.windows", JSON.stringify(REMEMBERED));
+
+    await expect(restoreWindows()).resolves.toBe(2);
+    expect(WebviewWindow).toHaveBeenCalledTimes(2);
+  });
+
+  it("opens route windows at the full route, not the bare embed view", async () => {
+    // A window is the whole app on another monitor; stripping the shell would make it useless.
+    pretendDesktop();
+    localStorage.setItem("ois.windows", JSON.stringify([REMEMBERED[0]]));
+
+    await restoreWindows();
+
+    expect(WebviewWindow).toHaveBeenCalledWith(
+      routeWindowLabel("/ops/idst"),
+      expect.objectContaining({url: "/ops/idst", alwaysOnTop: false}),
+    );
+  });
+
+  it("restores nothing from a window that is not the main one", async () => {
+    // Without this guard every restored window would restore the whole set as it booted, and one
+    // relaunch would spawn windows without end.
+    pretendDesktop();
+    currentLabel.value = "window--ops-idst";
+    localStorage.setItem("ois.windows", JSON.stringify(REMEMBERED));
+
+    await expect(restoreWindows()).resolves.toBe(0);
+    expect(WebviewWindow).not.toHaveBeenCalled();
+  });
+
+  it("restores nothing on the web build", async () => {
+    localStorage.setItem("ois.windows", JSON.stringify(REMEMBERED));
+
+    await expect(restoreWindows()).resolves.toBe(0);
+    expect(WebviewWindow).not.toHaveBeenCalled();
+  });
+
+  it("is a no-op when nothing was open last time", async () => {
+    pretendDesktop();
+    await expect(restoreWindows()).resolves.toBe(0);
   });
 });

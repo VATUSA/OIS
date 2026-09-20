@@ -60,7 +60,7 @@ const IMPLEMENTED: Readonly<Record<Capability, boolean>> = Object.freeze({
   autoUpdate: true, // #347 — signed auto-update (shipped)
   notifications: true, // #348 — native OS notifications (shipped)
   miniWindows: true, // #349 — pop-out always-on-top mini-windows (shipped)
-  multiWindow: false, // #350 — multi-window / multi-monitor
+  multiWindow: true, // #350 — multi-window / multi-monitor (shipped)
   tray: false, // #351 — system tray
   globalHotkeys: false, // #352 — global hotkeys
   audioAlerts: false, // #353 — audio alerts

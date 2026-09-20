@@ -6,6 +6,7 @@ import {DialogProvider, ThemeProvider, ToastProvider, TooltipProvider} from "@oi
 
 import {router} from "./router";
 import {desktopRefresh} from "./lib/desktop-auth";
+import {restoreWindows} from "./lib/popout";
 import {isTauri} from "./lib/platform";
 import {RealtimeProvider} from "./components/realtime-provider";
 import "@fontsource-variable/inter";
@@ -20,6 +21,11 @@ const queryClient = new QueryClient();
 // (#346). Deliberately not awaited — the stored token stays valid meanwhile, so there is no reason
 // to hold up first paint, and a failure here just means the app starts signed out.
 if (isTauri()) void desktopRefresh();
+
+// Desktop only: reopen the route windows that were open last time, each at the position it was
+// left (#350). Guarded inside to the main window — otherwise every restored window would restore
+// the whole set again as it booted. Not awaited; a window failing to reopen must not delay paint.
+if (isTauri()) void restoreWindows();
 
 ReactDOM.createRoot(document.getElementById("root")!).render(
   <React.StrictMode>
