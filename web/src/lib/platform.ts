@@ -70,11 +70,37 @@ const CAPABILITIES = Object.keys(IMPLEMENTED) as Capability[];
 /**
  * Every capability and whether it's available *right now*: it needs both the desktop shell and a
  * shipped implementation. On the web build they are all false, always.
+ *
+ * Memoised per platform. `isTauri()` and {@link IMPLEMENTED} are both constant for the life of the
+ * process, so a fresh object per call only churned identity — a caller putting the result in a
+ * `useMemo`/`useEffect` dependency array would re-run on every render.
  */
+const SNAPSHOTS = new Map<boolean, Readonly<Record<Capability, boolean>>>();
+
 export function capabilities(): Readonly<Record<Capability, boolean>> {
-  return Object.freeze(
-    Object.fromEntries(CAPABILITIES.map((c) => [c, can(c)])) as Record<Capability, boolean>,
-  );
+  const onDesktop = isTauri();
+  let snapshot = SNAPSHOTS.get(onDesktop);
+  if (!snapshot) {
+    snapshot = Object.freeze(
+      Object.fromEntries(
+        CAPABILITIES.map((c) => [c, availability(onDesktop, IMPLEMENTED[c])]),
+      ) as Record<Capability, boolean>,
+    );
+    SNAPSHOTS.set(onDesktop, snapshot);
+  }
+  return snapshot;
+}
+
+/**
+ * The rule itself: a capability needs *both* the desktop shell and a shipped implementation.
+ *
+ * Extracted as a pure function so the desktop half of the gate is testable today. Inlined into
+ * `can()` it was unobservable — every entry in {@link IMPLEMENTED} is currently `false`, so
+ * dropping the `isTauri()` check entirely left the whole suite green while quietly arming a leak
+ * of desktop-only UI into the browser the moment any feature issue flips its flag.
+ */
+export function availability(onDesktop: boolean, implemented: boolean): boolean {
+  return onDesktop && implemented;
 }
 
 /**
@@ -82,7 +108,7 @@ export function capabilities(): Readonly<Record<Capability, boolean>> {
  * definition of "available" that {@link capabilities} maps over.
  */
 export function can(capability: Capability): boolean {
-  return isTauri() && IMPLEMENTED[capability];
+  return availability(isTauri(), IMPLEMENTED[capability]);
 }
 
 /**
