@@ -39,6 +39,15 @@ per-feature specs); user docs are a VitePress site in `docs-site/`. The backlog 
 Rust: edition 2024, MSRV 1.85, **nightly** toolchain (for `-Zthreads` — no nightly *language*
 features, so `stable` remains a valid fallback).
 
+**On Linux, `just ci` needs the GTK/WebKit dev packages.** `just check` is
+`cargo check --workspace`, and the workspace includes the Tauri shell (`desktop/src-tauri`), whose
+Linux backend will not even `cargo check` without them — so a backend-only change still fails
+without this. macOS and Windows use the OS webview and need nothing extra.
+
+```bash
+sudo apt-get install -y libwebkit2gtk-4.1-dev libgtk-3-dev libayatana-appindicator3-dev librsvg2-dev
+```
+
 ---
 
 ## Architecture
