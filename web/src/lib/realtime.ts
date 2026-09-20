@@ -17,6 +17,10 @@ const TOPIC_KEYS: Record<string, string[][]> = {
   "tmu.program": [["tmu-programs"], ["departures"], ["flow"]],
   "flow.cfr": [["departures"], ["flow"]],
   "events.availability": [["event-availability"]],
+  // Payload-free by design: each client refetches its own data and works out whether the change
+  // was about them. The socket is broadcast to every signed-in client, so it must not carry who.
+  "access.granted": [["me"]],
+  "events.reminder": [["ace-claims"], ["my-ace-claims"]],
 };
 
 /** Every distinct key across all topics — refetched once on (re)connect to catch up on anything that

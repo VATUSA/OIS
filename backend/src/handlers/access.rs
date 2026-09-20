@@ -298,6 +298,11 @@ pub async fn update_user_access(
     )
     .await?;
 
+    // Tell connected clients their access may have changed. Deliberately fired for any save rather
+    // than only for additions: this is an invalidation nudge, and deciding whether *you* gained
+    // anything is the client's job — it is the only side that knows what you held before.
+    state.publish(crate::realtime::topic::ACCESS_GRANTED);
+
     Ok(Json(response))
 }
 
