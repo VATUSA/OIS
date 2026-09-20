@@ -1,11 +1,12 @@
 // @vitest-environment jsdom
 import {afterEach, beforeEach, describe, expect, it, vi} from "vitest";
 
-import {fetchUpdate} from "./desktop-update";
+import {fetchUpdate, installUpdate} from "./desktop-update";
 
 const check = vi.fn();
 const download = vi.fn();
 const downloadAndInstall = vi.fn();
+const install = vi.fn();
 const relaunch = vi.fn();
 
 vi.mock("@tauri-apps/plugin-updater", () => ({check: () => check()}));
@@ -20,6 +21,7 @@ beforeEach(() => {
   check.mockReset();
   download.mockReset();
   downloadAndInstall.mockReset();
+  install.mockReset();
   relaunch.mockReset();
 });
 
@@ -42,10 +44,10 @@ describe("fetchUpdate", () => {
 
   it("reports ready only after the package is downloaded and verified", async () => {
     pretendDesktop();
-    check.mockResolvedValue({version: "1.2.3", download, downloadAndInstall});
+    check.mockResolvedValue({version: "1.2.3", download, downloadAndInstall, install});
     download.mockResolvedValue(undefined);
 
-    await expect(fetchUpdate()).resolves.toEqual({state: "ready", version: "1.2.3"});
+    await expect(fetchUpdate()).resolves.toMatchObject({state: "ready", version: "1.2.3"});
     expect(download).toHaveBeenCalledTimes(1);
   });
 
@@ -54,7 +56,7 @@ describe("fetchUpdate", () => {
     // match the pubkey compiled into the app. A tampered update must therefore end as `failed` —
     // never `ready`, because `ready` is what the banner offers the user a restart for.
     pretendDesktop();
-    check.mockResolvedValue({version: "9.9.9", download, downloadAndInstall});
+    check.mockResolvedValue({version: "9.9.9", download, downloadAndInstall, install});
     download.mockRejectedValue(new Error("signature verification failed"));
 
     await expect(fetchUpdate()).resolves.toEqual({state: "failed"});
@@ -65,12 +67,13 @@ describe("fetchUpdate", () => {
   it("never restarts the app on its own, even for a good update", async () => {
     // Applying is a separate, user-initiated step; fetching must not have side effects.
     pretendDesktop();
-    check.mockResolvedValue({version: "1.2.3", download, downloadAndInstall});
+    check.mockResolvedValue({version: "1.2.3", download, downloadAndInstall, install});
     download.mockResolvedValue(undefined);
 
     await fetchUpdate();
 
     expect(downloadAndInstall).not.toHaveBeenCalled();
+    expect(install).not.toHaveBeenCalled();
     expect(relaunch).not.toHaveBeenCalled();
   });
 
@@ -79,5 +82,41 @@ describe("fetchUpdate", () => {
     check.mockRejectedValue(new Error("network down"));
 
     await expect(fetchUpdate()).resolves.toEqual({state: "failed"});
+  });
+});
+
+describe("installUpdate", () => {
+  it("applies the package that was verified, without asking the feed again", async () => {
+    // The whole point of holding the staged handle: re-`check()`ing would download the package a
+    // second time and apply whatever the feed serves *then*, not the thing the banner offered.
+    pretendDesktop();
+    check.mockResolvedValue({version: "1.2.3", download, downloadAndInstall, install});
+    download.mockResolvedValue(undefined);
+    install.mockResolvedValue(undefined);
+
+    const status = await fetchUpdate();
+    expect(status.state).toBe("ready");
+    check.mockClear();
+
+    if (status.state !== "ready") throw new Error("expected a staged update");
+    await installUpdate(status.staged);
+
+    expect(install).toHaveBeenCalledTimes(1);
+    expect(check).not.toHaveBeenCalled();
+    expect(downloadAndInstall).not.toHaveBeenCalled();
+    expect(relaunch).toHaveBeenCalledTimes(1);
+  });
+
+  it("propagates a failure to apply rather than swallowing it", async () => {
+    pretendDesktop();
+    check.mockResolvedValue({version: "1.2.3", download, downloadAndInstall, install});
+    download.mockResolvedValue(undefined);
+    install.mockRejectedValue(new Error("could not apply"));
+
+    const status = await fetchUpdate();
+    if (status.state !== "ready") throw new Error("expected a staged update");
+
+    await expect(installUpdate(status.staged)).rejects.toThrow(/could not apply/);
+    expect(relaunch).not.toHaveBeenCalled();
   });
 });

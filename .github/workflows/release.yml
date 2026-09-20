@@ -34,6 +34,11 @@ jobs:
     needs: release
     strategy:
       fail-fast: false
+      # One at a time: every leg publishes the same `latest.json` asset to the same release, and
+      # those publishes are not serialised against each other. Run in parallel, whichever upload
+      # lands last wins and the manifest can end up missing a platform — whose users then silently
+      # never update, with every job still green.
+      max-parallel: 1
       matrix:
         include:
           - os: macos-latest
@@ -50,6 +55,31 @@ jobs:
       # Refuse to ship rather than ship an update nobody can verify. Until the real key is in
       # tauri.conf.json every build would produce packages the installed app rejects — better to
       # fail here, loudly, than to publish a broken update channel.
+      # The shipped version must BE the tag. Inheriting the crate's hardcoded 0.1.0 meant every
+      # release published 0.1.0, so an installed app asked "is 0.1.0 newer than 0.1.0?" and the
+      # update channel never fired for anyone — silently, forever. Rewrite it from the tag, and
+      # refuse to build if the repo's VERSION disagrees, so a mistagged release fails here rather
+      # than shipping an app that can never update.
+      - name: Pin the desktop version to the tag
+        shell: bash
+        run: |
+          tag_version="${GITHUB_REF_NAME#v}"
+          repo_version="$(cat VERSION)"
+          if [ "$tag_version" != "$repo_version" ]; then
+            echo "::error::tag $GITHUB_REF_NAME implies version $tag_version but VERSION says $repo_version."
+            echo "::error::Bump VERSION and re-tag; they are the same release."
+            exit 1
+          fi
+          python3 - "$tag_version" <<'PY'
+          import json, sys, collections
+          path = "desktop/src-tauri/tauri.conf.json"
+          conf = json.load(open(path), object_pairs_hook=collections.OrderedDict)
+          conf["version"] = sys.argv[1]
+          json.dump(conf, open(path, "w"), indent=2)
+          open(path, "a").write("\n")
+          PY
+          echo "desktop version set to $tag_version"
+
       - name: Require a real updater public key
         shell: bash
         run: |

@@ -21,11 +21,14 @@ import {can} from "@/lib/platform";
 /** How often a long-running app re-checks. Most sessions never reach this; launch is the common path. */
 const CHECK_INTERVAL_MS = 6 * 60 * 60 * 1000;
 
+/** The staged package, held so installing applies the one we actually verified. */
+type StagedUpdate = {install: () => Promise<void>};
+
 export type UpdateStatus =
   /** No update, or not the desktop app at all. */
   | {state: "idle"}
   /** Verified and staged; waiting for the user to accept the restart. */
-  | {state: "ready"; version: string}
+  | {state: "ready"; version: string; staged: StagedUpdate}
   /** The check or the download failed — including a signature that didn't verify. */
   | {state: "failed"};
 
@@ -45,11 +48,15 @@ export async function fetchUpdate(): Promise<UpdateStatus> {
 
     // Downloads and verifies; throws if the signature doesn't match the configured public key.
     await update.download();
-    return {state: "ready", version: update.version};
-  } catch {
-    // A failed check is not worth interrupting anyone over — an unreachable feed, an offline
-    // machine, or a package that failed verification all mean the same thing to the user: carry on
-    // with the version they have.
+    // Hand back the very object we just verified. Re-`check()`ing at install time would download
+    // the package a second time and apply whatever the feed serves *then* — not the thing the
+    // banner told the user was verified.
+    return {state: "ready", version: update.version, staged: update};
+  } catch (error) {
+    // An unreachable feed and a package that failed verification both leave the user on the
+    // version they have, so the UI treats them alike — but they are not the same event, and a
+    // signature that didn't match means someone served a package we refused. Say so somewhere.
+    console.warn("[update] check or download failed", error);
     return {state: "failed"};
   }
 }
@@ -60,14 +67,13 @@ export async function fetchUpdate(): Promise<UpdateStatus> {
  * Only call this from a user action: it ends the current session, and doing that unasked to someone
  * running traffic is exactly what this design avoids.
  */
-export async function installUpdate(): Promise<void> {
-  const {check} = await import("@tauri-apps/plugin-updater");
+export async function installUpdate(staged: StagedUpdate): Promise<void> {
   const {relaunch} = await import("@tauri-apps/plugin-process");
 
-  const update = await check();
-  if (!update) return;
-
-  await update.downloadAndInstall();
+  // `staged` is the package `fetchUpdate` already downloaded and verified, so this applies exactly
+  // what the banner offered — no second download, and no window in which the feed could change
+  // underneath the user between being told an update was ready and accepting it.
+  await staged.install();
   await relaunch();
 }
 
