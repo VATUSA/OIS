@@ -58,7 +58,9 @@ function FcaNotifier({fcaId, name}: {fcaId: string; name: string}) {
   const {value: thresholdRaw} = useSetting<string>("notifications.meteringDelayMin", "15");
   const threshold = Number(thresholdRaw) || 15;
 
-  const traffic = useFcaTraffic(fcaId);
+  // Background polling on: this component exists to notice releases and metering delay while the
+  // window is hidden, which is when the default interval would be skipped.
+  const traffic = useFcaTraffic(fcaId, false, {background: true});
   const flights = React.useMemo(() => traffic.data ?? [], [traffic.data]);
   const route = `/ops/fca?fca=${encodeURIComponent(fcaId)}`;
 
@@ -216,7 +218,10 @@ function EventReminderNotifier() {
       // neither repeats.
       m.set(`${claim.claim_id}:${tier.hours}`, {
         title: `${claim.event_title} in ${tier.label}`,
-        body: `You're claimed for ${claim.position}.`,
+        // `position` is optional — support can be requested without naming one.
+        body: claim.position
+          ? `You're claimed for ${claim.position}.`
+          : `You're claimed for a position.`,
         route: `/planning/events/${claim.event_id}`,
       });
     }

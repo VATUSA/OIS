@@ -241,13 +241,6 @@ pub struct DueReminder {
 /// the claimer has a linked Discord account, the request isn't cancelled, and no `job_type` job has
 /// already been enqueued for this claim — so a released claim or a cancelled request naturally
 /// drops out, and a repeat scheduler tick never double-sends.
-/// Claims whose event falls in `(now + hours_after, now + hours_before]` — i.e. this tier's own
-/// window, not "anything within `hours_before`". Without a lower bound, a claim first seen after its
-/// event is already inside a *later* tier's window (e.g. claimed at T-3h, before either reminder has
-/// fired) would match every tier whose upper bound is ≥3h simultaneously — sending a 24h-tier
-/// reminder (labelled "24h") and a 6h-tier reminder back to back for an event that's actually only
-/// 3 hours out. Bounding each tier to its own slice ensures a claim only ever matches the tier whose
-/// window it's *actually* currently in.
 /// The signed-in user's claimed positions for events that haven't started yet.
 ///
 /// Mirrors the join `claims_due_for_reminder` uses (cancelled requests excluded) so the two agree
@@ -268,6 +261,13 @@ pub async fn my_upcoming_claims(pool: &PgPool, user_id: &str) -> Result<Vec<MyAc
     .map_err(|_| ApiError::Internal)
 }
 
+/// Claims whose event falls in `(now + hours_after, now + hours_before]` — i.e. this tier's own
+/// window, not "anything within `hours_before`". Without a lower bound, a claim first seen after its
+/// event is already inside a *later* tier's window (e.g. claimed at T-3h, before either reminder has
+/// fired) would match every tier whose upper bound is ≥3h simultaneously — sending a 24h-tier
+/// reminder (labelled "24h") and a 6h-tier reminder back to back for an event that's actually only
+/// 3 hours out. Bounding each tier to its own slice ensures a claim only ever matches the tier whose
+/// window it's *actually* currently in.
 pub async fn claims_due_for_reminder(
     pool: &PgPool,
     hours_after: i64,
@@ -568,7 +568,35 @@ mod tests {
 
         assert_eq!(mine.len(), 1, "someone else's claim must not appear");
         assert_eq!(mine[0].event_id, soon);
-        assert_eq!(mine[0].position, "DCA_APP");
+        assert_eq!(mine[0].position.as_deref(), Some("DCA_APP"));
+    }
+
+    /// `ace.requests.position` is nullable — support can be asked for without naming a position.
+    /// Typed as a non-Option String, `query_as` failed to decode and the endpoint 500'd for anyone
+    /// holding such a claim.
+    #[sqlx::test]
+    async fn my_claims_include_a_request_with_no_position(pool: PgPool) {
+        let me = seed_user(&pool, "Claimer").await;
+        let requester = seed_user(&pool, "Requester").await;
+        let event = seed_event(&pool, 9101, 5).await;
+
+        let mut tx = pool.begin().await.unwrap();
+        let request_id =
+            create_request(&mut tx, event, &requester, Some("ZDC"), None, 1, "any help")
+                .await
+                .unwrap();
+        tx.commit().await.unwrap();
+        let mut tx = pool.begin().await.unwrap();
+        claim_request(&mut tx, &request_id, &me, "", None, None)
+            .await
+            .unwrap();
+        tx.commit().await.unwrap();
+
+        let mine = my_upcoming_claims(&pool, &me)
+            .await
+            .expect("a claim without a position must not fail the whole query");
+        assert_eq!(mine.len(), 1);
+        assert_eq!(mine[0].position, None);
     }
 
     #[sqlx::test]
