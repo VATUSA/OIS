@@ -125,6 +125,33 @@ docker compose -f docker-compose.yml -f docker-compose.override.yml \
                -f docker-compose.observability.yml up -d --build
 ```
 
+### Portainer (paste-the-YAML deploys)
+
+The merge-file layout above works when Docker can see this repo's files (a local checkout, or a
+Portainer stack deployed **from Git**). A Portainer **web-editor** stack can't use it: its `./…`
+bind-mount sources resolve on the host to Portainer's per-stack dir, which doesn't hold these
+config files, so Prometheus and Grafana would come up unconfigured.
+
+For that, use **`docker-compose.observability.portainer.yml`** — a self-contained variant that
+carries every config **inline** as Docker `configs` (no bind mounts, no files on the host) and joins
+the base stack's network as **external** instead of being a merge fragment. Deploy it as its own
+Portainer stack:
+
+1. Deploy the base OIS stack first — it creates the shared network (`<base-stack-name>_default`).
+2. **New stack → Web editor →** paste `docker-compose.observability.portainer.yml`.
+3. Set env: `OIS_NETWORK` to the base stack's network name (default `ois_default`),
+   `GRAFANA_ADMIN_PASSWORD`, and the ports if you don't want the defaults.
+
+Requires a Compose with inline `configs` content (v2.23.1+); Portainer 2.19+ ships one.
+
+That file is **generated** from the `deploy/observability/*` sources (the editable source of truth,
+still used by the merge-file stack above) — never hand-edit it. After changing any source config or
+the dashboard, regenerate it so the two can't drift:
+
+```bash
+deploy/observability/gen-portainer-compose.sh
+```
+
 ### Securing `/metrics`
 
 `GET /metrics` is deliberately **not** in the OpenAPI spec or the typed client: it is text
