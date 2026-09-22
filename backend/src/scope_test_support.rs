@@ -105,3 +105,57 @@ pub(crate) async fn grant(
     .await
     .unwrap();
 }
+
+/// A signed-in session for `user_id`, as the `Cookie` header value the router reads it from.
+pub(crate) async fn session_cookie(pool: &PgPool, user_id: &str) -> String {
+    // Every real account has a VATSIM CID, and the session lookup decodes it as non-null — a
+    // `seed_user` row has none, so without one the caller would silently resolve as signed out.
+    sqlx::query(
+        "update identity.users \
+         set cid = coalesce(cid, (select coalesce(max(cid), 0) + 1 from identity.users)) \
+         where id = $1",
+    )
+    .bind(user_id)
+    .execute(pool)
+    .await
+    .unwrap();
+    let token = uuid::Uuid::new_v4().simple().to_string();
+    crate::repos::auth::insert_session(pool, &token, user_id)
+        .await
+        .unwrap();
+    format!("ois_session={token}")
+}
+
+/// Send one request through the real router — `resolve_current_user`, `RequirePermission` and the
+/// handler's own scope check all on the path — and return its status (VATUSA/OIS#364).
+///
+/// This is what the helper-level tests above cannot do: `RequirePermission` has a private field, so
+/// a gated handler can't be called directly, and a test of `can_edit`/`require_artcc_scope` alone
+/// stays green when a handler stops calling them. The two gates answer differently, which is what
+/// lets a test tell which one fired: a missing permission is **401**, a wrong facility **403**.
+pub(crate) async fn send(
+    state: &AppState,
+    method: http::Method,
+    uri: &str,
+    cookie: &str,
+    json: Option<serde_json::Value>,
+) -> http::StatusCode {
+    use tower::ServiceExt;
+
+    let builder = http::Request::builder()
+        .method(method)
+        .uri(uri)
+        .header(http::header::COOKIE, cookie);
+    let request = match json {
+        Some(body) => builder
+            .header(http::header::CONTENT_TYPE, "application/json")
+            .body(axum::body::Body::from(body.to_string())),
+        None => builder.body(axum::body::Body::empty()),
+    }
+    .unwrap();
+    crate::router::build_router(state.clone())
+        .oneshot(request)
+        .await
+        .unwrap()
+        .status()
+}
