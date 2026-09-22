@@ -28,6 +28,7 @@ import {
   favoriteHref,
   favoriteKey,
   isFavoriteHotkey,
+  pageFavoriteHref,
   unavailable,
   useFavorites,
 } from "@/lib/favorites";
@@ -81,9 +82,11 @@ function FavoriteCurrentPage() {
       if (!isFavoriteHotkey(e)) return;
       e.preventDefault();
       const label = title ?? location.pathname;
-      // Keyed on the full href: several routes carry their identity in `search` (?icao=, ?facility=,
-      // ?flight=), so keying on the path alone made two airports one favorite that overwrote itself.
-      const added = favorites.toggle({ kind: "page", id: location.href, label, href: location.href });
+      // Keyed on the href, not the path: several routes carry their identity in `search` (?icao=,
+      // ?facility=, ?flight=), so the path alone made two airports one favorite that overwrote itself.
+      // Minus the view switch, though, or each view became its own duplicate (VATUSA/OIS#339).
+      const href = pageFavoriteHref(location.href);
+      const added = favorites.toggle({ kind: "page", id: href, label, href });
       if (added != null) toast.success(added ? `Added ${label} to favorites` : `Removed ${label} from favorites`);
     };
     window.addEventListener("keydown", onKey);

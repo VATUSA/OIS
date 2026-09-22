@@ -7,6 +7,7 @@ import {
   favoriteHref,
   isFavorite,
   isFavoriteHotkey,
+  pageFavoriteHref,
   toggleFavorite,
   unavailable,
 } from "./favorites";
@@ -73,6 +74,23 @@ describe("favoriteHref", () => {
 
   it("escapes a param that isn't URL-safe", () => {
     expect(favoriteHref({ to: "/advisories/fcas", search: { flight: "N1 2A" } })).toBe("/advisories/fcas?flight=N1+2A");
+  });
+});
+
+describe("pageFavoriteHref (VATUSA/OIS#339)", () => {
+  it("drops the view switch, so every view of a page is one favorite — the one its nav row stars", () => {
+    expect(pageFavoriteHref("/ops/tmu?view=board")).toBe("/ops/tmu");
+    expect(pageFavoriteHref("/ops/tmu?view=table")).toBe("/ops/tmu");
+  });
+
+  it("keeps the params that say what the page is about", () => {
+    expect(pageFavoriteHref("/ops/airport?icao=KSFO&view=table")).toBe("/ops/airport?icao=KSFO");
+  });
+
+  it("leaves an href with no view untouched, so stored favorites keep their keys", () => {
+    for (const href of ["/ops/airport?icao=KSFO", "/advisories/fcas?flight=N1+2A", "/ops/tmu"]) {
+      expect(pageFavoriteHref(href)).toBe(href);
+    }
   });
 });
 

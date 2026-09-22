@@ -29,6 +29,22 @@ export const favoriteKey = (f: Pick<Favorite, "kind" | "id">) => `${f.kind}:${f.
 export const favoriteHref = ({ to, search }: { to: string; search: Record<string, string> }) =>
   `${to}?${new URLSearchParams(search)}`;
 
+/** Search params that change how a page is shown, not what it shows (`Header`'s view switch). */
+const PRESENTATIONAL_PARAMS = ["view"];
+
+/**
+ * The key and href for favoriting the page at `href`: the subject, minus presentational params. Keying
+ * on the raw href made `/ops/tmu?view=board` and `?view=table` two identical "TMU" favorites, neither
+ * of which the palette's own `/ops/tmu` row recognised as starred (VATUSA/OIS#339). An href with none
+ * of those params is returned untouched, so favorites already stored keep their keys.
+ */
+export function pageFavoriteHref(href: string): string {
+  const url = new URL(href, "http://x");
+  if (!PRESENTATIONAL_PARAMS.some((p) => url.searchParams.has(p))) return href;
+  for (const p of PRESENTATIONAL_PARAMS) url.searchParams.delete(p);
+  return `${url.pathname}${url.search}${url.hash}`;
+}
+
 /** The permission a favorite's kind needs before it is worth listing; the rest are gated by destination. */
 const KIND_PERMISSION: Partial<Record<FavoriteKind, string>> = {
   tmi: "tmu.tmi.read",
