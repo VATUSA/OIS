@@ -286,6 +286,17 @@ fn observe_db_pool(state: &AppState) {
 fn observe_jobs(state: &AppState) {
     for job in state.jobs.snapshot() {
         let name = job.name.clone();
+        // The per-job label is `task`, deliberately NOT `job`: `job` is a reserved Prometheus label
+        // the scrape sets to the scrape config's `job_name` (here `ois-backend`). An exposed `job`
+        // label collides with it, so Prometheus renames ours to `exported_job` and every series
+        // shows `job="ois-backend"` — which is why all three job panels read "ois-backend" on every
+        // line instead of the job's name. `task` sidesteps the reserved name entirely.
+        //
+        // `ois_job_info` is the standard info pattern (value always 1): it carries the human
+        // description so a dashboard can show "Fetch winds aloft" next to `winds_refresh` by joining
+        // on `task`, without hanging a long, rarely-changing string on every numeric series.
+        gauge!("ois_job_info", "task" => name.clone(), "description" => job.description.clone())
+            .set(1.0);
         // `last_finished_ms == 0` means "never finished" (see `JobRegistry`), not "finished at the
         // epoch". Emitting the zero made the dashboard's `time() - ois_job_last_run_timestamp_seconds`
         // panel read ~57 years for every job that had not ticked since boot — which, for a daily
@@ -293,22 +304,22 @@ fn observe_jobs(state: &AppState) {
         // "last run older than N" alert on all of them at once. Leaving the series out says
         // "unknown", which is what Prometheus takes an absent sample to mean.
         if job.last_finished_ms > 0 {
-            gauge!("ois_job_last_run_timestamp_seconds", "job" => name.clone())
+            gauge!("ois_job_last_run_timestamp_seconds", "task" => name.clone())
                 .set(job.last_finished_ms as f64 / 1000.0);
         }
         // Again not `_total` — this is a gauge read off the registry, not a counter we own.
-        gauge!("ois_job_runs", "job" => name.clone()).set(job.runs as f64);
+        gauge!("ois_job_runs", "task" => name.clone()).set(job.runs as f64);
         // `last_ok` is `None` until the job has finished once; report that as a failure so a job
         // that has never completed is as visible to an alert as one that completed badly.
-        gauge!("ois_job_last_success", "job" => name.clone()).set(if job.last_ok == Some(true) {
+        gauge!("ois_job_last_success", "task" => name.clone()).set(if job.last_ok == Some(true) {
             1.0
         } else {
             0.0
         });
-        gauge!("ois_job_running", "job" => name.clone()).set(if job.running { 1.0 } else { 0.0 });
+        gauge!("ois_job_running", "task" => name.clone()).set(if job.running { 1.0 } else { 0.0 });
         // Only meaningful once a run has both started and finished.
         if job.last_finished_ms > job.last_started_ms {
-            gauge!("ois_job_last_duration_seconds", "job" => name)
+            gauge!("ois_job_last_duration_seconds", "task" => name)
                 .set((job.last_finished_ms - job.last_started_ms) as f64 / 1000.0);
         }
     }
@@ -587,6 +598,49 @@ mod tests {
         assert!(
             seconds > 1_700_000_000.0,
             "implausible last-run time: {ran}"
+        );
+    }
+
+    /// Job series must identify the job with a `task` label, never `job`. `job` is reserved: the
+    /// scrape overwrites it with the scrape config's `job_name`, so an exposed `job` label gets
+    /// renamed to `exported_job` and every panel shows "ois-backend" instead of the job's name.
+    /// Also asserts `ois_job_info` carries the human description, since the jobs table joins on it.
+    #[tokio::test]
+    async fn job_series_are_labeled_by_task_and_carry_a_description() {
+        let state = crate::state::AppState::without_db();
+        state.jobs.register(
+            "winds_refresh",
+            "Fetch winds aloft (AWC FB tables)",
+            Some(3_600),
+            false,
+        );
+        state.jobs.begin("winds_refresh");
+        state.jobs.finish("winds_refresh", true, "ok");
+
+        let handle = handle();
+        observe(&state, None).await;
+        let rendered = handle.render();
+
+        let job_lines: Vec<&str> = rendered
+            .lines()
+            .filter(|l| l.starts_with("ois_job_") && l.contains("winds_refresh"))
+            .collect();
+        assert!(!job_lines.is_empty(), "expected job series:\n{rendered}");
+        for l in &job_lines {
+            assert!(
+                l.contains("task=\"winds_refresh\""),
+                "job series must be labeled by `task`, not `job` (reserved): {l}"
+            );
+            assert!(
+                !l.contains("job=\"winds_refresh\""),
+                "must not emit the reserved `job` label — it collides with the scrape: {l}"
+            );
+        }
+        assert!(
+            rendered.lines().any(|l| l.starts_with("ois_job_info")
+                && l.contains("task=\"winds_refresh\"")
+                && l.contains("Fetch winds aloft")),
+            "ois_job_info must carry the human description for the jobs table:\n{rendered}"
         );
     }
 
