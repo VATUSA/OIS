@@ -5,7 +5,7 @@ import {RouterProvider} from "@tanstack/react-router";
 import {DialogProvider, ThemeProvider, ToastProvider, TooltipProvider} from "@ois/ui";
 
 import {router} from "./router";
-import {desktopRefresh} from "./lib/desktop-auth";
+import {refreshBeforeLaunch} from "./lib/desktop-auth";
 import {isTauri} from "./lib/platform";
 import {RealtimeProvider} from "./components/realtime-provider";
 import "@fontsource-variable/inter";
@@ -22,11 +22,12 @@ const queryClient = new QueryClient();
 // Awaited, because rotation DELETES the old session row server-side the moment it succeeds. Any
 // request that left while the new token was still in flight would carry one that is already dead,
 // and `fetchMe` turns a 401 into a cached "signed out" for a full minute — which presents as the
-// app randomly forgetting you on launch. Holding first paint for one loopback round trip is the
-// cheaper trade. A failure just means we start signed out, which is what the UI would show anyway.
+// app randomly forgetting you on launch. So first paint waits for the rotation — for at most
+// `LAUNCH_REFRESH_BUDGET_MS`, since the API is remote and a blackholed host would otherwise leave a
+// blank window until the OS gives up. A failure just means we start signed out.
 async function bootstrap() {
   if (isTauri()) {
-    await desktopRefresh().catch(() => undefined);
+    await refreshBeforeLaunch();
   }
 
   ReactDOM.createRoot(document.getElementById("root")!).render(
