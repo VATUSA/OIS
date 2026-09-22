@@ -1,12 +1,26 @@
 // @vitest-environment jsdom
 import {afterEach, describe, expect, it, vi} from "vitest";
 
-import {can, capabilities, invokeDesktop, isTauri, platform, type Capability} from "./platform";
+import {
+  can,
+  capabilities,
+  invokeDesktop,
+  isMainWindow,
+  isTauri,
+  platform,
+  windowLabel,
+  type Capability,
+} from "./platform";
 
 // The real module talks to Tauri's IPC, which doesn't exist under test. Mocking it also proves
 // invokeDesktop reaches @tauri-apps/api through its dynamic import rather than a static one.
 const invoke = vi.fn();
 vi.mock("@tauri-apps/api/core", () => ({invoke: (...args: unknown[]) => invoke(...args)}));
+
+const currentLabel = vi.fn(() => "main");
+vi.mock("@tauri-apps/api/window", () => ({
+  getCurrentWindow: () => ({get label() {return currentLabel();}}),
+}));
 
 /** Stand in for the global the Tauri v2 runtime injects into its webview. */
 function pretendDesktop() {
@@ -87,5 +101,35 @@ describe("invokeDesktop", () => {
     invoke.mockResolvedValue("ok");
     await expect(invokeDesktop<string>("get_token", {cid: 1234})).resolves.toBe("ok");
     expect(invoke).toHaveBeenCalledWith("get_token", {cid: 1234});
+  });
+});
+
+describe("window identity", () => {
+  it("has no window label on the web build", async () => {
+    await expect(windowLabel()).resolves.toBeUndefined();
+    await expect(isMainWindow()).resolves.toBe(false);
+  });
+
+  it("recognises the primary window", async () => {
+    pretendDesktop();
+    currentLabel.mockReturnValue("main");
+    await expect(isMainWindow()).resolves.toBe(true);
+  });
+
+  /**
+   * The guard that stops a route window or a pop-out rotating the session token out from under the
+   * main window. Every Tauri webview runs the same entry module, so "am I the main window?" is the
+   * only thing separating launch-once work from work that runs per window.
+   */
+  it("does not mistake a route window for the primary window", async () => {
+    pretendDesktop();
+    currentLabel.mockReturnValue("window--ops-idst");
+    await expect(isMainWindow()).resolves.toBe(false);
+  });
+
+  it("does not mistake a pop-out for the primary window", async () => {
+    pretendDesktop();
+    currentLabel.mockReturnValue("popout-fca-ZDC");
+    await expect(isMainWindow()).resolves.toBe(false);
   });
 });

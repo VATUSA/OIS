@@ -7,7 +7,7 @@ import {DialogProvider, ThemeProvider, ToastProvider, TooltipProvider} from "@oi
 import {router} from "./router";
 import {desktopRefresh} from "./lib/desktop-auth";
 import {restoreWindows} from "./lib/popout";
-import {isTauri} from "./lib/platform";
+import {isMainWindow, isTauri} from "./lib/platform";
 import {RealtimeProvider} from "./components/realtime-provider";
 import "@fontsource-variable/inter";
 import "@fontsource/jetbrains-mono/400.css";
@@ -20,7 +20,16 @@ const queryClient = new QueryClient();
 // and pushes its expiry out, so an app that's opened regularly never makes the user sign in again
 // (#346). Deliberately not awaited — the stored token stays valid meanwhile, so there is no reason
 // to hold up first paint, and a failure here just means the app starts signed out.
-if (isTauri()) void desktopRefresh();
+//
+// Guarded to the MAIN window, for the same reason `restoreWindows()` below is: every Tauri webview
+// runs this module. Unguarded, each pop-out (#349) and route window (#350) rotated the session on
+// open — and rotation DELETES the token it is handed, leaving the windows that were already open
+// holding a dead one, with no 401 recovery path. Opening a second window signed the first out.
+if (isTauri()) {
+  void isMainWindow().then((primary) => {
+    if (primary) void desktopRefresh();
+  });
+}
 
 // Desktop only: reopen the route windows that were open last time, each at the position it was
 // left (#350). Guarded inside to the main window — otherwise every restored window would restore

@@ -87,6 +87,36 @@ export function can(capability: Capability): boolean {
   return isTauri() && IMPLEMENTED[capability];
 }
 
+/** The app's primary window. Pop-outs and route windows are not it. */
+export const MAIN_WINDOW_LABEL = "main";
+
+/**
+ * The Tauri window label this code is running in, or `undefined` on the web build.
+ *
+ * Every Tauri webview loads the same `index.html`, so anything at module scope runs once per
+ * window — in every pop-out (#349) and every route window (#350). Work that must happen once per
+ * app launch, or that owns state shared between windows, has to ask which window it is in.
+ */
+export async function windowLabel(): Promise<string | undefined> {
+  if (!isTauri()) return undefined;
+  try {
+    const {getCurrentWindow} = await import("@tauri-apps/api/window");
+    return getCurrentWindow().label;
+  } catch {
+    return undefined;
+  }
+}
+
+/**
+ * True only in the primary window.
+ *
+ * Rotating the session token is the example that bit us twice: run it in a second window and it
+ * deletes the token the first window is still holding, signing that window out.
+ */
+export async function isMainWindow(): Promise<boolean> {
+  return (await windowLabel()) === MAIN_WINDOW_LABEL;
+}
+
 /**
  * Call a `#[tauri::command]` in the desktop shell.
  *

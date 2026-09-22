@@ -61,9 +61,22 @@ const ROUTE: WindowKind = {
 /** How long a drag or resize must be still before the new geometry is written. */
 const GEOMETRY_SETTLE_MS = 300;
 
-/** Window labels must be simple; ids can be UUIDs or route paths, so normalise. */
+/**
+ * Window labels must be simple; ids can be UUIDs or route paths, so normalise.
+ *
+ * A plain substitution is not enough on its own: `/ops/idst` and `/ops-idst` both flatten to
+ * `-ops-idst`, and since the label is what `getByLabel` raises, one route would surface the other's
+ * window. Anything that had to be rewritten therefore carries a short hash of the original id, so
+ * distinct ids stay distinct while the label stays readable in the common case.
+ */
 function labelFor(kind: WindowKind, id: string): string {
-  return `${kind.labelPrefix}${id.replace(/[^a-zA-Z0-9-]/g, "-")}`;
+  const flattened = id.replace(/[^a-zA-Z0-9-]/g, "-");
+  if (flattened === id) return `${kind.labelPrefix}${id}`;
+
+  // djb2 — a label disambiguator, not a security boundary.
+  let hash = 5381;
+  for (let i = 0; i < id.length; i += 1) hash = ((hash << 5) + hash + id.charCodeAt(i)) >>> 0;
+  return `${kind.labelPrefix}${flattened}-${hash.toString(36)}`;
 }
 
 /** The window label a detached panel uses. */

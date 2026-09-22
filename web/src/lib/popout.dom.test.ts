@@ -81,7 +81,10 @@ afterEach(() => {
 
 describe("popoutLabel", () => {
   it("makes a window label safe from an arbitrary panel id", () => {
-    expect(popoutLabel("widget-9f3a/b c")).toBe("popout-widget-9f3a-b-c");
+    const label = popoutLabel("widget-9f3a/b c");
+
+    expect(label).toMatch(/^popout-[a-zA-Z0-9-]+$/);
+    expect(label.startsWith("popout-widget-9f3a-b-c")).toBe(true);
   });
 
   it("is stable for the same id, so reopening finds the same window", () => {
@@ -262,5 +265,29 @@ describe("restoring windows on launch", () => {
   it("is a no-op when nothing was open last time", async () => {
     pretendDesktop();
     await expect(restoreWindows()).resolves.toBe(0);
+  });
+});
+
+describe("window labels", () => {
+  it("leaves an already-simple id alone", () => {
+    expect(routeWindowLabel("ops-idst")).toBe("window-ops-idst");
+  });
+
+  /**
+   * `/ops/idst` and `/ops-idst` both flatten to the same characters. Since the label is what
+   * `getByLabel` raises, a collision means one route surfaces the other's window.
+   */
+  it("keeps route ids distinct that flatten to the same characters", () => {
+    const slashes = routeWindowLabel("/ops/idst");
+    const dashes = routeWindowLabel("-ops-idst");
+
+    expect(slashes).not.toBe(dashes);
+    for (const label of [slashes, dashes]) {
+      expect(label).toMatch(/^window-[a-zA-Z0-9-]+$/);
+    }
+  });
+
+  it("keeps a panel and a route window apart even for the same id", () => {
+    expect(popoutLabel("fca-ZDC")).not.toBe(routeWindowLabel("fca-ZDC"));
   });
 });
