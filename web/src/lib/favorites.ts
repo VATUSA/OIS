@@ -45,6 +45,36 @@ export function pageFavoriteHref(href: string): string {
   return `${url.pathname}${url.search}${url.hash}`;
 }
 
+/**
+ * Stored favorites, with page keys brought up to date.
+ *
+ * Page favorites saved before {@link pageFavoriteHref} existed carry the presentational params in
+ * their key — `page:/ops/my?view=list`. Left alone, the hotkey on that page now computes
+ * `page:/ops/my`, fails to match, and **adds a second favorite instead of removing the first**: two
+ * identical rows, the Pages row still unstarred, and the old one unreachable from the keyboard.
+ * That lands on exactly the users who already hit VATUSA/OIS#339.
+ *
+ * Normalising on read rather than migrating the stored blob keeps this a pure function of what is
+ * saved — nothing is rewritten until the user next toggles something, and a deployment that rolls
+ * back loses nothing. Two rows that collapse onto one key become one, first kept: the surviving row
+ * is the one nearest the top of the list, which is where the user last put it.
+ */
+export function normalizeFavorites(items: Favorite[]): Favorite[] {
+  const seen = new Set<string>();
+  const out: Favorite[] = [];
+  for (const item of items) {
+    const favorite =
+      item.kind === "page"
+        ? { ...item, id: pageFavoriteHref(item.id), href: pageFavoriteHref(item.href) }
+        : item;
+    const key = favoriteKey(favorite);
+    if (seen.has(key)) continue;
+    seen.add(key);
+    out.push(favorite);
+  }
+  return out;
+}
+
 /** The permission a favorite's kind needs before it is worth listing; the rest are gated by destination. */
 const KIND_PERMISSION: Partial<Record<FavoriteKind, string>> = {
   tmi: "tmu.tmi.read",
@@ -116,12 +146,16 @@ export function useFavorites(enabled = true) {
   const toast = useToast();
   const prefs = usePreferences<FavoritesPrefs>(NAMESPACE, { enabled });
   const save = useSavePreferences<FavoritesPrefs>(NAMESPACE);
-  const items = prefs.data?.items ?? [];
+  // Normalised, so a page favorite stored with `?view=` still answers to the key the hotkey now
+  // computes — otherwise un-starring it adds a duplicate instead (VATUSA/OIS#339).
+  const items = normalizeFavorites(prefs.data?.items ?? []);
 
   const toggle = (fav: Favorite): boolean | null => {
     if (!prefs.isSuccess) return null;
     const previous = queryClient.getQueryData<FavoritesPrefs | null>(["preferences", NAMESPACE]) ?? null;
-    const next = { items: toggleFavorite(previous?.items ?? [], fav) };
+    // Normalised on the way in as well: `toggle` reads the cache directly, not `items` above, and
+    // the legacy key has to be matchable here or the toggle is the thing that duplicates.
+    const next = { items: toggleFavorite(normalizeFavorites(previous?.items ?? []), fav) };
     queryClient.setQueryData(["preferences", NAMESPACE], next);
     save.mutate(next, {
       onError: () => {

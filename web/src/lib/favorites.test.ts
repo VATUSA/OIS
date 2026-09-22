@@ -1,16 +1,7 @@
 import {describe, expect, it} from "vitest";
 
 import type {Me} from "./auth";
-import {
-  type Favorite,
-  canSeeFavorite,
-  favoriteHref,
-  isFavorite,
-  isFavoriteHotkey,
-  pageFavoriteHref,
-  toggleFavorite,
-  unavailable,
-} from "./favorites";
+import { canSeeFavorite, favoriteHref, isFavorite, isFavoriteHotkey, normalizeFavorites, pageFavoriteHref, toggleFavorite, type Favorite, unavailable } from "./favorites";
 
 /** A permission tree holding exactly `names` (dotted `segments.action`), as in `nav.test.ts`. */
 function holding(...names: string[]): Me {
@@ -174,5 +165,50 @@ describe("isFavoriteHotkey", () => {
   it("ignores a bare ⇧F and a bare f", () => {
     expect(isFavoriteHotkey(key({ shiftKey: true }))).toBe(false);
     expect(isFavoriteHotkey(key({}))).toBe(false);
+  });
+});
+
+describe("favorites stored before the page key dropped ?view=", () => {
+  const legacy = (id: string) => ({ kind: "page" as const, id, label: "My dashboards", href: id });
+
+  it("lets the hotkey un-star one instead of adding a duplicate", () => {
+    // The users this issue was filed for already have `page:/ops/my?view=list` saved. Without
+    // normalisation the new key misses it, `toggleFavorite` adds, and they end up with two
+    // identical rows and no way to remove the old one from the keyboard.
+    const stored = normalizeFavorites([legacy("/ops/my?view=list")]);
+    const href = pageFavoriteHref("http://localhost:5173/ops/my?view=list");
+
+    const next = toggleFavorite(stored, { kind: "page", id: href, label: "My dashboards", href });
+
+    expect(next).toEqual([]);
+  });
+
+  it("collapses a legacy row and its new-key twin into one", () => {
+    // Someone who favorited the page again after the change has both keys stored.
+    const normalized = normalizeFavorites([legacy("/ops/my"), legacy("/ops/my?view=list")]);
+
+    expect(normalized.map((f) => f.id)).toEqual(["/ops/my"]);
+  });
+
+  it("rewrites href as well as id, so the row still navigates", () => {
+    const [favorite] = normalizeFavorites([legacy("/ops/tmu?view=board")]);
+
+    expect(favorite).toMatchObject({ id: "/ops/tmu", href: "/ops/tmu" });
+  });
+
+  it("leaves non-page favorites and identity-bearing params alone", () => {
+    // `?icao=` names the subject; only presentational params may be dropped.
+    const items = [
+      { kind: "tmi" as const, id: "t-1", label: "20 MIT", href: "/ops/tmu" },
+      legacy("/ops/airport?icao=KDCA"),
+    ];
+
+    expect(normalizeFavorites(items)).toEqual(items);
+  });
+
+  it("keeps the order the user left them in", () => {
+    const items = [legacy("/a"), legacy("/b?view=x"), legacy("/c")];
+
+    expect(normalizeFavorites(items).map((f) => f.id)).toEqual(["/a", "/b", "/c"]);
   });
 });

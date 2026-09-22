@@ -240,6 +240,16 @@ describe("⌘⇧F across a page's view switch (VATUSA/OIS#339)", () => {
     expect(stored.href).toBe("/ops/tmu");
   });
 
+  it("un-stars one stored before the key dropped ?view=, rather than adding a second", async () => {
+    // Favorites shipped on main, so this is what the users who already hit #339 actually have
+    // saved. Without normalising the stored list, the new key misses it, `toggleFavorite` adds,
+    // and they get two identical "TMU" rows with the old one unreachable from the keyboard.
+    const p = await mountClosed({ pathname: "/ops/tmu", href: "/ops/tmu?view=board" }, [
+      { kind: "page", id: "/ops/tmu?view=board", label: "TMU", href: "/ops/tmu?view=board" },
+    ]);
+    expect(p.favorite()).toEqual([]);
+  });
+
   it("treats a second view of a favorited page as the same favorite, not a duplicate", async () => {
     // Stored exactly as the palette's own Pages row stores it (`id: p.to`).
     const p = await mountClosed({ pathname: "/ops/tmu", href: "/ops/tmu?view=table" }, [
