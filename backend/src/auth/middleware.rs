@@ -18,9 +18,30 @@ use crate::{
 
 const SESSION_COOKIE: &str = "ois_session";
 
-/// User API keys carry this bearer-token prefix (vs `ois_sa_` for service accounts), so the two
+/// User API keys carry this bearer-token prefix, and service accounts the one below, so the two
 /// bearer kinds are told apart without a speculative lookup against both tables.
 const API_KEY_TOKEN_PREFIX: &str = "ois_pat_";
+const SERVICE_ACCOUNT_TOKEN_PREFIX: &str = "ois_sa_";
+
+#[derive(Debug, PartialEq, Eq)]
+enum BearerKind {
+    ApiKey,
+    ServiceAccount,
+}
+
+/// Which resolver a bearer token belongs to, by its prefix. `None` for anything else — the
+/// `METRICS_TOKEN` Prometheus presents, or a stranger's junk header — which can match neither table,
+/// so it gets no principal and costs no query (VATUSA/OIS#384). Every service-account token is minted
+/// with its prefix (`handlers::service_accounts::generate_token`), so none is lost by this.
+fn bearer_kind(token: &str) -> Option<BearerKind> {
+    if token.starts_with(API_KEY_TOKEN_PREFIX) {
+        Some(BearerKind::ApiKey)
+    } else if token.starts_with(SERVICE_ACCOUNT_TOKEN_PREFIX) {
+        Some(BearerKind::ServiceAccount)
+    } else {
+        None
+    }
+}
 
 /// Resolves the current user (session cookie) and/or service account (bearer token)
 /// and stashes them in request extensions for downstream extractors/handlers.
@@ -43,30 +64,32 @@ pub async fn resolve_current_user(
         };
 
     // A bearer token is either a user API key (`ois_pat_…`) or a service account (`ois_sa_…`); the
-    // prefix routes it to the right resolver so only one table is queried.
+    // prefix routes it to the right resolver so at most one table is queried, and none for neither.
     let client_ip = client_ip(request.headers());
-    let (current_service_account, current_api_key) =
-        match (state.db.as_ref(), bearer_token.as_deref()) {
-            (Some(pool), Some(token)) if token.starts_with(API_KEY_TOKEN_PREFIX) => {
-                let key = access_repo::find_current_api_key_by_bearer_token(
-                    pool,
-                    token,
-                    client_ip.as_deref(),
-                )
+    let bearer = bearer_token
+        .as_deref()
+        .and_then(|t| bearer_kind(t).map(|kind| (t, kind)));
+    let (current_service_account, current_api_key) = match (state.db.as_ref(), bearer) {
+        (Some(pool), Some((token, BearerKind::ApiKey))) => {
+            let key = access_repo::find_current_api_key_by_bearer_token(
+                pool,
+                token,
+                client_ip.as_deref(),
+            )
+            .await
+            .ok()
+            .flatten();
+            (None, key)
+        }
+        (Some(pool), Some((token, BearerKind::ServiceAccount))) => {
+            let sa = access_repo::find_current_service_account_by_bearer_token(pool, token)
                 .await
                 .ok()
                 .flatten();
-                (None, key)
-            }
-            (Some(pool), Some(token)) => {
-                let sa = access_repo::find_current_service_account_by_bearer_token(pool, token)
-                    .await
-                    .ok()
-                    .flatten();
-                (sa, None)
-            }
-            _ => (None, None),
-        };
+            (sa, None)
+        }
+        _ => (None, None),
+    };
 
     request.extensions_mut().insert(current_user);
     request.extensions_mut().insert(current_service_account);
@@ -152,7 +175,31 @@ fn parse_bearer_token(auth_header: Option<&http::HeaderValue>) -> Option<String>
 
 #[cfg(test)]
 mod tests {
-    use super::{parse_bearer_token, parse_cookie};
+    use super::{BearerKind, bearer_kind, parse_bearer_token, parse_cookie};
+
+    #[test]
+    fn routes_bearer_tokens_by_prefix() {
+        assert_eq!(bearer_kind("ois_pat_abc123"), Some(BearerKind::ApiKey));
+        assert_eq!(
+            bearer_kind("ois_sa_abc123"),
+            Some(BearerKind::ServiceAccount)
+        );
+    }
+
+    /// Neither prefix means neither table can match, so no lookup is spent on it — the Prometheus
+    /// `METRICS_TOKEN` on every scrape used to cost a service-account SELECT (VATUSA/OIS#384).
+    #[test]
+    fn a_bearer_with_neither_prefix_goes_to_no_resolver() {
+        for token in [
+            "s3cret-metrics-token",
+            "ois_other_abc",
+            "OIS_SA_upper",
+            "sa_abc",
+            "",
+        ] {
+            assert_eq!(bearer_kind(token), None, "{token:?}");
+        }
+    }
 
     #[test]
     fn parses_bearer_token() {
