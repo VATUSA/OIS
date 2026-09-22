@@ -20,6 +20,13 @@ type Tab =
 
 type TabDef = { value: Tab; label: string; icon: typeof Gauge };
 
+/**
+ * The page title, naming the active tab. It is also what ⌘⇧F stores as a favorite's label, and
+ * `?tab=` is part of the favorite's key — so without the tab in the title, a favorite per tab read
+ * as a column of identical "TMU" rows (VATUSA/OIS#339).
+ */
+export const tmuTitle = (tabLabel: string | undefined) => (tabLabel ? `TMU · ${tabLabel}` : "TMU");
+
 export function TmuPage() {
   const { data: me } = useMe();
   const canPrograms = hasPermission(me, "tmu.program.read");
@@ -41,6 +48,7 @@ export function TmuPage() {
 
   // The board/table view switch only applies to the Programs tab.
   usePageHeader({
+    title: tmuTitle(tabs.find((t) => t.value === active)?.label),
     subtitle: "Airport rate programs and inter-facility restrictions.",
     views: active === "programs" ? undefined : null,
   });

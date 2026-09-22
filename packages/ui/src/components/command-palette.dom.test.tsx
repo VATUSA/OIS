@@ -103,8 +103,9 @@ function mountPalette() {
     rows()
       .find((r) => r.textContent?.includes(label))
       ?.querySelector<HTMLButtonElement>("button[aria-pressed]");
-  const vanish = (id: string) => act(() => void ((hidden = [...hidden, id]), rerender()));
-  const restore = (id: string) => act(() => void ((hidden = hidden.filter((h) => h !== id)), rerender()));
+  // Several ids land in one render, as one refetch does.
+  const vanish = (...ids: string[]) => act(() => void ((hidden = [...hidden, ...ids]), rerender()));
+  const restore = (...ids: string[]) => act(() => void ((hidden = hidden.filter((h) => !ids.includes(h))), rerender()));
   return { key, rows, highlighted, starOf, vanish, restore, favs: () => favorites, opened };
 }
 
@@ -215,6 +216,20 @@ describe("a row that vanishes with no user input (VATUSA/OIS#339)", () => {
     expect(p.highlighted()).toContain("Events");
     p.restore("page:/ops/airport");
     // The user has been reading Events since the refetch; an Enter now must not open Airport.
+    expect(p.highlighted()).toContain("Events");
+  });
+});
+
+describe("a list that renders empty for one tick (VATUSA/OIS#339 review)", () => {
+  it("still holds the position the highlight had before it", () => {
+    const p = mountPalette();
+    p.key({ key: "ArrowDown" });
+    p.key({ key: "ArrowDown" });
+    expect(p.highlighted()).toContain("Airport");
+    p.vanish("page:/ops/advisories", "page:/ops/tmu", "page:/ops/airport", "page:/admin/planning/events");
+    expect(p.rows()).toHaveLength(0);
+    // Everything but Airport comes back: held at index 2, which is now Events — not the top row.
+    p.restore("page:/ops/advisories", "page:/ops/tmu", "page:/admin/planning/events");
     expect(p.highlighted()).toContain("Events");
   });
 });

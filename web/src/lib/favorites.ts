@@ -33,16 +33,31 @@ export const favoriteHref = ({ to, search }: { to: string; search: Record<string
 const PRESENTATIONAL_PARAMS = ["view"];
 
 /**
- * The key and href for favoriting the page at `href`: the subject, minus presentational params. Keying
- * on the raw href made `/ops/tmu?view=board` and `?view=table` two identical "TMU" favorites, neither
- * of which the palette's own `/ops/tmu` row recognised as starred (VATUSA/OIS#339). An href with none
- * of those params is returned untouched, so favorites already stored keep their keys.
+ * The key and href for favoriting the page at `href`: the subject, as a **relative** path, minus
+ * presentational params (VATUSA/OIS#339). Every page favorite goes through this — including stored ones,
+ * via {@link normalizeFavorites} — so the hotkey and the palette's own Pages row (`p.to`) agree on one
+ * key. Keying on the raw href had made `/ops/tmu?view=board` and `?view=table` two identical "TMU"
+ * favorites, and stored an absolute `http://…/dashboard` that the `/dashboard` row never matched.
  */
 export function pageFavoriteHref(href: string): string {
   const url = new URL(href, "http://x");
-  if (!PRESENTATIONAL_PARAMS.some((p) => url.searchParams.has(p))) return href;
   for (const p of PRESENTATIONAL_PARAMS) url.searchParams.delete(p);
   return `${url.pathname}${url.search}${url.hash}`;
+}
+
+/**
+ * {@link pageFavoriteHref} for the page at `pathname`, built from its route's **validated** search
+ * rather than the raw URL. `validateSearch` is what canonicalises a param — TMU uppercases
+ * `?facility=` — so a deep link to `?facility=zdv` and the same page reached as `?facility=ZDV` are
+ * one favorite, not two.
+ */
+export function pageFavoriteHrefFor(pathname: string, search: Record<string, unknown> | undefined): string {
+  const params = new URLSearchParams();
+  for (const [key, value] of Object.entries(search ?? {})) {
+    if (typeof value === "string" || typeof value === "number") params.set(key, String(value));
+  }
+  const query = params.toString();
+  return pageFavoriteHref(query ? `${pathname}?${query}` : pathname);
 }
 
 /**

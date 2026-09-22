@@ -1,7 +1,7 @@
 import {describe, expect, it} from "vitest";
 
 import type {Me} from "./auth";
-import { canSeeFavorite, favoriteHref, isFavorite, isFavoriteHotkey, normalizeFavorites, pageFavoriteHref, toggleFavorite, type Favorite, unavailable } from "./favorites";
+import { canSeeFavorite, favoriteHref, isFavorite, isFavoriteHotkey, normalizeFavorites, pageFavoriteHref, pageFavoriteHrefFor, toggleFavorite, type Favorite, unavailable } from "./favorites";
 
 /** A permission tree holding exactly `names` (dotted `segments.action`), as in `nav.test.ts`. */
 function holding(...names: string[]): Me {
@@ -78,10 +78,25 @@ describe("pageFavoriteHref (VATUSA/OIS#339)", () => {
     expect(pageFavoriteHref("/ops/airport?icao=KSFO&view=table")).toBe("/ops/airport?icao=KSFO");
   });
 
-  it("leaves an href with no view untouched, so stored favorites keep their keys", () => {
+  it("leaves a relative href with no view as it is", () => {
     for (const href of ["/ops/airport?icao=KSFO", "/advisories/fcas?flight=N1+2A", "/ops/tmu"]) {
       expect(pageFavoriteHref(href)).toBe(href);
     }
+  });
+
+  // The router's href is absolute; the Pages row keys on a relative `to`. One key for both (#339 review).
+  it("makes an absolute href relative, so it matches the page's own row", () => {
+    expect(pageFavoriteHref("http://localhost:5173/dashboard")).toBe("/dashboard");
+    expect(pageFavoriteHref("https://ois.vatusa.net/ops/airport?icao=KDCA")).toBe("/ops/airport?icao=KDCA");
+  });
+});
+
+describe("pageFavoriteHrefFor (VATUSA/OIS#339 review)", () => {
+  it("builds the key from the validated search, dropping empty values and the view", () => {
+    expect(pageFavoriteHrefFor("/ops/tmu", { facility: "ZDV", tab: undefined, view: "board" })).toBe(
+      "/ops/tmu?facility=ZDV",
+    );
+    expect(pageFavoriteHrefFor("/dashboard", undefined)).toBe("/dashboard");
   });
 });
 
