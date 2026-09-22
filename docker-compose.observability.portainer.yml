@@ -546,7 +546,7 @@ configs:
                 "expr": "ois_feed_prefiles",
                 "range": true,
                 "instant": false,
-                "refId": "A",
+                "refId": "B",
                 "legendFormat": "prefiles"
               }
             ],
@@ -620,7 +620,7 @@ configs:
                 "expr": "ois_active_ground_stops",
                 "range": true,
                 "instant": false,
-                "refId": "A",
+                "refId": "B",
                 "legendFormat": "ground stops"
               },
               {
@@ -632,7 +632,7 @@ configs:
                 "expr": "ois_active_gdps",
                 "range": true,
                 "instant": false,
-                "refId": "A",
+                "refId": "C",
                 "legendFormat": "GDPs"
               },
               {
@@ -644,7 +644,7 @@ configs:
                 "expr": "ois_active_programs",
                 "range": true,
                 "instant": false,
-                "refId": "A",
+                "refId": "D",
                 "legendFormat": "programs"
               }
             ],
@@ -918,7 +918,7 @@ configs:
                 "expr": "histogram_quantile(0.95, sum by (le) (rate(http_request_duration_seconds_bucket[5m])))",
                 "range": true,
                 "instant": false,
-                "refId": "A",
+                "refId": "B",
                 "legendFormat": "p95"
               },
               {
@@ -930,7 +930,7 @@ configs:
                 "expr": "histogram_quantile(0.99, sum by (le) (rate(http_request_duration_seconds_bucket[5m])))",
                 "range": true,
                 "instant": false,
-                "refId": "A",
+                "refId": "C",
                 "legendFormat": "p99"
               }
             ],
@@ -1440,7 +1440,7 @@ configs:
                 "expr": "ois_winds_data_age_seconds",
                 "range": true,
                 "instant": false,
-                "refId": "A",
+                "refId": "B",
                 "legendFormat": "winds"
               }
             ],
@@ -1715,7 +1715,7 @@ configs:
                 "expr": "ois_db_pool_connections{state=\"in_use\"}",
                 "range": true,
                 "instant": false,
-                "refId": "A",
+                "refId": "B",
                 "legendFormat": "in use"
               },
               {
@@ -1727,7 +1727,7 @@ configs:
                 "expr": "ois_db_pool_connections{state=\"idle\"}",
                 "range": true,
                 "instant": false,
-                "refId": "A",
+                "refId": "C",
                 "legendFormat": "idle"
               }
             ],
