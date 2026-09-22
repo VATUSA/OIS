@@ -1680,6 +1680,152 @@
         "overrides": []
       },
       "description": "One series per running build version. Two at once means a rollout is in progress."
+    },
+    {
+      "type": "timeseries",
+      "title": "Exporter upkeep (drain loop)",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "ois-prometheus"
+      },
+      "description": "The drain loop is the only thing keeping an UNSCRAPED backend from retaining every latency sample forever (the observability stack is opt-in, so the default deployment never scrapes). Expect ~10 drains per 10 min. ZERO MEANS THE LEAK IS BACK \u2014 alert on `increase(ois_metrics_upkeep_total[15m]) == 0`. Counter resets on restart are handled by increase(); it reads >0 as soon as the first 60s tick lands.",
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 0,
+        "y": 66
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "ois-prometheus"
+          },
+          "editorMode": "code",
+          "expr": "increase(ois_metrics_upkeep_total[10m])",
+          "range": true,
+          "instant": false,
+          "refId": "A",
+          "legendFormat": "drains / 10 min"
+        }
+      ],
+      "options": {
+        "legend": {
+          "displayMode": "list",
+          "placement": "bottom",
+          "showLegend": true
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "none",
+          "custom": {
+            "drawStyle": "line",
+            "lineWidth": 1,
+            "fillOpacity": 8,
+            "showPoints": "never",
+            "spanNulls": true,
+            "axisPlacement": "auto"
+          },
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "red",
+                "value": null
+              },
+              {
+                "color": "green",
+                "value": 1
+              }
+            ]
+          }
+        },
+        "overrides": []
+      }
+    },
+    {
+      "type": "timeseries",
+      "title": "Domain aggregate failures",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "ois-prometheus"
+      },
+      "description": "When the one DB aggregate behind /metrics fails, the scrape still serves the in-memory series and the six domain gauges FREEZE at their last, entirely plausible values. This counter is how that becomes visible. A rising rate means the Live operations row is stale, not calm.",
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 12,
+        "y": 66
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "ois-prometheus"
+          },
+          "editorMode": "code",
+          "expr": "ois_metrics_domain_aggregate_failures_total",
+          "range": true,
+          "instant": false,
+          "refId": "A",
+          "legendFormat": "failures"
+        },
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "ois-prometheus"
+          },
+          "editorMode": "code",
+          "expr": "rate(ois_metrics_domain_aggregate_failures_total[10m]) * 60",
+          "range": true,
+          "instant": false,
+          "refId": "B",
+          "legendFormat": "failures/min"
+        }
+      ],
+      "options": {
+        "legend": {
+          "displayMode": "list",
+          "placement": "bottom",
+          "showLegend": true
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "none",
+          "custom": {
+            "drawStyle": "line",
+            "lineWidth": 1,
+            "fillOpacity": 8,
+            "showPoints": "never",
+            "spanNulls": true,
+            "axisPlacement": "auto"
+          },
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "green",
+                "value": null
+              },
+              {
+                "color": "red",
+                "value": 1
+              }
+            ]
+          }
+        },
+        "overrides": []
+      }
     }
   ],
   "refresh": "30s",
