@@ -38,18 +38,20 @@ desktop dependency tree into a `rust:1-bookworm` builder that has no GTK.
   lack a task, which is exactly what we want — a `build` script here would make the repo-wide
   `pnpm build` try to bundle a native app, and `pnpm typecheck` would fail on a package with no
   TypeScript. Keep desktop tasks in the `justfile`.
-- **The API base is baked in at bundle time, and that still needs solving.** `web/src/lib/api.ts`
+- **The API base is baked in at bundle time.** `web/src/lib/api.ts`
   resolves an *absolute* base, so nothing breaks merely because the page is served from
   `tauri://localhost`. But the web app learns its base at **runtime**: `deploy/40-ois-config.sh`
   writes `window.__OIS_API_URL__` into `config.js` at container start. A Tauri bundle has no
   container start — `web/public/config.js` is a comment-only placeholder — so the SPA falls through
   to `VITE_OIS_API_URL`, and then to the `http://127.0.0.1:3000` default. A plain `just desktop-build`
   therefore ships an app that only ever talks to the build machine's own localhost. Dev is unaffected
-  (`devUrl` is the web dev server, which already points at the local backend). Choosing how a
-  released desktop build learns its API base — a build-time `VITE_OIS_API_URL`, or a desktop-side
-  runtime config — belongs to distribution, **#347**; until then, set `VITE_OIS_API_URL` explicitly
-  when you bundle anything you intend to hand to someone else. Auth differs too: the desktop app uses
-  a keychain-stored token rather than the session cookie (#346).
+  (`devUrl` is the web dev server, which already points at the local backend). **Releases** take the
+  base from the repo variable `OIS_DESKTOP_API_URL`: the release job runs
+  `desktop/scripts/pin-release-api.py`, which exports it as `VITE_OIS_API_URL` for the web build and
+  adds the origin to the CSP (below), and fails the release if the variable is unset, not `https://`,
+  carries a path, or points at loopback (#347). A local bundle you intend to hand to someone else
+  needs the same: `VITE_OIS_API_URL=https://… just desktop-build`, plus the CSP entry. Auth differs
+  too: the desktop app uses a keychain-stored token rather than the session cookie (#346).
 - **The backend must allow the webview's origin.** It isn't an http host: `tauri://localhost` on
   macOS/Linux, `http://tauri.localhost` on Windows. Both are in `.env.example`'s
   `CORS_ALLOWED_ORIGINS`; a deployment that drops them gets a desktop app whose every API call is
@@ -66,7 +68,7 @@ desktop dependency tree into a `rust:1-bookworm` builder that has no GTK.
   CLI, which runs `beforeBuildCommand` to produce `web/dist` first; a bare `cargo check`/`cargo build`
   never embeds and tolerates the directory being absent, in debug *and* release. So a fresh clone can
   `just ci` without building the web app — **on macOS and Windows**. On Linux it first needs the
-  GTK/WebKit dev packages (see below), because `just check` is `cargo check --workspace` and the
+  GTK/WebKit dev packages (see above), because `just check` is `cargo check --workspace` and the
   workspace now contains `ois-desktop`.
 - **`tauri.conf.json` carries an explicit `version`, and the release job rewrites it.** It has to:
   the bundle used to inherit the crate's hardcoded `0.1.0`, so every release shipped `0.1.0`, the
@@ -117,6 +119,12 @@ publish an update the installed app would reject.
 | `APPLE_CERTIFICATE`, `APPLE_CERTIFICATE_PASSWORD`, `APPLE_SIGNING_IDENTITY`, `APPLE_ID`, `APPLE_PASSWORD`, `APPLE_TEAM_ID` | No | macOS code signing + notarisation |
 | `WINDOWS_CERTIFICATE`, `WINDOWS_CERTIFICATE_PASSWORD` | No | Windows code signing |
 
+**Repository variable** (Settings → Variables, not a secret — it is baked into a public binary):
+
+| Variable | Required | For |
+| --- | --- | --- |
+| `OIS_DESKTOP_API_URL` | **Yes** | The production API origin the shipped app talks to, e.g. `https://api.example.org` (no path, no trailing slash). Added to the CSP `connect-src` as `https://` and `wss://`. The release fails without it. |
+
 Without the Apple/Windows certificates the build still succeeds, but the OS warns on first launch.
 Those are about *installing*; the updater signature above is what gates an update **applying**.
 
@@ -133,7 +141,7 @@ script could read it and post it anywhere.
 | `img-src`, `connect-src` → `https://*.cartocdn.com` | basemap style, tiles, sprites, glyphs | The map's only third-party origin. |
 | `worker-src 'self' blob:` | blob workers | maplibre spawns its tile workers from blobs. |
 | `connect-src ipc: http://ipc.localhost` | Tauri IPC | How `invoke` reaches the commands. |
-| `connect-src http://127.0.0.1:3000 ws://127.0.0.1:3000` | the API, REST + realtime (`/api/v1/ws`) | The default API base. **A build pointed at another API must add that origin, `http(s)` and `ws(s)`.** Choosing the shipped API base is #347's, which owes that entry. |
+| `connect-src http://127.0.0.1:3000 ws://127.0.0.1:3000` | the API, REST + realtime (`/api/v1/ws`) | The default API base. **A build pointed at another API must add that origin, `http(s)` and `ws(s)`.** Release builds get it from `OIS_DESKTOP_API_URL` via `desktop/scripts/pin-release-api.py` (#347). |
 
 `devCsp` is `null`: `just desktop` loads the Vite dev server, whose HMR and module preamble a strict
 policy would block. The policy is enforced only on the bundled app.

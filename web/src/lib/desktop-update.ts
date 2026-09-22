@@ -41,24 +41,36 @@ export type UpdateStatus =
 export async function fetchUpdate(): Promise<UpdateStatus> {
   if (!can("autoUpdate")) return {state: "idle"};
 
+  // An unreachable feed and a package that failed verification both leave the user on the version
+  // they have, so the UI treats them alike (`failed`, nothing shown). They are not the same event,
+  // though, so they are logged apart: a feed we couldn't reach is routine, a package we refused
+  // means a tampered or corrupt update was served (VATUSA/OIS#347 review).
+  // Typed off the plugin without importing it: a type-level `import()` is erased, so the web bundle
+  // never pulls `@tauri-apps/plugin-updater` in.
+  let update: Awaited<ReturnType<typeof import("@tauri-apps/plugin-updater").check>>;
   try {
     const {check} = await import("@tauri-apps/plugin-updater");
-    const update = await check();
-    if (!update) return {state: "idle"};
-
-    // Downloads and verifies; throws if the signature doesn't match the configured public key.
-    await update.download();
-    // Hand back the very object we just verified. Re-`check()`ing at install time would download
-    // the package a second time and apply whatever the feed serves *then* — not the thing the
-    // banner told the user was verified.
-    return {state: "ready", version: update.version, staged: update};
+    update = await check();
   } catch (error) {
-    // An unreachable feed and a package that failed verification both leave the user on the
-    // version they have, so the UI treats them alike — but they are not the same event, and a
-    // signature that didn't match means someone served a package we refused. Say so somewhere.
-    console.warn("[update] check or download failed", error);
+    console.warn("[update] could not check for an update", error);
     return {state: "failed"};
   }
+  if (!update) return {state: "idle"};
+
+  try {
+    // Downloads and verifies; throws if the signature doesn't match the configured public key.
+    await update.download();
+  } catch (error) {
+    console.error(
+      `[update] REJECTED update ${update.version}: download or signature verification failed`,
+      error,
+    );
+    return {state: "failed"};
+  }
+  // Hand back the very object we just verified. Re-`check()`ing at install time would download the
+  // package a second time and apply whatever the feed serves *then* — not the thing the banner told
+  // the user was verified.
+  return {state: "ready", version: update.version, staged: update};
 }
 
 /**

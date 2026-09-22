@@ -27,6 +27,7 @@ beforeEach(() => {
 
 afterEach(() => {
   delete window.__TAURI_INTERNALS__;
+  vi.restoreAllMocks(); // console spies must not leak between tests
 });
 
 describe("fetchUpdate", () => {
@@ -52,16 +53,32 @@ describe("fetchUpdate", () => {
   });
 
   it("does NOT report ready when the signature fails to verify", async () => {
-    // The updater plugin throws rather than returning a package whose minisign signature doesn't
-    // match the pubkey compiled into the app. A tampered update must therefore end as `failed` —
-    // never `ready`, because `ready` is what the banner offers the user a restart for.
+    // What this pins is this module's *reaction* to a rejected package: `failed`, never `ready`
+    // (`ready` is what the banner offers a restart for). The rejection itself is the updater plugin's
+    // — `download` is mocked here, so this test would pass even if verification were switched off.
+    // That the plugin really refuses a tampered package was verified against a genuinely signed
+    // build with minisign in the #347 review; keep verification delegated to the plugin.
     pretendDesktop();
+    const error = vi.spyOn(console, "error").mockImplementation(() => {});
     check.mockResolvedValue({version: "9.9.9", download, downloadAndInstall, install});
     download.mockRejectedValue(new Error("signature verification failed"));
 
     await expect(fetchUpdate()).resolves.toEqual({state: "failed"});
     expect(downloadAndInstall).not.toHaveBeenCalled();
     expect(relaunch).not.toHaveBeenCalled();
+    // A refused package is a security event, logged as such — not as a routine unreachable feed.
+    expect(error).toHaveBeenCalledWith(expect.stringContaining("REJECTED update 9.9.9"), expect.any(Error));
+  });
+
+  it("logs an unreachable feed as a warning, not as a rejected package", async () => {
+    pretendDesktop();
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+    const error = vi.spyOn(console, "error").mockImplementation(() => {});
+    check.mockRejectedValue(new Error("network down"));
+
+    await expect(fetchUpdate()).resolves.toEqual({state: "failed"});
+    expect(warn).toHaveBeenCalledWith(expect.stringContaining("could not check"), expect.any(Error));
+    expect(error).not.toHaveBeenCalled();
   });
 
   it("never restarts the app on its own, even for a good update", async () => {
