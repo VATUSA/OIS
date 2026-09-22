@@ -30,6 +30,8 @@ use utoipa::OpenApi;
         crate::handlers::auth::vatsim_login,
         crate::handlers::auth::vatsim_callback,
         crate::handlers::auth::logout,
+        crate::handlers::auth::desktop_exchange,
+        crate::handlers::auth::desktop_refresh,
         crate::handlers::users::search_users,
         crate::handlers::facilities::list_facilities,
         crate::handlers::facilities::get_facility,
@@ -235,6 +237,8 @@ use utoipa::OpenApi;
     ),
     components(schemas(
         crate::models::MeBody,
+        crate::models::DesktopExchangeRequest,
+        crate::models::DesktopSessionBody,
         crate::models::VatusaProfile,
         crate::models::VatusaRoleEntry,
         crate::models::DashboardSummary,

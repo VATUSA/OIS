@@ -19,6 +19,7 @@ import {
   Tooltip,
   TooltipContent,
   TooltipTrigger,
+  useToast,
 } from "@ois/ui";
 import {
   BookOpen,
@@ -38,7 +39,7 @@ import {
 
 import {ZuluClock} from "@/components/zulu-clock";
 import {DOCS_URL} from "@/lib/api";
-import {login, useLogout, useMe} from "@/lib/auth";
+import {useLogin, useLogout, useMe} from "@/lib/auth";
 import {hasPermission} from "@/lib/permissions";
 import {ADMIN_HOME, AREAS, visibleGroups} from "@/lib/nav";
 
@@ -118,14 +119,34 @@ function initials(name: string) {
 /** The signed-in identity (avatar, name, mono CID · rating), or the sign-in button. */
 function Identity({ collapsed }: { collapsed: boolean }) {
   const { data: me } = useMe();
+  const signIn = useLogin();
+  const toast = useToast();
+
+  // Desktop sign-in can fail in ways the web flow never could — the loopback listener may fail to
+  // bind, time out, or have its code refused — and those used to be a button that did nothing.
+  const startSignIn = () => {
+    signIn.mutate(undefined, {
+      onError: (error) =>
+        toast.error("Sign-in failed", {
+          description: error instanceof Error ? error.message : "Please try again.",
+        }),
+    });
+  };
+
   if (!me) {
     return collapsed ? (
-      <Button size="icon" aria-label="Sign in with VATSIM" onClick={login} className="mx-auto">
+      <Button
+        size="icon"
+        aria-label="Sign in with VATSIM"
+        onClick={startSignIn}
+        disabled={signIn.isPending}
+        className="mx-auto"
+      >
         <LogIn />
       </Button>
     ) : (
-      <Button size="sm" onClick={login}>
-        Sign in with VATSIM
+      <Button size="sm" onClick={startSignIn} disabled={signIn.isPending}>
+        {signIn.isPending ? "Signing in..." : "Sign in with VATSIM"}
       </Button>
     );
   }
