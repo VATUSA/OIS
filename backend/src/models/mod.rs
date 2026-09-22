@@ -20,6 +20,23 @@ pub struct MeBody {
     pub vatusa: Option<VatusaProfile>,
 }
 
+/// What the desktop app posts to trade its one-time OAuth code for a session token (#346).
+#[derive(Debug, Deserialize, ToSchema)]
+pub struct DesktopExchangeRequest {
+    /// The single-use code the OAuth callback handed to the app's loopback listener.
+    pub code: String,
+}
+
+/// A desktop session token and when it stops working.
+///
+/// Sent as `Authorization: Bearer <token>`; the app keeps it in the OS keychain. `expires_at` lets
+/// it refresh ahead of time rather than waiting to be surprised by a 401.
+#[derive(Debug, Serialize, ToSchema)]
+pub struct DesktopSessionBody {
+    pub token: String,
+    pub expires_at: DateTime<Utc>,
+}
+
 /// A signed-in member's VATUSA details, surfaced on their profile.
 #[derive(Debug, Serialize, ToSchema)]
 pub struct VatusaProfile {

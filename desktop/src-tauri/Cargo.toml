@@ -1,0 +1,18 @@
+[package]
+name = "ois-desktop"
+# Local/fallback base only, mirroring ois-backend. Release versioning for the shipped desktop
+# app lands with distribution + auto-update (#347); tauri.conf.json omits `version` so the
+# bundle inherits this one.
+version = "0.1.0"
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+
+[build-dependencies]
+tauri-build.workspace = true
+
+[dependencies]
+tauri.workspace = true
+keyring.workspace = true
+open.workspace = true
+uuid.workspace = true
