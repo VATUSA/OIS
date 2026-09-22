@@ -105,6 +105,22 @@ function FcaNotifier({fcaId, name}: {fcaId: string; name: string}) {
 }
 
 /**
+ * Whether the per-FCA traffic detectors are worth mounting.
+ *
+ * A *sound* counts as much as a banner. Reading only the notification settings meant
+ * `sounds.releases` with `notifications.releases` off mounted nothing at all — no detector, no
+ * traffic query, no sound — so two of the five toggles in the Sounds group silently did nothing.
+ */
+export function fcaNotifiersWanted(flags: {
+  releasesOn: boolean;
+  meteringOn: boolean;
+  releaseSoundOn: boolean;
+  meteringSoundOn: boolean;
+}): boolean {
+  return flags.releasesOn || flags.meteringOn || flags.releaseSoundOn || flags.meteringSoundOn;
+}
+
+/**
  * Notifies on EDCT releases and metering delay across every enabled FCA.
  *
  * Mounts nothing unless one of those categories is actually switched on: each `FcaNotifier` opens a
@@ -114,11 +130,13 @@ function FcaNotifier({fcaId, name}: {fcaId: string; name: string}) {
 function FcaNotifiers() {
   const {value: releasesOn} = useSetting<boolean>("notifications.releases", false);
   const {value: meteringOn} = useSetting<boolean>("notifications.metering", false);
+  const {value: releaseSoundOn} = useSetting<boolean>("sounds.releases", false);
+  const {value: meteringSoundOn} = useSetting<boolean>("sounds.metering", false);
   // The list query is shared cache with the rest of the app, so it costs nothing extra; the early
   // return below is what stops the per-FCA traffic polls from being opened.
   const fcas = useFcas();
 
-  if (!releasesOn && !meteringOn) return null;
+  if (!fcaNotifiersWanted({releasesOn, meteringOn, releaseSoundOn, meteringSoundOn})) return null;
 
   return (
     <>
@@ -201,7 +219,7 @@ function EventReminderNotifier() {
 
   const claims = useQuery({
     queryKey: ["my-ace-claims"],
-    enabled: !!me && can("notifications"),
+    enabled: !!me && (can("notifications") || can("audioAlerts")),
     queryFn: async () => {
       const {data} = await ois.GET("/api/v1/me/ace-claims");
       return data ?? [];
@@ -239,7 +257,9 @@ function EventReminderNotifier() {
  */
 export function DesktopNotifiers() {
   const {data: me} = useMe();
-  if (!can("notifications") || !me) return null;
+  // Either capability is reason enough to mount: the detectors feed banners *and* sounds, and
+  // `platform.ts` exists so one can be turned off without silently taking the other with it.
+  if ((!can("notifications") && !can("audioAlerts")) || !me) return null;
 
   return (
     <>
