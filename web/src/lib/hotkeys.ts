@@ -150,6 +150,35 @@ export async function applyHotkeys(
   }
 }
 
+/**
+ * Lets the settings UI hand the key combinations back while it records a new one.
+ *
+ * A registered global shortcut is swallowed by the OS before the webview sees it, so pressing the
+ * combination that is *already* bound — the obvious thing to do when moving it to another action —
+ * would fire the old shortcut and record nothing. The field therefore suspends the shortcuts while
+ * it captures, and resumes when it stops; the resume is a signal rather than a re-registration
+ * because only `DesktopHotkeys` knows the current bindings.
+ */
+const resumeListeners = new Set<() => void>();
+
+/** Subscribes to "capture finished, take the shortcuts back". Returns an unsubscribe. */
+export function onHotkeysResume(listener: () => void): () => void {
+  resumeListeners.add(listener);
+  return () => {
+    resumeListeners.delete(listener);
+  };
+}
+
+/** Hands every combination back to the OS while a new one is being recorded. */
+export async function suspendHotkeys(): Promise<void> {
+  await clearHotkeys();
+}
+
+/** Asks whoever owns the bindings to register them again. */
+export function resumeHotkeys(): void {
+  for (const listener of resumeListeners) listener();
+}
+
 /** Releases every shortcut — used when the feature is switched off. */
 export async function clearHotkeys(): Promise<void> {
   if (!can("globalHotkeys")) return;

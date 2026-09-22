@@ -88,6 +88,29 @@ export function can(capability: Capability): boolean {
 }
 
 /**
+ * Whether this webview is the app's **main** window.
+ *
+ * The desktop shell renders the same `RootLayout` in every window it opens — pop-out panels (#349)
+ * short-circuit on `?embed=1`, but whole-route windows (#350) do not. Anything that drives a
+ * *process-wide* resource must therefore run in one window only, or several windows fight over it
+ * and whichever closes first takes it away from the rest. Global shortcuts (#352) are exactly that:
+ * `unregisterAll()` is app-scoped, not window-scoped.
+ *
+ * `false` on the web build, where there is no window to ask about.
+ */
+export async function isMainWindow(): Promise<boolean> {
+  if (!isTauri()) return false;
+  try {
+    const {getCurrentWindow} = await import("@tauri-apps/api/window");
+    return getCurrentWindow().label === "main";
+  } catch {
+    // If we cannot tell, assume we are not the main window: declining to touch a shared resource
+    // is the safe failure, taking it from another window is not.
+    return false;
+  }
+}
+
+/**
  * Call a `#[tauri::command]` in the desktop shell.
  *
  * `@tauri-apps/api` is imported lazily so it stays out of the web bundle — the browser build never

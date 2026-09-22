@@ -2,6 +2,7 @@ import {Card, EmptyState, HotkeyInput, QueryState, Select, Switch} from "@ois/ui
 import {LogIn} from "lucide-react";
 
 import {usePageHeader} from "@/components/shell/page-meta";
+import {resumeHotkeys, suspendHotkeys} from "@/lib/hotkeys";
 import {useMe} from "@/lib/auth";
 import {SETTINGS, type SettingDef} from "@/lib/settings";
 import {useSetting} from "@/lib/settings";
@@ -23,6 +24,12 @@ function SettingRow({ def }: { def: SettingDef }) {
             value={value as string}
             placeholder={def.control.placeholder}
             onChange={(v) => setValue(v)}
+            // Hand the live shortcuts back while recording: a registered combination is swallowed
+            // by the OS, so rebinding one to another action would otherwise be impossible.
+            onCaptureChange={(capturing) => {
+              if (capturing) void suspendHotkeys();
+              else resumeHotkeys();
+            }}
             aria-label={def.label}
           />
         ) : (

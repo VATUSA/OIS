@@ -12,18 +12,60 @@ import {cn} from "../lib/utils";
  * Emits the accelerator in the form Tauri's global-shortcut plugin parses.
  */
 
-/** Modifier order is fixed so the same combination always produces the same string. */
+/** Whether we are on a Mac, where the Command key is named `Command` rather than `Super`. */
+function onMac(): boolean {
+  if (typeof navigator === "undefined") return false;
+  const id = navigator.userAgent ?? "";
+  return /Mac|iPhone|iPad/.test(id);
+}
+
+/**
+ * Modifier order is fixed so the same combination always produces the same string.
+ *
+ * Command and Control are named **separately**, not collapsed into `CommandOrControl`. They are
+ * different physical keys: on a Mac, folding Ctrl into `CommandOrControl` means the plugin
+ * registers Command instead — so the combination the user pressed does nothing and one they never
+ * chose is taken from every other application. The same applies to the Windows key.
+ *
+ * Returns `null` for anything that is not a usable shortcut, including a bare key with no modifier:
+ * bound globally, `O` would fire every time the user typed the letter O anywhere.
+ */
 function acceleratorFrom(event: KeyboardEvent): string | null {
   const parts: string[] = [];
-  if (event.metaKey || event.ctrlKey) parts.push("CommandOrControl");
+  if (event.metaKey) parts.push(onMac() ? "Command" : "Super");
+  if (event.ctrlKey) parts.push("Control");
   if (event.altKey) parts.push("Alt");
   if (event.shiftKey) parts.push("Shift");
 
   const key = keyName(event);
   if (!key) return null;
+  // No modifier means this would fire while the user types — refuse it at the source rather than
+  // storing a binding that can only ever be rejected at registration.
+  if (!parts.length) return null;
 
   parts.push(key);
   return parts.join("+");
+}
+
+/**
+ * Which field is recording, app-wide.
+ *
+ * The settings page renders one of these per action. Without a single owner, clicking a second
+ * field while a first is still armed leaves *both* listening, and one keypress is written into both
+ * bindings — which then collide at registration and are reported as another application's fault.
+ */
+const captureSubscribers = new Set<(owner: object | null) => void>();
+let captureOwner: object | null = null;
+
+function claimCapture(owner: object) {
+  captureOwner = owner;
+  for (const notify of captureSubscribers) notify(captureOwner);
+}
+
+function releaseCapture(owner: object) {
+  if (captureOwner !== owner) return;
+  captureOwner = null;
+  for (const notify of captureSubscribers) notify(null);
 }
 
 /**
@@ -47,17 +89,75 @@ function keyName(event: KeyboardEvent): string | null {
 export function HotkeyInput({
   value,
   onChange,
+  onCaptureChange,
   placeholder = "Click, then press a shortcut",
   className,
   "aria-label": ariaLabel,
 }: {
   value: string;
   onChange: (value: string) => void;
+  /**
+   * Called when this field starts and stops recording. The app uses it to hand the currently
+   * registered shortcuts back to the OS while capturing — otherwise pressing the combination that
+   * is already bound fires that shortcut instead of being recorded.
+   */
+  onCaptureChange?: (capturing: boolean) => void;
   placeholder?: string;
   className?: string;
   "aria-label"?: string;
 }) {
   const [capturing, setCapturing] = React.useState(false);
+  const rootRef = React.useRef<HTMLDivElement>(null);
+  // Identity for the app-wide "who is capturing" token; never read, only compared.
+  const identity = React.useRef({});
+
+  // Only one field records at a time — see `captureSubscribers`.
+  React.useEffect(() => {
+    const notify = (owner: object | null) => {
+      if (owner !== identity.current) setCapturing(false);
+    };
+    captureSubscribers.add(notify);
+    return () => {
+      captureSubscribers.delete(notify);
+    };
+  }, []);
+
+  // Tell the app so it can suspend / resume the live registrations.
+  const onCaptureChangeRef = React.useRef(onCaptureChange);
+  onCaptureChangeRef.current = onCaptureChange;
+  React.useEffect(() => {
+    onCaptureChangeRef.current?.(capturing);
+  }, [capturing]);
+
+  // Give the token back when this field stops recording, so a later click can claim it.
+  React.useEffect(() => {
+    if (capturing) return;
+    releaseCapture(identity.current);
+  }, [capturing]);
+
+  // Stop recording when the user's attention goes elsewhere.
+  //
+  // Without this, capture mode has no exit but Escape or finding this same button again — and
+  // because it swallows every keydown in the document, the whole application's keyboard stays dead
+  // in the meantime, with nothing on screen to explain it.
+  React.useEffect(() => {
+    if (!capturing) return;
+
+    const onPointerDown = (event: Event) => {
+      if (rootRef.current?.contains(event.target as Node)) return;
+      setCapturing(false);
+    };
+    const onWindowBlur = () => setCapturing(false);
+
+    document.addEventListener("pointerdown", onPointerDown, true);
+    document.addEventListener("mousedown", onPointerDown, true);
+    window.addEventListener("blur", onWindowBlur);
+    return () => {
+      document.removeEventListener("pointerdown", onPointerDown, true);
+      document.removeEventListener("mousedown", onPointerDown, true);
+      window.removeEventListener("blur", onWindowBlur);
+    };
+  }, [capturing]);
 
   // Listen on the document rather than on the button.
   //
@@ -95,11 +195,17 @@ export function HotkeyInput({
   }, [capturing, onChange]);
 
   return (
-    <div className="flex items-center gap-1.5">
+    <div ref={rootRef} className="flex items-center gap-1.5">
       <button
         type="button"
         aria-label={ariaLabel}
-        onClick={() => setCapturing((on) => !on)}
+        onClick={() =>
+          setCapturing((on) => {
+            if (on) return false;
+            claimCapture(identity.current);
+            return true;
+          })
+        }
         className={cn(
           "h-9 min-w-56 rounded-md border px-3 text-left font-mono text-sm transition-colors",
           capturing
