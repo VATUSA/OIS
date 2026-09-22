@@ -15,6 +15,8 @@
  *    static `import` at the top of any module would pull it into the main bundle; don't add one.
  */
 
+import {IMPLEMENTED} from "./platform-flags";
+
 /** The Tauri v2 runtime injects this into the webview before any app code runs. */
 declare global {
   interface Window {
@@ -48,22 +50,7 @@ export type Capability =
   | "audioAlerts"
   | "fileDialogs";
 
-/**
- * Whether each capability is actually *implemented* yet, independent of which platform we're on.
- *
- * Every entry starts `false` and is flipped by the issue that builds it, so this module can never
- * claim an ability the app doesn't have. Gating on a capability is therefore safe to write today
- * and starts working the day its feature lands — no caller changes needed.
- */
-const IMPLEMENTED: Readonly<Record<Capability, boolean>> = Object.freeze({
-  notifications: false, // #348 — native OS notifications
-  miniWindows: false, // #349 — pop-out always-on-top mini-windows
-  multiWindow: false, // #350 — multi-window / multi-monitor
-  tray: false, // #351 — system tray
-  globalHotkeys: false, // #352 — global hotkeys
-  audioAlerts: false, // #353 — audio alerts
-  fileDialogs: false, // #354 — native export/import dialogs
-});
+// What is implemented lives in `platform-flags.ts`, so a test can turn a flag on (VATUSA/OIS#345).
 
 const CAPABILITIES = Object.keys(IMPLEMENTED) as Capability[];
 
