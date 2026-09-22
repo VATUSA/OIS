@@ -1,0 +1,57 @@
+# Observability stack — Prometheus (scrape + time-series history) and Grafana (dashboards), both
+# provisioned so they come up ready with no manual clicking. Opt-in and kept OUT of the base file,
+# so a deployment that doesn't want it never runs it:
+#
+#   docker compose -f docker-compose.yml -f docker-compose.observability.yml up -d
+#
+# Merged `-f` files share one project and one network, so Prometheus reaches the API in-network at
+# backend:3000/metrics. That is the intended path, and it publishes no new port for it. Note
+# /metrics still rides the API's own listener, so it is reachable wherever the API is — set
+# METRICS_TOKEN on the backend (or block the path at your proxy) if the API is publicly proxied.
+# See deploy/observability/prometheus.yml for the scrape side.
+#
+# Prometheus and Grafana's own UIs are host-published (host-local by default) so you can reach
+# them through your reverse proxy, the same as the API and web ports.
+services:
+  prometheus:
+    image: prom/prometheus:v3.7.3
+    depends_on:
+      - backend
+    volumes:
+      - ./deploy/observability/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+      # Uncomment together with the `authorization` block in prometheus.yml to scrape with a token.
+      # - ./deploy/observability/metrics_token:/etc/prometheus/metrics_token:ro
+      - ois_prometheus:/prometheus
+    command:
+      - --config.file=/etc/prometheus/prometheus.yml
+      - --storage.tsdb.path=/prometheus
+      - --storage.tsdb.retention.time=${PROMETHEUS_RETENTION:-15d}
+    ports:
+      - "${BIND_HOST:-127.0.0.1}:${PROMETHEUS_PORT:-9090}:9090"
+    restart: unless-stopped
+
+  grafana:
+    image: grafana/grafana:12.3.1
+    depends_on:
+      - prometheus
+    environment:
+      # Read only when Grafana first creates the admin user. The ois_grafana volume keeps the
+      # user database, so changing this later and recreating does nothing — see docs/deploy.md.
+      GF_SECURITY_ADMIN_PASSWORD: ${GRAFANA_ADMIN_PASSWORD:-admin}
+      # This is an internal ops tool behind the same proxy as everything else; nobody signs
+      # themselves up for it.
+      GF_USERS_ALLOW_SIGN_UP: "false"
+    volumes:
+      # Datasource + dashboard-provider configs. Grafana reads these at boot, which is what makes
+      # the stack zero-setup.
+      - ./deploy/observability/grafana/provisioning:/etc/grafana/provisioning:ro
+      # The dashboard JSON the provider above points at.
+      - ./deploy/observability/grafana/dashboards:/var/lib/grafana/dashboards:ro
+      - ois_grafana:/var/lib/grafana
+    ports:
+      - "${BIND_HOST:-127.0.0.1}:${GRAFANA_PORT:-3001}:3000"
+    restart: unless-stopped
+
+volumes:
+  ois_prometheus:
+  ois_grafana:

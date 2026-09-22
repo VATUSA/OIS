@@ -52,6 +52,25 @@ export async function login(): Promise<void> {
   )}`;
 }
 
+/**
+ * Sign-in as a mutation, so the UI actually reacts to it.
+ *
+ * On desktop `login()` resolves in place rather than navigating away, and `fetchMe` caches a 401 as
+ * `null` ("signed out") for `staleTime`, so without invalidating `["me"]` the app keeps showing the
+ * sign-in button for up to a minute after a successful sign-in. Failures matter too: the loopback
+ * listener can fail to bind (port already held), time out, or have its code rejected — as a bare
+ * `onClick={login}` those were a button that silently did nothing.
+ */
+export function useLogin() {
+  const queryClient = useQueryClient();
+  return useMutation({
+    mutationFn: login,
+    onSuccess: () => {
+      void queryClient.invalidateQueries({queryKey: ["me"]});
+    },
+  });
+}
+
 export function useLogout() {
   const queryClient = useQueryClient();
   return useMutation({

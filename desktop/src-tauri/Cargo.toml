@@ -20,3 +20,4 @@ tauri-plugin-process.workspace = true
 # `tauri::generate_context!` expands to serde_json calls once tauri.conf.json carries a plugins
 # block, so it has to be in scope here even though no code of ours names it.
 serde_json.workspace = true
+uuid.workspace = true

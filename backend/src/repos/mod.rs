@@ -17,6 +17,7 @@ pub mod flight_exclusions;
 pub mod flow;
 pub mod gdp;
 pub mod integration;
+pub mod metrics;
 pub mod org;
 pub mod preferences;
 pub mod public;
