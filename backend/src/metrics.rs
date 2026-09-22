@@ -248,6 +248,14 @@ pub async fn observe(state: &AppState, domain: Option<DomainCounts>) {
     // is indistinguishable from a healthy zero, and this is how a permanently-broken aggregate
     // (which otherwise just freezes the six gauges at plausible values) becomes visible.
     counter!("ois_metrics_domain_aggregate_failures_total").increment(0);
+    // Registered here too, not only from inside the drain loop. The loop creates it on its first
+    // tick, so a task that never spawned — the very failure "alert on it going flat" is meant to
+    // catch — left the series absent instead of flat, and an alert on an absent series never fires.
+    //
+    // Not unit-tested: the recorder is process-wide, so `the_upkeep_task_drains_on_its_timer_…`
+    // creates this series too and an "is it absent?" assertion would depend on test order. Checked
+    // instead against a running backend, scraped inside the first minute.
+    counter!("ois_metrics_upkeep_total").increment(0);
 
     if let Some(d) = domain {
         gauge!("ois_active_tmis").set(d.active_tmis as f64);
@@ -278,8 +286,16 @@ fn observe_db_pool(state: &AppState) {
 fn observe_jobs(state: &AppState) {
     for job in state.jobs.snapshot() {
         let name = job.name.clone();
-        gauge!("ois_job_last_run_timestamp_seconds", "job" => name.clone())
-            .set(job.last_finished_ms as f64 / 1000.0);
+        // `last_finished_ms == 0` means "never finished" (see `JobRegistry`), not "finished at the
+        // epoch". Emitting the zero made the dashboard's `time() - ois_job_last_run_timestamp_seconds`
+        // panel read ~57 years for every job that had not ticked since boot — which, for a daily
+        // job like compaction, is most of the day after every restart, and trips any
+        // "last run older than N" alert on all of them at once. Leaving the series out says
+        // "unknown", which is what Prometheus takes an absent sample to mean.
+        if job.last_finished_ms > 0 {
+            gauge!("ois_job_last_run_timestamp_seconds", "job" => name.clone())
+                .set(job.last_finished_ms as f64 / 1000.0);
+        }
         // Again not `_total` — this is a gauge read off the registry, not a counter we own.
         gauge!("ois_job_runs", "job" => name.clone()).set(job.runs as f64);
         // `last_ok` is `None` until the job has finished once; report that as a failure so a job
@@ -529,6 +545,49 @@ mod tests {
         // Real methods keep their own identity — the allowlist must not flatten everything.
         assert_eq!(method_label(&Method::GET), "GET");
         assert_eq!(method_label(&Method::DELETE), "DELETE");
+    }
+
+    /// A job that has never finished must report *no* last-run time, not the epoch.
+    ///
+    /// `JobRegistry` uses `last_finished_ms == 0` for "never". Publishing that zero made the
+    /// dashboard's `time() - ois_job_last_run_timestamp_seconds` panel read ~57 years for every job
+    /// that had not run since boot, and tripped any "last run older than N" alert on all of them at
+    /// once after each restart.
+    #[tokio::test]
+    async fn a_job_that_has_never_finished_reports_no_last_run_time() {
+        let state = crate::state::AppState::without_db();
+        state
+            .jobs
+            .register("qa_never_ran", "never finished", Some(86_400), false);
+        state
+            .jobs
+            .register("qa_has_run", "finished once", Some(60), false);
+        state.jobs.begin("qa_has_run");
+        state.jobs.finish("qa_has_run", true, "ok");
+
+        let handle = handle();
+        observe(&state, None).await;
+        let rendered = handle.render();
+
+        let line_for = |job: &str| {
+            rendered
+                .lines()
+                .find(|l| l.starts_with("ois_job_last_run_timestamp_seconds") && l.contains(job))
+                .map(str::to_string)
+        };
+
+        assert_eq!(
+            line_for("qa_never_ran"),
+            None,
+            "a job that never finished must be absent, not zero:\n{rendered}"
+        );
+        let ran = line_for("qa_has_run").expect("a finished job must report its last run");
+        let seconds: f64 = ran.rsplit_once(' ').unwrap().1.parse().unwrap();
+        // Seconds since the epoch, i.e. actually now-ish — not 0.
+        assert!(
+            seconds > 1_700_000_000.0,
+            "implausible last-run time: {ran}"
+        );
     }
 
     /// AC1/AC3 for the half that comes from the database.

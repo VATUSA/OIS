@@ -4,12 +4,19 @@
 //! fetched as one query of scalar subqueries rather than six calls, because a scrape runs on
 //! Prometheus' interval and should cost one round trip, not six.
 //!
-//! **The "active" predicates below are mirrored from [`crate::repos::public`]**, whose module doc
-//! is the canonical definition of active for the public advisories board: restrictions and ground
-//! stops are published and not past their end, GDPs are published, programs are live (not past
-//! `active_until`), FCAs are enabled. If that definition changes there, it must change here — the
-//! two are deliberately identical so a dashboard and the public board can never disagree about how
-//! many TMIs are running.
+//! **The "active" predicates below are mirrored from the code that owns each one**, so a dashboard
+//! and the app can never disagree about how many TMIs or FCAs are running. If a definition changes
+//! there, it must change here.
+//!
+//! * TMIs, ground stops, GDPs and programs follow [`crate::repos::public`], whose module doc is the
+//!   canonical definition of active for the public advisories board: restrictions and ground stops
+//!   are published and not past their end, GDPs are published, programs are live (not past
+//!   `active_until`). None of those tables is soft-deleted.
+//! * FCAs follow [`crate::repos::flow`] — **not** `repos::public`, which has no `flow.fca` query at
+//!   all. `flow.fca` *is* soft-deleted (`deleted_at`, migration 0042) and carries an event
+//!   lifecycle (`event_status`, migration 0055), and every live reader filters both. Counting bare
+//!   `enabled` instead made the gauge include FCAs no map shows and no metering run sees, and —
+//!   because `delete_fca` only stamps `deleted_at` — made it climb forever.
 
 use sqlx::PgPool;
 
@@ -29,7 +36,9 @@ pub async fn domain_counts(pool: &PgPool) -> Result<DomainCounts, ApiError> {
            (select count(*) from tmu.gdp where status = 'published') as active_gdps, \
            (select count(*) from tmu.programs \
              where active_until is null or active_until > now()) as active_programs, \
-           (select count(*) from flow.fca where enabled) as enabled_fcas, \
+           (select count(*) from flow.fca \
+             where enabled and deleted_at is null \
+               and (event_id is null or event_status = 'published')) as enabled_fcas, \
            (select coalesce(sum(s.delay_min), 0)::bigint from tmu.gdp_slot s \
               join tmu.gdp g on g.id = s.gdp_id \
              where g.status = 'published') as gdp_delay_minutes",
@@ -96,9 +105,38 @@ mod tests {
         .await
         .unwrap();
 
+        // FCAs are the one count whose definition lives in `repos::flow`, not `repos::public`:
+        // soft-deleted rows stay in the table forever and event FCAs are hidden until published.
+        sqlx::query(
+            "insert into events.event (id, title, start_time, end_time) values \
+               (77, 'Test event', now() + interval '1 day', now() + interval '2 days')",
+        )
+        .execute(&pool)
+        .await
+        .unwrap();
+        sqlx::query(
+            "insert into flow.fca (id, name, enabled, deleted_at, event_id, event_status) values \
+               ('f-live',     'Live',           true,  null,  null, null), \
+               ('f-pubevent', 'Published event',true,  null,  77,   'published'), \
+               ('f-deleted',  'Soft-deleted',   true,  now(), null, null), \
+               ('f-planned',  'Planned event',  true,  null,  77,   'planned'), \
+               ('f-archived', 'Archived event', true,  null,  77,   'archived'), \
+               ('f-off',      'Disabled',       false, null,  null, null)",
+        )
+        .execute(&pool)
+        .await
+        .unwrap();
+
         let counts = domain_counts(&pool).await.expect("query is valid");
         // 't-live' and 't-open'; not the expired one, not the draft.
         assert_eq!(counts.active_tmis, 2);
+        // 'f-live' and 'f-pubevent' only — the same set `repos::flow::list_fcas` returns.
+        //
+        // A soft-deleted FCA is the one that bites: `delete_fca` only stamps `deleted_at`, so
+        // counting bare `enabled` made this gauge climb by one for every FCA ever deleted and
+        // never come back down. The planned and archived event FCAs are hidden from every live
+        // map and from metering, so a dashboard must not call them enabled either.
+        assert_eq!(counts.enabled_fcas, 2);
         // Only the published GDP.
         assert_eq!(counts.active_gdps, 1);
         // 12 + 8 — the draft GDP's 99 minutes are not delay anyone is serving.

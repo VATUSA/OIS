@@ -81,6 +81,13 @@ pub async fn log_requests(request: Request, next: Next) -> Response {
         response.headers_mut().insert("x-request-id", value);
     }
 
+    // Checked before the line is built rather than after it: a path polled every 15s forever should
+    // not pay to format a string that is immediately dropped. (`actor_label` above still runs — it
+    // needs the request, which `next.run` consumes — so this trims the formatting, not everything.)
+    if !should_log(&path, status) {
+        return response;
+    }
+
     // Build a single readable line; append query + ip only when present to avoid noise.
     let mut line = format!("{method} {path} -> {status} in {ms}ms · {actor}");
     if let Some(q) = &query {
@@ -88,10 +95,6 @@ pub async fn log_requests(request: Request, next: Next) -> Response {
     }
     if let Some(ip) = &ip {
         line.push_str(&format!(" · {ip}"));
-    }
-
-    if !should_log(&path, status) {
-        return response;
     }
 
     if status >= 500 {
