@@ -76,8 +76,7 @@ async function mountClosed(at: { pathname: string; href: string }, stored: unkno
 /**
  * Mounts the real CommandSearch with the palette open. Whether favorites are *fetched* is read off
  * the query cache rather than `fetch`: the generated client captures `fetch` when the module loads,
- * so a stub installed here would never be seen — and a disabled query is exactly one that sits at
- * fetchStatus "idle".
+ * so a stub installed here would never be seen.
  */
 async function mountSearch({ me, favorites }: { me?: unknown; favorites?: unknown[] } = {}) {
   const qc = new QueryClient({ defaultOptions: { queries: { retry: false, refetchInterval: false } } });
@@ -102,9 +101,11 @@ async function mountSearch({ me, favorites }: { me?: unknown; favorites?: unknow
     await new Promise((resolve) => setTimeout(resolve, 0));
   });
   return {
-    // A query that never ran sits at "pending" forever; one that ran resolves or errors. `fetchStatus`
-    // is no good here — it is back to "idle" either way once the request has settled.
-    favoritesRan: () => (qc.getQueryState(["preferences", "favorites"])?.status ?? "pending") !== "pending",
+    // Whether the query is *enabled*, not whether its request has settled. Reading the settled status
+    // after one tick only passed when nothing listened on API_BASE — the refused request errored in
+    // time — and failed against a live backend, whose round trip was still in flight (VATUSA/OIS#374).
+    favoritesEnabled: () =>
+      qc.getQueryCache().find({ queryKey: ["preferences", "favorites"] })?.isDisabled() === false,
     stars: () => document.querySelectorAll("[aria-pressed]"),
     groupHeadings: () =>
       Array.from(document.querySelectorAll("[data-index]"))
@@ -124,14 +125,14 @@ describe("command search, signed out (VATUSA/OIS#312)", () => {
   // M17: favorites are per user — there is nothing to fetch and nothing that could be saved.
   it("never requests the favorites preferences", async () => {
     const p = await mountSearch();
-    expect(p.favoritesRan()).toBe(false);
+    expect(p.favoritesEnabled()).toBe(false);
   });
 });
 
 describe("command search, signed in (VATUSA/OIS#312)", () => {
   it("does request the favorites preferences", async () => {
     const p = await mountSearch({ me: ME });
-    expect(p.favoritesRan()).toBe(true);
+    expect(p.favoritesEnabled()).toBe(true);
   });
 
   it("offers a star once there is a user to favorite for", async () => {
