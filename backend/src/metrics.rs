@@ -120,9 +120,10 @@ pub async fn track_http(request: Request, next: Next) -> Response {
 
 /// Whether a scrape may proceed (AC4).
 ///
-/// No `METRICS_TOKEN` configured means the endpoint is open — which is the intended default,
-/// because `/metrics` is not host-published and Prometheus reaches it over the compose network.
-/// Once a token *is* configured it is mandatory, and only an exact `Bearer <token>` passes.
+/// No `METRICS_TOKEN` configured means the endpoint is open, which is the intended default: the
+/// observability stack scrapes it in-network and publishes no port for it. It does still ride the
+/// API's own listener, so set a token wherever the API is publicly proxied. Once a token *is*
+/// configured it is mandatory, and only an exact `Bearer <token>` passes.
 pub fn scrape_authorized(expected: Option<&str>, authorization: Option<&str>) -> bool {
     let Some(expected) = expected.map(str::trim).filter(|t| !t.is_empty()) else {
         return true;
@@ -167,7 +168,9 @@ pub async fn observe(state: &AppState, domain: Option<DomainCounts>) {
         gauge!("ois_active_gdps").set(d.active_gdps as f64);
         gauge!("ois_active_programs").set(d.active_programs as f64);
         gauge!("ois_fca_enabled").set(d.enabled_fcas as f64);
-        gauge!("ois_gdp_delay_minutes_total").set(d.gdp_delay_minutes as f64);
+        // Not `_total`: that suffix is reserved for counters, and this is a *current* sum of
+        // assigned delay across live GDPs, which falls as programs end.
+        gauge!("ois_gdp_delay_minutes").set(d.gdp_delay_minutes as f64);
     }
 }
 
@@ -190,7 +193,8 @@ fn observe_jobs(state: &AppState) {
         let name = job.name.clone();
         gauge!("ois_job_last_run_timestamp_seconds", "job" => name.clone())
             .set(job.last_finished_ms as f64 / 1000.0);
-        gauge!("ois_job_runs_total", "job" => name.clone()).set(job.runs as f64);
+        // Again not `_total` — this is a gauge read off the registry, not a counter we own.
+        gauge!("ois_job_runs", "job" => name.clone()).set(job.runs as f64);
         // `last_ok` is `None` until the job has finished once; report that as a failure so a job
         // that has never completed is as visible to an alert as one that completed badly.
         gauge!("ois_job_last_success", "job" => name.clone()).set(if job.last_ok == Some(true) {

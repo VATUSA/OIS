@@ -36,7 +36,12 @@ pub async fn domain_counts(pool: &PgPool) -> Result<DomainCounts, ApiError> {
     )
     .fetch_one(pool)
     .await
-    .map_err(|_| ApiError::Internal)
+    .map_err(|e| {
+        // The handler degrades to the in-memory series when this fails, so without this line a
+        // permanently-wrong query would show up only as six missing gauges and no explanation.
+        tracing::warn!(error = %e, "metrics domain aggregate failed");
+        ApiError::Internal
+    })
 }
 
 #[cfg(test)]

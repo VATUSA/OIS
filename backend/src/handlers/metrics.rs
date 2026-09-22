@@ -162,14 +162,12 @@ mod tests {
             if line.is_empty() || line.starts_with('#') {
                 continue;
             }
-            let Some((name, rest)) = line.split_once(' ') else {
+            // Split from the right: the value is the last token, and a label value may legally
+            // contain a space (a build version, say), which a left split would mangle.
+            let Some((name, value)) = line.rsplit_once(' ') else {
                 return false;
             };
-            if name.is_empty() {
-                return false;
-            }
-            let value = rest.split_whitespace().next().unwrap_or("");
-            if value.parse::<f64>().is_err() {
+            if name.is_empty() || value.parse::<f64>().is_err() {
                 return false;
             }
             samples += 1;

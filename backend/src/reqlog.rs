@@ -45,6 +45,19 @@ fn actor_label(request: &Request) -> String {
     "anon".to_string()
 }
 
+/// Paths polled on a fixed interval forever, whose successful requests are pure log noise.
+/// Prometheus scrapes `/metrics` every 15s by default — thousands of identical INFO lines a day,
+/// burying everything else.
+const POLLED_PATHS: &[&str] = &["/metrics"];
+
+/// Whether a finished request earns a log line.
+///
+/// A *failed* poll is still worth one — that is how a misconfigured `METRICS_TOKEN` or a broken
+/// scrape surfaces at all — so only the 2xx/3xx case on a polled path is suppressed.
+fn should_log(path: &str, status: u16) -> bool {
+    status >= 400 || !POLLED_PATHS.contains(&path)
+}
+
 pub async fn log_requests(request: Request, next: Next) -> Response {
     // CORS preflight is noise — pass it through unlogged.
     if request.method() == Method::OPTIONS {
@@ -77,6 +90,10 @@ pub async fn log_requests(request: Request, next: Next) -> Response {
         line.push_str(&format!(" · {ip}"));
     }
 
+    if !should_log(&path, status) {
+        return response;
+    }
+
     if status >= 500 {
         tracing::error!(req = req_id, status, latency_ms = ms as u64, "{line}");
     } else if status >= 400 {
@@ -86,4 +103,29 @@ pub async fn log_requests(request: Request, next: Next) -> Response {
     }
 
     response
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_successful_scrape_is_suppressed_but_a_failing_one_is_not() {
+        // The whole point: Prometheus polling every 15s must not fill the log.
+        assert!(!should_log("/metrics", 200));
+        assert!(!should_log("/metrics", 304));
+        // ...but a scrape that is being refused has to be visible, or a misconfigured
+        // METRICS_TOKEN looks exactly like a healthy deployment from the logs.
+        assert!(should_log("/metrics", 401));
+        assert!(should_log("/metrics", 500));
+    }
+
+    #[test]
+    fn ordinary_requests_are_always_logged() {
+        assert!(should_log("/health", 200));
+        assert!(should_log("/api/v1/me", 200));
+        // Not a prefix match — a real route must not be silenced by sharing a stem.
+        assert!(should_log("/metrics/extra", 200));
+        assert!(should_log("/api/v1/metrics", 200));
+    }
 }

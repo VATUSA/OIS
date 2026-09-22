@@ -554,7 +554,7 @@
             "uid": "ois-prometheus"
           },
           "editorMode": "code",
-          "expr": "ois_gdp_delay_minutes_total",
+          "expr": "ois_gdp_delay_minutes",
           "range": true,
           "instant": false,
           "refId": "A",

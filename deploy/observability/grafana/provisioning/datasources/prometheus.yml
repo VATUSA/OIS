@@ -4,9 +4,10 @@ apiVersion: 1
 
 datasources:
   - name: Prometheus
-    # Fixed uid so the committed dashboard can bind to this datasource by name rather than
-    # depending on a generated id or a picker variable — that is what makes AC6's "zero manual
-    # setup" actually hold.
+    # Fixed uid so the committed dashboard binds to this exact datasource rather than depending on
+    # a generated id or a picker variable the viewer has to resolve. Every panel in
+    # ../../dashboards/ois-overview.json references this uid; change it here and you must change it
+    # there too.
     uid: ois-prometheus
     type: prometheus
     access: proxy
