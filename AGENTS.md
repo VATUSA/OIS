@@ -39,6 +39,15 @@ per-feature specs); user docs are a VitePress site in `docs-site/`. The backlog 
 Rust: edition 2024, MSRV 1.85, **nightly** toolchain (for `-Zthreads` — no nightly *language*
 features, so `stable` remains a valid fallback).
 
+**On Linux, `just ci` needs the GTK/WebKit dev packages.** `just check` is
+`cargo check --workspace`, and the workspace includes the Tauri shell (`desktop/src-tauri`), whose
+Linux backend will not even `cargo check` without them — so a backend-only change still fails
+without this. macOS and Windows use the OS webview and need nothing extra.
+
+```bash
+sudo apt-get install -y libwebkit2gtk-4.1-dev libgtk-3-dev libayatana-appindicator3-dev librsvg2-dev
+```
+
 ---
 
 ## Architecture
@@ -55,6 +64,7 @@ models/     request/response + row types (serde + utoipa + sqlx::FromRow)
 auth/       RequirePermission extractor, principal resolution, permission markers
 jobs.rs     background workers (nav/winds refresh, lifecycle, cleanup, compaction…)
 job_registry.rs  in-memory job status + manual-trigger registry
+metrics.rs  Prometheus registry + the HTTP-metrics layer; GET /metrics projects AppState
 feed/       live VATSIM-feed subsystem (poller, nav, airports, trajectory, flow, runway…)
 realtime.rs in-process broadcast hub behind GET /api/v1/ws
 audit.rs    middleware that records every successful mutation
@@ -109,6 +119,11 @@ OIS_OPENAPI_URL=http://127.0.0.1:3001/docs/api/v1/openapi.json \
 
 New handlers must be registered in **both** `router.rs` (the route) and `openapi.rs` (the path +
 any new schema), or they won't appear in the generated client.
+
+The one deliberate exception is **`GET /metrics`** (#382): Prometheus text exposition, not JSON the
+SPA consumes, so it is registered in `router.rs` only and there is **no client regen** for it.
+Adding another endpoint outside the spec needs the same kind of justification — "the generated
+client could not use it if it wanted to" — not merely "the SPA doesn't call it yet".
 
 ### The trajectory / ETA model (one predictor, many callers)
 
@@ -331,6 +346,9 @@ The full list with dev defaults is in `.env.example`. The ones that gate functio
 - **VATUSA** (optional roster sync): `VATUSA_API_BASE`, `VATUSA_API_KEY`, `OIS_PUBLIC_URL`.
 - **Discord bot** (optional): `DISCORD_BOT_TOKEN`, `OIS_API_BASE`, `OIS_API_TOKEN`, `OIS_POLL_SECS`.
 - **Web/Vite dev**: `VITE_OIS_API_URL`, `OIS_OPENAPI_URL` (codegen source) — in `web/.env.local`.
+- **Observability** (optional, second compose file): `METRICS_TOKEN` gates `GET /metrics` when set;
+  `PROMETHEUS_PORT`, `PROMETHEUS_RETENTION`, `GRAFANA_PORT`, `GRAFANA_ADMIN_PASSWORD`. See
+  `docs/deploy.md`.
 - **Origins** — two lists, deliberately separate. `CORS_ALLOWED_ORIGINS` grants *credentialed* CORS
   (the web app, and the Tauri webview's `tauri://localhost` / `http://tauri.localhost`) and is also
   accepted for OAuth `return_to`. `OAUTH_RETURN_TO_ORIGINS` is `return_to`-only, no CORS — the

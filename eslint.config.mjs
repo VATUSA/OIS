@@ -35,7 +35,10 @@ export default tseslint.config(
     // This rule only matches static imports, so platform.ts needs no exception — and deliberately
     // doesn't get one, so that adding a static import *there* is caught too. Go through
     // `invokeDesktop()` rather than importing Tauri directly (#345).
-    files: ["web/**/*.{ts,tsx}"],
+    // `packages/**` is in scope too: @ois/ui is consumed as raw source (its `exports` point at
+    // src/index.ts), so it compiles into the very browser bundle this rule protects — and shared
+    // shell chrome, where a tray or pop-out control would live, belongs there per DESIGN.md.
+    files: ["web/**/*.{ts,tsx}", "packages/**/*.{ts,tsx}"],
     rules: {
       "no-restricted-imports": [
         "error",

@@ -46,6 +46,12 @@ tracing-subscriber = { version = "0.3.20", features = ["env-filter", "fmt"] }
 utoipa = { version = "5.5.0", features = ["axum_extras", "chrono"] }
 utoipa-swagger-ui = { version = "9.0.2", features = ["axum"] }
 
+# --- metrics / observability ---
+# `default-features = false` drops the exporter's own hyper http-listener + push-gateway; we only
+# want the recorder and its text renderer, served from our own Axum route (see backend/src/metrics.rs).
+metrics = "0.24"
+metrics-exporter-prometheus = { version = "0.18", default-features = false }
+
 # --- config ---
 dotenvy = "0.15.7"
 

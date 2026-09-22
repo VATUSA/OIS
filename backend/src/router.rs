@@ -11,8 +11,9 @@ use crate::{
     handlers::{
         access, ace, admin, aircraft_profiles, airport_configs, airport_surface, api_keys, atc,
         audit, auth, dashboards, docs, events, facilities, facility_documents, facility_map, feed,
-        flight_exclusions, flow, gdp, health, integration, jobs as jobs_handler, preferences,
-        public, runway, service_accounts, stats, taxi_insights, tmu, users, webhooks,
+        flight_exclusions, flow, gdp, health, integration, jobs as jobs_handler,
+        metrics as metrics_handler, preferences, public, runway, service_accounts, stats,
+        taxi_insights, tmu, users, webhooks,
     },
     openapi::ApiDoc,
     realtime,
@@ -22,6 +23,9 @@ use crate::{
 pub fn build_router(state: AppState) -> Router {
     Router::new()
         .route("/health", get(health::health))
+        // Prometheus scrape target (#382). Intentionally NOT in the OpenAPI spec or the typed
+        // client: it is text exposition for Prometheus, not JSON the SPA consumes.
+        .route("/metrics", get(metrics_handler::metrics))
         .route("/docs/api/v1/openapi.json", get(docs::openapi_json))
         // Interactive API docs (Swagger UI), served from the same generated spec. Try-it-out calls
         // hit the real endpoints and obey their auth (session cookie or bearer token).
@@ -584,6 +588,11 @@ pub fn build_router(state: AppState) -> Router {
             state.clone(),
             resolve_current_user,
         ))
+        // HTTP metrics (#382). Outside resolve_current_user so the recorded latency covers auth
+        // resolution, the audit layer and the handler — everything the client actually waits for.
+        // Router::layer runs after routing, so `MatchedPath` is populated and requests are labelled
+        // by route template rather than raw path.
+        .layer(middleware::from_fn(crate::metrics::track_http))
         .layer(build_cors_layer())
         .with_state(state)
 }

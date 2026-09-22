@@ -182,4 +182,19 @@ mod tests {
             "http://127.0.0.1:5173"
         );
     }
+
+    /// The Tauri webview's origin is not an http host: `tauri://localhost` on macOS/Linux and
+    /// `http://tauri.localhost` on Windows. Both ship in `.env.example`'s `CORS_ALLOWED_ORIGINS`,
+    /// and the desktop app depends on them surviving normalisation verbatim — a `tauri://` scheme
+    /// has no known default port, so it must fall through to the raw value rather than be dropped.
+    /// Tightening this to http(s)-only silently blocks every desktop API call, which presents as
+    /// the server being down.
+    #[test]
+    fn passes_the_desktop_webview_origins_through_untouched() {
+        assert_eq!(normalize_origin("tauri://localhost"), "tauri://localhost");
+        assert_eq!(
+            normalize_origin("http://tauri.localhost"),
+            "http://tauri.localhost"
+        );
+    }
 }

@@ -1,10 +1,20 @@
 // @vitest-environment jsdom
 import {afterEach, describe, expect, it, vi} from "vitest";
 
-import {can, capabilities, invokeDesktop, isTauri, platform, type Capability} from "./platform";
+import {
+  availability,
+  can,
+  capabilities,
+  invokeDesktop,
+  isTauri,
+  platform,
+  type Capability,
+} from "./platform";
 
-// The real module talks to Tauri's IPC, which doesn't exist under test. Mocking it also proves
-// invokeDesktop reaches @tauri-apps/api through its dynamic import rather than a static one.
+// The real module talks to Tauri's IPC, which doesn't exist under test, so we stand in for it.
+// Note this mock says NOTHING about static-vs-dynamic importing — vi.mock intercepts both forms
+// identically, and this suite stays green if platform.ts is converted to a top-level import.
+// Bundle isolation is enforced solely by the `no-restricted-imports` rule in eslint.config.mjs.
 const invoke = vi.fn();
 vi.mock("@tauri-apps/api/core", () => ({invoke: (...args: unknown[]) => invoke(...args)}));
 
@@ -48,6 +58,23 @@ describe("capabilities", () => {
     for (const [name, available] of Object.entries(capabilities())) {
       expect(available, `${name} is not implemented yet`).toBe(false);
     }
+  });
+
+  // The gate this module exists for. It has to be asserted on `availability` rather than through
+  // `can()`, because every entry in IMPLEMENTED is false today — so `can()` returns false on both
+  // platforms whether or not it consults isTauri(), and an inlined guard could be deleted outright
+  // without a single test noticing. This is what arms the leak when a feature issue flips a flag.
+  it("withholds an implemented capability from the web build", () => {
+    expect(availability(false, true)).toBe(false);
+    expect(availability(true, true)).toBe(true);
+    expect(availability(true, false)).toBe(false);
+    expect(availability(false, false)).toBe(false);
+  });
+
+  it("keeps one snapshot identity per platform so it is safe in a dependency array", () => {
+    expect(capabilities()).toBe(capabilities());
+    pretendDesktop();
+    expect(capabilities()).toBe(capabilities());
   });
 
   it("hands back a frozen snapshot a caller can't corrupt for everyone else", () => {
