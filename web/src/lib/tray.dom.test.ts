@@ -133,3 +133,32 @@ describe("when the tray cannot actually be seen", () => {
     warn.mockRestore();
   });
 });
+
+describe("menu lifetime", () => {
+  /**
+   * `setMenu` does not dispose of the menu it replaces, and a fresh one is built on every status
+   * change — the pilot count moves about every 30s — so without an explicit close a full event
+   * leaves hundreds of live native menu handles behind.
+   */
+  it("closes the menu it replaced", async () => {
+    pretendDesktop();
+
+    const firstClose = vi.fn().mockResolvedValue(undefined);
+    const secondClose = vi.fn().mockResolvedValue(undefined);
+    menuNew.mockResolvedValueOnce({close: firstClose}).mockResolvedValueOnce({close: secondClose});
+
+    // First sync creates the tray and keeps its menu.
+    getById.mockResolvedValue(null);
+    await syncTray(LIVE);
+    expect(firstClose).not.toHaveBeenCalled();
+
+    // Second sync updates the existing tray, so the first menu is now unreferenced.
+    const existing = {setTooltip: vi.fn(), setMenu: vi.fn()};
+    getById.mockResolvedValue(existing);
+    await syncTray({...LIVE, pilots: 1205});
+
+    expect(existing.setMenu).toHaveBeenCalledTimes(1);
+    expect(firstClose).toHaveBeenCalledTimes(1);
+    expect(secondClose).not.toHaveBeenCalled();
+  });
+});

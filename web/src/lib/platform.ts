@@ -87,6 +87,31 @@ export function can(capability: Capability): boolean {
   return isTauri() && IMPLEMENTED[capability];
 }
 
+/** The app's primary window. Pop-outs and route windows are not it. */
+export const MAIN_WINDOW_LABEL = "main";
+
+/**
+ * The Tauri window label this code is running in, or `undefined` on the web build.
+ *
+ * Every Tauri webview loads the same `index.html`, so anything at module scope — or mounted in
+ * `RootLayout` — runs once per window. Work that owns something global has to ask which window
+ * it is in.
+ */
+export async function windowLabel(): Promise<string | undefined> {
+  if (!isTauri()) return undefined;
+  try {
+    const {getCurrentWindow} = await import("@tauri-apps/api/window");
+    return getCurrentWindow().label;
+  } catch {
+    return undefined;
+  }
+}
+
+/** True only in the primary window. */
+export async function isMainWindow(): Promise<boolean> {
+  return (await windowLabel()) === MAIN_WINDOW_LABEL;
+}
+
 /**
  * Call a `#[tauri::command]` in the desktop shell.
  *

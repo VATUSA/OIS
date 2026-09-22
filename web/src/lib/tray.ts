@@ -26,6 +26,14 @@ export type TrayStatus = {
 /** The tray is a singleton; reusing the id means a re-sync updates it instead of stacking icons. */
 const TRAY_ID = "ois-tray";
 
+/**
+ * The menu currently attached to the tray, so the one it replaces can be closed.
+ *
+ * `setMenu` does not dispose of the outgoing menu — it is a native resource held by the webview
+ * that built it — and a fresh one is built on every status change.
+ */
+let current: {close?: () => Promise<void>} | undefined;
+
 /** Where the quick links go. Chosen with you: the pages a controller actually lives in. */
 const QUICK_LINKS: {label: string; route: string}[] = [
   {label: "TMU board", route: "/ops/tmu"},
@@ -96,6 +104,11 @@ export async function syncTray(status: TrayStatus): Promise<boolean> {
     if (existing) {
       await existing.setTooltip(trayTooltip(status));
       await existing.setMenu(menu);
+      // Close the menu we just replaced. Each sync builds a fresh one, and the pilot count moves
+      // every ~30s, so without this a full event leaves hundreds of live menu handles behind.
+      const previous = current;
+      current = menu;
+      await previous?.close?.().catch(() => undefined);
       return true;
     }
 
@@ -115,6 +128,7 @@ export async function syncTray(status: TrayStatus): Promise<boolean> {
       // The menu is the whole point of the icon, so a left click should open it too.
       menuOnLeftClick: true,
     });
+    current = menu;
     return true;
   } catch (error) {
     // Surfaced rather than swallowed: the first version of this hid a missing Tauri permission,
@@ -129,6 +143,9 @@ export async function removeTray(): Promise<void> {
   try {
     const {TrayIcon} = await import("@tauri-apps/api/tray");
     await TrayIcon.removeById(TRAY_ID);
+    const previous = current;
+    current = undefined;
+    await previous?.close?.().catch(() => undefined);
   } catch {
     // Not there; nothing to remove.
   }

@@ -9,6 +9,7 @@ import {RestrictionAlerts} from "@/components/restriction-alerts";
 import {NotificationClicks} from "@/components/notification-clicks";
 import {DesktopNotifiers} from "@/components/desktop-notifiers";
 import {DesktopTray} from "@/components/desktop-tray";
+import {PrimaryWindowOnly} from "@/components/primary-window-only";
 import {WhatsNew} from "@/components/whats-new";
 import {useMe} from "@/lib/auth";
 import {movedPath} from "@/lib/moved-paths";
@@ -102,9 +103,13 @@ function RootLayout() {
     <>
       <FeedWatcher />
       <RestrictionAlerts />
-      <NotificationClicks />
-      <DesktopNotifiers />
-      <DesktopTray />
+      {/* OS-global, so once per app rather than once per window: mounted in every window, a
+          notification fired per window and every window raced to rebuild the one tray menu. */}
+      <PrimaryWindowOnly>
+        <NotificationClicks />
+        <DesktopNotifiers />
+        <DesktopTray />
+      </PrimaryWindowOnly>
       <WhatsNew />
       <AppShell>
         <Outlet />

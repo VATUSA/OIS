@@ -68,12 +68,6 @@ function TrayAbsent() {
  */
 function CloseToTray({enabled}: {enabled: boolean}) {
   React.useEffect(() => {
-    // Turning this off while the window is hidden would strand the user with no way back.
-    if (!enabled) {
-      void showMainWindow();
-      return;
-    }
-
     let dispose: (() => void) | undefined;
     let cancelled = false;
 
@@ -81,7 +75,17 @@ function CloseToTray({enabled}: {enabled: boolean}) {
       try {
         const {getCurrentWindow} = await import("@tauri-apps/api/window");
         const win = getCurrentWindow();
+        // Both branches below are about the MAIN window. The check has to come first: this
+        // component mounts in every non-embed window, so an unguarded `showMainWindow()` meant
+        // every route window (#350) dragged focus back to the main one as it opened — on the
+        // default settings, since closeToTray is off by default.
         if (win.label !== "main") return;
+
+        // Turning this off while the window is hidden would strand the user with no way back.
+        if (!enabled) {
+          await showMainWindow();
+          return;
+        }
 
         const unlisten = await win.onCloseRequested((event) => {
           event.preventDefault();

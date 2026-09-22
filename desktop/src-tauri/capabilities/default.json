@@ -1,10 +1,9 @@
 {
   "$schema": "../gen/schemas/desktop-schema.json",
   "identifier": "default",
-  "description": "Permissions for the OIS main window and the windows it opens: Tauri's core defaults, signed auto-update (#347), native notifications plus the window controls a notification click needs (#348), creating / placing / pinning pop-out panels (#349) and whole-route windows (#350), and the menu-bar tray (#351). Tray and menu themselves are already covered by core:default.",
+  "description": "Permissions for the OIS main window and the whole-route windows it opens (#350): Tauri's core defaults, signed auto-update (#347), native notifications plus the window controls a notification click needs (#348), creating / placing windows, and the menu-bar tray (#351). Pop-out panels get their own, narrower set \u2014 see popout.json.",
   "windows": [
     "main",
-    "popout-*",
     "window-*"
   ],
   "permissions": [
