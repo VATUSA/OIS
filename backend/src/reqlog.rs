@@ -120,6 +120,74 @@ mod tests {
         assert!(should_log("/metrics", 500));
     }
 
+    /// The rule above is a pure function; this drives the **middleware** that is supposed to obey
+    /// it. Without it the whole suppression can be deleted from `log_requests` in silence — the
+    /// predicate keeps passing its own tests while every scrape logs again.
+    ///
+    /// Counting events is enough: one line per logged request, none for a suppressed one.
+    #[tokio::test]
+    async fn the_middleware_actually_obeys_the_rule() {
+        use axum::{Router, body::Body, http::Request as HttpRequest, routing::get};
+        use std::sync::Arc;
+        use std::sync::atomic::AtomicUsize;
+        use tower::ServiceExt;
+        use tracing::instrument::WithSubscriber;
+
+        /// Counts emitted events and ignores everything else.
+        struct Counting(Arc<AtomicUsize>);
+        impl tracing::Subscriber for Counting {
+            fn enabled(&self, _: &tracing::Metadata<'_>) -> bool {
+                true
+            }
+            fn new_span(&self, _: &tracing::span::Attributes<'_>) -> tracing::Id {
+                tracing::Id::from_u64(1)
+            }
+            fn record(&self, _: &tracing::Id, _: &tracing::span::Record<'_>) {}
+            fn record_follows_from(&self, _: &tracing::Id, _: &tracing::Id) {}
+            fn event(&self, _: &tracing::Event<'_>) {
+                self.0.fetch_add(1, Ordering::Relaxed);
+            }
+            fn enter(&self, _: &tracing::Id) {}
+            fn exit(&self, _: &tracing::Id) {}
+        }
+
+        async fn lines_for(path: &'static str, status: axum::http::StatusCode) -> usize {
+            let count = Arc::new(AtomicUsize::new(0));
+            let app = Router::new()
+                .route(path, get(move || async move { status }))
+                .layer(axum::middleware::from_fn(log_requests));
+            let request = HttpRequest::builder()
+                .uri(path)
+                .body(Body::empty())
+                .unwrap();
+            async move {
+                app.oneshot(request).await.unwrap();
+            }
+            .with_subscriber(Counting(Arc::clone(&count)))
+            .await;
+            count.load(Ordering::Relaxed)
+        }
+
+        // The point of the feature: a healthy scrape every 15s must leave no trace.
+        assert_eq!(
+            lines_for("/metrics", axum::http::StatusCode::OK).await,
+            0,
+            "a successful scrape must not be logged"
+        );
+        // ...while a refused one must, or a misconfigured METRICS_TOKEN is invisible.
+        assert_eq!(
+            lines_for("/metrics", axum::http::StatusCode::UNAUTHORIZED).await,
+            1,
+            "a refused scrape must still be logged"
+        );
+        // And nothing else is affected.
+        assert_eq!(
+            lines_for("/health", axum::http::StatusCode::OK).await,
+            1,
+            "ordinary requests must still be logged"
+        );
+    }
+
     #[test]
     fn ordinary_requests_are_always_logged() {
         assert!(should_log("/health", 200));

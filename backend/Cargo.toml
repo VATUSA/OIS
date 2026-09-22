@@ -60,3 +60,7 @@ arc-swap = "1"
 # `MatchedPath` is opaque and can only be produced by actual routing, so the route-template
 # labelling cannot be tested without one. Already in the tree as an axum dependency.
 tower = { version = "0.5", features = ["util"] }
+# Paused-time control (`start_paused`, `advance`) so the metrics upkeep task can be driven through
+# its 60s timer instantly instead of the test sleeping for it. Test-only feature on the tokio the
+# crate already depends on.
+tokio = { workspace = true, features = ["test-util"] }

@@ -36,6 +36,10 @@ pub async fn run() -> color_eyre::Result<()> {
     let state = state::AppState::from_env().await?;
     run_startup_migrations(&state).await?;
 
+    // Drains the Prometheus recorder on a timer (#382). Required even when nothing scrapes:
+    // the observability stack is opt-in, and an unscraped recorder retains every latency sample.
+    metrics::spawn_upkeep(state.metrics.clone());
+
     feed::spawn_poller(state.feed.clone());
     feed::facilities::spawn_refresh(state.facilities.clone());
     feed::tracon::spawn_refresh(state.tracons.clone());

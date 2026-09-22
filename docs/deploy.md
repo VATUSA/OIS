@@ -101,8 +101,20 @@ That brings up:
   the provider is `allowUiUpdates: false` and the file wins on restart.
 
 Both bind host-local via `BIND_HOST` like every other service, so front them with the same reverse
-proxy (`metrics.<domain>`, `grafana.<domain>`). **Change `GRAFANA_ADMIN_PASSWORD` before exposing
-Grafana** — it defaults to `admin`.
+proxy (`metrics.<domain>`, `grafana.<domain>`). **Set `GRAFANA_ADMIN_PASSWORD` before the first
+`up`** — it defaults to `admin`.
+
+> **`GRAFANA_ADMIN_PASSWORD` only takes effect on Grafana's first boot.** Grafana stores its users
+> in the `ois_grafana` volume and reads that variable only when it creates the default admin, so
+> changing it later and recreating the container does **nothing** — the old password keeps working.
+> If you already booted the stack once with the default, reset it explicitly:
+>
+> ```bash
+> docker compose -f docker-compose.yml -f docker-compose.observability.yml \
+>   exec grafana grafana-cli admin reset-admin-password '<new password>'
+> ```
+>
+> (or drop the volume and start clean, which also discards any saved Grafana state).
 
 One local-dev gotcha: `docker compose` only auto-merges `docker-compose.override.yml` when you pass
 *no* `-f` flags. The command above passes two, so it pulls the published backend image rather than

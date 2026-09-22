@@ -75,6 +75,11 @@ pub struct AppState {
     /// because `metrics`' facade macros write to a global recorder; carrying the handle here keeps
     /// `GET /metrics` reading from state rather than reaching for that global.
     pub metrics: metrics_exporter_prometheus::PrometheusHandle,
+    /// Bearer token `GET /metrics` demands, when one is configured (#382). Resolved once here
+    /// rather than read from the process environment on every scrape — which also means a test can
+    /// set it by building a state, with no `unsafe { set_var }` racing the rest of the suite.
+    /// `None` (or blank) leaves the endpoint open; see `crate::metrics::scrape_authorized`.
+    pub metrics_token: Option<String>,
 }
 
 impl AppState {
@@ -147,6 +152,7 @@ impl AppState {
                 events,
                 jobs,
                 metrics: crate::metrics::handle(),
+                metrics_token: metrics_token_from_env(),
             });
         }
 
@@ -170,6 +176,7 @@ impl AppState {
             events,
             jobs,
             metrics: crate::metrics::handle(),
+            metrics_token: metrics_token_from_env(),
         })
     }
 
@@ -194,6 +201,16 @@ impl AppState {
             events: broadcast::channel(256).0,
             jobs: Arc::new(crate::job_registry::JobRegistry::new()),
             metrics: crate::metrics::handle(),
+            metrics_token: metrics_token_from_env(),
         }
     }
+}
+
+/// `METRICS_TOKEN` from the environment, with blank treated as unset so `METRICS_TOKEN=` in a
+/// `.env` does not lock Prometheus out with a token nobody can present.
+fn metrics_token_from_env() -> Option<String> {
+    std::env::var("METRICS_TOKEN")
+        .ok()
+        .map(|t| t.trim().to_string())
+        .filter(|t| !t.is_empty())
 }

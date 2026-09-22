@@ -35,6 +35,8 @@ services:
     depends_on:
       - prometheus
     environment:
+      # Read only when Grafana first creates the admin user. The ois_grafana volume keeps the
+      # user database, so changing this later and recreating does nothing — see docs/deploy.md.
       GF_SECURITY_ADMIN_PASSWORD: ${GRAFANA_ADMIN_PASSWORD:-admin}
       # This is an internal ops tool behind the same proxy as everything else; nobody signs
       # themselves up for it.

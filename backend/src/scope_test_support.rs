@@ -50,6 +50,7 @@ pub(crate) fn test_state(pool: PgPool, facilities: HashMap<String, Facility>) ->
         events: tokio::sync::broadcast::channel(256).0,
         jobs: Arc::new(crate::job_registry::JobRegistry::new()),
         metrics: crate::metrics::handle(),
+        metrics_token: None,
     }
 }
 

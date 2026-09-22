@@ -1,10 +1,14 @@
 //! Prometheus exposition for the backend (#382).
 //!
-//! Two halves:
+//! Three parts:
 //!
 //! * [`track_http`] — an Axum layer that counts every request and times it, labelled by the
-//!   *route template* rather than the raw path, so ids and callsigns can never fan the label set
-//!   out. This is the only metric written continuously.
+//!   *route template* and an allowlisted *method* rather than by anything the caller chooses, so
+//!   neither ids nor invented HTTP verbs can fan the label set out. This is the only metric
+//!   written continuously.
+//! * [`spawn_upkeep`] — drains the recorder on a timer. Not optional: the observability stack is
+//!   opt-in, so the default deployment never scrapes, and an unscraped recorder retains every
+//!   latency sample it was ever given.
 //! * [`observe`] — everything else. The process already knows its own state (the feed snapshot,
 //!   the freshness stamps, the job registry, the DB pool), so rather than maintaining a parallel
 //!   copy on every write we simply project that state into gauges at scrape time. Reads are
@@ -19,7 +23,9 @@ use std::sync::OnceLock;
 use std::sync::atomic::Ordering;
 use std::time::Instant;
 
-use axum::{extract::MatchedPath, extract::Request, middleware::Next, response::Response};
+use axum::{
+    extract::MatchedPath, extract::Request, http::Method, middleware::Next, response::Response,
+};
 use metrics::{counter, gauge, histogram};
 use metrics_exporter_prometheus::{Matcher, PrometheusBuilder, PrometheusHandle};
 
@@ -36,6 +42,12 @@ const LATENCY_BUCKETS: &[f64] = &[
 /// path would become the label and a scanner could mint unbounded series.
 const UNMATCHED_ROUTE: &str = "unmatched";
 
+/// Label used for any method outside [`method_label`]'s allowlist.
+const OTHER_METHOD: &str = "other";
+
+/// How often [`spawn_upkeep`] drains the recorder when nothing is scraping it.
+const UPKEEP_INTERVAL: std::time::Duration = std::time::Duration::from_secs(60);
+
 static HANDLE: OnceLock<PrometheusHandle> = OnceLock::new();
 static STARTED: OnceLock<Instant> = OnceLock::new();
 
@@ -45,11 +57,11 @@ static STARTED: OnceLock<Instant> = OnceLock::new();
 /// another recorder already being registered, and a process that cannot export metrics should
 /// still serve traffic. The returned handle always renders whatever *this* recorder holds.
 ///
-/// No periodic upkeep task is spawned, and none is needed here. The exporter asks callers to run
-/// upkeep themselves, but it does two things: draining histograms into distributions — which
-/// `render()` already does on every scrape — and expiring idle metrics, which only happens when an
-/// `idle_timeout` is configured. We configure none (every series here is bounded and long-lived),
-/// so a background task would have nothing left to do.
+/// Upkeep is **not** optional here — see [`spawn_upkeep`]. An earlier version of this comment
+/// argued a background task was unnecessary because `render()` drains histograms on every scrape.
+/// That only holds if something scrapes: the observability stack is opt-in, so in the default
+/// deployment `GET /metrics` is never called, nothing drains, and every recorded sample is retained
+/// for the life of the process.
 pub fn handle() -> PrometheusHandle {
     HANDLE
         .get_or_init(|| {
@@ -68,6 +80,56 @@ pub fn handle() -> PrometheusHandle {
             handle
         })
         .clone()
+}
+
+/// Drain the recorder on a timer, independently of whether anyone scrapes.
+///
+/// `track_http` records a latency sample per request, and those samples sit in the recorder's
+/// buckets until something drains them into distributions. Only `render()` (a scrape) and
+/// `run_upkeep()` do that. Because the observability stack is opt-in, the default deployment never
+/// scrapes — so without this task memory grows linearly with request count and is never released.
+/// It also covers the half-configured case `docs/deploy.md` warns about: with `METRICS_TOKEN` set
+/// but Prometheus not yet given the credentials file, the handler answers 401 *before* it renders,
+/// so a scraping Prometheus still drains nothing.
+///
+/// A minute is far finer than needed to bound the footprint and costs nothing when idle.
+pub fn spawn_upkeep(handle: PrometheusHandle) {
+    tokio::spawn(async move {
+        let mut ticker = tokio::time::interval(UPKEEP_INTERVAL);
+        // The first tick fires immediately; skip it so startup does no redundant work.
+        ticker.tick().await;
+        loop {
+            ticker.tick().await;
+            handle.run_upkeep();
+            // A drain leaves no other trace, so the loop counts itself. Without this the one task
+            // standing between the default deployment and unbounded growth would be invisible —
+            // and untestable. Alert on it going flat.
+            counter!("ois_metrics_upkeep_total").increment(1);
+        }
+    });
+}
+
+/// Coarse method label, restricted to a fixed allowlist.
+///
+/// The same cardinality guarantee as [`UNMATCHED_ROUTE`], for the other label. HTTP methods are
+/// *tokens*, not a closed set — hyper accepts any token as an extension method, and axum still
+/// matches the path before the `MethodRouter` rejects it, so `curl -X ZZZQ1 /health` would otherwise
+/// mint `method="ZZZQ1"` on a real route template (a counter plus a whole latency histogram). No
+/// `idle_timeout` is configured, so those series would live for the life of the process. Anything
+/// unrecognised therefore collapses onto one label.
+fn method_label(method: &Method) -> &'static str {
+    match *method {
+        Method::GET => "GET",
+        Method::POST => "POST",
+        Method::PUT => "PUT",
+        Method::PATCH => "PATCH",
+        Method::DELETE => "DELETE",
+        Method::HEAD => "HEAD",
+        Method::OPTIONS => "OPTIONS",
+        Method::TRACE => "TRACE",
+        Method::CONNECT => "CONNECT",
+        _ => OTHER_METHOD,
+    }
 }
 
 /// Coarse status label. A class rather than the exact code: `status="5xx"` is what alerts fire on,
@@ -94,7 +156,7 @@ pub async fn track_http(request: Request, next: Next) -> Response {
         .get::<MatchedPath>()
         .map(|m| m.as_str().to_string())
         .unwrap_or_else(|| UNMATCHED_ROUTE.to_string());
-    let method = request.method().as_str().to_string();
+    let method = method_label(request.method());
 
     let started = Instant::now();
     let response = next.run(request).await;
@@ -104,7 +166,7 @@ pub async fn track_http(request: Request, next: Next) -> Response {
     counter!(
         "http_requests_total",
         "route" => route.clone(),
-        "method" => method.clone(),
+        "method" => method,
         "status" => status,
     )
     .increment(1);
@@ -120,17 +182,37 @@ pub async fn track_http(request: Request, next: Next) -> Response {
 
 /// Whether a scrape may proceed (AC4).
 ///
-/// No `METRICS_TOKEN` configured means the endpoint is open, which is the intended default: the
-/// observability stack scrapes it in-network and publishes no port for it. It does still ride the
-/// API's own listener, so set a token wherever the API is publicly proxied. Once a token *is*
-/// configured it is mandatory, and only an exact `Bearer <token>` passes.
+/// No token configured (`AppState::metrics_token`, from `METRICS_TOKEN`) means the endpoint is
+/// open, which is the intended default: the observability stack scrapes it in-network and
+/// publishes no port for it. It does still ride the API's own listener, so set a token wherever
+/// the API is publicly proxied. Once a token *is* configured it is mandatory, and only an exact
+/// `Bearer <token>` passes.
 pub fn scrape_authorized(expected: Option<&str>, authorization: Option<&str>) -> bool {
     let Some(expected) = expected.map(str::trim).filter(|t| !t.is_empty()) else {
         return true;
     };
     authorization
         .and_then(|h| h.strip_prefix("Bearer "))
-        .is_some_and(|presented| presented == expected)
+        .is_some_and(|presented| constant_time_eq(presented.as_bytes(), expected.as_bytes()))
+}
+
+/// Compare two secrets without an early return.
+///
+/// `==` on `&str` short-circuits at the first differing byte, which leaks a matching-prefix timing
+/// signal (and the length) for the one credential this module owns. The accumulate-then-compare
+/// form below always touches every byte of `expected`. Length still differs in cost — unavoidable
+/// without hashing — so the length check is folded into the accumulator rather than returned early.
+fn constant_time_eq(presented: &[u8], expected: &[u8]) -> bool {
+    // A bool, not the XOR of the two lengths: `len_a ^ len_b` narrowed to a byte accumulator would
+    // read as "equal" whenever the lengths happened to differ by a multiple of 256.
+    let mut diff = u32::from(presented.len() != expected.len());
+    for (i, e) in expected.iter().enumerate() {
+        // The loop runs over `expected`, so its length depends only on the configured token and
+        // never on what the caller sent. A short `presented` pads with 0 rather than returning.
+        let p = presented.get(i).copied().unwrap_or(0);
+        diff |= u32::from(p ^ *e);
+    }
+    diff == 0
 }
 
 /// The one aggregate that cannot be answered from memory — see `repos::metrics`.
@@ -161,6 +243,11 @@ pub async fn observe(state: &AppState, domain: Option<DomainCounts>) {
     observe_jobs(state);
     observe_freshness(state);
     observe_feed(state).await;
+
+    // Registered every scrape so the series exists from the first one: a panel reading "No data"
+    // is indistinguishable from a healthy zero, and this is how a permanently-broken aggregate
+    // (which otherwise just freezes the six gauges at plausible values) becomes visible.
+    counter!("ois_metrics_domain_aggregate_failures_total").increment(0);
 
     if let Some(d) = domain {
         gauge!("ois_active_tmis").set(d.active_tmis as f64);
@@ -317,6 +404,177 @@ mod tests {
         );
     }
 
+    /// The leak fix (#382 review): the drain task must keep running without anyone scraping.
+    ///
+    /// **What this can and cannot prove.** `run_upkeep()` has no observable effect through the
+    /// exporter's API — a drained and an undrained recorder render identically — so no test can
+    /// tell that call from a no-op. What is observable is the timer, which is the realistic
+    /// regression (someone drops the task, or the loop exits after one pass), so that is what is
+    /// asserted here; `run_upkeep_preserves_the_samples_it_drains` covers the other half, that
+    /// draining does not cost us the data. Deleting the `spawn`, or the loop, hangs this test.
+    #[tokio::test(start_paused = true)]
+    async fn the_upkeep_task_drains_on_its_timer_with_no_scrape() {
+        let handle = handle();
+        spawn_upkeep(handle.clone());
+
+        fn upkeep_count(rendered: &str) -> u64 {
+            rendered
+                .lines()
+                .find(|l| l.starts_with("ois_metrics_upkeep_total"))
+                .and_then(|l| l.rsplit_once(' '))
+                .and_then(|(_, v)| v.parse().ok())
+                .unwrap_or(0)
+        }
+
+        async fn advance(intervals: u32) {
+            for _ in 0..intervals {
+                tokio::time::advance(UPKEEP_INTERVAL).await;
+                tokio::task::yield_now().await;
+            }
+        }
+
+        // Nothing is scraped here; only the timer drives the task.
+        let before = upkeep_count(&handle.render());
+        advance(4).await;
+        let first = upkeep_count(&handle.render());
+        advance(4).await;
+        let second = upkeep_count(&handle.render());
+
+        assert!(
+            first > before,
+            "upkeep never ran on its timer: {before} -> {first}"
+        );
+        // A repeating timer, not a single drain at startup — the leak returns if the loop exits.
+        assert!(
+            second > first,
+            "upkeep ran once but did not keep running: {first} -> {second}"
+        );
+    }
+
+    /// Draining must move samples into distributions, not discard them.
+    ///
+    /// The whole leak fix rests on calling `run_upkeep()` on a timer; if that dropped what it
+    /// drained, a default deployment would trade a memory leak for silently wrong latency numbers
+    /// the moment anyone did scrape. Records a known number of samples, drains *without* rendering,
+    /// and asserts the subsequent render still accounts for every one.
+    #[test]
+    fn run_upkeep_preserves_the_samples_it_drains() {
+        let handle = handle();
+        let _ = handle.render(); // start from a known state
+
+        for i in 0..7 {
+            histogram!("upkeep_drain_probe").record(i as f64 * 0.001);
+        }
+        // Drain via upkeep only — no render in between.
+        handle.run_upkeep();
+
+        let rendered = handle.render();
+        let count = rendered
+            .lines()
+            .find(|l| l.starts_with("upkeep_drain_probe_count"))
+            .and_then(|l| l.rsplit_once(' '))
+            .and_then(|(_, v)| v.parse::<u64>().ok());
+        assert_eq!(
+            count,
+            Some(7),
+            "upkeep lost samples it drained:\n{rendered}"
+        );
+    }
+
+    /// The mirror of the route-template test, for the *method* label.
+    ///
+    /// HTTP methods are tokens, not an enum, so an unauthenticated caller can invent as many as it
+    /// likes. Without the allowlist each one mints a counter series *and* a full latency histogram
+    /// on a real route template, and nothing ever expires them. Labelling by
+    /// `request.method().as_str()` makes this fail with one series per bogus method.
+    #[tokio::test]
+    async fn invented_methods_collapse_onto_one_label() {
+        let handle = handle();
+        let app = Router::new()
+            .route("/methodprobe", get(|| async { "ok" }))
+            .layer(axum::middleware::from_fn(track_http));
+
+        for i in 0..25 {
+            let request = HttpRequest::builder()
+                .method(format!("BOGUS{i}").as_str())
+                .uri("/methodprobe")
+                .body(Body::empty())
+                .unwrap();
+            app.clone().oneshot(request).await.unwrap();
+        }
+
+        let rendered = handle.render();
+        let series: Vec<&str> = rendered
+            .lines()
+            .filter(|l| l.starts_with("http_requests_total") && l.contains("/methodprobe"))
+            .collect();
+
+        assert_eq!(
+            series.len(),
+            1,
+            "25 invented methods must collapse onto one series, got {series:#?}"
+        );
+        assert!(
+            series[0].contains(r#"method="other""#),
+            "not collapsed onto the catch-all: {}",
+            series[0]
+        );
+        // No invented token may reach the exposition, on either the counter or the histogram.
+        for i in 0..25 {
+            assert!(
+                !rendered.contains(&format!("BOGUS{i}")),
+                "invented method BOGUS{i} leaked into the label set"
+            );
+        }
+        // Real methods keep their own identity — the allowlist must not flatten everything.
+        assert_eq!(method_label(&Method::GET), "GET");
+        assert_eq!(method_label(&Method::DELETE), "DELETE");
+    }
+
+    /// AC1/AC3 for the half that comes from the database.
+    ///
+    /// `observe` is what turns a [`DomainCounts`] row into gauges, and the committed Grafana
+    /// dashboard binds to these exact names — renaming one ships as a silently empty panel. Asserts
+    /// the value too, so a gauge wired to the wrong field is caught as well as a typo.
+    #[tokio::test]
+    async fn domain_counts_reach_the_exposition_under_their_dashboard_names() {
+        let state = crate::state::AppState::without_db();
+        let handle = handle();
+
+        observe(
+            &state,
+            Some(DomainCounts {
+                active_tmis: 7,
+                active_ground_stops: 3,
+                active_gdps: 2,
+                active_programs: 5,
+                enabled_fcas: 11,
+                gdp_delay_minutes: 137,
+            }),
+        )
+        .await;
+
+        let rendered = handle.render();
+        for (name, value) in [
+            ("ois_active_tmis", 7),
+            ("ois_active_ground_stops", 3),
+            ("ois_active_gdps", 2),
+            ("ois_active_programs", 5),
+            ("ois_fca_enabled", 11),
+            ("ois_gdp_delay_minutes", 137),
+        ] {
+            let line = rendered
+                .lines()
+                .find(|l| l.split_whitespace().next() == Some(name))
+                .unwrap_or_else(|| panic!("domain series {name} missing from:\n{rendered}"));
+            assert_eq!(
+                line,
+                format!("{name} {value}"),
+                "{name} carries the wrong value"
+            );
+        }
+    }
+
     #[test]
     fn status_codes_collapse_to_their_class() {
         assert_eq!(status_class(200), "2xx");
@@ -350,5 +608,15 @@ mod tests {
         // A prefix match must not pass.
         assert!(!scrape_authorized(Some("s3cret"), Some("Bearer s3cretX")));
         assert!(!scrape_authorized(Some("s3cret"), Some("Bearer s3cre")));
+        // Regression on the constant-time compare: the length difference must not be accumulated
+        // in a byte, or a token exactly 256 longer than the real one would compare equal.
+        let padded = format!("Bearer s3cret{}", "X".repeat(256));
+        assert!(!scrape_authorized(Some("s3cret"), Some(&padded)));
+        let long = "s".repeat(300);
+        assert!(!scrape_authorized(Some(&long), Some("Bearer s")));
+        assert!(scrape_authorized(
+            Some(&long),
+            Some(&format!("Bearer {long}"))
+        ));
     }
 }

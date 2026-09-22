@@ -22,11 +22,10 @@ use crate::{metrics, state::AppState};
 const EXPOSITION_CONTENT_TYPE: &str = "text/plain; version=0.0.4";
 
 pub async fn metrics(State(state): State<AppState>, headers: HeaderMap) -> Response {
-    let configured = std::env::var("METRICS_TOKEN").ok();
     let presented = headers
         .get(header::AUTHORIZATION)
         .and_then(|v| v.to_str().ok());
-    if !metrics::scrape_authorized(configured.as_deref(), presented) {
+    if !metrics::scrape_authorized(state.metrics_token.as_deref(), presented) {
         return StatusCode::UNAUTHORIZED.into_response();
     }
 
@@ -37,6 +36,10 @@ pub async fn metrics(State(state): State<AppState>, headers: HeaderMap) -> Respo
         Some(pool) => match crate::repos::metrics::domain_counts(pool).await {
             Ok(counts) => Some(counts),
             Err(_) => {
+                // The gauges keep their last values, which look perfectly plausible — so the
+                // failure has to be counted, or a permanently-broken aggregate shows up only as a
+                // WARN nobody is watching. See `metrics::observe`.
+                ::metrics::counter!("ois_metrics_domain_aggregate_failures_total").increment(1);
                 tracing::warn!("metrics: domain aggregate failed; serving in-memory series only");
                 None
             }
@@ -58,19 +61,16 @@ mod tests {
     use super::*;
     use axum::body::to_bytes;
 
-    fn set_token(value: &str) {
-        // SAFETY: `METRICS_TOKEN` is process-wide and this is the only test that touches it —
-        // see the single-test note on `the_endpoint_renders_exposition_and_honours_the_token`.
-        unsafe { std::env::set_var("METRICS_TOKEN", value) };
+    /// A state whose only interesting property is the configured scrape token. Building the state
+    /// is how a test sets it — the handler no longer reads the process environment, so nothing here
+    /// mutates global state and these tests can run concurrently with the rest of the suite.
+    fn state_with_token(token: Option<&str>) -> AppState {
+        let mut state = AppState::without_db();
+        state.metrics_token = token.map(str::to_string);
+        state
     }
 
-    fn clear_token() {
-        // SAFETY: as above.
-        unsafe { std::env::remove_var("METRICS_TOKEN") };
-    }
-
-    async fn scrape(headers: HeaderMap) -> (StatusCode, String, Option<String>) {
-        let state = AppState::without_db();
+    async fn scrape(state: AppState, headers: HeaderMap) -> (StatusCode, String, Option<String>) {
         let response = metrics(State(state), headers).await;
         let status = response.status();
         let content_type = response
@@ -86,22 +86,23 @@ mod tests {
         )
     }
 
-    /// AC1 (valid exposition, key series present) and AC4 (the token guard) in **one** test.
+    fn bearer(value: &str) -> HeaderMap {
+        let mut headers = HeaderMap::new();
+        headers.insert(header::AUTHORIZATION, value.parse().unwrap());
+        headers
+    }
+
+    /// AC1 — the endpoint serves valid exposition carrying the runtime series.
     ///
-    /// They share a body deliberately: `METRICS_TOKEN` is process-wide and the handler reads it at
-    /// call time, so two tests asserting different values of it would race under the default
-    /// multi-threaded test harness. One body makes the ordering explicit and guarantees the var is
-    /// cleared again at the end.
+    /// The domain (database-derived) series are asserted in `metrics::tests`, which can feed
+    /// `observe` a known `DomainCounts` without a pool; here `without_db()` means there is none.
     #[tokio::test]
-    async fn the_endpoint_renders_exposition_and_honours_the_token() {
-        clear_token();
-        let (status, body, content_type) = scrape(HeaderMap::new()).await;
+    async fn the_endpoint_renders_valid_exposition() {
+        let (status, body, content_type) = scrape(state_with_token(None), HeaderMap::new()).await;
 
         assert_eq!(status, StatusCode::OK);
         assert_eq!(content_type.as_deref(), Some(EXPOSITION_CONTENT_TYPE));
 
-        // Runtime, then domain — the issue asks for both, and asserting only one would let half
-        // the exporter be deleted silently.
         for name in [
             "ois_build_info",
             "ois_uptime_seconds",
@@ -118,38 +119,43 @@ mod tests {
             parses_as_exposition(&body),
             "body is not valid Prometheus exposition:\n{body}"
         );
+    }
 
-        // --- AC4: with a token configured, the guard is mandatory. Each case below turns red if
-        // `scrape_authorized` is dropped from the handler.
-        set_token("s3cret");
+    /// AC4 — with a token configured the guard is mandatory. Each case turns red if
+    /// `scrape_authorized` is dropped from the handler.
+    #[tokio::test]
+    async fn a_configured_token_gates_the_endpoint() {
+        let state = || state_with_token(Some("s3cret"));
 
-        let (status, ..) = scrape(HeaderMap::new()).await;
+        let (status, ..) = scrape(state(), HeaderMap::new()).await;
         assert_eq!(
             status,
             StatusCode::UNAUTHORIZED,
             "no header must be refused"
         );
 
-        let mut wrong = HeaderMap::new();
-        wrong.insert(header::AUTHORIZATION, "Bearer nope".parse().unwrap());
-        let (status, ..) = scrape(wrong).await;
+        let (status, ..) = scrape(state(), bearer("Bearer nope")).await;
         assert_eq!(
             status,
             StatusCode::UNAUTHORIZED,
             "wrong token must be refused"
         );
 
-        let mut right = HeaderMap::new();
-        right.insert(header::AUTHORIZATION, "Bearer s3cret".parse().unwrap());
-        let (status, body, _) = scrape(right).await;
+        let (status, body, _) = scrape(state(), bearer("Bearer s3cret")).await;
         assert_eq!(
             status,
             StatusCode::OK,
             "the right token must be let through"
         );
         assert!(body.contains("ois_build_info"));
+    }
 
-        clear_token();
+    /// A blank token is not a token: `METRICS_TOKEN=` in a `.env` must leave the endpoint open
+    /// rather than lock the scraper out with a value nobody can present.
+    #[tokio::test]
+    async fn a_blank_token_leaves_the_endpoint_open() {
+        let (status, ..) = scrape(state_with_token(Some("   ")), HeaderMap::new()).await;
+        assert_eq!(status, StatusCode::OK);
     }
 
     /// A deliberately small exposition check: every non-blank, non-comment line must be
