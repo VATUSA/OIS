@@ -75,7 +75,10 @@ afterEach(() => {
 
 describe("popoutLabel", () => {
   it("makes a window label safe from an arbitrary panel id", () => {
-    expect(popoutLabel("widget-9f3a/b c")).toBe("popout-widget-9f3a-b-c");
+    const label = popoutLabel("widget-9f3a/b c");
+
+    expect(label).toMatch(/^popout-[a-zA-Z0-9-]+$/);
+    expect(label.startsWith("popout-widget-9f3a-b-c")).toBe(true);
   });
 
   it("is stable for the same id, so reopening finds the same window", () => {
@@ -204,6 +207,27 @@ describe("remembering where a window was put", () => {
       expect(localStorage.getItem("ois.popout.fca-abc")).not.toBeNull();
     } finally {
       vi.useRealTimers();
+    }
+  });
+});
+
+describe("popoutLabel", () => {
+  it("leaves an already-simple id alone", () => {
+    expect(popoutLabel("fca-ZDC")).toBe("popout-fca-ZDC");
+  });
+
+  /**
+   * A plain character substitution collapsed `ZDC_ARR` and `ZDC.ARR` onto one label, and since the
+   * label is what `getByLabel` raises, opening the second panel would have surfaced the first.
+   */
+  it("keeps ids distinct that flatten to the same characters", () => {
+    const underscore = popoutLabel("fca-ZDC_ARR");
+    const dot = popoutLabel("fca-ZDC.ARR");
+
+    expect(underscore).not.toBe(dot);
+    for (const label of [underscore, dot]) {
+      expect(label.startsWith("popout-")).toBe(true);
+      expect(label).toMatch(/^[a-zA-Z0-9-]+$/);
     }
   });
 });

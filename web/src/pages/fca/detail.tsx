@@ -15,7 +15,7 @@ import {
 import {flightStatus} from "@/lib/status";
 import {hhmmZulu} from "@/lib/time";
 import {Ladder} from "@/pages/fca/ladder";
-import {DesktopOnly} from "@/components/desktop-only";
+import {can} from "@/lib/platform";
 import {openPopout} from "@/lib/popout";
 
 function fmtDelay(min: number): string {
@@ -295,7 +295,7 @@ export function FcaDetail({
             <div className="mb-2 flex items-center gap-2">
               <span className="text-xs font-semibold text-ink-2">Metering ladder · metered crossing</span>
               {/* Float the ladder over CRC/vATIS/charts. Desktop only (#349). */}
-              <DesktopOnly>
+              {can("miniWindows") && (
                 <Button
                   size="icon"
                   variant="ghost"
@@ -305,13 +305,13 @@ export function FcaDetail({
                     void openPopout({
                       id: `fca-${fca.id}`,
                       title: `${fca.name} · metering`,
-                      route: `/popout/fca/${fca.id}`,
+                      route: `/popout/fca/${encodeURIComponent(fca.id)}`,
                     })
                   }
                 >
                   <PictureInPicture2 className="size-3.5" />
                 </Button>
-              </DesktopOnly>
+              )}
             </div>
             <Ladder flights={list} now={now} />
           </div>

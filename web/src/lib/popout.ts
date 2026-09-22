@@ -33,9 +33,22 @@ const LABEL_PREFIX = "popout-";
 /** How long a drag or resize must be still before the new geometry is written. */
 const GEOMETRY_SETTLE_MS = 300;
 
-/** Window labels must be simple; panel ids can be UUIDs or paths, so normalise. */
+/**
+ * Window labels must be simple; panel ids can be UUIDs or paths, so normalise.
+ *
+ * A plain character substitution is not enough on its own: `ZDC_ARR` and `ZDC.ARR` both flatten to
+ * `ZDC-ARR`, and two different panels sharing one label means opening the second raises the first.
+ * Anything that had to be rewritten therefore carries a short hash of the original id, so distinct
+ * ids stay distinct while the label stays readable for the common case.
+ */
 export function popoutLabel(id: string): string {
-  return `${LABEL_PREFIX}${id.replace(/[^a-zA-Z0-9-]/g, "-")}`;
+  const flattened = id.replace(/[^a-zA-Z0-9-]/g, "-");
+  if (flattened === id) return `${LABEL_PREFIX}${id}`;
+
+  // djb2 — a label disambiguator, not a security boundary.
+  let hash = 5381;
+  for (let i = 0; i < id.length; i += 1) hash = ((hash << 5) + hash + id.charCodeAt(i)) >>> 0;
+  return `${LABEL_PREFIX}${flattened}-${hash.toString(36)}`;
 }
 
 function storageKey(id: string): string {

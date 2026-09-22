@@ -6,7 +6,7 @@ import {DialogProvider, ThemeProvider, ToastProvider, TooltipProvider} from "@oi
 
 import {router} from "./router";
 import {desktopRefresh} from "./lib/desktop-auth";
-import {isTauri} from "./lib/platform";
+import {isMainWindow, isTauri} from "./lib/platform";
 import {RealtimeProvider} from "./components/realtime-provider";
 import "@fontsource-variable/inter";
 import "@fontsource/jetbrains-mono/400.css";
@@ -19,7 +19,15 @@ const queryClient = new QueryClient();
 // and pushes its expiry out, so an app that's opened regularly never makes the user sign in again
 // (#346). Deliberately not awaited — the stored token stays valid meanwhile, so there is no reason
 // to hold up first paint, and a failure here just means the app starts signed out.
-if (isTauri()) void desktopRefresh();
+//
+// Guarded to the MAIN window. Every Tauri webview loads this same entry, so without the guard each
+// pop-out (#349) also rotated on open — and rotation deletes the presented token, leaving the main
+// window holding a dead one with no 401 recovery path. Popping a panel out signed you out.
+if (isTauri()) {
+  void isMainWindow().then((primary) => {
+    if (primary) void desktopRefresh();
+  });
+}
 
 ReactDOM.createRoot(document.getElementById("root")!).render(
   <React.StrictMode>

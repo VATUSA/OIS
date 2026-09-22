@@ -68,6 +68,7 @@ export function flightStatus(s: string): { tone: Tone; label: string; color: str
   };
 }
 
+/** An audit action's tone, from its verb. */
 export function auditActionTone(action: string): Tone {
   const a = action.toLowerCase();
   if (/(create|assign|grant|add|publish|activat)/.test(a)) return "good";

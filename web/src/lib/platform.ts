@@ -88,6 +88,40 @@ export function can(capability: Capability): boolean {
 }
 
 /**
+ * The Tauri window label this code is running in, or `undefined` on the web build.
+ *
+ * Every Tauri webview loads the same `index.html`, so anything in the module entry runs once per
+ * window — including in every pop-out (#349). Work that must happen exactly once per app launch has
+ * to ask which window it is in.
+ *
+ * Reached through a dynamic `import()` like the rest of the seam, so `@tauri-apps/*` stays out of
+ * the web bundle.
+ */
+export async function windowLabel(): Promise<string | undefined> {
+  if (!isTauri()) return undefined;
+  try {
+    const {getCurrentWindow} = await import("@tauri-apps/api/window");
+    return getCurrentWindow().label;
+  } catch {
+    return undefined;
+  }
+}
+
+/** The app's primary window. Pop-outs and other secondary windows are not it. */
+export const MAIN_WINDOW_LABEL = "main";
+
+/**
+ * True only in the primary window.
+ *
+ * Use this to guard launch-time work that owns shared state — rotating the session token is the
+ * example that bit us: run in a pop-out too, it rotates the token the main window is still holding
+ * and signs that window out.
+ */
+export async function isMainWindow(): Promise<boolean> {
+  return (await windowLabel()) === MAIN_WINDOW_LABEL;
+}
+
+/**
  * Call a `#[tauri::command]` in the desktop shell.
  *
  * `@tauri-apps/api` is imported lazily so it stays out of the web bundle — the browser build never
