@@ -71,9 +71,27 @@ desktop dependency tree into a `rust:1-bookworm` builder that has no GTK.
 - **No `version` in `tauri.conf.json`.** The bundle inherits the crate version; release versioning
   arrives with distribution + auto-update (#347).
 
+## Content Security Policy
+
+`tauri.conf.json` sets a CSP for bundled builds (#346). It matters because the webview can call the
+app's commands, and `get_token` hands back the 30-day keychain token: without a policy, one injected
+script could read it and post it anywhere.
+
+| Directive | Allows | Why |
+| --- | --- | --- |
+| `script-src 'self'` | the bundle's own scripts | Tauri hashes the inline pre-paint theme script in `index.html` into this automatically; nothing else inline may run. |
+| `style-src 'self' 'unsafe-inline'` | inline styles | maplibre and React set element styles at runtime. |
+| `img-src`, `connect-src` → `https://*.cartocdn.com` | basemap style, tiles, sprites, glyphs | The map's only third-party origin. |
+| `worker-src 'self' blob:` | blob workers | maplibre spawns its tile workers from blobs. |
+| `connect-src ipc: http://ipc.localhost` | Tauri IPC | How `invoke` reaches the commands. |
+| `connect-src http://127.0.0.1:3000 ws://127.0.0.1:3000` | the API, REST + realtime (`/api/v1/ws`) | The default API base. **A build pointed at another API must add that origin, `http(s)` and `ws(s)`.** Choosing the shipped API base is #347's, which owes that entry. |
+
+`devCsp` is `null`: `just desktop` loads the Vite dev server, whose HMR and module preamble a strict
+policy would block. The policy is enforced only on the bundled app.
+
 ## What isn't here yet
 
-The shell is deliberately bare — one window, no commands, no plugins. Desktop behaviour lands in
-later issues, each adding its own plugins and capability entries: the platform capability layer and
-IPC conventions (#345), keychain auth (#346), distribution and signed auto-update (#347), then the
-feature set (#348–#354). See the epic, #343.
+Keychain auth (#346) adds the app's first commands: `begin_login`, `get_token`, `store_token`,
+`delete_token`. The rest of desktop behaviour lands in later issues, each adding its own plugins and
+capability entries: distribution and signed auto-update (#347), then the feature set (#348–#354).
+See the epic, #343.

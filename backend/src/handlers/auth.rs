@@ -28,7 +28,6 @@ const OAUTH_STATE_COOKIE: &str = "ois_oauth_state";
 const OAUTH_RETURN_TO_COOKIE: &str = "ois_oauth_return_to";
 const SESSION_COOKIE: &str = "ois_session";
 const OAUTH_STATE_TTL_SECS: i64 = 10 * 60;
-const SESSION_TTL_SECS: i64 = 60 * 60 * 24 * 30;
 const DEFAULT_LOGIN_REDIRECT: &str = "/api/v1/me";
 
 /// Set alongside the OAuth state when the desktop app starts the flow, so the callback knows to
@@ -270,7 +269,9 @@ pub async fn vatsim_callback(
         .secure(cookie_secure())
         .same_site(SameSite::Lax)
         .path("/")
-        .max_age(time::Duration::seconds(SESSION_TTL_SECS))
+        .max_age(time::Duration::seconds(
+            crate::repos::auth::SESSION_TTL_SECS,
+        ))
         .build();
 
     Ok((

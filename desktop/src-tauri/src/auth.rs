@@ -235,6 +235,10 @@ fn urlencode(value: &str) -> String {
 
 /// Reverses percent-encoding in a query value. The code is hex, but a proxy or browser is free to
 /// escape it anyway, so decode rather than assume.
+///
+/// The two digits after `%` are read from the *bytes*, never by slicing the `&str`: this is network
+/// input from any local client, and a `%` followed by a multi-byte character would put a `str` slice
+/// boundary inside that character and panic (VATUSA/OIS#346 review).
 fn urldecode(value: &str) -> String {
     let bytes = value.as_bytes();
     let mut out = Vec::with_capacity(bytes.len());
@@ -242,12 +246,12 @@ fn urldecode(value: &str) -> String {
 
     while i < bytes.len() {
         match bytes[i] {
-            b'%' if i + 2 < bytes.len() => match u8::from_str_radix(&value[i + 1..i + 3], 16) {
-                Ok(byte) => {
+            b'%' => match hex_byte(bytes.get(i + 1..i + 3)) {
+                Some(byte) => {
                     out.push(byte);
                     i += 3;
                 }
-                Err(_) => {
+                None => {
                     out.push(bytes[i]);
                     i += 1;
                 }
@@ -266,9 +270,23 @@ fn urldecode(value: &str) -> String {
     String::from_utf8_lossy(&out).into_owned()
 }
 
+/// The byte two hex digits spell, if `digits` is exactly two ASCII hex digits.
+fn hex_byte(digits: Option<&[u8]>) -> Option<u8> {
+    u8::from_str_radix(std::str::from_utf8(digits?).ok()?, 16).ok()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Network input: a `%` before a multi-byte character used to slice mid-character and panic.
+    #[test]
+    fn a_percent_before_a_multibyte_character_is_kept_not_a_panic() {
+        assert_eq!(urldecode("%€"), "%€");
+        assert_eq!(urldecode("a%é1"), "a%é1");
+        assert_eq!(urldecode("%4"), "%4");
+        assert_eq!(urldecode("%41%42"), "AB");
+    }
 
     #[test]
     fn pulls_the_code_out_of_the_callback_request() {
