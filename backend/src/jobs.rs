@@ -797,6 +797,26 @@ pub fn spawn_cleanup(reg: Arc<JobRegistry>, pool: PgPool) {
     ));
 }
 
+/// Delete one-time desktop auth codes long past their 60-second life (VATUSA/OIS#346). Nothing
+/// else removes them, so without this the table only grows. Same cadence as the TMU cleanup.
+pub fn spawn_desktop_auth_code_prune(reg: Arc<JobRegistry>, pool: PgPool) {
+    tokio::spawn(run_interval(
+        reg,
+        "desktop_auth_code_prune",
+        "Delete expired one-time desktop sign-in codes",
+        CLEANUP_INTERVAL,
+        move || {
+            let pool = pool.clone();
+            async move {
+                crate::repos::auth::prune_desktop_auth_codes(&pool)
+                    .await
+                    .map(|n| format!("{n} deleted"))
+                    .map_err(|_| "prune failed".to_string())
+            }
+        },
+    ));
+}
+
 /// Drive event FCAs through their lifecycle: publish `planned` + auto ones ~30 min before their event
 /// starts, and archive still-live ones when it ends. Nudges connected maps (`flow.fca`) whenever
 /// anything changed. Runs every minute.
