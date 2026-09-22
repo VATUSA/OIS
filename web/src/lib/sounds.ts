@@ -40,13 +40,65 @@ export function bundledSoundUrl(category: NotifyCategory): string {
  * filesystem plugin and no read permissions are needed. Whether the file *exists* is answered by
  * trying to play it and falling back, rather than by asking the filesystem.
  */
-async function overrideSoundUrl(category: NotifyCategory): Promise<string | undefined> {
+async function resolveOverrideUrl(category: NotifyCategory): Promise<string | undefined> {
   try {
     const {appDataDir, join} = await import("@tauri-apps/api/path");
     const {convertFileSrc} = await import("@tauri-apps/api/core");
     return convertFileSrc(await join(await appDataDir(), "sounds", `${category}.wav`));
   } catch {
     return undefined;
+  }
+}
+
+/**
+ * Resolved override URLs, cached for the life of the process.
+ *
+ * The path does not move while the app is running, and almost nobody has dropped a file in — so
+ * without this every single alert paid for two IPC round-trips before it could fall back to the
+ * bundled tone. Only the *resolution* is cached; whether the file plays is still decided per alert,
+ * so replacing the file takes effect without a restart.
+ */
+const overrideUrls = new Map<NotifyCategory, string | undefined>();
+
+async function overrideSoundUrl(category: NotifyCategory): Promise<string | undefined> {
+  if (!overrideUrls.has(category)) {
+    overrideUrls.set(category, await resolveOverrideUrl(category));
+  }
+  return overrideUrls.get(category);
+}
+
+/**
+ * Categories that have already claimed a sound in the current tick.
+ *
+ * `useNewKeys` calls `notifyDesktop` once per newly-appeared key, synchronously, so a batch — a TMU
+ * releasing ten flights, or a role grant that `flattenPermissions` expands into dozens of
+ * permission keys — used to start that many copies of one 0.38s tone at once. Summed amplitudes
+ * clip and it reads as a blast rather than an alert. One sound per category per batch; the set is
+ * emptied on the next microtask, so genuinely separate events still each get their own.
+ */
+const claimedThisTick = new Set<NotifyCategory>();
+
+function claimTick(category: NotifyCategory): boolean {
+  if (claimedThisTick.has(category)) return false;
+  claimedThisTick.add(category);
+  queueMicrotask(() => claimedThisTick.delete(category));
+  return true;
+}
+
+/**
+ * Whether this webview should be the one making the noise.
+ *
+ * `RootLayout` renders the notifiers in every whole-route window (#350), not just the main one, so
+ * without this a ground stop played once per open window — the same tone, at once, near enough in
+ * phase. `desktop-tray.tsx` and `popout.ts` guard app-wide resources the same way.
+ */
+async function isMainWindow(): Promise<boolean> {
+  try {
+    const {getCurrentWindow} = await import("@tauri-apps/api/window");
+    return getCurrentWindow().label === "main";
+  } catch {
+    // Can't tell: stay quiet rather than risk one copy per window.
+    return false;
   }
 }
 
@@ -82,6 +134,9 @@ export async function playAlertSound(
   options: {enabled: boolean; volume?: string},
 ): Promise<boolean> {
   if (!options.enabled || !can("audioAlerts")) return false;
+  // Claimed synchronously, before the first await, so an entire synchronous burst collapses to one.
+  if (!claimTick(category)) return false;
+  if (!(await isMainWindow())) return false;
 
   const gain = gainFor(options.volume);
 
