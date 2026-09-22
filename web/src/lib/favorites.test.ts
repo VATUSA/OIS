@@ -1,15 +1,7 @@
 import {describe, expect, it} from "vitest";
 
 import type {Me} from "./auth";
-import {
-  type Favorite,
-  canSeeFavorite,
-  favoriteHref,
-  isFavorite,
-  isFavoriteHotkey,
-  toggleFavorite,
-  unavailable,
-} from "./favorites";
+import { canSeeFavorite, favoriteHref, isFavorite, isFavoriteHotkey, normalizeFavorites, pageFavoriteHref, pageFavoriteHrefFor, toggleFavorite, type Favorite, unavailable } from "./favorites";
 
 /** A permission tree holding exactly `names` (dotted `segments.action`), as in `nav.test.ts`. */
 function holding(...names: string[]): Me {
@@ -73,6 +65,38 @@ describe("favoriteHref", () => {
 
   it("escapes a param that isn't URL-safe", () => {
     expect(favoriteHref({ to: "/advisories/fcas", search: { flight: "N1 2A" } })).toBe("/advisories/fcas?flight=N1+2A");
+  });
+});
+
+describe("pageFavoriteHref (VATUSA/OIS#339)", () => {
+  it("drops the view switch, so every view of a page is one favorite — the one its nav row stars", () => {
+    expect(pageFavoriteHref("/ops/tmu?view=board")).toBe("/ops/tmu");
+    expect(pageFavoriteHref("/ops/tmu?view=table")).toBe("/ops/tmu");
+  });
+
+  it("keeps the params that say what the page is about", () => {
+    expect(pageFavoriteHref("/ops/airport?icao=KSFO&view=table")).toBe("/ops/airport?icao=KSFO");
+  });
+
+  it("leaves a relative href with no view as it is", () => {
+    for (const href of ["/ops/airport?icao=KSFO", "/advisories/fcas?flight=N1+2A", "/ops/tmu"]) {
+      expect(pageFavoriteHref(href)).toBe(href);
+    }
+  });
+
+  // The router's href is absolute; the Pages row keys on a relative `to`. One key for both (#339 review).
+  it("makes an absolute href relative, so it matches the page's own row", () => {
+    expect(pageFavoriteHref("http://localhost:5173/dashboard")).toBe("/dashboard");
+    expect(pageFavoriteHref("https://ois.vatusa.net/ops/airport?icao=KDCA")).toBe("/ops/airport?icao=KDCA");
+  });
+});
+
+describe("pageFavoriteHrefFor (VATUSA/OIS#339 review)", () => {
+  it("builds the key from the validated search, dropping empty values and the view", () => {
+    expect(pageFavoriteHrefFor("/ops/tmu", { facility: "ZDV", tab: undefined, view: "board" })).toBe(
+      "/ops/tmu?facility=ZDV",
+    );
+    expect(pageFavoriteHrefFor("/dashboard", undefined)).toBe("/dashboard");
   });
 });
 
@@ -156,5 +180,50 @@ describe("isFavoriteHotkey", () => {
   it("ignores a bare ⇧F and a bare f", () => {
     expect(isFavoriteHotkey(key({ shiftKey: true }))).toBe(false);
     expect(isFavoriteHotkey(key({}))).toBe(false);
+  });
+});
+
+describe("favorites stored before the page key dropped ?view=", () => {
+  const legacy = (id: string) => ({ kind: "page" as const, id, label: "My dashboards", href: id });
+
+  it("lets the hotkey un-star one instead of adding a duplicate", () => {
+    // The users this issue was filed for already have `page:/ops/my?view=list` saved. Without
+    // normalisation the new key misses it, `toggleFavorite` adds, and they end up with two
+    // identical rows and no way to remove the old one from the keyboard.
+    const stored = normalizeFavorites([legacy("/ops/my?view=list")]);
+    const href = pageFavoriteHref("http://localhost:5173/ops/my?view=list");
+
+    const next = toggleFavorite(stored, { kind: "page", id: href, label: "My dashboards", href });
+
+    expect(next).toEqual([]);
+  });
+
+  it("collapses a legacy row and its new-key twin into one", () => {
+    // Someone who favorited the page again after the change has both keys stored.
+    const normalized = normalizeFavorites([legacy("/ops/my"), legacy("/ops/my?view=list")]);
+
+    expect(normalized.map((f) => f.id)).toEqual(["/ops/my"]);
+  });
+
+  it("rewrites href as well as id, so the row still navigates", () => {
+    const [favorite] = normalizeFavorites([legacy("/ops/tmu?view=board")]);
+
+    expect(favorite).toMatchObject({ id: "/ops/tmu", href: "/ops/tmu" });
+  });
+
+  it("leaves non-page favorites and identity-bearing params alone", () => {
+    // `?icao=` names the subject; only presentational params may be dropped.
+    const items = [
+      { kind: "tmi" as const, id: "t-1", label: "20 MIT", href: "/ops/tmu" },
+      legacy("/ops/airport?icao=KDCA"),
+    ];
+
+    expect(normalizeFavorites(items)).toEqual(items);
+  });
+
+  it("keeps the order the user left them in", () => {
+    const items = [legacy("/a"), legacy("/b?view=x"), legacy("/c")];
+
+    expect(normalizeFavorites(items).map((f) => f.id)).toEqual(["/a", "/b", "/c"]);
   });
 });
