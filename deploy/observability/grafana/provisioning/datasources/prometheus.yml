@@ -1,0 +1,23 @@
+# Auto-provisioned at Grafana boot (#382) — this is what makes the stack zero-setup: the
+# datasource exists and is selected before anyone opens the UI.
+apiVersion: 1
+
+datasources:
+  - name: Prometheus
+    # Fixed uid so the committed dashboard can bind to this datasource by name rather than
+    # depending on a generated id or a picker variable — that is what makes AC6's "zero manual
+    # setup" actually hold.
+    uid: ois-prometheus
+    type: prometheus
+    access: proxy
+    # Service name on the shared compose network.
+    url: http://prometheus:9090
+    isDefault: true
+    # Provisioned datasources are immutable in the UI by default; allowing edits here means a
+    # change survives until the next container restart, which is the less confusing behaviour for
+    # someone tweaking a query.
+    editable: true
+    jsonData:
+      # Matches global.scrape_interval in deploy/observability/prometheus.yml, so Grafana's
+      # suggested step lines up with the real resolution.
+      timeInterval: 15s

@@ -71,6 +71,10 @@ pub struct AppState {
     pub events: crate::realtime::Events,
     /// Background-job status registry for the admin "Background Tasks" viewer (last run + trigger).
     pub jobs: Arc<crate::job_registry::JobRegistry>,
+    /// Render handle for the process-wide Prometheus registry (#382). The registry is global
+    /// because `metrics`' facade macros write to a global recorder; carrying the handle here keeps
+    /// `GET /metrics` reading from state rather than reaching for that global.
+    pub metrics: metrics_exporter_prometheus::PrometheusHandle,
 }
 
 impl AppState {
@@ -142,6 +146,7 @@ impl AppState {
                 metar_cache,
                 events,
                 jobs,
+                metrics: crate::metrics::handle(),
             });
         }
 
@@ -164,6 +169,7 @@ impl AppState {
             metar_cache,
             events,
             jobs,
+            metrics: crate::metrics::handle(),
         })
     }
 
@@ -187,6 +193,7 @@ impl AppState {
             metar_cache: Arc::new(Mutex::new(HashMap::new())),
             events: broadcast::channel(256).0,
             jobs: Arc::new(crate::job_registry::JobRegistry::new()),
+            metrics: crate::metrics::handle(),
         }
     }
 }

@@ -6,6 +6,7 @@ pub mod feed;
 pub mod handlers;
 pub mod job_registry;
 pub mod jobs;
+pub mod metrics;
 pub mod models;
 pub mod openapi;
 pub mod realtime;

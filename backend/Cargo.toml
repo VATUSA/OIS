@@ -42,6 +42,9 @@ tracing-subscriber.workspace = true
 utoipa.workspace = true
 utoipa-swagger-ui.workspace = true
 
+metrics.workspace = true
+metrics-exporter-prometheus.workspace = true
+
 dotenvy.workspace = true
 reqwest.workspace = true
 
@@ -51,3 +54,9 @@ zip = { version = "8", default-features = false, features = ["deflate"] }
 # Nav-fetch-only DNS resolver (A + AAAA itself, IPv4 first) — see feed/nav_dns.rs.
 hickory-resolver = { version = "0.26", features = ["tokio"] }
 arc-swap = "1"
+
+[dev-dependencies]
+# Only for driving the real `Router` through `ServiceExt::oneshot` in the HTTP-metrics test —
+# `MatchedPath` is opaque and can only be produced by actual routing, so the route-template
+# labelling cannot be tested without one. Already in the tree as an axum dependency.
+tower = { version = "0.5", features = ["util"] }

@@ -16,6 +16,8 @@ desktop/src-tauri/target
 .env
 .env.local
 *.local
+# Prometheus' copy of METRICS_TOKEN — the deploy docs tell you to create this; it is a credential.
+deploy/observability/metrics_token
 
 # OS / editor
 .DS_Store
