@@ -229,8 +229,13 @@ export function CommandPalette({
  * of the row button, never a descendant — a nested interactive role has no defined behaviour, so
  * assistive tech may expose one control, the wrong one, or neither (VATUSA/OIS#336). Being siblings
  * is also what keeps a star click from selecting the row. The active tint sits on the container so
- * the star stays inside the highlight, and the Enter hint sits inside the selection button so the
- * whole row minus the star still selects.
+ * the star stays inside the highlight, and the Enter hint sits inside the selection button. The
+ * container's own surface — the gutter beside and around the star — selects too, so the whole row
+ * minus the star selects (VATUSA/OIS#340).
+ *
+ * The star is out of the tab order: ⌘⇧F is its keyboard affordance. Tabbable, it could hold focus
+ * on a starred row that isn't highlighted, and un-starring that row unmounts it — dropping focus to
+ * `<body>`, where no palette shortcut is listening.
  */
 export function CommandRow({
   item,
@@ -250,6 +255,11 @@ export function CommandRow({
     <div
       data-index={index}
       onMouseMove={onActivate}
+      // Only a click on the container itself: the row button's click bubbles here too, and the star's
+      // must never select.
+      onClick={(e) => {
+        if (e.target === e.currentTarget) onSelect();
+      }}
       className={cn(
         "flex w-full items-center rounded-sm text-sm",
         active ? "bg-panel-2 text-ink" : "text-ink-2",
@@ -258,8 +268,6 @@ export function CommandRow({
       <button
         type="button"
         onClick={onSelect}
-        // The whole row bar the star selects, padding included — a gutter outside the button would
-        // be a strip of the row that highlights on hover but does nothing when clicked.
         className="flex min-w-0 flex-1 items-center gap-2.5 px-2.5 py-2 text-left"
       >
         {Icon && <Icon className={cn("size-4 shrink-0", active ? "text-brand-ink" : "text-ink-3")} />}
@@ -272,6 +280,7 @@ export function CommandRow({
           type="button"
           aria-label={item.starred ? "Remove from favorites" : "Add to favorites"}
           aria-pressed={!!item.starred}
+          tabIndex={-1}
           // Keep focus in the search field so the keyboard keeps working after a click.
           onMouseDown={(e) => e.preventDefault()}
           onClick={() => item.onToggleStar?.()}
