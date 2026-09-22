@@ -84,7 +84,8 @@ export function capabilities(): Readonly<Record<Capability, boolean>> {
  * Extracted as a pure function so the desktop half of the gate is testable today. Inlined into
  * `can()` it was unobservable — every entry in {@link IMPLEMENTED} is currently `false`, so
  * dropping the `isTauri()` check entirely left the whole suite green while quietly arming a leak
- * of desktop-only UI into the browser the moment any feature issue flips its flag.
+ * of desktop-only UI into the browser the moment any feature issue flips its flag. This pins the
+ * rule; `platform-gate.dom.test.ts` pins that `can()` and `capabilities()` actually apply it.
  */
 export function availability(onDesktop: boolean, implemented: boolean): boolean {
   return onDesktop && implemented;
