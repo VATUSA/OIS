@@ -130,7 +130,8 @@ mod tests {
         let counts = domain_counts(&pool).await.expect("query is valid");
         // 't-live' and 't-open'; not the expired one, not the draft.
         assert_eq!(counts.active_tmis, 2);
-        // 'f-live' and 'f-pubevent' only — the same set `repos::flow::list_fcas` returns.
+        // 'f-live' and 'f-pubevent' only — the enabled subset of what `repos::flow::list_fcas`
+        // returns (it lists 'f-off' too; it filters visibility, not `enabled`).
         //
         // A soft-deleted FCA is the one that bites: `delete_fca` only stamps `deleted_at`, so
         // counting bare `enabled` made this gauge climb by one for every FCA ever deleted and
