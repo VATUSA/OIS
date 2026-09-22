@@ -81,6 +81,15 @@ web:
 test-js:
     pnpm test
 
+# --- desktop (Tauri shell around the web SPA) ---
+# Run the desktop app: starts the web dev server and hot-reloads it into the Tauri webview
+desktop:
+    pnpm --filter desktop exec tauri dev
+
+# Build the desktop app bundle for the host platform (builds web/dist first)
+desktop-build:
+    pnpm --filter desktop exec tauri build
+
 # --- docs (VitePress user docs) ---
 # Run the docs site dev server (live reload)
 docs:

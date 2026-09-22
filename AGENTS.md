@@ -24,19 +24,29 @@ One monorepo, four parts, one API:
 | `backend/` | Rust · Axum | The API and the authority for identity, permissions, and every domain. Postgres + sqlx, embedded migrations, self-served OpenAPI. |
 | `discord/` | Rust · serenity | The bot. Owns no data — drains an outbound-job queue and calls back via REST as a service account. *(designed, not built)* |
 | `web/` | Vite · React | The site. TanStack Router + Query, consuming the OpenAPI-generated typed client. |
-| `desktop/` | Tauri | Native app *(Phase 5, not scaffolded)*. |
+| `desktop/` | Tauri · Rust | The native app. Not a second frontend — a webview shell (`src-tauri`) around the **same** `web/` bundle. *(shell scaffolded; desktop features in progress)* |
 | `crates/ois-core` | Rust | DB-free domain + permission types (ported from osmium). |
 | `crates/ois-client` | Rust | Typed backend client used by the bot. |
 | `packages/api-client` | TypeScript | OpenAPI-generated client (`@ois/api-client`) for web + desktop. |
 | `packages/ui` | TypeScript | Shared shadcn/ui components + theme. |
 
-Two workspace managers coexist: a Cargo workspace (`backend`, `discord`, `crates/*`) and a
-pnpm + Turborepo workspace (`web`, `packages/*`). The root `justfile` ties cross-language tasks
-together. Design docs live in `docs/` (architecture + per-feature specs); user docs are a VitePress
-site in `docs-site/`. The backlog is `docs/IDEAS.md`; the phased plan is `docs/PLAN.md`.
+Two workspace managers coexist: a Cargo workspace (`backend`, `discord`, `crates/*`,
+`desktop/src-tauri`) and a pnpm + Turborepo workspace (`web`, `desktop`, `packages/*`). The root
+`justfile` ties cross-language tasks together. Design docs live in `docs/` (architecture +
+per-feature specs); user docs are a VitePress site in `docs-site/`. The backlog is
+`docs/IDEAS.md`; the phased plan is `docs/PLAN.md`.
 
 Rust: edition 2024, MSRV 1.85, **nightly** toolchain (for `-Zthreads` — no nightly *language*
 features, so `stable` remains a valid fallback).
+
+**On Linux, `just ci` needs the GTK/WebKit dev packages.** `just check` is
+`cargo check --workspace`, and the workspace includes the Tauri shell (`desktop/src-tauri`), whose
+Linux backend will not even `cargo check` without them — so a backend-only change still fails
+without this. macOS and Windows use the OS webview and need nothing extra.
+
+```bash
+sudo apt-get install -y libwebkit2gtk-4.1-dev libgtk-3-dev libayatana-appindicator3-dev librsvg2-dev
+```
 
 ---
 
@@ -226,6 +236,7 @@ just backend       # cargo run -p ois-backend  (migrations apply on startup)
 just web           # pnpm --filter web dev      (Vite, default :5173)
 just bot           # cargo run -p ois-discord
 just docs          # VitePress user-docs dev server
+just desktop       # Tauri shell + web dev server, hot-reloaded into the webview
 
 # rust
 just check         # cargo check --workspace --all-targets
@@ -235,6 +246,9 @@ just test-rust     # cargo test --workspace --all-targets -- --test-threads=1
 
 # js
 just test-js       # pnpm test
+
+# desktop
+just desktop-build # bundle the Tauri app for the host platform
 
 # the full local gate (run before calling anything done)
 just ci            # fmt-check + cargo check + rust tests, then pnpm lint && pnpm typecheck

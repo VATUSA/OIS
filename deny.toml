@@ -1,6 +1,23 @@
 [advisories]
 version = 2
 yanked = "deny"
+# Ignored advisories, with the reason each one is here. Keep this list short and revisit it — an
+# entry only belongs here while we genuinely cannot act on it.
+#
+# All six are `unmaintained` notices (no known vulnerability, no fix available) on crates we never
+# depend on directly: they arrive transitively through the Tauri desktop shell (desktop/src-tauri),
+# so dropping them is upstream's call, not ours.
+#   - proc-macro-error   <- glib-macros, i.e. the Linux-only GTK stack under tauri
+#   - the unic-* family  <- urlpattern <- tauri-utils
+# Re-check on each Tauri bump and delete whatever no longer applies.
+ignore = [
+    "RUSTSEC-2024-0370",  # proc-macro-error
+    "RUSTSEC-2025-0081",  # unic-char-property
+    "RUSTSEC-2025-0075",  # unic-char-range
+    "RUSTSEC-2025-0080",  # unic-common
+    "RUSTSEC-2025-0100",  # unic-ucd-ident
+    "RUSTSEC-2025-0098",  # unic-ucd-version
+]
 
 [licenses]
 version = 2
@@ -17,6 +34,39 @@ allow = [
     # reqwest/rustls) — a standard, permissive data license for exactly this purpose.
     "CDLA-Permissive-2.0",
 ]
+
+# Per-crate exceptions, all pulled in by the Tauri desktop shell (desktop/src-tauri) and none of
+# them modified by us. Kept as narrow per-crate entries rather than a blanket `allow` so a new
+# copyleft dependency still has to be looked at deliberately.
+#
+# MPL-2.0 is file-level weak copyleft: it obliges us to publish changes to *those files*, and we
+# consume all of these unmodified from crates.io. cssparser/cssparser-macros/dtoa-short/selectors
+# arrive through wry's CSS handling; option-ext through dirs-sys.
+[[licenses.exceptions]]
+name = "cssparser"
+allow = ["MPL-2.0"]
+
+[[licenses.exceptions]]
+name = "cssparser-macros"
+allow = ["MPL-2.0"]
+
+[[licenses.exceptions]]
+name = "dtoa-short"
+allow = ["MPL-2.0"]
+
+[[licenses.exceptions]]
+name = "selectors"
+allow = ["MPL-2.0"]
+
+[[licenses.exceptions]]
+name = "option-ext"
+allow = ["MPL-2.0"]
+
+# Apache-2.0 plus the LLVM exception, which only *removes* the attribution obligation — strictly
+# more permissive than the plain Apache-2.0 already allowed above. Build-time only (system-deps).
+[[licenses.exceptions]]
+name = "target-lexicon"
+allow = ["Apache-2.0 WITH LLVM-exception"]
 
 [bans]
 multiple-versions = "warn"
