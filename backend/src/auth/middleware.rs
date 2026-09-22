@@ -43,6 +43,17 @@ fn bearer_kind(token: &str) -> Option<BearerKind> {
     }
 }
 
+/// The resolver a bearer belongs to, or `None` for no bearer and for one of neither kind.
+///
+/// Lifted out of [`resolve_current_user`] so the routing *decision* is testable on its own. The
+/// interesting case is the third: without it, `None` fell through to the service-account arm and
+/// every `METRICS_TOKEN` scrape and junk `Authorization` header bought a SELECT that could never
+/// match (VATUSA/OIS#384). Inlined, restoring that catch-all is a one-line change nothing notices —
+/// `bearer_kind`'s own tests keep passing, because they never reach this.
+fn bearer_route(bearer: Option<&str>) -> Option<(&str, BearerKind)> {
+    bearer.and_then(|token| bearer_kind(token).map(|kind| (token, kind)))
+}
+
 /// Resolves the current user (session cookie) and/or service account (bearer token)
 /// and stashes them in request extensions for downstream extractors/handlers.
 pub async fn resolve_current_user(
@@ -66,9 +77,7 @@ pub async fn resolve_current_user(
     // A bearer token is either a user API key (`ois_pat_…`) or a service account (`ois_sa_…`); the
     // prefix routes it to the right resolver so at most one table is queried, and none for neither.
     let client_ip = client_ip(request.headers());
-    let bearer = bearer_token
-        .as_deref()
-        .and_then(|t| bearer_kind(t).map(|kind| (t, kind)));
+    let bearer = bearer_route(bearer_token.as_deref());
     let (current_service_account, current_api_key) = match (state.db.as_ref(), bearer) {
         (Some(pool), Some((token, BearerKind::ApiKey))) => {
             let key = access_repo::find_current_api_key_by_bearer_token(
@@ -175,7 +184,7 @@ fn parse_bearer_token(auth_header: Option<&http::HeaderValue>) -> Option<String>
 
 #[cfg(test)]
 mod tests {
-    use super::{BearerKind, bearer_kind, parse_bearer_token, parse_cookie};
+    use super::{BearerKind, bearer_kind, bearer_route, parse_bearer_token, parse_cookie};
 
     #[test]
     fn routes_bearer_tokens_by_prefix() {
@@ -199,6 +208,37 @@ mod tests {
         ] {
             assert_eq!(bearer_kind(token), None, "{token:?}");
         }
+    }
+
+    /// The routing decision itself, which is what `resolve_current_user` acts on.
+    ///
+    /// `bearer_kind` alone is not enough: restoring the old catch-all (`unwrap_or(ServiceAccount)`)
+    /// leaves every one of its tests green, because none of them reaches the line that chooses a
+    /// resolver. These do (VATUSA/OIS#384).
+    #[test]
+    fn a_bearer_of_neither_kind_is_routed_to_no_resolver() {
+        // The `METRICS_TOKEN` Prometheus presents on every scrape — the case that cost a SELECT.
+        assert_eq!(bearer_route(Some("s3cret-metrics-token")), None);
+        assert_eq!(bearer_route(Some("ois_other_abc")), None);
+        assert_eq!(bearer_route(Some("")), None);
+    }
+
+    #[test]
+    fn no_bearer_at_all_is_routed_to_no_resolver() {
+        assert_eq!(bearer_route(None), None);
+    }
+
+    #[test]
+    fn each_prefix_is_routed_to_its_own_resolver() {
+        // The other half: narrowing must not cost a token that used to authenticate.
+        assert_eq!(
+            bearer_route(Some("ois_sa_abc123")),
+            Some(("ois_sa_abc123", BearerKind::ServiceAccount))
+        );
+        assert_eq!(
+            bearer_route(Some("ois_pat_abc123")),
+            Some(("ois_pat_abc123", BearerKind::ApiKey))
+        );
     }
 
     #[test]
