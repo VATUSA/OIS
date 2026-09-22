@@ -79,6 +79,73 @@ access, and reaches the backend over the compose network (`OIS_API_BASE=http://b
 `.env`'s discord section documents `DISCORD_BOT_TOKEN`, `OIS_API_TOKEN` (a service-account token,
 not a user key), and `OIS_POLL_SECS`. Leaving the profile off (the default) runs OIS without it.
 
+## Observability (optional)
+
+Prometheus + Grafana ship as a **second compose file**, so a deployment that doesn't want them
+never runs them. Merged `-f` files share one project and one network, which is what lets Prometheus
+reach the API by service name:
+
+```bash
+docker compose -f docker-compose.yml -f docker-compose.observability.yml up -d
+```
+
+That brings up:
+
+- **Prometheus** on `${PROMETHEUS_PORT:-9090}`, scraping `backend:3000/metrics` every 15s and
+  keeping `${PROMETHEUS_RETENTION:-15d}` of history in the `ois_prometheus` volume. Config lives in
+  `deploy/observability/prometheus.yml`.
+- **Grafana** on `${GRAFANA_PORT:-3001}`, provisioned at boot with the Prometheus datasource and
+  the committed **OIS overview** dashboard (live ops counts, API rate/latency, feed freshness, job
+  health, DB pool) — no manual setup. The dashboard is
+  `deploy/observability/grafana/dashboards/ois-overview.json`; edit that file to change it, since
+  the provider is `allowUiUpdates: false` and the file wins on restart.
+
+Both bind host-local via `BIND_HOST` like every other service, so front them with the same reverse
+proxy (`metrics.<domain>`, `grafana.<domain>`). **Set `GRAFANA_ADMIN_PASSWORD` before the first
+`up`** — it defaults to `admin`.
+
+> **`GRAFANA_ADMIN_PASSWORD` only takes effect on Grafana's first boot.** Grafana stores its users
+> in the `ois_grafana` volume and reads that variable only when it creates the default admin, so
+> changing it later and recreating the container does **nothing** — the old password keeps working.
+> If you already booted the stack once with the default, reset it explicitly:
+>
+> ```bash
+> docker compose -f docker-compose.yml -f docker-compose.observability.yml \
+>   exec grafana grafana-cli admin reset-admin-password '<new password>'
+> ```
+>
+> (or drop the volume and start clean, which also discards any saved Grafana state).
+
+One local-dev gotcha: `docker compose` only auto-merges `docker-compose.override.yml` when you pass
+*no* `-f` flags. The command above passes two, so it pulls the published backend image rather than
+building yours. To run the stack against a locally-built backend, name the override explicitly:
+
+```bash
+docker compose -f docker-compose.yml -f docker-compose.override.yml \
+               -f docker-compose.observability.yml up -d --build
+```
+
+### Securing `/metrics`
+
+`GET /metrics` is deliberately **not** in the OpenAPI spec or the typed client: it is text
+exposition for Prometheus, not JSON the SPA consumes, so a change there never needs a client regen.
+
+The observability stack publishes **no new port** for it — Prometheus scrapes it in-network at
+`backend:3000/metrics`. But it is a route on the API's own listener, so **anyone who can reach the
+API can scrape it**, including through a public `api.<domain>` proxy. It exposes operational
+numbers (traffic counts, active TMIs, job health, build version), not user data, but on a publicly
+proxied API you should either block `/metrics` at the proxy or set a token:
+
+1. Set `METRICS_TOKEN` in `.env` and recreate the backend. The endpoint then answers `401` without
+   `Authorization: Bearer <token>`.
+2. Prometheus does not expand environment variables in its own config, so the token has to reach it
+   as a **file**: write the same value to `deploy/observability/metrics_token` (gitignored — it is
+   a credential), uncomment that volume line in `docker-compose.observability.yml`, and uncomment
+   the `authorization` block in `deploy/observability/prometheus.yml`.
+
+Do both or neither: setting `METRICS_TOKEN` without step 2 leaves Prometheus scraping with no
+credential, and the target goes `DOWN` with `server returned HTTP status 401 Unauthorized`.
+
 ## Rolling back
 
 Set `.env`'s `IMAGE_TAG` back to the previous known-good value (a prior `vX.Y.Z`, or the previous
