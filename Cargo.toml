@@ -5,7 +5,7 @@ members = [
     "discord",
     "crates/ois-core",
     "crates/ois-client",
-    # "desktop/src-tauri",  # added in Phase 5
+    "desktop/src-tauri",
 ]
 
 [workspace.package]
@@ -46,8 +46,20 @@ tracing-subscriber = { version = "0.3.20", features = ["env-filter", "fmt"] }
 utoipa = { version = "5.5.0", features = ["axum_extras", "chrono"] }
 utoipa-swagger-ui = { version = "9.0.2", features = ["axum"] }
 
+# --- metrics / observability ---
+# `default-features = false` drops the exporter's own hyper http-listener + push-gateway; we only
+# want the recorder and its text renderer, served from our own Axum route (see backend/src/metrics.rs).
+metrics = "0.24"
+metrics-exporter-prometheus = { version = "0.18", default-features = false }
+
 # --- config ---
 dotenvy = "0.15.7"
+
+# --- desktop shell ---
+# The Tauri window around the web SPA (desktop/src-tauri). Pulled into the workspace so it shares
+# one lockfile and target dir, and so cargo-deny covers Tauri's dependency tree with everything else.
+tauri = { version = "2.11", features = [] }
+tauri-build = { version = "2.6", features = [] }
 
 # --- discord bot ---
 serenity = { version = "0.12", default-features = false, features = ["client", "gateway", "native_tls_backend", "model"] }

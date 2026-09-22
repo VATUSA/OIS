@@ -16,8 +16,11 @@ RUN cargo chef prepare --recipe-path recipe.json
 
 FROM chef AS builder
 COPY --from=planner /app/recipe.json recipe.json
-# Compile (and cache) just the dependencies.
-RUN cargo chef cook --release --recipe-path recipe.json
+# Compile (and cache) just the dependencies. `-p ois-discord` is load-bearing, not an optimisation:
+# without it cargo-chef cooks *every* workspace member's dependencies, which since the Tauri shell
+# joined the workspace (desktop/src-tauri) pulls in gdk-sys/gtk-sys/webkit2gtk-sys. This builder is
+# rust:1-bookworm and has no GTK/WebKit dev packages, so the cook aborts on gdk-sys's build script.
+RUN cargo chef cook --release -p ois-discord --recipe-path recipe.json
 # Then the workspace itself.
 COPY . .
 # Full version (1.0.1-<sha>), for consistency with the other images' build/label story even though
