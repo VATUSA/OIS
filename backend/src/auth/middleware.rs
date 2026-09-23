@@ -22,6 +22,35 @@ const SESSION_COOKIE: &str = "ois_session";
 /// bearer kinds are told apart without a speculative lookup against both tables.
 const API_KEY_TOKEN_PREFIX: &str = "ois_pat_";
 
+/// The desktop app has no browser origin and so cannot carry `ois_session`; it sends the same kind
+/// of session token as a bearer instead. Resolving it through the ordinary session lookup means a
+/// desktop request arrives as the very same `CurrentUser` a cookie would produce — one authority
+/// model, not two (#346).
+const DESKTOP_SESSION_TOKEN_PREFIX: &str = "ois_dsk_";
+
+/// How a websocket client offers its desktop session token.
+///
+/// The browser `WebSocket` constructor can set exactly one request header — the subprotocol list —
+/// so that is the only way a Tauri webview can authenticate an upgrade: it has no `ois_session`
+/// cookie (sign-in happens in the system browser) and cannot send `Authorization`. Deliberately the
+/// subprotocol rather than a query parameter, because a credential in a URL ends up in access logs,
+/// proxy logs and referers (#348).
+const WS_BEARER_PROTOCOL_PREFIX: &str = "ois.bearer.";
+
+/// Pulls a desktop session token out of a `Sec-WebSocket-Protocol` offer, if one is there.
+pub fn parse_ws_protocol_token(header: Option<&http::HeaderValue>) -> Option<String> {
+    header
+        .and_then(|value| value.to_str().ok())
+        .and_then(|value| {
+            value
+                .split(',')
+                .map(str::trim)
+                .find_map(|proto| proto.strip_prefix(WS_BEARER_PROTOCOL_PREFIX))
+        })
+        .filter(|token| !token.is_empty())
+        .map(str::to_owned)
+}
+
 /// Resolves the current user (session cookie) and/or service account (bearer token)
 /// and stashes them in request extensions for downstream extractors/handlers.
 pub async fn resolve_current_user(
@@ -31,6 +60,22 @@ pub async fn resolve_current_user(
 ) -> Response {
     let session_token = parse_cookie(request.headers().get(http::header::COOKIE), SESSION_COOKIE);
     let bearer_token = parse_bearer_token(request.headers().get(http::header::AUTHORIZATION));
+
+    // A desktop bearer *is* a session token, so it authenticates as the user exactly as the cookie
+    // does. Taking it as the session token here also means logout needs no desktop-specific path:
+    // it deletes whatever `SessionToken` holds.
+    let session_token = session_token.or_else(|| {
+        bearer_token
+            .as_deref()
+            .filter(|token| token.starts_with(DESKTOP_SESSION_TOKEN_PREFIX))
+            .map(str::to_owned)
+    });
+
+    // ...and the websocket upgrade, where no other header is available to the client.
+    let session_token = session_token.or_else(|| {
+        parse_ws_protocol_token(request.headers().get("sec-websocket-protocol"))
+            .filter(|token| token.starts_with(DESKTOP_SESSION_TOKEN_PREFIX))
+    });
 
     let current_user =
         if let (Some(pool), Some(token)) = (state.db.as_ref(), session_token.as_deref()) {
@@ -58,6 +103,8 @@ pub async fn resolve_current_user(
                 .flatten();
                 (None, key)
             }
+            // Already resolved above as a session; don't also probe the service-account table.
+            (_, Some(token)) if token.starts_with(DESKTOP_SESSION_TOKEN_PREFIX) => (None, None),
             (Some(pool), Some(token)) => {
                 let sa = access_repo::find_current_service_account_by_bearer_token(pool, token)
                     .await

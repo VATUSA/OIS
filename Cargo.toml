@@ -5,7 +5,7 @@ members = [
     "discord",
     "crates/ois-core",
     "crates/ois-client",
-    # "desktop/src-tauri",  # added in Phase 5
+    "desktop/src-tauri",
 ]
 
 [workspace.package]
@@ -54,6 +54,32 @@ metrics-exporter-prometheus = { version = "0.18", default-features = false }
 
 # --- config ---
 dotenvy = "0.15.7"
+
+# --- desktop shell ---
+# The Tauri window around the web SPA (desktop/src-tauri). Pulled into the workspace so it shares
+# one lockfile and target dir, and so cargo-deny covers Tauri's dependency tree with everything else.
+# `tray-icon` is not on by default: without it the tray commands aren't compiled in at all and
+# every call fails at runtime with "plugin tray not found" (#351). `image-png` lets the tray take
+# the app icon, which is a PNG.
+tauri = { version = "2.11", features = ["tray-icon", "image-png"] }
+tauri-build = { version = "2.6", features = [] }
+# Desktop auth (#346): the session token lives in the real OS keychain (macOS Keychain, Windows
+# Credential Manager, Linux Secret Service), and sign-in opens the SYSTEM browser so the app never
+# sees the user's VATSIM credentials.
+# zbus (pure Rust) rather than the dbus/libsecret backend on Linux, so no system library is needed
+# to build — the CI desktop job stays as it is.
+keyring = { version = "4.2", features = ["apple-native-keyring-store", "windows-native-keyring-store", "zbus-secret-service-keyring-store"] }
+open = "5.4"
+# Auto-update (#347). The updater plugin verifies a minisign signature against the public key in
+# tauri.conf.json and refuses anything that doesn't match, so package verification is its job
+# rather than a weaker hand-rolled check of ours. `process` is only for relaunch().
+# Native OS notifications (#348). Delivery only — what to notify about is decided in the
+# frontend, where the user's own permissions and settings already apply.
+# Launch at login (#351), toggled from the app's settings rather than assumed on.
+tauri-plugin-autostart = "2.5"
+tauri-plugin-notification = "2.4"
+tauri-plugin-updater = "2.11"
+tauri-plugin-process = "2.3"
 
 # --- discord bot ---
 serenity = { version = "0.12", default-features = false, features = ["client", "gateway", "native_tls_backend", "model"] }

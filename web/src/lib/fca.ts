@@ -392,7 +392,11 @@ export function useAtc(enabled: boolean) {
 }
 
 /** Aircraft whose filed route crosses one FCA, with ETA to the crossing. */
-export function useFcaTraffic(id: string | null, debug = false) {
+export function useFcaTraffic(
+  id: string | null,
+  debug = false,
+  { background = false }: { background?: boolean } = {},
+) {
   return useQuery({
     queryKey: ["fca-traffic", id, debug],
     queryFn: async () => {
@@ -406,6 +410,10 @@ export function useFcaTraffic(id: string | null, debug = false) {
     // Releases sync instantly over the websocket; the poll refreshes live crossing ETAs (and is the
     // fallback if the socket drops).
     refetchInterval: 30_000,
+    // TanStack skips a `refetchInterval` tick whenever `document.visibilityState === "hidden"`, so
+    // for a caller that exists to notice things while the window is hidden — the desktop notifiers
+    // — that fallback would be dead exactly when it is needed. The foreground UI keeps the default.
+    refetchIntervalInBackground: background,
   });
 }
 

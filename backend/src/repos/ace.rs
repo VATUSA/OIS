@@ -7,7 +7,7 @@ use sqlx::{PgPool, Postgres, Transaction};
 
 use crate::{
     errors::ApiError,
-    models::{AceClaimBody, AceRequestBody},
+    models::{AceClaimBody, AceRequestBody, MyAceClaim},
 };
 
 /// The request row + its aggregated claims (json_agg) + a live claim count. `slots` and the count
@@ -236,12 +236,33 @@ pub struct DueReminder {
     pub position: Option<String>,
 }
 
+/// The signed-in user's claimed positions for events that haven't started yet.
+///
+/// Mirrors the join `claims_due_for_reminder` uses (cancelled requests excluded) so the two agree
+/// about what a live claim is; it just scopes to one user and drops the reminder-tier window.
+pub async fn my_upcoming_claims(pool: &PgPool, user_id: &str) -> Result<Vec<MyAceClaim>, ApiError> {
+    sqlx::query_as::<_, MyAceClaim>(
+        "select c.id as claim_id, e.id as event_id, e.title as event_title, \
+                e.start_time, r.position \
+         from ace.claims c \
+         join ace.requests r on r.id = c.request_id and r.status <> 'cancelled' \
+         join events.event e on e.id = r.event_id \
+         where c.claimed_by = $1 and e.start_time > now() \
+         order by e.start_time",
+    )
+    .bind(user_id)
+    .fetch_all(pool)
+    .await
+    .map_err(|_| ApiError::Internal)
+}
+
 /// Claims due for a `job_type` reminder: their event starts within the next `hours_before` hours
 /// (i.e. the T-`hours_before`h threshold has just been crossed and the event hasn't started yet),
 /// the claimer has a linked Discord account, the request isn't cancelled, and no `job_type` job has
 /// already been enqueued for this claim — so a released claim or a cancelled request naturally
 /// drops out, and a repeat scheduler tick never double-sends.
-/// Claims whose event falls in `(now + hours_after, now + hours_before]` — i.e. this tier's own
+///
+/// Its window is `(now + hours_after, now + hours_before]` — i.e. this tier's own
 /// window, not "anything within `hours_before`". Without a lower bound, a claim first seen after its
 /// event is already inside a *later* tier's window (e.g. claimed at T-3h, before either reminder has
 /// fired) would match every tier whose upper bound is ≥3h simultaneously — sending a 24h-tier
@@ -273,6 +294,33 @@ pub async fn claims_due_for_reminder(
     .bind(hours_before as i32)
     .bind(job_type)
     .fetch_all(pool)
+    .await
+    .map_err(|_| ApiError::Internal)
+}
+
+/// How many live claims sit in a reminder tier's window `(now + hours_after, now + hours_before]`,
+/// whoever claimed them: the same claim/request/event rules as [`claims_due_for_reminder`], minus its
+/// Discord join and its already-sent check.
+///
+/// That query decides who gets a Discord DM; this one decides whether to nudge connected clients to
+/// re-check their own claims. Keying the nudge off DMs sent meant a desktop user without a linked
+/// Discord account never got a reminder at all (VATUSA/OIS#348 review).
+pub async fn claims_in_reminder_window(
+    pool: &PgPool,
+    hours_after: i64,
+    hours_before: i64,
+) -> Result<i64, ApiError> {
+    sqlx::query_scalar::<_, i64>(
+        "select count(*) \
+         from ace.claims c \
+         join ace.requests r on r.id = c.request_id and r.status <> 'cancelled' \
+         join events.event e on e.id = r.event_id \
+         where e.start_time > now() + make_interval(hours => $1::int) \
+           and e.start_time <= now() + make_interval(hours => $2::int)",
+    )
+    .bind(hours_after as i32)
+    .bind(hours_before as i32)
+    .fetch_one(pool)
     .await
     .map_err(|_| ApiError::Internal)
 }
@@ -404,6 +452,30 @@ mod tests {
             .unwrap()
     }
 
+    /// The client nudge counts every claim in the window; the DM query only those with Discord linked.
+    /// Keying reminders off the DM query left desktop users without Discord unreminded (#348 review).
+    #[sqlx::test]
+    async fn the_reminder_window_counts_claims_without_a_linked_discord_account(pool: PgPool) {
+        let requester = seed_user(&pool, "Requester").await;
+        let claimer = seed_user(&pool, "No Discord").await; // deliberately never linked
+        let event = seed_event(&pool, 7, 5).await; // inside the 6h tier (0, 6]
+        seed_claimed_request(&pool, event, &requester, &claimer).await;
+
+        assert_eq!(claims_in_reminder_window(&pool, 0, 6).await.unwrap(), 1);
+        assert_eq!(
+            claims_in_reminder_window(&pool, 6, 24).await.unwrap(),
+            0,
+            "other tier"
+        );
+        assert!(
+            claims_due_for_reminder(&pool, 0, 6, "ace_claim_reminder_6h")
+                .await
+                .unwrap()
+                .is_empty(),
+            "no Discord link, so no DM — which is why the nudge must not depend on DMs"
+        );
+    }
+
     #[sqlx::test]
     async fn claims_due_for_reminder_matches_the_24h_scheduling_math(pool: PgPool) {
         let requester = seed_user(&pool, "Requester").await;
@@ -530,5 +602,79 @@ mod tests {
         .await
         .unwrap();
         assert_eq!(count, 1, "exactly one row must exist, not two");
+    }
+
+    #[sqlx::test]
+    async fn my_claims_lists_only_my_own_upcoming_ones(pool: PgPool) {
+        let me = seed_user(&pool, "Claimer").await;
+        let someone_else = seed_user(&pool, "Other").await;
+        let requester = seed_user(&pool, "Requester").await;
+
+        let soon = seed_event(&pool, 9001, 5).await;
+        seed_claimed_request(&pool, soon, &requester, &me).await;
+
+        let also_soon = seed_event(&pool, 9002, 8).await;
+        seed_claimed_request(&pool, also_soon, &requester, &someone_else).await;
+
+        let mine = my_upcoming_claims(&pool, &me).await.unwrap();
+
+        assert_eq!(mine.len(), 1, "someone else's claim must not appear");
+        assert_eq!(mine[0].event_id, soon);
+        assert_eq!(mine[0].position.as_deref(), Some("DCA_APP"));
+    }
+
+    /// `ace.requests.position` is nullable — support can be asked for without naming a position.
+    /// Typed as a non-Option String, `query_as` failed to decode and the endpoint 500'd for anyone
+    /// holding such a claim.
+    #[sqlx::test]
+    async fn my_claims_include_a_request_with_no_position(pool: PgPool) {
+        let me = seed_user(&pool, "Claimer").await;
+        let requester = seed_user(&pool, "Requester").await;
+        let event = seed_event(&pool, 9101, 5).await;
+
+        let mut tx = pool.begin().await.unwrap();
+        let request_id =
+            create_request(&mut tx, event, &requester, Some("ZDC"), None, 1, "any help")
+                .await
+                .unwrap();
+        tx.commit().await.unwrap();
+        let mut tx = pool.begin().await.unwrap();
+        claim_request(&mut tx, &request_id, &me, "", None, None)
+            .await
+            .unwrap();
+        tx.commit().await.unwrap();
+
+        let mine = my_upcoming_claims(&pool, &me)
+            .await
+            .expect("a claim without a position must not fail the whole query");
+        assert_eq!(mine.len(), 1);
+        assert_eq!(mine[0].position, None);
+    }
+
+    #[sqlx::test]
+    async fn my_claims_drops_events_that_have_already_started(pool: PgPool) {
+        // A reminder for an event already underway is noise, not a reminder.
+        let me = seed_user(&pool, "Claimer").await;
+        let requester = seed_user(&pool, "Requester").await;
+
+        let past = seed_event(&pool, 9003, -2).await;
+        seed_claimed_request(&pool, past, &requester, &me).await;
+
+        assert!(my_upcoming_claims(&pool, &me).await.unwrap().is_empty());
+    }
+
+    #[sqlx::test]
+    async fn my_claims_are_ordered_soonest_first(pool: PgPool) {
+        let me = seed_user(&pool, "Claimer").await;
+        let requester = seed_user(&pool, "Requester").await;
+
+        let later = seed_event(&pool, 9005, 30).await;
+        seed_claimed_request(&pool, later, &requester, &me).await;
+        let sooner = seed_event(&pool, 9004, 3).await;
+        seed_claimed_request(&pool, sooner, &requester, &me).await;
+
+        let mine = my_upcoming_claims(&pool, &me).await.unwrap();
+        assert_eq!(mine.len(), 2);
+        assert_eq!(mine[0].event_id, sooner, "soonest first");
     }
 }

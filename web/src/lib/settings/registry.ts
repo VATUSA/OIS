@@ -1,3 +1,5 @@
+import {can} from "@/lib/platform";
+
 /**
  * The user-settings registry — the single place to define a setting. Add an entry here and it shows up
  * on the /settings page automatically; read it anywhere with `useSetting(key, default)`.
@@ -21,6 +23,14 @@ export interface SelectControl {
 export interface SettingDef {
   /** Stable storage key, dotted by area, e.g. "map.persistView". */
   key: string;
+  /**
+   * Whether this setting is offered on the current platform. Omitted means always.
+   *
+   * A setting the platform can't honour is worse than a missing one — it invites the user to turn
+   * something on and then quietly does nothing. The notification settings use this so they never
+   * appear on the web build (#348).
+   */
+  available?: () => boolean;
   /** Section heading it appears under on the settings page. */
   group: string;
   label: string;
@@ -33,6 +43,103 @@ export type SettingsBlob = Record<string, unknown>;
 
 /** Settings namespace for the preferences API (`/api/v1/me/preferences/settings`). */
 export const SETTINGS_NAMESPACE = "settings";
+
+// A switch the platform can't honour is worse than a missing one, so each desktop-only group is
+// gated on *its own* capability rather than on "is this the desktop build".
+const whenNotifications = () => can("notifications");
+const whenTray = () => can("tray");
+
+const NOTIFICATION_SETTINGS: SettingDef[] = [
+  {
+    key: "notifications.restrictions",
+    group: "Notifications",
+    available: whenNotifications,
+    label: "TMIs and ground stops",
+    description:
+      "Notify when a TMI, ground stop, GDP or TMU program is published — the same events the in-app restriction alerts show.",
+    control: { kind: "toggle", default: false },
+  },
+  {
+    key: "notifications.releases",
+    group: "Notifications",
+    available: whenNotifications,
+    label: "EDCT releases",
+    description: "Notify when a release time is issued for a flight crossing one of your FCAs.",
+    control: { kind: "toggle", default: false },
+  },
+  {
+    key: "notifications.metering",
+    group: "Notifications",
+    available: whenNotifications,
+    label: "Heavy metering delay",
+    description:
+      "Notify when metering assigns a crossing more delay than the threshold below. Uses the same delay the ladder shows.",
+    control: { kind: "toggle", default: false },
+  },
+  {
+    key: "notifications.meteringDelayMin",
+    group: "Notifications",
+    available: whenNotifications,
+    label: "Delay threshold",
+    description: "How much metering delay counts as worth interrupting you for.",
+    control: {
+      kind: "select",
+      default: "15",
+      options: [
+        { value: "5", label: "5 minutes" },
+        { value: "10", label: "10 minutes" },
+        { value: "15", label: "15 minutes" },
+        { value: "30", label: "30 minutes" },
+      ],
+    },
+  },
+  {
+    key: "notifications.access",
+    group: "Notifications",
+    available: whenNotifications,
+    label: "Access granted",
+    description: "Notify when someone grants you a new permission or role.",
+    control: { kind: "toggle", default: false },
+  },
+  {
+    key: "notifications.eventReminders",
+    group: "Notifications",
+    available: whenNotifications,
+    label: "Event reminders",
+    description:
+      "Notify 24 hours and 6 hours before an event you have claimed an ACE position for — the same reminders the Discord bot sends.",
+    control: { kind: "toggle", default: false },
+  },
+];
+
+const TRAY_SETTINGS: SettingDef[] = [
+  {
+    key: "tray.show",
+    group: "Menu bar",
+    available: whenTray,
+    label: "Show OIS in the menu bar",
+    description:
+      "A menu-bar icon with pilots online, active TMIs and feed health, plus quick links into the app.",
+    control: { kind: "toggle", default: false },
+  },
+  {
+    key: "tray.closeToTray",
+    group: "Menu bar",
+    available: whenTray,
+    label: "Closing the window keeps OIS running",
+    description:
+      "Closing hides the window to the menu bar instead of quitting, so notifications keep arriving. Quit from the menu-bar icon.",
+    control: { kind: "toggle", default: false },
+  },
+  {
+    key: "tray.launchAtLogin",
+    group: "Menu bar",
+    available: whenTray,
+    label: "Launch at login",
+    description: "Start OIS automatically when you sign in to this computer.",
+    control: { kind: "toggle", default: false },
+  },
+];
 
 /** Every setting, in display order. Groups render in first-seen order. */
 export const SETTINGS: SettingDef[] = [
@@ -99,6 +206,15 @@ export const SETTINGS: SettingDef[] = [
       "Requires Debug mode. Adds a forward-in-time scrubber to the flow map — scrubbing ahead projects every aircraft along its resolved route using the same ETA model as metering, instead of showing live positions.",
     control: { kind: "toggle", default: false },
   },
+
+  // --- Notifications (#348) ---
+  // Desktop only: the web build has no OS notification centre, and `can("notifications")` is false
+  // there, so these would be dead switches. Every one defaults OFF — an operator opts in to being
+  // interrupted, never the other way round.
+  ...NOTIFICATION_SETTINGS,
+
+  // --- Menu bar (#351) ---
+  ...TRAY_SETTINGS,
 ];
 
 /** The default value for a setting key (used before the server value loads, or when signed out). */

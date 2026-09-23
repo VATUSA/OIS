@@ -1,0 +1,25 @@
+[package]
+name = "ois-desktop"
+# Crate version only. The *shipped* version comes from `tauri.conf.json`'s `version`, which the
+# release job rewrites from the git tag — the bundle no longer inherits this number, because
+# inheriting it meant every release shipped 0.1.0 and `check()` never saw an update (#347).
+version = "0.1.0"
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+
+[build-dependencies]
+tauri-build.workspace = true
+
+[dependencies]
+tauri.workspace = true
+keyring.workspace = true
+open.workspace = true
+tauri-plugin-autostart.workspace = true
+tauri-plugin-notification.workspace = true
+tauri-plugin-updater.workspace = true
+tauri-plugin-process.workspace = true
+# `tauri::generate_context!` expands to serde_json calls once tauri.conf.json carries a plugins
+# block, so it has to be in scope here even though no code of ours names it.
+serde_json.workspace = true
+uuid.workspace = true

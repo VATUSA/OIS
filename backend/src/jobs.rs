@@ -692,27 +692,36 @@ const ACE_REMINDER_TIERS: &[(i64, i64, &str)] = &[
 /// construction: each tick re-queries live state (crossed the threshold, event still upcoming, not
 /// already reminded), so a released claim or a cancelled request simply stops matching — no
 /// separate "cancel the scheduled reminder" step is needed. Runs every 15 minutes.
-pub fn spawn_ace_reminder_scheduler(reg: Arc<JobRegistry>, pool: PgPool) {
+pub fn spawn_ace_reminder_scheduler(reg: Arc<JobRegistry>, pool: PgPool, events: Events) {
     tokio::spawn(run_interval(
         reg,
         "ace_reminder_scheduler",
         "DM ACE claimers a reminder at T-24h/T-6h before their event",
         ACE_REMINDER_INTERVAL,
         move || {
-            let pool = pool.clone();
-            async move { ace_reminder_scheduler_once(&pool).await }
+            let (pool, events) = (pool.clone(), events.clone());
+            async move { ace_reminder_scheduler_once(&pool, &events).await }
         },
     ));
 }
 
-async fn ace_reminder_scheduler_once(pool: &PgPool) -> Result<String, String> {
+async fn ace_reminder_scheduler_once(pool: &PgPool, events: &Events) -> Result<String, String> {
     let mut sent = 0u32;
+    let mut in_window = 0i64;
     let mut tier_failed = false;
     // Each tier is queried and enqueued independently — a transient failure on one tier's query
     // must not skip the other tier's check for this cycle (they're unrelated thresholds), so errors
     // are logged and accumulated rather than propagated with `?`, which would abort the whole loop
     // on the first failure.
     for &(hours_after, hours_before, job_type) in ACE_REMINDER_TIERS {
+        // Every live claim in this tier's window, Discord or not — what decides the client nudge below.
+        match ace_repo::claims_in_reminder_window(pool, hours_after, hours_before).await {
+            Ok(n) => in_window += n,
+            Err(e) => {
+                tracing::warn!(job_type, error = ?e, "ace reminder window count failed");
+                tier_failed = true;
+            }
+        }
         let due = match ace_repo::claims_due_for_reminder(pool, hours_after, hours_before, job_type)
             .await
         {
@@ -742,6 +751,16 @@ async fn ace_reminder_scheduler_once(pool: &PgPool) -> Result<String, String> {
             }
         }
     }
+    // Nudge connected clients whenever any claim is inside a reminder window, so the desktop app can
+    // surface the reminder natively (#348). Not keyed on `sent`: that counts Discord DMs, so a desktop
+    // user without a linked Discord account was never nudged and never reminded. Payload-free: each
+    // client re-checks its own claims, and its notifier fires once per claim and tier.
+    if in_window > 0 {
+        let _ = events.send(WsEvent {
+            topic: topic::EVENT_REMINDER.to_string(),
+        });
+    }
+
     // Unconditional on `tier_failed`: a persistently-failing tier must always surface to the
     // JobRegistry as a failure, even in a cycle where the *other* tier had genuine hits — masking
     // it behind `sent == 0` would hide an ongoing problem for as long as the healthy tier keeps
@@ -783,6 +802,26 @@ pub fn spawn_cleanup(reg: Arc<JobRegistry>, pool: PgPool) {
                     }
                     Err(_) => Err("cleanup pass failed".to_string()),
                 }
+            }
+        },
+    ));
+}
+
+/// Delete one-time desktop auth codes long past their 60-second life (VATUSA/OIS#346). Nothing
+/// else removes them, so without this the table only grows. Same cadence as the TMU cleanup.
+pub fn spawn_desktop_auth_code_prune(reg: Arc<JobRegistry>, pool: PgPool) {
+    tokio::spawn(run_interval(
+        reg,
+        "desktop_auth_code_prune",
+        "Delete expired one-time desktop sign-in codes",
+        CLEANUP_INTERVAL,
+        move || {
+            let pool = pool.clone();
+            async move {
+                crate::repos::auth::prune_desktop_auth_codes(&pool)
+                    .await
+                    .map(|n| format!("{n} deleted"))
+                    .map_err(|_| "prune failed".to_string())
             }
         },
     ));
@@ -1045,5 +1084,58 @@ mod nav_health_tests {
                 .1,
             None
         );
+    }
+}
+
+#[cfg(test)]
+mod ace_reminder_tests {
+    use sqlx::PgPool;
+
+    use super::ace_reminder_scheduler_once;
+    use crate::realtime::topic;
+    use crate::repos::ace as ace_repo;
+
+    /// A claim coming due for someone with no linked Discord account still nudges connected clients,
+    /// so the desktop app can remind them. Keying the nudge on Discord DMs sent meant it never fired
+    /// for them at all (VATUSA/OIS#348 review).
+    #[sqlx::test]
+    async fn a_claim_due_without_discord_still_nudges_clients(pool: PgPool) {
+        let user = |name: &'static str| {
+            let pool = pool.clone();
+            async move {
+                sqlx::query_scalar::<_, String>(
+                    "insert into identity.users (full_name, display_name) values ($1, $1) returning id",
+                )
+                .bind(name)
+                .fetch_one(&pool)
+                .await
+                .unwrap()
+            }
+        };
+        let requester = user("Requester").await;
+        let claimer = user("No Discord").await;
+        sqlx::query(
+            "insert into events.event (id, title, start_time, end_time) \
+             values (9, 'Fly-In', now() + interval '5 hours', now() + interval '7 hours')",
+        )
+        .execute(&pool)
+        .await
+        .unwrap();
+        let mut tx = pool.begin().await.unwrap();
+        let request = ace_repo::create_request(&mut tx, 9, &requester, Some("ZDC"), None, 1, "")
+            .await
+            .unwrap();
+        tx.commit().await.unwrap();
+        let mut tx = pool.begin().await.unwrap();
+        ace_repo::claim_request(&mut tx, &request, &claimer, "", None, None)
+            .await
+            .unwrap();
+        tx.commit().await.unwrap();
+
+        let (events, mut received) = tokio::sync::broadcast::channel(8);
+        ace_reminder_scheduler_once(&pool, &events).await.unwrap();
+
+        let event = received.try_recv().expect("a reminder nudge was published");
+        assert_eq!(event.topic, topic::EVENT_REMINDER);
     }
 }
