@@ -11,6 +11,7 @@ const availableMonitors = vi.fn();
 const handlers: {moved?: () => void; resized?: () => void} = {};
 const outerPosition = vi.fn();
 const outerSize = vi.fn();
+const scaleFactor = vi.fn();
 
 vi.mock("@tauri-apps/api/webviewWindow", () => ({
   WebviewWindow: Object.assign(
@@ -27,6 +28,7 @@ vi.mock("@tauri-apps/api/webviewWindow", () => ({
         },
         outerPosition: () => outerPosition(),
         outerSize: () => outerSize(),
+        scaleFactor: () => scaleFactor(),
       });
     },
     {getByLabel: (l: string) => getByLabel(l)},
@@ -59,13 +61,14 @@ beforeEach(() => {
   WebviewWindow.mockReset();
   getByLabel.mockReset().mockResolvedValue(null);
   availableMonitors.mockReset().mockResolvedValue([
-    {position: {x: 0, y: 0}, size: {width: 1512, height: 982}},
+    {position: {x: 0, y: 0}, size: {width: 1512, height: 982}, scaleFactor: 1},
   ]);
   installStorage();
   handlers.moved = undefined;
   handlers.resized = undefined;
   outerPosition.mockReset().mockResolvedValue({x: 300, y: 400});
   outerSize.mockReset().mockResolvedValue({width: 420, height: 640});
+  scaleFactor.mockReset().mockResolvedValue(1);
 });
 
 afterEach(() => {
@@ -184,6 +187,31 @@ describe("remembering where a window was put", () => {
 
       await vi.advanceTimersByTimeAsync(400);
       expect(outerPosition).toHaveBeenCalledTimes(1);
+      expect(JSON.parse(localStorage.getItem("ois.popout.fca-abc")!)).toEqual({
+        x: 300,
+        y: 400,
+        width: 420,
+        height: 640,
+      });
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  // Tauri reports physical pixels; a WebviewWindow is created from logical ones. Saving the physical
+  // numbers doubled a pop-out on every reopen on a 2x Retina display (VATUSA/OIS#349 review).
+  it("saves logical pixels on a 2x display, not the physical ones Tauri reports", async () => {
+    vi.useFakeTimers();
+    try {
+      pretendDesktop();
+      scaleFactor.mockResolvedValue(2);
+      outerPosition.mockResolvedValue({x: 600, y: 800});
+      outerSize.mockResolvedValue({width: 840, height: 1280});
+      await openPopout(SPEC);
+
+      handlers.moved?.();
+      await vi.advanceTimersByTimeAsync(400);
+
       expect(JSON.parse(localStorage.getItem("ois.popout.fca-abc")!)).toEqual({
         x: 300,
         y: 400,
