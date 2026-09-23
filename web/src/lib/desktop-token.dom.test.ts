@@ -95,4 +95,21 @@ describe("setDesktopToken", () => {
     await expect(getDesktopToken()).resolves.toBeUndefined();
     expect(invokeDesktop).toHaveBeenCalledTimes(1);
   });
+
+  // A keychain read started just before logout resolves after it. Writing its result into the cache
+  // would put the revoked token back and keep sending it (VATUSA/OIS#346 review).
+  it("a keychain read that finishes after logout does not restore the token", async () => {
+    onDesktop = true;
+    let finishRead: (token: string) => void = () => {};
+    invokeDesktop.mockReturnValueOnce(new Promise<string>((resolve) => (finishRead = resolve)));
+    const {getDesktopToken, setDesktopToken} = await freshModule();
+
+    const inFlight = getDesktopToken();
+    setDesktopToken(undefined); // logout, while the read is still pending
+    finishRead("ois_dsk_revoked");
+
+    await expect(inFlight).resolves.toBeUndefined();
+    invokeDesktop.mockResolvedValue(null);
+    await expect(getDesktopToken()).resolves.toBeUndefined();
+  });
 });

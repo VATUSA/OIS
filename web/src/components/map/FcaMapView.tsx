@@ -268,6 +268,7 @@ export function FcaMapView({
   overview = false,
   eventId,
   initialFlight,
+  initialFcaId,
   embedded = false,
   persistKey,
 }: {
@@ -279,6 +280,8 @@ export function FcaMapView({
    *  instead of flow.fca.*. Event FCAs stay off the live maps until published. */
   eventId?: number;
   initialFlight?: string;
+  /** Select this FCA on arrival — `/ops/fca?fca=<id>`, where a release or metering notification lands. */
+  initialFcaId?: string;
   embedded?: boolean;
   /** Stable key for remembering this map instance's pan/zoom (gated by the map.persistView setting). */
   persistKey?: string;
@@ -327,7 +330,12 @@ export function FcaMapView({
   const [phase, setPhase] = useState<Phase>("draw");
   const [routeForm, setRouteForm] = useState<RouteForm | null>(null);
 
-  const [selectedId, setSelectedId] = useState<string | null>(null);
+  const [selectedId, setSelectedId] = useState<string | null>(initialFcaId ?? null);
+  // Follow the deep link if it changes while mounted: a notification clicked while already on this
+  // page lands on a new `?fca=` without remounting (VATUSA/OIS#348 review).
+  useEffect(() => {
+    if (initialFcaId) setSelectedId(initialFcaId);
+  }, [initialFcaId]);
   const [selectedRouteId, setSelectedRouteId] = useState<string | null>(null);
   const [labeledRoutes, setLabeledRoutes] = useState<Set<string>>(new Set());
   // Display-only, per-viewer route visibility (see #108) — never touches the saved route data.

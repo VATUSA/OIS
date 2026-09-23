@@ -15,6 +15,8 @@
  *    static `import` at the top of any module would pull it into the main bundle; don't add one.
  */
 
+import {IMPLEMENTED} from "./platform-flags";
+
 /** The Tauri v2 runtime injects this into the webview before any app code runs. */
 declare global {
   interface Window {
@@ -49,34 +51,45 @@ export type Capability =
   | "audioAlerts"
   | "fileDialogs";
 
-/**
- * Whether each capability is actually *implemented* yet, independent of which platform we're on.
- *
- * Every entry starts `false` and is flipped by the issue that builds it, so this module can never
- * claim an ability the app doesn't have. Gating on a capability is therefore safe to write today
- * and starts working the day its feature lands — no caller changes needed.
- */
-const IMPLEMENTED: Readonly<Record<Capability, boolean>> = Object.freeze({
-  autoUpdate: true, // #347 — signed auto-update (shipped)
-  notifications: true, // #348 — native OS notifications (shipped)
-  miniWindows: true, // #349 — pop-out always-on-top mini-windows (shipped)
-  multiWindow: true, // #350 — multi-window / multi-monitor (shipped)
-  tray: true, // #351 — system tray (shipped)
-  globalHotkeys: true, // #352 — global hotkeys (shipped)
-  audioAlerts: false, // #353 — audio alerts
-  fileDialogs: false, // #354 — native export/import dialogs
-});
+// What is implemented lives in `platform-flags.ts`, so a test can turn a flag on (VATUSA/OIS#345).
 
 const CAPABILITIES = Object.keys(IMPLEMENTED) as Capability[];
 
 /**
  * Every capability and whether it's available *right now*: it needs both the desktop shell and a
  * shipped implementation. On the web build they are all false, always.
+ *
+ * Memoised per platform. `isTauri()` and {@link IMPLEMENTED} are both constant for the life of the
+ * process, so a fresh object per call only churned identity — a caller putting the result in a
+ * `useMemo`/`useEffect` dependency array would re-run on every render.
  */
+const SNAPSHOTS = new Map<boolean, Readonly<Record<Capability, boolean>>>();
+
 export function capabilities(): Readonly<Record<Capability, boolean>> {
-  return Object.freeze(
-    Object.fromEntries(CAPABILITIES.map((c) => [c, can(c)])) as Record<Capability, boolean>,
-  );
+  const onDesktop = isTauri();
+  let snapshot = SNAPSHOTS.get(onDesktop);
+  if (!snapshot) {
+    snapshot = Object.freeze(
+      Object.fromEntries(
+        CAPABILITIES.map((c) => [c, availability(onDesktop, IMPLEMENTED[c])]),
+      ) as Record<Capability, boolean>,
+    );
+    SNAPSHOTS.set(onDesktop, snapshot);
+  }
+  return snapshot;
+}
+
+/**
+ * The rule itself: a capability needs *both* the desktop shell and a shipped implementation.
+ *
+ * Extracted as a pure function so the desktop half of the gate is testable today. Inlined into
+ * `can()` it was unobservable — every entry in {@link IMPLEMENTED} is currently `false`, so
+ * dropping the `isTauri()` check entirely left the whole suite green while quietly arming a leak
+ * of desktop-only UI into the browser the moment any feature issue flips its flag. This pins the
+ * rule; `platform-gate.dom.test.ts` pins that `can()` and `capabilities()` actually apply it.
+ */
+export function availability(onDesktop: boolean, implemented: boolean): boolean {
+  return onDesktop && implemented;
 }
 
 /**
@@ -84,30 +97,42 @@ export function capabilities(): Readonly<Record<Capability, boolean>> {
  * definition of "available" that {@link capabilities} maps over.
  */
 export function can(capability: Capability): boolean {
-  return isTauri() && IMPLEMENTED[capability];
+  return availability(isTauri(), IMPLEMENTED[capability]);
+}
+
+/** The app's primary window. Pop-outs and route windows are not it. */
+export const MAIN_WINDOW_LABEL = "main";
+
+/**
+ * The Tauri window label this code is running in, or `undefined` on the web build.
+ *
+ * Every Tauri webview loads the same `index.html`, so anything at module scope — or mounted in
+ * `RootLayout` — runs once per window: in every pop-out (#349) and every route window (#350). Work that must happen once per
+ * app launch, or that owns state shared between windows, has to ask which window it is in.
+ *
+ * Reached through a dynamic `import()` like the rest of the seam, so `@tauri-apps/*` stays out of
+ * the web bundle.
+ */
+export async function windowLabel(): Promise<string | undefined> {
+  if (!isTauri()) return undefined;
+  try {
+    const {getCurrentWindow} = await import("@tauri-apps/api/window");
+    return getCurrentWindow().label;
+  } catch {
+    return undefined;
+  }
 }
 
 /**
- * Whether this webview is the app's **main** window.
+ * True only in the primary window.
  *
- * The desktop shell renders the same `RootLayout` in every window it opens — pop-out panels (#349)
- * short-circuit on `?embed=1`, but whole-route windows (#350) do not. Anything that drives a
- * *process-wide* resource must therefore run in one window only, or several windows fight over it
- * and whichever closes first takes it away from the rest. Global shortcuts (#352) are exactly that:
- * `unregisterAll()` is app-scoped, not window-scoped.
- *
- * `false` on the web build, where there is no window to ask about.
+ * Rotating the session token is the example that bit us twice: run it in a second window and it
+ * deletes the token the first window is still holding, signing that window out.
+ * Global shortcuts (#352) are the other: `unregisterAll()` is app-scoped, so a second window
+ * tearing its shortcuts down on close took them away from every window.
  */
 export async function isMainWindow(): Promise<boolean> {
-  if (!isTauri()) return false;
-  try {
-    const {getCurrentWindow} = await import("@tauri-apps/api/window");
-    return getCurrentWindow().label === "main";
-  } catch {
-    // If we cannot tell, assume we are not the main window: declining to touch a shared resource
-    // is the safe failure, taking it from another window is not.
-    return false;
-  }
+  return (await windowLabel()) === MAIN_WINDOW_LABEL;
 }
 
 /**

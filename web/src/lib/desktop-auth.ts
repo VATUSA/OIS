@@ -62,6 +62,26 @@ export async function desktopRefresh(): Promise<string | undefined> {
   return data.expires_at;
 }
 
+/** The longest launch waits on the token rotation before rendering anyway. */
+export const LAUNCH_REFRESH_BUDGET_MS = 5000;
+
+/**
+ * Rotates the stored token before the app renders, but never holds launch past `budgetMs`, and never
+ * throws. In the normal case the rotation lands first, so no request leaves carrying a token the
+ * rotation is about to kill. If the API is slow or unreachable (a blackholed host waits out the OS TCP
+ * timeout, over a minute), the app renders anyway after the budget, rather than showing a blank
+ * window, and simply starts signed out if the rotation never completes (VATUSA/OIS#346).
+ */
+export function refreshBeforeLaunch(budgetMs = LAUNCH_REFRESH_BUDGET_MS): Promise<void> {
+  return Promise.race([
+    desktopRefresh().then(
+      () => undefined,
+      () => undefined,
+    ),
+    new Promise<void>((resolve) => setTimeout(resolve, budgetMs)),
+  ]);
+}
+
 /**
  * Signs out: revokes the session server-side, then clears the keychain.
  *

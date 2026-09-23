@@ -1,6 +1,7 @@
 import type {QueryClient} from "@tanstack/react-query";
 
 import {API_BASE} from "./api";
+import {getDesktopToken} from "./desktop-token";
 
 /**
  * Realtime nudges: the backend pushes a small `{topic}` over the websocket when operational data
@@ -57,14 +58,29 @@ export function connectRealtime(qc: QueryClient): () => void {
     retry += 1;
     timer = setTimeout(() => {
       timer = null;
-      open();
+      void open();
     }, delay);
   };
 
-  const open = () => {
+  const open = async () => {
     if (closed) return;
+
+    // The desktop app has no `ois_session` cookie — sign-in runs in the system browser, so the
+    // cookie is set there and never in the webview — and the WebSocket constructor cannot set an
+    // Authorization header. The subprotocol list is the one request header it *can* set, so the
+    // session token rides there and the server echoes it back (`backend/src/realtime.rs`).
+    // Without this the upgrade 401s and the desktop app gets no realtime nudges at all.
+    let protocols: string[] | undefined;
     try {
-      ws = new WebSocket(wsUrl());
+      const token = await getDesktopToken();
+      if (token) protocols = [`ois.bearer.${token}`];
+    } catch {
+      /* no desktop token available; fall through to cookie auth */
+    }
+    if (closed) return;
+
+    try {
+      ws = protocols ? new WebSocket(wsUrl(), protocols) : new WebSocket(wsUrl());
     } catch {
       schedule();
       return;
@@ -91,7 +107,7 @@ export function connectRealtime(qc: QueryClient): () => void {
     ws.onerror = () => ws?.close();
   };
 
-  open();
+  void open();
   return () => {
     closed = true;
     if (timer) clearTimeout(timer);

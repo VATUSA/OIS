@@ -1,0 +1,20 @@
+{
+  "$schema": "../gen/schemas/desktop-schema.json",
+  "identifier": "popout",
+  "description": "Permissions for the pop-out mini-windows (#349). Deliberately narrower than the main window's: a pop-out only ever places, sizes, pins and closes itself. It cannot create or destroy other windows, quit the app, raise notifications, or change the login item.",
+  "windows": [
+    "popout-*"
+  ],
+  "permissions": [
+    "core:default",
+    "core:window:allow-set-always-on-top",
+    "core:window:allow-close",
+    "core:window:allow-set-position",
+    "core:window:allow-set-size",
+    "core:window:allow-outer-position",
+    "core:window:allow-outer-size",
+    "core:window:allow-set-focus",
+    "core:window:allow-show",
+    "core:window:allow-unminimize"
+  ]
+}

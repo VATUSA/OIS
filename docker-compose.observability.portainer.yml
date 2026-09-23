@@ -1,0 +1,1998 @@
+# GENERATED — do not edit by hand. Regenerate with deploy/observability/gen-portainer-compose.sh
+# (source of truth is deploy/observability/*).
+#
+# Self-contained observability stack for a Portainer web-editor (paste-the-YAML) deployment: it
+# carries its Prometheus + Grafana config INLINE as Docker configs, so there are no bind mounts and
+# nothing has to exist on the host. Deploy it as its own Portainer stack, separate from the base
+# OIS stack.
+#
+#   1. Deploy the base OIS stack (docker-compose.yml) first — it creates the shared network.
+#   2. New stack -> Web editor -> paste this file. Set OIS_NETWORK to your base stack's network
+#      (its name is "<base-stack-name>_default"; check Portainer -> Networks or `docker network
+#      ls`). Default below is ois_default.
+#   3. Reach Grafana at ${GRAFANA_PORT:-3001}; log in with GRAFANA_ADMIN_PASSWORD. The Prometheus
+#      datasource and the OIS dashboard are already provisioned.
+#
+# Requires a Compose that supports inline `configs` content (Docker Compose v2.23.1+); Portainer
+# 2.19+ ships one. /metrics is unauthenticated but only scraped in-network; see docs/deploy.md to
+# gate it with METRICS_TOKEN.
+services:
+  prometheus:
+    image: prom/prometheus:v3.7.3
+    configs:
+      - source: prometheus_config
+        target: /etc/prometheus/prometheus.yml
+    volumes:
+      - ois_prometheus:/prometheus
+    command:
+      - --config.file=/etc/prometheus/prometheus.yml
+      - --storage.tsdb.path=/prometheus
+      - --storage.tsdb.retention.time=${PROMETHEUS_RETENTION:-15d}
+    ports:
+      - "${BIND_HOST:-127.0.0.1}:${PROMETHEUS_PORT:-9090}:9090"
+    restart: unless-stopped
+
+  grafana:
+    image: grafana/grafana:12.3.1
+    depends_on:
+      - prometheus
+    environment:
+      GF_SECURITY_ADMIN_PASSWORD: ${GRAFANA_ADMIN_PASSWORD:-admin}
+      GF_USERS_ALLOW_SIGN_UP: "false"
+    configs:
+      - source: grafana_datasource
+        target: /etc/grafana/provisioning/datasources/prometheus.yml
+      - source: grafana_dashboard_provider
+        target: /etc/grafana/provisioning/dashboards/ois.yml
+      - source: grafana_dashboard_ois
+        target: /etc/grafana/dashboards/ois-overview.json
+    volumes:
+      - ois_grafana:/var/lib/grafana
+    ports:
+      - "${BIND_HOST:-127.0.0.1}:${GRAFANA_PORT:-3001}:3000"
+    restart: unless-stopped
+
+# The base OIS stack's network, joined as external so Prometheus can scrape backend:3000 in-network
+# without this stack redefining any of those services.
+networks:
+  default:
+    external: true
+    name: ${OIS_NETWORK:-ois_default}
+
+volumes:
+  ois_prometheus:
+  ois_grafana:
+
+configs:
+  prometheus_config:
+    content: |
+      # Prometheus scrape config for the OIS observability stack (#382).
+      #
+      # Mounted read-only at /etc/prometheus/prometheus.yml by docker-compose.observability.yml. Because
+      # that file is merged with the base compose file, this container shares the stack's network and can
+      # address the API by its service name.
+      global:
+        scrape_interval: 15s
+        evaluation_interval: 15s
+        external_labels:
+          stack: ois
+      
+      scrape_configs:
+        - job_name: ois-backend
+          metrics_path: /metrics
+          static_configs:
+            - targets: ["backend:3000"]
+      
+          # The endpoint is open by default. That is fine for this scrape — it never leaves the compose
+          # network — but /metrics shares the API's listener, so it is reachable wherever the API is. If
+          # you proxy the API publicly, set METRICS_TOKEN (below) or block /metrics at the proxy.
+          #
+          # To require a token instead, set METRICS_TOKEN on the backend, then write that same value to
+          # deploy/observability/metrics_token, uncomment the volume line for it in
+          # docker-compose.observability.yml, and uncomment the block below. Prometheus does not expand
+          # environment variables in this file, so the token has to arrive as a file — there is no way to
+          # wire it straight from .env.
+          #
+          # authorization:
+          #   type: Bearer
+          #   credentials_file: /etc/prometheus/metrics_token
+      
+        # Prometheus' own metrics, so the scraper's health is visible on the same dashboard.
+        - job_name: prometheus
+          static_configs:
+            - targets: ["localhost:9090"]
+  grafana_datasource:
+    content: |
+      # Auto-provisioned at Grafana boot (#382) — this is what makes the stack zero-setup: the
+      # datasource exists and is selected before anyone opens the UI.
+      apiVersion: 1
+      
+      datasources:
+        - name: Prometheus
+          # Fixed uid so the committed dashboard binds to this exact datasource rather than depending on
+          # a generated id or a picker variable the viewer has to resolve. Every panel in
+          # ../../dashboards/ois-overview.json references this uid; change it here and you must change it
+          # there too.
+          uid: ois-prometheus
+          type: prometheus
+          access: proxy
+          # Service name on the shared compose network.
+          url: http://prometheus:9090
+          isDefault: true
+          # Provisioned datasources are immutable in the UI by default; allowing edits here means a
+          # change survives until the next container restart, which is the less confusing behaviour for
+          # someone tweaking a query.
+          editable: true
+          jsonData:
+            # Matches global.scrape_interval in deploy/observability/prometheus.yml, so Grafana's
+            # suggested step lines up with the real resolution.
+            timeInterval: 15s
+  grafana_dashboard_provider:
+    content: |
+      # Dashboard provider (#382). Loads every dashboard JSON committed under
+      # deploy/observability/grafana/dashboards, which compose mounts at the path below.
+      apiVersion: 1
+      
+      providers:
+        - name: OIS
+          type: file
+          folder: OIS
+          # Let the file on disk win on restart, so editing the committed JSON is how a dashboard change
+          # ships — rather than a UI edit silently diverging from the repo.
+          allowUiUpdates: false
+          disableDeletion: false
+          updateIntervalSeconds: 30
+          options:
+            path: /etc/grafana/dashboards
+            foldersFromFilesStructure: false
+  grafana_dashboard_ois:
+    content: |
+      {
+        "__inputs": [],
+        "__requires": [],
+        "annotations": {
+          "list": []
+        },
+        "editable": true,
+        "graphTooltip": 1,
+        "links": [],
+        "panels": [
+          {
+            "type": "row",
+            "title": "Live operations",
+            "collapsed": false,
+            "gridPos": {
+              "h": 1,
+              "w": 24,
+              "x": 0,
+              "y": 0
+            },
+            "panels": []
+          },
+          {
+            "type": "stat",
+            "title": "Pilots in NAS",
+            "datasource": {
+              "type": "prometheus",
+              "uid": "ois-prometheus"
+            },
+            "gridPos": {
+              "h": 4,
+              "w": 4,
+              "x": 0,
+              "y": 1
+            },
+            "targets": [
+              {
+                "datasource": {
+                  "type": "prometheus",
+                  "uid": "ois-prometheus"
+                },
+                "editorMode": "code",
+                "expr": "ois_feed_pilots",
+                "range": false,
+                "instant": true,
+                "refId": "A"
+              }
+            ],
+            "options": {
+              "reduceOptions": {
+                "calcs": [
+                  "lastNotNull"
+                ],
+                "fields": "",
+                "values": false
+              },
+              "orientation": "auto",
+              "textMode": "auto",
+              "colorMode": "value",
+              "graphMode": "area",
+              "justifyMode": "auto"
+            },
+            "fieldConfig": {
+              "defaults": {
+                "unit": "none",
+                "noValue": "No data",
+                "thresholds": {
+                  "mode": "absolute",
+                  "steps": [
+                    {
+                      "color": "text",
+                      "value": null
+                    }
+                  ]
+                }
+              },
+              "overrides": []
+            }
+          },
+          {
+            "type": "stat",
+            "title": "Active TMIs",
+            "datasource": {
+              "type": "prometheus",
+              "uid": "ois-prometheus"
+            },
+            "gridPos": {
+              "h": 4,
+              "w": 4,
+              "x": 4,
+              "y": 1
+            },
+            "targets": [
+              {
+                "datasource": {
+                  "type": "prometheus",
+                  "uid": "ois-prometheus"
+                },
+                "editorMode": "code",
+                "expr": "ois_active_tmis",
+                "range": false,
+                "instant": true,
+                "refId": "A"
+              }
+            ],
+            "options": {
+              "reduceOptions": {
+                "calcs": [
+                  "lastNotNull"
+                ],
+                "fields": "",
+                "values": false
+              },
+              "orientation": "auto",
+              "textMode": "auto",
+              "colorMode": "value",
+              "graphMode": "area",
+              "justifyMode": "auto"
+            },
+            "fieldConfig": {
+              "defaults": {
+                "unit": "none",
+                "noValue": "No data",
+                "thresholds": {
+                  "mode": "absolute",
+                  "steps": [
+                    {
+                      "color": "text",
+                      "value": null
+                    }
+                  ]
+                }
+              },
+              "overrides": []
+            }
+          },
+          {
+            "type": "stat",
+            "title": "Ground stops",
+            "datasource": {
+              "type": "prometheus",
+              "uid": "ois-prometheus"
+            },
+            "gridPos": {
+              "h": 4,
+              "w": 4,
+              "x": 8,
+              "y": 1
+            },
+            "targets": [
+              {
+                "datasource": {
+                  "type": "prometheus",
+                  "uid": "ois-prometheus"
+                },
+                "editorMode": "code",
+                "expr": "ois_active_ground_stops",
+                "range": false,
+                "instant": true,
+                "refId": "A"
+              }
+            ],
+            "options": {
+              "reduceOptions": {
+                "calcs": [
+                  "lastNotNull"
+                ],
+                "fields": "",
+                "values": false
+              },
+              "orientation": "auto",
+              "textMode": "auto",
+              "colorMode": "value",
+              "graphMode": "area",
+              "justifyMode": "auto"
+            },
+            "fieldConfig": {
+              "defaults": {
+                "unit": "none",
+                "noValue": "No data",
+                "thresholds": {
+                  "mode": "absolute",
+                  "steps": [
+                    {
+                      "color": "text",
+                      "value": null
+                    }
+                  ]
+                }
+              },
+              "overrides": []
+            }
+          },
+          {
+            "type": "stat",
+            "title": "Active GDPs",
+            "datasource": {
+              "type": "prometheus",
+              "uid": "ois-prometheus"
+            },
+            "gridPos": {
+              "h": 4,
+              "w": 4,
+              "x": 12,
+              "y": 1
+            },
+            "targets": [
+              {
+                "datasource": {
+                  "type": "prometheus",
+                  "uid": "ois-prometheus"
+                },
+                "editorMode": "code",
+                "expr": "ois_active_gdps",
+                "range": false,
+                "instant": true,
+                "refId": "A"
+              }
+            ],
+            "options": {
+              "reduceOptions": {
+                "calcs": [
+                  "lastNotNull"
+                ],
+                "fields": "",
+                "values": false
+              },
+              "orientation": "auto",
+              "textMode": "auto",
+              "colorMode": "value",
+              "graphMode": "area",
+              "justifyMode": "auto"
+            },
+            "fieldConfig": {
+              "defaults": {
+                "unit": "none",
+                "noValue": "No data",
+                "thresholds": {
+                  "mode": "absolute",
+                  "steps": [
+                    {
+                      "color": "text",
+                      "value": null
+                    }
+                  ]
+                }
+              },
+              "overrides": []
+            }
+          },
+          {
+            "type": "stat",
+            "title": "Active programs",
+            "datasource": {
+              "type": "prometheus",
+              "uid": "ois-prometheus"
+            },
+            "gridPos": {
+              "h": 4,
+              "w": 4,
+              "x": 16,
+              "y": 1
+            },
+            "targets": [
+              {
+                "datasource": {
+                  "type": "prometheus",
+                  "uid": "ois-prometheus"
+                },
+                "editorMode": "code",
+                "expr": "ois_active_programs",
+                "range": false,
+                "instant": true,
+                "refId": "A"
+              }
+            ],
+            "options": {
+              "reduceOptions": {
+                "calcs": [
+                  "lastNotNull"
+                ],
+                "fields": "",
+                "values": false
+              },
+              "orientation": "auto",
+              "textMode": "auto",
+              "colorMode": "value",
+              "graphMode": "area",
+              "justifyMode": "auto"
+            },
+            "fieldConfig": {
+              "defaults": {
+                "unit": "none",
+                "noValue": "No data",
+                "thresholds": {
+                  "mode": "absolute",
+                  "steps": [
+                    {
+                      "color": "text",
+                      "value": null
+                    }
+                  ]
+                }
+              },
+              "overrides": []
+            }
+          },
+          {
+            "type": "stat",
+            "title": "Enabled FCAs",
+            "datasource": {
+              "type": "prometheus",
+              "uid": "ois-prometheus"
+            },
+            "gridPos": {
+              "h": 4,
+              "w": 4,
+              "x": 20,
+              "y": 1
+            },
+            "targets": [
+              {
+                "datasource": {
+                  "type": "prometheus",
+                  "uid": "ois-prometheus"
+                },
+                "editorMode": "code",
+                "expr": "ois_fca_enabled",
+                "range": false,
+                "instant": true,
+                "refId": "A"
+              }
+            ],
+            "options": {
+              "reduceOptions": {
+                "calcs": [
+                  "lastNotNull"
+                ],
+                "fields": "",
+                "values": false
+              },
+              "orientation": "auto",
+              "textMode": "auto",
+              "colorMode": "value",
+              "graphMode": "area",
+              "justifyMode": "auto"
+            },
+            "fieldConfig": {
+              "defaults": {
+                "unit": "none",
+                "noValue": "No data",
+                "thresholds": {
+                  "mode": "absolute",
+                  "steps": [
+                    {
+                      "color": "text",
+                      "value": null
+                    }
+                  ]
+                }
+              },
+              "overrides": []
+            }
+          },
+          {
+            "type": "timeseries",
+            "title": "Traffic in the NAS",
+            "datasource": {
+              "type": "prometheus",
+              "uid": "ois-prometheus"
+            },
+            "gridPos": {
+              "h": 8,
+              "w": 12,
+              "x": 0,
+              "y": 5
+            },
+            "targets": [
+              {
+                "datasource": {
+                  "type": "prometheus",
+                  "uid": "ois-prometheus"
+                },
+                "editorMode": "code",
+                "expr": "ois_feed_pilots",
+                "range": true,
+                "instant": false,
+                "refId": "A",
+                "legendFormat": "pilots"
+              },
+              {
+                "datasource": {
+                  "type": "prometheus",
+                  "uid": "ois-prometheus"
+                },
+                "editorMode": "code",
+                "expr": "ois_feed_prefiles",
+                "range": true,
+                "instant": false,
+                "refId": "B",
+                "legendFormat": "prefiles"
+              }
+            ],
+            "options": {
+              "legend": {
+                "displayMode": "list",
+                "placement": "bottom",
+                "showLegend": true
+              },
+              "tooltip": {
+                "mode": "multi",
+                "sort": "desc"
+              }
+            },
+            "fieldConfig": {
+              "defaults": {
+                "unit": "none",
+                "custom": {
+                  "drawStyle": "line",
+                  "lineWidth": 1,
+                  "fillOpacity": 8,
+                  "showPoints": "never",
+                  "spanNulls": true,
+                  "axisPlacement": "auto"
+                },
+                "thresholds": {
+                  "mode": "absolute",
+                  "steps": [
+                    {
+                      "color": "text",
+                      "value": null
+                    }
+                  ]
+                }
+              },
+              "overrides": []
+            }
+          },
+          {
+            "type": "timeseries",
+            "title": "Active traffic management initiatives",
+            "datasource": {
+              "type": "prometheus",
+              "uid": "ois-prometheus"
+            },
+            "gridPos": {
+              "h": 8,
+              "w": 12,
+              "x": 12,
+              "y": 5
+            },
+            "targets": [
+              {
+                "datasource": {
+                  "type": "prometheus",
+                  "uid": "ois-prometheus"
+                },
+                "editorMode": "code",
+                "expr": "ois_active_tmis",
+                "range": true,
+                "instant": false,
+                "refId": "A",
+                "legendFormat": "restrictions"
+              },
+              {
+                "datasource": {
+                  "type": "prometheus",
+                  "uid": "ois-prometheus"
+                },
+                "editorMode": "code",
+                "expr": "ois_active_ground_stops",
+                "range": true,
+                "instant": false,
+                "refId": "B",
+                "legendFormat": "ground stops"
+              },
+              {
+                "datasource": {
+                  "type": "prometheus",
+                  "uid": "ois-prometheus"
+                },
+                "editorMode": "code",
+                "expr": "ois_active_gdps",
+                "range": true,
+                "instant": false,
+                "refId": "C",
+                "legendFormat": "GDPs"
+              },
+              {
+                "datasource": {
+                  "type": "prometheus",
+                  "uid": "ois-prometheus"
+                },
+                "editorMode": "code",
+                "expr": "ois_active_programs",
+                "range": true,
+                "instant": false,
+                "refId": "D",
+                "legendFormat": "programs"
+              }
+            ],
+            "options": {
+              "legend": {
+                "displayMode": "list",
+                "placement": "bottom",
+                "showLegend": true
+              },
+              "tooltip": {
+                "mode": "multi",
+                "sort": "desc"
+              }
+            },
+            "fieldConfig": {
+              "defaults": {
+                "unit": "none",
+                "custom": {
+                  "drawStyle": "line",
+                  "lineWidth": 1,
+                  "fillOpacity": 8,
+                  "showPoints": "never",
+                  "spanNulls": true,
+                  "axisPlacement": "auto"
+                },
+                "thresholds": {
+                  "mode": "absolute",
+                  "steps": [
+                    {
+                      "color": "text",
+                      "value": null
+                    }
+                  ]
+                }
+              },
+              "overrides": []
+            }
+          },
+          {
+            "type": "timeseries",
+            "title": "Total GDP delay assigned",
+            "datasource": {
+              "type": "prometheus",
+              "uid": "ois-prometheus"
+            },
+            "gridPos": {
+              "h": 6,
+              "w": 24,
+              "x": 0,
+              "y": 13
+            },
+            "targets": [
+              {
+                "datasource": {
+                  "type": "prometheus",
+                  "uid": "ois-prometheus"
+                },
+                "editorMode": "code",
+                "expr": "ois_gdp_delay_minutes",
+                "range": true,
+                "instant": false,
+                "refId": "A",
+                "legendFormat": "delay"
+              }
+            ],
+            "options": {
+              "legend": {
+                "displayMode": "list",
+                "placement": "bottom",
+                "showLegend": true
+              },
+              "tooltip": {
+                "mode": "multi",
+                "sort": "desc"
+              }
+            },
+            "fieldConfig": {
+              "defaults": {
+                "unit": "m",
+                "custom": {
+                  "drawStyle": "line",
+                  "lineWidth": 1,
+                  "fillOpacity": 8,
+                  "showPoints": "never",
+                  "spanNulls": true,
+                  "axisPlacement": "auto"
+                },
+                "thresholds": {
+                  "mode": "absolute",
+                  "steps": [
+                    {
+                      "color": "text",
+                      "value": null
+                    }
+                  ]
+                }
+              },
+              "overrides": []
+            },
+            "description": "Sum of delay_min across the control slots of every published GDP."
+          },
+          {
+            "type": "row",
+            "title": "API health",
+            "collapsed": false,
+            "gridPos": {
+              "h": 1,
+              "w": 24,
+              "x": 0,
+              "y": 19
+            },
+            "panels": []
+          },
+          {
+            "type": "timeseries",
+            "title": "Request rate by route",
+            "datasource": {
+              "type": "prometheus",
+              "uid": "ois-prometheus"
+            },
+            "gridPos": {
+              "h": 8,
+              "w": 12,
+              "x": 0,
+              "y": 20
+            },
+            "targets": [
+              {
+                "datasource": {
+                  "type": "prometheus",
+                  "uid": "ois-prometheus"
+                },
+                "editorMode": "code",
+                "expr": "sum by (route) (rate(http_requests_total[5m]))",
+                "range": true,
+                "instant": false,
+                "refId": "A",
+                "legendFormat": "{{route}}"
+              }
+            ],
+            "options": {
+              "legend": {
+                "displayMode": "list",
+                "placement": "bottom",
+                "showLegend": true
+              },
+              "tooltip": {
+                "mode": "multi",
+                "sort": "desc"
+              }
+            },
+            "fieldConfig": {
+              "defaults": {
+                "unit": "reqps",
+                "custom": {
+                  "drawStyle": "line",
+                  "lineWidth": 1,
+                  "fillOpacity": 8,
+                  "showPoints": "never",
+                  "spanNulls": true,
+                  "axisPlacement": "auto"
+                },
+                "thresholds": {
+                  "mode": "absolute",
+                  "steps": [
+                    {
+                      "color": "text",
+                      "value": null
+                    }
+                  ]
+                }
+              },
+              "overrides": []
+            }
+          },
+          {
+            "type": "timeseries",
+            "title": "Error rate by status class",
+            "datasource": {
+              "type": "prometheus",
+              "uid": "ois-prometheus"
+            },
+            "gridPos": {
+              "h": 8,
+              "w": 12,
+              "x": 12,
+              "y": 20
+            },
+            "targets": [
+              {
+                "datasource": {
+                  "type": "prometheus",
+                  "uid": "ois-prometheus"
+                },
+                "editorMode": "code",
+                "expr": "sum by (status) (rate(http_requests_total{status=~\"4xx|5xx\"}[5m]))",
+                "range": true,
+                "instant": false,
+                "refId": "A",
+                "legendFormat": "{{status}}"
+              }
+            ],
+            "options": {
+              "legend": {
+                "displayMode": "list",
+                "placement": "bottom",
+                "showLegend": true
+              },
+              "tooltip": {
+                "mode": "multi",
+                "sort": "desc"
+              }
+            },
+            "fieldConfig": {
+              "defaults": {
+                "unit": "reqps",
+                "custom": {
+                  "drawStyle": "line",
+                  "lineWidth": 1,
+                  "fillOpacity": 8,
+                  "showPoints": "never",
+                  "spanNulls": true,
+                  "axisPlacement": "auto"
+                },
+                "thresholds": {
+                  "mode": "absolute",
+                  "steps": [
+                    {
+                      "color": "text",
+                      "value": null
+                    }
+                  ]
+                }
+              },
+              "overrides": []
+            },
+            "description": "4xx and 5xx only. A flat zero here is the healthy state."
+          },
+          {
+            "type": "timeseries",
+            "title": "Request latency (p50 / p95 / p99)",
+            "datasource": {
+              "type": "prometheus",
+              "uid": "ois-prometheus"
+            },
+            "gridPos": {
+              "h": 8,
+              "w": 12,
+              "x": 0,
+              "y": 28
+            },
+            "targets": [
+              {
+                "datasource": {
+                  "type": "prometheus",
+                  "uid": "ois-prometheus"
+                },
+                "editorMode": "code",
+                "expr": "histogram_quantile(0.50, sum by (le) (rate(http_request_duration_seconds_bucket[5m])))",
+                "range": true,
+                "instant": false,
+                "refId": "A",
+                "legendFormat": "p50"
+              },
+              {
+                "datasource": {
+                  "type": "prometheus",
+                  "uid": "ois-prometheus"
+                },
+                "editorMode": "code",
+                "expr": "histogram_quantile(0.95, sum by (le) (rate(http_request_duration_seconds_bucket[5m])))",
+                "range": true,
+                "instant": false,
+                "refId": "B",
+                "legendFormat": "p95"
+              },
+              {
+                "datasource": {
+                  "type": "prometheus",
+                  "uid": "ois-prometheus"
+                },
+                "editorMode": "code",
+                "expr": "histogram_quantile(0.99, sum by (le) (rate(http_request_duration_seconds_bucket[5m])))",
+                "range": true,
+                "instant": false,
+                "refId": "C",
+                "legendFormat": "p99"
+              }
+            ],
+            "options": {
+              "legend": {
+                "displayMode": "list",
+                "placement": "bottom",
+                "showLegend": true
+              },
+              "tooltip": {
+                "mode": "multi",
+                "sort": "desc"
+              }
+            },
+            "fieldConfig": {
+              "defaults": {
+                "unit": "s",
+                "custom": {
+                  "drawStyle": "line",
+                  "lineWidth": 1,
+                  "fillOpacity": 8,
+                  "showPoints": "never",
+                  "spanNulls": true,
+                  "axisPlacement": "auto"
+                },
+                "thresholds": {
+                  "mode": "absolute",
+                  "steps": [
+                    {
+                      "color": "text",
+                      "value": null
+                    }
+                  ]
+                }
+              },
+              "overrides": []
+            }
+          },
+          {
+            "type": "timeseries",
+            "title": "Slowest routes (p95)",
+            "datasource": {
+              "type": "prometheus",
+              "uid": "ois-prometheus"
+            },
+            "gridPos": {
+              "h": 8,
+              "w": 12,
+              "x": 12,
+              "y": 28
+            },
+            "targets": [
+              {
+                "datasource": {
+                  "type": "prometheus",
+                  "uid": "ois-prometheus"
+                },
+                "editorMode": "code",
+                "expr": "topk(5, histogram_quantile(0.95, sum by (le, route) (rate(http_request_duration_seconds_bucket[5m]))))",
+                "range": true,
+                "instant": false,
+                "refId": "A",
+                "legendFormat": "{{route}}"
+              }
+            ],
+            "options": {
+              "legend": {
+                "displayMode": "list",
+                "placement": "bottom",
+                "showLegend": true
+              },
+              "tooltip": {
+                "mode": "multi",
+                "sort": "desc"
+              }
+            },
+            "fieldConfig": {
+              "defaults": {
+                "unit": "s",
+                "custom": {
+                  "drawStyle": "line",
+                  "lineWidth": 1,
+                  "fillOpacity": 8,
+                  "showPoints": "never",
+                  "spanNulls": true,
+                  "axisPlacement": "auto"
+                },
+                "thresholds": {
+                  "mode": "absolute",
+                  "steps": [
+                    {
+                      "color": "text",
+                      "value": null
+                    }
+                  ]
+                }
+              },
+              "overrides": []
+            }
+          },
+          {
+            "type": "row",
+            "title": "Data freshness and background jobs",
+            "collapsed": false,
+            "gridPos": {
+              "h": 1,
+              "w": 24,
+              "x": 0,
+              "y": 36
+            },
+            "panels": []
+          },
+          {
+            "type": "stat",
+            "title": "Feed healthy",
+            "datasource": {
+              "type": "prometheus",
+              "uid": "ois-prometheus"
+            },
+            "gridPos": {
+              "h": 4,
+              "w": 4,
+              "x": 0,
+              "y": 37
+            },
+            "targets": [
+              {
+                "datasource": {
+                  "type": "prometheus",
+                  "uid": "ois-prometheus"
+                },
+                "editorMode": "code",
+                "expr": "ois_feed_healthy",
+                "range": false,
+                "instant": true,
+                "refId": "A"
+              }
+            ],
+            "options": {
+              "reduceOptions": {
+                "calcs": [
+                  "lastNotNull"
+                ],
+                "fields": "",
+                "values": false
+              },
+              "orientation": "auto",
+              "textMode": "auto",
+              "colorMode": "value",
+              "graphMode": "area",
+              "justifyMode": "auto"
+            },
+            "fieldConfig": {
+              "defaults": {
+                "unit": "none",
+                "noValue": "No data",
+                "thresholds": {
+                  "mode": "absolute",
+                  "steps": [
+                    {
+                      "color": "red",
+                      "value": null
+                    },
+                    {
+                      "color": "green",
+                      "value": 1
+                    }
+                  ]
+                }
+              },
+              "overrides": []
+            }
+          },
+          {
+            "type": "stat",
+            "title": "Nav data age",
+            "datasource": {
+              "type": "prometheus",
+              "uid": "ois-prometheus"
+            },
+            "gridPos": {
+              "h": 4,
+              "w": 4,
+              "x": 4,
+              "y": 37
+            },
+            "targets": [
+              {
+                "datasource": {
+                  "type": "prometheus",
+                  "uid": "ois-prometheus"
+                },
+                "editorMode": "code",
+                "expr": "ois_nav_data_age_seconds",
+                "range": false,
+                "instant": true,
+                "refId": "A"
+              }
+            ],
+            "options": {
+              "reduceOptions": {
+                "calcs": [
+                  "lastNotNull"
+                ],
+                "fields": "",
+                "values": false
+              },
+              "orientation": "auto",
+              "textMode": "auto",
+              "colorMode": "value",
+              "graphMode": "area",
+              "justifyMode": "auto"
+            },
+            "fieldConfig": {
+              "defaults": {
+                "unit": "s",
+                "noValue": "No data",
+                "thresholds": {
+                  "mode": "absolute",
+                  "steps": [
+                    {
+                      "color": "green",
+                      "value": null
+                    },
+                    {
+                      "color": "yellow",
+                      "value": 3600
+                    },
+                    {
+                      "color": "red",
+                      "value": 21600
+                    }
+                  ]
+                }
+              },
+              "overrides": []
+            }
+          },
+          {
+            "type": "stat",
+            "title": "Winds data age",
+            "datasource": {
+              "type": "prometheus",
+              "uid": "ois-prometheus"
+            },
+            "gridPos": {
+              "h": 4,
+              "w": 4,
+              "x": 8,
+              "y": 37
+            },
+            "targets": [
+              {
+                "datasource": {
+                  "type": "prometheus",
+                  "uid": "ois-prometheus"
+                },
+                "editorMode": "code",
+                "expr": "ois_winds_data_age_seconds",
+                "range": false,
+                "instant": true,
+                "refId": "A"
+              }
+            ],
+            "options": {
+              "reduceOptions": {
+                "calcs": [
+                  "lastNotNull"
+                ],
+                "fields": "",
+                "values": false
+              },
+              "orientation": "auto",
+              "textMode": "auto",
+              "colorMode": "value",
+              "graphMode": "area",
+              "justifyMode": "auto"
+            },
+            "fieldConfig": {
+              "defaults": {
+                "unit": "s",
+                "noValue": "No data",
+                "thresholds": {
+                  "mode": "absolute",
+                  "steps": [
+                    {
+                      "color": "green",
+                      "value": null
+                    },
+                    {
+                      "color": "yellow",
+                      "value": 3600
+                    },
+                    {
+                      "color": "red",
+                      "value": 21600
+                    }
+                  ]
+                }
+              },
+              "overrides": []
+            }
+          },
+          {
+            "type": "stat",
+            "title": "Refresh in flight",
+            "datasource": {
+              "type": "prometheus",
+              "uid": "ois-prometheus"
+            },
+            "gridPos": {
+              "h": 4,
+              "w": 4,
+              "x": 12,
+              "y": 37
+            },
+            "targets": [
+              {
+                "datasource": {
+                  "type": "prometheus",
+                  "uid": "ois-prometheus"
+                },
+                "editorMode": "code",
+                "expr": "ois_data_refresh_in_flight",
+                "range": false,
+                "instant": true,
+                "refId": "A"
+              }
+            ],
+            "options": {
+              "reduceOptions": {
+                "calcs": [
+                  "lastNotNull"
+                ],
+                "fields": "",
+                "values": false
+              },
+              "orientation": "auto",
+              "textMode": "auto",
+              "colorMode": "value",
+              "graphMode": "area",
+              "justifyMode": "auto"
+            },
+            "fieldConfig": {
+              "defaults": {
+                "unit": "none",
+                "noValue": "No data",
+                "thresholds": {
+                  "mode": "absolute",
+                  "steps": [
+                    {
+                      "color": "text",
+                      "value": null
+                    }
+                  ]
+                }
+              },
+              "overrides": []
+            }
+          },
+          {
+            "type": "stat",
+            "title": "Airports loaded",
+            "datasource": {
+              "type": "prometheus",
+              "uid": "ois-prometheus"
+            },
+            "gridPos": {
+              "h": 4,
+              "w": 4,
+              "x": 16,
+              "y": 37
+            },
+            "targets": [
+              {
+                "datasource": {
+                  "type": "prometheus",
+                  "uid": "ois-prometheus"
+                },
+                "editorMode": "code",
+                "expr": "ois_feed_airports_loaded",
+                "range": false,
+                "instant": true,
+                "refId": "A"
+              }
+            ],
+            "options": {
+              "reduceOptions": {
+                "calcs": [
+                  "lastNotNull"
+                ],
+                "fields": "",
+                "values": false
+              },
+              "orientation": "auto",
+              "textMode": "auto",
+              "colorMode": "value",
+              "graphMode": "area",
+              "justifyMode": "auto"
+            },
+            "fieldConfig": {
+              "defaults": {
+                "unit": "none",
+                "noValue": "No data",
+                "thresholds": {
+                  "mode": "absolute",
+                  "steps": [
+                    {
+                      "color": "text",
+                      "value": null
+                    }
+                  ]
+                }
+              },
+              "overrides": []
+            }
+          },
+          {
+            "type": "stat",
+            "title": "Uptime",
+            "datasource": {
+              "type": "prometheus",
+              "uid": "ois-prometheus"
+            },
+            "gridPos": {
+              "h": 4,
+              "w": 4,
+              "x": 20,
+              "y": 37
+            },
+            "targets": [
+              {
+                "datasource": {
+                  "type": "prometheus",
+                  "uid": "ois-prometheus"
+                },
+                "editorMode": "code",
+                "expr": "ois_uptime_seconds",
+                "range": false,
+                "instant": true,
+                "refId": "A"
+              }
+            ],
+            "options": {
+              "reduceOptions": {
+                "calcs": [
+                  "lastNotNull"
+                ],
+                "fields": "",
+                "values": false
+              },
+              "orientation": "auto",
+              "textMode": "auto",
+              "colorMode": "value",
+              "graphMode": "area",
+              "justifyMode": "auto"
+            },
+            "fieldConfig": {
+              "defaults": {
+                "unit": "s",
+                "noValue": "No data",
+                "thresholds": {
+                  "mode": "absolute",
+                  "steps": [
+                    {
+                      "color": "text",
+                      "value": null
+                    }
+                  ]
+                }
+              },
+              "overrides": []
+            }
+          },
+          {
+            "type": "timeseries",
+            "title": "Feed data age",
+            "datasource": {
+              "type": "prometheus",
+              "uid": "ois-prometheus"
+            },
+            "gridPos": {
+              "h": 8,
+              "w": 12,
+              "x": 0,
+              "y": 41
+            },
+            "targets": [
+              {
+                "datasource": {
+                  "type": "prometheus",
+                  "uid": "ois-prometheus"
+                },
+                "editorMode": "code",
+                "expr": "ois_nav_data_age_seconds",
+                "range": true,
+                "instant": false,
+                "refId": "A",
+                "legendFormat": "nav"
+              },
+              {
+                "datasource": {
+                  "type": "prometheus",
+                  "uid": "ois-prometheus"
+                },
+                "editorMode": "code",
+                "expr": "ois_winds_data_age_seconds",
+                "range": true,
+                "instant": false,
+                "refId": "B",
+                "legendFormat": "winds"
+              }
+            ],
+            "options": {
+              "legend": {
+                "displayMode": "list",
+                "placement": "bottom",
+                "showLegend": true
+              },
+              "tooltip": {
+                "mode": "multi",
+                "sort": "desc"
+              }
+            },
+            "fieldConfig": {
+              "defaults": {
+                "unit": "s",
+                "custom": {
+                  "drawStyle": "line",
+                  "lineWidth": 1,
+                  "fillOpacity": 8,
+                  "showPoints": "never",
+                  "spanNulls": true,
+                  "axisPlacement": "auto"
+                },
+                "thresholds": {
+                  "mode": "absolute",
+                  "steps": [
+                    {
+                      "color": "text",
+                      "value": null
+                    }
+                  ]
+                }
+              },
+              "overrides": []
+            },
+            "description": "Seconds since the last successful upstream fetch. A never-fetched source reads as its full epoch age, so it trips any staleness threshold rather than looking fresh."
+          },
+          {
+            "type": "timeseries",
+            "title": "Background job health",
+            "datasource": {
+              "type": "prometheus",
+              "uid": "ois-prometheus"
+            },
+            "gridPos": {
+              "h": 8,
+              "w": 12,
+              "x": 12,
+              "y": 41
+            },
+            "targets": [
+              {
+                "datasource": {
+                  "type": "prometheus",
+                  "uid": "ois-prometheus"
+                },
+                "editorMode": "code",
+                "expr": "ois_job_last_success",
+                "range": true,
+                "instant": false,
+                "refId": "A",
+                "legendFormat": "{{job}}"
+              }
+            ],
+            "options": {
+              "legend": {
+                "displayMode": "list",
+                "placement": "bottom",
+                "showLegend": true
+              },
+              "tooltip": {
+                "mode": "multi",
+                "sort": "desc"
+              }
+            },
+            "fieldConfig": {
+              "defaults": {
+                "unit": "none",
+                "custom": {
+                  "drawStyle": "line",
+                  "lineWidth": 1,
+                  "fillOpacity": 8,
+                  "showPoints": "never",
+                  "spanNulls": true,
+                  "axisPlacement": "auto"
+                },
+                "thresholds": {
+                  "mode": "absolute",
+                  "steps": [
+                    {
+                      "color": "text",
+                      "value": null
+                    }
+                  ]
+                }
+              },
+              "overrides": []
+            },
+            "description": "1 = the job's last completed run succeeded. 0 = it failed, or it has never finished."
+          },
+          {
+            "type": "timeseries",
+            "title": "Job run duration",
+            "datasource": {
+              "type": "prometheus",
+              "uid": "ois-prometheus"
+            },
+            "gridPos": {
+              "h": 8,
+              "w": 12,
+              "x": 0,
+              "y": 49
+            },
+            "targets": [
+              {
+                "datasource": {
+                  "type": "prometheus",
+                  "uid": "ois-prometheus"
+                },
+                "editorMode": "code",
+                "expr": "ois_job_last_duration_seconds",
+                "range": true,
+                "instant": false,
+                "refId": "A",
+                "legendFormat": "{{job}}"
+              }
+            ],
+            "options": {
+              "legend": {
+                "displayMode": "list",
+                "placement": "bottom",
+                "showLegend": true
+              },
+              "tooltip": {
+                "mode": "multi",
+                "sort": "desc"
+              }
+            },
+            "fieldConfig": {
+              "defaults": {
+                "unit": "s",
+                "custom": {
+                  "drawStyle": "line",
+                  "lineWidth": 1,
+                  "fillOpacity": 8,
+                  "showPoints": "never",
+                  "spanNulls": true,
+                  "axisPlacement": "auto"
+                },
+                "thresholds": {
+                  "mode": "absolute",
+                  "steps": [
+                    {
+                      "color": "text",
+                      "value": null
+                    }
+                  ]
+                }
+              },
+              "overrides": []
+            }
+          },
+          {
+            "type": "timeseries",
+            "title": "Time since last job run",
+            "datasource": {
+              "type": "prometheus",
+              "uid": "ois-prometheus"
+            },
+            "gridPos": {
+              "h": 8,
+              "w": 12,
+              "x": 12,
+              "y": 49
+            },
+            "targets": [
+              {
+                "datasource": {
+                  "type": "prometheus",
+                  "uid": "ois-prometheus"
+                },
+                "editorMode": "code",
+                "expr": "time() - ois_job_last_run_timestamp_seconds",
+                "range": true,
+                "instant": false,
+                "refId": "A",
+                "legendFormat": "{{job}}"
+              }
+            ],
+            "options": {
+              "legend": {
+                "displayMode": "list",
+                "placement": "bottom",
+                "showLegend": true
+              },
+              "tooltip": {
+                "mode": "multi",
+                "sort": "desc"
+              }
+            },
+            "fieldConfig": {
+              "defaults": {
+                "unit": "s",
+                "custom": {
+                  "drawStyle": "line",
+                  "lineWidth": 1,
+                  "fillOpacity": 8,
+                  "showPoints": "never",
+                  "spanNulls": true,
+                  "axisPlacement": "auto"
+                },
+                "thresholds": {
+                  "mode": "absolute",
+                  "steps": [
+                    {
+                      "color": "text",
+                      "value": null
+                    }
+                  ]
+                }
+              },
+              "overrides": []
+            },
+            "description": "A job climbing well past its interval is stuck or crashed."
+          },
+          {
+            "type": "row",
+            "title": "Process",
+            "collapsed": false,
+            "gridPos": {
+              "h": 1,
+              "w": 24,
+              "x": 0,
+              "y": 57
+            },
+            "panels": []
+          },
+          {
+            "type": "timeseries",
+            "title": "Database pool",
+            "datasource": {
+              "type": "prometheus",
+              "uid": "ois-prometheus"
+            },
+            "gridPos": {
+              "h": 8,
+              "w": 12,
+              "x": 0,
+              "y": 58
+            },
+            "targets": [
+              {
+                "datasource": {
+                  "type": "prometheus",
+                  "uid": "ois-prometheus"
+                },
+                "editorMode": "code",
+                "expr": "ois_db_pool_size",
+                "range": true,
+                "instant": false,
+                "refId": "A",
+                "legendFormat": "owned"
+              },
+              {
+                "datasource": {
+                  "type": "prometheus",
+                  "uid": "ois-prometheus"
+                },
+                "editorMode": "code",
+                "expr": "ois_db_pool_connections{state=\"in_use\"}",
+                "range": true,
+                "instant": false,
+                "refId": "B",
+                "legendFormat": "in use"
+              },
+              {
+                "datasource": {
+                  "type": "prometheus",
+                  "uid": "ois-prometheus"
+                },
+                "editorMode": "code",
+                "expr": "ois_db_pool_connections{state=\"idle\"}",
+                "range": true,
+                "instant": false,
+                "refId": "C",
+                "legendFormat": "idle"
+              }
+            ],
+            "options": {
+              "legend": {
+                "displayMode": "list",
+                "placement": "bottom",
+                "showLegend": true
+              },
+              "tooltip": {
+                "mode": "multi",
+                "sort": "desc"
+              }
+            },
+            "fieldConfig": {
+              "defaults": {
+                "unit": "none",
+                "custom": {
+                  "drawStyle": "line",
+                  "lineWidth": 1,
+                  "fillOpacity": 8,
+                  "showPoints": "never",
+                  "spanNulls": true,
+                  "axisPlacement": "auto"
+                },
+                "thresholds": {
+                  "mode": "absolute",
+                  "steps": [
+                    {
+                      "color": "text",
+                      "value": null
+                    }
+                  ]
+                }
+              },
+              "overrides": []
+            },
+            "description": "'in use' pinned at 'owned' means the pool is saturated and requests are queueing on acquire_timeout."
+          },
+          {
+            "type": "timeseries",
+            "title": "Build",
+            "datasource": {
+              "type": "prometheus",
+              "uid": "ois-prometheus"
+            },
+            "gridPos": {
+              "h": 8,
+              "w": 12,
+              "x": 12,
+              "y": 58
+            },
+            "targets": [
+              {
+                "datasource": {
+                  "type": "prometheus",
+                  "uid": "ois-prometheus"
+                },
+                "editorMode": "code",
+                "expr": "ois_build_info",
+                "range": true,
+                "instant": false,
+                "refId": "A",
+                "legendFormat": "{{version}}"
+              }
+            ],
+            "options": {
+              "legend": {
+                "displayMode": "list",
+                "placement": "bottom",
+                "showLegend": true
+              },
+              "tooltip": {
+                "mode": "multi",
+                "sort": "desc"
+              }
+            },
+            "fieldConfig": {
+              "defaults": {
+                "unit": "none",
+                "custom": {
+                  "drawStyle": "line",
+                  "lineWidth": 1,
+                  "fillOpacity": 8,
+                  "showPoints": "never",
+                  "spanNulls": true,
+                  "axisPlacement": "auto"
+                },
+                "thresholds": {
+                  "mode": "absolute",
+                  "steps": [
+                    {
+                      "color": "text",
+                      "value": null
+                    }
+                  ]
+                }
+              },
+              "overrides": []
+            },
+            "description": "One series per running build version. Two at once means a rollout is in progress."
+          },
+          {
+            "type": "timeseries",
+            "title": "Exporter upkeep (drain loop)",
+            "datasource": {
+              "type": "prometheus",
+              "uid": "ois-prometheus"
+            },
+            "description": "The drain loop is the only thing keeping an UNSCRAPED backend from retaining every latency sample forever (the observability stack is opt-in, so the default deployment never scrapes). Expect ~10 drains per 10 min. ZERO MEANS THE LEAK IS BACK \u2014 alert on `increase(ois_metrics_upkeep_total[15m]) == 0`. Counter resets on restart are handled by increase(); it reads >0 as soon as the first 60s tick lands.",
+            "gridPos": {
+              "h": 8,
+              "w": 12,
+              "x": 0,
+              "y": 66
+            },
+            "targets": [
+              {
+                "datasource": {
+                  "type": "prometheus",
+                  "uid": "ois-prometheus"
+                },
+                "editorMode": "code",
+                "expr": "increase(ois_metrics_upkeep_total[10m])",
+                "range": true,
+                "instant": false,
+                "refId": "A",
+                "legendFormat": "drains / 10 min"
+              }
+            ],
+            "options": {
+              "legend": {
+                "displayMode": "list",
+                "placement": "bottom",
+                "showLegend": true
+              },
+              "tooltip": {
+                "mode": "multi",
+                "sort": "desc"
+              }
+            },
+            "fieldConfig": {
+              "defaults": {
+                "unit": "none",
+                "custom": {
+                  "drawStyle": "line",
+                  "lineWidth": 1,
+                  "fillOpacity": 8,
+                  "showPoints": "never",
+                  "spanNulls": true,
+                  "axisPlacement": "auto"
+                },
+                "thresholds": {
+                  "mode": "absolute",
+                  "steps": [
+                    {
+                      "color": "red",
+                      "value": null
+                    },
+                    {
+                      "color": "green",
+                      "value": 1
+                    }
+                  ]
+                }
+              },
+              "overrides": []
+            }
+          },
+          {
+            "type": "timeseries",
+            "title": "Domain aggregate failures",
+            "datasource": {
+              "type": "prometheus",
+              "uid": "ois-prometheus"
+            },
+            "description": "When the one DB aggregate behind /metrics fails, the scrape still serves the in-memory series and the six domain gauges FREEZE at their last, entirely plausible values. This counter is how that becomes visible. A rising rate means the Live operations row is stale, not calm.",
+            "gridPos": {
+              "h": 8,
+              "w": 12,
+              "x": 12,
+              "y": 66
+            },
+            "targets": [
+              {
+                "datasource": {
+                  "type": "prometheus",
+                  "uid": "ois-prometheus"
+                },
+                "editorMode": "code",
+                "expr": "ois_metrics_domain_aggregate_failures_total",
+                "range": true,
+                "instant": false,
+                "refId": "A",
+                "legendFormat": "failures"
+              },
+              {
+                "datasource": {
+                  "type": "prometheus",
+                  "uid": "ois-prometheus"
+                },
+                "editorMode": "code",
+                "expr": "rate(ois_metrics_domain_aggregate_failures_total[10m]) * 60",
+                "range": true,
+                "instant": false,
+                "refId": "B",
+                "legendFormat": "failures/min"
+              }
+            ],
+            "options": {
+              "legend": {
+                "displayMode": "list",
+                "placement": "bottom",
+                "showLegend": true
+              },
+              "tooltip": {
+                "mode": "multi",
+                "sort": "desc"
+              }
+            },
+            "fieldConfig": {
+              "defaults": {
+                "unit": "none",
+                "custom": {
+                  "drawStyle": "line",
+                  "lineWidth": 1,
+                  "fillOpacity": 8,
+                  "showPoints": "never",
+                  "spanNulls": true,
+                  "axisPlacement": "auto"
+                },
+                "thresholds": {
+                  "mode": "absolute",
+                  "steps": [
+                    {
+                      "color": "green",
+                      "value": null
+                    },
+                    {
+                      "color": "red",
+                      "value": 1
+                    }
+                  ]
+                }
+              },
+              "overrides": []
+            }
+          }
+        ],
+        "refresh": "30s",
+        "schemaVersion": 39,
+        "tags": [
+          "ois"
+        ],
+        "templating": {
+          "list": []
+        },
+        "time": {
+          "from": "now-6h",
+          "to": "now"
+        },
+        "timepicker": {},
+        "timezone": "utc",
+        "title": "OIS overview",
+        "uid": "ois-overview",
+        "version": 1,
+        "weekStart": ""
+      }
