@@ -236,11 +236,6 @@ pub struct DueReminder {
     pub position: Option<String>,
 }
 
-/// Claims due for a `job_type` reminder: their event starts within the next `hours_before` hours
-/// (i.e. the T-`hours_before`h threshold has just been crossed and the event hasn't started yet),
-/// the claimer has a linked Discord account, the request isn't cancelled, and no `job_type` job has
-/// already been enqueued for this claim — so a released claim or a cancelled request naturally
-/// drops out, and a repeat scheduler tick never double-sends.
 /// The signed-in user's claimed positions for events that haven't started yet.
 ///
 /// Mirrors the join `claims_due_for_reminder` uses (cancelled requests excluded) so the two agree
@@ -261,7 +256,13 @@ pub async fn my_upcoming_claims(pool: &PgPool, user_id: &str) -> Result<Vec<MyAc
     .map_err(|_| ApiError::Internal)
 }
 
-/// Claims whose event falls in `(now + hours_after, now + hours_before]` — i.e. this tier's own
+/// Claims due for a `job_type` reminder: their event starts within the next `hours_before` hours
+/// (i.e. the T-`hours_before`h threshold has just been crossed and the event hasn't started yet),
+/// the claimer has a linked Discord account, the request isn't cancelled, and no `job_type` job has
+/// already been enqueued for this claim — so a released claim or a cancelled request naturally
+/// drops out, and a repeat scheduler tick never double-sends.
+///
+/// Its window is `(now + hours_after, now + hours_before]` — i.e. this tier's own
 /// window, not "anything within `hours_before`". Without a lower bound, a claim first seen after its
 /// event is already inside a *later* tier's window (e.g. claimed at T-3h, before either reminder has
 /// fired) would match every tier whose upper bound is ≥3h simultaneously — sending a 24h-tier
@@ -293,6 +294,33 @@ pub async fn claims_due_for_reminder(
     .bind(hours_before as i32)
     .bind(job_type)
     .fetch_all(pool)
+    .await
+    .map_err(|_| ApiError::Internal)
+}
+
+/// How many live claims sit in a reminder tier's window `(now + hours_after, now + hours_before]`,
+/// whoever claimed them: the same claim/request/event rules as [`claims_due_for_reminder`], minus its
+/// Discord join and its already-sent check.
+///
+/// That query decides who gets a Discord DM; this one decides whether to nudge connected clients to
+/// re-check their own claims. Keying the nudge off DMs sent meant a desktop user without a linked
+/// Discord account never got a reminder at all (VATUSA/OIS#348 review).
+pub async fn claims_in_reminder_window(
+    pool: &PgPool,
+    hours_after: i64,
+    hours_before: i64,
+) -> Result<i64, ApiError> {
+    sqlx::query_scalar::<_, i64>(
+        "select count(*) \
+         from ace.claims c \
+         join ace.requests r on r.id = c.request_id and r.status <> 'cancelled' \
+         join events.event e on e.id = r.event_id \
+         where e.start_time > now() + make_interval(hours => $1::int) \
+           and e.start_time <= now() + make_interval(hours => $2::int)",
+    )
+    .bind(hours_after as i32)
+    .bind(hours_before as i32)
+    .fetch_one(pool)
     .await
     .map_err(|_| ApiError::Internal)
 }
@@ -422,6 +450,30 @@ mod tests {
             .fetch_one(pool)
             .await
             .unwrap()
+    }
+
+    /// The client nudge counts every claim in the window; the DM query only those with Discord linked.
+    /// Keying reminders off the DM query left desktop users without Discord unreminded (#348 review).
+    #[sqlx::test]
+    async fn the_reminder_window_counts_claims_without_a_linked_discord_account(pool: PgPool) {
+        let requester = seed_user(&pool, "Requester").await;
+        let claimer = seed_user(&pool, "No Discord").await; // deliberately never linked
+        let event = seed_event(&pool, 7, 5).await; // inside the 6h tier (0, 6]
+        seed_claimed_request(&pool, event, &requester, &claimer).await;
+
+        assert_eq!(claims_in_reminder_window(&pool, 0, 6).await.unwrap(), 1);
+        assert_eq!(
+            claims_in_reminder_window(&pool, 6, 24).await.unwrap(),
+            0,
+            "other tier"
+        );
+        assert!(
+            claims_due_for_reminder(&pool, 0, 6, "ace_claim_reminder_6h")
+                .await
+                .unwrap()
+                .is_empty(),
+            "no Discord link, so no DM — which is why the nudge must not depend on DMs"
+        );
     }
 
     #[sqlx::test]

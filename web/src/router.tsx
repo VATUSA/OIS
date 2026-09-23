@@ -200,6 +200,10 @@ const fcaRoute = createRoute({
   path: "fca",
   component: FcaPage,
   staticData: { layout: "full", title: "FCA flow" },
+  // `?fca=<id>` selects that FCA on arrival — a desktop release/metering notification links here.
+  validateSearch: (search: Record<string, unknown>): { fca?: string } => ({
+    fca: typeof search.fca === "string" && search.fca ? search.fca : undefined,
+  }),
 });
 
 const runwayRoute = createRoute({

@@ -5,6 +5,7 @@ import {ois} from "@/lib/api";
 import {useMe} from "@/lib/auth";
 import {notifyDesktop, type NotifyCategory} from "@/lib/desktop-notify";
 import {useFcas, useFcaTraffic} from "@/lib/fca";
+import {hasPermission} from "@/lib/permissions";
 import {can} from "@/lib/platform";
 import {useSetting} from "@/lib/settings";
 
@@ -27,6 +28,11 @@ import {useSetting} from "@/lib/settings";
  *
  * The `null` seed is the important part — without it, every notification category would dump its
  * entire current state at the user the moment the app opens.
+ *
+ * `settled` must mean the first load *succeeded*, not merely that it is no longer pending: an errored
+ * query is not pending either, and seeding from its empty data made the first successful poll look
+ * like every entry was new — one native notification per flight already holding an EDCT
+ * (VATUSA/OIS#348 review). Pass `query.isSuccess`.
  */
 function useNewKeys(
   entries: Map<string, {title: string; body: string; route: string}>,
@@ -52,7 +58,7 @@ function useNewKeys(
 }
 
 /** EDCT releases and heavy metering delay, for one FCA. Both read the same traffic list. */
-function FcaNotifier({fcaId, name}: {fcaId: string; name: string}) {
+export function FcaNotifier({fcaId, name}: {fcaId: string; name: string}) {
   const {value: releasesOn} = useSetting<boolean>("notifications.releases", false);
   const {value: meteringOn} = useSetting<boolean>("notifications.metering", false);
   const {value: thresholdRaw} = useSetting<string>("notifications.meteringDelayMin", "15");
@@ -96,8 +102,8 @@ function FcaNotifier({fcaId, name}: {fcaId: string; name: string}) {
     return m;
   }, [flights, name, route, threshold]);
 
-  useNewKeys(released, !traffic.isPending, "releases", releasesOn);
-  useNewKeys(delayed, !traffic.isPending, "metering", meteringOn);
+  useNewKeys(released, traffic.isSuccess, "releases", releasesOn);
+  useNewKeys(delayed, traffic.isSuccess, "metering", meteringOn);
 
   return null;
 }
@@ -199,7 +205,10 @@ function EventReminderNotifier() {
 
   const claims = useQuery({
     queryKey: ["my-ace-claims"],
-    enabled: !!me && can("notifications"),
+    // Opened only for someone who asked for reminders and can hold a claim: the endpoint is gated
+    // on `ace.requests.claim`, so for everyone else it was a 403 on every mount, swallowed, and a
+    // request nobody opted into (VATUSA/OIS#348 review).
+    enabled: !!me && can("notifications") && enabled && hasPermission(me, "ace.requests.claim"),
     queryFn: async () => {
       const {data} = await ois.GET("/api/v1/me/ace-claims");
       return data ?? [];
@@ -228,7 +237,7 @@ function EventReminderNotifier() {
     return m;
   }, [claims.data]);
 
-  useNewKeys(due, !claims.isPending, "eventReminders", enabled);
+  useNewKeys(due, claims.isSuccess, "eventReminders", enabled);
   return null;
 }
 
