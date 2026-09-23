@@ -1,0 +1,35 @@
+# Prometheus scrape config for the OIS observability stack (#382).
+#
+# Mounted read-only at /etc/prometheus/prometheus.yml by docker-compose.observability.yml. Because
+# that file is merged with the base compose file, this container shares the stack's network and can
+# address the API by its service name.
+global:
+  scrape_interval: 15s
+  evaluation_interval: 15s
+  external_labels:
+    stack: ois
+
+scrape_configs:
+  - job_name: ois-backend
+    metrics_path: /metrics
+    static_configs:
+      - targets: ["backend:3000"]
+
+    # The endpoint is open by default. That is fine for this scrape — it never leaves the compose
+    # network — but /metrics shares the API's listener, so it is reachable wherever the API is. If
+    # you proxy the API publicly, set METRICS_TOKEN (below) or block /metrics at the proxy.
+    #
+    # To require a token instead, set METRICS_TOKEN on the backend, then write that same value to
+    # deploy/observability/metrics_token, uncomment the volume line for it in
+    # docker-compose.observability.yml, and uncomment the block below. Prometheus does not expand
+    # environment variables in this file, so the token has to arrive as a file — there is no way to
+    # wire it straight from .env.
+    #
+    # authorization:
+    #   type: Bearer
+    #   credentials_file: /etc/prometheus/metrics_token
+
+  # Prometheus' own metrics, so the scraper's health is visible on the same dashboard.
+  - job_name: prometheus
+    static_configs:
+      - targets: ["localhost:9090"]

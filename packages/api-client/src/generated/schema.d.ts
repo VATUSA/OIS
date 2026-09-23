@@ -4806,7 +4806,12 @@ export interface components {
             /** Format: int64 */
             event_id: number;
             event_title: string;
-            position: string;
+            /**
+             * @description Nullable in `ace.requests` — support can be requested without naming a position — so this
+             *     has to be optional. A non-Option String made `query_as` fail to decode for any user holding
+             *     such a claim, turning /api/v1/me/ace-claims into a permanent 500 for them (#348).
+             */
+            position?: string | null;
             /** Format: date-time */
             start_time: string;
         };

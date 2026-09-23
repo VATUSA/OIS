@@ -17,7 +17,15 @@ export function NotificationClicks() {
     let cancelled = false;
 
     void listenForNotificationClicks((route) => {
-      void router.navigate({ to: route });
+      // TanStack treats `to` as a pathname and matches it literally against the route tree, so a
+      // route carrying its query string ("/ops/tmu?tab=ground-stops") matches nothing and lands the
+      // user on not-found. Split it and hand the search over separately, as every other call site
+      // in the app does.
+      const [to, query] = route.split("?");
+      const search = query ? Object.fromEntries(new URLSearchParams(query)) : undefined;
+      void router.navigate(
+        (search ? { to, search } : { to }) as Parameters<typeof router.navigate>[0],
+      );
     }).then((d) => {
       // Unmounted before the listener finished registering — tear it straight back down.
       if (cancelled) d?.();

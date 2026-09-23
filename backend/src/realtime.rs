@@ -52,14 +52,37 @@ pub mod topic {
 pub async fn ws(
     ws: WebSocketUpgrade,
     State(state): State<AppState>,
+    headers: http::HeaderMap,
     Extension(current_user): Extension<Option<CurrentUser>>,
 ) -> Response {
     if current_user.is_none() {
         return StatusCode::UNAUTHORIZED.into_response();
     }
+
+    // A desktop client authenticates by offering its token as a subprotocol (see
+    // `auth::middleware::parse_ws_protocol_token`). The handshake only completes if the server
+    // echoes one of the offered protocols back, so select it explicitly — otherwise the browser
+    // tears the connection down immediately after we accepted it.
+    let offered = headers
+        .get("sec-websocket-protocol")
+        .and_then(|value| value.to_str().ok())
+        .map(|value| {
+            value
+                .split(',')
+                .map(|proto| proto.trim().to_owned())
+                .collect::<Vec<_>>()
+        })
+        .unwrap_or_default();
+
     let rx = state.events.subscribe();
-    ws.on_upgrade(move |socket| pump(socket, rx))
-        .into_response()
+    if offered.is_empty() {
+        ws.on_upgrade(move |socket| pump(socket, rx))
+            .into_response()
+    } else {
+        ws.protocols(offered)
+            .on_upgrade(move |socket| pump(socket, rx))
+            .into_response()
+    }
 }
 
 /// Forward broadcast events to the client, answer pings, and send a keepalive ping so idle

@@ -2,7 +2,7 @@ import {useRouterState} from "@tanstack/react-router";
 import {Button} from "@ois/ui";
 import {AppWindow} from "lucide-react";
 
-import {DesktopOnly} from "@/components/desktop-only";
+import {can} from "@/lib/platform";
 import {openRouteWindow} from "@/lib/popout";
 
 /**
@@ -20,24 +20,24 @@ export function OpenInWindowButton() {
 
   // The window the app already lives in is not worth "opening" again.
   if (location.pathname === "/") return null;
+  // Gate on the ability, not just the platform — platform.ts's own rule.
+  if (!can("multiWindow")) return null;
 
   return (
-    <DesktopOnly>
-      <Button
-        size="icon"
-        variant="ghost"
-        className="ml-auto size-7 text-ink-3 hover:text-ink"
-        title="Open this page in its own window"
-        onClick={() =>
-          void openRouteWindow({
-            id: location.pathname,
-            title: title ? `OIS · ${title}` : "OIS",
-            route: `${location.pathname}${location.searchStr ?? ""}`,
-          })
-        }
-      >
-        <AppWindow className="size-4" />
-      </Button>
-    </DesktopOnly>
+    <Button
+      size="icon"
+      variant="ghost"
+      className="ml-auto size-7 text-ink-3 hover:text-ink"
+      title="Open this page in its own window"
+      onClick={() =>
+        void openRouteWindow({
+          id: location.pathname,
+          title: title ? `OIS · ${title}` : "OIS",
+          route: `${location.pathname}${location.searchStr ?? ""}`,
+        })
+      }
+    >
+      <AppWindow className="size-4" />
+    </Button>
   );
 }

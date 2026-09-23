@@ -3,12 +3,16 @@ import * as React from "react";
 import {isMainWindow, isTauri} from "@/lib/platform";
 
 /**
- * Renders its children only in the app's primary window.
+ * Renders its children only in the app's primary window (#350).
  *
- * Route windows (#350) run the full shell, so anything OS-global mounted in `RootLayout` otherwise
- * runs once per open window: a native notification per window (#348), and a tray that every window
- * races to rebuild (#351). In-app UI — toasts, alerts, modals — deliberately does *not* belong in
- * here, because those are only visible in the window they fire in.
+ * Route windows run the full shell, so anything OS-global mounted in `RootLayout` otherwise runs once
+ * per open window: a native notification per window (#348), with a click raising and navigating
+ * every window, and a tray that every window races to rebuild (#351). That should happen once, in
+ * the main window.
+ *
+ * Only OS-level side effects belong in here. The realtime socket deliberately stays per window —
+ * each webview has its own query cache, so one socket in the main window could not keep the
+ * others live — and so do in-app toasts and alerts, which are only seen in the window they fire in.
  *
  * On the web build there is only ever one window, so children render as they always did.
  */

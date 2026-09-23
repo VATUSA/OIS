@@ -1,12 +1,29 @@
 // @vitest-environment jsdom
 import {afterEach, describe, expect, it, vi} from "vitest";
 
-import {can, capabilities, invokeDesktop, isTauri, platform, type Capability} from "./platform";
+import {
+  availability,
+  can,
+  capabilities,
+  invokeDesktop,
+  isMainWindow,
+  isTauri,
+  platform,
+  windowLabel,
+  type Capability,
+} from "./platform";
 
-// The real module talks to Tauri's IPC, which doesn't exist under test. Mocking it also proves
-// invokeDesktop reaches @tauri-apps/api through its dynamic import rather than a static one.
+// The real module talks to Tauri's IPC, which doesn't exist under test, so we stand in for it.
+// Note this mock says NOTHING about static-vs-dynamic importing — vi.mock intercepts both forms
+// identically, and this suite stays green if platform.ts is converted to a top-level import.
+// Bundle isolation is enforced solely by the `no-restricted-imports` rule in eslint.config.mjs.
 const invoke = vi.fn();
 vi.mock("@tauri-apps/api/core", () => ({invoke: (...args: unknown[]) => invoke(...args)}));
+
+const currentLabel = vi.fn(() => "main");
+vi.mock("@tauri-apps/api/window", () => ({
+  getCurrentWindow: () => ({get label() {return currentLabel();}}),
+}));
 
 /** Stand in for the global the Tauri v2 runtime injects into its webview. */
 function pretendDesktop() {
@@ -66,6 +83,23 @@ describe("capabilities", () => {
     expect(can("notifications")).toBe(false);
   });
 
+  // The gate this module exists for. It has to be asserted on `availability` rather than through
+  // `can()`, because every entry in IMPLEMENTED is false today — so `can()` returns false on both
+  // platforms whether or not it consults isTauri(), and an inlined guard could be deleted outright
+  // without a single test noticing. This is what arms the leak when a feature issue flips a flag.
+  it("withholds an implemented capability from the web build", () => {
+    expect(availability(false, true)).toBe(false);
+    expect(availability(true, true)).toBe(true);
+    expect(availability(true, false)).toBe(false);
+    expect(availability(false, false)).toBe(false);
+  });
+
+  it("keeps one snapshot identity per platform so it is safe in a dependency array", () => {
+    expect(capabilities()).toBe(capabilities());
+    pretendDesktop();
+    expect(capabilities()).toBe(capabilities());
+  });
+
   it("hands back a frozen snapshot a caller can't corrupt for everyone else", () => {
     const caps = capabilities();
     expect(Object.isFrozen(caps)).toBe(true);
@@ -88,5 +122,39 @@ describe("invokeDesktop", () => {
     invoke.mockResolvedValue("ok");
     await expect(invokeDesktop<string>("get_token", {cid: 1234})).resolves.toBe("ok");
     expect(invoke).toHaveBeenCalledWith("get_token", {cid: 1234});
+  });
+});
+
+describe("window identity", () => {
+  it("has no window label on the web build", async () => {
+    await expect(windowLabel()).resolves.toBeUndefined();
+    await expect(isMainWindow()).resolves.toBe(false);
+  });
+
+  it("recognises the primary window", async () => {
+    pretendDesktop();
+    currentLabel.mockReturnValue("main");
+
+    await expect(windowLabel()).resolves.toBe("main");
+    await expect(isMainWindow()).resolves.toBe(true);
+  });
+
+  /**
+   * The guard that stops a route window or a pop-out rotating the session token out from under the
+   * main window. Every Tauri webview runs the same entry module, so "am I the main window?" is the
+   * only thing separating launch-once work from work that runs per window.
+   */
+  it("does not mistake a route window for the primary window", async () => {
+    pretendDesktop();
+    currentLabel.mockReturnValue("window--ops-idst");
+    await expect(isMainWindow()).resolves.toBe(false);
+  });
+
+  it("does not mistake a pop-out for the primary window", async () => {
+    pretendDesktop();
+    currentLabel.mockReturnValue("popout-fca-ZDC");
+
+    await expect(windowLabel()).resolves.toBe("popout-fca-ZDC");
+    await expect(isMainWindow()).resolves.toBe(false);
   });
 });
