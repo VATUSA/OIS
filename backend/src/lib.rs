@@ -60,6 +60,8 @@ pub async fn run() -> color_eyre::Result<()> {
     );
     if let Some(pool) = state.db.clone() {
         jobs::spawn_cleanup(state.jobs.clone(), pool.clone());
+        // One-time desktop sign-in codes expire in 60s; this removes the dead rows (#346).
+        jobs::spawn_desktop_auth_code_prune(state.jobs.clone(), pool.clone());
         // Load configurable aircraft performance profiles and keep them current for the ETA model.
         jobs::spawn_aircraft_profiles_refresh(
             state.jobs.clone(),
@@ -103,7 +105,7 @@ pub async fn run() -> color_eyre::Result<()> {
         jobs::spawn_event_fca_lifecycle(state.jobs.clone(), pool.clone(), state.events.clone());
         jobs::spawn_event_package_lifecycle(state.jobs.clone(), pool.clone(), state.events.clone());
         // ACE-claim reminder DMs at T-24h/T-6h before the event.
-        jobs::spawn_ace_reminder_scheduler(state.jobs.clone(), pool.clone());
+        jobs::spawn_ace_reminder_scheduler(state.jobs.clone(), pool.clone(), state.events.clone());
         // VATUSA member sync: register the roster-change webhook and periodically reconcile.
         feed::vatusa::spawn_register_webhooks(pool.clone());
         feed::vatusa::spawn_reconcile(pool);

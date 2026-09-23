@@ -6,6 +6,8 @@ import {FeedWatcher} from "@/components/feed-watcher";
 import {AppShell} from "@/components/shell/app-shell";
 import type {RouteMeta} from "@/components/shell/page-meta";
 import {RestrictionAlerts} from "@/components/restriction-alerts";
+import {NotificationClicks} from "@/components/notification-clicks";
+import {DesktopNotifiers} from "@/components/desktop-notifiers";
 import {WhatsNew} from "@/components/whats-new";
 import {useMe} from "@/lib/auth";
 import {movedPath} from "@/lib/moved-paths";
@@ -13,6 +15,7 @@ import {AdvisoriesPage} from "@/pages/advisories";
 import {AdvisoriesFcaPage} from "@/pages/advisories/fcas";
 import {PilotPage} from "@/pages/pilot";
 import {PrivacyPage} from "@/pages/privacy";
+import {DownloadPage} from "@/pages/download";
 import {ProfilePage} from "@/pages/profile";
 import {SettingsPage} from "@/pages/settings";
 import {ApiKeysPage} from "@/pages/api-keys";
@@ -97,6 +100,8 @@ function RootLayout() {
     <>
       <FeedWatcher />
       <RestrictionAlerts />
+      <NotificationClicks />
+      <DesktopNotifiers />
       <WhatsNew />
       <AppShell>
         <Outlet />
@@ -195,6 +200,10 @@ const fcaRoute = createRoute({
   path: "fca",
   component: FcaPage,
   staticData: { layout: "full", title: "FCA flow" },
+  // `?fca=<id>` selects that FCA on arrival — a desktop release/metering notification links here.
+  validateSearch: (search: Record<string, unknown>): { fca?: string } => ({
+    fca: typeof search.fca === "string" && search.fca ? search.fca : undefined,
+  }),
 });
 
 const runwayRoute = createRoute({
@@ -315,6 +324,13 @@ const apiKeysRoute = createRoute({
 });
 
 // Public legal/info pages (linked from the footer).
+const downloadRoute = createRoute({
+  getParentRoute: () => rootRoute,
+  path: "download",
+  staticData: { title: "Download" },
+  component: DownloadPage,
+});
+
 const privacyRoute = createRoute({
   getParentRoute: () => rootRoute,
   path: "privacy",
@@ -579,6 +595,7 @@ const routeTree = rootRoute.addChildren([
   profileRoute,
   settingsRoute,
   apiKeysRoute,
+  downloadRoute,
   privacyRoute,
   adminRoute.addChildren([
     adminIndexRoute,
