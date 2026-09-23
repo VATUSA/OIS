@@ -1,0 +1,16 @@
+# Dashboard provider (#382). Loads every dashboard JSON committed under
+# deploy/observability/grafana/dashboards, which compose mounts at the path below.
+apiVersion: 1
+
+providers:
+  - name: OIS
+    type: file
+    folder: OIS
+    # Let the file on disk win on restart, so editing the committed JSON is how a dashboard change
+    # ships — rather than a UI edit silently diverging from the repo.
+    allowUiUpdates: false
+    disableDeletion: false
+    updateIntervalSeconds: 30
+    options:
+      path: /var/lib/grafana/dashboards
+      foldersFromFilesStructure: false

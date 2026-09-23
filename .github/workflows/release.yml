@@ -34,6 +34,11 @@ jobs:
     needs: release
     strategy:
       fail-fast: false
+      # One at a time: every leg publishes the same `latest.json` asset to the same release, and
+      # those publishes are not serialised against each other. Run in parallel, whichever upload
+      # lands last wins and the manifest can end up missing a platform — whose users then silently
+      # never update, with every job still green.
+      max-parallel: 1
       matrix:
         include:
           - os: macos-latest
@@ -46,6 +51,41 @@ jobs:
     runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v7
+
+      # The shipped version must BE the tag. Inheriting the crate's hardcoded 0.1.0 meant every
+      # release published 0.1.0, so an installed app asked "is 0.1.0 newer than 0.1.0?" and the
+      # update channel never fired for anyone — silently, forever. Rewrite it from the tag, and
+      # refuse to build if the repo's VERSION disagrees, so a mistagged release fails here rather
+      # than shipping an app that can never update.
+      - name: Pin the desktop version to the tag
+        shell: bash
+        run: |
+          tag_version="${GITHUB_REF_NAME#v}"
+          repo_version="$(cat VERSION)"
+          if [ "$tag_version" != "$repo_version" ]; then
+            echo "::error::tag $GITHUB_REF_NAME implies version $tag_version but VERSION says $repo_version."
+            echo "::error::Bump VERSION and re-tag; they are the same release."
+            exit 1
+          fi
+          python3 - "$tag_version" <<'PY'
+          import json, sys, collections
+          path = "desktop/src-tauri/tauri.conf.json"
+          conf = json.load(open(path), object_pairs_hook=collections.OrderedDict)
+          conf["version"] = sys.argv[1]
+          json.dump(conf, open(path, "w"), indent=2)
+          open(path, "a").write("\n")
+          PY
+          echo "desktop version set to $tag_version"
+
+      # A bundle has no container start to inject the API base, so it is baked in at build time —
+      # unset, every installer would talk only to http://127.0.0.1:3000. The script also adds the
+      # origin (https + wss) to the webview CSP's connect-src, or every API call would be blocked.
+      # It fails closed on a missing, non-https, pathful or loopback value. See desktop/README.md.
+      - name: Point the desktop build at the production API
+        shell: bash
+        run: python3 desktop/scripts/pin-release-api.py "$OIS_DESKTOP_API_URL" desktop/src-tauri/tauri.conf.json "$GITHUB_ENV"
+        env:
+          OIS_DESKTOP_API_URL: ${{ vars.OIS_DESKTOP_API_URL }}
 
       # Refuse to ship rather than ship an update nobody can verify. Until the real key is in
       # tauri.conf.json every build would produce packages the installed app rejects — better to
