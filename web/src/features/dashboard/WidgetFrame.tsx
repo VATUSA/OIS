@@ -2,7 +2,7 @@ import {useState} from "react";
 import {Button, ConfirmButton} from "@ois/ui";
 import {GripVertical, PictureInPicture2, RefreshCw, X} from "lucide-react";
 
-import {DesktopOnly} from "@/components/desktop-only";
+import {can} from "@/lib/platform";
 
 import {type WidgetStatus, WidgetStatusReporter} from "./widget-status";
 
@@ -108,18 +108,16 @@ export function WidgetFrame({
         <span className="truncate text-sm font-semibold">{title}</span>
         <div className="ml-auto flex items-center gap-1.5">
           {status && <RefreshControl status={status} />}
-          {onPopOut && (
-            <DesktopOnly>
-              <Button
-                size="icon"
-                variant="ghost"
-                className="size-7 text-ink-3 hover:text-ink"
-                title="Pop out into a floating window"
-                onClick={onPopOut}
-              >
-                <PictureInPicture2 className="size-4" />
-              </Button>
-            </DesktopOnly>
+          {onPopOut && can("miniWindows") && (
+            <Button
+              size="icon"
+              variant="ghost"
+              className="size-7 text-ink-3 hover:text-ink"
+              title="Pop out into a floating window"
+              onClick={onPopOut}
+            >
+              <PictureInPicture2 className="size-4" />
+            </Button>
           )}
           {editing && (
             <ConfirmButton

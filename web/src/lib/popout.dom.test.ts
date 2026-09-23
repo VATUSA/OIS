@@ -11,6 +11,7 @@ const availableMonitors = vi.fn();
 const handlers: {moved?: () => void; resized?: () => void} = {};
 const outerPosition = vi.fn();
 const outerSize = vi.fn();
+const scaleFactor = vi.fn();
 
 vi.mock("@tauri-apps/api/webviewWindow", () => ({
   WebviewWindow: Object.assign(
@@ -28,6 +29,7 @@ vi.mock("@tauri-apps/api/webviewWindow", () => ({
         onCloseRequested: () => Promise.resolve(() => undefined),
         outerPosition: () => outerPosition(),
         outerSize: () => outerSize(),
+        scaleFactor: () => scaleFactor(),
       });
     },
     {getByLabel: (l: string) => getByLabel(l)},
@@ -64,7 +66,7 @@ beforeEach(() => {
   WebviewWindow.mockReset();
   getByLabel.mockReset().mockResolvedValue(null);
   availableMonitors.mockReset().mockResolvedValue([
-    {position: {x: 0, y: 0}, size: {width: 1512, height: 982}},
+    {position: {x: 0, y: 0}, size: {width: 1512, height: 982}, scaleFactor: 1},
   ]);
   installStorage();
   handlers.moved = undefined;
@@ -72,6 +74,7 @@ beforeEach(() => {
   currentLabel.value = "main";
   outerPosition.mockReset().mockResolvedValue({x: 300, y: 400});
   outerSize.mockReset().mockResolvedValue({width: 420, height: 640});
+  scaleFactor.mockReset().mockResolvedValue(1);
 });
 
 afterEach(() => {
@@ -201,6 +204,31 @@ describe("remembering where a window was put", () => {
     }
   });
 
+  // Tauri reports physical pixels; a WebviewWindow is created from logical ones. Saving the physical
+  // numbers doubled a pop-out on every reopen on a 2x Retina display (VATUSA/OIS#349 review).
+  it("saves logical pixels on a 2x display, not the physical ones Tauri reports", async () => {
+    vi.useFakeTimers();
+    try {
+      pretendDesktop();
+      scaleFactor.mockResolvedValue(2);
+      outerPosition.mockResolvedValue({x: 600, y: 800});
+      outerSize.mockResolvedValue({width: 840, height: 1280});
+      await openPopout(SPEC);
+
+      handlers.moved?.();
+      await vi.advanceTimersByTimeAsync(400);
+
+      expect(JSON.parse(localStorage.getItem("ois.window.popout-fca-abc")!)).toEqual({
+        x: 300,
+        y: 400,
+        width: 420,
+        height: 640,
+      });
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
   it("remembers a resize too, not just a move", async () => {
     vi.useFakeTimers();
     try {
@@ -289,5 +317,24 @@ describe("window labels", () => {
 
   it("keeps a panel and a route window apart even for the same id", () => {
     expect(popoutLabel("fca-ZDC")).not.toBe(routeWindowLabel("fca-ZDC"));
+  });
+
+  it("leaves an already-simple panel id alone", () => {
+    expect(popoutLabel("fca-ZDC")).toBe("popout-fca-ZDC");
+  });
+
+  /**
+   * A plain character substitution collapsed `ZDC_ARR` and `ZDC.ARR` onto one label, and since the
+   * label is what `getByLabel` raises, opening the second panel would have surfaced the first.
+   */
+  it("keeps ids distinct that flatten to the same characters", () => {
+    const underscore = popoutLabel("fca-ZDC_ARR");
+    const dot = popoutLabel("fca-ZDC.ARR");
+
+    expect(underscore).not.toBe(dot);
+    for (const label of [underscore, dot]) {
+      expect(label.startsWith("popout-")).toBe(true);
+      expect(label).toMatch(/^[a-zA-Z0-9-]+$/);
+    }
   });
 });

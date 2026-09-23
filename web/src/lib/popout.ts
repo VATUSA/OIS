@@ -1,5 +1,5 @@
 import {can} from "@/lib/platform";
-import {clampToMonitors, type Monitor, type Rect} from "@/lib/popout-geometry";
+import {clampToMonitors, toLogical, type Monitor, type Rect} from "@/lib/popout-geometry";
 import {forgetWindow, rememberWindow, rememberedWindows} from "@/lib/window-registry";
 
 /**
@@ -194,13 +194,16 @@ async function openWindow(kind: WindowKind, spec: PopoutSpec): Promise<boolean> 
       window.clearTimeout(settle);
       settle = window.setTimeout(async () => {
         try {
-          const [position, outer] = await Promise.all([win.outerPosition(), win.outerSize()]);
-          writeGeometry(label, {
-            x: position.x,
-            y: position.y,
-            width: outer.width,
-            height: outer.height,
-          });
+          // Tauri reports these in physical pixels; stored geometry is logical (see `Rect`).
+          const [position, outer, factor] = await Promise.all([
+            win.outerPosition(),
+            win.outerSize(),
+            win.scaleFactor(),
+          ]);
+          writeGeometry(
+            label,
+            toLogical({x: position.x, y: position.y, width: outer.width, height: outer.height}, factor),
+          );
         } catch {
           // The window is probably closing; nothing to remember.
         }

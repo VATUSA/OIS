@@ -60,7 +60,7 @@ export function DashboardGrid({
               void openPopout({
                 id: `widget-${w.id}`,
                 title: widgetTitle(w),
-                route: `/popout/widget/${boardId}/${w.id}`,
+                route: `/popout/widget/${encodeURIComponent(boardId)}/${encodeURIComponent(w.id)}`,
               })
           : undefined
       }
