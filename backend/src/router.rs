@@ -33,7 +33,18 @@ pub fn build_router(state: AppState) -> Router {
         .route("/api/v1/auth/vatsim/login", get(auth::vatsim_login))
         .route("/api/v1/auth/vatsim/callback", get(auth::vatsim_callback))
         .route("/api/v1/auth/logout", post(auth::logout))
+        // Desktop auth (#346): the app trades the one-time code from the OAuth callback for a
+        // keychain-stored session token, then rotates it. Both are public in the router sense —
+        // exchange is authenticated by the single-use code, refresh by the token it rotates.
+        .route(
+            "/api/v1/auth/desktop/exchange",
+            post(auth::desktop_exchange),
+        )
+        .route("/api/v1/auth/desktop/refresh", post(auth::desktop_refresh))
         .route("/api/v1/me", get(auth::me))
+        // The signed-in user's own ACE claims — lets a client tell whether a reminder nudge
+        // (`events.reminder`) is about them, since the socket carries no payload (#348).
+        .route("/api/v1/me/ace-claims", get(ace::my_ace_claims))
         // The signed-in pilot's own live flight (CID-matched against the feed snapshot).
         .route("/api/v1/me/flight", get(flow::my_flight))
         .route(

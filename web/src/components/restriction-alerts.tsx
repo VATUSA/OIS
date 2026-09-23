@@ -1,4 +1,5 @@
 import {useEffect, useMemo, useRef, useState} from "react";
+import {useRestrictionNotifier} from "@/lib/notify-restrictions";
 import {cn, toneBg, toneText, type Tone} from "@ois/ui";
 import {AlertOctagon, X} from "lucide-react";
 
@@ -92,6 +93,7 @@ export function RestrictionAlerts() {
 }
 
 function RestrictionAlertsInner() {
+  const notifyRestrictions = useRestrictionNotifier();
   const live = useHistoricalAt() == null;
   const groundStops = useGroundStops();
   const gdps = useGdps();
@@ -133,8 +135,13 @@ function RestrictionAlertsInner() {
     }
     // Forget keys that dropped off so a cancel-then-reissue alerts again.
     for (const key of [...known.current]) if (!active.has(key)) known.current.delete(key);
-    if (fresh.length) setAlerts((prev) => [...prev, ...fresh]);
-  }, [live, settled, active]);
+    if (fresh.length) {
+      setAlerts((prev) => [...prev, ...fresh]);
+      // Same detection, second output: the desktop app also raises these natively, so a minimised
+      // operator sees them (#348). No-op on web and when the user hasn't opted in.
+      notifyRestrictions(fresh);
+    }
+  }, [live, settled, active, notifyRestrictions]);
 
   const dismiss = (key: string) => setAlerts((prev) => prev.filter((a) => a.key !== key));
 
