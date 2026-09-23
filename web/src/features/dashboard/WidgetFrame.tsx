@@ -1,6 +1,8 @@
 import {useState} from "react";
-import {ConfirmButton} from "@ois/ui";
-import {GripVertical, RefreshCw, X} from "lucide-react";
+import {Button, ConfirmButton} from "@ois/ui";
+import {GripVertical, PictureInPicture2, RefreshCw, X} from "lucide-react";
+
+import {can} from "@/lib/platform";
 
 import {type WidgetStatus, WidgetStatusReporter} from "./widget-status";
 
@@ -41,6 +43,7 @@ export function WidgetFrame({
   title,
   editing,
   onRemove,
+  onPopOut,
   flush = false,
   bare = false,
   draggable = true,
@@ -49,6 +52,8 @@ export function WidgetFrame({
   title: string;
   editing: boolean;
   onRemove: () => void;
+  /** Float this panel into its own always-on-top window. Desktop only (#349); omit elsewhere. */
+  onPopOut?: () => void;
   /** Render the body edge-to-edge with no padding/scroll (for the map/chart). */
   flush?: boolean;
   /** Headerless presentational widget (text, divider) — chrome collapses to a hover overlay. */
@@ -103,6 +108,17 @@ export function WidgetFrame({
         <span className="truncate text-sm font-semibold">{title}</span>
         <div className="ml-auto flex items-center gap-1.5">
           {status && <RefreshControl status={status} />}
+          {onPopOut && can("miniWindows") && (
+            <Button
+              size="icon"
+              variant="ghost"
+              className="size-7 text-ink-3 hover:text-ink"
+              title="Pop out into a floating window"
+              onClick={onPopOut}
+            >
+              <PictureInPicture2 className="size-4" />
+            </Button>
+          )}
           {editing && (
             <ConfirmButton
               size="icon"

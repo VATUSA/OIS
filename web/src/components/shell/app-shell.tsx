@@ -8,6 +8,7 @@ import {areaForPath, groupForPath, itemForPath, visibleGroups} from "@/lib/nav";
 
 import {AppSidebar, MobileNavButton} from "./app-sidebar";
 import {CommandSearch} from "./command-search";
+import {UpdateBanner} from "@/components/update-banner";
 import {PageMetaProvider, usePageHeaderOverride, usePageTitle, useRouteMeta, useView} from "./page-meta";
 import {recordVisit} from "./recent-pages";
 
@@ -87,6 +88,7 @@ function Frame({ children }: { children: React.ReactNode }) {
 export function AppShell({ children }: { children: React.ReactNode }) {
   return (
     <PageMetaProvider>
+      <UpdateBanner />
       <Frame>{children}</Frame>
       <CommandSearch />
     </PageMetaProvider>

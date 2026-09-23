@@ -1,10 +1,10 @@
 import {useMemo, useState} from "react";
-import {Button, ConfirmButton, Input, QueryState, Sheet, StatusPill, toneText, type Tone} from "@ois/ui";
+import {Button, ConfirmButton, Input, QueryState, Sheet, StatusPill, toneText} from "@ois/ui";
 
 import {closestCenter, DndContext, type DragEndEvent, PointerSensor, useSensor, useSensors,} from "@dnd-kit/core";
 import {arrayMove, SortableContext, useSortable, verticalListSortingStrategy,} from "@dnd-kit/sortable";
 import {CSS} from "@dnd-kit/utilities";
-import {GripVertical, RotateCcw, Trash2, X} from "lucide-react";
+import {GripVertical, PictureInPicture2, RotateCcw, Trash2, X} from "lucide-react";
 
 import {DELAY_THRESHOLD_SEC, type Fca, type FcaFlight, fmtDelaySec, useClearRelease, useMarkRelease, useReorderFca,} from "@/lib/fca";
 import {
@@ -12,22 +12,11 @@ import {
   useFlightExclusions,
   useRestoreFlight,
 } from "@/lib/flight-exclusions";
-import {FLIGHT_STATE_LABEL, toneOf} from "@/lib/status";
+import {flightStatus} from "@/lib/status";
 import {hhmmZulu} from "@/lib/time";
-import {ArrivalLadder} from "@/components/ladder/ArrivalLadder";
-
-/** A crossing flight's state tone, label and CSS colour (unknown states read as ground). */
-function statusOf(s: string): { tone: Tone; label: string; color: string } {
-  const known = toneOf("flight", s) !== "neutral";
-  const state = known ? s : "ground";
-  return { tone: toneOf("flight", state), label: FLIGHT_STATE_LABEL[state], color: `var(--flight-${state})` };
-}
-
-function minutesUntil(iso: string | null | undefined, now: number): number | null {
-  if (!iso) return null;
-  const t = new Date(iso).getTime();
-  return Number.isNaN(t) ? null : (t - now) / 60000;
-}
+import {Ladder} from "@/pages/fca/ladder";
+import {can} from "@/lib/platform";
+import {openPopout} from "@/lib/popout";
 
 function fmtDelay(min: number): string {
   if (min <= 0) return "";
@@ -42,53 +31,6 @@ function delayTag(f: FcaFlight): string {
   return f.status === "airborne" ? "air" : "gnd";
 }
 
-const LADDER_WIN = 60;
-const LADDER_CH = 7; // ≈ px per monospace/tabular char at text-xs
-
-/** Estimated rendered pixel width of one metering tag — connector + pill padding/border/gaps +
- * text (seq + callsign + "HH:MMz"-ish time). Mirrors `airport.tsx`'s `stripW`. */
-function measureTagWidth(f: FcaFlight): number {
-  const chars = String(f.seq).length + f.callsign.length + 5;
-  return 12 /* connector tick */ + 42 /* pill padding + border + dot + gaps */ + chars * LADDER_CH;
-}
-
-/** Metering ladder — plots each flight by its metered crossing time (now at bottom). */
-function Ladder({ flights, now }: { flights: FcaFlight[]; now: number }) {
-  const items = flights
-    .map((f) => ({ f, min: minutesUntil(f.cross_time, now) }))
-    // `min` is non-null only when `cross_time` was itself a valid, non-empty timestamp.
-    .filter((x): x is { f: FcaFlight; min: number } => x.min != null && !!x.f.cross_time)
-    .map((x) => ({ key: x.f.callsign, min: x.min, time: x.f.cross_time as string, data: x.f }));
-
-  return (
-    <ArrivalLadder
-      items={items}
-      now={now}
-      win={LADDER_WIN}
-      pxPerMin={5}
-      gutter={54}
-      step={10}
-      rowGap={22}
-      minGap={11}
-      pad={6}
-      minWidth={260}
-      emptyMessage={`No crossings in the next ${LADDER_WIN} min.`}
-      measureTagWidth={measureTagWidth}
-      connectorColor={(f) => statusOf(f.status).color}
-      renderTag={(f) => {
-        const st = statusOf(f.status);
-        return (
-          <span className="flex items-center gap-1.5 rounded-xs border border-line bg-panel-2 py-0.5 pl-1.5 pr-2 text-xs">
-            <span className="size-1.5 shrink-0 rounded-full" style={{ background: st.color }} />
-            <span className="font-mono text-ink-3">{f.seq}</span>
-            <span className="font-mono font-semibold">{f.callsign}</span>
-            <span className="font-mono text-ink-2">{hhmmZulu(f.cross_time)}</span>
-          </span>
-        );
-      }}
-    />
-  );
-}
 
 function Strip({
   f,
@@ -110,7 +52,7 @@ function Strip({
   const { attributes, listeners, setNodeRef, transform, transition, isDragging } =
     useSortable({ id: f.callsign });
   const [hhmm, setHhmm] = useState("");
-  const st = statusOf(f.status);
+  const st = flightStatus(f.status);
   const canCfr = canEdit && f.status !== "airborne";
 
   const delayed = f.delay_sec >= DELAY_THRESHOLD_SEC;
@@ -350,7 +292,27 @@ export function FcaDetail({
       <QueryState isLoading={!flights}>
         <div className="flex-1 overflow-y-auto">
           <div className="border-b border-line p-3">
-            <div className="mb-2 text-xs font-semibold text-ink-2">Metering ladder · metered crossing</div>
+            <div className="mb-2 flex items-center gap-2">
+              <span className="text-xs font-semibold text-ink-2">Metering ladder · metered crossing</span>
+              {/* Float the ladder over CRC/vATIS/charts. Desktop only (#349). */}
+              {can("miniWindows") && (
+                <Button
+                  size="icon"
+                  variant="ghost"
+                  className="ml-auto size-6 text-ink-3 hover:text-ink"
+                  title="Pop out into a floating window"
+                  onClick={() =>
+                    void openPopout({
+                      id: `fca-${fca.id}`,
+                      title: `${fca.name} · metering`,
+                      route: `/popout/fca/${encodeURIComponent(fca.id)}`,
+                    })
+                  }
+                >
+                  <PictureInPicture2 className="size-3.5" />
+                </Button>
+              )}
+            </div>
             <Ladder flights={list} now={now} />
           </div>
 

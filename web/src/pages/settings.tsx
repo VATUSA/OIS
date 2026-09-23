@@ -41,7 +41,7 @@ export function SettingsPage() {
 
   // Group settings by `group`, preserving first-seen order.
   const groups: { name: string; defs: SettingDef[] }[] = [];
-  for (const def of SETTINGS) {
+  for (const def of SETTINGS.filter((d) => d.available?.() ?? true)) {
     let g = groups.find((x) => x.name === def.group);
     if (!g) {
       g = { name: def.group, defs: [] };
