@@ -6,9 +6,12 @@ import {isMainWindow, isTauri} from "@/lib/platform";
  * Renders its children only in the app's primary window (#350).
  *
  * Route windows run the full shell, so without this every open window mounts its own copy of the
- * notification stack and the realtime socket: one ground stop fires a native notification per
- * window, clicking one makes every window raise and navigate itself, and each holds its own
- * websocket. All of that should happen once, in the window that owns it.
+ * native-notification stack: one ground stop fires a notification per window, and clicking one
+ * makes every window raise and navigate itself. That should happen once, in the main window.
+ *
+ * Only OS-level side effects belong in here. The realtime socket deliberately stays per window —
+ * each webview has its own query cache, so one socket in the main window could not keep the
+ * others live — and so do in-app toasts and alerts, which are only seen in the window they fire in.
  *
  * On the web build there is only ever one window, so children render as they always did.
  */
