@@ -66,7 +66,7 @@ function TrayAbsent() {
  * Main window only: #350's route windows use `onCloseRequested` to forget themselves, and
  * intercepting those would leave windows the user cannot close.
  */
-function CloseToTray({enabled}: {enabled: boolean}) {
+export function CloseToTray({enabled}: {enabled: boolean}) {
   React.useEffect(() => {
     let dispose: (() => void) | undefined;
     let cancelled = false;
