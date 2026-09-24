@@ -145,6 +145,14 @@ jobs:
           GH_TOKEN: ${{ secrets.HOMELAB_DEPLOY_TOKEN }}
         run: |
           set -euo pipefail
+          # An UNSET secret expands to an empty string, not an error. So GH_TOKEN is present in
+          # this step's environment, gh still reports "set the GH_TOKEN environment variable",
+          # and whoever reads the log goes looking for an env: block that is already right
+          # there -- exit code 4 with no other context. Say what is actually wrong instead.
+          if [ -z "${GH_TOKEN}" ]; then
+            echo "::error::HOMELAB_DEPLOY_TOKEN is not set on this repository, so the deploy could not be dispatched. The images were built and pushed -- only the GitOps trigger was skipped. Create a fine-grained PAT scoped to Vainnor/homelab-infra with Contents: read and write, then: gh secret set HOMELAB_DEPLOY_TOKEN --repo VATUSA/OIS"
+            exit 1
+          fi
           gh api --method POST repos/Vainnor/homelab-infra/dispatches \
             -f event_type=ois-image \
             -F "client_payload[environment]=${{ steps.what.outputs.environment }}" \
