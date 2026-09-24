@@ -1,15 +1,15 @@
 name: Build images
 
-# Build and push the backend + web images to GHCR on pushes to main, on version tags, and on
-# demand. Deploying a given tag to dev/staging/prod is a downstream step (pull the tag you want).
+# Build and push the backend + web images to GHCR on pushes to main and next, on version tags, and
+# on demand. Deploying a given tag to dev/staging/prod is a downstream step (pull the tag you want).
 #
-# Deliberately does NOT build on `next`: `next` is the integration/test-server branch (see #87) and
-# merging into it should not cut new prod-tagged images. A manual `workflow_dispatch` run on `next`
-# still works and tags `:next` (never `:latest`, which is gated to the default branch below) — that
-# is how test-server builds happen. Do not add `next` to the push branches list.
+# `next` is the integration/test-server branch (see #87): a push to it builds and tags `:next`
+# (never `:latest`, which is gated to the default branch below) and auto-deploys to the test server
+# via the deploy job. It never cuts prod-tagged or `:latest` images, so merging into it can't
+# promote a release — only `main` and version tags do that.
 on:
   push:
-    branches: [main]
+    branches: [main, next]
     tags: ["v*"]
   workflow_dispatch:
 
@@ -102,3 +102,52 @@ jobs:
           severity: CRITICAL
           ignore-unfixed: true
           exit-code: "1"
+
+  # Tell the homelab GitOps repo which tag to run. It resolves that tag to a digest, commits it,
+  # and Argo CD rolls the Deployments -- see Vainnor/homelab-infra .github/workflows/ois-deploy.yml.
+  #
+  # A SEPARATE JOB with `needs: build`, not a step inside it: `build` is a 4-image matrix, and a
+  # step would fire four dispatches -- three of them naming images whose siblings may still be
+  # mid-push, so the deploy repo could resolve a digest for backend while web is not yet there.
+  # `needs` waits for all four to succeed, so one dispatch goes out once everything is published.
+  #
+  # `main` auto-deploys to production and `next` auto-deploys to the test server (the environment and
+  # tag are worked out below). A push to a version tag still BUILDS images (see the trigger list) but
+  # deploying a release is a deliberate act: run ois-deploy.yml's workflow_dispatch in the infra repo
+  # with the tag you want -- a tag push does not match this job's `if` branches.
+  deploy:
+    needs: build
+    if: github.ref == 'refs/heads/main' || github.ref == 'refs/heads/next'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Work out what to deploy
+        id: what
+        run: |
+          set -euo pipefail
+          if [ "${GITHUB_REF}" = "refs/heads/main" ]; then
+            # Must match the `version` the build job computed, or the deploy repo resolves a tag
+            # that was never pushed and fails.
+            BASE="$(tr -d '[:space:]' < VERSION)"
+            echo "environment=prod" >> "$GITHUB_OUTPUT"
+            echo "tag=${BASE}-${GITHUB_SHA::7}" >> "$GITHUB_OUTPUT"
+          else
+            echo "environment=next" >> "$GITHUB_OUTPUT"
+            echo "tag=next" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Trigger the GitOps deploy
+        env:
+          # Fine-grained PAT (or GitHub App token) scoped to Vainnor/homelab-infra ONLY, with
+          # Contents: read and write -- the narrowest permission GitHub offers that can send a
+          # repository_dispatch. It cannot touch any other repository.
+          GH_TOKEN: ${{ secrets.HOMELAB_DEPLOY_TOKEN }}
+        run: |
+          set -euo pipefail
+          gh api --method POST repos/Vainnor/homelab-infra/dispatches \
+            -f event_type=ois-image \
+            -F "client_payload[environment]=${{ steps.what.outputs.environment }}" \
+            -F "client_payload[tag]=${{ steps.what.outputs.tag }}" \
+            -F "client_payload[sha]=${GITHUB_SHA}"
+          echo "Dispatched ${{ steps.what.outputs.environment }} -> ${{ steps.what.outputs.tag }}"
