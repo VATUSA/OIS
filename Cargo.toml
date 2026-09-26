@@ -43,7 +43,7 @@ tracing = "0.1.41"
 tracing-subscriber = { version = "0.3.20", features = ["env-filter", "fmt"] }
 
 # --- docs / openapi ---
-utoipa = { version = "5.5.0", features = ["axum_extras", "chrono"] }
+utoipa = { version = "6.0.0", features = ["axum_extras", "chrono"] }
 utoipa-swagger-ui = { version = "9.0.2", features = ["axum"] }
 
 # --- metrics / observability ---
