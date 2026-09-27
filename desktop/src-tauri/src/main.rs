@@ -21,19 +21,19 @@ mod popout;
 
 fn main() {
     tauri::Builder::default()
-        // Signed auto-update (#347). The plugin checks the endpoint in tauri.conf.json and will not
-        // apply a package whose signature doesn't verify against the configured public key; the
-        // frontend drives when that happens (`web/src/lib/desktop-update.ts`) so the app never
-        // restarts itself out from under someone mid-event.
-        // Native notifications (#348). The frontend decides what is worth notifying about and
-        // whether the user asked for it; this is delivery.
-        // Launch at login (#351). Registered always; whether it is *enabled* is the user's
-        // setting, toggled from the app.
+        // Launch at login (#351). Registered always; whether it is *enabled* is this computer's
+        // login item, read and written from the settings page — never an account setting.
         .plugin(tauri_plugin_autostart::init(
             tauri_plugin_autostart::MacosLauncher::LaunchAgent,
             None,
         ))
+        // Native notifications (#348). The frontend decides what is worth notifying about and
+        // whether the user asked for it; this is delivery.
         .plugin(tauri_plugin_notification::init())
+        // Signed auto-update (#347). The plugin checks the endpoint in tauri.conf.json and will not
+        // apply a package whose signature doesn't verify against the configured public key; the
+        // frontend drives when that happens (`web/src/lib/desktop-update.ts`) so the app never
+        // restarts itself out from under someone mid-event.
         .plugin(tauri_plugin_updater::Builder::new().build())
         .plugin(tauri_plugin_process::init())
         // Pop-outs and route windows close with the main window rather than outliving it (#349, #350).
@@ -54,12 +54,14 @@ fn main() {
             // macOS-only in the literal sense: `RunEvent::Reopen` does not exist on Windows or
             // Linux, so it must be compiled out there rather than merely skipped at runtime — a
             // plain runtime check does not compile at all (caught by the 3-OS CI matrix).
+            //
+            // Nested rather than a let chain: those need Rust 1.88, and the workspace promises 1.85.
             #[cfg(target_os = "macos")]
-            if let tauri::RunEvent::Reopen { .. } = _event
-                && let Some(window) = tauri::Manager::get_webview_window(_app, "main")
-            {
-                let _ = window.show();
-                let _ = window.set_focus();
+            if let tauri::RunEvent::Reopen { .. } = _event {
+                if let Some(window) = tauri::Manager::get_webview_window(_app, "main") {
+                    let _ = window.show();
+                    let _ = window.set_focus();
+                }
             }
         });
 }

@@ -23,6 +23,15 @@ export type TmiFilters = {
   to?: string;
 };
 
+/**
+ * Whether a TMI is in force: published, not a draft, expired or cancelled. The one predicate the
+ * dashboard and the menu-bar tray (#351) share, so the two can't count differently — the tray
+ * counted every TMI ever created while the dashboard beside it counted live ones.
+ */
+export function isActiveTmi(t: Tmi): boolean {
+  return t.status === "published";
+}
+
 export function useTmis(filters?: TmiFilters, { enabled = true }: { enabled?: boolean } = {}) {
   const at = useHistoricalAt();
   // Drop blank values so an empty filter bar is a plain unfiltered list. Filters don't apply in

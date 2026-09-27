@@ -27,7 +27,7 @@ export function feedIsStale(
 }
 
 /** Feed health, refreshed every 30s. */
-export function useFeedStatus() {
+export function useFeedStatus({ background = false }: { background?: boolean } = {}) {
   return useQuery({
     queryKey: ["feed-status"],
     queryFn: async () => {
@@ -36,6 +36,9 @@ export function useFeedStatus() {
       return data;
     },
     refetchInterval: 30_000,
+    // TanStack skips a `refetchInterval` tick while the document is hidden. The menu-bar tray (#351)
+    // reads this while the window is hidden to it — the one time its numbers matter — so it opts in.
+    refetchIntervalInBackground: background,
   });
 }
 

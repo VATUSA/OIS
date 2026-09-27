@@ -20,6 +20,19 @@ export interface SelectControl {
   options: { value: string; label: string }[];
 }
 
+/**
+ * A toggle for this *computer's* login item, read from and written to the OS itself (#351).
+ *
+ * Deliberately not an account setting: account settings follow the user to every machine, and
+ * launching at login is a property of one machine. Stored per account, switching it on registered
+ * OIS as a login item on every computer the user opened the app on — a shared ops PC included —
+ * and the launch-time reconcile disabled it while settings were still loading (VATUSA/OIS#351
+ * review). The OS is the only source of truth, so a login item removed in the OS stays removed.
+ */
+export interface LoginItemControl {
+  kind: "loginItem";
+}
+
 export interface SettingDef {
   /** Stable storage key, dotted by area, e.g. "map.persistView". */
   key: string;
@@ -35,7 +48,7 @@ export interface SettingDef {
   group: string;
   label: string;
   description?: string;
-  control: ToggleControl | SelectControl;
+  control: ToggleControl | SelectControl | LoginItemControl;
 }
 
 /** The opaque per-user jsonb blob shape (key → value) stored under the "settings" namespace. */
@@ -128,7 +141,7 @@ const TRAY_SETTINGS: SettingDef[] = [
     available: whenTray,
     label: "Closing the window keeps OIS running",
     description:
-      "Closing hides the window to the menu bar instead of quitting, so notifications keep arriving. Quit from the menu-bar icon.",
+      "Closing hides the window to the menu bar instead of quitting, so notifications keep arriving. Quit from the menu-bar icon — so this only takes effect while the icon is shown.",
     control: { kind: "toggle", default: false },
   },
   {
@@ -136,8 +149,8 @@ const TRAY_SETTINGS: SettingDef[] = [
     group: "Menu bar",
     available: whenTray,
     label: "Launch at login",
-    description: "Start OIS automatically when you sign in to this computer.",
-    control: { kind: "toggle", default: false },
+    description: "Start OIS automatically when you sign in to this computer. Applies to this computer only.",
+    control: { kind: "loginItem" },
   },
 ];
 
@@ -219,5 +232,6 @@ export const SETTINGS: SettingDef[] = [
 
 /** The default value for a setting key (used before the server value loads, or when signed out). */
 export function settingDefault(key: string): unknown {
-  return SETTINGS.find((s) => s.key === key)?.control.default;
+  const control = SETTINGS.find((s) => s.key === key)?.control;
+  return control && "default" in control ? control.default : undefined;
 }
