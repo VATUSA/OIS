@@ -266,3 +266,33 @@ describe("handing the shortcuts back while recording", () => {
     expect(onCaptureChange).toHaveBeenLastCalledWith(false);
   });
 });
+
+describe("HotkeyInput (VATUSA/OIS#352 review)", () => {
+  // Shift+O is a capital O: bound globally it would take that letter from every application.
+  it("does not record Shift plus a key as a shortcut", () => {
+    pretendPlatform(MAC);
+    const onChange = vi.fn();
+    const button = render("", onChange);
+    act(() => button.click());
+    press(button, {code: "KeyO", shiftKey: true});
+    expect(onChange).not.toHaveBeenCalled();
+  });
+
+  // Reporting "not capturing" on mount made every settings row ask for the shortcuts back, dropping
+  // and re-registering all of them each time Settings opened.
+  it("reports capture changes, not the initial state", () => {
+    const onCaptureChange = vi.fn();
+    container = document.createElement("div");
+    document.body.appendChild(container);
+    root = createRoot(container);
+    act(() =>
+      root.render(
+        <HotkeyInput value="" onChange={() => undefined} onCaptureChange={onCaptureChange} aria-label="Focus OIS" />,
+      ),
+    );
+    expect(onCaptureChange).not.toHaveBeenCalled();
+
+    act(() => container.querySelector("button")!.click());
+    expect(onCaptureChange).toHaveBeenLastCalledWith(true);
+  });
+});

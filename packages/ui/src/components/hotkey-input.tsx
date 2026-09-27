@@ -40,8 +40,9 @@ function acceleratorFrom(event: KeyboardEvent): string | null {
   const key = keyName(event);
   if (!key) return null;
   // No modifier means this would fire while the user types — refuse it at the source rather than
-  // storing a binding that can only ever be rejected at registration.
-  if (!parts.length) return null;
+  // storing a binding that can only ever be rejected at registration. Shift alone is no better:
+  // Shift+O is a capital O (VATUSA/OIS#352 review).
+  if (!parts.some((p) => p !== "Shift")) return null;
 
   parts.push(key);
   return parts.join("+");
@@ -123,9 +124,14 @@ export function HotkeyInput({
   }, []);
 
   // Tell the app so it can suspend / resume the live registrations.
+  // Only on a real change: reporting "not capturing" on mount sent one resume per field whenever
+  // Settings opened, dropping and re-registering every shortcut for nothing (VATUSA/OIS#352 review).
   const onCaptureChangeRef = React.useRef(onCaptureChange);
   onCaptureChangeRef.current = onCaptureChange;
+  const reported = React.useRef(capturing);
   React.useEffect(() => {
+    if (reported.current === capturing) return;
+    reported.current = capturing;
     onCaptureChangeRef.current?.(capturing);
   }, [capturing]);
 

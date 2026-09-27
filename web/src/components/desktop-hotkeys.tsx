@@ -1,11 +1,12 @@
 import * as React from "react";
+import {useQueryClient} from "@tanstack/react-query";
 import {useToast} from "@ois/ui";
 
 import {
   applyHotkeys,
   clearHotkeys,
   HOTKEY_ACTIONS,
-  onHotkeysResume,
+  ownHotkeys,
   type HotkeyAction,
 } from "@/lib/hotkeys";
 import {can, isMainWindow} from "@/lib/platform";
@@ -46,10 +47,27 @@ function DesktopHotkeysInner() {
     };
   }, []);
 
-  // Bumped when a settings field stops capturing a keystroke, so the bindings it released are
-  // taken back even if the user cancelled without changing anything.
+  // Bumped when a settings field — in this window or any other — stops capturing a keystroke, so the
+  // bindings it released are taken back even if the user cancelled without changing anything. The
+  // settings are re-read too: a field in a route window saved into *that* window's cache, not ours.
+  const queryClient = useQueryClient();
   const [resumeNonce, setResumeNonce] = React.useState(0);
-  React.useEffect(() => onHotkeysResume(() => setResumeNonce((n) => n + 1)), []);
+  React.useEffect(() => {
+    if (isMain !== true) return;
+    let dispose: (() => void) | undefined;
+    let cancelled = false;
+    void ownHotkeys(() => {
+      void queryClient.invalidateQueries({queryKey: ["preferences", "settings"]});
+      setResumeNonce((n) => n + 1);
+    }).then((d) => {
+      if (cancelled) d();
+      else dispose = d;
+    });
+    return () => {
+      cancelled = true;
+      dispose?.();
+    };
+  }, [isMain, queryClient]);
 
   // The accelerators as a stable string, so the effect re-runs when a binding actually changes
   // rather than on every settings refetch.
