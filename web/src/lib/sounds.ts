@@ -114,9 +114,13 @@ function audioContext(): AudioContext | undefined {
 /**
  * Decoded tones, keyed by URL.
  *
- * Decoding is the expensive part and a tone never changes while the app runs, so it is done once.
- * A failed fetch or decode is **not** kept, so a replacement that was briefly unreadable is tried
- * again on the next alert rather than written off for the process.
+ * Decoding is the expensive part, so it is done once per URL and the result is held for the life of
+ * the process. A failed fetch or decode is **not** kept, so a replacement that was briefly unreadable
+ * is tried again on the next alert rather than written off for the process.
+ *
+ * A replacement *can* change underneath us — the file keeps its URL when it is overwritten — which is
+ * why {@link previewAlertSound} evicts through {@link forgetDecoded} before it plays. Don't drop that
+ * eviction as redundant: without it a preview replays the stale decode and misreports it (#404).
  */
 const decodedTones = new Map<string, Promise<AudioBuffer | undefined>>();
 
