@@ -6,9 +6,7 @@ import {FeedWatcher} from "@/components/feed-watcher";
 import {AppShell} from "@/components/shell/app-shell";
 import type {RouteMeta} from "@/components/shell/page-meta";
 import {RestrictionAlerts} from "@/components/restriction-alerts";
-import {NotificationClicks} from "@/components/notification-clicks";
-import {PrimaryWindowOnly} from "@/components/primary-window-only";
-import {DesktopNotifiers} from "@/components/desktop-notifiers";
+import {PrimaryWindowFeatures} from "@/components/primary-window-features";
 import {WhatsNew} from "@/components/whats-new";
 import {useMe} from "@/lib/auth";
 import {movedPath} from "@/lib/moved-paths";
@@ -107,11 +105,9 @@ function RootLayout() {
       <WhatsNew />
       {/* Native notifications are the opposite: the OS shows them once, globally. Mounted in every
           window, one ground stop fired one notification per open window, and a single click ran
-          onAction in all of them — each raising and navigating itself, fighting for focus. */}
-      <PrimaryWindowOnly>
-        <NotificationClicks />
-        <DesktopNotifiers />
-      </PrimaryWindowOnly>
+          onAction in all of them — each raising and navigating itself, fighting for focus. The group
+          keeps its own window gate, so that gate is covered by a test. */}
+      <PrimaryWindowFeatures />
       <AppShell>
         <Outlet />
       </AppShell>
