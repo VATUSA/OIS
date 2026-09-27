@@ -24,3 +24,14 @@ tauri-plugin-process.workspace = true
 # block, so it has to be in scope here even though no code of ours names it.
 serde_json.workspace = true
 uuid.workspace = true
+
+# Clickable native notifications (#348, `src/notify.rs`).
+[target.'cfg(target_os = "macos")'.dependencies]
+mac-notification-sys.workspace = true
+
+[target.'cfg(windows)'.dependencies]
+tauri-winrt-notification.workspace = true
+
+[dev-dependencies]
+# `tauri::test::mock_app` — lets the click path be exercised without a display.
+tauri = { workspace = true, features = ["test"] }

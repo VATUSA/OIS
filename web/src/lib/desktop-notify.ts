@@ -1,4 +1,4 @@
-import {can} from "@/lib/platform";
+import {can, invokeDesktop} from "@/lib/platform";
 
 /**
  * Native OS notifications for the desktop app (#348).
@@ -13,8 +13,13 @@ import {can} from "@/lib/platform";
  * detectors react to is broadcast unfiltered to every signed-in client, so targeting *has* to
  * happen here rather than on the wire.
  *
- * `@tauri-apps/plugin-notification` is reached through a dynamic `import()` so it stays out of the
- * web bundle — the rule `eslint.config.mjs` enforces for every `@tauri-apps/*` package.
+ * Raising one goes through the desktop shell's own `notify` command rather than the plugin's
+ * `sendNotification`: on desktop the plugin drops the route and reports no clicks, so a notification
+ * raised through it could never open the page it is about (`desktop/src-tauri/src/notify.rs`). The
+ * plugin is still what asks the OS for permission.
+ *
+ * `@tauri-apps/*` packages are reached through a dynamic `import()` so they stay out of the web
+ * bundle — the rule `eslint.config.mjs` enforces.
  */
 
 /** Notification categories, each independently opt-in. Keys match the settings registry. */
@@ -33,8 +38,8 @@ export type Notification = {
   route: string;
 };
 
-/** Where a click should take the user — read back from the notification's `extra` payload. */
-const ROUTE_KEY = "ois.route";
+/** What the desktop shell emits when a notification is clicked; the payload is its route. */
+const CLICK_EVENT = "notification-clicked";
 
 /**
  * Asks the OS once, lazily.
@@ -76,11 +81,10 @@ export async function notifyDesktop(
   if (!(await ensurePermission())) return false;
 
   try {
-    const {sendNotification} = await import("@tauri-apps/plugin-notification");
-    sendNotification({
+    await invokeDesktop("notify", {
       title: notification.title,
       body: notification.body,
-      extra: {[ROUTE_KEY]: notification.route},
+      route: notification.route,
     });
     return true;
   } catch {
@@ -89,11 +93,10 @@ export async function notifyDesktop(
 }
 
 /**
- * Starts listening for notification clicks: raises the window and hands the route to `navigate`.
+ * Starts listening for notification clicks and hands each one's route to `navigate`.
  *
- * Unminimise *and* show *and* focus, in that order — a backgrounded app needs a different one of
- * those on each platform, and doing all three is both harmless and the only reliable way to end up
- * actually in front of the user.
+ * The shell has already brought the window to the front by the time the event arrives, so all
+ * that is left here is the navigation.
  *
  * Returns a disposer, or undefined on the web build where there is nothing to listen to.
  */
@@ -103,25 +106,10 @@ export async function listenForNotificationClicks(
   if (!can("notifications")) return undefined;
 
   try {
-    const {onAction} = await import("@tauri-apps/plugin-notification");
-    const listener = await onAction(async (notification) => {
-      const route = notification.extra?.[ROUTE_KEY];
-
-      try {
-        const {getCurrentWindow} = await import("@tauri-apps/api/window");
-        const win = getCurrentWindow();
-        await win.unminimize();
-        await win.show();
-        await win.setFocus();
-      } catch {
-        // Raising the window failed; still navigate, so the app is at least on the right page
-        // when the user gets to it.
-      }
-
-      if (typeof route === "string" && route) navigate(route);
+    const {listen} = await import("@tauri-apps/api/event");
+    return await listen<string>(CLICK_EVENT, (event) => {
+      if (typeof event.payload === "string" && event.payload) navigate(event.payload);
     });
-
-    return () => listener.unregister();
   } catch {
     return undefined;
   }
