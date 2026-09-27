@@ -13,6 +13,13 @@
 use tauri::{AppHandle, Emitter, Manager, Runtime};
 
 /// The event a click emits, with the notification's in-app route as its payload.
+///
+/// Only the macOS and Windows branches below report a click, so on any other platform this and
+/// [`on_click`] are unreachable from the binary — dead code that `-D warnings` rejects, which macOS
+/// clippy cannot see because it compiles a different branch. Both stay compiled in regardless: the
+/// test that pins this event name as the contract with `web/src/lib/desktop-notify.ts` has to run on
+/// Linux too, which is where CI runs the Rust job.
+#[cfg_attr(not(any(target_os = "macos", windows)), allow(dead_code))]
 pub const CLICK_EVENT: &str = "notification-clicked";
 
 /// Raises a native notification; clicking it raises the app and emits [`CLICK_EVENT`] with `route`.
@@ -24,6 +31,7 @@ pub fn notify(app: AppHandle, title: String, body: String, route: String) -> Res
 /// What a click does on every platform: bring the main window to the front, then hand the route to
 /// the frontend. Unminimise *and* show *and* focus — a backgrounded app needs a different one of
 /// those on each platform, and doing all three is the only reliable way to end up in front.
+#[cfg_attr(not(any(target_os = "macos", windows)), allow(dead_code))]
 fn on_click<R: Runtime>(app: &AppHandle<R>, route: &str) {
     if let Some(window) = app.get_webview_window("main") {
         let _ = window.unminimize();
