@@ -35,9 +35,13 @@ function mountPalette() {
   document.body.appendChild(host);
   const opened: string[] = [];
   let favorites: string[] = [];
+  // Rows dropped with no user input — the 15s traffic refetch losing a flight (VATUSA/OIS#339).
+  let hidden: string[] = [];
+  let rerender = () => {};
 
   function Harness() {
     const [, force] = React.useState(0);
+    rerender = () => force((n) => n + 1);
     const toggle = (id: string) => {
       favorites = favorites.includes(id) ? favorites.filter((f) => f !== id) : [id, ...favorites];
       force((n) => n + 1);
@@ -46,7 +50,8 @@ function mountPalette() {
       { id: "page:/ops/advisories", label: "Advisories" },
       { id: "page:/ops/tmu", label: "TMU" },
       { id: "page:/ops/airport", label: "Airport" },
-    ];
+      { id: "page:/admin/planning/events", label: "Events" },
+    ].filter((p) => !hidden.includes(p.id));
     const groups = [
       {
         label: "Favorites",
@@ -98,7 +103,10 @@ function mountPalette() {
     rows()
       .find((r) => r.textContent?.includes(label))
       ?.querySelector<HTMLButtonElement>("button[aria-pressed]");
-  return { key, rows, highlighted, starOf, favs: () => favorites, opened };
+  // Several ids land in one render, as one refetch does.
+  const vanish = (...ids: string[]) => act(() => void ((hidden = [...hidden, ...ids]), rerender()));
+  const restore = (...ids: string[]) => act(() => void ((hidden = hidden.filter((h) => !ids.includes(h))), rerender()));
+  return { key, rows, highlighted, starOf, vanish, restore, favs: () => favorites, opened };
 }
 
 describe("⌘⇧F must not move the highlight (VATUSA/OIS#312)", () => {
@@ -163,6 +171,20 @@ describe("⌘⇧F must not move the highlight (VATUSA/OIS#312)", () => {
     expect(p.favs()).toEqual([]);
   });
 
+  it("arrows from the twin after un-starring a pinned row, not from the top", () => {
+    const p = mountPalette();
+    p.key({ key: "ArrowDown" });
+    p.key({ key: "ArrowDown" });
+    p.key({ key: "f", metaKey: true, shiftKey: true }); // star Airport
+    p.key({ key: "ArrowUp" });
+    p.key({ key: "ArrowUp" });
+    p.key({ key: "ArrowUp" });
+    expect(p.highlighted()).toContain("Airport"); // the pinned row
+    p.key({ key: "f", metaKey: true, shiftKey: true }); // un-star it: highlight moves to the Pages twin
+    p.key({ key: "ArrowUp" });
+    expect(p.highlighted()).toContain("TMU");
+  });
+
   // M14: the star is its own button beside the row, so activating it cannot select the row.
   it("clicking the star toggles the favorite without opening the row", () => {
     const p = mountPalette();
@@ -171,5 +193,43 @@ describe("⌘⇧F must not move the highlight (VATUSA/OIS#312)", () => {
     act(() => star!.click());
     expect(p.favs()).toEqual(["page:/ops/advisories"]);
     expect(p.opened).toEqual([]);
+  });
+});
+
+describe("a row that vanishes with no user input (VATUSA/OIS#339)", () => {
+  it("arrows from the held position, not from the top", () => {
+    const p = mountPalette();
+    p.key({ key: "ArrowDown" });
+    p.key({ key: "ArrowDown" });
+    expect(p.highlighted()).toContain("Airport");
+    p.vanish("page:/ops/airport");
+    expect(p.highlighted()).toContain("Events"); // held at index 2
+    p.key({ key: "ArrowUp" });
+    expect(p.highlighted()).toContain("TMU");
+  });
+
+  it("does not take the highlight back when it returns", () => {
+    const p = mountPalette();
+    p.key({ key: "ArrowDown" });
+    p.key({ key: "ArrowDown" });
+    p.vanish("page:/ops/airport");
+    expect(p.highlighted()).toContain("Events");
+    p.restore("page:/ops/airport");
+    // The user has been reading Events since the refetch; an Enter now must not open Airport.
+    expect(p.highlighted()).toContain("Events");
+  });
+});
+
+describe("a list that renders empty for one tick (VATUSA/OIS#339 review)", () => {
+  it("still holds the position the highlight had before it", () => {
+    const p = mountPalette();
+    p.key({ key: "ArrowDown" });
+    p.key({ key: "ArrowDown" });
+    expect(p.highlighted()).toContain("Airport");
+    p.vanish("page:/ops/advisories", "page:/ops/tmu", "page:/ops/airport", "page:/admin/planning/events");
+    expect(p.rows()).toHaveLength(0);
+    // Everything but Airport comes back: held at index 2, which is now Events — not the top row.
+    p.restore("page:/ops/advisories", "page:/ops/tmu", "page:/admin/planning/events");
+    expect(p.highlighted()).toContain("Events");
   });
 });

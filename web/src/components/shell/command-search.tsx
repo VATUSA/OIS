@@ -28,6 +28,7 @@ import {
   favoriteHref,
   favoriteKey,
   isFavoriteHotkey,
+  pageFavoriteHrefFor,
   unavailable,
   useFavorites,
 } from "@/lib/favorites";
@@ -73,6 +74,8 @@ function FavoriteCurrentPage() {
   const favorites = useFavorites();
   const toast = useToast();
   const location = useRouterState({ select: (s) => s.location });
+  // The leaf route's search after `validateSearch`, which canonicalises it (see `pageFavoriteHrefFor`).
+  const search = useRouterState({ select: (s) => s.matches.at(-1)?.search as Record<string, unknown> | undefined });
   // The title the page is actually showing. Nothing in this app assigns `document.title`, so reading
   // that stored every deep page as "OIS" (VATUSA/OIS#312).
   const title = usePageTitle();
@@ -81,14 +84,16 @@ function FavoriteCurrentPage() {
       if (!isFavoriteHotkey(e)) return;
       e.preventDefault();
       const label = title ?? location.pathname;
-      // Keyed on the full href: several routes carry their identity in `search` (?icao=, ?facility=,
-      // ?flight=), so keying on the path alone made two airports one favorite that overwrote itself.
-      const added = favorites.toggle({ kind: "page", id: location.href, label, href: location.href });
+      // Keyed on the path *and* search: several routes carry their identity in it (?icao=, ?facility=,
+      // ?flight=), so the path alone made two airports one favorite that overwrote itself. The
+      // validated search, minus the view switch, so one page is one favorite (VATUSA/OIS#339).
+      const href = pageFavoriteHrefFor(location.pathname, search);
+      const added = favorites.toggle({ kind: "page", id: href, label, href });
       if (added != null) toast.success(added ? `Added ${label} to favorites` : `Removed ${label} from favorites`);
     };
     window.addEventListener("keydown", onKey);
     return () => window.removeEventListener("keydown", onKey);
-  }, [favorites, toast, location, title]);
+  }, [favorites, toast, location, search, title]);
   return null;
 }
 

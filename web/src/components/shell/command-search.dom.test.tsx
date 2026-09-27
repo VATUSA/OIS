@@ -2,21 +2,38 @@
 import * as React from "react";
 import {act} from "react";
 import {createRoot} from "react-dom/client";
-import {QueryClient, QueryClientProvider} from "@tanstack/react-query";
+import {QueryClient, QueryClientProvider, defaultScheduler, notifyManager} from "@tanstack/react-query";
 import {ToastProvider} from "@ois/ui";
 import {afterEach, beforeAll, describe, expect, it, vi} from "vitest";
 
 // The only seam that can't be driven for real: `useNavigate`/`useRouterState` need a live router.
 // Everything else — who is signed in, what is favorited — goes through the real query cache and a
 // stubbed `fetch`, so these assert the shipped wiring rather than a mock of it (VATUSA/OIS#312).
-const here = vi.hoisted(() => ({ pathname: "/ops/tmu", href: "/ops/tmu" }));
+const here = vi.hoisted(() => ({
+  pathname: "/ops/tmu",
+  href: "/ops/tmu",
+  // The matched routes' `staticData`, which is where a route declares its own title.
+  matches: [] as { staticData: { title?: string } }[],
+  // The leaf route's search *after* `validateSearch` — what the favorite key is built from.
+  search: {} as Record<string, unknown>,
+}));
 vi.mock("@tanstack/react-router", () => ({
   useNavigate: () => () => {},
   useRouterState: ({ select }: { select: (s: unknown) => unknown }) =>
-    select({ location: { pathname: here.pathname, href: here.href, search: {} }, matches: [] }),
+    select({
+      location: { pathname: here.pathname, href: here.href, search: {} },
+      matches: [...here.matches, { staticData: {}, search: here.search }],
+    }),
 }));
 
 import {CommandSearch, openCommandSearch} from "./command-search";
+import {PageMetaProvider, usePageHeader} from "./page-meta";
+
+/** A page that names itself at runtime, as an event's detail page does with the event's name. */
+function PageTitled({ title }: { title: string }) {
+  usePageHeader({ title });
+  return null;
+}
 
 declare global {
   var IS_REACT_ACT_ENVIRONMENT: boolean;
@@ -34,15 +51,22 @@ afterEach(() => {
     host.remove();
   }
   document.body.innerHTML = "";
+  here.matches = [];
   vi.unstubAllGlobals();
 });
 
 const ME = { cid: 1, server_admin: true, permissions: {} } as never;
 
 /** Mounts CommandSearch with the palette *closed*, which is when ⌘⇧F favorites the current page. */
-async function mountClosed(at: { pathname: string; href: string }, stored: unknown[] = []) {
+async function mountClosed(
+  at: { pathname: string; href: string; search?: Record<string, unknown> },
+  stored: unknown[] = [],
+  // The title the page itself sets at runtime; mounted inside `PageMetaProvider`, as `app-shell` does.
+  pageTitle?: string,
+) {
   here.pathname = at.pathname;
   here.href = at.href;
+  here.search = at.search ?? {};
   const qc = new QueryClient({ defaultOptions: { queries: { retry: false, refetchInterval: false } } });
   qc.setQueryData(["me"], ME);
   // `toggle` refuses to save until the stored list has loaded, so seed it.
@@ -56,7 +80,10 @@ async function mountClosed(at: { pathname: string; href: string }, stored: unkno
     root.render(
       <QueryClientProvider client={qc}>
         <ToastProvider>
-          <CommandSearch />
+          <PageMetaProvider>
+            {pageTitle && <PageTitled title={pageTitle} />}
+            <CommandSearch />
+          </PageMetaProvider>
         </ToastProvider>
       </QueryClientProvider>,
     );
@@ -68,10 +95,27 @@ async function mountClosed(at: { pathname: string; href: string }, stored: unkno
     act(() => {
       window.dispatchEvent(new KeyboardEvent("keydown", { key: "f", metaKey: true, shiftKey: true, bubbles: true }));
     });
-    return (qc.getQueryData(["preferences", "favorites"]) as { items: { id: string; label: string }[] }).items;
+    return (qc.getQueryData(["preferences", "favorites"]) as { items: { id: string; label: string; href: string }[] }).items;
   };
   return { favorite };
 }
+
+/** A keydown on the open palette's search field, which owns every palette shortcut. */
+const paletteKey = (init: KeyboardEventInit) =>
+  act(() => void document.querySelector("input")!.dispatchEvent(new KeyboardEvent("keydown", { bubbles: true, ...init })));
+/** Types into the open palette's search field, through React's own value tracking. */
+const paletteType = (text: string) =>
+  act(() => {
+    const input = document.querySelector("input")!;
+    Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, "value")!.set!.call(input, text);
+    input.dispatchEvent(new Event("input", { bubbles: true }));
+  });
+/** The highlighted palette row and the group it sits in. */
+const highlightedRow = () => {
+  const row = Array.from(document.querySelectorAll("[data-index]")).find((r) => r.className.includes("bg-panel-2"));
+  // Each group is a wrapper whose first child is its heading.
+  return { text: row?.textContent, group: row?.closest(".mb-1")?.firstElementChild?.textContent };
+};
 
 /**
  * Mounts the real CommandSearch with the palette open. Whether favorites are *fetched* is read off
@@ -162,9 +206,9 @@ describe("⌘⇧F on the current page (VATUSA/OIS#312)", () => {
 
   // Finding 6: several routes carry their identity in `search`, so keying on the path alone made
   // two airports one favorite that overwrote itself.
-  it("keys the favorite on the full href, so two airports are two favorites", async () => {
+  it("keys the favorite on the page's search, so two airports are two favorites", async () => {
     const p = await mountClosed(
-      { pathname: "/ops/airport", href: "/ops/airport?icao=KSFO" },
+      { pathname: "/ops/airport", href: "/ops/airport?icao=KSFO", search: { icao: "KSFO" } },
       [{ kind: "page", id: "/ops/airport?icao=KDEN", label: "Airport", href: "/ops/airport?icao=KDEN" }],
     );
     const stored = p.favorite();
@@ -172,5 +216,96 @@ describe("⌘⇧F on the current page (VATUSA/OIS#312)", () => {
       "/ops/airport?icao=KDEN",
       "/ops/airport?icao=KSFO",
     ]);
+  });
+});
+
+describe("⌘⇧F on a page below a nav item (VATUSA/OIS#339)", () => {
+  // Both tests above favorite nav items themselves, which resolve through the nav fallback whether or
+  // not the page's own title wins — so they could not catch every event being stored as "Events".
+  it("labels the favorite with the title the page sets for itself", async () => {
+    const p = await mountClosed(
+      { pathname: "/admin/planning/events/4821", href: "/admin/planning/events/4821" },
+      [],
+      "Cactus Crossing",
+    );
+    expect(p.favorite()[0].label).toBe("Cactus Crossing");
+  });
+
+  it("labels the favorite with its route's title when the page sets none", async () => {
+    here.matches = [{ staticData: { title: "Event builder" } }];
+    const p = await mountClosed({ pathname: "/admin/planning/events/9137", href: "/admin/planning/events/9137" });
+    expect(p.favorite()[0].label).toBe("Event builder");
+  });
+});
+
+describe("⌘⇧F across a page's view switch (VATUSA/OIS#339)", () => {
+  it("keys the favorite on the page, not the view it was on", async () => {
+    const p = await mountClosed({ pathname: "/ops/tmu", href: "/ops/tmu?view=board" });
+    const [stored] = p.favorite();
+    expect(stored.id).toBe("/ops/tmu");
+    expect(stored.href).toBe("/ops/tmu");
+  });
+
+  it("un-stars one stored before the key dropped ?view=, rather than adding a second", async () => {
+    // Favorites shipped on main, so this is what the users who already hit #339 actually have
+    // saved. Without normalising the stored list, the new key misses it, `toggleFavorite` adds,
+    // and they get two identical "TMU" rows with the old one unreachable from the keyboard.
+    const p = await mountClosed({ pathname: "/ops/tmu", href: "/ops/tmu?view=board" }, [
+      { kind: "page", id: "/ops/tmu?view=board", label: "TMU", href: "/ops/tmu?view=board" },
+    ]);
+    expect(p.favorite()).toEqual([]);
+  });
+
+  it("treats a second view of a favorited page as the same favorite, not a duplicate", async () => {
+    // Stored exactly as the palette's own Pages row stores it (`id: p.to`).
+    const p = await mountClosed({ pathname: "/ops/tmu", href: "/ops/tmu?view=table" }, [
+      { kind: "page", id: "/ops/tmu", label: "TMU", href: "/ops/tmu" },
+    ]);
+    expect(p.favorite()).toEqual([]);
+  });
+});
+
+describe("un-starring a pinned favorite in the palette (VATUSA/OIS#339)", () => {
+  // The pinned row and the row it was starred from share `entityId`; that is what lets the highlight
+  // land on the source row instead of holding a position that now belongs to something else.
+  it("moves the highlight to the row the favorite was starred from", async () => {
+    await mountSearch({ me: ME, favorites: [{ kind: "page", id: "/ops/tmu", label: "TMU", href: "/ops/tmu" }] });
+    // The Pages scope lists every page with Home first, so the source row sits well below where the
+    // pinned one was — holding position would land on a different page, and only `entityId` finds it.
+    paletteType("@pages ");
+    paletteKey({ key: "ArrowDown" });
+    paletteKey({ key: "ArrowUp" });
+    expect(highlightedRow()).toMatchObject({ text: expect.stringContaining("TMU"), group: "Favorites" });
+    // Synchronous, like `favorite` above: read the optimistic write before the failed save rolls it
+    // back. The cache only reaches the palette through `notifyManager`, which defers to a macrotask,
+    // so deliver inline for this one press or the re-render would wait on the rollback's race.
+    notifyManager.setScheduler((cb) => cb());
+    try {
+      paletteKey({ key: "f", metaKey: true, shiftKey: true });
+    } finally {
+      notifyManager.setScheduler(defaultScheduler);
+    }
+    expect(highlightedRow()).toMatchObject({ text: expect.stringContaining("TMU"), group: "Pages" });
+  });
+});
+
+describe("⌘⇧F keys a page the way its Pages row does (VATUSA/OIS#339 review)", () => {
+  // The router's `href` is absolute on a real page. Stored raw, `/dashboard`'s favorite never matched
+  // the palette's own `/dashboard` row, which stayed unstarred.
+  it("stores a relative key for a page with no search", async () => {
+    const p = await mountClosed({ pathname: "/dashboard", href: "http://localhost:5173/dashboard" });
+    const [stored] = p.favorite();
+    expect(stored.id).toBe("/dashboard");
+    expect(stored.href).toBe("/dashboard");
+  });
+
+  // `validateSearch` uppercases TMU's `?facility=`. Keyed on the raw URL, a deep link to `zdv` and the
+  // same page reached as `ZDV` were two favorites — so the hotkey added instead of removing.
+  it("keys on the validated search, so a deep link un-stars what the page stored", async () => {
+    const p = await mountClosed(
+      { pathname: "/ops/tmu", href: "/ops/tmu?facility=zdv", search: { facility: "ZDV" } },
+      [{ kind: "page", id: "/ops/tmu?facility=ZDV", label: "TMU", href: "/ops/tmu?facility=ZDV" }],
+    );
+    expect(p.favorite()).toEqual([]);
   });
 });

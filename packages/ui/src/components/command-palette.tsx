@@ -117,12 +117,24 @@ export function CommandPalette({
   const listRef = React.useRef<HTMLDivElement>(null);
   // Highlight the row `step` away, by id — an index would go stale the next time `groups` changes.
   // Resolved from the previous id rather than `active` so batched keydowns don't both read one index.
+  // `last` is redundant here — the effect below has already reconciled `activeId` to a live row by the
+  // time a key arrives — and is passed only so this resolves exactly as the render does.
   const move = (step: 1 | -1) =>
-    setActiveId((id) => flat[Math.min(flat.length - 1, Math.max(0, activeIndex(flat, id) + step))]?.id ?? null);
+    setActiveId(
+      (id) => flat[Math.min(flat.length - 1, Math.max(0, activeIndex(flat, id, last.current) + step))]?.id ?? null,
+    );
 
   React.useEffect(() => {
-    last.current = { index: active, entityId: flat[active]?.entityId };
-  }, [active, flat]);
+    // Only a real row is worth remembering. A list that renders empty for one tick (a traffic poll
+    // returning nothing) would otherwise overwrite the held position with index 0, and the rows
+    // coming back would land the highlight on the top one.
+    if (flat[active] != null) last.current = { index: active, entityId: flat[active].entityId };
+    // The highlight fell through to a twin or a held position: make that row the highlight. Otherwise
+    // `activeId` still names the vanished row, and when a refetch brings it back the highlight jumps
+    // off the row the user has been reading (VATUSA/OIS#339).
+    const settled = flat[active]?.id;
+    if (activeId != null && settled != null && settled !== activeId) setActiveId(settled);
+  }, [active, flat, activeId]);
 
   React.useEffect(() => setActiveId(null), [query, open, scope]);
 
