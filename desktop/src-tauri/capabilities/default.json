@@ -1,7 +1,7 @@
 {
   "$schema": "../gen/schemas/desktop-schema.json",
   "identifier": "default",
-  "description": "Permissions for the OIS main window and the whole-route windows it opens (#350): Tauri's core defaults, signed auto-update (#347), native notifications plus the window controls a notification click needs (#348), creating / placing windows, and the menu-bar tray (#351). Pop-out panels get their own, narrower set \u2014 see popout.json.",
+  "description": "Permissions for the OIS main window and the whole-route windows it opens (#350): Tauri's core defaults, signed auto-update (#347), native notifications (#348), creating and placing the windows themselves, and the menu-bar tray (#351). A notification click raises the window from Rust (src/notify.rs), so the window controls here are for raising an already-open pop-out or route window, not for notification clicks. Pop-out panels get their own, narrower set \u2014 see popout.json.",
   "windows": [
     "main",
     "window-*"
@@ -21,6 +21,7 @@
     "core:window:allow-set-position",
     "core:window:allow-set-size",
     "core:window:allow-outer-position",
+    "core:window:allow-inner-size",
     "core:window:allow-outer-size",
     "core:app:allow-default-window-icon",
     "core:window:allow-hide",

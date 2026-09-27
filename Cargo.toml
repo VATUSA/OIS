@@ -73,13 +73,18 @@ open = "5.4"
 # Auto-update (#347). The updater plugin verifies a minisign signature against the public key in
 # tauri.conf.json and refuses anything that doesn't match, so package verification is its job
 # rather than a weaker hand-rolled check of ours. `process` is only for relaunch().
-# Native OS notifications (#348). Delivery only — what to notify about is decided in the
-# frontend, where the user's own permissions and settings already apply.
 # Launch at login (#351), toggled from the app's settings rather than assumed on.
 tauri-plugin-autostart = "2.5"
-tauri-plugin-notification = "2.4"
 tauri-plugin-updater = "2.11"
 tauri-plugin-process = "2.3"
+# Native OS notifications (#348). Delivery only — what to notify about is decided in the
+# frontend, where the user's own permissions and settings already apply. The plugin is kept for the
+# OS permission prompt; notifications themselves are raised through each platform's own API
+# (`desktop/src-tauri/src/notify.rs`), because the plugin reports no clicks on desktop. Both crates
+# are the ones the plugin already pulls in through notify-rust, so no new code enters the tree.
+tauri-plugin-notification = "2.4"
+mac-notification-sys = "0.6"
+tauri-winrt-notification = "0.7"
 
 # --- discord bot ---
 serenity = { version = "0.12", default-features = false, features = ["client", "gateway", "native_tls_backend", "model"] }

@@ -3699,6 +3699,7 @@ name = "ois-desktop"
 version = "0.1.0"
 dependencies = [
  "keyring",
+ "mac-notification-sys",
  "open",
  "serde_json",
  "tauri",
@@ -3707,6 +3708,7 @@ dependencies = [
  "tauri-plugin-notification",
  "tauri-plugin-process",
  "tauri-plugin-updater",
+ "tauri-winrt-notification",
  "uuid",
 ]
 

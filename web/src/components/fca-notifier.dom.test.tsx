@@ -47,18 +47,22 @@ describe("FcaNotifier (VATUSA/OIS#348 review)", () => {
     const render = mount();
     traffic.current = {isSuccess: false, isPending: false, data: undefined}; // errored
     render();
-    traffic.current = {isSuccess: true, isPending: false, data: [flight("AAL1", "1200"), flight("UAL2", "1205")]};
+    traffic.current = {isSuccess: true, isPending: false, data: [flight("AAL1", "2026-09-27T12:00:00Z"), flight("UAL2", "2026-09-27T12:05:00Z")]};
     render();
     expect(notifyDesktop).not.toHaveBeenCalled();
   });
 
   it("announces a release that appears after the first successful load", () => {
     const render = mount();
-    traffic.current = {isSuccess: true, isPending: false, data: [flight("AAL1", "1200")]};
+    traffic.current = {isSuccess: true, isPending: false, data: [flight("AAL1", "2026-09-27T12:00:00Z")]};
     render();
-    traffic.current = {isSuccess: true, isPending: false, data: [flight("AAL1", "1200"), flight("DAL3", "1210")]};
+    traffic.current = {isSuccess: true, isPending: false, data: [flight("AAL1", "2026-09-27T12:00:00Z"), flight("DAL3", "2026-09-27T12:10:00Z")]};
     render();
     expect(notifyDesktop).toHaveBeenCalledTimes(1);
-    expect(notifyDesktop).toHaveBeenCalledWith(expect.objectContaining({title: "Release: DAL3"}), true);
+    // `edct` arrives as an ISO timestamp; the body shows it the way controllers read it.
+    expect(notifyDesktop).toHaveBeenCalledWith(
+      expect.objectContaining({title: "Release: DAL3", body: "EDCT 1210z · ZDC FCA"}),
+      true,
+    );
   });
 });
