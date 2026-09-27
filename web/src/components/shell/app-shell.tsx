@@ -10,6 +10,7 @@ import {AppSidebar, MobileNavButton} from "./app-sidebar";
 import {CommandSearch} from "./command-search";
 import {UpdateBanner} from "@/components/update-banner";
 import {OpenInWindowButton} from "@/components/shell/open-in-window";
+import {useDragRegionProps, WindowControls} from "@/components/shell/window-controls";
 import {PageMetaProvider, usePageHeaderOverride, usePageTitle, useRouteMeta, useView} from "./page-meta";
 import {recordVisit} from "./recent-pages";
 
@@ -67,6 +68,7 @@ function Frame({ children }: { children: React.ReactNode }) {
   // cannot drift from the title on screen (VATUSA/OIS#312).
   const title = usePageTitle();
   const crumbs = useCrumbs(title);
+  const dragRegion = useDragRegionProps();
 
   useEffect(() => {
     if (title) recordVisit({ path: pathname, label: title });
@@ -75,7 +77,17 @@ function Frame({ children }: { children: React.ReactNode }) {
   return (
     <Shell
       sidebar={<AppSidebar collapsed={collapsed} onToggle={() => setCollapsed(!collapsed)} />}
-      leading={<MobileNavButton />}
+      leading={
+        <>
+          <MobileNavButton />
+          <WindowControls />
+        </>
+      }
+      // The frameless main window has no native title bar (#402), so this row is what moves it.
+      // Double-click-to-maximize is Tauri's own, not ours: `drag.js` already does it for a drag
+      // region and gets the macOS/Windows difference right, and a handler of ours on top toggled
+      // twice. Nothing is passed on the web build or in a route window — see useDragRegionProps.
+      topBarProps={dragRegion}
       breadcrumbs={
         <>
           {crumbs.length > 0 && <Breadcrumbs items={crumbs} />}
