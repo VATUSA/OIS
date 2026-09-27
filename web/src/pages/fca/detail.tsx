@@ -16,7 +16,7 @@ import {flightStatus} from "@/lib/status";
 import {hhmmZulu} from "@/lib/time";
 import {Ladder} from "@/pages/fca/ladder";
 import {can} from "@/lib/platform";
-import {openPopout} from "@/lib/popout";
+import {openPopout, popoutSpecs} from "@/lib/popout";
 
 function fmtDelay(min: number): string {
   if (min <= 0) return "";
@@ -301,13 +301,7 @@ export function FcaDetail({
                   variant="ghost"
                   className="ml-auto size-6 text-ink-3 hover:text-ink"
                   title="Pop out into a floating window"
-                  onClick={() =>
-                    void openPopout({
-                      id: `fca-${fca.id}`,
-                      title: `${fca.name} · metering`,
-                      route: `/popout/fca/${encodeURIComponent(fca.id)}`,
-                    })
-                  }
+                  onClick={() => void openPopout(popoutSpecs.fcaLadder(fca.id, fca.name))}
                 >
                   <PictureInPicture2 className="size-3.5" />
                 </Button>
