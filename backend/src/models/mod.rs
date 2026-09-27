@@ -30,7 +30,10 @@ pub struct MyAceClaim {
     pub event_id: i64,
     pub event_title: String,
     pub start_time: DateTime<Utc>,
-    pub position: String,
+    /// Nullable in `ace.requests` — support can be requested without naming a position — so this
+    /// has to be optional. A non-Option String made `query_as` fail to decode for any user holding
+    /// such a claim, turning /api/v1/me/ace-claims into a permanent 500 for them (#348).
+    pub position: Option<String>,
 }
 
 /// What the desktop app posts to trade its one-time OAuth code for a session token (#346).

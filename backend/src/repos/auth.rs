@@ -10,8 +10,10 @@ use sqlx::PgPool;
 
 use crate::errors::ApiError;
 
-/// How long a login lasts, web or desktop. Mirrors the cookie `Max-Age` the handler sets.
-const SESSION_TTL: &str = "30 days";
+/// How long a login lasts, web or desktop, in seconds — also the cookie `Max-Age` the handler sets.
+/// Bound into the SQL as a parameter rather than formatted into it, so every query here stays a
+/// static literal (VATUSA/OIS#346 review).
+pub const SESSION_TTL_SECS: i64 = 60 * 60 * 24 * 30;
 
 /// One-time desktop auth codes are redeemed within a second or two — the app is already blocked on
 /// its loopback listener when the code is minted — so the window is deliberately tight.
@@ -23,14 +25,15 @@ pub async fn insert_session(
     session_token: &str,
     user_id: &str,
 ) -> Result<(), ApiError> {
-    sqlx::query(&format!(
+    sqlx::query(
         r#"
         insert into identity.sessions (session_token, user_id, kind, expires_at)
-        values ($1, $2, 'web', now() + interval '{SESSION_TTL}')
-        "#
-    ))
+        values ($1, $2, 'web', now() + make_interval(secs => $3))
+        "#,
+    )
     .bind(session_token)
     .bind(user_id)
+    .bind(SESSION_TTL_SECS as f64)
     .execute(pool)
     .await
     .map_err(|_| ApiError::Internal)?;
@@ -55,17 +58,33 @@ pub async fn insert_desktop_session(
     session_token: &str,
     user_id: &str,
 ) -> Result<DateTime<Utc>, ApiError> {
-    sqlx::query_scalar::<_, DateTime<Utc>>(&format!(
+    sqlx::query_scalar::<_, DateTime<Utc>>(
         r#"
         insert into identity.sessions (session_token, user_id, kind, expires_at)
-        values ($1, $2, 'desktop', now() + interval '{SESSION_TTL}')
+        values ($1, $2, 'desktop', now() + make_interval(secs => $3))
         returning expires_at
-        "#
-    ))
+        "#,
+    )
     .bind(session_token)
     .bind(user_id)
+    .bind(SESSION_TTL_SECS as f64)
     .fetch_one(pool)
     .await
+    .map_err(|_| ApiError::Internal)
+}
+
+/// Deletes one-time desktop auth codes that expired over an hour ago, consumed or not, returning how
+/// many went. A code lives 60 seconds, so anything this old is dead either way; without this the
+/// table only ever grows (VATUSA/OIS#346 review). The hour of slack keeps a just-expired row around
+/// for anyone reading the table while debugging a failed sign-in. Run by
+/// `jobs::spawn_desktop_auth_code_prune`; the `expires_at` index serves it.
+pub async fn prune_desktop_auth_codes(pool: &PgPool) -> Result<u64, ApiError> {
+    sqlx::query(
+        "delete from identity.desktop_auth_codes where expires_at < now() - interval '1 hour'",
+    )
+    .execute(pool)
+    .await
+    .map(|done| done.rows_affected())
     .map_err(|_| ApiError::Internal)
 }
 
@@ -127,7 +146,7 @@ pub async fn rotate_desktop_session(
     old_token: &str,
     new_token: &str,
 ) -> Result<Option<DateTime<Utc>>, ApiError> {
-    sqlx::query_scalar::<_, DateTime<Utc>>(&format!(
+    sqlx::query_scalar::<_, DateTime<Utc>>(
         r#"
         with rotated as (
             delete from identity.sessions
@@ -138,13 +157,14 @@ pub async fn rotate_desktop_session(
             returning user_id
         )
         insert into identity.sessions (session_token, user_id, kind, expires_at)
-        select $2, user_id, 'desktop', now() + interval '{SESSION_TTL}'
+        select $2, user_id, 'desktop', now() + make_interval(secs => $3)
         from rotated
         returning expires_at
-        "#
-    ))
+        "#,
+    )
     .bind(old_token)
     .bind(new_token)
+    .bind(SESSION_TTL_SECS as f64)
     .fetch_optional(pool)
     .await
     .map_err(|_| ApiError::Internal)
@@ -307,6 +327,68 @@ mod tests {
                 .await
                 .unwrap()
                 .is_none()
+        );
+    }
+
+    /// Every session path expires 30 days out. The TTL is now a bound parameter rather than SQL
+    /// text, so a units slip in the bind (seconds read as days, or the reverse) would otherwise go
+    /// unnoticed.
+    #[sqlx::test]
+    async fn every_kind_of_session_lasts_thirty_days(pool: PgPool) {
+        let user_id = user(&pool, 1101).await;
+        insert_session(&pool, "web-token", &user_id).await.unwrap();
+        let desktop = insert_desktop_session(&pool, "ois_dsk_a", &user_id)
+            .await
+            .unwrap();
+        let rotated = rotate_desktop_session(&pool, "ois_dsk_a", "ois_dsk_b")
+            .await
+            .unwrap()
+            .expect("a live desktop session rotates");
+        let web: DateTime<Utc> = sqlx::query_scalar(
+            "select expires_at from identity.sessions where session_token = 'web-token'",
+        )
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+
+        let expected = Utc::now() + chrono::Duration::days(30);
+        for (kind, at) in [("web", web), ("desktop", desktop), ("rotated", rotated)] {
+            let off = (at - expected).num_seconds().abs();
+            assert!(
+                off < 60,
+                "{kind} session expires {off}s away from 30 days out"
+            );
+        }
+    }
+
+    #[sqlx::test]
+    async fn pruning_removes_only_codes_long_expired(pool: PgPool) {
+        let user_id = user(&pool, 1102).await;
+        for code in ["live", "just-expired", "old-unused", "old-used"] {
+            insert_desktop_auth_code(&pool, &sha256_hex(code), &user_id)
+                .await
+                .unwrap();
+        }
+        expire_code(&pool, &sha256_hex("just-expired")).await;
+        sqlx::query(
+            "update identity.desktop_auth_codes set expires_at = now() - interval '2 hours', \
+             consumed_at = case when code_hash = $2 then now() else consumed_at end \
+             where code_hash in ($1, $2)",
+        )
+        .bind(sha256_hex("old-unused"))
+        .bind(sha256_hex("old-used"))
+        .execute(&pool)
+        .await
+        .unwrap();
+
+        assert_eq!(prune_desktop_auth_codes(&pool).await.unwrap(), 2);
+        let left: i64 = sqlx::query_scalar("select count(*) from identity.desktop_auth_codes")
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+        assert_eq!(
+            left, 2,
+            "the live code and the one that only just expired stay"
         );
     }
 }

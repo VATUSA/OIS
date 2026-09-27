@@ -1,7 +1,8 @@
 // @vitest-environment jsdom
 import {afterEach, beforeEach, describe, expect, it, vi} from "vitest";
 
-import {openPopout, popoutLabel, restoreWindows, routeWindowLabel} from "./popout";
+import {forgetOnClose, openPopout, openRouteWindow, popoutLabel, popoutSpecs, restoreWindows, routeWindowLabel} from "./popout";
+import {rememberedWindows} from "./window-registry";
 
 const WebviewWindow = vi.fn();
 const getByLabel = vi.fn();
@@ -11,6 +12,8 @@ const availableMonitors = vi.fn();
 const handlers: {moved?: () => void; resized?: () => void} = {};
 const outerPosition = vi.fn();
 const outerSize = vi.fn();
+const innerSize = vi.fn();
+const scaleFactor = vi.fn();
 
 vi.mock("@tauri-apps/api/webviewWindow", () => ({
   WebviewWindow: Object.assign(
@@ -25,18 +28,33 @@ vi.mock("@tauri-apps/api/webviewWindow", () => ({
           handlers.resized = cb;
           return Promise.resolve(() => undefined);
         },
-        onCloseRequested: () => Promise.resolve(() => undefined),
+        onCloseRequested: () => {
+          openerCloseListeners.count += 1;
+          return Promise.resolve(() => undefined);
+        },
         outerPosition: () => outerPosition(),
         outerSize: () => outerSize(),
+        innerSize: () => innerSize(),
+        scaleFactor: () => scaleFactor(),
       });
     },
     {getByLabel: (l: string) => getByLabel(l)},
   ),
 }));
 const currentLabel = {value: "main"};
+/** Close listeners registered on a window the code *opened*, as opposed to on its own window. */
+const openerCloseListeners = {count: 0};
+/** The close handler the current window registered on itself, so a test can "click X". */
+const ownClose: {handler?: () => void} = {};
 vi.mock("@tauri-apps/api/window", () => ({
   availableMonitors: () => availableMonitors(),
-  getCurrentWindow: () => ({label: currentLabel.value}),
+  getCurrentWindow: () => ({
+    label: currentLabel.value,
+    onCloseRequested: (cb: () => void) => {
+      ownClose.handler = cb;
+      return Promise.resolve(() => undefined);
+    },
+  }),
 }));
 
 function pretendDesktop() {
@@ -64,14 +82,17 @@ beforeEach(() => {
   WebviewWindow.mockReset();
   getByLabel.mockReset().mockResolvedValue(null);
   availableMonitors.mockReset().mockResolvedValue([
-    {position: {x: 0, y: 0}, size: {width: 1512, height: 982}},
+    {position: {x: 0, y: 0}, size: {width: 1512, height: 982}, scaleFactor: 1},
   ]);
   installStorage();
   handlers.moved = undefined;
   handlers.resized = undefined;
   currentLabel.value = "main";
   outerPosition.mockReset().mockResolvedValue({x: 300, y: 400});
-  outerSize.mockReset().mockResolvedValue({width: 420, height: 640});
+  // A real window's frame is bigger than its content — a title bar on macOS, borders on Windows.
+  outerSize.mockReset().mockResolvedValue({width: 420, height: 668});
+  innerSize.mockReset().mockResolvedValue({width: 420, height: 640});
+  scaleFactor.mockReset().mockResolvedValue(1);
 });
 
 afterEach(() => {
@@ -81,7 +102,10 @@ afterEach(() => {
 
 describe("popoutLabel", () => {
   it("makes a window label safe from an arbitrary panel id", () => {
-    expect(popoutLabel("widget-9f3a/b c")).toBe("popout-widget-9f3a-b-c");
+    const label = popoutLabel("widget-9f3a/b c");
+
+    expect(label).toMatch(/^popout-[a-zA-Z0-9-]+$/);
+    expect(label.startsWith("popout-widget-9f3a-b-c")).toBe(true);
   });
 
   it("is stable for the same id, so reopening finds the same window", () => {
@@ -198,6 +222,51 @@ describe("remembering where a window was put", () => {
     }
   });
 
+  // Tauri reports physical pixels; a WebviewWindow is created from logical ones. Saving the physical
+  // numbers doubled a pop-out on every reopen on a 2x Retina display (VATUSA/OIS#349 review).
+  it("saves logical pixels on a 2x display, not the physical ones Tauri reports", async () => {
+    vi.useFakeTimers();
+    try {
+      pretendDesktop();
+      scaleFactor.mockResolvedValue(2);
+      outerPosition.mockResolvedValue({x: 600, y: 800});
+      outerSize.mockResolvedValue({width: 840, height: 1336});
+      innerSize.mockResolvedValue({width: 840, height: 1280});
+      await openPopout(SPEC);
+
+      handlers.moved?.();
+      await vi.advanceTimersByTimeAsync(400);
+
+      expect(JSON.parse(localStorage.getItem("ois.window.popout-fca-abc")!)).toEqual({
+        x: 300,
+        y: 400,
+        width: 420,
+        height: 640,
+      });
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  // `width`/`height` reopen a window at that *content* size. Saving the frame size instead grew
+  // every pop-out by a title bar per reopen, compounding (VATUSA/OIS#349 review).
+  it("reopens at the size it was left, not a title bar taller", async () => {
+    vi.useFakeTimers();
+    try {
+      pretendDesktop();
+      await openPopout(SPEC);
+      handlers.resized?.();
+      await vi.advanceTimersByTimeAsync(400);
+
+      WebviewWindow.mockClear();
+      await openPopout(SPEC);
+
+      expect(WebviewWindow.mock.calls[0]![1]).toMatchObject({width: 420, height: 640});
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
   it("remembers a resize too, not just a move", async () => {
     vi.useFakeTimers();
     try {
@@ -262,5 +331,108 @@ describe("restoring windows on launch", () => {
   it("is a no-op when nothing was open last time", async () => {
     pretendDesktop();
     await expect(restoreWindows()).resolves.toBe(0);
+  });
+});
+
+describe("window labels", () => {
+  it("leaves an already-simple id alone", () => {
+    expect(routeWindowLabel("ops-idst")).toBe("window-ops-idst");
+  });
+
+  /**
+   * `/ops/idst` and `/ops-idst` both flatten to the same characters. Since the label is what
+   * `getByLabel` raises, a collision means one route surfaces the other's window.
+   */
+  it("keeps route ids distinct that flatten to the same characters", () => {
+    const slashes = routeWindowLabel("/ops/idst");
+    const dashes = routeWindowLabel("-ops-idst");
+
+    expect(slashes).not.toBe(dashes);
+    for (const label of [slashes, dashes]) {
+      expect(label).toMatch(/^window-[a-zA-Z0-9-]+$/);
+    }
+  });
+
+  it("keeps a panel and a route window apart even for the same id", () => {
+    expect(popoutLabel("fca-ZDC")).not.toBe(routeWindowLabel("fca-ZDC"));
+  });
+
+  it("leaves an already-simple panel id alone", () => {
+    expect(popoutLabel("fca-ZDC")).toBe("popout-fca-ZDC");
+  });
+
+  /**
+   * A plain character substitution collapsed `ZDC_ARR` and `ZDC.ARR` onto one label, and since the
+   * label is what `getByLabel` raises, opening the second panel would have surfaced the first.
+   */
+  it("keeps ids distinct that flatten to the same characters", () => {
+    const underscore = popoutLabel("fca-ZDC_ARR");
+    const dot = popoutLabel("fca-ZDC.ARR");
+
+    expect(underscore).not.toBe(dot);
+    for (const label of [underscore, dot]) {
+      expect(label.startsWith("popout-")).toBe(true);
+      expect(label).toMatch(/^[a-zA-Z0-9-]+$/);
+    }
+  });
+});
+
+describe("popoutSpecs", () => {
+  // An id carrying `/`, `?` or `#` changed the shape of the route and opened the wrong page.
+  it("encodes every id into its route segment", () => {
+    expect(popoutSpecs.widget("board/1", "w?2", "Rates").route).toBe("/popout/widget/board%2F1/w%3F2");
+    expect(popoutSpecs.fcaLadder("ZDC#1", "ZDC FCA").route).toBe("/popout/fca/ZDC%231");
+  });
+
+  it("keys the window on the panel, so reopening it raises the same one", () => {
+    expect(popoutSpecs.widget("b1", "w1", "Rates").id).toBe("widget-w1");
+    expect(popoutSpecs.fcaLadder("f1", "ZDC FCA")).toMatchObject({id: "fca-f1", title: "ZDC FCA · metering"});
+  });
+});
+
+describe("remembering which route windows are open (VATUSA/OIS#350 review)", () => {
+  const IDST = {id: "/ops/idst", title: "OIS · IDST", route: "/ops/idst"};
+  const MAP = {id: "/ops/map", title: "OIS · Map", route: "/ops/map"};
+
+  beforeEach(() => {
+    openerCloseListeners.count = 0;
+    ownClose.handler = undefined;
+    currentLabel.value = "main";
+  });
+
+  it("remembers a route window when it opens, so the next launch brings it back", async () => {
+    pretendDesktop();
+    await openRouteWindow(IDST);
+    expect(rememberedWindows()).toEqual([IDST]);
+  });
+
+  // Tauri blocks a close while any webview holds a JS close listener for the window, and never
+  // drops a dead webview's listeners. Registered in the opener, the listener outlived it and the
+  // route window could no longer be closed at all.
+  it("leaves the opener holding no close listener on the window it opened", async () => {
+    pretendDesktop();
+    await openRouteWindow(IDST);
+    expect(openerCloseListeners.count).toBe(0);
+  });
+
+  it("forgets a route window when the user closes that window, and only that one", async () => {
+    pretendDesktop();
+    await openRouteWindow(IDST);
+    await openRouteWindow(MAP);
+
+    currentLabel.value = routeWindowLabel(IDST.id); // now running inside the IDST window
+    await forgetOnClose();
+    ownClose.handler?.();
+
+    expect(rememberedWindows()).toEqual([MAP]);
+  });
+
+  it("registers no close handler in the main window or a pop-out", async () => {
+    pretendDesktop();
+    for (const label of ["main", popoutLabel("fca-abc")]) {
+      currentLabel.value = label;
+      await forgetOnClose();
+    }
+    expect(ownClose.handler).toBeUndefined();
   });
 });

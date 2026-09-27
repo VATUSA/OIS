@@ -5,9 +5,7 @@ import {RouterProvider} from "@tanstack/react-router";
 import {DialogProvider, ThemeProvider, ToastProvider, TooltipProvider} from "@ois/ui";
 
 import {router} from "./router";
-import {desktopRefresh} from "./lib/desktop-auth";
-import {restoreWindows} from "./lib/popout";
-import {isTauri} from "./lib/platform";
+import {launchDesktop} from "./lib/desktop-launch";
 import {RealtimeProvider} from "./components/realtime-provider";
 import "@fontsource-variable/inter";
 import "@fontsource/jetbrains-mono/400.css";
@@ -18,16 +16,21 @@ const queryClient = new QueryClient();
 
 // Desktop only: rotate the keychain-stored session on launch, which both proves it is still valid
 // and pushes its expiry out, so an app that's opened regularly never makes the user sign in again
-// (#346). Deliberately not awaited — the stored token stays valid meanwhile, so there is no reason
-// to hold up first paint, and a failure here just means the app starts signed out.
-if (isTauri()) void desktopRefresh();
+// (#346).
+//
+// Awaited, because rotation DELETES the old session row server-side the moment it succeeds. Any
+// request that left while the new token was still in flight would carry one that is already dead,
+// and `fetchMe` turns a 401 into a cached "signed out" for a full minute — which presents as the
+// app randomly forgetting you on launch. So first paint waits for the rotation — for at most
+// `LAUNCH_REFRESH_BUDGET_MS`, since the API is remote and a blackholed host would otherwise leave a
+// blank window until the OS gives up. A failure just means we start signed out.
+//
+// Main window only — `rotateOnLaunch` says why. It is followed by reopening last launch's route
+// windows (#350), and only once it has finished — `launchDesktop` says why, and pins the order.
+async function bootstrap() {
+  await launchDesktop();
 
-// Desktop only: reopen the route windows that were open last time, each at the position it was
-// left (#350). Guarded inside to the main window — otherwise every restored window would restore
-// the whole set again as it booted. Not awaited; a window failing to reopen must not delay paint.
-if (isTauri()) void restoreWindows();
-
-ReactDOM.createRoot(document.getElementById("root")!).render(
+  ReactDOM.createRoot(document.getElementById("root")!).render(
   <React.StrictMode>
     <ThemeProvider defaultTheme="dark">
       <ToastProvider>
@@ -43,4 +46,7 @@ ReactDOM.createRoot(document.getElementById("root")!).render(
       </ToastProvider>
     </ThemeProvider>
   </React.StrictMode>,
-);
+  );
+}
+
+void bootstrap();

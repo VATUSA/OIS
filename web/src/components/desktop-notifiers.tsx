@@ -2,10 +2,12 @@ import * as React from "react";
 import {useQuery} from "@tanstack/react-query";
 
 import {ois} from "@/lib/api";
-import {useMe} from "@/lib/auth";
+import {useMe, type Me} from "@/lib/auth";
 import {notifyDesktop, type NotifyCategory} from "@/lib/desktop-notify";
 import {useFcas, useFcaTraffic} from "@/lib/fca";
+import {hasPermission} from "@/lib/permissions";
 import {can} from "@/lib/platform";
+import {hhmmZulu} from "@/lib/time";
 import {useSetting} from "@/lib/settings";
 
 /**
@@ -27,12 +29,21 @@ import {useSetting} from "@/lib/settings";
  *
  * The `null` seed is the important part — without it, every notification category would dump its
  * entire current state at the user the moment the app opens.
+ *
+ * `settled` must mean the first load *succeeded*, not merely that it is no longer pending: an errored
+ * query is not pending either, and seeding from its empty data made the first successful poll look
+ * like every entry was new — one native notification per flight already holding an EDCT
+ * (VATUSA/OIS#348 review). Pass `query.isSuccess`.
  */
+type Entry = {title: string; body: string; route: string};
+
 function useNewKeys(
-  entries: Map<string, {title: string; body: string; route: string}>,
+  entries: Map<string, Entry>,
   settled: boolean,
   category: NotifyCategory,
   enabled: boolean,
+  /** Fold everything that arrived together into one notification, instead of one per key. */
+  collapse?: (fresh: Map<string, Entry>) => Entry,
 ) {
   // Sound settings live beside the notification ones, so a category can notify silently or make a
   // noise without a banner (#353).
@@ -45,35 +56,46 @@ function useNewKeys(
       if (settled) known.current = new Set(entries.keys());
       return;
     }
+    const fresh = new Map<string, Entry>();
     for (const [key, entry] of entries) {
       if (!known.current.has(key)) {
         known.current.add(key);
-        void notifyDesktop({category, ...entry}, enabled, {enabled: soundOn, volume});
+        fresh.set(key, entry);
       }
     }
     for (const key of [...known.current]) if (!entries.has(key)) known.current.delete(key);
-  }, [entries, settled, category, enabled, soundOn, volume]);
+
+    // The sound rides on the same call on both paths: a collapsed batch is one notification and so
+    // one sound, and `playAlertSound`'s own per-tick claim keeps the uncollapsed path to one too.
+    const sound = {enabled: soundOn, volume};
+    if (collapse && fresh.size) void notifyDesktop({category, ...collapse(fresh)}, enabled, sound);
+    else for (const entry of fresh.values()) void notifyDesktop({category, ...entry}, enabled, sound);
+  }, [entries, settled, category, enabled, collapse, soundOn, volume]);
 }
 
 /** EDCT releases and heavy metering delay, for one FCA. Both read the same traffic list. */
-function FcaNotifier({fcaId, name}: {fcaId: string; name: string}) {
+export function FcaNotifier({fcaId, name}: {fcaId: string; name: string}) {
   const {value: releasesOn} = useSetting<boolean>("notifications.releases", false);
   const {value: meteringOn} = useSetting<boolean>("notifications.metering", false);
   const {value: thresholdRaw} = useSetting<string>("notifications.meteringDelayMin", "15");
   const threshold = Number(thresholdRaw) || 15;
 
-  const traffic = useFcaTraffic(fcaId);
+  // Background polling on: this component exists to notice releases and metering delay while the
+  // window is hidden, which is when the default interval would be skipped.
+  const traffic = useFcaTraffic(fcaId, false, {background: true});
   const flights = React.useMemo(() => traffic.data ?? [], [traffic.data]);
   const route = `/ops/fca?fca=${encodeURIComponent(fcaId)}`;
 
   const released = React.useMemo(() => {
-    const m = new Map<string, {title: string; body: string; route: string}>();
+    const m = new Map<string, Entry>();
     for (const f of flights) {
       // Keyed on the EDCT itself, so a *re-issued* time is a new notification rather than silence.
       if (f.edct) {
         m.set(`${f.callsign}:${f.edct}`, {
           title: `Release: ${f.callsign}`,
-          body: `EDCT ${f.edct}z · ${name}`,
+          // `edct` is a full ISO timestamp, not a bare time — interpolated as-is it read
+          // "EDCT 2026-09-27T14:05:00Zz" (VATUSA/OIS#348 review).
+          body: `EDCT ${hhmmZulu(f.edct)} · ${name}`,
           route,
         });
       }
@@ -82,7 +104,7 @@ function FcaNotifier({fcaId, name}: {fcaId: string; name: string}) {
   }, [flights, name, route]);
 
   const delayed = React.useMemo(() => {
-    const m = new Map<string, {title: string; body: string; route: string}>();
+    const m = new Map<string, Entry>();
     for (const f of flights) {
       const delay = f.delay_min ?? 0;
       // Bucketed by threshold crossing, not by exact minute — otherwise one aircraft's delay
@@ -98,8 +120,8 @@ function FcaNotifier({fcaId, name}: {fcaId: string; name: string}) {
     return m;
   }, [flights, name, route, threshold]);
 
-  useNewKeys(released, !traffic.isPending, "releases", releasesOn);
-  useNewKeys(delayed, !traffic.isPending, "metering", meteringOn);
+  useNewKeys(released, traffic.isSuccess, "releases", releasesOn);
+  useNewKeys(delayed, traffic.isSuccess, "metering", meteringOn);
 
   return null;
 }
@@ -121,27 +143,43 @@ export function fcaNotifiersWanted(flags: {
 }
 
 /**
- * Notifies on EDCT releases and metering delay across every enabled FCA.
+ * The ARTCCs whose FCAs this user hears about: their home facility and the ones they visit.
+ * `null` means every ARTCC — server admins only.
+ *
+ * Without this, a ZDC controller who switched releases on was notified of every release at every
+ * FCA in the country, and kept one background poll open per FCA (VATUSA/OIS#348 review). Until the
+ * VATUSA profile has synced there is no facility to go on, so that is nothing rather than everything.
+ */
+export function notifyFacilities(me: Me | null | undefined): Set<string> | null {
+  if (me?.server_admin) return null;
+  const v = me?.vatusa;
+  return new Set([...(v?.home_facility ? [v.home_facility] : []), ...(v?.visits ?? [])]);
+}
+
+/**
+ * Notifies on EDCT releases and metering delay at the FCAs of the user's own ARTCCs.
  *
  * Mounts nothing unless one of those categories is actually switched on: each `FcaNotifier` opens a
  * traffic query that polls every 30s, so mounting them regardless would put one request per FCA per
  * 30s on every desktop client — including everyone who never asked for these notifications.
  */
-function FcaNotifiers() {
+export function FcaNotifiers() {
   const {value: releasesOn} = useSetting<boolean>("notifications.releases", false);
   const {value: meteringOn} = useSetting<boolean>("notifications.metering", false);
   const {value: releaseSoundOn} = useSetting<boolean>("sounds.releases", false);
   const {value: meteringSoundOn} = useSetting<boolean>("sounds.metering", false);
+  const {data: me} = useMe();
   // The list query is shared cache with the rest of the app, so it costs nothing extra; the early
   // return below is what stops the per-FCA traffic polls from being opened.
   const fcas = useFcas();
 
   if (!fcaNotifiersWanted({releasesOn, meteringOn, releaseSoundOn, meteringSoundOn})) return null;
 
+  const facilities = notifyFacilities(me);
   return (
     <>
       {(fcas.data ?? [])
-        .filter((f) => f.enabled)
+        .filter((f) => f.enabled && (facilities == null || facilities.has(f.artcc)))
         .map((f) => (
           <FcaNotifier key={f.id} fcaId={f.id} name={f.name} />
         ))}
@@ -166,69 +204,105 @@ export function flattenPermissions(node: unknown, prefix = ""): string[] {
 }
 
 /**
+ * One notification for everything a single access save granted.
+ *
+ * `/me` lists *effective* permissions, role-derived ones included, so granting a role with twenty
+ * permissions used to raise twenty-one notifications at once (VATUSA/OIS#348 review). A new role is
+ * named and the permissions it brought go unsaid; otherwise a lone permission is named and several
+ * are counted.
+ */
+export function summarizeGrants(fresh: Map<string, Entry>): Entry {
+  const roles = [...fresh.keys()].filter((k) => k.startsWith("role:")).map((k) => k.slice(5));
+  const permissions = [...fresh.keys()].filter((k) => k.startsWith("perm:")).map((k) => k.slice(5));
+  const body =
+    roles.length === 1
+      ? `You were given the ${roles[0]} role.`
+      : roles.length > 1
+        ? `You were given the ${roles.join(", ")} roles.`
+        : permissions.length === 1
+          ? `You were given ${permissions[0]}.`
+          : `You were given ${permissions.length} new permissions.`;
+  return {title: "Access granted", body, route: "/profile"};
+}
+
+/**
  * Notifies when the signed-in user gains a permission or role.
  *
  * `access.granted` invalidates `["me"]`, so this just watches the refetched profile. Comparing
  * against the previous value is what makes it "granted" rather than "you have access" — the nudge
  * itself is broadcast to everyone and says nothing about who changed.
  */
-function AccessNotifier() {
+export function AccessNotifier() {
   const {value: enabled} = useSetting<boolean>("notifications.access", false);
   const {data: me} = useMe();
 
   const held = React.useMemo(() => {
-    const m = new Map<string, {title: string; body: string; route: string}>();
-    for (const role of me?.role_names ?? []) {
-      m.set(`role:${role}`, {
-        title: "Access granted",
-        body: `You were given the ${role} role.`,
-        route: "/profile",
-      });
-    }
-    // Permissions as well as roles — the setting promises both, and most grants are permissions
-    // rather than a whole role.
-    for (const permission of flattenPermissions(me?.permissions)) {
-      m.set(`perm:${permission}`, {
-        title: "Access granted",
-        body: `You were given ${permission}.`,
-        route: "/profile",
-      });
-    }
+    const m = new Map<string, Entry>();
+    // The entry text is unused — `summarizeGrants` writes the one notification — but the keys
+    // are what the diff runs on. Permissions as well as roles: most grants are permissions.
+    const entry = {title: "", body: "", route: "/profile"};
+    for (const role of me?.role_names ?? []) m.set(`role:${role}`, entry);
+    for (const permission of flattenPermissions(me?.permissions)) m.set(`perm:${permission}`, entry);
     return m;
   }, [me?.role_names, me?.permissions]);
 
-  useNewKeys(held, !!me, "access", enabled);
+  useNewKeys(held, !!me, "access", enabled, summarizeGrants);
   return null;
 }
 
-/**
- * Notifies 24h and 6h before an event the user has claimed an ACE position for.
- *
- * Mirrors the Discord reminder the scheduler already sends — the backend nudges `events.reminder`
- * when it enqueues those DMs, this refetches the user's own claims and works out which one is due.
- * The window check is client-side because the nudge carries no payload.
- */
 const REMINDER_TIERS = [
   {hours: 6, label: "6 hours"},
   {hours: 24, label: "24 hours"},
 ];
 
-function EventReminderNotifier() {
+/** `Date.now()`, refreshed every minute. */
+function useMinuteClock(): number {
+  const [now, setNow] = React.useState(() => Date.now());
+  React.useEffect(() => {
+    const id = setInterval(() => setNow(Date.now()), 60_000);
+    return () => clearInterval(id);
+  }, []);
+  return now;
+}
+
+/**
+ * Notifies 24h and 6h before an event the user has claimed an ACE position for.
+ *
+ * Mirrors the Discord reminder the scheduler sends. The backend nudges `events.reminder` on every
+ * tick while any claim sits in a reminder window; this refetches the user's own claims and works
+ * out which one is due. The window check is client-side because the nudge carries no payload.
+ */
+export function EventReminderNotifier() {
   const {value: enabled} = useSetting<boolean>("notifications.eventReminders", false);
+  // The sound is a second output with its own switch, so it has to count towards opening the query
+  // — gating on the banner alone would make `sounds.eventReminders` another dead toggle (#353).
+  const {value: soundOn} = useSetting<boolean>("sounds.eventReminders", false);
   const {data: me} = useMe();
 
   const claims = useQuery({
     queryKey: ["my-ace-claims"],
-    enabled: !!me && (can("notifications") || can("audioAlerts")),
+    // Opened only for someone who asked for reminders — by banner or by sound — and who can hold a
+    // claim: the endpoint is gated on `ace.requests.claim`, so for everyone else it was a 403 on
+    // every mount, swallowed, and a request nobody opted into (VATUSA/OIS#348 review).
+    enabled:
+      !!me &&
+      (can("notifications") || can("audioAlerts")) &&
+      (enabled || soundOn) &&
+      hasPermission(me, "ace.requests.claim"),
     queryFn: async () => {
       const {data} = await ois.GET("/api/v1/me/ace-claims");
       return data ?? [];
     },
   });
 
+  // Whether a claim is due depends on the clock as much as on the data, and a refetch that returns
+  // the same claims hands back the *same* `data` object — so keyed on `data` alone, crossing T-24h
+  // or T-6h was never noticed and no reminder ever fired (VATUSA/OIS#348 review). Re-evaluate on
+  // every refetch (the `events.reminder` nudge) and on a one-minute tick, whichever comes first —
+  // a refetch's own timestamp is as good a "now" as the tick's.
+  const now = Math.max(useMinuteClock(), claims.dataUpdatedAt);
   const due = React.useMemo(() => {
-    const m = new Map<string, {title: string; body: string; route: string}>();
-    const now = Date.now();
+    const m = new Map<string, Entry>();
     for (const claim of claims.data ?? []) {
       const startsIn = new Date(claim.start_time).getTime() - now;
       if (startsIn <= 0) continue;
@@ -238,14 +312,17 @@ function EventReminderNotifier() {
       // neither repeats.
       m.set(`${claim.claim_id}:${tier.hours}`, {
         title: `${claim.event_title} in ${tier.label}`,
-        body: `You're claimed for ${claim.position}.`,
+        // `position` is optional — support can be requested without naming one.
+        body: claim.position
+          ? `You're claimed for ${claim.position}.`
+          : `You're claimed for a position.`,
         route: `/planning/events/${claim.event_id}`,
       });
     }
     return m;
-  }, [claims.data]);
+  }, [claims.data, now]);
 
-  useNewKeys(due, !claims.isPending, "eventReminders", enabled);
+  useNewKeys(due, claims.isSuccess, "eventReminders", enabled);
   return null;
 }
 

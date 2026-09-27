@@ -15,8 +15,8 @@ import {
 import {flightStatus} from "@/lib/status";
 import {hhmmZulu} from "@/lib/time";
 import {Ladder} from "@/pages/fca/ladder";
-import {DesktopOnly} from "@/components/desktop-only";
-import {openPopout} from "@/lib/popout";
+import {can} from "@/lib/platform";
+import {openPopout, popoutSpecs} from "@/lib/popout";
 
 function fmtDelay(min: number): string {
   if (min <= 0) return "";
@@ -295,23 +295,17 @@ export function FcaDetail({
             <div className="mb-2 flex items-center gap-2">
               <span className="text-xs font-semibold text-ink-2">Metering ladder · metered crossing</span>
               {/* Float the ladder over CRC/vATIS/charts. Desktop only (#349). */}
-              <DesktopOnly>
+              {can("miniWindows") && (
                 <Button
                   size="icon"
                   variant="ghost"
                   className="ml-auto size-6 text-ink-3 hover:text-ink"
                   title="Pop out into a floating window"
-                  onClick={() =>
-                    void openPopout({
-                      id: `fca-${fca.id}`,
-                      title: `${fca.name} · metering`,
-                      route: `/popout/fca/${fca.id}`,
-                    })
-                  }
+                  onClick={() => void openPopout(popoutSpecs.fcaLadder(fca.id, fca.name))}
                 >
                   <PictureInPicture2 className="size-3.5" />
                 </Button>
-              </DesktopOnly>
+              )}
             </div>
             <Ladder flights={list} now={now} />
           </div>

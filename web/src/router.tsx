@@ -6,10 +6,7 @@ import {FeedWatcher} from "@/components/feed-watcher";
 import {AppShell} from "@/components/shell/app-shell";
 import type {RouteMeta} from "@/components/shell/page-meta";
 import {RestrictionAlerts} from "@/components/restriction-alerts";
-import {NotificationClicks} from "@/components/notification-clicks";
-import {DesktopNotifiers} from "@/components/desktop-notifiers";
-import {DesktopTray} from "@/components/desktop-tray";
-import {DesktopHotkeys} from "@/components/desktop-hotkeys";
+import {PrimaryWindowFeatures} from "@/components/primary-window-features";
 import {WhatsNew} from "@/components/whats-new";
 import {useMe} from "@/lib/auth";
 import {movedPath} from "@/lib/moved-paths";
@@ -101,13 +98,15 @@ function RootLayout() {
   }
   return (
     <>
+      {/* In-app and per-window: a toast or an alert is only visible in the window it fires in, so
+          a controller working in a route window (#350) still needs to see these. */}
       <FeedWatcher />
       <RestrictionAlerts />
-      <NotificationClicks />
-      <DesktopNotifiers />
-      <DesktopTray />
-      <DesktopHotkeys />
       <WhatsNew />
+      {/* OS-global, so once per app rather than once per window: mounted in every window, a
+          notification fired per window and every window raced to rebuild the one tray menu. The
+          group keeps its own window gate, so that gate is covered by a test. */}
+      <PrimaryWindowFeatures />
       <AppShell>
         <Outlet />
       </AppShell>
@@ -205,6 +204,10 @@ const fcaRoute = createRoute({
   path: "fca",
   component: FcaPage,
   staticData: { layout: "full", title: "FCA flow" },
+  // `?fca=<id>` selects that FCA on arrival — a desktop release/metering notification links here.
+  validateSearch: (search: Record<string, unknown>): { fca?: string } => ({
+    fca: typeof search.fca === "string" && search.fca ? search.fca : undefined,
+  }),
 });
 
 const runwayRoute = createRoute({

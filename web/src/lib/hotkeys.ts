@@ -86,12 +86,15 @@ const MODIFIERS = new Set([
  * Whether an accelerator carries at least one modifier.
  *
  * A modifier-less shortcut is *global*: bind `O` and OIS reacts every time you type the letter O in
- * any application, including the field you typed it into. That is never what someone means, so it
+ * any application, including the field you typed it into. `Shift` alone is the same thing with a
+ * capital letter, so it doesn't count. That is never what someone means, so it
  * is refused with a reason rather than registered and left to cause confusion.
  */
 export function hasModifier(accelerator: string): boolean {
   const parts = accelerator.split("+").map((p) => p.trim().toLowerCase()).filter(Boolean);
-  return parts.length > 1 && parts.slice(0, -1).some((p) => MODIFIERS.has(p));
+  // Shift alone doesn't count: Shift+O is just a capital O, so it would take that letter away from
+  // every application on the machine (VATUSA/OIS#352 review).
+  return parts.length > 1 && parts.slice(0, -1).some((p) => MODIFIERS.has(p) && p !== "shift");
 }
 
 /** Per-shortcut outcome, so settings can show which ones the OS actually gave us. */
@@ -104,24 +107,52 @@ export type HotkeyResult = {
 };
 
 /**
+ * Registration runs one call at a time. An apply is a sequence of `register` calls; overlapping it
+ * with a suspend's `unregisterAll` (or another apply) let the rest of the sequence register after
+ * everything had been released (VATUSA/OIS#352 review).
+ */
+let queue: Promise<unknown> = Promise.resolve();
+
+function enqueue<T>(work: () => Promise<T>): Promise<T> {
+  const run = queue.then(work);
+  queue = run.catch(() => undefined);
+  return run;
+}
+
+/**
+ * True while a settings field anywhere is recording a new shortcut. Only meaningful in the window
+ * that owns the registrations — see {@link ownHotkeys}.
+ */
+let suspended = false;
+
+/**
  * Replaces every registered shortcut with the given bindings.
  *
  * Unregisters everything first: editing one binding must not leave the previous key combination
  * live, which is the bug people notice weeks later when an old shortcut still fires.
  *
+ * Registers nothing while shortcuts are suspended — checked before every `register`, so a suspend
+ * that arrives part-way through an apply stops the rest of it too.
+ *
  * A no-op on the web build. Never throws — a shortcut that can't be taken is reported, not fatal.
  */
-export async function applyHotkeys(
+export function applyHotkeys(
   bindings: Partial<Record<HotkeyAction, string>>,
 ): Promise<HotkeyResult[]> {
-  if (!can("globalHotkeys")) return [];
+  if (!can("globalHotkeys")) return Promise.resolve([]);
+  return enqueue(() => registerAll(bindings));
+}
 
+async function registerAll(
+  bindings: Partial<Record<HotkeyAction, string>>,
+): Promise<HotkeyResult[]> {
   try {
     const {register, unregisterAll} = await import("@tauri-apps/plugin-global-shortcut");
     await unregisterAll();
 
     const results: HotkeyResult[] = [];
     for (const {action} of HOTKEY_ACTIONS) {
+      if (suspended) return results; // a field started recording: leave the combinations free
       const accelerator = normalizeAccelerator(bindings[action]);
       // An unset shortcut is not a failure — it is the default, and nobody should have a global
       // key combination taken from them by installing an update.
@@ -150,13 +181,76 @@ export async function applyHotkeys(
   }
 }
 
-/** Releases every shortcut — used when the feature is switched off. */
-export async function clearHotkeys(): Promise<void> {
+/** Releases every shortcut — used when the feature is switched off, and while one is recorded. */
+export function clearHotkeys(): Promise<void> {
+  if (!can("globalHotkeys")) return Promise.resolve();
+  return enqueue(async () => {
+    try {
+      const {unregisterAll} = await import("@tauri-apps/plugin-global-shortcut");
+      await unregisterAll();
+    } catch {
+      // Nothing registered.
+    }
+  });
+}
+
+/**
+ * Suspending and resuming are app-wide events rather than calls, because the settings field that
+ * asks may be in a different window from the one that owns the shortcuts. As in-window calls, a
+ * field in a route window (#350) released every shortcut and its "take them back" never reached the
+ * main window, so all of them stayed dead (VATUSA/OIS#352 review).
+ */
+const SUSPEND_EVENT = "ois://hotkeys/suspend";
+const RESUME_EVENT = "ois://hotkeys/resume";
+
+async function broadcast(event: string): Promise<void> {
   if (!can("globalHotkeys")) return;
   try {
-    const {unregisterAll} = await import("@tauri-apps/plugin-global-shortcut");
-    await unregisterAll();
+    const {emit} = await import("@tauri-apps/api/event");
+    await emit(event);
   } catch {
-    // Nothing registered.
+    // No shell to tell; nothing is registered either.
+  }
+}
+
+/**
+ * Hands every combination back to the OS while a new one is being recorded.
+ *
+ * A registered global shortcut is swallowed by the OS before the webview sees it, so pressing the
+ * combination that is *already* bound — the obvious thing to do when moving it to another action —
+ * would fire the old shortcut and record nothing.
+ */
+export function suspendHotkeys(): Promise<void> {
+  return broadcast(SUSPEND_EVENT);
+}
+
+/** Recording finished: asks the owner to register the (possibly changed) bindings again. */
+export function resumeHotkeys(): Promise<void> {
+  return broadcast(RESUME_EVENT);
+}
+
+/**
+ * Makes this window the owner of the shortcuts' suspend/resume: suspending releases everything and
+ * holds it released; resuming lifts that and calls `onResume`, which should re-read the bindings —
+ * a field in another window may just have changed one. Returns a disposer.
+ */
+export async function ownHotkeys(onResume: () => void): Promise<() => void> {
+  if (!can("globalHotkeys")) return () => undefined;
+  try {
+    const {listen} = await import("@tauri-apps/api/event");
+    const offSuspend = await listen(SUSPEND_EVENT, () => {
+      suspended = true;
+      void clearHotkeys();
+    });
+    const offResume = await listen(RESUME_EVENT, () => {
+      suspended = false;
+      onResume();
+    });
+    return () => {
+      offSuspend();
+      offResume();
+    };
+  } catch {
+    return () => undefined;
   }
 }

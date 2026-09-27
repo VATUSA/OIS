@@ -163,3 +163,12 @@ describe("refusing a shortcut that would fire while you type", () => {
     expect(result!.reason).toBe("unavailable");
   });
 });
+
+describe("hasModifier and Shift (VATUSA/OIS#352 review)", () => {
+  // Shift+O is a capital O: bound globally it would take that letter from every application.
+  it("does not count Shift alone as a modifier", () => {
+    expect(hasModifier("Shift+O")).toBe(false);
+    expect(hasModifier("Shift+Control+O")).toBe(true);
+    expect(hasModifier("Alt+Shift+F2")).toBe(true);
+  });
+});

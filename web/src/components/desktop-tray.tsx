@@ -4,11 +4,13 @@ import {useFeedStatus} from "@/lib/feed";
 import {can} from "@/lib/platform";
 import {useSetting} from "@/lib/settings";
 import {removeTray, showMainWindow, syncTray} from "@/lib/tray";
-import {useTmis} from "@/lib/tmu";
+import {isActiveTmi, useTmis} from "@/lib/tmu";
 
 /**
- * Keeps the menu-bar tray in step with the app (#351), hides to it instead of quitting, and
- * reconciles the login item.
+ * Keeps the menu-bar tray in step with the app (#351), and hides to it instead of quitting.
+ *
+ * Launching at login is not here: it is a property of this computer, read and written straight
+ * from the OS by its settings row (`useLoginItem`), never reconciled at launch.
  *
  * Headless, mounted once in the root layout. The status comes from the *same* hooks the dashboard
  * tiles read, so the tray can't drift from what's on screen.
@@ -23,31 +25,34 @@ export function DesktopTray() {
 function DesktopTrayInner() {
   const {value: trayEnabled} = useSetting<boolean>("tray.show", false);
   const {value: closeToTray} = useSetting<boolean>("tray.closeToTray", false);
-  const {value: launchAtLogin} = useSetting<boolean>("tray.launchAtLogin", false);
 
   return (
     <>
       {/* Only mounted when the tray is on: it opens polling queries, and someone who never turns
           the tray on shouldn't pay for them. Unmounting takes the icon away. */}
       {trayEnabled ? <TrayStatus /> : <TrayAbsent />}
-      <CloseToTray enabled={closeToTray} />
-      <LaunchAtLogin enabled={launchAtLogin} />
+      {/* Hiding to the tray needs the tray: with the icon off, a hidden window had no way back and
+          no Quit — on Windows and Linux there is no dock to click (VATUSA/OIS#351 review). */}
+      <CloseToTray enabled={closeToTray && trayEnabled} />
     </>
   );
 }
 
 /** Pushes the live numbers into the tray whenever they move. */
 function TrayStatus() {
-  const feed = useFeedStatus();
+  // Polls while hidden: the window being hidden to the tray is when these numbers are read.
+  const feed = useFeedStatus({background: true});
   const tmis = useTmis();
+  // Live TMIs only — the dashboard's count, not every TMI the list endpoint returns.
+  const activeTmis = tmis.data?.filter(isActiveTmi).length;
 
   React.useEffect(() => {
     void syncTray({
       pilots: feed.data?.pilots,
-      activeTmis: tmis.data?.length,
+      activeTmis,
       feedHealthy: feed.data?.healthy,
     });
-  }, [feed.data?.pilots, feed.data?.healthy, tmis.data?.length]);
+  }, [feed.data?.pilots, feed.data?.healthy, activeTmis]);
 
   return null;
 }
@@ -66,14 +71,8 @@ function TrayAbsent() {
  * Main window only: #350's route windows use `onCloseRequested` to forget themselves, and
  * intercepting those would leave windows the user cannot close.
  */
-function CloseToTray({enabled}: {enabled: boolean}) {
+export function CloseToTray({enabled}: {enabled: boolean}) {
   React.useEffect(() => {
-    // Turning this off while the window is hidden would strand the user with no way back.
-    if (!enabled) {
-      void showMainWindow();
-      return;
-    }
-
     let dispose: (() => void) | undefined;
     let cancelled = false;
 
@@ -81,7 +80,17 @@ function CloseToTray({enabled}: {enabled: boolean}) {
       try {
         const {getCurrentWindow} = await import("@tauri-apps/api/window");
         const win = getCurrentWindow();
+        // Both branches below are about the MAIN window. The check has to come first: this
+        // component mounts in every non-embed window, so an unguarded `showMainWindow()` meant
+        // every route window (#350) dragged focus back to the main one as it opened — on the
+        // default settings, since closeToTray is off by default.
         if (win.label !== "main") return;
+
+        // Turning this off while the window is hidden would strand the user with no way back.
+        if (!enabled) {
+          await showMainWindow();
+          return;
+        }
 
         const unlisten = await win.onCloseRequested((event) => {
           event.preventDefault();
@@ -98,29 +107,6 @@ function CloseToTray({enabled}: {enabled: boolean}) {
       cancelled = true;
       dispose?.();
     };
-  }, [enabled]);
-
-  return null;
-}
-
-/**
- * Reconciles the OS login item with the setting.
- *
- * Reconciled rather than set blindly: the user may have removed the login item themselves, and
- * writing it back on every launch would be us overruling that.
- */
-function LaunchAtLogin({enabled}: {enabled: boolean}) {
-  React.useEffect(() => {
-    void (async () => {
-      try {
-        const {enable, disable, isEnabled} = await import("@tauri-apps/plugin-autostart");
-        const already = await isEnabled();
-        if (enabled && !already) await enable();
-        if (!enabled && already) await disable();
-      } catch {
-        // No autostart on this platform, or it refused; the setting simply doesn't take effect.
-      }
-    })();
   }, [enabled]);
 
   return null;

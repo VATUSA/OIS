@@ -29,7 +29,8 @@ export type NotifiableAlert = {
   lines: string[];
 };
 
-function routeFor(key: string): string {
+/** Where clicking a restriction's notification lands: the TMU tab that lists that kind. */
+export function routeFor(key: string): string {
   const tab = TAB_BY_PREFIX[key.split(":")[0] ?? ""] ?? "restrictions";
   return `/ops/tmu?tab=${tab}`;
 }

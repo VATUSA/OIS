@@ -1,17 +1,18 @@
 // @vitest-environment jsdom
 import {afterEach, beforeEach, describe, expect, it, vi} from "vitest";
 
-import {syncTray, trayStatusRows, trayTooltip} from "./tray";
+import {removeTray, syncTray, trayStatusRows, trayTooltip} from "./tray";
 
 const menuNew = vi.fn();
 const trayNew = vi.fn();
 const getById = vi.fn();
+const removeById = vi.fn();
 
 vi.mock("@tauri-apps/api/tray", () => ({
   TrayIcon: {
     new: (o: unknown) => trayNew(o),
     getById: (id: string) => getById(id),
-    removeById: vi.fn(),
+    removeById: (id: string) => removeById(id),
   },
 }));
 vi.mock("@tauri-apps/api/menu", () => ({Menu: {new: (o: unknown) => menuNew(o)}}));
@@ -131,5 +132,71 @@ describe("when the tray cannot actually be seen", () => {
     expect(warn).toHaveBeenCalled();
 
     warn.mockRestore();
+  });
+});
+
+describe("menu lifetime", () => {
+  /**
+   * `setMenu` does not dispose of the menu it replaces, and a fresh one is built on every status
+   * change — the pilot count moves about every 30s — so without an explicit close a full event
+   * leaves hundreds of live native menu handles behind.
+   */
+  it("closes the menu it replaced", async () => {
+    pretendDesktop();
+
+    const firstClose = vi.fn().mockResolvedValue(undefined);
+    const secondClose = vi.fn().mockResolvedValue(undefined);
+    menuNew.mockResolvedValueOnce({close: firstClose}).mockResolvedValueOnce({close: secondClose});
+
+    // First sync creates the tray and keeps its menu.
+    getById.mockResolvedValue(null);
+    await syncTray(LIVE);
+    expect(firstClose).not.toHaveBeenCalled();
+
+    // Second sync updates the existing tray, so the first menu is now unreferenced.
+    const existing = {setTooltip: vi.fn(), setMenu: vi.fn()};
+    getById.mockResolvedValue(existing);
+    await syncTray({...LIVE, pilots: 1205});
+
+    expect(existing.setMenu).toHaveBeenCalledTimes(1);
+    expect(firstClose).toHaveBeenCalledTimes(1);
+    expect(secondClose).not.toHaveBeenCalled();
+  });
+});
+
+describe("one tray, however the syncs overlap (VATUSA/OIS#351 review)", () => {
+  /** A menu bar that, like Tauri's, holds whatever it is given — duplicate ids included. */
+  function trackIcons() {
+    const icons: string[] = [];
+    getById.mockImplementation(async (id: string) => (icons.includes(id) ? {setTooltip: vi.fn(), setMenu: vi.fn()} : null));
+    trayNew.mockImplementation(async (o: {id: string}) => void icons.push(o.id));
+    removeById.mockImplementation(async (id: string) => {
+      const at = icons.indexOf(id);
+      if (at >= 0) icons.splice(at, 1);
+    });
+    return icons;
+  }
+
+  // At startup the status effect fires again as each list resolves; overlapping syncs each saw no
+  // icon and each created one.
+  it("creates a single icon when syncs overlap", async () => {
+    pretendDesktop();
+    const icons = trackIcons();
+
+    await Promise.all([syncTray({}), syncTray(LIVE), syncTray({...LIVE, pilots: 1300})]);
+
+    expect(icons).toEqual(["ois-tray"]);
+    expect(trayNew).toHaveBeenCalledTimes(1);
+  });
+
+  it("does not bring the icon back from a sync queued before it was turned off", async () => {
+    pretendDesktop();
+    const icons = trackIcons();
+
+    const pending = syncTray(LIVE);
+    const removed = removeTray();
+    await Promise.all([pending, removed]);
+
+    expect(icons).toEqual([]);
   });
 });

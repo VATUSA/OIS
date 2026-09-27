@@ -1,3 +1,5 @@
+import * as React from "react";
+
 import {can} from "@/lib/platform";
 import {openRouteWindow} from "@/lib/popout";
 
@@ -25,6 +27,14 @@ export type TrayStatus = {
 
 /** The tray is a singleton; reusing the id means a re-sync updates it instead of stacking icons. */
 const TRAY_ID = "ois-tray";
+
+/**
+ * The menu currently attached to the tray, so the one it replaces can be closed.
+ *
+ * `setMenu` does not dispose of the outgoing menu — it is a native resource held by the webview
+ * that built it — and a fresh one is built on every status change.
+ */
+let current: {close?: () => Promise<void>} | undefined;
 
 /** Where the quick links go. Chosen with you: the pages a controller actually lives in. */
 const QUICK_LINKS: {label: string; route: string}[] = [
@@ -63,18 +73,45 @@ export function trayStatusRows(status: TrayStatus): string[] {
 }
 
 /**
+ * Tray work runs one call at a time. The status effect fires several times at startup as the feed
+ * and TMI lists resolve, and two overlapping syncs each saw no icon and each created one: Tauri
+ * does not keep tray ids unique, so two icons appeared, later syncs updated only the first, and
+ * removing the tray left the second behind (VATUSA/OIS#351 review).
+ */
+let queue: Promise<unknown> = Promise.resolve();
+
+function enqueue<T>(work: () => Promise<T>): Promise<T> {
+  const run = queue.then(work);
+  queue = run.catch(() => undefined);
+  return run;
+}
+
+/**
  * Creates the tray if it isn't there, then updates its tooltip and menu to match `status`.
  *
  * A no-op on the web build. Never throws: a tray that fails to build must not take down the app
  * around it.
  */
-export async function syncTray(status: TrayStatus): Promise<boolean> {
-  if (!can("tray")) return false;
+export function syncTray(status: TrayStatus): Promise<boolean> {
+  if (!can("tray")) return Promise.resolve(false);
+  return enqueue(() => applyTray(status));
+}
 
+async function applyTray(status: TrayStatus): Promise<boolean> {
   try {
     const {TrayIcon} = await import("@tauri-apps/api/tray");
     const {Menu} = await import("@tauri-apps/api/menu");
     const {defaultWindowIcon} = await import("@tauri-apps/api/app");
+
+    const existing = await TrayIcon.getById(TRAY_ID);
+    // Checked before a menu is built, so a missing icon doesn't leak one menu per retry.
+    const icon = existing ? undefined : ((await defaultWindowIcon()) ?? undefined);
+    if (!existing && !icon) {
+      // A tray icon with no image is invisible on macOS — the menu bar shows nothing at all, which
+      // reads as "the feature is broken" rather than "the icon is missing".
+      console.warn("OIS tray: no window icon available; the menu-bar icon would be invisible");
+      return false;
+    }
 
     const menu = await Menu.new({
       items: [
@@ -92,29 +129,24 @@ export async function syncTray(status: TrayStatus): Promise<boolean> {
       ],
     });
 
-    const existing = await TrayIcon.getById(TRAY_ID);
     if (existing) {
       await existing.setTooltip(trayTooltip(status));
       await existing.setMenu(menu);
-      return true;
+    } else {
+      await TrayIcon.new({
+        id: TRAY_ID,
+        icon,
+        tooltip: trayTooltip(status),
+        menu,
+        // The menu is the whole point of the icon, so a left click should open it too.
+        menuOnLeftClick: true,
+      });
     }
-
-    const icon = (await defaultWindowIcon()) ?? undefined;
-    if (!icon) {
-      // A tray icon with no image is invisible on macOS — the menu bar shows nothing at all, which
-      // reads as "the feature is broken" rather than "the icon is missing".
-      console.warn("OIS tray: no window icon available; the menu-bar icon would be invisible");
-      return false;
-    }
-
-    await TrayIcon.new({
-      id: TRAY_ID,
-      icon,
-      tooltip: trayTooltip(status),
-      menu,
-      // The menu is the whole point of the icon, so a left click should open it too.
-      menuOnLeftClick: true,
-    });
+    // Close the menu just replaced. Each sync builds a fresh one, and the pilot count moves every
+    // ~30s, so without this a full event leaves hundreds of live menu handles behind.
+    const previous = current;
+    current = menu;
+    await previous?.close?.().catch(() => undefined);
     return true;
   } catch (error) {
     // Surfaced rather than swallowed: the first version of this hid a missing Tauri permission,
@@ -124,14 +156,24 @@ export async function syncTray(status: TrayStatus): Promise<boolean> {
   }
 }
 
-/** Takes the icon out of the menu bar, for when the user turns the setting off. */
-export async function removeTray(): Promise<void> {
-  try {
-    const {TrayIcon} = await import("@tauri-apps/api/tray");
-    await TrayIcon.removeById(TRAY_ID);
-  } catch {
-    // Not there; nothing to remove.
-  }
+/**
+ * Takes the icon out of the menu bar, for when the user turns the setting off.
+ *
+ * Queued behind any sync already in flight, so one that started before the tray was turned off
+ * can't create the icon again after it has gone.
+ */
+export function removeTray(): Promise<void> {
+  return enqueue(async () => {
+    try {
+      const {TrayIcon} = await import("@tauri-apps/api/tray");
+      await TrayIcon.removeById(TRAY_ID);
+      const previous = current;
+      current = undefined;
+      await previous?.close?.().catch(() => undefined);
+    } catch {
+      // Not there; nothing to remove.
+    }
+  });
 }
 
 /** Brings the main window back — the way back in once close-to-tray has hidden it. */
@@ -161,4 +203,45 @@ export async function quit(): Promise<void> {
   } catch {
     // Nothing sensible to do if even quitting fails.
   }
+}
+
+/**
+ * This computer's login item, read from and written to the OS (#351) — see `LoginItemControl`.
+ *
+ * `enabled` is `undefined` until the OS has answered, so the settings row never shows a guess.
+ * Setting it re-reads afterwards, so the switch reflects what the OS actually did rather than what
+ * was asked for.
+ */
+export function useLoginItem(): {enabled: boolean | undefined; setEnabled: (on: boolean) => void} {
+  const [enabled, setState] = React.useState<boolean | undefined>(undefined);
+
+  const read = React.useCallback(async () => {
+    try {
+      const {isEnabled} = await import("@tauri-apps/plugin-autostart");
+      setState(await isEnabled());
+    } catch {
+      setState(false); // No login items on this platform.
+    }
+  }, []);
+
+  React.useEffect(() => {
+    void read();
+  }, [read]);
+
+  const setEnabled = React.useCallback(
+    (on: boolean) => {
+      void (async () => {
+        try {
+          const {enable, disable} = await import("@tauri-apps/plugin-autostart");
+          await (on ? enable() : disable());
+        } catch {
+          // Refused; the re-read below shows the switch where the OS left it.
+        }
+        await read();
+      })();
+    },
+    [read],
+  );
+
+  return {enabled, setEnabled};
 }
