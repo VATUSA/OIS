@@ -13,7 +13,11 @@ import {Tooltip, TooltipContent, TooltipTrigger} from "../components/tooltip";
  * The outer edge of the app *is* the window's bounding box — no gutter, no outer rounded corners and
  * no frame shadow (#402). On the desktop app the native title bar is hidden, so a gutter here would
  * have read as a second chrome bar under it. The page's own 16px side gutters come from
- * {@link ShellContent}'s padding, not from this frame.
+ * {@link ShellContent}'s padding, and the content panel is held off the window edge by its own
+ * `mx-2 mb-2` — with the gutter gone there is nothing else to do it.
+ *
+ * `--ground` is gone from the outer element with it: the frame is the outer element's only child and
+ * stretches over the whole `h-dvh` box, so a ground fill behind it could never paint.
  */
 export function Shell({
   sidebar,
@@ -31,7 +35,7 @@ export function Shell({
   className?: string;
 }) {
   return (
-    <div className={cn("flex h-dvh bg-ground text-ink", className)}>
+    <div className={cn("flex h-dvh text-ink", className)}>
       <div className="flex min-h-0 min-w-0 flex-1 overflow-hidden bg-panel">
         {sidebar}
         <div className="flex min-w-0 flex-1 flex-col">

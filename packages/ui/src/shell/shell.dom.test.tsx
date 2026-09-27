@@ -62,7 +62,20 @@ describe("Shell chrome", () => {
 
     expect(panel, "the inner content panel should survive flattening the frame").not.toBeNull();
     expect(panel!.className).toContain("border");
+    // The inset is load-bearing now, not decoration: with the frame's gutter gone this margin is the
+    // only thing holding the content panel off the window edge, so assert it rather than just the
+    // rounding it is named after.
+    expect(panel!.className).toContain("mx-2");
+    expect(panel!.className).toContain("mb-2");
     expect(panel!.textContent).toBe("page");
+  });
+
+  it("does not paint a ground behind the frame, which would never be visible", () => {
+    // The frame is the outer element's only child and stretches over the whole h-dvh box, so a
+    // `bg-ground` out here is dead weight that reads as though a gutter were coming back.
+    const {outer} = shellParts(render(<Shell>page</Shell>));
+
+    expect(outer.className).not.toContain("bg-ground");
   });
 
   it("gets its side gutters from the content padding, not from the frame", () => {
