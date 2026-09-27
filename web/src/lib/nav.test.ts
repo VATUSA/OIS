@@ -23,6 +23,7 @@ function me(permissions: Record<string, unknown>, server_admin = false): Me {
     rating: null,
     server_admin,
     role_names: [],
+    tmu_national: false,
     permissions: permissions as Me["permissions"],
   } as Me;
 }

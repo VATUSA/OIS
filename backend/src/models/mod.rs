@@ -18,6 +18,43 @@ pub struct MeBody {
     pub permissions: Value,
     /// VATUSA member details, once synced (null until the first successful sync).
     pub vatusa: Option<VatusaProfile>,
+    /// True when the member holds `tmu.program.read` nationally — a DCC/national user who should see
+    /// restrictions from every ARTCC, not only their own. `permissions` is a flat name tree with no
+    /// ARTCC dimension, so without this the client can't tell the two apart (#405).
+    pub tmu_national: bool,
+}
+
+/// One ACE position the signed-in user has claimed, for an event still to come.
+///
+/// Exists so a client can answer "is this reminder about me?" — the realtime nudge that precedes it
+/// is payload-free by design, because it is broadcast to every signed-in client (#348).
+#[derive(Debug, Serialize, ToSchema, sqlx::FromRow)]
+pub struct MyAceClaim {
+    pub claim_id: String,
+    pub event_id: i64,
+    pub event_title: String,
+    pub start_time: DateTime<Utc>,
+    /// Nullable in `ace.requests` — support can be requested without naming a position — so this
+    /// has to be optional. A non-Option String made `query_as` fail to decode for any user holding
+    /// such a claim, turning /api/v1/me/ace-claims into a permanent 500 for them (#348).
+    pub position: Option<String>,
+}
+
+/// What the desktop app posts to trade its one-time OAuth code for a session token (#346).
+#[derive(Debug, Deserialize, ToSchema)]
+pub struct DesktopExchangeRequest {
+    /// The single-use code the OAuth callback handed to the app's loopback listener.
+    pub code: String,
+}
+
+/// A desktop session token and when it stops working.
+///
+/// Sent as `Authorization: Bearer <token>`; the app keeps it in the OS keychain. `expires_at` lets
+/// it refresh ahead of time rather than waiting to be surprised by a 401.
+#[derive(Debug, Serialize, ToSchema)]
+pub struct DesktopSessionBody {
+    pub token: String,
+    pub expires_at: DateTime<Utc>,
 }
 
 /// A signed-in member's VATUSA details, surfaced on their profile.
@@ -289,6 +326,13 @@ pub struct TmiBody {
     pub requesting: String,
     /// Providing facility (ARTCC/TRACON).
     pub providing: String,
+    /// The ARTCCs over `requesting`/`providing`, resolved live from the facility map at request time
+    /// (a TRACON resolves to its centre); null when the map doesn't know the facility. A centre cares
+    /// about a TMI from either side, so both are carried (#405).
+    #[sqlx(default)]
+    pub requesting_artcc: Option<String>,
+    #[sqlx(default)]
+    pub providing_artcc: Option<String>,
     /// The canonical raw NTML line (typed directly, or encoded from `structured`).
     pub restriction: String,
     pub start_time: DateTime<Utc>,
@@ -455,6 +499,10 @@ pub struct DeparturesResponse {
 pub struct GroundStopBody {
     pub id: String,
     pub airport: String,
+    /// The ARTCC that owns `airport`, resolved live from the facility map at request time; null when
+    /// the map doesn't know the field. Lets a client scope alerts to its own centre (#405).
+    #[sqlx(default)]
+    pub artcc: Option<String>,
     /// Space-separated ARTCC/FIR codes; empty = every departure (field-wide).
     pub scope: String,
     /// HHMM Zulu clock time the stop runs until; null = until further notice.
@@ -481,6 +529,10 @@ pub struct CreateGroundStopRequest {
 pub struct GdpBody {
     pub id: String,
     pub airport: String,
+    /// The ARTCC that owns `airport`, resolved live from the facility map at request time; null when
+    /// the map doesn't know the field. Lets a client scope alerts to its own centre (#405).
+    #[sqlx(default)]
+    pub artcc: Option<String>,
     /// Airport Acceptance Rate (arrivals/hour) the program meters to.
     pub aar: i32,
     /// Space-separated departure ARTCC codes in scope; empty = all departures.
@@ -2058,6 +2110,10 @@ pub struct GateRule {
 #[derive(Debug, Serialize, ToSchema, sqlx::FromRow)]
 pub struct ProgramBody {
     pub icao: String,
+    /// The ARTCC that owns `icao`, resolved live from the facility map at request time; null when the
+    /// map doesn't know the field. Lets a client scope alerts to its own centre (#405).
+    #[sqlx(default)]
+    pub artcc: Option<String>,
     pub aar: i32,
     /// Airport-wide minutes-in-trail default.
     pub trail: i32,

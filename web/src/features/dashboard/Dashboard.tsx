@@ -70,6 +70,7 @@ export function Dashboard({ boardId }: { boardId: string }) {
         <EmptyBoard editing={editing} onStart={() => setEditing(true)} />
       ) : (
         <DashboardGrid
+          boardId={boardId}
           state={state}
           editing={editing}
           onLayoutChange={setLayout}

@@ -52,6 +52,23 @@ export const FLIGHT_STATE_LABEL: Record<string, string> = {
 };
 
 /** An audit action's tone, from its verb. */
+/**
+ * A crossing flight's state tone, label and CSS colour (unknown states read as ground).
+ *
+ * Lives here rather than beside the ladder because both the FCA strip list and the metering ladder
+ * need it, and the ladder is now rendered from two places (the detail panel and a pop-out window).
+ */
+export function flightStatus(s: string): { tone: Tone; label: string; color: string } {
+  const known = toneOf("flight", s) !== "neutral";
+  const state = known ? s : "ground";
+  return {
+    tone: toneOf("flight", state),
+    label: FLIGHT_STATE_LABEL[state]!,
+    color: `var(--flight-${state})`,
+  };
+}
+
+/** An audit action's tone, from its verb. */
 export function auditActionTone(action: string): Tone {
   const a = action.toLowerCase();
   if (/(create|assign|grant|add|publish|activat)/.test(a)) return "good";

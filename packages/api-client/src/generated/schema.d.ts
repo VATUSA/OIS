@@ -564,6 +564,53 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/v1/auth/desktop/exchange": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Trades the one-time code from the OAuth callback for a desktop session token.
+         * @description Public, like the OAuth callback itself — the code *is* the credential, and it is single-use and
+         *     short-lived. Unknown, expired and already-consumed codes are all reported identically so a probe
+         *     learns nothing from which it hit.
+         */
+        post: operations["desktop_exchange"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/auth/desktop/refresh": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Rotates the caller's desktop session, returning a new token and extending the expiry.
+         * @description Authenticated by the token being rotated — no permission gate, because holding a live desktop
+         *     session is the whole claim being made. Rotation means a token that leaked stops working as soon
+         *     as the app next refreshes.
+         *
+         *     Only `kind = 'desktop'` rows rotate: a stolen browser cookie cannot be traded up for a
+         *     long-lived keychain credential.
+         */
+        post: operations["desktop_refresh"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/v1/auth/logout": {
         parameters: {
             query?: never;
@@ -1942,6 +1989,28 @@ export interface paths {
             cookie?: never;
         };
         get: operations["me"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/me/ace-claims": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * The signed-in user's claimed ACE positions for events still to come.
+         * @description Gated on the existing claim permission — if you can claim a position, you can see the ones you
+         *     hold — so no new permission marker is introduced. Scoped to the session user; the request never
+         *     names whose claims to return.
+         */
+        get: operations["my_ace_claims"];
         put?: never;
         post?: never;
         delete?: never;
@@ -3709,6 +3778,22 @@ export interface components {
             to_metered: number;
             total: number;
         };
+        /** @description What the desktop app posts to trade its one-time OAuth code for a session token (#346). */
+        DesktopExchangeRequest: {
+            /** @description The single-use code the OAuth callback handed to the app's loopback listener. */
+            code: string;
+        };
+        /**
+         * @description A desktop session token and when it stops working.
+         *
+         *     Sent as `Authorization: Bearer <token>`; the app keeps it in the OS keychain. `expires_at` lets
+         *     it refresh ahead of time rather than waiting to be surprised by a 401.
+         */
+        DesktopSessionBody: {
+            /** Format: date-time */
+            expires_at: string;
+            token: string;
+        };
         /**
          * @description Bot interaction callback: a Discord user submitted the claim modal on an ACE request. The backend
          *     resolves the Discord id to the linked OIS user and claims a slot on their behalf. `start_hhmm` /
@@ -4486,6 +4571,11 @@ export interface components {
             /** @description Rate changes across the window (empty = flat AAR). */
             aar_steps: components["schemas"]["AarStep"][];
             airport: string;
+            /**
+             * @description The ARTCC that owns `airport`, resolved live from the facility map at request time; null when
+             *     the map doesn't know the field. Lets a client scope alerts to its own centre (#405).
+             */
+            artcc?: string | null;
             /** @description HHMM Zulu program window end. */
             end_time: string;
             exempt_airborne: boolean;
@@ -4580,6 +4670,11 @@ export interface components {
         /** @description A ground stop: holds departures into `airport` from within `scope` until `until`. */
         GroundStopBody: {
             airport: string;
+            /**
+             * @description The ARTCC that owns `airport`, resolved live from the facility map at request time; null when
+             *     the map doesn't know the field. Lets a client scope alerts to its own centre (#405).
+             */
+            artcc?: string | null;
             id: string;
             /** Format: date-time */
             published_at?: string | null;
@@ -4708,7 +4803,33 @@ export interface components {
             rating?: string | null;
             role_names: string[];
             server_admin: boolean;
+            /**
+             * @description True when the member holds `tmu.program.read` nationally — a DCC/national user who should see
+             *     restrictions from every ARTCC, not only their own. `permissions` is a flat name tree with no
+             *     ARTCC dimension, so without this the client can't tell the two apart (#405).
+             */
+            tmu_national: boolean;
             vatusa?: null | components["schemas"]["VatusaProfile"];
+        };
+        /**
+         * @description One ACE position the signed-in user has claimed, for an event still to come.
+         *
+         *     Exists so a client can answer "is this reminder about me?" — the realtime nudge that precedes it
+         *     is payload-free by design, because it is broadcast to every signed-in client (#348).
+         */
+        MyAceClaim: {
+            claim_id: string;
+            /** Format: int64 */
+            event_id: number;
+            event_title: string;
+            /**
+             * @description Nullable in `ace.requests` — support can be requested without naming a position — so this
+             *     has to be optional. A non-Option String made `query_as` fail to decode for any user holding
+             *     such a claim, turning /api/v1/me/ace-claims into a permanent 500 for them (#348).
+             */
+            position?: string | null;
+            /** Format: date-time */
+            start_time: string;
         };
         /** @description A minimal `{ name }` body for creating/renaming collections + share responses. */
         NameRequest: {
@@ -4782,6 +4903,11 @@ export interface components {
              * @description Scheduled end; null = indefinite. Auto-removed an hour after this time.
              */
             active_until?: string | null;
+            /**
+             * @description The ARTCC that owns `icao`, resolved live from the facility map at request time; null when the
+             *     map doesn't know the field. Lets a client scope alerts to its own centre (#405).
+             */
+            artcc?: string | null;
             exclude_types: string[];
             exclude_wake: string[];
             gates: components["schemas"]["GateRule"][];
@@ -5495,10 +5621,17 @@ export interface components {
             id: string;
             /** @description Providing facility (ARTCC/TRACON). */
             providing: string;
+            providing_artcc?: string | null;
             /** Format: date-time */
             published_at?: string | null;
             /** @description Requesting facility (ARTCC/TRACON). */
             requesting: string;
+            /**
+             * @description The ARTCCs over `requesting`/`providing`, resolved live from the facility map at request time
+             *     (a TRACON resolves to its centre); null when the map doesn't know the facility. A centre cares
+             *     about a TMI from either side, so both are carried (#405).
+             */
+            requesting_artcc?: string | null;
             /** @description The canonical raw NTML line (typed directly, or encoded from `structured`). */
             restriction: string;
             /** Format: date-time */
@@ -7448,6 +7581,64 @@ export interface operations {
                 content?: never;
             };
             404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+        };
+    };
+    desktop_exchange: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["DesktopExchangeRequest"];
+            };
+        };
+        responses: {
+            /** @description A desktop session token */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["DesktopSessionBody"];
+                };
+            };
+            /** @description Unknown, expired, or already-used code */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+        };
+    };
+    desktop_refresh: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description A rotated desktop session token */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["DesktopSessionBody"];
+                };
+            };
+            /** @description Not a live desktop session */
+            401: {
                 headers: {
                     [name: string]: unknown;
                 };
@@ -11322,6 +11513,37 @@ export interface operations {
                 };
             };
             401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+        };
+    };
+    my_ace_claims: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["MyAceClaim"][];
+                };
+            };
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            403: {
                 headers: {
                     [name: string]: unknown;
                 };
