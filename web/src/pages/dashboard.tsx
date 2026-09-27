@@ -6,7 +6,7 @@ import {useMe} from "@/lib/auth";
 import {useUpcomingEvents} from "@/lib/events";
 import {useFeedStatus} from "@/lib/feed";
 import {hasPermission} from "@/lib/permissions";
-import {useGroundStops, usePrograms, useTmis} from "@/lib/tmu";
+import {isActiveTmi, useGroundStops, usePrograms, useTmis} from "@/lib/tmu";
 import {formatZuluFull, hhmmZulu} from "@/lib/time";
 
 /** A card that frames one operational summary list, with a header and a "view all" link. */
@@ -174,7 +174,7 @@ function Overview() {
   const gsList = (canGroundStops ? (groundStops.data ?? []) : []).filter(
     (g) => g.status !== "cancelled" && g.status !== "expired",
   );
-  const tmiList = (canTmis ? (tmis.data ?? []) : []).filter((t) => t.status === "published");
+  const tmiList = (canTmis ? (tmis.data ?? []) : []).filter(isActiveTmi);
 
   return (
     <div className="flex flex-col gap-6">

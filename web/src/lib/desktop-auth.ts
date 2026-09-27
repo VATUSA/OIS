@@ -1,6 +1,6 @@
 import {API_BASE, ois} from "@/lib/api";
 import {getDesktopToken, setDesktopToken} from "@/lib/desktop-token";
-import {invokeDesktop, isTauri} from "@/lib/platform";
+import {invokeDesktop, isMainWindow, isTauri} from "@/lib/platform";
 
 /**
  * Desktop sign-in, refresh and sign-out (#346).
@@ -80,6 +80,19 @@ export function refreshBeforeLaunch(budgetMs = LAUNCH_REFRESH_BUDGET_MS): Promis
     ),
     new Promise<void>((resolve) => setTimeout(resolve, budgetMs)),
   ]);
+}
+
+/**
+ * The launch rotation, run only where it belongs: the desktop app's main window.
+ *
+ * Every Tauri webview loads the same entry, so without the window check each pop-out (#349) rotated
+ * on open too — and rotation deletes the presented token, leaving the main window holding a dead one
+ * with no 401 recovery path. Popping a panel out signed you out. `main.tsx` calls this rather than
+ * carrying the check itself, so the check is tested (VATUSA/OIS#349 review).
+ */
+export async function rotateOnLaunch(budgetMs = LAUNCH_REFRESH_BUDGET_MS): Promise<void> {
+  if (!isTauri() || !(await isMainWindow())) return;
+  await refreshBeforeLaunch(budgetMs);
 }
 
 /**

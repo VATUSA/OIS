@@ -1,3 +1,4 @@
+import type * as React from "react";
 import {Card, EmptyState, HotkeyInput, QueryState, Select, Switch} from "@ois/ui";
 import {LogIn} from "lucide-react";
 
@@ -6,43 +7,71 @@ import {resumeHotkeys, suspendHotkeys} from "@/lib/hotkeys";
 import {useMe} from "@/lib/auth";
 import {SETTINGS, type SettingDef} from "@/lib/settings";
 import {useSetting} from "@/lib/settings";
+import {useLoginItem} from "@/lib/tray";
 
 /** One settings row — its own component so the `useSetting` hook is called once per setting. */
 function SettingRow({ def }: { def: SettingDef }) {
-  const { value, setValue } = useSetting(def.key, def.control.default);
+  // Not an account setting — read from and written to this computer (see `LoginItemControl`).
+  if (def.control.kind === "loginItem") return <LoginItemRow def={def} />;
+  return <AccountSettingRow def={def} />;
+}
+
+function LoginItemRow({ def }: { def: SettingDef }) {
+  const { enabled, setEnabled } = useLoginItem();
+  return (
+    <SettingRowFrame def={def}>
+      <Switch
+        checked={enabled ?? false}
+        disabled={enabled === undefined}
+        onCheckedChange={setEnabled}
+        aria-label={def.label}
+      />
+    </SettingRowFrame>
+  );
+}
+
+function SettingRowFrame({ def, children }: { def: SettingDef; children: React.ReactNode }) {
   return (
     <div className="flex items-center justify-between gap-4 border-b border-line-soft py-3 last:border-b-0">
       <div className="min-w-0">
         <div className="text-sm font-semibold text-ink">{def.label}</div>
         {def.description && <p className="mt-0.5 text-xs leading-snug text-ink-2">{def.description}</p>}
       </div>
-      <div className="shrink-0">
-        {def.control.kind === "toggle" ? (
-          <Switch checked={value as boolean} onCheckedChange={(v) => setValue(v)} aria-label={def.label} />
-        ) : def.control.kind === "hotkey" ? (
-          <HotkeyInput
-            value={value as string}
-            placeholder={def.control.placeholder}
-            onChange={(v) => setValue(v)}
-            // Hand the live shortcuts back while recording: a registered combination is swallowed
-            // by the OS, so rebinding one to another action would otherwise be impossible.
-            onCaptureChange={(capturing) => {
-              if (capturing) void suspendHotkeys();
-              else resumeHotkeys();
-            }}
-            aria-label={def.label}
-          />
-        ) : (
-          <Select value={value as string} onChange={(e) => setValue(e.target.value)} aria-label={def.label}>
-            {def.control.options.map((o) => (
-              <option key={o.value} value={o.value}>
-                {o.label}
-              </option>
-            ))}
-          </Select>
-        )}
-      </div>
+      <div className="shrink-0">{children}</div>
     </div>
+  );
+}
+
+function AccountSettingRow({ def }: { def: SettingDef }) {
+  const control = def.control;
+  const { value, setValue } = useSetting(def.key, "default" in control ? control.default : false);
+  return (
+    <SettingRowFrame def={def}>
+      {control.kind === "hotkey" ? (
+        <HotkeyInput
+          value={value as string}
+          placeholder={control.placeholder}
+          onChange={(v) => setValue(v)}
+          // Hand the live shortcuts back while recording: a registered combination is swallowed
+          // by the OS, so rebinding one to another action would otherwise be impossible.
+          onCaptureChange={(capturing) => {
+            if (capturing) void suspendHotkeys();
+            else void resumeHotkeys();
+          }}
+          aria-label={def.label}
+        />
+      ) : control.kind === "select" ? (
+        <Select value={value as string} onChange={(e) => setValue(e.target.value)} aria-label={def.label}>
+          {control.options.map((o) => (
+            <option key={o.value} value={o.value}>
+              {o.label}
+            </option>
+          ))}
+        </Select>
+      ) : (
+        <Switch checked={value as boolean} onCheckedChange={(v) => setValue(v)} aria-label={def.label} />
+      )}
+    </SettingRowFrame>
   );
 }
 

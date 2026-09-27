@@ -2,7 +2,7 @@ import {ResponsiveGridLayout, useContainerWidth, type Layout} from "react-grid-l
 import "react-grid-layout/css/styles.css";
 
 import {WidgetBody, widgetTitle} from "./render";
-import {openPopout} from "@/lib/popout";
+import {openPopout, popoutSpecs} from "@/lib/popout";
 import {defaultCell, GRID_COLS, type DashboardState, type GridCell, type Widget} from "./types";
 import {WidgetFrame} from "./WidgetFrame";
 
@@ -56,12 +56,7 @@ export function DashboardGrid({
       onRemove={() => onRemove(w.id)}
       onPopOut={
         boardId
-          ? () =>
-              void openPopout({
-                id: `widget-${w.id}`,
-                title: widgetTitle(w),
-                route: `/popout/widget/${encodeURIComponent(boardId)}/${encodeURIComponent(w.id)}`,
-              })
+          ? () => void openPopout(popoutSpecs.widget(boardId, w.id, widgetTitle(w)))
           : undefined
       }
     >

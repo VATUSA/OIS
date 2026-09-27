@@ -28,6 +28,25 @@ export type PopoutSpec = {
   height?: number;
 };
 
+/**
+ * The pop-out for one panel.
+ *
+ * Every id is encoded into its route segment: a board, widget or FCA id containing `/`, `?` or `#`
+ * would otherwise change the shape of the URL and open the wrong page.
+ */
+export const popoutSpecs = {
+  widget: (boardId: string, widgetId: string, title: string): PopoutSpec => ({
+    id: `widget-${widgetId}`,
+    title,
+    route: `/popout/widget/${encodeURIComponent(boardId)}/${encodeURIComponent(widgetId)}`,
+  }),
+  fcaLadder: (fcaId: string, name: string): PopoutSpec => ({
+    id: `fca-${fcaId}`,
+    title: `${name} · metering`,
+    route: `/popout/fca/${encodeURIComponent(fcaId)}`,
+  }),
+};
+
 /** What differs between a floating panel and a full route window; everything else is shared. */
 type WindowKind = {
   labelPrefix: string;
@@ -194,15 +213,19 @@ async function openWindow(kind: WindowKind, spec: PopoutSpec): Promise<boolean> 
       window.clearTimeout(settle);
       settle = window.setTimeout(async () => {
         try {
-          // Tauri reports these in physical pixels; stored geometry is logical (see `Rect`).
-          const [position, outer, factor] = await Promise.all([
+          // Saved in the units the window is reopened with (see `Rect`):
+          // - Tauri reports physical pixels, and `WebviewWindow` takes logical ones.
+          // - The `width`/`height` options set the *inner* (content) size, and `x`/`y` the outer
+          //   position. Saving `outerSize` — frame and title bar included — reopened every pop-out
+          //   a title bar taller, compounding on each cycle (VATUSA/OIS#349 review).
+          const [position, inner, factor] = await Promise.all([
             win.outerPosition(),
-            win.outerSize(),
+            win.innerSize(),
             win.scaleFactor(),
           ]);
           writeGeometry(
             label,
-            toLogical({x: position.x, y: position.y, width: outer.width, height: outer.height}, factor),
+            toLogical({x: position.x, y: position.y, width: inner.width, height: inner.height}, factor),
           );
         } catch {
           // The window is probably closing; nothing to remember.
@@ -213,11 +236,8 @@ async function openWindow(kind: WindowKind, spec: PopoutSpec): Promise<boolean> 
     await win.onMoved(remember);
     await win.onResized(remember);
 
-    if (remembered) {
-      rememberWindow({id: spec.id, route: spec.route, title: spec.title});
-      // Closing a window is how the user says "not next time", so that has to stick.
-      await win.onCloseRequested(() => forgetWindow(spec.id));
-    }
+    // Forgetting it again on close is the window's own job — see `forgetOnClose`.
+    if (remembered) rememberWindow({id: spec.id, route: spec.route, title: spec.title});
 
     return true;
   } catch {
@@ -235,6 +255,35 @@ export async function closePopout(id: string): Promise<void> {
     await win?.close();
   } catch {
     // Already gone.
+  }
+}
+
+/**
+ * In a route window, forgets it when the user closes it — closing a window is how you say "not
+ * next time", so that has to stick. A no-op in every other window.
+ *
+ * Registered by the route window itself, at boot, never by the window that opened it. Tauri blocks
+ * a close while *any* webview has a JS close listener for that window, and it never drops the
+ * listeners of a webview that was destroyed or reloaded. Registered in the opener, the listener
+ * outlived it, so once main closed or reloaded the route window's close was blocked with nothing
+ * left to finish it: the window could not be closed at all (VATUSA/OIS#350 review). A route
+ * window's own listener lives and dies with the window it guards.
+ */
+export async function forgetOnClose(): Promise<void> {
+  if (!can("multiWindow")) return;
+
+  try {
+    const {getCurrentWindow} = await import("@tauri-apps/api/window");
+    const current = getCurrentWindow();
+    if (!current.label.startsWith(ROUTE.labelPrefix)) return;
+
+    await current.onCloseRequested(() => {
+      for (const win of rememberedWindows()) {
+        if (routeWindowLabel(win.id) === current.label) forgetWindow(win.id);
+      }
+    });
+  } catch {
+    // Not remembering a close means the window comes back next launch; closable either way.
   }
 }
 
