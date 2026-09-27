@@ -1,3 +1,4 @@
+import type {NotifyCategory} from "@/lib/desktop-notify";
 import {can} from "@/lib/platform";
 import {HOTKEY_ACTIONS} from "@/lib/hotkeys";
 
@@ -46,6 +47,19 @@ export interface LoginItemControl {
   kind: "loginItem";
 }
 
+/**
+ * A sound category's on/off switch, with a button to hear it (#404).
+ *
+ * The tone is replaceable but the fallback to the bundled default is silent, so a wrong folder, a
+ * wrong name, a wrong case on Linux or a codec the webview rejects all looked exactly like success.
+ * The category rides on the control so the preview can resolve the same tone an alert would.
+ */
+export interface SoundToggleControl {
+  kind: "soundToggle";
+  default: boolean;
+  category: NotifyCategory;
+}
+
 export interface SettingDef {
   /** Stable storage key, dotted by area, e.g. "map.persistView". */
   key: string;
@@ -61,7 +75,7 @@ export interface SettingDef {
   group: string;
   label: string;
   description?: string;
-  control: ToggleControl | SelectControl | HotkeyControl | LoginItemControl;
+  control: ToggleControl | SelectControl | HotkeyControl | LoginItemControl | SoundToggleControl;
 }
 
 /** The opaque per-user jsonb blob shape (key → value) stored under the "settings" namespace. */
@@ -192,7 +206,7 @@ const HOTKEY_SETTINGS: SettingDef[] = HOTKEY_ACTIONS.map(({settingKey, label}) =
 const whenSounds = () => can("audioAlerts");
 
 /** The categories that can make a noise — the same ones that can notify (#348). */
-const SOUND_CATEGORIES: {key: string; label: string}[] = [
+const SOUND_CATEGORIES: {key: NotifyCategory; label: string}[] = [
   {key: "restrictions", label: "TMIs and ground stops"},
   {key: "releases", label: "EDCT releases"},
   {key: "metering", label: "Heavy metering delay"},
@@ -211,7 +225,7 @@ const SOUND_SETTINGS: SettingDef[] = SOUND_CATEGORIES.flatMap(({key, label}) => 
     group: "Sounds",
     available: whenSounds,
     label: `Play a sound for ${label.toLowerCase()}`,
-    control: {kind: "toggle", default: false},
+    control: {kind: "soundToggle", default: false, category: key},
   },
   {
     key: `sounds.${key}.volume`,

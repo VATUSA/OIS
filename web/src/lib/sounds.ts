@@ -164,12 +164,26 @@ async function play(url: string, gain: number): Promise<boolean> {
   }
 }
 
+/** Which file was actually heard — the answer the settings preview reports (#404). */
+export type AlertSource = "replacement" | "bundled" | "none";
+
+/**
+ * Plays a category's tone: the user's replacement if there is a usable one, else the bundled default.
+ *
+ * A missing or corrupt override degrades to the standard sound rather than to silence, because
+ * silence is indistinguishable from a broken feature. The one resolution path both an alert and the
+ * settings preview go through, so "the preview plays what an alert would" is true by construction
+ * rather than by comment.
+ */
+async function playResolved(category: NotifyCategory, gain: number): Promise<AlertSource> {
+  const override = await overrideSoundUrl(category);
+  if (override && (await play(override, gain))) return "replacement";
+  if (await play(bundledSoundUrl(category), gain)) return "bundled";
+  return "none";
+}
+
 /**
  * Sounds an alert for a category, if the platform allows it and the user asked for it.
- *
- * Tries the user's replacement first and falls back to the bundled default, so a missing or
- * corrupt override degrades to the standard sound rather than to silence — silence is
- * indistinguishable from a broken feature.
  *
  * Never throws: failing to make a noise must not break the surface that triggered it.
  */
@@ -184,10 +198,25 @@ export async function playAlertSound(
   // ground stop played once per open window — the same tone, at once, near enough in phase.
   if (!(await isMainWindow())) return false;
 
-  const gain = gainFor(options.volume);
+  return (await playResolved(category, gainFor(options.volume))) !== "none";
+}
 
-  const override = await overrideSoundUrl(category);
-  if (override && (await play(override, gain))) return true;
-
-  return play(bundledSoundUrl(category), gain);
+/**
+ * Plays a category on demand from the settings page, and says which file was heard (#404).
+ *
+ * Deliberately skips three of the guards {@link playAlertSound} needs, because each of them would be
+ * wrong here:
+ *
+ * - the per-tick claim — pressing preview twice has to sound twice;
+ * - the main-window check — the settings page may be open in a route window (#350);
+ * - the category's own on/off switch — the point is to audition a tone *before* turning it on.
+ *
+ * The platform gate stays, so this is silent on the web build like everything else here.
+ */
+export async function previewAlertSound(
+  category: NotifyCategory,
+  volume?: string,
+): Promise<AlertSource> {
+  if (!can("audioAlerts")) return "none";
+  return playResolved(category, gainFor(volume));
 }

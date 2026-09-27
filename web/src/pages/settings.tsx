@@ -2,6 +2,7 @@ import type * as React from "react";
 import {Card, EmptyState, HotkeyInput, QueryState, Select, Switch} from "@ois/ui";
 import {LogIn} from "lucide-react";
 
+import {SoundPreviewButton} from "@/components/settings/sound-preview";
 import {usePageHeader} from "@/components/shell/page-meta";
 import {resumeHotkeys, suspendHotkeys} from "@/lib/hotkeys";
 import {useMe} from "@/lib/auth";
@@ -68,6 +69,12 @@ function AccountSettingRow({ def }: { def: SettingDef }) {
             </option>
           ))}
         </Select>
+      ) : control.kind === "soundToggle" ? (
+        <div className="flex items-center gap-1">
+          {/* Audition the tone without switching the category on — see `SoundPreviewButton`. */}
+          <SoundPreviewButton category={control.category} />
+          <Switch checked={value as boolean} onCheckedChange={(v) => setValue(v)} aria-label={def.label} />
+        </div>
       ) : (
         <Switch checked={value as boolean} onCheckedChange={(v) => setValue(v)} aria-label={def.label} />
       )}

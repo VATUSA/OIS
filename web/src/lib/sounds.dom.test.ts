@@ -3,6 +3,7 @@ import {beforeEach, describe, expect, it, vi} from "vitest";
 
 type Sounds = typeof import("./sounds");
 let bundledSoundUrl: Sounds["bundledSoundUrl"];
+let previewAlertSound: Sounds["previewAlertSound"];
 let gainFor: Sounds["gainFor"];
 let playAlertSound: Sounds["playAlertSound"];
 
@@ -84,7 +85,7 @@ beforeEach(async () => {
   // Decoded tones, resolved override paths and the AudioContext all live for the process by
   // design, so each case takes a fresh module rather than inheriting the last one's caches.
   vi.resetModules();
-  ({bundledSoundUrl, gainFor, playAlertSound} = await import("./sounds"));
+  ({bundledSoundUrl, gainFor, playAlertSound, previewAlertSound} = await import("./sounds"));
 });
 
 describe("volume", () => {
@@ -209,5 +210,77 @@ describe("playAlertSound", () => {
     missing = () => true;
     await expect(playAlertSound("restrictions", {enabled: true})).resolves.toBe(false);
     expect(played).toHaveLength(0);
+  });
+});
+
+/**
+ * The settings preview (#404).
+ *
+ * It exists because the fallback to the bundled tone is silent, so a replacement that can't be read
+ * looked exactly like one that works. It shares `playAlertSound`'s resolution but deliberately not its
+ * guards — each of those would be wrong for a button the user just pressed.
+ */
+describe("previewAlertSound", () => {
+  it("reports the bundled default when the replacement resolves but won't play", async () => {
+    // The case a user actually hits: a file is named, and it is unreadable or a codec the webview
+    // rejects. Without this answer the fallback is indistinguishable from success.
+    missing = (url) => url.startsWith("asset://");
+
+    await expect(previewAlertSound("restrictions")).resolves.toBe("bundled");
+    expect(played[0]!.src).toBe(bundledSoundUrl("restrictions"));
+  });
+
+  it("reports the user's own file when it plays", async () => {
+    await expect(previewAlertSound("releases")).resolves.toBe("replacement");
+    expect(played[0]!.src).toContain("asset://");
+  });
+
+  it("reports failure when nothing can be played", async () => {
+    missing = () => true;
+
+    await expect(previewAlertSound("metering")).resolves.toBe("none");
+    expect(played).toHaveLength(0);
+  });
+
+  it("stays silent on a build without audio alerts", async () => {
+    platform.audioAlerts = false;
+
+    await expect(previewAlertSound("access")).resolves.toBe("none");
+    expect(played).toHaveLength(0);
+  });
+
+  it("sounds again on a second press in the same tick", async () => {
+    // `playAlertSound`'s per-tick claim collapses a burst of detections into one sound. Pressing a
+    // button twice is two requests, not a burst, so the claim must not apply here.
+    //
+    // Warmed first, and deliberately: `overrideSoundUrl` resolves the path through a *mocked*
+    // dynamic `import()`, and ten concurrent calls to one of those fail for all but the first — the
+    // same harness artifact that let #353 ship a burst test which passed without the claim. One
+    // awaited call fills the path cache so the pair below measures the claim and nothing else.
+    await previewAlertSound("releases");
+    played = [];
+
+    const [first, second] = await Promise.all([
+      previewAlertSound("releases"),
+      previewAlertSound("releases"),
+    ]);
+
+    expect([first, second]).toEqual(["replacement", "replacement"]);
+    expect(played).toHaveLength(2);
+  });
+
+  it("plays from a route window, where the settings page can be open", async () => {
+    // An alert only sounds in the main window, or one ground stop would play once per open window
+    // (#350). A preview is asked for by the window it is pressed in.
+    platform.main = false;
+
+    await expect(previewAlertSound("eventReminders")).resolves.toBe("replacement");
+    expect(played).toHaveLength(1);
+  });
+
+  it("plays at the volume the row is set to", async () => {
+    await previewAlertSound("access", "loud");
+
+    expect(played[0]!.gain).toBe(gainFor("loud"));
   });
 });
