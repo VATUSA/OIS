@@ -272,4 +272,66 @@ mod scope_tests {
                 .is_err()
         );
     }
+
+    // --- Through the router (VATUSA/OIS#364) ---
+    //
+    // Everything above tests the helpers, which stay green when a handler stops calling them. These
+    // send real requests with a real session, so the handler's `RequirePermission<FlowFcaUpdate>`
+    // and its `require_artcc_scope` call are both on the tested path. The two gates answer
+    // differently — no permission is 401, the wrong facility 403 — so each test pins one of them.
+
+    use http::{Method, StatusCode};
+    use scope_test_support::{send, session_cookie};
+
+    const EXCLUSION: &str = "/api/v1/flow/fcas/f-zdc/exclusions/AAL1";
+
+    /// ZDC's FCA, and a session for `user`.
+    async fn routed(pool: PgPool, user: &str) -> (crate::state::AppState, String) {
+        sqlx::query("insert into flow.fca (id, name, artcc) values ('f-zdc', 'ZDC FCA', 'ZDC')")
+            .execute(&pool)
+            .await
+            .unwrap();
+        let cookie = session_cookie(&pool, user).await;
+        (state_with_zdc(pool), cookie)
+    }
+
+    fn reason() -> Option<serde_json::Value> {
+        Some(serde_json::json!({ "reason": "ghost track" }))
+    }
+
+    /// Fails if either write drops `RequirePermission`: the scope check would then answer 403.
+    #[sqlx::test]
+    async fn through_the_router_a_caller_without_the_permission_gets_401(pool: PgPool) {
+        let user = scope_test_support::seed_user(&pool).await;
+        let (state, cookie) = routed(pool, &user).await;
+        let exclude = send(&state, Method::POST, EXCLUSION, &cookie, reason()).await;
+        let restore = send(&state, Method::DELETE, EXCLUSION, &cookie, None).await;
+        assert_eq!(exclude, StatusCode::UNAUTHORIZED, "exclude");
+        assert_eq!(restore, StatusCode::UNAUTHORIZED, "restore");
+    }
+
+    /// Fails if either write drops `require_artcc_scope`: the request would then go through.
+    #[sqlx::test]
+    async fn through_the_router_another_facilitys_grant_gets_403(pool: PgPool) {
+        let user = scope_test_support::seed_user(&pool).await;
+        grant(&pool, &user, "flow.fca.update", Some("ZNY")).await;
+        let (state, cookie) = routed(pool, &user).await;
+        let exclude = send(&state, Method::POST, EXCLUSION, &cookie, reason()).await;
+        let restore = send(&state, Method::DELETE, EXCLUSION, &cookie, None).await;
+        assert_eq!(exclude, StatusCode::FORBIDDEN, "exclude");
+        assert_eq!(restore, StatusCode::FORBIDDEN, "restore");
+    }
+
+    /// The positive control: the same requests go through for ZDC's own controller, so the refusals
+    /// above are the gates answering and not a broken fixture.
+    #[sqlx::test]
+    async fn through_the_router_the_owning_facilitys_grant_goes_through(pool: PgPool) {
+        let user = scope_test_support::seed_user(&pool).await;
+        grant(&pool, &user, "flow.fca.update", Some("ZDC")).await;
+        let (state, cookie) = routed(pool, &user).await;
+        let exclude = send(&state, Method::POST, EXCLUSION, &cookie, reason()).await;
+        let restore = send(&state, Method::DELETE, EXCLUSION, &cookie, None).await;
+        assert_eq!(exclude, StatusCode::OK, "exclude");
+        assert_eq!(restore, StatusCode::NO_CONTENT, "restore");
+    }
 }

@@ -438,4 +438,102 @@ mod tests {
             Err(ApiError::Forbidden)
         ));
     }
+
+    // --- Through the router (VATUSA/OIS#364) ---
+    //
+    // The tests above cover `can_edit`/`require_edit` directly, which stays green if a write handler
+    // stops calling them. These send real requests with a real session, so each write's
+    // `RequirePermission<EventsConfigUpdate>` and its `require_edit` call are on the tested path. A
+    // missing permission is 401 and the wrong facility 403, so each test pins one gate.
+
+    use http::{Method, StatusCode};
+    use scope_test_support::{send, session_cookie};
+
+    fn config_json() -> serde_json::Value {
+        serde_json::json!({
+            "name": "South flow",
+            "aar": 36,
+            "adr": 40,
+            "landing_runways": ["19"],
+            "wind_from_deg": 90,
+            "wind_to_deg": 270
+        })
+    }
+
+    /// A KDCA (ZDC) config to update and delete, and a session for `user`. Returns every write:
+    /// create, update, delete.
+    async fn routed(
+        pool: PgPool,
+        user: &str,
+    ) -> (crate::state::AppState, String, [(Method, String); 3]) {
+        let req: crate::models::UpsertAirportConfigRequest =
+            serde_json::from_value(config_json()).unwrap();
+        let existing = config_repo::create(&pool, "KDCA", &req, "ZDC", user)
+            .await
+            .unwrap();
+        let cookie = session_cookie(&pool, user).await;
+        let state = test_state(
+            pool,
+            std::collections::HashMap::from([
+                ("ZDC".to_string(), artcc(&["KDCA"])),
+                ("ZNY".to_string(), artcc(&["KJFK"])),
+            ]),
+        );
+        let one = format!("/api/v1/airport-configs/KDCA/{}", existing.id);
+        let writes = [
+            (Method::POST, "/api/v1/airport-configs/KDCA".to_string()),
+            (Method::PUT, one.clone()),
+            (Method::DELETE, one),
+        ];
+        (state, cookie, writes)
+    }
+
+    async fn statuses(
+        state: &crate::state::AppState,
+        cookie: &str,
+        writes: &[(Method, String); 3],
+    ) -> Vec<StatusCode> {
+        let mut out = Vec::new();
+        for (method, uri) in writes {
+            let body = (*method != Method::DELETE).then(config_json);
+            out.push(send(state, method.clone(), uri, cookie, body).await);
+        }
+        out
+    }
+
+    /// Fails if any write drops `RequirePermission`: `require_edit` would then answer 403.
+    #[sqlx::test]
+    async fn through_the_router_a_caller_without_the_permission_gets_401(pool: PgPool) {
+        let user = scope_test_support::seed_user(&pool).await;
+        let (state, cookie, writes) = routed(pool, &user).await;
+        assert_eq!(
+            statuses(&state, &cookie, &writes).await,
+            [StatusCode::UNAUTHORIZED; 3]
+        );
+    }
+
+    /// Fails if any write drops `require_edit`: the request would then go through.
+    #[sqlx::test]
+    async fn through_the_router_another_facilitys_grant_gets_403(pool: PgPool) {
+        let user = scope_test_support::seed_user(&pool).await;
+        grant(&pool, &user, "events.config.update", Some("ZNY")).await;
+        let (state, cookie, writes) = routed(pool, &user).await;
+        assert_eq!(
+            statuses(&state, &cookie, &writes).await,
+            [StatusCode::FORBIDDEN; 3]
+        );
+    }
+
+    /// The positive control: ZDC's own editor gets through every write, so the refusals above are
+    /// the gates answering and not a broken fixture.
+    #[sqlx::test]
+    async fn through_the_router_the_owning_facilitys_grant_goes_through(pool: PgPool) {
+        let user = scope_test_support::seed_user(&pool).await;
+        grant(&pool, &user, "events.config.update", Some("ZDC")).await;
+        let (state, cookie, writes) = routed(pool, &user).await;
+        assert_eq!(
+            statuses(&state, &cookie, &writes).await,
+            [StatusCode::OK, StatusCode::OK, StatusCode::NO_CONTENT]
+        );
+    }
 }
