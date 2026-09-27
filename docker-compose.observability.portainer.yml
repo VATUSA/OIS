@@ -1504,14 +1504,17 @@ configs:
                 "range": true,
                 "instant": false,
                 "refId": "A",
-                "legendFormat": "{{job}}"
+                "legendFormat": "{{task}}"
               }
             ],
             "options": {
               "legend": {
-                "displayMode": "list",
+                "displayMode": "table",
                 "placement": "bottom",
-                "showLegend": true
+                "showLegend": true,
+                "calcs": [
+                  "lastNotNull"
+                ]
               },
               "tooltip": {
                 "mode": "multi",
@@ -1533,11 +1536,37 @@ configs:
                   "mode": "absolute",
                   "steps": [
                     {
-                      "color": "text",
+                      "color": "red",
                       "value": null
+                    },
+                    {
+                      "color": "green",
+                      "value": 1
                     }
                   ]
-                }
+                },
+                "color": {
+                  "mode": "thresholds"
+                },
+                "mappings": [
+                  {
+                    "type": "value",
+                    "options": {
+                      "0": {
+                        "text": "FAIL",
+                        "color": "red",
+                        "index": 0
+                      },
+                      "1": {
+                        "text": "OK",
+                        "color": "green",
+                        "index": 1
+                      }
+                    }
+                  }
+                ],
+                "min": 0,
+                "max": 1
               },
               "overrides": []
             },
@@ -1567,14 +1596,17 @@ configs:
                 "range": true,
                 "instant": false,
                 "refId": "A",
-                "legendFormat": "{{job}}"
+                "legendFormat": "{{task}}"
               }
             ],
             "options": {
               "legend": {
-                "displayMode": "list",
+                "displayMode": "table",
                 "placement": "bottom",
-                "showLegend": true
+                "showLegend": true,
+                "calcs": [
+                  "lastNotNull"
+                ]
               },
               "tooltip": {
                 "mode": "multi",
@@ -1629,14 +1661,17 @@ configs:
                 "range": true,
                 "instant": false,
                 "refId": "A",
-                "legendFormat": "{{job}}"
+                "legendFormat": "{{task}}"
               }
             ],
             "options": {
               "legend": {
-                "displayMode": "list",
+                "displayMode": "table",
                 "placement": "bottom",
-                "showLegend": true
+                "showLegend": true,
+                "calcs": [
+                  "lastNotNull"
+                ]
               },
               "tooltip": {
                 "mode": "multi",
@@ -1669,6 +1704,227 @@ configs:
             "description": "A job climbing well past its interval is stuck or crashed."
           },
           {
+            "type": "table",
+            "title": "Background jobs",
+            "datasource": {
+              "type": "prometheus",
+              "uid": "ois-prometheus"
+            },
+            "gridPos": {
+              "h": 8,
+              "w": 24,
+              "x": 0,
+              "y": 57
+            },
+            "description": "Every registered background job with its human description, health, how long ago it last ran, its last run duration, and total run count. Sortable \u2014 click a column header.",
+            "targets": [
+              {
+                "datasource": {
+                  "type": "prometheus",
+                  "uid": "ois-prometheus"
+                },
+                "editorMode": "code",
+                "expr": "ois_job_last_success * on(task) group_left(description) ois_job_info",
+                "instant": true,
+                "range": false,
+                "format": "table",
+                "refId": "A",
+                "legendFormat": "__auto"
+              },
+              {
+                "datasource": {
+                  "type": "prometheus",
+                  "uid": "ois-prometheus"
+                },
+                "editorMode": "code",
+                "expr": "time() - ois_job_last_run_timestamp_seconds",
+                "instant": true,
+                "range": false,
+                "format": "table",
+                "refId": "B",
+                "legendFormat": "__auto"
+              },
+              {
+                "datasource": {
+                  "type": "prometheus",
+                  "uid": "ois-prometheus"
+                },
+                "editorMode": "code",
+                "expr": "ois_job_last_duration_seconds",
+                "instant": true,
+                "range": false,
+                "format": "table",
+                "refId": "C",
+                "legendFormat": "__auto"
+              },
+              {
+                "datasource": {
+                  "type": "prometheus",
+                  "uid": "ois-prometheus"
+                },
+                "editorMode": "code",
+                "expr": "ois_job_runs",
+                "instant": true,
+                "range": false,
+                "format": "table",
+                "refId": "D",
+                "legendFormat": "__auto"
+              }
+            ],
+            "transformations": [
+              {
+                "id": "joinByField",
+                "options": {
+                  "byField": "task",
+                  "mode": "outer"
+                }
+              },
+              {
+                "id": "organize",
+                "options": {
+                  "excludeByName": {
+                    "Time": true,
+                    "Time 1": true,
+                    "Time 2": true,
+                    "Time 3": true,
+                    "Time 4": true
+                  },
+                  "renameByName": {
+                    "task": "Job",
+                    "description": "Description",
+                    "Value #A": "Status",
+                    "Value #B": "Since last run",
+                    "Value #C": "Last duration",
+                    "Value #D": "Runs"
+                  },
+                  "indexByName": {
+                    "task": 0,
+                    "description": 1,
+                    "Value #A": 2,
+                    "Value #B": 3,
+                    "Value #C": 4,
+                    "Value #D": 5
+                  }
+                }
+              }
+            ],
+            "fieldConfig": {
+              "defaults": {
+                "custom": {
+                  "align": "auto",
+                  "cellOptions": {
+                    "type": "auto"
+                  }
+                }
+              },
+              "overrides": [
+                {
+                  "matcher": {
+                    "id": "byName",
+                    "options": "Status"
+                  },
+                  "properties": [
+                    {
+                      "id": "mappings",
+                      "value": [
+                        {
+                          "type": "value",
+                          "options": {
+                            "0": {
+                              "text": "FAIL",
+                              "color": "red",
+                              "index": 0
+                            },
+                            "1": {
+                              "text": "OK",
+                              "color": "green",
+                              "index": 1
+                            }
+                          }
+                        }
+                      ]
+                    },
+                    {
+                      "id": "custom.cellOptions",
+                      "value": {
+                        "type": "color-text"
+                      }
+                    },
+                    {
+                      "id": "custom.width",
+                      "value": 90
+                    }
+                  ]
+                },
+                {
+                  "matcher": {
+                    "id": "byName",
+                    "options": "Since last run"
+                  },
+                  "properties": [
+                    {
+                      "id": "unit",
+                      "value": "s"
+                    },
+                    {
+                      "id": "custom.width",
+                      "value": 150
+                    }
+                  ]
+                },
+                {
+                  "matcher": {
+                    "id": "byName",
+                    "options": "Last duration"
+                  },
+                  "properties": [
+                    {
+                      "id": "unit",
+                      "value": "s"
+                    },
+                    {
+                      "id": "custom.width",
+                      "value": 150
+                    }
+                  ]
+                },
+                {
+                  "matcher": {
+                    "id": "byName",
+                    "options": "Runs"
+                  },
+                  "properties": [
+                    {
+                      "id": "custom.width",
+                      "value": 90
+                    }
+                  ]
+                },
+                {
+                  "matcher": {
+                    "id": "byName",
+                    "options": "Job"
+                  },
+                  "properties": [
+                    {
+                      "id": "custom.width",
+                      "value": 220
+                    }
+                  ]
+                }
+              ]
+            },
+            "options": {
+              "showHeader": true,
+              "sortBy": [
+                {
+                  "displayName": "Since last run",
+                  "desc": true
+                }
+              ]
+            }
+          },
+          {
             "type": "row",
             "title": "Process",
             "collapsed": false,
@@ -1676,7 +1932,7 @@ configs:
               "h": 1,
               "w": 24,
               "x": 0,
-              "y": 57
+              "y": 65
             },
             "panels": []
           },
@@ -1691,7 +1947,7 @@ configs:
               "h": 8,
               "w": 12,
               "x": 0,
-              "y": 58
+              "y": 66
             },
             "targets": [
               {
@@ -1778,7 +2034,7 @@ configs:
               "h": 8,
               "w": 12,
               "x": 12,
-              "y": 58
+              "y": 66
             },
             "targets": [
               {
@@ -1842,7 +2098,7 @@ configs:
               "h": 8,
               "w": 12,
               "x": 0,
-              "y": 66
+              "y": 74
             },
             "targets": [
               {
@@ -1909,7 +2165,7 @@ configs:
               "h": 8,
               "w": 12,
               "x": 12,
-              "y": 66
+              "y": 74
             },
             "targets": [
               {

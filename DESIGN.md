@@ -32,9 +32,9 @@ headers. It should feel calm, precise, and obviously the same product on every s
    colours (success/danger/warning) exist only for **status**, never for decoration.
 2. **No gradients, anywhere.** Flat fills only — solid surfaces, a solid accent, flat translucent
    sparkline fills. Gradients read cheap; depth comes from surface tints, not blends.
-3. **No chrome shadows.** Cards, buttons, chips, popovers get **no** drop shadow. Elevation is a
-   surface-colour step (ground → panel → card) plus a hairline. The *only* allowed shadow is the one
-   soft drop under the whole app shell so it floats on its ground.
+3. **No shadows.** Cards, buttons, chips, popovers get **no** drop shadow, and neither does the shell
+   — the one soft drop under the frame went with the frame itself (#402). Elevation is a
+   surface-colour step (ground → panel → card) plus a hairline, and nothing else.
 4. **Hairlines, not borders.** Every separator is 1px in `--line` (`#26262d`). No 2px+ borders except a
    focused input or a selected row.
 5. **Continuous, generous corners.** Rounded everything, from a scale (below). Use CSS
@@ -131,8 +131,10 @@ content's left edge and rounding only that inner corner — not by rounding the 
 
 ## The shell (build this first)
 
-The single highest-leverage primitive. One full-height rounded frame on `--ground` (a thin gutter to
-the window, the system's only shadow beneath it) holds:
+The single highest-leverage primitive. Full height, **flush to the viewport on all four sides** — the
+outer edge of the app is the window's bounding box, with no gutter, no outer rounded corners and no
+shadow (#402). On the desktop app the native title bar is hidden and our own window controls sit in
+the chrome row, so a gutter here would read as a second bar beneath it. It holds:
 
 - **Sidebar** (`--panel`, collapsible): a chrome row (back · forward · recent pages / collapse), the
   identity (avatar + name + mono CID), a pill **⌘K** search, then **every section the user can use**
@@ -143,7 +145,7 @@ the window, the system's only shadow beneath it) holds:
   sidebar. Inside: the page header (700 title + count chip + subtitle, with a segmented view switch)
   and the content. Don't repeat the page's name in section headings.
 
-Every signed-in page renders inside this frame. The only page outside it is the signed-out homepage,
+Every signed-in page renders inside this shell. The only page outside it is the signed-out homepage,
 which keeps the public landing and the site footer (the footer appears nowhere else).
 
 ## Components (one each, tokens only)
@@ -190,7 +192,7 @@ One approach: `@tanstack/charts`, wrapped by the chart components in `@ois/ui` (
 Report each miss as `file:line — rule → fix`.
 
 - [ ] No hex, `rgb()`, or Tailwind palette class (`emerald-500`, `zinc-…`) outside `globals.css`.
-- [ ] No gradient; no `shadow-*` except the one under the app shell.
+- [ ] No gradient and no `shadow-*` at all — including on the shell.
 - [ ] No `font-medium` (500). Weights are 400 / 600 / 700.
 - [ ] Radii from the scale (`rounded-xs…xl`, `rounded-full` for pills); no arbitrary radius.
 - [ ] Separators are 1px `border-line` / `border-line-soft`.
