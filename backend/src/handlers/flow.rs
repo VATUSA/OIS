@@ -2674,6 +2674,58 @@ mod project_traffic_tests {
         );
         assert!(out.is_empty());
     }
+
+    /// #335: the arrival field's elevation must reach `project_traffic`'s own
+    /// `VerticalProfile::build` call, which takes it as an explicit argument — nothing failed when
+    /// that argument regressed to sea level.
+    ///
+    /// The projection has to land **inside the descent** to be sensitive at all: above
+    /// top-of-descent the profile samples never reference the field elevation, so the altitude
+    /// would be identical for any elevation and the assertion would prove nothing. Top-of-descent
+    /// is ~120 nm out for a sea-level field and ~107 nm for a 5431 ft one, so a 20-minute
+    /// projection down a ~200 nm route is well inside both.
+    #[test]
+    fn a_projected_arrival_descends_to_the_field_not_sea_level() {
+        let alt_after_20_min = |elevation_ft: f64| {
+            let ap = crate::feed::airports::AirportDb::from([
+                ("KJFK".to_string(), Airport::at(40.64, -73.78)),
+                (
+                    "KDCA".to_string(),
+                    Airport {
+                        elevation_ft,
+                        ..Airport::at(38.85, -77.04)
+                    },
+                ),
+            ]);
+            let data = VatsimData {
+                pilots: vec![airborne_pilot()],
+                ..Default::default()
+            };
+            let out = project_traffic(
+                &data,
+                &NavData::load(),
+                &ap,
+                &ProfileTable::default(),
+                &Winds::default(),
+                &HashMap::new(),
+                20 * 60,
+            );
+            assert_eq!(out.len(), 1);
+            out[0].alt
+        };
+
+        let sea_level = alt_after_20_min(0.0);
+        let high_field = alt_after_20_min(5431.0);
+        assert!(
+            high_field > sea_level,
+            "a 5431 ft field must project higher than a sea-level one ({high_field} ft vs \
+             {sea_level} ft) — equal means the elevation never reached VerticalProfile::build"
+        );
+        assert!(
+            high_field >= 5431,
+            "a descent toward a 5431 ft field must not project below the field, got {high_field} ft"
+        );
+    }
 }
 
 #[cfg(test)]
@@ -3079,6 +3131,35 @@ mod prefile_fix_predictions_tests {
         let ap = HashMap::from([("KDCA".to_string(), Airport::at(38.85, -77.04))]); // no KJFK
         let fp = plan("KJFK", "KDCA", "RBV WHITE SIE");
         assert!(prefile_fix_predictions(&st, &nav, &ap, &fp, now()).is_empty());
+    }
+
+    /// #335: the fix table's terminal altitude is the arrival field's elevation. `fix_predictions`
+    /// hands the elevation to `VerticalProfile::build` as an explicit argument, so replacing that
+    /// argument with `0.0` left the whole suite green while the arrival fix quietly read sea level.
+    #[tokio::test]
+    async fn the_fix_table_terminates_at_the_arrival_field_elevation() {
+        let (st, nav) = (state(), NavData::load());
+        let ap = crate::feed::airports::AirportDb::from([
+            ("KJFK".to_string(), Airport::at(40.64, -73.78)),
+            (
+                "KDCA".to_string(),
+                Airport {
+                    elevation_ft: 5431.0,
+                    ..Airport::at(38.85, -77.04)
+                },
+            ),
+        ]);
+        let fp = plan("KJFK", "KDCA", "RBV WHITE SIE");
+        let fixes = prefile_fix_predictions(&st, &nav, &ap, &fp, now());
+
+        let last = fixes.last().expect("the resolved route yields fixes");
+        assert_eq!(last.name, "KDCA");
+        assert!(
+            (last.altitude_ft - 5431).abs() <= 1,
+            "the arrival fix must terminate at the 5431 ft field, got {} ft — 0 means the \
+             elevation never reached the profile",
+            last.altitude_ft
+        );
     }
 }
 
@@ -3694,6 +3775,78 @@ mod mit_cross_speed_wiring_tests {
                 f.callsign,
                 dbg.cross_speed,
                 dbg.cruise_tas
+            );
+        }
+    }
+
+    /// #335: **both** candidate-build loops hand the arrival field elevation to
+    /// `predict::eta_along_route` as an explicit argument, and neither was covered — replacing both
+    /// with `0.0` left the suite green, which would revert every FCA-metering STA to a sea-level
+    /// descent. Asserted per loop for the same reason `cross_speed_for` is: a fixture that only
+    /// exercised `pilots` would leave the prefile site free to regress.
+    ///
+    /// The gate must sit **inside the descent**. Above top-of-descent the profile samples never
+    /// reference the field elevation, so an enroute crossing is elevation-independent and the
+    /// assertion would be vacuous — the exact shape of failure this pin exists to prevent.
+    /// `-76.75` is ~17 nm from KDCA, the same deep-descent gate
+    /// `cross_speed_at_a_low_arrival_fix_is_the_descent_speed_not_cruise` uses.
+    #[test]
+    fn a_high_field_arrival_crosses_a_descent_gate_earlier_on_both_loops() {
+        // One fixed `now` shared by both runs — a per-call `Utc::now()` would make the two ETAs
+        // incomparable and the comparison meaningless.
+        let now = chrono::DateTime::from_timestamp(1_700_000_000, 0).unwrap();
+        let fca = mit_fca_at_lon(-76.75, 38.5, 39.5);
+
+        let etas = |elevation_ft: f64| {
+            let ap = AirportDb::from([
+                ("KJFK".to_string(), Airport::at(40.64, -73.78)),
+                (
+                    "KDCA".to_string(),
+                    Airport {
+                        elevation_ft,
+                        ..Airport::at(38.85, -77.04)
+                    },
+                ),
+            ]);
+            let (flights, _) = build_candidates(
+                &fca,
+                &arrival_at_cruise(),
+                &ap,
+                &NavData::load(),
+                &Boundaries::default(),
+                &Winds::default(),
+                &ProfileTable::default(),
+                &ReleaseMap::new(),
+                &HashMap::new(),
+                &RunwayDb::default(),
+                &HashMap::new(),
+                &ExclusionSet::new(),
+                now,
+                false,
+            );
+            let eta = |cs: &str| {
+                flights
+                    .iter()
+                    .find(|f| f.callsign == cs)
+                    .and_then(|f| f.eta)
+                    .unwrap_or_else(|| panic!("{cs} must cross this FCA with an ETA"))
+            };
+            // (live-pilot loop, prefile loop) — the two independent elevation sites.
+            (eta("AAL1"), eta("AAL2"))
+        };
+
+        let (sea_live, sea_prefile) = etas(0.0);
+        let (high_live, high_prefile) = etas(5431.0);
+
+        for (site, high, sea) in [
+            ("live pilot", high_live, sea_live),
+            ("prefile", high_prefile, sea_prefile),
+        ] {
+            assert!(
+                high < sea,
+                "{site}: a 5431 ft field shortens the descent, so the metering crossing must come \
+                 earlier than a sea-level one — got {high} vs {sea}. Equal means the elevation \
+                 argument never reached predict::eta_along_route"
             );
         }
     }

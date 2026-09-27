@@ -1896,4 +1896,56 @@ mod tests {
             taxi_estimate::EstimateTier::Default
         );
     }
+
+    /// #335: `ground_estimate`'s synthetic fallback — taken when the departure airport is missing
+    /// from the `AirportDb`, or the arrival coordinates are unknown — builds its own 300 nm profile
+    /// and passes the arrival field elevation in as an explicit argument. Neutering that argument
+    /// to `0.0` left the suite green.
+    #[test]
+    fn the_synthetic_ground_estimate_descends_to_the_arrival_field() {
+        let estimate = |elevation_ft: f64| {
+            let ap = AirportDb::from([(
+                "KDEN".to_string(),
+                Airport {
+                    elevation_ft,
+                    ..Airport::at(39.86, -104.67)
+                },
+            )]);
+            let fp = FlightPlan {
+                departure: "KJFK".into(),
+                arrival: "KDEN".into(),
+                altitude: "35000".into(),
+                cruise_tas: "440".into(),
+                ..Default::default()
+            };
+            // `arr: None` takes the synthetic branch; KJFK is absent from `ap` besides, which is
+            // the other way in.
+            ground_estimate(
+                &NavData::default(),
+                "KJFK",
+                None,
+                &fp,
+                &ap,
+                &Winds::default(),
+                &trajectory::AircraftProfile::default(),
+                None,
+                &HashMap::new(),
+                &RunwayDb::default(),
+                &HashMap::new(),
+                t0(),
+            )
+        };
+
+        let (sea_nm, sea_min) = estimate(0.0);
+        let (high_nm, high_min) = estimate(5431.0);
+
+        // The fallback is the fixed 300 nm synthetic route, not a resolved one.
+        assert_eq!(sea_nm, 300.0);
+        assert_eq!(high_nm, 300.0);
+        assert!(
+            high_min < sea_min,
+            "a 5431 ft field shortens the synthetic descent, so the flight time must come in below \
+             a sea-level one — got {high_min:.2} min vs {sea_min:.2} min"
+        );
+    }
 }
