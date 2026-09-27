@@ -20,5 +20,6 @@ export const IMPLEMENTED: Readonly<Record<Capability, boolean>> = Object.freeze(
   tray: true, // #351 — system tray (shipped)
   globalHotkeys: true, // #352 — global hotkeys (shipped)
   audioAlerts: true, // #353 — audio alerts (shipped)
+  windowControls: true, // #402 — frameless window + our own minimize/maximize/close (shipped)
   fileDialogs: false, // #354 — native export/import dialogs
 });

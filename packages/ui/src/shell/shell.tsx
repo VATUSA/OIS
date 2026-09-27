@@ -14,6 +14,7 @@ export function Shell({
   sidebar,
   breadcrumbs,
   leading,
+  topBarProps,
   children,
   className,
 }: {
@@ -22,6 +23,12 @@ export function Shell({
   breadcrumbs?: React.ReactNode;
   /** Sits before the breadcrumbs (e.g. the phone menu button). */
   leading?: React.ReactNode;
+  /**
+   * Spread onto the top bar. Kept generic so this package stays free of platform assumptions: the
+   * desktop app passes a Tauri drag region and a double-click-to-maximize handler through it (#402),
+   * and the web build passes nothing.
+   */
+  topBarProps?: React.HTMLAttributes<HTMLDivElement> & {[attr: `data-${string}`]: unknown};
   children: React.ReactNode;
   className?: string;
 }) {
@@ -30,7 +37,7 @@ export function Shell({
       <div className="flex min-h-0 min-w-0 flex-1 overflow-hidden rounded-xl border border-line bg-panel shadow-[0_30px_80px_-40px_rgb(0_0_0/0.9)]">
         {sidebar}
         <div className="flex min-w-0 flex-1 flex-col">
-          <div className="flex h-11 shrink-0 items-center gap-2 px-3 md:px-5">
+          <div className="flex h-11 shrink-0 items-center gap-2 px-3 md:px-5" {...topBarProps}>
             {leading}
             {breadcrumbs}
           </div>

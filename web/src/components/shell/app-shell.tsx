@@ -4,12 +4,14 @@ import {Breadcrumbs, type Crumb, PageHeader, Shell, ShellContent, useLocalStorag
 import {Home} from "lucide-react";
 
 import {useMe} from "@/lib/auth";
+import {can} from "@/lib/platform";
 import {areaForPath, groupForPath, itemForPath, visibleGroups} from "@/lib/nav";
 
 import {AppSidebar, MobileNavButton} from "./app-sidebar";
 import {CommandSearch} from "./command-search";
 import {UpdateBanner} from "@/components/update-banner";
 import {OpenInWindowButton} from "@/components/shell/open-in-window";
+import {WindowControls} from "@/components/shell/window-controls";
 import {PageMetaProvider, usePageHeaderOverride, usePageTitle, useRouteMeta, useView} from "./page-meta";
 import {recordVisit} from "./recent-pages";
 
@@ -34,6 +36,18 @@ function useCrumbs(title: string | undefined): Crumb[] {
   // The page title adds a crumb only below a nav item (an event, a flight), not on the item's own page.
   if (title && (!hit || pathname !== hit.item.to)) crumbs.push({ label: title });
   return crumbs;
+}
+
+/** Double-clicking the drag region maximizes or restores, as a native title bar would. */
+function toggleMaximize() {
+  void (async () => {
+    try {
+      const {getCurrentWindow} = await import("@tauri-apps/api/window");
+      await getCurrentWindow().toggleMaximize();
+    } catch {
+      // Not on desktop, or the OS refused; either way the page is unaffected.
+    }
+  })();
 }
 
 function Header() {
@@ -75,7 +89,20 @@ function Frame({ children }: { children: React.ReactNode }) {
   return (
     <Shell
       sidebar={<AppSidebar collapsed={collapsed} onToggle={() => setCollapsed(!collapsed)} />}
-      leading={<MobileNavButton />}
+      leading={
+        <>
+          <MobileNavButton />
+          <WindowControls />
+        </>
+      }
+      // The main window has no native title bar (#402), so this row is what moves it. Double-click
+      // is wired here rather than left to the drag region, whose double-click behaviour differs by
+      // platform. Nothing is passed on the web build, where there is no window to drag.
+      topBarProps={
+        can("windowControls")
+          ? {"data-tauri-drag-region": true, onDoubleClick: toggleMaximize}
+          : undefined
+      }
       breadcrumbs={
         <>
           {crumbs.length > 0 && <Breadcrumbs items={crumbs} />}
