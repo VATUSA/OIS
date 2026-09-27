@@ -21,29 +21,77 @@ vi.mock("@tauri-apps/api/window", () => ({
 /** The tick claim collapses a synchronous burst; let it drain between independent cases. */
 const nextTick = () => new Promise((resolve) => setTimeout(resolve, 0));
 
-/** Records what was constructed, and lets a test decide whether it plays. */
+/** What played, and which URLs were fetched how. */
 let played: {src: string; volume: number}[] = [];
+let fetches: {url: string; init?: RequestInit}[] = [];
 let failFor: (src: string) => boolean = () => false;
 
-class FakeAudio {
-  volume = 1;
-  onerror: (() => void) | null = null;
-  constructor(public src: string) {}
-  play() {
-    played.push({src: this.src, volume: this.volume});
-    return failFor(this.src) ? Promise.reject(new Error("no such file")) : Promise.resolve();
+/**
+ * Web Audio, faked end to end: `fetch` hands back a buffer tagged with its URL, the context decodes
+ * it, and starting a source records what played and at what gain.
+ */
+type Tagged = {src: string};
+function installFakeAudio(record: (p: {src: string; volume: number}) => void, fails: (src: string) => boolean) {
+  vi.stubGlobal("fetch", async (url: string, init?: RequestInit) => {
+    fetches.push({url, init});
+    return fails(url)
+      ? {ok: false, arrayBuffer: async () => ({src: url})}
+      : {ok: true, arrayBuffer: async () => ({src: url})};
+  });
+  class FakeContext {
+    state = "running";
+    destination = {};
+    async resume() {}
+    async decodeAudioData(data: Tagged) {
+      return {src: data.src};
+    }
+    createGain() {
+      const node = {gain: {value: 1}, connect: (next: unknown) => next};
+      return node;
+    }
+    createBufferSource() {
+      let level: {gain: {value: number}} | undefined;
+      const source = {
+        buffer: undefined as Tagged | undefined,
+        connect(next: {gain: {value: number}}) {
+          level = next;
+          return next;
+        },
+        start() {
+          record({src: source.buffer!.src, volume: level?.gain.value ?? 1});
+        },
+      };
+      return source;
+    }
   }
+  vi.stubGlobal("AudioContext", FakeContext);
 }
 
+/**
+ * A desktop environment complete enough for the *real* `@tauri-apps/api/window` too, not just the
+ * mock: the real module reads the window label from `__TAURI_INTERNALS__.metadata`, and with a bare
+ * `{}` it threw, `isMainWindow` took its "can't tell, stay quiet" path, and the burst test passed
+ * whether or not the per-tick claim existed (VATUSA/OIS#353 review).
+ */
 function pretendDesktop() {
-  window.__TAURI_INTERNALS__ = {};
+  window.__TAURI_INTERNALS__ = {
+    metadata: {
+      get currentWindow() {
+        return {label: windowLabel};
+      },
+      get currentWebview() {
+        return {label: windowLabel, windowLabel};
+      },
+    },
+  };
 }
 
 beforeEach(() => {
   played = [];
+  fetches = [];
   failFor = () => false;
   windowLabel = "main";
-  vi.stubGlobal("Audio", FakeAudio);
+  installFakeAudio((p) => played.push(p), (src) => failFor(src));
   convertFileSrc.mockReset().mockImplementation((p: string) => `asset://${p}`);
   appDataDir.mockReset().mockResolvedValue("/Users/x/Library/Application Support/net.vatusa.ois");
 });
@@ -62,6 +110,12 @@ describe("volume", () => {
   it("falls back to normal for anything unrecognised", () => {
     expect(gainFor(undefined)).toBe(gainFor("normal"));
     expect(gainFor("deafening")).toBe(gainFor("normal"));
+  });
+
+  // Settings are a free-form blob; an inherited key came back as a function and silenced the category.
+  it("ignores keys that only exist on the object prototype", () => {
+    expect(gainFor("constructor")).toBe(gainFor("normal"));
+    expect(gainFor("toString")).toBe(gainFor("normal"));
   });
 });
 
@@ -141,10 +195,9 @@ describe("playAlertSound", () => {
     failFor = (src) => src.startsWith("asset://");
 
     await expect(playAlertSound("metering", {enabled: true})).resolves.toBe(true);
-    // Two constructions for one alert: the override attempt, then the bundled fallback.
-
-    expect(played).toHaveLength(2);
-    expect(played[1]!.src).toBe(bundledSoundUrl("metering"));
+    // The override was tried and failed; the bundled tone is what played.
+    expect(fetches.map((f) => f.url)).toEqual([expect.stringContaining("asset://"), bundledSoundUrl("metering")]);
+    expect(played).toEqual([{src: bundledSoundUrl("metering"), volume: gainFor("normal")}]);
   });
 
   it("plays at the configured volume", async () => {
@@ -158,5 +211,28 @@ describe("playAlertSound", () => {
     failFor = () => true;
 
     await expect(playAlertSound("releases", {enabled: true})).resolves.toBe(false);
+  });
+
+  // A media element streams with Range requests, which the release build's `tauri://` protocol
+  // doesn't answer; a whole-file GET works over every scheme. `no-store` so a replaced file plays.
+  it("fetches the whole file, uncached, rather than streaming it", async () => {
+    pretendDesktop();
+    await playAlertSound("restrictions", {enabled: true});
+    expect(fetches[0]!.init).toMatchObject({cache: "no-store"});
+    expect(fetches[0]!.init?.headers).toBeUndefined();
+  });
+
+  // A transient failure resolving the override path used to be cached as "no override" for good.
+  it("tries the override again after a failed resolution", async () => {
+    pretendDesktop();
+    appDataDir.mockRejectedValueOnce(new Error("ipc not ready"));
+    await playAlertSound("eventReminders", {enabled: true});
+    await nextTick();
+    await playAlertSound("eventReminders", {enabled: true});
+
+    expect(played.map((p) => p.src)).toEqual([
+      bundledSoundUrl("eventReminders"),
+      expect.stringContaining("asset://"),
+    ]);
   });
 });

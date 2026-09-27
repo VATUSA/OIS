@@ -25,7 +25,9 @@ const GAIN: Record<AlertVolume, number> = {
 };
 
 export function gainFor(volume: string | undefined): number {
-  return GAIN[(volume ?? "normal") as AlertVolume] ?? GAIN.normal;
+  // Own keys only: settings are a free-form blob, and `"constructor"` used to come back as a
+  // function, which made setting the volume throw and silenced the category.
+  return volume != null && Object.hasOwn(GAIN, volume) ? GAIN[volume as AlertVolume] : GAIN.normal;
 }
 
 /** The sound bundled with the app, served like any other public asset. */
@@ -61,10 +63,12 @@ async function resolveOverrideUrl(category: NotifyCategory): Promise<string | un
 const overrideUrls = new Map<NotifyCategory, string | undefined>();
 
 async function overrideSoundUrl(category: NotifyCategory): Promise<string | undefined> {
-  if (!overrideUrls.has(category)) {
-    overrideUrls.set(category, await resolveOverrideUrl(category));
-  }
-  return overrideUrls.get(category);
+  if (overrideUrls.has(category)) return overrideUrls.get(category);
+  const url = await resolveOverrideUrl(category);
+  // Only a resolved path is kept. A failed resolution (a transient IPC error at startup) cached as
+  // "no override" disabled a facility's replacement tone until the app restarted.
+  if (url !== undefined) overrideUrls.set(category, url);
+  return url;
 }
 
 /**
@@ -102,22 +106,39 @@ async function isMainWindow(): Promise<boolean> {
   }
 }
 
-/** Plays one source, resolving false if it couldn't be played at all. */
-function play(url: string, gain: number): Promise<boolean> {
-  return new Promise((resolve) => {
-    try {
-      const audio = new Audio(url);
-      audio.volume = gain;
-      audio.onerror = () => resolve(false);
-      // `play()` rejects if the source is missing or the platform refuses.
-      void audio
-        .play()
-        .then(() => resolve(true))
-        .catch(() => resolve(false));
-    } catch {
-      resolve(false);
-    }
-  });
+/** One context for the life of the app; browsers cap how many can exist. */
+let context: AudioContext | undefined;
+
+/**
+ * Plays one source, resolving false if it couldn't be played at all.
+ *
+ * Fetched whole and played through Web Audio rather than an `<audio>` element. A media element
+ * streams its source with byte-range requests, and in a release build the bundled tones come from
+ * Tauri's `tauri://` protocol, which answers no Range requests — dev (Vite over http) and the tests
+ * could never show whether that plays (VATUSA/OIS#353 review). A plain GET of the whole file works
+ * the same over `tauri://`, `asset://` and http. `no-store` means a replaced override file is what
+ * plays next, not a cached copy.
+ */
+async function play(url: string, gain: number): Promise<boolean> {
+  try {
+    const response = await fetch(url, {cache: "no-store"});
+    if (!response.ok) return false;
+    const data = await response.arrayBuffer();
+
+    context ??= new AudioContext();
+    if (context.state === "suspended") await context.resume();
+    const buffer = await context.decodeAudioData(data);
+
+    const source = context.createBufferSource();
+    source.buffer = buffer;
+    const level = context.createGain();
+    level.gain.value = gain;
+    source.connect(level).connect(context.destination);
+    source.start();
+    return true;
+  } catch {
+    return false;
+  }
 }
 
 /**

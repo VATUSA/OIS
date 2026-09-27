@@ -24,22 +24,55 @@ vi.mock("@tauri-apps/plugin-notification", () => ({
 }));
 
 let plays: string[] = [];
-class FakeAudio {
-  volume = 1;
-  onerror: (() => void) | null = null;
-  constructor(public src: string) {}
-  play() {
-    plays.push(this.src);
-    return Promise.resolve();
+let fetches: {url: string; init?: RequestInit}[] = [];
+/**
+ * Web Audio, faked end to end: `fetch` hands back a buffer tagged with its URL, the context decodes
+ * it, and starting a source records what played and at what gain.
+ */
+type Tagged = {src: string};
+function installFakeAudio(record: (p: {src: string; volume: number}) => void, fails: (src: string) => boolean) {
+  vi.stubGlobal("fetch", async (url: string, init?: RequestInit) => {
+    fetches.push({url, init});
+    return fails(url)
+      ? {ok: false, arrayBuffer: async () => ({src: url})}
+      : {ok: true, arrayBuffer: async () => ({src: url})};
+  });
+  class FakeContext {
+    state = "running";
+    destination = {};
+    async resume() {}
+    async decodeAudioData(data: Tagged) {
+      return {src: data.src};
+    }
+    createGain() {
+      const node = {gain: {value: 1}, connect: (next: unknown) => next};
+      return node;
+    }
+    createBufferSource() {
+      let level: {gain: {value: number}} | undefined;
+      const source = {
+        buffer: undefined as Tagged | undefined,
+        connect(next: {gain: {value: number}}) {
+          level = next;
+          return next;
+        },
+        start() {
+          record({src: source.buffer!.src, volume: level?.gain.value ?? 1});
+        },
+      };
+      return source;
+    }
   }
+  vi.stubGlobal("AudioContext", FakeContext);
 }
 
 const settle = () => new Promise((resolve) => setTimeout(resolve, 0));
 
 beforeEach(() => {
   plays = [];
-  vi.stubGlobal("Audio", FakeAudio);
-  window.__TAURI_INTERNALS__ = {};
+  fetches = [];
+  installFakeAudio((p) => plays.push(p.src), () => false);
+  window.__TAURI_INTERNALS__ = {metadata: {currentWindow: {label: "main"}, currentWebview: {label: "main", windowLabel: "main"}}};
 });
 
 const alert = {
