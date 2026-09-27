@@ -8,6 +8,8 @@ import {areaForPath, groupForPath, itemForPath, visibleGroups} from "@/lib/nav";
 
 import {AppSidebar, MobileNavButton} from "./app-sidebar";
 import {CommandSearch} from "./command-search";
+import {UpdateBanner} from "@/components/update-banner";
+import {OpenInWindowButton} from "@/components/shell/open-in-window";
 import {PageMetaProvider, usePageHeaderOverride, usePageTitle, useRouteMeta, useView} from "./page-meta";
 import {recordVisit} from "./recent-pages";
 
@@ -74,7 +76,12 @@ function Frame({ children }: { children: React.ReactNode }) {
     <Shell
       sidebar={<AppSidebar collapsed={collapsed} onToggle={() => setCollapsed(!collapsed)} />}
       leading={<MobileNavButton />}
-      breadcrumbs={crumbs.length > 0 ? <Breadcrumbs items={crumbs} /> : undefined}
+      breadcrumbs={
+        <>
+          {crumbs.length > 0 && <Breadcrumbs items={crumbs} />}
+          <OpenInWindowButton />
+        </>
+      }
     >
       <ShellContent layout={meta.layout} header={<Header />}>
         {children}
@@ -87,6 +94,7 @@ function Frame({ children }: { children: React.ReactNode }) {
 export function AppShell({ children }: { children: React.ReactNode }) {
   return (
     <PageMetaProvider>
+      <UpdateBanner />
       <Frame>{children}</Frame>
       <CommandSearch />
     </PageMetaProvider>

@@ -2,8 +2,10 @@ name: Release
 
 # Cuts a GitHub Release with auto-generated notes (a changelog built from merged PR titles since
 # the last tag) whenever a version tag is pushed — the same v* trigger build-images.yml already
-# uses to build prod images, so tagging a release does both in one push. No new secrets: uses the
-# default GITHUB_TOKEN.
+# uses to build prod images, so tagging a release does both in one push.
+#
+# The `desktop` job then attaches the Tauri installers and the updater manifest to that same
+# Release, so backend, web and desktop all ship on one version number (#347).
 on:
   push:
     tags: ["v*"]
@@ -14,8 +16,133 @@ permissions:
 jobs:
   release:
     runs-on: ubuntu-latest
+    # Exposed so the desktop job attaches its installers to *this* release rather than creating
+    # a second one for the same tag.
+    outputs:
+      id: ${{ steps.gh_release.outputs.id }}
     steps:
       - uses: actions/checkout@v7
       - uses: softprops/action-gh-release@v3
+        id: gh_release
         with:
           generate_release_notes: true
+
+  desktop:
+    # Builds, signs and uploads the desktop installers plus `latest.json`, which is the feed the
+    # app's updater reads (see desktop/src-tauri/tauri.conf.json). Runs after `release` so the
+    # Release already exists to attach assets to.
+    needs: release
+    strategy:
+      fail-fast: false
+      # One at a time: every leg publishes the same `latest.json` asset to the same release, and
+      # those publishes are not serialised against each other. Run in parallel, whichever upload
+      # lands last wins and the manifest can end up missing a platform — whose users then silently
+      # never update, with every job still green.
+      max-parallel: 1
+      matrix:
+        include:
+          - os: macos-latest
+            # One universal binary rather than separate Intel/Apple-Silicon downloads.
+            args: "--target universal-apple-darwin"
+          - os: windows-latest
+            args: ""
+          - os: ubuntu-latest
+            args: ""
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v7
+
+      # The shipped version must BE the tag. Inheriting the crate's hardcoded 0.1.0 meant every
+      # release published 0.1.0, so an installed app asked "is 0.1.0 newer than 0.1.0?" and the
+      # update channel never fired for anyone — silently, forever. Rewrite it from the tag, and
+      # refuse to build if the repo's VERSION disagrees, so a mistagged release fails here rather
+      # than shipping an app that can never update.
+      - name: Pin the desktop version to the tag
+        shell: bash
+        run: |
+          tag_version="${GITHUB_REF_NAME#v}"
+          repo_version="$(cat VERSION)"
+          if [ "$tag_version" != "$repo_version" ]; then
+            echo "::error::tag $GITHUB_REF_NAME implies version $tag_version but VERSION says $repo_version."
+            echo "::error::Bump VERSION and re-tag; they are the same release."
+            exit 1
+          fi
+          python3 - "$tag_version" <<'PY'
+          import json, sys, collections
+          path = "desktop/src-tauri/tauri.conf.json"
+          conf = json.load(open(path), object_pairs_hook=collections.OrderedDict)
+          conf["version"] = sys.argv[1]
+          json.dump(conf, open(path, "w"), indent=2)
+          open(path, "a").write("\n")
+          PY
+          echo "desktop version set to $tag_version"
+
+      # A bundle has no container start to inject the API base, so it is baked in at build time —
+      # unset, every installer would talk only to http://127.0.0.1:3000. The script also adds the
+      # origin (https + wss) to the webview CSP's connect-src, or every API call would be blocked.
+      # It fails closed on a missing, non-https, pathful or loopback value. See desktop/README.md.
+      - name: Point the desktop build at the production API
+        shell: bash
+        run: python3 desktop/scripts/pin-release-api.py "$OIS_DESKTOP_API_URL" desktop/src-tauri/tauri.conf.json "$GITHUB_ENV"
+        env:
+          OIS_DESKTOP_API_URL: ${{ vars.OIS_DESKTOP_API_URL }}
+
+      # Refuse to ship rather than ship an update nobody can verify. Until the real key is in
+      # tauri.conf.json every build would produce packages the installed app rejects — better to
+      # fail here, loudly, than to publish a broken update channel.
+      - name: Require a real updater public key
+        shell: bash
+        run: |
+          if grep -q 'REPLACE_WITH_TAURI_UPDATER_PUBLIC_KEY' desktop/src-tauri/tauri.conf.json; then
+            echo "::error::tauri.conf.json still has the placeholder updater pubkey. Run"
+            echo "::error::'pnpm --filter desktop exec tauri signer generate' and see desktop/README.md."
+            exit 1
+          fi
+          if [ -z "${TAURI_SIGNING_PRIVATE_KEY}" ]; then
+            echo "::error::TAURI_SIGNING_PRIVATE_KEY is not set; updates would be unsigned."
+            exit 1
+          fi
+        env:
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+
+      - if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libwebkit2gtk-4.1-dev libgtk-3-dev libayatana-appindicator3-dev librsvg2-dev
+
+      - uses: dtolnay/rust-toolchain@nightly
+        with:
+          # The universal macOS binary needs both arch targets available.
+          targets: ${{ matrix.os == 'macos-latest' && 'aarch64-apple-darwin,x86_64-apple-darwin' || '' }}
+      - if: runner.os == 'Linux'
+        uses: rui314/setup-mold@v1
+      - uses: Swatinem/rust-cache@v2
+
+      - uses: pnpm/action-setup@v6
+      - uses: actions/setup-node@v7
+        with: { node-version: 22, cache: pnpm }
+      - run: pnpm install --frozen-lockfile
+
+      - uses: tauri-apps/tauri-action@v0
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          # Signs the update packages; the app verifies this against the pubkey in tauri.conf.json.
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
+          # Code signing + notarisation. Absent, the build still succeeds but produces installers
+          # the OS will warn about — the updater signature above is what gates an update applying.
+          APPLE_CERTIFICATE: ${{ secrets.APPLE_CERTIFICATE }}
+          APPLE_CERTIFICATE_PASSWORD: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
+          APPLE_SIGNING_IDENTITY: ${{ secrets.APPLE_SIGNING_IDENTITY }}
+          APPLE_ID: ${{ secrets.APPLE_ID }}
+          APPLE_PASSWORD: ${{ secrets.APPLE_PASSWORD }}
+          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+          WINDOWS_CERTIFICATE: ${{ secrets.WINDOWS_CERTIFICATE }}
+          WINDOWS_CERTIFICATE_PASSWORD: ${{ secrets.WINDOWS_CERTIFICATE_PASSWORD }}
+        with:
+          projectPath: desktop
+          tagName: ${{ github.ref_name }}
+          releaseId: ${{ needs.release.outputs.id }}
+          # Emits latest.json alongside the installers — the endpoint the updater polls.
+          includeUpdaterJson: true
+          args: ${{ matrix.args }}

@@ -96,3 +96,4 @@ export {
   Breadcrumbs,
   type Crumb,
 } from "./shell/shell";
+export { HotkeyInput } from "./components/hotkey-input";

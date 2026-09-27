@@ -30,6 +30,9 @@ export function Footer() {
         </div>
 
         <nav className="flex flex-wrap items-center gap-x-4 gap-y-2 sm:ml-auto">
+          <Link to="/download" className={linkClass}>
+            Desktop app
+          </Link>
           <Link to="/privacy" className={linkClass}>
             Privacy
           </Link>
