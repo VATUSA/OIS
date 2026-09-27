@@ -31,6 +31,7 @@ function holding(...names: string[]): Me {
     rating: null,
     server_admin: false,
     role_names: [],
+    tmu_national: false,
     permissions: tree as Me["permissions"],
   } as Me;
 }

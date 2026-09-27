@@ -19,6 +19,7 @@ use crate::{
         require_permission::RequirePermission,
     },
     errors::ApiError,
+    handlers::restriction_artcc,
     models::{
         CreateGroundStopRequest, CreateTmiRequest, GateRule, GroundStopBody, ProgramBody, TmiBody,
         UpdateTmiRequest, UpsertProgramRequest,
@@ -81,9 +82,9 @@ pub async fn list_tmis(
     Query(query): Query<TmiListQuery>,
 ) -> Result<Json<Vec<TmiBody>>, ApiError> {
     let pool = state.db.as_ref().ok_or(ApiError::ServiceUnavailable)?;
-    Ok(Json(
-        tmu_repo::list_tmis(pool, &query.into_filters()).await?,
-    ))
+    let mut tmis = tmu_repo::list_tmis(pool, &query.into_filters()).await?;
+    restriction_artcc::stamp_tmis(&*state.facilities.read().await, &mut tmis);
+    Ok(Json(tmis))
 }
 
 #[utoipa::path(
@@ -120,9 +121,10 @@ pub async fn create_tmi(
     }
 
     let id = tmu_repo::create_tmi(pool, &payload, &user.id).await?;
-    let tmi = tmu_repo::get_tmi(pool, &id)
+    let mut tmi = tmu_repo::get_tmi(pool, &id)
         .await?
         .ok_or(ApiError::Internal)?;
+    restriction_artcc::stamp_tmi(&*state.facilities.read().await, &mut tmi);
     Ok(Json(tmi))
 }
 
@@ -150,9 +152,10 @@ pub async fn update_tmi(
     if !tmu_repo::update_tmi(pool, &id, &payload).await? {
         return Err(ApiError::NotFound);
     }
-    let tmi = tmu_repo::get_tmi(pool, &id)
+    let mut tmi = tmu_repo::get_tmi(pool, &id)
         .await?
         .ok_or(ApiError::NotFound)?;
+    restriction_artcc::stamp_tmi(&*state.facilities.read().await, &mut tmi);
     Ok(Json(tmi))
 }
 
@@ -177,7 +180,7 @@ pub async fn publish_tmi(
     // channel may be network-wide rather than per-facility (#194).
     let channel = integration_repo::channel_id(pool, TMU_CHANNEL, None).await?;
     let mut tx = pool.begin().await.map_err(|_| ApiError::Internal)?;
-    let tmi = tmu_repo::publish_tmi(&mut tx, &id, &user.id)
+    let mut tmi = tmu_repo::publish_tmi(&mut tx, &id, &user.id)
         .await?
         .ok_or(ApiError::Conflict)?; // not a draft (or absent)
     if let Some(channel_id) = channel {
@@ -196,6 +199,7 @@ pub async fn publish_tmi(
     }
     tx.commit().await.map_err(|_| ApiError::Internal)?;
 
+    restriction_artcc::stamp_tmi(&*state.facilities.read().await, &mut tmi);
     Ok(Json(tmi))
 }
 
@@ -215,9 +219,10 @@ pub async fn cancel_tmi(
     if !tmu_repo::cancel_tmi(pool, &id).await? {
         return Err(ApiError::Conflict);
     }
-    let tmi = tmu_repo::get_tmi(pool, &id)
+    let mut tmi = tmu_repo::get_tmi(pool, &id)
         .await?
         .ok_or(ApiError::NotFound)?;
+    restriction_artcc::stamp_tmi(&*state.facilities.read().await, &mut tmi);
     Ok(Json(tmi))
 }
 
@@ -312,7 +317,9 @@ pub async fn list_programs(
     _permission: RequirePermission<TmuProgramRead>,
 ) -> Result<Json<Vec<ProgramBody>>, ApiError> {
     let pool = state.db.as_ref().ok_or(ApiError::ServiceUnavailable)?;
-    Ok(Json(tmu_repo::list_programs(pool).await?))
+    let mut programs = tmu_repo::list_programs(pool).await?;
+    restriction_artcc::stamp_programs(&*state.facilities.read().await, &mut programs);
+    Ok(Json(programs))
 }
 
 #[utoipa::path(
@@ -337,9 +344,10 @@ pub async fn upsert_program(
     let gates = normalize_program(&mut payload)?;
 
     tmu_repo::upsert_program(pool, &icao, &payload, &gates, &user.id).await?;
-    let program = tmu_repo::get_program(pool, &icao)
+    let mut program = tmu_repo::get_program(pool, &icao)
         .await?
         .ok_or(ApiError::Internal)?;
+    restriction_artcc::stamp_program(&*state.facilities.read().await, &mut program);
     Ok(Json(program))
 }
 
@@ -412,7 +420,9 @@ pub async fn list_ground_stops(
     _permission: RequirePermission<TmuGroundStopRead>,
 ) -> Result<Json<Vec<GroundStopBody>>, ApiError> {
     let pool = state.db.as_ref().ok_or(ApiError::ServiceUnavailable)?;
-    Ok(Json(tmu_repo::list_ground_stops(pool).await?))
+    let mut stops = tmu_repo::list_ground_stops(pool).await?;
+    restriction_artcc::stamp_ground_stops(&*state.facilities.read().await, &mut stops);
+    Ok(Json(stops))
 }
 
 #[utoipa::path(
@@ -445,9 +455,10 @@ pub async fn create_ground_stop(
 
     let id =
         tmu_repo::create_ground_stop(pool, &payload, &scope, until.as_deref(), &user.id).await?;
-    let gs = tmu_repo::get_ground_stop(pool, &id)
+    let mut gs = tmu_repo::get_ground_stop(pool, &id)
         .await?
         .ok_or(ApiError::Internal)?;
+    restriction_artcc::stamp_ground_stop(&*state.facilities.read().await, &mut gs);
     Ok(Json(gs))
 }
 
@@ -469,9 +480,10 @@ pub async fn publish_ground_stop(
     if !tmu_repo::publish_ground_stop(pool, &id, &user.id).await? {
         return Err(ApiError::Conflict); // not a draft (or absent)
     }
-    let gs = tmu_repo::get_ground_stop(pool, &id)
+    let mut gs = tmu_repo::get_ground_stop(pool, &id)
         .await?
         .ok_or(ApiError::NotFound)?;
+    restriction_artcc::stamp_ground_stop(&*state.facilities.read().await, &mut gs);
     Ok(Json(gs))
 }
 
@@ -491,9 +503,10 @@ pub async fn cancel_ground_stop(
     if !tmu_repo::cancel_ground_stop(pool, &id).await? {
         return Err(ApiError::Conflict);
     }
-    let gs = tmu_repo::get_ground_stop(pool, &id)
+    let mut gs = tmu_repo::get_ground_stop(pool, &id)
         .await?
         .ok_or(ApiError::NotFound)?;
+    restriction_artcc::stamp_ground_stop(&*state.facilities.read().await, &mut gs);
     Ok(Json(gs))
 }
 

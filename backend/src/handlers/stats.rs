@@ -20,7 +20,10 @@ use crate::{
     },
     errors::ApiError,
     feed::stats::reconstruct::reconstruct_at,
-    handlers::{atc, feed as feed_handlers, flow as flow_handlers, runway as runway_handlers},
+    handlers::{
+        atc, feed as feed_handlers, flow as flow_handlers, restriction_artcc,
+        runway as runway_handlers,
+    },
     models::{
         AtcBoard, CaptureSummaryBody, DelaySummary, DeparturesResponse, NetworkPointBody,
         ReplayBody, ReplayChunkBody, ReplayFlightBody, ReplayPlan, SaveCaptureRequest,
@@ -817,9 +820,9 @@ pub async fn hist_tmis(
     Query(q): Query<AtQuery>,
 ) -> Result<Json<Vec<crate::models::TmiBody>>, ApiError> {
     let p = pool(&state)?;
-    Ok(Json(
-        crate::repos::tmu::list_tmis_at(p, parse_at(&q)?).await?,
-    ))
+    let mut tmis = crate::repos::tmu::list_tmis_at(p, parse_at(&q)?).await?;
+    restriction_artcc::stamp_tmis(&*state.facilities.read().await, &mut tmis);
+    Ok(Json(tmis))
 }
 
 #[utoipa::path(
@@ -835,9 +838,9 @@ pub async fn hist_gdps(
     Query(q): Query<AtQuery>,
 ) -> Result<Json<Vec<crate::models::GdpBody>>, ApiError> {
     let p = pool(&state)?;
-    Ok(Json(
-        crate::repos::gdp::list_gdps_at(p, parse_at(&q)?).await?,
-    ))
+    let mut gdps = crate::repos::gdp::list_gdps_at(p, parse_at(&q)?).await?;
+    restriction_artcc::stamp_gdps(&*state.facilities.read().await, &mut gdps);
+    Ok(Json(gdps))
 }
 
 #[utoipa::path(
@@ -853,9 +856,9 @@ pub async fn hist_ground_stops(
     Query(q): Query<AtQuery>,
 ) -> Result<Json<Vec<crate::models::GroundStopBody>>, ApiError> {
     let p = pool(&state)?;
-    Ok(Json(
-        crate::repos::tmu::list_ground_stops_at(p, parse_at(&q)?).await?,
-    ))
+    let mut stops = crate::repos::tmu::list_ground_stops_at(p, parse_at(&q)?).await?;
+    restriction_artcc::stamp_ground_stops(&*state.facilities.read().await, &mut stops);
+    Ok(Json(stops))
 }
 
 /// Current `stats` schema disk usage and a naive, no-further-compaction projection — ops

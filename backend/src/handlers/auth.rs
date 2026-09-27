@@ -30,6 +30,9 @@ const SESSION_COOKIE: &str = "ois_session";
 const OAUTH_STATE_TTL_SECS: i64 = 10 * 60;
 const SESSION_TTL_SECS: i64 = 60 * 60 * 24 * 30;
 const DEFAULT_LOGIN_REDIRECT: &str = "/api/v1/me";
+/// The permission whose scope decides whether a member reads restrictions nationally. The same one
+/// `RestrictionAlerts` gates its audience on, so the flag and the gate can't drift (#405).
+const TMU_READ_PERMISSION: &str = "tmu.program.read";
 
 /// Baseline self-service permissions every non-SERVER_ADMIN user is entitled to.
 /// Seeded on first login; every name here must exist in `access.permissions`.
@@ -240,6 +243,15 @@ async fn build_me_body(state: &AppState, user: &CurrentUser) -> Result<MeBody, A
         Some(pool) => crate::repos::vatusa::fetch_profile(pool, user.cid).await?,
         None => None,
     };
+    // `permissions` is a flat name tree with no ARTCC dimension, so a client can't tell a national
+    // (DCC) reader from a facility-scoped one. Resolve that one question here (#405).
+    let tmu_national = match state.db.as_ref() {
+        Some(pool) => matches!(
+            access_repo::permission_scope(pool, &user.id, TMU_READ_PERMISSION).await?,
+            access_repo::PermissionScope::National
+        ),
+        None => false,
+    };
     Ok(MeBody {
         id: user.id.clone(),
         cid: user.cid,
@@ -250,6 +262,7 @@ async fn build_me_body(state: &AppState, user: &CurrentUser) -> Result<MeBody, A
         role_names: roles,
         permissions: permission_tree_from_paths(&permissions),
         vatusa,
+        tmu_national,
     })
 }
 
@@ -401,5 +414,56 @@ fn url_origin(raw: &str) -> Option<String> {
         Some(format!("{scheme}://{host}"))
     } else {
         Some(format!("{scheme}://{host}:{port}"))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::collections::HashMap;
+
+    use sqlx::PgPool;
+
+    use super::*;
+    use crate::scope_test_support::{grant, seed_user, test_state};
+
+    fn current_user(id: &str) -> CurrentUser {
+        CurrentUser {
+            id: id.to_string(),
+            cid: 0,
+            email: String::new(),
+            display_name: String::new(),
+            rating: None,
+            primary_role: None,
+        }
+    }
+
+    /// `/me`'s `tmu_national` is what tells the client whether to scope restriction alerts to the
+    /// user's own ARTCCs (#405). It has to come from the *scope* of `tmu.program.read`, not from
+    /// `server_admin`: a DCC controller holds it nationally without being a server admin, and
+    /// reading the flag off `server_admin` would silently narrow them to their home facility.
+    #[sqlx::test]
+    async fn tmu_national_follows_the_permission_scope_not_the_admin_flag(pool: PgPool) {
+        let national = seed_user(&pool).await;
+        grant(&pool, &national, TMU_READ_PERMISSION, None).await;
+        let scoped = seed_user(&pool).await;
+        grant(&pool, &scoped, TMU_READ_PERMISSION, Some("ZDC")).await;
+        let none = seed_user(&pool).await;
+
+        let state = test_state(pool, HashMap::new());
+
+        let body = build_me_body(&state, &current_user(&national))
+            .await
+            .unwrap();
+        assert!(body.tmu_national, "an unscoped grant reads nationally");
+        assert!(
+            !body.server_admin,
+            "and does so without being a server admin — the point of the distinction"
+        );
+
+        let body = build_me_body(&state, &current_user(&scoped)).await.unwrap();
+        assert!(!body.tmu_national, "a ZDC-scoped grant is not national");
+
+        let body = build_me_body(&state, &current_user(&none)).await.unwrap();
+        assert!(!body.tmu_national, "no grant is not national");
     }
 }

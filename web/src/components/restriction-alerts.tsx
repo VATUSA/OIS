@@ -4,6 +4,7 @@ import {AlertOctagon, X} from "lucide-react";
 
 import {useMe} from "@/lib/auth";
 import {hasPermission} from "@/lib/permissions";
+import {inRestrictionScope, restrictionFacilities} from "@/lib/restriction-scope";
 import {useHistoricalAt} from "@/lib/historical-context";
 import {useGroundStops, usePrograms, useTmis, type GroundStop, type Program, type Tmi} from "@/lib/tmu";
 import {useGdps, type Gdp} from "@/lib/gdp";
@@ -80,9 +81,14 @@ function programAlert(p: Program): RestrictionAlert {
 
 /**
  * Broadcast popups: when a new restriction (ground stop, GDP, TMI, or metering program) is initiated,
- * every controller sees a prominent alert that auto-closes after {@link ALERT_MS}. Realtime nudges the
+ * a controller sees a prominent alert that auto-closes after {@link ALERT_MS}. Realtime nudges the
  * underlying lists, so it surfaces near-instantly. Only *new* restrictions fire — the set active when a
  * page first loads is captured silently. Mounted once in the root layout; gated to controllers below.
+ *
+ * Scoped to the user's own ARTCCs unless they read TMU nationally (VATUSA/OIS#405) — a ZDC controller
+ * was previously alerted to every restriction in the country. This component is also the single owner
+ * of "which restrictions are genuinely new", so the desktop notifier built on it (#348) inherits the
+ * same audience rather than deciding it a second time.
  */
 export function RestrictionAlerts() {
   const { data: me } = useMe();
@@ -93,21 +99,33 @@ export function RestrictionAlerts() {
 
 function RestrictionAlertsInner() {
   const live = useHistoricalAt() == null;
+  const { data: me } = useMe();
   const groundStops = useGroundStops();
   const gdps = useGdps();
   const tmis = useTmis();
   const programs = usePrograms();
 
-  // Identity keys currently "active" (published / present), independent of live mode.
+  // Memoized because a fresh Set every render would make `active`'s memo below recompute every render.
+  const facilities = useMemo(() => restrictionFacilities(me), [me]);
+
+  // Identity keys currently "active" (published / present), independent of live mode. Out-of-scope
+  // restrictions are dropped here rather than at display time, so they never enter `known` either —
+  // otherwise gaining a facility would replay every restriction already running there as "new".
   const active = useMemo(() => {
+    const mine = (...artccs: (string | null | undefined)[]) =>
+      inRestrictionScope(facilities, artccs);
     const m = new Map<string, RestrictionAlert>();
     for (const g of groundStops.data ?? [])
-      if (g.status === "published") m.set(`gs:${g.id}`, groundStopAlert(g));
-    for (const g of gdps.data ?? []) if (g.status === "published") m.set(`gdp:${g.id}`, gdpAlert(g));
-    for (const t of tmis.data ?? []) if (t.status === "published") m.set(`tmi:${t.id}`, tmiAlert(t));
-    for (const p of programs.data ?? []) m.set(`prog:${p.icao}`, programAlert(p));
+      if (g.status === "published" && mine(g.artcc)) m.set(`gs:${g.id}`, groundStopAlert(g));
+    for (const g of gdps.data ?? [])
+      if (g.status === "published" && mine(g.artcc)) m.set(`gdp:${g.id}`, gdpAlert(g));
+    for (const t of tmis.data ?? [])
+      if (t.status === "published" && mine(t.requesting_artcc, t.providing_artcc))
+        m.set(`tmi:${t.id}`, tmiAlert(t));
+    for (const p of programs.data ?? [])
+      if (mine(p.artcc)) m.set(`prog:${p.icao}`, programAlert(p));
     return m;
-  }, [groundStops.data, gdps.data, tmis.data, programs.data]);
+  }, [groundStops.data, gdps.data, tmis.data, programs.data, facilities]);
 
   // Keys we've already seen. Null until the first full load, so pre-existing restrictions never fire.
   const known = useRef<Set<string> | null>(null);

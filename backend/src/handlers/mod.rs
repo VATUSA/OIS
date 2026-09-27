@@ -24,6 +24,7 @@ pub mod jobs;
 pub mod metrics;
 pub mod preferences;
 pub mod public;
+pub mod restriction_artcc;
 pub mod runway;
 pub mod service_accounts;
 pub mod stats;
