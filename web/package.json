@@ -41,7 +41,7 @@
     "@tanstack/charts": "^0.17.0",
     "@tanstack/react-charts": "^0.17.0",
     "@tanstack/react-query": "^5.102.8",
-    "@tanstack/react-router": "^1.170.27",
+    "@tanstack/react-router": "^1.170.39",
     "@tauri-apps/api": "^2",
     "@tauri-apps/plugin-autostart": "^2",
     "@tauri-apps/plugin-global-shortcut": "^2",
