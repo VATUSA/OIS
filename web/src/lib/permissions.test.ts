@@ -12,6 +12,7 @@ function me(overrides: { server_admin?: boolean; permissions?: unknown }): Me {
     rating: null,
     server_admin: overrides.server_admin ?? false,
     role_names: [],
+    tmu_national: false,
     permissions: (overrides.permissions ?? {}) as Me["permissions"],
   } as Me;
 }

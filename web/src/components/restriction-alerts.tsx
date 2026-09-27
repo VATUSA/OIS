@@ -6,6 +6,7 @@ import {AlertOctagon, X} from "lucide-react";
 
 import {useMe} from "@/lib/auth";
 import {hasPermission} from "@/lib/permissions";
+import {inRestrictionScope, restrictionFacilities} from "@/lib/restriction-scope";
 import {useHistoricalAt} from "@/lib/historical-context";
 import {useGroundStops, usePrograms, useTmis, type GroundStop, type Program, type Tmi} from "@/lib/tmu";
 import {useGdps, type Gdp} from "@/lib/gdp";
@@ -82,9 +83,14 @@ function programAlert(p: Program): RestrictionAlert {
 
 /**
  * Broadcast popups: when a new restriction (ground stop, GDP, TMI, or metering program) is initiated,
- * every controller sees a prominent alert that auto-closes after {@link ALERT_MS}. Realtime nudges the
+ * a controller sees a prominent alert that auto-closes after {@link ALERT_MS}. Realtime nudges the
  * underlying lists, so it surfaces near-instantly. Only *new* restrictions fire — the set active when a
  * page first loads is captured silently. Mounted once in the root layout; gated to controllers below.
+ *
+ * Scoped to the user's own ARTCCs unless they read TMU nationally (VATUSA/OIS#405) — a ZDC controller
+ * was previously alerted to every restriction in the country. This component is also the single owner
+ * of "which restrictions are genuinely new", so the desktop notifier built on it (#348) inherits the
+ * same audience rather than deciding it a second time.
  */
 export function RestrictionAlerts() {
   const { data: me } = useMe();
@@ -94,52 +100,66 @@ export function RestrictionAlerts() {
 }
 
 function RestrictionAlertsInner() {
-  const notifyRestrictions = useRestrictionNotifier();
   const live = useHistoricalAt() == null;
+  const { data: me } = useMe();
   const groundStops = useGroundStops();
   const gdps = useGdps();
   const tmis = useTmis();
   const programs = usePrograms();
 
-  // Identity keys currently "active" (published / present), independent of live mode.
+  // Memoized because a fresh Set every render would make `active`'s memo below recompute every render.
+  const facilities = useMemo(() => restrictionFacilities(me), [me]);
+
+  // Identity keys currently "active" (published / present) and in scope, independent of live mode.
   const active = useMemo(() => {
+    const mine = (...artccs: (string | null | undefined)[]) =>
+      inRestrictionScope(facilities, artccs);
     const m = new Map<string, RestrictionAlert>();
     for (const g of groundStops.data ?? [])
-      if (g.status === "published") m.set(`gs:${g.id}`, groundStopAlert(g));
-    for (const g of gdps.data ?? []) if (g.status === "published") m.set(`gdp:${g.id}`, gdpAlert(g));
-    for (const t of tmis.data ?? []) if (t.status === "published") m.set(`tmi:${t.id}`, tmiAlert(t));
-    for (const p of programs.data ?? []) m.set(`prog:${p.icao}`, programAlert(p));
+      if (g.status === "published" && mine(g.artcc)) m.set(`gs:${g.id}`, groundStopAlert(g));
+    for (const g of gdps.data ?? [])
+      if (g.status === "published" && mine(g.artcc)) m.set(`gdp:${g.id}`, gdpAlert(g));
+    for (const t of tmis.data ?? [])
+      if (t.status === "published" && mine(t.requesting_artcc, t.providing_artcc))
+        m.set(`tmi:${t.id}`, tmiAlert(t));
+    for (const p of programs.data ?? [])
+      if (mine(p.artcc)) m.set(`prog:${p.icao}`, programAlert(p));
     return m;
-  }, [groundStops.data, gdps.data, tmis.data, programs.data]);
+  }, [groundStops.data, gdps.data, tmis.data, programs.data, facilities]);
 
-  // Keys we've already seen, and the lists that have loaded successfully at least once. Each list is
-  // seeded silently on its *own* first success, so restrictions already in force never fire:
-  // - not on "every list has settled": an errored list settles too, seeding nothing, and the next
-  //   good poll then announced every restriction already in force — as native OS notifications
-  //   too, on desktop (VATUSA/OIS#348 review);
-  // - nor on "every list has succeeded": each list needs its own `tmu.*.read` permission, so one the
-  //   user can't read would hold the rest back forever and no alert would ever fire.
-  const known = useRef(new Set<string>());
-  const seeded = useRef(new Set<string>());
+  // Keys we've already seen. Null until the first full load, so pre-existing restrictions never fire.
+  const known = useRef<Set<string> | null>(null);
   const [alerts, setAlerts] = useState<RestrictionAlert[]>([]);
+  const notifyRestrictions = useRestrictionNotifier();
 
-  const gsLoaded = groundStops.isSuccess;
-  const gdpLoaded = gdps.isSuccess;
-  const tmiLoaded = tmis.isSuccess;
-  const progLoaded = programs.isSuccess;
+  const settled =
+    !groundStops.isPending && !gdps.isPending && !tmis.isPending && !programs.isPending;
+
+  // The scope `known` was last seeded for. When it changes — the VATUSA profile syncs after sign-in,
+  // a visit is added, national TMU is granted — every restriction already running in the newly
+  // covered scope enters `active` at once. Diffed, each one announced itself as just initiated, and
+  // someone made national was alerted to the whole country (VATUSA/OIS#405 review). A new scope is
+  // seeded silently instead, the same as the first load.
+  const seededFor = useRef(facilities);
 
   useEffect(() => {
-    // Historical replay swaps the lists to past data — don't alert, and don't disturb what we've
-    // seen, so the live set is intact when we return.
+    // Historical replay swaps the lists to past data — don't alert, and don't disturb `known` so the
+    // live set is intact when we return.
     if (!live) return;
+    if (known.current == null || seededFor.current !== facilities) {
+      if (settled) {
+        known.current = new Set(active.keys());
+        seededFor.current = facilities;
+      }
+      return;
+    }
     const fresh: RestrictionAlert[] = [];
     for (const [key, a] of active) {
-      if (known.current.has(key)) continue;
-      known.current.add(key);
-      if (seeded.current.has(key.slice(0, key.indexOf(":")))) fresh.push(a);
+      if (!known.current.has(key)) {
+        known.current.add(key);
+        fresh.push(a);
+      }
     }
-    const loaded = {gs: gsLoaded, gdp: gdpLoaded, tmi: tmiLoaded, prog: progLoaded};
-    for (const [source, ok] of Object.entries(loaded)) if (ok) seeded.current.add(source);
     // Forget keys that dropped off so a cancel-then-reissue alerts again.
     for (const key of [...known.current]) if (!active.has(key)) known.current.delete(key);
     if (fresh.length) {
@@ -148,7 +168,7 @@ function RestrictionAlertsInner() {
       // operator sees them (#348). No-op on web and when the user hasn't opted in.
       notifyRestrictions(fresh);
     }
-  }, [live, gsLoaded, gdpLoaded, tmiLoaded, progLoaded, active, notifyRestrictions]);
+  }, [live, settled, active, facilities, notifyRestrictions]);
 
   const dismiss = (key: string) => setAlerts((prev) => prev.filter((a) => a.key !== key));
 

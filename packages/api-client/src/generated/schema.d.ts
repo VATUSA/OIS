@@ -4571,6 +4571,11 @@ export interface components {
             /** @description Rate changes across the window (empty = flat AAR). */
             aar_steps: components["schemas"]["AarStep"][];
             airport: string;
+            /**
+             * @description The ARTCC that owns `airport`, resolved live from the facility map at request time; null when
+             *     the map doesn't know the field. Lets a client scope alerts to its own centre (#405).
+             */
+            artcc?: string | null;
             /** @description HHMM Zulu program window end. */
             end_time: string;
             exempt_airborne: boolean;
@@ -4665,6 +4670,11 @@ export interface components {
         /** @description A ground stop: holds departures into `airport` from within `scope` until `until`. */
         GroundStopBody: {
             airport: string;
+            /**
+             * @description The ARTCC that owns `airport`, resolved live from the facility map at request time; null when
+             *     the map doesn't know the field. Lets a client scope alerts to its own centre (#405).
+             */
+            artcc?: string | null;
             id: string;
             /** Format: date-time */
             published_at?: string | null;
@@ -4793,6 +4803,12 @@ export interface components {
             rating?: string | null;
             role_names: string[];
             server_admin: boolean;
+            /**
+             * @description True when the member holds `tmu.program.read` nationally — a DCC/national user who should see
+             *     restrictions from every ARTCC, not only their own. `permissions` is a flat name tree with no
+             *     ARTCC dimension, so without this the client can't tell the two apart (#405).
+             */
+            tmu_national: boolean;
             vatusa?: null | components["schemas"]["VatusaProfile"];
         };
         /**
@@ -4887,6 +4903,11 @@ export interface components {
              * @description Scheduled end; null = indefinite. Auto-removed an hour after this time.
              */
             active_until?: string | null;
+            /**
+             * @description The ARTCC that owns `icao`, resolved live from the facility map at request time; null when the
+             *     map doesn't know the field. Lets a client scope alerts to its own centre (#405).
+             */
+            artcc?: string | null;
             exclude_types: string[];
             exclude_wake: string[];
             gates: components["schemas"]["GateRule"][];
@@ -5600,10 +5621,17 @@ export interface components {
             id: string;
             /** @description Providing facility (ARTCC/TRACON). */
             providing: string;
+            providing_artcc?: string | null;
             /** Format: date-time */
             published_at?: string | null;
             /** @description Requesting facility (ARTCC/TRACON). */
             requesting: string;
+            /**
+             * @description The ARTCCs over `requesting`/`providing`, resolved live from the facility map at request time
+             *     (a TRACON resolves to its centre); null when the map doesn't know the facility. A centre cares
+             *     about a TMI from either side, so both are carried (#405).
+             */
+            requesting_artcc?: string | null;
             /** @description The canonical raw NTML line (typed directly, or encoded from `structured`). */
             restriction: string;
             /** Format: date-time */

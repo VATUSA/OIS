@@ -21,6 +21,7 @@ use crate::{
     feed::facilities,
     feed::flow,
     feed::gdp::{self, GdpBoard, GdpFlightView},
+    handlers::restriction_artcc,
     models::{AarStep, CreateGdpRequest, GdpBody, UpdateGdpRequest},
     repos::gdp as gdp_repo,
     state::AppState,
@@ -341,7 +342,9 @@ pub async fn list_gdps(
     _permission: RequirePermission<TmuGdpRead>,
 ) -> Result<Json<Vec<GdpBody>>, ApiError> {
     let pool = state.db.as_ref().ok_or(ApiError::ServiceUnavailable)?;
-    Ok(Json(gdp_repo::list_gdps(pool).await?))
+    let mut gdps = gdp_repo::list_gdps(pool).await?;
+    restriction_artcc::stamp_gdps(&*state.facilities.read().await, &mut gdps);
+    Ok(Json(gdps))
 }
 
 #[utoipa::path(
@@ -392,9 +395,10 @@ pub async fn create_gdp(
         &user.id,
     )
     .await?;
-    let gdp = gdp_repo::get_gdp(pool, &id)
+    let mut gdp = gdp_repo::get_gdp(pool, &id)
         .await?
         .ok_or(ApiError::Internal)?;
+    restriction_artcc::stamp_gdp(&*state.facilities.read().await, &mut gdp);
     Ok(Json(gdp))
 }
 
@@ -523,9 +527,10 @@ pub async fn cancel_gdp(
     if !gdp_repo::cancel_gdp(pool, &id).await? {
         return Err(ApiError::Conflict);
     }
-    let gdp = gdp_repo::get_gdp(pool, &id)
+    let mut gdp = gdp_repo::get_gdp(pool, &id)
         .await?
         .ok_or(ApiError::NotFound)?;
+    restriction_artcc::stamp_gdp(&*state.facilities.read().await, &mut gdp);
     Ok(Json(gdp))
 }
 

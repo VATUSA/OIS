@@ -94,8 +94,11 @@ fn normalize_item(kind: &str, payload: Value) -> Result<Value, ApiError> {
         "restriction" => {
             let mut r: RestrictionItem =
                 serde_json::from_value(payload).map_err(|_| ApiError::BadRequest)?;
-            r.requesting = r.requesting.trim().to_string();
-            r.providing = r.providing.trim().to_string();
+            // Uppercased like every other TMI write path: activation stores these as typed, and the
+            // facility map is keyed uppercase, so `zdc` resolved to no ARTCC and the TMI reached no
+            // one outside national TMU (VATUSA/OIS#405 review).
+            r.requesting = r.requesting.trim().to_ascii_uppercase();
+            r.providing = r.providing.trim().to_ascii_uppercase();
             // A structured restriction derives its raw line; a raw one uses the typed text.
             if let Some(s) = &r.structured {
                 r.restriction = crate::tmi::encode(s);
@@ -1573,4 +1576,25 @@ pub async fn publish_event_discord(
     .await?;
     tx.commit().await.map_err(|_| ApiError::Internal)?;
     Ok(StatusCode::ACCEPTED)
+}
+
+#[cfg(test)]
+mod tests {
+    use serde_json::json;
+
+    use super::normalize_item;
+
+    /// Event restriction items become live TMIs on activation, stored as typed. The facility map is
+    /// keyed uppercase, so a lowercase facility resolved to no ARTCC and the TMI alerted no one but
+    /// national TMU (VATUSA/OIS#405 review).
+    #[test]
+    fn a_restriction_items_facilities_are_uppercased() {
+        let item = normalize_item(
+            "restriction",
+            json!({"requesting": " zdc ", "providing": "zny", "restriction": "20 MIT"}),
+        )
+        .unwrap();
+        assert_eq!(item["requesting"], "ZDC");
+        assert_eq!(item["providing"], "ZNY");
+    }
 }

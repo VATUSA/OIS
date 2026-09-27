@@ -1,133 +1,203 @@
 // @vitest-environment jsdom
+import * as React from "react";
 import {act} from "react";
 import {createRoot} from "react-dom/client";
-import {afterEach, beforeAll, beforeEach, describe, expect, it, vi} from "vitest";
-
-type Q = {isSuccess: boolean; isPending: boolean; data: unknown[] | undefined};
-const pending = (): Q => ({isSuccess: false, isPending: true, data: undefined});
-const errored = (): Q => ({isSuccess: false, isPending: false, data: undefined});
-const ok = (data: unknown[]): Q => ({isSuccess: true, isPending: false, data});
-
-// The four restriction lists, each stepped through states the way a real poll moves them.
-const lists = vi.hoisted(() => ({gs: {} as Q, gdp: {} as Q, tmi: {} as Q, prog: {} as Q}));
-const notifyRestrictions = vi.hoisted(() => vi.fn());
-
-vi.mock("@/lib/tmu", () => ({
-  useGroundStops: () => lists.gs,
-  useTmis: () => lists.tmi,
-  usePrograms: () => lists.prog,
-}));
-vi.mock("@/lib/gdp", () => ({useGdps: () => lists.gdp}));
-vi.mock("@/lib/auth", () => ({useMe: () => ({data: {server_admin: true}})}));
-vi.mock("@/lib/historical-context", () => ({useHistoricalAt: () => null}));
-vi.mock("@/lib/notify-restrictions", () => ({useRestrictionNotifier: () => notifyRestrictions}));
+import {QueryClient, QueryClientProvider} from "@tanstack/react-query";
+import {ToastProvider} from "@ois/ui";
+import {afterEach, beforeAll, describe, expect, it} from "vitest";
 
 import {RestrictionAlerts} from "./restriction-alerts";
 
 declare global {
   var IS_REACT_ACT_ENVIRONMENT: boolean;
 }
+
 beforeAll(() => {
   globalThis.IS_REACT_ACT_ENVIRONMENT = true;
 });
 
-let root: ReturnType<typeof createRoot> | undefined;
-beforeEach(() => {
-  lists.gs = pending();
-  lists.gdp = pending();
-  lists.tmi = pending();
-  lists.prog = pending();
-  notifyRestrictions.mockClear();
-});
+const roots: { root: ReturnType<typeof createRoot>; host: HTMLElement }[] = [];
 afterEach(() => {
-  act(() => root?.unmount());
-  root = undefined;
+  for (const { root, host } of roots.splice(0)) {
+    act(() => root.unmount());
+    host.remove();
+  }
+  document.body.innerHTML = "";
 });
 
-function mount() {
-  root = createRoot(document.createElement("div"));
-  const render = () => act(() => root!.render(<RestrictionAlerts />));
-  render();
-  return render;
+/**
+ * A ZDC controller who runs traffic management. Not `server_admin` — that short-circuits
+ * `hasPermission` and would let the component render for the wrong reason, masking the scoping.
+ */
+const zdcController = {
+  id: "u1",
+  cid: 1,
+  email: "a@b.c",
+  display_name: "Tester",
+  rating: null,
+  server_admin: false,
+  role_names: [],
+  tmu_national: false,
+  permissions: { tmu: { program: ["read"] } },
+  vatusa: { home_facility: "ZDC", visits: [] },
+} as never;
+
+const nationalController = { ...(zdcController as object), tmu_national: true } as never;
+
+const groundStop = (id: string, airport: string, artcc: string | null) => ({
+  id,
+  airport,
+  artcc,
+  scope: "",
+  until: null,
+  status: "published",
+  published_at: null,
+  updated_at: "2026-09-27T00:00:00Z",
+  updated_by: null,
+});
+
+/**
+ * Mounts the real component against the real query cache. The lists are seeded rather than fetched —
+ * the generated client captures `fetch` at module load, so a stub here would never be seen.
+ *
+ * `known` is null until the first full load, so the set present at mount is captured silently. To get
+ * an alert at all, mount with the lists already settled and *then* publish the new restrictions.
+ */
+async function mountWith(me: unknown) {
+  // No network at all: the seeded lists must not refetch on mount. A failing background fetch would
+  // otherwise re-render after the act block and make every assertion race it.
+  const qc = new QueryClient({
+    defaultOptions: {
+      queries: {
+        retry: false,
+        refetchInterval: false,
+        refetchOnMount: false,
+        refetchOnWindowFocus: false,
+        refetchOnReconnect: false,
+        staleTime: Infinity,
+      },
+    },
+  });
+  qc.setQueryData(["me"], me);
+  qc.setQueryData(["ground-stops"], []);
+  qc.setQueryData(["gdps"], []);
+  qc.setQueryData(["tmis"], []);
+  qc.setQueryData(["tmu-programs"], []);
+
+  const host = document.createElement("div");
+  document.body.appendChild(host);
+  const root = createRoot(host);
+  roots.push({ root, host });
+  await act(async () => {
+    root.render(
+      <QueryClientProvider client={qc}>
+        <ToastProvider>
+          <RestrictionAlerts />
+        </ToastProvider>
+      </QueryClientProvider>,
+    );
+  });
+
+  // The macrotask matters: TanStack's notify manager batches cache notifications outside React's
+  // scheduler, so a plain `await act(async () => setQueryData(...))` returns before the re-render.
+  const set = async (key: string, value: unknown) => {
+    await act(async () => {
+      qc.setQueryData([key], value);
+      await new Promise((resolve) => setTimeout(resolve, 0));
+    });
+  };
+  const publish = (stops: unknown[]) => set("ground-stops", stops);
+  const publishTo = (key: "gdps" | "tmis" | "tmu-programs", rows: unknown[]) => set(key, rows);
+  const setMe = (next: unknown) => set("me", next);
+  const alerted = () =>
+    [...document.querySelectorAll('[role="alert"]')].map((el) => el.textContent ?? "");
+  return { publish, publishTo, setMe, alerted };
 }
 
-const gs = (id: number, airport: string) => ({id, airport, status: "published", scope: "", until: null});
-const announced = () => notifyRestrictions.mock.calls.flatMap(([alerts]) => alerts.map((a: {key: string}) => a.key));
+describe("RestrictionAlerts scoping (VATUSA/OIS#405)", () => {
+  it("alerts a ZDC controller to a ZDC ground stop, and not to a ZLA one", async () => {
+    const { publish, alerted } = await mountWith(zdcController);
+    await publish([groundStop("gs1", "KDCA", "ZDC"), groundStop("gs2", "KLAX", "ZLA")]);
 
-// One row per list, each the minimum its alert builder reads.
-const gdp = (id: number) => ({id, airport: "KEWR", status: "published", aar: 40, start_time: "1200", end_time: "1400", scope: ""});
-const tmi = (id: number) => ({id, status: "published", requesting: "ZDC", providing: "ZNY", restriction: "20 MIT", decoded: ""});
-const prog = (icao: string) => ({icao, mit: 20, aar: 0, jets_only: false});
-
-describe("RestrictionAlerts (VATUSA/OIS#348 review)", () => {
-  it("does not announce restrictions already in force when a list's first load failed", () => {
-    const render = mount();
-    lists.gdp = ok([]);
-    lists.tmi = ok([]);
-    lists.prog = ok([]);
-    lists.gs = errored(); // e.g. the backend was mid-restart
-    render();
-
-    lists.gs = ok([gs(1, "KATL"), gs(2, "KJFK")]); // the next poll succeeds
-    render();
-
-    expect(notifyRestrictions).not.toHaveBeenCalled();
+    const text = alerted().join(" | ");
+    expect(text).toContain("KDCA");
+    expect(text).not.toContain("KLAX");
+    expect(alerted()).toHaveLength(1);
   });
 
-  it("still alerts on the lists it can read when one needs a permission the user lacks", () => {
-    const render = mount();
-    lists.gs = ok([]);
-    lists.tmi = ok([]);
-    lists.prog = ok([]);
-    lists.gdp = errored(); // 403: no tmu.gdp.read — permanently
-    render();
+  it("alerts a national TMU reader to both", async () => {
+    const { publish, alerted } = await mountWith(nationalController);
+    await publish([groundStop("gs1", "KDCA", "ZDC"), groundStop("gs2", "KLAX", "ZLA")]);
 
-    lists.gs = ok([gs(3, "KDCA")]);
-    render();
-
-    expect(announced()).toEqual(["gs:3"]);
+    const text = alerted().join(" | ");
+    expect(text).toContain("KDCA");
+    expect(text).toContain("KLAX");
+    expect(alerted()).toHaveLength(2);
   });
 
-  it("announces a restriction that appears after its list first loaded, and only that one", () => {
-    const render = mount();
-    lists.gs = ok([gs(1, "KATL")]);
-    lists.gdp = ok([]);
-    lists.tmi = ok([]);
-    lists.prog = ok([]);
-    render();
-    expect(notifyRestrictions).not.toHaveBeenCalled();
+  // Fail open: scoping narrows an audience that used to be everyone, and a ground stop the map
+  // couldn't place (a 3-letter id, a lowercase event TMI) went to no one outside national TMU.
+  it("alerts about a restriction whose ARTCC the facility map could not resolve", async () => {
+    const { publish, alerted } = await mountWith(zdcController);
+    await publish([groundStop("gs1", "KXXX", null)]);
 
-    lists.gs = ok([gs(1, "KATL"), gs(4, "KORD")]);
-    render();
+    expect(alerted()).toHaveLength(1);
+  });
+});
 
-    expect(announced()).toEqual(["gs:4"]);
+const gdp = (id: string, airport: string, artcc: string | null) => ({
+  id, airport, artcc, status: "published", aar: 40, start_time: "2026-09-27T12:00:00Z",
+  end_time: "2026-09-27T14:00:00Z", scope: "",
+});
+const tmi = (id: string, requesting_artcc: string | null, providing_artcc: string | null) => ({
+  id, status: "published", requesting: requesting_artcc ?? "XXX", providing: providing_artcc ?? "XXX",
+  requesting_artcc, providing_artcc, restriction: "20 MIT", decoded: "",
+});
+const program = (icao: string, artcc: string | null) => ({icao, artcc, aar: 40, trail: 0, mit: 0, jets_only: false});
+
+// Each list filters on its own field; only ground stops were pinned (VATUSA/OIS#405 review).
+describe("RestrictionAlerts scoping, per list (VATUSA/OIS#405 review)", () => {
+  it("scopes GDPs", async () => {
+    const {publishTo, alerted} = await mountWith(zdcController);
+    await publishTo("gdps", [gdp("g1", "KIAD", "ZDC"), gdp("g2", "KSFO", "ZOA")]);
+    expect(alerted()).toHaveLength(1);
+    expect(alerted()[0]).toContain("KIAD");
   });
 
-  /**
-   * Each list's silent seed is found by slicing its key's prefix and looking it up among the
-   * loaded-list flags, so the key prefix and that flag's name are coupled by two bare strings that
-   * nothing type-checks. Get them out of step for one list and that list inverts: every restriction
-   * already in force announces itself on the first load, for ever. Only ground stops were covered,
-   * so three of the four pairings were unpinned.
-   */
-  it.each([
-    ["ground stops", "gs", () => (lists.gs = ok([gs(1, "KATL")])), () => (lists.gs = ok([gs(1, "KATL"), gs(2, "KJFK")])), "gs:2"],
-    ["GDPs", "gdp", () => (lists.gdp = ok([gdp(1)])), () => (lists.gdp = ok([gdp(1), gdp(2)])), "gdp:2"],
-    ["TMIs", "tmi", () => (lists.tmi = ok([tmi(1)])), () => (lists.tmi = ok([tmi(1), tmi(2)])), "tmi:2"],
-    ["programs", "prog", () => (lists.prog = ok([prog("KATL")])), () => (lists.prog = ok([prog("KATL"), prog("KJFK")])), "prog:KJFK"],
-  ])("seeds %s silently and then announces only what is new", (_label, _source, seed, arrive, expected) => {
-    const render = mount();
-    lists.gs = ok([]);
-    lists.gdp = ok([]);
-    lists.tmi = ok([]);
-    lists.prog = ok([]);
-    seed();
-    render();
-    expect(notifyRestrictions).not.toHaveBeenCalled();
+  it("scopes metering programs", async () => {
+    const {publishTo, alerted} = await mountWith(zdcController);
+    await publishTo("tmu-programs", [program("KDCA", "ZDC"), program("KORD", "ZAU")]);
+    expect(alerted()).toHaveLength(1);
+    expect(alerted()[0]).toContain("KDCA");
+  });
 
-    arrive();
-    render();
+  it("alerts a centre to a TMI it is providing, not only one it requested", async () => {
+    const {publishTo, alerted} = await mountWith(zdcController);
+    await publishTo("tmis", [tmi("t1", "ZNY", "ZDC"), tmi("t2", "ZNY", "ZBW")]);
+    expect(alerted()).toHaveLength(1);
+  });
+});
 
-    expect(announced()).toEqual([expected]);
+describe("RestrictionAlerts when the scope changes (VATUSA/OIS#405 review)", () => {
+  // Diffed against the old scope, every restriction already running in the new one announced
+  // itself as just initiated — someone made national was alerted to the whole country at once.
+  it("does not replay running restrictions as new when the scope widens", async () => {
+    const {publish, setMe, alerted} = await mountWith(zdcController);
+    await publish([groundStop("gs1", "KDCA", "ZDC")]);
+    expect(alerted()).toHaveLength(1);
+
+    await publish([groundStop("gs1", "KDCA", "ZDC"), groundStop("gs2", "KLAX", "ZLA")]);
+    await setMe(nationalController); // KLAX, already running, is now in scope
+
+    expect(alerted()).toHaveLength(1);
+    expect(alerted().join(" ")).not.toContain("KLAX");
+  });
+
+  it("still alerts to a restriction initiated after the scope changed", async () => {
+    const {publish, setMe, alerted} = await mountWith(zdcController);
+    await setMe(nationalController);
+    await publish([groundStop("gs3", "KSEA", "ZSE")]);
+
+    expect(alerted().join(" ")).toContain("KSEA");
   });
 });
