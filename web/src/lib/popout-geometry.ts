@@ -5,7 +5,8 @@
 
 /**
  * A window rect in **logical** pixels — the unit `WebviewWindow` options take, and the unit saved
- * geometry is stored in.
+ * geometry is stored in. `x`/`y` are the window's outer position and `width`/`height` its *inner*
+ * (content) size, because that is what those options set.
  *
  * Tauri *reports* window position and size in physical pixels (`outerPosition`, `outerSize`), so they
  * go through {@link toLogical} before being saved. The two units coincide on a 1x display and differ

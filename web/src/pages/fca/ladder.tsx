@@ -27,12 +27,24 @@ function minutesUntil(iso: string | null | undefined, now: number): number | nul
   return Number.isNaN(t) ? null : (t - now) / 60000;
 }
 
-export function Ladder({ flights, now }: { flights: FcaFlight[]; now: number }) {
-  const items = flights
+/**
+ * What the ladder plots: connected traffic with a real crossing time.
+ *
+ * Proposed flights — prefiled, pilot not yet connected — are left off *here*, not by each caller.
+ * The detail panel filtered them and the pop-out didn't, so the floating ladder showed a different
+ * sequence from the panel it was popped out of (VATUSA/OIS#349 review).
+ */
+export function ladderItems(flights: FcaFlight[], now: number) {
+  return flights
+    .filter((f) => f.status !== "proposed")
     .map((f) => ({ f, min: minutesUntil(f.cross_time, now) }))
     // `min` is non-null only when `cross_time` was itself a valid, non-empty timestamp.
     .filter((x): x is { f: FcaFlight; min: number } => x.min != null && !!x.f.cross_time)
     .map((x) => ({ key: x.f.callsign, min: x.min, time: x.f.cross_time as string, data: x.f }));
+}
+
+export function Ladder({ flights, now }: { flights: FcaFlight[]; now: number }) {
+  const items = ladderItems(flights, now);
 
   return (
     <ArrivalLadder

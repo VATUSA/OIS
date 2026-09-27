@@ -7,13 +7,20 @@ vi.mock("@/lib/desktop-token", () => ({
   getDesktopToken: async () => "ois_dsk_stored",
   setDesktopToken: vi.fn(),
 }));
-vi.mock("@/lib/platform", () => ({ isTauri: () => true, invokeDesktop: vi.fn(async () => undefined) }));
+const platform = vi.hoisted(() => ({tauri: true, main: true}));
+vi.mock("@/lib/platform", () => ({
+  isTauri: () => platform.tauri,
+  isMainWindow: async () => platform.main,
+  invokeDesktop: vi.fn(async () => undefined),
+}));
 
-import {LAUNCH_REFRESH_BUDGET_MS, refreshBeforeLaunch} from "./desktop-auth";
+import {LAUNCH_REFRESH_BUDGET_MS, refreshBeforeLaunch, rotateOnLaunch} from "./desktop-auth";
 
 afterEach(() => {
   vi.useRealTimers();
   post.mockReset();
+  platform.tauri = true;
+  platform.main = true;
 });
 
 describe("refreshBeforeLaunch (VATUSA/OIS#346)", () => {
@@ -34,5 +41,29 @@ describe("refreshBeforeLaunch (VATUSA/OIS#346)", () => {
   it("never rejects, so a failed rotation cannot stop the app rendering", async () => {
     post.mockRejectedValue(new Error("network down"));
     await expect(refreshBeforeLaunch()).resolves.toBeUndefined();
+  });
+});
+
+describe("rotateOnLaunch (VATUSA/OIS#349 review)", () => {
+  const rotated = () => post.mock.calls.some(([path]) => path === "/api/v1/auth/desktop/refresh");
+
+  it("rotates the session in the main window", async () => {
+    post.mockResolvedValue({data: {token: "ois_dsk_new"}});
+    await rotateOnLaunch();
+    expect(rotated()).toBe(true);
+  });
+
+  // Every window loads the same entry. A pop-out rotating deleted the token the main window still
+  // held, so popping a panel out signed the user out.
+  it("leaves the session alone in a pop-out", async () => {
+    platform.main = false;
+    await rotateOnLaunch();
+    expect(post).not.toHaveBeenCalled();
+  });
+
+  it("does nothing on the web build", async () => {
+    platform.tauri = false;
+    await rotateOnLaunch();
+    expect(post).not.toHaveBeenCalled();
   });
 });
