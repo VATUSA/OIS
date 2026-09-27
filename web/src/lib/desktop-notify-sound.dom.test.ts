@@ -1,21 +1,22 @@
 // @vitest-environment jsdom
 import {beforeEach, describe, expect, it, vi} from "vitest";
 
-import {notifyDesktop} from "./desktop-notify";
-
 /**
  * The seam between a detection and a noise (#353).
  *
- * `sounds.dom.test.ts` covers `playAlertSound` in isolation; this covers *when* it is reached.
- * Nothing did before, which is how a release went out where the sound toggles were wired to the
- * notification settings.
+ * `sounds.dom.test.ts` covers `playAlertSound` itself; this covers *when* it is reached, and with
+ * what. Nothing did before, which is how a release went out where the sound toggles were wired to
+ * the notification settings.
+ *
+ * `@/lib/sounds` is mocked rather than the audio stack re-stubbed: what matters here is that the
+ * sound is a second output of the same call, decided by its own settings.
  */
-vi.mock("@tauri-apps/api/core", () => ({convertFileSrc: (p: string) => `asset://${p}`}));
-vi.mock("@tauri-apps/api/path", () => ({
-  appDataDir: async () => "/appdata",
-  join: async (...parts: string[]) => parts.join("/"),
+const playAlertSound = vi.hoisted(() => vi.fn(() => Promise.resolve(true)));
+vi.mock("@/lib/sounds", () => ({playAlertSound}));
+vi.mock("@/lib/platform", () => ({
+  can: () => true,
+  invokeDesktop: () => Promise.resolve(),
 }));
-vi.mock("@tauri-apps/api/window", () => ({getCurrentWindow: () => ({label: "main"})}));
 // Keep the banner half out of the way — this is about the audio path.
 vi.mock("@tauri-apps/plugin-notification", () => ({
   isPermissionGranted: async () => false,
@@ -23,23 +24,12 @@ vi.mock("@tauri-apps/plugin-notification", () => ({
   sendNotification: () => {},
 }));
 
-let plays: string[] = [];
-class FakeAudio {
-  volume = 1;
-  onerror: (() => void) | null = null;
-  constructor(public src: string) {}
-  play() {
-    plays.push(this.src);
-    return Promise.resolve();
-  }
-}
+import {notifyDesktop} from "./desktop-notify";
 
 const settle = () => new Promise((resolve) => setTimeout(resolve, 0));
 
 beforeEach(() => {
-  plays = [];
-  vi.stubGlobal("Audio", FakeAudio);
-  window.__TAURI_INTERNALS__ = {};
+  playAlertSound.mockClear();
 });
 
 const alert = {
@@ -56,7 +46,8 @@ describe("sound is a second output, not a second notification", () => {
     await notifyDesktop(alert, false, {enabled: true});
     await settle();
 
-    expect(plays).toHaveLength(1);
+    expect(playAlertSound).toHaveBeenCalledTimes(1);
+    expect(playAlertSound).toHaveBeenCalledWith("restrictions", {enabled: true});
   });
 
   it("stays silent with the sound switched off, banner or not", async () => {
@@ -64,7 +55,7 @@ describe("sound is a second output, not a second notification", () => {
     await notifyDesktop(alert, false, {enabled: false});
     await settle();
 
-    expect(plays).toHaveLength(0);
+    expect(playAlertSound).not.toHaveBeenCalled();
   });
 
   it("stays silent when the caller asks for no sound at all", async () => {
@@ -72,13 +63,13 @@ describe("sound is a second output, not a second notification", () => {
     await notifyDesktop(alert, true);
     await settle();
 
-    expect(plays).toHaveLength(0);
+    expect(playAlertSound).not.toHaveBeenCalled();
   });
 
-  it("plays on the volume the caller passed", async () => {
+  it("hands the caller's volume through", async () => {
     await notifyDesktop(alert, false, {enabled: true, volume: "quiet"});
     await settle();
 
-    expect(plays).toHaveLength(1);
+    expect(playAlertSound).toHaveBeenCalledWith("restrictions", {enabled: true, volume: "quiet"});
   });
 });

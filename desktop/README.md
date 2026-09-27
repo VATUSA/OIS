@@ -144,6 +144,20 @@ The names are the alert categories: `restrictions.wav`, `releases.wav`, `meterin
 default, so a bad replacement degrades to the standard sound rather than to silence — silence is
 indistinguishable from a broken feature.
 
+**A replacement is picked up at the next launch.** Tones are fetched and decoded once and then kept
+for the life of the process, so dropping a file in while the app is running does not change the sound
+until it restarts. (An earlier note here claimed otherwise; it did not account for the decode cache,
+nor for the webview caching an unchanged URL.)
+
+Sounds play through **Web Audio** — fetched whole, decoded, then played through a gain node — rather
+than through an `Audio` element. A release build serves the bundle over Tauri's `tauri://` protocol,
+which has no byte-range handling, and a webview's media stack asks for media with Range requests, so
+an `<audio>` source could fail in the shipped build while working in dev over Vite's http. A plain
+`fetch` needs no Range support, so both take the same path.
+
+The CSP (see above) has no `media-src`, so `connect-src` carries `asset:` and
+`http://asset.localhost` — without them `default-src 'self'` blocks a replacement tone outright.
+
 The asset-protocol scope in `tauri.conf.json` is deliberately `$APPDATA/sounds/*` and nothing
 wider: the webview can read a replaced alert sound and no other file on the machine.
 

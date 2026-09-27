@@ -1,5 +1,5 @@
-import {can} from "@/lib/platform";
 import type {NotifyCategory} from "@/lib/desktop-notify";
+import {can, isMainWindow} from "@/lib/platform";
 
 /**
  * Audible alerts for the desktop app (#353).
@@ -13,6 +13,12 @@ import type {NotifyCategory} from "@/lib/desktop-notify";
  *
  * Each sound ships as a default but is **replaceable**: drop a `.wav` of the same name into the
  * OIS app-data folder and it is used instead, so a facility can use its own tones without a build.
+ *
+ * Played through **Web Audio** rather than an `Audio` element. In a release build the bundle is
+ * served over Tauri's `tauri://` protocol, which has no byte-range handling, and a webview's media
+ * stack asks for media with Range requests — so `<audio>` could fail in exactly the build that
+ * ships, while working in dev over Vite's http. A plain `fetch` needs no Range support, so dev and
+ * release take the same path (VATUSA/OIS#353 review).
  */
 
 /** How loud, as the settings offer it. */
@@ -25,7 +31,11 @@ const GAIN: Record<AlertVolume, number> = {
 };
 
 export function gainFor(volume: string | undefined): number {
-  return GAIN[(volume ?? "normal") as AlertVolume] ?? GAIN.normal;
+  const key = volume ?? "normal";
+  // Own properties only. Settings are a free-form blob, so `"constructor"` would otherwise index
+  // the prototype, hand back a function, and throw when assigned as a gain — silencing that
+  // category (VATUSA/OIS#353 review).
+  return Object.hasOwn(GAIN, key) ? GAIN[key as AlertVolume] : GAIN.normal;
 }
 
 /** The sound bundled with the app, served like any other public asset. */
@@ -38,43 +48,44 @@ export function bundledSoundUrl(category: NotifyCategory): string {
  *
  * Resolved with `convertFileSrc`, which hands the webview a URL for a file on disk — so no
  * filesystem plugin and no read permissions are needed. Whether the file *exists* is answered by
- * trying to play it and falling back, rather than by asking the filesystem.
+ * trying to fetch it and falling back, rather than by asking the filesystem.
  */
-async function resolveOverrideUrl(category: NotifyCategory): Promise<string | undefined> {
-  try {
-    const {appDataDir, join} = await import("@tauri-apps/api/path");
-    const {convertFileSrc} = await import("@tauri-apps/api/core");
-    return convertFileSrc(await join(await appDataDir(), "sounds", `${category}.wav`));
-  } catch {
-    return undefined;
-  }
+async function resolveOverrideUrl(category: NotifyCategory): Promise<string> {
+  const {appDataDir, join} = await import("@tauri-apps/api/path");
+  const {convertFileSrc} = await import("@tauri-apps/api/core");
+  return convertFileSrc(await join(await appDataDir(), "sounds", `${category}.wav`));
 }
 
 /**
  * Resolved override URLs, cached for the life of the process.
  *
  * The path does not move while the app is running, and almost nobody has dropped a file in — so
- * without this every single alert paid for two IPC round-trips before it could fall back to the
- * bundled tone. Only the *resolution* is cached; whether the file plays is still decided per alert,
- * so replacing the file takes effect without a restart.
+ * without this every alert paid for two IPC round-trips before it could fall back to the bundled
+ * tone. A *failure* is deliberately not cached: caching it meant one transient IPC error disabled a
+ * facility's replacement tone until the app restarted (VATUSA/OIS#353 review).
  */
-const overrideUrls = new Map<NotifyCategory, string | undefined>();
+const overrideUrls = new Map<NotifyCategory, string>();
 
 async function overrideSoundUrl(category: NotifyCategory): Promise<string | undefined> {
-  if (!overrideUrls.has(category)) {
-    overrideUrls.set(category, await resolveOverrideUrl(category));
+  const known = overrideUrls.get(category);
+  if (known) return known;
+  try {
+    const url = await resolveOverrideUrl(category);
+    overrideUrls.set(category, url);
+    return url;
+  } catch {
+    return undefined;
   }
-  return overrideUrls.get(category);
 }
 
 /**
  * Categories that have already claimed a sound in the current tick.
  *
  * `useNewKeys` calls `notifyDesktop` once per newly-appeared key, synchronously, so a batch — a TMU
- * releasing ten flights, or a role grant that `flattenPermissions` expands into dozens of
- * permission keys — used to start that many copies of one 0.38s tone at once. Summed amplitudes
- * clip and it reads as a blast rather than an alert. One sound per category per batch; the set is
- * emptied on the next microtask, so genuinely separate events still each get their own.
+ * releasing ten flights, or a role grant that expands into dozens of permission keys — would start
+ * that many copies of one 0.38s tone at once. Summed amplitudes clip and it reads as a blast rather
+ * than an alert. One sound per category per batch; the set is emptied on the next microtask, so
+ * genuinely separate events still each get their own.
  */
 const claimedThisTick = new Set<NotifyCategory>();
 
@@ -85,39 +96,72 @@ function claimTick(category: NotifyCategory): boolean {
   return true;
 }
 
-/**
- * Whether this webview should be the one making the noise.
- *
- * `RootLayout` renders the notifiers in every whole-route window (#350), not just the main one, so
- * without this a ground stop played once per open window — the same tone, at once, near enough in
- * phase. `desktop-tray.tsx` and `popout.ts` guard app-wide resources the same way.
- */
-async function isMainWindow(): Promise<boolean> {
+/** One context for the process: one per alert would leak a hardware audio stream each time. */
+let context: AudioContext | undefined;
+
+function audioContext(): AudioContext | undefined {
+  if (context) return context;
+  const Ctor = typeof AudioContext === "function" ? AudioContext : undefined;
+  if (!Ctor) return undefined;
   try {
-    const {getCurrentWindow} = await import("@tauri-apps/api/window");
-    return getCurrentWindow().label === "main";
+    context = new Ctor();
+    return context;
   } catch {
-    // Can't tell: stay quiet rather than risk one copy per window.
-    return false;
+    return undefined;
   }
 }
 
+/**
+ * Decoded tones, keyed by URL.
+ *
+ * Decoding is the expensive part and a tone never changes while the app runs, so it is done once.
+ * A failed fetch or decode is **not** kept, so a replacement that was briefly unreadable is tried
+ * again on the next alert rather than written off for the process.
+ */
+const decodedTones = new Map<string, Promise<AudioBuffer | undefined>>();
+
+async function decode(url: string, ctx: AudioContext): Promise<AudioBuffer | undefined> {
+  let pending = decodedTones.get(url);
+  if (!pending) {
+    pending = (async () => {
+      try {
+        const response = await fetch(url);
+        if (!response.ok) return undefined;
+        return await ctx.decodeAudioData(await response.arrayBuffer());
+      } catch {
+        return undefined;
+      }
+    })();
+    decodedTones.set(url, pending);
+  }
+
+  const buffer = await pending;
+  if (!buffer) decodedTones.delete(url);
+  return buffer;
+}
+
 /** Plays one source, resolving false if it couldn't be played at all. */
-function play(url: string, gain: number): Promise<boolean> {
-  return new Promise((resolve) => {
-    try {
-      const audio = new Audio(url);
-      audio.volume = gain;
-      audio.onerror = () => resolve(false);
-      // `play()` rejects if the source is missing or the platform refuses.
-      void audio
-        .play()
-        .then(() => resolve(true))
-        .catch(() => resolve(false));
-    } catch {
-      resolve(false);
-    }
-  });
+async function play(url: string, gain: number): Promise<boolean> {
+  const ctx = audioContext();
+  if (!ctx) return false;
+
+  const buffer = await decode(url, ctx);
+  if (!buffer) return false;
+
+  try {
+    // A context can start suspended; without this the first alert of a session is silent.
+    if (ctx.state === "suspended") await ctx.resume();
+    const source = ctx.createBufferSource();
+    source.buffer = buffer;
+    const volume = ctx.createGain();
+    volume.gain.value = gain;
+    source.connect(volume);
+    volume.connect(ctx.destination);
+    source.start();
+    return true;
+  } catch {
+    return false;
+  }
 }
 
 /**
@@ -136,6 +180,8 @@ export async function playAlertSound(
   if (!options.enabled || !can("audioAlerts")) return false;
   // Claimed synchronously, before the first await, so an entire synchronous burst collapses to one.
   if (!claimTick(category)) return false;
+  // `RootLayout` renders the notifiers in every whole-route window (#350), so without this one
+  // ground stop played once per open window — the same tone, at once, near enough in phase.
   if (!(await isMainWindow())) return false;
 
   const gain = gainFor(options.volume);

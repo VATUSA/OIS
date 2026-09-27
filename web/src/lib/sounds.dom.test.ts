@@ -1,56 +1,90 @@
 // @vitest-environment jsdom
-import {afterEach, beforeEach, describe, expect, it, vi} from "vitest";
+import {beforeEach, describe, expect, it, vi} from "vitest";
 
-import {bundledSoundUrl, gainFor, playAlertSound} from "./sounds";
+type Sounds = typeof import("./sounds");
+let bundledSoundUrl: Sounds["bundledSoundUrl"];
+let gainFor: Sounds["gainFor"];
+let playAlertSound: Sounds["playAlertSound"];
 
-const convertFileSrc = vi.fn();
+const platform = vi.hoisted(() => ({audioAlerts: true, main: true}));
+// Mocked as a module rather than through `window.__TAURI_INTERNALS__`: `isMainWindow` used to be a
+// local copy here reached by a dynamic `import()`, and ten concurrent calls to a *mocked* dynamic
+// import fail for all but the first — so a burst looked collapsed whether or not the per-tick claim
+// existed, and the test that was meant to pin the claim passed without it (VATUSA/OIS#353 review).
+vi.mock("@/lib/platform", () => ({
+  can: () => platform.audioAlerts,
+  isMainWindow: () => Promise.resolve(platform.main),
+}));
+
 const appDataDir = vi.fn();
-let windowLabel = "main";
-
-vi.mock("@tauri-apps/api/core", () => ({convertFileSrc: (p: string) => convertFileSrc(p)}));
+vi.mock("@tauri-apps/api/core", () => ({convertFileSrc: (p: string) => `asset://${p}`}));
 vi.mock("@tauri-apps/api/path", () => ({
   appDataDir: () => appDataDir(),
   join: (...parts: string[]) => Promise.resolve(parts.join("/")),
 }));
-// The notifiers render in every route window (#350), so which window we are in decides whether we
-// are the one that makes the noise.
-vi.mock("@tauri-apps/api/window", () => ({
-  getCurrentWindow: () => ({label: windowLabel}),
-}));
 
-/** The tick claim collapses a synchronous burst; let it drain between independent cases. */
-const nextTick = () => new Promise((resolve) => setTimeout(resolve, 0));
+/** Which URLs a fetch should refuse, so a test can say "there is no replacement". */
+let missing: (url: string) => boolean = () => false;
+let fetched: string[] = [];
+/** Every tone that actually reached the output, with the gain it was played at. */
+let played: {src: string; gain: number}[] = [];
+let resumed = 0;
 
-/** Records what was constructed, and lets a test decide whether it plays. */
-let played: {src: string; volume: number}[] = [];
-let failFor: (src: string) => boolean = () => false;
-
-class FakeAudio {
-  volume = 1;
-  onerror: (() => void) | null = null;
-  constructor(public src: string) {}
-  play() {
-    played.push({src: this.src, volume: this.volume});
-    return failFor(this.src) ? Promise.reject(new Error("no such file")) : Promise.resolve();
+class FakeGain {
+  gain = {value: 1};
+  connect() {}
+}
+class FakeSource {
+  buffer: {url: string} | null = null;
+  private out: FakeGain | undefined;
+  connect(node: FakeGain) {
+    this.out = node;
+  }
+  start() {
+    played.push({src: this.buffer?.url ?? "?", gain: this.out?.gain.value ?? -1});
+  }
+}
+class FakeAudioContext {
+  state = "suspended";
+  destination = {};
+  resume() {
+    resumed += 1;
+    this.state = "running";
+    return Promise.resolve();
+  }
+  createBufferSource() {
+    return new FakeSource();
+  }
+  createGain() {
+    return new FakeGain();
+  }
+  // The decoded "buffer" just remembers which URL it came from, which is what tests assert on.
+  decodeAudioData(bytes: ArrayBuffer & {url?: string}) {
+    return Promise.resolve({url: bytes.url ?? "?"});
   }
 }
 
-function pretendDesktop() {
-  window.__TAURI_INTERNALS__ = {};
-}
+const drain = () => new Promise((resolve) => setTimeout(resolve, 0));
 
-beforeEach(() => {
+beforeEach(async () => {
   played = [];
-  failFor = () => false;
-  windowLabel = "main";
-  vi.stubGlobal("Audio", FakeAudio);
-  convertFileSrc.mockReset().mockImplementation((p: string) => `asset://${p}`);
+  fetched = [];
+  resumed = 0;
+  missing = () => false;
+  platform.audioAlerts = true;
+  platform.main = true;
   appDataDir.mockReset().mockResolvedValue("/Users/x/Library/Application Support/net.vatusa.ois");
-});
-
-afterEach(() => {
-  delete window.__TAURI_INTERNALS__;
-  vi.unstubAllGlobals();
+  vi.stubGlobal("AudioContext", FakeAudioContext);
+  vi.stubGlobal("fetch", (url: string) => {
+    fetched.push(url);
+    if (missing(url)) return Promise.resolve({ok: false, arrayBuffer: () => Promise.resolve({})});
+    const bytes = {url} as unknown as ArrayBuffer;
+    return Promise.resolve({ok: true, arrayBuffer: () => Promise.resolve(bytes)});
+  });
+  // Decoded tones, resolved override paths and the AudioContext all live for the process by
+  // design, so each case takes a fresh module rather than inheriting the last one's caches.
+  vi.resetModules();
+  ({bundledSoundUrl, gainFor, playAlertSound} = await import("./sounds"));
 });
 
 describe("volume", () => {
@@ -63,100 +97,117 @@ describe("volume", () => {
     expect(gainFor(undefined)).toBe(gainFor("normal"));
     expect(gainFor("deafening")).toBe(gainFor("normal"));
   });
+
+  it("falls back for a prototype key, rather than handing back a function", () => {
+    // Settings are a free-form blob, so these can genuinely arrive. Indexing the prototype returned
+    // a function, and assigning it as a gain threw — silencing the category (#353 review).
+    expect(gainFor("constructor")).toBe(gainFor("normal"));
+    expect(gainFor("toString")).toBe(gainFor("normal"));
+    expect(gainFor("__proto__")).toBe(gainFor("normal"));
+  });
 });
 
 describe("playAlertSound", () => {
-  it("stays silent on the web build", async () => {
+  it("stays silent when the platform has no audio alerts", async () => {
+    platform.audioAlerts = false;
     await expect(playAlertSound("restrictions", {enabled: true})).resolves.toBe(false);
     expect(played).toHaveLength(0);
-  });
-
-  it("stays silent in a route window, so one alert isn't played once per open window", async () => {
-    // `RootLayout` renders the notifiers in every whole-route window, and three open windows played
-    // the same tone three times at once — near enough in phase to sum rather than echo.
-    pretendDesktop();
-    windowLabel = "window-/ops/tmu";
-
-    await expect(playAlertSound("restrictions", {enabled: true})).resolves.toBe(false);
-    expect(played).toHaveLength(0);
-  });
-
-  it("plays once for a batch that arrives in one tick", async () => {
-    // `useNewKeys` notifies per newly-appeared key, synchronously. A TMU releasing ten flights —
-    // or a role grant that expands into dozens of permission keys — must not start that many
-    // copies of the same tone at once.
-    pretendDesktop();
-
-    const results = await Promise.all(
-      Array.from({length: 10}, () => playAlertSound("releases", {enabled: true})),
-    );
-
-    expect(played).toHaveLength(1);
-    expect(results.filter(Boolean)).toHaveLength(1);
-  });
-
-  it("plays again for a batch in the next tick", async () => {
-    // Separate events are separate alerts — the claim must not silence everything after the first.
-    pretendDesktop();
-    await playAlertSound("releases", {enabled: true});
-    await nextTick();
-    await playAlertSound("releases", {enabled: true});
-
-    expect(played).toHaveLength(2);
-  });
-
-  it("resolves the override path once, not on every alert", async () => {
-    // The path can't move while the app runs, and the probe costs two IPC round-trips before the
-    // bundled tone can even start.
-    pretendDesktop();
-    await playAlertSound("access", {enabled: true});
-    await nextTick();
-    await playAlertSound("access", {enabled: true});
-    await nextTick();
-    await playAlertSound("access", {enabled: true});
-
-    expect(appDataDir).toHaveBeenCalledTimes(1);
-    expect(played).toHaveLength(3);
   });
 
   it("stays silent when the category is switched off", async () => {
-    pretendDesktop();
     await expect(playAlertSound("restrictions", {enabled: false})).resolves.toBe(false);
     expect(played).toHaveLength(0);
   });
 
-  it("prefers a replacement the user has dropped in", async () => {
-    pretendDesktop();
-
-    await expect(playAlertSound("restrictions", {enabled: true})).resolves.toBe(true);
-
-    expect(played[0]!.src).toContain("sounds/restrictions.wav");
-    expect(played[0]!.src.startsWith("asset://")).toBe(true);
+  it("stays silent in a route window, so one alert isn't played once per open window", async () => {
+    platform.main = false;
+    await expect(playAlertSound("restrictions", {enabled: true})).resolves.toBe(false);
+    expect(played).toHaveLength(0);
   });
 
-  it("falls back to the bundled sound when there is no replacement", async () => {
-    // A missing or unplayable override must degrade to the standard sound, not to silence —
-    // silence is indistinguishable from a broken feature.
-    pretendDesktop();
-    failFor = (src) => src.startsWith("asset://");
+  it("plays once for a burst that arrives in one tick", async () => {
+    // `useNewKeys` notifies per newly-appeared key, synchronously. Ten new releases must not start
+    // ten copies of the same tone at once; summed, they clip and read as a blast.
+    for (let i = 0; i < 10; i++) void playAlertSound("releases", {enabled: true});
+    await drain();
 
-    await expect(playAlertSound("metering", {enabled: true})).resolves.toBe(true);
-    // Two constructions for one alert: the override attempt, then the bundled fallback.
+    expect(played).toHaveLength(1);
+  });
+
+  it("plays again for a burst in the next tick", async () => {
+    // Separate events are separate alerts — the claim must not silence everything after the first.
+    await playAlertSound("releases", {enabled: true});
+    await drain();
+    await playAlertSound("releases", {enabled: true});
+    await drain();
 
     expect(played).toHaveLength(2);
-    expect(played[1]!.src).toBe(bundledSoundUrl("metering"));
+  });
+
+  it("prefers a replacement the user has dropped in", async () => {
+    await playAlertSound("restrictions", {enabled: true});
+    await drain();
+
+    expect(played).toHaveLength(1);
+    expect(played[0]!.src).toContain("asset://");
+    expect(played[0]!.src).toContain("sounds/restrictions.wav");
+  });
+
+  it("falls back to the bundled tone when there is no replacement", async () => {
+    missing = (url) => url.startsWith("asset://");
+    await playAlertSound("metering", {enabled: true});
+    await drain();
+
+    expect(played).toHaveLength(1);
+    expect(played[0]!.src).toBe(bundledSoundUrl("metering"));
   });
 
   it("plays at the configured volume", async () => {
-    pretendDesktop();
     await playAlertSound("access", {enabled: true, volume: "quiet"});
-    expect(played[0]!.volume).toBe(gainFor("quiet"));
+    await drain();
+
+    expect(played[0]!.gain).toBe(gainFor("quiet"));
+  });
+
+  it("resumes a suspended context, or the first alert of a session is silent", async () => {
+    await playAlertSound("access", {enabled: true});
+    await drain();
+
+    expect(resumed).toBe(1);
+    expect(played).toHaveLength(1);
+  });
+
+  it("decodes each tone once, not on every alert", async () => {
+    missing = (url) => url.startsWith("asset://");
+    for (const _ of [1, 2, 3]) {
+      await playAlertSound("releases", {enabled: true});
+      await drain();
+    }
+
+    expect(played).toHaveLength(3);
+    // Three alerts, one fetch of the bundled tone. The override 404s, and a failure is deliberately
+    // not cached, so it is retried each time.
+    expect(fetched.filter((u) => u === bundledSoundUrl("releases"))).toHaveLength(1);
+  });
+
+  it("retries a replacement that was briefly unreadable", async () => {
+    missing = (url) => url.startsWith("asset://");
+    await playAlertSound("eventReminders", {enabled: true});
+    await drain();
+    expect(played[0]!.src).toBe(bundledSoundUrl("eventReminders"));
+
+    // The file becomes readable — caching the earlier failure would have written it off until the
+    // app restarted (#353 review).
+    missing = () => false;
+    await playAlertSound("eventReminders", {enabled: true});
+    await drain();
+
+    expect(played[1]!.src).toContain("asset://");
   });
 
   it("reports failure rather than throwing when nothing can be played", async () => {
-    pretendDesktop();
-    failFor = () => true;
-
-    await expect(playAlertSound("releases", {enabled: true})).resolves.toBe(false);
+    missing = () => true;
+    await expect(playAlertSound("restrictions", {enabled: true})).resolves.toBe(false);
+    expect(played).toHaveLength(0);
   });
 });
