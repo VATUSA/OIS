@@ -119,14 +119,16 @@ describe("Shell top bar", () => {
   });
 
   it("cannot have its layout classes replaced by a caller's props", () => {
-    // The seam is opaque on purpose, but `className` is not a prop to hand over: spread last it
-    // would silently drop the row's height and padding. The type forbids it; this pins the shape.
+    // The seam is opaque on purpose, but `className` is not a prop to hand over: spread after it, a
+    // caller's className silently drops the row's height and padding. The type forbids it — this
+    // pins that the spread order does too, for a caller that gets past the type.
     const host = render(
-      <Shell topBarProps={{"data-tauri-drag-region": true, id: "top-bar"}}>page</Shell>,
+      <Shell topBarProps={{id: "top-bar", className: "p-0"} as never}>page</Shell>,
     );
 
     const bar = host.querySelector("#top-bar") as HTMLElement;
     expect(bar.className).toContain("h-11");
     expect(bar.className).toContain("px-3");
+    expect(bar.className).not.toBe("p-0");
   });
 });

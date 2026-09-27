@@ -34,10 +34,14 @@ export function Shell({
   leading?: React.ReactNode;
   /**
    * Spread onto the top bar. Kept generic so this package stays free of platform assumptions: the
-   * desktop app passes a Tauri drag region and a double-click-to-maximize handler through it (#402),
-   * and the web build passes nothing.
+   * desktop app passes a Tauri drag region through it (#402), and the web build passes nothing.
+   *
+   * `className` is excluded on purpose, and the props are spread *before* it, so a caller cannot
+   * replace the row's height and padding — by the type or by accident.
    */
-  topBarProps?: React.HTMLAttributes<HTMLDivElement> & {[attr: `data-${string}`]: unknown};
+  topBarProps?: Omit<React.HTMLAttributes<HTMLDivElement>, "className"> & {
+    [attr: `data-${string}`]: unknown;
+  };
   children: React.ReactNode;
   className?: string;
 }) {
@@ -46,7 +50,8 @@ export function Shell({
       <div className="flex min-h-0 min-w-0 flex-1 overflow-hidden bg-panel">
         {sidebar}
         <div className="flex min-w-0 flex-1 flex-col">
-          <div className="flex h-11 shrink-0 items-center gap-2 px-3 md:px-5" {...topBarProps}>
+          {/* Spread first: the row's own layout classes must win over anything a caller passes. */}
+          <div {...topBarProps} className="flex h-11 shrink-0 items-center gap-2 px-3 md:px-5">
             {leading}
             {breadcrumbs}
           </div>
