@@ -114,9 +114,13 @@ function audioContext(): AudioContext | undefined {
 /**
  * Decoded tones, keyed by URL.
  *
- * Decoding is the expensive part and a tone never changes while the app runs, so it is done once.
- * A failed fetch or decode is **not** kept, so a replacement that was briefly unreadable is tried
- * again on the next alert rather than written off for the process.
+ * Decoding is the expensive part, so it is done once per URL and the result is held for the life of
+ * the process. A failed fetch or decode is **not** kept, so a replacement that was briefly unreadable
+ * is tried again on the next alert rather than written off for the process.
+ *
+ * A replacement *can* change underneath us — the file keeps its URL when it is overwritten — which is
+ * why {@link previewAlertSound} evicts through {@link forgetDecoded} before it plays. Don't drop that
+ * eviction as redundant: without it a preview replays the stale decode and misreports it (#404).
  */
 const decodedTones = new Map<string, Promise<AudioBuffer | undefined>>();
 
@@ -125,7 +129,9 @@ async function decode(url: string, ctx: AudioContext): Promise<AudioBuffer | und
   if (!pending) {
     pending = (async () => {
       try {
-        const response = await fetch(url);
+        // `no-store`: an overwritten replacement keeps its URL, and a cached response would hand
+        // back the old bytes. Each URL is fetched once per process anyway, so this costs alerts nothing.
+        const response = await fetch(url, {cache: "no-store"});
         if (!response.ok) return undefined;
         return await ctx.decodeAudioData(await response.arrayBuffer());
       } catch {
@@ -164,12 +170,26 @@ async function play(url: string, gain: number): Promise<boolean> {
   }
 }
 
+/** Which file was actually heard — the answer the settings preview reports (#404). */
+export type AlertSource = "replacement" | "bundled" | "none";
+
+/**
+ * Plays a category's tone: the user's replacement if there is a usable one, else the bundled default.
+ *
+ * A missing or corrupt override degrades to the standard sound rather than to silence, because
+ * silence is indistinguishable from a broken feature. The one resolution path both an alert and the
+ * settings preview go through, so "the preview plays what an alert would" is true by construction
+ * rather than by comment.
+ */
+async function playResolved(category: NotifyCategory, gain: number): Promise<AlertSource> {
+  const override = await overrideSoundUrl(category);
+  if (override && (await play(override, gain))) return "replacement";
+  if (await play(bundledSoundUrl(category), gain)) return "bundled";
+  return "none";
+}
+
 /**
  * Sounds an alert for a category, if the platform allows it and the user asked for it.
- *
- * Tries the user's replacement first and falls back to the bundled default, so a missing or
- * corrupt override degrades to the standard sound rather than to silence — silence is
- * indistinguishable from a broken feature.
  *
  * Never throws: failing to make a noise must not break the surface that triggered it.
  */
@@ -184,10 +204,37 @@ export async function playAlertSound(
   // ground stop played once per open window — the same tone, at once, near enough in phase.
   if (!(await isMainWindow())) return false;
 
-  const gain = gainFor(options.volume);
+  return (await playResolved(category, gainFor(options.volume))) !== "none";
+}
 
+/**
+ * Plays a category on demand from the settings page, and says which file was heard (#404).
+ *
+ * Deliberately skips three of the guards {@link playAlertSound} needs, because each of them would be
+ * wrong here:
+ *
+ * - the per-tick claim — pressing preview twice has to sound twice;
+ * - the main-window check — the settings page may be open in a route window (#350);
+ * - the category's own on/off switch — the point is to audition a tone *before* turning it on.
+ *
+ * The platform gate stays, so this is silent on the web build like everything else here.
+ */
+export async function previewAlertSound(
+  category: NotifyCategory,
+  volume?: string,
+): Promise<AlertSource> {
+  if (!can("audioAlerts")) return "none";
+  // Read from disk, not from what this window decoded earlier: the question a preview answers is
+  // "did my change take?", and an overwritten replacement used to replay the stale decoded copy
+  // while still reporting "Your file" (VATUSA/OIS#404 review). Alerts in this window then use the
+  // new file too.
+  await forgetDecoded(category);
+  return playResolved(category, gainFor(volume));
+}
+
+/** Drops a category's decoded tones, so the next play fetches and decodes them afresh. */
+async function forgetDecoded(category: NotifyCategory): Promise<void> {
   const override = await overrideSoundUrl(category);
-  if (override && (await play(override, gain))) return true;
-
-  return play(bundledSoundUrl(category), gain);
+  if (override) decodedTones.delete(override);
+  decodedTones.delete(bundledSoundUrl(category));
 }
