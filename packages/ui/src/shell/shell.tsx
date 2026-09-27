@@ -38,8 +38,15 @@ export function Shell({
    *
    * `className` is excluded on purpose, and the props are spread *before* it, so a caller cannot
    * replace the row's height and padding — by the type or by accident.
+   *
+   * `onDoubleClick` is excluded for a sharper reason: when this row is a Tauri drag region, Tauri's
+   * own injected `drag.js` already toggles maximize on a double-click inside it. A handler here fires
+   * *as well*, so one double-click toggled twice — dead on Windows and Linux, unrestorable on macOS
+   * (#402 review). React's synthetic events also bubble, where Tauri's drag matching is self-only, so
+   * the same handler fired for every button and breadcrumb in the row. Excluding it makes putting one
+   * back a type error rather than a defect a reviewer has to find twice.
    */
-  topBarProps?: Omit<React.HTMLAttributes<HTMLDivElement>, "className"> & {
+  topBarProps?: Omit<React.HTMLAttributes<HTMLDivElement>, "className" | "onDoubleClick"> & {
     [attr: `data-${string}`]: unknown;
   };
   children: React.ReactNode;
