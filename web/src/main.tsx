@@ -5,8 +5,7 @@ import {RouterProvider} from "@tanstack/react-router";
 import {DialogProvider, ThemeProvider, ToastProvider, TooltipProvider} from "@ois/ui";
 
 import {router} from "./router";
-import {refreshBeforeLaunch} from "./lib/desktop-auth";
-import {isMainWindow, isTauri} from "./lib/platform";
+import {rotateOnLaunch} from "./lib/desktop-auth";
 import {RealtimeProvider} from "./components/realtime-provider";
 import "@fontsource-variable/inter";
 import "@fontsource/jetbrains-mono/400.css";
@@ -26,13 +25,9 @@ const queryClient = new QueryClient();
 // `LAUNCH_REFRESH_BUDGET_MS`, since the API is remote and a blackholed host would otherwise leave a
 // blank window until the OS gives up. A failure just means we start signed out.
 //
-// Guarded to the MAIN window. Every Tauri webview loads this same entry, so without the guard each
-// pop-out (#349) also rotated on open — and rotation deletes the presented token, leaving the main
-// window holding a dead one with no 401 recovery path. Popping a panel out signed you out.
+// Main window only — `rotateOnLaunch` says why, and pins it with a test.
 async function bootstrap() {
-  if (isTauri() && (await isMainWindow())) {
-    await refreshBeforeLaunch();
-  }
+  await rotateOnLaunch();
 
   ReactDOM.createRoot(document.getElementById("root")!).render(
   <React.StrictMode>

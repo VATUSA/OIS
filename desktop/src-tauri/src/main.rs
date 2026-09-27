@@ -17,6 +17,7 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
 mod auth;
+mod popout;
 
 fn main() {
     tauri::Builder::default()
@@ -29,6 +30,8 @@ fn main() {
         .plugin(tauri_plugin_notification::init())
         .plugin(tauri_plugin_updater::Builder::new().build())
         .plugin(tauri_plugin_process::init())
+        // Pop-outs close with the main window rather than outliving it (#349).
+        .on_window_event(popout::on_window_event)
         .invoke_handler(tauri::generate_handler![
             auth::store_token,
             auth::get_token,

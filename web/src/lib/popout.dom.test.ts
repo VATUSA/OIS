@@ -1,7 +1,7 @@
 // @vitest-environment jsdom
 import {afterEach, beforeEach, describe, expect, it, vi} from "vitest";
 
-import {openPopout, popoutLabel} from "./popout";
+import {openPopout, popoutLabel, popoutSpecs} from "./popout";
 
 const WebviewWindow = vi.fn();
 const getByLabel = vi.fn();
@@ -11,6 +11,7 @@ const availableMonitors = vi.fn();
 const handlers: {moved?: () => void; resized?: () => void} = {};
 const outerPosition = vi.fn();
 const outerSize = vi.fn();
+const innerSize = vi.fn();
 const scaleFactor = vi.fn();
 
 vi.mock("@tauri-apps/api/webviewWindow", () => ({
@@ -28,6 +29,7 @@ vi.mock("@tauri-apps/api/webviewWindow", () => ({
         },
         outerPosition: () => outerPosition(),
         outerSize: () => outerSize(),
+        innerSize: () => innerSize(),
         scaleFactor: () => scaleFactor(),
       });
     },
@@ -67,7 +69,9 @@ beforeEach(() => {
   handlers.moved = undefined;
   handlers.resized = undefined;
   outerPosition.mockReset().mockResolvedValue({x: 300, y: 400});
-  outerSize.mockReset().mockResolvedValue({width: 420, height: 640});
+  // A real window's frame is bigger than its content — a title bar on macOS, borders on Windows.
+  outerSize.mockReset().mockResolvedValue({width: 420, height: 668});
+  innerSize.mockReset().mockResolvedValue({width: 420, height: 640});
   scaleFactor.mockReset().mockResolvedValue(1);
 });
 
@@ -206,7 +210,8 @@ describe("remembering where a window was put", () => {
       pretendDesktop();
       scaleFactor.mockResolvedValue(2);
       outerPosition.mockResolvedValue({x: 600, y: 800});
-      outerSize.mockResolvedValue({width: 840, height: 1280});
+      outerSize.mockResolvedValue({width: 840, height: 1336});
+      innerSize.mockResolvedValue({width: 840, height: 1280});
       await openPopout(SPEC);
 
       handlers.moved?.();
@@ -218,6 +223,25 @@ describe("remembering where a window was put", () => {
         width: 420,
         height: 640,
       });
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  // `width`/`height` reopen a window at that *content* size. Saving the frame size instead grew
+  // every pop-out by a title bar per reopen, compounding (VATUSA/OIS#349 review).
+  it("reopens at the size it was left, not a title bar taller", async () => {
+    vi.useFakeTimers();
+    try {
+      pretendDesktop();
+      await openPopout(SPEC);
+      handlers.resized?.();
+      await vi.advanceTimersByTimeAsync(400);
+
+      WebviewWindow.mockClear();
+      await openPopout(SPEC);
+
+      expect(WebviewWindow.mock.calls[0]![1]).toMatchObject({width: 420, height: 640});
     } finally {
       vi.useRealTimers();
     }
@@ -257,5 +281,18 @@ describe("popoutLabel", () => {
       expect(label.startsWith("popout-")).toBe(true);
       expect(label).toMatch(/^[a-zA-Z0-9-]+$/);
     }
+  });
+});
+
+describe("popoutSpecs", () => {
+  // An id carrying `/`, `?` or `#` changed the shape of the route and opened the wrong page.
+  it("encodes every id into its route segment", () => {
+    expect(popoutSpecs.widget("board/1", "w?2", "Rates").route).toBe("/popout/widget/board%2F1/w%3F2");
+    expect(popoutSpecs.fcaLadder("ZDC#1", "ZDC FCA").route).toBe("/popout/fca/ZDC%231");
+  });
+
+  it("keys the window on the panel, so reopening it raises the same one", () => {
+    expect(popoutSpecs.widget("b1", "w1", "Rates").id).toBe("widget-w1");
+    expect(popoutSpecs.fcaLadder("f1", "ZDC FCA")).toMatchObject({id: "fca-f1", title: "ZDC FCA · metering"});
   });
 });

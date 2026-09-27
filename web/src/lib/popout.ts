@@ -27,6 +27,25 @@ export type PopoutSpec = {
   height?: number;
 };
 
+/**
+ * The pop-out for one panel.
+ *
+ * Every id is encoded into its route segment: a board, widget or FCA id containing `/`, `?` or `#`
+ * would otherwise change the shape of the URL and open the wrong page.
+ */
+export const popoutSpecs = {
+  widget: (boardId: string, widgetId: string, title: string): PopoutSpec => ({
+    id: `widget-${widgetId}`,
+    title,
+    route: `/popout/widget/${encodeURIComponent(boardId)}/${encodeURIComponent(widgetId)}`,
+  }),
+  fcaLadder: (fcaId: string, name: string): PopoutSpec => ({
+    id: `fca-${fcaId}`,
+    title: `${name} · metering`,
+    route: `/popout/fca/${encodeURIComponent(fcaId)}`,
+  }),
+};
+
 const DEFAULT_SIZE = {width: 380, height: 520};
 const LABEL_PREFIX = "popout-";
 
@@ -134,15 +153,19 @@ export async function openPopout(spec: PopoutSpec): Promise<boolean> {
       window.clearTimeout(settle);
       settle = window.setTimeout(async () => {
         try {
-          // Tauri reports these in physical pixels; stored geometry is logical (see `Rect`).
-          const [position, outer, factor] = await Promise.all([
+          // Saved in the units the window is reopened with (see `Rect`):
+          // - Tauri reports physical pixels, and `WebviewWindow` takes logical ones.
+          // - The `width`/`height` options set the *inner* (content) size, and `x`/`y` the outer
+          //   position. Saving `outerSize` — frame and title bar included — reopened every pop-out
+          //   a title bar taller, compounding on each cycle (VATUSA/OIS#349 review).
+          const [position, inner, factor] = await Promise.all([
             win.outerPosition(),
-            win.outerSize(),
+            win.innerSize(),
             win.scaleFactor(),
           ]);
           writeGeometry(
             spec.id,
-            toLogical({x: position.x, y: position.y, width: outer.width, height: outer.height}, factor),
+            toLogical({x: position.x, y: position.y, width: inner.width, height: inner.height}, factor),
           );
         } catch {
           // The window is probably closing; nothing to remember.
