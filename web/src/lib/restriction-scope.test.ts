@@ -58,9 +58,16 @@ describe("inRestrictionScope", () => {
     expect(inRestrictionScope(zdc, ["ZLA", "ZNY"])).toBe(false);
   });
 
-  it("stays quiet for an ARTCC the facility map could not resolve", () => {
-    expect(inRestrictionScope(zdc, [null])).toBe(false);
-    expect(inRestrictionScope(zdc, [undefined, null])).toBe(false);
+  // Fail open: a restriction the map couldn't place (a 3-letter id, a lowercase event TMI) used to
+  // reach no one outside national TMU (VATUSA/OIS#405 review).
+  it("lets a restriction through when none of its ARTCCs could be resolved", () => {
+    expect(inRestrictionScope(zdc, [null])).toBe(true);
+    expect(inRestrictionScope(zdc, [undefined, null])).toBe(true);
+  });
+
+  it("scopes on the side that did resolve when only one did", () => {
+    expect(inRestrictionScope(zdc, [null, "ZDC"])).toBe(true);
+    expect(inRestrictionScope(zdc, [null, "ZLA"])).toBe(false);
   });
 
   it("lets a national reader through, including an unresolved ARTCC", () => {

@@ -108,9 +108,7 @@ function RestrictionAlertsInner() {
   // Memoized because a fresh Set every render would make `active`'s memo below recompute every render.
   const facilities = useMemo(() => restrictionFacilities(me), [me]);
 
-  // Identity keys currently "active" (published / present), independent of live mode. Out-of-scope
-  // restrictions are dropped here rather than at display time, so they never enter `known` either —
-  // otherwise gaining a facility would replay every restriction already running there as "new".
+  // Identity keys currently "active" (published / present) and in scope, independent of live mode.
   const active = useMemo(() => {
     const mine = (...artccs: (string | null | undefined)[]) =>
       inRestrictionScope(facilities, artccs);
@@ -134,12 +132,22 @@ function RestrictionAlertsInner() {
   const settled =
     !groundStops.isPending && !gdps.isPending && !tmis.isPending && !programs.isPending;
 
+  // The scope `known` was last seeded for. When it changes — the VATUSA profile syncs after sign-in,
+  // a visit is added, national TMU is granted — every restriction already running in the newly
+  // covered scope enters `active` at once. Diffed, each one announced itself as just initiated, and
+  // someone made national was alerted to the whole country (VATUSA/OIS#405 review). A new scope is
+  // seeded silently instead, the same as the first load.
+  const seededFor = useRef(facilities);
+
   useEffect(() => {
     // Historical replay swaps the lists to past data — don't alert, and don't disturb `known` so the
     // live set is intact when we return.
     if (!live) return;
-    if (known.current == null) {
-      if (settled) known.current = new Set(active.keys());
+    if (known.current == null || seededFor.current !== facilities) {
+      if (settled) {
+        known.current = new Set(active.keys());
+        seededFor.current = facilities;
+      }
       return;
     }
     const fresh: RestrictionAlert[] = [];
@@ -152,7 +160,7 @@ function RestrictionAlertsInner() {
     // Forget keys that dropped off so a cancel-then-reissue alerts again.
     for (const key of [...known.current]) if (!active.has(key)) known.current.delete(key);
     if (fresh.length) setAlerts((prev) => [...prev, ...fresh]);
-  }, [live, settled, active]);
+  }, [live, settled, active, facilities]);
 
   const dismiss = (key: string) => setAlerts((prev) => prev.filter((a) => a.key !== key));
 

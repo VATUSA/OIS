@@ -118,6 +118,37 @@ mod tests {
         assert_eq!(rows[1].artcc.as_deref(), Some("ZLA"));
     }
 
+    fn program(icao: &str) -> ProgramBody {
+        ProgramBody {
+            icao: icao.to_string(),
+            artcc: None,
+            aar: 40,
+            trail: 0,
+            mit: 0,
+            gates: sqlx::types::Json(Vec::new()),
+            exclude_wake: Vec::new(),
+            exclude_types: Vec::new(),
+            jets_only: false,
+            active_until: None,
+            updated_at: chrono::Utc::now(),
+            updated_by: None,
+        }
+    }
+
+    /// Programs are the one restriction keyed on `icao` rather than `airport`, so they get their own
+    /// case — nothing pinned that they were stamped at all (VATUSA/OIS#405 review).
+    #[test]
+    fn stamps_a_programs_owning_artcc() {
+        let mut rows = vec![program("KDCA"), program("LAX")];
+        stamp_programs(&map(), &mut rows);
+        assert_eq!(rows[0].artcc.as_deref(), Some("ZDC"));
+        assert_eq!(
+            rows[1].artcc.as_deref(),
+            Some("ZLA"),
+            "a 3-letter id resolves as its ICAO"
+        );
+    }
+
     #[test]
     fn leaves_an_unknown_airport_unresolved() {
         let mut rows = vec![ground_stop("XXXX")];

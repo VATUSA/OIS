@@ -23,13 +23,19 @@ export function restrictionFacilities(me: Me | null | undefined): Set<string> | 
  * Whether a restriction owned by `artccs` is in scope for `facilities`.
  *
  * A TMI carries two ARTCCs (requesting and providing) and matching either is enough — a centre cares
- * about a restriction whether it asked for it or is providing it. An ARTCC the facility map couldn't
- * resolve arrives as null and never matches, so an unresolvable restriction stays quiet.
+ * about a restriction whether it asked for it or is providing it.
+ *
+ * A restriction whose ARTCC couldn't be resolved at all is *in* scope for everyone. Scoping narrows
+ * an audience that used to be the whole country; for a ground stop, a missed alert is worse than an
+ * extra one. Dropping the unresolvable meant a ground stop entered as a 3-letter id, or an event TMI
+ * typed in lowercase, reached no one outside national TMU (VATUSA/OIS#405 review).
  */
 export function inRestrictionScope(
   facilities: Set<string> | null,
   artccs: (string | null | undefined)[],
 ): boolean {
   if (facilities == null) return true;
-  return artccs.some((a) => a != null && facilities.has(a));
+  const known = artccs.filter((a): a is string => a != null);
+  if (known.length === 0) return true;
+  return known.some((a) => facilities.has(a));
 }
