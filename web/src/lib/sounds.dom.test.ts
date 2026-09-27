@@ -27,8 +27,11 @@ vi.mock("@tauri-apps/api/path", () => ({
 /** Which URLs a fetch should refuse, so a test can say "there is no replacement". */
 let missing: (url: string) => boolean = () => false;
 let fetched: string[] = [];
-/** Every tone that actually reached the output, with the gain it was played at. */
-let played: {src: string; gain: number}[] = [];
+let fetchInits: (RequestInit | undefined)[] = [];
+/** The contents of each file on "disk", as a version number, so a test can overwrite one. */
+let onDisk: Record<string, number> = {};
+/** Every tone that actually reached the output, with the gain it was played at and the file version. */
+let played: {src: string; gain: number; version?: number}[] = [];
 let resumed = 0;
 
 class FakeGain {
@@ -36,13 +39,13 @@ class FakeGain {
   connect() {}
 }
 class FakeSource {
-  buffer: {url: string} | null = null;
+  buffer: {url: string; version?: number} | null = null;
   private out: FakeGain | undefined;
   connect(node: FakeGain) {
     this.out = node;
   }
   start() {
-    played.push({src: this.buffer?.url ?? "?", gain: this.out?.gain.value ?? -1});
+    played.push({src: this.buffer?.url ?? "?", gain: this.out?.gain.value ?? -1, version: this.buffer?.version});
   }
 }
 class FakeAudioContext {
@@ -60,8 +63,8 @@ class FakeAudioContext {
     return new FakeGain();
   }
   // The decoded "buffer" just remembers which URL it came from, which is what tests assert on.
-  decodeAudioData(bytes: ArrayBuffer & {url?: string}) {
-    return Promise.resolve({url: bytes.url ?? "?"});
+  decodeAudioData(bytes: ArrayBuffer & {url?: string; version?: number}) {
+    return Promise.resolve({url: bytes.url ?? "?", version: bytes.version});
   }
 }
 
@@ -70,16 +73,19 @@ const drain = () => new Promise((resolve) => setTimeout(resolve, 0));
 beforeEach(async () => {
   played = [];
   fetched = [];
+  fetchInits = [];
+  onDisk = {};
   resumed = 0;
   missing = () => false;
   platform.audioAlerts = true;
   platform.main = true;
   appDataDir.mockReset().mockResolvedValue("/Users/x/Library/Application Support/net.vatusa.ois");
   vi.stubGlobal("AudioContext", FakeAudioContext);
-  vi.stubGlobal("fetch", (url: string) => {
+  vi.stubGlobal("fetch", (url: string, init?: RequestInit) => {
     fetched.push(url);
+    fetchInits.push(init);
     if (missing(url)) return Promise.resolve({ok: false, arrayBuffer: () => Promise.resolve({})});
-    const bytes = {url} as unknown as ArrayBuffer;
+    const bytes = {url, version: onDisk[url] ?? 1} as unknown as ArrayBuffer;
     return Promise.resolve({ok: true, arrayBuffer: () => Promise.resolve(bytes)});
   });
   // Decoded tones, resolved override paths and the AudioContext all live for the process by
@@ -282,5 +288,39 @@ describe("previewAlertSound", () => {
     await previewAlertSound("access", "loud");
 
     expect(played[0]!.gain).toBe(gainFor("loud"));
+  });
+
+  // "Did my change take?" is the question the button answers. Decoded tones are kept for the process,
+  // so an overwritten replacement replayed its stale decoded copy while still saying "Your file".
+  it("plays the replacement as it is on disk now, after it has been overwritten", async () => {
+    await playAlertSound("restrictions", {enabled: true});
+    const override = played[0]!.src;
+    expect(played[0]!.version).toBe(1);
+    await drain();
+
+    onDisk[override] = 2; // the facility overwrites its tone while the app runs
+    played = [];
+    await expect(previewAlertSound("restrictions")).resolves.toBe("replacement");
+
+    expect(played[0]!.version).toBe(2);
+  });
+
+  it("lets later alerts in the window use the file the preview just read", async () => {
+    await playAlertSound("releases", {enabled: true});
+    const override = played[0]!.src;
+    await drain();
+    onDisk[override] = 2;
+
+    await previewAlertSound("releases");
+    await drain();
+    played = [];
+    await playAlertSound("releases", {enabled: true});
+
+    expect(played[0]!.version).toBe(2);
+  });
+
+  it("fetches around the webview's HTTP cache, which would keep an overwritten file's old bytes", async () => {
+    await previewAlertSound("access");
+    expect(fetchInits[0]).toMatchObject({cache: "no-store"});
   });
 });

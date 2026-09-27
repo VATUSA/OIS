@@ -91,4 +91,19 @@ describe("SoundPreviewButton", () => {
     const host = await press();
     expect(host.querySelector("[aria-live]")).not.toBeNull();
   });
+
+  // A repeat press with the same answer changed no text, so the live region announced nothing and a
+  // sighted user couldn't tell the second press ran at all (VATUSA/OIS#404 review).
+  it("clears the last answer while a new press is playing", async () => {
+    const host = await press();
+    expect(host.textContent).toContain("Bundled default");
+
+    let finish: (source: string) => void = () => undefined;
+    previewAlertSound.mockReturnValueOnce(new Promise((resolve) => (finish = resolve)));
+    await act(async () => host.querySelector("button")!.click());
+    expect(host.textContent).not.toContain("Bundled default");
+
+    await act(async () => finish("bundled"));
+    expect(host.textContent).toContain("Bundled default");
+  });
 });

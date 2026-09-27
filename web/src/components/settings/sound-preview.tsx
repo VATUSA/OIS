@@ -17,9 +17,9 @@ const ANSWER: Record<Exclude<AlertSource, "none">, string> = {
  *
  * The tones are replaceable, but a replacement that can't be read falls back to the bundled default
  * in silence — so a wrong folder, a wrong name, the wrong case on Linux (`eventreminders.wav`) or a
- * codec the webview rejects were all indistinguishable from success. Since #353 the tones are also
- * decoded once per process, so a file dropped in while the app runs isn't picked up until the next
- * launch; without this button there was no way to find that out except by waiting for a real alert.
+ * codec the webview rejects were all indistinguishable from success. Tones are decoded once per
+ * process (#353), so an alert keeps playing the copy it decoded first; a preview always reads the
+ * file as it is on disk now, and alerts in this window pick that up from then on.
  *
  * The answer goes beside the button rather than into a toast: the question is about the row you are
  * looking at.
@@ -42,6 +42,8 @@ export function SoundPreviewButton({category}: {category: NotifyCategory}) {
         className="size-7 text-ink-3 hover:text-ink"
         disabled={busy}
         onClick={() => {
+          // Cleared so a repeat press with the same answer is still announced, and visibly ran.
+          setPlayed(undefined);
           setBusy(true);
           void previewAlertSound(category, volume)
             .then(setPlayed)

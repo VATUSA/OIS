@@ -125,7 +125,9 @@ async function decode(url: string, ctx: AudioContext): Promise<AudioBuffer | und
   if (!pending) {
     pending = (async () => {
       try {
-        const response = await fetch(url);
+        // `no-store`: an overwritten replacement keeps its URL, and a cached response would hand
+        // back the old bytes. Each URL is fetched once per process anyway, so this costs alerts nothing.
+        const response = await fetch(url, {cache: "no-store"});
         if (!response.ok) return undefined;
         return await ctx.decodeAudioData(await response.arrayBuffer());
       } catch {
@@ -218,5 +220,17 @@ export async function previewAlertSound(
   volume?: string,
 ): Promise<AlertSource> {
   if (!can("audioAlerts")) return "none";
+  // Read from disk, not from what this window decoded earlier: the question a preview answers is
+  // "did my change take?", and an overwritten replacement used to replay the stale decoded copy
+  // while still reporting "Your file" (VATUSA/OIS#404 review). Alerts in this window then use the
+  // new file too.
+  await forgetDecoded(category);
   return playResolved(category, gainFor(volume));
+}
+
+/** Drops a category's decoded tones, so the next play fetches and decodes them afresh. */
+async function forgetDecoded(category: NotifyCategory): Promise<void> {
+  const override = await overrideSoundUrl(category);
+  if (override) decodedTones.delete(override);
+  decodedTones.delete(bundledSoundUrl(category));
 }
