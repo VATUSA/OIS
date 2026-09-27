@@ -7,8 +7,11 @@
 //! take the already-read map and stay pure, which is also what makes them testable without a DB.
 //!
 //! The lookups want uppercase ids, which is what the write handlers store — every create/update
-//! path normalizes the airport, icao and TMI facilities before insert. A row that somehow held a
-//! lowercase id resolves to `None` and simply stays quiet, rather than alerting the wrong centre.
+//! path, including event activation, normalizes the airport, icao and TMI facilities before insert.
+//! A row that still resolves to nothing stamps `None`, which the client treats as *in* scope for
+//! everyone rather than for no one: scoping narrows an audience that used to be the whole country,
+//! and for a ground stop a missed alert is worse than an extra one. See `inRestrictionScope` in
+//! `web/src/lib/restriction-scope.ts` — don't make this fail closed without changing that too.
 
 use crate::{
     feed::facilities::{FacilityMap, artcc_for_airport, artcc_for_facility},
