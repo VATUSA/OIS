@@ -1,7 +1,7 @@
 {
   "$schema": "../gen/schemas/desktop-schema.json",
   "identifier": "default",
-  "description": "Permissions for the OIS main window: Tauri's core defaults, signed auto-update (#347), native notifications plus the window controls a notification click needs (#348), and creating the always-on-top pop-outs (#349). Pop-out windows get their own, smaller set \u2014 see popout.json.",
+  "description": "Permissions for the OIS main window: Tauri's core defaults, signed auto-update (#347), native notifications (#348), and creating and placing the always-on-top pop-outs (#349). A notification click raises the window from Rust (src/notify.rs), so the window controls here are for raising an already-open pop-out, not for notification clicks. Pop-out windows get their own, smaller set \u2014 see popout.json.",
   "windows": [
     "main"
   ],

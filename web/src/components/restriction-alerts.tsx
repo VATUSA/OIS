@@ -111,28 +111,34 @@ function RestrictionAlertsInner() {
     return m;
   }, [groundStops.data, gdps.data, tmis.data, programs.data]);
 
-  // Keys we've already seen. Null until the first full load, so pre-existing restrictions never fire.
-  const known = useRef<Set<string> | null>(null);
+  // Keys we've already seen, and the lists that have loaded successfully at least once. Each list is
+  // seeded silently on its *own* first success, so restrictions already in force never fire:
+  // - not on "every list has settled": an errored list settles too, seeding nothing, and the next
+  //   good poll then announced every restriction already in force — as native OS notifications
+  //   too, on desktop (VATUSA/OIS#348 review);
+  // - nor on "every list has succeeded": each list needs its own `tmu.*.read` permission, so one the
+  //   user can't read would hold the rest back forever and no alert would ever fire.
+  const known = useRef(new Set<string>());
+  const seeded = useRef(new Set<string>());
   const [alerts, setAlerts] = useState<RestrictionAlert[]>([]);
 
-  const settled =
-    !groundStops.isPending && !gdps.isPending && !tmis.isPending && !programs.isPending;
+  const gsLoaded = groundStops.isSuccess;
+  const gdpLoaded = gdps.isSuccess;
+  const tmiLoaded = tmis.isSuccess;
+  const progLoaded = programs.isSuccess;
 
   useEffect(() => {
-    // Historical replay swaps the lists to past data — don't alert, and don't disturb `known` so the
-    // live set is intact when we return.
+    // Historical replay swaps the lists to past data — don't alert, and don't disturb what we've
+    // seen, so the live set is intact when we return.
     if (!live) return;
-    if (known.current == null) {
-      if (settled) known.current = new Set(active.keys());
-      return;
-    }
     const fresh: RestrictionAlert[] = [];
     for (const [key, a] of active) {
-      if (!known.current.has(key)) {
-        known.current.add(key);
-        fresh.push(a);
-      }
+      if (known.current.has(key)) continue;
+      known.current.add(key);
+      if (seeded.current.has(key.slice(0, key.indexOf(":")))) fresh.push(a);
     }
+    const loaded = {gs: gsLoaded, gdp: gdpLoaded, tmi: tmiLoaded, prog: progLoaded};
+    for (const [source, ok] of Object.entries(loaded)) if (ok) seeded.current.add(source);
     // Forget keys that dropped off so a cancel-then-reissue alerts again.
     for (const key of [...known.current]) if (!active.has(key)) known.current.delete(key);
     if (fresh.length) {
@@ -141,7 +147,7 @@ function RestrictionAlertsInner() {
       // operator sees them (#348). No-op on web and when the user hasn't opted in.
       notifyRestrictions(fresh);
     }
-  }, [live, settled, active, notifyRestrictions]);
+  }, [live, gsLoaded, gdpLoaded, tmiLoaded, progLoaded, active, notifyRestrictions]);
 
   const dismiss = (key: string) => setAlerts((prev) => prev.filter((a) => a.key !== key));
 

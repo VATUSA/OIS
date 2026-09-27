@@ -37,8 +37,12 @@ const DESKTOP_SESSION_TOKEN_PREFIX: &str = "ois_dsk_";
 /// proxy logs and referers (#348).
 const WS_BEARER_PROTOCOL_PREFIX: &str = "ois.bearer.";
 
+/// The one route that reads a token from the subprotocol list. Anywhere else the client can send
+/// `Authorization`, so the subprotocol is not a credential there (VATUSA/OIS#348 review).
+const WS_ROUTE: &str = "/api/v1/ws";
+
 /// Pulls a desktop session token out of a `Sec-WebSocket-Protocol` offer, if one is there.
-pub fn parse_ws_protocol_token(header: Option<&http::HeaderValue>) -> Option<String> {
+fn parse_ws_protocol_token(header: Option<&http::HeaderValue>) -> Option<String> {
     header
         .and_then(|value| value.to_str().ok())
         .and_then(|value| {
@@ -71,9 +75,12 @@ pub async fn resolve_current_user(
             .map(str::to_owned)
     });
 
-    // ...and the websocket upgrade, where no other header is available to the client.
+    // ...and the websocket upgrade, where no other header is available to the client. Only there,
+    // and only a desktop token: a web session authenticates the socket with its cookie.
     let session_token = session_token.or_else(|| {
-        parse_ws_protocol_token(request.headers().get("sec-websocket-protocol"))
+        (request.uri().path() == WS_ROUTE)
+            .then(|| parse_ws_protocol_token(request.headers().get("sec-websocket-protocol")))
+            .flatten()
             .filter(|token| token.starts_with(DESKTOP_SESSION_TOKEN_PREFIX))
     });
 
@@ -199,7 +206,7 @@ fn parse_bearer_token(auth_header: Option<&http::HeaderValue>) -> Option<String>
 
 #[cfg(test)]
 mod tests {
-    use super::{parse_bearer_token, parse_cookie};
+    use super::{parse_bearer_token, parse_cookie, parse_ws_protocol_token};
 
     #[test]
     fn parses_bearer_token() {
@@ -219,5 +226,28 @@ mod tests {
             parse_cookie(Some(&value), "ois_session").as_deref(),
             Some("abc")
         );
+    }
+
+    #[test]
+    fn finds_the_token_among_the_offered_subprotocols() {
+        let offer = http::HeaderValue::from_static("ois.v1, ois.bearer.ois_dsk_abc");
+        assert_eq!(
+            parse_ws_protocol_token(Some(&offer)).as_deref(),
+            Some("ois_dsk_abc")
+        );
+        let reordered = http::HeaderValue::from_static("ois.bearer.ois_dsk_abc,ois.v1");
+        assert_eq!(
+            parse_ws_protocol_token(Some(&reordered)).as_deref(),
+            Some("ois_dsk_abc")
+        );
+    }
+
+    #[test]
+    fn no_bearer_offer_means_no_token() {
+        let marker_only = http::HeaderValue::from_static("ois.v1");
+        assert!(parse_ws_protocol_token(Some(&marker_only)).is_none());
+        let empty_token = http::HeaderValue::from_static("ois.v1, ois.bearer.");
+        assert!(parse_ws_protocol_token(Some(&empty_token)).is_none());
+        assert!(parse_ws_protocol_token(None).is_none());
     }
 }

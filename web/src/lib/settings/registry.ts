@@ -62,7 +62,8 @@ const NOTIFICATION_SETTINGS: SettingDef[] = [
     group: "Notifications",
     available: onDesktop,
     label: "EDCT releases",
-    description: "Notify when a release time is issued for a flight crossing one of your FCAs.",
+    description:
+      "Notify when a release time is issued for a flight crossing an FCA in your home or visiting ARTCC.",
     control: { kind: "toggle", default: false },
   },
   {
@@ -71,7 +72,7 @@ const NOTIFICATION_SETTINGS: SettingDef[] = [
     available: onDesktop,
     label: "Heavy metering delay",
     description:
-      "Notify when metering assigns a crossing more delay than the threshold below. Uses the same delay the ladder shows.",
+      "Notify when metering assigns a crossing more delay than the threshold below, at an FCA in your home or visiting ARTCC. Uses the same delay the ladder shows.",
     control: { kind: "toggle", default: false },
   },
   {

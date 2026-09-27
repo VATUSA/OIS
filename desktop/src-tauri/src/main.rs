@@ -10,13 +10,15 @@
 //! bearer. The remaining desktop features arrive in later issues, each adding its own commands and
 //! capability entries:
 //!
-//! - notifications, tray, hotkeys and the rest — #348-#354
+//! - native notifications whose click opens the page they're about — #348 (see [`notify`])
+//! - tray, hotkeys and the rest — #349-#354
 
 // Release builds on Windows are GUI apps, so suppress the console window that would otherwise
 // appear behind them. Debug builds keep it — that's where our logs go.
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
 mod auth;
+mod notify;
 mod popout;
 
 fn main() {
@@ -25,11 +27,12 @@ fn main() {
         // apply a package whose signature doesn't verify against the configured public key; the
         // frontend drives when that happens (`web/src/lib/desktop-update.ts`) so the app never
         // restarts itself out from under someone mid-event.
-        // Native notifications (#348). The frontend decides what is worth notifying about and
-        // whether the user asked for it; this is delivery.
-        .plugin(tauri_plugin_notification::init())
         .plugin(tauri_plugin_updater::Builder::new().build())
         .plugin(tauri_plugin_process::init())
+        // Native notifications (#348). The frontend decides what is worth notifying about and
+        // whether the user asked for it. The plugin is here for the OS permission prompt; raising
+        // a notification goes through `notify::notify`, because only that reports the click.
+        .plugin(tauri_plugin_notification::init())
         // Pop-outs close with the main window rather than outliving it (#349).
         .on_window_event(popout::on_window_event)
         .invoke_handler(tauri::generate_handler![
@@ -37,6 +40,7 @@ fn main() {
             auth::get_token,
             auth::delete_token,
             auth::begin_login,
+            notify::notify,
         ])
         .run(tauri::generate_context!())
         .expect("failed to start the OIS desktop shell");
