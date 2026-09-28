@@ -129,16 +129,17 @@ jobs:
           # Signs the update packages; the app verifies this against the pubkey in tauri.conf.json.
           TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
           TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
-          # Code signing + notarisation. Absent, the build still succeeds but produces installers
-          # the OS will warn about — the updater signature above is what gates an update applying.
-          APPLE_CERTIFICATE: ${{ secrets.APPLE_CERTIFICATE }}
-          APPLE_CERTIFICATE_PASSWORD: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
-          APPLE_SIGNING_IDENTITY: ${{ secrets.APPLE_SIGNING_IDENTITY }}
-          APPLE_ID: ${{ secrets.APPLE_ID }}
-          APPLE_PASSWORD: ${{ secrets.APPLE_PASSWORD }}
-          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
-          WINDOWS_CERTIFICATE: ${{ secrets.WINDOWS_CERTIFICATE }}
-          WINDOWS_CERTIFICATE_PASSWORD: ${{ secrets.WINDOWS_CERTIFICATE_PASSWORD }}
+          # OS code signing + notarisation is intentionally NOT wired here yet. These vars must not be
+          # passed empty: Tauri's bundler treats a *present-but-blank* APPLE_CERTIFICATE /
+          # WINDOWS_CERTIFICATE as "sign" and then fails `security import` on the empty value, which is
+          # what broke the v0.1.1 build. Leaving them absent makes the bundler skip OS signing and
+          # produce unsigned installers (the updater signature above still applies, so auto-update
+          # works — the OS just shows an "unidentified developer" warning on first launch).
+          #
+          # To enable OS signing later, add the secrets AND restore the env lines:
+          #   APPLE_CERTIFICATE, APPLE_CERTIFICATE_PASSWORD, APPLE_SIGNING_IDENTITY, APPLE_ID,
+          #   APPLE_PASSWORD, APPLE_TEAM_ID (macOS) and WINDOWS_CERTIFICATE,
+          #   WINDOWS_CERTIFICATE_PASSWORD (Windows). Only add each line once its secret is set.
         with:
           projectPath: desktop
           tagName: ${{ github.ref_name }}
