@@ -114,8 +114,12 @@ jobs:
 
       - uses: dtolnay/rust-toolchain@nightly
         with:
-          # The universal macOS binary needs both arch targets available.
-          targets: ${{ matrix.os == 'macos-latest' && 'aarch64-apple-darwin,x86_64-apple-darwin' || '' }}
+          # The universal macOS binary needs both arch targets; the action only installs the host
+          # arch by default, so the runner would otherwise lack x86_64 and the lipo step fails.
+          # Match on the `macos` prefix, NOT the exact `macos-latest` label: the runner is pinned
+          # to a specific version (macos-15) for DMG-tooling stability, so an equality check on
+          # `macos-latest` silently skipped this and the universal build broke.
+          targets: ${{ startsWith(matrix.os, 'macos') && 'aarch64-apple-darwin,x86_64-apple-darwin' || '' }}
       - if: runner.os == 'Linux'
         uses: rui314/setup-mold@v1
       - uses: Swatinem/rust-cache@v2
