@@ -656,10 +656,12 @@ mod tests {
             .eta
         };
         let sea_level = at(0.0);
-        assert_ne!(
-            at(5431.0),
-            sea_level,
-            "the field elevation must reach the profile"
+        // #335: the *direction*, not merely "different". A higher field shortens the descent, so
+        // the arrival is strictly earlier — `assert_ne!` was also satisfied by an inverted sign.
+        assert!(
+            at(5431.0) < sea_level,
+            "a 5431 ft field must arrive earlier than a sea-level one, got {} vs {sea_level}",
+            at(5431.0)
         );
 
         let unknown_dest = ArrivalInput {

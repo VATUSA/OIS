@@ -47,6 +47,9 @@ jobs:
             echo "Tag ${tag} already exists — VERSION unchanged, no release to cut."
             exit 0
           fi
+          # An annotated tag needs a tagger identity, which a fresh runner checkout has none of.
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
           git tag -a "${tag}" -m "Release ${tag}"
           git push origin "${tag}"
           echo "Pushed ${tag}. release.yml (Release + desktop installers) and build-images.yml" \

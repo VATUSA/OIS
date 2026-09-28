@@ -3675,7 +3675,7 @@ dependencies = [
 
 [[package]]
 name = "ois-backend"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "arc-swap",
  "axum",
@@ -3730,7 +3730,7 @@ dependencies = [
 
 [[package]]
 name = "ois-desktop"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "keyring",
  "mac-notification-sys",
