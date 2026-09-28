@@ -65,7 +65,7 @@
       "windows": {
         "installMode": "passive"
       },
-      "pubkey": "REPLACE_WITH_TAURI_UPDATER_PUBLIC_KEY"
+      "pubkey": "dW50cnVzdGVkIGNvbW1lbnQ6IG1pbmlzaWduIHB1YmxpYyBrZXk6IDA4MzFCODBDREI2ODYwNzMKUldSellHamJETGd4Q0lWVnhwdzl4MFhzZVFRL01EdnlweFdLeUFQU21Fdk1iRFVucnZWTGZrNDkK"
     }
   }
 }
