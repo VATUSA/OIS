@@ -41,8 +41,10 @@ jobs:
       max-parallel: 1
       matrix:
         include:
-          - os: macos-latest
-            # One universal binary rather than separate Intel/Apple-Silicon downloads.
+          # Pinned (not macos-latest): the DMG step (hdiutil in bundle_dmg.sh) flaked intermittently
+          # on the brand-new macos-26 image. macos-15 has more reliable disk-image tooling.
+          # One universal binary rather than separate Intel/Apple-Silicon downloads.
+          - os: macos-15
             args: "--target universal-apple-darwin"
           - os: windows-latest
             args: ""
