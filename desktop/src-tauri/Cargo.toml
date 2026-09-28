@@ -3,7 +3,7 @@ name = "ois-desktop"
 # Crate version only. The *shipped* version comes from `tauri.conf.json`'s `version`, which the
 # release job rewrites from the git tag — the bundle no longer inherits this number, because
 # inheriting it meant every release shipped 0.1.0 and `check()` never saw an update (#347).
-version = "0.1.3"
+version = "0.1.4"
 edition.workspace = true
 license.workspace = true
 rust-version.workspace = true
