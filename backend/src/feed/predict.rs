@@ -620,6 +620,50 @@ mod tests {
         );
     }
 
+    /// #411: `profile_from_here` is the one place an airborne prediction is anchored to its
+    /// observed groundspeed, and nothing proved that wiring — deleting the `if airborne` branch
+    /// left all 527 tests green. The only test that mentioned anchoring
+    /// (`project_along_route_agrees_with_eta_along_route`) cannot catch it: both of its sides run
+    /// through this same helper, so removing the anchoring moves both identically.
+    #[test]
+    fn an_airborne_prediction_is_anchored_to_the_observed_groundspeed() {
+        let profile = AircraftProfile::default();
+        let eta_at = |airborne: bool, observed_gs: f64| {
+            eta_along_route(
+                airborne,
+                300.0,
+                300.0,
+                if airborne { 35_000.0 } else { 0.0 },
+                observed_gs,
+                35_000.0,
+                440.0,
+                &airports(),
+                "KMIA",
+                &profile,
+                None,
+                0.0,
+                now(),
+            )
+            .eta
+        };
+
+        // Established at cruise (within ANCHOR_ALT_TOLERANCE_FT of it, above ANCHOR_MIN_GS_KT) and
+        // 30 kt faster than the 440 kt profile, so every predicted groundspeed scales to it.
+        let (fast, on_profile) = (eta_at(true, 470.0), eta_at(true, 440.0));
+        assert!(
+            fast < on_profile,
+            "an aircraft observed at 470 kt must arrive before one flying the 440 kt profile, got \
+             {fast} vs {on_profile} — equal means the anchoring never reached the profile"
+        );
+
+        // A ground aircraft is never anchored, so its observed groundspeed is inert.
+        assert_eq!(
+            eta_at(false, 470.0),
+            eta_at(false, 440.0),
+            "a ground aircraft must not be anchored to its observed groundspeed"
+        );
+    }
+
     #[test]
     fn project_along_route_clamps_at_the_destination() {
         let profile = AircraftProfile::default();
