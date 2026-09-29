@@ -44,7 +44,9 @@ function WhatsNewInner() {
     if (unseenEntries(CHANGELOG, prefs.data?.lastSeenId).length > 0) {
       setOpen(true);
     }
-  }, [prefs.isSuccess, prefs.data, newestId]);
+    // `save` is listed for honesty, not for effect: the `decided` latch above makes every re-run a
+    // no-op, so a fresh mutation identity cannot seed twice (#329).
+  }, [prefs.isSuccess, prefs.data, newestId, save]);
 
   const dismiss = () => {
     setOpen(false);

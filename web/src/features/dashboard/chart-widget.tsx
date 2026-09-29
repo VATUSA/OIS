@@ -1,4 +1,4 @@
-import {useMemo, useState} from "react";
+import {useCallback, useMemo, useState} from "react";
 import {Button, ChartTooltip, useElementSize, Donut, EmptyState, formatCompact, useChartTheme} from "@ois/ui";
 import {areaY, barY, type ChartValue, defineChart, dot, lineY, ruleY} from "@tanstack/charts";
 import {tooltip} from "@tanstack/charts/tooltip";
@@ -375,7 +375,8 @@ function ChartInner({
   const multiAirport = source.needsIcao && icaos.length > 1;
   const splitKey = multiAirport && widget.x !== AIRPORT_KEY ? AIRPORT_KEY : undefined;
   const normalize = !!widget.normalize;
-  const thresholds = widget.thresholds ?? [];
+  // Memoised for the same reason as `colors` below: a fresh `[]` each render rebuilt the chart.
+  const thresholds = useMemo(() => widget.thresholds ?? [], [widget.thresholds]);
 
   const shaped = useMemo(
     () =>
@@ -393,13 +394,18 @@ function ChartInner({
     [rows, source, widget.x, widget.y, aggregate, widget.chartType, widget.topN, splitKey, normalize],
   );
 
-  const colors = widget.colors ?? {};
+  // Memoised fallbacks: `?? {}` was a fresh object every render, so the `definition` memo below —
+  // which lists them — rebuilt the whole chart on every render of the dashboard (#329).
+  const colors = useMemo(() => widget.colors ?? {}, [widget.colors]);
   const chartTheme = useChartTheme();
-  const colorFor = (key: string, i: number) => colors[key] ?? chartTheme.seriesAt(i);
+  const colorFor = useCallback(
+    (key: string, i: number) => colors[key] ?? chartTheme.seriesAt(i),
+    [colors, chartTheme],
+  );
   const setColor = (key: string, hex: string) =>
     onChange(widget.id, { colors: { ...colors, [key]: hex } });
 
-  const categoryColors = widget.categoryColors ?? {};
+  const categoryColors = useMemo(() => widget.categoryColors ?? {}, [widget.categoryColors]);
   // The distinct x-categories in render order (same trim/order as what's actually drawn) — drives
   // both the per-datum bar/scatter recoloring below and the config panel's category swatch list.
   const categories = useMemo(
@@ -423,8 +429,9 @@ function ChartInner({
         thresholds,
         chartTheme.theme,
       ),
-    // colorFor closes over `colors` + the theme; recompute when either (or thresholds) change.
-    [shaped, widget.chartType, widget.x, xLabel, colors, categoryColors, normalize, thresholds, chartTheme],
+    // `colorFor` is a `useCallback` over `colors` + the theme, so listing it recomputes on exactly
+    // the renders the old `colors` entry did (#329).
+    [shaped, widget.chartType, widget.x, xLabel, colorFor, categoryColors, normalize, thresholds, chartTheme],
   );
   // ChartPoint.markId === the series' `key` (set via `id:` in buildDefinition's marks) — this maps
   // a tooltip point back to its real, human series label instead of the mark's raw generated id.

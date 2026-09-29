@@ -63,7 +63,8 @@ export function useTokens<const N extends string>(names: readonly N[]): Record<N
   const key = names.join("|");
   return React.useMemo(
     () => Object.fromEntries(names.map((n) => [n, readToken(n)])) as Record<N, string>,
-    // `key` stands in for `names` so a fresh array literal each render doesn't re-read.
+    // `key` stands in for `names` so a fresh array literal each render doesn't re-read (#329).
+    // eslint-disable-next-line react-hooks/exhaustive-deps
     [cls, key],
   );
 }
