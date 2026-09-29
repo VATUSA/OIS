@@ -23,7 +23,7 @@ use crate::{
     },
     errors::ApiError,
     feed::{
-        airports::{Airport, AirportDb, field_elevation_ft},
+        airports::{Airport, AirportDb},
         airspace::Boundaries,
         facilities, fca, flow as feed_flow,
         nav::NavData,
@@ -1326,16 +1326,20 @@ pub(crate) fn project_traffic(
                 profile,
             );
             let headwind = winds.route_headwind(&path, p.altitude as f64);
-            let vp = trajectory::VerticalProfile::build(
-                p.altitude as f64,
+            // `airborne = true`: a connected pilot is projected from the altitude they report and
+            // anchored to the groundspeed they report, whether or not they have left the ground.
+            let vp = predict::profile_from_here(
+                true,
                 route_len_nm,
-                field_elevation_ft(airports, &fp.arrival),
+                p.altitude as f64,
+                p.groundspeed as f64,
                 cruise_ft,
                 cruise_tas,
+                airports,
+                &fp.arrival,
                 profile,
                 headwind,
-            )
-            .anchor_to_observed_gs(p.groundspeed as f64);
+            );
             let target_d = vp.distance_after(route_len_nm, offset_sec);
             let ahead_nm = (route_len_nm - target_d).max(0.0);
             let (pos, heading) = fca::point_and_heading_at(&path, ahead_nm);
@@ -1472,21 +1476,18 @@ fn fix_predictions(
         )
     };
 
-    let start_alt = if airborne { cur_alt_ft } else { 0.0 };
-    let vp = trajectory::VerticalProfile::build(
-        start_alt,
+    let vp = predict::profile_from_here(
+        airborne,
         route_len,
-        field_elevation_ft(airports, &fp.arrival),
+        cur_alt_ft,
+        gs as f64,
         cruise_alt,
         cruise_tas,
+        airports,
+        &fp.arrival,
         profile,
         headwind,
     );
-    let vp = if airborne {
-        vp.anchor_to_observed_gs(gs as f64)
-    } else {
-        vp
-    };
 
     let arr_ll = airports.get(&fp.arrival.to_ascii_uppercase()).map(
         |&Airport {
@@ -1726,7 +1727,8 @@ fn build_candidates(
             p.groundspeed as f64,
             cruise,
             cruise_tas,
-            field_elevation_ft(airports, &fp.arrival),
+            airports,
+            &fp.arrival,
             profile,
             headwind,
             allowance,
@@ -1826,7 +1828,8 @@ fn build_candidates(
             0.0,
             cruise,
             cruise_tas,
-            field_elevation_ft(airports, &fp.arrival),
+            airports,
+            &fp.arrival,
             profile,
             headwind,
             allowance,

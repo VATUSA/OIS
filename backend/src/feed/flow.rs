@@ -803,12 +803,17 @@ fn ground_estimate(
             (pred.route_nm, ft_min)
         }
         _ => {
-            let vp = trajectory::VerticalProfile::build(
-                0.0,
+            // `airborne = false`: a synthetic 300 nm climb from the surface, so the current
+            // altitude and observed groundspeed are inert here.
+            let vp = predict::profile_from_here(
+                false,
                 300.0,
-                super::airports::field_elevation_ft(airports, &fp.arrival),
+                0.0,
+                0.0,
                 cruise,
                 cruise_tas,
+                airports,
+                &fp.arrival,
                 profile,
                 None,
             );
