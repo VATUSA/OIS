@@ -2,7 +2,7 @@ import * as React from "react";
 import {Button} from "@ois/ui";
 import {Minus, Square, Copy, X} from "lucide-react";
 
-import {can, MAIN_WINDOW_LABEL} from "@/lib/platform";
+import {can, isMainWindow} from "@/lib/platform";
 
 /**
  * Minimize / maximize / close for the frameless main window (#402).
@@ -41,12 +41,11 @@ export function useFramelessWindow(): boolean {
     if (!enabled) return;
     let alive = true;
     void (async () => {
-      try {
-        const win = await mainWindow();
-        if (alive) setFrameless(win.label === MAIN_WINDOW_LABEL);
-      } catch {
-        // Can't tell which window this is — draw nothing rather than risk duplicating the OS's.
-      }
+      // `isMainWindow()` is the one definition of the rule (#403), and it answers `false` when the
+      // window can't be read — which is the answer this gate wants anyway: draw nothing rather than
+      // risk duplicating the OS's controls.
+      const main = await isMainWindow();
+      if (alive) setFrameless(main);
     })();
     return () => {
       alive = false;

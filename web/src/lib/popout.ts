@@ -1,4 +1,4 @@
-import {can} from "@/lib/platform";
+import {can, isMainWindow} from "@/lib/platform";
 import {clampToMonitors, toLogical, type Monitor, type Rect} from "@/lib/popout-geometry";
 import {forgetWindow, rememberWindow, rememberedWindows} from "@/lib/window-registry";
 
@@ -298,12 +298,9 @@ export async function forgetOnClose(): Promise<void> {
 export async function restoreWindows(): Promise<number> {
   if (!can("multiWindow")) return 0;
 
-  try {
-    const {getCurrentWindow} = await import("@tauri-apps/api/window");
-    if (getCurrentWindow().label !== "main") return 0;
-  } catch {
-    return 0;
-  }
+  // The rule lives in `platform.ts` (#403), including its "couldn't tell" answer: `isMainWindow()`
+  // resolves false when the window can't be read, which restores nothing — as the local `catch` did.
+  if (!(await isMainWindow())) return 0;
 
   // One at a time, not in parallel: window placement is deterministic this way, and opening a
   // handful of native windows simultaneously is not something to ask a window manager to do at
