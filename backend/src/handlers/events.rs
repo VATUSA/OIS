@@ -1303,9 +1303,9 @@ pub async fn get_event_stats(
     Path(id): Path<i64>,
 ) -> Result<Json<EventStatsBody>, ApiError> {
     let pool = state.db.as_ref().ok_or(ApiError::ServiceUnavailable)?;
-    if events_repo::get(pool, id).await?.is_none() {
+    let Some(event) = events_repo::get(pool, id).await? else {
         return Err(ApiError::NotFound);
-    }
+    };
 
     let empty_combined = || CombinedStatBody {
         arrivals: 0,
@@ -1326,8 +1326,13 @@ pub async fn get_event_stats(
         }));
     };
 
-    let from = cap.start_time;
-    let to = cap.end_time.unwrap_or_else(Utc::now);
+    // The event's own window, not the capture's (#433). A capture is padded by `pre/post_minutes`
+    // — an hour by default — because replay needs lead-in, and that padding has no business in a
+    // statistic. Worse, an *open* capture has no `end_time`, and falling back to `Utc::now()` made
+    // the window grow until it was closed, so the same event reported a different number every time
+    // it was asked. The capture still gates whether anything was recorded at all.
+    let from = event.start_time;
+    let to = event.end_time;
 
     // Featured airports = the event's configured (rated) airports.
     let icaos: Vec<String> = events_repo::list_airport_rates(pool, id)
@@ -1353,7 +1358,16 @@ pub async fn get_event_stats(
     };
 
     // Per-airport breakdown + top aircraft (grouped by ICAO).
-    let breakdown = stats_repo::event_airport_breakdown(pool, &icaos, from, to).await?;
+    //
+    // Prefer the copy frozen when the capture closed (#433). Movements come from `stats.flight_leg`,
+    // which is pruned at 30 days, so a past event recomputed from legs would report zero once they
+    // aged out. Live and recently-finished events have no snapshot yet and compute as normal.
+    let snapshot = stats_repo::event_movements_snapshot(pool, id).await?;
+    let breakdown = if snapshot.is_empty() {
+        stats_repo::event_airport_breakdown(pool, &icaos, from, to).await?
+    } else {
+        snapshot
+    };
     let mut top_by_icao: std::collections::HashMap<String, Vec<KeyCountBody>> =
         std::collections::HashMap::new();
     for r in stats_repo::event_airport_top_aircraft(pool, &icaos, from, to, 4).await? {

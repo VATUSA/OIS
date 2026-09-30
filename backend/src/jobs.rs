@@ -626,6 +626,48 @@ pub fn spawn_capture_scheduler(reg: Arc<JobRegistry>, pool: PgPool) {
 
 /// One capture-scheduler pass: open a capture for each event now inside its window, and close+save
 /// captures whose window has ended. Idempotent. Returns a summary of what changed.
+/// Freeze an event's movement counts as its capture closes (#433).
+///
+/// Movements are counted from `stats.flight_leg`, which is pruned at [`DELAY_LEG_RETAIN_DAYS`], so
+/// without this an event's numbers would quietly fall to zero a month after it ran. Taken over the
+/// event's own window, matching what the stats endpoint reports.
+///
+/// Best-effort: a failure here costs the frozen copy, not the capture that was just saved, and the
+/// endpoint still computes from legs until they age out. So it logs and returns rather than
+/// propagating — the scheduler's job is the capture lifecycle.
+async fn snapshot_event_movements(
+    pool: &PgPool,
+    event_id: i64,
+    start_time: chrono::DateTime<Utc>,
+    end_time: chrono::DateTime<Utc>,
+) {
+    let icaos: Vec<String> = match events_repo::list_airport_rates(pool, event_id).await {
+        Ok(rates) => rates.into_iter().map(|r| r.icao).collect(),
+        Err(_) => {
+            tracing::warn!(
+                event = event_id,
+                "stats: snapshot skipped, airports unreadable"
+            );
+            return;
+        }
+    };
+    if icaos.is_empty() {
+        return;
+    }
+
+    match stats_repo::event_airport_breakdown(pool, &icaos, start_time, end_time).await {
+        Ok(rows) => {
+            match stats_repo::snapshot_event_movements(pool, event_id, start_time, end_time, &rows)
+                .await
+            {
+                Ok(n) => tracing::info!(event = event_id, airports = n, "stats: froze movements"),
+                Err(_) => tracing::warn!(event = event_id, "stats: snapshot write failed"),
+            }
+        }
+        Err(_) => tracing::warn!(event = event_id, "stats: snapshot breakdown failed"),
+    }
+}
+
 async fn capture_scheduler_once(pool: &PgPool) -> Result<String, String> {
     let rows = stats_repo::list_capture_schedule(pool)
         .await
@@ -664,6 +706,7 @@ async fn capture_scheduler_once(pool: &PgPool) -> Result<String, String> {
                 {
                     tracing::info!(event = r.event_id, "stats: saved event capture");
                     saved += 1;
+                    snapshot_event_movements(pool, r.event_id, r.start_time, r.end_time).await;
                 }
             }
             _ => {}

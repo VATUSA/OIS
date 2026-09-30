@@ -1096,9 +1096,22 @@ pub struct AirportBreakdown {
     pub unique_pilots: i64,
 }
 
-/// Arrivals, departures, and distinct pilots for each featured airport during the window. A pilot
-/// that both arrived at and departed from the same field (turnaround) is one unique pilot but two
-/// movements.
+/// Arrivals, departures, and distinct pilots for each featured airport during the window.
+///
+/// **Movements are observed, not filed** (#433). They come from `stats.flight_leg`, which
+/// `feed/delays.rs` writes one row into per detected wheels-up or touchdown, keyed on `end_time` —
+/// the movement instant itself. Counting `stats.flight` instead meant a movement was only ever
+/// *inferred*, from a filed plan plus a connection that overlapped the window, which counted a pilot
+/// who logged on and never moved, an overflight at its filed destination, and a long-haul that was
+/// merely connected — as both a departure and an arrival.
+///
+/// It also fixes reconnects for free, and that is the non-obvious part: a reconnect gets a new
+/// `logon_time`, so `session_id` changes and `stats.flight` gains a second row for the same flight
+/// (`migrations/0039_stats.sql:17-18`). One wheels-up is still one leg, so it is still one departure.
+///
+/// `unique_pilots` deliberately stays on `stats.flight`: it answers "who took part", which is not the
+/// same question as "what moved", and a pilot who connected without flying still took part. A pilot
+/// who both arrived at and departed from the same field is one unique pilot but two movements.
 pub async fn event_airport_breakdown(
     pool: &PgPool,
     icaos: &[String],
@@ -1106,22 +1119,88 @@ pub async fn event_airport_breakdown(
     to: DateTime<Utc>,
 ) -> Result<Vec<AirportBreakdown>, ApiError> {
     sqlx::query_as::<_, AirportBreakdown>(
-        "select icao,
-                count(*) filter (where kind = 'arr') as arrivals,
-                count(*) filter (where kind = 'dep') as departures,
-                count(distinct cid) as unique_pilots
+        // `full join` rather than an inner one: an airport can have movements with no overlapping
+        // connection row, or connections with no movement, and either way it belongs in the result.
+        "select coalesce(m.icao, p.icao) as icao,
+                coalesce(m.arrivals, 0) as arrivals,
+                coalesce(m.departures, 0) as departures,
+                coalesce(p.unique_pilots, 0) as unique_pilots
          from (
-            select arrival as icao, cid, 'arr' as kind from stats.flight
-              where arrival = any($3) and status <> 'prefiled' and first_seen <= $2 and last_seen >= $1
-            union all
-            select departure as icao, cid, 'dep' as kind from stats.flight
-              where departure = any($3) and status <> 'prefiled' and first_seen <= $2 and last_seen >= $1
-         ) t
-         group by icao order by (count(*)) desc",
+            select airport as icao,
+                   count(*) filter (where kind = 'arrival') as arrivals,
+                   count(*) filter (where kind = 'departure') as departures
+              from stats.flight_leg
+              where airport = any($3) and end_time >= $1 and end_time <= $2
+              group by airport
+         ) m
+         full join (
+            select icao, count(distinct cid) as unique_pilots from (
+               select arrival as icao, cid from stats.flight
+                 where arrival = any($3) and status <> 'prefiled'
+                   and first_seen <= $2 and last_seen >= $1
+               union all
+               select departure as icao, cid from stats.flight
+                 where departure = any($3) and status <> 'prefiled'
+                   and first_seen <= $2 and last_seen >= $1
+            ) t group by icao
+         ) p on p.icao = m.icao
+         order by (coalesce(m.arrivals, 0) + coalesce(m.departures, 0)) desc",
     )
     .bind(from)
     .bind(to)
     .bind(icaos)
+    .fetch_all(pool)
+    .await
+    .map_err(db)
+}
+
+/// Freeze an event's per-airport breakdown, so it survives leg retention (#433).
+///
+/// Called once, when the capture closes. Idempotent on `(event_id, icao)` so a re-close — or a
+/// re-run of the scheduler pass — overwrites rather than duplicating.
+pub async fn snapshot_event_movements(
+    pool: &PgPool,
+    event_id: i64,
+    from: DateTime<Utc>,
+    to: DateTime<Utc>,
+    rows: &[AirportBreakdown],
+) -> Result<u64, ApiError> {
+    if rows.is_empty() {
+        return Ok(0);
+    }
+    let mut qb: QueryBuilder<Postgres> = QueryBuilder::new(
+        "insert into stats.event_movements \
+         (event_id, icao, arrivals, departures, unique_pilots, window_start, window_end) ",
+    );
+    qb.push_values(rows, |mut b, r| {
+        b.push_bind(event_id)
+            .push_bind(&r.icao)
+            .push_bind(r.arrivals)
+            .push_bind(r.departures)
+            .push_bind(r.unique_pilots)
+            .push_bind(from)
+            .push_bind(to);
+    });
+    qb.push(
+        " on conflict (event_id, icao) do update set \
+         arrivals = excluded.arrivals, departures = excluded.departures, \
+         unique_pilots = excluded.unique_pilots, window_start = excluded.window_start, \
+         window_end = excluded.window_end, captured_at = now()",
+    );
+    let res = qb.build().execute(pool).await.map_err(db)?;
+    Ok(res.rows_affected())
+}
+
+/// The frozen breakdown for an event, or empty when it was never snapshotted.
+pub async fn event_movements_snapshot(
+    pool: &PgPool,
+    event_id: i64,
+) -> Result<Vec<AirportBreakdown>, ApiError> {
+    sqlx::query_as::<_, AirportBreakdown>(
+        "select icao, arrivals, departures, unique_pilots from stats.event_movements \
+         where event_id = $1 order by (arrivals + departures) desc",
+    )
+    .bind(event_id)
     .fetch_all(pool)
     .await
     .map_err(db)
@@ -1619,4 +1698,156 @@ pub async fn prune_winds(pool: &PgPool, before: DateTime<Utc>) -> Result<u64, Ap
 fn db(e: sqlx::Error) -> ApiError {
     tracing::warn!(error = %e, "stats db error");
     ApiError::Internal
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use chrono::TimeZone;
+
+    /// A movement is a detected wheels-up or touchdown, not a filed plan (#433). These fixtures are
+    /// the four shapes that used to be counted and should not be, plus the one that should.
+    fn at(hour: u32, minute: u32) -> DateTime<Utc> {
+        Utc.with_ymd_and_hms(2026, 6, 1, hour, minute, 0).unwrap()
+    }
+
+    /// The event window every test counts over: 12:00–14:00.
+    fn window() -> (DateTime<Utc>, DateTime<Utc>) {
+        (at(12, 0), at(14, 0))
+    }
+
+    /// A connection: someone logged on with a filed plan. Says nothing about whether they moved.
+    async fn connection(
+        pool: &PgPool,
+        session_id: i64,
+        cid: i32,
+        departure: &str,
+        arrival: &str,
+        first_seen: DateTime<Utc>,
+        last_seen: DateTime<Utc>,
+    ) {
+        sqlx::query(
+            "insert into stats.flight \
+             (session_id, cid, callsign, logon_time, first_seen, last_seen, status, departure, arrival) \
+             values ($1, $2, $3, $4, $4, $5, 'active', $6, $7)",
+        )
+        .bind(session_id)
+        .bind(cid)
+        .bind(format!("TEST{session_id}"))
+        .bind(first_seen)
+        .bind(last_seen)
+        .bind(departure)
+        .bind(arrival)
+        .execute(pool)
+        .await
+        .unwrap();
+    }
+
+    /// An observed movement: wheels-up or touchdown at `end_time`.
+    async fn movement(pool: &PgPool, kind: &str, airport: &str, cid: i32, end: DateTime<Utc>) {
+        sqlx::query(
+            "insert into stats.flight_leg \
+             (kind, airport, callsign, cid, start_time, end_time, duration_sec) \
+             values ($1, $2, $3, $4, $5, $6, 600)",
+        )
+        .bind(kind)
+        .bind(airport)
+        .bind(format!("TEST{cid}"))
+        .bind(cid)
+        .bind(end - chrono::Duration::minutes(10))
+        .bind(end)
+        .execute(pool)
+        .await
+        .unwrap();
+    }
+
+    async fn counts(pool: &PgPool, icaos: &[&str]) -> Vec<AirportBreakdown> {
+        let (from, to) = window();
+        let owned: Vec<String> = icaos.iter().map(|s| s.to_string()).collect();
+        event_airport_breakdown(pool, &owned, from, to)
+            .await
+            .unwrap()
+    }
+
+    fn find<'a>(rows: &'a [AirportBreakdown], icao: &str) -> Option<&'a AirportBreakdown> {
+        rows.iter().find(|r| r.icao == icao)
+    }
+
+    /// AC2. The biggest single source of inflation: a pilot who connects, files, and disconnects at
+    /// the gate used to be a full departure.
+    #[sqlx::test]
+    async fn a_connection_that_never_moved_is_not_a_movement(pool: PgPool) {
+        connection(&pool, 1, 1001, "KJFK", "KBOS", at(12, 10), at(12, 40)).await;
+
+        let rows = counts(&pool, &["KJFK", "KBOS"]).await;
+
+        let jfk = find(&rows, "KJFK").expect("KJFK present — they were connected there");
+        assert_eq!(jfk.departures, 0, "never rolled, so never departed");
+        assert_eq!(jfk.arrivals, 0);
+        // They still took part, which is a different question from whether they moved.
+        assert_eq!(jfk.unique_pilots, 1);
+    }
+
+    /// AC3. An overflight, a diversion or a crash used to count at the filed destination.
+    #[sqlx::test]
+    async fn a_flight_that_never_lands_is_not_an_arrival(pool: PgPool) {
+        connection(&pool, 2, 1002, "KJFK", "KBOS", at(12, 0), at(13, 30)).await;
+        movement(&pool, "departure", "KJFK", 1002, at(12, 20)).await;
+
+        let rows = counts(&pool, &["KJFK", "KBOS"]).await;
+
+        assert_eq!(
+            find(&rows, "KJFK").unwrap().departures,
+            1,
+            "it did take off"
+        );
+        let bos = find(&rows, "KBOS").expect("KBOS present — a plan was filed to it");
+        assert_eq!(bos.arrivals, 0, "it never touched down");
+    }
+
+    /// AC5. `session_id = fnv1a(cid, logon_time)`, so a reconnect mints a second `stats.flight` row
+    /// for one flight (migrations/0039_stats.sql:17-18) — and used to mint a second departure.
+    #[sqlx::test]
+    async fn a_reconnect_during_one_flight_is_one_departure(pool: PgPool) {
+        connection(&pool, 3, 1003, "KJFK", "KBOS", at(12, 0), at(12, 30)).await;
+        connection(&pool, 4, 1003, "KJFK", "KBOS", at(12, 31), at(13, 30)).await;
+        // One aircraft, one wheels-up, however many times its pilot dropped.
+        movement(&pool, "departure", "KJFK", 1003, at(12, 15)).await;
+
+        let rows = counts(&pool, &["KJFK"]).await;
+
+        let jfk = find(&rows, "KJFK").unwrap();
+        assert_eq!(jfk.departures, 1, "two sessions, one flight, one departure");
+        assert_eq!(jfk.unique_pilots, 1, "and one pilot");
+    }
+
+    /// AC4. The window is the event's own, and a movement outside it belongs to another event — the
+    /// old predicate counted any connection merely *overlapping* the window, so a long-haul that
+    /// pushed hours earlier landed in the totals.
+    #[sqlx::test]
+    async fn a_movement_outside_the_event_window_is_not_counted(pool: PgPool) {
+        movement(&pool, "departure", "KJFK", 1004, at(11, 30)).await; // before
+        movement(&pool, "departure", "KJFK", 1005, at(13, 0)).await; // inside
+        movement(&pool, "arrival", "KJFK", 1006, at(14, 30)).await; // after
+
+        let rows = counts(&pool, &["KJFK"]).await;
+
+        let jfk = find(&rows, "KJFK").unwrap();
+        assert_eq!(jfk.departures, 1);
+        assert_eq!(jfk.arrivals, 0);
+    }
+
+    /// A real turnaround still counts twice, which is the behaviour the docs promise.
+    #[sqlx::test]
+    async fn a_turnaround_is_one_pilot_and_two_movements(pool: PgPool) {
+        connection(&pool, 5, 1007, "KJFK", "KJFK", at(12, 0), at(13, 45)).await;
+        movement(&pool, "arrival", "KJFK", 1007, at(12, 30)).await;
+        movement(&pool, "departure", "KJFK", 1007, at(13, 30)).await;
+
+        let rows = counts(&pool, &["KJFK"]).await;
+
+        let jfk = find(&rows, "KJFK").unwrap();
+        assert_eq!(jfk.arrivals + jfk.departures, 2);
+        assert_eq!(jfk.unique_pilots, 1);
+    }
 }
