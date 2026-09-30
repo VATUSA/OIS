@@ -1,31 +1,43 @@
-import {useDragRegionProps, WindowControls} from "./window-controls";
+import {useDragRegionProps, WindowChromeSlot} from "./window-controls";
 
 /**
- * The frameless main window's controls for the layouts that render *outside* `AppShell` (#423).
+ * The main window's own chrome for the layouts that render *outside* `AppShell` (#423).
  *
- * `AppShell` puts `WindowControls` in `Shell`'s `leading` slot, but two layouts return from
- * `RootLayout` before reaching it — the backend-unreachable error screen and the signed-out landing
- * page. `decorations: false` means those had no native title bar *and* no controls: an undecorated
- * rectangle with no in-app way to close it, on the first screen a new desktop user sees.
+ * `AppShell` puts the window's buttons at the leading edge of the sidebar's chrome row, but two
+ * layouts return from `RootLayout` before reaching it — the backend-unreachable error screen and the
+ * signed-out landing page. On Windows and Linux `decorations: false` means those had no native title
+ * bar *and* no buttons: an undecorated rectangle with no in-app way to close it, on the first screen
+ * a new desktop user sees.
  *
  * Mounted in those two layouts rather than above the layout branch, because above it this would draw
- * a second set of controls on top of the shell's own for every signed-in page.
+ * a second set on top of the shell's own for every signed-in page.
  *
- * `useDragRegionProps()` is deliberately the only gate here: it is already `undefined` on the web
- * build and in route windows (#350), which keep their native title bar. Reusing that one answer
- * instead of a platform check of our own is what keeps this correct when the gate changes — #419
- * gives macOS its decorations back, and this follows without an edit.
+ * Two gates, not one, because they answer different questions (#419):
+ *
+ * - {@link useDragRegionProps} decides whether this strip exists at all. It is already `undefined` on
+ *   the web build and in route windows (#350), which keep their native title bar, so reusing that one
+ *   answer avoids a platform check of our own. On macOS it is `true` — an `Overlay` title bar is
+ *   transparent and needs the drag region as much as an undecorated window does — so the strip is
+ *   drawn there too, and makes the top of the signed-out window draggable.
+ * - {@link WindowChromeSlot} decides what goes *in* it. On macOS that is nothing, because the OS
+ *   paints the real traffic lights over this spot itself; elsewhere it is the replica. It also owns
+ *   how wide the buttons are, which differs per platform and must not be guessed here.
+ *
+ * The geometry matches the shell's chrome row — `px-2.5` and a 44px strip, the same `h-11` as
+ * `Shell`'s top bar — so the buttons do not move when the user signs in or out (#423 review). That
+ * matters on Windows and Linux, where the replica is ours to place; on macOS the OS holds the lights
+ * at fixed window coordinates regardless.
+ *
+ * The strip covers no content: the landing hero opens on 72px of padding and the error screen is
+ * vertically centred, and nothing else in either layout is positioned or stacked.
  */
 export function WindowChromeBar() {
   const dragRegion = useDragRegionProps();
   if (!dragRegion) return null;
 
-  // Left, matching `Shell`'s `leading` slot, so the signed-out window reads like the signed-in one.
-  // Nothing else in these layouts is positioned or stacked, and both start below this strip — the
-  // landing hero opens on padding, the error screen is vertically centred — so it covers no content.
   return (
-    <div {...dragRegion} className="fixed inset-x-0 top-0 z-50 flex h-9 items-center px-2">
-      <WindowControls />
+    <div {...dragRegion} className="fixed inset-x-0 top-0 z-50 flex h-11 items-center px-2.5">
+      <WindowChromeSlot />
     </div>
   );
 }

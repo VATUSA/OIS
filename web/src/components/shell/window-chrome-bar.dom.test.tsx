@@ -11,18 +11,21 @@ import {afterEach, beforeAll, beforeEach, describe, expect, it, vi} from "vitest
  * and the error screen are not undecorated rectangles with no way to close them, and it must stay
  * invisible everywhere the OS already draws a title bar.
  */
-const platform = vi.hoisted(() => ({windowControls: true, label: "main"}));
+const platform = vi.hoisted(() => ({windowControls: true, label: "main", macos: false}));
 vi.mock("@/lib/platform", () => ({
   can: () => platform.windowControls,
-  MAIN_WINDOW_LABEL: "main",
+  isMacOS: () => platform.macos,
+  isMainWindow: async () => platform.label === "main",
 }));
 
 const win = vi.hoisted(() => ({
   minimize: vi.fn(() => Promise.resolve()),
   toggleMaximize: vi.fn(() => Promise.resolve()),
   close: vi.fn(() => Promise.resolve()),
-  isMaximized: vi.fn(() => Promise.resolve(false)),
-  onResized: vi.fn((_cb: () => void) => Promise.resolve(() => undefined)),
+  isFocused: vi.fn(() => Promise.resolve(true)),
+  onFocusChanged: vi.fn((_cb: (event: {payload: boolean}) => void) =>
+    Promise.resolve(() => undefined),
+  ),
   get label() {
     return platform.label;
   },
@@ -46,8 +49,9 @@ afterEach(() => {
 beforeEach(() => {
   platform.windowControls = true;
   platform.label = "main";
-  win.isMaximized.mockResolvedValue(false);
-  win.onResized.mockImplementation(() => Promise.resolve(() => undefined));
+  platform.macos = false;
+  win.isFocused.mockResolvedValue(true);
+  win.onFocusChanged.mockImplementation(() => Promise.resolve(() => undefined));
 });
 
 async function render(): Promise<HTMLElement> {
@@ -60,12 +64,40 @@ async function render(): Promise<HTMLElement> {
 }
 
 describe("WindowChromeBar", () => {
-  it("offers close, minimize and zoom in the frameless main window", async () => {
+  it("offers close, minimize and zoom in the undecorated main window", async () => {
     const host = await render();
 
-    for (const label of ["Minimize", "Maximize", "Close"]) {
+    // macOS calls it Zoom, and so does the replica, because the label is its accessible name (#419).
+    for (const label of ["Minimize", "Zoom", "Close"]) {
       expect(host.querySelector(`[aria-label="${label}"]`)).not.toBeNull();
     }
+  });
+
+  /**
+   * #419: on macOS the OS draws the real traffic lights over this spot, so the strip stays — it is
+   * what makes the top of the window draggable under an `Overlay` title bar — but draws no replica.
+   */
+  it("keeps the drag strip on macOS but draws no replica in it", async () => {
+    platform.macos = true;
+    const host = await render();
+
+    expect(host.querySelector("[data-tauri-drag-region]")).not.toBeNull();
+    expect(host.querySelectorAll("button")).toHaveLength(0);
+  });
+
+  /**
+   * The buttons must not move when the user signs in or out, so the strip's leading edge and height
+   * match the shell's chrome row rather than being chosen here (#423 review).
+   */
+  it("places the buttons where the shell does, so they do not jump on sign-in", async () => {
+    const host = await render();
+    const bar = host.querySelector("[data-tauri-drag-region]")!;
+
+    // `px-2.5` = the sidebar header's own padding; `h-11` = Shell's top bar.
+    expect(bar.className).toContain("px-2.5");
+    expect(bar.className).toContain("h-11");
+    // The width of the buttons is the slot's business, not this strip's — it differs per platform.
+    expect(host.querySelector("[data-window-chrome-slot]")).not.toBeNull();
   });
 
   it("is the window's drag region, so the bar still moves an undecorated window", async () => {
