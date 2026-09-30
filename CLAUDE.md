@@ -14,8 +14,9 @@ here.
 
 OIS is VATUSA's operations platform: a **Rust/Axum backend** (the authority for identity,
 permissions, and every domain) over Postgres, a **Vite + React web app** consuming an
-OpenAPI-generated typed client, and a **Rust Discord bot** (designed, not built). One monorepo,
-Cargo + pnpm/Turbo workspaces, tied together by a `justfile`. See `AGENTS.md` § Architecture.
+OpenAPI-generated typed client, and a **Rust Discord bot** (built — it drains the backend's
+outbound-job queue). One monorepo, Cargo + pnpm/Turbo workspaces, tied together by a `justfile`.
+See `AGENTS.md` § Architecture.
 
 ---
 

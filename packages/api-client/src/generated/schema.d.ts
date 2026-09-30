@@ -883,6 +883,32 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/v1/events/{id}/banner": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * Relays an event's banner image through the API (#429).
+         * @description Banners are third-party URLs mirrored from VATUSA, and organisers use whatever host they like —
+         *     five unrelated ones are in the data already. The bundled desktop app runs under a CSP whose
+         *     `img-src` cannot name them all without becoming `https:`, so the image is fetched here and served
+         *     from our own origin instead. The caller turns it into a `blob:` URL, which the policy does allow.
+         *
+         *     Guarded, because this makes the backend fetch a URL someone else controls: `https` only, public
+         *     addresses only, no redirects, a short timeout, a size cap, and an `image/*` response or nothing.
+         */
+        get: operations["get_event_banner"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/v1/events/{id}/capture": {
         parameters: {
             query?: never;
@@ -2172,6 +2198,39 @@ export interface paths {
          */
         post: operations["save_capture"];
         delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/stats/captures/{id}": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        post?: never;
+        /**
+         * Deletes a saved capture, releasing the position data it was pinning (#432).
+         * @description A saved capture is not just a metadata row: `CAPTURE_GUARD` keeps every position inside its window
+         *     out of compaction forever, so until now a mis-scoped capture was storage nobody could reclaim.
+         *
+         *     Gated on `stats.capture.delete` rather than `stats.capture.update`: saving a window and destroying
+         *     one somebody else saved are different levels of trust.
+         *
+         *     An event-tied capture is deletable — blocking it would leave the worst case, a wrongly-scoped
+         *     event capture, with no remedy at all. The consequence is made explicit where the person can act on
+         *     it, in the replay page's confirmation, rather than by refusing here.
+         *
+         *     The one exception is an event capture that is still *open* and still inside the window the
+         *     scheduler watches: discarding it makes the event look uncaptured, so the next scheduler pass opens
+         *     a replacement and the positions stay pinned. Answering 409 is honest about that; the capture is
+         *     saved when its window ends and can be deleted then (#432 review).
+         */
+        delete: operations["delete_capture"];
         options?: never;
         head?: never;
         patch?: never;
@@ -8433,6 +8492,49 @@ export interface operations {
             };
         };
     };
+    get_event_banner: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /** @description VATUSA event id */
+                id: number;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description The event's banner image */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "image/*": unknown;
+                };
+            };
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description No such event, or it has no banner */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description The banner's host did not return a usable image */
+            503: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+        };
+    };
     get_event_capture: {
         parameters: {
             query?: never;
@@ -11856,6 +11958,51 @@ export interface operations {
                 content?: never;
             };
             404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+        };
+    };
+    delete_capture: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /** @description Capture id */
+                id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            204: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description The event's capture is still recording; it can be deleted once its window ends */
+            409: {
                 headers: {
                     [name: string]: unknown;
                 };

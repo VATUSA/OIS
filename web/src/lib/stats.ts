@@ -235,6 +235,41 @@ export function useCaptures() {
   });
 }
 
+/**
+ * Delete a saved capture, releasing the position data it pins.
+ *
+ * A capture isn't just a row: while it exists, compaction skips every position inside its window, so
+ * deleting one is how that storage is given back (#432). The space returns on the next compaction
+ * pass rather than immediately.
+ */
+export function useDeleteCapture() {
+  const qc = useQueryClient();
+  const toast = useToast();
+  return useMutation({
+    mutationFn: async (id: string): Promise<void> => {
+      const { error, response } = await ois.DELETE("/api/v1/stats/captures/{id}", {
+        params: { path: { id } },
+      });
+      // 409 is the one refusal a user can act on, so it has to survive as more than "failed": the
+      // event is still recording, and deleting now would be undone by the capture scheduler
+      // reopening it (#432 review). Anything else stays generic.
+      if (response.status === 409) throw new Error("still-recording");
+      if (error) throw new Error("failed to delete capture");
+    },
+    onSuccess: () => {
+      qc.invalidateQueries({ queryKey: ["stats-captures"] });
+      toast.success("Capture deleted");
+    },
+    onError: (e) =>
+      e.message === "still-recording"
+        ? toast.error("That event is still recording", {
+            description:
+              "Its capture is deleted once the event’s window ends — try again after that.",
+          })
+        : toast.error("Couldn’t delete that capture"),
+  });
+}
+
 /** Save an already-viewed window as a permanent, named capture. */
 export function useSaveCapture() {
   const qc = useQueryClient();

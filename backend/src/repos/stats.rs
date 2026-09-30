@@ -836,6 +836,57 @@ pub async fn close_capture(
     Ok(res.rows_affected() > 0)
 }
 
+/// Marks a capture `discarded`, releasing the positions it was pinning (#432).
+///
+/// Not a row delete. `CAPTURE_GUARD` (see [`downsample_positions`]) keeps every position inside an
+/// `'open'` or `'saved'` window out of compaction, so dropping out of that set is what actually gives
+/// the space back — on the next compaction pass, not immediately. Keeping the row also keeps the
+/// record that the capture existed, which a hard delete would lose.
+///
+/// Accepts `'open'` as well as `'saved'`: discarding an ad-hoc capture that is still recording is a
+/// coherent thing to want, and leaving it running would keep pinning data. An open *event* capture
+/// inside its window is refused by the caller instead — see [`event_capture_is_live`]. Returns
+/// `false` when there is no such capture or it was already discarded, so the caller can answer 404
+/// rather than pretend.
+pub async fn discard_capture(pool: &PgPool, id: &str) -> Result<bool, ApiError> {
+    let res = sqlx::query(
+        "update stats.capture set status = 'discarded' \
+         where id = $1 and status in ('open', 'saved')",
+    )
+    .bind(id)
+    .execute(pool)
+    .await
+    .map_err(db)?;
+    Ok(res.rows_affected() > 0)
+}
+
+/// Whether this capture is an event's, still open, and still inside the window the scheduler watches.
+///
+/// Such a capture cannot usefully be discarded: `list_capture_schedule` derives `open_capture_id`
+/// from `status = 'open'`, so discarding it makes the event look like it has no capture, and
+/// `capture_scheduler_once`'s `(in_window, None)` arm opens a fresh one on its next pass. The delete
+/// would report success, the row would leave the picker, and a new capture would resume pinning the
+/// same positions (#432 review).
+///
+/// The window is the padded one the scheduler uses — `pre_minutes` before the event to `post_minutes`
+/// after — because that is the span in which it will reopen.
+pub async fn event_capture_is_live(pool: &PgPool, id: &str) -> Result<bool, ApiError> {
+    sqlx::query_scalar::<_, bool>(
+        "select exists ( \
+           select 1 from stats.capture c \
+             join events.event e on e.id = c.event_id \
+             join stats.event_capture ec on ec.event_id = e.id \
+           where c.id = $1 and c.status = 'open' and ec.enabled \
+             and now() >= e.start_time - make_interval(mins => ec.pre_minutes) \
+             and now() <= e.end_time + make_interval(mins => ec.post_minutes) \
+        )",
+    )
+    .bind(id)
+    .fetch_one(pool)
+    .await
+    .map_err(db)
+}
+
 /// Save an already-elapsed `[start, end)` window as a capture directly, bypassing the open/close
 /// lifecycle — used to keep a window after the fact rather than while it's being recorded live.
 /// `relax_scope` is false: the data already exists, so there's nothing left for the live collector
@@ -2074,5 +2125,213 @@ mod tests {
         let jfk = find(&rows, "KJFK").unwrap();
         assert_eq!(jfk.arrivals + jfk.departures, 2);
         assert_eq!(jfk.unique_pilots, 1);
+    }
+}
+
+#[cfg(test)]
+mod capture_release_tests {
+    use chrono::TimeZone;
+
+    use super::*;
+
+    fn at(hour: u32) -> DateTime<Utc> {
+        Utc.with_ymd_and_hms(2026, 6, 1, hour, 0, 0).unwrap()
+    }
+
+    /// Ten positions on one session across the hour the capture will cover.
+    async fn positions(pool: &PgPool) {
+        for i in 0..10i32 {
+            sqlx::query(
+                "insert into stats.position \
+                 (session_id, ts, lat, lon, altitude, groundspeed, heading) \
+                 values (1, $1, 0, 0, 0, 0, 0)",
+            )
+            .bind(at(12) + chrono::Duration::minutes(i as i64))
+            .execute(pool)
+            .await
+            .unwrap();
+        }
+    }
+
+    async fn saved_capture(pool: &PgPool) -> String {
+        sqlx::query_scalar::<_, String>(
+            "insert into stats.capture (label, start_time, end_time, status) \
+             values ('w', $1, $2, 'saved') returning id",
+        )
+        .bind(at(12))
+        .bind(at(13))
+        .fetch_one(pool)
+        .await
+        .unwrap()
+    }
+
+    async fn remaining(pool: &PgPool) -> i64 {
+        sqlx::query_scalar::<_, i64>("select count(*) from stats.position")
+            .fetch_one(pool)
+            .await
+            .unwrap()
+    }
+
+    /// AC2 — the whole point of #432. A saved capture pins its positions against compaction; the
+    /// delete is only worth anything if discarding it lets them go. That step was asserted by a
+    /// comment and by nothing else: `downsample_positions` had no test in the repo at all
+    /// (#432 review).
+    #[sqlx::test]
+    async fn discarding_a_capture_releases_the_positions_it_was_pinning(pool: PgPool) {
+        positions(&pool).await;
+        let id = saved_capture(&pool).await;
+
+        // Saved: CAPTURE_GUARD protects every row in the window, so compaction takes nothing.
+        let thinned = downsample_positions(&pool, at(11), at(14), 2)
+            .await
+            .unwrap();
+        assert_eq!(thinned, 0, "a saved capture must pin its positions");
+        assert_eq!(remaining(&pool).await, 10);
+
+        assert!(discard_capture(&pool, &id).await.unwrap());
+
+        // Discarded: out of the guard, so the same pass now thins them.
+        let thinned = downsample_positions(&pool, at(11), at(14), 2)
+            .await
+            .unwrap();
+        assert!(
+            thinned > 0,
+            "discarding must let compaction reclaim the space"
+        );
+        assert_eq!(
+            remaining(&pool).await,
+            5,
+            "keep_every = 2 keeps every second row"
+        );
+    }
+
+    /// The guard is on `status in ('open','saved')`, so an *open* capture pins too — otherwise a
+    /// recording in progress would be thinned underneath itself.
+    #[sqlx::test]
+    async fn an_open_capture_pins_its_positions_as_well(pool: PgPool) {
+        positions(&pool).await;
+        sqlx::query(
+            "insert into stats.capture (label, start_time, end_time, status) \
+             values ('w', $1, $2, 'open')",
+        )
+        .bind(at(12))
+        .bind(at(13))
+        .execute(&pool)
+        .await
+        .unwrap();
+
+        assert_eq!(
+            downsample_positions(&pool, at(11), at(14), 2)
+                .await
+                .unwrap(),
+            0
+        );
+    }
+
+    /// #432 review: an event capture that is still open and still inside the scheduler's padded
+    /// window must not be discardable — `capture_scheduler_once` would open a replacement on its
+    /// next pass and the positions would stay pinned, after the delete reported success.
+    #[sqlx::test]
+    async fn an_event_capture_still_recording_is_reported_live(pool: PgPool) {
+        sqlx::query(
+            "insert into events.event (id, title, start_time, end_time) \
+             values (500, 'E', now() - interval '10 minutes', now() + interval '1 hour')",
+        )
+        .execute(&pool)
+        .await
+        .unwrap();
+        sqlx::query("insert into stats.event_capture (event_id, enabled) values (500, true)")
+            .execute(&pool)
+            .await
+            .unwrap();
+        let open = sqlx::query_scalar::<_, String>(
+            "insert into stats.capture (event_id, label, start_time, status) \
+             values (500, 'E', now() - interval '40 minutes', 'open') returning id",
+        )
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+
+        assert!(event_capture_is_live(&pool, &open).await.unwrap());
+
+        // Once it is saved, the scheduler no longer reopens and it is deletable.
+        sqlx::query("update stats.capture set status = 'saved', end_time = now() where id = $1")
+            .bind(&open)
+            .execute(&pool)
+            .await
+            .unwrap();
+        assert!(!event_capture_is_live(&pool, &open).await.unwrap());
+    }
+
+    /// The refusal is scoped to the window, not to "event capture that is open". Past its window the
+    /// scheduler closes a capture rather than reopening it, so refusing there would strand a stale
+    /// open row as permanently undeletable — the exact unreclaimable storage #432 exists to fix.
+    /// (Caught by mutation: dropping the window clause left every other case green.)
+    #[sqlx::test]
+    async fn an_open_event_capture_past_its_window_is_not_live(pool: PgPool) {
+        sqlx::query(
+            "insert into events.event (id, title, start_time, end_time) \
+             values (502, 'E', now() - interval '6 hours', now() - interval '5 hours')",
+        )
+        .execute(&pool)
+        .await
+        .unwrap();
+        sqlx::query("insert into stats.event_capture (event_id, enabled) values (502, true)")
+            .execute(&pool)
+            .await
+            .unwrap();
+        let stale = sqlx::query_scalar::<_, String>(
+            "insert into stats.capture (event_id, label, start_time, status) \
+             values (502, 'E', now() - interval '7 hours', 'open') returning id",
+        )
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+
+        assert!(
+            !event_capture_is_live(&pool, &stale).await.unwrap(),
+            "the scheduler will not reopen past the window, so this must stay deletable"
+        );
+        assert!(discard_capture(&pool, &stale).await.unwrap());
+    }
+
+    /// Likewise when the event's capture is switched off: nothing will reopen it.
+    #[sqlx::test]
+    async fn an_open_event_capture_with_capturing_disabled_is_not_live(pool: PgPool) {
+        sqlx::query(
+            "insert into events.event (id, title, start_time, end_time) \
+             values (503, 'E', now() - interval '10 minutes', now() + interval '1 hour')",
+        )
+        .execute(&pool)
+        .await
+        .unwrap();
+        sqlx::query("insert into stats.event_capture (event_id, enabled) values (503, false)")
+            .execute(&pool)
+            .await
+            .unwrap();
+        let id = sqlx::query_scalar::<_, String>(
+            "insert into stats.capture (event_id, label, start_time, status) \
+             values (503, 'E', now() - interval '40 minutes', 'open') returning id",
+        )
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+
+        assert!(!event_capture_is_live(&pool, &id).await.unwrap());
+    }
+
+    /// An ad-hoc open capture has no scheduler behind it, so it stays discardable.
+    #[sqlx::test]
+    async fn an_ad_hoc_open_capture_is_not_live(pool: PgPool) {
+        let id = sqlx::query_scalar::<_, String>(
+            "insert into stats.capture (label, start_time, status) \
+             values ('adhoc', now(), 'open') returning id",
+        )
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+
+        assert!(!event_capture_is_live(&pool, &id).await.unwrap());
+        assert!(discard_capture(&pool, &id).await.unwrap());
     }
 }

@@ -169,6 +169,7 @@ pub fn build_router(state: AppState) -> Router {
         // Events (VATUSA cache — anchors per-event planning)
         .route("/api/v1/events", get(events::list_events))
         .route("/api/v1/events/{id}", get(events::get_event))
+        .route("/api/v1/events/{id}/banner", get(events::get_event_banner))
         .route(
             "/api/v1/events/{id}/dcc",
             get(events::get_event_dcc).put(events::update_event_dcc),
@@ -363,6 +364,7 @@ pub fn build_router(state: AppState) -> Router {
             "/api/v1/stats/captures",
             get(stats::list_captures).post(stats::save_capture),
         )
+        .route("/api/v1/stats/captures/{id}", delete(stats::delete_capture))
         .route(
             "/api/v1/stats/captures/{id}/replay",
             get(stats::capture_replay),

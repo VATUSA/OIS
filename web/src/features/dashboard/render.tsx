@@ -75,7 +75,7 @@ export function widgetTitle(widget: Widget): string {
       return widget.params?.icao ? `${widget.params.icao} · ${label}` : label;
     }
     case "atc":
-      return `${widget.facility.id} · ATC`;
+      return widget.facility.kind === "national" ? "NAS · ATC" : `${widget.facility.id} · ATC`;
     case "aadc":
       return `${widget.icao} · AADC`;
     case "text":
