@@ -79,6 +79,14 @@ export function buildAtcLayers(
   const layers: Layer[] = [];
 
   // Center (ARTCC) areas — filter the bundled boundaries to the online centers.
+  //
+  // `stroked` below is load-bearing, not decoration: this is the only outline a shaded centre gets
+  // when it is not the selected facility, and #482 was filed partly on the belief that such a centre
+  // rendered with no border at all. Filling without stroking here would make that true.
+  //
+  // The ids are trusted: the API only emits a centre it holds a polygon for (`handlers::atc`,
+  // VATUSA/OIS#482), so an unknown id never reaches this filter rather than being silently dropped
+  // by it.
   const online = new Set(atc.centers.map((c) => c.id.toUpperCase()));
   // The one path that had no geometry validation whatever — bundled GeoJSON went straight into a
   // filled layer, which is how the ZNY bowtie reached earcut and wedged across the map (#481).
