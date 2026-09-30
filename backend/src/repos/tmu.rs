@@ -719,21 +719,23 @@ async fn allocate_advisory_number(
 ///
 /// An unknown `kind` also passes the body through untouched, which is how `kind` stays open for
 /// #461's types without this becoming a dispatch table that must be edited in lockstep.
+/// `None` means "nothing to derive" — the caller keeps whatever body it already had in hand. That is
+/// deliberately distinct from `Some(String::new())`: on an edit the body is written through
+/// `coalesce`, so a derived empty string would blank the stored document, while `None` leaves it be.
 fn advisory_body(
     kind: &str,
     structured: Option<&serde_json::Value>,
-    raw: &str,
     ident: &crate::advisory::AdvisoryIdent,
-) -> Result<String, ApiError> {
+) -> Result<Option<String>, ApiError> {
     if kind != crate::models::ADVISORY_KIND_REROUTE {
-        return Ok(raw.trim().to_string());
+        return Ok(None);
     }
     let Some(value) = structured else {
-        return Ok(raw.trim().to_string());
+        return Ok(None);
     };
     let parsed: crate::models::RerouteAdvisory =
         serde_json::from_value(value.clone()).map_err(|_| ApiError::BadRequest)?;
-    Ok(crate::advisory::render_reroute(&parsed, ident))
+    Ok(Some(crate::advisory::render_reroute(&parsed, ident)))
 }
 
 /// Creates a draft advisory, allocating its number (#457).
@@ -763,14 +765,14 @@ pub async fn create_advisory(
     let body = advisory_body(
         req.kind.trim(),
         req.structured.as_ref(),
-        &req.body,
         &crate::advisory::AdvisoryIdent {
             facility: facility.clone(),
             number,
             issued_day: day,
             signed_at: Utc::now(),
         },
-    )?;
+    )?
+    .unwrap_or_else(|| req.body.trim().to_string());
     let id = sqlx::query_scalar::<_, String>(
         "insert into tmu.advisories \
          (facility, issued_day, number, kind, body, structured, decoded, created_by) \
@@ -839,17 +841,19 @@ pub async fn update_advisory(
                 return Ok(false);
             };
             let kind = req.kind.as_deref().unwrap_or(&current_kind);
-            Some(advisory_body(
+            advisory_body(
                 kind.trim(),
                 Some(structured),
-                req.body.as_deref().unwrap_or_default(),
                 &crate::advisory::AdvisoryIdent {
                     facility,
                     number,
                     issued_day,
                     signed_at: Utc::now(),
                 },
-            )?)
+            )?
+            // Nothing rendered for this kind, so the edit's own body stands — importantly `None`
+            // when it supplied none, which leaves the stored document untouched.
+            .or_else(|| req.body.clone())
         }
     };
 
@@ -1177,6 +1181,45 @@ mod tests {
         assert!(
             after.body.contains("TMI ID: RRDCC001"),
             "the number is unchanged by an edit"
+        );
+    }
+
+    /// A structured edit on a kind this renderer knows nothing about must leave the stored document
+    /// alone. The body is written through `coalesce`, so "derived nothing" and "derived an empty
+    /// string" are very different answers — the second blanks the document.
+    #[sqlx::test]
+    async fn a_structured_edit_on_an_unknown_kind_leaves_the_body_alone(pool: PgPool) {
+        let adv = create(
+            &pool,
+            CreateAdvisoryRequest {
+                facility: "DCC".into(),
+                kind: "ground_stop".into(),
+                body: "SOME OTHER DOCUMENT".into(),
+                structured: None,
+                decoded: None,
+            },
+        )
+        .await;
+
+        assert!(
+            update_advisory(
+                &pool,
+                &adv.id,
+                &UpdateAdvisoryRequest {
+                    kind: None,
+                    body: None,
+                    structured: Some(serde_json::json!({"anything": 1})),
+                    decoded: None,
+                },
+            )
+            .await
+            .unwrap()
+        );
+
+        let after = get_advisory(&pool, &adv.id).await.unwrap().unwrap();
+        assert_eq!(
+            after.body, "SOME OTHER DOCUMENT",
+            "a structured edit blanked a document it could not render"
         );
     }
 
