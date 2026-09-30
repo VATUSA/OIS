@@ -364,6 +364,7 @@ pub fn build_router(state: AppState) -> Router {
             "/api/v1/stats/captures",
             get(stats::list_captures).post(stats::save_capture),
         )
+        .route("/api/v1/stats/captures/{id}", delete(stats::delete_capture))
         .route(
             "/api/v1/stats/captures/{id}/replay",
             get(stats::capture_replay),

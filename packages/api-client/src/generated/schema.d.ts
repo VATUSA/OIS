@@ -2203,6 +2203,39 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/v1/stats/captures/{id}": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        post?: never;
+        /**
+         * Deletes a saved capture, releasing the position data it was pinning (#432).
+         * @description A saved capture is not just a metadata row: `CAPTURE_GUARD` keeps every position inside its window
+         *     out of compaction forever, so until now a mis-scoped capture was storage nobody could reclaim.
+         *
+         *     Gated on `stats.capture.delete` rather than `stats.capture.update`: saving a window and destroying
+         *     one somebody else saved are different levels of trust.
+         *
+         *     An event-tied capture is deletable — blocking it would leave the worst case, a wrongly-scoped
+         *     event capture, with no remedy at all. The consequence is made explicit where the person can act on
+         *     it, in the replay page's confirmation, rather than by refusing here.
+         *
+         *     The one exception is an event capture that is still *open* and still inside the window the
+         *     scheduler watches: discarding it makes the event look uncaptured, so the next scheduler pass opens
+         *     a replacement and the positions stay pinned. Answering 409 is honest about that; the capture is
+         *     saved when its window ends and can be deleted then (#432 review).
+         */
+        delete: operations["delete_capture"];
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/v1/stats/captures/{id}/replay": {
         parameters: {
             query?: never;
@@ -11925,6 +11958,51 @@ export interface operations {
                 content?: never;
             };
             404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+        };
+    };
+    delete_capture: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /** @description Capture id */
+                id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            204: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description The event's capture is still recording; it can be deleted once its window ends */
+            409: {
                 headers: {
                     [name: string]: unknown;
                 };
