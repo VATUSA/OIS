@@ -113,6 +113,13 @@ permission!(
 );
 
 // stats — persistent network statistics + saved capture windows
+// tmu advisories (ADVZY documents) — the catalog strings and migration rows have existed since
+// 0008_tmu.sql; these are the markers that finally let a handler gate on them (#457).
+permission!(TmuAdvRead, ["tmu", "adv"], Read);
+permission!(TmuAdvCreate, ["tmu", "adv"], Create);
+permission!(TmuAdvUpdate, ["tmu", "adv"], Update);
+permission!(TmuAdvPublish, ["tmu", "adv"], Publish);
+
 permission!(StatsRead, ["stats", "data"], Read);
 permission!(StatsCaptureUpdate, ["stats", "capture"], Update);
 

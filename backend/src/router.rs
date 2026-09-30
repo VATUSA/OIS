@@ -129,6 +129,26 @@ pub fn build_router(state: AppState) -> Router {
         )
         .route("/api/v1/tmu/tmis/{id}/publish", post(tmu::publish_tmi))
         .route("/api/v1/tmu/tmis/{id}/cancel", post(tmu::cancel_tmi))
+        // Advisories — ADVZY documents (#457). Distinct from the pilot-facing `/advisories` board
+        // and from NTML; see docs/features/tmu-ntml-adv-tmi.md for which is which (#456).
+        .route(
+            "/api/v1/tmu/advisories",
+            get(tmu::list_advisories).post(tmu::create_advisory),
+        )
+        .route(
+            "/api/v1/tmu/advisories/{id}",
+            get(tmu::get_advisory)
+                .patch(tmu::update_advisory)
+                .delete(tmu::delete_advisory),
+        )
+        .route(
+            "/api/v1/tmu/advisories/{id}/publish",
+            post(tmu::publish_advisory),
+        )
+        .route(
+            "/api/v1/tmu/advisories/{id}/cancel",
+            post(tmu::cancel_advisory),
+        )
         // TMU — ground stops
         .route(
             "/api/v1/tmu/ground-stops",

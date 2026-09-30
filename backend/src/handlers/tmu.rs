@@ -12,17 +12,19 @@ use crate::{
     auth::{
         context::CurrentUser,
         permissions::{
-            TmuGroundStopCreate, TmuGroundStopDelete, TmuGroundStopPublish, TmuGroundStopRead,
-            TmuProgramDelete, TmuProgramRead, TmuProgramUpdate, TmuTmiCreate, TmuTmiDelete,
-            TmuTmiPublish, TmuTmiRead, TmuTmiUpdate,
+            TmuAdvCreate, TmuAdvPublish, TmuAdvRead, TmuAdvUpdate, TmuGroundStopCreate,
+            TmuGroundStopDelete, TmuGroundStopPublish, TmuGroundStopRead, TmuProgramDelete,
+            TmuProgramRead, TmuProgramUpdate, TmuTmiCreate, TmuTmiDelete, TmuTmiPublish,
+            TmuTmiRead, TmuTmiUpdate,
         },
         require_permission::RequirePermission,
     },
     errors::ApiError,
     handlers::restriction_artcc,
     models::{
-        CreateGroundStopRequest, CreateTmiRequest, GateRule, GroundStopBody, ProgramBody, TmiBody,
-        UpdateTmiRequest, UpsertProgramRequest,
+        AdvisoryBody, CreateAdvisoryRequest, CreateGroundStopRequest, CreateTmiRequest, GateRule,
+        GroundStopBody, ProgramBody, TmiBody, UpdateAdvisoryRequest, UpdateTmiRequest,
+        UpsertProgramRequest,
     },
     repos::{integration as integration_repo, tmu as tmu_repo},
     state::AppState,
@@ -533,6 +535,150 @@ pub async fn delete_ground_stop(
 mod tests {
     use super::*;
 
+    use std::collections::HashMap;
+
+    use sqlx::PgPool;
+
+    use crate::scope_test_support::{grant, seed_user, send, session_cookie, test_state};
+
+    fn new_advisory() -> serde_json::Value {
+        serde_json::json!({"facility": "DCC", "kind": "reroute", "body": "vATCSCC ADVZY"})
+    }
+
+    async fn seed_draft(pool: &PgPool) -> String {
+        let author = seed_user(pool).await;
+        crate::repos::tmu::create_advisory(
+            pool,
+            &CreateAdvisoryRequest {
+                facility: "DCC".into(),
+                kind: "reroute".into(),
+                body: "vATCSCC ADVZY".into(),
+                structured: None,
+                decoded: None,
+            },
+            &author,
+        )
+        .await
+        .unwrap()
+    }
+
+    /// #457 AC1. `tmu.adv.*` were seeded in 0008_tmu.sql and dead ever since, because nothing could
+    /// gate on them. These go through the real router so `RequirePermission` is on the tested path —
+    /// it holds a private field, so a handler cannot be called directly to check its gate.
+    ///
+    /// A missing permission is **401** here, not 403: `ensure_permission` answers `Unauthorized` for
+    /// every absent permission, and 403 is reserved for a wrong facility scope.
+    #[sqlx::test]
+    async fn creating_an_advisory_requires_the_create_permission(pool: PgPool) {
+        let state = test_state(pool.clone(), HashMap::new());
+        let user = seed_user(&pool).await;
+        let cookie = session_cookie(&pool, &user).await;
+
+        let refused = send(
+            &state,
+            http::Method::POST,
+            "/api/v1/tmu/advisories",
+            &cookie,
+            Some(new_advisory()),
+        )
+        .await;
+        assert_eq!(refused, http::StatusCode::UNAUTHORIZED);
+        assert!(
+            crate::repos::tmu::list_advisories(&pool)
+                .await
+                .unwrap()
+                .is_empty(),
+            "a refused create must not have written anything"
+        );
+
+        grant(&pool, &user, "tmu.adv.create", None).await;
+        let allowed = send(
+            &state,
+            http::Method::POST,
+            "/api/v1/tmu/advisories",
+            &cookie,
+            Some(new_advisory()),
+        )
+        .await;
+        assert_eq!(allowed, http::StatusCode::OK);
+        assert_eq!(
+            crate::repos::tmu::list_advisories(&pool)
+                .await
+                .unwrap()
+                .len(),
+            1
+        );
+    }
+
+    /// Publishing is a separate permission from creating: drafting a document and issuing it are
+    /// different levels of trust, which is why 0008_tmu.sql seeded them separately.
+    #[sqlx::test]
+    async fn publishing_an_advisory_requires_the_publish_permission(pool: PgPool) {
+        let state = test_state(pool.clone(), HashMap::new());
+        let id = seed_draft(&pool).await;
+
+        let user = seed_user(&pool).await;
+        let cookie = session_cookie(&pool, &user).await;
+        let uri = format!("/api/v1/tmu/advisories/{id}/publish");
+
+        // Holding create is not holding publish.
+        grant(&pool, &user, "tmu.adv.create", None).await;
+        assert_eq!(
+            send(&state, http::Method::POST, &uri, &cookie, None).await,
+            http::StatusCode::UNAUTHORIZED
+        );
+        let still_draft = crate::repos::tmu::get_advisory(&pool, &id)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(still_draft.status, "draft");
+
+        grant(&pool, &user, "tmu.adv.publish", None).await;
+        assert_eq!(
+            send(&state, http::Method::POST, &uri, &cookie, None).await,
+            http::StatusCode::OK
+        );
+        let published = crate::repos::tmu::get_advisory(&pool, &id)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(published.status, "published");
+        assert!(published.published_at.is_some());
+    }
+
+    /// Reading is gated too — advisories are not public until #459 posts them.
+    #[sqlx::test]
+    async fn listing_advisories_requires_the_read_permission(pool: PgPool) {
+        let state = test_state(pool.clone(), HashMap::new());
+        let user = seed_user(&pool).await;
+        let cookie = session_cookie(&pool, &user).await;
+
+        assert_eq!(
+            send(
+                &state,
+                http::Method::GET,
+                "/api/v1/tmu/advisories",
+                &cookie,
+                None
+            )
+            .await,
+            http::StatusCode::UNAUTHORIZED
+        );
+
+        grant(&pool, &user, "tmu.adv.read", None).await;
+        assert_eq!(
+            send(
+                &state,
+                http::Method::GET,
+                "/api/v1/tmu/advisories",
+                &cookie,
+                None
+            )
+            .await,
+            http::StatusCode::OK
+        );
+    }
+
     #[test]
     fn icao_normalization() {
         assert_eq!(normalize_icao("kjfk").as_deref(), Some("KJFK"));
@@ -597,5 +743,147 @@ mod tests {
         assert!(normalize_until(Some("9999")).is_err()); // hour 99
         assert!(normalize_until(Some("2460")).is_err()); // hour 24
         assert!(normalize_until(Some("1275")).is_err()); // minute 75
+    }
+}
+
+// --- advisories (ADVZY documents, #457) ---
+
+#[utoipa::path(
+    get, path = "/api/v1/tmu/advisories", tag = "tmu",
+    responses((status = 200, body = Vec<AdvisoryBody>), (status = 401))
+)]
+pub async fn list_advisories(
+    State(state): State<AppState>,
+    _permission: RequirePermission<TmuAdvRead>,
+) -> Result<Json<Vec<AdvisoryBody>>, ApiError> {
+    let pool = state.db.as_ref().ok_or(ApiError::ServiceUnavailable)?;
+    Ok(Json(tmu_repo::list_advisories(pool).await?))
+}
+
+#[utoipa::path(
+    get, path = "/api/v1/tmu/advisories/{id}", tag = "tmu",
+    params(("id" = String, Path)),
+    responses((status = 200, body = AdvisoryBody), (status = 401), (status = 404))
+)]
+pub async fn get_advisory(
+    State(state): State<AppState>,
+    _permission: RequirePermission<TmuAdvRead>,
+    Path(id): Path<String>,
+) -> Result<Json<AdvisoryBody>, ApiError> {
+    let pool = state.db.as_ref().ok_or(ApiError::ServiceUnavailable)?;
+    tmu_repo::get_advisory(pool, &id)
+        .await?
+        .map(Json)
+        .ok_or(ApiError::NotFound)
+}
+
+/// Creates a draft, allocating its advisory number immediately so the author can see what they will
+/// issue under (#457).
+#[utoipa::path(
+    post, path = "/api/v1/tmu/advisories", tag = "tmu",
+    request_body = CreateAdvisoryRequest,
+    responses((status = 200, body = AdvisoryBody), (status = 400), (status = 401))
+)]
+pub async fn create_advisory(
+    State(state): State<AppState>,
+    _permission: RequirePermission<TmuAdvCreate>,
+    Extension(current_user): Extension<Option<CurrentUser>>,
+    Json(payload): Json<CreateAdvisoryRequest>,
+) -> Result<Json<AdvisoryBody>, ApiError> {
+    let user = current_user.as_ref().ok_or(ApiError::Unauthorized)?;
+    let pool = state.db.as_ref().ok_or(ApiError::ServiceUnavailable)?;
+    if payload.facility.trim().is_empty()
+        || payload.kind.trim().is_empty()
+        || payload.body.trim().is_empty()
+    {
+        return Err(ApiError::BadRequest);
+    }
+    let id = tmu_repo::create_advisory(pool, &payload, &user.id).await?;
+    tmu_repo::get_advisory(pool, &id)
+        .await?
+        .map(Json)
+        .ok_or(ApiError::Internal)
+}
+
+#[utoipa::path(
+    patch, path = "/api/v1/tmu/advisories/{id}", tag = "tmu",
+    params(("id" = String, Path)), request_body = UpdateAdvisoryRequest,
+    responses((status = 200, body = AdvisoryBody), (status = 401), (status = 404))
+)]
+pub async fn update_advisory(
+    State(state): State<AppState>,
+    _permission: RequirePermission<TmuAdvUpdate>,
+    Path(id): Path<String>,
+    Json(payload): Json<UpdateAdvisoryRequest>,
+) -> Result<Json<AdvisoryBody>, ApiError> {
+    let pool = state.db.as_ref().ok_or(ApiError::ServiceUnavailable)?;
+    if !tmu_repo::update_advisory(pool, &id, &payload).await? {
+        return Err(ApiError::NotFound);
+    }
+    tmu_repo::get_advisory(pool, &id)
+        .await?
+        .map(Json)
+        .ok_or(ApiError::NotFound)
+}
+
+#[utoipa::path(
+    post, path = "/api/v1/tmu/advisories/{id}/publish", tag = "tmu",
+    params(("id" = String, Path)),
+    responses((status = 200, body = AdvisoryBody), (status = 401), (status = 409))
+)]
+pub async fn publish_advisory(
+    State(state): State<AppState>,
+    _permission: RequirePermission<TmuAdvPublish>,
+    Extension(current_user): Extension<Option<CurrentUser>>,
+    Path(id): Path<String>,
+) -> Result<Json<AdvisoryBody>, ApiError> {
+    let user = current_user.as_ref().ok_or(ApiError::Unauthorized)?;
+    let pool = state.db.as_ref().ok_or(ApiError::ServiceUnavailable)?;
+    if !tmu_repo::publish_advisory(pool, &id, &user.id).await? {
+        return Err(ApiError::Conflict);
+    }
+    tmu_repo::get_advisory(pool, &id)
+        .await?
+        .map(Json)
+        .ok_or(ApiError::NotFound)
+}
+
+#[utoipa::path(
+    post, path = "/api/v1/tmu/advisories/{id}/cancel", tag = "tmu",
+    params(("id" = String, Path)),
+    responses((status = 200, body = AdvisoryBody), (status = 401), (status = 409))
+)]
+pub async fn cancel_advisory(
+    State(state): State<AppState>,
+    _permission: RequirePermission<TmuAdvPublish>,
+    Path(id): Path<String>,
+) -> Result<Json<AdvisoryBody>, ApiError> {
+    let pool = state.db.as_ref().ok_or(ApiError::ServiceUnavailable)?;
+    if !tmu_repo::cancel_advisory(pool, &id).await? {
+        return Err(ApiError::Conflict);
+    }
+    tmu_repo::get_advisory(pool, &id)
+        .await?
+        .map(Json)
+        .ok_or(ApiError::NotFound)
+}
+
+/// Abandons a draft. `409` when it cannot be deleted — a published or cancelled advisory, or a draft
+/// whose number is no longer the top of its sequence (see `repos::tmu::delete_advisory`).
+#[utoipa::path(
+    delete, path = "/api/v1/tmu/advisories/{id}", tag = "tmu",
+    params(("id" = String, Path)),
+    responses((status = 204), (status = 401), (status = 409))
+)]
+pub async fn delete_advisory(
+    State(state): State<AppState>,
+    _permission: RequirePermission<TmuAdvUpdate>,
+    Path(id): Path<String>,
+) -> Result<StatusCode, ApiError> {
+    let pool = state.db.as_ref().ok_or(ApiError::ServiceUnavailable)?;
+    if tmu_repo::delete_advisory(pool, &id).await? {
+        Ok(StatusCode::NO_CONTENT)
+    } else {
+        Err(ApiError::Conflict)
     }
 }

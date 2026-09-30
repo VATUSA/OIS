@@ -2527,6 +2527,78 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/v1/tmu/advisories": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get: operations["list_advisories"];
+        put?: never;
+        /**
+         * Creates a draft, allocating its advisory number immediately so the author can see what they will
+         *     issue under (#457).
+         */
+        post: operations["create_advisory"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/tmu/advisories/{id}": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get: operations["get_advisory"];
+        put?: never;
+        post?: never;
+        /**
+         * Abandons a draft. `409` when it cannot be deleted — a published or cancelled advisory, or a draft
+         *     whose number is no longer the top of its sequence (see `repos::tmu::delete_advisory`).
+         */
+        delete: operations["delete_advisory"];
+        options?: never;
+        head?: never;
+        patch: operations["update_advisory"];
+        trace?: never;
+    };
+    "/api/v1/tmu/advisories/{id}/cancel": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        post: operations["cancel_advisory"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/tmu/advisories/{id}/publish": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        post: operations["publish_advisory"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/v1/tmu/cfr": {
         parameters: {
             query?: never;
@@ -3093,6 +3165,28 @@ export interface components {
             roles: string[];
         };
         /**
+         * @description One advisory. `number` is its identity within `facility` on `issued_day` — see
+         *     `repos::tmu::allocate_advisory_number` for what that sequence promises.
+         */
+        AdvisoryBody: {
+            body: string;
+            /** Format: date-time */
+            created_at: string;
+            decoded?: string | null;
+            facility: string;
+            id: string;
+            /** Format: date */
+            issued_day: string;
+            kind: string;
+            /** Format: int32 */
+            number: number;
+            /** Format: date-time */
+            published_at?: string | null;
+            status: string;
+            /** @description The fields a form-built advisory came from; null when it was typed as raw text. */
+            structured?: unknown;
+        };
+        /**
          * @description A configurable aircraft performance profile (climb / cruise / descent schedules) used by the
          *     trajectory / ETA model. Keyed by `kind` (`type` / `wake` / `default`) + `key` (ICAO type, wake
          *     token, or empty). See migration 0059 and `feed::trajectory`.
@@ -3534,6 +3628,14 @@ export interface components {
             position?: string | null;
             /** Format: int32 */
             slots?: number;
+        };
+        CreateAdvisoryRequest: {
+            body: string;
+            decoded?: string | null;
+            /** @description The issuing facility. The advisory's number is a sequence within this. */
+            facility: string;
+            kind: string;
+            structured?: unknown;
         };
         CreateApiKeyRequest: {
             description?: string | null;
@@ -5703,6 +5805,12 @@ export interface components {
         UnresolvedToken: {
             count: number;
             token: string;
+        };
+        UpdateAdvisoryRequest: {
+            body?: string | null;
+            decoded?: string | null;
+            kind?: string | null;
+            structured?: unknown;
         };
         UpdateDashboardRequest: {
             collection_id?: string | null;
@@ -12687,6 +12795,233 @@ export interface operations {
                 };
             };
             401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+        };
+    };
+    list_advisories: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["AdvisoryBody"][];
+                };
+            };
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+        };
+    };
+    create_advisory: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["CreateAdvisoryRequest"];
+            };
+        };
+        responses: {
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["AdvisoryBody"];
+                };
+            };
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+        };
+    };
+    get_advisory: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["AdvisoryBody"];
+                };
+            };
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+        };
+    };
+    delete_advisory: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            204: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            409: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+        };
+    };
+    update_advisory: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                id: string;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["UpdateAdvisoryRequest"];
+            };
+        };
+        responses: {
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["AdvisoryBody"];
+                };
+            };
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+        };
+    };
+    cancel_advisory: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["AdvisoryBody"];
+                };
+            };
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            409: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+        };
+    };
+    publish_advisory: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["AdvisoryBody"];
+                };
+            };
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            409: {
                 headers: {
                     [name: string]: unknown;
                 };
