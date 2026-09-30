@@ -7,6 +7,33 @@
 //! whole row into the line the NTML channel actually carries, so exactly one place knows the full
 //! shape (#436). Before it existed the bot improvised a bold `**N90 → ZNY**` header and the log time
 //! and valid window were simply absent.
+//!
+//! # The codec is deliberately one-way
+//!
+//! There is no `parse`/`from_raw`, so a raw-typed TMI keeps `structured` null and anything wanting
+//! fields gets nothing rather than a guess. That is a decision, not an omission, and the reason is
+//! in the grammar below: two positions emit bare, unprefixed words.
+//!
+//! - A `qualifier` (`NO STACKS`) and a `condition` carrying no detail (`VOLUME`) are both
+//!   written as plain uppercase text, in that order. Given `20MIT NO STACKS VOLUME`, nothing in
+//!   the line says whether the qualifier is `NO STACKS` and the condition `VOLUME`, or whether
+//!   the qualifier is the whole `NO STACKS VOLUME`. Only a closed vocabulary of conditions could
+//!   split it, and the vocabulary is open — controllers name the cause of the day.
+//! - `TXT` writes its free text verbatim into the slot a kind keyword occupies, so `PHL STOP NOW`
+//!   is either `kind: STOP` qualified `NOW`, or `kind: TXT` with the text `STOP NOW`.
+//!
+//! Round-tripping the *line* does not rule either out, which is the trap worth naming: a parser
+//! that folded a detail-less `VOLUME` into `qualifier` would satisfy `encode(parse(line)) == line`
+//! while putting the value in the wrong field. Anything built here has to round-trip the *struct* —
+//! `parse(encode(r)) == r` over the reference examples in `tests` — and refuse a line it cannot
+//! place rather than filling fields on a best guess.
+//!
+//! Raw entry exists precisely because the grammar cannot express everything a controller needs to
+//! say. Inferring a breakdown for text chosen to escape the grammar is how a confidently wrong
+//! breakdown ships, which is worse than admitting there isn't one. If a parser does become worth
+//! building, the prefixed half of the grammar (`nMIT`/`nMINIT`, `via`, `TYPE:`, `SPD:`, `ALT:`,
+//! `EXCL:`, and `CONDITION:DETAIL`) is unambiguous on its own; the two bare positions above are
+//! what needs settling first.
 
 use chrono::{DateTime, Utc};
 
@@ -256,6 +283,30 @@ mod tests {
 
     fn at(day: u32, hh: u32, mm: u32) -> DateTime<Utc> {
         Utc.with_ymd_and_hms(2026, 6, day, hh, mm, 0).unwrap()
+    }
+
+    /// Base restriction with everything empty/none, for tests to tweak.
+    ///
+    /// Restored here: #436 added it for the raw-vs-structured test below, and #455's fixture-driven
+    /// rewrite of this module removed it. Neither change conflicted textually, so the merge kept the
+    /// caller and dropped the helper — `cargo clippy --all-targets` then fails with E0425 while
+    /// `cargo build` stays green, because nothing outside the test build references it.
+    fn base(element: &str, direction: &str, kind: &str) -> NtmlRestriction {
+        NtmlRestriction {
+            element: element.into(),
+            direction: direction.into(),
+            via: None,
+            kind: kind.into(),
+            value: None,
+            text: None,
+            qualifier: None,
+            aircraft: None,
+            speed: None,
+            altitude: None,
+            condition: None,
+            condition_detail: None,
+            exclude: Vec::new(),
+        }
     }
 
     /// The reference row from the vATCSCC TMI material, assembled end to end (#436). Every section
