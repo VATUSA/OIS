@@ -22,7 +22,8 @@ import {Clock, ChevronDown, Folder, FolderPlus, LayoutDashboard, Plus, Share2, T
 
 import {FacilityCombobox, type FacilityPick} from "@/components/facility-combobox";
 import {usePageHeader, useView} from "@/components/shell/page-meta";
-import {type Template, TEMPLATES} from "@/features/dashboard/templates";
+import {type Template, templatesFor} from "@/features/dashboard/templates";
+import {useMe} from "@/lib/auth";
 import {
   type DashboardCollection,
   type DashboardSummary,
@@ -138,6 +139,13 @@ function BoardCard({
 
 const GRID = "grid gap-3 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4 2xl:grid-cols-5";
 
+/**
+ * Whether a template asks the user for airports before it can build. Named rather than written as
+ * `!== "none"` at each site, because a mode that needs no input is not automatically `"none"` —
+ * `"national"` needs none either, and the inequality silently prompted it for an ICAO.
+ */
+const needsAirports = (t: Template) => t.airports === "one" || t.airports === "many";
+
 export function BoardLibraryPage() {
   const { data, isLoading, isError, refetch } = useDashboards();
   const navigate = useNavigate();
@@ -152,6 +160,11 @@ export function BoardLibraryPage() {
 
   const boards = data?.dashboards ?? [];
   const collections = data?.collections ?? [];
+  // A national board is only useful to someone who works the NAS, so it is offered only to them —
+  // the same `tmu_national` test the national widgets use (VATUSA/OIS#474, #475, #476). Curation,
+  // not a boundary: every widget on that board can be added by hand regardless.
+  const me = useMe();
+  const templates = useMemo(() => templatesFor(me.data?.tmu_national), [me.data?.tmu_national]);
   // A facility-scoped template waiting for the user to pick its facility.
   const [facTemplate, setFacTemplate] = useState<Template | null>(null);
 
@@ -175,7 +188,7 @@ export function BoardLibraryPage() {
       return;
     }
     let icaos: string[] = [];
-    if (t.airports !== "none") {
+    if (needsAirports(t)) {
       const raw = await prompt({
         title: t.name,
         label: t.airports === "many" ? "Airports (comma-separated)" : "Airport (ICAO)",
@@ -186,7 +199,7 @@ export function BoardLibraryPage() {
       icaos = cleanIcaos(raw, t.airports === "one");
       if (icaos.length === 0) return;
     }
-    const name = t.airports === "none" ? t.name : `${icaos.join("/")} · ${t.name}`;
+    const name = needsAirports(t) ? `${icaos.join("/")} · ${t.name}` : t.name;
     const b = await create.mutateAsync({ name, data: t.build({ icaos }) });
     navigate({ to: "/ops/my/$boardId", params: { boardId: b.id } });
   }
@@ -223,7 +236,10 @@ export function BoardLibraryPage() {
     if (name && name !== c.name) renameCollection.mutate({ id: c.id, name });
   }
 
-  // The header actions are memoized once; they call the latest handlers through a ref.
+  // The header actions memo re-runs only when the template list changes; the callbacks it wires up
+  // go through a ref so they stay current without rebuilding the JSX. `templates` cannot go through
+  // that ref: `.map` runs *inside* this memo, so a ref would pin the list to its first-render value,
+  // before `useMe` has resolved and while the national template is still filtered out.
   const handlers = useRef({ createBlank, createFromTemplate, newCollection });
   handlers.current = { createBlank, createFromTemplate, newCollection };
   const actions = useMemo(
@@ -248,7 +264,7 @@ export function BoardLibraryPage() {
             </DropdownMenuItem>
             <DropdownMenuSeparator />
             <DropdownMenuLabel>From a template</DropdownMenuLabel>
-            {TEMPLATES.map((t) => (
+            {templates.map((t) => (
               <DropdownMenuItem
                 key={t.id}
                 className="flex-col items-start gap-0.5"
@@ -262,7 +278,7 @@ export function BoardLibraryPage() {
         </DropdownMenu>
       </div>
     ),
-    [],
+    [templates],
   );
   usePageHeader({ subtitle: "Your saved boards.", count: data ? boards.length : null, actions });
 
