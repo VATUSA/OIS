@@ -66,7 +66,18 @@ jobs:
       - run: pnpm typecheck
       - run: pnpm test
       # Dependabot vulnerability alerts aren't enabled on this repo yet, so this is the active
-      # JS-side advisory gate (see #89) rather than a passive GitHub setting. Advisories ignored
+      # JS-side advisory gate (see #89) rather than a passive GitHub setting.
+      #
+      # Advisories fixed by forcing a version are `pnpm.overrides` in root package.json. JSON takes no
+      # comments and pnpm rejects a "//" key as a selector, so the reasons live here:
+      #   * `minimatch@5>brace-expansion: ^2.1.6` — GHSA-qhr7-859c-m2p7 / GHSA-6j4f-fj2g-mc7p, DoS by
+      #     stack exhaustion. Patched is >=2.1.6, *not* 2.1.5: the first advisory still lists 2.1.5 as
+      #     vulnerable. Scoped to minimatch@5 because that is the only copy ever flagged
+      #     (openapi-typescript > @redocly/openapi-core > minimatch@5.1.9); minimatch@3 declares
+      #     ^1.1.7 and minimatch@10 declares ^5.0.8, neither is affected, and an unscoped override
+      #     bumped one a major and downgraded the other three (#449).
+      #
+      # Advisories ignored
       # pending real fixes are tracked in root package.json's `pnpm.auditConfig`, not here — pnpm
       # 9.12's documented `pnpm audit --ignore <GHSA>` flag errors ("Unknown option") despite its
       # own --help describing it, and a `pnpm-workspace.yaml`-level auditConfig is silently not

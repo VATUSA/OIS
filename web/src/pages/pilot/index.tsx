@@ -19,7 +19,7 @@ import {useTraffic} from "@/lib/fca";
 import {toneOf} from "@/lib/status";
 import {hhmmZulu} from "@/lib/time";
 import {
-  type FlightAdvisory,
+  type FlightImpact,
   type PublicRestriction,
   useMyFlight,
   usePublicBoard,
@@ -40,7 +40,7 @@ type Constraint = {
   delay: number | null;
 };
 
-function constraintsOf(f: FlightAdvisory): Constraint[] {
+function constraintsOf(f: FlightImpact): Constraint[] {
   const out: Constraint[] = [];
   if (f.gdp) {
     out.push({
@@ -170,7 +170,7 @@ const restrictionColumns: DataColumn<PublicRestriction>[] = [
   },
 ];
 
-function Result({ f }: { f: FlightAdvisory }) {
+function Result({ f }: { f: FlightImpact }) {
   if (!f.found) {
     return (
       <EmptyState icon={Plane} title={<span className="font-mono">{f.callsign}</span>}>

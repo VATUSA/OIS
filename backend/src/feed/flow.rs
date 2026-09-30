@@ -803,12 +803,17 @@ fn ground_estimate(
             (pred.route_nm, ft_min)
         }
         _ => {
-            let vp = trajectory::VerticalProfile::build(
-                0.0,
+            // `airborne = false`: a synthetic 300 nm climb from the surface, so the current
+            // altitude and observed groundspeed are inert here.
+            let vp = predict::profile_from_here(
+                false,
                 300.0,
-                super::airports::field_elevation_ft(airports, &fp.arrival),
+                0.0,
+                0.0,
                 cruise,
                 cruise_tas,
+                airports,
+                &fp.arrival,
                 profile,
                 None,
             );
@@ -1899,8 +1904,10 @@ mod tests {
 
     /// #335: `ground_estimate`'s synthetic fallback — taken when the departure airport is missing
     /// from the `AirportDb`, or the arrival coordinates are unknown — builds its own 300 nm profile
-    /// and passes the arrival field elevation in as an explicit argument. Neutering that argument
-    /// to `0.0` left the suite green.
+    /// down to the arrival field's elevation, and reading sea level instead left the suite green.
+    /// Since #411 the fallback no longer resolves the elevation itself, so the mutation this pin
+    /// catches is neutering `predict::profile_from_here`'s `field_elevation_ft(airports, arr_icao)`
+    /// lookup to `0.0`.
     #[test]
     fn the_synthetic_ground_estimate_descends_to_the_arrival_field() {
         let estimate = |elevation_ft: f64| {

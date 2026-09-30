@@ -6,7 +6,8 @@ import {Copy, LayoutDashboard, Loader2} from "lucide-react";
 import {usePageHeader} from "@/components/shell/page-meta";
 import {DashboardGrid} from "@/features/dashboard/DashboardGrid";
 import {type DashboardState, EMPTY_DASHBOARD} from "@/features/dashboard/types";
-import {login, useMe} from "@/lib/auth";
+import {useMe} from "@/lib/auth";
+import {SignInButton} from "@/components/sign-in-button";
 import {useCopyDashboard, useSharedDashboard} from "@/lib/dashboards";
 
 function coerce(raw: unknown): DashboardState {
@@ -72,7 +73,7 @@ export function SharedBoardPage() {
   if (meLoading) return <Centered loading>Loading…</Centered>;
   if (!me) {
     return (
-      <Centered action={<Button onClick={login}>Sign in with VATSIM</Button>}>
+      <Centered action={<SignInButton />}>
         Sign in to view this shared dashboard.
       </Centered>
     );

@@ -438,6 +438,51 @@ pub struct UpdateTmiRequest {
     pub stop_time: Option<DateTime<Utc>>,
 }
 
+// --- TMU advisories (ADVZY documents, #457) ---
+
+/// One advisory. `number` is its identity within `facility` on `issued_day` — see
+/// `repos::tmu::allocate_advisory_number` for what that sequence promises.
+#[derive(Debug, Serialize, ToSchema, sqlx::FromRow)]
+pub struct AdvisoryBody {
+    pub id: String,
+    pub facility: String,
+    pub issued_day: chrono::NaiveDate,
+    pub number: i32,
+    pub kind: String,
+    pub body: String,
+    /// The fields a form-built advisory came from; null when it was typed as raw text.
+    #[schema(value_type = Option<Value>)]
+    pub structured: Option<sqlx::types::Json<Value>>,
+    pub decoded: Option<String>,
+    pub status: String,
+    pub published_at: Option<DateTime<Utc>>,
+    pub created_at: DateTime<Utc>,
+}
+
+#[derive(Debug, Deserialize, ToSchema)]
+pub struct CreateAdvisoryRequest {
+    /// The issuing facility. The advisory's number is a sequence within this.
+    pub facility: String,
+    pub kind: String,
+    pub body: String,
+    #[serde(default)]
+    pub structured: Option<Value>,
+    #[serde(default)]
+    pub decoded: Option<String>,
+}
+
+#[derive(Debug, Deserialize, ToSchema)]
+pub struct UpdateAdvisoryRequest {
+    #[serde(default)]
+    pub kind: Option<String>,
+    #[serde(default)]
+    pub body: Option<String>,
+    #[serde(default)]
+    pub structured: Option<Value>,
+    #[serde(default)]
+    pub decoded: Option<String>,
+}
+
 // --- TMU CFR / departures ---
 
 /// A locked (issued) Call-For-Release wheels-up time.
@@ -2406,8 +2451,13 @@ pub struct FlightFcaCrossing {
 /// Everything currently affecting one flight (by callsign), for the public "my
 /// flight" lookup and the FCA-map search. `found` is false when the callsign
 /// isn't in the live feed.
+///
+/// Named `FlightImpact`, not `FlightAdvisory` (#456): it is a summary of which initiatives touch
+/// this flight and what they cost it, not an advisory document. "Advisory" already meant two other
+/// things here — the pilot-facing board at `/advisories`, and the authored vATCSCC ADVZY documents
+/// of #437 — and a third use of the word in the type system was the one with no claim to it.
 #[derive(Debug, Default, Serialize, ToSchema)]
-pub struct FlightAdvisory {
+pub struct FlightImpact {
     pub callsign: String,
     pub found: bool,
     pub dep: String,
