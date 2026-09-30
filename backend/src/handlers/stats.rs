@@ -345,12 +345,23 @@ pub async fn list_captures(
 /// An event-tied capture is deletable — blocking it would leave the worst case, a wrongly-scoped
 /// event capture, with no remedy at all. The consequence is made explicit where the person can act on
 /// it, in the replay page's confirmation, rather than by refusing here.
+///
+/// The one exception is an event capture that is still *open* and still inside the window the
+/// scheduler watches: discarding it makes the event look uncaptured, so the next scheduler pass opens
+/// a replacement and the positions stay pinned. Answering 409 is honest about that; the capture is
+/// saved when its window ends and can be deleted then (#432 review).
 #[utoipa::path(
     delete,
     path = "/api/v1/stats/captures/{id}",
     tag = "stats",
     params(("id" = String, Path, description = "Capture id")),
-    responses((status = 204), (status = 401), (status = 403), (status = 404))
+    responses(
+        (status = 204),
+        (status = 401),
+        (status = 403),
+        (status = 404),
+        (status = 409, description = "The event's capture is still recording; it can be deleted once its window ends")
+    )
 )]
 pub async fn delete_capture(
     State(state): State<AppState>,
@@ -358,6 +369,9 @@ pub async fn delete_capture(
     Path(id): Path<String>,
 ) -> Result<StatusCode, ApiError> {
     let pool = state.db.as_ref().ok_or(ApiError::ServiceUnavailable)?;
+    if stats_repo::event_capture_is_live(pool, &id).await? {
+        return Err(ApiError::Conflict);
+    }
     if stats_repo::discard_capture(pool, &id).await? {
         Ok(StatusCode::NO_CONTENT)
     } else {
@@ -971,6 +985,59 @@ mod tests {
             "discarded",
             "the capture drops out of CAPTURE_GUARD so compaction can reclaim its positions"
         );
+    }
+
+    /// #432 review: an event capture still recording answers 409 rather than a 204 the scheduler
+    /// would quietly undo — discarding it makes the event look uncaptured, so the next scheduler
+    /// pass opens a replacement and the positions stay pinned.
+    #[sqlx::test]
+    async fn an_event_capture_still_recording_cannot_be_deleted(pool: PgPool) {
+        let state = test_state(pool.clone(), HashMap::new());
+        sqlx::query(
+            "insert into events.event (id, title, start_time, end_time) \
+             values (501, 'E', now() - interval '10 minutes', now() + interval '1 hour')",
+        )
+        .execute(&pool)
+        .await
+        .unwrap();
+        sqlx::query("insert into stats.event_capture (event_id, enabled) values (501, true)")
+            .execute(&pool)
+            .await
+            .unwrap();
+        let id = sqlx::query_scalar::<_, String>(
+            "insert into stats.capture (event_id, label, start_time, status) \
+             values (501, 'E', now() - interval '40 minutes', 'open') returning id",
+        )
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+
+        let user = seed_user(&pool).await;
+        grant(&pool, &user, "stats.capture.delete", None).await;
+        let cookie = session_cookie(&pool, &user).await;
+        let uri = format!("/api/v1/stats/captures/{id}");
+
+        assert_eq!(
+            send(&state, http::Method::DELETE, &uri, &cookie, None).await,
+            http::StatusCode::CONFLICT
+        );
+        assert_eq!(
+            status_of(&pool, &id).await,
+            "open",
+            "refusing must leave the recording running, not half-discard it"
+        );
+
+        // Once its window has been closed and saved, the same call succeeds.
+        sqlx::query("update stats.capture set status = 'saved', end_time = now() where id = $1")
+            .bind(&id)
+            .execute(&pool)
+            .await
+            .unwrap();
+        assert_eq!(
+            send(&state, http::Method::DELETE, &uri, &cookie, None).await,
+            http::StatusCode::NO_CONTENT
+        );
+        assert_eq!(status_of(&pool, &id).await, "discarded");
     }
 
     /// Deleting the same capture twice is a 404, not a silent success — the second caller should be

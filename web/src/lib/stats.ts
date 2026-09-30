@@ -247,16 +247,26 @@ export function useDeleteCapture() {
   const toast = useToast();
   return useMutation({
     mutationFn: async (id: string): Promise<void> => {
-      const { error } = await ois.DELETE("/api/v1/stats/captures/{id}", {
+      const { error, response } = await ois.DELETE("/api/v1/stats/captures/{id}", {
         params: { path: { id } },
       });
+      // 409 is the one refusal a user can act on, so it has to survive as more than "failed": the
+      // event is still recording, and deleting now would be undone by the capture scheduler
+      // reopening it (#432 review). Anything else stays generic.
+      if (response.status === 409) throw new Error("still-recording");
       if (error) throw new Error("failed to delete capture");
     },
     onSuccess: () => {
       qc.invalidateQueries({ queryKey: ["stats-captures"] });
       toast.success("Capture deleted");
     },
-    onError: () => toast.error("Couldn’t delete that capture"),
+    onError: (e) =>
+      e.message === "still-recording"
+        ? toast.error("That event is still recording", {
+            description:
+              "Its capture is deleted once the event’s window ends — try again after that.",
+          })
+        : toast.error("Couldn’t delete that capture"),
   });
 }
 
