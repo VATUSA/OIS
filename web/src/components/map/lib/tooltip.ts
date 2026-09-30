@@ -76,10 +76,19 @@ export function mapTooltip({ aircraft = true }: { aircraft?: boolean } = {}) {
     // Matched glyph layers are "matched" (one FCA) or "matched-<fcaId>" (overview); their sibling
     // trail/dot/badge layers aren't pickable, so any "matched" pick is a glyph.
     if (id === "aircraft" || id?.startsWith("matched")) {
-      // With aircraft cards off, look past the glyph for an ATC pill underneath: a plane parked on
-      // a staffed airport's badge wins the pick, and returning null here would blank the pill's
-      // card too, even though only *aircraft* tooltips were turned off (#323).
-      if (!aircraft) return atcCard(objectUnder(info, "atc-hover") as AtcAnchor | null, style);
+      // Look past the glyph for an ATC pill underneath, whatever the aircraft setting. A plane
+      // parked on a staffed airport's badge wins the pick — the aircraft IconLayer is a 48x48 masked
+      // icon sitting above `atc-hover`, against a 13-19px ATC circle — and at exactly the airports
+      // that draw a DEL/GND/TWR/ATIS stack there is usually a plane on the badge. #323 added this
+      // re-pick but applied it only when aircraft cards were off, so with default settings the ATC
+      // card could never render while aircraft tooltips visibly worked (#477).
+      //
+      // The pill wins the overlap: it is a small, deliberate target, and its card is the one a
+      // controller is reaching for when they hover an airport badge.
+      const pill = atcCard(objectUnder(info, "atc-hover") as AtcAnchor | null, style);
+      if (pill) return pill;
+      // Nothing underneath. With aircraft cards off that means no card, rather than an empty one.
+      if (!aircraft) return null;
       // The plain "aircraft" layer holds NormAircraft (actype/alt/gs); the matched (in-FCA) layers
       // hold MatchedFlight (aircraft_type/altitude/groundspeed + metering). Read whichever it carries.
       const d = info.object as (NormAircraft & Partial<MatchedFlight>) | undefined;
