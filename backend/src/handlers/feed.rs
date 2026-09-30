@@ -259,6 +259,19 @@ pub async fn airport_aadc(
 ///
 /// `None` when the airport has neither a program nor a config — it is left out of the ranking
 /// rather than ranked against a capacity nobody set.
+/// Rank order for the demand board: most over capacity first, ICAO breaking ties.
+///
+/// The tiebreaker is not cosmetic. The candidate set is a `HashSet`, so equally-stressed airports
+/// would otherwise swap places between polls and the table would flicker.
+fn by_exceedance(
+    a: &crate::models::AirportDemandBody,
+    b: &crate::models::AirportDemandBody,
+) -> std::cmp::Ordering {
+    b.exceedance
+        .cmp(&a.exceedance)
+        .then_with(|| a.icao.cmp(&b.icao))
+}
+
 fn effective_aar(
     program: Option<&ProgramInputs>,
     configs: &[crate::models::AirportConfigBody],
@@ -441,11 +454,7 @@ pub async fn airport_demand(
             .collect();
 
         // Rank server-side, so the ordering is right even for a client that doesn't sort.
-        rows.sort_by(|a, b| {
-            b.exceedance
-                .cmp(&a.exceedance)
-                .then_with(|| a.icao.cmp(&b.icao))
-        });
+        rows.sort_by(by_exceedance);
         rows
     })
     .await
@@ -804,6 +813,44 @@ mod tests {
     #[test]
     fn an_airport_with_neither_is_left_out_rather_than_ranked() {
         assert_eq!(effective_aar(None, &[]), None);
+    }
+
+    fn demand(icao: &str, exceedance: i32) -> crate::models::AirportDemandBody {
+        crate::models::AirportDemandBody {
+            icao: icao.to_string(),
+            demand_60min: 40 + exceedance,
+            aar: 40,
+            exceedance,
+            aar_source: "program".to_string(),
+            inbound: 0,
+            airborne: 0,
+            ground: 0,
+        }
+    }
+
+    // --- The ranking itself (VATUSA/OIS#475) ---
+
+    #[test]
+    fn the_most_over_capacity_airport_ranks_first() {
+        let mut rows = [demand("KDCA", -3), demand("KJFK", 12), demand("KLAX", 5)];
+        rows.sort_by(by_exceedance);
+        let order: Vec<&str> = rows.iter().map(|r| r.icao.as_str()).collect();
+        assert_eq!(order, ["KJFK", "KLAX", "KDCA"]);
+    }
+
+    #[test]
+    fn equally_stressed_airports_hold_a_stable_order() {
+        // The candidate set is a HashSet, so without the ICAO tiebreaker these two would swap
+        // between polls and the board would flicker.
+        let mut a = vec![demand("KSFO", 4), demand("KBOS", 4)];
+        let mut b = vec![demand("KBOS", 4), demand("KSFO", 4)];
+        a.sort_by(by_exceedance);
+        b.sort_by(by_exceedance);
+        let names = |v: &[crate::models::AirportDemandBody]| {
+            v.iter().map(|r| r.icao.clone()).collect::<Vec<_>>()
+        };
+        assert_eq!(names(&a), ["KBOS", "KSFO"]);
+        assert_eq!(names(&a), names(&b));
     }
 
     // --- Through the router ---
