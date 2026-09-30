@@ -176,10 +176,23 @@ polygon in the asset**, so a controller on either shades nothing.
 **feature's** `properties.id` against the online set. Consequences worth knowing:
 
 - An online id with no matching feature draws nothing. An unknown or misspelled centre id therefore
-  cannot select a polygon — the filter is feature-driven, not id-driven.
+  cannot select a polygon — the filter is feature-driven, not id-driven. This is what makes the
+  client safe on its own terms, whatever the API sends.
 - `center_artcc` (`backend/src/handlers/atc.rs`) maps FAA radio prefixes to `Zxx` ids, and accepts a
-  bare `Zxx` verbatim. `"BDA" | "NY" => "ZNY"` is **correct**: New York Oceanic (KZWY) is
-  ZNY-controlled. `"ZMO" => "ZMA"` is unverified — see Open questions.
+  bare `Zxx` verbatim. It answers **"which US ARTCC is this?"** and nothing else — deliberately not
+  "can we draw it", because its other caller (`feed::stats::is_us_controller`) uses it to decide
+  whether a controller counts as American, and `ZAK`/`ZSU` must keep counting despite having no
+  polygon.
+- **`BDA` is not mapped.** Bermuda (TXKF) is not a VATUSA position, so a `BDA_CTR` is neither shaded
+  nor counted as a US controller (#482, settled with the repo owner). An earlier reading had it as a
+  ZNY position on the grounds that New York Oceanic is ZNY-controlled; that conflated the two, and the
+  alias meant one Bermuda controller shaded the whole of New York.
+- **A centre with no polygon never reaches the board.** `board_from` filters on
+  `Boundaries::has` at its own call site (#482), so the id list the client receives is already
+  restricted to centres the bundled asset can draw. That filter is *in addition to* the
+  feature-driven client filter above, not a replacement for it — each is independently sufficient to
+  stop an unknown id shading anything, and the backend one also keeps the board from advertising a
+  centre the map would silently ignore.
 - **Every shaded centre is also outlined**, by `atc-centers` itself (`stroked: true`, the ATC centre
   colour at alpha 140, 1.5px). Shading and outline do come from different props — `boundaries` is the
   selected facility, `atcBoundaries` the national set — but nothing is ever shaded without a stroke.
@@ -197,9 +210,15 @@ polygon in the asset**, so a controller on either shades nothing.
 
 ## Open questions
 
-- **`"ZMO" => "ZMA"`** in `center_artcc` maps something to Miami Center and nobody has established
-  what `ZMO` is. Settling it needs VATSpy's `[FIRs]` list, which is not in this repo. It is harmless
-  unless `ZMO` is a non-US FIR, in which case a controller there shades Miami.
+- **What `ZMO` is** — nobody has established it, and settling it needs VATSpy's `[FIRs]` list, which
+  is not in this repo. `center_artcc` used to carry a `"ZMO" => "ZMA"` arm, removed in #482 because it
+  could never fire: the bare-`Zxx` branch at the top of the function returns any three-character
+  alphanumeric `Z`-prefixed id verbatim, so `ZMO` resolved to `ZMO` and the table below was never
+  reached. The open question is therefore **not** that a `ZMO` controller might shade Miami — that was
+  never reachable — but that a non-US FIR whose id happens to look like a US ARTCC id resolves as US.
+  Today it is inert for the map, because such an id has no polygon and #482's filter drops it before
+  the board; it still counts that controller as American in `feed::stats::is_us_controller`, which has
+  no geometry to filter on.
 - **Nobody owns `artcc-boundaries.json`.** There is no regeneration script and no recorded
   provenance beyond `source: "squawk-airspace-data"`. The invariant test keeps it honest but cannot
   refresh it.
