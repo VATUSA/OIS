@@ -367,6 +367,11 @@ pub async fn airport_demand(
     let rows = tokio::task::spawn_blocking(move || {
         // Only airports something is actually flying to can be over capacity, so intersect the
         // capacity-bearing set with the arrivals in this snapshot. One pass.
+        //
+        // Both sides are upper-case: every write path normalises through `normalize_icao`
+        // (`handlers/events.rs:140`), and `compute` compares against an upper-cased `fp.arrival`.
+        // If that ever stopped holding, this intersection would come back empty and the ranking
+        // would silently vanish rather than fail — so it is an invariant, not a coincidence.
         let mut arriving: HashSet<String> = HashSet::new();
         for fp in snap
             .data
@@ -383,6 +388,15 @@ pub async fn airport_demand(
             arriving.insert(fp.arrival.to_ascii_uppercase());
         }
 
+        // The set dedupes an airport that has both a program and a config. Its iteration order is
+        // arbitrary, which is why the sort below carries an ICAO tiebreaker — without one, equally
+        // -stressed airports would swap places between polls.
+        //
+        // Cost: `compute` rescans the pilot list per airport, so this is N cheap scans. The heavy
+        // work (route resolution, ETA) is *not* repeated — `compute` early-filters on arrival ICAO
+        // (`feed/flow.rs`), so a flight is resolved under exactly one airport. Bucketing arrivals
+        // by ICAO first would remove the rescans, but that belongs in `feed/flow.rs` and is not
+        // worth doing before profiling says so.
         let mut rows: Vec<crate::models::AirportDemandBody> = programs
             .keys()
             .chain(configs_by_icao.keys())
