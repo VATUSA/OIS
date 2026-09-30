@@ -59,7 +59,15 @@ fn facility_kind(facility: i32) -> Option<&'static str> {
 /// US ARTCC id for a center callsign's first segment. Center positions log on with the FAA
 /// radio prefix (`BOS`, `NY`, `DC`, `LAX`) rather than the `Zxx` id our boundaries use;
 /// a bare `Zxx` id (e.g. `ZLA_CTR`) is accepted directly. Prefixes are from VATSpy `[FIRs]`.
-/// Non-US centers return `None` (we have no boundary geometry to shade for them).
+/// Non-US centers return `None`.
+///
+/// This answers **"which US ARTCC is this?"** and nothing more. It deliberately does *not* check
+/// whether we hold a boundary polygon for the answer, because its two callers ask different
+/// questions: the ATC board wants something it can shade, while `feed::stats::is_us_controller`
+/// wants to know whether a controller counts as American. `ZAK` (Oakland Oceanic) and `ZSU`
+/// (San Juan) are real US ARTCCs with no polygon in the bundled set — filtering here would quietly
+/// drop them from stats collection. The map filters on [`Boundaries::has`] at its own call site
+/// instead (VATUSA/OIS#482).
 pub(crate) fn center_artcc(prefix: &str) -> Option<String> {
     if prefix.len() == 3
         && prefix.starts_with('Z')
@@ -70,7 +78,9 @@ pub(crate) fn center_artcc(prefix: &str) -> Option<String> {
     let mapped = match prefix {
         "ABQ" => "ZAB",
         "ATL" => "ZTL",
-        "BDA" | "NY" => "ZNY",
+        // `BDA` (Bermuda, TXKF) deliberately absent: it is not a ZNY position, and mapping it
+        // here shaded the whole of New York for a Bermuda controller (VATUSA/OIS#482).
+        "NY" => "ZNY",
         "BOS" => "ZBW",
         "CHI" | "ORD" => "ZAU",
         "CLE" => "ZOB",
@@ -83,7 +93,10 @@ pub(crate) fn center_artcc(prefix: &str) -> Option<String> {
         "KC" | "MCI" => "ZKC",
         "LA" | "LAX" => "ZLA",
         "MEM" => "ZME",
-        "MIA" | "ZMO" => "ZMA",
+        // `ZMO` was listed here too, but the bare-`Zxx` branch above returns it verbatim before
+        // this table is reached, so the arm never fired. Removed rather than left as a promise the
+        // code does not keep.
+        "MIA" => "ZMA",
         "MSP" => "ZMP",
         "OAK" => "ZOA",
         "OO" | "OOR" | "OORO" => "ZAK",
@@ -132,7 +145,13 @@ pub async fn list_atc(State(state): State<AppState>) -> Json<AtcBoard> {
             as_of: Utc::now(),
         });
     };
-    Json(board_from(&snap.data, &airports, &iata, &tracons))
+    Json(board_from(
+        &snap.data,
+        &airports,
+        &iata,
+        &tracons,
+        &state.airspace,
+    ))
 }
 
 /// Classify a network snapshot's `controllers`/`atis` into airport ground stations (badges),
@@ -143,6 +162,7 @@ pub fn board_from(
     airports: &AirportDb,
     iata: &IataMap,
     tracons: &TraconData,
+    boundaries: &crate::feed::airspace::Boundaries,
 ) -> AtcBoard {
     let mut board = AtcBoard {
         airports: Vec::new(),
@@ -247,8 +267,12 @@ pub fn board_from(
                 }
             }
             "CTR" => {
-                // Map the radio prefix to the ARTCC id the client can shade; skip non-US.
-                if let Some(id) = center_artcc(&prefix) {
+                // Map the radio prefix to the ARTCC id the client can shade; skip non-US, and skip
+                // anything we hold no polygon for. The board exists to be drawn: emitting a centre
+                // the client cannot outline gave it a choice between ignoring the row and shading
+                // nothing, and an unknown or typo'd `Zxx` id used to get through here unchecked
+                // (VATUSA/OIS#482).
+                if let Some(id) = center_artcc(&prefix).filter(|id| boundaries.has(id)) {
                     centers
                         .entry(id.clone())
                         .or_insert_with(|| AtcCenter {
@@ -303,4 +327,110 @@ pub fn board_from(
     }
 
     board
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::feed::airspace::Boundaries;
+
+    // --- which ARTCC a centre prefix belongs to (VATUSA/OIS#482) ---
+
+    /// Bermuda is its own place. Mapping `BDA` to ZNY shaded the whole of New York whenever a
+    /// Bermuda controller was online — the defect this issue was filed for.
+    #[test]
+    fn bermuda_is_not_new_york() {
+        assert_eq!(center_artcc("BDA"), None);
+        assert_eq!(center_artcc("NY"), Some("ZNY".to_string()));
+    }
+
+    /// A bare `Zxx` id is taken verbatim, which is why the table below it can never claim one.
+    #[test]
+    fn a_bare_artcc_id_is_taken_as_itself() {
+        assert_eq!(center_artcc("ZLA"), Some("ZLA".to_string()));
+        // `ZMO` used to appear in the table as an alias for ZMA; it never fired, because this
+        // branch answers first. Pinning it stops the arm being reintroduced.
+        assert_eq!(center_artcc("ZMO"), Some("ZMO".to_string()));
+    }
+
+    #[test]
+    fn a_radio_prefix_maps_to_its_artcc() {
+        assert_eq!(center_artcc("BOS"), Some("ZBW".to_string()));
+        assert_eq!(center_artcc("DC"), Some("ZDC".to_string()));
+    }
+
+    #[test]
+    fn a_prefix_we_do_not_know_is_not_a_us_centre() {
+        assert_eq!(center_artcc("EGLL"), None);
+        assert_eq!(center_artcc(""), None);
+    }
+
+    /// `center_artcc` answers "which US ARTCC", not "can we draw it" — its other caller
+    /// (`feed::stats::is_us_controller`) depends on that distinction, so these real US centres must
+    /// keep resolving even though no polygon exists for them.
+    #[test]
+    fn a_real_us_centre_resolves_even_with_no_polygon() {
+        let boundaries = Boundaries::load();
+        for prefix in ["OO", "SJU"] {
+            let id = center_artcc(prefix).unwrap_or_else(|| panic!("{prefix} should resolve"));
+            assert!(
+                !boundaries.has(&id),
+                "{id} unexpectedly has geometry — this test is asserting the wrong thing now"
+            );
+        }
+    }
+
+    // --- what the board is willing to hand the map ---
+
+    fn ctr(callsign: &str) -> crate::feed::vatsim::Controller {
+        crate::feed::vatsim::Controller {
+            callsign: callsign.to_string(),
+            frequency: "133.000".to_string(),
+            facility: 6, // CTR
+            rating: 5,
+            cid: 1,
+            name: "A Controller".to_string(),
+            server: None,
+            visual_range: None,
+            logon_time: String::new(),
+            last_updated: String::new(),
+        }
+    }
+
+    fn board_with(callsigns: &[&str]) -> AtcBoard {
+        let data = VatsimData {
+            controllers: callsigns.iter().map(|c| ctr(c)).collect(),
+            ..Default::default()
+        };
+        board_from(
+            &data,
+            &AirportDb::new(),
+            &IataMap::new(),
+            &TraconData::default(),
+            &Boundaries::load(),
+        )
+    }
+
+    /// The board exists to be drawn. A centre with no polygon left the client shading nothing, or
+    /// shading the wrong thing.
+    #[test]
+    fn a_centre_with_no_polygon_never_reaches_the_board() {
+        let ids: Vec<String> = board_with(&["ZAK_CTR", "ZSU_CTR", "ZBW_CTR"])
+            .centers
+            .into_iter()
+            .map(|c| c.id)
+            .collect();
+        assert_eq!(ids, vec!["ZBW".to_string()]);
+    }
+
+    /// The no-allowlist hole: any three characters starting with `Z` used to select a polygon.
+    #[test]
+    fn a_typod_centre_id_draws_nothing() {
+        assert!(board_with(&["ZQQ_CTR"]).centers.is_empty());
+    }
+
+    #[test]
+    fn a_bermuda_controller_no_longer_shades_new_york() {
+        assert!(board_with(&["BDA_CTR"]).centers.is_empty());
+    }
 }

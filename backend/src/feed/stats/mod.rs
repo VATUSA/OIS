@@ -478,4 +478,23 @@ mod tests {
         assert!(!is_us_airport("CYYZ")); // Toronto
         assert!(!is_us_airport("KJF")); // too short
     }
+
+    /// Stats scoping runs through `center_artcc`, so #482's removal of the `BDA -> ZNY` alias
+    /// reaches here too: a Bermuda controller was being counted as American. The real US oceanic
+    /// centres must keep counting, which is exactly why that fix filters geometry at the map's call
+    /// site rather than inside `center_artcc`.
+    #[test]
+    fn centre_prefixes_decide_us_controllers() {
+        let iata = IataMap::new();
+        let airports = AirportDb::new();
+        let us = |cs: &str| is_us_controller(cs, &iata, &airports);
+
+        assert!(us("ZBW_CTR"));
+        assert!(us("BOS_CTR"));
+        assert!(us("ZAK_CTR"), "Oakland Oceanic is American with no polygon");
+        assert!(us("ZSU_CTR"), "San Juan is American with no polygon");
+
+        assert!(!us("BDA_CTR"), "Bermuda is not a US controller");
+        assert!(!us("EGLL_CTR"));
+    }
 }

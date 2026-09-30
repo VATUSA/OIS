@@ -1,6 +1,7 @@
 import {GeoJsonLayer} from "@deck.gl/layers";
 
 import {type MapPalette, readMapPalette} from "../lib/colors";
+import {sanitizeBoundaries} from "../lib/geo";
 import type {RGBA} from "../lib/types";
 
 /**
@@ -17,7 +18,9 @@ export function buildBoundaryLayer(
   const fill: RGBA = [r, g, b, 16];
   return new GeoJsonLayer({
     id: "artcc-boundaries",
-    data,
+    // Validated even though the fill is conditional: `emphasis` fills, and a bridged ring wedges
+    // exactly the same way here as in `atc-centers` (#481).
+    data: sanitizeBoundaries(data),
     stroked: true,
     filled: emphasis,
     getFillColor: emphasis ? fill : [r, g, b, 0],

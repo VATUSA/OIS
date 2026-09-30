@@ -822,10 +822,9 @@ pub async fn update_advisory(
     // cannot end up showing fields it no longer has. The identity it renders under comes off the
     // row — the number was settled when the draft was created.
     //
-    // Known gap, deliberately not widened here: a *raw* edit still leaves any existing `structured`
-    // in place (`coalesce` below), so the breakdown can go stale against the body. That is the same
-    // defect #452 fixed for TMIs and wants the same treatment; filed separately rather than folded
-    // into the type work.
+    // The raw-edit half of this — a body edit with no new fields leaving a stale `structured` behind
+    // — was the gap #458 deliberately left open and filed as #488; `clear_breakdown` below is that
+    // fix, so the two halves now meet here.
     let body = match req.structured.as_ref() {
         None => req.body.clone(),
         Some(structured) => {
@@ -857,12 +856,24 @@ pub async fn update_advisory(
         }
     };
 
+    // A raw body edit invalidates the breakdown. For a structured advisory the `body` is *rendered
+    // from* `structured`, so new prose with no new fields leaves the stored breakdown describing a
+    // document that is no longer there — and anything reading it then gets a confident wrong answer
+    // rather than nothing. Clearing beats coalescing, which is the same conclusion and the same shape
+    // `update_tmi` reached for TMIs (#452); advisories arrived after that fix and never got it (#488).
+    //
+    // `decoded` is where the two paths genuinely differ, so the SQL below cannot be copied across
+    // verbatim. `UpdateTmiRequest` has no `decoded` field — it is derived from `structured` inside
+    // `update_tmi`, so clearing it there can never discard anything a caller sent. Here the caller
+    // supplies it, and a decoding sent *with* a new body describes the new body: it is not stale, so
+    // the clear must yield to it rather than overwrite it.
+    let clear_breakdown = req.structured.is_none() && req.body.is_some();
     let result = sqlx::query(
         "update tmu.advisories set \
             kind = coalesce($2, kind), \
             body = coalesce($3, body), \
-            structured = coalesce($4, structured), \
-            decoded = coalesce($5, decoded) \
+            structured = case when $6 then null else coalesce($4, structured) end, \
+            decoded = case when $6 then $5 else coalesce($5, decoded) end \
          where id = $1 and status = 'draft'",
     )
     .bind(id)
@@ -870,6 +881,7 @@ pub async fn update_advisory(
     .bind(body.as_deref())
     .bind(req.structured.as_ref().map(sqlx::types::Json))
     .bind(req.decoded.as_deref())
+    .bind(clear_breakdown)
     .execute(pool)
     .await
     .map_err(|_| ApiError::Internal)?;
@@ -972,6 +984,218 @@ mod tests {
         .await
         .unwrap();
         get_advisory(pool, &id).await.unwrap().unwrap()
+    }
+
+    /// An advisory patch that changes nothing, for tests to fill one field of — mirroring `patch()`
+    /// for TMIs. A test-local helper rather than a `Default` derive, so a `ToSchema` model stays
+    /// untouched.
+    fn adv_patch() -> UpdateAdvisoryRequest {
+        UpdateAdvisoryRequest {
+            kind: None,
+            body: None,
+            structured: None,
+            decoded: None,
+        }
+    }
+
+    /// A draft carrying a structured breakdown, for the #488 cases below.
+    ///
+    /// Deliberately **not** `reroute`: since #458 that kind is a typed document whose body is rendered
+    /// from `structured`, so this placeholder payload is now rejected outright. These cases are about
+    /// the clearing rule itself, which is keyed on the request shape and not on any kind, so they use
+    /// a kind with no renderer. `a_raw_edit_on_a_rendered_advisory_clears_its_breakdown` covers the
+    /// rendered kind.
+    async fn structured_draft(pool: &PgPool) -> AdvisoryBody {
+        let user = crate::scope_test_support::seed_user(pool).await;
+        let id = create_advisory(
+            pool,
+            &CreateAdvisoryRequest {
+                facility: "DCC".to_string(),
+                kind: "gs".to_string(),
+                body: "vATCSCC ADVZY 001 REROUTE".to_string(),
+                structured: Some(serde_json::json!({"routes": [{"from": "JFK", "to": "BOS"}]})),
+                decoded: Some("JFK to BOS reroute".to_string()),
+            },
+            &user,
+        )
+        .await
+        .unwrap();
+        get_advisory(pool, &id).await.unwrap().unwrap()
+    }
+
+    /// #488 AC1. `update_advisory` used to coalesce `structured`, so editing a raw body left the old
+    /// breakdown behind, describing a document that no longer existed. `body` for a structured
+    /// advisory is rendered *from* `structured`, so the two are one fact expressed twice; a raw edit
+    /// breaks that and the breakdown has to go rather than silently disagree.
+    #[sqlx::test]
+    async fn a_raw_body_edit_clears_the_breakdown(pool: PgPool) {
+        let before = structured_draft(&pool).await;
+        assert!(before.structured.is_some(), "fixture must start with one");
+
+        assert!(
+            update_advisory(
+                &pool,
+                &before.id,
+                &UpdateAdvisoryRequest {
+                    body: Some("vATCSCC ADVZY 001 FREE TEXT".to_string()),
+                    ..adv_patch()
+                },
+            )
+            .await
+            .unwrap()
+        );
+
+        let after = get_advisory(&pool, &before.id).await.unwrap().unwrap();
+        assert_eq!(after.body, "vATCSCC ADVZY 001 FREE TEXT");
+        assert!(
+            after.structured.is_none(),
+            "stale breakdown survived a raw edit"
+        );
+        assert!(
+            after.decoded.is_none(),
+            "stale decoding survived a raw edit"
+        );
+    }
+
+    /// A raw edit clears the *stale* breakdown, not a decoding the caller sent in the same patch.
+    ///
+    /// `update_tmi`'s clear covers `decoded` too, and copying that across discarded a supplied value:
+    /// `UpdateTmiRequest` has no `decoded` (it is derived from `structured`), so the clear there can
+    /// only ever null something already null. `UpdateAdvisoryRequest` does have one, and
+    /// `CreateAdvisoryRequest` takes `structured` and `decoded` as independent optionals — so a raw
+    /// advisory with a hand-written decoding is a state the API lets you build, and editing its body
+    /// silently wiped the decoding while reporting success.
+    #[sqlx::test]
+    async fn a_decoding_supplied_with_the_new_body_is_kept(pool: PgPool) {
+        let before = structured_draft(&pool).await;
+
+        assert!(
+            update_advisory(
+                &pool,
+                &before.id,
+                &UpdateAdvisoryRequest {
+                    body: Some("vATCSCC ADVZY 001 FREE TEXT".to_string()),
+                    decoded: Some("hand-written decoding".to_string()),
+                    ..adv_patch()
+                },
+            )
+            .await
+            .unwrap()
+        );
+
+        let after = get_advisory(&pool, &before.id).await.unwrap().unwrap();
+        assert!(
+            after.structured.is_none(),
+            "the breakdown no longer describes this body and must still go"
+        );
+        assert_eq!(
+            after.decoded.as_deref(),
+            Some("hand-written decoding"),
+            "a decoding sent with the new body describes it, so it is not stale"
+        );
+    }
+
+    /// Where #458 and #488 meet, and the case neither could write alone: a `reroute`'s body is
+    /// *rendered from* its breakdown, so a hand-edited raw body is precisely when the stored breakdown
+    /// stops describing the document. The clear has to fire on the rendered kind too — it is keyed on
+    /// the request shape, not on the kind, and this pins that.
+    #[sqlx::test]
+    async fn a_raw_edit_on_a_rendered_advisory_clears_its_breakdown(pool: PgPool) {
+        let user = crate::scope_test_support::seed_user(&pool).await;
+        let id = create_advisory(
+            &pool,
+            &CreateAdvisoryRequest {
+                facility: "DCC".to_string(),
+                kind: "reroute".to_string(),
+                body: String::new(),
+                structured: Some(reroute_structured()),
+                decoded: None,
+            },
+            &user,
+        )
+        .await
+        .unwrap();
+        let before = get_advisory(&pool, &id).await.unwrap().unwrap();
+        assert!(
+            before.structured.is_some() && before.body.contains("NO_J75_3_PARTIAL"),
+            "fixture must start as a rendered reroute: {}",
+            before.body
+        );
+
+        assert!(
+            update_advisory(
+                &pool,
+                &id,
+                &UpdateAdvisoryRequest {
+                    body: Some("vATCSCC ADVZY 001 REROUTE CANCELLED BY HAND".to_string()),
+                    ..adv_patch()
+                },
+            )
+            .await
+            .unwrap()
+        );
+
+        let after = get_advisory(&pool, &id).await.unwrap().unwrap();
+        assert_eq!(after.body, "vATCSCC ADVZY 001 REROUTE CANCELLED BY HAND");
+        assert!(
+            after.structured.is_none(),
+            "the rendered breakdown no longer describes this body and must go"
+        );
+    }
+
+    /// #488 AC2, first half: supplying a breakdown still replaces it. This is why the guard is keyed
+    /// on `structured.is_none()` rather than on the body changing at all.
+    #[sqlx::test]
+    async fn supplying_a_breakdown_replaces_it(pool: PgPool) {
+        let before = structured_draft(&pool).await;
+
+        assert!(
+            update_advisory(
+                &pool,
+                &before.id,
+                &UpdateAdvisoryRequest {
+                    body: Some("vATCSCC ADVZY 001 REROUTE (REVISED)".to_string()),
+                    structured: Some(serde_json::json!({"routes": [{"from": "EWR", "to": "ORD"}]})),
+                    decoded: Some("EWR to ORD reroute".to_string()),
+                    ..adv_patch()
+                },
+            )
+            .await
+            .unwrap()
+        );
+
+        let after = get_advisory(&pool, &before.id).await.unwrap().unwrap();
+        let structured = after.structured.expect("a supplied breakdown must survive");
+        assert_eq!(structured["routes"][0]["from"], "EWR");
+        assert_eq!(after.decoded.as_deref(), Some("EWR to ORD reroute"));
+    }
+
+    /// #488 AC2, second half, and the reason this cannot be a blanket clear: an edit that does not
+    /// touch the body must leave the breakdown alone.
+    #[sqlx::test]
+    async fn editing_neither_leaves_the_breakdown_alone(pool: PgPool) {
+        let before = structured_draft(&pool).await;
+
+        assert!(
+            update_advisory(
+                &pool,
+                &before.id,
+                &UpdateAdvisoryRequest {
+                    kind: Some("gdp".to_string()),
+                    ..adv_patch()
+                },
+            )
+            .await
+            .unwrap()
+        );
+
+        let after = get_advisory(&pool, &before.id).await.unwrap().unwrap();
+        assert_eq!(after.kind, "gdp");
+        assert!(
+            after.structured.is_some(),
+            "an edit that left the body alone must not clear the breakdown"
+        );
+        assert!(after.decoded.is_some());
     }
 
     /// The reference single-segment reroute, as a structured payload.
