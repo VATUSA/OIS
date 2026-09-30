@@ -1,3 +1,4 @@
+import {safeUnlisten} from "@/lib/desktop-events";
 import {isTauri} from "@/lib/platform";
 
 /**
@@ -31,7 +32,7 @@ export function onDismissAllAlerts(listener: Listener): () => void {
     void import("@tauri-apps/api/event")
       .then(({listen}) => listen(DISMISS_EVENT, () => listener()))
       .then((off) => {
-        if (removed) off();
+        if (removed) safeUnlisten(off);
         else offDesktop = off;
       })
       .catch(() => undefined);
@@ -39,7 +40,8 @@ export function onDismissAllAlerts(listener: Listener): () => void {
   return () => {
     removed = true;
     listeners.delete(listener);
-    offDesktop?.();
+    // An unlisten handle is async: a bare call discards its rejection (#426).
+    safeUnlisten(offDesktop);
   };
 }
 
