@@ -12,6 +12,8 @@ const availableMonitors = vi.fn();
 const handlers: {moved?: () => void; resized?: () => void; destroyed?: () => void} = {};
 /** Which geometry listeners the code under test released, in order (VATUSA/OIS#439). */
 const released: string[] = [];
+/** Makes registering the `tauri://destroyed` listener fail, as it would on a window already gone. */
+const onceFails = {value: false};
 const outerPosition = vi.fn();
 const outerSize = vi.fn();
 const innerSize = vi.fn();
@@ -37,6 +39,7 @@ vi.mock("@tauri-apps/api/webviewWindow", () => ({
         // The opener releases the geometry listeners on `tauri://destroyed` — deliberately not on
         // close-requested, which is what #350 made unsafe from an opener.
         once: (event: string, cb: () => void) => {
+          if (onceFails.value) return Promise.reject(new Error("window is gone"));
           if (event === "tauri://destroyed") handlers.destroyed = cb;
           return Promise.resolve(() => undefined);
         },
@@ -97,6 +100,7 @@ beforeEach(() => {
   handlers.resized = undefined;
   handlers.destroyed = undefined;
   released.length = 0;
+  onceFails.value = false;
   currentLabel.value = "main";
   outerPosition.mockReset().mockResolvedValue({x: 300, y: 400});
   // A real window's frame is bigger than its content — a title bar on macOS, borders on Windows.
@@ -425,6 +429,16 @@ describe("remembering which route windows are open (VATUSA/OIS#350 review)", () 
 
     handlers.destroyed?.();
     expect(released.sort()).toEqual(["moved", "resized"]);
+  });
+
+  // The registration itself is awaited, so a window that dies during setup reports a failed open
+  // rather than throwing past `openWindow`'s catch as an unhandled rejection — the failure class
+  // `safeUnlisten` exists to prevent, one webview-lifetime leak per window opened behind it.
+  it("reports a failed open when the destroyed listener cannot be registered", async () => {
+    pretendDesktop();
+    onceFails.value = true;
+
+    await expect(openRouteWindow(IDST)).resolves.toBe(false);
   });
 
   // The release must hang off destruction, not off the close handshake: an opener-side close

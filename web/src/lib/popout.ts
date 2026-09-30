@@ -246,8 +246,10 @@ async function openWindow(kind: WindowKind, spec: PopoutSpec): Promise<boolean> 
     // reloaded. Destroyed fires after the window is gone and takes no part in that handshake.
     // `popout.dom.test.ts` guards the distinction.
     //
-    // `once` removes itself after firing, so its own handle needs no retaining.
-    void win.once("tauri://destroyed", () => {
+    // `once` removes itself after firing, so its own handle needs no retaining. Awaited all the
+    // same: unawaited, a failure to register would escape the `catch` below instead of reporting
+    // the open as failed, and would leave the two listeners above with nothing to release them.
+    await win.once("tauri://destroyed", () => {
       safeUnlisten(offMoved);
       safeUnlisten(offResized);
       window.clearTimeout(settle);
