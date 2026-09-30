@@ -275,6 +275,9 @@ export async function closePopout(id: string): Promise<void> {
   }
 }
 
+/** This webview's own close listener, kept so a repeat call can replace rather than stack it. */
+let offClose: (() => unknown) | undefined;
+
 /**
  * In a route window, forgets it when the user closes it — closing a window is how you say "not
  * next time", so that has to stick. A no-op in every other window.
@@ -286,9 +289,6 @@ export async function closePopout(id: string): Promise<void> {
  * left to finish it: the window could not be closed at all (VATUSA/OIS#350 review). A route
  * window's own listener lives and dies with the window it guards.
  */
-/** This webview's own close listener, kept so a repeat call can replace rather than stack it. */
-let offClose: (() => unknown) | undefined;
-
 export async function forgetOnClose(): Promise<void> {
   if (!can("multiWindow")) return;
 
