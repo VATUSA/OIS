@@ -57,7 +57,8 @@ async fn perform_job(
         "ace_claim_dm" | "ace_claim_reminder_24h" | "ace_claim_reminder_6h" => {
             send_claim_dm(http, &job.payload).await
         }
-        "tmi_publish" => post_tmi(http, &job.payload).await,
+        // Both carry an already-assembled NTML row; the bot only decides how it is framed (#436).
+        "tmi_publish" | "tmi_cancel" => post_tmi(http, &job.payload).await,
         "event_thread_create" => create_event_thread(http, &job.payload).await,
         // The admin's "Refresh from Discord" button — re-pull + push the guild snapshot.
         "guild_snapshot" => snapshot_and_push(http, api).await.map(|()| None),

@@ -841,7 +841,7 @@ pub(crate) async fn activate_package(
     // falling back to the pre-#194 first-created-wins behavior with no error.
     let tmu_channel = integration_repo::channel_id(
         pool,
-        crate::handlers::tmu::TMU_CHANNEL,
+        crate::handlers::tmu::NTML_CHANNEL,
         normalize_facility(&event.facility).as_deref(),
     )
     .await?;
@@ -885,15 +885,7 @@ pub(crate) async fn activate_package(
                 let mut tx = pool.begin().await.map_err(|_| ApiError::Internal)?;
                 let tmi = tmu_repo::publish_tmi(&mut tx, &tmi_id, actor).await?;
                 if let (Some(tmi), Some(channel_id)) = (tmi, tmu_channel.clone()) {
-                    let job = serde_json::json!({
-                        "channel_id": channel_id,
-                        "tmi_id": tmi.id,
-                        "requesting": tmi.requesting,
-                        "providing": tmi.providing,
-                        "restriction": tmi.restriction,
-                        "start_time": tmi.start_time,
-                        "stop_time": tmi.stop_time,
-                    });
+                    let job = crate::handlers::tmu::tmi_publish_job(&channel_id, &tmi);
                     integration_repo::enqueue_job(
                         &mut tx,
                         "tmi_publish",

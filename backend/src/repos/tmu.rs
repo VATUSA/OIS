@@ -156,13 +156,20 @@ pub async fn publish_tmi(
 
 /// Cancels a draft or published TMI. Returns false if it's already terminal. `ended_at` records the
 /// early close so replay stops showing it at the cancellation time.
-pub async fn cancel_tmi(pool: &PgPool, id: &str) -> Result<bool, ApiError> {
+///
+/// Generic over the executor so the TMU handler can run it inside the transaction that also
+/// enqueues the cancel post (#436) — the Discord row must not exist unless the TMI really cancelled —
+/// while `handlers/events.rs` keeps calling it with a plain pool.
+pub async fn cancel_tmi<'e, E>(executor: E, id: &str) -> Result<bool, ApiError>
+where
+    E: sqlx::Executor<'e, Database = Postgres>,
+{
     let result = sqlx::query(
         "update tmu.tmis set status = 'cancelled', ended_at = coalesce(ended_at, now()) \
          where id = $1 and status in ('draft', 'published')",
     )
     .bind(id)
-    .execute(pool)
+    .execute(executor)
     .await
     .map_err(|_| ApiError::Internal)?;
     Ok(result.rows_affected() > 0)

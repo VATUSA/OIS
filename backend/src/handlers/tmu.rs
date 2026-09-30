@@ -29,8 +29,33 @@ use crate::{
 };
 use serde_json::json;
 
-/// Logical channel name (mapped to a snowflake in the Discord config) where published TMIs are posted.
-pub(crate) const TMU_CHANNEL: &str = "tmu-advisories";
+/// Logical channel name (mapped to a snowflake in the Discord config) where NTML rows are posted.
+///
+/// Separate from `tmu-advisories` (#436): NTML is a chronological log of restrictions, and real
+/// vATCSCC advisories are a different artifact entirely. Sharing one channel made the name a
+/// misnomer the moment either grew.
+pub(crate) const NTML_CHANNEL: &str = "tmu-ntml";
+
+/// The `tmi_publish` job payload: the assembled NTML row plus what the bot needs to post it.
+///
+/// Shared because there are two publish paths — a TMI published directly, and one materialized from
+/// an event package (`handlers/events.rs`) — and they previously built this object separately. The
+/// bot stays a dumb renderer: everything about NTML's shape is decided here (#436).
+pub(crate) fn tmi_publish_job(channel_id: &str, tmi: &TmiBody) -> serde_json::Value {
+    json!({
+        "channel_id": channel_id,
+        "tmi_id": tmi.id,
+        // Stamped now, because this is the moment it is being logged.
+        "ntml": crate::tmi::ntml_line(
+            chrono::Utc::now(),
+            &tmi.restriction,
+            Some(tmi.start_time),
+            tmi.stop_time,
+            Some(&tmi.requesting),
+            Some(&tmi.providing),
+        ),
+    })
+}
 
 #[derive(Debug, Default, Deserialize)]
 pub struct TmiListQuery {
@@ -178,22 +203,14 @@ pub async fn publish_tmi(
     // Resolve the target channel before the tx; no config just means "don't post" (skip enqueue).
     // Unscoped: a TMI has requesting/providing ARTCCs but no single "issuing facility", and the TMU
     // channel may be network-wide rather than per-facility (#194).
-    let channel = integration_repo::channel_id(pool, TMU_CHANNEL, None).await?;
+    let channel = integration_repo::channel_id(pool, NTML_CHANNEL, None).await?;
     let mut tx = pool.begin().await.map_err(|_| ApiError::Internal)?;
     let mut tmi = tmu_repo::publish_tmi(&mut tx, &id, &user.id)
         .await?
         .ok_or(ApiError::Conflict)?; // not a draft (or absent)
     if let Some(channel_id) = channel {
         // Enqueued in the same tx as the publish: the advisory can't post without the TMI going live.
-        let job = json!({
-            "channel_id": channel_id,
-            "tmi_id": tmi.id,
-            "requesting": tmi.requesting,
-            "providing": tmi.providing,
-            "restriction": tmi.restriction,
-            "start_time": tmi.start_time,
-            "stop_time": tmi.stop_time,
-        });
+        let job = tmi_publish_job(&channel_id, &tmi);
         integration_repo::enqueue_job(&mut tx, "tmi_publish", &job, Some("tmi"), Some(&tmi.id))
             .await?;
     }
@@ -216,12 +233,34 @@ pub async fn cancel_tmi(
     Path(id): Path<String>,
 ) -> Result<Json<TmiBody>, ApiError> {
     let pool = state.db.as_ref().ok_or(ApiError::ServiceUnavailable)?;
-    if !tmu_repo::cancel_tmi(pool, &id).await? {
+
+    // Resolved before the tx; no config just means "don't post".
+    let channel = integration_repo::channel_id(pool, NTML_CHANNEL, None).await?;
+    let mut tx = pool.begin().await.map_err(|_| ApiError::Internal)?;
+    if !tmu_repo::cancel_tmi(&mut *tx, &id).await? {
         return Err(ApiError::Conflict);
     }
     let mut tmi = tmu_repo::get_tmi(pool, &id)
         .await?
         .ok_or(ApiError::NotFound)?;
+    if let Some(channel_id) = channel {
+        // A cancel is its own NTML row rather than an edit of the original (#436): the channel is a
+        // chronological log, and the original entry did happen. Enqueued in the same tx as the
+        // cancel, so the post can't exist for a TMI that is still live.
+        let job = json!({
+            "channel_id": channel_id,
+            "tmi_id": tmi.id,
+            "ntml": crate::tmi::ntml_cancel_line(
+                chrono::Utc::now(),
+                &tmi.restriction,
+                Some(&tmi.requesting),
+                Some(&tmi.providing),
+            ),
+        });
+        integration_repo::enqueue_job(&mut tx, "tmi_cancel", &job, Some("tmi"), Some(&tmi.id))
+            .await?;
+    }
+    tx.commit().await.map_err(|_| ApiError::Internal)?;
     restriction_artcc::stamp_tmi(&*state.facilities.read().await, &mut tmi);
     Ok(Json(tmi))
 }
