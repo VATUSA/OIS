@@ -464,3 +464,143 @@ pub async fn refresh_guild_snapshot(
     tx.commit().await.map_err(|_| ApiError::Internal)?;
     Ok(StatusCode::ACCEPTED)
 }
+
+#[cfg(test)]
+mod tests {
+    use sqlx::PgPool;
+
+    use crate::scope_test_support::{grant, seed_user, send, session_cookie, test_state};
+
+    /// A job `in_progress` on `attempt_count`, as a successor holds it after a reap and re-lease.
+    ///
+    /// Written directly rather than driven through lease → reap → re-lease: that sequence is already
+    /// covered in `repos::integration::tests::a_predecessors_ack_cannot_touch_a_re_leased_job`, and
+    /// what these tests are about is the route, not how the row reached this state.
+    async fn job_held_on_attempt(pool: &PgPool, attempt_count: i32) -> String {
+        sqlx::query_scalar::<_, String>(
+            "insert into integration.outbound_jobs (job_type, status, attempt_count, last_attempt_at) \
+             values ('tmi_publish', 'in_progress', $1, now()) returning id",
+        )
+        .bind(attempt_count)
+        .fetch_one(pool)
+        .await
+        .unwrap()
+    }
+
+    async fn status_of(pool: &PgPool, id: &str) -> String {
+        sqlx::query_scalar::<_, String>(
+            "select status from integration.outbound_jobs where id = $1",
+        )
+        .bind(id)
+        .fetch_one(pool)
+        .await
+        .unwrap()
+    }
+
+    /// The lease fence has to survive the trip through the handler, and nothing else proves it does.
+    ///
+    /// `repos::integration::ack_job`'s own tests call the function directly, so replacing
+    /// `payload.attempt` with `None` here — which silently reduces every ack to the status-only fence
+    /// and makes VATUSA/OIS#472's fix a no-op in production — left all 612 of them green. This drives
+    /// the real route instead (`scope_test_support::send`, VATUSA/OIS#364), so the handler is on the
+    /// tested path.
+    ///
+    /// It also pins the field's name on the wire. `attempt` is `#[serde(default)]` by necessity — an
+    /// old bot must keep working across the deploy — so a rename doesn't fail to parse, it quietly
+    /// deserialises to `None` and falls back to the fence this issue exists to replace.
+    #[sqlx::test]
+    async fn the_route_refuses_a_predecessors_ack_and_accepts_the_holders(pool: PgPool) {
+        let id = job_held_on_attempt(&pool, 2).await;
+        let user = seed_user(&pool).await;
+        grant(&pool, &user, "integration.jobs.update", None).await;
+        let cookie = session_cookie(&pool, &user).await;
+        let state = test_state(pool.clone(), Default::default());
+        let uri = format!("/api/v1/integration/jobs/{id}/ack");
+
+        let stale = send(
+            &state,
+            http::Method::POST,
+            &uri,
+            &cookie,
+            Some(serde_json::json!({"success": true, "attempt": 1})),
+        )
+        .await;
+        assert_eq!(
+            stale,
+            http::StatusCode::NOT_FOUND,
+            "attempt 1 no longer holds the lease, so the ack must not apply"
+        );
+        assert_eq!(
+            status_of(&pool, &id).await,
+            "in_progress",
+            "the successor is still working the job"
+        );
+
+        let current = send(
+            &state,
+            http::Method::POST,
+            &uri,
+            &cookie,
+            Some(serde_json::json!({"success": true, "attempt": 2})),
+        )
+        .await;
+        assert_eq!(current, http::StatusCode::NO_CONTENT);
+        assert_eq!(status_of(&pool, &id).await, "succeeded");
+    }
+
+    /// The old-bot path, through the route: no `attempt` at all must still be accepted, or deploying
+    /// the backend ahead of the bot rejects every ack and turns a narrow race into total delivery
+    /// failure.
+    #[sqlx::test]
+    async fn the_route_still_accepts_an_ack_carrying_no_lease_token(pool: PgPool) {
+        let id = job_held_on_attempt(&pool, 2).await;
+        let user = seed_user(&pool).await;
+        grant(&pool, &user, "integration.jobs.update", None).await;
+        let cookie = session_cookie(&pool, &user).await;
+        let state = test_state(pool.clone(), Default::default());
+
+        let status = send(
+            &state,
+            http::Method::POST,
+            &format!("/api/v1/integration/jobs/{id}/ack"),
+            &cookie,
+            Some(serde_json::json!({"success": true})),
+        )
+        .await;
+
+        assert_eq!(status, http::StatusCode::NO_CONTENT);
+        assert_eq!(status_of(&pool, &id).await, "succeeded");
+    }
+
+    /// Acking a job is state-mutating, so it must be gated — and until now no test said so. A caller
+    /// without `integration.jobs.update` is refused by `RequirePermission` before the handler runs,
+    /// which is a **401**, distinct from the 404 a stale ack earns.
+    #[sqlx::test]
+    async fn acking_a_job_requires_the_integration_jobs_permission(pool: PgPool) {
+        let id = job_held_on_attempt(&pool, 1).await;
+        let user = seed_user(&pool).await;
+        let cookie = session_cookie(&pool, &user).await;
+        let state = test_state(pool.clone(), Default::default());
+        let uri = format!("/api/v1/integration/jobs/{id}/ack");
+        let body = serde_json::json!({"success": true, "attempt": 1});
+
+        let refused = send(
+            &state,
+            http::Method::POST,
+            &uri,
+            &cookie,
+            Some(body.clone()),
+        )
+        .await;
+        assert_eq!(refused, http::StatusCode::UNAUTHORIZED);
+        assert_eq!(
+            status_of(&pool, &id).await,
+            "in_progress",
+            "a refused ack must not have touched the row"
+        );
+
+        grant(&pool, &user, "integration.jobs.update", None).await;
+        let allowed = send(&state, http::Method::POST, &uri, &cookie, Some(body)).await;
+        assert_eq!(allowed, http::StatusCode::NO_CONTENT);
+    }
+}

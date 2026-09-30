@@ -304,3 +304,48 @@ impl OisClient {
         Ok(())
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::AckBody;
+
+    /// `AckBody` is hand-written, not generated, and the backend reads the lease token through
+    /// `#[serde(default)]` so that an old bot keeps working across a deploy (VATUSA/OIS#472). Together
+    /// that means a disagreement about this field's name is silent: the backend deserialises `None`,
+    /// falls back to the status-only fence the issue exists to replace, and nothing fails. Nor would
+    /// `client-drift` notice — it compares the OpenAPI document to the TypeScript client, and this
+    /// crate is neither.
+    ///
+    /// So the name is asserted against `AckJobRequest`'s field in `backend/src/models/mod.rs`.
+    #[test]
+    fn the_lease_token_goes_on_the_wire_as_attempt() {
+        let body = serde_json::to_value(AckBody {
+            success: true,
+            result: None,
+            error: None,
+            attempt: Some(2),
+        })
+        .unwrap();
+
+        assert_eq!(body.get("attempt").and_then(|v| v.as_i64()), Some(2));
+    }
+
+    /// Omitted rather than sent as `null` when there is no lease token, which is what lets an older
+    /// backend — one that has never heard of the field — accept the ack unchanged.
+    #[test]
+    fn no_lease_token_means_the_field_is_absent_not_null() {
+        let body = serde_json::to_value(AckBody {
+            success: true,
+            result: None,
+            error: None,
+            attempt: None,
+        })
+        .unwrap();
+
+        assert_eq!(
+            body.as_object().map(|o| o.contains_key("attempt")),
+            Some(false)
+        );
+        assert_eq!(body.get("success").and_then(|v| v.as_bool()), Some(true));
+    }
+}
