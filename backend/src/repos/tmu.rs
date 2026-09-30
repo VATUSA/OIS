@@ -779,13 +779,19 @@ pub async fn update_advisory(
     // document that is no longer there — and anything reading it then gets a confident wrong answer
     // rather than nothing. Clearing beats coalescing, which is the same conclusion and the same shape
     // `update_tmi` reached for TMIs (#452); advisories arrived after that fix and never got it (#488).
+    //
+    // `decoded` is where the two paths genuinely differ, so the SQL below cannot be copied across
+    // verbatim. `UpdateTmiRequest` has no `decoded` field — it is derived from `structured` inside
+    // `update_tmi`, so clearing it there can never discard anything a caller sent. Here the caller
+    // supplies it, and a decoding sent *with* a new body describes the new body: it is not stale, so
+    // the clear must yield to it rather than overwrite it.
     let clear_breakdown = req.structured.is_none() && req.body.is_some();
     let result = sqlx::query(
         "update tmu.advisories set \
             kind = coalesce($2, kind), \
             body = coalesce($3, body), \
             structured = case when $6 then null else coalesce($4, structured) end, \
-            decoded = case when $6 then null else coalesce($5, decoded) end \
+            decoded = case when $6 then $5 else coalesce($5, decoded) end \
          where id = $1 and status = 'draft'",
     )
     .bind(id)
@@ -960,6 +966,44 @@ mod tests {
         assert!(
             after.decoded.is_none(),
             "stale decoding survived a raw edit"
+        );
+    }
+
+    /// A raw edit clears the *stale* breakdown, not a decoding the caller sent in the same patch.
+    ///
+    /// `update_tmi`'s clear covers `decoded` too, and copying that across discarded a supplied value:
+    /// `UpdateTmiRequest` has no `decoded` (it is derived from `structured`), so the clear there can
+    /// only ever null something already null. `UpdateAdvisoryRequest` does have one, and
+    /// `CreateAdvisoryRequest` takes `structured` and `decoded` as independent optionals — so a raw
+    /// advisory with a hand-written decoding is a state the API lets you build, and editing its body
+    /// silently wiped the decoding while reporting success.
+    #[sqlx::test]
+    async fn a_decoding_supplied_with_the_new_body_is_kept(pool: PgPool) {
+        let before = structured_draft(&pool).await;
+
+        assert!(
+            update_advisory(
+                &pool,
+                &before.id,
+                &UpdateAdvisoryRequest {
+                    body: Some("vATCSCC ADVZY 001 FREE TEXT".to_string()),
+                    decoded: Some("hand-written decoding".to_string()),
+                    ..adv_patch()
+                },
+            )
+            .await
+            .unwrap()
+        );
+
+        let after = get_advisory(&pool, &before.id).await.unwrap().unwrap();
+        assert!(
+            after.structured.is_none(),
+            "the breakdown no longer describes this body and must still go"
+        );
+        assert_eq!(
+            after.decoded.as_deref(),
+            Some("hand-written decoding"),
+            "a decoding sent with the new body describes it, so it is not stale"
         );
     }
 
