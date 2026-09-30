@@ -562,6 +562,98 @@ mod tests {
         .unwrap()
     }
 
+    /// A signed-in caller holding no permissions, and the state to send through.
+    ///
+    /// Deliberately two steps rather than one refused-then-granted helper: the interesting assertion
+    /// is that the *refused* call changed nothing, and that has to be checked before the granted call
+    /// runs — a helper that did both first would let the granted call mask it (which it did, on the
+    /// first run of these tests).
+    async fn caller(pool: &PgPool) -> (crate::state::AppState, String, String) {
+        let state = test_state(pool.clone(), HashMap::new());
+        let user = seed_user(pool).await;
+        let cookie = session_cookie(pool, &user).await;
+        (state, user, cookie)
+    }
+
+    async fn status_of(pool: &PgPool, id: &str) -> Option<String> {
+        crate::repos::tmu::get_advisory(pool, id)
+            .await
+            .unwrap()
+            .map(|a| a.status)
+    }
+
+    /// AC 1's third verb. `cancel_advisory` shares `TmuAdvPublish` with publish, so publish's test
+    /// covered the permission but not *this route's* use of it: dropping the extractor here left 21
+    /// passed / 0 failed (#457 review).
+    #[sqlx::test]
+    async fn cancelling_an_advisory_requires_the_publish_permission(pool: PgPool) {
+        let id = seed_draft(&pool).await;
+        let (state, user, cookie) = caller(&pool).await;
+        let uri = format!("/api/v1/tmu/advisories/{id}/cancel");
+
+        let refused = send(&state, http::Method::POST, &uri, &cookie, None).await;
+        assert_eq!(refused, http::StatusCode::UNAUTHORIZED);
+        assert_eq!(
+            status_of(&pool, &id).await.as_deref(),
+            Some("draft"),
+            "a refused cancel must not have changed the status"
+        );
+
+        grant(&pool, &user, "tmu.adv.publish", None).await;
+        let allowed = send(&state, http::Method::POST, &uri, &cookie, None).await;
+        assert_eq!(allowed, http::StatusCode::OK);
+        assert_eq!(status_of(&pool, &id).await.as_deref(), Some("cancelled"));
+    }
+
+    /// The remaining two gated routes, for the same reason: each one's extractor should be removable
+    /// only at the cost of a red test (#457 review).
+    #[sqlx::test]
+    async fn editing_an_advisory_requires_the_update_permission(pool: PgPool) {
+        let id = seed_draft(&pool).await;
+        let (state, user, cookie) = caller(&pool).await;
+        let uri = format!("/api/v1/tmu/advisories/{id}");
+        let edit = || Some(serde_json::json!({"body": "vATCSCC ADVZY 001 amended"}));
+        let body_now = async || {
+            crate::repos::tmu::get_advisory(&pool, &id)
+                .await
+                .unwrap()
+                .unwrap()
+                .body
+        };
+
+        let refused = send(&state, http::Method::PATCH, &uri, &cookie, edit()).await;
+        assert_eq!(refused, http::StatusCode::UNAUTHORIZED);
+        assert_eq!(
+            body_now().await,
+            "vATCSCC ADVZY",
+            "a refused edit must not have rewritten the document"
+        );
+
+        grant(&pool, &user, "tmu.adv.update", None).await;
+        let allowed = send(&state, http::Method::PATCH, &uri, &cookie, edit()).await;
+        assert_eq!(allowed, http::StatusCode::OK);
+        assert_eq!(body_now().await, "vATCSCC ADVZY 001 amended");
+    }
+
+    #[sqlx::test]
+    async fn abandoning_an_advisory_requires_the_update_permission(pool: PgPool) {
+        let id = seed_draft(&pool).await;
+        let (state, user, cookie) = caller(&pool).await;
+        let uri = format!("/api/v1/tmu/advisories/{id}");
+
+        let refused = send(&state, http::Method::DELETE, &uri, &cookie, None).await;
+        assert_eq!(refused, http::StatusCode::UNAUTHORIZED);
+        assert!(
+            status_of(&pool, &id).await.is_some(),
+            "a refused delete must not have removed it"
+        );
+
+        grant(&pool, &user, "tmu.adv.update", None).await;
+        let allowed = send(&state, http::Method::DELETE, &uri, &cookie, None).await;
+        assert_eq!(allowed, http::StatusCode::NO_CONTENT);
+        assert!(status_of(&pool, &id).await.is_none());
+    }
+
     /// #457 AC1. `tmu.adv.*` were seeded in 0008_tmu.sql and dead ever since, because nothing could
     /// gate on them. These go through the real router so `RequirePermission` is on the tested path —
     /// it holds a private field, so a handler cannot be called directly to check its gate.
@@ -868,8 +960,10 @@ pub async fn cancel_advisory(
         .ok_or(ApiError::NotFound)
 }
 
-/// Abandons a draft. `409` when it cannot be deleted — a published or cancelled advisory, or a draft
-/// whose number is no longer the top of its sequence (see `repos::tmu::delete_advisory`).
+/// Abandons a draft. `409` when it is not a draft — a published advisory is a document that went out,
+/// and a cancelled one is a record of that; neither is deleted. Any draft can be abandoned, whether or
+/// not its number is the top of the sequence; abandoning an older one simply leaves a gap (see
+/// `repos::tmu::delete_advisory`).
 #[utoipa::path(
     delete, path = "/api/v1/tmu/advisories/{id}", tag = "tmu",
     params(("id" = String, Path)),

@@ -574,6 +574,198 @@ pub async fn prune_history(pool: &PgPool, before: DateTime<Utc>) -> Result<u64, 
     Ok(total)
 }
 
+// --- advisories (ADVZY documents, #457) ---
+
+const ADVISORY_SELECT: &str = "select id, facility, issued_day, number, kind, body, structured, \
+    decoded, status, published_at, created_at from tmu.advisories";
+
+/// Take the next advisory number for `facility` on today's **Zulu** day.
+///
+/// vATCSCC numbers advisories per issuing facility per day (`vATCSCC ADVZY 002`), and the number is
+/// part of the document's identity — so it is allocated here and stored, not computed at render time.
+/// Zulu because that is how the wider network numbers them and how every other time in this domain is
+/// expressed; a server in another timezone must not roll the sequence at a different moment.
+///
+/// Runs in the caller's transaction behind a transaction-scoped advisory lock keyed on the facility
+/// and day, so two racing allocations serialise rather than both reading the same maximum. The lock
+/// releases when the transaction ends, however it ends.
+///
+/// A row lock cannot do this job: `select max(...) ... for update` is rejected outright by Postgres
+/// ("FOR UPDATE is not allowed with aggregate functions"), and locking the current top row would
+/// protect nothing on the first allocation of the day, when there is no row to lock. Same
+/// `pg_advisory_xact_lock` pattern `repos::faa_surface_seed` uses for seed-once-per-airport.
+///
+/// The unique constraint on `(facility, issued_day, number)` is the backstop if one ever slips past.
+async fn allocate_advisory_number(
+    tx: &mut Transaction<'_, Postgres>,
+    facility: &str,
+    day: chrono::NaiveDate,
+) -> Result<i32, ApiError> {
+    sqlx::query("select pg_advisory_xact_lock(hashtext($1))")
+        .bind(format!("tmu.advisory:{facility}:{day}"))
+        .execute(&mut **tx)
+        .await
+        .map_err(|_| ApiError::Internal)?;
+
+    sqlx::query_scalar::<_, Option<i32>>(
+        "select max(number) from tmu.advisories where facility = $1 and issued_day = $2",
+    )
+    .bind(facility)
+    .bind(day)
+    .fetch_one(&mut **tx)
+    .await
+    .map(|max| max.unwrap_or(0) + 1)
+    .map_err(|_| ApiError::Internal)
+}
+
+/// Creates a draft advisory, allocating its number (#457).
+///
+/// The number is taken at **draft**, so the author sees the number they will issue under while still
+/// writing, and [`delete_advisory`] leaves a gap rather than renumbering when one is abandoned.
+///
+/// A consequence worth naming rather than discovering: the Zulu day is fixed here, at creation. A draft
+/// started 23:59Z and published 00:05Z therefore carries the *previous* day's number. That follows from
+/// `issued_day` meaning "the day the number was allocated on" (0085's own words) and is self-consistent
+/// — but whether vATCSCC numbers a document by the day it was drafted or the day it was issued is a
+/// domain question, open on #457. If it is the issue day, the allocation moves to `publish_advisory`
+/// and a draft can no longer show its final number.
+pub async fn create_advisory(
+    pool: &PgPool,
+    req: &CreateAdvisoryRequest,
+    created_by: &str,
+) -> Result<String, ApiError> {
+    let facility = req.facility.trim().to_ascii_uppercase();
+    let day = Utc::now().date_naive();
+
+    let mut tx = pool.begin().await.map_err(|_| ApiError::Internal)?;
+    let number = allocate_advisory_number(&mut tx, &facility, day).await?;
+    let id = sqlx::query_scalar::<_, String>(
+        "insert into tmu.advisories \
+         (facility, issued_day, number, kind, body, structured, decoded, created_by) \
+         values ($1, $2, $3, $4, $5, $6, $7, $8) returning id",
+    )
+    .bind(&facility)
+    .bind(day)
+    .bind(number)
+    .bind(req.kind.trim())
+    .bind(req.body.trim())
+    .bind(req.structured.as_ref().map(sqlx::types::Json))
+    .bind(req.decoded.as_deref())
+    .bind(created_by)
+    .fetch_one(&mut *tx)
+    .await
+    .map_err(|_| ApiError::Internal)?;
+    tx.commit().await.map_err(|_| ApiError::Internal)?;
+    Ok(id)
+}
+
+pub async fn get_advisory(pool: &PgPool, id: &str) -> Result<Option<AdvisoryBody>, ApiError> {
+    sqlx::query_as::<_, AdvisoryBody>(&format!("{ADVISORY_SELECT} where id = $1"))
+        .bind(id)
+        .fetch_optional(pool)
+        .await
+        .map_err(|_| ApiError::Internal)
+}
+
+/// Newest first, which for advisories means by the number they were issued under.
+pub async fn list_advisories(pool: &PgPool) -> Result<Vec<AdvisoryBody>, ApiError> {
+    sqlx::query_as::<_, AdvisoryBody>(&format!(
+        "{ADVISORY_SELECT} order by issued_day desc, number desc"
+    ))
+    .fetch_all(pool)
+    .await
+    .map_err(|_| ApiError::Internal)
+}
+
+/// Edits a draft. A published advisory is a document that went out; it is cancelled and reissued
+/// rather than rewritten.
+pub async fn update_advisory(
+    pool: &PgPool,
+    id: &str,
+    req: &UpdateAdvisoryRequest,
+) -> Result<bool, ApiError> {
+    let result = sqlx::query(
+        "update tmu.advisories set \
+            kind = coalesce($2, kind), \
+            body = coalesce($3, body), \
+            structured = coalesce($4, structured), \
+            decoded = coalesce($5, decoded) \
+         where id = $1 and status = 'draft'",
+    )
+    .bind(id)
+    .bind(req.kind.as_deref())
+    .bind(req.body.as_deref())
+    .bind(req.structured.as_ref().map(sqlx::types::Json))
+    .bind(req.decoded.as_deref())
+    .execute(pool)
+    .await
+    .map_err(|_| ApiError::Internal)?;
+    Ok(result.rows_affected() > 0)
+}
+
+/// Publishes a draft. Returns false if it was not a draft (or is absent).
+pub async fn publish_advisory(
+    pool: &PgPool,
+    id: &str,
+    published_by: &str,
+) -> Result<bool, ApiError> {
+    let result = sqlx::query(
+        "update tmu.advisories \
+         set status = 'published', published_by = $2, published_at = now() \
+         where id = $1 and status = 'draft'",
+    )
+    .bind(id)
+    .bind(published_by)
+    .execute(pool)
+    .await
+    .map_err(|_| ApiError::Internal)?;
+    Ok(result.rows_affected() > 0)
+}
+
+/// Cancels a draft or published advisory. Its number is **not** released: a published advisory was
+/// issued, and a cancelled draft that once held a number is not worth the ambiguity of reissuing it.
+pub async fn cancel_advisory(pool: &PgPool, id: &str) -> Result<bool, ApiError> {
+    let result = sqlx::query(
+        "update tmu.advisories set status = 'cancelled' \
+         where id = $1 and status in ('draft', 'published')",
+    )
+    .bind(id)
+    .execute(pool)
+    .await
+    .map_err(|_| ApiError::Internal)?;
+    Ok(result.rows_affected() > 0)
+}
+
+/// Deletes an abandoned draft. Returns false only if it is not a draft (or is absent).
+///
+/// Numbers are allocated at draft so the author can see theirs while writing, which means an abandoned
+/// draft would otherwise burn one. Reclaiming happens **for free and only at the top of the sequence**,
+/// because [`allocate_advisory_number`] is `max(number) + 1`:
+///
+/// - delete the newest of `{1, 2}` → rows `{1}`, next allocation is 2 — rewound
+/// - delete an older one → rows `{2}`, next allocation is 3 — number 1 stays burned, leaving a gap
+///
+/// A gap is the accepted cost of allocating at draft (#457), and it costs nothing: the unique
+/// constraint is on `(facility, issued_day, number)`, not on the sequence being dense.
+///
+/// This deliberately does **not** refuse a draft below the top. It used to, and that made an older
+/// draft permanently undeletable — the handler answered 409 forever, so the only ways out were to
+/// delete the newer draft first or to *cancel* the older one, writing a `cancelled` advisory for a
+/// document that was never issued. With two controllers drafting for one facility — the expected case,
+/// since numbering is per facility — whoever drafted first could never abandon their draft (#457
+/// review).
+///
+/// A published or cancelled advisory is never deleted here at all: that is what `status = 'draft'`
+/// is for.
+pub async fn delete_advisory(pool: &PgPool, id: &str) -> Result<bool, ApiError> {
+    let result = sqlx::query("delete from tmu.advisories where id = $1 and status = 'draft'")
+        .bind(id)
+        .execute(pool)
+        .await
+        .map_err(|_| ApiError::Internal)?;
+    Ok(result.rows_affected() > 0)
+}
+
 #[cfg(test)]
 mod tests {
     use sqlx::PgPool;
@@ -673,13 +865,21 @@ mod tests {
     #[sqlx::test]
     async fn abandoning_an_older_draft_leaves_its_number_burned(pool: PgPool) {
         let first = draft(&pool, "DCC").await;
-        let _second = draft(&pool, "DCC").await;
+        let second = draft(&pool, "DCC").await;
+        assert_eq!((first.number, second.number), (1, 2));
 
         assert!(
-            !delete_advisory(&pool, &first.id).await.unwrap(),
-            "deleting below the top must be refused, not silently leave a hole"
+            delete_advisory(&pool, &first.id).await.unwrap(),
+            "an older draft must still be abandonable — refusing it left it undeletable forever"
         );
-        assert!(get_advisory(&pool, &first.id).await.unwrap().is_some());
+        assert!(get_advisory(&pool, &first.id).await.unwrap().is_none());
+
+        // The gap is the point: 1 is burned, and the sequence carries on above the survivor.
+        assert_eq!(
+            draft(&pool, "DCC").await.number,
+            3,
+            "1 must not be reissued while 2 still holds the top"
+        );
     }
 
     /// AC4, and the line that does not move: a published advisory went out, and a cancelled one is
@@ -925,189 +1125,4 @@ mod tests {
         assert!(!listed.iter().any(|g| g.id == id));
         assert!(row_exists(&pool, "tmu.gdp", &id).await);
     }
-}
-
-// --- advisories (ADVZY documents, #457) ---
-
-const ADVISORY_SELECT: &str = "select id, facility, issued_day, number, kind, body, structured, \
-    decoded, status, published_at, created_at from tmu.advisories";
-
-/// Take the next advisory number for `facility` on today's **Zulu** day.
-///
-/// vATCSCC numbers advisories per issuing facility per day (`vATCSCC ADVZY 002`), and the number is
-/// part of the document's identity — so it is allocated here and stored, not computed at render time.
-/// Zulu because that is how the wider network numbers them and how every other time in this domain is
-/// expressed; a server in another timezone must not roll the sequence at a different moment.
-///
-/// Runs in the caller's transaction behind a transaction-scoped advisory lock keyed on the facility
-/// and day, so two racing allocations serialise rather than both reading the same maximum. The lock
-/// releases when the transaction ends, however it ends.
-///
-/// A row lock cannot do this job: `select max(...) ... for update` is rejected outright by Postgres
-/// ("FOR UPDATE is not allowed with aggregate functions"), and locking the current top row would
-/// protect nothing on the first allocation of the day, when there is no row to lock. Same
-/// `pg_advisory_xact_lock` pattern `repos::faa_surface_seed` uses for seed-once-per-airport.
-///
-/// The unique constraint on `(facility, issued_day, number)` is the backstop if one ever slips past.
-async fn allocate_advisory_number(
-    tx: &mut Transaction<'_, Postgres>,
-    facility: &str,
-    day: chrono::NaiveDate,
-) -> Result<i32, ApiError> {
-    sqlx::query("select pg_advisory_xact_lock(hashtext($1))")
-        .bind(format!("tmu.advisory:{facility}:{day}"))
-        .execute(&mut **tx)
-        .await
-        .map_err(|_| ApiError::Internal)?;
-
-    sqlx::query_scalar::<_, Option<i32>>(
-        "select max(number) from tmu.advisories where facility = $1 and issued_day = $2",
-    )
-    .bind(facility)
-    .bind(day)
-    .fetch_one(&mut **tx)
-    .await
-    .map(|max| max.unwrap_or(0) + 1)
-    .map_err(|_| ApiError::Internal)
-}
-
-/// Creates a draft advisory, allocating its number (#457).
-///
-/// The number is taken at **draft**, so the author sees the number they will issue under while still
-/// writing. [`delete_advisory`] gives it back when a draft is abandoned — under the one condition
-/// that makes that safe.
-pub async fn create_advisory(
-    pool: &PgPool,
-    req: &CreateAdvisoryRequest,
-    created_by: &str,
-) -> Result<String, ApiError> {
-    let facility = req.facility.trim().to_ascii_uppercase();
-    let day = Utc::now().date_naive();
-
-    let mut tx = pool.begin().await.map_err(|_| ApiError::Internal)?;
-    let number = allocate_advisory_number(&mut tx, &facility, day).await?;
-    let id = sqlx::query_scalar::<_, String>(
-        "insert into tmu.advisories \
-         (facility, issued_day, number, kind, body, structured, decoded, created_by) \
-         values ($1, $2, $3, $4, $5, $6, $7, $8) returning id",
-    )
-    .bind(&facility)
-    .bind(day)
-    .bind(number)
-    .bind(req.kind.trim())
-    .bind(req.body.trim())
-    .bind(req.structured.as_ref().map(sqlx::types::Json))
-    .bind(req.decoded.as_deref())
-    .bind(created_by)
-    .fetch_one(&mut *tx)
-    .await
-    .map_err(|_| ApiError::Internal)?;
-    tx.commit().await.map_err(|_| ApiError::Internal)?;
-    Ok(id)
-}
-
-pub async fn get_advisory(pool: &PgPool, id: &str) -> Result<Option<AdvisoryBody>, ApiError> {
-    sqlx::query_as::<_, AdvisoryBody>(&format!("{ADVISORY_SELECT} where id = $1"))
-        .bind(id)
-        .fetch_optional(pool)
-        .await
-        .map_err(|_| ApiError::Internal)
-}
-
-/// Newest first, which for advisories means by the number they were issued under.
-pub async fn list_advisories(pool: &PgPool) -> Result<Vec<AdvisoryBody>, ApiError> {
-    sqlx::query_as::<_, AdvisoryBody>(&format!(
-        "{ADVISORY_SELECT} order by issued_day desc, number desc"
-    ))
-    .fetch_all(pool)
-    .await
-    .map_err(|_| ApiError::Internal)
-}
-
-/// Edits a draft. A published advisory is a document that went out; it is cancelled and reissued
-/// rather than rewritten.
-pub async fn update_advisory(
-    pool: &PgPool,
-    id: &str,
-    req: &UpdateAdvisoryRequest,
-) -> Result<bool, ApiError> {
-    let result = sqlx::query(
-        "update tmu.advisories set \
-            kind = coalesce($2, kind), \
-            body = coalesce($3, body), \
-            structured = coalesce($4, structured), \
-            decoded = coalesce($5, decoded) \
-         where id = $1 and status = 'draft'",
-    )
-    .bind(id)
-    .bind(req.kind.as_deref())
-    .bind(req.body.as_deref())
-    .bind(req.structured.as_ref().map(sqlx::types::Json))
-    .bind(req.decoded.as_deref())
-    .execute(pool)
-    .await
-    .map_err(|_| ApiError::Internal)?;
-    Ok(result.rows_affected() > 0)
-}
-
-/// Publishes a draft. Returns false if it was not a draft (or is absent).
-pub async fn publish_advisory(
-    pool: &PgPool,
-    id: &str,
-    published_by: &str,
-) -> Result<bool, ApiError> {
-    let result = sqlx::query(
-        "update tmu.advisories \
-         set status = 'published', published_by = $2, published_at = now() \
-         where id = $1 and status = 'draft'",
-    )
-    .bind(id)
-    .bind(published_by)
-    .execute(pool)
-    .await
-    .map_err(|_| ApiError::Internal)?;
-    Ok(result.rows_affected() > 0)
-}
-
-/// Cancels a draft or published advisory. Its number is **not** released: a published advisory was
-/// issued, and a cancelled draft that once held a number is not worth the ambiguity of reissuing it.
-pub async fn cancel_advisory(pool: &PgPool, id: &str) -> Result<bool, ApiError> {
-    let result = sqlx::query(
-        "update tmu.advisories set status = 'cancelled' \
-         where id = $1 and status in ('draft', 'published')",
-    )
-    .bind(id)
-    .execute(pool)
-    .await
-    .map_err(|_| ApiError::Internal)?;
-    Ok(result.rows_affected() > 0)
-}
-
-/// Deletes an abandoned draft, giving its number back **only if nothing higher has since been
-/// taken** (#457).
-///
-/// Numbers are allocated at draft so the author can see theirs while writing, which means an
-/// abandoned draft would otherwise burn one. Reclaiming is therefore wanted — but only at the top of
-/// the sequence: releasing a number below the maximum would either leave the hole anyway or require
-/// renumbering the drafts above it, and a number that has already appeared on someone's screen
-/// pointing at a *different* advisory is worse than a gap.
-///
-/// So: abandon the newest draft and the sequence rewinds; abandon an older one and its number stays
-/// burned. A published or cancelled advisory is never deleted here at all.
-pub async fn delete_advisory(pool: &PgPool, id: &str) -> Result<bool, ApiError> {
-    let result = sqlx::query(
-        "delete from tmu.advisories a \
-         where a.id = $1 and a.status = 'draft' \
-           and not exists ( \
-               select 1 from tmu.advisories higher \
-                where higher.facility = a.facility \
-                  and higher.issued_day = a.issued_day \
-                  and higher.number > a.number \
-           )",
-    )
-    .bind(id)
-    .execute(pool)
-    .await
-    .map_err(|_| ApiError::Internal)?;
-    Ok(result.rows_affected() > 0)
 }
