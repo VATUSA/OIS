@@ -63,7 +63,7 @@ export function encodeNtml(r: Ntml): string {
   if (q) parts.push(clean(q));
   const a = opt(r.aircraft);
   if (a) parts.push(`TYPE:${clean(a)}`);
-  if (r.speed) parts.push(`SPD:${r.speed.op}${r.speed.value}`);
+  if (r.speed) parts.push(`SPD:${r.speed.op.trim()}${r.speed.value}`);
   if (r.altitude) parts.push(`ALT:${clean(r.altitude.op)}${String(r.altitude.value).padStart(3, "0")}`);
   const c = opt(r.condition);
   if (c) {
@@ -117,7 +117,11 @@ export function decodeNtml(r: Ntml): string {
   const a = opt(r.aircraft);
   if (a) mods.push(AIRCRAFT_EN[clean(a)] ?? a.toLowerCase());
   if (r.speed) {
-    const lead = r.speed.op === "≤" ? "at or below " : r.speed.op === "≥" ? "at or above " : "at ";
+    // `op` is a free string on the API, so the ASCII spellings arrive too; `backend/src/tmi.rs`
+    // accepts both and trims, and this has to agree or the form previews a different restriction
+    // than the one that gets published.
+    const op = r.speed.op.trim();
+    const lead = op === "≤" || op === "<=" ? "at or below " : op === "≥" || op === ">=" ? "at or above " : "at ";
     mods.push(`${lead}${r.speed.value}kt`);
   }
   if (r.altitude) {

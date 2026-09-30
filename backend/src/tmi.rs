@@ -170,102 +170,48 @@ pub fn render_english(r: &NtmlRestriction) -> String {
 mod tests {
     use super::*;
 
-    fn bound(op: &str, value: i32) -> Bound {
-        Bound {
-            op: op.into(),
-            value,
+    /// One reference case from `fixtures/ntml-reference.json`. The same file drives
+    /// `web/src/lib/ntml.test.ts`, so a case is written once and the two implementations of this
+    /// grammar cannot drift apart without a test failing on one side or the other.
+    #[derive(serde::Deserialize)]
+    struct Case {
+        name: String,
+        restriction: NtmlRestriction,
+        raw: String,
+        english: String,
+    }
+
+    #[derive(serde::Deserialize)]
+    struct Fixtures {
+        cases: Vec<Case>,
+    }
+
+    /// Baked in at compile time, so there is no runtime path to get wrong and no way to run the
+    /// suite against a fixture file that isn't there.
+    const FIXTURES: &str = include_str!("../../fixtures/ntml-reference.json");
+
+    #[test]
+    fn matches_every_shared_reference_case() {
+        let fixtures: Fixtures =
+            serde_json::from_str(FIXTURES).expect("fixtures/ntml-reference.json is not valid JSON");
+        assert!(
+            !fixtures.cases.is_empty(),
+            "the fixture file parsed but held no cases, so this test would pass by asserting nothing"
+        );
+
+        for case in &fixtures.cases {
+            assert_eq!(
+                encode(&case.restriction),
+                case.raw,
+                "encoded line disagrees with the shared fixture for case '{}'",
+                case.name
+            );
+            assert_eq!(
+                render_english(&case.restriction),
+                case.english,
+                "English rendering disagrees with the shared fixture for case '{}'",
+                case.name
+            );
         }
-    }
-
-    /// Base restriction with everything empty/none, for tests to tweak.
-    fn base(element: &str, direction: &str, kind: &str) -> NtmlRestriction {
-        NtmlRestriction {
-            element: element.into(),
-            direction: direction.into(),
-            via: None,
-            kind: kind.into(),
-            value: None,
-            text: None,
-            qualifier: None,
-            aircraft: None,
-            speed: None,
-            altitude: None,
-            condition: None,
-            condition_detail: None,
-            exclude: Vec::new(),
-        }
-    }
-
-    #[test]
-    fn encodes_the_camrn_mit_example() {
-        let r = NtmlRestriction {
-            via: Some("CAMRN".into()),
-            value: Some(20),
-            qualifier: Some("NO STACKS".into()),
-            aircraft: Some("ALL".into()),
-            speed: Some(bound("≤", 210)),
-            altitude: Some(bound("AOB", 90)),
-            condition: Some("VOLUME".into()),
-            condition_detail: Some("VOLUME".into()),
-            exclude: vec!["PHL".into()],
-            ..base("JFK", "arrivals", "MIT")
-        };
-        assert_eq!(
-            encode(&r),
-            "JFK arrivals via CAMRN 20MIT NO STACKS TYPE:ALL SPD:≤210 ALT:AOB090 VOLUME:VOLUME EXCL:PHL"
-        );
-    }
-
-    #[test]
-    fn encodes_the_enroute_stop_example() {
-        let r = NtmlRestriction {
-            via: Some("J152".into()),
-            aircraft: Some("ALL".into()),
-            condition: Some("WEATHER".into()),
-            condition_detail: Some("THUNDERSTORMS".into()),
-            exclude: vec!["PNE".into()],
-            ..base("PHL", "enroute", "STOP")
-        };
-        assert_eq!(
-            encode(&r),
-            "PHL via J152 STOP TYPE:ALL WEATHER:THUNDERSTORMS EXCL:PNE"
-        );
-    }
-
-    #[test]
-    fn encodes_the_per_airport_departure_example() {
-        let r = NtmlRestriction {
-            via: Some("BIGGY".into()),
-            value: Some(15),
-            qualifier: Some("PER AIRPORT".into()),
-            aircraft: Some("JET".into()),
-            condition: Some("VOLUME".into()),
-            condition_detail: Some("VOLUME".into()),
-            ..base("EWR,LGA", "departures", "MIT")
-        };
-        assert_eq!(
-            encode(&r),
-            "EWR,LGA departures via BIGGY 15MIT PER AIRPORT TYPE:JET VOLUME:VOLUME"
-        );
-    }
-
-    #[test]
-    fn renders_readable_english() {
-        let r = NtmlRestriction {
-            via: Some("CAMRN".into()),
-            value: Some(20),
-            qualifier: Some("NO STACKS".into()),
-            aircraft: Some("ALL".into()),
-            speed: Some(bound("≤", 210)),
-            altitude: Some(bound("AOB", 90)),
-            condition: Some("VOLUME".into()),
-            condition_detail: Some("VOLUME".into()),
-            exclude: vec!["PHL".into()],
-            ..base("JFK", "arrivals", "MIT")
-        };
-        assert_eq!(
-            render_english(&r),
-            "JFK arrivals via CAMRN: 20 miles-in-trail (no stacks, all aircraft, at or below 210kt, at or below FL090) — due to volume; excluding PHL"
-        );
     }
 }
