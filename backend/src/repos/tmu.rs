@@ -708,6 +708,34 @@ async fn allocate_advisory_number(
     .map_err(|_| ApiError::Internal)
 }
 
+/// The body to store for an advisory.
+///
+/// A **typed** advisory's document is re-derived from its fields rather than trusted from the
+/// client, mirroring the rule a structured TMI follows (`models::UpdateTmiRequest`): the fields are
+/// the source of truth and the document is their rendering, so the two can never drift. A **raw**
+/// advisory — one with no `structured` — keeps the text it was given, byte for byte. That is what
+/// makes a raw advisory and a structured one of the same content render identically (#458): the
+/// same function produced both.
+///
+/// An unknown `kind` also passes the body through untouched, which is how `kind` stays open for
+/// #461's types without this becoming a dispatch table that must be edited in lockstep.
+fn advisory_body(
+    kind: &str,
+    structured: Option<&serde_json::Value>,
+    raw: &str,
+    ident: &crate::advisory::AdvisoryIdent,
+) -> Result<String, ApiError> {
+    if kind != crate::models::ADVISORY_KIND_REROUTE {
+        return Ok(raw.trim().to_string());
+    }
+    let Some(value) = structured else {
+        return Ok(raw.trim().to_string());
+    };
+    let parsed: crate::models::RerouteAdvisory =
+        serde_json::from_value(value.clone()).map_err(|_| ApiError::BadRequest)?;
+    Ok(crate::advisory::render_reroute(&parsed, ident))
+}
+
 /// Creates a draft advisory, allocating its number (#457).
 ///
 /// The number is taken at **draft**, so the author sees the number they will issue under while still
@@ -729,6 +757,20 @@ pub async fn create_advisory(
 
     let mut tx = pool.begin().await.map_err(|_| ApiError::Internal)?;
     let number = allocate_advisory_number(&mut tx, &facility, day).await?;
+    // Rendered here rather than in the handler because the number is allocated in this transaction:
+    // the document carries it twice (header and TMI ID), and re-deriving it outside would be a
+    // second answer to a question the database has already settled.
+    let body = advisory_body(
+        req.kind.trim(),
+        req.structured.as_ref(),
+        &req.body,
+        &crate::advisory::AdvisoryIdent {
+            facility: facility.clone(),
+            number,
+            issued_day: day,
+            signed_at: Utc::now(),
+        },
+    )?;
     let id = sqlx::query_scalar::<_, String>(
         "insert into tmu.advisories \
          (facility, issued_day, number, kind, body, structured, decoded, created_by) \
@@ -738,7 +780,7 @@ pub async fn create_advisory(
     .bind(day)
     .bind(number)
     .bind(req.kind.trim())
-    .bind(req.body.trim())
+    .bind(&body)
     .bind(req.structured.as_ref().map(sqlx::types::Json))
     .bind(req.decoded.as_deref())
     .bind(created_by)
@@ -774,6 +816,43 @@ pub async fn update_advisory(
     id: &str,
     req: &UpdateAdvisoryRequest,
 ) -> Result<bool, ApiError> {
+    // A structured edit re-derives the document, the same way a create does, so an edited advisory
+    // cannot end up showing fields it no longer has. The identity it renders under comes off the
+    // row — the number was settled when the draft was created.
+    //
+    // Known gap, deliberately not widened here: a *raw* edit still leaves any existing `structured`
+    // in place (`coalesce` below), so the breakdown can go stale against the body. That is the same
+    // defect #452 fixed for TMIs and wants the same treatment; filed separately rather than folded
+    // into the type work.
+    let body = match req.structured.as_ref() {
+        None => req.body.clone(),
+        Some(structured) => {
+            let row = sqlx::query_as::<_, (String, i32, chrono::NaiveDate, String)>(
+                "select facility, number, issued_day, kind from tmu.advisories \
+                 where id = $1 and status = 'draft'",
+            )
+            .bind(id)
+            .fetch_optional(pool)
+            .await
+            .map_err(|_| ApiError::Internal)?;
+            let Some((facility, number, issued_day, current_kind)) = row else {
+                return Ok(false);
+            };
+            let kind = req.kind.as_deref().unwrap_or(&current_kind);
+            Some(advisory_body(
+                kind.trim(),
+                Some(structured),
+                req.body.as_deref().unwrap_or_default(),
+                &crate::advisory::AdvisoryIdent {
+                    facility,
+                    number,
+                    issued_day,
+                    signed_at: Utc::now(),
+                },
+            )?)
+        }
+    };
+
     let result = sqlx::query(
         "update tmu.advisories set \
             kind = coalesce($2, kind), \
@@ -784,7 +863,7 @@ pub async fn update_advisory(
     )
     .bind(id)
     .bind(req.kind.as_deref())
-    .bind(req.body.as_deref())
+    .bind(body.as_deref())
     .bind(req.structured.as_ref().map(sqlx::types::Json))
     .bind(req.decoded.as_deref())
     .execute(pool)
@@ -889,6 +968,216 @@ mod tests {
         .await
         .unwrap();
         get_advisory(pool, &id).await.unwrap().unwrap()
+    }
+
+    /// The reference single-segment reroute, as a structured payload.
+    fn reroute_structured() -> serde_json::Value {
+        serde_json::json!({
+            "header": "FCA RQD/FL",
+            "name": "NO_J75_3_PARTIAL",
+            "impacted_area": "ZDC",
+            "reason": "WEATHER / THUNDERSTORMS",
+            "include_traffic": "KBOS DEPARTURES TO KMCO",
+            "valid": {"basis": "fca_entry_time", "from": "142030", "to": "150230"},
+            "facilities_included": "ALL_FLIGHTS",
+            "probability_of_extension": "MEDIUM",
+            "remarks": null,
+            "associated_restrictions": null,
+            "modifications": null,
+            "routes": {
+                "kind": "single",
+                "rows": [{
+                    "orig": "ZBW", "dest": "MCO",
+                    "route": ">GONZZ Q29 DORET DJB J84 SPA J85 TWINS JEFOI SHEMP< BUGGZ4"
+                }]
+            }
+        })
+    }
+
+    async fn create(pool: &PgPool, req: CreateAdvisoryRequest) -> AdvisoryBody {
+        let user = seed_user(pool).await;
+        let id = create_advisory(pool, &req, &user).await.unwrap();
+        get_advisory(pool, &id).await.unwrap().unwrap()
+    }
+
+    // --- the Reroute document type (VATUSA/OIS#458) ---
+
+    /// A structured advisory's document is rendered from its fields, not taken from the client — so
+    /// a client that posts a body contradicting its own fields cannot store the contradiction.
+    #[sqlx::test]
+    async fn a_structured_reroute_renders_its_own_document(pool: PgPool) {
+        let adv = create(
+            &pool,
+            CreateAdvisoryRequest {
+                facility: "DCC".into(),
+                kind: "reroute".into(),
+                body: "IGNORE ME".into(),
+                structured: Some(reroute_structured()),
+                decoded: None,
+            },
+        )
+        .await;
+
+        assert!(
+            adv.body.starts_with("vATCSCC ADVZY 001 DCC "),
+            "{}",
+            adv.body
+        );
+        assert!(adv.body.contains("NAME: NO_J75_3_PARTIAL"));
+        assert!(adv.body.contains("ORIG     DEST      ROUTE"));
+        assert!(adv.body.contains("TMI ID: RRDCC001"));
+        assert!(
+            !adv.body.contains("IGNORE ME"),
+            "the posted body was trusted"
+        );
+    }
+
+    /// The header and the TMI ID both carry the number, and it is the one the database allocated —
+    /// not a second answer computed at render time.
+    #[sqlx::test]
+    async fn the_document_carries_the_allocated_number_in_both_places(pool: PgPool) {
+        create(
+            &pool,
+            CreateAdvisoryRequest {
+                facility: "DCC".into(),
+                kind: "reroute".into(),
+                body: "x".into(),
+                structured: Some(reroute_structured()),
+                decoded: None,
+            },
+        )
+        .await;
+        let second = create(
+            &pool,
+            CreateAdvisoryRequest {
+                facility: "DCC".into(),
+                kind: "reroute".into(),
+                body: "x".into(),
+                structured: Some(reroute_structured()),
+                decoded: None,
+            },
+        )
+        .await;
+
+        assert_eq!(second.number, 2);
+        assert!(second.body.starts_with("vATCSCC ADVZY 002 DCC "));
+        assert!(second.body.contains("TMI ID: RRDCC002"));
+    }
+
+    /// #458 AC3: a raw advisory keeps its text byte for byte, and a raw advisory carrying the
+    /// rendered document is indistinguishable from the structured one that produced it.
+    #[sqlx::test]
+    async fn a_raw_reroute_is_stored_verbatim_and_matches_the_structured_form(pool: PgPool) {
+        let structured = create(
+            &pool,
+            CreateAdvisoryRequest {
+                facility: "DCC".into(),
+                kind: "reroute".into(),
+                body: "x".into(),
+                structured: Some(reroute_structured()),
+                decoded: None,
+            },
+        )
+        .await;
+
+        // Same document, typed as raw text into a *different* facility's advisory so it gets its
+        // own number — then compare everything below the header, which is what the author wrote.
+        let raw = create(
+            &pool,
+            CreateAdvisoryRequest {
+                facility: "DCC".into(),
+                kind: "reroute".into(),
+                body: structured.body.clone(),
+                structured: None,
+                decoded: None,
+            },
+        )
+        .await;
+
+        assert!(raw.structured.is_none(), "a raw advisory has no breakdown");
+        assert_eq!(
+            raw.body, structured.body,
+            "a raw advisory is stored exactly as typed"
+        );
+    }
+
+    /// An unknown kind is passed through untouched, so `kind` stays open for #461's types without
+    /// this becoming a dispatch table that has to be edited in lockstep.
+    #[sqlx::test]
+    async fn an_unknown_kind_keeps_whatever_body_it_was_given(pool: PgPool) {
+        let adv = create(
+            &pool,
+            CreateAdvisoryRequest {
+                facility: "DCC".into(),
+                kind: "ground_stop".into(),
+                body: "SOME OTHER DOCUMENT".into(),
+                structured: Some(reroute_structured()),
+                decoded: None,
+            },
+        )
+        .await;
+        assert_eq!(adv.body, "SOME OTHER DOCUMENT");
+    }
+
+    /// A structured payload that is not a reroute is a client error, not a silently empty document.
+    #[sqlx::test]
+    async fn a_malformed_reroute_payload_is_rejected(pool: PgPool) {
+        let user = seed_user(&pool).await;
+        let err = create_advisory(
+            &pool,
+            &CreateAdvisoryRequest {
+                facility: "DCC".into(),
+                kind: "reroute".into(),
+                body: "x".into(),
+                structured: Some(serde_json::json!({"nope": true})),
+                decoded: None,
+            },
+            &user,
+        )
+        .await;
+        assert!(matches!(err, Err(ApiError::BadRequest)), "{err:?}");
+    }
+
+    /// Editing the fields re-renders the document, so an edited draft cannot keep showing the
+    /// values it no longer has.
+    #[sqlx::test]
+    async fn a_structured_edit_re_renders_the_document(pool: PgPool) {
+        let adv = create(
+            &pool,
+            CreateAdvisoryRequest {
+                facility: "DCC".into(),
+                kind: "reroute".into(),
+                body: "x".into(),
+                structured: Some(reroute_structured()),
+                decoded: None,
+            },
+        )
+        .await;
+
+        let mut edited = reroute_structured();
+        edited["name"] = serde_json::json!("RENAMED_ROUTE");
+        assert!(
+            update_advisory(
+                &pool,
+                &adv.id,
+                &UpdateAdvisoryRequest {
+                    kind: None,
+                    body: None,
+                    structured: Some(edited),
+                    decoded: None,
+                },
+            )
+            .await
+            .unwrap()
+        );
+
+        let after = get_advisory(&pool, &adv.id).await.unwrap().unwrap();
+        assert!(after.body.contains("NAME: RENAMED_ROUTE"), "{}", after.body);
+        assert!(!after.body.contains("NO_J75_3_PARTIAL"));
+        assert!(
+            after.body.contains("TMI ID: RRDCC001"),
+            "the number is unchanged by an edit"
+        );
     }
 
     /// #457, AC2: the sequence is per issuing facility, so two facilities numbering on the same day

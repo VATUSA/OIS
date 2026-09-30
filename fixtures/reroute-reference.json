@@ -1,0 +1,104 @@
+{
+  "note": "Shared Reroute advisory (ADVZY) reference cases, taken from the vATCSCC TMI material cited by VATUSA/OIS#437. The renderer is backend/src/advisory.rs (render_reroute); this file is what its tests assert against, so an example is written once and the document format cannot quietly drift. Every field is written out, null where absent, so a case reads as a complete advisory. The backend is authoritative: if a case and an implementation disagree, the backend decides which is wrong. One deliberate deviation from the source document is recorded per case in `deviation`.",
+  "cases": [
+    {
+      "name": "advzy-004-single-segment",
+      "why": "The reference single-segment reroute, every field populated. Every section is load-bearing: drop a label, the TMI ID, the valid window or the signature and this fails.",
+      "deviation": null,
+      "ident": {
+        "facility": "DCC",
+        "number": 4,
+        "issued_day": "2020-04-14",
+        "signed_at": "2020-04-14T14:36:00Z",
+        "valid_from": "142030",
+        "valid_to": "150230"
+      },
+      "structured": {
+        "header": "FCA RQD/FL",
+        "name": "NO_J75_3_PARTIAL",
+        "impacted_area": "ZDC",
+        "reason": "WEATHER / THUNDERSTORMS",
+        "include_traffic": "KBOS DEPARTURES TO KMCO",
+        "valid": {
+          "basis": "fca_entry_time",
+          "from": "142030",
+          "to": "150230"
+        },
+        "facilities_included": "ALL_FLIGHTS",
+        "probability_of_extension": "MEDIUM",
+        "remarks": null,
+        "associated_restrictions": null,
+        "modifications": null,
+        "routes": {
+          "kind": "single",
+          "rows": [
+            {
+              "orig": "ZBW",
+              "dest": "MCO",
+              "route": ">GONZZ Q29 DORET DJB J84 SPA J85 TWINS JEFOI SHEMP< BUGGZ4"
+            }
+          ]
+        }
+      },
+      "rendered": "vATCSCC ADVZY 004 DCC 04/14/2020 FCA RQD/FL\nNAME: NO_J75_3_PARTIAL\nIMPACTED AREA: ZDC\nREASON: WEATHER / THUNDERSTORMS\nINCLUDE TRAFFIC: KBOS DEPARTURES TO KMCO\nVALID: FCA ENTRY TIME FROM 142030 TO 150230\nFACILITIES INCLUDED: ALL_FLIGHTS\nPROBABILITY OF EXTENSION: MEDIUM\nREMARKS:\nASSOCIATED RESTRICTIONS:\nMODIFICATIONS:\nROUTE:\nORIG     DEST      ROUTE\n----     ----      -----\nZBW      MCO       >GONZZ Q29 DORET DJB J84 SPA J85 TWINS JEFOI SHEMP< BUGGZ4\n\nTMI ID: RRDCC004\n142030-150230\n20/04/14 14:36"
+    },
+    {
+      "name": "advzy-005-multi-segment",
+      "why": "The reference multi-segment reroute: two tables (origin segments, then destination segments), an ETD-based valid period, and the remarks/associated-restrictions/modifications lines carrying text rather than being bare.",
+      "deviation": "The source document wraps a long route onto a continuation line indented to the ROUTE column, but not by any stated rule - measured inline widths are LAS 62 (not wrapped), SEA 50 (not wrapped), LAX 65 (wrapped), SFO 65 (wrapped), so the threshold is a column artifact of the source PDF rather than a spec. Each route therefore renders on one line here. If a real wrap width is ever documented, this case is where it gets pinned.",
+      "ident": {
+        "facility": "DCC",
+        "number": 5,
+        "issued_day": "2020-04-14",
+        "signed_at": "2020-04-14T14:15:00Z",
+        "valid_from": "142030",
+        "valid_to": "150230"
+      },
+      "structured": {
+        "header": "ROUTE RQD/FL",
+        "name": "CAN_NOSIK_WEST_2_PARTIAL",
+        "impacted_area": "ZOB",
+        "reason": "WEATHER / THUNDERSTORMS",
+        "include_traffic": "KJFK DEPARTURES TO KLAS/KLAX/KSFO/KSEA",
+        "valid": {
+          "basis": "etd",
+          "from": "142030",
+          "to": "150230"
+        },
+        "facilities_included": "ALL_FLIGHTS",
+        "probability_of_extension": "LOW",
+        "remarks": "CZY REQUESTS 20 MIT.",
+        "associated_restrictions": "REPLACES ADVZY 001",
+        "modifications": "EXTENDS ADVZY.",
+        "routes": {
+          "kind": "segmented",
+          "origin": [
+            {
+              "orig": "JFK",
+              "route": ">GREKI JUDDS CAM NOVON SIKBO NOSIK"
+            }
+          ],
+          "destination": [
+            {
+              "orig": "LAS",
+              "route": "NOSIK ZOHAN LAAKE ONL EKR J100 SAKES GGAPP< SITEE4"
+            },
+            {
+              "orig": "LAX",
+              "route": "NOSIK ZOHAN LAAKE ONL EKR HVE PROMT Q88 HAKMN< ANJLL4"
+            },
+            {
+              "orig": "SFO",
+              "route": "NOSIK ZOHAN LAAKE FOSIG DDY MLD J32 LLC LEGGS< BDEGA3"
+            },
+            {
+              "orig": "SEA",
+              "route": "NOSIK ZOHAN CESNA EXHOS LWT MLP< GLASR1"
+            }
+          ]
+        }
+      },
+      "rendered": "vATCSCC ADVZY 005 DCC 04/14/2020 ROUTE RQD/FL\nNAME: CAN_NOSIK_WEST_2_PARTIAL\nIMPACTED AREA: ZOB\nREASON: WEATHER / THUNDERSTORMS\nINCLUDE TRAFFIC: KJFK DEPARTURES TO KLAS/KLAX/KSFO/KSEA\nVALID: ETD 142030 TO 150230\nFACILITIES INCLUDED: ALL_FLIGHTS\nPROBABILITY OF EXTENSION: LOW\nREMARKS: CZY REQUESTS 20 MIT.\nASSOCIATED RESTRICTIONS: REPLACES ADVZY 001\nMODIFICATIONS: EXTENDS ADVZY.\nROUTE:\nORIG        ROUTE - ORIGIN SEGMENTS\n----        -----------------------\nJFK         >GREKI JUDDS CAM NOVON SIKBO NOSIK\n\nORIG        ROUTE - DESTINATION SEGMENTS\n----        ----------------------------\nLAS         NOSIK ZOHAN LAAKE ONL EKR J100 SAKES GGAPP< SITEE4\nLAX         NOSIK ZOHAN LAAKE ONL EKR HVE PROMT Q88 HAKMN< ANJLL4\nSFO         NOSIK ZOHAN LAAKE FOSIG DDY MLD J32 LLC LEGGS< BDEGA3\nSEA         NOSIK ZOHAN CESNA EXHOS LWT MLP< GLASR1\n\nTMI ID: RRDCC005\n142030-150230\n20/04/14 14:15"
+    }
+  ]
+}
