@@ -103,9 +103,17 @@ pub async fn create_tmi(
     .map_err(|_| ApiError::Internal)
 }
 
-/// Updates the given fields (COALESCE — omitted fields are left unchanged). Returns
-/// false if the TMI doesn't exist.
-pub async fn update_tmi(pool: &PgPool, id: &str, req: &UpdateTmiRequest) -> Result<bool, ApiError> {
+/// Update the given fields (COALESCE — omitted fields are left unchanged) **in the caller's
+/// transaction**, so that a published TMI's corrected Discord row can be enqueued atomically with
+/// the edit. Returns the updated row, or `None` if the TMI doesn't exist.
+///
+/// Shaped like [`publish_tmi`], including re-selecting rather than using `returning`: `SELECT` joins
+/// `identity.users` for `author`, which `returning` cannot produce.
+pub async fn update_tmi(
+    tx: &mut Transaction<'_, Postgres>,
+    id: &str,
+    req: &UpdateTmiRequest,
+) -> Result<Option<TmiBody>, ApiError> {
     let result = sqlx::query(
         "update tmu.tmis set \
             requesting = coalesce($2, requesting), \
@@ -121,10 +129,17 @@ pub async fn update_tmi(pool: &PgPool, id: &str, req: &UpdateTmiRequest) -> Resu
     .bind(&req.restriction)
     .bind(req.start_time)
     .bind(req.stop_time)
-    .execute(pool)
+    .execute(&mut **tx)
     .await
     .map_err(|_| ApiError::Internal)?;
-    Ok(result.rows_affected() > 0)
+    if result.rows_affected() == 0 {
+        return Ok(None);
+    }
+    sqlx::query_as::<_, TmiBody>(&format!("{SELECT} where t.id = $1"))
+        .bind(id)
+        .fetch_optional(&mut **tx)
+        .await
+        .map_err(|_| ApiError::Internal)
 }
 
 /// Publishes a draft. Returns false if the TMI isn't currently a draft.
