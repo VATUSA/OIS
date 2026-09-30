@@ -39,7 +39,9 @@ export function FacilityCombobox({
   const [query, setQuery] = useState("");
   const [open, setOpen] = useState(false);
 
-  const all = dir.data ?? [];
+  // Memoised so the empty fallback isn't a fresh array every render, which made `matches` below
+  // re-sort on every keystroke's re-render while the directory was still loading (#329).
+  const all = useMemo(() => dir.data ?? [], [dir.data]);
   const q = query.trim().toUpperCase();
   const matches = useMemo(() => {
     const kindRank = (k: string) => (k === "artcc" ? 0 : 1);

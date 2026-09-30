@@ -213,7 +213,8 @@ export function FacilitySupportSection({ eventId, eventStart }: { eventId: numbe
         cell: (c) => <ClearCell eventId={eventId} row={c.row.original} />,
       },
     ],
-    [eventId, nameById],
+    // `drafts` is a ref-held Map, so listing it costs nothing — its identity never changes (#329).
+    [eventId, nameById, drafts],
   );
 
   return (

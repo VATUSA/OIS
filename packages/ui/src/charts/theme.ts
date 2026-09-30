@@ -14,7 +14,8 @@ export type ChartColor = string;
 /** Resolved chart theme + a colour resolver, re-read when the theme flips. */
 export function useChartTheme(extra: readonly string[] = []) {
   const key = extra.join("|");
-  // `key` stands in for `extra` so a fresh array literal each render doesn't re-resolve.
+  // `key` stands in for `extra` so a fresh array literal each render doesn't re-resolve (#329).
+  // eslint-disable-next-line react-hooks/exhaustive-deps
   const names = React.useMemo(() => [...BASE, ...SERIES, ...extra], [key]);
   const t = useTokens(names);
   return React.useMemo(() => {

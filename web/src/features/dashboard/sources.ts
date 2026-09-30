@@ -103,6 +103,9 @@ function useTaggedRows<T>(
         const d = qs[i]?.data;
         return (d ? pick(d) : []).map((r) => ({ ...(r as object), [AIRPORT_KEY]: ic }) as Row);
       }),
+    // `sig` stands in for `list`/`qs`/`pick` deliberately — see the note above: depending on the
+    // arrays themselves is the freeze this hook exists to avoid (#329).
+    // eslint-disable-next-line react-hooks/exhaustive-deps
     [sig],
   );
 }
