@@ -2,6 +2,7 @@ import * as React from "react";
 import {useQueryClient} from "@tanstack/react-query";
 import {useToast} from "@ois/ui";
 
+import {safeUnlisten} from "@/lib/desktop-events";
 import {
   applyHotkeys,
   clearHotkeys,
@@ -60,12 +61,14 @@ function DesktopHotkeysInner() {
       void queryClient.invalidateQueries({queryKey: ["preferences", "settings"]});
       setResumeNonce((n) => n + 1);
     }).then((d) => {
-      if (cancelled) d();
+      if (cancelled) safeUnlisten(d);
       else dispose = d;
     });
     return () => {
       cancelled = true;
-      dispose?.();
+      // `ownHotkeys` already guards the two handles it owns; this keeps the shape uniform with the
+      // other teardowns, and covers a future disposer that forwards a handle straight through (#426).
+      safeUnlisten(dispose);
     };
   }, [isMain, queryClient]);
 

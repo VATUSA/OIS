@@ -1,9 +1,9 @@
-import {useAtc, type AtcPosition} from "@/lib/fca";
+import {useAtc, type AtcBoard, type AtcPosition} from "@/lib/fca";
 import {facilityAirports, facilityKindLabel, useFacilityDirectory} from "@/lib/facilities";
 import {onlineFor, ratingLabel} from "@/lib/atc-format";
 import {hhmmZulu} from "@/lib/time";
 
-import type {AtcWidget} from "./types";
+import type {AtcWidget, FacilityRef} from "./types";
 import {useReportWidgetStatus} from "./widget-status";
 
 /** ATC position kind → its domain-token badge (tinted fill + same-hue text). */
@@ -40,53 +40,100 @@ function PositionRow({ p }: { p: AtcPosition }) {
   );
 }
 
-/** Online ATC for a facility: its center/approach positions + its airports' ground stacks. */
-export function AtcWidgetView({ widget }: { widget: AtcWidget }) {
-  const { facility } = widget;
-  const { data: board, isLoading, isFetching, dataUpdatedAt, refetch } = useAtc(true);
-  const dir = useFacilityDirectory();
-  useReportWidgetStatus(isFetching, dataUpdatedAt, refetch);
+/** One labelled block of positions. `mono` renders the heading as an identifier (an ICAO / facility id). */
+type PositionGroup = { key: string; label: string; mono: boolean; positions: AtcPosition[] };
 
-  const facilityPositions: AtcPosition[] =
+const withPositions = (g: PositionGroup): boolean => g.positions.length > 0;
+
+/**
+ * Every online position in the country, grouped: centers, then approach areas, then airport stacks.
+ *
+ * The board is already national — `useAtc` makes one `GET /api/v1/flow/atc` — so this is the
+ * unfiltered view of what the facility branch narrows.
+ */
+function nationalGroups(board: AtcBoard | undefined): PositionGroup[] {
+  const byId = <T extends { id: string }>(xs: T[]) =>
+    xs.slice().sort((a, b) => a.id.localeCompare(b.id));
+  return [
+    ...byId(board?.centers ?? []).map((c) => ({
+      key: `ctr:${c.id}`,
+      label: c.id,
+      mono: true,
+      positions: c.positions,
+    })),
+    ...byId(board?.tracons ?? []).map((t) => ({
+      key: `app:${t.id}`,
+      label: t.id,
+      mono: true,
+      positions: t.positions,
+    })),
+    ...(board?.airports ?? [])
+      .slice()
+      .sort((a, b) => a.icao.localeCompare(b.icao))
+      .map((a) => ({ key: `apt:${a.icao}`, label: a.icao, mono: true, positions: a.positions })),
+  ].filter(withPositions);
+}
+
+/** Online ATC for one facility: its center/approach positions + its airports' ground stacks. */
+function facilityGroups(
+  board: AtcBoard | undefined,
+  facility: FacilityRef,
+  memberIcaos: string[],
+): PositionGroup[] {
+  const own =
     facility.kind === "artcc"
       ? (board?.centers.find((c) => c.id === facility.id)?.positions ?? [])
       : (board?.tracons.find((t) => t.id === facility.id)?.positions ?? []);
+  return [
+    {
+      key: "own",
+      label: facility.kind === "artcc" ? "Center" : "Approach / Departure",
+      mono: false,
+      positions: own,
+    },
+    ...(board?.airports ?? [])
+      .filter((a) => memberIcaos.includes(a.icao))
+      .sort((a, b) => a.icao.localeCompare(b.icao))
+      .map((a) => ({ key: `apt:${a.icao}`, label: a.icao, mono: true, positions: a.positions })),
+  ].filter(withPositions);
+}
 
-  const memberIcaos = facilityAirports(dir.data, facility.id);
-  const airportGroups = (board?.airports ?? [])
-    .filter((a) => memberIcaos.includes(a.icao))
-    .sort((a, b) => a.icao.localeCompare(b.icao));
+/** Online ATC for a facility, or for the whole NAS when the widget is scoped nationally. */
+export function AtcWidgetView({ widget }: { widget: AtcWidget }) {
+  const { facility } = widget;
+  const national = facility.kind === "national";
+  const { data: board, isLoading, isFetching, dataUpdatedAt, refetch } = useAtc(true);
+  // Only the facility branch resolves member airports; the national view shows every airport as-is.
+  const dir = useFacilityDirectory();
+  useReportWidgetStatus(isFetching, dataUpdatedAt, refetch);
 
-  const anyOnline = facilityPositions.length > 0 || airportGroups.length > 0;
-  const facilityLabel = facility.kind === "artcc" ? "Center" : "Approach / Departure";
+  const groups = national
+    ? nationalGroups(board)
+    : facilityGroups(board, facility, facilityAirports(dir.data, facility.id));
 
   return (
     <div className="flex h-full flex-col overflow-y-auto p-3 text-ink">
       {isLoading && !board ? (
         <p className="text-sm text-ink-3">Loading…</p>
-      ) : !anyOnline ? (
+      ) : groups.length === 0 ? (
         <p className="text-sm text-ink-3">
-          No online ATC for {facility.id} ({facilityKindLabel(facility.kind)}).
+          {national
+            ? "No online ATC anywhere in the NAS."
+            : `No online ATC for ${facility.id} (${facilityKindLabel(facility.kind)}).`}
         </p>
       ) : (
         <div className="flex flex-col gap-3">
-          {facilityPositions.length > 0 && (
-            <div>
-              <div className="mb-0.5 text-xs font-semibold text-ink-2">
-                {facilityLabel}
+          {groups.map((g) => (
+            <div key={g.key}>
+              <div
+                className={
+                  "mb-0.5 text-xs font-semibold text-ink-2" + (g.mono ? " font-mono" : "")
+                }
+              >
+                {g.label}
               </div>
               <div className="divide-y divide-line-soft">
-                {facilityPositions.map((p) => (
-                  <PositionRow key={p.callsign} p={p} />
-                ))}
-              </div>
-            </div>
-          )}
-          {airportGroups.map((ap) => (
-            <div key={ap.icao}>
-              <div className="mb-0.5 font-mono text-xs font-semibold text-ink-2">{ap.icao}</div>
-              <div className="divide-y divide-line-soft">
-                {ap.positions.map((p) => (
+                {g.positions.map((p) => (
                   <PositionRow key={p.callsign} p={p} />
                 ))}
               </div>

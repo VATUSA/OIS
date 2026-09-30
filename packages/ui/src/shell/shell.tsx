@@ -10,9 +10,14 @@ import {Tooltip, TooltipContent, TooltipTrigger} from "../components/tooltip";
  * collapsible sidebar and the main area. The main area is a breadcrumb row over the page's content
  * panel, inset and rounded on all four corners.
  *
- * The outer edge of the app *is* the window's bounding box — no gutter, no outer rounded corners and
+ * The outer edge of the app *is* the window's bounding box — no gutter, no CSS rounding of its own and
  * no frame shadow (#402). On the desktop app the native title bar is hidden, so a gutter here would
- * have read as a second chrome bar under it. The page's own 16px side gutters come from
+ * have read as a second chrome bar under it.
+ *
+ * The *window* does have rounded corners, put there by the OS rather than by this component (#419):
+ * macOS rounds a decorated window itself and Windows 11 is asked to via DWM, and the compositor clips
+ * the webview to that shape. So there is deliberately no `border-radius` here to match — adding one
+ * would double the curve inside the OS's. The page's own 16px side gutters come from
  * {@link ShellContent}'s padding, and the content panel is held off the window edge by its own
  * `mx-2 mb-2` — with the gutter gone there is nothing else to do it.
  *

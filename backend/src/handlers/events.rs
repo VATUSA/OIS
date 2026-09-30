@@ -5,7 +5,7 @@ use axum::{
     extract::{Extension, Path, State},
     http::StatusCode,
 };
-use std::collections::HashSet;
+use std::{collections::HashSet, time::Duration};
 
 use chrono::{DateTime, Datelike, Utc, Weekday};
 use serde::{Deserialize, Serialize};
@@ -188,6 +188,241 @@ pub async fn get_event(
         .await?
         .map(Json)
         .ok_or(ApiError::NotFound)
+}
+
+/// How long the banner fetch gets before it is abandoned. Short: a page is waiting on it.
+const BANNER_TIMEOUT: Duration = Duration::from_secs(10);
+
+/// The most banner we will relay. Event banners are a few hundred KB; this only stops a hostile or
+/// broken upstream streaming indefinitely into our memory.
+const BANNER_MAX_BYTES: usize = 8 * 1024 * 1024;
+
+/// One client for every banner fetch, rather than one per request.
+///
+/// A `reqwest::Client` owns a connection pool and a TLS config; building one per call throws both
+/// away each time. That is tolerable in the feed pollers, which run on a timer — this is a *request*
+/// handler, and the events list renders one banner per row, so a page of N events built N clients
+/// and reused no connection (#429 review). Same shape as `feed/forecast.rs`.
+/// A DNS resolver that refuses to hand back an address inside our own network.
+///
+/// The filter lives *in* resolution rather than in a check before the fetch, which matters: a check
+/// then a separate connect is a check-then-use gap — the name can answer differently the second time
+/// (DNS rebinding). Here the addresses the connector is given are the only ones it can dial, and
+/// every request through this client goes through it.
+struct PublicOnlyResolver;
+
+impl reqwest::dns::Resolve for PublicOnlyResolver {
+    fn resolve(&self, name: reqwest::dns::Name) -> reqwest::dns::Resolving {
+        let host = name.as_str().to_string();
+        Box::pin(async move {
+            let addrs: Vec<std::net::SocketAddr> = tokio::net::lookup_host((host.as_str(), 0))
+                .await
+                .map_err(|e| Box::new(e) as Box<dyn std::error::Error + Send + Sync>)?
+                .collect();
+            // All or nothing: a name answering with both a public and a private address is not one
+            // we follow at all, rather than one we follow to whichever came first.
+            if addrs.is_empty() || addrs.iter().any(|a| !is_public_ip(&a.ip())) {
+                return Err(Box::<dyn std::error::Error + Send + Sync>::from(
+                    "banner host resolves to a non-public address",
+                ));
+            }
+            Ok(Box::new(addrs.into_iter()) as reqwest::dns::Addrs)
+        })
+    }
+}
+
+/// One client for every banner fetch, rather than one per request.
+///
+/// A `reqwest::Client` owns a connection pool and a TLS config; building one per call throws both
+/// away each time. That is tolerable in the feed pollers, which run on a timer — this is a *request*
+/// handler, and the events list renders one banner per row, so a page of N events built N clients
+/// and reused no connection (#429 review). Same shape as `feed/forecast.rs`.
+static BANNER_CLIENT: std::sync::LazyLock<reqwest::Client> = std::sync::LazyLock::new(|| {
+    reqwest::Client::builder()
+        .user_agent("ois-backend/0.1 (+https://vatusa.net)")
+        .timeout(BANNER_TIMEOUT)
+        // A redirect is how an allowed-looking URL becomes a disallowed one — and how an address
+        // filter would be sidestepped after the fact.
+        .redirect(reqwest::redirect::Policy::none())
+        .dns_resolver(std::sync::Arc::new(PublicOnlyResolver))
+        .build()
+        .expect("banner http client")
+});
+
+/// Why a banner could not be relayed. Separate from the response so each guard can be tested.
+#[derive(Debug, PartialEq, Eq)]
+pub(crate) enum BannerReject {
+    /// The event has no banner, or no such event.
+    Missing,
+    /// Plain http, or not a URL we will fetch at all.
+    NotHttps,
+    /// The host answered, but not with a usable image.
+    Unusable,
+}
+
+/// Whether a banner URL is one we will fetch at all, before any connection is made.
+///
+/// Only the scheme here — *where* it may go is the resolver's job ([`PublicOnlyResolver`]), because
+/// a check made here and a connection made later is a gap the name can be changed inside.
+pub(crate) fn check_banner_scheme(url: &str) -> Result<(), BannerReject> {
+    // Plain http would let anything on the path swap the image, and a scheme like `file:` has no
+    // business reaching a fetcher at all. Judged on the parsed scheme rather than a `starts_with`,
+    // which was the same check twice — dropping the prefix test changed no behaviour and no test
+    // (#429 review), so the parse is the one that earns its place.
+    let parsed = reqwest::Url::parse(url).map_err(|_| BannerReject::NotHttps)?;
+    if parsed.scheme() != "https" || parsed.host_str().is_none() {
+        return Err(BannerReject::NotHttps);
+    }
+    Ok(())
+}
+
+/// Whether an address is one we are willing to fetch from — i.e. out on the internet.
+///
+/// An allowlist of "public" rather than a blocklist of known-bad: the ranges that must not be
+/// reachable from a URL someone else supplies are loopback, link-local (which is where cloud
+/// metadata lives), the RFC1918 blocks, carrier-grade NAT, and IPv6's unique-local and mapped-v4
+/// forms. Anything unrecognised is refused rather than allowed.
+pub(crate) fn is_public_ip(ip: &std::net::IpAddr) -> bool {
+    use std::net::IpAddr;
+    match ip {
+        IpAddr::V4(v4) => {
+            let o = v4.octets();
+            !(v4.is_loopback()
+                || v4.is_private()
+                || v4.is_link_local()
+                || v4.is_broadcast()
+                || v4.is_documentation()
+                || v4.is_unspecified()
+                || o[0] == 0
+                || o[0] >= 224                       // multicast + reserved
+                || (o[0] == 100 && (64..128).contains(&o[1]))) // 100.64/10 CGNAT
+        }
+        IpAddr::V6(v6) => {
+            // A v4 address wearing a v6 hat is still that v4 address.
+            if let Some(v4) = v6.to_ipv4_mapped() {
+                return is_public_ip(&IpAddr::V4(v4));
+            }
+            let seg = v6.segments();
+            !(v6.is_loopback()
+                || v6.is_unspecified()
+                || v6.is_multicast()
+                || (seg[0] & 0xfe00) == 0xfc00       // fc00::/7 unique-local
+                || (seg[0] & 0xffc0) == 0xfe80) // fe80::/10 link-local
+        }
+    }
+}
+
+#[utoipa::path(
+    get,
+    path = "/api/v1/events/{id}/banner",
+    tag = "events",
+    params(("id" = i64, Path, description = "VATUSA event id")),
+    responses(
+        (status = 200, description = "The event's banner image", content_type = "image/*"),
+        (status = 401),
+        (status = 404, description = "No such event, or it has no banner"),
+        (status = 503, description = "The banner's host did not return a usable image")
+    )
+)]
+/// Relays an event's banner image through the API (#429).
+///
+/// Banners are third-party URLs mirrored from VATUSA, and organisers use whatever host they like —
+/// five unrelated ones are in the data already. The bundled desktop app runs under a CSP whose
+/// `img-src` cannot name them all without becoming `https:`, so the image is fetched here and served
+/// from our own origin instead. The caller turns it into a `blob:` URL, which the policy does allow.
+///
+/// Guarded, because this makes the backend fetch a URL someone else controls: `https` only, public
+/// addresses only, no redirects, a short timeout, a size cap, and an `image/*` response or nothing.
+// Where it may go is `PublicOnlyResolver`; what may come back is `relay_banner`. Kept out of the doc
+// comment above because utoipa publishes that verbatim into the OpenAPI description, and an API
+// consumer has no way to look up a Rust symbol (#429 review).
+pub async fn get_event_banner(
+    State(state): State<AppState>,
+    _permission: RequirePermission<EventsPlanRead>,
+    Path(id): Path<i64>,
+) -> Result<axum::response::Response, ApiError> {
+    use axum::response::IntoResponse;
+
+    let pool = state.db.as_ref().ok_or(ApiError::ServiceUnavailable)?;
+    let event = events_repo::get(pool, id)
+        .await?
+        .ok_or(ApiError::NotFound)?;
+
+    let (content_type, bytes) = relay_banner(&event.banner_image_url).await.map_err(|e| {
+        match e {
+            BannerReject::Missing => ApiError::NotFound,
+            // Deliberately the same answer for the rest: the caller learns "no banner", not whether
+            // the URL was internal, unreachable, or simply not an image.
+            _ => ApiError::ServiceUnavailable,
+        }
+    })?;
+
+    Ok((
+        [
+            (axum::http::header::CONTENT_TYPE, content_type),
+            // Banners change when an organiser edits the event, which is rare; an hour keeps the
+            // page snappy without pinning a stale image for long.
+            (
+                axum::http::header::CACHE_CONTROL,
+                "private, max-age=3600".to_string(),
+            ),
+        ],
+        bytes,
+    )
+        .into_response())
+}
+
+/// Fetch a banner and hand back its content type and bytes, or why not.
+///
+/// Split from the handler so every guard here is reachable from a test: `RequirePermission` holds a
+/// private field, and the guards are the whole safety story of an endpoint that fetches somebody
+/// else's URL — they were deletable with the entire suite green (#429 review).
+pub(crate) async fn relay_banner(url: &str) -> Result<(String, Vec<u8>), BannerReject> {
+    if url.is_empty() {
+        return Err(BannerReject::Missing);
+    }
+    check_banner_scheme(url)?;
+
+    // A private address never resolves through this client, so a URL aimed inside the network fails
+    // here as a transport error rather than being fetched (see `PublicOnlyResolver`).
+    let res = BANNER_CLIENT
+        .get(url)
+        .send()
+        .await
+        .map_err(|_| BannerReject::Unusable)?;
+    if !res.status().is_success() {
+        return Err(BannerReject::Unusable);
+    }
+
+    let content_type = res
+        .headers()
+        .get(axum::http::header::CONTENT_TYPE)
+        .and_then(|v| v.to_str().ok())
+        .unwrap_or_default()
+        .to_string();
+    if !content_type.starts_with("image/") {
+        return Err(BannerReject::Unusable);
+    }
+
+    // Refuse on the declared length before reading anything, then cap while reading anyway: a
+    // hostile or broken host can lie about `Content-Length`, or omit it, and `bytes()` would buffer
+    // the whole body into memory before any size check could run.
+    if res
+        .content_length()
+        .is_some_and(|n| n > BANNER_MAX_BYTES as u64)
+    {
+        return Err(BannerReject::Unusable);
+    }
+
+    let mut res = res;
+    let mut bytes: Vec<u8> = Vec::new();
+    while let Some(chunk) = res.chunk().await.map_err(|_| BannerReject::Unusable)? {
+        if bytes.len() + chunk.len() > BANNER_MAX_BYTES {
+            return Err(BannerReject::Unusable);
+        }
+        bytes.extend_from_slice(&chunk);
+    }
+    Ok((content_type, bytes))
 }
 
 #[utoipa::path(
@@ -1576,6 +1811,122 @@ pub async fn publish_event_discord(
     .await?;
     tx.commit().await.map_err(|_| ApiError::Internal)?;
     Ok(StatusCode::ACCEPTED)
+}
+
+#[cfg(test)]
+mod banner_tests {
+    use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
+
+    use super::*;
+
+    /// The addresses a banner URL must never reach. Every one of these is somewhere inside a
+    /// deployment — loopback, the cloud metadata service, the RFC1918 blocks, CGNAT — and the URL is
+    /// chosen by whoever created the VATUSA event, not by us (#429 review).
+    #[test]
+    fn no_address_inside_our_own_network_counts_as_public() {
+        for ip in [
+            "127.0.0.1",
+            "0.0.0.0",
+            "169.254.169.254", // the cloud metadata service
+            "10.0.0.5",
+            "172.16.0.1",
+            "192.168.1.1",
+            "100.64.0.1", // carrier-grade NAT
+            "224.0.0.1",  // multicast
+        ] {
+            let addr: IpAddr = ip.parse().unwrap();
+            assert!(!is_public_ip(&addr), "{ip} must not be treated as public");
+        }
+        for ip in [
+            "::1",
+            "fc00::1",
+            "fe80::1",
+            "::ffff:10.0.0.5",
+            "::ffff:127.0.0.1",
+        ] {
+            let addr: IpAddr = ip.parse().unwrap();
+            assert!(!is_public_ip(&addr), "{ip} must not be treated as public");
+        }
+    }
+
+    /// …and the guard has to still allow the actual internet, or banners stop working entirely.
+    #[test]
+    fn ordinary_public_addresses_are_allowed() {
+        for ip in ["1.1.1.1", "104.16.0.1", "8.8.8.8"] {
+            assert!(is_public_ip(&ip.parse::<IpAddr>().unwrap()), "{ip}");
+        }
+        assert!(is_public_ip(&IpAddr::V6(
+            "2606:4700::1111".parse::<Ipv6Addr>().unwrap()
+        )));
+        assert!(is_public_ip(&IpAddr::V4(Ipv4Addr::new(93, 184, 216, 34))));
+    }
+
+    /// A v4 address wrapped in v6 is still that v4 address; missing this is a standard bypass.
+    #[test]
+    fn a_v4_mapped_private_address_is_not_laundered_by_the_v6_form() {
+        assert!(!is_public_ip(
+            &"::ffff:192.168.0.1".parse::<IpAddr>().unwrap()
+        ));
+        assert!(is_public_ip(&"::ffff:8.8.8.8".parse::<IpAddr>().unwrap()));
+    }
+
+    /// Plain http would let anything on the path swap the image, and a non-https scheme is how a
+    /// `file:` or `gopher:` URL would otherwise reach the fetcher.
+    #[test]
+    fn only_https_urls_are_fetched() {
+        assert_eq!(
+            check_banner_scheme("http://example.com/a.png"),
+            Err(BannerReject::NotHttps)
+        );
+        assert_eq!(
+            check_banner_scheme("file:///etc/passwd"),
+            Err(BannerReject::NotHttps)
+        );
+        assert_eq!(
+            check_banner_scheme("not a url"),
+            Err(BannerReject::NotHttps)
+        );
+        assert_eq!(check_banner_scheme("https://example.com/a.png"), Ok(()));
+    }
+
+    /// An event with no banner is a 404, not an attempt to fetch the empty string.
+    #[tokio::test]
+    async fn an_empty_banner_url_is_missing_rather_than_fetched() {
+        assert_eq!(relay_banner("").await.unwrap_err(), BannerReject::Missing);
+    }
+
+    /// End to end through the real client: a URL aimed at loopback must not be fetched. Binding a
+    /// listener proves the point either way — if the resolver let it through, this would connect.
+    #[tokio::test]
+    async fn a_url_aimed_inside_the_network_is_never_connected_to() {
+        use std::sync::{
+            Arc,
+            atomic::{AtomicBool, Ordering},
+        };
+
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let connected = Arc::new(AtomicBool::new(false));
+        let flag = connected.clone();
+        std::thread::spawn(move || {
+            listener
+                .set_nonblocking(false)
+                .and_then(|()| listener.accept())
+                .map(|_| flag.store(true, Ordering::SeqCst))
+                .ok();
+        });
+
+        let err = relay_banner(&format!("https://localhost:{port}/banner.png"))
+            .await
+            .unwrap_err();
+
+        assert_eq!(err, BannerReject::Unusable, "refused, not fetched");
+        tokio::time::sleep(Duration::from_millis(300)).await;
+        assert!(
+            !connected.load(Ordering::SeqCst),
+            "the backend opened a connection to a loopback address"
+        );
+    }
 }
 
 #[cfg(test)]

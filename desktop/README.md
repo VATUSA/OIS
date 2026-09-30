@@ -172,12 +172,18 @@ script could read it and post it anywhere.
 | `script-src 'self'` | the bundle's own scripts | Tauri hashes the inline pre-paint theme script in `index.html` into this automatically; nothing else inline may run. |
 | `style-src 'self' 'unsafe-inline'` | inline styles | maplibre and React set element styles at runtime. |
 | `img-src`, `connect-src` → `https://*.cartocdn.com` | basemap style, tiles, sprites, glyphs | The map's only third-party origin. |
+| `img-src blob:` | event banners | Banners are third-party URLs and organisers use any host, so no allowlist can cover them (#429). They are fetched through the API by `EventBanner` and handed over as an object URL — nothing is added to `img-src` for them. |
 | `worker-src 'self' blob:` | blob workers | maplibre spawns its tile workers from blobs. |
 | `connect-src ipc: http://ipc.localhost` | Tauri IPC | How `invoke` reaches the commands. |
 | `connect-src http://127.0.0.1:3000 ws://127.0.0.1:3000` | the API, REST + realtime (`/api/v1/ws`) | The default API base. **A build pointed at another API must add that origin, `http(s)` and `ws(s)`.** Release builds get it from `OIS_DESKTOP_API_URL` via `desktop/scripts/pin-release-api.py` (#347). |
 
 `devCsp` is `null`: `just desktop` loads the Vite dev server, whose HMR and module preamble a strict
 policy would block. The policy is enforced only on the bundled app.
+
+**That is why a CSP mistake reaches users.** Dev has no policy, so a blocked resource looks perfectly
+fine until the bundle ships — which is how event banners were broken for the whole of #429's life.
+Anything that loads a remote resource must be checked in a *bundled* build, or kept off remote
+origins entirely the way banners now are.
 
 ## What isn't here yet
 

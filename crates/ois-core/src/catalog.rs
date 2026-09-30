@@ -153,6 +153,7 @@ pub fn draft_new_permission_names() -> Vec<&'static str> {
         // --- stats: persistent network statistics + saved capture windows ---
         "stats.data.read",
         "stats.capture.update",
+        "stats.capture.delete",
         // --- discord / integration: outbound-job queue (the bot) + guild config mapping ---
         "discord.config.read",
         "discord.config.update",
