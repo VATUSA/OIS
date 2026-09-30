@@ -105,14 +105,29 @@ pub async fn create_tmi(
 
 /// Updates the given fields (COALESCE — omitted fields are left unchanged). Returns
 /// false if the TMI doesn't exist.
+///
+/// `structured`/`decoded` are the exception to "omitted means unchanged" (#452). Three cases:
+///
+/// | request | stored breakdown |
+/// | --- | --- |
+/// | `structured` present | replaced, with `decoded` re-rendered from it |
+/// | `restriction` present, `structured` absent | **cleared** — it no longer describes the text |
+/// | neither (e.g. only `stop_time`) | unchanged |
+///
+/// The third case is why this cannot be a blanket clear: editing only the valid window must not throw
+/// the breakdown away. COALESCE cannot express "set to null", hence the explicit flag.
 pub async fn update_tmi(pool: &PgPool, id: &str, req: &UpdateTmiRequest) -> Result<bool, ApiError> {
+    let clear_breakdown = req.structured.is_none() && req.restriction.is_some();
+    let decoded = req.structured.as_ref().map(crate::tmi::render_english);
     let result = sqlx::query(
         "update tmu.tmis set \
             requesting = coalesce($2, requesting), \
             providing = coalesce($3, providing), \
             restriction = coalesce($4, restriction), \
             start_time = coalesce($5, start_time), \
-            stop_time = coalesce($6, stop_time) \
+            stop_time = coalesce($6, stop_time), \
+            structured = case when $7 then null else coalesce($8, structured) end, \
+            decoded = case when $7 then null else coalesce($9, decoded) end \
          where id = $1",
     )
     .bind(id)
@@ -121,6 +136,9 @@ pub async fn update_tmi(pool: &PgPool, id: &str, req: &UpdateTmiRequest) -> Resu
     .bind(&req.restriction)
     .bind(req.start_time)
     .bind(req.stop_time)
+    .bind(clear_breakdown)
+    .bind(req.structured.as_ref().map(sqlx::types::Json))
+    .bind(decoded)
     .execute(pool)
     .await
     .map_err(|_| ApiError::Internal)?;
@@ -588,6 +606,138 @@ mod tests {
         .fetch_one(pool)
         .await
         .unwrap()
+    }
+
+    fn ntml(element: &str, value: i64) -> NtmlRestriction {
+        serde_json::from_value(serde_json::json!({
+            "element": element,
+            "direction": "arrivals",
+            "kind": "MIT",
+            "via": "CAMRN",
+            "value": value,
+        }))
+        .unwrap()
+    }
+
+    /// A structured TMI to edit. Returns its id and the breakdown it started with.
+    async fn structured_tmi(pool: &PgPool) -> (String, NtmlRestriction) {
+        let user = seed_user(pool).await;
+        let original = ntml("JFK", 20);
+        let id = create_tmi(
+            pool,
+            &CreateTmiRequest {
+                requesting: "ZDC".to_string(),
+                providing: "ZNY".to_string(),
+                restriction: crate::tmi::encode(&original),
+                structured: Some(original.clone()),
+                start_time: None,
+                stop_time: None,
+            },
+            &user,
+        )
+        .await
+        .unwrap();
+        (id, original)
+    }
+
+    fn patch() -> UpdateTmiRequest {
+        UpdateTmiRequest {
+            requesting: None,
+            providing: None,
+            restriction: None,
+            structured: None,
+            start_time: None,
+            stop_time: None,
+        }
+    }
+
+    /// #452, and the whole point of the issue: the row must never hold a new raw line beside the old
+    /// parsed fields, because "View structured" then answers with a restriction that is not in force.
+    #[sqlx::test]
+    async fn a_structured_edit_replaces_the_breakdown(pool: PgPool) {
+        let (id, original) = structured_tmi(&pool).await;
+        let before = get_tmi(&pool, &id).await.unwrap().unwrap();
+        assert_eq!(before.decoded, Some(crate::tmi::render_english(&original)));
+
+        // Edit through the fields: 20MIT → 30MIT.
+        let edited = ntml("JFK", 30);
+        assert!(
+            update_tmi(
+                &pool,
+                &id,
+                &UpdateTmiRequest {
+                    restriction: Some(crate::tmi::encode(&edited)),
+                    structured: Some(edited.clone()),
+                    ..patch()
+                },
+            )
+            .await
+            .unwrap()
+        );
+
+        let after = get_tmi(&pool, &id).await.unwrap().unwrap();
+        assert_eq!(after.restriction, crate::tmi::encode(&edited));
+        assert_eq!(after.decoded, Some(crate::tmi::render_english(&edited)));
+        assert_ne!(
+            after.decoded, before.decoded,
+            "the breakdown must not still be the pre-edit one"
+        );
+        assert_eq!(after.structured.unwrap().0.value, Some(30));
+    }
+
+    /// Editing only the raw text leaves no breakdown that could describe it, so the stored one is
+    /// dropped rather than kept — a raw-typed TMI's honest "no breakdown" is better than a wrong one.
+    #[sqlx::test]
+    async fn a_raw_edit_clears_the_breakdown(pool: PgPool) {
+        let (id, _) = structured_tmi(&pool).await;
+
+        assert!(
+            update_tmi(
+                &pool,
+                &id,
+                &UpdateTmiRequest {
+                    restriction: Some("JFK arrivals via CAMRN 30MIT NO STACKS".to_string()),
+                    ..patch()
+                },
+            )
+            .await
+            .unwrap()
+        );
+
+        let after = get_tmi(&pool, &id).await.unwrap().unwrap();
+        assert_eq!(after.restriction, "JFK arrivals via CAMRN 30MIT NO STACKS");
+        assert!(
+            after.structured.is_none(),
+            "stale breakdown survived a raw edit"
+        );
+        assert!(after.decoded.is_none());
+    }
+
+    /// The reason this cannot be a blanket clear: an edit that does not touch the restriction must
+    /// leave the breakdown alone.
+    #[sqlx::test]
+    async fn editing_only_the_window_keeps_the_breakdown(pool: PgPool) {
+        let (id, original) = structured_tmi(&pool).await;
+
+        assert!(
+            update_tmi(
+                &pool,
+                &id,
+                &UpdateTmiRequest {
+                    stop_time: Some(chrono::Utc::now() + chrono::Duration::hours(2)),
+                    ..patch()
+                },
+            )
+            .await
+            .unwrap()
+        );
+
+        let after = get_tmi(&pool, &id).await.unwrap().unwrap();
+        assert!(
+            after.structured.is_some(),
+            "an unrelated edit dropped the breakdown"
+        );
+        assert_eq!(after.decoded, Some(crate::tmi::render_english(&original)));
     }
 
     /// The `restriction`/`structured`/`decoded` split a raw-typed TMI and a structured (form-built)

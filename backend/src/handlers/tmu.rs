@@ -149,6 +149,15 @@ pub async fn update_tmi(
     if let Some(providing) = &payload.providing {
         payload.providing = Some(providing.trim().to_ascii_uppercase());
     }
+    // Same rule as `create_tmi`: a structured edit derives its raw line from the fields, so the two
+    // cannot disagree. Without this the row kept the new text beside the old breakdown, and "View
+    // structured" answered with a restriction that was no longer in force (#452).
+    if let Some(structured) = &payload.structured {
+        if structured.element.trim().is_empty() || structured.kind.trim().is_empty() {
+            return Err(ApiError::BadRequest);
+        }
+        payload.restriction = Some(crate::tmi::encode(structured));
+    }
     if !tmu_repo::update_tmi(pool, &id, &payload).await? {
         return Err(ApiError::NotFound);
     }
@@ -532,6 +541,112 @@ pub async fn delete_ground_stop(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    use std::collections::HashMap;
+
+    use sqlx::PgPool;
+
+    use crate::scope_test_support::{grant, seed_user, send, session_cookie, test_state};
+
+    /// #452: the handler, not the repo, is what derives a structured edit's raw line — mirroring
+    /// `create_tmi`. A repo-level test cannot see that, because it hands the repo both fields; this
+    /// sends **only** `structured`, so the restriction can only change if the handler derived it.
+    #[sqlx::test]
+    async fn a_structured_patch_derives_the_restriction(pool: PgPool) {
+        let state = test_state(pool.clone(), HashMap::new());
+        let author = seed_user(&pool).await;
+
+        let id = crate::repos::tmu::create_tmi(
+            &pool,
+            &CreateTmiRequest {
+                requesting: "ZDC".into(),
+                providing: "ZNY".into(),
+                restriction: "JFK arrivals via CAMRN 20MIT".into(),
+                structured: None,
+                start_time: None,
+                stop_time: None,
+            },
+            &author,
+        )
+        .await
+        .unwrap();
+
+        let editor = seed_user(&pool).await;
+        grant(&pool, &editor, "tmu.tmi.update", None).await;
+        let cookie = session_cookie(&pool, &editor).await;
+
+        let status = send(
+            &state,
+            http::Method::PATCH,
+            &format!("/api/v1/tmu/tmis/{id}"),
+            &cookie,
+            Some(serde_json::json!({
+                "structured": {
+                    "element": "JFK",
+                    "direction": "arrivals",
+                    "kind": "MIT",
+                    "via": "CAMRN",
+                    "value": 30
+                }
+            })),
+        )
+        .await;
+        assert_eq!(status, http::StatusCode::OK);
+
+        let after = crate::repos::tmu::get_tmi(&pool, &id)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            after.restriction, "JFK arrivals via CAMRN 30MIT",
+            "the raw line must be re-derived from the fields, not left at the old text"
+        );
+        assert_eq!(after.structured.unwrap().0.value, Some(30));
+    }
+
+    /// The same validation `create_tmi` applies: a structured payload with no element is not a
+    /// restriction, and must not silently overwrite the stored one with an empty line.
+    #[sqlx::test]
+    async fn a_structured_patch_with_no_element_is_refused(pool: PgPool) {
+        let state = test_state(pool.clone(), HashMap::new());
+        let author = seed_user(&pool).await;
+        let id = crate::repos::tmu::create_tmi(
+            &pool,
+            &CreateTmiRequest {
+                requesting: "ZDC".into(),
+                providing: "ZNY".into(),
+                restriction: "JFK arrivals via CAMRN 20MIT".into(),
+                structured: None,
+                start_time: None,
+                stop_time: None,
+            },
+            &author,
+        )
+        .await
+        .unwrap();
+
+        let editor = seed_user(&pool).await;
+        grant(&pool, &editor, "tmu.tmi.update", None).await;
+        let cookie = session_cookie(&pool, &editor).await;
+
+        let status = send(
+            &state,
+            http::Method::PATCH,
+            &format!("/api/v1/tmu/tmis/{id}"),
+            &cookie,
+            Some(serde_json::json!({
+                "structured": {"element": "  ", "direction": "arrivals", "kind": "MIT"}
+            })),
+        )
+        .await;
+        assert_eq!(status, http::StatusCode::BAD_REQUEST);
+
+        let after = crate::repos::tmu::get_tmi(&pool, &id)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(after.restriction, "JFK arrivals via CAMRN 20MIT");
+    }
 
     #[test]
     fn icao_normalization() {

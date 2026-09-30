@@ -426,6 +426,12 @@ pub struct UpdateTmiRequest {
     pub providing: Option<String>,
     #[serde(default)]
     pub restriction: Option<String>,
+    /// The re-built structured form, when the edit was made through the fields rather than as raw
+    /// text. Present ⇒ `restriction` is re-derived from it and the stored breakdown is replaced;
+    /// absent while `restriction` changes ⇒ the breakdown is *cleared*, because it no longer
+    /// describes the text (#452).
+    #[serde(default)]
+    pub structured: Option<NtmlRestriction>,
     #[serde(default)]
     pub start_time: Option<DateTime<Utc>>,
     #[serde(default)]
