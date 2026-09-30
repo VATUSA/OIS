@@ -245,6 +245,201 @@ pub async fn airport_aadc(
     }))
 }
 
+/// The capacity an airport's demand is ranked against, with where it came from.
+///
+/// A metering program's AAR wins: it is the rate that actually meters traffic
+/// (`feed::flow::compute`'s `apply_metering`), so ranking against anything else would contradict
+/// the sequence controllers are working. Otherwise fall back to the airport's runway config.
+///
+/// The config branch passes `None` for the wind, which `favored_config` documents as always falling
+/// through to the calm-default (else the first config). Resolving the *wind-favored* config costs
+/// one outbound Open-Meteo request per airport (`feed::forecast::wind_at`, 15s timeout behind a
+/// process-global mutex), which a national aggregate cannot afford. An airport under metering is
+/// unaffected, since its program AAR wins here anyway.
+///
+/// `None` when the airport has neither a program nor a config — it is left out of the ranking
+/// rather than ranked against a capacity nobody set.
+fn effective_aar(
+    program: Option<&ProgramInputs>,
+    configs: &[crate::models::AirportConfigBody],
+) -> Option<(i32, &'static str)> {
+    if let Some(p) = program {
+        return Some((p.aar, "program"));
+    }
+    config_repo::favored_config(configs, None).map(|c| (c.aar, "config"))
+}
+
+#[utoipa::path(
+    get,
+    path = "/api/v1/tmu/demand",
+    tag = "tmu",
+    responses(
+        (status = 200, body = Vec<crate::models::AirportDemandBody>),
+        (status = 401),
+        (status = 503),
+    )
+)]
+/// Current arrival demand vs capacity for every airport at once, ranked by exceedance
+/// (VATUSA/OIS#475).
+///
+/// Shaped like `flow::fca_counts`, not like the per-airport handlers above: a fixed three queries up
+/// front, one brief feed read, then a *single* blocking task for the whole loop. Fanning
+/// `flow_for` out per airport (as `public::get_board` does for the handful of metered fields) would
+/// be two queries and a blocking task each.
+///
+/// Gated coarsely on `tmu.program.read` at any scope, like the sibling feed reads — the ranking is
+/// derived from public VATSIM traffic, so a facility-scoped caller gets it too. "National" is a
+/// menu-curation decision in the client, not a boundary here (VATUSA/OIS#474).
+pub async fn airport_demand(
+    State(state): State<AppState>,
+    _permission: RequirePermission<TmuProgramRead>,
+) -> Result<Json<Vec<crate::models::AirportDemandBody>>, ApiError> {
+    let pool = state.db.as_ref().ok_or(ApiError::ServiceUnavailable)?;
+
+    // All DB access happens here, before any feed work — `feed::*` has no pool (AGENTS.md).
+    let (programs, configs, cfrs) = tokio::try_join!(
+        tmu_repo::list_programs(pool),
+        config_repo::list_all(pool),
+        tmu_repo::all_issued_cfrs(pool),
+    )?;
+
+    let programs: HashMap<String, ProgramInputs> = programs
+        .into_iter()
+        .map(|p| {
+            (
+                p.icao.clone(),
+                ProgramInputs {
+                    aar: p.aar,
+                    trail: p.trail,
+                    mit: p.mit,
+                    gates: p
+                        .gates
+                        .0
+                        .iter()
+                        .map(|g| flow::GateSpacing {
+                            name: g.name.clone(),
+                            trail: g.trail,
+                            mit: g.mit,
+                        })
+                        .collect(),
+                    exclude_wake: p.exclude_wake,
+                    exclude_types: p.exclude_types,
+                    jets_only: p.jets_only,
+                },
+            )
+        })
+        .collect();
+
+    let mut configs_by_icao: HashMap<String, Vec<crate::models::AirportConfigBody>> =
+        HashMap::new();
+    for c in configs {
+        configs_by_icao.entry(c.icao.clone()).or_default().push(c);
+    }
+
+    // One fold, replacing a per-airport `issued_cfr_map` call each.
+    let mut issued_by_airport: HashMap<String, HashMap<String, DateTime<Utc>>> = HashMap::new();
+    for (callsign, airport, wheels_up) in cfrs {
+        issued_by_airport
+            .entry(airport)
+            .or_default()
+            .insert(callsign, wheels_up);
+    }
+
+    // Clone the snapshot + airport handles under one brief lock, then release it before the CPU.
+    let (snapshot, airports) = {
+        let guard = state.feed.read().await;
+        (guard.snapshot.clone(), guard.airports.clone())
+    };
+    let Some(snap) = snapshot else {
+        return Ok(Json(Vec::new()));
+    };
+
+    let nav = state.nav.load_full();
+    let winds = state.winds.load_full();
+    let profiles = state.aircraft_profiles.load_full();
+    let gates = state.gates.load_full();
+    let runways = state.runways.clone();
+    let taxi_estimate_samples = state.taxi_estimate_samples.load_full();
+    let manual_exclusions =
+        crate::handlers::flow::all_excluded_callsigns(state.flight_exclusions.load().as_ref());
+    let now = Utc::now();
+
+    let rows = tokio::task::spawn_blocking(move || {
+        // Only airports something is actually flying to can be over capacity, so intersect the
+        // capacity-bearing set with the arrivals in this snapshot. One pass.
+        let mut arriving: HashSet<String> = HashSet::new();
+        for fp in snap
+            .data
+            .pilots
+            .iter()
+            .filter_map(|p| p.flight_plan.as_ref())
+            .chain(
+                snap.data
+                    .prefiles
+                    .iter()
+                    .filter_map(|p| p.flight_plan.as_ref()),
+            )
+        {
+            arriving.insert(fp.arrival.to_ascii_uppercase());
+        }
+
+        let mut rows: Vec<crate::models::AirportDemandBody> = programs
+            .keys()
+            .chain(configs_by_icao.keys())
+            .collect::<HashSet<_>>()
+            .into_iter()
+            .filter(|icao| arriving.contains(*icao))
+            .filter_map(|icao| {
+                let program = programs.get(icao);
+                let empty: Vec<crate::models::AirportConfigBody> = Vec::new();
+                let configs = configs_by_icao.get(icao).unwrap_or(&empty);
+                let (aar, aar_source) = effective_aar(program, configs)?;
+
+                let empty_issued = HashMap::new();
+                let flow = flow::compute(
+                    icao,
+                    program,
+                    &snap.data,
+                    airports.as_ref(),
+                    nav.as_ref(),
+                    winds.as_ref(),
+                    profiles.as_ref(),
+                    issued_by_airport.get(icao).unwrap_or(&empty_issued),
+                    gates.as_ref(),
+                    runways.as_ref(),
+                    taxi_estimate_samples.as_ref(),
+                    &manual_exclusions,
+                    now,
+                );
+
+                let demand_60min = flow.demand_60min as i32;
+                Some(crate::models::AirportDemandBody {
+                    icao: icao.clone(),
+                    demand_60min,
+                    aar,
+                    exceedance: demand_60min - aar,
+                    aar_source: aar_source.to_string(),
+                    inbound: flow.inbound as i32,
+                    airborne: flow.airborne as i32,
+                    ground: flow.ground as i32,
+                })
+            })
+            .collect();
+
+        // Rank server-side, so the ordering is right even for a client that doesn't sort.
+        rows.sort_by(|a, b| {
+            b.exceedance
+                .cmp(&a.exceedance)
+                .then_with(|| a.icao.cmp(&b.icao))
+        });
+        rows
+    })
+    .await
+    .map_err(|_| ApiError::Internal)?;
+
+    Ok(Json(rows))
+}
+
 #[utoipa::path(
     get,
     path = "/api/v1/tmu/taxi/{icao}",
@@ -528,4 +723,124 @@ pub async fn release_cfr(
     }
     state.publish(crate::realtime::topic::CFR);
     Ok(StatusCode::NO_CONTENT)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::models::AirportConfigBody;
+
+    fn config(name: &str, aar: i32, calm_default: bool) -> AirportConfigBody {
+        AirportConfigBody {
+            id: name.to_string(),
+            icao: "KDCA".to_string(),
+            name: name.to_string(),
+            aar,
+            adr: 40,
+            landing_runways: vec!["01".to_string()],
+            wind_from_deg: 0,
+            wind_to_deg: 90,
+            calm_default,
+            artcc: "ZDC".to_string(),
+            updated_at: Utc::now(),
+            updated_by: None,
+            editable: false,
+        }
+    }
+
+    fn program(aar: i32) -> ProgramInputs {
+        ProgramInputs {
+            aar,
+            trail: 0,
+            mit: 0,
+            gates: Vec::new(),
+            exclude_wake: Vec::new(),
+            exclude_types: Vec::new(),
+            jets_only: false,
+        }
+    }
+
+    // --- Which capacity a demand figure is ranked against (VATUSA/OIS#475) ---
+
+    #[test]
+    fn a_metering_program_outranks_the_runway_config() {
+        // The program AAR is the rate actually metering traffic, so it must win even when a config
+        // exists — ranking against the config would contradict the sequence controllers are working.
+        let configs = vec![config("north", 60, true)];
+        assert_eq!(
+            effective_aar(Some(&program(30)), &configs),
+            Some((30, "program"))
+        );
+    }
+
+    #[test]
+    fn without_a_program_it_falls_back_to_the_calm_default_config() {
+        // `None` wind deliberately skips the favored-config lookup, which would cost one outbound
+        // forecast request per airport.
+        let configs = vec![config("north", 44, false), config("calm", 52, true)];
+        assert_eq!(effective_aar(None, &configs), Some((52, "config")));
+    }
+
+    #[test]
+    fn without_a_calm_default_it_takes_the_first_config() {
+        let configs = vec![config("north", 44, false), config("south", 48, false)];
+        assert_eq!(effective_aar(None, &configs), Some((44, "config")));
+    }
+
+    #[test]
+    fn an_airport_with_neither_is_left_out_rather_than_ranked() {
+        assert_eq!(effective_aar(None, &[]), None);
+    }
+
+    // --- Through the router ---
+    //
+    // `effective_aar` above stays green if the handler stops gating, so these send real requests
+    // with a real session: `RequirePermission<TmuProgramRead>` is on the tested path.
+
+    use crate::scope_test_support::{self, artcc, grant, send, session_cookie, test_state};
+    use http::{Method, StatusCode};
+
+    const DEMAND: &str = "/api/v1/tmu/demand";
+
+    fn state_for(pool: PgPool) -> AppState {
+        test_state(pool, HashMap::from([("ZDC".to_string(), artcc(&["KDCA"]))]))
+    }
+
+    #[sqlx::test]
+    async fn without_the_permission_the_ranking_is_401(pool: PgPool) {
+        let user = scope_test_support::seed_user(&pool).await;
+        let cookie = session_cookie(&pool, &user).await;
+        let state = state_for(pool);
+        assert_eq!(
+            send(&state, Method::GET, DEMAND, &cookie, None).await,
+            StatusCode::UNAUTHORIZED
+        );
+    }
+
+    #[sqlx::test]
+    async fn a_national_reader_gets_the_ranking(pool: PgPool) {
+        let user = scope_test_support::seed_user(&pool).await;
+        grant(&pool, &user, "tmu.program.read", None).await;
+        let cookie = session_cookie(&pool, &user).await;
+        let state = state_for(pool);
+        assert_eq!(
+            send(&state, Method::GET, DEMAND, &cookie, None).await,
+            StatusCode::OK
+        );
+    }
+
+    #[sqlx::test]
+    async fn a_facility_scoped_reader_also_gets_it(pool: PgPool) {
+        // Deliberate: the gate is coarse, matching the sibling feed reads. The ranking is derived
+        // from public VATSIM traffic, so "national" is menu curation in the client (VATUSA/OIS#474),
+        // not a boundary here. If this ever becomes 403, that was a policy change — not a tidy-up.
+        let user = scope_test_support::seed_user(&pool).await;
+        grant(&pool, &user, "tmu.program.read", Some("ZDC")).await;
+        let cookie = session_cookie(&pool, &user).await;
+        let state = state_for(pool);
+        assert_eq!(
+            send(&state, Method::GET, DEMAND, &cookie, None).await,
+            StatusCode::OK
+        );
+    }
 }

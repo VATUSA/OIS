@@ -25,6 +25,19 @@ const newId = () => crypto.randomUUID();
 /** The airport-scoped sources — the ones that also support a whole-facility scope. */
 const AIRPORT_SOURCES = DATA_SOURCES.filter((s) => s.needsIcao);
 
+/** Everything offered in the general Tables/Charts lists: the national sources are listed on their
+ * own, behind the `tmu_national` gate, so they must not appear here too. */
+const GENERAL_SOURCES = DATA_SOURCES.filter((s) => s.category !== "national");
+
+/** Whole-NAS sources, offered only to a national reader. */
+const NATIONAL_SOURCES = DATA_SOURCES.filter((s) => s.category === "national");
+
+/** A national table is only useful ranked, and its first numeric column is the ranking key. */
+const NATIONAL_SORT: Record<string, { id: string; desc: boolean }[]> = {
+  "nas-demand": [{ id: "exceedance", desc: true }],
+  "nas-fca-pressure": [{ id: "count", desc: true }],
+};
+
 async function askIcao(prompt: ReturnType<typeof usePrompt>): Promise<string | null> {
   const raw = await prompt({ title: "Airport", label: "Airport (ICAO)", placeholder: "KJFK" });
   if (!raw) return null;
@@ -142,7 +155,7 @@ export function AddWidgetMenu({ onAdd }: { onAdd: (widget: Widget) => void }) {
         ))}
         <DropdownMenuSeparator />
         <DropdownMenuLabel>Tables</DropdownMenuLabel>
-        {DATA_SOURCES.map((s) => (
+        {GENERAL_SOURCES.map((s) => (
           <DropdownMenuItem key={s.id} onSelect={() => void addTable(s.id, s.needsIcao)}>
             {s.label}
             {s.needsIcao && <span className="ml-auto text-xs text-ink-3">airport</span>}
@@ -150,7 +163,7 @@ export function AddWidgetMenu({ onAdd }: { onAdd: (widget: Widget) => void }) {
         ))}
         <DropdownMenuSeparator />
         <DropdownMenuLabel>Charts</DropdownMenuLabel>
-        {DATA_SOURCES.filter((s) => s.fields.some((f) => f.type === "number")).map((s) => (
+        {GENERAL_SOURCES.filter((s) => s.fields.some((f) => f.type === "number")).map((s) => (
           <DropdownMenuItem key={s.id} onSelect={() => void addChart(s.id, s.needsIcao)}>
             {s.label}
             {s.needsIcao && <span className="ml-auto text-xs text-ink-3">airport</span>}
@@ -190,6 +203,22 @@ export function AddWidgetMenu({ onAdd }: { onAdd: (widget: Widget) => void }) {
               Online ATC positions
               <span className="ml-auto text-xs text-ink-3">NAS</span>
             </DropdownMenuItem>
+            {NATIONAL_SOURCES.map((s) => (
+              <DropdownMenuItem
+                key={`nat-${s.id}`}
+                onSelect={() =>
+                  onAdd({
+                    id: newId(),
+                    kind: "table",
+                    source: s.id,
+                    sort: NATIONAL_SORT[s.id],
+                  })
+                }
+              >
+                {s.label}
+                <span className="ml-auto text-xs text-ink-3">table</span>
+              </DropdownMenuItem>
+            ))}
           </>
         )}
         <DropdownMenuSeparator />
