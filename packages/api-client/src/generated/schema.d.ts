@@ -3181,6 +3181,18 @@ export interface components {
          *     (message/thread id); `error` explains a failure (triggers backoff + retry).
          */
         AckJobRequest: {
+            /**
+             * Format: int32
+             * @description The `attempt_count` this worker was leased under, echoed back so the ack can be matched to a
+             *     lease rather than to a status (VATUSA/OIS#472). `lease_jobs` increments it and returns it on
+             *     `OutboundJobBody`, so a worker always holds the value that identifies its own lease.
+             *
+             *     **Optional on purpose.** A new backend will be running against the old bot for as long as it
+             *     takes to deploy the second half, and a required field would reject every ack in that window —
+             *     turning a narrow race into total delivery failure. Absent means "fence on status alone",
+             *     exactly as before. (#436's payload-shape change is the precedent for getting this wrong.)
+             */
+            attempt?: number | null;
             error?: string | null;
             result?: Record<string, never> | null;
             success: boolean;

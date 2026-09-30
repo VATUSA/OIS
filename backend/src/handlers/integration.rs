@@ -72,6 +72,7 @@ pub async fn ack_job(
         payload.success,
         payload.result.as_ref(),
         payload.error.as_deref(),
+        payload.attempt,
     )
     .await?;
     if ok {
@@ -85,7 +86,8 @@ pub async fn ack_job(
         tracing::warn!(
             job = %id,
             success = payload.success,
-            "integration: ack did not apply — unknown job, or the lease was already reaped"
+            attempt = ?payload.attempt,
+            "integration: ack did not apply — unknown job, or this worker no longer holds the lease"
         );
         Err(ApiError::NotFound)
     }

@@ -1480,6 +1480,16 @@ pub struct OutboundJobBody {
 #[derive(Debug, Deserialize, ToSchema)]
 pub struct AckJobRequest {
     pub success: bool,
+    /// The `attempt_count` this worker was leased under, echoed back so the ack can be matched to a
+    /// lease rather than to a status (VATUSA/OIS#472). `lease_jobs` increments it and returns it on
+    /// `OutboundJobBody`, so a worker always holds the value that identifies its own lease.
+    ///
+    /// **Optional on purpose.** A new backend will be running against the old bot for as long as it
+    /// takes to deploy the second half, and a required field would reject every ack in that window —
+    /// turning a narrow race into total delivery failure. Absent means "fence on status alone",
+    /// exactly as before. (#436's payload-shape change is the precedent for getting this wrong.)
+    #[serde(default)]
+    pub attempt: Option<i32>,
     #[serde(default)]
     #[schema(value_type = Option<Object>)]
     pub result: Option<Value>,

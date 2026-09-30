@@ -44,6 +44,11 @@ struct AckBody<'a> {
     result: Option<Value>,
     #[serde(skip_serializing_if = "Option::is_none")]
     error: Option<&'a str>,
+    /// The `attempt_count` this worker was leased under, so the backend can refuse an ack from a
+    /// lease that has already been superseded (VATUSA/OIS#472). Omitted when unknown, which the
+    /// backend treats as the old status-only fence.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    attempt: Option<i32>,
 }
 
 /// What the bot needs to render the claim time-selectors for a request.
@@ -178,6 +183,7 @@ impl OisClient {
         success: bool,
         result: Option<Value>,
         error: Option<&str>,
+        attempt: Option<i32>,
     ) -> Result<(), ClientError> {
         let resp = self
             .http
@@ -187,6 +193,7 @@ impl OisClient {
                 success,
                 result,
                 error,
+                attempt,
             })
             .send()
             .await?;
