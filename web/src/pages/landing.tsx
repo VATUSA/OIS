@@ -1,9 +1,8 @@
-import {Button} from "@ois/ui";
 import {Link} from "@tanstack/react-router";
 import {ArrowRight, CalendarClock, Gauge, type LucideIcon, Radar, TrendingUp, Waypoints, Wind} from "lucide-react";
 
 import {Footer} from "@/components/footer";
-import {login} from "@/lib/auth";
+import {SignInButton} from "@/components/sign-in-button";
 
 /** A tinted icon-chip accent — background + matching icon color, paired so they always read as one. */
 type Accent = { bg: string; icon: string };
@@ -114,9 +113,7 @@ export function LandingPage() {
         <p className="max-w-xl text-muted-foreground">
           VATUSA's traffic-management and event-planning platform.
         </p>
-        <Button size="lg" onClick={login}>
-          Sign in with VATSIM
-        </Button>
+        <SignInButton size="lg" />
         <span className="text-xs text-muted-foreground">
           Or browse{" "}
           <Link to="/advisories" className="underline underline-offset-2 hover:text-foreground">
