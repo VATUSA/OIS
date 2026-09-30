@@ -57,7 +57,13 @@ static LOGIN_GENERATION: AtomicU64 = AtomicU64::new(0);
 /// single sleep. `AddrInUse` past the deadline means something else on the machine holds the port —
 /// reported as before, since no amount of waiting will free it.
 fn bind_with_takeover(addr: &str) -> Result<TcpListener, String> {
-    let deadline = Instant::now() + TAKEOVER_TIMEOUT;
+    bind_until(addr, Instant::now() + TAKEOVER_TIMEOUT)
+}
+
+/// The retry itself, with the deadline handed in so a test can exercise the give-up path without
+/// sitting out [`TAKEOVER_TIMEOUT`] — the version that inlined the deadline could only be tested by
+/// re-implementing it, which is not a test of anything (#428 review).
+fn bind_until(addr: &str, deadline: Instant) -> Result<TcpListener, String> {
     loop {
         match TcpListener::bind(addr) {
             Ok(listener) => return Ok(listener),
@@ -371,17 +377,40 @@ mod tests {
 
     /// A port held by something that is *not* a superseded sign-in is not worth waiting on, and the
     /// message has to name the address so the user can find the culprit.
+    ///
+    /// Calls the real retry with an already-spent deadline, so it gives up at once rather than
+    /// sitting out `TAKEOVER_TIMEOUT`. The previous version of this test built the expected string
+    /// itself and asserted it started with a prefix of itself — it passed against an entirely
+    /// different message (#428 review).
     #[test]
     fn reports_a_port_that_never_frees_up() {
         let addr = spare_port();
         let _held = TcpListener::bind(&addr).expect("hold the port");
 
-        // Same code path, with the deadline already spent, so the test does not sit for TAKEOVER_TIMEOUT.
-        let err = match TcpListener::bind(&addr) {
-            Ok(_) => panic!("the port should still be held"),
-            Err(e) => format!("could not listen on {addr}: {e}"),
-        };
-        assert!(err.starts_with(&format!("could not listen on {addr}")));
+        let spent = Instant::now() - Duration::from_secs(1);
+        let err = bind_until(&addr, spent).expect_err("the port is held, so this cannot bind");
+
+        assert!(
+            err.starts_with(&format!("could not listen on {addr}")),
+            "the error must name the address the user has to free up, got: {err}"
+        );
+    }
+
+    /// The give-up path must not be reached while the deadline is still running — that is the whole
+    /// difference between waiting a superseded attempt out and failing the way #428 did.
+    #[test]
+    fn waits_rather_than_giving_up_while_the_deadline_is_live() {
+        let addr = spare_port();
+        let _held = TcpListener::bind(&addr).expect("hold the port");
+
+        let started = Instant::now();
+        let err = bind_until(&addr, started + Duration::from_millis(200));
+
+        assert!(err.is_err());
+        assert!(
+            started.elapsed() >= Duration::from_millis(200),
+            "it gave up early rather than retrying until the deadline"
+        );
     }
 
     /// The generation is what makes the takeover possible: an attempt that no longer owns the flow

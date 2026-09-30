@@ -72,6 +72,25 @@ async function render(qc: QueryClient) {
   return host.querySelector("button")!;
 }
 
+/** Two buttons under one client, as the signed-out shared-dashboard page renders them. */
+async function renderPair(qc: QueryClient) {
+  host = document.createElement("div");
+  document.body.append(host);
+  root = createRoot(host);
+  await act(async () => {
+    root!.render(
+      <QueryClientProvider client={qc}>
+        <ToastProvider>
+          <SignInButton />
+          <SignInButton />
+        </ToastProvider>
+      </QueryClientProvider>,
+    );
+  });
+  const [first, second] = [...host.querySelectorAll("button")];
+  return {first: first!, second: second!};
+}
+
 describe("SignInButton", () => {
   it("invalidates the cached signed-out ['me'] so the app re-renders signed in", async () => {
     const qc = signedOutClient();
@@ -110,6 +129,41 @@ describe("SignInButton", () => {
       release();
     });
     expect(desktopLogin).toHaveBeenCalledTimes(1);
+  });
+
+  /**
+   * #428 review: more than one of these can be on screen at once — signed out on a shared dashboard,
+   * the sidebar's identity button and the page's call to action are both mounted. A mutation's own
+   * `isPending` is per hook instance, so the first click disabled only the button that was clicked
+   * and the second still fired `begin_login`. The second attempt takes the loopback port from the
+   * first, so finishing the *first* browser tab hands its code to a listener expecting a different
+   * nonce — rejected, and then five minutes of silence.
+   */
+  it("disables every sign-in button on screen, not just the one that was clicked", async () => {
+    let release: () => void = () => undefined;
+    desktopLogin.mockImplementation(
+      () => new Promise<undefined>((resolve) => (release = () => resolve(undefined))),
+    );
+
+    const {first, second} = await renderPair(signedOutClient());
+    await act(async () => first.click());
+    await act(async () => {
+      await new Promise((resolve) => setTimeout(resolve, 0));
+    });
+
+    expect(first.disabled).toBe(true);
+    expect(second.disabled).toBe(true);
+
+    // And it is genuinely inert, not merely styled: a click must not start a second sign-in.
+    await act(async () => second.click());
+    await act(async () => {
+      await new Promise((resolve) => setTimeout(resolve, 0));
+    });
+    expect(desktopLogin).toHaveBeenCalledTimes(1);
+
+    await act(async () => {
+      release();
+    });
   });
 
   it("surfaces a failed sign-in instead of failing silently", async () => {

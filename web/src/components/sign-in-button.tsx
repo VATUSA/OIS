@@ -1,7 +1,7 @@
 import {Button, useToast} from "@ois/ui";
 import {LogIn} from "lucide-react";
 
-import {useLogin} from "@/lib/auth";
+import {useLogin, useSignInPending} from "@/lib/auth";
 
 /**
  * The one way to start sign-in (#428).
@@ -29,6 +29,9 @@ export function SignInButton({
   iconOnly?: boolean;
 }) {
   const signIn = useLogin();
+  // App-wide, not this button's own: two of these can be on screen at once and a second `begin_login`
+  // takes the loopback port from the first (#428 review).
+  const pending = useSignInPending();
   const toast = useToast();
 
   const startSignIn = () => {
@@ -46,7 +49,7 @@ export function SignInButton({
         size="icon"
         aria-label="Sign in with VATSIM"
         onClick={startSignIn}
-        disabled={signIn.isPending}
+        disabled={pending}
         className={className}
       >
         <LogIn />
@@ -55,8 +58,8 @@ export function SignInButton({
   }
 
   return (
-    <Button size={size} onClick={startSignIn} disabled={signIn.isPending} className={className}>
-      {signIn.isPending ? "Signing in..." : "Sign in with VATSIM"}
+    <Button size={size} onClick={startSignIn} disabled={pending} className={className}>
+      {pending ? "Signing in..." : "Sign in with VATSIM"}
     </Button>
   );
 }
