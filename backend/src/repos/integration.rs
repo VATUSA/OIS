@@ -124,6 +124,41 @@ pub async fn ack_job(
     Ok(res.rows_affected() > 0)
 }
 
+/// Return jobs stranded `in_progress` to the queue (#446).
+///
+/// `lease_jobs` marks a job `in_progress` and stamps `last_attempt_at`; only the bot acking it moves
+/// it on. So a worker that dies between leasing and acking — a redeploy, a crash, a dropped
+/// connection — leaves the job there permanently. It is never retried and never delivered: an event
+/// post or TMI that silently does not happen, with no error anywhere, because nothing ever failed.
+///
+/// A stranded job is treated exactly as a failed ack treats one — same backoff, same
+/// `MAX_ATTEMPTS` terminal — so there is one retry policy rather than two that can drift. The only
+/// difference is the error text, and it is written with `coalesce` so a real failure reason already
+/// recorded is not overwritten by this generic one.
+///
+/// **Delivery is at-least-once, deliberately.** If the worker posted to Discord and died before
+/// acking, re-leasing posts again. Detecting that would need the bot to record the message before
+/// sending it, which is a larger change than this one; a duplicate post is recoverable by hand
+/// whereas a silently undelivered TMI is not, so the duplicate is the better failure to have.
+pub async fn reap_stranded_jobs(
+    pool: &PgPool,
+    stranded_before: DateTime<Utc>,
+) -> Result<u64, ApiError> {
+    sqlx::query(
+        "update integration.outbound_jobs \
+         set status = case when attempt_count >= $2 then 'failed' else 'pending' end, \
+             next_attempt_at = now() + (interval '30 seconds' * least(attempt_count, 10)), \
+             error = coalesce(error, 'lease expired: the worker never acked') \
+         where status = 'in_progress' and last_attempt_at < $1",
+    )
+    .bind(stranded_before)
+    .bind(MAX_ATTEMPTS)
+    .execute(pool)
+    .await
+    .map(|r| r.rows_affected())
+    .map_err(|_| ApiError::Internal)
+}
+
 /// Shared by `channel_id`/`role_id`: resolve `name` to its Discord snowflake in `table` (`id_col`
 /// its snowflake column), preferring a guild whose config lists `facility` among its ARTCCs
 /// (`integration.discord_config_facilities`, #194) over one that doesn't, falling back to
@@ -541,6 +576,114 @@ mod tests {
 
     use super::*;
     use crate::models::DiscordGuildConfigInput;
+
+    /// A job sitting `in_progress`, last touched `mins_ago`, with `attempt_count` attempts behind it.
+    async fn stranded_job(pool: &PgPool, mins_ago: i64, attempt_count: i32) -> String {
+        sqlx::query_scalar::<_, String>(
+            "insert into integration.outbound_jobs \
+             (job_type, status, attempt_count, last_attempt_at) \
+             values ('tmi_publish', 'in_progress', $1, now() - make_interval(mins => $2)) \
+             returning id",
+        )
+        .bind(attempt_count)
+        .bind(mins_ago as i32)
+        .fetch_one(pool)
+        .await
+        .unwrap()
+    }
+
+    async fn status_of(pool: &PgPool, id: &str) -> String {
+        sqlx::query_scalar::<_, String>(
+            "select status from integration.outbound_jobs where id = $1",
+        )
+        .bind(id)
+        .fetch_one(pool)
+        .await
+        .unwrap()
+    }
+
+    /// #446: only an ack moves a job out of `in_progress`, so a worker that died mid-job left it
+    /// there forever — never retried, never delivered, and with no error, because nothing failed.
+    #[sqlx::test]
+    async fn a_job_whose_worker_died_is_returned_to_the_queue(pool: PgPool) {
+        let stranded = stranded_job(&pool, 10, 1).await;
+        let working = stranded_job(&pool, 1, 1).await;
+        let cutoff = Utc::now() - chrono::Duration::minutes(5);
+
+        assert_eq!(reap_stranded_jobs(&pool, cutoff).await.unwrap(), 1);
+
+        assert_eq!(status_of(&pool, &stranded).await, "pending");
+        assert_eq!(
+            status_of(&pool, &working).await,
+            "in_progress",
+            "a job still inside its lease is being worked on, not abandoned"
+        );
+    }
+
+    /// The recovery reuses the failed-ack transition, so a stranded job that has already exhausted
+    /// its attempts becomes terminal rather than looping forever.
+    #[sqlx::test]
+    async fn a_stranded_job_out_of_attempts_becomes_failed(pool: PgPool) {
+        let exhausted = stranded_job(&pool, 10, MAX_ATTEMPTS).await;
+
+        reap_stranded_jobs(&pool, Utc::now() - chrono::Duration::minutes(5))
+            .await
+            .unwrap();
+
+        assert_eq!(status_of(&pool, &exhausted).await, "failed");
+    }
+
+    /// It must only ever touch `in_progress`. A pending job is waiting its turn and a succeeded one
+    /// is done; re-queueing either would deliver something twice for no reason.
+    #[sqlx::test]
+    async fn no_other_status_is_disturbed(pool: PgPool) {
+        for status in ["pending", "succeeded", "failed"] {
+            let id = sqlx::query_scalar::<_, String>(
+                "insert into integration.outbound_jobs (job_type, status, last_attempt_at) \
+                 values ('tmi_publish', $1, now() - interval '1 hour') returning id",
+            )
+            .bind(status)
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+
+            reap_stranded_jobs(&pool, Utc::now() - chrono::Duration::minutes(5))
+                .await
+                .unwrap();
+
+            assert_eq!(
+                status_of(&pool, &id).await,
+                status,
+                "{status} was disturbed"
+            );
+        }
+    }
+
+    /// A real failure reason already on the row is the useful one; the generic lease-expiry text
+    /// must not overwrite it.
+    #[sqlx::test]
+    async fn an_existing_error_is_not_overwritten(pool: PgPool) {
+        let id = stranded_job(&pool, 10, 1).await;
+        sqlx::query(
+            "update integration.outbound_jobs set error = 'channel not found' where id = $1",
+        )
+        .bind(&id)
+        .execute(&pool)
+        .await
+        .unwrap();
+
+        reap_stranded_jobs(&pool, Utc::now() - chrono::Duration::minutes(5))
+            .await
+            .unwrap();
+
+        let error: Option<String> =
+            sqlx::query_scalar("select error from integration.outbound_jobs where id = $1")
+                .bind(&id)
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+        assert_eq!(error.as_deref(), Some("channel not found"));
+    }
 
     #[sqlx::test]
     async fn event_thread_template_get_returns_the_seeded_default(pool: PgPool) {

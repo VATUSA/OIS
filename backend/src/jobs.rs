@@ -25,6 +25,7 @@ use crate::repos::airport_surface as airport_surface_repo;
 use crate::repos::events as events_repo;
 use crate::repos::flight_exclusions as flight_exclusions_repo;
 use crate::repos::flow as flow_repo;
+use crate::repos::integration as integration_repo;
 use crate::repos::stats as stats_repo;
 use crate::repos::tmu as tmu_repo;
 
@@ -40,6 +41,13 @@ const STATS_COMPACTION_INTERVAL: Duration = Duration::from_secs(60 * 60);
 const STATS_PRUNE_AFTER_DAYS: i64 = 14;
 /// Delay legs are tiny (one row per flight leg) and useful over a longer window than raw positions.
 const DELAY_LEG_RETAIN_DAYS: i64 = 30;
+
+/// How long a leased outbound job may stay `in_progress` before it is treated as abandoned (#446).
+///
+/// The bot leases, performs one Discord call and acks — seconds of work. Five minutes is far beyond
+/// any legitimate run, so a job still `in_progress` after it did not finish: its worker died between
+/// leasing and acking, and nothing else will ever move it.
+const OUTBOUND_JOB_LEASE_TIMEOUT_MINS: i64 = 5;
 
 /// Weekly compaction ladder for `stats.position`: `(age_days, keep_every)`. When a position's age
 /// first crosses `age_days`, keep only every `keep_every`-th sample of the survivors handed down
@@ -822,6 +830,33 @@ pub fn spawn_desktop_auth_code_prune(reg: Arc<JobRegistry>, pool: PgPool) {
                     .await
                     .map(|n| format!("{n} deleted"))
                     .map_err(|_| "prune failed".to_string())
+            }
+        },
+    ));
+}
+
+/// Return outbound jobs stranded `in_progress` to the queue (#446).
+///
+/// Only the bot acking a job moves it out of `in_progress`, so a worker that dies mid-job leaves it
+/// there forever — never retried, never delivered, and with no error to notice, because nothing
+/// failed. Every redeploy is a chance to hit that window.
+///
+/// The recovery reuses the failed-ack transition, so the retry policy lives in one place.
+pub fn spawn_outbound_job_reaper(reg: Arc<JobRegistry>, pool: PgPool) {
+    tokio::spawn(run_interval(
+        reg,
+        "outbound_job_reaper",
+        "Requeue Discord jobs whose worker never acked",
+        CLEANUP_INTERVAL,
+        move || {
+            let pool = pool.clone();
+            async move {
+                let stranded_before =
+                    Utc::now() - chrono::Duration::minutes(OUTBOUND_JOB_LEASE_TIMEOUT_MINS);
+                integration_repo::reap_stranded_jobs(&pool, stranded_before)
+                    .await
+                    .map(|n| format!("{n} requeued"))
+                    .map_err(|_| "reap failed".to_string())
             }
         },
     ));
