@@ -231,6 +231,19 @@ export const TEMPLATES: Template[] = [
 ];
 
 /**
+ * Whether a template asks the user for airports before it can build.
+ *
+ * An allowlist, not `!== "none"`: a mode that needs no input is not automatically `"none"`.
+ * `"national"` needs none either, and the inequality silently prompted the NAS for an ICAO
+ * (VATUSA/OIS#476) — so a new no-input mode must opt *in* to prompting rather than inherit it.
+ *
+ * Lives here beside `templatesFor` for the same reason it does: the rule belongs with the modes it
+ * reads, where a test can reach it, not in the page that happens to call it.
+ */
+export const needsAirports = (t: Template): boolean =>
+  t.airports === "one" || t.airports === "many";
+
+/**
  * The templates to offer a user. A national board is only useful to someone who works the NAS, so it
  * is shown only to a `tmu_national` reader — the same flag the national widgets gate on
  * (VATUSA/OIS#474, #475, #476). Curation, not a boundary: every widget on that board can still be

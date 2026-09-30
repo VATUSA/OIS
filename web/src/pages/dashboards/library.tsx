@@ -22,7 +22,7 @@ import {Clock, ChevronDown, Folder, FolderPlus, LayoutDashboard, Plus, Share2, T
 
 import {FacilityCombobox, type FacilityPick} from "@/components/facility-combobox";
 import {usePageHeader, useView} from "@/components/shell/page-meta";
-import {type Template, templatesFor} from "@/features/dashboard/templates";
+import {needsAirports, type Template, templatesFor} from "@/features/dashboard/templates";
 import {useMe} from "@/lib/auth";
 import {
   type DashboardCollection,
@@ -138,13 +138,6 @@ function BoardCard({
 }
 
 const GRID = "grid gap-3 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4 2xl:grid-cols-5";
-
-/**
- * Whether a template asks the user for airports before it can build. Named rather than written as
- * `!== "none"` at each site, because a mode that needs no input is not automatically `"none"` —
- * `"national"` needs none either, and the inequality silently prompted it for an ICAO.
- */
-const needsAirports = (t: Template) => t.airports === "one" || t.airports === "many";
 
 export function BoardLibraryPage() {
   const { data, isLoading, isError, refetch } = useDashboards();
