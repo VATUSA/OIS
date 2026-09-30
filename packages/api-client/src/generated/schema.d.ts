@@ -5922,6 +5922,7 @@ export interface components {
             start_time?: string | null;
             /** Format: date-time */
             stop_time?: string | null;
+            structured?: null | components["schemas"]["NtmlRestriction"];
         };
         /**
          * @description The editor's SAVE payload. `reason` is required (audited). Each entry in `scopes`
