@@ -167,6 +167,7 @@ const TMU_TAB_IDS = [
   "ground-stops",
   "gdp",
   "rate-calculator",
+  "advisories",
 ] as const;
 type TmuTabId = (typeof TMU_TAB_IDS)[number];
 
