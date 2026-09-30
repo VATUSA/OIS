@@ -30,6 +30,13 @@ Reading the history, the reason is consistent: the rules that matter here were n
 This spec exists so the next change to this pipeline starts from the rules rather than rediscovering
 them.
 
+## Status
+
+This document specifies the pipeline **as of #477, #481 and #482 together**, and parts of it
+describe code that arrives with those: `sanitizeRings` / `sanitizeBoundaries` (#481), the
+`artcc-boundaries.test.ts` invariants (#477), and `Boundaries::has` (#482). It should land after
+them — merged first, it describes a pipeline that does not exist yet.
+
 ## Scope
 
 The ATC area/hover rendering path: the bundled ARTCC boundaries, the live TRACON rings, the ATC hover
@@ -77,9 +84,16 @@ is load-bearing, not cosmetic:
 | 6 | `matched` / `matched-<fcaId>` | **yes** |
 | 7 | selected track, selected route | no |
 | 8 | `aircraft` | **yes** |
-| 9 | labels, waypoints, draft editors | no |
+| 9 | labels, waypoints, `draft-vertices` (`buildDraftLayers`) | `draft-vertices` **yes**, rest no |
 
-Four layers are pickable, one per module (`fca.ts`, `atc.ts`, `matched.ts`, `aircraft.ts`).
+Five layers are pickable, one per module (`fca.ts`, `atc.ts`, `matched.ts`, `aircraft.ts`,
+`draft.ts`).
+
+`draft-vertices` is the one that is easy to forget: it exists only while a draft is open
+(`TrafficMap.tsx`: `if (draft) out.push(...buildDraftLayers(draft, palette))`), so it is absent from
+the stack most of the time. While it is there it sits above everything below it and wins the pick,
+which is the point of a vertex handle — but it means "the topmost pickable layer" is a different
+layer during drafting, and any reasoning about pick order has to allow for it.
 
 Two placements are deliberate and easy to undo by accident:
 
