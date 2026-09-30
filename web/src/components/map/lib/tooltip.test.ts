@@ -87,6 +87,24 @@ describe("mapTooltip", () => {
     // Nothing underneath — no card, rather than an empty one.
     expect(atcOnly(pickOver("aircraft", plane, null))).toBeNull();
   });
+
+  // VATUSA/OIS#477 symptom 3: the same rescue has to work with **default** settings. The aircraft
+  // IconLayer is pushed above `atc-hover` and is far bigger than the ATC circle, so at a staffed
+  // airport the glyph wins the pick — and #323 applied the re-pick only when aircraft cards were
+  // off, which left the defaulted configuration the one path that could never show an ATC card.
+  //
+  // This is the pick-resolution rule, so it is also the regression guard for the layer ordering:
+  // whatever the layer stack does, hovering a pill must resolve to the pill.
+  it("shows the ATC pill under a glyph with default settings (aircraft tooltips on)", () => {
+    expect(html(tooltip(pickOver("aircraft", plane, tower)))).toContain("ORD_TWR");
+    expect(html(tooltip(pickOver("matched", matched, tower)))).toContain("ORD_TWR");
+  });
+
+  it("still shows the aircraft card when no pill is underneath", () => {
+    // The pill only wins where there actually is one; an aircraft in open airspace is unaffected.
+    expect(html(tooltip(pickOver("aircraft", plane, null)))).toContain("AAL1");
+    expect(html(tooltip(pickOver("matched", matched, null)))).toContain("UAL2");
+  });
 });
 
 describe("tooltipFor", () => {
