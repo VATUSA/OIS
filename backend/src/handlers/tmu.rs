@@ -224,7 +224,7 @@ pub async fn publish_tmi(
         .await?
         .ok_or(ApiError::Conflict)?; // not a draft (or absent)
     if let Some(channel_id) = channel {
-        // Enqueued in the same tx as the publish: the advisory can't post without the TMI going live.
+        // Enqueued in the same tx as the publish: the NTML row can't post without the TMI going live.
         let job = tmi_publish_job(&channel_id, &tmi);
         integration_repo::enqueue_job(&mut tx, "tmi_publish", &job, Some("tmi"), Some(&tmi.id))
             .await?;
@@ -255,8 +255,17 @@ pub async fn cancel_tmi(
 ) -> Result<Json<TmiBody>, ApiError> {
     let pool = state.db.as_ref().ok_or(ApiError::ServiceUnavailable)?;
 
-    // Resolved before the tx; no config just means "don't post".
-    let channel = integration_repo::channel_id(pool, NTML_CHANNEL, None).await?;
+    // The channel the publish actually posted to, not a fresh resolution (#436 review). A cancel row
+    // only corrects anything if it lands beside the row it corrects, and re-resolving does not get
+    // there: this path passes `None` while `activate_package` passes the event's facility, so
+    // `resolve_scoped_id` can answer with a different guild for the same logical name — publishing an
+    // event-package TMI to ZNY's channel and cancelling it in VATUSA's. Falling back to a fresh
+    // resolution covers a TMI with no publish job at all (never published, or published before this
+    // shipped); no config still just means "don't post".
+    let channel = match integration_repo::published_channel_for_tmi(pool, &id).await? {
+        Some(posted_to) => Some(posted_to),
+        None => integration_repo::channel_id(pool, NTML_CHANNEL, None).await?,
+    };
     let mut tx = pool.begin().await.map_err(|_| ApiError::Internal)?;
     if !tmu_repo::cancel_tmi(&mut *tx, &id).await? {
         return Err(ApiError::Conflict);
@@ -639,6 +648,213 @@ mod tests {
     }
 
     use super::*;
+    use crate::scope_test_support;
+
+    /// Seed a guild with `tmu-ntml` mapped to `channel`, optionally scoped to one ARTCC, and return
+    /// its config id.
+    async fn guild(
+        pool: &sqlx::PgPool,
+        name: &str,
+        channel: &str,
+        sort_order: i32,
+        artcc: Option<&str>,
+    ) -> String {
+        let config = sqlx::query_scalar::<_, String>(
+            "insert into integration.discord_configs (name, guild_id, sort_order) \
+             values ($1, $2, $3) returning id",
+        )
+        .bind(name)
+        .bind(format!("g-{name}"))
+        .bind(sort_order)
+        .fetch_one(pool)
+        .await
+        .unwrap();
+        sqlx::query(
+            "insert into integration.discord_channels (config_id, name, channel_id) \
+             values ($1, 'tmu-ntml', $2)",
+        )
+        .bind(&config)
+        .bind(channel)
+        .execute(pool)
+        .await
+        .unwrap();
+        if let Some(artcc) = artcc {
+            sqlx::query(
+                "insert into integration.discord_config_facilities (config_id, artcc_id) \
+                 values ($1, $2)",
+            )
+            .bind(&config)
+            .bind(artcc)
+            .execute(pool)
+            .await
+            .unwrap();
+        }
+        config
+    }
+
+    /// A TMI row, published, with a `tmi_publish` job recording the channel it went to.
+    async fn published_tmi(pool: &sqlx::PgPool, id: &str, posted_to: Option<&str>) {
+        sqlx::query(
+            "insert into tmu.tmis (id, requesting, providing, restriction, status, start_time) \
+             values ($1, 'N90', 'ZNY', 'JFK arrivals via CAMRN 20MIT', 'published', now())",
+        )
+        .bind(id)
+        .execute(pool)
+        .await
+        .unwrap();
+        if let Some(channel) = posted_to {
+            sqlx::query(
+                "insert into integration.outbound_jobs \
+                 (job_type, payload, subject_type, subject_id) \
+                 values ('tmi_publish', $1::jsonb, 'tmi', $2)",
+            )
+            .bind(json!({ "channel_id": channel, "tmi_id": id, "ntml": "row" }).to_string())
+            .bind(id)
+            .execute(pool)
+            .await
+            .unwrap();
+        }
+    }
+
+    async fn cancel_jobs(pool: &sqlx::PgPool, tmi_id: &str) -> Vec<(String, String)> {
+        sqlx::query_as::<_, (String, String)>(
+            "select payload->>'channel_id', payload->>'ntml' \
+             from integration.outbound_jobs \
+             where job_type = 'tmi_cancel' and subject_id = $1",
+        )
+        .bind(tmi_id)
+        .fetch_all(pool)
+        .await
+        .unwrap()
+    }
+
+    /// Drive the real cancel route: `resolve_current_user`, `RequirePermission<TmuTmiPublish>` and the
+    /// handler all on the path (`scope_test_support::send`, VATUSA/OIS#364). The enqueue is a database
+    /// side effect, so it is observable afterwards even though `send` only returns the status.
+    async fn cancel_through_the_router(
+        pool: &sqlx::PgPool,
+        tmi_id: &str,
+        with_permission: bool,
+    ) -> http::StatusCode {
+        let user = scope_test_support::seed_user(pool).await;
+        if with_permission {
+            scope_test_support::grant(pool, &user, "tmu.tmi.publish", None).await;
+        }
+        let cookie = scope_test_support::session_cookie(pool, &user).await;
+        let state = scope_test_support::test_state(pool.clone(), Default::default());
+        scope_test_support::send(
+            &state,
+            http::Method::POST,
+            &format!("/api/v1/tmu/tmis/{tmi_id}/cancel"),
+            &cookie,
+            None,
+        )
+        .await
+    }
+
+    /// AC 3's first half. Nothing covered the enqueue itself: deleting it, or changing the job type
+    /// the bot dispatches on, left all 534 tests green while cancellations silently never reached
+    /// Discord — which is the bug #436 exists to fix (#436 review).
+    #[sqlx::test]
+    async fn cancelling_a_tmi_enqueues_a_cancel_post(pool: sqlx::PgPool) {
+        guild(&pool, "VATUSA", "CH-VATUSA", 1, None).await;
+        published_tmi(&pool, "tmi-1", Some("CH-VATUSA")).await;
+
+        assert_eq!(
+            cancel_through_the_router(&pool, "tmi-1", true).await,
+            http::StatusCode::OK
+        );
+
+        let jobs = cancel_jobs(&pool, "tmi-1").await;
+        assert_eq!(jobs.len(), 1, "exactly one tmi_cancel job");
+        assert_eq!(jobs[0].0, "CH-VATUSA");
+        assert!(
+            jobs[0].1.contains("CANCEL TMI") && jobs[0].1.contains("N90:ZNY"),
+            "the assembled cancel row, not a placeholder: {}",
+            jobs[0].1
+        );
+    }
+
+    /// AC 3's "**the same** channel". `publish_tmi` resolves the channel unscoped while
+    /// `activate_package` resolves it with the event's facility, so with two guilds the same logical
+    /// name answers differently — an event-package TMI published to ZNY's channel would have had its
+    /// cancellation posted to VATUSA's, leaving the restriction uncorrected where anyone could see it
+    /// (#436 review). Proven in SQL before the fix.
+    #[sqlx::test]
+    async fn a_cancel_posts_to_the_channel_the_publish_used(pool: sqlx::PgPool) {
+        // VATUSA sorts first, so an unscoped resolution picks it; ZNY is where the publish went.
+        guild(&pool, "VATUSA", "CH-VATUSA", 1, None).await;
+        guild(&pool, "ZNY", "CH-ZNY", 2, Some("ZNY")).await;
+        published_tmi(&pool, "tmi-2", Some("CH-ZNY")).await;
+
+        cancel_through_the_router(&pool, "tmi-2", true).await;
+
+        assert_eq!(
+            cancel_jobs(&pool, "tmi-2").await[0].0,
+            "CH-ZNY",
+            "the cancel must land beside the row it corrects, not in whichever guild sorts first"
+        );
+    }
+
+    /// A TMI with no publish job — never published, or published before this shipped — still cancels,
+    /// falling back to a fresh resolution rather than posting nowhere.
+    #[sqlx::test]
+    async fn a_cancel_without_a_publish_job_falls_back_to_the_mapped_channel(pool: sqlx::PgPool) {
+        guild(&pool, "VATUSA", "CH-VATUSA", 1, None).await;
+        published_tmi(&pool, "tmi-3", None).await;
+
+        cancel_through_the_router(&pool, "tmi-3", true).await;
+
+        assert_eq!(cancel_jobs(&pool, "tmi-3").await[0].0, "CH-VATUSA");
+    }
+
+    /// The route is gated: without `tmu.tmi.publish` the cancel is refused and nothing is enqueued, so
+    /// dropping the extractor cannot pass unnoticed.
+    #[sqlx::test]
+    async fn cancelling_without_the_permission_is_refused_and_enqueues_nothing(pool: sqlx::PgPool) {
+        guild(&pool, "VATUSA", "CH-VATUSA", 1, None).await;
+        published_tmi(&pool, "tmi-4", Some("CH-VATUSA")).await;
+
+        assert_eq!(
+            cancel_through_the_router(&pool, "tmi-4", false).await,
+            http::StatusCode::UNAUTHORIZED
+        );
+        assert!(cancel_jobs(&pool, "tmi-4").await.is_empty());
+    }
+
+    /// The `ntml` key is a contract with `ois-discord`, which reads exactly that key and now hard-errors
+    /// without it. Nothing referenced `tmi_publish_job` but its two call sites, so either side could be
+    /// renamed silently (#436 review).
+    #[test]
+    fn the_publish_payload_carries_the_assembled_row_under_ntml() {
+        let now = chrono::Utc::now();
+        let tmi = TmiBody {
+            id: "tmi-9".into(),
+            requesting: "N90".into(),
+            providing: "ZNY".into(),
+            requesting_artcc: None,
+            providing_artcc: None,
+            restriction: "JFK arrivals via CAMRN 20MIT".into(),
+            start_time: now,
+            stop_time: None,
+            status: "published".into(),
+            published_at: Some(now),
+            created_at: now,
+            author: None,
+            structured: None,
+            decoded: None,
+        };
+
+        let job = tmi_publish_job("CH-1", &tmi);
+
+        assert_eq!(job["channel_id"], "CH-1");
+        assert_eq!(job["tmi_id"], "tmi-9");
+        let ntml = job["ntml"]
+            .as_str()
+            .expect("the bot reads `ntml` and nothing else");
+        assert!(ntml.contains("JFK arrivals via CAMRN 20MIT"), "{ntml}");
+        assert!(ntml.ends_with("N90:ZNY"), "{ntml}");
+    }
 
     /// A guild that already has both names must not fail the migration: `(config_id, name)` is
     /// unique, so a bare `update` would collide and take the whole deploy's migration down with it.
