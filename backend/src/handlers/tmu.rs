@@ -10,13 +10,14 @@ use serde::Deserialize;
 
 use crate::{
     auth::{
-        context::CurrentUser,
+        context::{CurrentApiKey, CurrentUser},
         permissions::{
             TmuAdvCreate, TmuAdvPublish, TmuAdvRead, TmuAdvUpdate, TmuGroundStopCreate,
             TmuGroundStopDelete, TmuGroundStopPublish, TmuGroundStopRead, TmuProgramDelete,
             TmuProgramRead, TmuProgramUpdate, TmuTmiCreate, TmuTmiDelete, TmuTmiPublish,
             TmuTmiRead, TmuTmiUpdate,
         },
+        principal::Principal,
         require_permission::RequirePermission,
     },
     errors::ApiError,
@@ -546,11 +547,20 @@ mod tests {
     }
 
     async fn seed_draft(pool: &PgPool) -> String {
+        seed_draft_for(pool, "DCC").await
+    }
+
+    /// A draft belonging to `facility`.
+    ///
+    /// The scope tests need a real ARTCC because `access.user_permissions.artcc_id` is a foreign key
+    /// to `org.facilities`, so a grant simply cannot be scoped to something absent from it — see
+    /// `a_dcc_advisory_is_reachable_only_by_a_national_grant`.
+    async fn seed_draft_for(pool: &PgPool, facility: &str) -> String {
         let author = seed_user(pool).await;
         crate::repos::tmu::create_advisory(
             pool,
             &CreateAdvisoryRequest {
-                facility: "DCC".into(),
+                facility: facility.into(),
                 kind: "reroute".into(),
                 body: "vATCSCC ADVZY".into(),
                 structured: None,
@@ -580,6 +590,111 @@ mod tests {
             .await
             .unwrap()
             .map(|a| a.status)
+    }
+
+    /// #457 review: `RequirePermission` answers "holds it", not "holds it here". An advisory
+    /// carries the issuing facility in its identity, so a grant scoped to one ARTCC must not reach
+    /// another's document — otherwise a ZDC controller could cancel ZNY's published advisory.
+    #[sqlx::test]
+    async fn a_facility_scoped_grant_cannot_touch_another_facilitys_advisory(pool: PgPool) {
+        let id = seed_draft_for(&pool, "ZDC").await;
+        let (state, user, cookie) = caller(&pool).await;
+        grant(&pool, &user, "tmu.adv.publish", Some("ZNY")).await;
+        grant(&pool, &user, "tmu.adv.update", Some("ZNY")).await;
+
+        for (method, uri) in [
+            (
+                http::Method::POST,
+                format!("/api/v1/tmu/advisories/{id}/cancel"),
+            ),
+            (
+                http::Method::POST,
+                format!("/api/v1/tmu/advisories/{id}/publish"),
+            ),
+            (http::Method::DELETE, format!("/api/v1/tmu/advisories/{id}")),
+        ] {
+            assert_eq!(
+                send(&state, method.clone(), &uri, &cookie, None).await,
+                http::StatusCode::FORBIDDEN,
+                "{method} {uri} must be refused for another facility's advisory"
+            );
+        }
+        assert_eq!(
+            status_of(&pool, &id).await.as_deref(),
+            Some("draft"),
+            "a refused call must leave the advisory untouched"
+        );
+    }
+
+    /// The same grant scoped to the advisory's *own* facility is allowed — the check must gate on
+    /// the facility, not simply refuse every scoped grant.
+    #[sqlx::test]
+    async fn a_grant_scoped_to_the_advisorys_own_facility_is_allowed(pool: PgPool) {
+        let id = seed_draft_for(&pool, "ZDC").await;
+        let (state, user, cookie) = caller(&pool).await;
+        grant(&pool, &user, "tmu.adv.publish", Some("ZDC")).await;
+
+        assert_eq!(
+            send(
+                &state,
+                http::Method::POST,
+                &format!("/api/v1/tmu/advisories/{id}/publish"),
+                &cookie,
+                None,
+            )
+            .await,
+            http::StatusCode::OK
+        );
+        assert_eq!(status_of(&pool, &id).await.as_deref(), Some("published"));
+    }
+
+    /// A DCC advisory is reachable only by a **national** grant, and that falls out of the schema
+    /// rather than being a rule anyone wrote: `tmu.advisories.facility` is deliberately not a
+    /// foreign key (0085 — the DCC is not an ARTCC in `org.facilities`), while
+    /// `access.user_permissions.artcc_id` *is* one. So no grant can be scoped to `DCC` in the first
+    /// place, and only an unscoped holder can act on its documents (#457 review).
+    ///
+    /// That is the right outcome — DCC advisories are national by nature — but it is worth pinning,
+    /// because it means facility scoping silently does not apply to a whole class of advisory.
+    #[sqlx::test]
+    async fn a_dcc_advisory_is_reachable_only_by_a_national_grant(pool: PgPool) {
+        let id = seed_draft_for(&pool, "DCC").await;
+        let (state, user, cookie) = caller(&pool).await;
+        let uri = format!("/api/v1/tmu/advisories/{id}/publish");
+
+        // A grant scoped to a real ARTCC does not reach it.
+        grant(&pool, &user, "tmu.adv.publish", Some("ZDC")).await;
+        assert_eq!(
+            send(&state, http::Method::POST, &uri, &cookie, None).await,
+            http::StatusCode::FORBIDDEN
+        );
+
+        // A national one does.
+        grant(&pool, &user, "tmu.adv.publish", None).await;
+        assert_eq!(
+            send(&state, http::Method::POST, &uri, &cookie, None).await,
+            http::StatusCode::OK
+        );
+    }
+
+    /// Creating is scoped on the facility in the *body*, which is the only place it exists yet —
+    /// so this is what stops a ZDC controller issuing an advisory in another facility's name.
+    #[sqlx::test]
+    async fn creating_for_another_facility_is_refused(pool: PgPool) {
+        let (state, user, cookie) = caller(&pool).await;
+        grant(&pool, &user, "tmu.adv.create", Some("ZNY")).await;
+
+        assert_eq!(
+            send(
+                &state,
+                http::Method::POST,
+                "/api/v1/tmu/advisories",
+                &cookie,
+                Some(new_advisory()), // facility DCC
+            )
+            .await,
+            http::StatusCode::FORBIDDEN
+        );
     }
 
     /// AC 1's third verb. `cancel_advisory` shares `TmuAdvPublish` with publish, so publish's test
@@ -871,6 +986,40 @@ pub async fn get_advisory(
 
 /// Creates a draft, allocating its advisory number immediately so the author can see what they will
 /// issue under (#457).
+/// The permission whose ARTCC scope decides who may act on a facility's advisory.
+///
+/// `tmu.adv.update` and `tmu.adv.publish` are graded separately everywhere else, but the *scope*
+/// question is the same one for both: is this principal allowed to act for this facility at all.
+/// Checking the permission the caller was already gated on keeps the two answers from diverging.
+async fn require_advisory_scope(
+    state: &AppState,
+    principal: &Principal,
+    permission: &str,
+    facility: &str,
+) -> Result<(), ApiError> {
+    if principal
+        .permission_scope(state, permission)
+        .await?
+        .allows(Some(facility))
+    {
+        Ok(())
+    } else {
+        Err(ApiError::Forbidden)
+    }
+}
+
+/// The facility an existing advisory belongs to, or 404.
+///
+/// Read before every mutation so the scope check is against the row's own facility rather than
+/// anything the caller sent — the body cannot move a document into a facility the caller can reach
+/// (#457 review).
+async fn advisory_facility(pool: &sqlx::PgPool, id: &str) -> Result<String, ApiError> {
+    tmu_repo::get_advisory(pool, id)
+        .await?
+        .map(|a| a.facility)
+        .ok_or(ApiError::NotFound)
+}
+
 #[utoipa::path(
     post, path = "/api/v1/tmu/advisories", tag = "tmu",
     request_body = CreateAdvisoryRequest,
@@ -880,9 +1029,11 @@ pub async fn create_advisory(
     State(state): State<AppState>,
     _permission: RequirePermission<TmuAdvCreate>,
     Extension(current_user): Extension<Option<CurrentUser>>,
+    Extension(current_api_key): Extension<Option<CurrentApiKey>>,
     Json(payload): Json<CreateAdvisoryRequest>,
 ) -> Result<Json<AdvisoryBody>, ApiError> {
     let user = current_user.as_ref().ok_or(ApiError::Unauthorized)?;
+    let principal = Principal::require(current_user.as_ref(), current_api_key.as_ref())?;
     let pool = state.db.as_ref().ok_or(ApiError::ServiceUnavailable)?;
     if payload.facility.trim().is_empty()
         || payload.kind.trim().is_empty()
@@ -890,6 +1041,15 @@ pub async fn create_advisory(
     {
         return Err(ApiError::BadRequest);
     }
+    // On create the facility comes from the body, so this is what stops a ZDC controller issuing
+    // an advisory in ZNY's name (#457 review). A national grant allows any.
+    require_advisory_scope(
+        &state,
+        &principal,
+        "tmu.adv.create",
+        &payload.facility.trim().to_ascii_uppercase(),
+    )
+    .await?;
     let id = tmu_repo::create_advisory(pool, &payload, &user.id).await?;
     tmu_repo::get_advisory(pool, &id)
         .await?
@@ -905,10 +1065,15 @@ pub async fn create_advisory(
 pub async fn update_advisory(
     State(state): State<AppState>,
     _permission: RequirePermission<TmuAdvUpdate>,
+    Extension(current_user): Extension<Option<CurrentUser>>,
+    Extension(current_api_key): Extension<Option<CurrentApiKey>>,
     Path(id): Path<String>,
     Json(payload): Json<UpdateAdvisoryRequest>,
 ) -> Result<Json<AdvisoryBody>, ApiError> {
+    let principal = Principal::require(current_user.as_ref(), current_api_key.as_ref())?;
     let pool = state.db.as_ref().ok_or(ApiError::ServiceUnavailable)?;
+    let facility = advisory_facility(pool, &id).await?;
+    require_advisory_scope(&state, &principal, "tmu.adv.update", &facility).await?;
     if !tmu_repo::update_advisory(pool, &id, &payload).await? {
         return Err(ApiError::NotFound);
     }
@@ -927,10 +1092,14 @@ pub async fn publish_advisory(
     State(state): State<AppState>,
     _permission: RequirePermission<TmuAdvPublish>,
     Extension(current_user): Extension<Option<CurrentUser>>,
+    Extension(current_api_key): Extension<Option<CurrentApiKey>>,
     Path(id): Path<String>,
 ) -> Result<Json<AdvisoryBody>, ApiError> {
     let user = current_user.as_ref().ok_or(ApiError::Unauthorized)?;
+    let principal = Principal::require(current_user.as_ref(), current_api_key.as_ref())?;
     let pool = state.db.as_ref().ok_or(ApiError::ServiceUnavailable)?;
+    let facility = advisory_facility(pool, &id).await?;
+    require_advisory_scope(&state, &principal, "tmu.adv.publish", &facility).await?;
     if !tmu_repo::publish_advisory(pool, &id, &user.id).await? {
         return Err(ApiError::Conflict);
     }
@@ -948,9 +1117,14 @@ pub async fn publish_advisory(
 pub async fn cancel_advisory(
     State(state): State<AppState>,
     _permission: RequirePermission<TmuAdvPublish>,
+    Extension(current_user): Extension<Option<CurrentUser>>,
+    Extension(current_api_key): Extension<Option<CurrentApiKey>>,
     Path(id): Path<String>,
 ) -> Result<Json<AdvisoryBody>, ApiError> {
+    let principal = Principal::require(current_user.as_ref(), current_api_key.as_ref())?;
     let pool = state.db.as_ref().ok_or(ApiError::ServiceUnavailable)?;
+    let facility = advisory_facility(pool, &id).await?;
+    require_advisory_scope(&state, &principal, "tmu.adv.publish", &facility).await?;
     if !tmu_repo::cancel_advisory(pool, &id).await? {
         return Err(ApiError::Conflict);
     }
@@ -972,9 +1146,14 @@ pub async fn cancel_advisory(
 pub async fn delete_advisory(
     State(state): State<AppState>,
     _permission: RequirePermission<TmuAdvUpdate>,
+    Extension(current_user): Extension<Option<CurrentUser>>,
+    Extension(current_api_key): Extension<Option<CurrentApiKey>>,
     Path(id): Path<String>,
 ) -> Result<StatusCode, ApiError> {
+    let principal = Principal::require(current_user.as_ref(), current_api_key.as_ref())?;
     let pool = state.db.as_ref().ok_or(ApiError::ServiceUnavailable)?;
+    let facility = advisory_facility(pool, &id).await?;
+    require_advisory_scope(&state, &principal, "tmu.adv.update", &facility).await?;
     if tmu_repo::delete_advisory(pool, &id).await? {
         Ok(StatusCode::NO_CONTENT)
     } else {

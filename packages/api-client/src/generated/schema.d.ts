@@ -2536,10 +2536,6 @@ export interface paths {
         };
         get: operations["list_advisories"];
         put?: never;
-        /**
-         * Creates a draft, allocating its advisory number immediately so the author can see what they will
-         *     issue under (#457).
-         */
         post: operations["create_advisory"];
         delete?: never;
         options?: never;
@@ -2558,8 +2554,10 @@ export interface paths {
         put?: never;
         post?: never;
         /**
-         * Abandons a draft. `409` when it cannot be deleted — a published or cancelled advisory, or a draft
-         *     whose number is no longer the top of its sequence (see `repos::tmu::delete_advisory`).
+         * Abandons a draft. `409` when it is not a draft — a published advisory is a document that went out,
+         *     and a cancelled one is a record of that; neither is deleted. Any draft can be abandoned, whether or
+         *     not its number is the top of the sequence; abandoning an older one simply leaves a gap (see
+         *     `repos::tmu::delete_advisory`).
          */
         delete: operations["delete_advisory"];
         options?: never;

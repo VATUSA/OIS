@@ -815,13 +815,21 @@ mod tests {
         assert_eq!(draft(&pool, "DCC").await.number, 3);
     }
 
-    /// AC3. The allocator locks the facility's rows for the day, so two allocations racing in
-    /// separate transactions cannot both read the same maximum. The unique constraint is the
-    /// backstop; this asserts the allocator itself does not rely on it.
+    /// AC3. Two advisories must never take the same number, and the allocator is what guarantees
+    /// it — the unique constraint is only the backstop that turns a race into an error instead of a
+    /// duplicate identity.
+    ///
+    /// Eight concurrent creates rather than two: with two, removing `pg_advisory_xact_lock` still
+    /// let the test pass roughly one run in five, because the window in which both transactions
+    /// read the same `max(number)` is narrow enough to miss (#457 review). Eight makes the race
+    /// near-certain, so the test fails every time the lock is gone rather than most of the time.
     #[sqlx::test]
     async fn concurrent_allocations_get_different_numbers(pool: PgPool) {
+        const CONCURRENCY: usize = 8;
         let user = seed_user(&pool).await;
-        let req = CreateAdvisoryRequest {
+        // Built per task rather than cloned: `CreateAdvisoryRequest` is a request model and does not
+        // derive `Clone`, which is not worth changing for a test.
+        let request = || CreateAdvisoryRequest {
             facility: "DCC".to_string(),
             kind: "reroute".to_string(),
             body: "vATCSCC ADVZY".to_string(),
@@ -829,18 +837,31 @@ mod tests {
             decoded: None,
         };
 
-        let (a, b) = tokio::join!(
-            create_advisory(&pool, &req, &user),
-            create_advisory(&pool, &req, &user),
-        );
-        let (a, b) = (a.unwrap(), b.unwrap());
+        // Spawned, not just awaited together: each create needs its own task to contend for a
+        // separate pool connection, which is what makes the allocation genuinely concurrent.
+        let mut tasks = Vec::new();
+        for _ in 0..CONCURRENCY {
+            let (pool, req, user) = (pool.clone(), request(), user.clone());
+            tasks.push(tokio::spawn(async move {
+                create_advisory(&pool, &req, &user).await
+            }));
+        }
 
-        let one = get_advisory(&pool, &a).await.unwrap().unwrap().number;
-        let two = get_advisory(&pool, &b).await.unwrap().unwrap().number;
-        assert_ne!(one, two, "two advisories took the same number");
-        let mut got = [one, two];
-        got.sort();
-        assert_eq!(got, [1, 2]);
+        let mut numbers = Vec::new();
+        for task in tasks {
+            let id = task
+                .await
+                .expect("task panicked")
+                .expect("every concurrent create must succeed");
+            numbers.push(get_advisory(&pool, &id).await.unwrap().unwrap().number);
+        }
+        numbers.sort_unstable();
+
+        assert_eq!(
+            numbers,
+            (1..=CONCURRENCY as i32).collect::<Vec<_>>(),
+            "concurrent allocations must be a dense 1..=n with no duplicates and no gaps"
+        );
     }
 
     /// AC4. Numbers are taken at draft so the author can see theirs, which means abandoning one must
