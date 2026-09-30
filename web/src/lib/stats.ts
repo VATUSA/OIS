@@ -235,6 +235,31 @@ export function useCaptures() {
   });
 }
 
+/**
+ * Delete a saved capture, releasing the position data it pins.
+ *
+ * A capture isn't just a row: while it exists, compaction skips every position inside its window, so
+ * deleting one is how that storage is given back (#432). The space returns on the next compaction
+ * pass rather than immediately.
+ */
+export function useDeleteCapture() {
+  const qc = useQueryClient();
+  const toast = useToast();
+  return useMutation({
+    mutationFn: async (id: string): Promise<void> => {
+      const { error } = await ois.DELETE("/api/v1/stats/captures/{id}", {
+        params: { path: { id } },
+      });
+      if (error) throw new Error("failed to delete capture");
+    },
+    onSuccess: () => {
+      qc.invalidateQueries({ queryKey: ["stats-captures"] });
+      toast.success("Capture deleted");
+    },
+    onError: () => toast.error("Couldn’t delete that capture"),
+  });
+}
+
 /** Save an already-viewed window as a permanent, named capture. */
 export function useSaveCapture() {
   const qc = useQueryClient();

@@ -836,6 +836,28 @@ pub async fn close_capture(
     Ok(res.rows_affected() > 0)
 }
 
+/// Marks a capture `discarded`, releasing the positions it was pinning (#432).
+///
+/// Not a row delete. `CAPTURE_GUARD` (see [`downsample_positions`]) keeps every position inside an
+/// `'open'` or `'saved'` window out of compaction, so dropping out of that set is what actually gives
+/// the space back — on the next compaction pass, not immediately. Keeping the row also keeps the
+/// record that the capture existed, which a hard delete would lose.
+///
+/// Accepts `'open'` as well as `'saved'`: discarding a capture that is still recording is a coherent
+/// thing to want, and leaving it running would keep pinning data. Returns `false` when there is no
+/// such capture or it was already discarded, so the caller can answer 404 rather than pretend.
+pub async fn discard_capture(pool: &PgPool, id: &str) -> Result<bool, ApiError> {
+    let res = sqlx::query(
+        "update stats.capture set status = 'discarded' \
+         where id = $1 and status in ('open', 'saved')",
+    )
+    .bind(id)
+    .execute(pool)
+    .await
+    .map_err(db)?;
+    Ok(res.rows_affected() > 0)
+}
+
 /// Save an already-elapsed `[start, end)` window as a capture directly, bypassing the open/close
 /// lifecycle — used to keep a window after the fact rather than while it's being recorded live.
 /// `relax_scope` is false: the data already exists, so there's nothing left for the live collector
