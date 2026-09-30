@@ -36,6 +36,21 @@ use serde_json::json;
 /// misnomer the moment either grew.
 pub(crate) const NTML_CHANNEL: &str = "tmu-ntml";
 
+/// Records that a TMI never reached Discord because the logical channel resolves to nothing.
+///
+/// `channel_id` answering `None` means "don't post", and that is a legitimate state — a deployment
+/// with no Discord config, or a guild that has not mapped this channel. It is also exactly what a
+/// typo, a removed mapping or a renamed constant looks like, and the caller still returns 200 either
+/// way. One line here is the difference between a diagnosable gap and a channel nobody notices has
+/// gone quiet (#436 review).
+fn skipped_post(channel: &str, what: &str, tmi_id: &str) {
+    tracing::warn!(
+        channel,
+        tmi = tmi_id,
+        "tmu: no Discord channel mapped for `{channel}`; TMI {what} not posted"
+    );
+}
+
 /// The `tmi_publish` job payload: the assembled NTML row plus what the bot needs to post it.
 ///
 /// Shared because there are two publish paths — a TMI published directly, and one materialized from
@@ -213,6 +228,12 @@ pub async fn publish_tmi(
         let job = tmi_publish_job(&channel_id, &tmi);
         integration_repo::enqueue_job(&mut tx, "tmi_publish", &job, Some("tmi"), Some(&tmi.id))
             .await?;
+    } else {
+        // Not an error — a deployment with no Discord config is a real state — but it is
+        // indistinguishable from a mapping that is missing by accident, and the publish still
+        // answers 200. Without this the only symptom is a channel that quietly went silent (#436
+        // review); renaming the logical channel made that case likely across every install at once.
+        skipped_post(NTML_CHANNEL, "publish", &tmi.id);
     }
     tx.commit().await.map_err(|_| ApiError::Internal)?;
 
@@ -259,6 +280,8 @@ pub async fn cancel_tmi(
         });
         integration_repo::enqueue_job(&mut tx, "tmi_cancel", &job, Some("tmi"), Some(&tmi.id))
             .await?;
+    } else {
+        skipped_post(NTML_CHANNEL, "cancel", &tmi.id);
     }
     tx.commit().await.map_err(|_| ApiError::Internal)?;
     restriction_artcc::stamp_tmi(&*state.facilities.read().await, &mut tmi);
@@ -570,7 +593,93 @@ pub async fn delete_ground_stop(
 
 #[cfg(test)]
 mod tests {
+    /// #436 review: renaming the logical channel without moving the existing row would have made
+    /// `channel_id` answer `None` for every guild that already had one — and `None` means "don't
+    /// post", silently, with the publish still returning 200. The migration repoints it, mirroring
+    /// `0041_stats_perm_rename.sql`.
+    ///
+    /// `#[sqlx::test]` applies every migration to a fresh database, so seeding the *old* name here
+    /// and finding the new one is only possible if the rename is idempotent — which it must be,
+    /// since it runs on databases that never had the old row either.
+    #[sqlx::test]
+    async fn the_ntml_channel_mapping_survives_the_rename(pool: sqlx::PgPool) {
+        let config = sqlx::query_scalar::<_, String>(
+            "insert into integration.discord_configs (name, guild_id) values ('g', '1') returning id",
+        )
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        // A guild mapped under the pre-#436 name, as every existing deployment is.
+        sqlx::query(
+            "insert into integration.discord_channels (config_id, name, channel_id) \
+             values ($1, 'tmu-advisories', '999')",
+        )
+        .bind(&config)
+        .execute(&pool)
+        .await
+        .unwrap();
+
+        // Re-run the rename the migration performs; on a real deploy the migration has already run
+        // before this row existed, so applying it here is what reproduces the upgrade order.
+        sqlx::query(include_str!(
+            "../../migrations/0083_tmu_ntml_channel_rename.sql"
+        ))
+        .execute(&pool)
+        .await
+        .unwrap();
+
+        let mapped = crate::repos::integration::channel_id(&pool, NTML_CHANNEL, None)
+            .await
+            .unwrap();
+        assert_eq!(
+            mapped,
+            Some("999".to_string()),
+            "an existing mapping must keep posting without an admin remapping it"
+        );
+    }
+
     use super::*;
+
+    /// A guild that already has both names must not fail the migration: `(config_id, name)` is
+    /// unique, so a bare `update` would collide and take the whole deploy's migration down with it.
+    /// The existing `tmu-ntml` row is the one that already wins, so it is left alone.
+    /// (Caught by mutation: removing the guard left the test above green.)
+    #[sqlx::test]
+    async fn a_guild_holding_both_channel_names_does_not_break_the_rename(pool: sqlx::PgPool) {
+        let config = sqlx::query_scalar::<_, String>(
+            "insert into integration.discord_configs (name, guild_id) values ('g', '1') returning id",
+        )
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        for (name, id) in [("tmu-advisories", "111"), ("tmu-ntml", "222")] {
+            sqlx::query(
+                "insert into integration.discord_channels (config_id, name, channel_id) \
+                 values ($1, $2, $3)",
+            )
+            .bind(&config)
+            .bind(name)
+            .bind(id)
+            .execute(&pool)
+            .await
+            .unwrap();
+        }
+
+        sqlx::query(include_str!(
+            "../../migrations/0083_tmu_ntml_channel_rename.sql"
+        ))
+        .execute(&pool)
+        .await
+        .expect("the rename must not collide with an existing tmu-ntml row");
+
+        assert_eq!(
+            crate::repos::integration::channel_id(&pool, NTML_CHANNEL, None)
+                .await
+                .unwrap(),
+            Some("222".to_string()),
+            "the channel already mapped as tmu-ntml stays the one that wins"
+        );
+    }
 
     #[test]
     fn icao_normalization() {
