@@ -1,6 +1,7 @@
 import * as React from "react";
 import {useRouter} from "@tanstack/react-router";
 
+import {safeUnlisten} from "@/lib/desktop-events";
 import {listenForNotificationClicks} from "@/lib/desktop-notify";
 
 /**
@@ -32,13 +33,13 @@ export function NotificationClicks() {
       void router.navigate(toNavigation(route) as Parameters<typeof router.navigate>[0]);
     }).then((d) => {
       // Unmounted before the listener finished registering — tear it straight back down.
-      if (cancelled) d?.();
+      if (cancelled) safeUnlisten(d);
       else dispose = d;
     });
 
     return () => {
       cancelled = true;
-      dispose?.();
+      safeUnlisten(dispose);
     };
   }, [router]);
 

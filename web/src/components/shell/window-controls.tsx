@@ -2,6 +2,7 @@ import * as React from "react";
 import {Button} from "@ois/ui";
 import {Minus, Square, Copy, X} from "lucide-react";
 
+import {safeUnlisten} from "@/lib/desktop-events";
 import {can, MAIN_WINDOW_LABEL} from "@/lib/platform";
 
 /**
@@ -116,7 +117,7 @@ export function WindowControls() {
         // read-once state tells a screen reader the wrong action (#402 review).
         const stop = await win.onResized(() => void read());
         if (alive) unlisten = stop;
-        else stop();
+        else safeUnlisten(stop);
       } catch {
         // Can't tell; the icon is cosmetic and the toggle still works.
       }
@@ -124,7 +125,7 @@ export function WindowControls() {
 
     return () => {
       alive = false;
-      unlisten?.();
+      safeUnlisten(unlisten);
     };
   }, [frameless]);
 

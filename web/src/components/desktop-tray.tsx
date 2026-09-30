@@ -1,5 +1,6 @@
 import * as React from "react";
 
+import {safeUnlisten} from "@/lib/desktop-events";
 import {useFeedStatus} from "@/lib/feed";
 import {can} from "@/lib/platform";
 import {useSetting} from "@/lib/settings";
@@ -96,7 +97,7 @@ export function CloseToTray({enabled}: {enabled: boolean}) {
           event.preventDefault();
           void win.hide();
         });
-        if (cancelled) unlisten();
+        if (cancelled) safeUnlisten(unlisten);
         else dispose = unlisten;
       } catch {
         // Without the listener the window closes normally, which is the previous behaviour.
@@ -105,7 +106,7 @@ export function CloseToTray({enabled}: {enabled: boolean}) {
 
     return () => {
       cancelled = true;
-      dispose?.();
+      safeUnlisten(dispose);
     };
   }, [enabled]);
 
