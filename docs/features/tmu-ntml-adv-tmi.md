@@ -21,12 +21,12 @@ new should reuse the word loosely:
 | --- | --- | --- |
 | **The advisories board** | The pilot-facing read view of initiatives **currently in effect** — ground stops, GDPs, restrictions, rate programs. A projection of live rows, not an authored document. | `/advisories`, `GET /api/v1/public/board` → `PublicBoard` |
 | **NTML** | The chronological log of TMIs as they are issued and cancelled. One line per entry. | `tmu.tmis`, `backend/src/tmi.rs`, Discord `tmu-ntml` |
-| **ADVZY advisories** | Authored multi-line vATCSCC documents with a number, a valid period and a signature. Not built — see #437. | `tmu.adv.*` permissions (seeded, unused) |
+| **ADVZY advisories** | Authored multi-line vATCSCC documents with a number, a valid period and a signature. The entity and its lifecycle landed in #457; Reroute is the first document type (#458). | `tmu.advisories` (0085), `backend/src/advisory.rs`, `tmu.adv.*` permissions |
 
 **The board keeps `/advisories`.** It is advisory information to pilots, it is what the product is
 named after, and renaming a public route costs bookmarks and an API contract for a distinction nobody
-is confused by at that surface. **ADVZY documents therefore get their own name** when #437 builds
-them, rather than taking a route that is already in use — naming the unbuilt thing is free.
+is confused by at that surface. **ADVZY documents therefore get their own name**, rather than taking
+a route that is already in use — naming the unbuilt thing was free.
 
 `FlightImpact` (`backend/src/models/mod.rs`) was called `FlightAdvisory` and is neither of the above:
 it is a per-flight summary of which initiatives touch one callsign and what they cost it. Renamed in
@@ -58,7 +58,9 @@ ingested VATSIM feed / nav / winds model the `flow` domain uses.
 
 **Not built (from the original spec)**
 
-- NTML **entry** CRUD and advisories (ADV) as separate authored/parsed records.
+- NTML **entry** CRUD as a separate authored record. (ADVZY advisories *are* now authored records —
+  `tmu.advisories`, #457 — but they are not parsed: see "the renderer is one-way" in
+  `backend/src/advisory.rs`.)
 - Plain-language parse-on-write rendering.
 - A public/versioned read API for advisories/TMIs (only the public "board"
   `GET /api/v1/public/board` and per-flight `GET /api/v1/public/flight/{callsign}`
@@ -108,6 +110,24 @@ tier), `exempt_airborne`, `scope` (departure ARTCCs; `''` = all), `status`
 `draft → published → expired/cancelled`. `tmu.gdp_slot` (pk `gdp_id, callsign`, cascade):
 frozen `original_eta`, `cta`, `edct`, `delay_min` assigned by Ration-By-Schedule at
 publish.
+
+### `tmu.advisories` — ADVZY documents *(0085)*
+
+`facility`, `issued_day`, `number` (unique per facility per day, allocated at **draft** under a
+`pg_advisory_xact_lock`), `kind`, `body` (the rendered document), `structured` jsonb, `decoded`,
+`status` `draft → published → cancelled`. A published advisory is never edited — it is cancelled and
+reissued, which is deliberately the opposite of a TMI (#453 reposts an edited TMI).
+
+`kind` is free-form text with no check constraint, so a document type is claimed by rendering it, not
+by extending an enum. **Reroute (`reroute`) is the first**, added in #458: `backend/src/advisory.rs`
+renders `RerouteAdvisory` to the vATCSCC document, with `fixtures/reroute-reference.json` holding the
+reference examples both its tests assert against.
+
+A structured advisory's `body` is **re-derived** from its fields rather than trusted from the client,
+the same rule a structured TMI's raw line follows; a raw advisory keeps its text byte for byte. The
+renderer is one-way — there is no document parser, for the reasons `backend/src/tmi.rs` sets out for
+NTML (#454), which apply with more force here because a reroute's free-text lines can contain
+anything, including text that looks like another label.
 
 ## Permissions
 
@@ -207,7 +227,7 @@ entered via the structured form.
 
 ## Not built
 
-- NTML entries and advisories as first-class records, the plain-language parser, and the
-  public advisory/TMI API from the original spec — so there is no separate `adv_publish` Discord
-  job either; only TMIs post today.
+- NTML entries as first-class records, the plain-language parser, and the public advisory/TMI API
+  from the original spec. ADVZY advisories became first-class records in #457, but there is still no
+  `adv_publish` Discord job (#459) and no advisory UI (#460); only TMIs post today.
 - The average-delay page (`tmu.delays.read`).

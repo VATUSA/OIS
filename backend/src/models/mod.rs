@@ -440,6 +440,93 @@ pub struct UpdateTmiRequest {
 
 // --- TMU advisories (ADVZY documents, #457) ---
 
+/// The `kind` value identifying a Reroute advisory. `tmu.advisories.kind` is free-form text with no
+/// check constraint (migration `0085`: "Left open here — #458 and #461 add the types"), so this is
+/// the first type to claim a value rather than an enum variant to add.
+pub const ADVISORY_KIND_REROUTE: &str = "reroute";
+
+/// One row of a single-segment reroute's route table: `ORIG / DEST / ROUTE`.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, ToSchema)]
+pub struct RerouteRow {
+    pub orig: String,
+    pub dest: String,
+    /// The route string, mandatory segments already delimited with `><`. Stored and rendered
+    /// verbatim — the renderer never inserts or validates the markers.
+    pub route: String,
+}
+
+/// One row of a multi-segment reroute's origin- or destination-segment table, which carries no
+/// `DEST` column.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, ToSchema)]
+pub struct RerouteSegment {
+    pub orig: String,
+    pub route: String,
+}
+
+/// A reroute's route table. The reference shows two shapes: one `ORIG/DEST/ROUTE` table, or a pair
+/// of tables splitting the origin and destination halves of the route.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, ToSchema)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum RerouteRoutes {
+    Single {
+        rows: Vec<RerouteRow>,
+    },
+    Segmented {
+        origin: Vec<RerouteSegment>,
+        destination: Vec<RerouteSegment>,
+    },
+}
+
+/// What the reroute's valid period is measured from. The reference shows
+/// `FCA ENTRY TIME FROM … TO …` and `ETD … TO …`, which render differently.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, ToSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum RerouteValidBasis {
+    FcaEntryTime,
+    Etd,
+}
+
+/// The reroute's valid period. `from`/`to` are `DDHHMM` as the document carries them — kept as
+/// written rather than parsed, because the document is the contract and a round-trip through a
+/// timestamp would have to invent a month and year the source never states.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, ToSchema)]
+pub struct RerouteValid {
+    pub basis: RerouteValidBasis,
+    pub from: String,
+    pub to: String,
+}
+
+/// The structured fields a Reroute (RR) advisory is built from, per the vATCSCC reference.
+///
+/// Stored in `tmu.advisories.structured` and rendered to `body` by
+/// [`crate::advisory::render_reroute`]. Optional fields follow `NtmlRestriction`'s convention —
+/// `Option<String>` with `#[serde(default)]`, so an absent field and an empty one behave alike.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, ToSchema)]
+pub struct RerouteAdvisory {
+    /// The header's trailing qualifier — `FCA RQD/FL` and `ROUTE RQD/FL` both appear in the
+    /// reference. Carried explicitly rather than derived from `valid.basis`: the two correlate
+    /// across the two available examples, which is not enough to call it a rule.
+    pub header: String,
+    pub name: String,
+    pub impacted_area: String,
+    #[serde(default)]
+    pub reason: Option<String>,
+    #[serde(default)]
+    pub include_traffic: Option<String>,
+    pub valid: RerouteValid,
+    #[serde(default)]
+    pub facilities_included: Option<String>,
+    #[serde(default)]
+    pub probability_of_extension: Option<String>,
+    #[serde(default)]
+    pub remarks: Option<String>,
+    #[serde(default)]
+    pub associated_restrictions: Option<String>,
+    #[serde(default)]
+    pub modifications: Option<String>,
+    pub routes: RerouteRoutes,
+}
+
 /// One advisory. `number` is its identity within `facility` on `issued_day` — see
 /// `repos::tmu::allocate_advisory_number` for what that sequence promises.
 #[derive(Debug, Serialize, ToSchema, sqlx::FromRow)]
