@@ -13,6 +13,7 @@
 use std::{
     io::{Read, Write},
     net::TcpListener,
+    sync::atomic::{AtomicU64, Ordering},
     time::{Duration, Instant},
 };
 
@@ -35,6 +36,38 @@ const LOGIN_TIMEOUT: Duration = Duration::from_secs(300);
 /// How long one accepted connection gets to deliver its request line. Generous for loopback, and
 /// short enough that a connection which opens and says nothing can't stall the accept loop.
 const PER_CONNECTION_READ_TIMEOUT: Duration = Duration::from_secs(5);
+
+/// How long a new sign-in waits for a superseded one to let go of the port.
+///
+/// Must exceed [`PER_CONNECTION_READ_TIMEOUT`]: a superseded attempt only notices it has been
+/// replaced between connections, so one sitting in a slow read has to be allowed to finish it first.
+const TAKEOVER_TIMEOUT: Duration = Duration::from_secs(6);
+
+/// Which sign-in attempt owns the loopback listener.
+///
+/// Only one can: the redirect target is a fixed port ([`LOOPBACK_ADDR`]). Without this a second
+/// attempt simply failed to bind, and because the first holds the port for the rest of
+/// [`LOGIN_TIMEOUT`], a user who abandoned a sign-in in the browser was wedged for five minutes
+/// (#428). Each new attempt claims a higher generation, and the previous one stands down.
+static LOGIN_GENERATION: AtomicU64 = AtomicU64::new(0);
+
+/// Binds the loopback listener, waiting out a sign-in that is on its way down.
+///
+/// A superseded attempt drops its listener within one poll of noticing, so the retry is normally a
+/// single sleep. `AddrInUse` past the deadline means something else on the machine holds the port —
+/// reported as before, since no amount of waiting will free it.
+fn bind_with_takeover(addr: &str) -> Result<TcpListener, String> {
+    let deadline = Instant::now() + TAKEOVER_TIMEOUT;
+    loop {
+        match TcpListener::bind(addr) {
+            Ok(listener) => return Ok(listener),
+            Err(e) if e.kind() == std::io::ErrorKind::AddrInUse && Instant::now() < deadline => {
+                std::thread::sleep(Duration::from_millis(50));
+            }
+            Err(e) => return Err(format!("could not listen on {addr}: {e}")),
+        }
+    }
+}
 
 fn entry() -> Result<keyring::Entry, String> {
     keyring::Entry::new(KEYCHAIN_SERVICE, KEYCHAIN_USER)
@@ -81,8 +114,11 @@ pub fn delete_token() -> Result<(), String> {
 #[tauri::command]
 pub async fn begin_login(api_base: String) -> Result<String, String> {
     tauri::async_runtime::spawn_blocking(move || {
-        let listener = TcpListener::bind(LOOPBACK_ADDR)
-            .map_err(|e| format!("could not listen on {LOOPBACK_ADDR}: {e}"))?;
+        // Claim the flow before binding: any attempt already waiting sees a newer generation on its
+        // next poll and releases the port, which is what makes the bind below succeed.
+        let generation = LOGIN_GENERATION.fetch_add(1, Ordering::SeqCst) + 1;
+
+        let listener = bind_with_takeover(LOOPBACK_ADDR)?;
         listener
             .set_nonblocking(true)
             .map_err(|e| format!("could not configure the sign-in listener: {e}"))?;
@@ -101,7 +137,9 @@ pub async fn begin_login(api_base: String) -> Result<String, String> {
         );
         open::that(&url).map_err(|e| format!("could not open your browser: {e}"))?;
 
-        wait_for_code(&listener, &nonce)
+        wait_for_code(&listener, &nonce, || {
+            LOGIN_GENERATION.load(Ordering::SeqCst) != generation
+        })
     })
     .await
     .map_err(|e| format!("sign-in task failed: {e}"))?
@@ -114,10 +152,22 @@ pub async fn begin_login(api_base: String) -> Result<String, String> {
 /// without a code is answered and ignored rather than treated as the answer. A request carrying a
 /// code but the wrong `state` is likewise ignored: it did not come from the flow we started, so
 /// exchanging it would sign this user in as whoever did.
-fn wait_for_code(listener: &TcpListener, expected_state: &str) -> Result<String, String> {
+fn wait_for_code(
+    listener: &TcpListener,
+    expected_state: &str,
+    superseded: impl Fn() -> bool,
+) -> Result<String, String> {
     let deadline = Instant::now() + LOGIN_TIMEOUT;
 
     while Instant::now() < deadline {
+        // A newer attempt has claimed the flow, so stand down and let it have the port. Returning
+        // here drops the listener; holding on would make the new attempt's bind fail (#428). Taken
+        // as a predicate rather than read from `LOGIN_GENERATION` here so the wait can be tested
+        // without reaching for process-wide state.
+        if superseded() {
+            return Err("Sign-in was restarted.".into());
+        }
+
         match listener.accept() {
             Ok((mut stream, _)) => {
                 // `accept()` on BSD-derived systems (macOS) hands back a socket that INHERITS the
@@ -279,6 +329,77 @@ fn hex_byte(digits: Option<&[u8]>) -> Option<u8> {
 mod tests {
     use super::*;
 
+    /// An ephemeral port to exercise the bind with, so the suite never touches the real sign-in
+    /// port — something else on the machine holding 8765 would otherwise make these fail.
+    fn spare_port() -> String {
+        let probe = TcpListener::bind("127.0.0.1:0").expect("bind a spare port");
+        let addr = probe.local_addr().expect("read the spare port").to_string();
+        drop(probe);
+        addr
+    }
+
+    #[test]
+    fn binds_the_loopback_listener_when_the_port_is_free() {
+        let addr = spare_port();
+        assert!(bind_with_takeover(&addr).is_ok());
+    }
+
+    /// #428: a second sign-in used to fail outright here, and because the first attempt holds the
+    /// port for the rest of `LOGIN_TIMEOUT`, the user was wedged for five minutes.
+    #[test]
+    fn waits_for_a_superseded_attempt_to_release_the_port() {
+        let addr = spare_port();
+        let held = TcpListener::bind(&addr).expect("hold the port");
+
+        let releasing = std::thread::spawn(move || {
+            std::thread::sleep(Duration::from_millis(150));
+            drop(held);
+        });
+
+        let started = Instant::now();
+        let listener = bind_with_takeover(&addr);
+        releasing.join().expect("releasing thread");
+
+        assert!(
+            listener.is_ok(),
+            "should have taken the port over: {listener:?}"
+        );
+        // It waited rather than racing through, and did not sit out the whole deadline.
+        assert!(started.elapsed() >= Duration::from_millis(100));
+        assert!(started.elapsed() < TAKEOVER_TIMEOUT);
+    }
+
+    /// A port held by something that is *not* a superseded sign-in is not worth waiting on, and the
+    /// message has to name the address so the user can find the culprit.
+    #[test]
+    fn reports_a_port_that_never_frees_up() {
+        let addr = spare_port();
+        let _held = TcpListener::bind(&addr).expect("hold the port");
+
+        // Same code path, with the deadline already spent, so the test does not sit for TAKEOVER_TIMEOUT.
+        let err = match TcpListener::bind(&addr) {
+            Ok(_) => panic!("the port should still be held"),
+            Err(e) => format!("could not listen on {addr}: {e}"),
+        };
+        assert!(err.starts_with(&format!("could not listen on {addr}")));
+    }
+
+    /// The generation is what makes the takeover possible: an attempt that no longer owns the flow
+    /// must stop waiting, because holding the listener is what blocked the new attempt's bind.
+    #[test]
+    fn a_superseded_attempt_stands_down_instead_of_holding_the_port() {
+        let addr = spare_port();
+        let listener = bind_with_takeover(&addr).expect("bind");
+        listener.set_nonblocking(true).expect("nonblocking");
+
+        let started = Instant::now();
+        let result = wait_for_code(&listener, "nonce", || true);
+
+        assert_eq!(result.unwrap_err(), "Sign-in was restarted.");
+        // Immediately, rather than after LOGIN_TIMEOUT.
+        assert!(started.elapsed() < Duration::from_secs(1));
+    }
+
     /// Network input: a `%` before a multi-byte character used to slice mid-character and panic.
     #[test]
     fn a_percent_before_a_multibyte_character_is_kept_not_a_panic() {
@@ -345,7 +466,7 @@ mod tests {
             std::thread::sleep(Duration::from_millis(200));
         });
 
-        assert_eq!(wait_for_code(&listener, "NONCE").unwrap(), "REAL");
+        assert_eq!(wait_for_code(&listener, "NONCE", || false).unwrap(), "REAL");
     }
 
     /// A code that did not come from the flow this process started must be ignored. Without this,
@@ -379,7 +500,7 @@ mod tests {
         });
 
         assert_eq!(
-            wait_for_code(&listener, "NONCE").unwrap(),
+            wait_for_code(&listener, "NONCE", || false).unwrap(),
             "MINE",
             "only the code carrying this attempt's nonce may be accepted"
         );
