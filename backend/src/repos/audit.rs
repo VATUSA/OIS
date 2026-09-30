@@ -318,3 +318,158 @@ pub fn client_ip(headers: &HeaderMap) -> Option<String> {
         .filter(|value| !value.is_empty())
         .map(ToOwned::to_owned)
 }
+
+/// The most rows one prune pass will delete.
+///
+/// The pass is bounded because the first one is not like the rest. `access.audit_logs` has never
+/// been pruned — it has grown for the life of the deployment, at times at ~17k rows a day — so an
+/// unbounded `delete … where created_at < $1` would take the entire pre-window backlog in a single
+/// statement: one long transaction holding a snapshot against vacuum, a large WAL burst, and a
+/// bloated table for autovacuum to work through afterwards. Nothing would stop it either; the pool
+/// sets `acquire_timeout` but no `statement_timeout` (#444 review).
+///
+/// `prune_flight_legs` is unbounded and that is fine, because it has run since it shipped and only
+/// ever has a day to remove. This one inherits a backlog, so the cap is what turns a single
+/// unbounded statement into a few dozen ordinary ones. Steady state never reaches it: a day of audit
+/// rows is far under 10k, so after the backlog drains every pass deletes everything due in one go.
+const PRUNE_BATCH: i64 = 10_000;
+
+/// Delete audit rows older than `before`, up to [`PRUNE_BATCH`] of them.
+///
+/// Returns how many went. The caller runs every `CLEANUP_INTERVAL`, so a backlog larger than one
+/// batch simply drains over the following passes rather than needing a loop here — that keeps each
+/// pass's cost predictable and lets the job registry report honest per-pass numbers.
+///
+/// Deletes by `ctid` rather than `id in (…)`: the subquery is index-only on `created_at` and the
+/// outer delete addresses rows physically, which avoids re-checking the predicate per row.
+pub async fn prune_audit_logs(pool: &PgPool, before: DateTime<Utc>) -> Result<u64, ApiError> {
+    sqlx::query(
+        "delete from access.audit_logs \
+         where ctid in ( \
+             select ctid from access.audit_logs where created_at < $1 limit $2 \
+         )",
+    )
+    .bind(before)
+    .bind(PRUNE_BATCH)
+    .execute(pool)
+    .await
+    .map(|r| r.rows_affected())
+    .map_err(|_| ApiError::Internal)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use chrono::Duration;
+
+    async fn audit_row(pool: &PgPool, created_at: DateTime<Utc>) -> String {
+        sqlx::query_scalar::<_, String>(
+            "insert into access.audit_logs (action, resource_type, created_at) \
+             values ('update', 'tmu.tmis', $1) returning id",
+        )
+        .bind(created_at)
+        .fetch_one(pool)
+        .await
+        .unwrap()
+    }
+
+    /// #444: the table had no retention at all. Pruning must take what is past the window and leave
+    /// what is inside it — a prune that took everything would be worse than none.
+    #[sqlx::test]
+    async fn prunes_only_rows_past_the_window(pool: PgPool) {
+        let now = Utc::now();
+        let cutoff = now - Duration::days(180);
+
+        let old = audit_row(&pool, cutoff - Duration::days(1)).await;
+        let recent = audit_row(&pool, cutoff + Duration::days(1)).await;
+
+        assert_eq!(prune_audit_logs(&pool, cutoff).await.unwrap(), 1);
+
+        let surviving: Vec<String> =
+            sqlx::query_scalar("select id from access.audit_logs order by created_at")
+                .fetch_all(&pool)
+                .await
+                .unwrap();
+        assert_eq!(
+            surviving,
+            vec![recent],
+            "the row inside the window must survive"
+        );
+        assert!(!surviving.contains(&old));
+    }
+
+    /// #444 review: the cold start is the dangerous pass. The table has never been pruned, so the
+    /// first run faces the whole backlog — the cap is what stops that being one unbounded statement
+    /// holding a snapshot against vacuum. Steady state never reaches it.
+    #[sqlx::test]
+    async fn one_pass_deletes_at_most_the_batch_and_leaves_the_rest(pool: PgPool) {
+        let cutoff = Utc::now() - Duration::days(180);
+        // A small stand-in for the backlog: `PRUNE_BATCH + 3` rows all past the window.
+        let total = PRUNE_BATCH + 3;
+        sqlx::query(
+            "insert into access.audit_logs (action, resource_type, created_at) \
+             select 'update', 'tmu.tmis', $1 from generate_series(1, $2)",
+        )
+        .bind(cutoff - Duration::days(1))
+        .bind(total)
+        .execute(&pool)
+        .await
+        .unwrap();
+
+        let first = prune_audit_logs(&pool, cutoff).await.unwrap();
+        assert_eq!(
+            first, PRUNE_BATCH as u64,
+            "a pass must stop at the cap rather than taking the whole backlog at once"
+        );
+
+        // The remainder is not lost — the next pass takes it, as the 15-minute job would.
+        let second = prune_audit_logs(&pool, cutoff).await.unwrap();
+        assert_eq!(second, 3);
+        assert_eq!(
+            sqlx::query_scalar::<_, i64>("select count(*) from access.audit_logs")
+                .fetch_one(&pool)
+                .await
+                .unwrap(),
+            0,
+            "the backlog drains across passes"
+        );
+    }
+
+    /// The cap must never cost a row that is inside the window, however large the backlog.
+    #[sqlx::test]
+    async fn the_batch_cap_never_takes_a_row_inside_the_window(pool: PgPool) {
+        let cutoff = Utc::now() - Duration::days(180);
+        sqlx::query(
+            "insert into access.audit_logs (action, resource_type, created_at) \
+             select 'update', 'tmu.tmis', $1 from generate_series(1, $2)",
+        )
+        .bind(cutoff - Duration::days(1))
+        .bind(PRUNE_BATCH + 50)
+        .execute(&pool)
+        .await
+        .unwrap();
+        let keep = audit_row(&pool, cutoff + Duration::days(1)).await;
+
+        prune_audit_logs(&pool, cutoff).await.unwrap();
+        prune_audit_logs(&pool, cutoff).await.unwrap();
+
+        let surviving: Vec<String> = sqlx::query_scalar("select id from access.audit_logs")
+            .fetch_all(&pool)
+            .await
+            .unwrap();
+        assert_eq!(surviving, vec![keep]);
+    }
+
+    /// Nothing to do is not an error — the job runs every 15 minutes and will almost always find
+    /// nothing.
+    #[sqlx::test]
+    async fn pruning_an_empty_window_removes_nothing(pool: PgPool) {
+        audit_row(&pool, Utc::now()).await;
+        assert_eq!(
+            prune_audit_logs(&pool, Utc::now() - Duration::days(180))
+                .await
+                .unwrap(),
+            0
+        );
+    }
+}
