@@ -225,3 +225,50 @@ describe("buildAtcHoverLayer (VATUSA/OIS#477)", () => {
     expect(pos(airport("KORD", 1))).toEqual([-87, 41]);
   });
 });
+
+/// VATUSA/OIS#481 — a validator nothing calls is worth nothing, so these pin the wiring rather than
+/// the algorithm (which `geo.test.ts` covers against the real ZNY ring).
+describe("ring topology is applied to both atc.ts paths (VATUSA/OIS#481)", () => {
+  /// Two triangles sharing one vertex — a bridged ring, the shape that tessellates into a wedge
+  /// spanning between the lobes.
+  const bridged: number[][] = [
+    [40, -80],
+    [41, -80],
+    [41, -79],
+    [40, -80],
+    [45, -75],
+    [46, -75],
+    [46, -74],
+  ];
+
+  it("splits a bridged TRACON ring instead of drawing a wedge across it", () => {
+    const atc = { ...baseAtc(), tracons: [tracon({ rings: [bridged] })] };
+    const polys = tracons(buildAtcLayers(atc, emptyBoundaries));
+    expect(polys).toBeDefined();
+    // One ring in, two lobes out — each drawn as its own polygon.
+    expect((polys!.props.data as unknown[]).length).toBe(2);
+  });
+
+  it("splits a bridged ARTCC boundary on the centers path", () => {
+    const boundaries: GeoJSON.FeatureCollection = {
+      type: "FeatureCollection",
+      features: [
+        {
+          type: "Feature",
+          properties: { id: "ZZZ" },
+          geometry: {
+            type: "Polygon",
+            coordinates: [[[-80, 40], [-80, 41], [-79, 41], [-80, 40], [-75, 45], [-75, 46], [-74, 46], [-80, 40]]],
+          },
+        } as GeoJSON.Feature,
+      ],
+    };
+    const atc = { ...baseAtc(), centers: [{ id: "ZZZ", positions: [] }] } as unknown as AtcData;
+    const layer = buildAtcLayers(atc, boundaries).find((l) => l.id === "atc-centers");
+    expect(layer).toBeDefined();
+    const data = layer!.props.data as GeoJSON.FeatureCollection;
+    const g = data.features[0].geometry as GeoJSON.MultiPolygon;
+    expect(g.type).toBe("MultiPolygon");
+    expect(g.coordinates).toHaveLength(2);
+  });
+});

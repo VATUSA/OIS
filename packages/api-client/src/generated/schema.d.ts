@@ -3181,6 +3181,18 @@ export interface components {
          *     (message/thread id); `error` explains a failure (triggers backoff + retry).
          */
         AckJobRequest: {
+            /**
+             * Format: int32
+             * @description The `attempt_count` this worker was leased under, echoed back so the ack can be matched to a
+             *     lease rather than to a status (VATUSA/OIS#472). `lease_jobs` increments it and returns it on
+             *     `OutboundJobBody`, so a worker always holds the value that identifies its own lease.
+             *
+             *     **Optional on purpose.** A new backend will be running against the old bot for as long as it
+             *     takes to deploy the second half, and a required field would reject every ack in that window —
+             *     turning a narrow race into total delivery failure. Absent means "fence on status alone",
+             *     exactly as before. (#436's payload-shape change is the precedent for getting this wrong.)
+             */
+            attempt?: number | null;
             error?: string | null;
             result?: Record<string, never> | null;
             success: boolean;
@@ -5272,6 +5284,80 @@ export interface components {
              */
             t: number;
         };
+        /**
+         * @description The structured fields a Reroute (RR) advisory is built from, per the vATCSCC reference.
+         *
+         *     Stored in `tmu.advisories.structured` and rendered to `body` by
+         *     [`crate::advisory::render_reroute`]. Optional fields follow `NtmlRestriction`'s convention —
+         *     `Option<String>` with `#[serde(default)]`, so an absent field and an empty one behave alike.
+         */
+        RerouteAdvisory: {
+            associated_restrictions?: string | null;
+            facilities_included?: string | null;
+            /**
+             * @description The header's trailing qualifier — `FCA RQD/FL` and `ROUTE RQD/FL` both appear in the
+             *     reference. Carried explicitly rather than derived from `valid.basis`: the two correlate
+             *     across the two available examples, which is not enough to call it a rule.
+             */
+            header: string;
+            impacted_area: string;
+            include_traffic?: string | null;
+            modifications?: string | null;
+            name: string;
+            probability_of_extension?: string | null;
+            reason?: string | null;
+            remarks?: string | null;
+            routes: components["schemas"]["RerouteRoutes"];
+            valid: components["schemas"]["RerouteValid"];
+        };
+        /**
+         * @description A reroute's route table. The reference shows two shapes: one `ORIG/DEST/ROUTE` table, or a pair
+         *     of tables splitting the origin and destination halves of the route.
+         */
+        RerouteRoutes: {
+            /** @enum {string} */
+            kind: "single";
+            rows: components["schemas"]["RerouteRow"][];
+        } | {
+            destination: components["schemas"]["RerouteSegment"][];
+            /** @enum {string} */
+            kind: "segmented";
+            origin: components["schemas"]["RerouteSegment"][];
+        };
+        /** @description One row of a single-segment reroute's route table: `ORIG / DEST / ROUTE`. */
+        RerouteRow: {
+            dest: string;
+            orig: string;
+            /**
+             * @description The route string, mandatory segments already delimited with `><`. Stored and rendered
+             *     verbatim — the renderer never inserts or validates the markers.
+             */
+            route: string;
+        };
+        /**
+         * @description One row of a multi-segment reroute's origin- or destination-segment table, which carries no
+         *     `DEST` column.
+         */
+        RerouteSegment: {
+            orig: string;
+            route: string;
+        };
+        /**
+         * @description The reroute's valid period. `from`/`to` are `DDHHMM` as the document carries them — kept as
+         *     written rather than parsed, because the document is the contract and a round-trip through a
+         *     timestamp would have to invent a month and year the source never states.
+         */
+        RerouteValid: {
+            basis: components["schemas"]["RerouteValidBasis"];
+            from: string;
+            to: string;
+        };
+        /**
+         * @description What the reroute's valid period is measured from. The reference shows
+         *     `FCA ENTRY TIME FROM … TO …` and `ETD … TO …`, which render differently.
+         * @enum {string}
+         */
+        RerouteValidBasis: "fca_entry_time" | "etd";
         /** @description One flight to resolve a filed route for (batch route resolution for the replay map). */
         ResolveRouteRequest: {
             arr?: string;

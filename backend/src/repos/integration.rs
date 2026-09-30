@@ -96,11 +96,14 @@ pub async fn lease_jobs(pool: &PgPool, limit: i64) -> Result<Vec<OutboundJobBody
 /// terminal) and the reaped worker acks anyway. Unfenced, a stale *success* marked that pending row
 /// `succeeded` — never delivered, never retried, the exact silent loss #446 exists to stop.
 ///
-/// What it does **not** close: once a successor has re-leased the job the row is `in_progress` again, and
-/// a status check cannot tell the two workers apart. Fencing that needs the worker to echo the lease it
-/// was given — `attempt_count` is already returned in `OutboundJobBody`, so the shape is there — which
-/// means a field on `AckJobRequest`, a client regeneration and a bot change. Tracked in #471 rather
-/// than smuggled in here; the tests below say which half is covered.
+/// The status alone could not close the other half: once a successor has re-leased the job the row is
+/// `in_progress` again, and a status check cannot tell the two workers apart. `attempt` fences that
+/// (VATUSA/OIS#472) — `lease_jobs` increments `attempt_count` and returns it, so a worker echoes back
+/// the number identifying its own lease and a predecessor's late ack no longer matches.
+///
+/// `attempt` is `None` for a worker that doesn't send one, which falls back to the status-only fence.
+/// That is deliberate: a required value would reject every ack from an old bot during the window
+/// between deploying the two halves.
 ///
 /// Returns false when nothing was updated: the id doesn't exist, or the ack is stale. The caller logs
 /// that rather than discarding it, because a stale ack means a worker ran past its lease.
@@ -110,6 +113,7 @@ pub async fn ack_job(
     success: bool,
     result: Option<&Value>,
     error: Option<&str>,
+    attempt: Option<i32>,
 ) -> Result<bool, ApiError> {
     let res = if success {
         let result =
@@ -117,10 +121,12 @@ pub async fn ack_job(
         sqlx::query(
             "update integration.outbound_jobs \
              set status = 'succeeded', result = $2::jsonb, error = null \
-             where id = $1 and status = 'in_progress'",
+             where id = $1 and status = 'in_progress' \
+               and ($3::int is null or attempt_count = $3)",
         )
         .bind(id)
         .bind(result)
+        .bind(attempt)
         .execute(pool)
         .await
         .map_err(|_| ApiError::Internal)?
@@ -130,11 +136,13 @@ pub async fn ack_job(
              set status = case when attempt_count >= $2 then 'failed' else 'pending' end, \
                  next_attempt_at = now() + (interval '30 seconds' * least(attempt_count, 10)), \
                  error = $3 \
-             where id = $1 and status = 'in_progress'",
+             where id = $1 and status = 'in_progress' \
+               and ($4::int is null or attempt_count = $4)",
         )
         .bind(id)
         .bind(MAX_ATTEMPTS)
         .bind(error)
+        .bind(attempt)
         .execute(pool)
         .await
         .map_err(|_| ApiError::Internal)?
@@ -941,9 +949,8 @@ mod tests {
     /// which is precisely the silent loss #446 exists to stop. A stale *failure* burned an attempt and
     /// pushed the backoff out for a job nobody was working.
     ///
-    /// It does **not** cover the case where a successor has already re-leased the job: the row is
-    /// `in_progress` again, so a status check cannot tell the two workers apart. That needs a lease
-    /// token, which is a contract change — #471, and the note on [`ack_job`].
+    /// It covers only the status fence — these acks carry no lease token, which is also the
+    /// old-bot path. The re-leased case is `a_predecessors_ack_cannot_touch_a_re_leased_job` below.
     #[sqlx::test]
     async fn an_ack_from_a_reaped_worker_is_refused_while_the_job_waits(pool: PgPool) {
         let id = stranded_job(&pool, 10, 1).await;
@@ -956,7 +963,7 @@ mod tests {
         assert_eq!(status_of(&pool, &id).await, "pending");
 
         assert!(
-            !ack_job(&pool, &id, true, None, None).await.unwrap(),
+            !ack_job(&pool, &id, true, None, None, None).await.unwrap(),
             "a stale success must not apply; the bool is what lets the handler log it"
         );
         assert_eq!(
@@ -966,7 +973,7 @@ mod tests {
         );
 
         assert!(
-            !ack_job(&pool, &id, false, None, Some("stale"))
+            !ack_job(&pool, &id, false, None, Some("stale"), None)
                 .await
                 .unwrap()
         );
@@ -985,7 +992,86 @@ mod tests {
                 .iter()
                 .any(|j| j.id == id)
         );
-        assert!(ack_job(&pool, &id, true, None, None).await.unwrap());
+        assert!(ack_job(&pool, &id, true, None, None, None).await.unwrap());
+        assert_eq!(status_of(&pool, &id).await, "succeeded");
+    }
+
+    /// The half a status fence cannot reach (VATUSA/OIS#472): once a successor has re-leased the job
+    /// the row is `in_progress` again, so only the lease token tells the two workers apart.
+    ///
+    /// Driven the way it actually happens — lease, reap, re-lease, then both acks arrive.
+    #[sqlx::test]
+    async fn a_predecessors_ack_cannot_touch_a_re_leased_job(pool: PgPool) {
+        let id = stranded_job(&pool, 10, 1).await;
+        // Worker A holds attempt 1. The reaper returns the job, and worker B takes it as attempt 2.
+        reap_stranded_jobs(&pool, Utc::now() - chrono::Duration::minutes(5))
+            .await
+            .unwrap();
+        // The reaper backs the job off; bring it forward so the successor can take it now.
+        sqlx::query("update integration.outbound_jobs set next_attempt_at = now() where id = $1")
+            .bind(&id)
+            .execute(&pool)
+            .await
+            .unwrap();
+        let b = lease_jobs(&pool, 10)
+            .await
+            .unwrap()
+            .into_iter()
+            .find(|j| j.id == id)
+            .expect("the successor leases it");
+        assert_eq!(b.attempt_count, 2, "the successor holds a later lease");
+        assert_eq!(status_of(&pool, &id).await, "in_progress");
+
+        // A's success arrives late. Unfenced this marked the job delivered while B was mid-flight,
+        // and B's own ack — carrying the real message id — was then refused.
+        assert!(
+            !ack_job(&pool, &id, true, None, None, Some(1))
+                .await
+                .unwrap(),
+            "a predecessor's success must not apply to its successor's lease"
+        );
+        assert_eq!(status_of(&pool, &id).await, "in_progress");
+
+        // A's failure is refused too: unfenced it returned a job B was holding to `pending`, so a
+        // third worker could take it while B was still running.
+        assert!(
+            !ack_job(&pool, &id, false, None, Some("stale"), Some(1))
+                .await
+                .unwrap()
+        );
+        assert_eq!(status_of(&pool, &id).await, "in_progress");
+
+        // B's ack still applies, and its result is the one recorded.
+        let result = serde_json::json!({"message_id": "123"});
+        assert!(
+            ack_job(&pool, &id, true, Some(&result), None, Some(2))
+                .await
+                .unwrap()
+        );
+        assert_eq!(status_of(&pool, &id).await, "succeeded");
+        let stored: Option<Value> =
+            sqlx::query_scalar("select result from integration.outbound_jobs where id = $1")
+                .bind(&id)
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+        assert_eq!(
+            stored,
+            Some(result),
+            "the successor's result is the one kept"
+        );
+    }
+
+    /// An ack with no lease token must behave exactly as before, or deploying the backend ahead of
+    /// the bot would reject every ack and turn a narrow race into total delivery failure.
+    #[sqlx::test]
+    async fn an_ack_without_a_lease_token_still_applies(pool: PgPool) {
+        let id = stranded_job(&pool, 10, 1).await;
+        assert_eq!(status_of(&pool, &id).await, "in_progress");
+        assert!(
+            ack_job(&pool, &id, true, None, None, None).await.unwrap(),
+            "an old bot sends no attempt and must keep working"
+        );
         assert_eq!(status_of(&pool, &id).await, "succeeded");
     }
 
@@ -999,7 +1085,7 @@ mod tests {
             .unwrap();
         assert_eq!(status_of(&pool, &id).await, "failed");
 
-        assert!(!ack_job(&pool, &id, true, None, None).await.unwrap());
+        assert!(!ack_job(&pool, &id, true, None, None, None).await.unwrap());
         assert_eq!(status_of(&pool, &id).await, "failed");
     }
 

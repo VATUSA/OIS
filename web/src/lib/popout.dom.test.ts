@@ -8,8 +8,12 @@ const WebviewWindow = vi.fn();
 const getByLabel = vi.fn();
 const availableMonitors = vi.fn();
 
-/** Handlers the created window registered, so a test can simulate a drag. */
-const handlers: {moved?: () => void; resized?: () => void} = {};
+/** Handlers the created window registered, so a test can simulate a drag or its destruction. */
+const handlers: {moved?: () => void; resized?: () => void; destroyed?: () => void} = {};
+/** Which geometry listeners the code under test released, in order (VATUSA/OIS#439). */
+const released: string[] = [];
+/** Makes registering the `tauri://destroyed` listener fail, as it would on a window already gone. */
+const onceFails = {value: false};
 const outerPosition = vi.fn();
 const outerSize = vi.fn();
 const innerSize = vi.fn();
@@ -22,14 +26,21 @@ vi.mock("@tauri-apps/api/webviewWindow", () => ({
       return Object.assign(this as object, {
         onMoved: (cb: () => void) => {
           handlers.moved = cb;
-          return Promise.resolve(() => undefined);
+          return Promise.resolve(() => released.push("moved"));
         },
         onResized: (cb: () => void) => {
           handlers.resized = cb;
-          return Promise.resolve(() => undefined);
+          return Promise.resolve(() => released.push("resized"));
         },
         onCloseRequested: () => {
           openerCloseListeners.count += 1;
+          return Promise.resolve(() => undefined);
+        },
+        // The opener releases the geometry listeners on `tauri://destroyed` — deliberately not on
+        // close-requested, which is what #350 made unsafe from an opener.
+        once: (event: string, cb: () => void) => {
+          if (onceFails.value) return Promise.reject(new Error("window is gone"));
+          if (event === "tauri://destroyed") handlers.destroyed = cb;
           return Promise.resolve(() => undefined);
         },
         outerPosition: () => outerPosition(),
@@ -87,6 +98,9 @@ beforeEach(() => {
   installStorage();
   handlers.moved = undefined;
   handlers.resized = undefined;
+  handlers.destroyed = undefined;
+  released.length = 0;
+  onceFails.value = false;
   currentLabel.value = "main";
   outerPosition.mockReset().mockResolvedValue({x: 300, y: 400});
   // A real window's frame is bigger than its content — a title bar on macOS, borders on Windows.
@@ -404,6 +418,38 @@ describe("remembering which route windows are open (VATUSA/OIS#350 review)", () 
     pretendDesktop();
     await openRouteWindow(IDST);
     expect(rememberedWindows()).toEqual([IDST]);
+  });
+
+  // VATUSA/OIS#439 — the opener kept the geometry listeners for windows that were long gone, one
+  // pair per window opened, for as long as the app ran.
+  it("releases the geometry listeners when the window it opened is destroyed", async () => {
+    pretendDesktop();
+    await openRouteWindow(IDST);
+    expect(released).toEqual([]); // still open — nothing released yet
+
+    handlers.destroyed?.();
+    expect(released.sort()).toEqual(["moved", "resized"]);
+  });
+
+  // The registration itself is awaited, so a window that dies during setup reports a failed open
+  // rather than throwing past `openWindow`'s catch as an unhandled rejection — the failure class
+  // `safeUnlisten` exists to prevent, one webview-lifetime leak per window opened behind it.
+  it("reports a failed open when the destroyed listener cannot be registered", async () => {
+    pretendDesktop();
+    onceFails.value = true;
+
+    await expect(openRouteWindow(IDST)).resolves.toBe(false);
+  });
+
+  // The release must hang off destruction, not off the close handshake: an opener-side close
+  // listener is exactly what made a route window unclosable in #350.
+  it("releases them without ever registering a close listener on that window", async () => {
+    pretendDesktop();
+    await openRouteWindow(IDST);
+    handlers.destroyed?.();
+
+    expect(released).toHaveLength(2);
+    expect(openerCloseListeners.count).toBe(0);
   });
 
   // Tauri blocks a close while any webview holds a JS close listener for the window, and never
