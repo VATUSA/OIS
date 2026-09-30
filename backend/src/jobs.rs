@@ -624,8 +624,6 @@ pub fn spawn_capture_scheduler(reg: Arc<JobRegistry>, pool: PgPool) {
     ));
 }
 
-/// One capture-scheduler pass: open a capture for each event now inside its window, and close+save
-/// captures whose window has ended. Idempotent. Returns a summary of what changed.
 /// Freeze an event's movement counts as its capture closes (#433).
 ///
 /// Movements are counted from `stats.flight_leg`, which is pruned at [`DELAY_LEG_RETAIN_DAYS`], so
@@ -668,6 +666,8 @@ async fn snapshot_event_movements(
     }
 }
 
+/// One capture-scheduler pass: open a capture for each event now inside its window, and close+save
+/// captures whose window has ended. Idempotent. Returns a summary of what changed.
 async fn capture_scheduler_once(pool: &PgPool) -> Result<String, String> {
     let rows = stats_repo::list_capture_schedule(pool)
         .await

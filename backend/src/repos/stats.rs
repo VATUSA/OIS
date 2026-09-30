@@ -1191,19 +1191,59 @@ pub async fn snapshot_event_movements(
     Ok(res.rows_affected())
 }
 
-/// The frozen breakdown for an event, or empty when it was never snapshotted.
+/// A frozen breakdown, with the window it was actually taken over.
+pub struct MovementsSnapshot {
+    pub rows: Vec<AirportBreakdown>,
+    /// The window the counts cover. Reported instead of the event's current one: an event that was
+    /// rescheduled after its capture closed still has these counts, and labelling them with the new
+    /// times would describe them as something they are not (#433 review).
+    pub window_start: DateTime<Utc>,
+    pub window_end: DateTime<Utc>,
+}
+
+#[derive(Debug, sqlx::FromRow)]
+struct SnapshotRow {
+    icao: String,
+    arrivals: i64,
+    departures: i64,
+    unique_pilots: i64,
+    window_start: DateTime<Utc>,
+    window_end: DateTime<Utc>,
+}
+
+/// The frozen breakdown for an event, or `None` when it was never snapshotted.
 pub async fn event_movements_snapshot(
     pool: &PgPool,
     event_id: i64,
-) -> Result<Vec<AirportBreakdown>, ApiError> {
-    sqlx::query_as::<_, AirportBreakdown>(
-        "select icao, arrivals, departures, unique_pilots from stats.event_movements \
+) -> Result<Option<MovementsSnapshot>, ApiError> {
+    let rows = sqlx::query_as::<_, SnapshotRow>(
+        "select icao, arrivals, departures, unique_pilots, window_start, window_end \
+         from stats.event_movements \
          where event_id = $1 order by (arrivals + departures) desc",
     )
     .bind(event_id)
     .fetch_all(pool)
     .await
-    .map_err(db)
+    .map_err(db)?;
+
+    let Some(first) = rows.first() else {
+        return Ok(None);
+    };
+    // Every row of one snapshot is written in a single statement with the same window.
+    let (window_start, window_end) = (first.window_start, first.window_end);
+    Ok(Some(MovementsSnapshot {
+        window_start,
+        window_end,
+        rows: rows
+            .into_iter()
+            .map(|r| AirportBreakdown {
+                icao: r.icao,
+                arrivals: r.arrivals,
+                departures: r.departures,
+                unique_pilots: r.unique_pilots,
+            })
+            .collect(),
+    }))
 }
 
 #[derive(Debug, sqlx::FromRow)]
@@ -1835,6 +1875,94 @@ mod tests {
         let jfk = find(&rows, "KJFK").unwrap();
         assert_eq!(jfk.departures, 1);
         assert_eq!(jfk.arrivals, 0);
+    }
+
+    /// Seed an event, since `stats.event_movements` is keyed to one by foreign key.
+    async fn event(pool: &PgPool, id: i64) {
+        let (from, to) = window();
+        sqlx::query(
+            "insert into events.event (id, title, start_time, end_time) values ($1, 'Test', $2, $3)",
+        )
+        .bind(id)
+        .bind(from)
+        .bind(to)
+        .execute(pool)
+        .await
+        .unwrap();
+    }
+
+    fn breakdown(icao: &str, arrivals: i64, departures: i64) -> AirportBreakdown {
+        AirportBreakdown {
+            icao: icao.to_string(),
+            arrivals,
+            departures,
+            unique_pilots: 3,
+        }
+    }
+
+    /// AC7. Legs are pruned at `DELAY_LEG_RETAIN_DAYS`, so an event recomputed from them reports zero
+    /// once they age out — correct numbers that quietly disappear. The snapshot is what stops that,
+    /// and none of it was covered: blanking either half left the whole suite green (#433 review).
+    #[sqlx::test]
+    async fn a_frozen_breakdown_reads_back_with_the_window_it_was_taken_over(pool: PgPool) {
+        let (from, to) = window();
+        event(&pool, 900).await;
+
+        let written = snapshot_event_movements(
+            &pool,
+            900,
+            from,
+            to,
+            &[breakdown("KJFK", 4, 6), breakdown("KBOS", 1, 2)],
+        )
+        .await
+        .unwrap();
+        assert_eq!(written, 2);
+
+        let snap = event_movements_snapshot(&pool, 900)
+            .await
+            .unwrap()
+            .expect("a snapshot was just written");
+
+        // Busiest first, as the live query orders.
+        assert_eq!(snap.rows[0].icao, "KJFK");
+        assert_eq!((snap.rows[0].arrivals, snap.rows[0].departures), (4, 6));
+        assert_eq!((snap.rows[1].arrivals, snap.rows[1].departures), (1, 2));
+        // The window travels with the counts, so a rescheduled event cannot mislabel them.
+        assert_eq!((snap.window_start, snap.window_end), (from, to));
+    }
+
+    /// The scheduler pass is idempotent, so a re-close must overwrite rather than duplicate — the
+    /// primary key would reject the second insert outright without `on conflict`.
+    #[sqlx::test]
+    async fn re_freezing_an_event_replaces_its_counts_rather_than_duplicating_them(pool: PgPool) {
+        let (from, to) = window();
+        event(&pool, 901).await;
+
+        snapshot_event_movements(&pool, 901, from, to, &[breakdown("KJFK", 1, 1)])
+            .await
+            .unwrap();
+        snapshot_event_movements(&pool, 901, from, to, &[breakdown("KJFK", 9, 9)])
+            .await
+            .unwrap();
+
+        let snap = event_movements_snapshot(&pool, 901).await.unwrap().unwrap();
+        assert_eq!(snap.rows.len(), 1, "one row per (event, airport)");
+        assert_eq!((snap.rows[0].arrivals, snap.rows[0].departures), (9, 9));
+    }
+
+    /// An event that was never snapshotted must say so, not return an empty breakdown — the read
+    /// path tells "frozen, and it was zero" from "not frozen, compute it" by exactly this.
+    #[sqlx::test]
+    async fn an_event_that_was_never_frozen_has_no_snapshot(pool: PgPool) {
+        event(&pool, 902).await;
+
+        assert!(
+            event_movements_snapshot(&pool, 902)
+                .await
+                .unwrap()
+                .is_none()
+        );
     }
 
     /// A real turnaround still counts twice, which is the behaviour the docs promise.

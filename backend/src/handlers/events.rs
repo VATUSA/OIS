@@ -1303,6 +1303,16 @@ pub async fn get_event_stats(
     Path(id): Path<i64>,
 ) -> Result<Json<EventStatsBody>, ApiError> {
     let pool = state.db.as_ref().ok_or(ApiError::ServiceUnavailable)?;
+    event_stats(pool, id).await.map(Json)
+}
+
+/// The body of [`get_event_stats`], without the extractors.
+///
+/// Split out so the window it reports can be tested: `RequirePermission` holds a private field, and
+/// the alternative — a test-only constructor on a permission type — is not a door worth opening for
+/// a stats query. Which window this picks is the whole of #433's AC 4, and nothing covered it while
+/// it lived inside the handler (#433 review).
+async fn event_stats(pool: &sqlx::PgPool, id: i64) -> Result<EventStatsBody, ApiError> {
     let Some(event) = events_repo::get(pool, id).await? else {
         return Err(ApiError::NotFound);
     };
@@ -1316,14 +1326,14 @@ pub async fn get_event_stats(
     };
 
     let Some(cap) = stats_repo::latest_capture_for_event(pool, id).await? else {
-        return Ok(Json(EventStatsBody {
+        return Ok(EventStatsBody {
             captured: false,
             status: None,
             window_start: None,
             window_end: None,
             airports: Vec::new(),
             combined: empty_combined(),
-        }));
+        });
     };
 
     // The event's own window, not the capture's (#433). A capture is padded by `pre/post_minutes`
@@ -1342,14 +1352,14 @@ pub async fn get_event_stats(
         .collect();
 
     if icaos.is_empty() {
-        return Ok(Json(EventStatsBody {
+        return Ok(EventStatsBody {
             captured: true,
             status: Some(cap.status),
             window_start: Some(from),
             window_end: Some(to),
             airports: Vec::new(),
             combined: empty_combined(),
-        }));
+        });
     }
 
     let key_count = |k: stats_repo::KeyCount| KeyCountBody {
@@ -1362,11 +1372,16 @@ pub async fn get_event_stats(
     // Prefer the copy frozen when the capture closed (#433). Movements come from `stats.flight_leg`,
     // which is pruned at 30 days, so a past event recomputed from legs would report zero once they
     // aged out. Live and recently-finished events have no snapshot yet and compute as normal.
-    let snapshot = stats_repo::event_movements_snapshot(pool, id).await?;
-    let breakdown = if snapshot.is_empty() {
-        stats_repo::event_airport_breakdown(pool, &icaos, from, to).await?
-    } else {
-        snapshot
+    // A snapshot also carries the window it was taken over, and that is what gets reported: an event
+    // rescheduled after its capture closed keeps the counts it earned, and labelling them with the
+    // new times would describe them as something they are not (#433 review).
+    let (breakdown, from, to) = match stats_repo::event_movements_snapshot(pool, id).await? {
+        Some(snap) => (snap.rows, snap.window_start, snap.window_end),
+        None => (
+            stats_repo::event_airport_breakdown(pool, &icaos, from, to).await?,
+            from,
+            to,
+        ),
     };
     let mut top_by_icao: std::collections::HashMap<String, Vec<KeyCountBody>> =
         std::collections::HashMap::new();
@@ -1404,14 +1419,14 @@ pub async fn get_event_stats(
             .collect(),
     };
 
-    Ok(Json(EventStatsBody {
+    Ok(EventStatsBody {
         captured: true,
         status: Some(cap.status),
         window_start: Some(from),
         window_end: Some(to),
         airports,
         combined,
-    }))
+    })
 }
 
 #[utoipa::path(
@@ -1590,6 +1605,150 @@ pub async fn publish_event_discord(
     .await?;
     tx.commit().await.map_err(|_| ApiError::Internal)?;
     Ok(StatusCode::ACCEPTED)
+}
+
+#[cfg(test)]
+mod stats_window_tests {
+    use chrono::{DateTime, TimeZone, Utc};
+    use sqlx::PgPool;
+
+    use super::*;
+
+    const EVENT: i64 = 700;
+
+    fn at(hour: u32, minute: u32) -> DateTime<Utc> {
+        Utc.with_ymd_and_hms(2026, 6, 1, hour, minute, 0).unwrap()
+    }
+
+    /// The event runs 12:00–14:00. Its capture is padded by 30 minutes either side, as
+    /// `pre/post_minutes` default — so 11:30–14:30 is what the old code reported over.
+    async fn seed(pool: &PgPool, capture_end: Option<DateTime<Utc>>) {
+        sqlx::query(
+            "insert into events.event (id, title, start_time, end_time) \
+             values ($1, 'Test', $2, $3)",
+        )
+        .bind(EVENT)
+        .bind(at(12, 0))
+        .bind(at(14, 0))
+        .execute(pool)
+        .await
+        .unwrap();
+        sqlx::query("insert into events.airport_rate (event_id, icao) values ($1, 'KJFK')")
+            .bind(EVENT)
+            .execute(pool)
+            .await
+            .unwrap();
+        sqlx::query(
+            "insert into stats.capture (id, event_id, start_time, end_time, status) \
+             values ('cap-test', $1, $2, $3, $4)",
+        )
+        .bind(EVENT)
+        .bind(at(11, 30))
+        .bind(capture_end)
+        .bind(if capture_end.is_some() {
+            "saved"
+        } else {
+            "open"
+        })
+        .execute(pool)
+        .await
+        .unwrap();
+    }
+
+    async fn leg(pool: &PgPool, kind: &str, cid: i32, end: DateTime<Utc>) {
+        sqlx::query(
+            "insert into stats.flight_leg \
+             (kind, airport, callsign, cid, start_time, end_time, duration_sec) \
+             values ($1, 'KJFK', $2, $3, $4, $5, 600)",
+        )
+        .bind(kind)
+        .bind(format!("TEST{cid}"))
+        .bind(cid)
+        .bind(end - chrono::Duration::minutes(10))
+        .bind(end)
+        .execute(pool)
+        .await
+        .unwrap();
+    }
+
+    async fn stats(pool: &PgPool) -> EventStatsBody {
+        event_stats(pool, EVENT).await.expect("stats")
+    }
+
+    /// AC4. The capture is padded by an hour because *replay* needs lead-in; that padding has no
+    /// business in a statistic. Reverting this to `cap.start_time` left every test green, because
+    /// the repo tests are handed a window rather than choosing one (#433 review).
+    #[sqlx::test]
+    async fn the_window_is_the_events_own_not_the_captures_padded_one(pool: PgPool) {
+        seed(&pool, Some(at(14, 30))).await;
+        leg(&pool, "departure", 1, at(11, 45)).await; // inside the padding, before the event
+        leg(&pool, "departure", 2, at(13, 0)).await; // inside the event
+        leg(&pool, "arrival", 3, at(14, 15)).await; // inside the padding, after the event
+
+        let body = stats(&pool).await;
+
+        assert_eq!(body.window_start, Some(at(12, 0)));
+        assert_eq!(body.window_end, Some(at(14, 0)));
+        assert_eq!(
+            body.combined.movements, 1,
+            "only the movement inside the event window counts"
+        );
+    }
+
+    /// AC4, the other half. An open capture has no `end_time`, and falling back to `Utc::now()` made
+    /// the window grow until it was closed — the same event answered differently every time it was
+    /// asked, and swept up everything that had happened since.
+    #[sqlx::test]
+    async fn an_open_capture_does_not_stretch_the_window_to_now(pool: PgPool) {
+        seed(&pool, None).await;
+        leg(&pool, "departure", 4, at(13, 0)).await;
+        // Long after the event, and long before "now" — `Utc::now()` is years past 2026-06-01 only
+        // if the clock says so, so pin the far side with a leg the old code would have swept in.
+        leg(&pool, "departure", 5, at(20, 0)).await;
+
+        let body = stats(&pool).await;
+
+        assert_eq!(body.window_end, Some(at(14, 0)), "not now()");
+        assert_eq!(body.combined.movements, 1);
+    }
+
+    /// The frozen copy is served with the window it was taken over, so an event rescheduled after
+    /// its capture closed keeps counts that still describe themselves correctly (#433 review).
+    #[sqlx::test]
+    async fn a_frozen_breakdown_is_served_with_its_own_window(pool: PgPool) {
+        seed(&pool, Some(at(14, 30))).await;
+        stats_repo::snapshot_event_movements(
+            &pool,
+            EVENT,
+            at(12, 0),
+            at(14, 0),
+            &[stats_repo::AirportBreakdown {
+                icao: "KJFK".into(),
+                arrivals: 7,
+                departures: 5,
+                unique_pilots: 9,
+            }],
+        )
+        .await
+        .unwrap();
+        // Rescheduled afterwards: the counts are still the ones it earned over the old window.
+        sqlx::query("update events.event set start_time = $1, end_time = $2 where id = $3")
+            .bind(at(18, 0))
+            .bind(at(20, 0))
+            .bind(EVENT)
+            .execute(&pool)
+            .await
+            .unwrap();
+
+        let body = stats(&pool).await;
+
+        assert_eq!(
+            body.combined.movements, 12,
+            "the frozen counts, not a recount"
+        );
+        assert_eq!(body.window_start, Some(at(12, 0)));
+        assert_eq!(body.window_end, Some(at(14, 0)));
+    }
 }
 
 #[cfg(test)]
