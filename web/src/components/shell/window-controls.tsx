@@ -3,6 +3,7 @@ import {Minus, Plus, X} from "lucide-react";
 
 import {cn} from "@ois/ui";
 
+import {safeUnlisten} from "@/lib/desktop-events";
 import {can, isMacOS, isMainWindow} from "@/lib/platform";
 
 /**
@@ -104,7 +105,7 @@ function useWindowFocus(enabled: boolean): boolean {
         });
         if (alive) unlisten = stop;
         else {
-          stop();
+          safeUnlisten(stop);
           return;
         }
         const now = await win.isFocused();
@@ -116,7 +117,7 @@ function useWindowFocus(enabled: boolean): boolean {
 
     return () => {
       alive = false;
-      unlisten?.();
+      safeUnlisten(unlisten);
     };
   }, [enabled]);
 
