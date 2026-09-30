@@ -23,22 +23,31 @@ const KNOWN_VERBS: &[&str] = &[
     "release", "share", "copy",
 ];
 
-/// resource_types whose handlers already write their own richer audit entry (so the generic
-/// middleware entry would just be a duplicate), or which aren't mutations at all. Everything else is
-/// logged. `admin.users` is the access editor (`PUT /admin/users/{id}/access`), which records its own
-/// before/after entry.
+/// resource_types the generic middleware does not log: ones whose handlers already write their own
+/// richer entry, ones that aren't mutations, and ones whose entry identified nothing. Everything
+/// else is logged. `admin.users` is the access editor (`PUT /admin/users/{id}/access`), which
+/// records its own before/after entry.
+///
+/// Adding to this list blinds the audit trail for a route, so each entry says which of those three
+/// reasons applies — and they are not interchangeable.
 fn is_excluded(resource_type: &str) -> bool {
     // `flow.resolve-routes` is a read (POST only because it takes a list body), not a mutation.
     // `api-keys` / `admin.api-keys` handlers write their own richer before/after audit entries.
     //
-    // `integration.jobs.lease` is the same shape as `flow.resolve-routes`: the Discord bot polls it
-    // every 5s and the overwhelmingly common answer is an empty list, which is not an event anyone
-    // will ever read. Auditing it wrote ~17k identical, id-less rows a day per bot process and
-    // crowded every real mutation out of the default view (#430). The work a lease leads to is
-    // still audited — `ack` writes one row per job actually done, proportional to real work — so
-    // nothing traceable is lost. Note it is excluded as `integration.jobs.lease` specifically,
-    // *not* by adding "lease" to KNOWN_VERBS: that would collapse its resource_type to
-    // `integration.jobs`, which is the ack's, and silence the ack too.
+    // `integration.jobs.lease` is excluded for the third reason, not the second: it *does* mutate —
+    // `repos::integration::lease_jobs` flips `pending → in_progress`, bumps `attempt_count` and sets
+    // `last_attempt_at`. What made its audit row worthless is that it carried no `resource_id`, so it
+    // never said which jobs were claimed, or whether any were. The Discord bot polls every 5s and the
+    // overwhelmingly common answer is an empty list, so this wrote ~17k identical, id-less rows a day
+    // per bot process and crowded every real mutation out of the default view (#430).
+    //
+    // The state change itself stays traceable: `ack` writes one row per job actually done, naming it.
+    // What is genuinely lost is a job leased and never acked — which has no audit trail now, and had
+    // an unidentifiable one before. That gap is #446's reaper, not this list's.
+    //
+    // Excluded as `integration.jobs.lease` specifically, *not* by adding "lease" to KNOWN_VERBS: that
+    // would collapse its resource_type to `integration.jobs`, which is the ack's, and silence the ack
+    // too.
     matches!(
         resource_type,
         "admin.users"
