@@ -897,11 +897,8 @@ export interface paths {
          *     `img-src` cannot name them all without becoming `https:`, so the image is fetched here and served
          *     from our own origin instead. The caller turns it into a `blob:` URL, which the policy does allow.
          *
-         *     Guarded, because this makes the backend fetch a URL someone else controls:
-         *     `https` only, no redirects, a short timeout, a size cap, and an `image/*` response or nothing.
-         *     That bounds it to "fetch a public image or fail". It does not make the fetch unreachable from
-         *     inside the cluster — a banner URL pointing at an internal host would still be requested — but the
-         *     response only ever leaves here as an image, to a caller who already holds `EventsPlanRead`.
+         *     Guarded, because this makes the backend fetch a URL someone else controls: `https` only, public
+         *     addresses only, no redirects, a short timeout, a size cap, and an `image/*` response or nothing.
          */
         get: operations["get_event_banner"];
         put?: never;
