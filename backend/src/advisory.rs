@@ -180,6 +180,31 @@ pub fn render_reroute(a: &RerouteAdvisory, id: &AdvisoryIdent) -> String {
     lines.join("\n")
 }
 
+/// The correction posted when an advisory is cancelled (VATUSA/OIS#459).
+///
+/// A short line, not a re-render of the document. The channel is a chronological log and the original
+/// advisory did go out, so the cancellation sits beside it as its own entry rather than replacing it —
+/// the shape #436 chose for TMI cancellations, for the same reason.
+///
+/// It repeats the TMI ID, which is what ties the correction to the document above it. Deliberately
+/// **not** the valid period: that lives in `structured`, which a raw-typed advisory does not have, so
+/// including it would make the correction's shape depend on how the advisory happened to be entered.
+/// The ID identifies the document on its own.
+pub fn render_cancellation(id: &AdvisoryIdent) -> String {
+    let facility = clean(&id.facility);
+    [
+        format!(
+            "vATCSCC ADVZY {:03} {} {} CANCELLED",
+            id.number,
+            facility,
+            id.issued_day.format("%m/%d/%Y"),
+        ),
+        format!("TMI ID: RR{}{:03}", facility, id.number),
+        id.signed_at.format("%y/%m/%d %H:%M").to_string(),
+    ]
+    .join("\n")
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -269,6 +294,45 @@ mod tests {
              142030-150230\n\
              20/04/14 14:36"
         );
+    }
+
+    // --- the cancellation correction (VATUSA/OIS#459) ---
+
+    /// A short correction, not a re-render. It ties itself to the document by TMI ID; the channel is
+    /// a chronological log, so the cancellation sits beside the original rather than replacing it.
+    #[test]
+    fn a_cancellation_names_the_document_it_corrects() {
+        let fixtures: Fixtures = serde_json::from_str(FIXTURES).expect("fixtures parse");
+        let case = fixtures
+            .cases
+            .iter()
+            .find(|c| c.name == "advzy-004-single-segment")
+            .expect("the single-segment reference case");
+
+        assert_eq!(
+            render_cancellation(&ident(&case.ident)),
+            "vATCSCC ADVZY 004 DCC 04/14/2020 CANCELLED\n\
+             TMI ID: RRDCC004\n\
+             20/04/14 14:36"
+        );
+    }
+
+    /// The number in the header and in the TMI ID are the same one, so a reader cannot be told two
+    /// different things about which advisory was cancelled.
+    #[test]
+    fn a_cancellation_cannot_disagree_with_itself_about_the_number() {
+        let fixtures: Fixtures = serde_json::from_str(FIXTURES).expect("fixtures parse");
+        for case in &fixtures.cases {
+            let out = render_cancellation(&ident(&case.ident));
+            let n = case.ident.number;
+            assert!(out.contains(&format!("ADVZY {n:03} ")), "{out}");
+            assert!(out.contains(&format!("{:03}", n)), "{out}");
+            assert_eq!(
+                out.matches(&format!("{n:03}")).count(),
+                2,
+                "the number appears exactly twice — header and TMI ID: {out}"
+            );
+        }
     }
 
     /// An absent optional and an empty one must print the same bare label — the document always

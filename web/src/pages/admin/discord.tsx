@@ -19,6 +19,13 @@ import {useFacilities} from "@/lib/admin";
  *  admin knows which names actually drive a feature. Keep in sync with the handlers' constants. */
 const KNOWN_CHANNELS: { name: string; hint: string }[] = [
   { name: "aceteam-requests", hint: "ACE coverage requests post + claim notifications" },
+  {
+    name: "tmu-advisories",
+    // The name previously carried NTML rows; #436 moved those to `tmu-ntml` (migration 0083) and
+    // #456 settled that ADVZY documents get their own name. Spelled out here because this is where
+    // an operator who remembers the old meaning would otherwise wire it to the wrong channel.
+    hint: "Published vATCSCC ADVZY advisory documents (not NTML — that moved to tmu-ntml)",
+  },
   { name: "tmu-ntml", hint: "Published TMIs and cancellations, as NTML log rows" },
   { name: "region-northeast", hint: "DCC threads for North East hosts (ZBW/ZDC/ZNY/ZOB)" },
   { name: "region-southeast", hint: "DCC threads for South East hosts (ZID/ZJX/ZMA/ZTL)" },

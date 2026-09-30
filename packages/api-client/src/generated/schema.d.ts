@@ -1880,6 +1880,23 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/v1/integration/discord/advisory/{id}": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** What the bot needs to reply to a "View structured" button click on an advisory post. */
+        get: operations["discord_advisory_info"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/v1/integration/discord/availability/{id}": {
         parameters: {
             query?: never;
@@ -3991,6 +4008,19 @@ export interface components {
             time_options: string[];
             /** @description A human window label, e.g. `2300–0300z`. */
             window_label: string;
+        };
+        /**
+         * @description What the bot needs to reply to a "View structured" button click on an advisory post
+         *     (VATUSA/OIS#459).
+         */
+        DiscordAdvisoryInfoBody: {
+            /** @description Which document type this is — `reroute` today. */
+            kind: string;
+            /**
+             * @description The fields the document was built from; null when it was typed as raw text, which the bot
+             *     reports as such rather than showing an empty breakdown.
+             */
+            structured?: unknown;
         };
         /**
          * @description The bot relays an availability button press: which Discord user pressed which colour. The event
@@ -11545,6 +11575,39 @@ export interface operations {
                 content?: never;
             };
             409: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+        };
+    };
+    discord_advisory_info: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["DiscordAdvisoryInfoBody"];
+                };
+            };
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            404: {
                 headers: {
                     [name: string]: unknown;
                 };

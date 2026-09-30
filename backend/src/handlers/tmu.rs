@@ -39,6 +39,30 @@ use serde_json::json;
 /// misnomer the moment either grew.
 pub(crate) const NTML_CHANNEL: &str = "tmu-ntml";
 
+/// Logical channel name where ADVZY advisory documents are posted (VATUSA/OIS#459).
+///
+/// **This name has history.** It used to carry NTML rows, until #436 decided NTML and real vATCSCC
+/// advisories are different artifacts and renamed those to [`NTML_CHANNEL`] — migration
+/// `0083_tmu_ntml_channel_rename.sql` moved existing rows. #456 then settled that ADVZY documents get
+/// their own name, and this is it: the name is free again and now literally accurate.
+///
+/// The risk that leaves is human, not technical: an operator who remembers `tmu-advisories` meaning
+/// NTML could map this to the channel NTML now lives in. The admin hint
+/// (`web/src/pages/admin/discord.tsx`) says so at the point of configuring it.
+pub(crate) const ADV_CHANNEL: &str = "tmu-advisories";
+
+/// Records that an advisory never reached Discord because the logical channel resolves to nothing.
+///
+/// Separate from [`skipped_post`] rather than generalised, so the log keeps naming the subject it is
+/// actually about — a grep for `advisory=` finds advisory gaps and nothing else.
+fn skipped_advisory_post(channel: &str, what: &str, advisory_id: &str) {
+    tracing::warn!(
+        channel,
+        advisory = advisory_id,
+        "tmu: no Discord channel mapped for `{channel}`; advisory {what} not posted"
+    );
+}
+
 /// Records that a TMI never reached Discord because the logical channel resolves to nothing.
 ///
 /// `channel_id` answering `None` means "don't post", and that is a legitimate state — a deployment
@@ -74,6 +98,35 @@ pub(crate) fn tmi_publish_job(channel_id: &str, tmi: &TmiBody) -> serde_json::Va
             Some(&tmi.requesting),
             Some(&tmi.providing),
         ),
+    })
+}
+
+/// The `adv_publish` job payload: the rendered document plus what the bot needs to post it.
+///
+/// The document is the **stored** `body`, not a re-render. It is what was reviewed and published, and
+/// re-rendering here would let the post differ from the row — the same reason `tmi_publish_job`
+/// assembles the row in one place. The bot stays a dumb renderer: it fences and splits, and decides
+/// nothing about content (#436's invariant, VATUSA/OIS#459).
+pub(crate) fn advisory_publish_job(channel_id: &str, adv: &AdvisoryBody) -> serde_json::Value {
+    json!({
+        "channel_id": channel_id,
+        "advisory_id": adv.id,
+        "document": adv.body,
+    })
+}
+
+/// The `adv_cancel` job payload: a short correction, not a re-post of the document.
+pub(crate) fn advisory_cancel_job(channel_id: &str, adv: &AdvisoryBody) -> serde_json::Value {
+    json!({
+        "channel_id": channel_id,
+        "advisory_id": adv.id,
+        "document": crate::advisory::render_cancellation(&crate::advisory::AdvisoryIdent {
+            facility: adv.facility.clone(),
+            number: adv.number,
+            issued_day: adv.issued_day,
+            // Stamped now: this is the moment the cancellation is being logged.
+            signed_at: chrono::Utc::now(),
+        }),
     })
 }
 
@@ -1256,6 +1309,140 @@ mod tests {
         assert!(published.published_at.is_some());
     }
 
+    // --- posting an advisory to Discord (VATUSA/OIS#459) ---
+
+    /// Map `tmu-advisories` to a channel for `facility`, so `channel_id` resolves.
+    async fn map_adv_channel(pool: &PgPool, channel: &str) -> String {
+        let config = sqlx::query_scalar::<_, String>(
+            "insert into integration.discord_configs (name, guild_id) values ('g', '1') returning id",
+        )
+        .fetch_one(pool)
+        .await
+        .unwrap();
+        sqlx::query(
+            "insert into integration.discord_channels (config_id, name, channel_id) \
+             values ($1, 'tmu-advisories', $2)",
+        )
+        .bind(&config)
+        .bind(channel)
+        .execute(pool)
+        .await
+        .unwrap();
+        config
+    }
+
+    async fn adv_jobs(pool: &PgPool, job_type: &str, id: &str) -> Vec<(String, String)> {
+        sqlx::query_as::<_, (String, String)>(
+            "select payload->>'channel_id', payload->>'document' \
+             from integration.outbound_jobs \
+             where job_type = $1 and subject_type = 'advisory' and subject_id = $2",
+        )
+        .bind(job_type)
+        .bind(id)
+        .fetch_all(pool)
+        .await
+        .unwrap()
+    }
+
+    async fn publish_through_the_router(pool: &PgPool, id: &str) -> http::StatusCode {
+        let state = test_state(pool.clone(), HashMap::new());
+        let user = seed_user(pool).await;
+        grant(pool, &user, "tmu.adv.publish", None).await;
+        let cookie = session_cookie(pool, &user).await;
+        send(
+            &state,
+            http::Method::POST,
+            &format!("/api/v1/tmu/advisories/{id}/publish"),
+            &cookie,
+            None,
+        )
+        .await
+    }
+
+    /// AC1: publishing enqueues the post, carrying the document that was actually stored.
+    #[sqlx::test]
+    async fn publishing_an_advisory_enqueues_its_document(pool: PgPool) {
+        map_adv_channel(&pool, "999").await;
+        let id = seed_draft(&pool).await;
+
+        assert_eq!(
+            publish_through_the_router(&pool, &id).await,
+            http::StatusCode::OK
+        );
+
+        let jobs = adv_jobs(&pool, "adv_publish", &id).await;
+        assert_eq!(jobs.len(), 1, "exactly one adv_publish job");
+        assert_eq!(jobs[0].0, "999");
+        assert_eq!(
+            jobs[0].1, "vATCSCC ADVZY",
+            "the job carries the stored body, not a re-render"
+        );
+    }
+
+    /// An unconfigured channel is a real state: the advisory still publishes, and nothing is queued.
+    #[sqlx::test]
+    async fn publishing_without_a_mapped_channel_still_publishes(pool: PgPool) {
+        let id = seed_draft(&pool).await;
+
+        assert_eq!(
+            publish_through_the_router(&pool, &id).await,
+            http::StatusCode::OK
+        );
+
+        assert!(adv_jobs(&pool, "adv_publish", &id).await.is_empty());
+        let adv = crate::repos::tmu::get_advisory(&pool, &id)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            adv.status, "published",
+            "the publish must not be rolled back"
+        );
+    }
+
+    /// AC3: cancelling posts a correction — and to the channel the publish went to, not wherever the
+    /// name resolves at cancel time.
+    #[sqlx::test]
+    async fn cancelling_an_advisory_corrects_it_in_the_same_channel(pool: PgPool) {
+        map_adv_channel(&pool, "999").await;
+        let id = seed_draft(&pool).await;
+        assert_eq!(
+            publish_through_the_router(&pool, &id).await,
+            http::StatusCode::OK
+        );
+
+        // Re-point the logical name. A cancel that re-resolved would land in 888.
+        sqlx::query("update integration.discord_channels set channel_id = '888' where name = 'tmu-advisories'")
+            .execute(&pool)
+            .await
+            .unwrap();
+
+        let state = test_state(pool.clone(), HashMap::new());
+        let user = seed_user(&pool).await;
+        grant(&pool, &user, "tmu.adv.publish", None).await;
+        let cookie = session_cookie(&pool, &user).await;
+        assert_eq!(
+            send(
+                &state,
+                http::Method::POST,
+                &format!("/api/v1/tmu/advisories/{id}/cancel"),
+                &cookie,
+                None
+            )
+            .await,
+            http::StatusCode::OK
+        );
+
+        let jobs = adv_jobs(&pool, "adv_cancel", &id).await;
+        assert_eq!(jobs.len(), 1, "exactly one adv_cancel job");
+        assert_eq!(
+            jobs[0].0, "999",
+            "the correction must land where the document did, not where the name points now"
+        );
+        assert!(jobs[0].1.contains("CANCELLED"), "{}", jobs[0].1);
+        assert!(jobs[0].1.contains("TMI ID: RRDCC001"), "{}", jobs[0].1);
+    }
+
     /// Reading is gated too — advisories are not public until #459 posts them.
     #[sqlx::test]
     async fn listing_advisories_requires_the_read_permission(pool: PgPool) {
@@ -1603,13 +1790,34 @@ pub async fn publish_advisory(
     let pool = state.db.as_ref().ok_or(ApiError::ServiceUnavailable)?;
     let facility = advisory_facility(pool, &id).await?;
     require_advisory_scope(&state, &principal, "tmu.adv.publish", &facility).await?;
-    if !tmu_repo::publish_advisory(pool, &id, &user.id).await? {
-        return Err(ApiError::Conflict);
+
+    // Resolved before the tx, and **scoped to the issuing facility** — unlike a TMI, which has a
+    // requesting and a providing ARTCC and so no single owner. An advisory has exactly one.
+    let channel = integration_repo::channel_id(pool, ADV_CHANNEL, Some(&facility)).await?;
+    let mut tx = pool.begin().await.map_err(|_| ApiError::Internal)?;
+    if !tmu_repo::publish_advisory(&mut tx, &id, &user.id).await? {
+        return Err(ApiError::Conflict); // not a draft (or absent)
     }
-    tmu_repo::get_advisory(pool, &id)
+    let adv = tmu_repo::get_advisory_tx(&mut tx, &id)
         .await?
-        .map(Json)
-        .ok_or(ApiError::NotFound)
+        .ok_or(ApiError::NotFound)?;
+    if let Some(channel_id) = channel {
+        // In the same tx as the publish: a post must not exist for an advisory that did not publish,
+        // and an advisory must not go live with nothing queued to announce it.
+        let job = advisory_publish_job(&channel_id, &adv);
+        integration_repo::enqueue_job(
+            &mut tx,
+            "adv_publish",
+            &job,
+            Some("advisory"),
+            Some(&adv.id),
+        )
+        .await?;
+    } else {
+        skipped_advisory_post(ADV_CHANNEL, "publish", &adv.id);
+    }
+    tx.commit().await.map_err(|_| ApiError::Internal)?;
+    Ok(Json(adv))
 }
 
 #[utoipa::path(
@@ -1628,13 +1836,30 @@ pub async fn cancel_advisory(
     let pool = state.db.as_ref().ok_or(ApiError::ServiceUnavailable)?;
     let facility = advisory_facility(pool, &id).await?;
     require_advisory_scope(&state, &principal, "tmu.adv.publish", &facility).await?;
-    if !tmu_repo::cancel_advisory(pool, &id).await? {
+
+    // Where the publish actually went, not where the name resolves now. Advisory channels are
+    // facility-scoped, so re-deriving would route the correction by today's facility map — an
+    // advisory published under one guild could have its cancellation land in another.
+    let channel = match integration_repo::published_channel_for_advisory(pool, &id).await? {
+        Some(c) => Some(c),
+        None => integration_repo::channel_id(pool, ADV_CHANNEL, Some(&facility)).await?,
+    };
+    let mut tx = pool.begin().await.map_err(|_| ApiError::Internal)?;
+    if !tmu_repo::cancel_advisory(&mut tx, &id).await? {
         return Err(ApiError::Conflict);
     }
-    tmu_repo::get_advisory(pool, &id)
+    let adv = tmu_repo::get_advisory_tx(&mut tx, &id)
         .await?
-        .map(Json)
-        .ok_or(ApiError::NotFound)
+        .ok_or(ApiError::NotFound)?;
+    if let Some(channel_id) = channel {
+        let job = advisory_cancel_job(&channel_id, &adv);
+        integration_repo::enqueue_job(&mut tx, "adv_cancel", &job, Some("advisory"), Some(&adv.id))
+            .await?;
+    } else {
+        skipped_advisory_post(ADV_CHANNEL, "cancel", &adv.id);
+    }
+    tx.commit().await.map_err(|_| ApiError::Internal)?;
+    Ok(Json(adv))
 }
 
 /// Abandons a draft. `409` when it is not a draft — a published advisory is a document that went out,

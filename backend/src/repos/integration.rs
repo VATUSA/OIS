@@ -262,6 +262,32 @@ pub async fn ec_discord_ids(pool: &PgPool, facility: &str) -> Result<Vec<String>
 
 /// The `result` payload of the most recent succeeded job for a subject + type — used to recover ids
 /// the bot returned on ack (e.g. the posted message id, needed by a follow-up job).
+/// The channel an advisory's publish post was actually sent to, if it was ever enqueued
+/// (VATUSA/OIS#459).
+///
+/// Same reasoning as [`published_channel_for_tmi`], and it bites harder here: advisory channels are
+/// resolved **with** the issuing facility, so re-deriving on cancel would route the correction by
+/// whatever the facility map says now. An advisory published under ZNY and cancelled after a
+/// realignment would have its cancellation land in a different guild from the document it corrects.
+///
+/// Deliberately not filtered on `status`, for the same reason: an advisory cancelled moments after
+/// publishing still has a `pending` job, and that job's channel is the right answer.
+pub async fn published_channel_for_advisory(
+    pool: &PgPool,
+    advisory_id: &str,
+) -> Result<Option<String>, ApiError> {
+    sqlx::query_scalar::<_, Option<String>>(
+        "select payload->>'channel_id' from integration.outbound_jobs \
+         where subject_type = 'advisory' and subject_id = $1 and job_type = 'adv_publish' \
+         order by created_at desc limit 1",
+    )
+    .bind(advisory_id)
+    .fetch_optional(pool)
+    .await
+    .map(Option::flatten)
+    .map_err(|_| ApiError::Internal)
+}
+
 /// The channel a TMI's publish post was actually sent to, if it was ever enqueued (#436 review).
 ///
 /// A cancellation has to land beside the row it corrects, and re-deriving the channel does not get

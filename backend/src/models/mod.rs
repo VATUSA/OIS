@@ -1712,6 +1712,18 @@ pub struct DiscordTmiInfoBody {
     pub decoded: Option<String>,
 }
 
+/// What the bot needs to reply to a "View structured" button click on an advisory post
+/// (VATUSA/OIS#459).
+#[derive(Debug, Serialize, ToSchema)]
+pub struct DiscordAdvisoryInfoBody {
+    /// Which document type this is — `reroute` today.
+    pub kind: String,
+    /// The fields the document was built from; null when it was typed as raw text, which the bot
+    /// reports as such rather than showing an empty breakdown.
+    #[schema(value_type = Option<Value>)]
+    pub structured: Option<Value>,
+}
+
 /// Bot interaction callback: a Discord user submitted the claim modal on an ACE request. The backend
 /// resolves the Discord id to the linked OIS user and claims a slot on their behalf. `start_hhmm` /
 /// `end_hhmm` are the modal's raw Zulu times (e.g. "2330"); the backend parses them against the
