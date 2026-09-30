@@ -109,11 +109,20 @@ pub async fn create_tmi(
 ///
 /// Shaped like [`publish_tmi`], including re-selecting rather than using `returning`: `SELECT` joins
 /// `identity.users` for `author`, which `returning` cannot produce.
+///
+/// Returns the row **and whether any field that appears in the posted NTML line actually changed** — see
+/// [`TmiEdit`]. `rows_affected` cannot answer that: a COALESCE update setting every column to its current
+/// value still affects the row, so it only distinguishes "no such id" (#453 review).
 pub async fn update_tmi(
     tx: &mut Transaction<'_, Postgres>,
     id: &str,
     req: &UpdateTmiRequest,
-) -> Result<Option<TmiBody>, ApiError> {
+) -> Result<Option<TmiEdit>, ApiError> {
+    // Read the pre-edit row inside the same transaction, so "did the line change" is answered against the
+    // row the edit is actually applied to rather than one that may have moved under us.
+    let Some(before) = get_tmi_tx(tx, id).await? else {
+        return Ok(None);
+    };
     let result = sqlx::query(
         "update tmu.tmis set \
             requesting = coalesce($2, requesting), \
@@ -135,6 +144,43 @@ pub async fn update_tmi(
     if result.rows_affected() == 0 {
         return Ok(None);
     }
+    let Some(tmi) = get_tmi_tx(tx, id).await? else {
+        return Ok(None);
+    };
+    Ok(Some(TmiEdit {
+        line_changed: line_fields_differ(&before, &tmi),
+        tmi,
+    }))
+}
+
+/// A TMI after an edit, and whether the edit changed anything the channel shows.
+pub struct TmiEdit {
+    pub tmi: TmiBody,
+    /// True when a field carried by the posted NTML line differs from before the edit. The handler posts a
+    /// revised row only then: an edit that changed nothing must not put a second identical line into a log
+    /// whose whole premise is that a later line supersedes the earlier one (#453 review).
+    pub line_changed: bool,
+}
+
+/// The fields the posted NTML row is built from — `tmi_publish_job`'s payload, in other words.
+///
+/// `restriction`, `requesting` and `providing` are the line's text and its `REQ:PROV` token; the two times
+/// are its valid window, which is why a `stop_time`-only edit **must** still post. Anything outside this
+/// set (`status` transitions, `author`, `decoded`) either has its own path or does not appear in the
+/// channel (#453 review).
+fn line_fields_differ(before: &TmiBody, after: &TmiBody) -> bool {
+    before.restriction != after.restriction
+        || before.requesting != after.requesting
+        || before.providing != after.providing
+        || before.start_time != after.start_time
+        || before.stop_time != after.stop_time
+}
+
+/// `get_tmi` against a transaction, so the before/after comparison sees the edit's own snapshot.
+async fn get_tmi_tx(
+    tx: &mut Transaction<'_, Postgres>,
+    id: &str,
+) -> Result<Option<TmiBody>, ApiError> {
     sqlx::query_as::<_, TmiBody>(&format!("{SELECT} where t.id = $1"))
         .bind(id)
         .fetch_optional(&mut **tx)
