@@ -2,6 +2,33 @@
 //! canonical raw NTML line stored on `tmu.tmis.restriction`, and into the plain-English `decoded`
 //! rendering pilots read. Modelled on the vATCSCC/FAA NTML entry breakdown (see docs/TMIs). The
 //! requesting/providing facilities and the valid window live on the TMI row, not in the line here.
+//!
+//! # The codec is deliberately one-way
+//!
+//! There is no `parse`/`from_raw`, so a raw-typed TMI keeps `structured` null and anything wanting
+//! fields gets nothing rather than a guess. That is a decision, not an omission, and the reason is
+//! in the grammar below: two positions emit bare, unprefixed words.
+//!
+//! - A `qualifier` (`NO STACKS`) and a `condition` carrying no detail (`VOLUME`) are both
+//!   written as plain uppercase text, in that order. Given `20MIT NO STACKS VOLUME`, nothing in
+//!   the line says whether the qualifier is `NO STACKS` and the condition `VOLUME`, or whether
+//!   the qualifier is the whole `NO STACKS VOLUME`. Only a closed vocabulary of conditions could
+//!   split it, and the vocabulary is open — controllers name the cause of the day.
+//! - `TXT` writes its free text verbatim into the slot a kind keyword occupies, so `PHL STOP NOW`
+//!   is either `kind: STOP` qualified `NOW`, or `kind: TXT` with the text `STOP NOW`.
+//!
+//! Round-tripping the *line* does not rule either out, which is the trap worth naming: a parser
+//! that folded a detail-less `VOLUME` into `qualifier` would satisfy `encode(parse(line)) == line`
+//! while putting the value in the wrong field. Anything built here has to round-trip the *struct* —
+//! `parse(encode(r)) == r` over the reference examples in `tests` — and refuse a line it cannot
+//! place rather than filling fields on a best guess.
+//!
+//! Raw entry exists precisely because the grammar cannot express everything a controller needs to
+//! say. Inferring a breakdown for text chosen to escape the grammar is how a confidently wrong
+//! breakdown ships, which is worse than admitting there isn't one. If a parser does become worth
+//! building, the prefixed half of the grammar (`nMIT`/`nMINIT`, `via`, `TYPE:`, `SPD:`, `ALT:`,
+//! `EXCL:`, and `CONDITION:DETAIL`) is unambiguous on its own; the two bare positions above are
+//! what needs settling first.
 
 use crate::models::{Bound, NtmlRestriction};
 
