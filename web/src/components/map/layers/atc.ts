@@ -2,7 +2,7 @@ import {GeoJsonLayer, PolygonLayer, ScatterplotLayer} from "@deck.gl/layers";
 import type {Layer} from "@deck.gl/core";
 
 import {ATC_COLORS, type MapPalette, readMapPalette} from "../lib/colors";
-import {toDeckPath, toDeckPoint, type LatLng} from "../lib/geo";
+import {type LatLng, sanitizeBoundaries, sanitizeRings, toDeckPath, toDeckPoint} from "../lib/geo";
 import type {RGBA} from "../lib/types";
 
 /** ATC board subset the map renders (from the /flow/atc endpoint). */
@@ -80,7 +80,9 @@ export function buildAtcLayers(
 
   // Center (ARTCC) areas — filter the bundled boundaries to the online centers.
   const online = new Set(atc.centers.map((c) => c.id.toUpperCase()));
-  const centerFeatures = boundaries.features.filter((f) =>
+  // The one path that had no geometry validation whatever — bundled GeoJSON went straight into a
+  // filled layer, which is how the ZNY bowtie reached earcut and wedged across the map (#481).
+  const centerFeatures = sanitizeBoundaries(boundaries).features.filter((f) =>
     online.has(String(f.properties?.id ?? "").toUpperCase()),
   );
   if (centerFeatures.length > 0) {
@@ -104,7 +106,9 @@ export function buildAtcLayers(
   // none falls back to a circle at its label.
   const polygonTracons = atc.tracons
     .filter((t) => !t.circle && t.rings.length > 0)
-    .map((t) => ({ t, rings: t.rings.filter(isValidRing) }));
+    // `isValidRing` catches off-globe and far-outlier vertices; `sanitizeRings` catches the ring
+    // being two lobes bridged together, which no per-vertex check can see (#481). Both, not either.
+    .map((t) => ({ t, rings: sanitizeRings(t.rings.filter(isValidRing) as LatLng[][]) }));
   const ringPolys = polygonTracons.flatMap(({ rings }) =>
     rings.map((ring) => ({ contour: toDeckPath(ring as LatLng[]) })),
   );
