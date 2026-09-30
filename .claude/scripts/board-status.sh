@@ -12,7 +12,10 @@ FIELD="PVTSSF_lADOAd0rh84Bi-Gkzhh0Mvg"         # its "Status" single-select fiel
 
 opt=$(gh api graphql -f query='query{organization(login:"VATUSA"){projectV2(number:7){field(name:"Status"){... on ProjectV2SingleSelectField{options{id name}}}}}}' \
   --jq ".data.organization.projectV2.field.options[] | select(.name==\"$col\") | .id")
-item=$(gh project item-list 7 --owner VATUSA --format json --limit 200 \
+# --limit must exceed the board's TOTAL item count, Done included: `item-list` truncates silently,
+# so a card past the cap looks identical to one that isn't on the board at all. At 200 it had already
+# started hiding live cards behind ~170 Done rows.
+item=$(gh project item-list 7 --owner VATUSA --format json --limit 2000 \
   | jq -r ".items[] | select(.content.number==$issue) | .id")
 
 [ -n "$opt" ]  || { echo "no such Status column: $col" >&2; exit 1; }
