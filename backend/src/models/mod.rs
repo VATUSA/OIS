@@ -2445,8 +2445,13 @@ pub struct FlightFcaCrossing {
 /// Everything currently affecting one flight (by callsign), for the public "my
 /// flight" lookup and the FCA-map search. `found` is false when the callsign
 /// isn't in the live feed.
+///
+/// Named `FlightImpact`, not `FlightAdvisory` (#456): it is a summary of which initiatives touch
+/// this flight and what they cost it, not an advisory document. "Advisory" already meant two other
+/// things here — the pilot-facing board at `/advisories`, and the authored vATCSCC ADVZY documents
+/// of #437 — and a third use of the word in the type system was the one with no claim to it.
 #[derive(Debug, Default, Serialize, ToSchema)]
-pub struct FlightAdvisory {
+pub struct FlightImpact {
     pub callsign: String,
     pub found: bool,
     pub dep: String,
