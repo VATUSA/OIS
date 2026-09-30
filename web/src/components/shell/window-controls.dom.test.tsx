@@ -12,9 +12,12 @@ import {afterEach, beforeAll, beforeEach, describe, expect, it, vi} from "vitest
  * window (#350), which renders this same shell inside a window that still has its native title bar.
  */
 const platform = vi.hoisted(() => ({windowControls: true, label: "main"}));
+// `isMainWindow` is stubbed from the same `platform.label` handle the window mock reads, so the
+// route-window case below still turns on the label it always did (#403 moved the comparison into
+// `platform.ts`, and this factory mock replaces that module wholesale).
 vi.mock("@/lib/platform", () => ({
   can: () => platform.windowControls,
-  MAIN_WINDOW_LABEL: "main",
+  isMainWindow: async () => platform.label === "main",
 }));
 
 const win = vi.hoisted(() => ({

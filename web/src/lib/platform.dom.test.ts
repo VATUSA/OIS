@@ -33,6 +33,9 @@ function pretendDesktop() {
 afterEach(() => {
   delete window.__TAURI_INTERNALS__;
   invoke.mockReset();
+  // Back to the default label: tests below install their own, including one that throws, and a
+  // leaked implementation would decide a later test's answer.
+  currentLabel.mockImplementation(() => "main");
 });
 
 describe("platform detection", () => {
@@ -158,6 +161,27 @@ describe("window identity", () => {
     currentLabel.mockReturnValue("popout-fca-ZDC");
 
     await expect(windowLabel()).resolves.toBe("popout-fca-ZDC");
+    await expect(isMainWindow()).resolves.toBe(false);
+  });
+
+  /**
+   * #403: "couldn't tell" must answer *not* the main window, and this is the only place that
+   * answer is made. `window-controls.tsx` and `popout.ts` each had their own `catch` until the
+   * three copies were collapsed into this helper; now the fallback below is the only thing
+   * standing between an unreadable window and a route window that thinks it is `main` — drawing a
+   * second set of controls over the OS's, and, in `restoreWindows`, relaunching the whole set from
+   * a window that was itself restored.
+   *
+   * Flipping the fallback to `MAIN_WINDOW_LABEL`, or deleting the `catch` so the throw escapes,
+   * must fail here.
+   */
+  it("is not the primary window when the window cannot be read", async () => {
+    pretendDesktop();
+    currentLabel.mockImplementation(() => {
+      throw new Error("window unavailable");
+    });
+
+    await expect(windowLabel()).resolves.toBeUndefined();
     await expect(isMainWindow()).resolves.toBe(false);
   });
 });
