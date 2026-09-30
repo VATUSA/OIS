@@ -318,3 +318,71 @@ pub fn client_ip(headers: &HeaderMap) -> Option<String> {
         .filter(|value| !value.is_empty())
         .map(ToOwned::to_owned)
 }
+
+/// Delete audit rows older than `before`. Returns how many went (#444).
+///
+/// Nothing pruned this table before, so it had grown for the life of the deployment. The retention
+/// window itself lives with the job that calls this — see `jobs::AUDIT_RETAIN_DAYS`.
+pub async fn prune_audit_logs(pool: &PgPool, before: DateTime<Utc>) -> Result<u64, ApiError> {
+    sqlx::query("delete from access.audit_logs where created_at < $1")
+        .bind(before)
+        .execute(pool)
+        .await
+        .map(|r| r.rows_affected())
+        .map_err(|_| ApiError::Internal)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use chrono::Duration;
+
+    async fn audit_row(pool: &PgPool, created_at: DateTime<Utc>) -> String {
+        sqlx::query_scalar::<_, String>(
+            "insert into access.audit_logs (action, resource_type, created_at) \
+             values ('update', 'tmu.tmis', $1) returning id",
+        )
+        .bind(created_at)
+        .fetch_one(pool)
+        .await
+        .unwrap()
+    }
+
+    /// #444: the table had no retention at all. Pruning must take what is past the window and leave
+    /// what is inside it — a prune that took everything would be worse than none.
+    #[sqlx::test]
+    async fn prunes_only_rows_past_the_window(pool: PgPool) {
+        let now = Utc::now();
+        let cutoff = now - Duration::days(180);
+
+        let old = audit_row(&pool, cutoff - Duration::days(1)).await;
+        let recent = audit_row(&pool, cutoff + Duration::days(1)).await;
+
+        assert_eq!(prune_audit_logs(&pool, cutoff).await.unwrap(), 1);
+
+        let surviving: Vec<String> =
+            sqlx::query_scalar("select id from access.audit_logs order by created_at")
+                .fetch_all(&pool)
+                .await
+                .unwrap();
+        assert_eq!(
+            surviving,
+            vec![recent],
+            "the row inside the window must survive"
+        );
+        assert!(!surviving.contains(&old));
+    }
+
+    /// Nothing to do is not an error — the job runs every 15 minutes and will almost always find
+    /// nothing.
+    #[sqlx::test]
+    async fn pruning_an_empty_window_removes_nothing(pool: PgPool) {
+        audit_row(&pool, Utc::now()).await;
+        assert_eq!(
+            prune_audit_logs(&pool, Utc::now() - Duration::days(180))
+                .await
+                .unwrap(),
+            0
+        );
+    }
+}

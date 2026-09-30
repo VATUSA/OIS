@@ -41,6 +41,17 @@ const STATS_PRUNE_AFTER_DAYS: i64 = 14;
 /// Delay legs are tiny (one row per flight leg) and useful over a longer window than raw positions.
 const DELAY_LEG_RETAIN_DAYS: i64 = 30;
 
+/// How long `access.audit_logs` rows are kept (#444).
+///
+/// Six months: long enough to span a full VATUSA event season, so "what changed before that event"
+/// is still answerable, and short enough that the table stops growing without bound — it had no
+/// retention at all, and grew for the life of the deployment.
+///
+/// One window for every `resource_type` deliberately. A per-type table would have to track the types
+/// `audit::derive` invents from the request path, which nothing centrally registers, so it would
+/// drift silently the first time a route was added.
+const AUDIT_RETAIN_DAYS: i64 = 180;
+
 /// Weekly compaction ladder for `stats.position`: `(age_days, keep_every)`. When a position's age
 /// first crosses `age_days`, keep only every `keep_every`-th sample of the survivors handed down
 /// from the previous tier — an *incremental* factor, not a cumulative target. Each pass only looks
@@ -819,6 +830,31 @@ pub fn spawn_desktop_auth_code_prune(reg: Arc<JobRegistry>, pool: PgPool) {
             let pool = pool.clone();
             async move {
                 crate::repos::auth::prune_desktop_auth_codes(&pool)
+                    .await
+                    .map(|n| format!("{n} deleted"))
+                    .map_err(|_| "prune failed".to_string())
+            }
+        },
+    ));
+}
+
+/// Delete audit rows past [`AUDIT_RETAIN_DAYS`] (#444). Nothing removed them before, so the table
+/// only grew — most recently at the Discord bot's job-queue poll rate until #430 stopped that.
+///
+/// Its own job rather than another pass inside `stats_compaction_once`: an audit trail's retention is
+/// a policy decision, not stats housekeeping, and a separate entry is what makes it visible (and
+/// runnable) in the admin jobs view. Same cadence as the other cleanups.
+pub fn spawn_audit_log_prune(reg: Arc<JobRegistry>, pool: PgPool) {
+    tokio::spawn(run_interval(
+        reg,
+        "audit_log_prune",
+        "Delete audit-log rows past their retention window",
+        CLEANUP_INTERVAL,
+        move || {
+            let pool = pool.clone();
+            async move {
+                let before = Utc::now() - chrono::Duration::days(AUDIT_RETAIN_DAYS);
+                crate::repos::audit::prune_audit_logs(&pool, before)
                     .await
                     .map(|n| format!("{n} deleted"))
                     .map_err(|_| "prune failed".to_string())
