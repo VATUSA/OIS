@@ -16,6 +16,9 @@ import {afterEach, beforeAll, beforeEach, describe, expect, it, vi} from "vitest
  * turns on the host and the label it claims to turn on.
  */
 const platform = vi.hoisted(() => ({windowControls: true, label: "main", macos: false}));
+// `isMainWindow` is stubbed from the same `platform.label` handle the window mock reads, so the
+// route-window case below still turns on the label it always did (#403 moved the comparison into
+// `platform.ts`, and this factory mock replaces that module wholesale).
 vi.mock("@/lib/platform", () => ({
   can: () => platform.windowControls,
   isMacOS: () => platform.macos,

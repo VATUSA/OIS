@@ -19,7 +19,6 @@ import {
   Tooltip,
   TooltipContent,
   TooltipTrigger,
-  useToast,
 } from "@ois/ui";
 import {
   BookOpen,
@@ -28,7 +27,6 @@ import {
   History,
   Home,
   KeyRound,
-  LogIn,
   LogOut,
   Menu,
   PanelLeft,
@@ -37,9 +35,10 @@ import {
   User as UserIcon,
 } from "lucide-react";
 
+import {SignInButton} from "@/components/sign-in-button";
 import {ZuluClock} from "@/components/zulu-clock";
 import {DOCS_URL} from "@/lib/api";
-import {useLogin, useLogout, useMe} from "@/lib/auth";
+import {useLogout, useMe} from "@/lib/auth";
 import {hasPermission} from "@/lib/permissions";
 import {ADMIN_HOME, AREAS, visibleGroups} from "@/lib/nav";
 
@@ -144,36 +143,11 @@ function initials(name: string) {
 /** The signed-in identity (avatar, name, mono CID · rating), or the sign-in button. */
 function Identity({ collapsed }: { collapsed: boolean }) {
   const { data: me } = useMe();
-  const signIn = useLogin();
-  const toast = useToast();
 
-  // Desktop sign-in can fail in ways the web flow never could — the loopback listener may fail to
-  // bind, time out, or have its code refused — and those used to be a button that did nothing.
-  const startSignIn = () => {
-    signIn.mutate(undefined, {
-      onError: (error) =>
-        toast.error("Sign-in failed", {
-          description: error instanceof Error ? error.message : "Please try again.",
-        }),
-    });
-  };
-
+  // The button itself owns the sign-in mutation, its pending state and its error toast, so this and
+  // the two signed-out pages cannot drift apart again (#428).
   if (!me) {
-    return collapsed ? (
-      <Button
-        size="icon"
-        aria-label="Sign in with VATSIM"
-        onClick={startSignIn}
-        disabled={signIn.isPending}
-        className="mx-auto"
-      >
-        <LogIn />
-      </Button>
-    ) : (
-      <Button size="sm" onClick={startSignIn} disabled={signIn.isPending}>
-        {signIn.isPending ? "Signing in..." : "Sign in with VATSIM"}
-      </Button>
-    );
+    return collapsed ? <SignInButton iconOnly className="mx-auto" /> : <SignInButton />;
   }
   return (
     <SidebarTooltip label={`${me.display_name} · CID ${me.cid}${me.rating ? ` · ${me.rating}` : ""}`}>

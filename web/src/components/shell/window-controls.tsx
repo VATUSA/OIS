@@ -53,6 +53,9 @@ export function useWindowChrome(): boolean {
     if (!enabled) return;
     let alive = true;
     void (async () => {
+      // `isMainWindow()` is the one definition of the rule (#403), and it answers `false` when the
+      // window can't be read — which is the answer this gate wants anyway: draw nothing rather than
+      // risk duplicating the OS's chrome.
       const isMain = await isMainWindow();
       if (alive) setMain(isMain);
     })();

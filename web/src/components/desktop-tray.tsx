@@ -1,7 +1,7 @@
 import * as React from "react";
 
 import {useFeedStatus} from "@/lib/feed";
-import {can} from "@/lib/platform";
+import {can, isMainWindow} from "@/lib/platform";
 import {useSetting} from "@/lib/settings";
 import {removeTray, showMainWindow, syncTray} from "@/lib/tray";
 import {isActiveTmi, useTmis} from "@/lib/tmu";
@@ -80,11 +80,12 @@ export function CloseToTray({enabled}: {enabled: boolean}) {
       try {
         const {getCurrentWindow} = await import("@tauri-apps/api/window");
         const win = getCurrentWindow();
-        // Both branches below are about the MAIN window. The check has to come first: this
-        // component mounts in every non-embed window, so an unguarded `showMainWindow()` meant
-        // every route window (#350) dragged focus back to the main one as it opened — on the
-        // default settings, since closeToTray is off by default.
-        if (win.label !== "main") return;
+        // Both branches below are about the MAIN window, and the check has to come first: an
+        // unguarded `showMainWindow()` meant every route window (#350) dragged focus back to the
+        // main one as it opened — on the default settings, since closeToTray is off by default.
+        // `PrimaryWindowFeatures` also keeps this out of route windows; this is the belt to that
+        // pair of braces, and the rule itself lives in `platform.ts` (#403).
+        if (!(await isMainWindow())) return;
 
         // Turning this off while the window is hidden would strand the user with no way back.
         if (!enabled) {

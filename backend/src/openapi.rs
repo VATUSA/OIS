@@ -64,6 +64,7 @@ use utoipa::OpenApi;
         crate::handlers::tmu::delete_ground_stop,
         crate::handlers::events::list_events,
         crate::handlers::events::get_event,
+        crate::handlers::events::get_event_banner,
         crate::handlers::events::get_event_dcc,
         crate::handlers::events::update_event_dcc,
         crate::handlers::events::list_event_facilities,
