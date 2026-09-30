@@ -5,24 +5,31 @@ import {createRoot} from "react-dom/client";
 import {afterEach, beforeAll, beforeEach, describe, expect, it, vi} from "vitest";
 
 /**
- * The window controls for the frameless main window (#402).
+ * The main window's own window buttons (#402, #419).
  *
- * The native title bar is off, so these are the only in-app way to manage the window — and they must
- * appear *only* there: not on the web build, where the browser draws its own, and not in a route
- * window (#350), which renders this same shell inside a window that still has its native title bar.
+ * Who draws them depends on the host: macOS keeps its decorations, so the **OS** draws the real traffic
+ * lights and the app must draw nothing; Windows and Linux run the window undecorated and get the app's
+ * replica. Neither belongs on the web build, where the browser draws its own chrome, nor in a route
+ * window (#350), which renders this same shell inside a window that still has a native title bar.
+ *
+ * `isMacOS` and `isMainWindow` are stubbed from the same handles the window mock reads, so each case
+ * turns on the host and the label it claims to turn on.
  */
-const platform = vi.hoisted(() => ({windowControls: true, label: "main"}));
+const platform = vi.hoisted(() => ({windowControls: true, label: "main", macos: false}));
 vi.mock("@/lib/platform", () => ({
   can: () => platform.windowControls,
-  MAIN_WINDOW_LABEL: "main",
+  isMacOS: () => platform.macos,
+  isMainWindow: async () => platform.label === "main",
 }));
 
 const win = vi.hoisted(() => ({
   minimize: vi.fn(() => Promise.resolve()),
   toggleMaximize: vi.fn(() => Promise.resolve()),
   close: vi.fn(() => Promise.resolve()),
-  isMaximized: vi.fn(() => Promise.resolve(false)),
-  onResized: vi.fn((_cb: () => void) => Promise.resolve(() => undefined)),
+  isFocused: vi.fn(() => Promise.resolve(true)),
+  onFocusChanged: vi.fn((_cb: (event: {payload: boolean}) => void) =>
+    Promise.resolve(() => undefined),
+  ),
   get label() {
     return platform.label;
   },
@@ -46,11 +53,12 @@ afterEach(() => {
 beforeEach(() => {
   platform.windowControls = true;
   platform.label = "main";
+  platform.macos = false;
   for (const [name, fn] of Object.entries(win)) {
     if (name !== "label") (fn as ReturnType<typeof vi.fn>).mockClear();
   }
-  win.isMaximized.mockResolvedValue(false);
-  win.onResized.mockImplementation(() => Promise.resolve(() => undefined));
+  win.isFocused.mockResolvedValue(true);
+  win.onFocusChanged.mockImplementation(() => Promise.resolve(() => undefined));
 });
 
 async function render(node: React.ReactNode = <WindowControls />): Promise<HTMLElement> {
@@ -64,6 +72,7 @@ async function render(node: React.ReactNode = <WindowControls />): Promise<HTMLE
 
 const button = (host: HTMLElement, label: string) =>
   host.querySelector<HTMLButtonElement>(`[aria-label="${label}"]`);
+const lights = (host: HTMLElement) => host.querySelector<HTMLElement>(".traffic-lights");
 
 describe("WindowControls", () => {
   it("renders nothing on a build without the capability", async () => {
@@ -72,30 +81,46 @@ describe("WindowControls", () => {
 
     expect(host.innerHTML).toBe("");
     // Nor may it ask the window anything — there is no window.
-    expect(win.isMaximized).not.toHaveBeenCalled();
+    expect(win.isFocused).not.toHaveBeenCalled();
   });
 
   it("renders nothing in a route window, which still has its native title bar", async () => {
-    // `decorations: false` is set on `main` alone, but every Tauri webview runs this same bundle, so
-    // a capability-only gate drew a second set of controls over the OS's in every route window.
+    // Every Tauri webview runs this same bundle, so a capability-only gate drew a second set of
+    // controls over the OS's in every route window (#402 review).
     platform.label = "window--ops-idst";
     const host = await render();
 
     expect(host.innerHTML).toBe("");
-    expect(win.isMaximized).not.toHaveBeenCalled();
   });
 
-  it("minimizes, toggles and closes the window", async () => {
+  /**
+   * #419: on macOS the real traffic lights are already in this spot — the OS draws them, inset into the
+   * app's chrome row by `trafficLightPosition` in `tauri.macos.conf.json`. Drawing the replica as well
+   * would stack two sets of buttons on top of each other.
+   */
+  it("draws no replica on macOS, where the OS draws the real lights", async () => {
+    platform.macos = true;
     const host = await render();
+
+    expect(host.innerHTML).toBe("");
+    expect(win.isFocused).not.toHaveBeenCalled();
+  });
+
+  it("draws the three lights on Windows, and each one acts on the window", async () => {
+    const host = await render();
+
+    expect(lights(host)).not.toBeNull();
+    expect(host.querySelectorAll("button")).toHaveLength(3);
+
+    await act(async () => button(host, "Close")!.click());
+    expect(win.close).toHaveBeenCalledTimes(1);
 
     await act(async () => button(host, "Minimize")!.click());
     expect(win.minimize).toHaveBeenCalledTimes(1);
 
-    await act(async () => button(host, "Maximize")!.click());
+    // macOS calls it zoom, so the replica does too — the label is what a screen reader reads out.
+    await act(async () => button(host, "Zoom")!.click());
     expect(win.toggleMaximize).toHaveBeenCalledTimes(1);
-
-    await act(async () => button(host, "Close")!.click());
-    expect(win.close).toHaveBeenCalledTimes(1);
   });
 
   it("opts every control out of the drag region, or a click would drag the window", async () => {
@@ -108,48 +133,37 @@ describe("WindowControls", () => {
     }
   });
 
-  it("names the toggle for what it will do, reading the window rather than assuming", async () => {
-    win.isMaximized.mockResolvedValue(true);
-    const host = await render();
-
-    expect(button(host, "Restore")).not.toBeNull();
-    expect(button(host, "Maximize")).toBeNull();
-  });
-
-  it("re-reads the window after acting, so a refused toggle doesn't flip the label", async () => {
-    const host = await render();
-
-    // The OS took the toggle: the label has to follow the window, not the click.
-    win.isMaximized.mockResolvedValue(true);
-    await act(async () => button(host, "Maximize")!.click());
-    expect(button(host, "Restore"), "the label should follow the window after a toggle").not.toBeNull();
-
-    // The OS refused it: the label must stay put rather than assume the click landed.
-    win.isMaximized.mockResolvedValue(true);
-    await act(async () => button(host, "Restore")!.click());
-    expect(button(host, "Restore")).not.toBeNull();
-  });
-
-  it("resyncs when the window is maximized without us", async () => {
-    // Snap, Win+Up, dragging to the top edge, or double-clicking the bar: nothing routes through
-    // this component, and aria-label is the button's accessible name.
-    const host = await render();
-    expect(button(host, "Maximize")).not.toBeNull();
-
-    const onResized = win.onResized.mock.calls[0]?.[0];
-    expect(onResized, "the component should subscribe to window resizes").toBeTypeOf("function");
-
-    win.isMaximized.mockResolvedValue(true);
-    await act(async () => {
-      onResized!();
+  /**
+   * The real buttons grey out when their window loses focus, so the replica has to as well — otherwise
+   * a window in the background looks like the active one.
+   */
+  it("greys out when the window loses focus, and lights up when it comes back", async () => {
+    let notify: ((event: {payload: boolean}) => void) | undefined;
+    win.onFocusChanged.mockImplementation((cb) => {
+      notify = cb;
+      return Promise.resolve(() => undefined);
     });
+    const host = await render();
 
-    expect(button(host, "Restore"), "an external maximize should reach the label").not.toBeNull();
+    expect(lights(host)!.hasAttribute("data-blurred")).toBe(false);
+
+    await act(async () => notify!({payload: false}));
+    expect(lights(host)!.hasAttribute("data-blurred")).toBe(true);
+
+    await act(async () => notify!({payload: true}));
+    expect(lights(host)!.hasAttribute("data-blurred")).toBe(false);
   });
 
-  it("stops listening when it unmounts", async () => {
+  it("starts from the window's real focus state rather than assuming it has focus", async () => {
+    win.isFocused.mockResolvedValue(false);
+    const host = await render();
+
+    expect(lights(host)!.hasAttribute("data-blurred")).toBe(true);
+  });
+
+  it("stops listening for focus when it unmounts", async () => {
     const stop = vi.fn();
-    win.onResized.mockImplementation(() => Promise.resolve(stop));
+    win.onFocusChanged.mockImplementation(() => Promise.resolve(stop));
     await render();
 
     await act(async () => root?.unmount());
@@ -160,40 +174,45 @@ describe("WindowControls", () => {
 });
 
 describe("useDragRegionProps", () => {
-  let seen: Record<string, unknown> | undefined;
   function Probe() {
     const props = useDragRegionProps();
-    seen = props;
     return <div data-testid="probe" {...props} />;
   }
-  beforeEach(() => {
-    seen = undefined;
-  });
+  const probe = (host: HTMLElement) => host.querySelector<HTMLElement>('[data-testid="probe"]')!;
 
-  it("marks the row a drag region in the frameless main window, and adds nothing else", async () => {
+  it("marks the row a drag region in the main window, and adds nothing else", async () => {
     const host = await render(<Probe />);
-    const probe = host.querySelector('[data-testid="probe"]')!;
 
-    expect(probe.getAttribute("data-tauri-drag-region")).toBe("true");
+    expect(probe(host).getAttribute("data-tauri-drag-region")).toBe("true");
     // Nothing else, and in particular no double-click handler: Tauri's own drag.js is injected into
     // every webview and already maximizes on a double-click of a drag region, handling the
-    // macOS/Windows difference itself. One of ours alongside it toggled maximize twice — dead on
-    // Windows, unrestorable on macOS — and, being a bubbled React event, also fired when a button
-    // or a breadcrumb inside the row was double-clicked (#402 review).
-    expect(Object.keys(seen!)).toEqual(["data-tauri-drag-region"]);
+    // macOS/Windows difference itself — ours on top of it toggled twice (#402 review).
+    expect(probe(host).attributes).toHaveLength(2);
   });
 
-  it("marks nothing on the web build", async () => {
-    platform.windowControls = false;
+  /**
+   * #419: the drag region is **not** gated on the OS the way the replica is. macOS's `Overlay` title bar
+   * is transparent and sits over the content, so without this the top of a macOS window would not move
+   * the window either — the one thing a title bar has to do.
+   */
+  it("still marks the row on macOS, where an Overlay title bar needs it too", async () => {
+    platform.macos = true;
     const host = await render(<Probe />);
 
-    expect(host.querySelector("[data-tauri-drag-region]")).toBeNull();
+    expect(probe(host).getAttribute("data-tauri-drag-region")).toBe("true");
   });
 
   it("marks nothing in a route window, which is moved by its own title bar", async () => {
     platform.label = "window--ops-idst";
     const host = await render(<Probe />);
 
-    expect(host.querySelector("[data-tauri-drag-region]")).toBeNull();
+    expect(probe(host).hasAttribute("data-tauri-drag-region")).toBe(false);
+  });
+
+  it("marks nothing on the web build, where the browser owns the window", async () => {
+    platform.windowControls = false;
+    const host = await render(<Probe />);
+
+    expect(probe(host).hasAttribute("data-tauri-drag-region")).toBe(false);
   });
 });

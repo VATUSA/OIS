@@ -1,63 +1,71 @@
 import * as React from "react";
-import {Button} from "@ois/ui";
-import {Minus, Square, Copy, X} from "lucide-react";
+import {Minus, Plus, X} from "lucide-react";
 
-import {can, MAIN_WINDOW_LABEL} from "@/lib/platform";
+import {cn} from "@ois/ui";
+
+import {can, isMacOS, isMainWindow} from "@/lib/platform";
 
 /**
- * Minimize / maximize / close for the frameless main window (#402).
+ * The main window's own minimize / zoom / close, and the drag region that moves it (#402, #419).
  *
- * The native title bar is off (`decorations: false`), so these are the only way to manage the window
- * short of OS shortcuts — which is why they sit in the breadcrumb row rather than the sidebar's
- * chrome row: that row collapses to a 60px rail, and controls that move (or vanish) when you collapse
- * a sidebar are worse than controls in a slightly different place from the back/forward pair.
+ * Which of those the app draws depends on the host OS, because the window is shaped differently on
+ * each: macOS keeps its decorations (`tauri.macos.conf.json` — an `Overlay` title bar with a
+ * `trafficLightPosition` that insets the real buttons into the app's own chrome row), so the OS draws
+ * the traffic lights and the app must not. Windows and Linux run `decorations: false`, so the app
+ * draws a replica of those buttons in the same place.
  *
- * Desktop only, and gated on the ability rather than the platform, per `platform.ts`'s own rule.
+ * The drag region is needed on **every** platform: an `Overlay` title bar is transparent and sits over
+ * the content, so without it the top of a macOS window would not move the window either.
+ *
  * `@tauri-apps/*` is reached through a dynamic `import()` — a static one is banned repo-wide by
  * `eslint.config.mjs` because it would pull Tauri into the bundle every browser downloads.
  */
-async function mainWindow() {
+async function currentWindow() {
   const {getCurrentWindow} = await import("@tauri-apps/api/window");
   return getCurrentWindow();
 }
 
 /**
- * Whether *this* webview is the frameless window — which is the main window and only the main window.
+ * Whether this window's top-left carries window buttons — the OS's on macOS, ours everywhere else.
  *
- * `can("windowControls")` is true in every Tauri webview, but `decorations: false` is set on `main`
- * alone. Route windows (#350) render this same shell inside a window that still has its native title
- * bar, so a capability-only gate drew a second set of controls on top of the OS's and turned that
- * row into a drag region the window did not need (#402 review). `platform.ts` warns about exactly
- * this: every window loads the same bundle.
+ * The sidebar asks this to reserve the space they sit in, which has to happen on *both* platforms:
+ * the native macOS lights are drawn by the OS over whatever the page put there, so the room must be
+ * left for them exactly as it is for the replica.
  *
- * Starts `false` and resolves, so the controls appear a tick late rather than appearing in a window
- * that should not have them.
+ * It is the same question as "is this the app's main window", because that is the only window the app
+ * shapes.
+ *
+ * `can("windowControls")` is true in every Tauri webview, but the shaping in `tauri.conf.json` applies
+ * to `main` alone. Route windows (#350) render this same shell inside a window that still has its own
+ * native title bar, so a capability-only gate drew a second set of controls on top of the OS's and
+ * turned that row into a drag region the window did not need (#402 review). `platform.ts` warns about
+ * exactly this: every window loads the same bundle.
+ *
+ * Starts `false` and resolves, so chrome appears a tick late rather than appearing in a window that
+ * should not have it. `isMainWindow()` answers `false` when the window cannot be read, which is the
+ * answer this gate wants anyway.
  */
-export function useFramelessWindow(): boolean {
+export function useWindowChrome(): boolean {
   const enabled = can("windowControls");
-  const [frameless, setFrameless] = React.useState(false);
+  const [main, setMain] = React.useState(false);
 
   React.useEffect(() => {
     if (!enabled) return;
     let alive = true;
     void (async () => {
-      try {
-        const win = await mainWindow();
-        if (alive) setFrameless(win.label === MAIN_WINDOW_LABEL);
-      } catch {
-        // Can't tell which window this is — draw nothing rather than risk duplicating the OS's.
-      }
+      const isMain = await isMainWindow();
+      if (alive) setMain(isMain);
     })();
     return () => {
       alive = false;
     };
   }, [enabled]);
 
-  return enabled && frameless;
+  return enabled && main;
 }
 
 /**
- * What makes the app's top bar move the frameless window, or `undefined` everywhere else.
+ * What makes the app's chrome row move the window, or `undefined` in a browser and in a route window.
  *
  * Only the drag region: Tauri's own `drag.js` is injected into every webview and already maximizes
  * on a double-click of a drag region, handling the macOS/Windows difference itself. An extra
@@ -65,60 +73,41 @@ export function useFramelessWindow(): boolean {
  * (#402 review) — so the built-in is the only double-click here.
  */
 export function useDragRegionProps(): {readonly "data-tauri-drag-region": true} | undefined {
-  return useFramelessWindow() ? ({"data-tauri-drag-region": true} as const) : undefined;
+  return useWindowChrome() ? ({"data-tauri-drag-region": true} as const) : undefined;
 }
 
-function ControlButton({
-  label,
-  onClick,
-  children,
-}: {
-  label: string;
-  onClick: () => void;
-  children: React.ReactNode;
-}) {
-  return (
-    <Button
-      size="icon"
-      variant="ghost"
-      aria-label={label}
-      title={label}
-      className="size-7 text-ink-3 hover:text-ink"
-      // The row around these is the window's drag region; without this a click on a control would
-      // start dragging the window instead of pressing the button.
-      data-tauri-drag-region="false"
-      onClick={onClick}
-    >
-      {children}
-    </Button>
-  );
-}
-
-export function WindowControls() {
-  const frameless = useFramelessWindow();
-  const [maximized, setMaximized] = React.useState(false);
+/**
+ * Whether the window has focus, so the replica greys out the way the real buttons do.
+ *
+ * Starts focused: a window drawing its own chrome is almost always the one being looked at, and
+ * guessing "focused" wrong for a tick is less visible than starting grey and lighting up.
+ */
+function useWindowFocus(enabled: boolean): boolean {
+  const [focused, setFocused] = React.useState(true);
 
   React.useEffect(() => {
-    if (!frameless) return;
+    if (!enabled) return;
     let alive = true;
     let unlisten: (() => void) | undefined;
 
     void (async () => {
       try {
-        const win = await mainWindow();
-        const read = async () => {
-          const now = await win.isMaximized();
-          if (alive) setMaximized(now);
-        };
-        await read();
-        // The window is maximized and restored without us too — Snap, Win+Up, dragging to the top
-        // edge, double-clicking the bar — and the toggle's label is its accessible name, so a
-        // read-once state tells a screen reader the wrong action (#402 review).
-        const stop = await win.onResized(() => void read());
+        const win = await currentWindow();
+        // Subscribe *before* the first read. The other order loses any focus change that lands while
+        // the dynamic import and the read are in flight — click away during launch and the replica
+        // stayed lit until the next transition (#419 review).
+        const stop = await win.onFocusChanged(({payload}) => {
+          if (alive) setFocused(payload);
+        });
         if (alive) unlisten = stop;
-        else stop();
+        else {
+          stop();
+          return;
+        }
+        const now = await win.isFocused();
+        if (alive) setFocused(now);
       } catch {
-        // Can't tell; the icon is cosmetic and the toggle still works.
+        // Can't tell; the buttons stay in their focused colours and still work.
       }
     })();
 
@@ -126,37 +115,122 @@ export function WindowControls() {
       alive = false;
       unlisten?.();
     };
-  }, [frameless]);
+  }, [enabled]);
 
-  if (!frameless) return null;
+  return focused;
+}
 
-  const act = (run: (win: Awaited<ReturnType<typeof mainWindow>>) => Promise<unknown>) => () => {
+/**
+ * One traffic light: a 12px dot that reveals its glyph when the group is hovered, as macOS's own
+ * buttons do — the glyphs appear on all three at once, not only the one under the cursor.
+ *
+ * Colours come from tokens (`--traffic-*` in `globals.css`), not inline hex, per DESIGN.md. They are
+ * deliberately *not* the semantic status colours: these are Apple's three window buttons, and reusing
+ * `--danger` for the close dot would make a status token mean "chrome".
+ */
+function TrafficLight({
+  label,
+  tone,
+  onClick,
+  children,
+}: {
+  label: string;
+  tone: "close" | "minimize" | "zoom";
+  onClick: () => void;
+  children: React.ReactNode;
+}) {
+  return (
+    <button
+      type="button"
+      aria-label={label}
+      title={label}
+      data-tone={tone}
+      // The row around these is the window's drag region; without this a click on a control would
+      // start dragging the window instead of pressing the button.
+      data-tauri-drag-region="false"
+      onClick={onClick}
+      className="traffic-light"
+    >
+      <span aria-hidden="true">{children}</span>
+    </button>
+  );
+}
+
+/**
+ * The traffic-light replica, for the windows whose OS does not draw its own.
+ *
+ * Renders nothing on macOS — the real buttons are already there, in this same spot, put there by
+ * `trafficLightPosition` — and nothing in a browser or in a route window.
+ */
+export function WindowControls() {
+  const main = useWindowChrome();
+  const drawn = main && !isMacOS();
+  const focused = useWindowFocus(drawn);
+
+  const act = (run: (win: Awaited<ReturnType<typeof currentWindow>>) => Promise<unknown>) => () => {
     void (async () => {
       try {
-        const win = await mainWindow();
-        await run(win);
-        // Re-read rather than assume: a toggle the OS refused would otherwise flip the icon anyway.
-        setMaximized(await win.isMaximized());
+        await run(await currentWindow());
       } catch {
         // Failing to manage the window must not break the page it is drawn on.
       }
     })();
   };
 
+  if (!drawn) return null;
+
   return (
-    <div className="flex items-center gap-0.5">
-      <ControlButton label="Minimize" onClick={act((win) => win.minimize())}>
-        <Minus className="size-4" />
-      </ControlButton>
-      <ControlButton
-        label={maximized ? "Restore" : "Maximize"}
-        onClick={act((win) => win.toggleMaximize())}
-      >
-        {maximized ? <Copy className="size-3.5" /> : <Square className="size-3.5" />}
-      </ControlButton>
-      <ControlButton label="Close" onClick={act((win) => win.close())}>
-        <X className="size-4" />
-      </ControlButton>
+    <div className="traffic-lights" data-blurred={focused ? undefined : true}>
+      <TrafficLight label="Close" tone="close" onClick={act((win) => win.close())}>
+        <X strokeWidth={4} />
+      </TrafficLight>
+      <TrafficLight label="Minimize" tone="minimize" onClick={act((win) => win.minimize())}>
+        <Minus strokeWidth={4} />
+      </TrafficLight>
+      {/* macOS calls this zoom, not maximize, and its glyph doesn't change with the window's state —
+          which is also why nothing here reads `isMaximized()`: there is no label to keep truthful. */}
+      <TrafficLight label="Zoom" tone="zoom" onClick={act((win) => win.toggleMaximize())}>
+        <Plus strokeWidth={4} />
+      </TrafficLight>
+    </div>
+  );
+}
+
+/**
+ * How wide the window's buttons are at the row's leading edge.
+ *
+ * Two numbers, because two different sets of buttons land in this spot. The replica is exactly what
+ * `globals.css` draws: three 12px dots with two 8px gaps. macOS's real lights belong to the OS and
+ * cannot be resized — measured on screen they span 59px, three ~13px dots at a 23px pitch. Reserving
+ * the replica's 52px on macOS left the green light overlapping the Back button (#419 review), so the
+ * width has to follow whoever is actually drawing.
+ *
+ * Both are written out as whole class names because Tailwind scans source text: a computed
+ * `w-[${n}px]` would never be generated.
+ */
+const SLOT_WIDTH = {native: "w-[59px]", replica: "w-[52px]"} as const;
+
+/**
+ * The room the window's own buttons take at the leading edge of a chrome row, with the replica inside
+ * it where the OS draws nothing.
+ *
+ * The room is reserved on *both* platforms and the box is sized rather than left to its contents,
+ * because on macOS it is empty: the OS paints the real lights over this spot at the fixed window
+ * coordinates `trafficLightPosition` gives them, so the space has to be held whether or not the app
+ * fills it. Renders nothing at all on the web build and in a route window, which have native chrome.
+ *
+ * Mounting this is what gives an undecorated window its only close button, so
+ * `app-sidebar.window-chrome.test.tsx` fails if a `ChromeRow` branch stops rendering it.
+ */
+export function WindowChromeSlot({className}: {className?: string}) {
+  const main = useWindowChrome();
+  if (!main) return null;
+  return (
+    <div
+      data-window-chrome-slot=""
+      className={cn("shrink-0", isMacOS() ? SLOT_WIDTH.native : SLOT_WIDTH.replica, className)}
+    >
+      <WindowControls />
     </div>
   );
 }
