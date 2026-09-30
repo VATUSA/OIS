@@ -32,10 +32,9 @@ them.
 
 ## Status
 
-This document specifies the pipeline **as of #477, #481 and #482 together**, and parts of it
-describe code that arrives with those: `sanitizeRings` / `sanitizeBoundaries` (#481), the
-`artcc-boundaries.test.ts` invariants (#477), and `Boundaries::has` (#482). It should land after
-them — merged first, it describes a pipeline that does not exist yet.
+Current. This document specifies the pipeline as it stands after #477, #481 and #482, all of which
+are merged: `sanitizeRings` / `sanitizeBoundaries` (#481), the `artcc-boundaries.test.ts`
+invariants (#477), and `Boundaries::has` (#482).
 
 ## Scope
 
@@ -45,6 +44,11 @@ editors appear here only where they affect pick order.
 
 Out of scope: the facility map's aircraft colour rules ([flow.md](flow.md)), the ATC datafeed's
 ingestion, and the badge/pill DOM markers themselves.
+
+Also out of scope: **`SurfaceMap`** (`web/src/components/map/surface/`). It is a separate component
+that `TrafficMap` never imports, and it has three pickable layers of its own — so a `pickable: true`
+count taken across `components/map/` returns eight, not the five this document's stack has. Every
+layer named here is one `TrafficMap` pushes.
 
 ## Coordinate convention
 
