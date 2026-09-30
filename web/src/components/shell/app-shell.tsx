@@ -105,8 +105,14 @@ function Frame({ children }: { children: React.ReactNode }) {
 export function AppShell({ children }: { children: React.ReactNode }) {
   return (
     <PageMetaProvider>
-      <UpdateBanner />
-      <Frame>{children}</Frame>
+      {/* Inside the frame, not above it. The banner is an in-flow strip, and anything in flow above
+          the shell pushes the sidebar's chrome row down while the OS keeps the macOS traffic lights
+          at the fixed window coordinates `trafficLightPosition` gives them (#419 review) — a staged
+          update put the real lights on top of the banner and left an empty gap in the row. */}
+      <Frame>
+        <UpdateBanner />
+        {children}
+      </Frame>
       <CommandSearch />
     </PageMetaProvider>
   );

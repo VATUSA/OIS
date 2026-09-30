@@ -1,6 +1,8 @@
 import * as React from "react";
 import {Minus, Plus, X} from "lucide-react";
 
+import {cn} from "@ois/ui";
+
 import {can, isMacOS, isMainWindow} from "@/lib/platform";
 
 /**
@@ -91,13 +93,19 @@ function useWindowFocus(enabled: boolean): boolean {
     void (async () => {
       try {
         const win = await currentWindow();
-        const now = await win.isFocused();
-        if (alive) setFocused(now);
+        // Subscribe *before* the first read. The other order loses any focus change that lands while
+        // the dynamic import and the read are in flight — click away during launch and the replica
+        // stayed lit until the next transition (#419 review).
         const stop = await win.onFocusChanged(({payload}) => {
           if (alive) setFocused(payload);
         });
         if (alive) unlisten = stop;
-        else stop();
+        else {
+          stop();
+          return;
+        }
+        const now = await win.isFocused();
+        if (alive) setFocused(now);
       } catch {
         // Can't tell; the buttons stay in their focused colours and still work.
       }
@@ -184,6 +192,45 @@ export function WindowControls() {
       <TrafficLight label="Zoom" tone="zoom" onClick={act((win) => win.toggleMaximize())}>
         <Plus strokeWidth={4} />
       </TrafficLight>
+    </div>
+  );
+}
+
+/**
+ * How wide the window's buttons are at the row's leading edge.
+ *
+ * Two numbers, because two different sets of buttons land in this spot. The replica is exactly what
+ * `globals.css` draws: three 12px dots with two 8px gaps. macOS's real lights belong to the OS and
+ * cannot be resized — measured on screen they span 59px, three ~13px dots at a 23px pitch. Reserving
+ * the replica's 52px on macOS left the green light overlapping the Back button (#419 review), so the
+ * width has to follow whoever is actually drawing.
+ *
+ * Both are written out as whole class names because Tailwind scans source text: a computed
+ * `w-[${n}px]` would never be generated.
+ */
+const SLOT_WIDTH = {native: "w-[59px]", replica: "w-[52px]"} as const;
+
+/**
+ * The room the window's own buttons take at the leading edge of a chrome row, with the replica inside
+ * it where the OS draws nothing.
+ *
+ * The room is reserved on *both* platforms and the box is sized rather than left to its contents,
+ * because on macOS it is empty: the OS paints the real lights over this spot at the fixed window
+ * coordinates `trafficLightPosition` gives them, so the space has to be held whether or not the app
+ * fills it. Renders nothing at all on the web build and in a route window, which have native chrome.
+ *
+ * Mounting this is what gives an undecorated window its only close button, so
+ * `app-sidebar.window-chrome.test.tsx` fails if a `ChromeRow` branch stops rendering it.
+ */
+export function WindowChromeSlot({className}: {className?: string}) {
+  const main = useWindowChrome();
+  if (!main) return null;
+  return (
+    <div
+      data-window-chrome-slot=""
+      className={cn("shrink-0", isMacOS() ? SLOT_WIDTH.native : SLOT_WIDTH.replica, className)}
+    >
+      <WindowControls />
     </div>
   );
 }

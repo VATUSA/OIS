@@ -72,6 +72,21 @@ mod tests {
                 .expect("app.windows[0] is an object")
                 .clone()
         };
+        // Only `windows[0]` is compared below, so pin the count too: Tauri replaces the whole array,
+        // and a second window added to the base alone would simply not exist on macOS (#419 review).
+        let count = |config: &serde_json::Value| {
+            config["app"]["windows"]
+                .as_array()
+                .expect("app.windows is an array")
+                .len()
+        };
+        assert_eq!(
+            count(&macos),
+            count(&base),
+            "tauri.macos.conf.json must repeat every window in tauri.conf.json — Tauri replaces the \
+             whole array, so one left out here does not exist on macOS at all"
+        );
+
         let (base_window, macos_window) = (window(&base), window(&macos));
 
         // The keys the override exists to change, plus the macOS-only ones it adds.

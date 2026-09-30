@@ -45,7 +45,7 @@ import {ADMIN_HOME, AREAS, visibleGroups} from "@/lib/nav";
 
 import {openCommandSearch} from "./command-search";
 import {useRecentPages} from "./recent-pages";
-import {useWindowChrome, WindowControls} from "./window-controls";
+import {WindowChromeSlot} from "./window-controls";
 
 function ChromeButton({ label, onClick, children }: { label: string; onClick?: () => void; children: React.ReactNode }) {
   return (
@@ -65,8 +65,9 @@ function ChromeButton({ label, onClick, children }: { label: string; onClick?: (
  *
  * On the desktop app the window's own buttons live at its top-left corner — the OS's traffic lights on
  * macOS, our replica of them on Windows and Linux (#419) — which is this row's leading edge. So the
- * row reserves their width and the navigation shifts right of them. On the web build `useWindowChrome`
- * is false and the row is exactly what it always was.
+ * row reserves their width and the navigation shifts right of them. {@link WindowChromeSlot} owns both
+ * the reservation and how wide it is, because that differs per platform; on the web build it renders
+ * nothing and the row is exactly what it always was.
  *
  * Collapsed, the 60px rail is narrower than the buttons need, so they overhang into the top bar: both
  * surfaces are `bg-panel` with no divider between them, which makes the overhang invisible, and the
@@ -75,19 +76,14 @@ function ChromeButton({ label, onClick, children }: { label: string; onClick?: (
 function ChromeRow({ collapsed, onToggle }: { collapsed: boolean; onToggle: () => void }) {
   const router = useRouter();
   const recent = useRecentPages();
-  const chrome = useWindowChrome();
   if (collapsed) {
     return (
       <div className="flex flex-col gap-2">
         {/* Same reserved box as the expanded row: the native lights are at fixed *window* coordinates,
-            so collapsing the sidebar must not move what sits under them. 52px is wider than the 40px
-            of content a 60px rail has, so it overhangs into the top bar — invisible, since both
+            so collapsing the sidebar must not move what sits under them. The box is wider than the
+            40px of content a 60px rail has, so it overhangs into the top bar — invisible, since both
             surfaces are `bg-panel` with no divider. */}
-        {chrome && (
-          <div className="flex h-7 w-[52px] shrink-0 items-center">
-            <WindowControls />
-          </div>
-        )}
+        <WindowChromeSlot className="flex h-7 items-center" />
         <div className="flex justify-center">
           <ChromeButton label="Expand sidebar" onClick={onToggle}>
             <PanelLeft />
@@ -99,15 +95,10 @@ function ChromeRow({ collapsed, onToggle }: { collapsed: boolean; onToggle: () =
   return (
     <div className="flex items-center gap-0.5">
       {/* The window's buttons sit at the window's own top-left, so they come first and the navigation
-          follows. The box is sized (52px = three 12px dots with two 8px gaps) rather than left to its
-          contents, because on macOS it is *empty*: the OS draws the real lights over this spot at the
-          fixed coordinates `trafficLightPosition` gives them, so the room has to be reserved whether
-          or not the app fills it. `pr-3` is the gap Apple leaves before the first control beside them. */}
-      {chrome && (
-        <div className="w-[52px] shrink-0 pr-3">
-          <WindowControls />
-        </div>
-      )}
+          follows. `mr-2.5` plus the row's own `gap-0.5` is the 12px Apple leaves before the first
+          control beside them — a *margin*, not padding: `pr-3` inside a `w-[52px]` box left the dots
+          only 40px to lay out in, and they compressed into ellipses (#419 review). */}
+      <WindowChromeSlot className="mr-2.5" />
       <ChromeButton label="Back" onClick={() => router.history.back()}>
         <ChevronLeft />
       </ChromeButton>
