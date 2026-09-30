@@ -883,6 +883,35 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/v1/events/{id}/banner": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * Relays an event's banner image through the API (#429).
+         * @description Banners are third-party URLs mirrored from VATUSA, and organisers use whatever host they like —
+         *     five unrelated ones are in the data already. The bundled desktop app runs under a CSP whose
+         *     `img-src` cannot name them all without becoming `https:`, so the image is fetched here and served
+         *     from our own origin instead. The caller turns it into a `blob:` URL, which the policy does allow.
+         *
+         *     Guarded, because this makes the backend fetch a URL someone else controls:
+         *     `https` only, no redirects, a short timeout, a size cap, and an `image/*` response or nothing.
+         *     That bounds it to "fetch a public image or fail". It does not make the fetch unreachable from
+         *     inside the cluster — a banner URL pointing at an internal host would still be requested — but the
+         *     response only ever leaves here as an image, to a caller who already holds `EventsPlanRead`.
+         */
+        get: operations["get_event_banner"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/v1/events/{id}/capture": {
         parameters: {
             query?: never;
@@ -8426,6 +8455,49 @@ export interface operations {
                 };
             };
             401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+        };
+    };
+    get_event_banner: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /** @description VATUSA event id */
+                id: number;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description The event's banner image */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "image/*": unknown;
+                };
+            };
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description No such event, or it has no banner */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description The banner's host did not return a usable image */
+            503: {
                 headers: {
                     [name: string]: unknown;
                 };

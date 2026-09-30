@@ -5,7 +5,7 @@ use axum::{
     extract::{Extension, Path, State},
     http::StatusCode,
 };
-use std::collections::HashSet;
+use std::{collections::HashSet, time::Duration};
 
 use chrono::{DateTime, Datelike, Utc, Weekday};
 use serde::{Deserialize, Serialize};
@@ -188,6 +188,123 @@ pub async fn get_event(
         .await?
         .map(Json)
         .ok_or(ApiError::NotFound)
+}
+
+/// How long the banner fetch gets before it is abandoned. Short: a page is waiting on it.
+const BANNER_TIMEOUT: Duration = Duration::from_secs(10);
+
+/// The most banner we will relay. Event banners are a few hundred KB; this only stops a hostile or
+/// broken upstream streaming indefinitely into our memory.
+const BANNER_MAX_BYTES: usize = 8 * 1024 * 1024;
+
+#[utoipa::path(
+    get,
+    path = "/api/v1/events/{id}/banner",
+    tag = "events",
+    params(("id" = i64, Path, description = "VATUSA event id")),
+    responses(
+        (status = 200, description = "The event's banner image", content_type = "image/*"),
+        (status = 401),
+        (status = 404, description = "No such event, or it has no banner"),
+        (status = 503, description = "The banner's host did not return a usable image")
+    )
+)]
+/// Relays an event's banner image through the API (#429).
+///
+/// Banners are third-party URLs mirrored from VATUSA, and organisers use whatever host they like —
+/// five unrelated ones are in the data already. The bundled desktop app runs under a CSP whose
+/// `img-src` cannot name them all without becoming `https:`, so the image is fetched here and served
+/// from our own origin instead. The caller turns it into a `blob:` URL, which the policy does allow.
+///
+/// Guarded, because this makes the backend fetch a URL someone else controls:
+/// `https` only, no redirects, a short timeout, a size cap, and an `image/*` response or nothing.
+/// That bounds it to "fetch a public image or fail". It does not make the fetch unreachable from
+/// inside the cluster — a banner URL pointing at an internal host would still be requested — but the
+/// response only ever leaves here as an image, to a caller who already holds `EventsPlanRead`.
+pub async fn get_event_banner(
+    State(state): State<AppState>,
+    _permission: RequirePermission<EventsPlanRead>,
+    Path(id): Path<i64>,
+) -> Result<axum::response::Response, ApiError> {
+    use axum::response::IntoResponse;
+
+    let pool = state.db.as_ref().ok_or(ApiError::ServiceUnavailable)?;
+    let event = events_repo::get(pool, id)
+        .await?
+        .ok_or(ApiError::NotFound)?;
+    let url = event.banner_image_url;
+    if url.is_empty() {
+        return Err(ApiError::NotFound);
+    }
+
+    // Plain http would let anything on the path swap the image; there is no reason to accept it.
+    if !url.starts_with("https://") {
+        return Err(ApiError::ServiceUnavailable);
+    }
+
+    let client = reqwest::Client::builder()
+        .user_agent("ois-backend/0.1 (+https://vatusa.net)")
+        .timeout(BANNER_TIMEOUT)
+        // A redirect is how an allowed-looking URL becomes a disallowed one.
+        .redirect(reqwest::redirect::Policy::none())
+        .build()
+        .map_err(|_| ApiError::Internal)?;
+
+    let res = client
+        .get(&url)
+        .send()
+        .await
+        .map_err(|_| ApiError::ServiceUnavailable)?;
+    if !res.status().is_success() {
+        return Err(ApiError::ServiceUnavailable);
+    }
+
+    let content_type = res
+        .headers()
+        .get(axum::http::header::CONTENT_TYPE)
+        .and_then(|v| v.to_str().ok())
+        .unwrap_or_default()
+        .to_string();
+    if !content_type.starts_with("image/") {
+        return Err(ApiError::ServiceUnavailable);
+    }
+
+    // Refuse on the declared length before reading anything, then cap while reading anyway: a
+    // hostile or broken host can lie about `Content-Length`, or omit it, and `bytes()` would buffer
+    // the whole body into memory before any size check could run.
+    if res
+        .content_length()
+        .is_some_and(|n| n > BANNER_MAX_BYTES as u64)
+    {
+        return Err(ApiError::ServiceUnavailable);
+    }
+
+    let mut res = res;
+    let mut bytes: Vec<u8> = Vec::new();
+    while let Some(chunk) = res
+        .chunk()
+        .await
+        .map_err(|_| ApiError::ServiceUnavailable)?
+    {
+        if bytes.len() + chunk.len() > BANNER_MAX_BYTES {
+            return Err(ApiError::ServiceUnavailable);
+        }
+        bytes.extend_from_slice(&chunk);
+    }
+
+    Ok((
+        [
+            (axum::http::header::CONTENT_TYPE, content_type),
+            // Banners change when an organiser edits the event, which is rare; an hour keeps the
+            // page snappy without pinning a stale image for long.
+            (
+                axum::http::header::CACHE_CONTROL,
+                "private, max-age=3600".to_string(),
+            ),
+        ],
+        bytes,
+    )
+        .into_response())
 }
 
 #[utoipa::path(
