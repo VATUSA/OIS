@@ -254,6 +254,32 @@ pub async fn ec_discord_ids(pool: &PgPool, facility: &str) -> Result<Vec<String>
 
 /// The `result` payload of the most recent succeeded job for a subject + type — used to recover ids
 /// the bot returned on ack (e.g. the posted message id, needed by a follow-up job).
+/// The channel a TMI's publish post was actually sent to, if it was ever enqueued (#436 review).
+///
+/// A cancellation has to land beside the row it corrects, and re-deriving the channel does not get
+/// there: `publish_tmi` resolves it unscoped while `activate_package` resolves it with the event's
+/// facility, so `resolve_scoped_id` can legitimately answer with two different guilds for the same
+/// logical name. Reading it back off the publish job is exact and needs no decision about scoping.
+///
+/// Deliberately not filtered on `status`: a TMI cancelled moments after publishing has a job that is
+/// still `pending`, and that job's channel is still the right answer. `(subject_type, subject_id)` is
+/// indexed (`0048_integration_discord.sql:28`).
+pub async fn published_channel_for_tmi(
+    pool: &PgPool,
+    tmi_id: &str,
+) -> Result<Option<String>, ApiError> {
+    sqlx::query_scalar::<_, Option<String>>(
+        "select payload->>'channel_id' from integration.outbound_jobs \
+         where subject_type = 'tmi' and subject_id = $1 and job_type = 'tmi_publish' \
+         order by created_at desc limit 1",
+    )
+    .bind(tmi_id)
+    .fetch_optional(pool)
+    .await
+    .map(Option::flatten)
+    .map_err(|_| ApiError::Internal)
+}
+
 pub async fn succeeded_job_result(
     pool: &PgPool,
     subject_type: &str,
