@@ -440,7 +440,7 @@ use utoipa::OpenApi;
         crate::models::PublicGroundStop,
         crate::models::PublicGdp,
         crate::models::PublicProgram,
-        crate::models::FlightAdvisory,
+        crate::models::FlightImpact,
         crate::models::FlightGdp,
         crate::models::FlightGroundStop,
         crate::models::FlightProgram,

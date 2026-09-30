@@ -4294,44 +4294,6 @@ export interface components {
             unknown: string[];
         };
         /**
-         * @description Everything currently affecting one flight (by callsign), for the public "my
-         *     flight" lookup and the FCA-map search. `found` is false when the callsign
-         *     isn't in the live feed.
-         */
-        FlightAdvisory: {
-            aircraft_type: string;
-            /** Format: int64 */
-            altitude: number;
-            arr: string;
-            callsign: string;
-            dep: string;
-            /**
-             * Format: date-time
-             * @description The latest expect-departure-clearance time across ground programs, if any.
-             */
-            edct?: string | null;
-            fcas: components["schemas"]["FlightFcaCrossing"][];
-            found: boolean;
-            gdp?: null | components["schemas"]["FlightGdp"];
-            ground_stop?: null | components["schemas"]["FlightGroundStop"];
-            /** Format: int64 */
-            groundspeed: number;
-            /** Format: int64 */
-            heading: number;
-            /** Format: double */
-            lat: number;
-            /** Format: double */
-            lon: number;
-            rate_program?: null | components["schemas"]["FlightProgram"];
-            /** @description `airborne` | `ground`. */
-            status: string;
-            /**
-             * Format: int64
-             * @description The binding (worst) predicted delay across all applicable initiatives.
-             */
-            total_delay_min: number;
-        };
-        /**
          * @description A manually excluded ("bogus") flight — one VATSIM callsign a controller has dropped from the flow
          *     picture because its data is garbage (issue #342). Scoped to the removing controller's ARTCC.
          *
@@ -4412,6 +4374,49 @@ export interface components {
             airport: string;
             scope: string;
             until?: string | null;
+        };
+        /**
+         * @description Everything currently affecting one flight (by callsign), for the public "my
+         *     flight" lookup and the FCA-map search. `found` is false when the callsign
+         *     isn't in the live feed.
+         *
+         *     Named `FlightImpact`, not `FlightAdvisory` (#456): it is a summary of which initiatives touch
+         *     this flight and what they cost it, not an advisory document. "Advisory" already meant two other
+         *     things here — the pilot-facing board at `/advisories`, and the authored vATCSCC ADVZY documents
+         *     of #437 — and a third use of the word in the type system was the one with no claim to it.
+         */
+        FlightImpact: {
+            aircraft_type: string;
+            /** Format: int64 */
+            altitude: number;
+            arr: string;
+            callsign: string;
+            dep: string;
+            /**
+             * Format: date-time
+             * @description The latest expect-departure-clearance time across ground programs, if any.
+             */
+            edct?: string | null;
+            fcas: components["schemas"]["FlightFcaCrossing"][];
+            found: boolean;
+            gdp?: null | components["schemas"]["FlightGdp"];
+            ground_stop?: null | components["schemas"]["FlightGroundStop"];
+            /** Format: int64 */
+            groundspeed: number;
+            /** Format: int64 */
+            heading: number;
+            /** Format: double */
+            lat: number;
+            /** Format: double */
+            lon: number;
+            rate_program?: null | components["schemas"]["FlightProgram"];
+            /** @description `airborne` | `ground`. */
+            status: string;
+            /**
+             * Format: int64
+             * @description The binding (worst) predicted delay across all applicable initiatives.
+             */
+            total_delay_min: number;
         };
         /** @description One flight-plan revision, for the flight-detail amendment history. */
         FlightPlanRevisionBody: {
@@ -11590,7 +11595,7 @@ export interface operations {
                     [name: string]: unknown;
                 };
                 content: {
-                    "application/json": components["schemas"]["FlightAdvisory"];
+                    "application/json": components["schemas"]["FlightImpact"];
                 };
             };
             401: {
@@ -11703,7 +11708,7 @@ export interface operations {
                     [name: string]: unknown;
                 };
                 content: {
-                    "application/json": components["schemas"]["FlightAdvisory"];
+                    "application/json": components["schemas"]["FlightImpact"];
                 };
             };
         };

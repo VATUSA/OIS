@@ -37,7 +37,7 @@ use crate::{
     jobs,
     models::{
         AircraftRoute, AirportGateBody, DataStatus, FcaBody, FcaFlight, FixPrediction,
-        FixValidationBody, FlightAdvisory, FlightFcaCrossing, FlightGdp, FlightGroundStop,
+        FixValidationBody, FlightFcaCrossing, FlightGdp, FlightGroundStop, FlightImpact,
         FlightProgram, IdstFlight, IdstResponse, ReleaseRequest, ReorderRequest,
         ResolveRouteRequest, ResolvedRoute, RouteBody, RouteWaypoint, TrafficAircraft,
         UpsertFcaRequest, UpsertRouteRequest,
@@ -796,12 +796,12 @@ pub async fn data_status(State(state): State<AppState>) -> Json<DataStatus> {
     path = "/api/v1/public/flight/{callsign}",
     tag = "public",
     params(("callsign" = String, Path, description = "Aircraft callsign")),
-    responses((status = 200, body = FlightAdvisory))
+    responses((status = 200, body = FlightImpact))
 )]
 pub async fn flight_advisory(
     State(state): State<AppState>,
     Path(callsign): Path<String>,
-) -> Result<Json<FlightAdvisory>, ApiError> {
+) -> Result<Json<FlightImpact>, ApiError> {
     let cs = callsign.trim().to_ascii_uppercase();
     Ok(Json(build_flight_advisory(&state, cs).await?))
 }
@@ -811,7 +811,7 @@ pub async fn flight_advisory(
 pub(crate) async fn build_flight_advisory(
     state: &AppState,
     cs: String,
-) -> Result<FlightAdvisory, ApiError> {
+) -> Result<FlightImpact, ApiError> {
     let pool = state.db.as_ref().ok_or(ApiError::ServiceUnavailable)?;
 
     // Locate the flight in the live feed (clone just the fields we need).
@@ -833,7 +833,7 @@ pub(crate) async fn build_flight_advisory(
             })
     });
     let Some((lat, lon, altitude, groundspeed, heading, fp)) = hit else {
-        return Ok(FlightAdvisory {
+        return Ok(FlightImpact {
             callsign: cs,
             found: false,
             ..Default::default()
@@ -845,7 +845,7 @@ pub(crate) async fn build_flight_advisory(
         .unwrap_or_default();
     let airborne = groundspeed >= 50;
 
-    let mut adv = FlightAdvisory {
+    let mut adv = FlightImpact {
         callsign: cs.clone(),
         found: true,
         dep: fp.as_ref().map(|f| f.departure.clone()).unwrap_or_default(),
@@ -1004,12 +1004,12 @@ pub(crate) async fn build_flight_advisory(
     get,
     path = "/api/v1/me/flight",
     tag = "public",
-    responses((status = 200, body = FlightAdvisory), (status = 401))
+    responses((status = 200, body = FlightImpact), (status = 401))
 )]
 pub async fn my_flight(
     State(state): State<AppState>,
     Extension(current_user): Extension<Option<CurrentUser>>,
-) -> Result<Json<FlightAdvisory>, ApiError> {
+) -> Result<Json<FlightImpact>, ApiError> {
     let user = current_user.as_ref().ok_or(ApiError::Unauthorized)?;
     let cs = {
         let (snapshot, _) = feed_view(&state).await;
@@ -1023,7 +1023,7 @@ pub async fn my_flight(
     };
     match cs {
         Some(cs) => Ok(Json(build_flight_advisory(&state, cs).await?)),
-        None => Ok(Json(FlightAdvisory {
+        None => Ok(Json(FlightImpact {
             found: false,
             ..Default::default()
         })),
