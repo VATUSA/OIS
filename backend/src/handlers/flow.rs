@@ -23,7 +23,7 @@ use crate::{
     },
     errors::ApiError,
     feed::{
-        airports::{Airport, AirportDb, field_elevation_ft},
+        airports::{Airport, AirportDb},
         airspace::Boundaries,
         facilities, fca, flow as feed_flow,
         nav::NavData,
@@ -1326,16 +1326,22 @@ pub(crate) fn project_traffic(
                 profile,
             );
             let headwind = winds.route_headwind(&path, p.altitude as f64);
-            let vp = trajectory::VerticalProfile::build(
-                p.altitude as f64,
+            // Everything that reaches here is airborne — the early return above bails out on
+            // `!airborne` — so the pilot is projected from the altitude they report and anchored
+            // to the groundspeed they report. Passed through rather than hardcoded so that guard
+            // stays the single thing deciding it.
+            let vp = predict::profile_from_here(
+                airborne,
                 route_len_nm,
-                field_elevation_ft(airports, &fp.arrival),
+                p.altitude as f64,
+                p.groundspeed as f64,
                 cruise_ft,
                 cruise_tas,
+                airports,
+                &fp.arrival,
                 profile,
                 headwind,
-            )
-            .anchor_to_observed_gs(p.groundspeed as f64);
+            );
             let target_d = vp.distance_after(route_len_nm, offset_sec);
             let ahead_nm = (route_len_nm - target_d).max(0.0);
             let (pos, heading) = fca::point_and_heading_at(&path, ahead_nm);
@@ -1472,21 +1478,18 @@ fn fix_predictions(
         )
     };
 
-    let start_alt = if airborne { cur_alt_ft } else { 0.0 };
-    let vp = trajectory::VerticalProfile::build(
-        start_alt,
+    let vp = predict::profile_from_here(
+        airborne,
         route_len,
-        field_elevation_ft(airports, &fp.arrival),
+        cur_alt_ft,
+        gs as f64,
         cruise_alt,
         cruise_tas,
+        airports,
+        &fp.arrival,
         profile,
         headwind,
     );
-    let vp = if airborne {
-        vp.anchor_to_observed_gs(gs as f64)
-    } else {
-        vp
-    };
 
     let arr_ll = airports.get(&fp.arrival.to_ascii_uppercase()).map(
         |&Airport {
@@ -1726,7 +1729,8 @@ fn build_candidates(
             p.groundspeed as f64,
             cruise,
             cruise_tas,
-            field_elevation_ft(airports, &fp.arrival),
+            airports,
+            &fp.arrival,
             profile,
             headwind,
             allowance,
@@ -1826,7 +1830,8 @@ fn build_candidates(
             0.0,
             cruise,
             cruise_tas,
-            field_elevation_ft(airports, &fp.arrival),
+            airports,
+            &fp.arrival,
             profile,
             headwind,
             allowance,
@@ -2675,9 +2680,51 @@ mod project_traffic_tests {
         assert!(out.is_empty());
     }
 
-    /// #335: the arrival field's elevation must reach `project_traffic`'s own
-    /// `VerticalProfile::build` call, which takes it as an explicit argument — nothing failed when
-    /// that argument regressed to sea level.
+    /// #411: `project_traffic` now hands the reported altitude and groundspeed to
+    /// `profile_from_here` as **adjacent** `f64` arguments of one call. Before, they went to two
+    /// different functions (`VerticalProfile::build`'s `start_alt_ft` and
+    /// `anchor_to_observed_gs`'s argument) and could not be transposed; now they can be, and
+    /// transposing them compiles and left the whole suite green. Pin that the projection starts
+    /// from the altitude the pilot reports: a cruising aircraft stays near cruise rather than
+    /// climbing away from its groundspeed read as feet.
+    #[test]
+    fn a_projection_starts_from_the_reported_altitude_not_the_groundspeed() {
+        let ap = crate::feed::airports::AirportDb::from([
+            ("KJFK".to_string(), Airport::at(40.64, -73.78)),
+            ("KDCA".to_string(), Airport::at(38.85, -77.04)),
+        ]);
+        // At cruise and above ANCHOR_MIN_GS_KT, so the anchoring path is live too.
+        let pilot = Pilot {
+            altitude: 35_000,
+            groundspeed: 470,
+            ..airborne_pilot()
+        };
+        let data = VatsimData {
+            pilots: vec![pilot],
+            ..Default::default()
+        };
+        let out = project_traffic(
+            &data,
+            &NavData::load(),
+            &ap,
+            &ProfileTable::default(),
+            &Winds::default(),
+            &HashMap::new(),
+            60,
+        );
+        assert_eq!(out.len(), 1);
+        assert!(
+            out[0].alt > 20_000,
+            "a pilot reporting 35000 ft must project from that altitude, got {} ft — a low value \
+             means the groundspeed was read as the starting altitude",
+            out[0].alt
+        );
+    }
+
+    /// #335: the arrival field's elevation must reach the profile `project_traffic` builds —
+    /// nothing failed when it regressed to sea level. Since #411 the site no longer resolves the
+    /// elevation itself, so the mutation this pin catches is neutering
+    /// `predict::profile_from_here`'s `field_elevation_ft(airports, arr_icao)` lookup to `0.0`.
     ///
     /// The projection has to land **inside the descent** to be sensitive at all: above
     /// top-of-descent the profile samples never reference the field elevation, so the altitude
@@ -3133,9 +3180,11 @@ mod prefile_fix_predictions_tests {
         assert!(prefile_fix_predictions(&st, &nav, &ap, &fp, now()).is_empty());
     }
 
-    /// #335: the fix table's terminal altitude is the arrival field's elevation. `fix_predictions`
-    /// hands the elevation to `VerticalProfile::build` as an explicit argument, so replacing that
-    /// argument with `0.0` left the whole suite green while the arrival fix quietly read sea level.
+    /// #335: the fix table's terminal altitude is the arrival field's elevation, and reading sea
+    /// level instead left the whole suite green while the arrival fix quietly sat at 0 ft. Since
+    /// #411 `fix_predictions` no longer resolves the elevation itself, so the mutation this pin
+    /// catches is neutering `predict::profile_from_here`'s `field_elevation_ft(airports, arr_icao)`
+    /// lookup to `0.0`.
     #[tokio::test]
     async fn the_fix_table_terminates_at_the_arrival_field_elevation() {
         let (st, nav) = (state(), NavData::load());
@@ -3779,11 +3828,13 @@ mod mit_cross_speed_wiring_tests {
         }
     }
 
-    /// #335: **both** candidate-build loops hand the arrival field elevation to
-    /// `predict::eta_along_route` as an explicit argument, and neither was covered — replacing both
-    /// with `0.0` left the suite green, which would revert every FCA-metering STA to a sea-level
-    /// descent. Asserted per loop for the same reason `cross_speed_for` is: a fixture that only
-    /// exercised `pilots` would leave the prefile site free to regress.
+    /// #335: **both** candidate-build loops time their crossing against the arrival field's
+    /// elevation, and neither was covered — reading sea level left the suite green, which would
+    /// revert every FCA-metering STA to a sea-level descent. Since #411 neither loop resolves the
+    /// elevation itself, so the mutation this pin catches is neutering
+    /// `predict::profile_from_here`'s `field_elevation_ft(airports, arr_icao)` lookup to `0.0`.
+    /// Asserted per loop for the same reason `cross_speed_for` is: a fixture that only exercised
+    /// `pilots` would leave the prefile site free to regress.
     ///
     /// The gate must sit **inside the descent**. Above top-of-descent the profile samples never
     /// reference the field elevation, so an enroute crossing is elevation-independent and the

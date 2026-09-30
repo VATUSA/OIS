@@ -25,7 +25,13 @@ vi.mock("@tauri-apps/api/window", () => ({
   }),
 }));
 vi.mock("@/lib/tray", () => tray);
-vi.mock("@/lib/platform", () => ({can: () => true}));
+// `isMainWindow` is stubbed from the same `current.label` handle the window mock reads, so the
+// route-window case below still turns on the label it always did (#403 moved the comparison into
+// `platform.ts`, and this factory mock replaces that module wholesale).
+vi.mock("@/lib/platform", () => ({
+  can: () => true,
+  isMainWindow: async () => current.label === "main",
+}));
 vi.mock("@/lib/settings", () => ({
   useSetting: (key: string, fallback: unknown) => ({value: key in settings.values ? settings.values[key] : fallback}),
 }));

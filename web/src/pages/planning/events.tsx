@@ -22,6 +22,7 @@ import {type EventSummary, useUpcomingEvents, vatusaEditUrl} from "@/lib/events"
 import {hasPermission} from "@/lib/permissions";
 import {toneOf} from "@/lib/status";
 import {formatZuluFull} from "@/lib/time";
+import {EventBanner} from "@/components/event-banner";
 
 const RECORDING_LABEL: Record<string, string> = {
   recording: "Recording",
@@ -171,13 +172,15 @@ const COLUMNS: DataColumn<EventSummary>[] = [
 function EventCard({ event: e }: { event: EventSummary }) {
   return (
     <Card className="flex flex-col overflow-hidden">
-      {e.banner_image_url ? (
-        <img src={e.banner_image_url} alt="" className="aspect-[16/7] w-full border-b border-line object-cover" />
-      ) : (
-        <div className="flex aspect-[16/7] w-full items-center justify-center border-b border-line bg-panel-2">
-          <CalendarClock className="size-6 text-ink-3" />
-        </div>
-      )}
+      <EventBanner
+        eventId={e.id}
+        className="aspect-[16/7] w-full border-b border-line object-cover"
+        fallback={
+          <div className="flex aspect-[16/7] w-full items-center justify-center border-b border-line bg-panel-2">
+            <CalendarClock className="size-6 text-ink-3" />
+          </div>
+        }
+      />
       <div className="flex flex-1 flex-col gap-3 p-4">
         <div className="flex flex-col gap-1">
           <div className="flex items-start justify-between gap-2">
