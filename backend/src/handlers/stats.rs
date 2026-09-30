@@ -753,7 +753,13 @@ pub async fn hist_atc(
         (guard.airports.clone(), guard.iata.clone())
     };
     let tracons = state.tracons.load();
-    Ok(Json(atc::board_from(&data, &airports, &iata, &tracons)))
+    Ok(Json(atc::board_from(
+        &data,
+        &airports,
+        &iata,
+        &tracons,
+        &state.airspace,
+    )))
 }
 
 #[utoipa::path(

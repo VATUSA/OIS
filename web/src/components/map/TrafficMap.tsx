@@ -44,8 +44,17 @@ export interface TrafficMapProps {
   boundaries?: GeoJSON.FeatureCollection;
   /** Draw the boundary bolder + lightly filled (facility map's single-facility focus). */
   boundaryEmphasis?: boolean;
-  /** Boundary set to shade online ARTCC centers against. Defaults to `boundaries`; pass the full
-   *  national set when `boundaries` is narrowed to one facility, so every online center still shades. */
+  /**
+   * Boundary set to shade online ARTCC centers against. Defaults to `boundaries`; pass the full
+   * national set when `boundaries` is narrowed to one facility, so every online center still shades.
+   *
+   * Shading every online centre is deliberate (`51cbb4f`), and #482 re-confirmed it: the value of
+   * the map is seeing who is covering what, which a single-facility shade cannot show. The two sets
+   * differing does **not** leave anything un-outlined — `buildAtcLayers` strokes the same features
+   * it fills, in the CTR colour, so a shaded neighbour reads as "a centre that is online" while the
+   * bolder `palette.boundary` outline stays the answer to "the facility you selected". If shading
+   * is ever narrowed back to the selection, this prop is what to remove.
+   */
   atcBoundaries?: GeoJSON.FeatureCollection;
   trails?: PathDatum[];
   routeOverlays?: PathDatum[];
