@@ -140,6 +140,23 @@ export function usePrograms() {
   });
 }
 
+/**
+ * Every airport's current arrival demand against its capacity, ranked by exceedance
+ * (VATUSA/OIS#475). One request for the whole country — the aggregation happens server-side,
+ * because the per-airport flow hooks fan out one request per ICAO (`lib/historical.ts`).
+ */
+export function useAirportDemand() {
+  return useQuery({
+    queryKey: ["tmu-demand"],
+    queryFn: async () => {
+      const { data, error } = await ois.GET("/api/v1/tmu/demand");
+      if (error || !data) throw new Error("failed to load demand");
+      return data;
+    },
+    refetchInterval: 60_000,
+  });
+}
+
 export function useUpsertProgram() {
   const queryClient = useQueryClient();
   const toast = useToast();

@@ -6,9 +6,9 @@
 
 import {useMemo} from "react";
 
-import {useFcas} from "@/lib/fca";
+import {useFcaCounts, useFcas} from "@/lib/fca";
 import {useModeAirportFlow, useModeDepartures, useModeTaxi, useModeTraffic} from "@/lib/historical";
-import {usePrograms, useTmis} from "@/lib/tmu";
+import {useAirportDemand, usePrograms, useTmis} from "@/lib/tmu";
 
 import {useHistoricalAt} from "./historical";
 
@@ -66,7 +66,12 @@ export interface SourceParams {
 export interface DataSource {
   id: string;
   label: string;
-  category: "airport" | "global";
+  /**
+   * What the source is scoped to. `"national"` sources answer a question about the whole NAS and
+   * are offered only to a `tmu_national` reader (see `AddWidgetMenu`) — they are deliberately kept
+   * out of the general Tables/Charts lists.
+   */
+  category: "airport" | "global" | "national";
   /** True → the widget must be bound to at least one airport. */
   needsIcao: boolean;
   fields: FieldDef[];
@@ -277,6 +282,64 @@ export const DATA_SOURCES: DataSource[] = [
       const at = useHistoricalAt();
       const q = useModeTraffic(at);
       return { rows: (q.data ?? []) as Row[], isLoading: q.isLoading, isError: q.isError, ...singleStatus(q) };
+    },
+  },
+  {
+    id: "nas-demand",
+    label: "NAS — demand vs capacity",
+    category: "national",
+    // Takes no params at all, like the other whole-network sources. That is the point: a national
+    // scope must never resolve to an airport list, because the per-airport sources fetch one
+    // request per ICAO (`lib/historical.ts`). The server ranks; this just renders.
+    needsIcao: false,
+    fields: [
+      f("icao", "Airport"),
+      f("exceedance", "Over by", "number"),
+      f("demand_60min", "Demand 60m", "number"),
+      f("aar", "AAR", "number"),
+      f("aar_source", "Rate from"),
+      f("inbound", "Inbound", "number"),
+      f("airborne", "Airborne", "number"),
+      f("ground", "Ground", "number"),
+    ],
+    useRows: () => {
+      const q = useAirportDemand();
+      return { rows: (q.data ?? []) as Row[], isLoading: q.isLoading, isError: q.isError, ...singleStatus(q) };
+    },
+  },
+  {
+    id: "nas-fca-pressure",
+    label: "NAS — FCA pressure",
+    category: "national",
+    needsIcao: false,
+    fields: [
+      f("name", "FCA"),
+      f("artcc", "ARTCC"),
+      f("count", "Aircraft", "number"),
+      f("rate", "Rate", "number"),
+      f("mode", "Mode"),
+    ],
+    useRows: () => {
+      // Reuses the existing national aggregate `GET /api/v1/flow/counts` rather than adding a
+      // second one; `useFcas` supplies the names the counts are keyed by.
+      const counts = useFcaCounts();
+      const fcas = useFcas();
+      const countMap = counts.data;
+      const list = fcas.data;
+      const rows = useMemo(
+        () =>
+          ((list ?? []) as { id: string }[]).map((fca) => ({
+            ...(fca as object),
+            count: countMap?.[fca.id] ?? 0,
+          })) as Row[],
+        [list, countMap],
+      );
+      return {
+        rows,
+        isLoading: fcas.isLoading || counts.isLoading,
+        isError: fcas.isError && counts.isError,
+        ...multiStatus([fcas, counts]),
+      };
     },
   },
 ];

@@ -2688,6 +2688,34 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/v1/tmu/demand": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * Current arrival demand vs capacity for every airport at once, ranked by exceedance
+         *     (VATUSA/OIS#475).
+         * @description Shaped like `flow::fca_counts`, not like the per-airport handlers above: a fixed three queries up
+         *     front, one brief feed read, then a *single* blocking task for the whole loop. Fanning
+         *     `flow_for` out per airport (as `public::get_board` does for the handful of metered fields) would
+         *     be two queries and a blocking task each.
+         *
+         *     Gated coarsely on `tmu.program.read` at any scope, like the sibling feed reads — the ranking is
+         *     derived from public VATSIM traffic, so a facility-scoped caller gets it too. "National" is a
+         *     menu-curation decision in the client, not a boundary here (VATUSA/OIS#474).
+         */
+        get: operations["airport_demand"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/v1/tmu/departures/{dep}": {
         parameters: {
             query?: never;
@@ -3344,6 +3372,45 @@ export interface components {
             wind_from_deg: number;
             /** Format: int32 */
             wind_to_deg: number;
+        };
+        /**
+         * @description One airport's current arrival demand against the capacity it is ranked on
+         *     (`GET /tmu/demand`, VATUSA/OIS#475). One row per airport that has capacity data *and* at least
+         *     one inbound — an airport with no inbounds has zero demand and can never be over capacity, so it
+         *     is left out rather than ranked.
+         */
+        AirportDemandBody: {
+            /**
+             * Format: int32
+             * @description The capacity `demand_60min` is measured against — see `aar_source`.
+             */
+            aar: number;
+            /**
+             * @description Where `aar` came from: `"program"` when a metering program exists (the rate that actually
+             *     meters), else `"config"` — the airport's calm-default runway config.
+             *
+             *     Note `"config"` ignores wind: resolving the wind-favored config costs one outbound forecast
+             *     request per airport, which a national aggregate cannot afford. An airport under metering is
+             *     unaffected, because its program AAR wins.
+             */
+            aar_source: string;
+            /** Format: int32 */
+            airborne: number;
+            /**
+             * Format: int32
+             * @description Metered arrivals estimated to land within the next 60 minutes.
+             */
+            demand_60min: number;
+            /**
+             * Format: int32
+             * @description `demand_60min - aar`. Positive means over capacity; this is the ranking key.
+             */
+            exceedance: number;
+            /** Format: int32 */
+            ground: number;
+            icao: string;
+            /** Format: int32 */
+            inbound: number;
         };
         /** @description The forecast wind at an airport for a given time (Open-Meteo, or live METAR fallback). */
         AirportForecastBody: {
@@ -13326,6 +13393,37 @@ export interface operations {
                 content?: never;
             };
             404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+        };
+    };
+    airport_demand: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["AirportDemandBody"][];
+                };
+            };
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            503: {
                 headers: {
                     [name: string]: unknown;
                 };

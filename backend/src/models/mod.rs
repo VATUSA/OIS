@@ -2279,6 +2279,31 @@ pub struct ProgramBody {
     pub updated_by: Option<String>,
 }
 
+/// One airport's current arrival demand against the capacity it is ranked on
+/// (`GET /tmu/demand`, VATUSA/OIS#475). One row per airport that has capacity data *and* at least
+/// one inbound — an airport with no inbounds has zero demand and can never be over capacity, so it
+/// is left out rather than ranked.
+#[derive(Debug, Serialize, ToSchema)]
+pub struct AirportDemandBody {
+    pub icao: String,
+    /// Metered arrivals estimated to land within the next 60 minutes.
+    pub demand_60min: i32,
+    /// The capacity `demand_60min` is measured against — see `aar_source`.
+    pub aar: i32,
+    /// `demand_60min - aar`. Positive means over capacity; this is the ranking key.
+    pub exceedance: i32,
+    /// Where `aar` came from: `"program"` when a metering program exists (the rate that actually
+    /// meters), else `"config"` — the airport's calm-default runway config.
+    ///
+    /// Note `"config"` ignores wind: resolving the wind-favored config costs one outbound forecast
+    /// request per airport, which a national aggregate cannot afford. An airport under metering is
+    /// unaffected, because its program AAR wins.
+    pub aar_source: String,
+    pub inbound: i32,
+    pub airborne: i32,
+    pub ground: i32,
+}
+
 /// Upsert a program (`PUT /tmu/programs/{icao}`) — the full normalized program body.
 #[derive(Debug, Deserialize, ToSchema)]
 pub struct UpsertProgramRequest {
