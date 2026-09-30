@@ -23,15 +23,21 @@ pub(crate) async fn job_loop(api: OisClient, http: Arc<Http>, poll: Duration) {
             Ok(jobs) => {
                 for job in jobs {
                     let id = job.id.clone();
+                    // The lease this worker holds. Echoed back on the ack so a successor that
+                    // re-leased the job after a reap doesn't have its result overwritten by ours
+                    // (VATUSA/OIS#472).
+                    let attempt = Some(job.attempt_count);
                     match perform_job(&api, &http, &job).await {
                         Ok(result) => {
-                            if let Err(e) = api.ack_job(&id, true, result, None).await {
+                            if let Err(e) = api.ack_job(&id, true, result, None, attempt).await {
                                 tracing::error!(error = %e, job = %id, "ack(success) failed");
                             }
                         }
                         Err(reason) => {
                             tracing::warn!(job = %id, reason, "job failed; nacking for retry");
-                            if let Err(e) = api.ack_job(&id, false, None, Some(&reason)).await {
+                            if let Err(e) =
+                                api.ack_job(&id, false, None, Some(&reason), attempt).await
+                            {
                                 tracing::error!(error = %e, job = %id, "ack(failure) failed");
                             }
                         }
