@@ -70,7 +70,9 @@ export function TimeSeries<T>({
         theme,
         tooltip,
       }),
-    // colours derive from `theme`; the accessors are expected to be stable per data identity.
+    // `colors` derives from `series` + `theme`, both listed; `x` and the format closures are caller
+    // props, so listing them would rebuild the chart on every parent render (#329).
+    // eslint-disable-next-line react-hooks/exhaustive-deps
     [data, series, kind, thresholds, theme, isTime],
   );
 

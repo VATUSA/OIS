@@ -62,6 +62,8 @@ pub async fn run() -> color_eyre::Result<()> {
         jobs::spawn_cleanup(state.jobs.clone(), pool.clone());
         // One-time desktop sign-in codes expire in 60s; this removes the dead rows (#346).
         jobs::spawn_desktop_auth_code_prune(state.jobs.clone(), pool.clone());
+        jobs::spawn_outbound_job_reaper(state.jobs.clone(), pool.clone());
+        jobs::spawn_audit_log_prune(state.jobs.clone(), pool.clone());
         // Load configurable aircraft performance profiles and keep them current for the ETA model.
         jobs::spawn_aircraft_profiles_refresh(
             state.jobs.clone(),

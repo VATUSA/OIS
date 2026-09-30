@@ -132,9 +132,14 @@ content's left edge and rounding only that inner corner — not by rounding the 
 ## The shell (build this first)
 
 The single highest-leverage primitive. Full height, **flush to the viewport on all four sides** — the
-outer edge of the app is the window's bounding box, with no gutter, no outer rounded corners and no
-shadow (#402). On the desktop app the native title bar is hidden and our own window controls sit in
-the chrome row, so a gutter here would read as a second bar beneath it. It holds:
+outer edge of the app is the window's bounding box, with no gutter, no CSS rounding of its own and no
+shadow (#402). On the desktop app the native title bar is hidden and the window's buttons sit at the
+top-left of the sidebar's chrome row, so a gutter here would read as a second bar beneath it.
+
+**The window's own corners are rounded, and that is the OS's doing rather than the shell's** (#419):
+macOS rounds a decorated window itself, Windows 11 is asked to through DWM, and the compositor clips
+the webview — so nothing in the page carries a `border-radius` for it. "Flush, no outer rounding" is a
+rule about *this stylesheet*; it does not mean the app is a hard-cornered rectangle on screen. It holds:
 
 - **Sidebar** (`--panel`, collapsible): a chrome row (back · forward · recent pages / collapse), the
   identity (avatar + name + mono CID), a pill **⌘K** search, then **every section the user can use**

@@ -70,7 +70,10 @@ export function Bars<T>({
           theme,
           tooltip,
         });
-    // colours derive from `theme`; the accessors are expected to be stable per data identity.
+    // Colours derive from `theme`; the accessors stay out on purpose — `fill` is rebuilt every
+    // render and the rest are caller closures, so listing them would rebuild the chart on every
+    // parent render (#329).
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [data, horizontal, cap, capOf, theme]);
 
   return (
@@ -146,7 +149,9 @@ export function StackedBars({
         theme,
         tooltip,
       }),
-    // colours derive from `theme`; the accessors are expected to be stable per data identity.
+    // Colours derive from `theme` and `keys` is tracked through `rows`/`colorOf`; the caller's
+    // format closures stay out, or the chart would rebuild on every parent render (#329).
+    // eslint-disable-next-line react-hooks/exhaustive-deps
     [rows, colorOf, cap, theme],
   );
 

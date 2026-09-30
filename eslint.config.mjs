@@ -17,9 +17,11 @@ export default tseslint.config(
     plugins: { "react-hooks": reactHooks },
     rules: {
       "react-hooks/rules-of-hooks": "error",
-      // Reported, not blocking: changing a dependency list changes when an effect re-runs, so
-      // existing omissions are fixed deliberately rather than to satisfy the gate (#306).
-      "react-hooks/exhaustive-deps": "warn",
+      // Blocking as of #329: every omission that existed when this was a warning has been either
+      // fixed or annotated with an `eslint-disable-next-line` saying why the dependency is left out,
+      // so a *new* one is an unreviewed stale closure and should fail the gate. Deliberately keeping
+      // a dependency out is still allowed — say why on the disable line.
+      "react-hooks/exhaustive-deps": "error",
       "@typescript-eslint/no-unused-vars": [
         "error",
         { argsIgnorePattern: "^_", varsIgnorePattern: "^_", caughtErrorsIgnorePattern: "^_" },

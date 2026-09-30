@@ -30,6 +30,7 @@ import {AvailabilitySection} from "@/pages/planning/availability";
 import {TmiPackagesSection} from "@/pages/planning/tmi-packages";
 import {EventFcasSection} from "@/pages/planning/event-fcas";
 import {EventStatsSection} from "@/pages/planning/event-stats";
+import {EventBanner} from "@/components/event-banner";
 
 type TabId = "airports" | "facility" | "tmi" | "fcas" | "ace" | "availability" | "stats";
 const TABS = [
@@ -143,13 +144,10 @@ export function EventPlanningPage() {
     <div className="flex flex-col gap-6">
       {(e.banner_image_url || blurb || e.review_status) && (
         <Card className="flex flex-col overflow-hidden md:flex-row">
-          {e.banner_image_url && (
-            <img
-              src={e.banner_image_url}
-              alt=""
-              className="max-h-56 w-full border-b border-line object-cover md:h-48 md:w-80 md:border-b-0 md:border-r"
-            />
-          )}
+          <EventBanner
+            eventId={e.id}
+            className="max-h-56 w-full border-b border-line object-cover md:h-48 md:w-80 md:border-b-0 md:border-r"
+          />
           <div className="flex min-w-0 flex-1 flex-col gap-3 p-4">
             {e.review_status && (
               <div className="flex flex-wrap items-center gap-2 text-xs text-ink-3">

@@ -55,6 +55,10 @@ export function usePageHeader(o: PageHeaderOverride) {
   const set = ctx?.set;
   useLayoutEffect(() => {
     set?.(o);
+    // The field list is the contract above, not an omission: depending on `o` itself would re-apply
+    // on every render for any caller passing an object literal, and `set` stores state — so it would
+    // loop (#329).
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [set, o.title, o.subtitle, o.count, o.actions, o.views]);
 }
 

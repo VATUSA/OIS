@@ -1,4 +1,5 @@
 import {dismissAllAlerts} from "@/lib/alerts";
+import {safeUnlisten} from "@/lib/desktop-events";
 import {can} from "@/lib/platform";
 import {openRouteWindow} from "@/lib/popout";
 import {showMainWindow} from "@/lib/tray";
@@ -247,8 +248,10 @@ export async function ownHotkeys(onResume: () => void): Promise<() => void> {
       onResume();
     });
     return () => {
-      offSuspend();
-      offResume();
+      // Both are Tauri unlisten handles, so both are async and both reject rather than throw when the
+      // webview has already forgotten the id — discarding either is an unhandled rejection (#426).
+      safeUnlisten(offSuspend);
+      safeUnlisten(offResume);
     };
   } catch {
     return () => undefined;

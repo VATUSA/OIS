@@ -25,6 +25,7 @@ use crate::repos::airport_surface as airport_surface_repo;
 use crate::repos::events as events_repo;
 use crate::repos::flight_exclusions as flight_exclusions_repo;
 use crate::repos::flow as flow_repo;
+use crate::repos::integration as integration_repo;
 use crate::repos::stats as stats_repo;
 use crate::repos::tmu as tmu_repo;
 
@@ -40,6 +41,24 @@ const STATS_COMPACTION_INTERVAL: Duration = Duration::from_secs(60 * 60);
 const STATS_PRUNE_AFTER_DAYS: i64 = 14;
 /// Delay legs are tiny (one row per flight leg) and useful over a longer window than raw positions.
 const DELAY_LEG_RETAIN_DAYS: i64 = 30;
+
+/// How long a leased outbound job may stay `in_progress` before it is treated as abandoned (#446).
+///
+/// The bot leases, performs one Discord call and acks — seconds of work. Five minutes is far beyond
+/// any legitimate run, so a job still `in_progress` after it did not finish: its worker died between
+/// leasing and acking, and nothing else will ever move it.
+const OUTBOUND_JOB_LEASE_TIMEOUT_MINS: i64 = 5;
+
+/// How long `access.audit_logs` rows are kept (#444).
+///
+/// Six months: long enough to span a full VATUSA event season, so "what changed before that event"
+/// is still answerable, and short enough that the table stops growing without bound — it had no
+/// retention at all, and grew for the life of the deployment.
+///
+/// One window for every `resource_type` deliberately. A per-type table would have to track the types
+/// `audit::derive` invents from the request path, which nothing centrally registers, so it would
+/// drift silently the first time a route was added.
+const AUDIT_RETAIN_DAYS: i64 = 180;
 
 /// Weekly compaction ladder for `stats.position`: `(age_days, keep_every)`. When a position's age
 /// first crosses `age_days`, keep only every `keep_every`-th sample of the survivors handed down
@@ -624,6 +643,73 @@ pub fn spawn_capture_scheduler(reg: Arc<JobRegistry>, pool: PgPool) {
     ));
 }
 
+/// Freeze one event's movement counts over its own window (#433).
+///
+/// Movements are counted from `stats.flight_leg`, which is pruned at [`DELAY_LEG_RETAIN_DAYS`], so
+/// without this an event's numbers would quietly fall to zero a month after it ran. Taken over the
+/// event's own window, matching what the stats endpoint reports.
+///
+/// Best-effort: a failure here costs the frozen copy, not the capture lifecycle the scheduler is
+/// actually responsible for, and the endpoint still computes from legs until they age out. So it logs
+/// and returns rather than propagating. The next tick retries, since the missing row is exactly what
+/// makes the event match again.
+///
+/// Returns whether a row was actually written, so the pass's summary — which the admin Jobs page
+/// shows as `last_detail` — counts freezes rather than attempts.
+async fn snapshot_event_movements(
+    pool: &PgPool,
+    event_id: i64,
+    start_time: chrono::DateTime<Utc>,
+    end_time: chrono::DateTime<Utc>,
+) -> bool {
+    let icaos: Vec<String> = match events_repo::list_airport_rates(pool, event_id).await {
+        Ok(rates) => rates.into_iter().map(|r| r.icao).collect(),
+        Err(_) => {
+            tracing::warn!(
+                event = event_id,
+                "stats: snapshot skipped, airports unreadable"
+            );
+            return false;
+        }
+    };
+    if icaos.is_empty() {
+        return false;
+    }
+
+    match stats_repo::event_airport_breakdown(pool, &icaos, start_time, end_time).await {
+        Ok(rows) => {
+            // Never freeze an all-zero breakdown. For an event whose legs have already been pruned
+            // the recomputed movements are zero for that reason alone, and freezing them would make
+            // an artifact of retention permanent — the row is what makes the freeze pass stop
+            // matching the event, so no later pass could do better. Leaving it unfrozen costs nothing: the read
+            // path computes the same zero, and keeps the option open (#433 review).
+            if rows.iter().all(|r| r.arrivals + r.departures == 0) {
+                tracing::debug!(
+                    event = event_id,
+                    "stats: no observed movements to freeze, left to compute"
+                );
+                return false;
+            }
+            match stats_repo::snapshot_event_movements(pool, event_id, start_time, end_time, &rows)
+                .await
+            {
+                Ok(n) => {
+                    tracing::info!(event = event_id, airports = n, "stats: froze movements");
+                    true
+                }
+                Err(_) => {
+                    tracing::warn!(event = event_id, "stats: snapshot write failed");
+                    false
+                }
+            }
+        }
+        Err(_) => {
+            tracing::warn!(event = event_id, "stats: snapshot breakdown failed");
+            false
+        }
+    }
+}
+
 /// One capture-scheduler pass: open a capture for each event now inside its window, and close+save
 /// captures whose window has ended. Idempotent. Returns a summary of what changed.
 async fn capture_scheduler_once(pool: &PgPool) -> Result<String, String> {
@@ -669,10 +755,37 @@ async fn capture_scheduler_once(pool: &PgPool) -> Result<String, String> {
             _ => {}
         }
     }
-    Ok(if opened == 0 && saved == 0 {
+    // Freeze the movements of every finished event that isn't frozen yet (#433 review).
+    //
+    // This is deliberately one pass rather than a snapshot on the close transition plus a separate
+    // backfill. The close arm only fires for an event with an *open* capture, so on its own it could
+    // never reach anything that closed before `stats.event_movements` existed — those events kept
+    // computing from `stats.flight_leg` and fell to zero as their legs crossed
+    // DELAY_LEG_RETAIN_DAYS. Asking "which finished events have no snapshot" answers both cases
+    // with one query, and it runs in the same invocation as the close above, so a capture that
+    // closes on this tick is still frozen on this tick. A call in the close arm as well was
+    // redundant: deleting it left every test green, because this pass had already done the work.
+    //
+    // Idempotent and self-limiting — writing the row is what stops the event matching. Events whose
+    // legs are already gone are declined by the all-zero guard in `snapshot_event_movements`, and
+    // the query is bounded to the same retention horizon so it does not re-ask about them every
+    // minute for the life of the deployment.
+    let mut frozen = 0u32;
+    match stats_repo::events_missing_movement_snapshot(pool, DELAY_LEG_RETAIN_DAYS).await {
+        Ok(unfrozen) => {
+            for e in unfrozen {
+                if snapshot_event_movements(pool, e.event_id, e.start_time, e.end_time).await {
+                    frozen += 1;
+                }
+            }
+        }
+        Err(_) => tracing::warn!("stats: unfrozen-event query failed"),
+    }
+
+    Ok(if opened == 0 && saved == 0 && frozen == 0 {
         "no changes".to_string()
     } else {
-        format!("{opened} opened, {saved} saved")
+        format!("{opened} opened, {saved} saved, {frozen} frozen")
     })
 }
 
@@ -825,6 +938,66 @@ pub fn spawn_desktop_auth_code_prune(reg: Arc<JobRegistry>, pool: PgPool) {
             }
         },
     ));
+}
+
+/// Return outbound jobs stranded `in_progress` to the queue (#446).
+///
+/// Only the bot acking a job moves it out of `in_progress`, so a worker that dies mid-job leaves it
+/// there forever — never retried, never delivered, and with no error to notice, because nothing
+/// failed. Every redeploy is a chance to hit that window.
+///
+/// The recovery reuses the failed-ack transition, so the retry policy lives in one place.
+pub fn spawn_outbound_job_reaper(reg: Arc<JobRegistry>, pool: PgPool) {
+    tokio::spawn(run_interval(
+        reg,
+        "outbound_job_reaper",
+        "Requeue Discord jobs whose worker never acked",
+        CLEANUP_INTERVAL,
+        move || {
+            let pool = pool.clone();
+            async move { outbound_job_reaper_once(&pool).await }
+        },
+    ));
+}
+
+/// Delete audit rows past [`AUDIT_RETAIN_DAYS`] (#444). Nothing removed them before, so the table
+/// only grew — most recently at the Discord bot's job-queue poll rate until #430 stopped that.
+///
+/// Its own job rather than another pass inside `stats_compaction_once`: an audit trail's retention is
+/// a policy decision, not stats housekeeping, and a separate entry is what makes it visible (and
+/// runnable) in the admin jobs view. Same cadence as the other cleanups.
+pub fn spawn_audit_log_prune(reg: Arc<JobRegistry>, pool: PgPool) {
+    tokio::spawn(run_interval(
+        reg,
+        "audit_log_prune",
+        "Delete audit-log rows past their retention window",
+        CLEANUP_INTERVAL,
+        move || {
+            let pool = pool.clone();
+            async move {
+                let before = Utc::now() - chrono::Duration::days(AUDIT_RETAIN_DAYS);
+                crate::repos::audit::prune_audit_logs(&pool, before)
+                    .await
+                    .map(|n| format!("{n} deleted"))
+                    .map_err(|_| "prune failed".to_string())
+            }
+        },
+    ));
+}
+
+/// One reaper pass: anything `in_progress` past [`OUTBOUND_JOB_LEASE_TIMEOUT_MINS`] goes back to the
+/// queue.
+///
+/// Split out of the spawn so the cutoff can be tested, mirroring `capture_scheduler_once` and
+/// `ace_reminder_scheduler_once`. `reap_stranded_jobs` takes the cutoff as a parameter, which is what
+/// makes its own tests precise — but it also meant the *constant* was outside every test, and a constant
+/// is exactly the kind of thing that gets "tuned" without anyone noticing what it turns off (#446 review).
+async fn outbound_job_reaper_once(pool: &PgPool) -> Result<String, String> {
+    let stranded_before = Utc::now() - chrono::Duration::minutes(OUTBOUND_JOB_LEASE_TIMEOUT_MINS);
+    integration_repo::reap_stranded_jobs(pool, stranded_before)
+        .await
+        .map(|n| format!("{n} requeued"))
+        .map_err(|_| "reap failed".to_string())
 }
 
 /// Drive event FCAs through their lifecycle: publish `planned` + auto ones ~30 min before their event
@@ -1137,5 +1310,323 @@ mod ace_reminder_tests {
 
         let event = received.try_recv().expect("a reminder nudge was published");
         assert_eq!(event.topic, topic::EVENT_REMINDER);
+    }
+}
+
+#[cfg(test)]
+mod capture_scheduler_tests {
+    use chrono::{DateTime, Utc};
+    use sqlx::PgPool;
+
+    use super::{capture_scheduler_once, snapshot_event_movements};
+    use crate::repos::stats as stats_repo;
+
+    const EVENT: i64 = 800;
+
+    /// Yesterday at `hour:minute`, not a fixed calendar date. This pass compares against
+    /// `Utc::now()`, and the backfill is deliberately bounded to the last `DELAY_LEG_RETAIN_DAYS`, so
+    /// a hard-coded date would silently drift out of both — first out of the retention window, and
+    /// eventually the test would be asserting nothing at all.
+    fn at(hour: u32, minute: u32) -> DateTime<Utc> {
+        (Utc::now() - chrono::Duration::days(1))
+            .date_naive()
+            .and_hms_opt(hour, minute, 0)
+            .expect("a valid time of day")
+            .and_utc()
+    }
+
+    /// An event that ran 12:00–14:00 with the default ±30 min capture padding, so its capture window
+    /// is 11:30–14:30. Both are in the past, so one scheduler pass closes the capture.
+    async fn seed(pool: &PgPool, capture_status: &str) {
+        sqlx::query(
+            "insert into events.event (id, title, start_time, end_time) values ($1, 'Test', $2, $3)",
+        )
+        .bind(EVENT)
+        .bind(at(12, 0))
+        .bind(at(14, 0))
+        .execute(pool)
+        .await
+        .unwrap();
+        sqlx::query("insert into events.airport_rate (event_id, icao) values ($1, 'KJFK')")
+            .bind(EVENT)
+            .execute(pool)
+            .await
+            .unwrap();
+        sqlx::query(
+            "insert into stats.event_capture (event_id, enabled, pre_minutes, post_minutes) \
+             values ($1, true, 30, 30)",
+        )
+        .bind(EVENT)
+        .execute(pool)
+        .await
+        .unwrap();
+        sqlx::query(
+            "insert into stats.capture (id, event_id, label, start_time, end_time, status) \
+             values ('cap-sched', $1, 'Test', $2, $3, $4)",
+        )
+        .bind(EVENT)
+        .bind(at(11, 30))
+        .bind((capture_status == "saved").then(|| at(14, 30)))
+        .bind(capture_status)
+        .execute(pool)
+        .await
+        .unwrap();
+    }
+
+    async fn leg(pool: &PgPool, kind: &str, cid: i32, end: DateTime<Utc>) {
+        sqlx::query(
+            "insert into stats.flight_leg \
+             (kind, airport, callsign, cid, start_time, end_time, duration_sec) \
+             values ($1, 'KJFK', $2, $3, $4, $5, 600)",
+        )
+        .bind(kind)
+        .bind(format!("TEST{cid}"))
+        .bind(cid)
+        .bind(end - chrono::Duration::minutes(10))
+        .bind(end)
+        .execute(pool)
+        .await
+        .unwrap();
+    }
+
+    /// Seed one leg inside the event and one inside the padding on either side of it.
+    async fn three_legs(pool: &PgPool) {
+        leg(pool, "departure", 1, at(11, 45)).await; // padding, before the event
+        leg(pool, "departure", 2, at(13, 0)).await; // inside the event
+        leg(pool, "arrival", 3, at(14, 15)).await; // padding, after the event
+    }
+
+    /// A capture that closes on this tick is frozen on this tick, over the **event's** window rather
+    /// than the capture's padded one.
+    ///
+    /// This is the seam the unit tests cannot reach: `stats_window_tests` writes a snapshot by hand
+    /// with the window it then asserts, and the `repos::stats` cases are *handed* a window rather than
+    /// choosing one. So passing the padded `window_start, window_end` — in scope at the call site —
+    /// left all 538 tests green while silently reintroducing #433's AC 4 bug on the frozen path, the
+    /// one that serves every event past leg retention (#433 review).
+    #[sqlx::test]
+    async fn the_scheduler_freezes_over_the_events_window_not_the_padded_capture(pool: PgPool) {
+        seed(&pool, "open").await;
+        three_legs(&pool).await;
+
+        capture_scheduler_once(&pool).await.unwrap();
+
+        let snap = stats_repo::event_movements_snapshot(&pool, EVENT)
+            .await
+            .unwrap()
+            .expect("closing the capture froze the movements");
+        assert_eq!(
+            (snap.window_start, snap.window_end),
+            (at(12, 0), at(14, 0)),
+            "the event's own window, not 11:30–14:30"
+        );
+        assert_eq!(
+            snap.rows[0].arrivals + snap.rows[0].departures,
+            1,
+            "only the movement inside the event window was frozen"
+        );
+    }
+
+    /// The other half of the same pass: an event whose capture was *already* saved. It never enters
+    /// the close arm again, so if freezing only happened there its counts would compute from legs and
+    /// fall to zero at `DELAY_LEG_RETAIN_DAYS` — correct numbers that quietly disappear, which is the
+    /// state every event on the board was in before this shipped (#433 review).
+    #[sqlx::test]
+    async fn an_event_that_closed_before_the_table_existed_is_still_frozen(pool: PgPool) {
+        seed(&pool, "saved").await;
+        three_legs(&pool).await;
+        assert!(
+            stats_repo::event_movements_snapshot(&pool, EVENT)
+                .await
+                .unwrap()
+                .is_none(),
+            "nothing frozen yet — this is the pre-deploy state"
+        );
+
+        capture_scheduler_once(&pool).await.unwrap();
+
+        let snap = stats_repo::event_movements_snapshot(&pool, EVENT)
+            .await
+            .unwrap()
+            .expect("the backfill froze it");
+        assert_eq!((snap.window_start, snap.window_end), (at(12, 0), at(14, 0)));
+        assert_eq!(snap.rows[0].arrivals + snap.rows[0].departures, 1);
+
+        // Idempotent and self-limiting: the row it just wrote is what stops the event matching.
+        assert_eq!(
+            stats_repo::events_missing_movement_snapshot(&pool, super::DELAY_LEG_RETAIN_DAYS)
+                .await
+                .unwrap()
+                .len(),
+            0
+        );
+    }
+
+    /// An event whose legs were already pruned recomputes to zero for that reason alone. Freezing
+    /// that would make an artifact of retention permanent, because the row is what stops the backfill
+    /// matching — so it is deliberately left unfrozen (#433 review).
+    #[sqlx::test]
+    async fn an_event_with_no_surviving_legs_is_not_frozen_at_zero(pool: PgPool) {
+        seed(&pool, "saved").await;
+        // The shape of a pruned event: the connections are still there (`stats.flight` is never
+        // pruned) so the breakdown is *not* empty — it is a row of zero movements beside a real pilot
+        // count, which is exactly what the page renders as "Movements 0 / Pilots 1".
+        sqlx::query(
+            "insert into stats.flight \
+             (session_id, cid, callsign, logon_time, first_seen, last_seen, status, departure, arrival) \
+             values (1, 1001, 'TEST1', $1, $1, $2, 'active', 'KJFK', 'KBOS')",
+        )
+        .bind(at(12, 10))
+        .bind(at(13, 40))
+        .execute(&pool)
+        .await
+        .unwrap();
+        let rows =
+            stats_repo::event_airport_breakdown(&pool, &["KJFK".to_string()], at(12, 0), at(14, 0))
+                .await
+                .unwrap();
+        assert_eq!(rows.len(), 1, "a row exists, it just has no movements");
+        assert_eq!(
+            (rows[0].arrivals, rows[0].departures, rows[0].unique_pilots),
+            (0, 0, 1)
+        );
+
+        assert!(
+            !snapshot_event_movements(&pool, EVENT, at(12, 0), at(14, 0)).await,
+            "it reports that it froze nothing, so the job summary stays honest"
+        );
+        assert!(
+            stats_repo::event_movements_snapshot(&pool, EVENT)
+                .await
+                .unwrap()
+                .is_none(),
+            "a zero-movement breakdown must not be frozen — freezing it would make the artifact \
+             permanent, since the row is what stops the backfill matching"
+        );
+    }
+}
+
+#[cfg(test)]
+mod outbound_job_reaper_tests {
+    use sqlx::PgPool;
+
+    use super::{OUTBOUND_JOB_LEASE_TIMEOUT_MINS, outbound_job_reaper_once};
+
+    async fn leased(pool: &PgPool, mins_ago: i64) -> String {
+        sqlx::query_scalar::<_, String>(
+            "insert into integration.outbound_jobs \
+             (job_type, status, attempt_count, last_attempt_at) \
+             values ('tmi_publish', 'in_progress', 1, now() - make_interval(mins => $1)) \
+             returning id",
+        )
+        .bind(mins_ago as i32)
+        .fetch_one(pool)
+        .await
+        .unwrap()
+    }
+
+    async fn status_of(pool: &PgPool, id: &str) -> String {
+        sqlx::query_scalar::<_, String>(
+            "select status from integration.outbound_jobs where id = $1",
+        )
+        .bind(id)
+        .fetch_one(pool)
+        .await
+        .unwrap()
+    }
+
+    /// The pass applies `OUTBOUND_JOB_LEASE_TIMEOUT_MINS` rather than taking a cutoff, so this is what
+    /// pins the constant: widen it and the stranded job stops being recovered, which is the bug back
+    /// (#446 review).
+    #[sqlx::test]
+    async fn the_pass_reaps_past_the_lease_and_leaves_a_fresh_lease_alone(pool: PgPool) {
+        let stranded = leased(&pool, OUTBOUND_JOB_LEASE_TIMEOUT_MINS + 5).await;
+        let working = leased(&pool, 1).await;
+
+        assert_eq!(
+            outbound_job_reaper_once(&pool).await.unwrap(),
+            "1 requeued",
+            "the summary the admin Jobs page shows must count what it actually did"
+        );
+
+        assert_eq!(status_of(&pool, &stranded).await, "pending");
+        assert_eq!(
+            status_of(&pool, &working).await,
+            "in_progress",
+            "a job inside its lease is being worked on, not abandoned"
+        );
+    }
+
+    /// Nothing to do is not a failure — the pass runs every CLEANUP_INTERVAL and almost always finds
+    /// nothing.
+    #[sqlx::test]
+    async fn an_empty_queue_is_not_an_error(pool: PgPool) {
+        assert_eq!(outbound_job_reaper_once(&pool).await.unwrap(), "0 requeued");
+    }
+}
+
+#[cfg(test)]
+mod registration_tests {
+    //! Every background pass defined here has to actually be started in `lib.rs`, and until now
+    //! nothing checked that.
+    //!
+    //! A job can be written, given a registry entry, unit-tested thoroughly, and simply never
+    //! spawned — and then the behaviour it exists for is silently absent while the whole suite
+    //! stays green. Deleting `spawn_outbound_job_reaper` from `lib.rs` left 536 passed / 0 failed.
+    //! Three cards in a row (#433, #436, #446) were returned for a gap of exactly this shape, so
+    //! this asserts the wiring itself rather than any one job: add a `spawn_*` and forget to start
+    //! it, and this fails.
+
+    const JOBS_RS: &str = include_str!("jobs.rs");
+    const LIB_RS: &str = include_str!("lib.rs");
+
+    /// Drop `//` comments, so prose naming a spawn is not mistaken for a call site — the false
+    /// positive a source scan gets wrong first.
+    fn without_line_comments(src: &str) -> String {
+        src.lines()
+            .map(|line| match line.find("//") {
+                Some(i) => &line[..i],
+                None => line,
+            })
+            .collect::<Vec<_>>()
+            .join("\n")
+    }
+
+    fn spawn_fn_names(src: &str) -> Vec<String> {
+        without_line_comments(src)
+            .lines()
+            .filter_map(|line| line.trim().strip_prefix("pub fn spawn_"))
+            .filter_map(|rest| rest.split(['(', '<']).next())
+            .map(|name| format!("spawn_{name}"))
+            .collect()
+    }
+
+    #[test]
+    fn every_background_job_is_started_in_lib() {
+        let names = spawn_fn_names(JOBS_RS);
+
+        // Without this the test passes by checking nothing the moment the matcher stops matching,
+        // which is the way a source scan rots.
+        assert!(
+            names.len() >= 10,
+            "only found {} spawn fns in jobs.rs, so the matcher has stopped matching: {names:?}",
+            names.len()
+        );
+        assert!(
+            names.iter().any(|n| n == "spawn_outbound_job_reaper"),
+            "the matcher no longer finds a spawn fn known to exist, so it is broken: {names:?}"
+        );
+
+        let lib = without_line_comments(LIB_RS);
+        let missing: Vec<&str> = names
+            .iter()
+            .map(String::as_str)
+            .filter(|name| !lib.contains(&format!("jobs::{name}(")))
+            .collect();
+
+        assert!(
+            missing.is_empty(),
+            "defined in jobs.rs but never started in lib.rs, so they silently never run: {missing:?}"
+        );
     }
 }

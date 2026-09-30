@@ -13,6 +13,7 @@ import {
 import {Plus} from "lucide-react";
 
 import {FacilityCombobox, type FacilityPick} from "@/components/facility-combobox";
+import {useMe} from "@/lib/auth";
 import {defaultChartConfig} from "./chart-widget";
 import {AIRPORT_KEY, DATA_SOURCES, DATA_SOURCES_BY_ID} from "./sources";
 import {STAT_METRICS} from "./stat-widgets";
@@ -40,6 +41,11 @@ type FacAction =
 export function AddWidgetMenu({ onAdd }: { onAdd: (widget: Widget) => void }) {
   const prompt = usePrompt();
   const [facAction, setFacAction] = useState<FacAction | null>(null);
+  // Menu curation, not a security boundary: `/api/v1/flow/atc` is readable by any signed-in user.
+  // A facility controller simply has no use for a national board, so it isn't offered to them —
+  // the same `tmu_national` test `lib/restriction-scope.ts:17` uses to pick a default audience.
+  const me = useMe();
+  const national = me.data?.tmu_national === true;
 
   async function addView(view: ViewId) {
     const icao = await askIcao(prompt);
@@ -172,6 +178,20 @@ export function AddWidgetMenu({ onAdd }: { onAdd: (widget: Widget) => void }) {
           Online ATC positions
           <span className="ml-auto text-xs text-ink-3">atc</span>
         </DropdownMenuItem>
+        {national && (
+          <>
+            <DropdownMenuSeparator />
+            <DropdownMenuLabel>National (NAS)</DropdownMenuLabel>
+            <DropdownMenuItem
+              onSelect={() =>
+                onAdd({ id: newId(), kind: "atc", facility: { kind: "national" } })
+              }
+            >
+              Online ATC positions
+              <span className="ml-auto text-xs text-ink-3">NAS</span>
+            </DropdownMenuItem>
+          </>
+        )}
         <DropdownMenuSeparator />
         <DropdownMenuLabel>Map</DropdownMenuLabel>
         <DropdownMenuItem onSelect={() => onAdd({ id: newId(), kind: "map" })}>

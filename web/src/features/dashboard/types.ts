@@ -79,6 +79,23 @@ export interface FacilityRef {
   id: string;
 }
 
+/** A dashboard scope of "the whole NAS" — every facility at once, for a national (DCC) reader. */
+export interface NationalRef {
+  kind: "national";
+}
+
+/**
+ * A scope that may be one facility *or* the whole NAS.
+ *
+ * Deliberately not a widened `FacilityRef`: only a widget already backed by a national endpoint can
+ * serve this. The airport-scoped sources resolve a facility to its member airports and then fetch
+ * one airport at a time — `useModeAirportFlow` is a `useQueries` over `icaos.map(...)`
+ * (`lib/historical.ts:35-47`) — so a national scope there would mean a request per airport in the
+ * country, every poll. Keeping those on `FacilityRef` makes that unrepresentable rather than merely
+ * discouraged (VATUSA/OIS#474).
+ */
+export type ScopeRef = FacilityRef | NationalRef;
+
 export interface TableWidget {
   id: string;
   kind: "table";
@@ -153,12 +170,17 @@ export interface DividerWidget {
   label?: string;
 }
 
-/** Online ATC positions for a whole facility (its center/approach positions + its airports' towers). */
+/**
+ * Online ATC positions for a whole facility (its center/approach positions + its airports' towers),
+ * or for the whole NAS when scoped nationally. The board behind it
+ * (`GET /api/v1/flow/atc`) is national in one request either way, so the national scope costs no
+ * extra fetch — it just stops filtering.
+ */
 export interface AtcWidget {
   id: string;
   kind: "atc";
   title?: string;
-  facility: FacilityRef;
+  facility: ScopeRef;
 }
 
 /** AADC (Airport Arrival Demand Chart, #242): bucketed forward arrival demand for one airport,
