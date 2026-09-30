@@ -19,7 +19,7 @@ import {useFacilities} from "@/lib/admin";
  *  admin knows which names actually drive a feature. Keep in sync with the handlers' constants. */
 const KNOWN_CHANNELS: { name: string; hint: string }[] = [
   { name: "aceteam-requests", hint: "ACE coverage requests post + claim notifications" },
-  { name: "tmu-advisories", hint: "Published TMIs (traffic management advisories)" },
+  { name: "tmu-ntml", hint: "Published TMIs and cancellations, as NTML log rows" },
   { name: "region-northeast", hint: "DCC threads for North East hosts (ZBW/ZDC/ZNY/ZOB)" },
   { name: "region-southeast", hint: "DCC threads for South East hosts (ZID/ZJX/ZMA/ZTL)" },
   { name: "region-southcentral", hint: "DCC threads for South Central hosts (ZAB/ZFW/ZHU/ZME)" },

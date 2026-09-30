@@ -92,6 +92,11 @@ tauri-plugin-notification = "2.4"
 mac-notification-sys = "0.6"
 tauri-winrt-notification = "0.7"
 
+# Rounded corners for the undecorated Windows window (#419, `desktop/src-tauri/src/window_shape.rs`).
+# One DWM call, so only the features that call needs are enabled; the crate is already in the tree
+# under Tauri's own Windows backend.
+windows-sys = { version = "0.61", features = ["Win32_Graphics_Dwm", "Win32_Foundation"] }
+
 # --- discord bot ---
 serenity = { version = "0.12", default-features = false, features = ["client", "gateway", "native_tls_backend", "model"] }
 

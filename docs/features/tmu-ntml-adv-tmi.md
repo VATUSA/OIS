@@ -11,6 +11,27 @@
 > The GDP feature (create/publish/freeze, board, compress, lock/unlock, revise/extend) is
 > feature-complete; this is the domain-level spec.
 
+## What "advisory" means here
+
+The word was doing three jobs at once, which is how #430's symptom went untraced and why the Discord
+channel carried the wrong name for its whole life. Settled in #456 — these are the names, and nothing
+new should reuse the word loosely:
+
+| Thing | What it is | Where it lives |
+| --- | --- | --- |
+| **The advisories board** | The pilot-facing read view of initiatives **currently in effect** — ground stops, GDPs, restrictions, rate programs. A projection of live rows, not an authored document. | `/advisories`, `GET /api/v1/public/board` → `PublicBoard` |
+| **NTML** | The chronological log of TMIs as they are issued and cancelled. One line per entry. | `tmu.tmis`, `backend/src/tmi.rs`, Discord `tmu-ntml` |
+| **ADVZY advisories** | Authored multi-line vATCSCC documents with a number, a valid period and a signature. Not built — see #437. | `tmu.adv.*` permissions (seeded, unused) |
+
+**The board keeps `/advisories`.** It is advisory information to pilots, it is what the product is
+named after, and renaming a public route costs bookmarks and an API contract for a distinction nobody
+is confused by at that surface. **ADVZY documents therefore get their own name** when #437 builds
+them, rather than taking a route that is already in use — naming the unbuilt thing is free.
+
+`FlightImpact` (`backend/src/models/mod.rs`) was called `FlightAdvisory` and is neither of the above:
+it is a per-flight summary of which initiatives touch one callsign and what they cost it. Renamed in
+#456.
+
 ## Problem
 
 VATUSA's traffic-management tooling (restrictions, rate programs, ground stops, ground

@@ -77,6 +77,16 @@ pub async fn ack_job(
     if ok {
         Ok(StatusCode::NO_CONTENT)
     } else {
+        // Either the id is unknown, or the ack is stale — the job was reaped for running past its
+        // lease and re-leased, so this worker no longer owns it (#446 review). Both answer 404 to the
+        // bot, which retries nothing; the log is what makes the second case diagnosable, because a
+        // stale ack means a worker took longer than OUTBOUND_JOB_LEASE_TIMEOUT_MINS and its Discord
+        // call may well have gone out twice.
+        tracing::warn!(
+            job = %id,
+            success = payload.success,
+            "integration: ack did not apply — unknown job, or the lease was already reaped"
+        );
         Err(ApiError::NotFound)
     }
 }

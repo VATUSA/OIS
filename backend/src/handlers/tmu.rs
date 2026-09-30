@@ -10,27 +10,70 @@ use serde::Deserialize;
 
 use crate::{
     auth::{
-        context::CurrentUser,
+        context::{CurrentApiKey, CurrentUser},
         permissions::{
-            TmuGroundStopCreate, TmuGroundStopDelete, TmuGroundStopPublish, TmuGroundStopRead,
-            TmuProgramDelete, TmuProgramRead, TmuProgramUpdate, TmuTmiCreate, TmuTmiDelete,
-            TmuTmiPublish, TmuTmiRead, TmuTmiUpdate,
+            TmuAdvCreate, TmuAdvPublish, TmuAdvRead, TmuAdvUpdate, TmuGroundStopCreate,
+            TmuGroundStopDelete, TmuGroundStopPublish, TmuGroundStopRead, TmuProgramDelete,
+            TmuProgramRead, TmuProgramUpdate, TmuTmiCreate, TmuTmiDelete, TmuTmiPublish,
+            TmuTmiRead, TmuTmiUpdate,
         },
+        principal::Principal,
         require_permission::RequirePermission,
     },
     errors::ApiError,
     handlers::restriction_artcc,
     models::{
-        CreateGroundStopRequest, CreateTmiRequest, GateRule, GroundStopBody, ProgramBody, TmiBody,
-        UpdateTmiRequest, UpsertProgramRequest,
+        AdvisoryBody, CreateAdvisoryRequest, CreateGroundStopRequest, CreateTmiRequest, GateRule,
+        GroundStopBody, ProgramBody, TmiBody, UpdateAdvisoryRequest, UpdateTmiRequest,
+        UpsertProgramRequest,
     },
     repos::{integration as integration_repo, tmu as tmu_repo},
     state::AppState,
 };
 use serde_json::json;
 
-/// Logical channel name (mapped to a snowflake in the Discord config) where published TMIs are posted.
-pub(crate) const TMU_CHANNEL: &str = "tmu-advisories";
+/// Logical channel name (mapped to a snowflake in the Discord config) where NTML rows are posted.
+///
+/// Separate from `tmu-advisories` (#436): NTML is a chronological log of restrictions, and real
+/// vATCSCC advisories are a different artifact entirely. Sharing one channel made the name a
+/// misnomer the moment either grew.
+pub(crate) const NTML_CHANNEL: &str = "tmu-ntml";
+
+/// Records that a TMI never reached Discord because the logical channel resolves to nothing.
+///
+/// `channel_id` answering `None` means "don't post", and that is a legitimate state — a deployment
+/// with no Discord config, or a guild that has not mapped this channel. It is also exactly what a
+/// typo, a removed mapping or a renamed constant looks like, and the caller still returns 200 either
+/// way. One line here is the difference between a diagnosable gap and a channel nobody notices has
+/// gone quiet (#436 review).
+fn skipped_post(channel: &str, what: &str, tmi_id: &str) {
+    tracing::warn!(
+        channel,
+        tmi = tmi_id,
+        "tmu: no Discord channel mapped for `{channel}`; TMI {what} not posted"
+    );
+}
+
+/// The `tmi_publish` job payload: the assembled NTML row plus what the bot needs to post it.
+///
+/// Shared because there are two publish paths — a TMI published directly, and one materialized from
+/// an event package (`handlers/events.rs`) — and they previously built this object separately. The
+/// bot stays a dumb renderer: everything about NTML's shape is decided here (#436).
+pub(crate) fn tmi_publish_job(channel_id: &str, tmi: &TmiBody) -> serde_json::Value {
+    json!({
+        "channel_id": channel_id,
+        "tmi_id": tmi.id,
+        // Stamped now, because this is the moment it is being logged.
+        "ntml": crate::tmi::ntml_line(
+            chrono::Utc::now(),
+            &tmi.restriction,
+            Some(tmi.start_time),
+            tmi.stop_time,
+            Some(&tmi.requesting),
+            Some(&tmi.providing),
+        ),
+    })
+}
 
 #[derive(Debug, Default, Deserialize)]
 pub struct TmiListQuery {
@@ -178,24 +221,22 @@ pub async fn publish_tmi(
     // Resolve the target channel before the tx; no config just means "don't post" (skip enqueue).
     // Unscoped: a TMI has requesting/providing ARTCCs but no single "issuing facility", and the TMU
     // channel may be network-wide rather than per-facility (#194).
-    let channel = integration_repo::channel_id(pool, TMU_CHANNEL, None).await?;
+    let channel = integration_repo::channel_id(pool, NTML_CHANNEL, None).await?;
     let mut tx = pool.begin().await.map_err(|_| ApiError::Internal)?;
     let mut tmi = tmu_repo::publish_tmi(&mut tx, &id, &user.id)
         .await?
         .ok_or(ApiError::Conflict)?; // not a draft (or absent)
     if let Some(channel_id) = channel {
-        // Enqueued in the same tx as the publish: the advisory can't post without the TMI going live.
-        let job = json!({
-            "channel_id": channel_id,
-            "tmi_id": tmi.id,
-            "requesting": tmi.requesting,
-            "providing": tmi.providing,
-            "restriction": tmi.restriction,
-            "start_time": tmi.start_time,
-            "stop_time": tmi.stop_time,
-        });
+        // Enqueued in the same tx as the publish: the NTML row can't post without the TMI going live.
+        let job = tmi_publish_job(&channel_id, &tmi);
         integration_repo::enqueue_job(&mut tx, "tmi_publish", &job, Some("tmi"), Some(&tmi.id))
             .await?;
+    } else {
+        // Not an error — a deployment with no Discord config is a real state — but it is
+        // indistinguishable from a mapping that is missing by accident, and the publish still
+        // answers 200. Without this the only symptom is a channel that quietly went silent (#436
+        // review); renaming the logical channel made that case likely across every install at once.
+        skipped_post(NTML_CHANNEL, "publish", &tmi.id);
     }
     tx.commit().await.map_err(|_| ApiError::Internal)?;
 
@@ -216,12 +257,45 @@ pub async fn cancel_tmi(
     Path(id): Path<String>,
 ) -> Result<Json<TmiBody>, ApiError> {
     let pool = state.db.as_ref().ok_or(ApiError::ServiceUnavailable)?;
-    if !tmu_repo::cancel_tmi(pool, &id).await? {
+
+    // The channel the publish actually posted to, not a fresh resolution (#436 review). A cancel row
+    // only corrects anything if it lands beside the row it corrects, and re-resolving does not get
+    // there: this path passes `None` while `activate_package` passes the event's facility, so
+    // `resolve_scoped_id` can answer with a different guild for the same logical name — publishing an
+    // event-package TMI to ZNY's channel and cancelling it in VATUSA's. Falling back to a fresh
+    // resolution covers a TMI with no publish job at all (never published, or published before this
+    // shipped); no config still just means "don't post".
+    let channel = match integration_repo::published_channel_for_tmi(pool, &id).await? {
+        Some(posted_to) => Some(posted_to),
+        None => integration_repo::channel_id(pool, NTML_CHANNEL, None).await?,
+    };
+    let mut tx = pool.begin().await.map_err(|_| ApiError::Internal)?;
+    if !tmu_repo::cancel_tmi(&mut *tx, &id).await? {
         return Err(ApiError::Conflict);
     }
     let mut tmi = tmu_repo::get_tmi(pool, &id)
         .await?
         .ok_or(ApiError::NotFound)?;
+    if let Some(channel_id) = channel {
+        // A cancel is its own NTML row rather than an edit of the original (#436): the channel is a
+        // chronological log, and the original entry did happen. Enqueued in the same tx as the
+        // cancel, so the post can't exist for a TMI that is still live.
+        let job = json!({
+            "channel_id": channel_id,
+            "tmi_id": tmi.id,
+            "ntml": crate::tmi::ntml_cancel_line(
+                chrono::Utc::now(),
+                &tmi.restriction,
+                Some(&tmi.requesting),
+                Some(&tmi.providing),
+            ),
+        });
+        integration_repo::enqueue_job(&mut tx, "tmi_cancel", &job, Some("tmi"), Some(&tmi.id))
+            .await?;
+    } else {
+        skipped_post(NTML_CHANNEL, "cancel", &tmi.id);
+    }
+    tx.commit().await.map_err(|_| ApiError::Internal)?;
     restriction_artcc::stamp_tmi(&*state.facilities.read().await, &mut tmi);
     Ok(Json(tmi))
 }
@@ -531,7 +605,650 @@ pub async fn delete_ground_stop(
 
 #[cfg(test)]
 mod tests {
+    /// #436 review: renaming the logical channel without moving the existing row would have made
+    /// `channel_id` answer `None` for every guild that already had one — and `None` means "don't
+    /// post", silently, with the publish still returning 200. The migration repoints it, mirroring
+    /// `0041_stats_perm_rename.sql`.
+    ///
+    /// `#[sqlx::test]` applies every migration to a fresh database, so seeding the *old* name here
+    /// and finding the new one is only possible if the rename is idempotent — which it must be,
+    /// since it runs on databases that never had the old row either.
+    #[sqlx::test]
+    async fn the_ntml_channel_mapping_survives_the_rename(pool: sqlx::PgPool) {
+        let config = sqlx::query_scalar::<_, String>(
+            "insert into integration.discord_configs (name, guild_id) values ('g', '1') returning id",
+        )
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        // A guild mapped under the pre-#436 name, as every existing deployment is.
+        sqlx::query(
+            "insert into integration.discord_channels (config_id, name, channel_id) \
+             values ($1, 'tmu-advisories', '999')",
+        )
+        .bind(&config)
+        .execute(&pool)
+        .await
+        .unwrap();
+
+        // Re-run the rename the migration performs; on a real deploy the migration has already run
+        // before this row existed, so applying it here is what reproduces the upgrade order.
+        sqlx::query(include_str!(
+            "../../migrations/0083_tmu_ntml_channel_rename.sql"
+        ))
+        .execute(&pool)
+        .await
+        .unwrap();
+
+        let mapped = crate::repos::integration::channel_id(&pool, NTML_CHANNEL, None)
+            .await
+            .unwrap();
+        assert_eq!(
+            mapped,
+            Some("999".to_string()),
+            "an existing mapping must keep posting without an admin remapping it"
+        );
+    }
+
     use super::*;
+    use crate::scope_test_support;
+
+    /// Seed a guild with `tmu-ntml` mapped to `channel`, optionally scoped to one ARTCC, and return
+    /// its config id.
+    async fn guild(
+        pool: &sqlx::PgPool,
+        name: &str,
+        channel: &str,
+        sort_order: i32,
+        artcc: Option<&str>,
+    ) -> String {
+        let config = sqlx::query_scalar::<_, String>(
+            "insert into integration.discord_configs (name, guild_id, sort_order) \
+             values ($1, $2, $3) returning id",
+        )
+        .bind(name)
+        .bind(format!("g-{name}"))
+        .bind(sort_order)
+        .fetch_one(pool)
+        .await
+        .unwrap();
+        sqlx::query(
+            "insert into integration.discord_channels (config_id, name, channel_id) \
+             values ($1, 'tmu-ntml', $2)",
+        )
+        .bind(&config)
+        .bind(channel)
+        .execute(pool)
+        .await
+        .unwrap();
+        if let Some(artcc) = artcc {
+            sqlx::query(
+                "insert into integration.discord_config_facilities (config_id, artcc_id) \
+                 values ($1, $2)",
+            )
+            .bind(&config)
+            .bind(artcc)
+            .execute(pool)
+            .await
+            .unwrap();
+        }
+        config
+    }
+
+    /// A TMI row, published, with a `tmi_publish` job recording the channel it went to.
+    async fn published_tmi(pool: &sqlx::PgPool, id: &str, posted_to: Option<&str>) {
+        sqlx::query(
+            "insert into tmu.tmis (id, requesting, providing, restriction, status, start_time) \
+             values ($1, 'N90', 'ZNY', 'JFK arrivals via CAMRN 20MIT', 'published', now())",
+        )
+        .bind(id)
+        .execute(pool)
+        .await
+        .unwrap();
+        if let Some(channel) = posted_to {
+            sqlx::query(
+                "insert into integration.outbound_jobs \
+                 (job_type, payload, subject_type, subject_id) \
+                 values ('tmi_publish', $1::jsonb, 'tmi', $2)",
+            )
+            .bind(json!({ "channel_id": channel, "tmi_id": id, "ntml": "row" }).to_string())
+            .bind(id)
+            .execute(pool)
+            .await
+            .unwrap();
+        }
+    }
+
+    async fn cancel_jobs(pool: &sqlx::PgPool, tmi_id: &str) -> Vec<(String, String)> {
+        sqlx::query_as::<_, (String, String)>(
+            "select payload->>'channel_id', payload->>'ntml' \
+             from integration.outbound_jobs \
+             where job_type = 'tmi_cancel' and subject_id = $1",
+        )
+        .bind(tmi_id)
+        .fetch_all(pool)
+        .await
+        .unwrap()
+    }
+
+    /// Drive the real cancel route: `resolve_current_user`, `RequirePermission<TmuTmiPublish>` and the
+    /// handler all on the path (`scope_test_support::send`, VATUSA/OIS#364). The enqueue is a database
+    /// side effect, so it is observable afterwards even though `send` only returns the status.
+    async fn cancel_through_the_router(
+        pool: &sqlx::PgPool,
+        tmi_id: &str,
+        with_permission: bool,
+    ) -> http::StatusCode {
+        let user = scope_test_support::seed_user(pool).await;
+        if with_permission {
+            scope_test_support::grant(pool, &user, "tmu.tmi.publish", None).await;
+        }
+        let cookie = scope_test_support::session_cookie(pool, &user).await;
+        let state = scope_test_support::test_state(pool.clone(), Default::default());
+        scope_test_support::send(
+            &state,
+            http::Method::POST,
+            &format!("/api/v1/tmu/tmis/{tmi_id}/cancel"),
+            &cookie,
+            None,
+        )
+        .await
+    }
+
+    /// AC 3's first half. Nothing covered the enqueue itself: deleting it, or changing the job type
+    /// the bot dispatches on, left all 534 tests green while cancellations silently never reached
+    /// Discord — which is the bug #436 exists to fix (#436 review).
+    #[sqlx::test]
+    async fn cancelling_a_tmi_enqueues_a_cancel_post(pool: sqlx::PgPool) {
+        guild(&pool, "VATUSA", "CH-VATUSA", 1, None).await;
+        published_tmi(&pool, "tmi-1", Some("CH-VATUSA")).await;
+
+        assert_eq!(
+            cancel_through_the_router(&pool, "tmi-1", true).await,
+            http::StatusCode::OK
+        );
+
+        let jobs = cancel_jobs(&pool, "tmi-1").await;
+        assert_eq!(jobs.len(), 1, "exactly one tmi_cancel job");
+        assert_eq!(jobs[0].0, "CH-VATUSA");
+        assert!(
+            jobs[0].1.contains("CANCEL TMI") && jobs[0].1.contains("N90:ZNY"),
+            "the assembled cancel row, not a placeholder: {}",
+            jobs[0].1
+        );
+    }
+
+    /// AC 3's "**the same** channel". `publish_tmi` resolves the channel unscoped while
+    /// `activate_package` resolves it with the event's facility, so with two guilds the same logical
+    /// name answers differently — an event-package TMI published to ZNY's channel would have had its
+    /// cancellation posted to VATUSA's, leaving the restriction uncorrected where anyone could see it
+    /// (#436 review). Proven in SQL before the fix.
+    #[sqlx::test]
+    async fn a_cancel_posts_to_the_channel_the_publish_used(pool: sqlx::PgPool) {
+        // VATUSA sorts first, so an unscoped resolution picks it; ZNY is where the publish went.
+        guild(&pool, "VATUSA", "CH-VATUSA", 1, None).await;
+        guild(&pool, "ZNY", "CH-ZNY", 2, Some("ZNY")).await;
+        published_tmi(&pool, "tmi-2", Some("CH-ZNY")).await;
+
+        cancel_through_the_router(&pool, "tmi-2", true).await;
+
+        assert_eq!(
+            cancel_jobs(&pool, "tmi-2").await[0].0,
+            "CH-ZNY",
+            "the cancel must land beside the row it corrects, not in whichever guild sorts first"
+        );
+    }
+
+    /// A TMI with no publish job — never published, or published before this shipped — still cancels,
+    /// falling back to a fresh resolution rather than posting nowhere.
+    #[sqlx::test]
+    async fn a_cancel_without_a_publish_job_falls_back_to_the_mapped_channel(pool: sqlx::PgPool) {
+        guild(&pool, "VATUSA", "CH-VATUSA", 1, None).await;
+        published_tmi(&pool, "tmi-3", None).await;
+
+        cancel_through_the_router(&pool, "tmi-3", true).await;
+
+        assert_eq!(cancel_jobs(&pool, "tmi-3").await[0].0, "CH-VATUSA");
+    }
+
+    /// The route is gated: without `tmu.tmi.publish` the cancel is refused and nothing is enqueued, so
+    /// dropping the extractor cannot pass unnoticed.
+    #[sqlx::test]
+    async fn cancelling_without_the_permission_is_refused_and_enqueues_nothing(pool: sqlx::PgPool) {
+        guild(&pool, "VATUSA", "CH-VATUSA", 1, None).await;
+        published_tmi(&pool, "tmi-4", Some("CH-VATUSA")).await;
+
+        assert_eq!(
+            cancel_through_the_router(&pool, "tmi-4", false).await,
+            http::StatusCode::UNAUTHORIZED
+        );
+        assert!(cancel_jobs(&pool, "tmi-4").await.is_empty());
+    }
+
+    /// The `ntml` key is a contract with `ois-discord`, which reads exactly that key and now hard-errors
+    /// without it. Nothing referenced `tmi_publish_job` but its two call sites, so either side could be
+    /// renamed silently (#436 review).
+    #[test]
+    fn the_publish_payload_carries_the_assembled_row_under_ntml() {
+        let now = chrono::Utc::now();
+        let tmi = TmiBody {
+            id: "tmi-9".into(),
+            requesting: "N90".into(),
+            providing: "ZNY".into(),
+            requesting_artcc: None,
+            providing_artcc: None,
+            restriction: "JFK arrivals via CAMRN 20MIT".into(),
+            start_time: now,
+            stop_time: None,
+            status: "published".into(),
+            published_at: Some(now),
+            created_at: now,
+            author: None,
+            structured: None,
+            decoded: None,
+        };
+
+        let job = tmi_publish_job("CH-1", &tmi);
+
+        assert_eq!(job["channel_id"], "CH-1");
+        assert_eq!(job["tmi_id"], "tmi-9");
+        let ntml = job["ntml"]
+            .as_str()
+            .expect("the bot reads `ntml` and nothing else");
+        assert!(ntml.contains("JFK arrivals via CAMRN 20MIT"), "{ntml}");
+        assert!(ntml.ends_with("N90:ZNY"), "{ntml}");
+    }
+
+    /// A guild that already has both names must not fail the migration: `(config_id, name)` is
+    /// unique, so a bare `update` would collide and take the whole deploy's migration down with it.
+    /// The existing `tmu-ntml` row is the one that already wins, so it is left alone.
+    /// (Caught by mutation: removing the guard left the test above green.)
+    #[sqlx::test]
+    async fn a_guild_holding_both_channel_names_does_not_break_the_rename(pool: sqlx::PgPool) {
+        let config = sqlx::query_scalar::<_, String>(
+            "insert into integration.discord_configs (name, guild_id) values ('g', '1') returning id",
+        )
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        for (name, id) in [("tmu-advisories", "111"), ("tmu-ntml", "222")] {
+            sqlx::query(
+                "insert into integration.discord_channels (config_id, name, channel_id) \
+                 values ($1, $2, $3)",
+            )
+            .bind(&config)
+            .bind(name)
+            .bind(id)
+            .execute(&pool)
+            .await
+            .unwrap();
+        }
+
+        sqlx::query(include_str!(
+            "../../migrations/0083_tmu_ntml_channel_rename.sql"
+        ))
+        .execute(&pool)
+        .await
+        .expect("the rename must not collide with an existing tmu-ntml row");
+
+        assert_eq!(
+            crate::repos::integration::channel_id(&pool, NTML_CHANNEL, None)
+                .await
+                .unwrap(),
+            Some("222".to_string()),
+            "the channel already mapped as tmu-ntml stays the one that wins"
+        );
+    }
+
+    use std::collections::HashMap;
+
+    use sqlx::PgPool;
+
+    use crate::scope_test_support::{grant, seed_user, send, session_cookie, test_state};
+
+    fn new_advisory() -> serde_json::Value {
+        serde_json::json!({"facility": "DCC", "kind": "reroute", "body": "vATCSCC ADVZY"})
+    }
+
+    async fn seed_draft(pool: &PgPool) -> String {
+        seed_draft_for(pool, "DCC").await
+    }
+
+    /// A draft belonging to `facility`.
+    ///
+    /// The scope tests need a real ARTCC because `access.user_permissions.artcc_id` is a foreign key
+    /// to `org.facilities`, so a grant simply cannot be scoped to something absent from it — see
+    /// `a_dcc_advisory_is_reachable_only_by_a_national_grant`.
+    async fn seed_draft_for(pool: &PgPool, facility: &str) -> String {
+        let author = seed_user(pool).await;
+        crate::repos::tmu::create_advisory(
+            pool,
+            &CreateAdvisoryRequest {
+                facility: facility.into(),
+                kind: "reroute".into(),
+                body: "vATCSCC ADVZY".into(),
+                structured: None,
+                decoded: None,
+            },
+            &author,
+        )
+        .await
+        .unwrap()
+    }
+
+    /// A signed-in caller holding no permissions, and the state to send through.
+    ///
+    /// Deliberately two steps rather than one refused-then-granted helper: the interesting assertion
+    /// is that the *refused* call changed nothing, and that has to be checked before the granted call
+    /// runs — a helper that did both first would let the granted call mask it (which it did, on the
+    /// first run of these tests).
+    async fn caller(pool: &PgPool) -> (crate::state::AppState, String, String) {
+        let state = test_state(pool.clone(), HashMap::new());
+        let user = seed_user(pool).await;
+        let cookie = session_cookie(pool, &user).await;
+        (state, user, cookie)
+    }
+
+    async fn status_of(pool: &PgPool, id: &str) -> Option<String> {
+        crate::repos::tmu::get_advisory(pool, id)
+            .await
+            .unwrap()
+            .map(|a| a.status)
+    }
+
+    /// #457 review: `RequirePermission` answers "holds it", not "holds it here". An advisory
+    /// carries the issuing facility in its identity, so a grant scoped to one ARTCC must not reach
+    /// another's document — otherwise a ZDC controller could cancel ZNY's published advisory.
+    #[sqlx::test]
+    async fn a_facility_scoped_grant_cannot_touch_another_facilitys_advisory(pool: PgPool) {
+        let id = seed_draft_for(&pool, "ZDC").await;
+        let (state, user, cookie) = caller(&pool).await;
+        grant(&pool, &user, "tmu.adv.publish", Some("ZNY")).await;
+        grant(&pool, &user, "tmu.adv.update", Some("ZNY")).await;
+
+        for (method, uri) in [
+            (
+                http::Method::POST,
+                format!("/api/v1/tmu/advisories/{id}/cancel"),
+            ),
+            (
+                http::Method::POST,
+                format!("/api/v1/tmu/advisories/{id}/publish"),
+            ),
+            (http::Method::DELETE, format!("/api/v1/tmu/advisories/{id}")),
+        ] {
+            assert_eq!(
+                send(&state, method.clone(), &uri, &cookie, None).await,
+                http::StatusCode::FORBIDDEN,
+                "{method} {uri} must be refused for another facility's advisory"
+            );
+        }
+        assert_eq!(
+            status_of(&pool, &id).await.as_deref(),
+            Some("draft"),
+            "a refused call must leave the advisory untouched"
+        );
+    }
+
+    /// The same grant scoped to the advisory's *own* facility is allowed — the check must gate on
+    /// the facility, not simply refuse every scoped grant.
+    #[sqlx::test]
+    async fn a_grant_scoped_to_the_advisorys_own_facility_is_allowed(pool: PgPool) {
+        let id = seed_draft_for(&pool, "ZDC").await;
+        let (state, user, cookie) = caller(&pool).await;
+        grant(&pool, &user, "tmu.adv.publish", Some("ZDC")).await;
+
+        assert_eq!(
+            send(
+                &state,
+                http::Method::POST,
+                &format!("/api/v1/tmu/advisories/{id}/publish"),
+                &cookie,
+                None,
+            )
+            .await,
+            http::StatusCode::OK
+        );
+        assert_eq!(status_of(&pool, &id).await.as_deref(), Some("published"));
+    }
+
+    /// A DCC advisory is reachable only by a **national** grant, and that falls out of the schema
+    /// rather than being a rule anyone wrote: `tmu.advisories.facility` is deliberately not a
+    /// foreign key (0085 — the DCC is not an ARTCC in `org.facilities`), while
+    /// `access.user_permissions.artcc_id` *is* one. So no grant can be scoped to `DCC` in the first
+    /// place, and only an unscoped holder can act on its documents (#457 review).
+    ///
+    /// That is the right outcome — DCC advisories are national by nature — but it is worth pinning,
+    /// because it means facility scoping silently does not apply to a whole class of advisory.
+    #[sqlx::test]
+    async fn a_dcc_advisory_is_reachable_only_by_a_national_grant(pool: PgPool) {
+        let id = seed_draft_for(&pool, "DCC").await;
+        let (state, user, cookie) = caller(&pool).await;
+        let uri = format!("/api/v1/tmu/advisories/{id}/publish");
+
+        // A grant scoped to a real ARTCC does not reach it.
+        grant(&pool, &user, "tmu.adv.publish", Some("ZDC")).await;
+        assert_eq!(
+            send(&state, http::Method::POST, &uri, &cookie, None).await,
+            http::StatusCode::FORBIDDEN
+        );
+
+        // A national one does.
+        grant(&pool, &user, "tmu.adv.publish", None).await;
+        assert_eq!(
+            send(&state, http::Method::POST, &uri, &cookie, None).await,
+            http::StatusCode::OK
+        );
+    }
+
+    /// Creating is scoped on the facility in the *body*, which is the only place it exists yet —
+    /// so this is what stops a ZDC controller issuing an advisory in another facility's name.
+    #[sqlx::test]
+    async fn creating_for_another_facility_is_refused(pool: PgPool) {
+        let (state, user, cookie) = caller(&pool).await;
+        grant(&pool, &user, "tmu.adv.create", Some("ZNY")).await;
+
+        assert_eq!(
+            send(
+                &state,
+                http::Method::POST,
+                "/api/v1/tmu/advisories",
+                &cookie,
+                Some(new_advisory()), // facility DCC
+            )
+            .await,
+            http::StatusCode::FORBIDDEN
+        );
+    }
+
+    /// AC 1's third verb. `cancel_advisory` shares `TmuAdvPublish` with publish, so publish's test
+    /// covered the permission but not *this route's* use of it: dropping the extractor here left 21
+    /// passed / 0 failed (#457 review).
+    #[sqlx::test]
+    async fn cancelling_an_advisory_requires_the_publish_permission(pool: PgPool) {
+        let id = seed_draft(&pool).await;
+        let (state, user, cookie) = caller(&pool).await;
+        let uri = format!("/api/v1/tmu/advisories/{id}/cancel");
+
+        let refused = send(&state, http::Method::POST, &uri, &cookie, None).await;
+        assert_eq!(refused, http::StatusCode::UNAUTHORIZED);
+        assert_eq!(
+            status_of(&pool, &id).await.as_deref(),
+            Some("draft"),
+            "a refused cancel must not have changed the status"
+        );
+
+        grant(&pool, &user, "tmu.adv.publish", None).await;
+        let allowed = send(&state, http::Method::POST, &uri, &cookie, None).await;
+        assert_eq!(allowed, http::StatusCode::OK);
+        assert_eq!(status_of(&pool, &id).await.as_deref(), Some("cancelled"));
+    }
+
+    /// The remaining two gated routes, for the same reason: each one's extractor should be removable
+    /// only at the cost of a red test (#457 review).
+    #[sqlx::test]
+    async fn editing_an_advisory_requires_the_update_permission(pool: PgPool) {
+        let id = seed_draft(&pool).await;
+        let (state, user, cookie) = caller(&pool).await;
+        let uri = format!("/api/v1/tmu/advisories/{id}");
+        let edit = || Some(serde_json::json!({"body": "vATCSCC ADVZY 001 amended"}));
+        let body_now = async || {
+            crate::repos::tmu::get_advisory(&pool, &id)
+                .await
+                .unwrap()
+                .unwrap()
+                .body
+        };
+
+        let refused = send(&state, http::Method::PATCH, &uri, &cookie, edit()).await;
+        assert_eq!(refused, http::StatusCode::UNAUTHORIZED);
+        assert_eq!(
+            body_now().await,
+            "vATCSCC ADVZY",
+            "a refused edit must not have rewritten the document"
+        );
+
+        grant(&pool, &user, "tmu.adv.update", None).await;
+        let allowed = send(&state, http::Method::PATCH, &uri, &cookie, edit()).await;
+        assert_eq!(allowed, http::StatusCode::OK);
+        assert_eq!(body_now().await, "vATCSCC ADVZY 001 amended");
+    }
+
+    #[sqlx::test]
+    async fn abandoning_an_advisory_requires_the_update_permission(pool: PgPool) {
+        let id = seed_draft(&pool).await;
+        let (state, user, cookie) = caller(&pool).await;
+        let uri = format!("/api/v1/tmu/advisories/{id}");
+
+        let refused = send(&state, http::Method::DELETE, &uri, &cookie, None).await;
+        assert_eq!(refused, http::StatusCode::UNAUTHORIZED);
+        assert!(
+            status_of(&pool, &id).await.is_some(),
+            "a refused delete must not have removed it"
+        );
+
+        grant(&pool, &user, "tmu.adv.update", None).await;
+        let allowed = send(&state, http::Method::DELETE, &uri, &cookie, None).await;
+        assert_eq!(allowed, http::StatusCode::NO_CONTENT);
+        assert!(status_of(&pool, &id).await.is_none());
+    }
+
+    /// #457 AC1. `tmu.adv.*` were seeded in 0008_tmu.sql and dead ever since, because nothing could
+    /// gate on them. These go through the real router so `RequirePermission` is on the tested path —
+    /// it holds a private field, so a handler cannot be called directly to check its gate.
+    ///
+    /// A missing permission is **401** here, not 403: `ensure_permission` answers `Unauthorized` for
+    /// every absent permission, and 403 is reserved for a wrong facility scope.
+    #[sqlx::test]
+    async fn creating_an_advisory_requires_the_create_permission(pool: PgPool) {
+        let state = test_state(pool.clone(), HashMap::new());
+        let user = seed_user(&pool).await;
+        let cookie = session_cookie(&pool, &user).await;
+
+        let refused = send(
+            &state,
+            http::Method::POST,
+            "/api/v1/tmu/advisories",
+            &cookie,
+            Some(new_advisory()),
+        )
+        .await;
+        assert_eq!(refused, http::StatusCode::UNAUTHORIZED);
+        assert!(
+            crate::repos::tmu::list_advisories(&pool)
+                .await
+                .unwrap()
+                .is_empty(),
+            "a refused create must not have written anything"
+        );
+
+        grant(&pool, &user, "tmu.adv.create", None).await;
+        let allowed = send(
+            &state,
+            http::Method::POST,
+            "/api/v1/tmu/advisories",
+            &cookie,
+            Some(new_advisory()),
+        )
+        .await;
+        assert_eq!(allowed, http::StatusCode::OK);
+        assert_eq!(
+            crate::repos::tmu::list_advisories(&pool)
+                .await
+                .unwrap()
+                .len(),
+            1
+        );
+    }
+
+    /// Publishing is a separate permission from creating: drafting a document and issuing it are
+    /// different levels of trust, which is why 0008_tmu.sql seeded them separately.
+    #[sqlx::test]
+    async fn publishing_an_advisory_requires_the_publish_permission(pool: PgPool) {
+        let state = test_state(pool.clone(), HashMap::new());
+        let id = seed_draft(&pool).await;
+
+        let user = seed_user(&pool).await;
+        let cookie = session_cookie(&pool, &user).await;
+        let uri = format!("/api/v1/tmu/advisories/{id}/publish");
+
+        // Holding create is not holding publish.
+        grant(&pool, &user, "tmu.adv.create", None).await;
+        assert_eq!(
+            send(&state, http::Method::POST, &uri, &cookie, None).await,
+            http::StatusCode::UNAUTHORIZED
+        );
+        let still_draft = crate::repos::tmu::get_advisory(&pool, &id)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(still_draft.status, "draft");
+
+        grant(&pool, &user, "tmu.adv.publish", None).await;
+        assert_eq!(
+            send(&state, http::Method::POST, &uri, &cookie, None).await,
+            http::StatusCode::OK
+        );
+        let published = crate::repos::tmu::get_advisory(&pool, &id)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(published.status, "published");
+        assert!(published.published_at.is_some());
+    }
+
+    /// Reading is gated too — advisories are not public until #459 posts them.
+    #[sqlx::test]
+    async fn listing_advisories_requires_the_read_permission(pool: PgPool) {
+        let state = test_state(pool.clone(), HashMap::new());
+        let user = seed_user(&pool).await;
+        let cookie = session_cookie(&pool, &user).await;
+
+        assert_eq!(
+            send(
+                &state,
+                http::Method::GET,
+                "/api/v1/tmu/advisories",
+                &cookie,
+                None
+            )
+            .await,
+            http::StatusCode::UNAUTHORIZED
+        );
+
+        grant(&pool, &user, "tmu.adv.read", None).await;
+        assert_eq!(
+            send(
+                &state,
+                http::Method::GET,
+                "/api/v1/tmu/advisories",
+                &cookie,
+                None
+            )
+            .await,
+            http::StatusCode::OK
+        );
+    }
 
     #[test]
     fn icao_normalization() {
@@ -597,5 +1314,213 @@ mod tests {
         assert!(normalize_until(Some("9999")).is_err()); // hour 99
         assert!(normalize_until(Some("2460")).is_err()); // hour 24
         assert!(normalize_until(Some("1275")).is_err()); // minute 75
+    }
+}
+
+// --- advisories (ADVZY documents, #457) ---
+
+#[utoipa::path(
+    get, path = "/api/v1/tmu/advisories", tag = "tmu",
+    responses((status = 200, body = Vec<AdvisoryBody>), (status = 401))
+)]
+pub async fn list_advisories(
+    State(state): State<AppState>,
+    _permission: RequirePermission<TmuAdvRead>,
+) -> Result<Json<Vec<AdvisoryBody>>, ApiError> {
+    let pool = state.db.as_ref().ok_or(ApiError::ServiceUnavailable)?;
+    Ok(Json(tmu_repo::list_advisories(pool).await?))
+}
+
+#[utoipa::path(
+    get, path = "/api/v1/tmu/advisories/{id}", tag = "tmu",
+    params(("id" = String, Path)),
+    responses((status = 200, body = AdvisoryBody), (status = 401), (status = 404))
+)]
+pub async fn get_advisory(
+    State(state): State<AppState>,
+    _permission: RequirePermission<TmuAdvRead>,
+    Path(id): Path<String>,
+) -> Result<Json<AdvisoryBody>, ApiError> {
+    let pool = state.db.as_ref().ok_or(ApiError::ServiceUnavailable)?;
+    tmu_repo::get_advisory(pool, &id)
+        .await?
+        .map(Json)
+        .ok_or(ApiError::NotFound)
+}
+
+/// Creates a draft, allocating its advisory number immediately so the author can see what they will
+/// issue under (#457).
+/// The permission whose ARTCC scope decides who may act on a facility's advisory.
+///
+/// `tmu.adv.update` and `tmu.adv.publish` are graded separately everywhere else, but the *scope*
+/// question is the same one for both: is this principal allowed to act for this facility at all.
+/// Checking the permission the caller was already gated on keeps the two answers from diverging.
+async fn require_advisory_scope(
+    state: &AppState,
+    principal: &Principal,
+    permission: &str,
+    facility: &str,
+) -> Result<(), ApiError> {
+    if principal
+        .permission_scope(state, permission)
+        .await?
+        .allows(Some(facility))
+    {
+        Ok(())
+    } else {
+        Err(ApiError::Forbidden)
+    }
+}
+
+/// The facility an existing advisory belongs to, or 404.
+///
+/// Read before every mutation so the scope check is against the row's own facility rather than
+/// anything the caller sent — the body cannot move a document into a facility the caller can reach
+/// (#457 review).
+async fn advisory_facility(pool: &sqlx::PgPool, id: &str) -> Result<String, ApiError> {
+    tmu_repo::get_advisory(pool, id)
+        .await?
+        .map(|a| a.facility)
+        .ok_or(ApiError::NotFound)
+}
+
+#[utoipa::path(
+    post, path = "/api/v1/tmu/advisories", tag = "tmu",
+    request_body = CreateAdvisoryRequest,
+    responses((status = 200, body = AdvisoryBody), (status = 400), (status = 401))
+)]
+pub async fn create_advisory(
+    State(state): State<AppState>,
+    _permission: RequirePermission<TmuAdvCreate>,
+    Extension(current_user): Extension<Option<CurrentUser>>,
+    Extension(current_api_key): Extension<Option<CurrentApiKey>>,
+    Json(payload): Json<CreateAdvisoryRequest>,
+) -> Result<Json<AdvisoryBody>, ApiError> {
+    let user = current_user.as_ref().ok_or(ApiError::Unauthorized)?;
+    let principal = Principal::require(current_user.as_ref(), current_api_key.as_ref())?;
+    let pool = state.db.as_ref().ok_or(ApiError::ServiceUnavailable)?;
+    if payload.facility.trim().is_empty()
+        || payload.kind.trim().is_empty()
+        || payload.body.trim().is_empty()
+    {
+        return Err(ApiError::BadRequest);
+    }
+    // On create the facility comes from the body, so this is what stops a ZDC controller issuing
+    // an advisory in ZNY's name (#457 review). A national grant allows any.
+    require_advisory_scope(
+        &state,
+        &principal,
+        "tmu.adv.create",
+        &payload.facility.trim().to_ascii_uppercase(),
+    )
+    .await?;
+    let id = tmu_repo::create_advisory(pool, &payload, &user.id).await?;
+    tmu_repo::get_advisory(pool, &id)
+        .await?
+        .map(Json)
+        .ok_or(ApiError::Internal)
+}
+
+#[utoipa::path(
+    patch, path = "/api/v1/tmu/advisories/{id}", tag = "tmu",
+    params(("id" = String, Path)), request_body = UpdateAdvisoryRequest,
+    responses((status = 200, body = AdvisoryBody), (status = 401), (status = 404))
+)]
+pub async fn update_advisory(
+    State(state): State<AppState>,
+    _permission: RequirePermission<TmuAdvUpdate>,
+    Extension(current_user): Extension<Option<CurrentUser>>,
+    Extension(current_api_key): Extension<Option<CurrentApiKey>>,
+    Path(id): Path<String>,
+    Json(payload): Json<UpdateAdvisoryRequest>,
+) -> Result<Json<AdvisoryBody>, ApiError> {
+    let principal = Principal::require(current_user.as_ref(), current_api_key.as_ref())?;
+    let pool = state.db.as_ref().ok_or(ApiError::ServiceUnavailable)?;
+    let facility = advisory_facility(pool, &id).await?;
+    require_advisory_scope(&state, &principal, "tmu.adv.update", &facility).await?;
+    if !tmu_repo::update_advisory(pool, &id, &payload).await? {
+        return Err(ApiError::NotFound);
+    }
+    tmu_repo::get_advisory(pool, &id)
+        .await?
+        .map(Json)
+        .ok_or(ApiError::NotFound)
+}
+
+#[utoipa::path(
+    post, path = "/api/v1/tmu/advisories/{id}/publish", tag = "tmu",
+    params(("id" = String, Path)),
+    responses((status = 200, body = AdvisoryBody), (status = 401), (status = 409))
+)]
+pub async fn publish_advisory(
+    State(state): State<AppState>,
+    _permission: RequirePermission<TmuAdvPublish>,
+    Extension(current_user): Extension<Option<CurrentUser>>,
+    Extension(current_api_key): Extension<Option<CurrentApiKey>>,
+    Path(id): Path<String>,
+) -> Result<Json<AdvisoryBody>, ApiError> {
+    let user = current_user.as_ref().ok_or(ApiError::Unauthorized)?;
+    let principal = Principal::require(current_user.as_ref(), current_api_key.as_ref())?;
+    let pool = state.db.as_ref().ok_or(ApiError::ServiceUnavailable)?;
+    let facility = advisory_facility(pool, &id).await?;
+    require_advisory_scope(&state, &principal, "tmu.adv.publish", &facility).await?;
+    if !tmu_repo::publish_advisory(pool, &id, &user.id).await? {
+        return Err(ApiError::Conflict);
+    }
+    tmu_repo::get_advisory(pool, &id)
+        .await?
+        .map(Json)
+        .ok_or(ApiError::NotFound)
+}
+
+#[utoipa::path(
+    post, path = "/api/v1/tmu/advisories/{id}/cancel", tag = "tmu",
+    params(("id" = String, Path)),
+    responses((status = 200, body = AdvisoryBody), (status = 401), (status = 409))
+)]
+pub async fn cancel_advisory(
+    State(state): State<AppState>,
+    _permission: RequirePermission<TmuAdvPublish>,
+    Extension(current_user): Extension<Option<CurrentUser>>,
+    Extension(current_api_key): Extension<Option<CurrentApiKey>>,
+    Path(id): Path<String>,
+) -> Result<Json<AdvisoryBody>, ApiError> {
+    let principal = Principal::require(current_user.as_ref(), current_api_key.as_ref())?;
+    let pool = state.db.as_ref().ok_or(ApiError::ServiceUnavailable)?;
+    let facility = advisory_facility(pool, &id).await?;
+    require_advisory_scope(&state, &principal, "tmu.adv.publish", &facility).await?;
+    if !tmu_repo::cancel_advisory(pool, &id).await? {
+        return Err(ApiError::Conflict);
+    }
+    tmu_repo::get_advisory(pool, &id)
+        .await?
+        .map(Json)
+        .ok_or(ApiError::NotFound)
+}
+
+/// Abandons a draft. `409` when it is not a draft — a published advisory is a document that went out,
+/// and a cancelled one is a record of that; neither is deleted. Any draft can be abandoned, whether or
+/// not its number is the top of the sequence; abandoning an older one simply leaves a gap (see
+/// `repos::tmu::delete_advisory`).
+#[utoipa::path(
+    delete, path = "/api/v1/tmu/advisories/{id}", tag = "tmu",
+    params(("id" = String, Path)),
+    responses((status = 204), (status = 401), (status = 409))
+)]
+pub async fn delete_advisory(
+    State(state): State<AppState>,
+    _permission: RequirePermission<TmuAdvUpdate>,
+    Extension(current_user): Extension<Option<CurrentUser>>,
+    Extension(current_api_key): Extension<Option<CurrentApiKey>>,
+    Path(id): Path<String>,
+) -> Result<StatusCode, ApiError> {
+    let principal = Principal::require(current_user.as_ref(), current_api_key.as_ref())?;
+    let pool = state.db.as_ref().ok_or(ApiError::ServiceUnavailable)?;
+    let facility = advisory_facility(pool, &id).await?;
+    require_advisory_scope(&state, &principal, "tmu.adv.update", &facility).await?;
+    if tmu_repo::delete_advisory(pool, &id).await? {
+        Ok(StatusCode::NO_CONTENT)
+    } else {
+        Err(ApiError::Conflict)
     }
 }

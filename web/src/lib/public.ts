@@ -8,7 +8,7 @@ export type PublicRestriction = components["schemas"]["PublicRestriction"];
 export type PublicGroundStop = components["schemas"]["PublicGroundStop"];
 export type PublicGdp = components["schemas"]["PublicGdp"];
 export type PublicProgram = components["schemas"]["PublicProgram"];
-export type FlightAdvisory = components["schemas"]["FlightAdvisory"];
+export type FlightImpact = components["schemas"]["FlightImpact"];
 
 /** Everything currently affecting one flight (by callsign). Public, no auth. */
 export function usePublicFlight(callsign: string | null) {

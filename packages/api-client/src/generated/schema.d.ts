@@ -883,6 +883,32 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/v1/events/{id}/banner": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * Relays an event's banner image through the API (#429).
+         * @description Banners are third-party URLs mirrored from VATUSA, and organisers use whatever host they like —
+         *     five unrelated ones are in the data already. The bundled desktop app runs under a CSP whose
+         *     `img-src` cannot name them all without becoming `https:`, so the image is fetched here and served
+         *     from our own origin instead. The caller turns it into a `blob:` URL, which the policy does allow.
+         *
+         *     Guarded, because this makes the backend fetch a URL someone else controls: `https` only, public
+         *     addresses only, no redirects, a short timeout, a size cap, and an `image/*` response or nothing.
+         */
+        get: operations["get_event_banner"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/v1/events/{id}/capture": {
         parameters: {
             query?: never;
@@ -2177,6 +2203,39 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/v1/stats/captures/{id}": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        post?: never;
+        /**
+         * Deletes a saved capture, releasing the position data it was pinning (#432).
+         * @description A saved capture is not just a metadata row: `CAPTURE_GUARD` keeps every position inside its window
+         *     out of compaction forever, so until now a mis-scoped capture was storage nobody could reclaim.
+         *
+         *     Gated on `stats.capture.delete` rather than `stats.capture.update`: saving a window and destroying
+         *     one somebody else saved are different levels of trust.
+         *
+         *     An event-tied capture is deletable — blocking it would leave the worst case, a wrongly-scoped
+         *     event capture, with no remedy at all. The consequence is made explicit where the person can act on
+         *     it, in the replay page's confirmation, rather than by refusing here.
+         *
+         *     The one exception is an event capture that is still *open* and still inside the window the
+         *     scheduler watches: discarding it makes the event look uncaptured, so the next scheduler pass opens
+         *     a replacement and the positions stay pinned. Answering 409 is honest about that; the capture is
+         *     saved when its window ends and can be deleted then (#432 review).
+         */
+        delete: operations["delete_capture"];
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/v1/stats/captures/{id}/replay": {
         parameters: {
             query?: never;
@@ -2521,6 +2580,76 @@ export interface paths {
         get: operations["list_taxi_observations"];
         put?: never;
         post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/tmu/advisories": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get: operations["list_advisories"];
+        put?: never;
+        post: operations["create_advisory"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/tmu/advisories/{id}": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get: operations["get_advisory"];
+        put?: never;
+        post?: never;
+        /**
+         * Abandons a draft. `409` when it is not a draft — a published advisory is a document that went out,
+         *     and a cancelled one is a record of that; neither is deleted. Any draft can be abandoned, whether or
+         *     not its number is the top of the sequence; abandoning an older one simply leaves a gap (see
+         *     `repos::tmu::delete_advisory`).
+         */
+        delete: operations["delete_advisory"];
+        options?: never;
+        head?: never;
+        patch: operations["update_advisory"];
+        trace?: never;
+    };
+    "/api/v1/tmu/advisories/{id}/cancel": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        post: operations["cancel_advisory"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/tmu/advisories/{id}/publish": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        post: operations["publish_advisory"];
         delete?: never;
         options?: never;
         head?: never;
@@ -3093,6 +3222,28 @@ export interface components {
             roles: string[];
         };
         /**
+         * @description One advisory. `number` is its identity within `facility` on `issued_day` — see
+         *     `repos::tmu::allocate_advisory_number` for what that sequence promises.
+         */
+        AdvisoryBody: {
+            body: string;
+            /** Format: date-time */
+            created_at: string;
+            decoded?: string | null;
+            facility: string;
+            id: string;
+            /** Format: date */
+            issued_day: string;
+            kind: string;
+            /** Format: int32 */
+            number: number;
+            /** Format: date-time */
+            published_at?: string | null;
+            status: string;
+            /** @description The fields a form-built advisory came from; null when it was typed as raw text. */
+            structured?: unknown;
+        };
+        /**
          * @description A configurable aircraft performance profile (climb / cruise / descent schedules) used by the
          *     trajectory / ETA model. Keyed by `kind` (`type` / `wake` / `default`) + `key` (ICAO type, wake
          *     token, or empty). See migration 0059 and `feed::trajectory`.
@@ -3534,6 +3685,14 @@ export interface components {
             position?: string | null;
             /** Format: int32 */
             slots?: number;
+        };
+        CreateAdvisoryRequest: {
+            body: string;
+            decoded?: string | null;
+            /** @description The issuing facility. The advisory's number is a sequence within this. */
+            facility: string;
+            kind: string;
+            structured?: unknown;
         };
         CreateApiKeyRequest: {
             description?: string | null;
@@ -4294,44 +4453,6 @@ export interface components {
             unknown: string[];
         };
         /**
-         * @description Everything currently affecting one flight (by callsign), for the public "my
-         *     flight" lookup and the FCA-map search. `found` is false when the callsign
-         *     isn't in the live feed.
-         */
-        FlightAdvisory: {
-            aircraft_type: string;
-            /** Format: int64 */
-            altitude: number;
-            arr: string;
-            callsign: string;
-            dep: string;
-            /**
-             * Format: date-time
-             * @description The latest expect-departure-clearance time across ground programs, if any.
-             */
-            edct?: string | null;
-            fcas: components["schemas"]["FlightFcaCrossing"][];
-            found: boolean;
-            gdp?: null | components["schemas"]["FlightGdp"];
-            ground_stop?: null | components["schemas"]["FlightGroundStop"];
-            /** Format: int64 */
-            groundspeed: number;
-            /** Format: int64 */
-            heading: number;
-            /** Format: double */
-            lat: number;
-            /** Format: double */
-            lon: number;
-            rate_program?: null | components["schemas"]["FlightProgram"];
-            /** @description `airborne` | `ground`. */
-            status: string;
-            /**
-             * Format: int64
-             * @description The binding (worst) predicted delay across all applicable initiatives.
-             */
-            total_delay_min: number;
-        };
-        /**
          * @description A manually excluded ("bogus") flight — one VATSIM callsign a controller has dropped from the flow
          *     picture because its data is garbage (issue #342). Scoped to the removing controller's ARTCC.
          *
@@ -4412,6 +4533,49 @@ export interface components {
             airport: string;
             scope: string;
             until?: string | null;
+        };
+        /**
+         * @description Everything currently affecting one flight (by callsign), for the public "my
+         *     flight" lookup and the FCA-map search. `found` is false when the callsign
+         *     isn't in the live feed.
+         *
+         *     Named `FlightImpact`, not `FlightAdvisory` (#456): it is a summary of which initiatives touch
+         *     this flight and what they cost it, not an advisory document. "Advisory" already meant two other
+         *     things here — the pilot-facing board at `/advisories`, and the authored vATCSCC ADVZY documents
+         *     of #437 — and a third use of the word in the type system was the one with no claim to it.
+         */
+        FlightImpact: {
+            aircraft_type: string;
+            /** Format: int64 */
+            altitude: number;
+            arr: string;
+            callsign: string;
+            dep: string;
+            /**
+             * Format: date-time
+             * @description The latest expect-departure-clearance time across ground programs, if any.
+             */
+            edct?: string | null;
+            fcas: components["schemas"]["FlightFcaCrossing"][];
+            found: boolean;
+            gdp?: null | components["schemas"]["FlightGdp"];
+            ground_stop?: null | components["schemas"]["FlightGroundStop"];
+            /** Format: int64 */
+            groundspeed: number;
+            /** Format: int64 */
+            heading: number;
+            /** Format: double */
+            lat: number;
+            /** Format: double */
+            lon: number;
+            rate_program?: null | components["schemas"]["FlightProgram"];
+            /** @description `airborne` | `ground`. */
+            status: string;
+            /**
+             * Format: int64
+             * @description The binding (worst) predicted delay across all applicable initiatives.
+             */
+            total_delay_min: number;
         };
         /** @description One flight-plan revision, for the flight-detail amendment history. */
         FlightPlanRevisionBody: {
@@ -5703,6 +5867,12 @@ export interface components {
         UnresolvedToken: {
             count: number;
             token: string;
+        };
+        UpdateAdvisoryRequest: {
+            body?: string | null;
+            decoded?: string | null;
+            kind?: string | null;
+            structured?: unknown;
         };
         UpdateDashboardRequest: {
             collection_id?: string | null;
@@ -8426,6 +8596,49 @@ export interface operations {
                 };
             };
             401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+        };
+    };
+    get_event_banner: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /** @description VATUSA event id */
+                id: number;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description The event's banner image */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "image/*": unknown;
+                };
+            };
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description No such event, or it has no banner */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description The banner's host did not return a usable image */
+            503: {
                 headers: {
                     [name: string]: unknown;
                 };
@@ -11590,7 +11803,7 @@ export interface operations {
                     [name: string]: unknown;
                 };
                 content: {
-                    "application/json": components["schemas"]["FlightAdvisory"];
+                    "application/json": components["schemas"]["FlightImpact"];
                 };
             };
             401: {
@@ -11703,7 +11916,7 @@ export interface operations {
                     [name: string]: unknown;
                 };
                 content: {
-                    "application/json": components["schemas"]["FlightAdvisory"];
+                    "application/json": components["schemas"]["FlightImpact"];
                 };
             };
         };
@@ -11856,6 +12069,51 @@ export interface operations {
                 content?: never;
             };
             404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+        };
+    };
+    delete_capture: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /** @description Capture id */
+                id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            204: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description The event's capture is still recording; it can be deleted once its window ends */
+            409: {
                 headers: {
                     [name: string]: unknown;
                 };
@@ -12687,6 +12945,233 @@ export interface operations {
                 };
             };
             401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+        };
+    };
+    list_advisories: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["AdvisoryBody"][];
+                };
+            };
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+        };
+    };
+    create_advisory: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["CreateAdvisoryRequest"];
+            };
+        };
+        responses: {
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["AdvisoryBody"];
+                };
+            };
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+        };
+    };
+    get_advisory: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["AdvisoryBody"];
+                };
+            };
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+        };
+    };
+    delete_advisory: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            204: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            409: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+        };
+    };
+    update_advisory: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                id: string;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["UpdateAdvisoryRequest"];
+            };
+        };
+        responses: {
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["AdvisoryBody"];
+                };
+            };
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+        };
+    };
+    cancel_advisory: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["AdvisoryBody"];
+                };
+            };
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            409: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+        };
+    };
+    publish_advisory: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["AdvisoryBody"];
+                };
+            };
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            409: {
                 headers: {
                     [name: string]: unknown;
                 };

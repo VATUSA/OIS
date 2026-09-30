@@ -1,4 +1,4 @@
-import {useMutation, useQuery, useQueryClient,} from "@tanstack/react-query";
+import {useIsMutating, useMutation, useQuery, useQueryClient,} from "@tanstack/react-query";
 import type {components} from "@ois/api-client";
 
 import {API_BASE, ois} from "./api";
@@ -61,14 +61,33 @@ export async function login(): Promise<void> {
  * listener can fail to bind (port already held), time out, or have its code rejected — as a bare
  * `onClick={login}` those were a button that silently did nothing.
  */
+export const LOGIN_MUTATION_KEY = ["auth", "login"] as const;
+
 export function useLogin() {
   const queryClient = useQueryClient();
   return useMutation({
+    mutationKey: LOGIN_MUTATION_KEY,
     mutationFn: login,
     onSuccess: () => {
       void queryClient.invalidateQueries({queryKey: ["me"]});
     },
   });
+}
+
+/**
+ * Whether *any* sign-in is in flight, anywhere in the app.
+ *
+ * A mutation's own `isPending` is per hook instance, and more than one sign-in button can be on
+ * screen at once — signed out on a shared dashboard, the sidebar's identity button and the page's
+ * call to action are both mounted. Clicking each in turn started two `begin_login` calls; the second
+ * takes the loopback port from the first, so finishing the first browser tab then hands its code to a
+ * listener expecting a different nonce, which rejects it and waits out the five-minute timeout in
+ * silence (#428 review).
+ *
+ * Keyed off the shared {@link LOGIN_MUTATION_KEY} so every surface disables together.
+ */
+export function useSignInPending(): boolean {
+  return useIsMutating({mutationKey: LOGIN_MUTATION_KEY}) > 0;
 }
 
 export function useLogout() {
