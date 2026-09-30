@@ -56,9 +56,11 @@ fn skipped_post(channel: &str, what: &str, tmi_id: &str) {
 
 /// The `tmi_publish` job payload: the assembled NTML row plus what the bot needs to post it.
 ///
-/// Shared because there are two publish paths — a TMI published directly, and one materialized from
-/// an event package (`handlers/events.rs`) — and they previously built this object separately. The
-/// bot stays a dumb renderer: everything about NTML's shape is decided here (#436).
+/// Shared because there are three paths that post one — a TMI published directly, one materialized
+/// from an event package (`handlers/events.rs`), and the corrected row an edit posts (#453) — and
+/// they previously built this object separately. A corrected row must be assembled exactly like the
+/// original; the two drifting is how the channel ends up showing a line the row never had. The bot
+/// stays a dumb renderer: everything about NTML's shape is decided here (#436).
 pub(crate) fn tmi_publish_job(channel_id: &str, tmi: &TmiBody) -> serde_json::Value {
     json!({
         "channel_id": channel_id,
@@ -201,12 +203,40 @@ pub async fn update_tmi(
         }
         payload.restriction = Some(crate::tmi::encode(structured));
     }
-    if !tmu_repo::update_tmi(pool, &id, &payload).await? {
-        return Err(ApiError::NotFound);
-    }
-    let mut tmi = tmu_repo::get_tmi(pool, &id)
+    // Resolved before the tx, like `publish_tmi`: no channel configured just means "don't post".
+    let channel = integration_repo::channel_id(pool, NTML_CHANNEL, None).await?;
+    let mut tx = pool.begin().await.map_err(|_| ApiError::Internal)?;
+    let edit = tmu_repo::update_tmi(&mut tx, &id, &payload)
         .await?
         .ok_or(ApiError::NotFound)?;
+    let mut tmi = edit.tmi;
+
+    // An edit to a TMI that is already in the channel posts a **revised row** rather than editing the
+    // original message. NTML is a chronological log and the later line for an element supersedes the
+    // earlier one, which is also the shape a cancellation takes — and editing in place would silently
+    // rewrite what a controller has already read. The row carries no "REVISED" marker on purpose: an
+    // unmarked later line is how NTML reads, and marking it would have to happen bot-side.
+    //
+    // Only `published` posts. A `draft` was never in the channel, and `cancelled`/`expired` have had
+    // their say — re-posting either would put a dead restriction back at the bottom of the log.
+    //
+    // And only when the edit actually changed the line. `rows_affected` cannot tell: a COALESCE update
+    // setting every column to its current value still affects the row, so an empty `PATCH {}` — a "save"
+    // with nothing altered, or a retried request — used to queue a second identical row. In a log whose
+    // premise is that a later line supersedes the earlier one, a duplicate reads as a re-issue, and is
+    // indistinguishable from one (#453 review).
+    //
+    // Enqueued in the same tx as the edit, for the reason `publish_tmi` does it: an edit that commits
+    // without its job is this bug again, and a job without its edit posts a line the row never had.
+    if tmi.status == "published" && edit.line_changed {
+        if let Some(channel_id) = &channel {
+            let job = tmi_publish_job(channel_id, &tmi);
+            integration_repo::enqueue_job(&mut tx, "tmi_publish", &job, Some("tmi"), Some(&tmi.id))
+                .await?;
+        }
+    }
+    tx.commit().await.map_err(|_| ApiError::Internal)?;
+
     restriction_artcc::stamp_tmi(&*state.facilities.read().await, &mut tmi);
     Ok(Json(tmi))
 }
@@ -1631,5 +1661,232 @@ pub async fn delete_advisory(
         Ok(StatusCode::NO_CONTENT)
     } else {
         Err(ApiError::Conflict)
+    }
+}
+
+/// VATUSA/OIS#453 (and its duplicate #466): editing a **published** TMI has to correct the channel.
+///
+/// Driven through the real router rather than by calling the handler, because
+/// `RequirePermission<TmuTmiUpdate>` holds a private field and cannot be constructed here — and
+/// because a test that called the repo directly would stay green if the handler stopped enqueuing,
+/// which is the entire defect. `send` returns only the status, so the assertions that matter read the
+/// enqueued rows back out of the same pool.
+#[cfg(test)]
+mod repost_tests {
+    use sqlx::PgPool;
+
+    use super::NTML_CHANNEL;
+    use crate::scope_test_support::{self, grant, send, session_cookie, test_state};
+
+    /// Map `NTML_CHANNEL` to a channel, the way `repos::integration`'s own tests do.
+    async fn map_tmu_channel(pool: &PgPool) {
+        let config_id = sqlx::query_scalar::<_, String>(
+            "insert into integration.discord_configs (name, guild_id, sort_order) \
+             values ('test-guild', 'test-guild-snowflake', 0) returning id",
+        )
+        .fetch_one(pool)
+        .await
+        .unwrap();
+        sqlx::query(
+            "insert into integration.discord_channels (config_id, name, channel_id) \
+             values ($1, $2, '1234567890')",
+        )
+        .bind(&config_id)
+        .bind(NTML_CHANNEL)
+        .execute(pool)
+        .await
+        .unwrap();
+    }
+
+    async fn seed_tmi(pool: &PgPool, status: &str) -> String {
+        sqlx::query_scalar::<_, String>(
+            "insert into tmu.tmis \
+             (requesting, providing, restriction, status, published_at) \
+             values ('N90', 'ZNY', 'JFK arrivals via CAMRN 20MIT', $1, \
+                     case when $1 = 'draft' then null else now() end) \
+             returning id",
+        )
+        .bind(status)
+        .fetch_one(pool)
+        .await
+        .unwrap()
+    }
+
+    /// The assembled NTML line of every `tmi_publish` job queued for this TMI, newest last.
+    ///
+    /// #436 replaced the payload's loose `requesting`/`providing`/`restriction` fields with the single
+    /// `ntml` row the bot posts verbatim, so the restriction is now a substring of the line rather than
+    /// a column of its own.
+    async fn queued_ntml_lines(pool: &PgPool, tmi_id: &str) -> Vec<String> {
+        sqlx::query_scalar::<_, String>(
+            "select payload->>'ntml' from integration.outbound_jobs \
+             where job_type = 'tmi_publish' and subject_type = 'tmi' and subject_id = $1 \
+             order by created_at",
+        )
+        .bind(tmi_id)
+        .fetch_all(pool)
+        .await
+        .unwrap()
+    }
+
+    /// PATCH a TMI through the router with an arbitrary body, as a user holding `tmu.tmi.update`.
+    async fn patch(pool: PgPool, tmi_id: &str, body: serde_json::Value) -> http::StatusCode {
+        let user = scope_test_support::seed_user(&pool).await;
+        grant(&pool, &user, "tmu.tmi.update", None).await;
+        let cookie = session_cookie(&pool, &user).await;
+        let state = test_state(pool, std::collections::HashMap::new());
+        send(
+            &state,
+            http::Method::PATCH,
+            &format!("/api/v1/tmu/tmis/{tmi_id}"),
+            &cookie,
+            Some(body),
+        )
+        .await
+    }
+
+    /// Edit a TMI through the router as a user holding `tmu.tmi.update`.
+    async fn patch_restriction(pool: PgPool, tmi_id: &str, restriction: &str) -> http::StatusCode {
+        let user = scope_test_support::seed_user(&pool).await;
+        grant(&pool, &user, "tmu.tmi.update", None).await;
+        let cookie = session_cookie(&pool, &user).await;
+        let state = test_state(pool, std::collections::HashMap::new());
+        send(
+            &state,
+            http::Method::PATCH,
+            &format!("/api/v1/tmu/tmis/{tmi_id}"),
+            &cookie,
+            Some(serde_json::json!({ "restriction": restriction })),
+        )
+        .await
+    }
+
+    #[sqlx::test]
+    async fn editing_a_published_tmi_enqueues_a_revised_row(pool: PgPool) {
+        map_tmu_channel(&pool).await;
+        let id = seed_tmi(&pool, "published").await;
+
+        let status = patch_restriction(pool.clone(), &id, "JFK arrivals via CAMRN 30MIT").await;
+        assert_eq!(status, http::StatusCode::OK);
+
+        // The new text, not merely "a job exists" — a job carrying the pre-edit line would leave the
+        // channel just as wrong while looking like the fix worked.
+        let queued = queued_ntml_lines(&pool, &id).await;
+        assert_eq!(
+            queued.len(),
+            1,
+            "an edit to a published TMI must queue exactly one revised row, carrying the new line"
+        );
+        assert!(
+            queued[0].contains("JFK arrivals via CAMRN 30MIT"),
+            "the queued row must carry the expected restriction, got {:?}",
+            queued[0]
+        );
+    }
+
+    #[sqlx::test]
+    async fn editing_a_draft_enqueues_nothing(pool: PgPool) {
+        map_tmu_channel(&pool).await;
+        let id = seed_tmi(&pool, "draft").await;
+
+        let status = patch_restriction(pool.clone(), &id, "JFK arrivals via CAMRN 30MIT").await;
+        assert_eq!(status, http::StatusCode::OK);
+
+        assert!(
+            queued_ntml_lines(&pool, &id).await.is_empty(),
+            "a draft was never posted, so editing it must not put anything in the channel"
+        );
+    }
+
+    #[sqlx::test]
+    async fn editing_a_cancelled_tmi_enqueues_nothing(pool: PgPool) {
+        map_tmu_channel(&pool).await;
+        let id = seed_tmi(&pool, "cancelled").await;
+
+        let status = patch_restriction(pool.clone(), &id, "JFK arrivals via CAMRN 30MIT").await;
+        assert_eq!(status, http::StatusCode::OK);
+
+        assert!(
+            queued_ntml_lines(&pool, &id).await.is_empty(),
+            "a cancelled restriction is dead; re-posting it would revive it at the bottom of the log"
+        );
+    }
+
+    /// #453 review: an edit that changed nothing must not post. `rows_affected` cannot tell — a COALESCE
+    /// update setting every column to its current value still affects the row — so an empty `PATCH {}`
+    /// queued a second identical line. In a log whose premise is that a later line supersedes the earlier
+    /// one, that reads as a re-issue and is indistinguishable from one.
+    ///
+    /// Both shapes are pinned because they arrive by different routes: an empty body leaves every field
+    /// `None`, while a resent value passes COALESCE a value equal to the column's.
+    #[sqlx::test]
+    async fn an_edit_that_changes_nothing_enqueues_nothing(pool: PgPool) {
+        map_tmu_channel(&pool).await;
+        let id = seed_tmi(&pool, "published").await;
+
+        assert_eq!(
+            patch(pool.clone(), &id, serde_json::json!({})).await,
+            http::StatusCode::OK,
+            "a no-op edit is not an error, it just has nothing to say to the channel"
+        );
+        assert!(
+            queued_ntml_lines(&pool, &id).await.is_empty(),
+            "an empty PATCH must not queue a row"
+        );
+
+        assert_eq!(
+            patch(
+                pool.clone(),
+                &id,
+                serde_json::json!({ "restriction": "JFK arrivals via CAMRN 20MIT" })
+            )
+            .await,
+            http::StatusCode::OK
+        );
+        assert!(
+            queued_ntml_lines(&pool, &id).await.is_empty(),
+            "resending the line the row already has must not queue a duplicate either"
+        );
+    }
+
+    /// The other half of the same guard: the valid window *is* part of the posted row, so a `stop_time`-only
+    /// edit has to post even though the restriction text is untouched. A guard written as "was a restriction
+    /// supplied" would silently drop this (#453 review).
+    #[sqlx::test]
+    async fn editing_only_the_valid_window_still_enqueues(pool: PgPool) {
+        map_tmu_channel(&pool).await;
+        let id = seed_tmi(&pool, "published").await;
+
+        let status = patch(
+            pool.clone(),
+            &id,
+            serde_json::json!({ "stop_time": "2026-06-01T23:15:00Z" }),
+        )
+        .await;
+        assert_eq!(status, http::StatusCode::OK);
+
+        let queued = queued_ntml_lines(&pool, &id).await;
+        assert_eq!(
+            queued.len(),
+            1,
+            "the window changed, so the channel needs the corrected row — carrying the same text"
+        );
+        assert!(
+            queued[0].contains("JFK arrivals via CAMRN 20MIT"),
+            "the queued row must carry the expected restriction, got {:?}",
+            queued[0]
+        );
+    }
+
+    /// No channel mapped means "don't post" everywhere else in this file, and an edit is no different
+    /// — in particular it must not fail the edit.
+    #[sqlx::test]
+    async fn an_edit_with_no_channel_mapped_enqueues_nothing(pool: PgPool) {
+        let id = seed_tmi(&pool, "published").await;
+
+        let status = patch_restriction(pool.clone(), &id, "JFK arrivals via CAMRN 30MIT").await;
+        assert_eq!(status, http::StatusCode::OK);
+
+        assert!(queued_ntml_lines(&pool, &id).await.is_empty());
     }
 }

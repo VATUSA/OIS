@@ -104,8 +104,16 @@ pub async fn create_tmi(
     .map_err(|_| ApiError::Internal)
 }
 
-/// Updates the given fields (COALESCE — omitted fields are left unchanged). Returns
-/// false if the TMI doesn't exist.
+/// Update the given fields (COALESCE — omitted fields are left unchanged) **in the caller's
+/// transaction**, so that a published TMI's corrected Discord row can be enqueued atomically with
+/// the edit. Returns the updated row, or `None` if the TMI doesn't exist.
+///
+/// Shaped like [`publish_tmi`], including re-selecting rather than using `returning`: `SELECT` joins
+/// `identity.users` for `author`, which `returning` cannot produce.
+///
+/// Returns the row **and whether any field that appears in the posted NTML line actually changed** — see
+/// [`TmiEdit`]. `rows_affected` cannot answer that: a COALESCE update setting every column to its current
+/// value still affects the row, so it only distinguishes "no such id" (#453 review).
 ///
 /// `structured`/`decoded` are the exception to "omitted means unchanged" (#452). Three cases:
 ///
@@ -117,9 +125,22 @@ pub async fn create_tmi(
 ///
 /// The third case is why this cannot be a blanket clear: editing only the valid window must not throw
 /// the breakdown away. COALESCE cannot express "set to null", hence the explicit flag.
-pub async fn update_tmi(pool: &PgPool, id: &str, req: &UpdateTmiRequest) -> Result<bool, ApiError> {
+///
+/// Neither column appears in the NTML line, so a breakdown-only change correctly leaves
+/// `line_changed` false; a structured edit reaches here with `restriction` already re-derived by the
+/// handler, which is what makes it count as a changed line.
+pub async fn update_tmi(
+    tx: &mut Transaction<'_, Postgres>,
+    id: &str,
+    req: &UpdateTmiRequest,
+) -> Result<Option<TmiEdit>, ApiError> {
     let clear_breakdown = req.structured.is_none() && req.restriction.is_some();
     let decoded = req.structured.as_ref().map(crate::tmi::render_english);
+    // Read the pre-edit row inside the same transaction, so "did the line change" is answered against the
+    // row the edit is actually applied to rather than one that may have moved under us.
+    let Some(before) = get_tmi_tx(tx, id).await? else {
+        return Ok(None);
+    };
     let result = sqlx::query(
         "update tmu.tmis set \
             requesting = coalesce($2, requesting), \
@@ -140,10 +161,54 @@ pub async fn update_tmi(pool: &PgPool, id: &str, req: &UpdateTmiRequest) -> Resu
     .bind(clear_breakdown)
     .bind(req.structured.as_ref().map(sqlx::types::Json))
     .bind(decoded)
-    .execute(pool)
+    .execute(&mut **tx)
     .await
     .map_err(|_| ApiError::Internal)?;
-    Ok(result.rows_affected() > 0)
+    if result.rows_affected() == 0 {
+        return Ok(None);
+    }
+    let Some(tmi) = get_tmi_tx(tx, id).await? else {
+        return Ok(None);
+    };
+    Ok(Some(TmiEdit {
+        line_changed: line_fields_differ(&before, &tmi),
+        tmi,
+    }))
+}
+
+/// A TMI after an edit, and whether the edit changed anything the channel shows.
+pub struct TmiEdit {
+    pub tmi: TmiBody,
+    /// True when a field carried by the posted NTML line differs from before the edit. The handler posts a
+    /// revised row only then: an edit that changed nothing must not put a second identical line into a log
+    /// whose whole premise is that a later line supersedes the earlier one (#453 review).
+    pub line_changed: bool,
+}
+
+/// The fields the posted NTML row is built from — `tmi_publish_job`'s payload, in other words.
+///
+/// `restriction`, `requesting` and `providing` are the line's text and its `REQ:PROV` token; the two times
+/// are its valid window, which is why a `stop_time`-only edit **must** still post. Anything outside this
+/// set (`status` transitions, `author`, `decoded`) either has its own path or does not appear in the
+/// channel (#453 review).
+fn line_fields_differ(before: &TmiBody, after: &TmiBody) -> bool {
+    before.restriction != after.restriction
+        || before.requesting != after.requesting
+        || before.providing != after.providing
+        || before.start_time != after.start_time
+        || before.stop_time != after.stop_time
+}
+
+/// `get_tmi` against a transaction, so the before/after comparison sees the edit's own snapshot.
+async fn get_tmi_tx(
+    tx: &mut Transaction<'_, Postgres>,
+    id: &str,
+) -> Result<Option<TmiBody>, ApiError> {
+    sqlx::query_as::<_, TmiBody>(&format!("{SELECT} where t.id = $1"))
+        .bind(id)
+        .fetch_optional(&mut **tx)
+        .await
+        .map_err(|_| ApiError::Internal)
 }
 
 /// Publishes a draft. Returns false if the TMI isn't currently a draft.
@@ -982,6 +1047,16 @@ mod tests {
         (id, original)
     }
 
+    /// `update_tmi` runs in the caller's transaction since #453, so it can enqueue the corrected
+    /// Discord row atomically with the edit. These tests only care that the edit applied, so they
+    /// open a transaction, commit it, and hand back what it reported.
+    async fn edit(pool: &PgPool, id: &str, req: &UpdateTmiRequest) -> Option<TmiEdit> {
+        let mut tx = pool.begin().await.unwrap();
+        let edited = update_tmi(&mut tx, id, req).await.unwrap();
+        tx.commit().await.unwrap();
+        edited
+    }
+
     fn patch() -> UpdateTmiRequest {
         UpdateTmiRequest {
             requesting: None,
@@ -1004,7 +1079,7 @@ mod tests {
         // Edit through the fields: 20MIT → 30MIT.
         let edited = ntml("JFK", 30);
         assert!(
-            update_tmi(
+            edit(
                 &pool,
                 &id,
                 &UpdateTmiRequest {
@@ -1014,7 +1089,7 @@ mod tests {
                 },
             )
             .await
-            .unwrap()
+            .is_some()
         );
 
         let after = get_tmi(&pool, &id).await.unwrap().unwrap();
@@ -1034,7 +1109,7 @@ mod tests {
         let (id, _) = structured_tmi(&pool).await;
 
         assert!(
-            update_tmi(
+            edit(
                 &pool,
                 &id,
                 &UpdateTmiRequest {
@@ -1043,7 +1118,7 @@ mod tests {
                 },
             )
             .await
-            .unwrap()
+            .is_some()
         );
 
         let after = get_tmi(&pool, &id).await.unwrap().unwrap();
@@ -1062,7 +1137,7 @@ mod tests {
         let (id, original) = structured_tmi(&pool).await;
 
         assert!(
-            update_tmi(
+            edit(
                 &pool,
                 &id,
                 &UpdateTmiRequest {
@@ -1071,7 +1146,7 @@ mod tests {
                 },
             )
             .await
-            .unwrap()
+            .is_some()
         );
 
         let after = get_tmi(&pool, &id).await.unwrap().unwrap();
