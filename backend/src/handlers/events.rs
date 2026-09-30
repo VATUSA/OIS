@@ -1308,10 +1308,13 @@ pub async fn get_event_stats(
 
 /// The body of [`get_event_stats`], without the extractors.
 ///
-/// Split out so the window it reports can be tested: `RequirePermission` holds a private field, and
-/// the alternative — a test-only constructor on a permission type — is not a door worth opening for
-/// a stats query. Which window this picks is the whole of #433's AC 4, and nothing covered it while
-/// it lived inside the handler (#433 review).
+/// Split out so the window it reports can be asserted on. `RequirePermission` holds a private field,
+/// so a gated handler cannot be called directly; the crate's answer to that is
+/// [`crate::scope_test_support::send`], which drives a real request through the real router — but it
+/// returns a `StatusCode` and nothing else, and what AC 4 is about is a *value in the body*. Rather
+/// than widen a helper built for authorization boundaries, the logic moved. Note what that leaves
+/// uncovered: the extractor on `get_event_stats` and this delegation. If either needs pinning, extend
+/// `send` to hand back the body — not a test-only constructor on a permission type (#433 review).
 async fn event_stats(pool: &sqlx::PgPool, id: i64) -> Result<EventStatsBody, ApiError> {
     let Some(event) = events_repo::get(pool, id).await? else {
         return Err(ApiError::NotFound);
@@ -1371,11 +1374,19 @@ async fn event_stats(pool: &sqlx::PgPool, id: i64) -> Result<EventStatsBody, Api
     //
     // Prefer the copy frozen when the capture closed (#433). Movements come from `stats.flight_leg`,
     // which is pruned at 30 days, so a past event recomputed from legs would report zero once they
-    // aged out. Live and recently-finished events have no snapshot yet and compute as normal.
-    // A snapshot also carries the window it was taken over, and that is what gets reported: an event
-    // rescheduled after its capture closed keeps the counts it earned, and labelling them with the
-    // new times would describe them as something they are not (#433 review).
-    let (breakdown, from, to) = match stats_repo::event_movements_snapshot(pool, id).await? {
+    // aged out. The snapshot also carries the window it was taken over, and that is what gets
+    // reported: an event rescheduled after its capture closed keeps the counts it earned, and
+    // labelling them with the new times would describe them as something they are not.
+    //
+    // Only a **saved** capture's snapshot, though. A rescheduled event opens a second one, and while
+    // that is recording the event is live again — serving the frozen copy then reported the previous
+    // run's counts under the previous run's window, with `status: open` beside them, until the new
+    // capture closed (#433 review).
+    let snapshot = match cap.status.as_str() {
+        "saved" => stats_repo::event_movements_snapshot(pool, id).await?,
+        _ => None,
+    };
+    let (breakdown, from, to) = match snapshot {
         Some(snap) => (snap.rows, snap.window_start, snap.window_end),
         None => (
             stats_repo::event_airport_breakdown(pool, &icaos, from, to).await?,
@@ -1710,6 +1721,39 @@ mod stats_window_tests {
 
         assert_eq!(body.window_end, Some(at(14, 0)), "not now()");
         assert_eq!(body.combined.movements, 1);
+    }
+
+    /// A frozen copy is only preferred while the latest capture is `saved`. Serving it during a
+    /// *second, open* capture reported the previous run's counts under the previous run's window while
+    /// `status` said `open` beside them, and it stayed that way until the new capture closed
+    /// (#433 review).
+    #[sqlx::test]
+    async fn a_live_recapture_computes_instead_of_serving_the_frozen_copy(pool: PgPool) {
+        seed(&pool, None).await; // an `open` capture — the event is being recorded again
+        stats_repo::snapshot_event_movements(
+            &pool,
+            EVENT,
+            at(6, 0),
+            at(8, 0),
+            &[stats_repo::AirportBreakdown {
+                icao: "KJFK".into(),
+                arrivals: 40,
+                departures: 40,
+                unique_pilots: 9,
+            }],
+        )
+        .await
+        .unwrap();
+        leg(&pool, "departure", 6, at(13, 0)).await;
+
+        let body = stats(&pool).await;
+
+        assert_eq!(
+            body.combined.movements, 1,
+            "the live count, not the 80 frozen from the previous run"
+        );
+        assert_eq!(body.window_start, Some(at(12, 0)), "and the live window");
+        assert_eq!(body.window_end, Some(at(14, 0)));
     }
 
     /// The frozen copy is served with the window it was taken over, so an event rescheduled after

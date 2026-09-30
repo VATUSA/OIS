@@ -1156,8 +1156,12 @@ pub async fn event_airport_breakdown(
 
 /// Freeze an event's per-airport breakdown, so it survives leg retention (#433).
 ///
-/// Called once, when the capture closes. Idempotent on `(event_id, icao)` so a re-close — or a
-/// re-run of the scheduler pass — overwrites rather than duplicating.
+/// A **replace**, not just an upsert: the event's rows for airports absent from `rows` are deleted in
+/// the same transaction. Upserting alone left a dropped airport behind with counts and a window from
+/// an earlier freeze, and since [`event_movements_snapshot`] reads the reported window off the
+/// busiest row, that stale row could both inflate `combined` and mislabel the entire response
+/// (#433 review). The delete and the insert share one transaction so a concurrent read never sees a
+/// half-replaced snapshot.
 pub async fn snapshot_event_movements(
     pool: &PgPool,
     event_id: i64,
@@ -1168,6 +1172,14 @@ pub async fn snapshot_event_movements(
     if rows.is_empty() {
         return Ok(0);
     }
+    let icaos: Vec<String> = rows.iter().map(|r| r.icao.clone()).collect();
+    let mut tx = pool.begin().await.map_err(db)?;
+    sqlx::query("delete from stats.event_movements where event_id = $1 and icao <> all($2)")
+        .bind(event_id)
+        .bind(&icaos)
+        .execute(&mut *tx)
+        .await
+        .map_err(db)?;
     let mut qb: QueryBuilder<Postgres> = QueryBuilder::new(
         "insert into stats.event_movements \
          (event_id, icao, arrivals, departures, unique_pilots, window_start, window_end) ",
@@ -1187,7 +1199,8 @@ pub async fn snapshot_event_movements(
          unique_pilots = excluded.unique_pilots, window_start = excluded.window_start, \
          window_end = excluded.window_end, captured_at = now()",
     );
-    let res = qb.build().execute(pool).await.map_err(db)?;
+    let res = qb.build().execute(&mut *tx).await.map_err(db)?;
+    tx.commit().await.map_err(db)?;
     Ok(res.rows_affected())
 }
 
@@ -1211,6 +1224,50 @@ struct SnapshotRow {
     window_end: DateTime<Utc>,
 }
 
+/// An event's own window, for the movement-snapshot backfill.
+#[derive(Debug, sqlx::FromRow)]
+pub struct EventWindow {
+    pub event_id: i64,
+    pub start_time: DateTime<Utc>,
+    pub end_time: DateTime<Utc>,
+}
+
+/// Events that finished with a saved capture but have no frozen movement breakdown (#433 review).
+///
+/// The close transition is the only thing that writes a snapshot, and it needs an *open* capture — so
+/// every event that closed before `stats.event_movements` existed would never get one, keep computing
+/// from `stats.flight_leg`, and drop to zero as its legs crossed `DELAY_LEG_RETAIN_DAYS`. This is
+/// what lets the scheduler freeze them retroactively, while their legs are still there.
+///
+/// Excludes events with an *open* capture: one of those is being recorded again (rescheduled), and
+/// its numbers are not final yet.
+///
+/// Bounded to the last `leg_retain_days`, which is what makes this cheap enough to run on every
+/// scheduler tick. An event whose window ended before that has no legs left to count, so it can never
+/// be backfilled — and because the all-zero guard deliberately declines to freeze it, an unbounded
+/// query would re-answer and re-compute it once a minute forever.
+pub async fn events_missing_movement_snapshot(
+    pool: &PgPool,
+    leg_retain_days: i64,
+) -> Result<Vec<EventWindow>, ApiError> {
+    sqlx::query_as::<_, EventWindow>(
+        "select e.id as event_id, e.start_time, e.end_time \
+         from stats.event_capture ec join events.event e on e.id = ec.event_id \
+         where e.end_time < now() \
+           and e.end_time > now() - make_interval(days => $1::int) \
+           and exists (select 1 from stats.capture c \
+                        where c.event_id = e.id and c.status = 'saved') \
+           and not exists (select 1 from stats.capture c \
+                            where c.event_id = e.id and c.status = 'open') \
+           and not exists (select 1 from stats.event_movements m where m.event_id = e.id) \
+         order by e.end_time desc",
+    )
+    .bind(leg_retain_days)
+    .fetch_all(pool)
+    .await
+    .map_err(db)
+}
+
 /// The frozen breakdown for an event, or `None` when it was never snapshotted.
 pub async fn event_movements_snapshot(
     pool: &PgPool,
@@ -1219,7 +1276,7 @@ pub async fn event_movements_snapshot(
     let rows = sqlx::query_as::<_, SnapshotRow>(
         "select icao, arrivals, departures, unique_pilots, window_start, window_end \
          from stats.event_movements \
-         where event_id = $1 order by (arrivals + departures) desc",
+         where event_id = $1 order by (arrivals + departures) desc, icao",
     )
     .bind(event_id)
     .fetch_all(pool)
@@ -1229,7 +1286,9 @@ pub async fn event_movements_snapshot(
     let Some(first) = rows.first() else {
         return Ok(None);
     };
-    // Every row of one snapshot is written in a single statement with the same window.
+    // Safe because `snapshot_event_movements` replaces rather than upserts: every row for an event
+    // comes from the same freeze, so any of them carries that freeze's window. The `, icao`
+    // tiebreaker above makes which one deterministic when two airports tie (#433 review).
     let (window_start, window_end) = (first.window_start, first.window_end);
     Ok(Some(MovementsSnapshot {
         window_start,
@@ -1949,6 +2008,44 @@ mod tests {
         let snap = event_movements_snapshot(&pool, 901).await.unwrap().unwrap();
         assert_eq!(snap.rows.len(), 1, "one row per (event, airport)");
         assert_eq!((snap.rows[0].arrivals, snap.rows[0].departures), (9, 9));
+    }
+
+    /// A re-freeze is a **replace**. Upserting alone left a dropped airport behind with counts and a
+    /// window from the earlier freeze, and since the window is read off the busiest row, that stale
+    /// row both inflated `combined` and mislabelled the whole response. Proven against the real
+    /// schema before the fix: KBOS(50/50)@12:00–14:00 survived beside KJFK(2/2)@18:00–20:00 and, being
+    /// busiest, supplied 12:00–14:00 as the reported window for a 4-movement event reporting 104
+    /// (#433 review).
+    #[sqlx::test]
+    async fn re_freezing_with_fewer_airports_drops_the_ones_no_longer_featured(pool: PgPool) {
+        let (from, to) = window();
+        event(&pool, 903).await;
+
+        snapshot_event_movements(
+            &pool,
+            903,
+            from,
+            to,
+            &[breakdown("KBOS", 50, 50), breakdown("KJFK", 1, 1)],
+        )
+        .await
+        .unwrap();
+
+        // Rescheduled, and KBOS is no longer a featured airport: a second freeze over a later window.
+        let (from2, to2) = (at(18, 0), at(20, 0));
+        snapshot_event_movements(&pool, 903, from2, to2, &[breakdown("KJFK", 2, 2)])
+            .await
+            .unwrap();
+
+        let snap = event_movements_snapshot(&pool, 903).await.unwrap().unwrap();
+        assert_eq!(snap.rows.len(), 1, "KBOS is gone, not left behind at 50/50");
+        assert_eq!(snap.rows[0].icao, "KJFK");
+        assert_eq!((snap.rows[0].arrivals, snap.rows[0].departures), (2, 2));
+        assert_eq!(
+            (snap.window_start, snap.window_end),
+            (from2, to2),
+            "the window of the freeze that is actually in the table"
+        );
     }
 
     /// An event that was never snapshotted must say so, not return an empty breakdown — the read
