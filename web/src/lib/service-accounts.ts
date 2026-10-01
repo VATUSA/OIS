@@ -1,0 +1,98 @@
+import {useMutation, useQuery, useQueryClient} from "@tanstack/react-query";
+import type {components} from "@ois/api-client";
+
+import {useToast} from "@ois/ui";
+import {ois} from "./api";
+
+export type ServiceAccount = components["schemas"]["ServiceAccountBody"];
+export type ServiceAccountToken = components["schemas"]["ServiceAccountTokenBody"];
+export type CreateServiceAccountRequest = components["schemas"]["CreateServiceAccountRequest"];
+export type SetServiceAccountRolesRequest =
+  components["schemas"]["SetServiceAccountRolesRequest"];
+
+export const ACCOUNTS = ["service-accounts"] as const;
+const ROLES = ["service-account-roles"] as const;
+
+/** Every service account, with its granted roles. */
+export function useServiceAccounts() {
+  return useQuery({
+    queryKey: ACCOUNTS,
+    queryFn: async (): Promise<ServiceAccount[]> => {
+      const {data, error} = await ois.GET("/api/v1/admin/service-accounts");
+      if (error || !data) throw new Error("failed to load service accounts");
+      return data;
+    },
+  });
+}
+
+/**
+ * The roles a service account may hold. Deliberately *not* the access catalog: that serves
+ * ASSIGNABLE_USER_ROLES, the human editor's list, which omits the machine roles — so a picker
+ * built from it could never grant BOT. This endpoint returns the same list the backend validates
+ * against, so the two cannot disagree.
+ */
+export function useAssignableRoles() {
+  return useQuery({
+    queryKey: ROLES,
+    queryFn: async (): Promise<string[]> => {
+      const {data, error} = await ois.GET("/api/v1/admin/service-accounts/roles");
+      if (error || !data) throw new Error("failed to load assignable roles");
+      return data;
+    },
+    staleTime: 5 * 60_000,
+  });
+}
+
+/**
+ * Add a just-issued token to the on-screen reveals, newest first. A token is shown only once, so
+ * another account's reveal is never dropped; the same account re-issued replaces its dead token.
+ */
+export function withReveal(
+  reveals: readonly ServiceAccountToken[],
+  token: ServiceAccountToken,
+): ServiceAccountToken[] {
+  return [token, ...reveals.filter((t) => t.account.id !== token.account.id)];
+}
+
+export function withoutReveal(
+  reveals: readonly ServiceAccountToken[],
+  accountId: string,
+): ServiceAccountToken[] {
+  return reveals.filter((t) => t.account.id !== accountId);
+}
+
+/** Create an account. The plaintext token in the result is shown once — never returned again. */
+export function useCreateServiceAccount() {
+  const qc = useQueryClient();
+  const toast = useToast();
+  return useMutation({
+    mutationFn: async (body: CreateServiceAccountRequest): Promise<ServiceAccountToken> => {
+      const {data, error} = await ois.POST("/api/v1/admin/service-accounts", {body});
+      if (error || !data) throw new Error("create failed");
+      return data;
+    },
+    onSuccess: () => qc.invalidateQueries({queryKey: ACCOUNTS}),
+    onError: () => toast.error("Couldn’t create the service account"),
+  });
+}
+
+/** Replace an account's roles. A full replace, not a patch. */
+export function useSetServiceAccountRoles() {
+  const qc = useQueryClient();
+  const toast = useToast();
+  return useMutation({
+    mutationFn: async (args: {
+      id: string;
+      body: SetServiceAccountRolesRequest;
+    }): Promise<ServiceAccount> => {
+      const {data, error} = await ois.PUT("/api/v1/admin/service-accounts/{id}/roles", {
+        params: {path: {id: args.id}},
+        body: args.body,
+      });
+      if (error || !data) throw new Error("set roles failed");
+      return data;
+    },
+    onSuccess: () => qc.invalidateQueries({queryKey: ACCOUNTS}),
+    onError: () => toast.error("Couldn’t update the roles"),
+  });
+}
