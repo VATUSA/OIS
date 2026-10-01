@@ -176,7 +176,7 @@ describe("AdminServiceAccounts (VATUSA/OIS#531)", () => {
  * exists only in a React state that dies with the component.
  *
  * So this reads the source, in the same spirit as `features/dashboard/nas-template-gate.test.ts` and
- * `components/map/lib/desktop-events.guard.test.ts` (#439): crude on purpose, and aimed at the one
+ * `lib/desktop-events.guard.test.ts` (#439): crude on purpose, and aimed at the one
  * thing that must not silently change.
  */
 describe("the token never reaches client storage (VATUSA/OIS#531 AC2)", () => {
