@@ -60,6 +60,14 @@ const OUTBOUND_JOB_LEASE_TIMEOUT_MINS: i64 = 5;
 /// drift silently the first time a route was added.
 const AUDIT_RETAIN_DAYS: i64 = 180;
 
+/// How long a departure-runway assignment outlives its last touch (#509).
+///
+/// Hours, not days: an assignment describes a flight that is about to depart, so one untouched for
+/// this long belongs to an aircraft that has gone. `flow.departure_runway_assignment` is the first
+/// callsign-keyed table with no parent row to cascade from — `flow.fca_release` and `tmu.gdp_slot`
+/// both vanish with their initiative — so this is the only thing that removes a row.
+const DEPARTURE_RUNWAY_RETAIN_HOURS: i64 = 12;
+
 /// Weekly compaction ladder for `stats.position`: `(age_days, keep_every)`. When a position's age
 /// first crosses `age_days`, keep only every `keep_every`-th sample of the survivors handed down
 /// from the previous tier — an *incremental* factor, not a cumulative target. Each pass only looks
@@ -985,6 +993,37 @@ pub fn spawn_audit_log_prune(reg: Arc<JobRegistry>, pool: PgPool) {
     ));
 }
 
+/// Delete departure-runway assignments past [`DEPARTURE_RUNWAY_RETAIN_HOURS`] (#509).
+///
+/// Its own job rather than a pass inside the stats compaction, following `spawn_audit_log_prune`'s
+/// reasoning: retention here is a modelling consequence of the table's key, not stats housekeeping,
+/// and a separate entry is what makes it visible and runnable in the admin jobs view.
+pub fn spawn_departure_runway_prune(reg: Arc<JobRegistry>, pool: PgPool) {
+    tokio::spawn(run_interval(
+        reg,
+        "departure_runway_prune",
+        "Delete departure-runway assignments past their retention window",
+        CLEANUP_INTERVAL,
+        move || {
+            let pool = pool.clone();
+            async move { departure_runway_prune_once(&pool).await }
+        },
+    ));
+}
+
+/// One prune pass.
+///
+/// Split out of the spawn for the reason [`outbound_job_reaper_once`] records: the cutoff is
+/// computed from a constant, and a constant that no test can reach is exactly the kind of thing that
+/// gets "tuned" without anyone noticing what it turns off.
+async fn departure_runway_prune_once(pool: &PgPool) -> Result<String, String> {
+    let before = Utc::now() - chrono::Duration::hours(DEPARTURE_RUNWAY_RETAIN_HOURS);
+    crate::repos::departure_runway::prune(pool, before)
+        .await
+        .map(|n| format!("{n} deleted"))
+        .map_err(|_| "prune failed".to_string())
+}
+
 /// One reaper pass: anything `in_progress` past [`OUTBOUND_JOB_LEASE_TIMEOUT_MINS`] goes back to the
 /// queue.
 ///
@@ -1257,6 +1296,91 @@ mod nav_health_tests {
                 .1,
             None
         );
+    }
+}
+
+#[cfg(test)]
+mod departure_runway_prune_tests {
+    use sqlx::PgPool;
+
+    use super::{DEPARTURE_RUNWAY_RETAIN_HOURS, departure_runway_prune_once};
+    use crate::repos::departure_runway::{RunwaySource, assign, get};
+
+    /// Ages are **absolute hours, not offsets from [`DEPARTURE_RUNWAY_RETAIN_HOURS`]**, and that is
+    /// the whole point of these two cases.
+    ///
+    /// Backdating by `RETAIN_HOURS + 1` reads as careful and is worthless: the row moves with the
+    /// constant, so the test passes for *any* value of it. Widening the horizon from 12 hours to a
+    /// year left both of these green when they were written that way — the exact failure
+    /// `outbound_job_reaper_once`'s doc warns about, reproduced while trying to avoid it.
+    ///
+    /// Fixed ages straddling the documented 12-hour horizon mean a change to the policy has to come
+    /// with a change here, which is what makes it deliberate.
+    const STALE_AGE_HOURS: i32 = 13;
+    const FRESH_AGE_HOURS: i32 = 11;
+
+    async fn age(pool: &PgPool, callsign: &str, hours: i32) {
+        sqlx::query(
+            "update flow.departure_runway_assignment \
+             set updated_at = now() - make_interval(hours => $2::int) where callsign = $1",
+        )
+        .bind(callsign)
+        .bind(hours)
+        .execute(pool)
+        .await
+        .unwrap();
+    }
+
+    /// Guards the constant itself. `STALE`/`FRESH` only straddle the horizon while it sits between
+    /// them, so this says out loud what those ages assume.
+    #[test]
+    fn the_fixed_ages_straddle_the_retention_horizon() {
+        assert!(
+            (FRESH_AGE_HOURS as i64) < DEPARTURE_RUNWAY_RETAIN_HOURS
+                && DEPARTURE_RUNWAY_RETAIN_HOURS < (STALE_AGE_HOURS as i64),
+            "retention is {DEPARTURE_RUNWAY_RETAIN_HOURS}h, which no longer sits between \
+             {FRESH_AGE_HOURS}h and {STALE_AGE_HOURS}h — update both the constant and these ages"
+        );
+    }
+
+    /// The pass, not `repos::departure_runway::prune` directly: `prune` takes its cutoff as a
+    /// parameter, so testing it alone proves nothing about the constant the job actually uses.
+    #[sqlx::test]
+    async fn the_pass_prunes_past_the_retention_horizon(pool: PgPool) {
+        assign(&pool, "KJFK", "STALE", "13R", RunwaySource::Auto, None)
+            .await
+            .unwrap();
+        assign(&pool, "KJFK", "FRESH", "13R", RunwaySource::Auto, None)
+            .await
+            .unwrap();
+        age(&pool, "STALE", STALE_AGE_HOURS).await;
+        age(&pool, "FRESH", FRESH_AGE_HOURS).await;
+
+        assert_eq!(
+            departure_runway_prune_once(&pool).await.unwrap(),
+            "1 deleted"
+        );
+        assert!(get(&pool, "KJFK", "STALE").await.unwrap().is_none());
+        assert!(
+            get(&pool, "KJFK", "FRESH").await.unwrap().is_some(),
+            "an assignment inside the horizon must survive the sweep"
+        );
+    }
+
+    /// A sweep with nothing stale must not touch the table — the delete is bounded by `updated_at`,
+    /// not a blanket clear.
+    #[sqlx::test]
+    async fn a_sweep_with_nothing_stale_deletes_nothing(pool: PgPool) {
+        assign(&pool, "KJFK", "FRESH", "13R", RunwaySource::Auto, None)
+            .await
+            .unwrap();
+        age(&pool, "FRESH", FRESH_AGE_HOURS).await;
+
+        assert_eq!(
+            departure_runway_prune_once(&pool).await.unwrap(),
+            "0 deleted"
+        );
+        assert!(get(&pool, "KJFK", "FRESH").await.unwrap().is_some());
     }
 }
 

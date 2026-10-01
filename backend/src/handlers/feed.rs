@@ -761,6 +761,7 @@ mod tests {
             aar,
             adr: 40,
             landing_runways: vec!["01".to_string()],
+            departure_runways: vec![],
             wind_from_deg: 0,
             wind_to_deg: 90,
             calm_default,

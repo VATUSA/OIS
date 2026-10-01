@@ -3355,6 +3355,11 @@ export interface components {
             artcc: string;
             /** @description Used when the wind is light/variable or nothing matches (at most one per airport). */
             calm_default: boolean;
+            /**
+             * @description Runways departures are expected to use under this config — the departure side of
+             *     `landing_runways`, and the third rung of #511's prediction ladder (#509).
+             */
+            departure_runways: string[];
             /** @description Whether the requesting user may edit this airport's configs (per their ARTCC scope). */
             editable: boolean;
             icao: string;
@@ -6120,6 +6125,7 @@ export interface components {
             /** Format: int32 */
             adr: number;
             calm_default?: boolean;
+            departure_runways?: string[];
             landing_runways?: string[];
             name: string;
             /** Format: int32 */

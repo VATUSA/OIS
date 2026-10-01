@@ -292,10 +292,56 @@ mod tests {
             aar: 30,
             adr: 30,
             landing_runways: vec![],
+            departure_runways: vec![],
             wind_from_deg: 0,
             wind_to_deg: 360,
             calm_default: false,
         }
+    }
+
+    /// #509 AC 3: `departure_runways` has to survive a create *and* an update. Both SQL statements
+    /// list their columns positionally, so a column added to one and not the other, or bound out of
+    /// order, writes the wrong value — and with two `text[]` columns side by side that silently swaps
+    /// arrivals for departures rather than failing.
+    #[sqlx::test]
+    async fn departure_runways_round_trip_through_create_and_update(pool: PgPool) {
+        let user = seed_user(&pool).await;
+        let created = config_repo::create(
+            &pool,
+            "KJFK",
+            &UpsertAirportConfigRequest {
+                landing_runways: vec!["04R".into(), "22L".into()],
+                departure_runways: vec!["04L".into(), "31L".into()],
+                ..upsert("JFK south")
+            },
+            "ZNY",
+            &user,
+        )
+        .await
+        .unwrap();
+        assert_eq!(created.departure_runways, vec!["04L", "31L"]);
+        assert_eq!(
+            created.landing_runways,
+            vec!["04R", "22L"],
+            "the two arrays must not be swapped"
+        );
+
+        let updated = config_repo::update(
+            &pool,
+            &created.id,
+            "KJFK",
+            &UpsertAirportConfigRequest {
+                landing_runways: vec!["13L".into()],
+                departure_runways: vec!["13R".into()],
+                ..upsert("JFK south")
+            },
+            &user,
+        )
+        .await
+        .unwrap()
+        .expect("the config exists");
+        assert_eq!(updated.departure_runways, vec!["13R"]);
+        assert_eq!(updated.landing_runways, vec!["13L"]);
     }
 
     /// Realignment scenario: KORD's config was created while ZDC owned it (stored `artcc: "ZDC"`),

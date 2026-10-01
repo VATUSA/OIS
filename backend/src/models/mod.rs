@@ -876,6 +876,9 @@ pub struct AirportConfigBody {
     pub aar: i32,
     pub adr: i32,
     pub landing_runways: Vec<String>,
+    /// Runways departures are expected to use under this config — the departure side of
+    /// `landing_runways`, and the third rung of #511's prediction ladder (#509).
+    pub departure_runways: Vec<String>,
     /// Favored-wind rule: applies when the surface wind direction is within [from, to] (wrap-around
     /// allowed). Ignored when `calm_default`.
     pub wind_from_deg: i32,
@@ -897,6 +900,8 @@ pub struct UpsertAirportConfigRequest {
     pub adr: i32,
     #[serde(default)]
     pub landing_runways: Vec<String>,
+    #[serde(default)]
+    pub departure_runways: Vec<String>,
     pub wind_from_deg: i32,
     pub wind_to_deg: i32,
     #[serde(default)]

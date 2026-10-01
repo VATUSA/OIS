@@ -10,6 +10,7 @@ use crate::{
 };
 
 const CONFIG_SELECT: &str = "select c.id, c.icao, c.name, c.aar, c.adr, c.landing_runways, \
+    c.departure_runways, \
     c.wind_from_deg, c.wind_to_deg, c.calm_default, c.artcc, c.updated_at, \
     u.display_name as updated_by \
     from flow.airport_config c left join identity.users u on u.id = c.updated_by";
@@ -71,14 +72,15 @@ pub async fn create(
     }
     let id: String = sqlx::query_scalar(
         "insert into flow.airport_config \
-             (icao, name, aar, adr, landing_runways, wind_from_deg, wind_to_deg, calm_default, artcc, updated_by) \
-         values ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10) returning id",
+             (icao, name, aar, adr, landing_runways, departure_runways, wind_from_deg, wind_to_deg, calm_default, artcc, updated_by) \
+         values ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11) returning id",
     )
     .bind(icao)
     .bind(&req.name)
     .bind(req.aar)
     .bind(req.adr)
     .bind(&req.landing_runways)
+    .bind(&req.departure_runways)
     .bind(req.wind_from_deg)
     .bind(req.wind_to_deg)
     .bind(req.calm_default)
@@ -102,8 +104,8 @@ pub async fn update(
     }
     let r = sqlx::query(
         "update flow.airport_config set \
-             name = $3, aar = $4, adr = $5, landing_runways = $6, \
-             wind_from_deg = $7, wind_to_deg = $8, calm_default = $9, updated_by = $10 \
+             name = $3, aar = $4, adr = $5, landing_runways = $6, departure_runways = $7, \
+             wind_from_deg = $8, wind_to_deg = $9, calm_default = $10, updated_by = $11 \
          where id = $1 and icao = $2",
     )
     .bind(id)
@@ -112,6 +114,7 @@ pub async fn update(
     .bind(req.aar)
     .bind(req.adr)
     .bind(&req.landing_runways)
+    .bind(&req.departure_runways)
     .bind(req.wind_from_deg)
     .bind(req.wind_to_deg)
     .bind(req.calm_default)
@@ -178,6 +181,7 @@ mod tests {
             aar,
             adr: aar,
             landing_runways: vec![],
+            departure_runways: vec![],
             wind_from_deg: from,
             wind_to_deg: to,
             calm_default: calm,
