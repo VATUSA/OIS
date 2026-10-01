@@ -31,7 +31,14 @@ const DEFAULT_WINDOW_MIN: i32 = 90;
 const METAR_TTL_MS: i64 = 10 * 60_000;
 
 /// Latest METAR for `icao`, from the shared cache; fetched server-side (no CORS) when stale.
-async fn metar_for(state: &AppState, icao: &str) -> Option<crate::feed::metar::MetarInfo> {
+///
+/// `pub(crate)` since #510: the observed wind that resolves an airport's configuration comes from here,
+/// so `handlers::airport_configs::wind_for` shares this cache rather than opening a second one with its
+/// own TTL and its own idea of how stale is too stale.
+pub(crate) async fn metar_for(
+    state: &AppState,
+    icao: &str,
+) -> Option<crate::feed::metar::MetarInfo> {
     let now = Utc::now().timestamp_millis();
     if let Ok(cache) = state.metar_cache.lock()
         && let Some((info, at)) = cache.get(icao)

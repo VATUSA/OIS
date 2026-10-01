@@ -1599,6 +1599,40 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/v1/flow/fcas/{id}/swap": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Trade two flights' release times.
+         * @description The point of #434: two departures holding releases exchange slots, and the times they exchange
+         *     are exactly the two that already existed — so nothing downstream renumbers and neither ends up
+         *     later than it was.
+         *
+         *     # Not the reorder, and not a recompute
+         *
+         *     [`reorder_fca`] is the other way to change who goes first, and it is the wrong tool: manual mode
+         *     re-chains every aircraft behind the one that moved (`feed::fca`), which is the opposite of
+         *     trading two slots. This writes two `flow.fca_release` rows and nothing else; the metering engine
+         *     reads them as `frozen_ms` on its next pass and sequences around them unchanged.
+         *
+         *     Returns a status rather than the re-metered list, unlike [`mark_release`]. Pinning a *new* time
+         *     genuinely changes the sequence, so `mark_release` re-runs `build_candidates`; an exchange of two
+         *     existing frozen times does not, and calling `build_candidates` here would be the very recompute
+         *     this endpoint exists to avoid. Clients refetch, as they do after `reorder_fca`.
+         */
+        post: operations["swap_releases"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/v1/flow/fcas/{id}/traffic": {
         parameters: {
             query?: never;
@@ -1874,6 +1908,23 @@ export interface paths {
         get?: never;
         put?: never;
         post: operations["discord_ace_claim"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/integration/discord/advisory/{id}": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** What the bot needs to reply to a "View structured" button click on an advisory post. */
+        get: operations["discord_advisory_info"];
+        put?: never;
+        post?: never;
         delete?: never;
         options?: never;
         head?: never;
@@ -4060,6 +4111,19 @@ export interface components {
             window_label: string;
         };
         /**
+         * @description What the bot needs to reply to a "View structured" button click on an advisory post
+         *     (VATUSA/OIS#459).
+         */
+        DiscordAdvisoryInfoBody: {
+            /** @description Which document type this is — `reroute` today. */
+            kind: string;
+            /**
+             * @description The fields the document was built from; null when it was typed as raw text, which the bot
+             *     reports as such rather than showing an empty breakdown.
+             */
+            structured?: unknown;
+        };
+        /**
          * @description The bot relays an availability button press: which Discord user pressed which colour. The event
          *     id travels in the path.
          */
@@ -5968,6 +6032,18 @@ export interface components {
              * @description Total on-disk bytes across the `stats` schema's tables (incl. indexes).
              */
             total_bytes: number;
+        };
+        /**
+         * @description The two callsigns whose release times trade places (#514).
+         *
+         *     No FCA field: the FCA is in the route path, which is what makes a cross-FCA swap
+         *     unrepresentable. A release is a slot in one FCA's metered sequence (`flow.fca_release` is keyed
+         *     `(fca_id, callsign)`), so moving one into another FCA would hand that FCA's metering a fixed
+         *     constraint it never sequenced.
+         */
+        SwapReleaseRequest: {
+            a: string;
+            b: string;
         };
         /** @description A departure currently being timed at a field. */
         TaxiActive: {
@@ -11085,6 +11161,48 @@ export interface operations {
             };
         };
     };
+    swap_releases: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /** @description FCA id */
+                id: string;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["SwapReleaseRequest"];
+            };
+        };
+        responses: {
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+        };
+    };
     fca_traffic: {
         parameters: {
             query?: {
@@ -11789,6 +11907,39 @@ export interface operations {
                 content?: never;
             };
             409: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+        };
+    };
+    discord_advisory_info: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["DiscordAdvisoryInfoBody"];
+                };
+            };
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            404: {
                 headers: {
                     [name: string]: unknown;
                 };

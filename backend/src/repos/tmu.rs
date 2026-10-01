@@ -738,6 +738,37 @@ async fn allocate_advisory_number(
     .map_err(|_| ApiError::Internal)
 }
 
+/// Whether a create or edit can derive its document from `structured` — i.e. whether `body` is
+/// redundant for this request.
+///
+/// [`advisory_body`] and `handlers::tmu::create_advisory`'s validation must agree on this, so they
+/// share one statement of it rather than each testing `kind` for itself (#503).
+///
+/// The sharing is the load-bearing part, and it is worth being precise about why. If the two *drift* —
+/// the handler treating any `structured` request as needing no body while this still renders only
+/// `reroute` — then a structured advisory of an unrenderable kind passes validation with an empty body,
+/// derives nothing, and **stores an empty document**: the #499 bug. Verified by mutation: making that
+/// one-sided change turns `a_structured_create_of_an_underivable_kind_still_needs_a_body` from 400 to
+/// 200. Changing the rule *here* stays safe, because both callers move with it.
+pub(crate) fn derives_body(kind: &str, structured: Option<&serde_json::Value>) -> bool {
+    structured.is_some() && renders_body(kind)
+}
+
+/// The kinds [`advisory_body`] has a renderer for.
+///
+/// One list on purpose. `derives_body` decides whether a create must supply a body (#503) and
+/// `advisory_body` decides whether one gets rendered (#461); the two drifting apart is what rejects a
+/// create that would have rendered fine, or stores a kind whose document nobody produced. #461 adding
+/// GDP and Ground Stop without this is exactly that drift.
+fn renders_body(kind: &str) -> bool {
+    matches!(
+        kind,
+        crate::models::ADVISORY_KIND_REROUTE
+            | crate::models::ADVISORY_KIND_GDP
+            | crate::models::ADVISORY_KIND_GROUND_STOP
+    )
+}
+
 /// The body to store for an advisory.
 ///
 /// A **typed** advisory's document is re-derived from its fields rather than trusted from the
@@ -760,6 +791,9 @@ fn advisory_body(
     structured: Option<&serde_json::Value>,
     ident: &crate::advisory::AdvisoryIdent,
 ) -> Result<Option<String>, ApiError> {
+    if !derives_body(kind, structured) {
+        return Ok(None);
+    }
     let Some(value) = structured else {
         return Ok(None);
     };
@@ -902,6 +936,22 @@ pub(crate) async fn cancel_program_advisory_tx(
         .rows_affected())
 }
 
+/// [`get_advisory`] inside a caller's transaction.
+///
+/// Needed because publish and cancel read the row back *after* updating it and *before* committing,
+/// to build the Discord payload from what was actually written rather than from what the caller
+/// hoped was written (VATUSA/OIS#459). Reading on the pool there would see the pre-update row.
+pub async fn get_advisory_tx(
+    tx: &mut Transaction<'_, Postgres>,
+    id: &str,
+) -> Result<Option<AdvisoryBody>, ApiError> {
+    sqlx::query_as::<_, AdvisoryBody>(&format!("{ADVISORY_SELECT} where id = $1"))
+        .bind(id)
+        .fetch_optional(&mut **tx)
+        .await
+        .map_err(|_| ApiError::Internal)
+}
+
 pub async fn get_advisory(pool: &PgPool, id: &str) -> Result<Option<AdvisoryBody>, ApiError> {
     sqlx::query_as::<_, AdvisoryBody>(&format!("{ADVISORY_SELECT} where id = $1"))
         .bind(id)
@@ -976,13 +1026,24 @@ pub async fn update_advisory(
     // `update_tmi`, so clearing it there can never discard anything a caller sent. Here the caller
     // supplies it, and a decoding sent *with* a new body describes the new body: it is not stale, so
     // the clear must yield to it rather than overwrite it.
+    // And a **new breakdown with no decoding sent** is the mirror case (#499). The stored decoding
+    // described the breakdown that has just been replaced, so keeping it is the same confident wrong
+    // answer in the other direction — a LAX-SFO breakdown carrying a JFK-BOS decoding.
+    //
+    // It clears rather than re-deriving, which is the choice worth recording. `update_tmi` re-derives
+    // (`render_english`), and the analogue here would be a decoding renderer for an advisory — but
+    // none exists, and nothing specifies what it would say that `body` does not, because `body` *is*
+    // the rendered document. `AdvisoryBody.decoded` carries no doc comment at all: 0085 took the
+    // `structured`/`decoded` pair from `tmu.tmis`'s shape, where `decoded` expands a terse NTML line
+    // into the prose an advisory already is. So null is honest here and a stale sentence is not.
     let clear_breakdown = req.structured.is_none() && req.body.is_some();
+    let stale_decoding = req.structured.is_some() && req.decoded.is_none();
     let result = sqlx::query(
         "update tmu.advisories set \
             kind = coalesce($2, kind), \
             body = coalesce($3, body), \
             structured = case when $6 then null else coalesce($4, structured) end, \
-            decoded = case when $6 then $5 else coalesce($5, decoded) end \
+            decoded = case when $6 then $5 when $7 then null else coalesce($5, decoded) end \
          where id = $1 and status = 'draft'",
     )
     .bind(id)
@@ -991,6 +1052,7 @@ pub async fn update_advisory(
     .bind(req.structured.as_ref().map(sqlx::types::Json))
     .bind(req.decoded.as_deref())
     .bind(clear_breakdown)
+    .bind(stale_decoding)
     .execute(pool)
     .await
     .map_err(|_| ApiError::Internal)?;
@@ -998,8 +1060,12 @@ pub async fn update_advisory(
 }
 
 /// Publishes a draft. Returns false if it was not a draft (or is absent).
+///
+/// Takes the caller's transaction so the Discord post is enqueued atomically with the publish
+/// (VATUSA/OIS#459) — a post must not exist for an advisory that did not publish, and an advisory
+/// must not go live with nothing queued to announce it.
 pub async fn publish_advisory(
-    pool: &PgPool,
+    tx: &mut Transaction<'_, Postgres>,
     id: &str,
     published_by: &str,
 ) -> Result<bool, ApiError> {
@@ -1010,7 +1076,7 @@ pub async fn publish_advisory(
     )
     .bind(id)
     .bind(published_by)
-    .execute(pool)
+    .execute(&mut **tx)
     .await
     .map_err(|_| ApiError::Internal)?;
     Ok(result.rows_affected() > 0)
@@ -1018,13 +1084,19 @@ pub async fn publish_advisory(
 
 /// Cancels a draft or published advisory. Its number is **not** released: a published advisory was
 /// issued, and a cancelled draft that once held a number is not worth the ambiguity of reissuing it.
-pub async fn cancel_advisory(pool: &PgPool, id: &str) -> Result<bool, ApiError> {
+///
+/// Transactional for the same reason as [`publish_advisory`]: the correction post is enqueued with
+/// the cancellation.
+pub async fn cancel_advisory(
+    tx: &mut Transaction<'_, Postgres>,
+    id: &str,
+) -> Result<bool, ApiError> {
     let result = sqlx::query(
         "update tmu.advisories set status = 'cancelled' \
          where id = $1 and status in ('draft', 'published')",
     )
     .bind(id)
-    .execute(pool)
+    .execute(&mut **tx)
     .await
     .map_err(|_| ApiError::Internal)?;
     Ok(result.rows_affected() > 0)
@@ -1392,6 +1464,87 @@ mod tests {
             after.structured.is_none(),
             "the rendered breakdown no longer describes this body and must go"
         );
+    }
+
+    /// #499. A new breakdown with no decoding sent must not keep the old decoding, which described
+    /// the breakdown that was just replaced — the same stale-pair defect #488 fixed, on the other
+    /// axis. This is the case #488's own `supplying_a_breakdown_replaces_it` could not catch,
+    /// because it supplies `decoded` alongside `structured` and so never exercises the omission.
+    #[sqlx::test]
+    async fn a_new_breakdown_with_no_decoding_clears_the_old_one(pool: PgPool) {
+        let before = structured_draft(&pool).await;
+        assert!(
+            before.decoded.is_some(),
+            "fixture must start with a decoding"
+        );
+
+        assert!(
+            update_advisory(
+                &pool,
+                &before.id,
+                &UpdateAdvisoryRequest {
+                    structured: Some(serde_json::json!({"routes": [{"from": "LAX", "to": "SFO"}]})),
+                    ..adv_patch()
+                },
+            )
+            .await
+            .unwrap()
+        );
+
+        let after = get_advisory(&pool, &before.id).await.unwrap().unwrap();
+        let structured = after.structured.expect("the new breakdown must be stored");
+        assert_eq!(structured["routes"][0]["from"], "LAX");
+        assert!(
+            after.decoded.is_none(),
+            "a decoding describing the replaced breakdown survived"
+        );
+    }
+
+    /// The reason this cannot be a blanket clear on any structured edit: a decoding sent *with* the
+    /// new breakdown describes that breakdown, so it is not stale and must be stored.
+    #[sqlx::test]
+    async fn a_decoding_sent_with_the_new_breakdown_is_kept(pool: PgPool) {
+        let before = structured_draft(&pool).await;
+
+        assert!(
+            update_advisory(
+                &pool,
+                &before.id,
+                &UpdateAdvisoryRequest {
+                    structured: Some(serde_json::json!({"routes": [{"from": "LAX", "to": "SFO"}]})),
+                    decoded: Some("LAX to SFO reroute".to_string()),
+                    ..adv_patch()
+                },
+            )
+            .await
+            .unwrap()
+        );
+
+        let after = get_advisory(&pool, &before.id).await.unwrap().unwrap();
+        assert_eq!(after.decoded.as_deref(), Some("LAX to SFO reroute"));
+    }
+
+    /// An edit touching neither field leaves the decoding alone — a kind-only edit is not a reason
+    /// to drop it, which is what makes the guard `structured.is_some()` rather than `decoded.is_none()`.
+    #[sqlx::test]
+    async fn a_kind_only_edit_keeps_the_decoding(pool: PgPool) {
+        let before = structured_draft(&pool).await;
+
+        assert!(
+            update_advisory(
+                &pool,
+                &before.id,
+                &UpdateAdvisoryRequest {
+                    kind: Some("gdp".to_string()),
+                    ..adv_patch()
+                },
+            )
+            .await
+            .unwrap()
+        );
+
+        let after = get_advisory(&pool, &before.id).await.unwrap().unwrap();
+        assert_eq!(after.decoded, before.decoded);
     }
 
     /// #488 AC2, first half: supplying a breakdown still replaces it. This is why the guard is keyed
@@ -1807,13 +1960,22 @@ mod tests {
     async fn a_published_or_cancelled_number_is_never_reissued(pool: PgPool) {
         let user = seed_user(&pool).await;
         let published = draft(&pool, "DCC").await;
-        assert!(publish_advisory(&pool, &published.id, &user).await.unwrap());
+        // Transactional since #459, so the Discord enqueue is atomic with the state change.
+        let mut tx = pool.begin().await.unwrap();
+        assert!(
+            publish_advisory(&mut tx, &published.id, &user)
+                .await
+                .unwrap()
+        );
+        tx.commit().await.unwrap();
 
         assert!(
             !delete_advisory(&pool, &published.id).await.unwrap(),
             "a published advisory must not be deletable"
         );
-        assert!(cancel_advisory(&pool, &published.id).await.unwrap());
+        let mut tx = pool.begin().await.unwrap();
+        assert!(cancel_advisory(&mut tx, &published.id).await.unwrap());
+        tx.commit().await.unwrap();
         assert!(!delete_advisory(&pool, &published.id).await.unwrap());
 
         assert_eq!(

@@ -18,9 +18,10 @@ use crate::{
     handlers::events::normalize_facility,
     models::{
         AceRequestBody, AckJobRequest, DiscordAceClaimRequest, DiscordAceInfoBody,
-        DiscordAvailabilityRequest, DiscordAvailabilityResult, DiscordConfigBody, DiscordLinkBody,
-        DiscordTmiInfoBody, EventThreadTemplateBody, OutboundJobBody, PushGuildSnapshotRequest,
-        UpsertDiscordConfigRequest, UpsertEventThreadTemplateRequest,
+        DiscordAdvisoryInfoBody, DiscordAvailabilityRequest, DiscordAvailabilityResult,
+        DiscordConfigBody, DiscordLinkBody, DiscordTmiInfoBody, EventThreadTemplateBody,
+        OutboundJobBody, PushGuildSnapshotRequest, UpsertDiscordConfigRequest,
+        UpsertEventThreadTemplateRequest,
     },
     repos::{
         access as access_repo, ace as ace_repo, availability as availability_repo,
@@ -167,6 +168,26 @@ pub async fn discord_tmi_info(
     Ok(Json(DiscordTmiInfoBody {
         restriction: tmi.restriction,
         decoded: tmi.decoded,
+    }))
+}
+
+/// What the bot needs to reply to a "View structured" button click on an advisory post.
+#[utoipa::path(
+    get, path = "/api/v1/integration/discord/advisory/{id}", tag = "integration",
+    params(("id" = String, Path)),
+    responses((status = 200, body = DiscordAdvisoryInfoBody), (status = 401), (status = 404))
+)]
+pub async fn discord_advisory_info(
+    State(state): State<AppState>,
+    _permission: RequirePermission<IntegrationJobsUpdate>,
+    Path(id): Path<String>,
+) -> Result<Json<DiscordAdvisoryInfoBody>, ApiError> {
+    let adv = tmu_repo::get_advisory(pool(&state)?, &id)
+        .await?
+        .ok_or(ApiError::NotFound)?;
+    Ok(Json(DiscordAdvisoryInfoBody {
+        kind: adv.kind,
+        structured: adv.structured.map(|j| j.0),
     }))
 }
 

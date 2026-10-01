@@ -1,4 +1,5 @@
 mod ace;
+mod advisory;
 mod dm;
 mod thread;
 mod tmi;
@@ -12,6 +13,7 @@ use serenity::all::Http;
 
 use crate::snapshot::snapshot_and_push;
 use ace::{notify_ace_claim, post_ace_request};
+use advisory::post_advisory;
 use dm::send_claim_dm;
 use thread::create_event_thread;
 use tmi::post_tmi;
@@ -65,6 +67,9 @@ enum Route {
     /// A published TMI *or* a cancellation — both carry an already-assembled NTML row, and the bot
     /// only decides how it is framed (#436).
     PostTmi,
+    /// A published advisory *or* its cancellation correction — both carry an already-rendered
+    /// document, and the bot only fences and splits it (VATUSA/OIS#459).
+    PostAdvisory,
     EventThreadCreate,
     GuildSnapshot,
     Unknown,
@@ -76,6 +81,7 @@ fn route(job_type: &str) -> Route {
         "ace_request_notify" => Route::AceRequestNotify,
         "ace_claim_dm" | "ace_claim_reminder_24h" | "ace_claim_reminder_6h" => Route::AceClaimDm,
         "tmi_publish" | "tmi_cancel" => Route::PostTmi,
+        "adv_publish" | "adv_cancel" => Route::PostAdvisory,
         "event_thread_create" => Route::EventThreadCreate,
         "guild_snapshot" => Route::GuildSnapshot,
         _ => Route::Unknown,
@@ -94,6 +100,7 @@ async fn perform_job(
         Route::AceRequestNotify => notify_ace_claim(http, &job.payload).await,
         Route::AceClaimDm => send_claim_dm(http, &job.payload).await,
         Route::PostTmi => post_tmi(http, &job.payload).await,
+        Route::PostAdvisory => post_advisory(http, &job.payload).await,
         Route::EventThreadCreate => create_event_thread(http, &job.payload).await,
         // The admin's "Refresh from Discord" button — re-pull + push the guild snapshot.
         Route::GuildSnapshot => snapshot_and_push(http, api).await.map(|()| None),
@@ -114,11 +121,28 @@ mod route_tests {
         assert_eq!(route("tmi_publish"), Route::PostTmi);
     }
 
+    /// The same arm, for advisories (VATUSA/OIS#459). Exactly the failure #436 recorded: without this
+    /// the cancellation correction never posts and every `adv_cancel` parks as `failed`, with a
+    /// cancelled advisory still standing uncorrected in the channel.
+    #[test]
+    fn an_advisory_cancellation_routes_to_the_same_poster_as_a_publish() {
+        assert_eq!(route("adv_cancel"), Route::PostAdvisory);
+        assert_eq!(route("adv_publish"), Route::PostAdvisory);
+    }
+
+    /// An advisory and a TMI must not share a poster: the bot fences a whole multi-line document for
+    /// one and a single row for the other, so a mis-route would post the wrong shape entirely.
+    #[test]
+    fn advisories_and_tmis_do_not_share_a_route() {
+        assert_ne!(route("adv_publish"), route("tmi_publish"));
+    }
+
     /// An unrecognised type must be rejected rather than silently doing nothing — that is what nacks
     /// the job so it parks with a reason instead of looking delivered.
     #[test]
     fn an_unknown_job_type_is_not_silently_accepted() {
         assert_eq!(route("tmi_cancelled"), Route::Unknown);
+        assert_eq!(route("advisory_publish"), Route::Unknown);
         assert_eq!(route(""), Route::Unknown);
     }
 
