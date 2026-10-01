@@ -883,13 +883,24 @@ pub async fn update_advisory(
     // `update_tmi`, so clearing it there can never discard anything a caller sent. Here the caller
     // supplies it, and a decoding sent *with* a new body describes the new body: it is not stale, so
     // the clear must yield to it rather than overwrite it.
+    // And a **new breakdown with no decoding sent** is the mirror case (#499). The stored decoding
+    // described the breakdown that has just been replaced, so keeping it is the same confident wrong
+    // answer in the other direction — a LAX-SFO breakdown carrying a JFK-BOS decoding.
+    //
+    // It clears rather than re-deriving, which is the choice worth recording. `update_tmi` re-derives
+    // (`render_english`), and the analogue here would be a decoding renderer for an advisory — but
+    // none exists, and nothing specifies what it would say that `body` does not, because `body` *is*
+    // the rendered document. `AdvisoryBody.decoded` carries no doc comment at all: 0085 took the
+    // `structured`/`decoded` pair from `tmu.tmis`'s shape, where `decoded` expands a terse NTML line
+    // into the prose an advisory already is. So null is honest here and a stale sentence is not.
     let clear_breakdown = req.structured.is_none() && req.body.is_some();
+    let stale_decoding = req.structured.is_some() && req.decoded.is_none();
     let result = sqlx::query(
         "update tmu.advisories set \
             kind = coalesce($2, kind), \
             body = coalesce($3, body), \
             structured = case when $6 then null else coalesce($4, structured) end, \
-            decoded = case when $6 then $5 else coalesce($5, decoded) end \
+            decoded = case when $6 then $5 when $7 then null else coalesce($5, decoded) end \
          where id = $1 and status = 'draft'",
     )
     .bind(id)
@@ -898,6 +909,7 @@ pub async fn update_advisory(
     .bind(req.structured.as_ref().map(sqlx::types::Json))
     .bind(req.decoded.as_deref())
     .bind(clear_breakdown)
+    .bind(stale_decoding)
     .execute(pool)
     .await
     .map_err(|_| ApiError::Internal)?;
@@ -1157,6 +1169,87 @@ mod tests {
             after.structured.is_none(),
             "the rendered breakdown no longer describes this body and must go"
         );
+    }
+
+    /// #499. A new breakdown with no decoding sent must not keep the old decoding, which described
+    /// the breakdown that was just replaced — the same stale-pair defect #488 fixed, on the other
+    /// axis. This is the case #488's own `supplying_a_breakdown_replaces_it` could not catch,
+    /// because it supplies `decoded` alongside `structured` and so never exercises the omission.
+    #[sqlx::test]
+    async fn a_new_breakdown_with_no_decoding_clears_the_old_one(pool: PgPool) {
+        let before = structured_draft(&pool).await;
+        assert!(
+            before.decoded.is_some(),
+            "fixture must start with a decoding"
+        );
+
+        assert!(
+            update_advisory(
+                &pool,
+                &before.id,
+                &UpdateAdvisoryRequest {
+                    structured: Some(serde_json::json!({"routes": [{"from": "LAX", "to": "SFO"}]})),
+                    ..adv_patch()
+                },
+            )
+            .await
+            .unwrap()
+        );
+
+        let after = get_advisory(&pool, &before.id).await.unwrap().unwrap();
+        let structured = after.structured.expect("the new breakdown must be stored");
+        assert_eq!(structured["routes"][0]["from"], "LAX");
+        assert!(
+            after.decoded.is_none(),
+            "a decoding describing the replaced breakdown survived"
+        );
+    }
+
+    /// The reason this cannot be a blanket clear on any structured edit: a decoding sent *with* the
+    /// new breakdown describes that breakdown, so it is not stale and must be stored.
+    #[sqlx::test]
+    async fn a_decoding_sent_with_the_new_breakdown_is_kept(pool: PgPool) {
+        let before = structured_draft(&pool).await;
+
+        assert!(
+            update_advisory(
+                &pool,
+                &before.id,
+                &UpdateAdvisoryRequest {
+                    structured: Some(serde_json::json!({"routes": [{"from": "LAX", "to": "SFO"}]})),
+                    decoded: Some("LAX to SFO reroute".to_string()),
+                    ..adv_patch()
+                },
+            )
+            .await
+            .unwrap()
+        );
+
+        let after = get_advisory(&pool, &before.id).await.unwrap().unwrap();
+        assert_eq!(after.decoded.as_deref(), Some("LAX to SFO reroute"));
+    }
+
+    /// An edit touching neither field leaves the decoding alone — a kind-only edit is not a reason
+    /// to drop it, which is what makes the guard `structured.is_some()` rather than `decoded.is_none()`.
+    #[sqlx::test]
+    async fn a_kind_only_edit_keeps_the_decoding(pool: PgPool) {
+        let before = structured_draft(&pool).await;
+
+        assert!(
+            update_advisory(
+                &pool,
+                &before.id,
+                &UpdateAdvisoryRequest {
+                    kind: Some("gdp".to_string()),
+                    ..adv_patch()
+                },
+            )
+            .await
+            .unwrap()
+        );
+
+        let after = get_advisory(&pool, &before.id).await.unwrap().unwrap();
+        assert_eq!(after.decoded, before.decoded);
     }
 
     /// #488 AC2, first half: supplying a breakdown still replaces it. This is why the guard is keyed
