@@ -39,12 +39,22 @@ use chrono::{DateTime, Utc};
 
 use crate::models::{Bound, NtmlRestriction};
 
+/// Upper-cased and whitespace-collapsed. The collapse is what stops an author-supplied value
+/// from breaking the one-line NTML row (#498) — see [`crate::text::collapse`].
 fn clean(s: &str) -> String {
-    s.trim().to_ascii_uppercase()
+    crate::text::collapse(s).to_ascii_uppercase()
 }
 
-fn opt(s: &Option<String>) -> Option<&str> {
-    s.as_deref().map(str::trim).filter(|t| !t.is_empty())
+/// A present, non-blank value, collapsed.
+///
+/// Returns an owned `String` rather than a borrow because collapsing allocates. That is the
+/// deliberate cost of collapsing here, in the helper that *produces* the value, instead of at each
+/// place one is printed — a print site can then do anything it likes with the string without
+/// reopening #498.
+fn opt(s: &Option<String>) -> Option<String> {
+    s.as_deref()
+        .map(crate::text::collapse)
+        .filter(|t| !t.is_empty())
 }
 
 /// Encode the canonical raw NTML line, e.g.
@@ -52,13 +62,16 @@ fn opt(s: &Option<String>) -> Option<&str> {
 pub fn encode(r: &NtmlRestriction) -> String {
     let mut parts: Vec<String> = vec![clean(&r.element)];
 
-    match r.direction.trim().to_ascii_lowercase().as_str() {
+    match crate::text::collapse(&r.direction)
+        .to_ascii_lowercase()
+        .as_str()
+    {
         "arrivals" => parts.push("arrivals".into()),
         "departures" => parts.push("departures".into()),
         _ => {} // enroute — no direction word (e.g. "PHL via J152 STOP")
     }
     if let Some(via) = opt(&r.via) {
-        parts.push(format!("via {}", clean(via)));
+        parts.push(format!("via {}", clean(&via)));
     }
 
     let kind = clean(&r.kind);
@@ -66,28 +79,28 @@ pub fn encode(r: &NtmlRestriction) -> String {
         "MIT" | "MINIT" => parts.push(format!("{}{kind}", r.value.unwrap_or(0))),
         "TXT" => {
             if let Some(t) = opt(&r.text) {
-                parts.push(t.to_string());
+                parts.push(t);
             }
         }
         other => parts.push(other.to_string()), // STOP, DSP, APREQ, TBM, CFR
     }
 
     if let Some(q) = opt(&r.qualifier) {
-        parts.push(clean(q));
+        parts.push(clean(&q));
     }
     if let Some(a) = opt(&r.aircraft) {
-        parts.push(format!("TYPE:{}", clean(a)));
+        parts.push(format!("TYPE:{}", clean(&a)));
     }
     if let Some(s) = &r.speed {
-        parts.push(format!("SPD:{}{}", s.op.trim(), s.value));
+        parts.push(format!("SPD:{}{}", crate::text::collapse(&s.op), s.value));
     }
     if let Some(a) = &r.altitude {
         parts.push(format!("ALT:{}{:03}", clean(&a.op), a.value));
     }
     if let Some(c) = opt(&r.condition) {
         match opt(&r.condition_detail) {
-            Some(d) => parts.push(format!("{}:{}", clean(c), clean(d))),
-            None => parts.push(clean(c)),
+            Some(d) => parts.push(format!("{}:{}", clean(&c), clean(&d))),
+            None => parts.push(clean(&c)),
         }
     }
     let excl: Vec<String> = r
@@ -104,7 +117,7 @@ pub fn encode(r: &NtmlRestriction) -> String {
 }
 
 fn speed_english(b: &Bound) -> String {
-    let lead = match b.op.trim() {
+    let lead = match crate::text::collapse(&b.op).as_str() {
         "≤" | "<=" => "at or below ",
         "≥" | ">=" => "at or above ",
         _ => "at ",
@@ -122,10 +135,10 @@ fn altitude_english(b: &Bound) -> String {
 }
 
 fn condition_english(cat: &str, detail: Option<&str>) -> String {
-    let base = cat.trim().to_ascii_lowercase();
+    let base = crate::text::collapse(cat).to_ascii_lowercase();
     match detail {
         Some(d) if !d.eq_ignore_ascii_case(cat) => {
-            format!("{base} ({})", d.trim().to_ascii_lowercase())
+            format!("{base} ({})", crate::text::collapse(d).to_ascii_lowercase())
         }
         _ => base,
     }
@@ -136,13 +149,16 @@ fn condition_english(cat: &str, detail: Option<&str>) -> String {
 /// below FL090) — due to volume; excluding PHL`.
 pub fn render_english(r: &NtmlRestriction) -> String {
     let mut s = clean(&r.element);
-    match r.direction.trim().to_ascii_lowercase().as_str() {
+    match crate::text::collapse(&r.direction)
+        .to_ascii_lowercase()
+        .as_str()
+    {
         "arrivals" => s.push_str(" arrivals"),
         "departures" => s.push_str(" departures"),
         _ => {}
     }
     if let Some(via) = opt(&r.via) {
-        s.push_str(&format!(" via {}", clean(via)));
+        s.push_str(&format!(" via {}", clean(&via)));
     }
     s.push_str(": ");
 
@@ -155,7 +171,7 @@ pub fn render_english(r: &NtmlRestriction) -> String {
         "CFR" => "call-for-release (CFR)".into(),
         "DSP" => "departure spacing program (DSP)".into(),
         "TBM" => "time-based metering (TBM)".into(),
-        "TXT" => opt(&r.text).unwrap_or("free-text restriction").to_string(),
+        "TXT" => opt(&r.text).unwrap_or_else(|| "free-text restriction".to_string()),
         other => other.to_lowercase(),
     });
 
@@ -164,7 +180,7 @@ pub fn render_english(r: &NtmlRestriction) -> String {
         mods.push(q.to_lowercase());
     }
     if let Some(a) = opt(&r.aircraft) {
-        mods.push(match clean(a).as_str() {
+        mods.push(match clean(&a).as_str() {
             "ALL" => "all aircraft".into(),
             "JET" => "jets only".into(),
             "PROP" => "props only".into(),
@@ -185,7 +201,7 @@ pub fn render_english(r: &NtmlRestriction) -> String {
     if let Some(c) = opt(&r.condition) {
         s.push_str(&format!(
             " — due to {}",
-            condition_english(c, opt(&r.condition_detail))
+            condition_english(&c, opt(&r.condition_detail).as_deref())
         ));
     }
     let excl: Vec<String> = r
@@ -209,9 +225,9 @@ fn facilities(requesting: Option<&str>, providing: Option<&str>) -> Option<Strin
         opt(&requesting.map(str::to_string)),
         opt(&providing.map(str::to_string)),
     ) {
-        (Some(req), Some(prov)) => Some(format!("{}:{}", clean(req), clean(prov))),
-        (Some(req), None) => Some(clean(req)),
-        (None, Some(prov)) => Some(clean(prov)),
+        (Some(req), Some(prov)) => Some(format!("{}:{}", clean(&req), clean(&prov))),
+        (Some(req), None) => Some(clean(&req)),
+        (None, Some(prov)) => Some(clean(&prov)),
         (None, None) => None,
     }
 }
@@ -246,7 +262,7 @@ pub fn ntml_line(
     requesting: Option<&str>,
     providing: Option<&str>,
 ) -> String {
-    let mut parts = vec![log_stamp(logged_at), restriction.trim().to_string()];
+    let mut parts = vec![log_stamp(logged_at), crate::text::collapse(restriction)];
     parts.extend(window(start, stop));
     parts.extend(facilities(requesting, providing));
     parts.join(" ")
@@ -269,7 +285,7 @@ pub fn ntml_cancel_line(
 ) -> String {
     let mut parts = vec![
         log_stamp(logged_at),
-        restriction.trim().to_string(),
+        crate::text::collapse(restriction),
         "CANCEL TMI".to_string(),
     ];
     parts.extend(facilities(requesting, providing));
@@ -442,5 +458,106 @@ mod tests {
                 case.name
             );
         }
+    }
+}
+
+/// #498 — an NTML row is one line, so no author-supplied value may introduce another.
+#[cfg(test)]
+mod whitespace_tests {
+    use super::*;
+    use crate::models::Bound;
+    use chrono::TimeZone;
+
+    const POISON: &str = "A\nB\tC  D";
+
+    fn at() -> DateTime<Utc> {
+        Utc.with_ymd_and_hms(2026, 6, 25, 2, 10, 0).unwrap()
+    }
+
+    /// Every field set to `value`.
+    ///
+    /// **A full struct literal on purpose**, like `advisory::whitespace_tests::advisory`: a literal
+    /// names every field, so adding one to `NtmlRestriction` breaks this test's compilation rather
+    /// than leaving it silently unpoisoned. `base()` above deliberately is *not* reused — it sets
+    /// everything to `None`, which is the opposite of what this needs.
+    fn restriction(value: &str, kind: &str) -> NtmlRestriction {
+        NtmlRestriction {
+            element: value.to_string(),
+            direction: value.to_string(),
+            via: Some(value.to_string()),
+            kind: kind.to_string(),
+            value: Some(20),
+            text: Some(value.to_string()),
+            qualifier: Some(value.to_string()),
+            aircraft: Some(value.to_string()),
+            speed: Some(Bound {
+                op: value.to_string(),
+                value: 210,
+            }),
+            altitude: Some(Bound {
+                op: value.to_string(),
+                value: 90,
+            }),
+            condition: Some(value.to_string()),
+            condition_detail: Some(value.to_string()),
+            exclude: vec![value.to_string()],
+        }
+    }
+
+    /// `encode` returns **one line**, whatever any field contains. Asserted for `TXT` as well as a
+    /// structured kind, because the `"TXT"` arm is the one that reaches output without calling
+    /// `clean` — a fix applied only inside `clean` would leave it broken.
+    #[test]
+    fn encode_is_always_one_line() {
+        for kind in ["MIT", "TXT", "STOP"] {
+            let out = encode(&restriction(POISON, kind));
+            assert_eq!(out.lines().count(), 1, "kind {kind} broke the row: {out:?}");
+            assert!(!out.contains('\t'), "kind {kind} kept a tab: {out:?}");
+            // Collapsing is the only change: the same value already clean renders identically.
+            assert_eq!(out, encode(&restriction("A B C D", kind)), "kind {kind}");
+        }
+    }
+
+    /// The plain-English sentence has the same one-line contract, and the same `"TXT"` hole —
+    /// `render_english` reaches output through `to_lowercase()` rather than `clean`.
+    #[test]
+    fn render_english_is_always_one_line() {
+        for kind in ["MIT", "TXT", "STOP"] {
+            let out = render_english(&restriction(POISON, kind));
+            assert_eq!(out.lines().count(), 1, "kind {kind} broke it: {out:?}");
+            assert!(!out.contains('\t'), "kind {kind} kept a tab: {out:?}");
+        }
+    }
+
+    /// A free-text restriction is the case the structured path cannot police, and the one both
+    /// renderers passed through untouched before #498.
+    #[test]
+    fn a_multi_line_free_text_restriction_collapses() {
+        let mut r = restriction("X", "TXT");
+        r.text = Some("NO STACKS\nEXPECT DELAYS".to_string());
+        assert!(
+            encode(&r).contains("NO STACKS EXPECT DELAYS"),
+            "{}",
+            encode(&r)
+        );
+        assert_eq!(encode(&r).lines().count(), 1);
+    }
+
+    /// `ntml_line` stamps a row and is what reaches Discord. Its own doc says `restriction` is
+    /// "the typed text for a raw one", so a raw author's newline would make every line after the
+    /// first read as a separate log entry under no timestamp.
+    #[test]
+    fn a_stamped_row_stays_one_line_even_for_raw_text() {
+        let raw = "CVG via ALL STOP\n25/0215 FORGED ENTRY";
+        let out = ntml_line(at(), raw, None, None, Some("ZID"), Some("ZTL"));
+        assert_eq!(out.lines().count(), 1, "forged a second log entry: {out:?}");
+        assert!(
+            out.contains("CVG via ALL STOP 25/0215 FORGED ENTRY"),
+            "{out:?}"
+        );
+
+        let out = ntml_cancel_line(at(), raw, Some("ZID"), Some("ZTL"));
+        assert_eq!(out.lines().count(), 1, "cancel row broke: {out:?}");
+        assert!(out.contains("CANCEL TMI"), "{out:?}");
     }
 }
