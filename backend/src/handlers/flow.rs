@@ -1468,6 +1468,7 @@ fn fix_predictions(
         0.0
     } else {
         let aircraft = (!fp.aircraft_short.is_empty()).then_some(fp.aircraft_short.as_str());
+        // `None`: the per-fix prediction path has no assignment in hand (#513's stated limit).
         feed_flow::resolve_ground_allowance_sec(
             &state.gates.load_full(),
             &state.runways,
@@ -1475,6 +1476,7 @@ fn fix_predictions(
             &dep,
             aircraft,
             pilot_pos,
+            None,
         )
     };
 
@@ -1646,6 +1648,20 @@ fn fca_debug(
     }
 }
 
+/// The runway #511's ladder assigned to this aircraft at this field, if any.
+///
+/// Keyed `(icao, callsign)` rather than by FCA, matching the store: a flight metered by two FCAs has one
+/// assignment, so both of its rows model the same runway rather than two that could disagree.
+fn assigned_runway<'a>(
+    assigned: &'a HashMap<(String, String), (String, String)>,
+    dep: &str,
+    callsign: &str,
+) -> Option<&'a str> {
+    assigned
+        .get(&(dep.to_ascii_uppercase(), callsign.to_string()))
+        .map(|(runway, _source)| runway.as_str())
+}
+
 /// Build the crossing candidates for an FCA from a live snapshot (no metering yet).
 #[allow(clippy::too_many_arguments)]
 fn build_candidates(
@@ -1661,6 +1677,10 @@ fn build_candidates(
     runways: &RunwayDb,
     taxi_samples: &HashMap<String, Vec<taxi_estimate::TaxiSample>>,
     exclusions: &ExclusionSet,
+    // Runways already assigned by #511's ladder, keyed `(icao, callsign)` — the same map `list_idst`
+    // reads. An entry replaces the heading guess in the ground allowance (#513), which is what lets a
+    // parked or prefiled departure reach the runway taxi tiers at all.
+    assigned: &HashMap<(String, String), (String, String)>,
     now: DateTime<Utc>,
     debug: bool,
 ) -> (Vec<FcaFlight>, Vec<fca::MeterInput>) {
@@ -1718,6 +1738,7 @@ fn build_candidates(
                 &dep,
                 aircraft,
                 Some((p.latitude, p.longitude, p.heading, p.groundspeed)),
+                assigned_runway(assigned, &dep, &p.callsign),
             ))
         };
         let allowance = ground_taxi.as_ref().map(|b| b.total_sec()).unwrap_or(0.0);
@@ -1819,8 +1840,15 @@ fn build_candidates(
         // airport/default tier.
         let dep = fp.departure.to_ascii_uppercase();
         let aircraft = (!fp.aircraft_short.is_empty()).then_some(fp.aircraft_short.as_str());
-        let ground_taxi =
-            feed_flow::resolve_ground_allowance(gates, runways, taxi_samples, &dep, aircraft, None);
+        let ground_taxi = feed_flow::resolve_ground_allowance(
+            gates,
+            runways,
+            taxi_samples,
+            &dep,
+            aircraft,
+            None,
+            assigned_runway(assigned, &dep, &pf.callsign),
+        );
         let allowance = ground_taxi.total_sec();
         let pred = predict::eta_along_route(
             false,
@@ -2037,6 +2065,7 @@ async fn metered_flights(
             runways.as_ref(),
             taxi_estimate_samples.as_ref(),
             flight_exclusions.as_ref(),
+            &Default::default(),
             now,
             debug,
         );
@@ -2196,6 +2225,7 @@ pub async fn list_idst(
                 runways.as_ref(),
                 taxi_estimate_samples.as_ref(),
                 flight_exclusions.as_ref(),
+                &predicted,
                 now,
                 false,
             );
@@ -2311,6 +2341,7 @@ pub async fn mark_release(
             state.runways.as_ref(),
             state.taxi_estimate_samples.load_full().as_ref(),
             state.flight_exclusions.load_full().as_ref(),
+            &Default::default(),
             now,
             false,
         )
@@ -2385,6 +2416,7 @@ pub async fn clear_release(
             state.runways.as_ref(),
             state.taxi_estimate_samples.load_full().as_ref(),
             state.flight_exclusions.load_full().as_ref(),
+            &Default::default(),
             now,
             false,
         )
@@ -2963,6 +2995,7 @@ mod prefile_skip_integration_tests {
                 &RunwayDb::default(),
                 &HashMap::new(),
                 ex,
+                &Default::default(),
                 Utc::now(),
                 false,
             );
@@ -3016,6 +3049,7 @@ mod prefile_skip_integration_tests {
             &RunwayDb::default(),
             &HashMap::new(),
             &HashMap::new(),
+            &Default::default(),
             Utc::now(),
             false,
         );
@@ -3115,6 +3149,7 @@ mod prefile_fix_predictions_tests {
             &RunwayDb::load(),
             &HashMap::new(),
             &fp.departure,
+            None,
             None,
             None,
         );
@@ -3673,6 +3708,7 @@ mod mit_cross_speed_wiring_tests {
             &RunwayDb::default(),
             &HashMap::new(),
             &ExclusionSet::new(),
+            &Default::default(),
             Utc::now(),
             false,
         );
@@ -3765,6 +3801,7 @@ mod mit_cross_speed_wiring_tests {
             &RunwayDb::default(),
             &HashMap::new(),
             &ExclusionSet::new(),
+            &Default::default(),
             Utc::now(),
             false,
         );
@@ -3820,6 +3857,7 @@ mod mit_cross_speed_wiring_tests {
             &RunwayDb::default(),
             &HashMap::new(),
             &ExclusionSet::new(),
+            &Default::default(),
             Utc::now(),
             true, // debug on
         );
@@ -3890,6 +3928,7 @@ mod mit_cross_speed_wiring_tests {
                 &RunwayDb::default(),
                 &HashMap::new(),
                 &ExclusionSet::new(),
+                &Default::default(),
                 now,
                 false,
             );
@@ -4234,6 +4273,7 @@ mod fca_inclusion_tests {
                 &RunwayDb::default(),
                 &HashMap::new(),
                 &empty,
+                &Default::default(),
                 Utc::now(),
                 false,
             );
