@@ -609,13 +609,11 @@ pub async fn publish_ground_stop(
     let mut gs = tmu_repo::get_ground_stop(&mut *tx, &id)
         .await?
         .ok_or(ApiError::NotFound)?;
-    // A stop starts when it is issued -- there is no start column, and `until` is its end (null = UFN).
-    let doc = crate::advisory::ground_stop_advisory_from(
-        &gs,
-        (now, ground_stop_end(now, gs.until.as_deref())),
-        &editorial,
-        now,
-    );
+    // A stop starts when it is issued -- there is no start column. The end comes from Postgres's own
+    // `tmu.ground_stop_until_ts`, the same resolver the cleanup job expires the stop with, so the
+    // document cannot state an end the system does not enforce.
+    let until = tmu_repo::ground_stop_until_instant(&mut tx, &id).await?;
+    let doc = crate::advisory::ground_stop_advisory_from(&gs, (now, until), &editorial, now);
     let req = CreateAdvisoryRequest {
         facility: "DCC".to_string(),
         kind: crate::models::ADVISORY_KIND_GROUND_STOP.to_string(),
@@ -634,28 +632,6 @@ pub async fn publish_ground_stop(
 
     restriction_artcc::stamp_ground_stop(&*state.facilities.read().await, &mut gs);
     Ok(Json(gs))
-}
-
-/// Resolve a ground stop's `until` (HHMM Zulu) to the next occurrence of that clock time after `now`.
-///
-/// `None` in, `None` out: a stop with no stated end runs until further notice, and the advisory prints
-/// `UFN` rather than a time nobody committed to.
-fn ground_stop_end(now: DateTime<Utc>, until: Option<&str>) -> Option<DateTime<Utc>> {
-    let raw = until?.trim();
-    let digits: String = raw.chars().filter(|c| c.is_ascii_digit()).collect();
-    if digits.len() != 4 {
-        return None;
-    }
-    let (h, m) = (
-        digits[..2].parse::<u32>().ok()?,
-        digits[2..].parse::<u32>().ok()?,
-    );
-    let today = now.date_naive().and_hms_opt(h, m, 0)?.and_utc();
-    Some(if today > now {
-        today
-    } else {
-        today + chrono::Duration::days(1)
-    })
 }
 
 #[utoipa::path(
@@ -1361,6 +1337,56 @@ mod tests {
         assert!(
             body.contains("UFN"),
             "an open-ended stop should say UFN; got:\n{body}"
+        );
+    }
+
+    /// The document's end must be the instant the system will actually expire the stop at.
+    ///
+    /// `tmu.ground_stop_until_ts` resolves a bare HHMM relative to `created_at`, so a stop created at
+    /// 1500Z with `until` 1430 ends *tomorrow* at 1430 — not today, and not relative to whenever it was
+    /// published. Resolving that rule a second time in Rust is how the advisory would come to state an
+    /// end nothing enforces, so this pins the document to the database's own answer.
+    #[sqlx::test]
+    async fn the_stated_end_matches_what_the_system_will_expire(pool: PgPool) {
+        let state = test_state(pool.clone(), HashMap::new());
+        let user = seed_user(&pool).await;
+        let cookie = session_cookie(&pool, &user).await;
+        grant(&pool, &user, "tmu.groundstop.publish", None).await;
+        let id = draft_ground_stop(&pool, &user, Some("1430")).await;
+        // Backdate by whole days, not hours. With a few hours' offset the two readings usually
+        // coincide, so the test passed against a now-relative resolver — it did, until this was
+        // checked. Three days back puts the system's answer unambiguously in the past, days away from
+        // whatever "the next 1430 from now" would be, whatever time the suite happens to run at.
+        sqlx::query(
+            "update tmu.ground_stops set created_at = now() - interval '3 days' where id = $1",
+        )
+        .bind(&id)
+        .execute(&pool)
+        .await
+        .unwrap();
+
+        send(
+            &state,
+            http::Method::POST,
+            &format!("/api/v1/tmu/ground-stops/{id}/publish"),
+            &cookie,
+            None,
+        )
+        .await;
+
+        let expected: Option<chrono::DateTime<Utc>> = sqlx::query_scalar(
+            "select tmu.ground_stop_until_ts(created_at, until) from tmu.ground_stops where id = $1",
+        )
+        .bind(&id)
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        let expected = expected.expect("a stated until resolves to an instant");
+        let body = advisories_for_ground_stop(&pool, &id).await.remove(0).2;
+        let stamp = expected.format("%d/%H%MZ").to_string();
+        assert!(
+            body.contains(&stamp),
+            "the document should carry the system's own resolved end {stamp}; got:\n{body}"
         );
     }
 

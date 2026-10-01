@@ -411,6 +411,27 @@ where
         .map_err(|_| ApiError::Internal)
 }
 
+/// The absolute instant a ground stop's `until` resolves to, or `None` for "until further notice".
+///
+/// Delegates to `tmu.ground_stop_until_ts` (migration `0014`) rather than resolving the bare HHMM in
+/// Rust. That function is what the cleanup job uses to expire a stop, and it resolves relative to
+/// `created_at` — not to now — so a draft created at 1500 and published at 1700 with `until` 1630 ends
+/// *tomorrow* at 1630 by the system's reckoning. Reimplementing the rule here would make the generated
+/// advisory state an end the system does not enforce, which is the drift #508 exists to prevent.
+pub(crate) async fn ground_stop_until_instant(
+    tx: &mut Transaction<'_, Postgres>,
+    id: &str,
+) -> Result<Option<DateTime<Utc>>, ApiError> {
+    sqlx::query_scalar::<_, Option<DateTime<Utc>>>(
+        "select tmu.ground_stop_until_ts(created_at, until) from tmu.ground_stops where id = $1",
+    )
+    .bind(id)
+    .fetch_optional(&mut **tx)
+    .await
+    .map(Option::flatten)
+    .map_err(|_| ApiError::Internal)
+}
+
 pub async fn create_ground_stop(
     pool: &PgPool,
     req: &CreateGroundStopRequest,
