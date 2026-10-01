@@ -341,27 +341,32 @@ mod tests {
         assert_eq!(favored_config(&configs, Some(225)).unwrap().id, "south");
     }
 
-    /// AC3's escape hatch, pinned: the wind-favoured config and the controller's active arrival runways
-    /// are allowed to disagree. A controller may hold a crosswind runway for noise, a closure, or a
-    /// tailwind within limits, so this is a valid operating state rather than an inconsistency — the
-    /// point is that nothing silently reconciles them behind an operator's back.
+    /// AC3's escape hatch. The wind-favoured config and the controller's active arrival runways are
+    /// allowed to disagree, and this pins that `favored_config` neither reads nor constrains the arrival
+    /// side — a controller may hold a crosswind runway for noise, a closure, or a tailwind within limits.
+    ///
+    /// Asserted as *independence*: the same arrival state is paired with two different winds, and the
+    /// answer moves with the wind alone. An earlier version of this test compared the result against a
+    /// hard-coded `"south"` string and so asserted only that 270 picks `west`, which a neighbouring test
+    /// already covered — it would have passed even if this function had started consulting
+    /// `active_ends`.
     #[test]
-    fn arrivals_may_differ_from_the_wind_favoured_config() {
+    fn the_favoured_config_is_independent_of_the_arrival_side() {
         let configs = vec![
             cfg("calm", 30, 0, 0, true),
             cfg("south", 30, 150, 210, false),
             cfg("west", 30, 240, 300, false),
         ];
-        // The wind favours west...
-        let favoured = favored_config(&configs, Some(270)).unwrap();
-        assert_eq!(favoured.id, "west");
-        // ...while the arrival side is whatever `flow.runway_config.active_ends` holds, which this
-        // function neither reads nor constrains. Nothing here forces them to agree, and that is the
-        // documented behaviour rather than an oversight.
-        let controllers_choice = "south";
+        // `flow.runway_config.active_ends` is the arrival side's state. It is not an input here, and
+        // that is the point: this function cannot see it, so the two are free to disagree.
+        let westerly = favored_config(&configs, Some(270)).unwrap().id.clone();
+        let southerly = favored_config(&configs, Some(180)).unwrap().id.clone();
+
+        assert_eq!(westerly, "west");
+        assert_eq!(southerly, "south");
         assert_ne!(
-            favoured.id, controllers_choice,
-            "a controller's active arrival config may legitimately differ from the wind's"
+            westerly, southerly,
+            "the answer tracks the wind, with nothing reconciling it against the arrival config"
         );
     }
 
