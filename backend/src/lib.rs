@@ -17,6 +17,7 @@ pub mod router;
 #[cfg(test)]
 pub(crate) mod scope_test_support;
 pub mod state;
+pub(crate) mod text;
 pub mod tmi;
 
 use std::net::SocketAddr;
@@ -92,6 +93,10 @@ pub async fn run() -> color_eyre::Result<()> {
         );
         // Seed airport ramp/taxiway geometry from the bundled FAA AM extract (#230/#231).
         jobs::spawn_faa_surface_seed(state.jobs.clone(), pool.clone());
+        // Seed airport parking stands from the bundled X-Plane extract (#431). After
+        // spawn_airport_gates_refresh above, so a seed's own cache reload is not immediately
+        // overwritten by a poll that started before the rows landed.
+        jobs::spawn_xplane_gate_seed(state.jobs.clone(), pool.clone(), state.gates.clone());
         // Learned taxi-observation samples, for feed::flow's ground-allowance estimate (#164
         // sub-issue E, kept DB-less).
         jobs::spawn_taxi_estimate_samples_refresh(

@@ -445,6 +445,9 @@ pub struct UpdateTmiRequest {
 /// the first type to claim a value rather than an enum variant to add.
 pub const ADVISORY_KIND_REROUTE: &str = "reroute";
 
+/// The `kind` value identifying a Ground Delay Program advisory (#461).
+pub const ADVISORY_KIND_GDP: &str = "gdp";
+
 /// One row of a single-segment reroute's route table: `ORIG / DEST / ROUTE`.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, ToSchema)]
 pub struct RerouteRow {
@@ -527,6 +530,144 @@ pub struct RerouteAdvisory {
     pub routes: RerouteRoutes,
 }
 
+/// The structured fields a Ground Delay Program (GDP) advisory is built from, per the vATCSCC
+/// reference quoted in #437.
+///
+/// Stored in `tmu.advisories.structured` and rendered to `body` by
+/// [`crate::advisory::render_gdp`]. Optional fields follow `RerouteAdvisory`'s convention —
+/// `Option<String>` with `#[serde(default)]`, so an absent field and an empty one behave alike.
+///
+/// # Every field is a string, including the numeric-looking ones
+///
+/// `PROGRAM RATE` is `40/40/40/30/25/20/20/36/54` — a per-hour profile, not a number — and
+/// `DEPARTURE SCOPE` is `1200`, which the reference never defines as minutes, a tier or a code.
+/// Typing either as an integer would commit to a reading of the document that the document does not
+/// support. The advisory is a *document*: these are its lines, and #461's follow-up is where the
+/// values get derived from `tmu.gdp` (whose `aar_steps` is the same profile in structured form).
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, ToSchema)]
+pub struct GdpAdvisory {
+    /// The header's trailing qualifier — `CDM GROUND DELAY PROGRAM` in the one available example.
+    /// Carried rather than hardcoded for the same reason `RerouteAdvisory::header` is: one sample is
+    /// not enough to assert that every GDP is a CDM GDP.
+    pub header: String,
+    /// The header's element slot — `JFK/ZNY`, the control element and its ARTCC.
+    ///
+    /// Carried rather than derived, and **not** taken from `AdvisoryIdent::facility` the way
+    /// `render_reroute` takes its header element. Reroute puts the *issuing* facility there (`DCC`,
+    /// matching its `TMI ID: RRDCC004`); the GDP reference puts the control element there while also
+    /// printing `CTL ELEMENT: JFK` on its own line. The reference duplicates the airport across the
+    /// two positions, so this does too — the rule for joining a control element to its ARTCC is
+    /// stated nowhere, and one example is not enough to infer one.
+    pub element: String,
+    pub control_element: String,
+    /// `APT` in the reference. Free-form because the field is named "element *type*" — a GDP can be
+    /// run on something other than an airport — and the reference lists no closed set.
+    pub element_type: String,
+    /// Aggregate Demand List time the program was built from, `1349Z`.
+    pub adl_time: String,
+    /// `DAS`, `GAAP` or `UDP` per #437. Not an enum: the reference names the three in prose without
+    /// ruling out a fourth, and a `kind`-style free string is this module's existing answer to that.
+    pub delay_assignment_mode: String,
+    pub arrivals_estimated_for: String,
+    pub cumulative_program_period: String,
+    pub program_rate: String,
+    #[serde(default)]
+    pub pop_up_factor: Option<String>,
+    /// `FLT INCL`, which the reference prints **twice** — `1stTier` then `CZY` — so this is a list
+    /// and each entry gets its own line. A Ground Stop prints one combined line
+    /// (`(Manual) ZHU ZJX ZMA ZME ZTL`), which is the same shape with one entry.
+    #[serde(default)]
+    pub flights_included: Vec<String>,
+    #[serde(default)]
+    pub departure_scope: Option<String>,
+    #[serde(default)]
+    pub additional_dep_facilities_included: Option<String>,
+    #[serde(default)]
+    pub exempt_dep_facilities: Option<String>,
+    #[serde(default)]
+    pub canadian_arpts_included: Option<String>,
+    #[serde(default)]
+    pub delay_assignment_table_applies_to: Option<String>,
+    #[serde(default)]
+    pub delay_limit: Option<String>,
+    #[serde(default)]
+    pub maximum_delay: Option<String>,
+    #[serde(default)]
+    pub average_delay: Option<String>,
+    #[serde(default)]
+    pub impacting_condition: Option<String>,
+    #[serde(default)]
+    pub comments: Option<String>,
+    /// The footer's period line, `141415-142315`.
+    ///
+    /// Held as one string rather than a from/to pair: the reference prints it verbatim in a DDHHMM
+    /// form that `cumulative_program_period` also expresses as `14/1415Z - 14/2315Z`, and nothing
+    /// states which is derived from which. `RerouteValid` splits from/to because reroute's own
+    /// `VALID` line is assembled from them; here the two renderings of the same window differ in
+    /// format, so re-deriving one would be inventing a conversion.
+    pub period: String,
+}
+
+/// The `kind` value identifying a Ground Stop advisory (#461).
+///
+/// Spelled out rather than abbreviated to `"gs"`, matching `ADVISORY_KIND_GROUND_STOP`'s siblings.
+/// `repos::tmu`'s tests keep their own `UNRENDERED_KIND` for cases that need a kind nothing renders,
+/// so claiming this value does not repurpose any of them.
+pub const ADVISORY_KIND_GROUND_STOP: &str = "ground_stop";
+
+/// The structured fields a Ground Stop (GS) advisory is built from, per the vATCSCC reference.
+///
+/// Stored in `tmu.advisories.structured` and rendered to `body` by
+/// [`crate::advisory::render_ground_stop`].
+///
+/// Shares most of its shape with [`GdpAdvisory`] — same header, same `CTL ELEMENT`/`ELEMENT
+/// TYPE`/`ADL TIME` opening, same `CUMULATIVE PROGRAM PERIOD`, same footer — but the two are
+/// separate structs rather than one with optional halves. A GS has no delay-assignment mode, rate
+/// or pop-up factor, and reports delays as three `TOTAL, MAXIMUM, AVERAGE` triplets where a GDP
+/// reports a limit and two scalars. Merging them would make every field optional and let a
+/// nonsensical advisory typecheck.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, ToSchema)]
+pub struct GroundStopAdvisory {
+    /// The header's trailing qualifier — `CDM GROUND STOP` in the reference.
+    pub header: String,
+    /// The header's element slot — `DFW/ZFW`, the control element and its ARTCC. See
+    /// [`GdpAdvisory::element`]; the GS reference puts the control element here too, which is what
+    /// makes that reading of the format more than a one-document guess.
+    pub element: String,
+    pub control_element: String,
+    pub element_type: String,
+    pub adl_time: String,
+    /// When the first and last stopped aircraft are scheduled to depart.
+    pub ground_stop_period: String,
+    pub cumulative_program_period: String,
+    /// `FLT INCL`. A list for the same reason [`GdpAdvisory::flights_included`] is; the GS reference
+    /// uses a single entry carrying its mode inline, `(Manual) ZHU ZJX ZMA ZME ZTL`.
+    #[serde(default)]
+    pub flights_included: Vec<String>,
+    #[serde(default)]
+    pub additional_dep_facilities_included: Option<String>,
+    /// The three delay triplets, each printed `TOTAL/MAXIMUM/AVERAGE` in minutes — `1240/414/81`.
+    ///
+    /// Held as written rather than as three numbers: the reference's own annotation calls them
+    /// "Total, Current, Average" while the labels say "TOTAL, MAXIMUM, AVERAGE", so the document
+    /// disagrees with its own legend about what the middle figure is. Parsing would require picking
+    /// a side; printing the line verbatim does not.
+    #[serde(default)]
+    pub current_delays: Option<String>,
+    #[serde(default)]
+    pub previous_delays: Option<String>,
+    #[serde(default)]
+    pub new_delays: Option<String>,
+    #[serde(default)]
+    pub probability_of_extension: Option<String>,
+    #[serde(default)]
+    pub impacting_condition: Option<String>,
+    #[serde(default)]
+    pub comments: Option<String>,
+    /// The footer's period line, `141430-141630`.
+    pub period: String,
+}
+
 /// One advisory. `number` is its identity within `facility` on `issued_day` — see
 /// `repos::tmu::allocate_advisory_number` for what that sequence promises.
 #[derive(Debug, Serialize, ToSchema, sqlx::FromRow)]
@@ -544,6 +685,72 @@ pub struct AdvisoryBody {
     pub status: String,
     pub published_at: Option<DateTime<Utc>>,
     pub created_at: DateTime<Utc>,
+}
+
+/// The parts of a generated GDP advisory that no data can supply (#508).
+///
+/// Publishing a GDP derives most of the document from `tmu.gdp`, but a metering engine cannot know
+/// *why* a program exists, and several reference fields have no source at all:
+///
+/// - `DELAY LIMIT` is not `max_enroute_min` — that is an enroute *scope tier*, not a delay cap.
+/// - `DEPARTURE SCOPE` is `1200` in the reference, which #507 recorded as undefined: not minutes, not a
+///   tier, not a code. The program's `scope` is a list of departure ARTCCs, so putting it here would
+///   assert a reading the document does not support. Left to the author deliberately.
+/// - `IMPACTING CONDITION`, `COMMENTS`, `POP-UP FACTOR` and the facility lists are editorial by nature.
+///
+/// Every field is optional: a GDP must stay publishable in a hurry, and the renderer already prints a
+/// bare `LABEL:` for an absent value.
+#[derive(Debug, Default, Deserialize, ToSchema)]
+pub struct PublishGdpRequest {
+    /// `DAS` | `GAAP` | `UDP`. Defaults to `DAS`, the ordinary case.
+    #[serde(default)]
+    pub delay_assignment_mode: Option<String>,
+    #[serde(default)]
+    pub delay_limit: Option<String>,
+    #[serde(default)]
+    pub departure_scope: Option<String>,
+    #[serde(default)]
+    pub pop_up_factor: Option<String>,
+    #[serde(default)]
+    pub flights_included: Option<Vec<String>>,
+    #[serde(default)]
+    pub additional_dep_facilities_included: Option<String>,
+    #[serde(default)]
+    pub exempt_dep_facilities: Option<String>,
+    #[serde(default)]
+    pub canadian_arpts_included: Option<String>,
+    #[serde(default)]
+    pub delay_assignment_table_applies_to: Option<String>,
+    #[serde(default)]
+    pub impacting_condition: Option<String>,
+    #[serde(default)]
+    pub comments: Option<String>,
+}
+
+/// The editorial half of a generated Ground Stop advisory (#508).
+///
+/// A ground stop has **no delay data anywhere**: there is no slot table for one and no delay
+/// computation in `feed/`, so all three `TOTAL/MAXIMUM/AVERAGE` triplets are author-supplied.
+/// `previous_delays` is inherently historical — nothing records a prior revision's figures — so it
+/// could not be derived even if the others were.
+#[derive(Debug, Default, Deserialize, ToSchema)]
+pub struct PublishGroundStopRequest {
+    #[serde(default)]
+    pub flights_included: Option<Vec<String>>,
+    #[serde(default)]
+    pub additional_dep_facilities_included: Option<String>,
+    #[serde(default)]
+    pub current_delays: Option<String>,
+    #[serde(default)]
+    pub previous_delays: Option<String>,
+    #[serde(default)]
+    pub new_delays: Option<String>,
+    #[serde(default)]
+    pub probability_of_extension: Option<String>,
+    #[serde(default)]
+    pub impacting_condition: Option<String>,
+    #[serde(default)]
+    pub comments: Option<String>,
 }
 
 #[derive(Debug, Deserialize, ToSchema)]
@@ -737,6 +944,12 @@ pub struct UpdateGdpRequest {
     /// Optional rate changes across the window (empty = flat AAR).
     #[serde(default)]
     pub aar_steps: Vec<AarStep>,
+    /// Editorial fields for the advisory reissued when a **published** program is revised (#508).
+    /// Revising changes the delay figures, and #461 settled that an advisory is cancelled and reissued
+    /// rather than rewritten — so the author gets to restate the context. Ignored for a draft, which has
+    /// no advisory yet.
+    #[serde(default)]
+    pub advisory: Option<PublishGdpRequest>,
 }
 
 fn default_true() -> bool {
@@ -940,8 +1153,11 @@ pub struct AirportGateBody {
     pub name: String,
     pub lat: f64,
     pub lon: f64,
-    /// `manual` | `osm` | `crc`.
+    /// `manual` | `osm` | `crc` | `faa` | `xplane`.
     pub source: String,
+    /// X-Plane stand type (`gate` | `tie_down` | `misc` | `hangar`) for imported stands; `None` for
+    /// hand-entered ones. Read-only: an operator adding a stand has no X-Plane type to declare.
+    pub kind: Option<String>,
     pub updated_at: DateTime<Utc>,
     /// Whether the requesting user may edit this airport's surface data (per their ARTCC scope).
     #[sqlx(default)]
@@ -1048,6 +1264,14 @@ pub struct FaaRepullResult {
     pub runways_inserted: usize,
     pub osm_taxiways_retired: usize,
     pub osm_ramps_retired: usize,
+    /// Stands newly inserted from the X-Plane extract (#431). Existing imported stands are refreshed
+    /// in place rather than replaced, so they are not counted here — see
+    /// `repos::xplane_gate_seed::seed_for_icao`.
+    pub gates_inserted: usize,
+    /// Stands refreshed in place. A healthy re-pull reports 0 inserted and every stand refreshed, so
+    /// both numbers are needed to tell "nothing to do" from "nothing happened".
+    pub gates_refreshed: usize,
+    pub osm_gates_retired: usize,
 }
 
 /// A configurable aircraft performance profile (climb / cruise / descent schedules) used by the
@@ -1740,6 +1964,18 @@ pub struct DiscordTmiInfoBody {
     pub decoded: Option<String>,
 }
 
+/// What the bot needs to reply to a "View structured" button click on an advisory post
+/// (VATUSA/OIS#459).
+#[derive(Debug, Serialize, ToSchema)]
+pub struct DiscordAdvisoryInfoBody {
+    /// Which document type this is — `reroute` today.
+    pub kind: String,
+    /// The fields the document was built from; null when it was typed as raw text, which the bot
+    /// reports as such rather than showing an empty breakdown.
+    #[schema(value_type = Option<Value>)]
+    pub structured: Option<Value>,
+}
+
 /// Bot interaction callback: a Discord user submitted the claim modal on an ACE request. The backend
 /// resolves the Discord id to the linked OIS user and claims a slot on their behalf. `start_hhmm` /
 /// `end_hhmm` are the modal's raw Zulu times (e.g. "2330"); the backend parses them against the
@@ -1981,6 +2217,18 @@ pub struct ReleaseRequest {
 #[derive(Debug, Deserialize, ToSchema)]
 pub struct ReorderRequest {
     pub order: Vec<String>,
+}
+
+/// The two callsigns whose release times trade places (#514).
+///
+/// No FCA field: the FCA is in the route path, which is what makes a cross-FCA swap
+/// unrepresentable. A release is a slot in one FCA's metered sequence (`flow.fca_release` is keyed
+/// `(fca_id, callsign)`), so moving one into another FCA would hand that FCA's metering a fixed
+/// constraint it never sequenced.
+#[derive(Debug, Deserialize, ToSchema)]
+pub struct SwapReleaseRequest {
+    pub a: String,
+    pub b: String,
 }
 
 /// Route-fix tokens that don't resolve to a known nav fix/navaid/airway/procedure — likely typos in

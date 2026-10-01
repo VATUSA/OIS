@@ -100,19 +100,44 @@ export function inWindRange(dir: number, from: number, to: number): boolean {
   return from <= to ? dir >= from && dir <= to : dir >= from || dir <= to;
 }
 
+/** Degrees between two bearings, the short way round (0..180). */
+function arcDeg(a: number, b: number): number {
+  const d = ((a - b) % 360 + 360) % 360;
+  return Math.min(d, 360 - d);
+}
+
+/** How far `dir` is from a config's rule: 0 when the rule contains it, else to the nearer edge. */
+function distanceToRule(dir: number, c: AirportConfig): number {
+  return inWindRange(dir, c.wind_from_deg, c.wind_to_deg)
+    ? 0
+    : Math.min(arcDeg(dir, c.wind_from_deg), arcDeg(dir, c.wind_to_deg));
+}
+
 /**
- * The config a forecast wind selects: the first non-calm config whose wind rule contains the
- * direction, else the calm-default (or the first config). Returns undefined if there are none.
+ * The config a wind selects: the **closest** non-calm config, by distance to its wind rule — 0 when the
+ * rule contains the direction, else the degrees to its nearer edge. A tie goes to the calm-default,
+ * because equally close has no answer and the configured default beats resolving by name. Calm or
+ * unknown wind takes the calm-default outright. Returns undefined if there are no configs.
+ *
+ * Hand-mirrors `favored_config` (`backend/src/repos/airport_configs.rs`), which carries the full
+ * reasoning and is authoritative for departures (#510). The two must move together — this side had no
+ * tests at all until #510 added them, so a drift would previously have been caught by nothing.
  */
 export function matchConfig(
   configs: AirportConfig[],
   windDir: number | null | undefined,
 ): AirportConfig | undefined {
-  if (windDir != null) {
-    const m = configs.find((c) => !c.calm_default && inWindRange(windDir, c.wind_from_deg, c.wind_to_deg));
-    if (m) return m;
-  }
-  return configs.find((c) => c.calm_default) ?? configs[0];
+  const calm = () => configs.find((c) => c.calm_default);
+  if (windDir == null) return calm() ?? configs[0];
+
+  const candidates = configs.filter((c) => !c.calm_default);
+  if (candidates.length === 0) return calm() ?? configs[0];
+
+  const scored = candidates.map((c) => ({ c, d: distanceToRule(windDir, c) }));
+  const best = Math.min(...scored.map((s) => s.d));
+  const tied = scored.filter((s) => s.d === best);
+  if (tied.length > 1) return calm() ?? tied[0].c;
+  return tied[0].c;
 }
 
 /** A `{ key: runway }` rule map as the editor's `KEY=RUNWAY, KEY=RUNWAY` text. */

@@ -23,10 +23,16 @@ pub async fn list_gdps(pool: &PgPool) -> Result<Vec<GdpBody>, ApiError> {
     .map_err(|_| ApiError::Internal)
 }
 
-pub async fn get_gdp(pool: &PgPool, id: &str) -> Result<Option<GdpBody>, ApiError> {
+/// Generic over the executor so the publish path can re-select inside its own transaction and see its
+/// own `UPDATE` — the same reason `publish_tmi` re-selects rather than using `returning` (the select
+/// joins `identity.users` for `updated_by`, which `returning` cannot produce).
+pub async fn get_gdp<'e, E>(executor: E, id: &str) -> Result<Option<GdpBody>, ApiError>
+where
+    E: sqlx::Executor<'e, Database = sqlx::Postgres>,
+{
     sqlx::query_as::<_, GdpBody>(&format!("{GDP_SELECT} where g.id = $1"))
         .bind(id)
-        .fetch_optional(pool)
+        .fetch_optional(executor)
         .await
         .map_err(|_| ApiError::Internal)
 }
@@ -101,14 +107,21 @@ pub async fn update_gdp(
 }
 
 /// Publish a draft GDP. Returns false if it isn't currently a draft.
-pub async fn publish_gdp(pool: &PgPool, id: &str, published_by: &str) -> Result<bool, ApiError> {
+///
+/// Generic over the executor (the `cancel_tmi` shape) so the publish can run inside the caller's
+/// transaction: #508 generates the program's advisory in the same transaction, and an advisory must not
+/// exist for a program that did not publish. Pool callers pass `pool`, transactional ones `&mut *tx`.
+pub async fn publish_gdp<'e, E>(executor: E, id: &str, published_by: &str) -> Result<bool, ApiError>
+where
+    E: sqlx::Executor<'e, Database = sqlx::Postgres>,
+{
     let result = sqlx::query(
         "update tmu.gdp set status = 'published', published_by = $2, published_at = now() \
          where id = $1 and status = 'draft'",
     )
     .bind(id)
     .bind(published_by)
-    .execute(pool)
+    .execute(executor)
     .await
     .map_err(|_| ApiError::Internal)?;
     Ok(result.rows_affected() > 0)
@@ -179,9 +192,25 @@ pub async fn replace_slots(
     slots: &[GdpSlotRow],
 ) -> Result<(), ApiError> {
     let mut tx = pool.begin().await.map_err(|_| ApiError::Internal)?;
+    replace_slots_in(&mut tx, gdp_id, slots).await?;
+    tx.commit().await.map_err(|_| ApiError::Internal)?;
+    Ok(())
+}
+
+/// The slot replacement itself, on a connection the caller owns.
+///
+/// Split out of [`replace_slots`] for #508: the publish path freezes slots and generates the advisory
+/// in one transaction, because the advisory's `MAXIMUM`/`AVERAGE DELAY` are an aggregate of exactly
+/// these rows. Several statements rather than one, so this takes `&mut PgConnection` rather than being
+/// generic over `Executor` (which each query would consume).
+pub(crate) async fn replace_slots_in(
+    conn: &mut sqlx::PgConnection,
+    gdp_id: &str,
+    slots: &[GdpSlotRow],
+) -> Result<(), ApiError> {
     sqlx::query("delete from tmu.gdp_slot where gdp_id = $1")
         .bind(gdp_id)
-        .execute(&mut *tx)
+        .execute(&mut *conn)
         .await
         .map_err(|_| ApiError::Internal)?;
     for s in slots {
@@ -197,11 +226,10 @@ pub async fn replace_slots(
         .bind(s.cta)
         .bind(s.edct)
         .bind(s.delay_min)
-        .execute(&mut *tx)
+        .execute(&mut *conn)
         .await
         .map_err(|_| ApiError::Internal)?;
     }
-    tx.commit().await.map_err(|_| ApiError::Internal)?;
     Ok(())
 }
 

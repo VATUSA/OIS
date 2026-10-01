@@ -122,6 +122,12 @@ const FLIGHT_EXCLUSIONS_INTERVAL: Duration = Duration::from_secs(60);
 /// redeployed extract newly covers), plus the admin Background Tasks page's (#40) on-demand run.
 const FAA_SURFACE_SEED_INTERVAL: Duration = Duration::from_secs(24 * 60 * 60);
 
+/// How often to run the X-Plane gate seed (#431). Like the FAA surface seed, it only fills airports
+/// with no `xplane` stands yet, so the interval isn't about freshness — the meaningful trigger is
+/// `run_interval`'s immediate first tick on every boot, plus the admin Background Tasks page's
+/// on-demand run.
+const XPLANE_GATE_SEED_INTERVAL: Duration = Duration::from_secs(24 * 60 * 60);
+
 /// How often to refresh the airport coordinate database (#216). Fast enough that a transient
 /// startup failure self-heals within minutes instead of requiring a restart; slow enough not to
 /// hammer the upstream (mwgg/Airports on GitHub raw).
@@ -443,6 +449,44 @@ pub fn spawn_airport_gates_refresh(
                     }
                     Err(e) => Err(format!("{e:?}")),
                 }
+            }
+        },
+    ));
+}
+
+/// Seed airport parking stands from the bundled X-Plane Scenery Gateway extract (#431), taking gate
+/// coverage from one airport to 183.
+///
+/// Unlike the FAA surface layers, gates are **cached** in `AppState::gates` for the DB-less feed
+/// subsystem, so a successful seed reloads that cache immediately rather than leaving a freshly seeded
+/// airport unmatched until `spawn_airport_gates_refresh`'s next poll.
+pub fn spawn_xplane_gate_seed(
+    reg: Arc<JobRegistry>,
+    pool: PgPool,
+    gates: Arc<ArcSwap<std::collections::HashMap<String, Vec<AirportGateBody>>>>,
+) {
+    tokio::spawn(run_interval(
+        reg,
+        "xplane_gate_seed",
+        "Seed airport parking stands from the bundled X-Plane extract",
+        XPLANE_GATE_SEED_INTERVAL,
+        move || {
+            let (pool, gates) = (pool.clone(), gates.clone());
+            async move {
+                let summary = crate::repos::xplane_gate_seed::seed(&pool)
+                    .await
+                    .map_err(|e| format!("{e:?}"))?;
+                // Only reload the cache when something actually changed — a no-op run is the common
+                // case (every boot after the first), and re-reading every gate for nothing is waste.
+                if summary.gates_inserted > 0 || summary.osm_gates_retired > 0 {
+                    match airport_surface_repo::load_all_gates(&pool).await {
+                        Ok(by_icao) => gates.store(Arc::new(by_icao)),
+                        Err(e) => {
+                            return Err(format!("seeded, but the gate cache reload failed: {e:?}"));
+                        }
+                    }
+                }
+                Ok(summary.to_string())
             }
         },
     ));
@@ -1924,6 +1968,8 @@ mod departure_runway_derive_tests {
                 lat: 40.6413,
                 lon: -73.7781,
                 source: "manual".into(),
+                // Hand-entered, so no X-Plane stand type (#517).
+                kind: None,
                 updated_at: Utc::now(),
                 editable: false,
             }],

@@ -1599,6 +1599,40 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/v1/flow/fcas/{id}/swap": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Trade two flights' release times.
+         * @description The point of #434: two departures holding releases exchange slots, and the times they exchange
+         *     are exactly the two that already existed — so nothing downstream renumbers and neither ends up
+         *     later than it was.
+         *
+         *     # Not the reorder, and not a recompute
+         *
+         *     [`reorder_fca`] is the other way to change who goes first, and it is the wrong tool: manual mode
+         *     re-chains every aircraft behind the one that moved (`feed::fca`), which is the opposite of
+         *     trading two slots. This writes two `flow.fca_release` rows and nothing else; the metering engine
+         *     reads them as `frozen_ms` on its next pass and sequences around them unchanged.
+         *
+         *     Returns a status rather than the re-metered list, unlike [`mark_release`]. Pinning a *new* time
+         *     genuinely changes the sequence, so `mark_release` re-runs `build_candidates`; an exchange of two
+         *     existing frozen times does not, and calling `build_candidates` here would be the very recompute
+         *     this endpoint exists to avoid. Clients refetch, as they do after `reorder_fca`.
+         */
+        post: operations["swap_releases"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/v1/flow/fcas/{id}/traffic": {
         parameters: {
             query?: never;
@@ -1874,6 +1908,23 @@ export interface paths {
         get?: never;
         put?: never;
         post: operations["discord_ace_claim"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/integration/discord/advisory/{id}": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** What the bot needs to reply to a "View structured" button click on an advisory post. */
+        get: operations["discord_advisory_info"];
+        put?: never;
+        post?: never;
         delete?: never;
         options?: never;
         head?: never;
@@ -3462,12 +3513,17 @@ export interface components {
             editable: boolean;
             icao: string;
             id: string;
+            /**
+             * @description X-Plane stand type (`gate` | `tie_down` | `misc` | `hangar`) for imported stands; `None` for
+             *     hand-entered ones. Read-only: an operator adding a stand has no X-Plane type to declare.
+             */
+            kind?: string | null;
             /** Format: double */
             lat: number;
             /** Format: double */
             lon: number;
             name: string;
-            /** @description `manual` | `osm` | `crc`. */
+            /** @description `manual` | `osm` | `crc` | `faa` | `xplane`. */
             source: string;
             /** Format: date-time */
             updated_at: string;
@@ -4081,6 +4137,19 @@ export interface components {
             window_label: string;
         };
         /**
+         * @description What the bot needs to reply to a "View structured" button click on an advisory post
+         *     (VATUSA/OIS#459).
+         */
+        DiscordAdvisoryInfoBody: {
+            /** @description Which document type this is — `reroute` today. */
+            kind: string;
+            /**
+             * @description The fields the document was built from; null when it was typed as raw text, which the bot
+             *     reports as such rather than showing an empty breakdown.
+             */
+            structured?: unknown;
+        };
+        /**
          * @description The bot relays an availability button press: which Discord user pressed which colour. The event
          *     id travels in the path.
          */
@@ -4292,6 +4361,18 @@ export interface components {
          *     extract (#232) — a permissioned, on-demand equivalent of #231's nationwide startup seed.
          */
         FaaRepullResult: {
+            /**
+             * @description Stands newly inserted from the X-Plane extract (#431). Existing imported stands are refreshed
+             *     in place rather than replaced, so they are not counted here — see
+             *     `repos::xplane_gate_seed::seed_for_icao`.
+             */
+            gates_inserted: number;
+            /**
+             * @description Stands refreshed in place. A healthy re-pull reports 0 inserted and every stand refreshed, so
+             *     both numbers are needed to tell "nothing to do" from "nothing happened".
+             */
+            gates_refreshed: number;
+            osm_gates_retired: number;
             osm_ramps_retired: number;
             osm_taxiways_retired: number;
             ramps_inserted: number;
@@ -4794,6 +4875,84 @@ export interface components {
             trail?: number;
         };
         /**
+         * @description The structured fields a Ground Delay Program (GDP) advisory is built from, per the vATCSCC
+         *     reference quoted in #437.
+         *
+         *     Stored in `tmu.advisories.structured` and rendered to `body` by
+         *     [`crate::advisory::render_gdp`]. Optional fields follow `RerouteAdvisory`'s convention —
+         *     `Option<String>` with `#[serde(default)]`, so an absent field and an empty one behave alike.
+         *
+         *     # Every field is a string, including the numeric-looking ones
+         *
+         *     `PROGRAM RATE` is `40/40/40/30/25/20/20/36/54` — a per-hour profile, not a number — and
+         *     `DEPARTURE SCOPE` is `1200`, which the reference never defines as minutes, a tier or a code.
+         *     Typing either as an integer would commit to a reading of the document that the document does not
+         *     support. The advisory is a *document*: these are its lines, and #461's follow-up is where the
+         *     values get derived from `tmu.gdp` (whose `aar_steps` is the same profile in structured form).
+         */
+        GdpAdvisory: {
+            additional_dep_facilities_included?: string | null;
+            /** @description Aggregate Demand List time the program was built from, `1349Z`. */
+            adl_time: string;
+            arrivals_estimated_for: string;
+            average_delay?: string | null;
+            canadian_arpts_included?: string | null;
+            comments?: string | null;
+            control_element: string;
+            cumulative_program_period: string;
+            /**
+             * @description `DAS`, `GAAP` or `UDP` per #437. Not an enum: the reference names the three in prose without
+             *     ruling out a fourth, and a `kind`-style free string is this module's existing answer to that.
+             */
+            delay_assignment_mode: string;
+            delay_assignment_table_applies_to?: string | null;
+            delay_limit?: string | null;
+            departure_scope?: string | null;
+            /**
+             * @description The header's element slot — `JFK/ZNY`, the control element and its ARTCC.
+             *
+             *     Carried rather than derived, and **not** taken from `AdvisoryIdent::facility` the way
+             *     `render_reroute` takes its header element. Reroute puts the *issuing* facility there (`DCC`,
+             *     matching its `TMI ID: RRDCC004`); the GDP reference puts the control element there while also
+             *     printing `CTL ELEMENT: JFK` on its own line. The reference duplicates the airport across the
+             *     two positions, so this does too — the rule for joining a control element to its ARTCC is
+             *     stated nowhere, and one example is not enough to infer one.
+             */
+            element: string;
+            /**
+             * @description `APT` in the reference. Free-form because the field is named "element *type*" — a GDP can be
+             *     run on something other than an airport — and the reference lists no closed set.
+             */
+            element_type: string;
+            exempt_dep_facilities?: string | null;
+            /**
+             * @description `FLT INCL`, which the reference prints **twice** — `1stTier` then `CZY` — so this is a list
+             *     and each entry gets its own line. A Ground Stop prints one combined line
+             *     (`(Manual) ZHU ZJX ZMA ZME ZTL`), which is the same shape with one entry.
+             */
+            flights_included?: string[];
+            /**
+             * @description The header's trailing qualifier — `CDM GROUND DELAY PROGRAM` in the one available example.
+             *     Carried rather than hardcoded for the same reason `RerouteAdvisory::header` is: one sample is
+             *     not enough to assert that every GDP is a CDM GDP.
+             */
+            header: string;
+            impacting_condition?: string | null;
+            maximum_delay?: string | null;
+            /**
+             * @description The footer's period line, `141415-142315`.
+             *
+             *     Held as one string rather than a from/to pair: the reference prints it verbatim in a DDHHMM
+             *     form that `cumulative_program_period` also expresses as `14/1415Z - 14/2315Z`, and nothing
+             *     states which is derived from which. `RerouteValid` splits from/to because reroute's own
+             *     `VALID` line is assembled from them; here the two renderings of the same window differ in
+             *     format, so re-deriving one would be inventing a conversion.
+             */
+            period: string;
+            pop_up_factor?: string | null;
+            program_rate: string;
+        };
+        /**
          * @description The full GDP board: the program, its window, controlled + exempt flights, demand vs AAR,
          *     and delay stats — everything the frontend needs in one payload.
          */
@@ -4930,6 +5089,57 @@ export interface components {
             artccs: string[];
             national: boolean;
             permission: string;
+        };
+        /**
+         * @description The structured fields a Ground Stop (GS) advisory is built from, per the vATCSCC reference.
+         *
+         *     Stored in `tmu.advisories.structured` and rendered to `body` by
+         *     [`crate::advisory::render_ground_stop`].
+         *
+         *     Shares most of its shape with [`GdpAdvisory`] — same header, same `CTL ELEMENT`/`ELEMENT
+         *     TYPE`/`ADL TIME` opening, same `CUMULATIVE PROGRAM PERIOD`, same footer — but the two are
+         *     separate structs rather than one with optional halves. A GS has no delay-assignment mode, rate
+         *     or pop-up factor, and reports delays as three `TOTAL, MAXIMUM, AVERAGE` triplets where a GDP
+         *     reports a limit and two scalars. Merging them would make every field optional and let a
+         *     nonsensical advisory typecheck.
+         */
+        GroundStopAdvisory: {
+            additional_dep_facilities_included?: string | null;
+            adl_time: string;
+            comments?: string | null;
+            control_element: string;
+            cumulative_program_period: string;
+            /**
+             * @description The three delay triplets, each printed `TOTAL/MAXIMUM/AVERAGE` in minutes — `1240/414/81`.
+             *
+             *     Held as written rather than as three numbers: the reference's own annotation calls them
+             *     "Total, Current, Average" while the labels say "TOTAL, MAXIMUM, AVERAGE", so the document
+             *     disagrees with its own legend about what the middle figure is. Parsing would require picking
+             *     a side; printing the line verbatim does not.
+             */
+            current_delays?: string | null;
+            /**
+             * @description The header's element slot — `DFW/ZFW`, the control element and its ARTCC. See
+             *     [`GdpAdvisory::element`]; the GS reference puts the control element here too, which is what
+             *     makes that reading of the format more than a one-document guess.
+             */
+            element: string;
+            element_type: string;
+            /**
+             * @description `FLT INCL`. A list for the same reason [`GdpAdvisory::flights_included`] is; the GS reference
+             *     uses a single entry carrying its mode inline, `(Manual) ZHU ZJX ZMA ZME ZTL`.
+             */
+            flights_included?: string[];
+            /** @description When the first and last stopped aircraft are scheduled to depart. */
+            ground_stop_period: string;
+            /** @description The header's trailing qualifier — `CDM GROUND STOP` in the reference. */
+            header: string;
+            impacting_condition?: string | null;
+            new_delays?: string | null;
+            /** @description The footer's period line, `141430-141630`. */
+            period: string;
+            previous_delays?: string | null;
+            probability_of_extension?: string | null;
         };
         /** @description A ground stop: holds departures into `airport` from within `scope` until `until`. */
         GroundStopBody: {
@@ -5315,6 +5525,53 @@ export interface components {
              * @description null = until further notice.
              */
             stop_time?: string | null;
+        };
+        /**
+         * @description The parts of a generated GDP advisory that no data can supply (#508).
+         *
+         *     Publishing a GDP derives most of the document from `tmu.gdp`, but a metering engine cannot know
+         *     *why* a program exists, and several reference fields have no source at all:
+         *
+         *     - `DELAY LIMIT` is not `max_enroute_min` — that is an enroute *scope tier*, not a delay cap.
+         *     - `DEPARTURE SCOPE` is `1200` in the reference, which #507 recorded as undefined: not minutes, not a
+         *       tier, not a code. The program's `scope` is a list of departure ARTCCs, so putting it here would
+         *       assert a reading the document does not support. Left to the author deliberately.
+         *     - `IMPACTING CONDITION`, `COMMENTS`, `POP-UP FACTOR` and the facility lists are editorial by nature.
+         *
+         *     Every field is optional: a GDP must stay publishable in a hurry, and the renderer already prints a
+         *     bare `LABEL:` for an absent value.
+         */
+        PublishGdpRequest: {
+            additional_dep_facilities_included?: string | null;
+            canadian_arpts_included?: string | null;
+            comments?: string | null;
+            /** @description `DAS` | `GAAP` | `UDP`. Defaults to `DAS`, the ordinary case. */
+            delay_assignment_mode?: string | null;
+            delay_assignment_table_applies_to?: string | null;
+            delay_limit?: string | null;
+            departure_scope?: string | null;
+            exempt_dep_facilities?: string | null;
+            flights_included?: string[] | null;
+            impacting_condition?: string | null;
+            pop_up_factor?: string | null;
+        };
+        /**
+         * @description The editorial half of a generated Ground Stop advisory (#508).
+         *
+         *     A ground stop has **no delay data anywhere**: there is no slot table for one and no delay
+         *     computation in `feed/`, so all three `TOTAL/MAXIMUM/AVERAGE` triplets are author-supplied.
+         *     `previous_delays` is inherently historical — nothing records a prior revision's figures — so it
+         *     could not be derived even if the others were.
+         */
+        PublishGroundStopRequest: {
+            additional_dep_facilities_included?: string | null;
+            comments?: string | null;
+            current_delays?: string | null;
+            flights_included?: string[] | null;
+            impacting_condition?: string | null;
+            new_delays?: string | null;
+            previous_delays?: string | null;
+            probability_of_extension?: string | null;
         };
         /** @description The bot's push of every guild it's in (full replace of the snapshot). */
         PushGuildSnapshotRequest: {
@@ -5825,6 +6082,18 @@ export interface components {
              */
             total_bytes: number;
         };
+        /**
+         * @description The two callsigns whose release times trade places (#514).
+         *
+         *     No FCA field: the FCA is in the route path, which is what makes a cross-FCA swap
+         *     unrepresentable. A release is a slot in one FCA's metered sequence (`flow.fca_release` is keyed
+         *     `(fca_id, callsign)`), so moving one into another FCA would hand that FCA's metering a fixed
+         *     constraint it never sequenced.
+         */
+        SwapReleaseRequest: {
+            a: string;
+            b: string;
+        };
         /** @description A departure currently being timed at a field. */
         TaxiActive: {
             /** Format: int64 */
@@ -6089,6 +6358,7 @@ export interface components {
             aar: number;
             /** @description Optional rate changes across the window (empty = flat AAR). */
             aar_steps?: components["schemas"]["AarStep"][];
+            advisory?: null | components["schemas"]["PublishGdpRequest"];
             end_time: string;
             exempt_airborne?: boolean;
             /**
@@ -10956,6 +11226,48 @@ export interface operations {
             };
         };
     };
+    swap_releases: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /** @description FCA id */
+                id: string;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["SwapReleaseRequest"];
+            };
+        };
+        responses: {
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+        };
+    };
     fca_traffic: {
         parameters: {
             query?: {
@@ -11660,6 +11972,39 @@ export interface operations {
                 content?: never;
             };
             409: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+        };
+    };
+    discord_advisory_info: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["DiscordAdvisoryInfoBody"];
+                };
+            };
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            404: {
                 headers: {
                     [name: string]: unknown;
                 };
@@ -13892,7 +14237,12 @@ export interface operations {
             };
             cookie?: never;
         };
-        requestBody?: never;
+        /** @description Optional editorial fields for the advisory generated on publish (#508). Omit the body entirely and the advisory still generates, with those lines blank. */
+        requestBody?: {
+            content: {
+                "application/json": null | components["schemas"]["PublishGdpRequest"];
+            };
+        };
         responses: {
             200: {
                 headers: {
@@ -14148,7 +14498,12 @@ export interface operations {
             };
             cookie?: never;
         };
-        requestBody?: never;
+        /** @description Optional editorial fields for the advisory generated on publish (#508). A ground stop has no delay data of its own, so its delay triplets are author-supplied. */
+        requestBody?: {
+            content: {
+                "application/json": null | components["schemas"]["PublishGroundStopRequest"];
+            };
+        };
         responses: {
             200: {
                 headers: {

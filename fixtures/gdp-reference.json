@@ -1,0 +1,44 @@
+{
+  "note": "Shared Ground Delay Program advisory (ADVZY) reference cases. Transcribed from the vATCSCC TMI reference PDF cited by VATUSA/OIS#437 (the 'TMIs' document, 4 example advisories: GDP 002, Ground Stop 003, Reroute 004/005). The renderer is backend/src/advisory.rs (render_gdp); this file is what its tests assert against, so an example is written once and the document format cannot quietly drift. Every field is written out, null where absent, so a case reads as a complete advisory. The backend is authoritative: if a case and an implementation disagree, the backend decides which is wrong. Deviations are recorded per case in `deviation`.",
+  "cases": [
+    {
+      "name": "advzy-002-gdp",
+      "why": "The reference GDP, every field populated as the source prints it. Each line is load-bearing: drop a label, change its spelling, reorder the delay block, change the header's element slot, the period line or the signature and this fails. `ident.facility` is DCC -- the issuing facility -- and is deliberately NOT what the header prints, which pins that a GDP header carries the control element where a reroute header carries the issuer. Note FLT INCL appears twice, which is why the model holds a list.",
+      "deviation": "One. The source puts two blank lines between COMMENTS and the period line; this uses one, matching reroute-reference.json and render_reroute. The second blank is a page-layout artifact of the PDF, not a field.",
+      "ident": {
+        "facility": "DCC",
+        "number": 2,
+        "issued_day": "2020-04-14",
+        "signed_at": "2020-04-14T13:49:00Z"
+      },
+      "structured": {
+        "header": "CDM GROUND DELAY PROGRAM",
+        "element": "JFK/ZNY",
+        "control_element": "JFK",
+        "element_type": "APT",
+        "adl_time": "1349Z",
+        "delay_assignment_mode": "DAS",
+        "arrivals_estimated_for": "14/1415Z - 14/2315Z",
+        "cumulative_program_period": "14/1415Z - 14/2315Z",
+        "program_rate": "40/40/40/30/25/20/20/36/54",
+        "pop_up_factor": "MEDIUM",
+        "flights_included": [
+          "1stTier",
+          "CZY"
+        ],
+        "departure_scope": "1200",
+        "additional_dep_facilities_included": "KATL",
+        "exempt_dep_facilities": "KORD",
+        "canadian_arpts_included": "CYYZ",
+        "delay_assignment_table_applies_to": "ZNY",
+        "delay_limit": "240",
+        "maximum_delay": "171",
+        "average_delay": "38",
+        "impacting_condition": "WEATHER / THUNDERSTORMS",
+        "comments": "COMMENTS COMMENTS COMMENTS",
+        "period": "141415-142315"
+      },
+      "rendered": "vATCSCC ADVZY 002 JFK/ZNY 04/14/2020 CDM GROUND DELAY PROGRAM\nCTL ELEMENT: JFK\nELEMENT TYPE: APT\nADL TIME: 1349Z\nDELAY ASSIGNMENT MODE: DAS\nARRIVALS ESTIMATED FOR: 14/1415Z - 14/2315Z\nCUMULATIVE PROGRAM PERIOD: 14/1415Z - 14/2315Z\nPROGRAM RATE: 40/40/40/30/25/20/20/36/54\nPOP-UP FACTOR: MEDIUM\nFLT INCL: 1stTier\nFLT INCL: CZY\nDEPARTURE SCOPE: 1200\nADDITIONAL DEP FACILITIES INCLUDED: KATL\nEXEMPT DEP FACILITIES: KORD\nCANADIAN ARPTS INCLUDED: CYYZ\nDELAY ASSIGNMENT TABLE APPLIES TO: ZNY\nDELAY LIMIT: 240\nMAXIMUM DELAY: 171\nAVERAGE DELAY: 38\nIMPACTING CONDITION: WEATHER / THUNDERSTORMS\nCOMMENTS: COMMENTS COMMENTS COMMENTS\n\n141415-142315\n20/04/14 13:49"
+    }
+  ]
+}

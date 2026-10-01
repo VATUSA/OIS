@@ -68,6 +68,16 @@ pub struct DiscordTmiInfo {
     pub decoded: Option<String>,
 }
 
+/// What the bot needs to reply to a "View structured" button click on an advisory post
+/// (VATUSA/OIS#459).
+#[derive(Debug, Clone, Deserialize)]
+pub struct DiscordAdvisoryInfo {
+    pub kind: String,
+    /// Null when the advisory was typed as raw text — the bot reports that rather than showing an
+    /// empty breakdown.
+    pub structured: Option<serde_json::Value>,
+}
+
 #[derive(Debug, Serialize)]
 struct DiscordAceClaimBody<'a> {
     discord_user_id: &'a str,
@@ -231,6 +241,25 @@ impl OisClient {
             return Err(ClientError::Status(resp.status().as_u16()));
         }
         Ok(resp.json::<DiscordTmiInfo>().await?)
+    }
+
+    /// The document type + structured fields (if any) for an advisory's "View structured" reply.
+    pub async fn advisory_info(
+        &self,
+        advisory_id: &str,
+    ) -> Result<DiscordAdvisoryInfo, ClientError> {
+        let resp = self
+            .http
+            .get(self.url(&format!(
+                "/api/v1/integration/discord/advisory/{advisory_id}"
+            )))
+            .bearer_auth(&self.token)
+            .send()
+            .await?;
+        if !resp.status().is_success() {
+            return Err(ClientError::Status(resp.status().as_u16()));
+        }
+        Ok(resp.json::<DiscordAdvisoryInfo>().await?)
     }
 
     #[allow(clippy::too_many_arguments)]

@@ -7,7 +7,7 @@ use axum::{
     extract::{Extension, Path, Query, State},
     http::StatusCode,
 };
-use chrono::{TimeZone, Utc};
+use chrono::{DateTime, TimeZone, Utc};
 use serde::Deserialize;
 
 use crate::{
@@ -50,25 +50,84 @@ pub async fn forecast_wind(
     let at =
         q.at.and_then(|s| Utc.timestamp_opt(s, 0).single())
             .unwrap_or_else(Utc::now);
-    let airports = state.feed.read().await.airports.clone();
-    match feed::forecast::wind_at(&airports, &icao, at).await {
-        Some(h) => Ok(Json(AirportForecastBody {
-            icao,
-            time: h.time,
-            wind_dir: h.dir,
-            wind_kt: h.spd_kt,
-            gust_kt: h.gust_kt,
-            source: "forecast".to_string(),
-        })),
-        None => Ok(Json(AirportForecastBody {
-            icao,
-            time: at,
-            wind_dir: None,
-            wind_kt: 0,
-            gust_kt: None,
-            source: "none".to_string(),
-        })),
+    let w = wind_for(&state, &icao, at).await;
+    Ok(Json(AirportForecastBody {
+        icao,
+        time: w.time,
+        wind_dir: w.dir,
+        wind_kt: w.spd_kt,
+        gust_kt: w.gust_kt,
+        source: w.source.to_string(),
+    }))
+}
+
+/// How near "now" a request has to be before the observed METAR answers it instead of the forecast.
+///
+/// A METAR describes the field as it is, so it is the better answer for now and useless for later. The
+/// window is generous relative to the 10-minute METAR cache and narrow relative to the forecast's hourly
+/// resolution, so "what is the wind doing" gets the observation and "what will it be at 2300Z" gets the
+/// model.
+const METAR_PREFERRED_WITHIN_MIN: i64 = 30;
+
+/// The wind an airport's configuration is matched against, and where it came from (#510).
+///
+/// **Observed wind wins for the present**: METAR is a ten-minute observation that degrades to its last
+/// cached value when the upstream fails, where the forecast is a two-hour-TTL 10-metre model value with
+/// no fallback at all. Beyond [`METAR_PREFERRED_WITHIN_MIN`] there is nothing to observe, so the
+/// forecast answers.
+///
+/// This is deliberately the **one** place that choice is made. `GET /forecast/{icao}` returns it and the
+/// AADC path calls it, so the backend and the client's `matchConfig` cannot end up matching
+/// configurations against different winds — which is how arrivals and departures would come to disagree
+/// for a reason nobody intended (#510 AC3).
+///
+/// `source` fills in `metar`, which [`AirportForecastBody`] has documented since #242 and no code ever
+/// emitted.
+pub(crate) async fn wind_for(state: &AppState, icao: &str, at: DateTime<Utc>) -> ResolvedWind {
+    let now = Utc::now();
+    if (at - now).num_minutes().abs() <= METAR_PREFERRED_WITHIN_MIN
+        && let Some(obs) = crate::handlers::runway::metar_for(state, icao)
+            .await
+            .and_then(|m| m.wind_obs)
+    {
+        return ResolvedWind {
+            time: now,
+            // The same calm rule the forecast applies, so a 2-knot wind is calm whichever source
+            // reported it and the airport does not change config with the weather provider.
+            dir: obs.dir.filter(|_| obs.spd_kt >= feed::forecast::CALM_KT),
+            spd_kt: obs.spd_kt,
+            gust_kt: obs.gust_kt,
+            source: "metar",
+        };
     }
+    let airports = state.feed.read().await.airports.clone();
+    match feed::forecast::wind_at(&airports, icao, at).await {
+        Some(h) => ResolvedWind {
+            time: h.time,
+            dir: h.dir,
+            spd_kt: h.spd_kt,
+            gust_kt: h.gust_kt,
+            source: "forecast",
+        },
+        // No observation and no forecast: say so rather than imply a direction. `dir: None` makes
+        // `favored_config` take the calm default, which is the defined no-wind answer (#510 AC4).
+        None => ResolvedWind {
+            time: at,
+            dir: None,
+            spd_kt: 0,
+            gust_kt: None,
+            source: "none",
+        },
+    }
+}
+
+/// A wind with its provenance. `source` is `metar` | `forecast` | `none`.
+pub(crate) struct ResolvedWind {
+    pub time: DateTime<Utc>,
+    pub dir: Option<i32>,
+    pub spd_kt: i32,
+    pub gust_kt: Option<i32>,
+    pub source: &'static str,
 }
 
 fn validate(req: &UpsertAirportConfigRequest) -> Result<(), ApiError> {
@@ -758,5 +817,146 @@ mod tests {
             statuses(&state, &cookie, &writes).await,
             [StatusCode::OK, StatusCode::OK, StatusCode::NO_CONTENT]
         );
+    }
+}
+
+/// `wind_for` is the one place the observed-vs-forecast choice is made (#510 AC3), and these pin it.
+///
+/// Hermetic: `scope_test_support::test_state` builds an empty `metar_cache`, and `metar_for` returns a
+/// fresh cached entry *before* any network call — so seeding one entry exercises the observed arm with
+/// no upstream. An empty airports map leaves the forecast with nothing to answer, which is the no-data
+/// arm (AC4).
+#[cfg(test)]
+mod wind_for_tests {
+    use super::*;
+    use crate::feed::metar::{MetarInfo, MetarWind};
+    use crate::scope_test_support::test_state;
+    use sqlx::PgPool;
+    use std::collections::HashMap;
+
+    fn seed_metar(state: &AppState, icao: &str, wind: Option<MetarWind>) {
+        let info = MetarInfo {
+            raw: format!("{icao} AUTO"),
+            category: "VFR".to_string(),
+            wind: None,
+            wind_obs: wind,
+        };
+        state
+            .metar_cache
+            .lock()
+            .unwrap()
+            .insert(icao.to_string(), (info, Utc::now().timestamp_millis()));
+    }
+
+    fn wind(dir: Option<i32>, spd_kt: i32) -> MetarWind {
+        MetarWind {
+            dir,
+            spd_kt,
+            gust_kt: None,
+        }
+    }
+
+    /// The observed arm: a cached METAR answers "now", and says so.
+    #[sqlx::test]
+    async fn an_observed_wind_answers_for_now(pool: PgPool) {
+        let state = test_state(pool, HashMap::new());
+        seed_metar(&state, "KJFK", Some(wind(Some(270), 15)));
+
+        let w = wind_for(&state, "KJFK", Utc::now()).await;
+
+        assert_eq!(w.source, "metar", "the observation should win for now");
+        assert_eq!(w.dir, Some(270));
+        assert_eq!(w.spd_kt, 15);
+    }
+
+    /// The calm rule has to be the *same* rule on both sources. Without it a 2-knot METAR keeps its
+    /// direction while a 2-knot forecast does not, so the airport would match a different configuration
+    /// depending on which source answered — the divergence AC3 exists to prevent.
+    #[sqlx::test]
+    async fn an_observed_wind_below_the_calm_threshold_has_no_direction(pool: PgPool) {
+        let state = test_state(pool, HashMap::new());
+        seed_metar(&state, "KJFK", Some(wind(Some(270), 2)));
+
+        let w = wind_for(&state, "KJFK", Utc::now()).await;
+
+        assert_eq!(w.source, "metar");
+        assert_eq!(
+            w.dir, None,
+            "2 knots is calm, exactly as the forecast path treats it"
+        );
+        assert_eq!(w.spd_kt, 2, "the speed is still reported");
+    }
+
+    /// At the threshold the wind keeps its direction — the boundary is `>=`, matching the forecast.
+    #[sqlx::test]
+    async fn an_observed_wind_at_the_calm_threshold_keeps_its_direction(pool: PgPool) {
+        let state = test_state(pool, HashMap::new());
+        seed_metar(&state, "KJFK", Some(wind(Some(270), 3)));
+
+        assert_eq!(wind_for(&state, "KJFK", Utc::now()).await.dir, Some(270));
+    }
+
+    /// Beyond the window there is nothing to observe, so the observation must not answer however fresh
+    /// it is. With no airports seeded the forecast cannot answer either, which is how this distinguishes
+    /// "did not prefer METAR" from "preferred METAR and got a direction".
+    #[sqlx::test]
+    async fn a_future_time_does_not_take_the_observation(pool: PgPool) {
+        let state = test_state(pool, HashMap::new());
+        seed_metar(&state, "KJFK", Some(wind(Some(270), 15)));
+
+        // Two hours out, stated absolutely rather than as `METAR_PREFERRED_WITHIN_MIN + n`: a test
+        // written in terms of the constant moves with it, so widening the window would never fail it.
+        // Nobody observes the wind two hours from now, whatever the window is set to.
+        let later = Utc::now() + chrono::Duration::hours(2);
+        let w = wind_for(&state, "KJFK", later).await;
+
+        assert_ne!(w.source, "metar", "beyond the window the forecast answers");
+        assert_eq!(w.dir, None, "and with no forecast available, no direction");
+    }
+
+    /// Just inside the window it still does.
+    #[sqlx::test]
+    async fn just_inside_the_window_still_takes_the_observation(pool: PgPool) {
+        let state = test_state(pool, HashMap::new());
+        seed_metar(&state, "KJFK", Some(wind(Some(90), 12)));
+
+        // Five minutes out is unambiguously "now" in any reasonable window.
+        let soon = Utc::now() + chrono::Duration::minutes(5);
+
+        assert_eq!(wind_for(&state, "KJFK", soon).await.source, "metar");
+    }
+
+    /// AC4: no wind from either source is a *defined* result, and it must say `none` rather than claim
+    /// a forecast it never got — a caller tells "the wind chose this" from "we have no idea" by that
+    /// string alone.
+    ///
+    /// Seeds a METAR carrying no wind group rather than leaving the cache empty: on a cache *miss*
+    /// `metar_for` reaches `aviationweather.gov`, so an empty cache would make this test depend on the
+    /// network and on KJFK's real weather. A cached entry with no wind exercises the same fall-through
+    /// hermetically — observation present but silent, no airports for the forecast, so `none`.
+    #[sqlx::test]
+    async fn no_wind_from_either_source_reports_none(pool: PgPool) {
+        let state = test_state(pool, HashMap::new());
+        seed_metar(&state, "KJFK", None);
+
+        let w = wind_for(&state, "KJFK", Utc::now()).await;
+
+        assert_eq!(w.source, "none", "not `forecast`, which it never got");
+        assert_eq!(w.dir, None);
+        assert_eq!(w.spd_kt, 0);
+        assert_eq!(w.gust_kt, None);
+    }
+
+    /// A variable (`VRB`) wind is an observation with no direction. It still answers — the speed is
+    /// real — but gives nothing to match a configuration against, so the caller takes the calm default.
+    #[sqlx::test]
+    async fn a_variable_observed_wind_answers_without_a_direction(pool: PgPool) {
+        let state = test_state(pool, HashMap::new());
+        seed_metar(&state, "KJFK", Some(wind(None, 8)));
+
+        let w = wind_for(&state, "KJFK", Utc::now()).await;
+
+        assert_eq!(w.source, "metar");
+        assert_eq!(w.dir, None);
     }
 }

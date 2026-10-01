@@ -397,12 +397,39 @@ pub async fn list_ground_stops_at(
     .map_err(|_| ApiError::Internal)
 }
 
-pub async fn get_ground_stop(pool: &PgPool, id: &str) -> Result<Option<GroundStopBody>, ApiError> {
+pub async fn get_ground_stop<'e, E>(
+    executor: E,
+    id: &str,
+) -> Result<Option<GroundStopBody>, ApiError>
+where
+    E: sqlx::Executor<'e, Database = Postgres>,
+{
     sqlx::query_as::<_, GroundStopBody>(&format!("{GS_SELECT} where g.id = $1"))
         .bind(id)
-        .fetch_optional(pool)
+        .fetch_optional(executor)
         .await
         .map_err(|_| ApiError::Internal)
+}
+
+/// The absolute instant a ground stop's `until` resolves to, or `None` for "until further notice".
+///
+/// Delegates to `tmu.ground_stop_until_ts` (migration `0014`) rather than resolving the bare HHMM in
+/// Rust. That function is what the cleanup job uses to expire a stop, and it resolves relative to
+/// `created_at` — not to now — so a draft created at 1500 and published at 1700 with `until` 1630 ends
+/// *tomorrow* at 1630 by the system's reckoning. Reimplementing the rule here would make the generated
+/// advisory state an end the system does not enforce, which is the drift #508 exists to prevent.
+pub(crate) async fn ground_stop_until_instant(
+    tx: &mut Transaction<'_, Postgres>,
+    id: &str,
+) -> Result<Option<DateTime<Utc>>, ApiError> {
+    sqlx::query_scalar::<_, Option<DateTime<Utc>>>(
+        "select tmu.ground_stop_until_ts(created_at, until) from tmu.ground_stops where id = $1",
+    )
+    .bind(id)
+    .fetch_optional(&mut **tx)
+    .await
+    .map(Option::flatten)
+    .map_err(|_| ApiError::Internal)
 }
 
 pub async fn create_ground_stop(
@@ -426,18 +453,21 @@ pub async fn create_ground_stop(
 }
 
 /// Publishes a draft ground stop. Returns false if it isn't currently a draft.
-pub async fn publish_ground_stop(
-    pool: &PgPool,
+pub async fn publish_ground_stop<'e, E>(
+    executor: E,
     id: &str,
     published_by: &str,
-) -> Result<bool, ApiError> {
+) -> Result<bool, ApiError>
+where
+    E: sqlx::Executor<'e, Database = Postgres>,
+{
     let result = sqlx::query(
         "update tmu.ground_stops set status = 'published', published_by = $2, published_at = now() \
          where id = $1 and status = 'draft'",
     )
     .bind(id)
     .bind(published_by)
-    .execute(pool)
+    .execute(executor)
     .await
     .map_err(|_| ApiError::Internal)?;
     Ok(result.rows_affected() > 0)
@@ -708,6 +738,37 @@ async fn allocate_advisory_number(
     .map_err(|_| ApiError::Internal)
 }
 
+/// Whether a create or edit can derive its document from `structured` — i.e. whether `body` is
+/// redundant for this request.
+///
+/// [`advisory_body`] and `handlers::tmu::create_advisory`'s validation must agree on this, so they
+/// share one statement of it rather than each testing `kind` for itself (#503).
+///
+/// The sharing is the load-bearing part, and it is worth being precise about why. If the two *drift* —
+/// the handler treating any `structured` request as needing no body while this still renders only
+/// `reroute` — then a structured advisory of an unrenderable kind passes validation with an empty body,
+/// derives nothing, and **stores an empty document**: the #499 bug. Verified by mutation: making that
+/// one-sided change turns `a_structured_create_of_an_underivable_kind_still_needs_a_body` from 400 to
+/// 200. Changing the rule *here* stays safe, because both callers move with it.
+pub(crate) fn derives_body(kind: &str, structured: Option<&serde_json::Value>) -> bool {
+    structured.is_some() && renders_body(kind)
+}
+
+/// The kinds [`advisory_body`] has a renderer for.
+///
+/// One list on purpose. `derives_body` decides whether a create must supply a body (#503) and
+/// `advisory_body` decides whether one gets rendered (#461); the two drifting apart is what rejects a
+/// create that would have rendered fine, or stores a kind whose document nobody produced. #461 adding
+/// GDP and Ground Stop without this is exactly that drift.
+fn renders_body(kind: &str) -> bool {
+    matches!(
+        kind,
+        crate::models::ADVISORY_KIND_REROUTE
+            | crate::models::ADVISORY_KIND_GDP
+            | crate::models::ADVISORY_KIND_GROUND_STOP
+    )
+}
+
 /// The body to store for an advisory.
 ///
 /// A **typed** advisory's document is re-derived from its fields rather than trusted from the
@@ -718,7 +779,10 @@ async fn allocate_advisory_number(
 /// same function produced both.
 ///
 /// An unknown `kind` also passes the body through untouched, which is how `kind` stays open for
-/// #461's types without this becoming a dispatch table that must be edited in lockstep.
+/// the types #437 has not reached yet without this becoming a dispatch table that must be edited in
+/// lockstep. #437's three types — reroute (#458), GDP and Ground Stop (#461) — are all rendered;
+/// the tests' `UNRENDERED_KIND` is not, which is what keeps the clearing-rule cases independent of
+/// this table.
 /// `None` means "nothing to derive" — the caller keeps whatever body it already had in hand. That is
 /// deliberately distinct from `Some(String::new())`: on an edit the body is written through
 /// `coalesce`, so a derived empty string would blank the stored document, while `None` leaves it be.
@@ -727,15 +791,32 @@ fn advisory_body(
     structured: Option<&serde_json::Value>,
     ident: &crate::advisory::AdvisoryIdent,
 ) -> Result<Option<String>, ApiError> {
-    if kind != crate::models::ADVISORY_KIND_REROUTE {
+    if !derives_body(kind, structured) {
         return Ok(None);
     }
     let Some(value) = structured else {
         return Ok(None);
     };
-    let parsed: crate::models::RerouteAdvisory =
-        serde_json::from_value(value.clone()).map_err(|_| ApiError::BadRequest)?;
-    Ok(Some(crate::advisory::render_reroute(&parsed, ident)))
+    // One arm per rendered type; anything else falls through to `None` and keeps the body it was
+    // given, which is what holds `kind` open for the types #437 has not reached yet.
+    match kind {
+        crate::models::ADVISORY_KIND_REROUTE => {
+            let parsed: crate::models::RerouteAdvisory =
+                serde_json::from_value(value.clone()).map_err(|_| ApiError::BadRequest)?;
+            Ok(Some(crate::advisory::render_reroute(&parsed, ident)))
+        }
+        crate::models::ADVISORY_KIND_GDP => {
+            let parsed: crate::models::GdpAdvisory =
+                serde_json::from_value(value.clone()).map_err(|_| ApiError::BadRequest)?;
+            Ok(Some(crate::advisory::render_gdp(&parsed, ident)))
+        }
+        crate::models::ADVISORY_KIND_GROUND_STOP => {
+            let parsed: crate::models::GroundStopAdvisory =
+                serde_json::from_value(value.clone()).map_err(|_| ApiError::BadRequest)?;
+            Ok(Some(crate::advisory::render_ground_stop(&parsed, ident)))
+        }
+        _ => Ok(None),
+    }
 }
 
 /// Creates a draft advisory, allocating its number (#457).
@@ -754,11 +835,37 @@ pub async fn create_advisory(
     req: &CreateAdvisoryRequest,
     created_by: &str,
 ) -> Result<String, ApiError> {
+    let mut tx = pool.begin().await.map_err(|_| ApiError::Internal)?;
+    let id = create_advisory_tx(&mut tx, req, created_by, None).await?;
+    tx.commit().await.map_err(|_| ApiError::Internal)?;
+    Ok(id)
+}
+
+/// Which program an advisory was generated from (#508), or `None` for a hand-authored one. Written to
+/// `tmu.advisories.gdp_id` / `ground_stop_id` (migration `0088`) so the revise path can find a
+/// program's live advisory to cancel it.
+#[derive(Debug, Clone, Copy)]
+pub(crate) enum AdvisoryProgram<'a> {
+    Gdp(&'a str),
+    GroundStop(&'a str),
+}
+
+/// [`create_advisory`] on a transaction the caller owns.
+///
+/// Split out for #508: publishing a GDP or Ground Stop generates its advisory in the *same*
+/// transaction as the publish and the slot freeze, so that an advisory cannot exist for a program that
+/// did not publish, or the reverse. [`allocate_advisory_number`] already takes the transaction and
+/// holds its advisory lock for the rest of it — which is why the caller must do any feed or RBS work
+/// *before* opening the transaction, not inside it.
+pub(crate) async fn create_advisory_tx(
+    tx: &mut Transaction<'_, Postgres>,
+    req: &CreateAdvisoryRequest,
+    created_by: &str,
+    program: Option<AdvisoryProgram<'_>>,
+) -> Result<String, ApiError> {
     let facility = req.facility.trim().to_ascii_uppercase();
     let day = Utc::now().date_naive();
-
-    let mut tx = pool.begin().await.map_err(|_| ApiError::Internal)?;
-    let number = allocate_advisory_number(&mut tx, &facility, day).await?;
+    let number = allocate_advisory_number(tx, &facility, day).await?;
     // Rendered here rather than in the handler because the number is allocated in this transaction:
     // the document carries it twice (header and TMI ID), and re-deriving it outside would be a
     // second answer to a question the database has already settled.
@@ -773,10 +880,16 @@ pub async fn create_advisory(
         },
     )?
     .unwrap_or_else(|| req.body.trim().to_string());
+    let (gdp_id, ground_stop_id) = match program {
+        Some(AdvisoryProgram::Gdp(id)) => (Some(id), None),
+        Some(AdvisoryProgram::GroundStop(id)) => (None, Some(id)),
+        None => (None, None),
+    };
     let id = sqlx::query_scalar::<_, String>(
         "insert into tmu.advisories \
-         (facility, issued_day, number, kind, body, structured, decoded, created_by) \
-         values ($1, $2, $3, $4, $5, $6, $7, $8) returning id",
+         (facility, issued_day, number, kind, body, structured, decoded, created_by, \
+          gdp_id, ground_stop_id) \
+         values ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10) returning id",
     )
     .bind(&facility)
     .bind(day)
@@ -786,11 +899,57 @@ pub async fn create_advisory(
     .bind(req.structured.as_ref().map(sqlx::types::Json))
     .bind(req.decoded.as_deref())
     .bind(created_by)
-    .fetch_one(&mut *tx)
+    .bind(gdp_id)
+    .bind(ground_stop_id)
+    .fetch_one(&mut **tx)
     .await
     .map_err(|_| ApiError::Internal)?;
-    tx.commit().await.map_err(|_| ApiError::Internal)?;
     Ok(id)
+}
+
+/// Cancels the live (draft or published) advisory generated from `program`, returning how many were
+/// cancelled.
+///
+/// #461 settled that an advisory is cancelled and reissued rather than rewritten, so revising a
+/// published program cancels its current advisory and issues a new one in the same transaction. In
+/// practice this cancels at most one row — there is only ever one live advisory per program — but it is
+/// written as a set operation rather than asserting that, because an unexpected second row should be
+/// retired too, not left live alongside the new one.
+pub(crate) async fn cancel_program_advisory_tx(
+    tx: &mut Transaction<'_, Postgres>,
+    program: AdvisoryProgram<'_>,
+) -> Result<u64, ApiError> {
+    let (column, id) = match program {
+        AdvisoryProgram::Gdp(id) => ("gdp_id", id),
+        AdvisoryProgram::GroundStop(id) => ("ground_stop_id", id),
+    };
+    // `column` is one of two internal literals, never user input.
+    let sql = format!(
+        "update tmu.advisories set status = 'cancelled' \
+         where {column} = $1 and status in ('draft', 'published')"
+    );
+    Ok(sqlx::query(&sql)
+        .bind(id)
+        .execute(&mut **tx)
+        .await
+        .map_err(|_| ApiError::Internal)?
+        .rows_affected())
+}
+
+/// [`get_advisory`] inside a caller's transaction.
+///
+/// Needed because publish and cancel read the row back *after* updating it and *before* committing,
+/// to build the Discord payload from what was actually written rather than from what the caller
+/// hoped was written (VATUSA/OIS#459). Reading on the pool there would see the pre-update row.
+pub async fn get_advisory_tx(
+    tx: &mut Transaction<'_, Postgres>,
+    id: &str,
+) -> Result<Option<AdvisoryBody>, ApiError> {
+    sqlx::query_as::<_, AdvisoryBody>(&format!("{ADVISORY_SELECT} where id = $1"))
+        .bind(id)
+        .fetch_optional(&mut **tx)
+        .await
+        .map_err(|_| ApiError::Internal)
 }
 
 pub async fn get_advisory(pool: &PgPool, id: &str) -> Result<Option<AdvisoryBody>, ApiError> {
@@ -867,13 +1026,24 @@ pub async fn update_advisory(
     // `update_tmi`, so clearing it there can never discard anything a caller sent. Here the caller
     // supplies it, and a decoding sent *with* a new body describes the new body: it is not stale, so
     // the clear must yield to it rather than overwrite it.
+    // And a **new breakdown with no decoding sent** is the mirror case (#499). The stored decoding
+    // described the breakdown that has just been replaced, so keeping it is the same confident wrong
+    // answer in the other direction — a LAX-SFO breakdown carrying a JFK-BOS decoding.
+    //
+    // It clears rather than re-deriving, which is the choice worth recording. `update_tmi` re-derives
+    // (`render_english`), and the analogue here would be a decoding renderer for an advisory — but
+    // none exists, and nothing specifies what it would say that `body` does not, because `body` *is*
+    // the rendered document. `AdvisoryBody.decoded` carries no doc comment at all: 0085 took the
+    // `structured`/`decoded` pair from `tmu.tmis`'s shape, where `decoded` expands a terse NTML line
+    // into the prose an advisory already is. So null is honest here and a stale sentence is not.
     let clear_breakdown = req.structured.is_none() && req.body.is_some();
+    let stale_decoding = req.structured.is_some() && req.decoded.is_none();
     let result = sqlx::query(
         "update tmu.advisories set \
             kind = coalesce($2, kind), \
             body = coalesce($3, body), \
             structured = case when $6 then null else coalesce($4, structured) end, \
-            decoded = case when $6 then $5 else coalesce($5, decoded) end \
+            decoded = case when $6 then $5 when $7 then null else coalesce($5, decoded) end \
          where id = $1 and status = 'draft'",
     )
     .bind(id)
@@ -882,6 +1052,7 @@ pub async fn update_advisory(
     .bind(req.structured.as_ref().map(sqlx::types::Json))
     .bind(req.decoded.as_deref())
     .bind(clear_breakdown)
+    .bind(stale_decoding)
     .execute(pool)
     .await
     .map_err(|_| ApiError::Internal)?;
@@ -889,8 +1060,12 @@ pub async fn update_advisory(
 }
 
 /// Publishes a draft. Returns false if it was not a draft (or is absent).
+///
+/// Takes the caller's transaction so the Discord post is enqueued atomically with the publish
+/// (VATUSA/OIS#459) — a post must not exist for an advisory that did not publish, and an advisory
+/// must not go live with nothing queued to announce it.
 pub async fn publish_advisory(
-    pool: &PgPool,
+    tx: &mut Transaction<'_, Postgres>,
     id: &str,
     published_by: &str,
 ) -> Result<bool, ApiError> {
@@ -901,7 +1076,7 @@ pub async fn publish_advisory(
     )
     .bind(id)
     .bind(published_by)
-    .execute(pool)
+    .execute(&mut **tx)
     .await
     .map_err(|_| ApiError::Internal)?;
     Ok(result.rows_affected() > 0)
@@ -909,13 +1084,19 @@ pub async fn publish_advisory(
 
 /// Cancels a draft or published advisory. Its number is **not** released: a published advisory was
 /// issued, and a cancelled draft that once held a number is not worth the ambiguity of reissuing it.
-pub async fn cancel_advisory(pool: &PgPool, id: &str) -> Result<bool, ApiError> {
+///
+/// Transactional for the same reason as [`publish_advisory`]: the correction post is enqueued with
+/// the cancellation.
+pub async fn cancel_advisory(
+    tx: &mut Transaction<'_, Postgres>,
+    id: &str,
+) -> Result<bool, ApiError> {
     let result = sqlx::query(
         "update tmu.advisories set status = 'cancelled' \
          where id = $1 and status in ('draft', 'published')",
     )
     .bind(id)
-    .execute(pool)
+    .execute(&mut **tx)
     .await
     .map_err(|_| ApiError::Internal)?;
     Ok(result.rows_affected() > 0)
@@ -989,6 +1170,16 @@ mod tests {
     /// An advisory patch that changes nothing, for tests to fill one field of — mirroring `patch()`
     /// for TMIs. A test-local helper rather than a `Default` derive, so a `ToSchema` model stays
     /// untouched.
+    /// A `kind` no renderer claims, for the cases that are about `advisory_body`'s pass-through
+    /// rather than about any one document type.
+    ///
+    /// Named rather than written inline because it has already gone stale twice: these cases used
+    /// `"ground_stop"` until #461 made it a rendered type, at which point they began failing with
+    /// `BadRequest` on a payload that was never meant to parse. `AFP` (Airspace Flow Program) is a
+    /// real vATCSCC initiative that OIS does not implement, so it is unlikely to be claimed by
+    /// accident — and if it ever is, this is the single line to change.
+    const UNRENDERED_KIND: &str = "afp";
+
     fn adv_patch() -> UpdateAdvisoryRequest {
         UpdateAdvisoryRequest {
             kind: None,
@@ -1003,7 +1194,7 @@ mod tests {
     /// Deliberately **not** `reroute`: since #458 that kind is a typed document whose body is rendered
     /// from `structured`, so this placeholder payload is now rejected outright. These cases are about
     /// the clearing rule itself, which is keyed on the request shape and not on any kind, so they use
-    /// a kind with no renderer. `a_raw_edit_on_a_rendered_advisory_clears_its_breakdown` covers the
+    /// [`UNRENDERED_KIND`]. `a_raw_edit_on_a_rendered_advisory_clears_its_breakdown` covers the
     /// rendered kind.
     async fn structured_draft(pool: &PgPool) -> AdvisoryBody {
         let user = crate::scope_test_support::seed_user(pool).await;
@@ -1011,7 +1202,7 @@ mod tests {
             pool,
             &CreateAdvisoryRequest {
                 facility: "DCC".to_string(),
-                kind: "gs".to_string(),
+                kind: UNRENDERED_KIND.to_string(),
                 body: "vATCSCC ADVZY 001 REROUTE".to_string(),
                 structured: Some(serde_json::json!({"routes": [{"from": "JFK", "to": "BOS"}]})),
                 decoded: Some("JFK to BOS reroute".to_string()),
@@ -1021,6 +1212,138 @@ mod tests {
         .await
         .unwrap();
         get_advisory(pool, &id).await.unwrap().unwrap()
+    }
+
+    /// #461 AC2: a `gdp` advisory's body is **rendered**, which is what proves the dispatch arm in
+    /// [`advisory_body`] is wired and not merely written.
+    ///
+    /// `advisory.rs` already pins the document itself against `fixtures/gdp-reference.json`. What
+    /// only a round-trip can show is that creating a GDP reaches that renderer at all: delete the
+    /// `ADVISORY_KIND_GDP` arm and every renderer test stays green while a real GDP stores the raw
+    /// body it was handed. So this asserts the supplied body is *replaced*, not merely that the
+    /// stored one looks plausible.
+    #[sqlx::test]
+    async fn a_gdp_advisory_body_is_rendered_from_its_fields(pool: PgPool) {
+        let user = crate::scope_test_support::seed_user(&pool).await;
+        let id = create_advisory(
+            &pool,
+            &CreateAdvisoryRequest {
+                facility: "DCC".to_string(),
+                kind: crate::models::ADVISORY_KIND_GDP.to_string(),
+                body: "THIS RAW TEXT MUST NOT SURVIVE".to_string(),
+                structured: Some(serde_json::json!({
+                    "header": "CDM GROUND DELAY PROGRAM",
+                    "element": "JFK/ZNY",
+                    "control_element": "JFK",
+                    "element_type": "APT",
+                    "adl_time": "1349Z",
+                    "delay_assignment_mode": "DAS",
+                    "arrivals_estimated_for": "14/1415Z - 14/2315Z",
+                    "cumulative_program_period": "14/1415Z - 14/2315Z",
+                    "program_rate": "40/40/40/30/25/20/20/36/54",
+                    "pop_up_factor": "MEDIUM",
+                    "flights_included": ["1stTier", "CZY"],
+                    "departure_scope": "1200",
+                    "impacting_condition": "WEATHER / THUNDERSTORMS",
+                    "comments": "ADVZY 002 SUPERSEDES ADVZY 001",
+                    "period": "141415-142315",
+                })),
+                decoded: None,
+            },
+            &user,
+        )
+        .await
+        .unwrap();
+
+        let stored = get_advisory(&pool, &id).await.unwrap().unwrap();
+        assert!(
+            !stored.body.contains("THIS RAW TEXT MUST NOT SURVIVE"),
+            "a rendered kind must not keep the body it was handed: {}",
+            stored.body
+        );
+        for line in [
+            "CTL ELEMENT: JFK",
+            "ELEMENT TYPE: APT",
+            "DELAY ASSIGNMENT MODE: DAS",
+            "PROGRAM RATE: 40/40/40/30/25/20/20/36/54",
+            "FLT INCL: 1stTier",
+            "141415-142315",
+        ] {
+            assert!(
+                stored.body.contains(line),
+                "missing {line:?}: {}",
+                stored.body
+            );
+        }
+        // The header's element slot is the control element, not the issuing facility (`DCC`),
+        // which a reroute would print here instead.
+        assert!(
+            stored.body.starts_with("vATCSCC ADVZY 001 JFK/ZNY "),
+            "header must carry the control element: {}",
+            stored.body
+        );
+        assert!(
+            !stored.body.contains("DCC"),
+            "the issuing facility has no place in a GDP document: {}",
+            stored.body
+        );
+    }
+
+    /// The Ground Stop half of #461 AC2, for the reason the GDP case gives: delete the
+    /// `ADVISORY_KIND_GROUND_STOP` arm and every renderer test stays green while a real ground stop
+    /// stores the raw body it was handed.
+    #[sqlx::test]
+    async fn a_ground_stop_advisory_body_is_rendered_from_its_fields(pool: PgPool) {
+        let user = crate::scope_test_support::seed_user(&pool).await;
+        let id = create_advisory(
+            &pool,
+            &CreateAdvisoryRequest {
+                facility: "DCC".to_string(),
+                kind: crate::models::ADVISORY_KIND_GROUND_STOP.to_string(),
+                body: "THIS RAW TEXT MUST NOT SURVIVE".to_string(),
+                structured: Some(serde_json::json!({
+                    "header": "CDM GROUND STOP",
+                    "element": "DFW/ZFW",
+                    "control_element": "DFW",
+                    "element_type": "APT",
+                    "adl_time": "1354Z",
+                    "ground_stop_period": "14/1430Z - 14/1630Z",
+                    "cumulative_program_period": "14/1430Z - 14/1630Z",
+                    "flights_included": ["(Manual) ZHU ZJX ZMA ZME ZTL"],
+                    "current_delays": "1240/414/81",
+                    "previous_delays": "636/211/70",
+                    "new_delays": "1876/625/151",
+                    "probability_of_extension": "MEDIUM",
+                    "impacting_condition": "EQUIPMENT / STARS",
+                    "comments": "BLAH",
+                    "period": "141430-141630",
+                })),
+                decoded: None,
+            },
+            &user,
+        )
+        .await
+        .unwrap();
+
+        let stored = get_advisory(&pool, &id).await.unwrap().unwrap();
+        assert!(
+            !stored.body.contains("THIS RAW TEXT MUST NOT SURVIVE"),
+            "a rendered kind must not keep the body it was handed: {}",
+            stored.body
+        );
+        for line in [
+            "CTL ELEMENT: DFW",
+            "GROUND STOP PERIOD: 14/1430Z - 14/1630Z",
+            "FLT INCL: (Manual) ZHU ZJX ZMA ZME ZTL",
+            "CURRENT TOTAL, MAXIMUM, AVERAGE DELAYS: 1240/414/81",
+            "NEW TOTAL, MAXIMUM, AVERAGE DELAYS: 1876/625/151",
+        ] {
+            assert!(
+                stored.body.contains(line),
+                "missing {line:?}: {}",
+                stored.body
+            );
+        }
     }
 
     /// #488 AC1. `update_advisory` used to coalesce `structured`, so editing a raw body left the old
@@ -1143,6 +1466,87 @@ mod tests {
         );
     }
 
+    /// #499. A new breakdown with no decoding sent must not keep the old decoding, which described
+    /// the breakdown that was just replaced — the same stale-pair defect #488 fixed, on the other
+    /// axis. This is the case #488's own `supplying_a_breakdown_replaces_it` could not catch,
+    /// because it supplies `decoded` alongside `structured` and so never exercises the omission.
+    #[sqlx::test]
+    async fn a_new_breakdown_with_no_decoding_clears_the_old_one(pool: PgPool) {
+        let before = structured_draft(&pool).await;
+        assert!(
+            before.decoded.is_some(),
+            "fixture must start with a decoding"
+        );
+
+        assert!(
+            update_advisory(
+                &pool,
+                &before.id,
+                &UpdateAdvisoryRequest {
+                    structured: Some(serde_json::json!({"routes": [{"from": "LAX", "to": "SFO"}]})),
+                    ..adv_patch()
+                },
+            )
+            .await
+            .unwrap()
+        );
+
+        let after = get_advisory(&pool, &before.id).await.unwrap().unwrap();
+        let structured = after.structured.expect("the new breakdown must be stored");
+        assert_eq!(structured["routes"][0]["from"], "LAX");
+        assert!(
+            after.decoded.is_none(),
+            "a decoding describing the replaced breakdown survived"
+        );
+    }
+
+    /// The reason this cannot be a blanket clear on any structured edit: a decoding sent *with* the
+    /// new breakdown describes that breakdown, so it is not stale and must be stored.
+    #[sqlx::test]
+    async fn a_decoding_sent_with_the_new_breakdown_is_kept(pool: PgPool) {
+        let before = structured_draft(&pool).await;
+
+        assert!(
+            update_advisory(
+                &pool,
+                &before.id,
+                &UpdateAdvisoryRequest {
+                    structured: Some(serde_json::json!({"routes": [{"from": "LAX", "to": "SFO"}]})),
+                    decoded: Some("LAX to SFO reroute".to_string()),
+                    ..adv_patch()
+                },
+            )
+            .await
+            .unwrap()
+        );
+
+        let after = get_advisory(&pool, &before.id).await.unwrap().unwrap();
+        assert_eq!(after.decoded.as_deref(), Some("LAX to SFO reroute"));
+    }
+
+    /// An edit touching neither field leaves the decoding alone — a kind-only edit is not a reason
+    /// to drop it, which is what makes the guard `structured.is_some()` rather than `decoded.is_none()`.
+    #[sqlx::test]
+    async fn a_kind_only_edit_keeps_the_decoding(pool: PgPool) {
+        let before = structured_draft(&pool).await;
+
+        assert!(
+            update_advisory(
+                &pool,
+                &before.id,
+                &UpdateAdvisoryRequest {
+                    kind: Some("gdp".to_string()),
+                    ..adv_patch()
+                },
+            )
+            .await
+            .unwrap()
+        );
+
+        let after = get_advisory(&pool, &before.id).await.unwrap().unwrap();
+        assert_eq!(after.decoded, before.decoded);
+    }
+
     /// #488 AC2, first half: supplying a breakdown still replaces it. This is why the guard is keyed
     /// on `structured.is_none()` rather than on the body changing at all.
     #[sqlx::test]
@@ -1181,7 +1585,8 @@ mod tests {
                 &pool,
                 &before.id,
                 &UpdateAdvisoryRequest {
-                    kind: Some("gdp".to_string()),
+                    // Any kind will do — this case is about the clearing rule, not the type.
+                    kind: Some(UNRENDERED_KIND.to_string()),
                     ..adv_patch()
                 },
             )
@@ -1190,7 +1595,7 @@ mod tests {
         );
 
         let after = get_advisory(&pool, &before.id).await.unwrap().unwrap();
-        assert_eq!(after.kind, "gdp");
+        assert_eq!(after.kind, UNRENDERED_KIND);
         assert!(
             after.structured.is_some(),
             "an edit that left the body alone must not clear the breakdown"
@@ -1337,7 +1742,7 @@ mod tests {
             &pool,
             CreateAdvisoryRequest {
                 facility: "DCC".into(),
-                kind: "ground_stop".into(),
+                kind: UNRENDERED_KIND.into(),
                 body: "SOME OTHER DOCUMENT".into(),
                 structured: Some(reroute_structured()),
                 decoded: None,
@@ -1417,7 +1822,7 @@ mod tests {
             &pool,
             CreateAdvisoryRequest {
                 facility: "DCC".into(),
-                kind: "ground_stop".into(),
+                kind: UNRENDERED_KIND.into(),
                 body: "SOME OTHER DOCUMENT".into(),
                 structured: None,
                 decoded: None,
@@ -1555,13 +1960,22 @@ mod tests {
     async fn a_published_or_cancelled_number_is_never_reissued(pool: PgPool) {
         let user = seed_user(&pool).await;
         let published = draft(&pool, "DCC").await;
-        assert!(publish_advisory(&pool, &published.id, &user).await.unwrap());
+        // Transactional since #459, so the Discord enqueue is atomic with the state change.
+        let mut tx = pool.begin().await.unwrap();
+        assert!(
+            publish_advisory(&mut tx, &published.id, &user)
+                .await
+                .unwrap()
+        );
+        tx.commit().await.unwrap();
 
         assert!(
             !delete_advisory(&pool, &published.id).await.unwrap(),
             "a published advisory must not be deletable"
         );
-        assert!(cancel_advisory(&pool, &published.id).await.unwrap());
+        let mut tx = pool.begin().await.unwrap();
+        assert!(cancel_advisory(&mut tx, &published.id).await.unwrap());
+        tx.commit().await.unwrap();
         assert!(!delete_advisory(&pool, &published.id).await.unwrap());
 
         assert_eq!(
