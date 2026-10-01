@@ -8,6 +8,8 @@ import type {
   AirportTaxiway,
 } from "@/lib/airport-surface";
 
+import {surfaceTooltip} from "../lib/tooltip";
+
 import {
   MIN_SURFACE_POINTS,
   buildSurfaceDraftLayers,
@@ -247,5 +249,65 @@ describe("polygon geometry (#278)", () => {
     );
     const ids = layers.map((l) => l.id);
     expect(ids.indexOf("surface-ramp-areas")).toBeLessThan(ids.indexOf("surface-taxiways"));
+  });
+});
+
+describe("stand detail (#517)", () => {
+  /** The radius accessor deck.gl will call per stand. */
+  const radiusOf = (g: AirportGate) => {
+    const layers = buildSurfaceLayers(surface({ gates: [g] }), null);
+    const layer = layers.find((l) => l.id === "surface-gates");
+    // Cast as `dataIds` above does: deck's generic layer props don't surface accessors by name.
+    const { getRadius } = (layer?.props ?? {}) as { getRadius: (d: AirportGate) => number };
+    return getRadius(g);
+  };
+
+  it("draws a non-gate stand smaller than a terminal gate", () => {
+    const gateRadius = radiusOf(gate({ id: "g", kind: "gate" }));
+    expect(radiusOf(gate({ id: "t", kind: "tie_down" }))).toBeLessThan(gateRadius);
+    expect(radiusOf(gate({ id: "h", kind: "hangar" }))).toBeLessThan(gateRadius);
+  });
+
+  /** Every manual/osm/crc row has no kind. Shrinking those would move stands already on screen. */
+  it("leaves a stand with no kind at the gate size", () => {
+    expect(radiusOf(gate({ id: "m", kind: null }))).toBe(radiusOf(gate({ id: "g", kind: "gate" })));
+  });
+
+  const card = (g: AirportGate) =>
+    surfaceTooltip()({
+      layer: { id: "surface-gates" },
+      object: g,
+    } as unknown as Parameters<ReturnType<typeof surfaceTooltip>>[0]);
+
+  it("shows the stand's name, kind and source", () => {
+    const html = card(gate({ name: "E57", kind: "tie_down", source: "xplane" }))?.html ?? "";
+    expect(html).toContain("E57");
+    expect(html).toContain("tie_down");
+    expect(html).toContain("xplane");
+  });
+
+  /** AC3: a null kind must not surface as "null" or an empty badge. */
+  it("omits the kind badge when a stand has none", () => {
+    const html = card(gate({ name: "A1", kind: null, source: "manual" }))?.html ?? "";
+    expect(html).toContain("A1");
+    expect(html).toContain("manual");
+    expect(html).not.toContain("null");
+    expect(html).not.toMatch(/padding:0 3px[^>]*><\/span>/);
+  });
+
+  /** A stand name is operator-editable and also arrives from a community-contributed extract, and the
+   * card is rendered as html — so an unescaped name would be stored XSS, not a display bug. */
+  it("escapes a stand name rather than rendering it as markup", () => {
+    const html = card(gate({ name: '<img src=x onerror=alert(1)>', kind: null }))?.html ?? "";
+    expect(html).not.toContain("<img");
+    expect(html).toContain("&lt;img");
+  });
+
+  it("ignores a pick on any layer that is not the stands layer", () => {
+    const other = surfaceTooltip()({
+      layer: { id: "surface-taxiways" },
+      object: gate({ name: "A1" }),
+    } as unknown as Parameters<ReturnType<typeof surfaceTooltip>>[0]);
+    expect(other).toBeNull();
   });
 });
