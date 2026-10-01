@@ -281,6 +281,8 @@ use utoipa::OpenApi;
         crate::models::RerouteValid,
         crate::models::RerouteValidBasis,
         crate::models::RerouteRoutes,
+        crate::models::GdpAdvisory,
+        crate::models::GroundStopAdvisory,
         crate::models::RerouteRow,
         crate::models::RerouteSegment,
         crate::models::CreateAdvisoryRequest,
