@@ -2013,6 +2013,13 @@ pub struct IdstFlight {
     /// Frozen wheels-up (EDCT) once released; null while unscheduled.
     pub edct: Option<DateTime<Utc>>,
     pub released: bool,
+    /// The predicted departure runway (#511), or null when nothing could predict one — no airport
+    /// configuration, or no rule and no configured default. Null is a real answer: a wrong runway would
+    /// narrow the learned taxi estimate to the wrong bucket and move the EDCT with it.
+    pub runway: Option<String>,
+    /// Which rung of the ladder chose `runway`: `manual` | `rule` | `config`, so a controller can see
+    /// *why* it was predicted and whether a human set it. Null exactly when `runway` is.
+    pub runway_source: Option<String>,
 }
 
 /// The IDST board: FCA-metered ground departures in scope, split by release state.

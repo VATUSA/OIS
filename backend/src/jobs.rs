@@ -60,6 +60,14 @@ const OUTBOUND_JOB_LEASE_TIMEOUT_MINS: i64 = 5;
 /// drift silently the first time a route was added.
 const AUDIT_RETAIN_DAYS: i64 = 180;
 
+/// How often the departure-runway ladder runs (#511).
+///
+/// A minute, matching `FLIGHT_EXCLUSIONS_INTERVAL`: an assignment only has to be in place before a
+/// controller sequences the flight, and the ladder's inputs (a filed route, a parked position, a wind)
+/// do not move faster than that. The cost per pass is bounded by the fields that actually have a
+/// departure right now, not by the 185 that have a configuration.
+const DEPARTURE_RUNWAY_DERIVE_INTERVAL: Duration = Duration::from_secs(60);
+
 /// How long a departure-runway assignment outlives its last touch (#509).
 ///
 /// Hours, not days: an assignment describes a flight that is about to depart, so one untouched for
@@ -1024,6 +1032,120 @@ async fn departure_runway_prune_once(pool: &PgPool) -> Result<String, String> {
         .map_err(|_| "prune failed".to_string())
 }
 
+/// Predict a departure runway for every pending departure, and record which rung chose it (#511).
+///
+/// A job rather than the IDST read path, deliberately. The `config` rung needs the wind-favoured airport
+/// configuration, and resolving wind is one outbound Open-Meteo request per airport behind a
+/// process-global mutex — a cost `handlers::feed`'s national demand board explicitly refuses to pay on a
+/// read (see its `effective_aar` doc). IDST is a read, scoped to a whole ARTCC, polled every 30 s per
+/// controller. Here the same work happens once a minute for the whole system, and the read path just
+/// shows what is stored.
+pub fn spawn_departure_runway_derive(
+    reg: Arc<JobRegistry>,
+    pool: PgPool,
+    feed: FeedState,
+    gates: Arc<ArcSwap<std::collections::HashMap<String, Vec<crate::models::AirportGateBody>>>>,
+) {
+    tokio::spawn(run_interval(
+        reg,
+        "departure_runway_derive",
+        "Predict a departure runway for pending departures",
+        DEPARTURE_RUNWAY_DERIVE_INTERVAL,
+        move || {
+            let (pool, feed, gates) = (pool.clone(), feed.clone(), gates.clone());
+            async move { departure_runway_derive_once(&pool, &feed, &gates).await }
+        },
+    ));
+}
+
+/// One derive pass.
+///
+/// Split from the spawn for the reason the prune pass records: a constant no test can reach is the kind
+/// of thing that gets "tuned" without anyone noticing what it turns off.
+///
+/// Order matters for cost. The candidates are grouped by field **first**, so the wind is resolved only
+/// for airports that actually have a departure — tens, not the 185 that have a configuration — and the
+/// forecast's own two-hour cache makes repeat passes free. Reversing this (wind for every configured
+/// airport) is what would make the pass unaffordable.
+async fn departure_runway_derive_once(
+    pool: &PgPool,
+    feed: &FeedState,
+    gates: &Arc<ArcSwap<std::collections::HashMap<String, Vec<crate::models::AirportGateBody>>>>,
+) -> Result<String, String> {
+    use std::collections::HashMap;
+
+    // All the DB reading happens here, before any feed work — `feed::*` holds no pool (AGENTS.md).
+    let configs = crate::repos::airport_configs::list_all(pool)
+        .await
+        .map_err(|_| "could not load airport configs".to_string())?;
+    let mut by_icao: HashMap<String, Vec<crate::models::AirportConfigBody>> = HashMap::new();
+    for c in configs {
+        by_icao.entry(c.icao.clone()).or_default().push(c);
+    }
+
+    let (snapshot, airports) = {
+        let guard = feed.read().await;
+        (guard.snapshot.clone(), guard.airports.clone())
+    };
+    // No feed yet (startup, or an upstream outage) means nothing to predict for — not an error.
+    let Some(snapshot) = snapshot else {
+        return Ok("no feed snapshot yet".to_string());
+    };
+    let catalog = gates.load();
+    let candidates = crate::feed::departure_runway::candidates(&snapshot.data, &catalog);
+
+    // Group by field, so the wind is paid for once per airport that has a departure.
+    let mut per_field: HashMap<String, Vec<crate::feed::departure_runway::Candidate>> =
+        HashMap::new();
+    for c in candidates {
+        per_field.entry(c.icao.clone()).or_default().push(c);
+    }
+
+    let now = Utc::now();
+    let (mut written, mut skipped) = (0u64, 0u64);
+    for (icao, flights) in per_field {
+        let Some(configs) = by_icao.get(&icao) else {
+            // No configuration at all: the ladder has nothing to predict from, and saying so costs
+            // nothing. #511's first mandatory fallback.
+            skipped += flights.len() as u64;
+            continue;
+        };
+        let wind = crate::feed::forecast::wind_at(&airports, &icao, now)
+            .await
+            .and_then(|h| h.dir);
+        let favored = crate::repos::airport_configs::favored_config(configs, wind);
+        for c in flights {
+            match crate::feed::departure_runway::predict(
+                c.gate_name.as_deref(),
+                c.sid.as_deref(),
+                favored,
+            ) {
+                Some((runway, source)) => {
+                    // `assign` refuses a write that a higher rung already owns, so a controller's
+                    // manual override survives every pass without this caller checking for it.
+                    if crate::repos::departure_runway::assign(
+                        pool,
+                        &icao,
+                        &c.callsign,
+                        &runway,
+                        source,
+                        None,
+                    )
+                    .await
+                    .map_err(|_| "could not record a departure runway".to_string())?
+                    {
+                        written += 1;
+                    } else {
+                        skipped += 1;
+                    }
+                }
+                None => skipped += 1,
+            }
+        }
+    }
+    Ok(format!("{written} assigned, {skipped} left alone"))
+}
+
 /// One reaper pass: anything `in_progress` past [`OUTBOUND_JOB_LEASE_TIMEOUT_MINS`] goes back to the
 /// queue.
 ///
@@ -1752,5 +1874,189 @@ mod registration_tests {
             missing.is_empty(),
             "defined in jobs.rs but never started in lib.rs, so they silently never run: {missing:?}"
         );
+    }
+}
+
+/// The derive pass (#511). Exercises the pass end to end — snapshot in, assignments out — rather than
+/// only the pure ladder, which `feed::departure_runway`'s own tests cover rung by rung.
+#[cfg(test)]
+mod departure_runway_derive_tests {
+    use chrono::Utc;
+    use sqlx::PgPool;
+    use std::collections::HashMap;
+
+    use super::departure_runway_derive_once;
+    use crate::models::{AirportGateBody, UpsertAirportConfigRequest};
+    use crate::repos::departure_runway::{RunwaySource, assign, get};
+
+    /// A connected, parked departure sitting on stand `A1` at KJFK.
+    fn snapshot_with_a_parked_departure() -> crate::feed::Snapshot {
+        let data: crate::feed::vatsim::VatsimData = serde_json::from_value(serde_json::json!({
+            "pilots": [{
+                "callsign": "AAL123",
+                "latitude": 40.6413,
+                "longitude": -73.7781,
+                "altitude": 13,
+                "groundspeed": 0,
+                "heading": 90,
+                "flight_plan": {
+                    "departure": "KJFK",
+                    "arrival": "KBOS",
+                    "aircraft_short": "B738",
+                    "route": "CAMRN4 J174 BOS"
+                }
+            }],
+            "prefiles": [],
+            "controllers": [],
+            "atis": []
+        }))
+        .expect("the fixture should deserialize");
+        crate::feed::Snapshot::of(data)
+    }
+
+    fn gates_at_kjfk() -> HashMap<String, Vec<AirportGateBody>> {
+        HashMap::from([(
+            "KJFK".to_string(),
+            vec![AirportGateBody {
+                id: "gate-uuid-1".into(),
+                icao: "KJFK".into(),
+                name: "A1".into(),
+                lat: 40.6413,
+                lon: -73.7781,
+                source: "manual".into(),
+                updated_at: Utc::now(),
+                editable: false,
+            }],
+        )])
+    }
+
+    async fn state_with(pool: PgPool, snapshot: crate::feed::Snapshot) -> crate::state::AppState {
+        let state = crate::scope_test_support::test_state(pool, HashMap::new());
+        state.feed.write().await.snapshot = Some(std::sync::Arc::new(snapshot));
+        state.gates.store(std::sync::Arc::new(gates_at_kjfk()));
+        state
+    }
+
+    async fn seed_config(pool: &PgPool, actor: &str, req: UpsertAirportConfigRequest) {
+        crate::repos::airport_configs::create(pool, "KJFK", &req, "ZNY", actor)
+            .await
+            .expect("the config should insert");
+    }
+
+    fn config_with(
+        dep_runways: Vec<String>,
+        sid: Option<HashMap<String, String>>,
+    ) -> UpsertAirportConfigRequest {
+        UpsertAirportConfigRequest {
+            name: "South".into(),
+            aar: 30,
+            adr: 30,
+            landing_runways: vec![],
+            departure_runways: dep_runways,
+            sid_rules: sid,
+            gate_rules: None,
+            wind_from_deg: 0,
+            wind_to_deg: 360,
+            calm_default: true,
+        }
+    }
+
+    /// The pass records a runway for a parked departure, and records the rung that chose it.
+    #[sqlx::test]
+    async fn the_pass_assigns_from_a_sid_rule(pool: PgPool) {
+        let actor = crate::scope_test_support::seed_user(&pool).await;
+        seed_config(
+            &pool,
+            &actor,
+            config_with(
+                vec!["04L".into()],
+                Some(HashMap::from([("CAMRN".to_string(), "31L".to_string())])),
+            ),
+        )
+        .await;
+        let state = state_with(pool.clone(), snapshot_with_a_parked_departure()).await;
+
+        let report = departure_runway_derive_once(&pool, &state.feed, &state.gates)
+            .await
+            .expect("the pass should succeed");
+
+        let got = get(&pool, "KJFK", "AAL123")
+            .await
+            .unwrap()
+            .expect("an assignment");
+        assert_eq!(got.runway, "31L", "the filed CAMRN4 matched the CAMRN rule");
+        assert_eq!(got.source, RunwaySource::Rule.as_str());
+        assert!(report.contains("1 assigned"), "got: {report}");
+    }
+
+    /// #511's first mandatory fallback, through the pass: an airport with no configuration at all gets
+    /// no assignment, and the pass says so rather than failing.
+    #[sqlx::test]
+    async fn an_airport_with_no_config_gets_nothing(pool: PgPool) {
+        let state = state_with(pool.clone(), snapshot_with_a_parked_departure()).await;
+
+        let report = departure_runway_derive_once(&pool, &state.feed, &state.gates)
+            .await
+            .expect("the pass should succeed, not error");
+
+        assert!(get(&pool, "KJFK", "AAL123").await.unwrap().is_none());
+        assert!(report.contains("0 assigned"), "got: {report}");
+    }
+
+    /// #511 AC4, through the pass. A controller's manual override must survive a derive, and this is the
+    /// caller's half of that — `assign`'s SQL guard is what enforces it, and this proves the pass does
+    /// not somehow route around it.
+    #[sqlx::test]
+    async fn a_manual_override_survives_a_derive_pass(pool: PgPool) {
+        let actor = crate::scope_test_support::seed_user(&pool).await;
+        seed_config(
+            &pool,
+            &actor,
+            config_with(
+                vec!["04L".into()],
+                Some(HashMap::from([("CAMRN".to_string(), "31L".to_string())])),
+            ),
+        )
+        .await;
+        // A controller sets 22R by hand.
+        assert!(
+            assign(
+                &pool,
+                "KJFK",
+                "AAL123",
+                "22R",
+                RunwaySource::Manual,
+                Some(&actor)
+            )
+            .await
+            .unwrap()
+        );
+        let state = state_with(pool.clone(), snapshot_with_a_parked_departure()).await;
+
+        departure_runway_derive_once(&pool, &state.feed, &state.gates)
+            .await
+            .unwrap();
+
+        let got = get(&pool, "KJFK", "AAL123")
+            .await
+            .unwrap()
+            .expect("an assignment");
+        assert_eq!(
+            got.runway, "22R",
+            "the derive must not displace a manual override"
+        );
+        assert_eq!(got.source, RunwaySource::Manual.as_str());
+    }
+
+    /// An empty feed is a normal state at startup and during an upstream outage, not an error.
+    #[sqlx::test]
+    async fn no_snapshot_is_not_an_error(pool: PgPool) {
+        let state = crate::scope_test_support::test_state(pool.clone(), HashMap::new());
+
+        let report = departure_runway_derive_once(&pool, &state.feed, &state.gates)
+            .await
+            .expect("an empty feed must not fail the job");
+
+        assert!(report.contains("no feed snapshot"), "got: {report}");
     }
 }

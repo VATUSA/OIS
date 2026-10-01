@@ -4979,6 +4979,17 @@ export interface components {
             fca_name: string;
             released: boolean;
             /**
+             * @description The predicted departure runway (#511), or null when nothing could predict one — no airport
+             *     configuration, or no rule and no configured default. Null is a real answer: a wrong runway would
+             *     narrow the learned taxi estimate to the wrong bucket and move the EDCT with it.
+             */
+            runway?: string | null;
+            /**
+             * @description Which rung of the ladder chose `runway`: `manual` | `rule` | `config`, so a controller can see
+             *     *why* it was predicted and whether a human set it. Null exactly when `runway` is.
+             */
+            runway_source?: string | null;
+            /**
              * Format: int64
              * @description 1-based sequence in that FCA's metered order.
              */
