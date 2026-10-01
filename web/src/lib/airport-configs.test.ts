@@ -1,6 +1,28 @@
 import {describe, expect, it} from "vitest";
 
-import {inWindRange, matchConfig, type AirportConfig} from "./airport-configs";
+import {formatRules, inWindRange, matchConfig, parseRules, type AirportConfig} from "./airport-configs";
+
+describe("departure rule text (#512)", () => {
+  it("round-trips a rule map through the editor's text form", () => {
+    const rules = { CAMRN: "26R", HAPIE: "28" };
+    expect(parseRules(formatRules(rules))).toEqual(rules);
+  });
+
+  it("upper-cases both halves, so case is never a different rule", () => {
+    expect(parseRules("camrn=26r")).toEqual({ CAMRN: "26R" });
+  });
+
+  it("drops a fragment that names no runway rather than storing a rule pointing nowhere", () => {
+    expect(parseRules("CAMRN=26R, JUNK, HAPIE=")).toEqual({ CAMRN: "26R" });
+  });
+
+  it("treats an empty field as no rules", () => {
+    expect(parseRules("")).toEqual({});
+    expect(formatRules(undefined)).toBe("");
+    expect(formatRules(null)).toBe("");
+  });
+});
+
 
 /**
  * These mirror the Rust cases in `backend/src/repos/airport_configs.rs` one for one. `matchConfig` is a
@@ -14,6 +36,10 @@ const cfg = (over: Partial<AirportConfig>): AirportConfig => ({
   aar: 30,
   adr: 30,
   landing_runways: [],
+  // Required on the contract since #509/#512; no case here turns on any of them.
+  departure_runways: [],
+  gate_rules: {},
+  sid_rules: {},
   wind_from_deg: 0,
   wind_to_deg: 360,
   calm_default: false,

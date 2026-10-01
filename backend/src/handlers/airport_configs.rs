@@ -140,7 +140,30 @@ fn validate(req: &UpsertAirportConfigRequest) -> Result<(), ApiError> {
     if !(0..=360).contains(&req.wind_from_deg) || !(0..=360).contains(&req.wind_to_deg) {
         return Err(ApiError::BadRequest);
     }
+    // #512 AC4: a rule must not name a runway this config does not have. Rejected rather than ignored
+    // at read time, so the operator finds out when they save instead of wondering why their rule never
+    // fires. Checked against the request's own `departure_runways`, since both can move together.
+    for rules in [req.sid_rules.as_ref(), req.gate_rules.as_ref()]
+        .into_iter()
+        .flatten()
+    {
+        if !rules_fit(rules.values().map(String::as_str), &req.departure_runways) {
+            return Err(ApiError::BadRequest);
+        }
+    }
     Ok(())
+}
+
+/// Whether every runway a rule map names is one the config actually has.
+///
+/// Comparison is on the trimmed, upper-cased name: a rule typed `31l` means the same runway as `31L`,
+/// and rejecting it for case would be a trap rather than a safeguard.
+fn rules_fit<'a>(mut named: impl Iterator<Item = &'a str>, available: &[String]) -> bool {
+    let have: std::collections::HashSet<String> = available
+        .iter()
+        .map(|r| r.trim().to_ascii_uppercase())
+        .collect();
+    named.all(|r| have.contains(&r.trim().to_ascii_uppercase()))
 }
 
 /// Does the caller hold `events.config.update` nationally or for `icao`'s owning ARTCC?
@@ -294,6 +317,23 @@ pub async fn update_airport_config(
     let icao = normalize_icao(&icao).ok_or(ApiError::BadRequest)?;
     validate(&req)?;
     require_edit(&state, &principal, &icao).await?;
+    // The other half of AC4. `validate` only sees the rules the request carries; a save that omits them
+    // while narrowing `departure_runways` would leave the STORED rules naming a runway that no longer
+    // exists — orphaned silently, which is exactly what the AC forbids. Read them and check.
+    if req.sid_rules.is_none() || req.gate_rules.is_none() {
+        let stored = config_repo::get(pool, &id)
+            .await?
+            .ok_or(ApiError::NotFound)?;
+        let keeping = [
+            (req.sid_rules.is_none(), &stored.sid_rules),
+            (req.gate_rules.is_none(), &stored.gate_rules),
+        ];
+        for (_, rules) in keeping.iter().filter(|(omitted, _)| *omitted) {
+            if !rules_fit(rules.0.values().map(String::as_str), &req.departure_runways) {
+                return Err(ApiError::BadRequest);
+            }
+        }
+    }
 
     let mut row = config_repo::update(pool, &id, &icao, &req, principal.user_id())
         .await?
@@ -351,10 +391,60 @@ mod tests {
             aar: 30,
             adr: 30,
             landing_runways: vec![],
+            departure_runways: vec![],
+            // None, not empty: the default fixture must exercise the omit-to-keep path, which is what
+            // every pre-#512 client sends.
+            sid_rules: None,
+            gate_rules: None,
             wind_from_deg: 0,
             wind_to_deg: 360,
             calm_default: false,
         }
+    }
+
+    /// #509 AC 3: `departure_runways` has to survive a create *and* an update. Both SQL statements
+    /// list their columns positionally, so a column added to one and not the other, or bound out of
+    /// order, writes the wrong value — and with two `text[]` columns side by side that silently swaps
+    /// arrivals for departures rather than failing.
+    #[sqlx::test]
+    async fn departure_runways_round_trip_through_create_and_update(pool: PgPool) {
+        let user = seed_user(&pool).await;
+        let created = config_repo::create(
+            &pool,
+            "KJFK",
+            &UpsertAirportConfigRequest {
+                landing_runways: vec!["04R".into(), "22L".into()],
+                departure_runways: vec!["04L".into(), "31L".into()],
+                ..upsert("JFK south")
+            },
+            "ZNY",
+            &user,
+        )
+        .await
+        .unwrap();
+        assert_eq!(created.departure_runways, vec!["04L", "31L"]);
+        assert_eq!(
+            created.landing_runways,
+            vec!["04R", "22L"],
+            "the two arrays must not be swapped"
+        );
+
+        let updated = config_repo::update(
+            &pool,
+            &created.id,
+            "KJFK",
+            &UpsertAirportConfigRequest {
+                landing_runways: vec!["13L".into()],
+                departure_runways: vec!["13R".into()],
+                ..upsert("JFK south")
+            },
+            &user,
+        )
+        .await
+        .unwrap()
+        .expect("the config exists");
+        assert_eq!(updated.departure_runways, vec!["13R"]);
+        assert_eq!(updated.landing_runways, vec!["13L"]);
     }
 
     /// Realignment scenario: KORD's config was created while ZDC owned it (stored `artcc: "ZDC"`),
@@ -580,6 +670,139 @@ mod tests {
         assert_eq!(
             statuses(&state, &cookie, &writes).await,
             [StatusCode::FORBIDDEN; 3]
+        );
+    }
+
+    /// A map of rules, for the fixtures below.
+    fn rules(pairs: &[(&str, &str)]) -> std::collections::HashMap<String, String> {
+        pairs
+            .iter()
+            .map(|(k, v)| (k.to_string(), v.to_string()))
+            .collect()
+    }
+
+    /// AC3, and the one that protects the other 184 airports: a config created without rules has
+    /// empty maps and behaves exactly as it did before #512.
+    #[sqlx::test]
+    async fn a_config_with_no_rules_is_unchanged(pool: PgPool) {
+        let user = scope_test_support::seed_user(&pool).await;
+        let created = config_repo::create(&pool, "KJFK", &upsert("South"), "ZNY", &user)
+            .await
+            .unwrap();
+        assert!(created.sid_rules.0.is_empty());
+        assert!(created.gate_rules.0.is_empty());
+    }
+
+    /// AC2, the patch convention: a save that omits the rule maps leaves the stored ones alone. A
+    /// client predating #512 sends exactly this shape on every unrelated edit, so without `coalesce`
+    /// it would wipe an ARTCC's rules each time it changed an AAR.
+    #[sqlx::test]
+    async fn omitting_the_rules_leaves_them_unchanged(pool: PgPool) {
+        let user = scope_test_support::seed_user(&pool).await;
+        let mut req = upsert("South");
+        req.departure_runways = vec!["31L".into()];
+        req.sid_rules = Some(rules(&[("CAMRN", "31L")]));
+        let created = config_repo::create(&pool, "KJFK", &req, "ZNY", &user)
+            .await
+            .unwrap();
+
+        // An unrelated edit, in the shape an older client sends: no rule fields at all.
+        let mut later = upsert("South");
+        later.departure_runways = vec!["31L".into()];
+        later.aar = 44;
+        assert!(later.sid_rules.is_none() && later.gate_rules.is_none());
+        let updated = config_repo::update(&pool, &created.id, "KJFK", &later, &user)
+            .await
+            .unwrap()
+            .unwrap();
+
+        assert_eq!(updated.aar, 44, "the edit applied");
+        assert_eq!(
+            updated.sid_rules.0.get("CAMRN").map(String::as_str),
+            Some("31L"),
+            "and the rules it never mentioned survived it"
+        );
+    }
+
+    /// AC1: rules round-trip, and the two maps stay distinct — a gate and a SID may share a name.
+    #[sqlx::test]
+    async fn rules_round_trip_per_config(pool: PgPool) {
+        let user = scope_test_support::seed_user(&pool).await;
+        let mut req = upsert("South");
+        req.departure_runways = vec!["31L".into(), "04L".into()];
+        req.sid_rules = Some(rules(&[("CAMRN", "31L")]));
+        req.gate_rules = Some(rules(&[("CAMRN", "04L")]));
+        let row = config_repo::create(&pool, "KJFK", &req, "ZNY", &user)
+            .await
+            .unwrap();
+
+        assert_eq!(
+            row.sid_rules.0.get("CAMRN").map(String::as_str),
+            Some("31L")
+        );
+        assert_eq!(
+            row.gate_rules.0.get("CAMRN").map(String::as_str),
+            Some("04L"),
+            "a gate named like a SID is a different rule, which is why there are two maps"
+        );
+    }
+
+    /// AC4: a rule naming a runway the config does not have is rejected, not stored and ignored.
+    #[test]
+    fn a_rule_naming_an_absent_runway_is_rejected() {
+        let mut req = upsert("South");
+        req.departure_runways = vec!["31L".into()];
+        req.sid_rules = Some(rules(&[("CAMRN", "22R")]));
+        assert!(matches!(validate(&req), Err(ApiError::BadRequest)));
+
+        // The same runway, differently cased, is the same runway — rejecting it would be a trap.
+        req.sid_rules = Some(rules(&[("CAMRN", "31l")]));
+        assert!(validate(&req).is_ok());
+    }
+
+    /// AC4's other half, which `validate` alone cannot see: narrowing `departure_runways` while the
+    /// request says nothing about the rules would orphan the STORED ones. The update handler reads them
+    /// and refuses, so a config can never hold a rule pointing at a runway it no longer has.
+    #[sqlx::test]
+    async fn narrowing_the_runways_cannot_orphan_a_stored_rule(pool: PgPool) {
+        let user = scope_test_support::seed_user(&pool).await;
+        grant(&pool, &user, "events.config.update", Some("ZDC")).await;
+        let mut req = upsert("South");
+        req.departure_runways = vec!["31L".into(), "04L".into()];
+        req.sid_rules = Some(rules(&[("CAMRN", "04L")]));
+        let created = config_repo::create(&pool, "KDCA", &req, "ZDC", &user)
+            .await
+            .unwrap();
+
+        // Drop 04L, saying nothing about the rules — the shape a pre-#512 client sends. The stored
+        // CAMRN→04L rule would be left pointing at a runway the config no longer has.
+        let narrowing = serde_json::json!({
+            "name": "South",
+            "aar": 30,
+            "adr": 30,
+            "landing_runways": [],
+            "departure_runways": ["31L"],
+            "wind_from_deg": 0,
+            "wind_to_deg": 360
+        });
+        let cookie = session_cookie(&pool, &user).await;
+        let state = test_state(
+            pool,
+            std::collections::HashMap::from([("ZDC".to_string(), artcc(&["KDCA"]))]),
+        );
+        let status = send(
+            &state,
+            Method::PUT,
+            &format!("/api/v1/airport-configs/KDCA/{}", created.id),
+            &cookie,
+            Some(narrowing),
+        )
+        .await;
+
+        assert_eq!(
+            status,
+            StatusCode::BAD_REQUEST,
+            "narrowing the runways must not silently orphan the stored CAMRN rule"
         );
     }
 

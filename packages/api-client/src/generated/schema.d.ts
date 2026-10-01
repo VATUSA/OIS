@@ -3406,12 +3406,33 @@ export interface components {
             artcc: string;
             /** @description Used when the wind is light/variable or nothing matches (at most one per airport). */
             calm_default: boolean;
+            /**
+             * @description Runways departures are expected to use under this config — the departure side of
+             *     `landing_runways`, and the third rung of #511's prediction ladder (#509).
+             */
+            departure_runways: string[];
             /** @description Whether the requesting user may edit this airport's configs (per their ARTCC scope). */
             editable: boolean;
+            /**
+             * @description Departure gate/stand name → runway, e.g. `{"A1": "04L"}` (#512). Separate from `sid_rules`
+             *     because a gate and a SID can share a name and mean different things.
+             */
+            gate_rules: {
+                [key: string]: string;
+            };
             icao: string;
             id: string;
             landing_runways: string[];
             name: string;
+            /**
+             * @description Departure SID base → runway, e.g. `{"CAMRN": "31L"}` — the *second* rung of #511's ladder,
+             *     above `departure_runways` and below a manual override (#512). Keys are revision-stripped by
+             *     `feed::runway::star_base`, so `CAMRN4` and `CAMRN3` are one rule. Empty means no rules, which is
+             *     every airport until a facility configures one.
+             */
+            sid_rules: {
+                [key: string]: string;
+            };
             /** Format: date-time */
             updated_at: string;
             updated_by?: string | null;
@@ -5168,6 +5189,17 @@ export interface components {
             fca_name: string;
             released: boolean;
             /**
+             * @description The predicted departure runway (#511), or null when nothing could predict one — no airport
+             *     configuration, or no rule and no configured default. Null is a real answer: a wrong runway would
+             *     narrow the learned taxi estimate to the wrong bucket and move the EDCT with it.
+             */
+            runway?: string | null;
+            /**
+             * @description Which rung of the ladder chose `runway`: `manual` | `rule` | `config`, so a controller can see
+             *     *why* it was predicted and whether a human set it. Null exactly when `runway` is.
+             */
+            runway_source?: string | null;
+            /**
              * Format: int64
              * @description 1-based sequence in that FCA's metered order.
              */
@@ -6390,8 +6422,24 @@ export interface components {
             /** Format: int32 */
             adr: number;
             calm_default?: boolean;
+            departure_runways?: string[];
+            /** @description When present, replaces the gate→runway rules; **omit to keep them unchanged** (#512). */
+            gate_rules?: {
+                [key: string]: string;
+            } | null;
             landing_runways?: string[];
             name: string;
+            /**
+             * @description When present, replaces the SID→runway rules; **omit to keep them unchanged** (#512).
+             *
+             *     `Option` where every other field on this request is replace-always, and the asymmetry is
+             *     deliberate: this is a whole-config PUT, so a client that predates these fields would wipe an
+             *     ARTCC's rules on every unrelated save. That is the hazard `RunwayConfigRequest` documents — "one
+             *     controller toggling a runway can't clobber another's STAR rule" — and this is the same remedy.
+             */
+            sid_rules?: {
+                [key: string]: string;
+            } | null;
             /** Format: int32 */
             wind_from_deg: number;
             /** Format: int32 */

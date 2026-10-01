@@ -91,7 +91,7 @@ pub(crate) fn nearest_runway(runways: &RunwayDb, icao: &str, heading: i64) -> Op
 /// The filed SID base name: the first route token that looks like a named procedure (≥4 leading
 /// letters then a revision digit, e.g. `GLASR3` → `GLASR`), scanning only the front of the route so
 /// enroute airways (`J146`) and fixes aren't mistaken for a departure procedure.
-fn sid_of(route: &str) -> Option<String> {
+pub(crate) fn sid_of(route: &str) -> Option<String> {
     for raw in route
         .to_ascii_uppercase()
         .split([' ', '\t', '\n', '\r', '.', '/'])

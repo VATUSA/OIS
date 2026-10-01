@@ -9,6 +9,7 @@ pub mod audit;
 pub mod auth;
 pub mod availability;
 pub mod dashboards;
+pub mod departure_runway;
 pub mod events;
 pub mod faa_surface_seed;
 pub mod facility_documents;

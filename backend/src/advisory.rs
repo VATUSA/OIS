@@ -889,7 +889,8 @@ mod ground_stop_tests {
 /// has not loaded yet. A wrong-looking element beats an empty one in a published document, and for the
 /// contiguous US the fallback is already correct.
 fn element_airport(iata: &IataMap, icao: &str) -> String {
-    let t = icao.trim().to_ascii_uppercase();
+    // `clean` is collapse + upper-case, which is what every other value here gets (#498).
+    let t = clean(icao);
     if let Some((code, _)) = iata.iter().find(|(_, mapped)| **mapped == t) {
         return code.clone();
     }

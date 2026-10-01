@@ -10,6 +10,7 @@ use crate::{
 };
 
 const CONFIG_SELECT: &str = "select c.id, c.icao, c.name, c.aar, c.adr, c.landing_runways, \
+    c.departure_runways, c.sid_rules, c.gate_rules, \
     c.wind_from_deg, c.wind_to_deg, c.calm_default, c.artcc, c.updated_at, \
     u.display_name as updated_by \
     from flow.airport_config c left join identity.users u on u.id = c.updated_by";
@@ -71,14 +72,20 @@ pub async fn create(
     }
     let id: String = sqlx::query_scalar(
         "insert into flow.airport_config \
-             (icao, name, aar, adr, landing_runways, wind_from_deg, wind_to_deg, calm_default, artcc, updated_by) \
-         values ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10) returning id",
+             (icao, name, aar, adr, landing_runways, departure_runways, sid_rules, gate_rules, \
+              wind_from_deg, wind_to_deg, calm_default, artcc, updated_by) \
+         values ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13) returning id",
     )
     .bind(icao)
     .bind(&req.name)
     .bind(req.aar)
     .bind(req.adr)
     .bind(&req.landing_runways)
+    .bind(&req.departure_runways)
+    .bind(sqlx::types::Json(req.sid_rules.clone().unwrap_or_default()))
+    .bind(sqlx::types::Json(
+        req.gate_rules.clone().unwrap_or_default(),
+    ))
     .bind(req.wind_from_deg)
     .bind(req.wind_to_deg)
     .bind(req.calm_default)
@@ -101,9 +108,12 @@ pub async fn update(
         clear_calm(pool, icao, Some(id)).await?;
     }
     let r = sqlx::query(
+        // `coalesce` on the two rule maps: a request that omits them leaves the stored rules alone,
+        // so a client predating #512 cannot wipe an ARTCC's rules on an unrelated save.
         "update flow.airport_config set \
-             name = $3, aar = $4, adr = $5, landing_runways = $6, \
-             wind_from_deg = $7, wind_to_deg = $8, calm_default = $9, updated_by = $10 \
+             name = $3, aar = $4, adr = $5, landing_runways = $6, departure_runways = $7, \
+             sid_rules = coalesce($8, sid_rules), gate_rules = coalesce($9, gate_rules), \
+             wind_from_deg = $10, wind_to_deg = $11, calm_default = $12, updated_by = $13 \
          where id = $1 and icao = $2",
     )
     .bind(id)
@@ -112,6 +122,9 @@ pub async fn update(
     .bind(req.aar)
     .bind(req.adr)
     .bind(&req.landing_runways)
+    .bind(&req.departure_runways)
+    .bind(req.sid_rules.as_ref().map(sqlx::types::Json))
+    .bind(req.gate_rules.as_ref().map(sqlx::types::Json))
     .bind(req.wind_from_deg)
     .bind(req.wind_to_deg)
     .bind(req.calm_default)
@@ -236,6 +249,9 @@ mod tests {
             aar,
             adr: aar,
             landing_runways: vec![],
+            departure_runways: vec![],
+            sid_rules: sqlx::types::Json(Default::default()),
+            gate_rules: sqlx::types::Json(Default::default()),
             wind_from_deg: from,
             wind_to_deg: to,
             calm_default: calm,
