@@ -687,6 +687,72 @@ pub struct AdvisoryBody {
     pub created_at: DateTime<Utc>,
 }
 
+/// The parts of a generated GDP advisory that no data can supply (#508).
+///
+/// Publishing a GDP derives most of the document from `tmu.gdp`, but a metering engine cannot know
+/// *why* a program exists, and several reference fields have no source at all:
+///
+/// - `DELAY LIMIT` is not `max_enroute_min` — that is an enroute *scope tier*, not a delay cap.
+/// - `DEPARTURE SCOPE` is `1200` in the reference, which #507 recorded as undefined: not minutes, not a
+///   tier, not a code. The program's `scope` is a list of departure ARTCCs, so putting it here would
+///   assert a reading the document does not support. Left to the author deliberately.
+/// - `IMPACTING CONDITION`, `COMMENTS`, `POP-UP FACTOR` and the facility lists are editorial by nature.
+///
+/// Every field is optional: a GDP must stay publishable in a hurry, and the renderer already prints a
+/// bare `LABEL:` for an absent value.
+#[derive(Debug, Default, Deserialize, ToSchema)]
+pub struct PublishGdpRequest {
+    /// `DAS` | `GAAP` | `UDP`. Defaults to `DAS`, the ordinary case.
+    #[serde(default)]
+    pub delay_assignment_mode: Option<String>,
+    #[serde(default)]
+    pub delay_limit: Option<String>,
+    #[serde(default)]
+    pub departure_scope: Option<String>,
+    #[serde(default)]
+    pub pop_up_factor: Option<String>,
+    #[serde(default)]
+    pub flights_included: Option<Vec<String>>,
+    #[serde(default)]
+    pub additional_dep_facilities_included: Option<String>,
+    #[serde(default)]
+    pub exempt_dep_facilities: Option<String>,
+    #[serde(default)]
+    pub canadian_arpts_included: Option<String>,
+    #[serde(default)]
+    pub delay_assignment_table_applies_to: Option<String>,
+    #[serde(default)]
+    pub impacting_condition: Option<String>,
+    #[serde(default)]
+    pub comments: Option<String>,
+}
+
+/// The editorial half of a generated Ground Stop advisory (#508).
+///
+/// A ground stop has **no delay data anywhere**: there is no slot table for one and no delay
+/// computation in `feed/`, so all three `TOTAL/MAXIMUM/AVERAGE` triplets are author-supplied.
+/// `previous_delays` is inherently historical — nothing records a prior revision's figures — so it
+/// could not be derived even if the others were.
+#[derive(Debug, Default, Deserialize, ToSchema)]
+pub struct PublishGroundStopRequest {
+    #[serde(default)]
+    pub flights_included: Option<Vec<String>>,
+    #[serde(default)]
+    pub additional_dep_facilities_included: Option<String>,
+    #[serde(default)]
+    pub current_delays: Option<String>,
+    #[serde(default)]
+    pub previous_delays: Option<String>,
+    #[serde(default)]
+    pub new_delays: Option<String>,
+    #[serde(default)]
+    pub probability_of_extension: Option<String>,
+    #[serde(default)]
+    pub impacting_condition: Option<String>,
+    #[serde(default)]
+    pub comments: Option<String>,
+}
+
 #[derive(Debug, Deserialize, ToSchema)]
 pub struct CreateAdvisoryRequest {
     /// The issuing facility. The advisory's number is a sequence within this.
@@ -878,6 +944,12 @@ pub struct UpdateGdpRequest {
     /// Optional rate changes across the window (empty = flat AAR).
     #[serde(default)]
     pub aar_steps: Vec<AarStep>,
+    /// Editorial fields for the advisory reissued when a **published** program is revised (#508).
+    /// Revising changes the delay figures, and #461 settled that an advisory is cancelled and reissued
+    /// rather than rewritten — so the author gets to restate the context. Ignored for a draft, which has
+    /// no advisory yet.
+    #[serde(default)]
+    pub advisory: Option<PublishGdpRequest>,
 }
 
 fn default_true() -> bool {

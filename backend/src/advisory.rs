@@ -32,8 +32,10 @@
 
 use chrono::{DateTime, NaiveDate, Utc};
 
+use crate::feed::gdp::GdpStats;
 use crate::models::{
-    GdpAdvisory, GroundStopAdvisory, RerouteAdvisory, RerouteRoutes, RerouteValidBasis,
+    AarStep, GdpAdvisory, GdpBody, GroundStopAdvisory, GroundStopBody, PublishGdpRequest,
+    PublishGroundStopRequest, RerouteAdvisory, RerouteRoutes, RerouteValidBasis,
 };
 
 fn clean(s: &str) -> String {
@@ -733,5 +735,165 @@ mod ground_stop_tests {
                 assert_eq!(line, line.trim_end(), "case {} line {}", case.name, i + 1);
             }
         }
+    }
+}
+
+// ---- generating a document from a program (#508) ----------------------------------------------
+//
+// #461 settled that a GDP advisory and its `tmu.gdp` row are the same event, so the document is
+// derived here rather than retyped by the author. These functions are the mapping, and they live
+// beside the renderers because this is document construction — they touch no database.
+
+/// `KJFK` → `JFK`. The documents use the three-letter form (`JFK/ZNY`, `CTL ELEMENT: JFK`) while the
+/// programs store the ICAO identifier.
+///
+/// Only a four-character code beginning with `K` is shortened: that is the US domestic form, and
+/// VATUSA's airports are all of it. Anything else — a three-letter code already, `PANC`, `CYYZ` — is
+/// passed through untouched rather than mangled by a blind first-character strip.
+fn short_airport(icao: &str) -> String {
+    let t = icao.trim().to_ascii_uppercase();
+    match t.strip_prefix('K') {
+        Some(rest) if t.len() == 4 => rest.to_string(),
+        _ => t,
+    }
+}
+
+/// `JFK/ZNY` — the header's element slot. Falls back to the airport alone when the program has no
+/// ARTCC stamped (`GdpBody::artcc` is filled from the live facility map, not a column, so it can be
+/// absent).
+fn element_of(airport: &str, artcc: Option<&str>) -> String {
+    let apt = short_airport(airport);
+    match artcc.map(str::trim).filter(|a| !a.is_empty()) {
+        Some(a) => format!("{apt}/{}", a.to_ascii_uppercase()),
+        None => apt,
+    }
+}
+
+/// `14/1415Z - 14/2315Z` — the form `ARRIVALS ESTIMATED FOR` and `CUMULATIVE PROGRAM PERIOD` take.
+fn day_window(from: DateTime<Utc>, to: DateTime<Utc>) -> String {
+    format!("{} - {}", from.format("%d/%H%MZ"), to.format("%d/%H%MZ"))
+}
+
+/// `141415-142315` — the compact form the footer `PERIOD` takes.
+fn compact_window(from: DateTime<Utc>, to: DateTime<Utc>) -> String {
+    format!("{}-{}", from.format("%d%H%M"), to.format("%d%H%M"))
+}
+
+/// `40/40/30` — the per-hour rate profile.
+///
+/// The reference shows nine values for a nine-hour program. We emit one per configured step, which is
+/// the same information in the program's own terms; expanding a stepped rate into one value per clock
+/// hour would require inventing how a step that starts mid-hour is reported. A program with no steps
+/// emits its single AAR.
+fn program_rate(aar: i32, steps: &[AarStep]) -> String {
+    if steps.is_empty() {
+        return aar.to_string();
+    }
+    steps
+        .iter()
+        .map(|s| s.aar.to_string())
+        .collect::<Vec<_>>()
+        .join("/")
+}
+
+/// Build a GDP advisory document from the program, its frozen-slot statistics, and the author's
+/// editorial fields.
+///
+/// `window` is the program's resolved start/end — passed in rather than recomputed here, because the
+/// caller has already resolved it to freeze the slots and two answers to the same question is how the
+/// document and the program drift.
+///
+/// `stats` comes from [`crate::feed::gdp::program_stats`] over the same assignments that were frozen,
+/// so `MAXIMUM`/`AVERAGE DELAY` describe exactly the rows in `tmu.gdp_slot`. Note that
+/// `repos::public` aggregates the same two figures in SQL with `round(avg(...))` where `program_stats`
+/// uses integer division, so the public board and this document can differ by a minute on the average.
+/// Not reconciled here — that is a visible decision of its own.
+pub fn gdp_advisory_from(
+    gdp: &GdpBody,
+    stats: &GdpStats,
+    window: (DateTime<Utc>, DateTime<Utc>),
+    ed: &PublishGdpRequest,
+    now: DateTime<Utc>,
+) -> GdpAdvisory {
+    let (from, to) = window;
+    GdpAdvisory {
+        // Constant per kind, not editorial: the reference's header line for every GDP.
+        header: "CDM GROUND DELAY PROGRAM".to_string(),
+        element: element_of(&gdp.airport, gdp.artcc.as_deref()),
+        control_element: short_airport(&gdp.airport),
+        // A GDP in OIS always meters an airport's arrivals, so the element is always an airport.
+        element_type: "APT".to_string(),
+        adl_time: now.format("%H%MZ").to_string(),
+        delay_assignment_mode: ed
+            .delay_assignment_mode
+            .clone()
+            .unwrap_or_else(|| "DAS".to_string()),
+        arrivals_estimated_for: day_window(from, to),
+        cumulative_program_period: day_window(from, to),
+        program_rate: program_rate(gdp.aar, &gdp.aar_steps),
+        pop_up_factor: ed.pop_up_factor.clone(),
+        flights_included: ed.flights_included.clone().unwrap_or_default(),
+        departure_scope: ed.departure_scope.clone(),
+        additional_dep_facilities_included: ed.additional_dep_facilities_included.clone(),
+        exempt_dep_facilities: ed.exempt_dep_facilities.clone(),
+        canadian_arpts_included: ed.canadian_arpts_included.clone(),
+        delay_assignment_table_applies_to: ed.delay_assignment_table_applies_to.clone(),
+        delay_limit: ed.delay_limit.clone(),
+        maximum_delay: Some(stats.max_delay_min.to_string()),
+        average_delay: Some(stats.avg_delay_min.to_string()),
+        impacting_condition: ed.impacting_condition.clone(),
+        comments: ed.comments.clone(),
+        period: compact_window(from, to),
+    }
+}
+
+/// `14/1430Z - 14/1630Z`, or `14/1430Z - UFN` for a stop with no stated end.
+///
+/// `UFN` ("until further notice") is the term the documents use for an open-ended stop, which is what a
+/// null `until` means on `tmu.ground_stops`. Printing a fabricated end time instead would be worse.
+fn day_window_open(from: DateTime<Utc>, to: Option<DateTime<Utc>>) -> String {
+    match to {
+        Some(t) => day_window(from, t),
+        None => format!("{} - UFN", from.format("%d/%H%MZ")),
+    }
+}
+
+/// `141430-141630`, or `141430-UFN`.
+fn compact_window_open(from: DateTime<Utc>, to: Option<DateTime<Utc>>) -> String {
+    match to {
+        Some(t) => compact_window(from, t),
+        None => format!("{}-UFN", from.format("%d%H%M")),
+    }
+}
+
+/// Build a Ground Stop advisory document from the program and the author's editorial fields.
+///
+/// Far less derives here than for a GDP, and that is the data's fault rather than an omission: a ground
+/// stop has no slot table and no delay computation anywhere, so every delay figure is author-supplied.
+/// `window` is the stop's resolved period.
+pub fn ground_stop_advisory_from(
+    gs: &GroundStopBody,
+    window: (DateTime<Utc>, Option<DateTime<Utc>>),
+    ed: &PublishGroundStopRequest,
+    now: DateTime<Utc>,
+) -> GroundStopAdvisory {
+    let (from, to) = window;
+    GroundStopAdvisory {
+        header: "CDM GROUND STOP".to_string(),
+        element: element_of(&gs.airport, gs.artcc.as_deref()),
+        control_element: short_airport(&gs.airport),
+        element_type: "APT".to_string(),
+        adl_time: now.format("%H%MZ").to_string(),
+        ground_stop_period: day_window_open(from, to),
+        cumulative_program_period: day_window_open(from, to),
+        flights_included: ed.flights_included.clone().unwrap_or_default(),
+        additional_dep_facilities_included: ed.additional_dep_facilities_included.clone(),
+        current_delays: ed.current_delays.clone(),
+        previous_delays: ed.previous_delays.clone(),
+        new_delays: ed.new_delays.clone(),
+        probability_of_extension: ed.probability_of_extension.clone(),
+        impacting_condition: ed.impacting_condition.clone(),
+        comments: ed.comments.clone(),
+        period: compact_window_open(from, to),
     }
 }

@@ -24,8 +24,8 @@ use crate::{
     handlers::restriction_artcc,
     models::{
         AdvisoryBody, CreateAdvisoryRequest, CreateGroundStopRequest, CreateTmiRequest, GateRule,
-        GroundStopBody, ProgramBody, TmiBody, UpdateAdvisoryRequest, UpdateTmiRequest,
-        UpsertProgramRequest,
+        GroundStopBody, ProgramBody, PublishGroundStopRequest, TmiBody, UpdateAdvisoryRequest,
+        UpdateTmiRequest, UpsertProgramRequest,
     },
     repos::{integration as integration_repo, tmu as tmu_repo},
     state::AppState,
@@ -580,6 +580,11 @@ pub async fn create_ground_stop(
     path = "/api/v1/tmu/ground-stops/{id}/publish",
     tag = "tmu",
     params(("id" = String, Path, description = "Ground stop id")),
+    request_body(
+        content = Option<PublishGroundStopRequest>,
+        description = "Optional editorial fields for the advisory generated on publish (#508). A ground \
+                       stop has no delay data of its own, so its delay triplets are author-supplied."
+    ),
     responses((status = 200, body = GroundStopBody), (status = 401), (status = 409))
 )]
 pub async fn publish_ground_stop(
@@ -587,17 +592,70 @@ pub async fn publish_ground_stop(
     _permission: RequirePermission<TmuGroundStopPublish>,
     Extension(current_user): Extension<Option<CurrentUser>>,
     Path(id): Path<String>,
+    editorial: Option<Json<PublishGroundStopRequest>>,
 ) -> Result<Json<GroundStopBody>, ApiError> {
     let user = current_user.as_ref().ok_or(ApiError::Unauthorized)?;
     let pool = state.db.as_ref().ok_or(ApiError::ServiceUnavailable)?;
-    if !tmu_repo::publish_ground_stop(pool, &id, &user.id).await? {
+    let editorial = editorial.map(|Json(e)| e).unwrap_or_default();
+    let now = Utc::now();
+
+    // One transaction for the publish and the generated advisory (#508): an advisory must not exist for
+    // a stop that did not publish, or the reverse. Simpler than the GDP path -- a ground stop has no
+    // slot table, so there is no feed work to keep outside the transaction.
+    let mut tx = pool.begin().await.map_err(|_| ApiError::Internal)?;
+    if !tmu_repo::publish_ground_stop(&mut *tx, &id, &user.id).await? {
         return Err(ApiError::Conflict); // not a draft (or absent)
     }
-    let mut gs = tmu_repo::get_ground_stop(pool, &id)
+    let mut gs = tmu_repo::get_ground_stop(&mut *tx, &id)
         .await?
         .ok_or(ApiError::NotFound)?;
+    // A stop starts when it is issued -- there is no start column, and `until` is its end (null = UFN).
+    let doc = crate::advisory::ground_stop_advisory_from(
+        &gs,
+        (now, ground_stop_end(now, gs.until.as_deref())),
+        &editorial,
+        now,
+    );
+    let req = CreateAdvisoryRequest {
+        facility: "DCC".to_string(),
+        kind: crate::models::ADVISORY_KIND_GROUND_STOP.to_string(),
+        body: String::new(),
+        structured: Some(serde_json::to_value(&doc).map_err(|_| ApiError::Internal)?),
+        decoded: None,
+    };
+    tmu_repo::create_advisory_tx(
+        &mut tx,
+        &req,
+        &user.id,
+        Some(tmu_repo::AdvisoryProgram::GroundStop(&id)),
+    )
+    .await?;
+    tx.commit().await.map_err(|_| ApiError::Internal)?;
+
     restriction_artcc::stamp_ground_stop(&*state.facilities.read().await, &mut gs);
     Ok(Json(gs))
+}
+
+/// Resolve a ground stop's `until` (HHMM Zulu) to the next occurrence of that clock time after `now`.
+///
+/// `None` in, `None` out: a stop with no stated end runs until further notice, and the advisory prints
+/// `UFN` rather than a time nobody committed to.
+fn ground_stop_end(now: DateTime<Utc>, until: Option<&str>) -> Option<DateTime<Utc>> {
+    let raw = until?.trim();
+    let digits: String = raw.chars().filter(|c| c.is_ascii_digit()).collect();
+    if digits.len() != 4 {
+        return None;
+    }
+    let (h, m) = (
+        digits[..2].parse::<u32>().ok()?,
+        digits[2..].parse::<u32>().ok()?,
+    );
+    let today = now.date_naive().and_hms_opt(h, m, 0)?.and_utc();
+    Some(if today > now {
+        today
+    } else {
+        today + chrono::Duration::days(1)
+    })
 }
 
 #[utoipa::path(
@@ -1218,6 +1276,144 @@ mod tests {
                 .len(),
             1
         );
+    }
+
+    async fn draft_ground_stop(pool: &PgPool, author: &str, until: Option<&str>) -> String {
+        tmu_repo::create_ground_stop(
+            pool,
+            &CreateGroundStopRequest {
+                airport: "KDFW".into(),
+                scope: Some("ZHU ZME".into()),
+                until: until.map(str::to_string),
+            },
+            "ZHU ZME",
+            until,
+            author,
+        )
+        .await
+        .unwrap()
+    }
+
+    async fn advisories_for_ground_stop(pool: &PgPool, id: &str) -> Vec<(String, String, String)> {
+        sqlx::query_as::<_, (String, String, String)>(
+            "select id, status, body from tmu.advisories where ground_stop_id = $1 order by number",
+        )
+        .bind(id)
+        .fetch_all(pool)
+        .await
+        .unwrap()
+    }
+
+    /// AC1/AC3 for a ground stop — publishing generates the document, and it carries the program's own
+    /// airport rather than a constant.
+    #[sqlx::test]
+    async fn publishing_a_ground_stop_generates_its_advisory(pool: PgPool) {
+        let state = test_state(pool.clone(), HashMap::new());
+        let user = seed_user(&pool).await;
+        let cookie = session_cookie(&pool, &user).await;
+        grant(&pool, &user, "tmu.groundstop.publish", None).await;
+        let id = draft_ground_stop(&pool, &user, Some("1630")).await;
+
+        let status = send(
+            &state,
+            http::Method::POST,
+            &format!("/api/v1/tmu/ground-stops/{id}/publish"),
+            &cookie,
+            None,
+        )
+        .await;
+        assert_eq!(status, http::StatusCode::OK);
+
+        let advisories = advisories_for_ground_stop(&pool, &id).await;
+        assert_eq!(advisories.len(), 1);
+        let body = &advisories[0].2;
+        assert!(body.contains("CDM GROUND STOP"), "got:\n{body}");
+        assert!(
+            body.contains("CTL ELEMENT: DFW"),
+            "KDFW should print as DFW; got:\n{body}"
+        );
+        assert!(
+            body.contains("1630Z"),
+            "the stated end should appear; got:\n{body}"
+        );
+    }
+
+    /// A ground stop with no stated end runs until further notice. Printing an invented end time would
+    /// commit the document to something nobody agreed to.
+    #[sqlx::test]
+    async fn an_open_ended_ground_stop_renders_ufn(pool: PgPool) {
+        let state = test_state(pool.clone(), HashMap::new());
+        let user = seed_user(&pool).await;
+        let cookie = session_cookie(&pool, &user).await;
+        grant(&pool, &user, "tmu.groundstop.publish", None).await;
+        let id = draft_ground_stop(&pool, &user, None).await;
+
+        send(
+            &state,
+            http::Method::POST,
+            &format!("/api/v1/tmu/ground-stops/{id}/publish"),
+            &cookie,
+            None,
+        )
+        .await;
+
+        let body = advisories_for_ground_stop(&pool, &id).await.remove(0).2;
+        assert!(
+            body.contains("UFN"),
+            "an open-ended stop should say UFN; got:\n{body}"
+        );
+    }
+
+    /// A ground stop has no delay data anywhere in the system, so the triplets are author-supplied —
+    /// this is the test that they actually arrive.
+    #[sqlx::test]
+    async fn ground_stop_delay_triplets_come_from_the_request(pool: PgPool) {
+        let state = test_state(pool.clone(), HashMap::new());
+        let user = seed_user(&pool).await;
+        let cookie = session_cookie(&pool, &user).await;
+        grant(&pool, &user, "tmu.groundstop.publish", None).await;
+        let id = draft_ground_stop(&pool, &user, Some("1630")).await;
+
+        send(
+            &state,
+            http::Method::POST,
+            &format!("/api/v1/tmu/ground-stops/{id}/publish"),
+            &cookie,
+            Some(serde_json::json!({
+                "current_delays": "1240/414/81",
+                "probability_of_extension": "MEDIUM",
+            })),
+        )
+        .await;
+
+        let body = advisories_for_ground_stop(&pool, &id).await.remove(0).2;
+        assert!(body.contains("1240/414/81"), "got:\n{body}");
+        assert!(
+            body.contains("PROBABILITY OF EXTENSION: MEDIUM"),
+            "got:\n{body}"
+        );
+    }
+
+    /// AC1's other direction for a ground stop: a refused publish writes nothing.
+    #[sqlx::test]
+    async fn a_conflicting_ground_stop_publish_generates_no_advisory(pool: PgPool) {
+        let state = test_state(pool.clone(), HashMap::new());
+        let user = seed_user(&pool).await;
+        let cookie = session_cookie(&pool, &user).await;
+        grant(&pool, &user, "tmu.groundstop.publish", None).await;
+        let id = draft_ground_stop(&pool, &user, Some("1630")).await;
+        let uri = format!("/api/v1/tmu/ground-stops/{id}/publish");
+
+        assert_eq!(
+            send(&state, http::Method::POST, &uri, &cookie, None).await,
+            http::StatusCode::OK
+        );
+        assert_eq!(
+            send(&state, http::Method::POST, &uri, &cookie, None).await,
+            http::StatusCode::CONFLICT
+        );
+
+        assert_eq!(advisories_for_ground_stop(&pool, &id).await.len(), 1);
     }
 
     /// Publishing is a separate permission from creating: drafting a document and issuing it are

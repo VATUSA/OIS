@@ -5413,6 +5413,53 @@ export interface components {
              */
             stop_time?: string | null;
         };
+        /**
+         * @description The parts of a generated GDP advisory that no data can supply (#508).
+         *
+         *     Publishing a GDP derives most of the document from `tmu.gdp`, but a metering engine cannot know
+         *     *why* a program exists, and several reference fields have no source at all:
+         *
+         *     - `DELAY LIMIT` is not `max_enroute_min` — that is an enroute *scope tier*, not a delay cap.
+         *     - `DEPARTURE SCOPE` is `1200` in the reference, which #507 recorded as undefined: not minutes, not a
+         *       tier, not a code. The program's `scope` is a list of departure ARTCCs, so putting it here would
+         *       assert a reading the document does not support. Left to the author deliberately.
+         *     - `IMPACTING CONDITION`, `COMMENTS`, `POP-UP FACTOR` and the facility lists are editorial by nature.
+         *
+         *     Every field is optional: a GDP must stay publishable in a hurry, and the renderer already prints a
+         *     bare `LABEL:` for an absent value.
+         */
+        PublishGdpRequest: {
+            additional_dep_facilities_included?: string | null;
+            canadian_arpts_included?: string | null;
+            comments?: string | null;
+            /** @description `DAS` | `GAAP` | `UDP`. Defaults to `DAS`, the ordinary case. */
+            delay_assignment_mode?: string | null;
+            delay_assignment_table_applies_to?: string | null;
+            delay_limit?: string | null;
+            departure_scope?: string | null;
+            exempt_dep_facilities?: string | null;
+            flights_included?: string[] | null;
+            impacting_condition?: string | null;
+            pop_up_factor?: string | null;
+        };
+        /**
+         * @description The editorial half of a generated Ground Stop advisory (#508).
+         *
+         *     A ground stop has **no delay data anywhere**: there is no slot table for one and no delay
+         *     computation in `feed/`, so all three `TOTAL/MAXIMUM/AVERAGE` triplets are author-supplied.
+         *     `previous_delays` is inherently historical — nothing records a prior revision's figures — so it
+         *     could not be derived even if the others were.
+         */
+        PublishGroundStopRequest: {
+            additional_dep_facilities_included?: string | null;
+            comments?: string | null;
+            current_delays?: string | null;
+            flights_included?: string[] | null;
+            impacting_condition?: string | null;
+            new_delays?: string | null;
+            previous_delays?: string | null;
+            probability_of_extension?: string | null;
+        };
         /** @description The bot's push of every guild it's in (full replace of the snapshot). */
         PushGuildSnapshotRequest: {
             guilds: components["schemas"]["DiscordGuildSnapshotBody"][];
@@ -6186,6 +6233,7 @@ export interface components {
             aar: number;
             /** @description Optional rate changes across the window (empty = flat AAR). */
             aar_steps?: components["schemas"]["AarStep"][];
+            advisory?: null | components["schemas"]["PublishGdpRequest"];
             end_time: string;
             exempt_airborne?: boolean;
             /**
@@ -13973,7 +14021,12 @@ export interface operations {
             };
             cookie?: never;
         };
-        requestBody?: never;
+        /** @description Optional editorial fields for the advisory generated on publish (#508). Omit the body entirely and the advisory still generates, with those lines blank. */
+        requestBody?: {
+            content: {
+                "application/json": null | components["schemas"]["PublishGdpRequest"];
+            };
+        };
         responses: {
             200: {
                 headers: {
@@ -14229,7 +14282,12 @@ export interface operations {
             };
             cookie?: never;
         };
-        requestBody?: never;
+        /** @description Optional editorial fields for the advisory generated on publish (#508). A ground stop has no delay data of its own, so its delay triplets are author-supplied. */
+        requestBody?: {
+            content: {
+                "application/json": null | components["schemas"]["PublishGroundStopRequest"];
+            };
+        };
         responses: {
             200: {
                 headers: {
