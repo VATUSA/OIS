@@ -32,7 +32,12 @@
 
 use chrono::{DateTime, NaiveDate, Utc};
 
-use crate::models::{RerouteAdvisory, RerouteRoutes, RerouteValidBasis};
+use crate::feed::airports::IataMap;
+use crate::feed::gdp::GdpStats;
+use crate::models::{
+    AarStep, GdpAdvisory, GdpBody, GroundStopAdvisory, GroundStopBody, PublishGdpRequest,
+    PublishGroundStopRequest, RerouteAdvisory, RerouteRoutes, RerouteValidBasis,
+};
 use crate::text::collapse;
 
 /// Upper-cased and whitespace-collapsed. The collapse is what stops an author-supplied value
@@ -209,6 +214,164 @@ pub fn render_reroute(a: &RerouteAdvisory, id: &AdvisoryIdent) -> String {
         collapse(&a.valid.from),
         collapse(&a.valid.to)
     ));
+    lines.push(id.signed_at.format("%y/%m/%d %H:%M").to_string());
+
+    lines.join("\n")
+}
+
+/// `FLT INCL` is printed once per entry, and once bare when there are none.
+///
+/// The GDP reference carries two (`1stTier`, then `CZY`); the Ground Stop reference carries one with
+/// its mode inline. Values print as typed — `(Manual)` and `1stTier` are the only mixed-case values
+/// in any of the four reference documents, so `clean` would corrupt them. `collapse` is applied
+/// instead (#498): it cannot introduce or remove a line, and it leaves case alone.
+fn flt_incl(entries: &[String]) -> Vec<String> {
+    let printed: Vec<String> = entries
+        .iter()
+        .map(|e| collapse(e))
+        .filter(|e| !e.is_empty())
+        .map(|e| format!("FLT INCL: {e}"))
+        .collect();
+    if printed.is_empty() {
+        vec![label("FLT INCL", None)]
+    } else {
+        printed
+    }
+}
+
+/// Render a Ground Delay Program advisory to its vATCSCC document.
+///
+/// The document is the contract: `fixtures/gdp-reference.json` holds the reference example this is
+/// pinned against, transcribed from the source PDF cited by #437.
+///
+/// # No `TMI ID:` line
+///
+/// Not an omission. Neither the GDP nor the Ground Stop reference carries one, and #437 attributes
+/// the TMI ID to reroute specifically (`RRDCC004` = Reroute + facility + advisory number). A GDP is
+/// identified by its advisory number in the header alone.
+pub fn render_gdp(a: &GdpAdvisory, id: &AdvisoryIdent) -> String {
+    let mut lines: Vec<String> = vec![
+        format!(
+            "vATCSCC ADVZY {:03} {} {} {}",
+            id.number,
+            clean(&a.element),
+            id.issued_day.format("%m/%d/%Y"),
+            clean(&a.header),
+        ),
+        label("CTL ELEMENT", Some(&clean(&a.control_element))),
+        label("ELEMENT TYPE", Some(&clean(&a.element_type))),
+        label("ADL TIME", Some(&clean(&a.adl_time))),
+        label(
+            "DELAY ASSIGNMENT MODE",
+            Some(&clean(&a.delay_assignment_mode)),
+        ),
+        label(
+            "ARRIVALS ESTIMATED FOR",
+            Some(&clean(&a.arrivals_estimated_for)),
+        ),
+        label(
+            "CUMULATIVE PROGRAM PERIOD",
+            Some(&clean(&a.cumulative_program_period)),
+        ),
+        label("PROGRAM RATE", Some(&clean(&a.program_rate))),
+        label("POP-UP FACTOR", opt(&a.pop_up_factor).as_deref()),
+    ];
+
+    lines.extend(flt_incl(&a.flights_included));
+
+    lines.extend([
+        label("DEPARTURE SCOPE", opt(&a.departure_scope).as_deref()),
+        label(
+            "ADDITIONAL DEP FACILITIES INCLUDED",
+            opt(&a.additional_dep_facilities_included).as_deref(),
+        ),
+        label(
+            "EXEMPT DEP FACILITIES",
+            opt(&a.exempt_dep_facilities).as_deref(),
+        ),
+        label(
+            "CANADIAN ARPTS INCLUDED",
+            opt(&a.canadian_arpts_included).as_deref(),
+        ),
+        label(
+            "DELAY ASSIGNMENT TABLE APPLIES TO",
+            opt(&a.delay_assignment_table_applies_to).as_deref(),
+        ),
+        label("DELAY LIMIT", opt(&a.delay_limit).as_deref()),
+        label("MAXIMUM DELAY", opt(&a.maximum_delay).as_deref()),
+        label("AVERAGE DELAY", opt(&a.average_delay).as_deref()),
+        label(
+            "IMPACTING CONDITION",
+            opt(&a.impacting_condition).as_deref(),
+        ),
+        label("COMMENTS", opt(&a.comments).as_deref()),
+    ]);
+
+    lines.push(String::new());
+    lines.push(collapse(&a.period));
+    lines.push(id.signed_at.format("%y/%m/%d %H:%M").to_string());
+
+    lines.join("\n")
+}
+
+/// Render a Ground Stop advisory to its vATCSCC document.
+///
+/// The document is the contract: `fixtures/ground-stop-reference.json` holds the reference example.
+///
+/// Structurally a GDP with the metering fields swapped for the three delay triplets — same header,
+/// same opening, same footer, and no `TMI ID:` line. The two renderers are kept separate for the
+/// reason [`crate::models::GroundStopAdvisory`] gives: sharing one would make every field optional.
+pub fn render_ground_stop(a: &GroundStopAdvisory, id: &AdvisoryIdent) -> String {
+    let mut lines: Vec<String> = vec![
+        format!(
+            "vATCSCC ADVZY {:03} {} {} {}",
+            id.number,
+            clean(&a.element),
+            id.issued_day.format("%m/%d/%Y"),
+            clean(&a.header),
+        ),
+        label("CTL ELEMENT", Some(&clean(&a.control_element))),
+        label("ELEMENT TYPE", Some(&clean(&a.element_type))),
+        label("ADL TIME", Some(&clean(&a.adl_time))),
+        label("GROUND STOP PERIOD", Some(&clean(&a.ground_stop_period))),
+        label(
+            "CUMULATIVE PROGRAM PERIOD",
+            Some(&clean(&a.cumulative_program_period)),
+        ),
+    ];
+
+    lines.extend(flt_incl(&a.flights_included));
+
+    lines.extend([
+        label(
+            "ADDITIONAL DEP FACILITIES INCLUDED",
+            opt(&a.additional_dep_facilities_included).as_deref(),
+        ),
+        label(
+            "CURRENT TOTAL, MAXIMUM, AVERAGE DELAYS",
+            opt(&a.current_delays).as_deref(),
+        ),
+        label(
+            "PREVIOUS TOTAL, MAXIMUM, AVERAGE DELAYS",
+            opt(&a.previous_delays).as_deref(),
+        ),
+        label(
+            "NEW TOTAL, MAXIMUM, AVERAGE DELAYS",
+            opt(&a.new_delays).as_deref(),
+        ),
+        label(
+            "PROBABILITY OF EXTENSION",
+            opt(&a.probability_of_extension).as_deref(),
+        ),
+        label(
+            "IMPACTING CONDITION",
+            opt(&a.impacting_condition).as_deref(),
+        ),
+        label("COMMENTS", opt(&a.comments).as_deref()),
+    ]);
+
+    lines.push(String::new());
+    lines.push(collapse(&a.period));
     lines.push(id.signed_at.format("%y/%m/%d %H:%M").to_string());
 
     lines.join("\n")
@@ -400,6 +563,610 @@ mod tests {
                 assert_eq!(line, line.trim_end(), "case {} line {}", case.name, i + 1);
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod gdp_tests {
+    use super::*;
+
+    /// Mirrors the envelope of `fixtures/gdp-reference.json`.
+    #[derive(serde::Deserialize)]
+    struct Ident {
+        facility: String,
+        number: i32,
+        issued_day: NaiveDate,
+        signed_at: DateTime<Utc>,
+    }
+
+    #[derive(serde::Deserialize)]
+    struct Case {
+        name: String,
+        ident: Ident,
+        structured: GdpAdvisory,
+        rendered: String,
+    }
+
+    #[derive(serde::Deserialize)]
+    struct Fixtures {
+        cases: Vec<Case>,
+    }
+
+    const FIXTURES: &str = include_str!("../../fixtures/gdp-reference.json");
+
+    fn ident(i: &Ident) -> AdvisoryIdent {
+        AdvisoryIdent {
+            facility: i.facility.clone(),
+            number: i.number,
+            issued_day: i.issued_day,
+            signed_at: i.signed_at,
+        }
+    }
+
+    fn fixtures() -> Fixtures {
+        let fixtures: Fixtures = serde_json::from_str(FIXTURES).expect("fixtures parse");
+        // A failed load must not make these vacuously green.
+        assert!(!fixtures.cases.is_empty(), "no reference cases loaded");
+        fixtures
+    }
+
+    #[test]
+    fn matches_every_shared_reference_case() {
+        for case in &fixtures().cases {
+            assert_eq!(
+                render_gdp(&case.structured, &ident(&case.ident)),
+                case.rendered,
+                "case {}",
+                case.name
+            );
+        }
+    }
+
+    /// The reference document, written out here as well as in the fixture.
+    ///
+    /// The duplication is the point — this one reads as the document a controller would recognise.
+    /// Note what the header does *not* contain: `ident.facility` is `DCC`, the issuing facility, and
+    /// a reroute would print it there. A GDP prints the control element instead.
+    #[test]
+    fn assembles_the_reference_gdp_document() {
+        let fixtures = fixtures();
+        let case = fixtures
+            .cases
+            .iter()
+            .find(|c| c.name == "advzy-002-gdp")
+            .expect("the reference GDP case");
+
+        assert_eq!(
+            render_gdp(&case.structured, &ident(&case.ident)),
+            concat!(
+                "vATCSCC ADVZY 002 JFK/ZNY 04/14/2020 CDM GROUND DELAY PROGRAM\n",
+                "CTL ELEMENT: JFK\n",
+                "ELEMENT TYPE: APT\n",
+                "ADL TIME: 1349Z\n",
+                "DELAY ASSIGNMENT MODE: DAS\n",
+                "ARRIVALS ESTIMATED FOR: 14/1415Z - 14/2315Z\n",
+                "CUMULATIVE PROGRAM PERIOD: 14/1415Z - 14/2315Z\n",
+                "PROGRAM RATE: 40/40/40/30/25/20/20/36/54\n",
+                "POP-UP FACTOR: MEDIUM\n",
+                "FLT INCL: 1stTier\n",
+                "FLT INCL: CZY\n",
+                "DEPARTURE SCOPE: 1200\n",
+                "ADDITIONAL DEP FACILITIES INCLUDED: KATL\n",
+                "EXEMPT DEP FACILITIES: KORD\n",
+                "CANADIAN ARPTS INCLUDED: CYYZ\n",
+                "DELAY ASSIGNMENT TABLE APPLIES TO: ZNY\n",
+                "DELAY LIMIT: 240\n",
+                "MAXIMUM DELAY: 171\n",
+                "AVERAGE DELAY: 38\n",
+                "IMPACTING CONDITION: WEATHER / THUNDERSTORMS\n",
+                "COMMENTS: COMMENTS COMMENTS COMMENTS\n",
+                "\n",
+                "141415-142315\n",
+                "20/04/14 13:49",
+            )
+        );
+    }
+
+    /// `FLT INCL` repeats, which the reference shows and a single-string field could not express.
+    /// With no entries it still prints once, bare, so the document never loses the line entirely.
+    #[test]
+    fn flt_incl_prints_once_per_entry_and_once_bare_when_empty() {
+        let fixtures = fixtures();
+        let case = &fixtures.cases[0];
+
+        let out = render_gdp(&case.structured, &ident(&case.ident));
+        assert_eq!(
+            out.lines().filter(|l| l.starts_with("FLT INCL")).count(),
+            2,
+            "the reference carries two: {out}"
+        );
+
+        let mut empty = case.structured.clone();
+        empty.flights_included = vec![];
+        let out = render_gdp(&empty, &ident(&case.ident));
+        assert_eq!(
+            out.lines().filter(|l| l.starts_with("FLT INCL")).count(),
+            1,
+            "still one, bare: {out}"
+        );
+        assert!(out.contains("\nFLT INCL:\n"), "bare form: {out}");
+    }
+
+    /// An absent optional still prints its label, as reroute's do — a reader uses the bare label to
+    /// know the author had nothing to add rather than that the section is missing.
+    #[test]
+    fn an_absent_optional_prints_a_bare_label() {
+        let fixtures = fixtures();
+        let case = &fixtures.cases[0];
+        let mut a = case.structured.clone();
+        a.delay_limit = None;
+        a.comments = Some("   ".to_string());
+
+        let out = render_gdp(&a, &ident(&case.ident));
+        assert!(out.contains("\nDELAY LIMIT:\n"), "bare label: {out}");
+        assert!(
+            out.contains("\nCOMMENTS:\n"),
+            "whitespace is absence: {out}"
+        );
+    }
+
+    /// A GDP footer carries no `TMI ID:` line — #437 attributes that to reroute, whose own test
+    /// asserts `RRDCC004`. If a future edit copies reroute's footer wholesale, this catches it.
+    #[test]
+    fn a_gdp_carries_no_tmi_id() {
+        for case in &fixtures().cases {
+            let out = render_gdp(&case.structured, &ident(&case.ident));
+            assert!(!out.contains("TMI ID"), "case {}: {out}", case.name);
+        }
+    }
+
+    /// Alignment is part of a document's meaning, so a stray trailing space is a real defect — the
+    /// same invariant `tests::no_line_has_trailing_whitespace` holds for reroute.
+    #[test]
+    fn no_line_has_trailing_whitespace() {
+        for case in &fixtures().cases {
+            let out = render_gdp(&case.structured, &ident(&case.ident));
+            for (i, line) in out.lines().enumerate() {
+                assert_eq!(line, line.trim_end(), "case {} line {}", case.name, i + 1);
+            }
+        }
+    }
+}
+
+#[cfg(test)]
+mod ground_stop_tests {
+    use super::*;
+
+    /// Mirrors the envelope of `fixtures/ground-stop-reference.json`.
+    #[derive(serde::Deserialize)]
+    struct Ident {
+        facility: String,
+        number: i32,
+        issued_day: NaiveDate,
+        signed_at: DateTime<Utc>,
+    }
+
+    #[derive(serde::Deserialize)]
+    struct Case {
+        name: String,
+        ident: Ident,
+        structured: GroundStopAdvisory,
+        rendered: String,
+    }
+
+    #[derive(serde::Deserialize)]
+    struct Fixtures {
+        cases: Vec<Case>,
+    }
+
+    const FIXTURES: &str = include_str!("../../fixtures/ground-stop-reference.json");
+
+    fn ident(i: &Ident) -> AdvisoryIdent {
+        AdvisoryIdent {
+            facility: i.facility.clone(),
+            number: i.number,
+            issued_day: i.issued_day,
+            signed_at: i.signed_at,
+        }
+    }
+
+    fn fixtures() -> Fixtures {
+        let fixtures: Fixtures = serde_json::from_str(FIXTURES).expect("fixtures parse");
+        assert!(!fixtures.cases.is_empty(), "no reference cases loaded");
+        fixtures
+    }
+
+    #[test]
+    fn matches_every_shared_reference_case() {
+        for case in &fixtures().cases {
+            assert_eq!(
+                render_ground_stop(&case.structured, &ident(&case.ident)),
+                case.rendered,
+                "case {}",
+                case.name
+            );
+        }
+    }
+
+    /// The reference document, written out as a controller would recognise it.
+    #[test]
+    fn assembles_the_reference_ground_stop_document() {
+        let fixtures = fixtures();
+        let case = &fixtures.cases[0];
+
+        assert_eq!(
+            render_ground_stop(&case.structured, &ident(&case.ident)),
+            concat!(
+                "vATCSCC ADVZY 003 DFW/ZFW 04/14/2020 CDM GROUND STOP\n",
+                "CTL ELEMENT: DFW\n",
+                "ELEMENT TYPE: APT\n",
+                "ADL TIME: 1354Z\n",
+                "GROUND STOP PERIOD: 14/1430Z - 14/1630Z\n",
+                "CUMULATIVE PROGRAM PERIOD: 14/1430Z - 14/1630Z\n",
+                "FLT INCL: (Manual) ZHU ZJX ZMA ZME ZTL\n",
+                "ADDITIONAL DEP FACILITIES INCLUDED: KDEN\n",
+                "CURRENT TOTAL, MAXIMUM, AVERAGE DELAYS: 1240/414/81\n",
+                "PREVIOUS TOTAL, MAXIMUM, AVERAGE DELAYS: 636/211/70\n",
+                "NEW TOTAL, MAXIMUM, AVERAGE DELAYS: 1876/625/151\n",
+                "PROBABILITY OF EXTENSION: MEDIUM\n",
+                "IMPACTING CONDITION: EQUIPMENT / STARS\n",
+                "COMMENTS: BLAH\n",
+                "\n",
+                "141430-141630\n",
+                "20/04/14 13:54",
+            )
+        );
+    }
+
+    /// The three delay triplets are distinct lines in a fixed order. Swapping CURRENT for PREVIOUS
+    /// would change what a controller reads off the document, so the order is asserted directly
+    /// rather than left to the whole-document comparison alone.
+    #[test]
+    fn the_delay_triplets_keep_their_order() {
+        let fixtures = fixtures();
+        let case = &fixtures.cases[0];
+        let out = render_ground_stop(&case.structured, &ident(&case.ident));
+
+        let at = |needle: &str| {
+            out.find(needle)
+                .unwrap_or_else(|| panic!("missing {needle}: {out}"))
+        };
+        assert!(
+            at("CURRENT TOTAL") < at("PREVIOUS TOTAL") && at("PREVIOUS TOTAL") < at("NEW TOTAL"),
+            "CURRENT then PREVIOUS then NEW: {out}"
+        );
+        assert!(out.contains("CURRENT TOTAL, MAXIMUM, AVERAGE DELAYS: 1240/414/81"));
+    }
+
+    /// `(Manual)` is one of only two mixed-case values in the four reference documents, so a stray
+    /// `clean` here would silently corrupt the document to `(MANUAL)`.
+    #[test]
+    fn flt_incl_keeps_its_case() {
+        let fixtures = fixtures();
+        let case = &fixtures.cases[0];
+        let out = render_ground_stop(&case.structured, &ident(&case.ident));
+        assert!(out.contains("(Manual)"), "case preserved: {out}");
+    }
+
+    #[test]
+    fn a_ground_stop_carries_no_tmi_id() {
+        for case in &fixtures().cases {
+            let out = render_ground_stop(&case.structured, &ident(&case.ident));
+            assert!(!out.contains("TMI ID"), "case {}: {out}", case.name);
+        }
+    }
+
+    #[test]
+    fn no_line_has_trailing_whitespace() {
+        for case in &fixtures().cases {
+            let out = render_ground_stop(&case.structured, &ident(&case.ident));
+            for (i, line) in out.lines().enumerate() {
+                assert_eq!(line, line.trim_end(), "case {} line {}", case.name, i + 1);
+            }
+        }
+    }
+}
+
+// ---- generating a document from a program (#508) ----------------------------------------------
+//
+// #461 settled that a GDP advisory and its `tmu.gdp` row are the same event, so the document is
+// derived here rather than retyped by the author. These functions are the mapping, and they live
+// beside the renderers because this is document construction — they touch no database.
+
+/// The three-letter form the documents use for an airport — `KJFK` → `JFK`, `PHNL` → `HNL`,
+/// `TJSJ` → `SJU`.
+///
+/// Looked up in the feed's IATA index rather than derived by stripping a character, because the US is
+/// not all `K`: `feed::stats::US_ICAO_PREFIXES` lists eight prefixes, and `data/facilities.json` carries
+/// PANC, PHNL, TJSJ, PAFA and PHOG. No string rule can do it either — `PHNL` → `HNL` drops two
+/// characters and `TJSJ` → `SJU` is not a substring of its ICAO at all.
+///
+/// `IataMap` is IATA → ICAO, so this is a reverse scan. Linear over ~28k entries and deliberately not
+/// indexed: it runs twice per *publish*, an operator action measured in a handful per hour, and adding a
+/// third airport map would reach the fetch, `FeedInner` and the refresh job for no measurable gain.
+///
+/// Falls back to the old `K`-strip when the index has no entry — an empty map in tests, or a feed that
+/// has not loaded yet. A wrong-looking element beats an empty one in a published document, and for the
+/// contiguous US the fallback is already correct.
+fn element_airport(iata: &IataMap, icao: &str) -> String {
+    let t = icao.trim().to_ascii_uppercase();
+    if let Some((code, _)) = iata.iter().find(|(_, mapped)| **mapped == t) {
+        return code.clone();
+    }
+    match t.strip_prefix('K') {
+        Some(rest) if t.len() == 4 => rest.to_string(),
+        _ => t,
+    }
+}
+
+/// `JFK/ZNY` — the header's element slot. Falls back to the airport alone when the program has no
+/// ARTCC stamped (`GdpBody::artcc` is filled from the live facility map, not a column, so it can be
+/// absent).
+fn element_of(iata: &IataMap, airport: &str, artcc: Option<&str>) -> String {
+    let apt = element_airport(iata, airport);
+    match artcc.map(str::trim).filter(|a| !a.is_empty()) {
+        Some(a) => format!("{apt}/{}", a.to_ascii_uppercase()),
+        None => apt,
+    }
+}
+
+/// `14/1415Z - 14/2315Z` — the form `ARRIVALS ESTIMATED FOR` and `CUMULATIVE PROGRAM PERIOD` take.
+fn day_window(from: DateTime<Utc>, to: DateTime<Utc>) -> String {
+    format!("{} - {}", from.format("%d/%H%MZ"), to.format("%d/%H%MZ"))
+}
+
+/// `141415-142315` — the compact form the footer `PERIOD` takes.
+fn compact_window(from: DateTime<Utc>, to: DateTime<Utc>) -> String {
+    format!("{}-{}", from.format("%d%H%M"), to.format("%d%H%M"))
+}
+
+/// `40/40/30` — the per-hour rate profile.
+///
+/// The reference shows nine values for a nine-hour program. We emit one per configured step, which is
+/// the same information in the program's own terms; expanding a stepped rate into one value per clock
+/// hour would require inventing how a step that starts mid-hour is reported. A program with no steps
+/// emits its single AAR.
+fn program_rate(aar: i32, steps: &[AarStep]) -> String {
+    if steps.is_empty() {
+        return aar.to_string();
+    }
+    steps
+        .iter()
+        .map(|s| s.aar.to_string())
+        .collect::<Vec<_>>()
+        .join("/")
+}
+
+#[cfg(test)]
+mod derivation_tests {
+    use super::*;
+    use chrono::TimeZone;
+
+    /// The feed's index, as `feed::airports::fetch` builds it: IATA → ICAO.
+    fn iata() -> IataMap {
+        ["JFK:KJFK", "HNL:PHNL", "SJU:TJSJ", "ANC:PANC", "YYZ:CYYZ"]
+            .iter()
+            .map(|e| {
+                let (code, icao) = e.split_once(':').unwrap();
+                (code.to_string(), icao.to_string())
+            })
+            .collect()
+    }
+
+    fn at(day: u32, hour: u32, min: u32) -> DateTime<Utc> {
+        Utc.with_ymd_and_hms(2020, 4, day, hour, min, 0).unwrap()
+    }
+
+    /// The documents use the three-letter form, and the US is not all `K`: PANC, PHNL, TJSJ, PAFA and
+    /// PHOG are all in `data/facilities.json`. A `K`-strip gets `KJFK` right and every one of those
+    /// wrong — `PHNL` drops two characters and `TJSJ → SJU` shares no substring with its ICAO.
+    #[test]
+    fn the_element_airport_is_looked_up_not_stripped() {
+        let m = iata();
+        assert_eq!(element_airport(&m, "KJFK"), "JFK");
+        assert_eq!(element_airport(&m, "PHNL"), "HNL", "Honolulu is VATUSA");
+        assert_eq!(
+            element_airport(&m, "TJSJ"),
+            "SJU",
+            "no string rule produces this"
+        );
+        assert_eq!(element_airport(&m, "PANC"), "ANC", "Anchorage is VATUSA");
+        assert_eq!(element_airport(&m, "CYYZ"), "YYZ");
+        assert_eq!(
+            element_airport(&m, " kjfk "),
+            "JFK",
+            "trimmed and upper-cased"
+        );
+    }
+
+    /// With no index — an empty map in a test, or a feed that has not loaded — the old `K`-strip
+    /// stands, because a wrong-looking element beats an empty one in a published document. It must not
+    /// mangle a non-`K` code into nonsense while doing so.
+    #[test]
+    fn an_unknown_airport_falls_back_without_mangling() {
+        let empty = IataMap::new();
+        assert_eq!(element_airport(&empty, "KJFK"), "JFK");
+        assert_eq!(
+            element_airport(&empty, "PHNL"),
+            "PHNL",
+            "not \"HNL\", and not \"HNL\"-by-luck"
+        );
+        assert_eq!(element_airport(&empty, "TJSJ"), "TJSJ");
+        assert_eq!(
+            element_airport(&empty, "JFK"),
+            "JFK",
+            "already three letters"
+        );
+        assert_eq!(element_airport(&empty, "KSFO"), "SFO");
+    }
+
+    #[test]
+    fn the_element_slot_carries_the_artcc_when_there_is_one() {
+        let m = iata();
+        assert_eq!(element_of(&m, "KJFK", Some("ZNY")), "JFK/ZNY");
+        assert_eq!(element_of(&m, "PHNL", Some("zak")), "HNL/ZAK");
+        assert_eq!(element_of(&m, "KJFK", None), "JFK");
+        assert_eq!(element_of(&m, "KJFK", Some("  ")), "JFK", "blank is absent");
+    }
+
+    /// **Order is the point.** A window printed end-first reads as a program that finishes before it
+    /// starts, and an assertion that each timestamp merely *appears* cannot tell the two apart — which
+    /// is how a swapped `from`/`to` survived the handler test it was supposed to be caught by.
+    #[test]
+    fn the_day_window_prints_start_then_end() {
+        assert_eq!(
+            day_window(at(14, 14, 15), at(14, 23, 15)),
+            "14/1415Z - 14/2315Z"
+        );
+        assert_ne!(
+            day_window(at(14, 14, 15), at(14, 23, 15)),
+            day_window(at(14, 23, 15), at(14, 14, 15)),
+            "a swapped window must not render identically"
+        );
+    }
+
+    /// The footer `PERIOD` is day-hour-minute, not any other arrangement of the same digits.
+    #[test]
+    fn the_compact_window_is_day_then_time() {
+        assert_eq!(
+            compact_window(at(14, 14, 15), at(15, 2, 30)),
+            "141415-150230"
+        );
+    }
+
+    /// Open-ended forms: a ground stop with no resolved end is `UFN`, not a blank or a guess.
+    #[test]
+    fn an_open_ended_window_renders_ufn() {
+        let from = at(14, 14, 15);
+        assert_eq!(
+            day_window_open(from, Some(at(14, 23, 15))),
+            "14/1415Z - 14/2315Z"
+        );
+        assert!(day_window_open(from, None).contains("UFN"));
+        assert!(compact_window_open(from, None).contains("UFN"));
+    }
+
+    /// One value per configured step, in order, falling back to the single AAR when there are none.
+    #[test]
+    fn the_program_rate_lists_each_step_in_order() {
+        let step = |aar| AarStep {
+            start_time: "1400".to_string(),
+            aar,
+        };
+        assert_eq!(
+            program_rate(40, &[step(40), step(30), step(25)]),
+            "40/30/25"
+        );
+        assert_ne!(
+            program_rate(40, &[step(40), step(30), step(25)]),
+            program_rate(40, &[step(25), step(30), step(40)]),
+            "reversing the steps must not render identically"
+        );
+        assert_eq!(program_rate(44, &[]), "44", "no steps means the single AAR");
+    }
+}
+
+/// Build a GDP advisory document from the program, its frozen-slot statistics, and the author's
+/// editorial fields.
+///
+/// `window` is the program's resolved start/end — passed in rather than recomputed here, because the
+/// caller has already resolved it to freeze the slots and two answers to the same question is how the
+/// document and the program drift.
+///
+/// `stats` comes from [`crate::feed::gdp::program_stats`] over the same assignments that were frozen,
+/// so `MAXIMUM`/`AVERAGE DELAY` describe exactly the rows in `tmu.gdp_slot`. Note that
+/// `repos::public` aggregates the same two figures in SQL with `round(avg(...))` where `program_stats`
+/// uses integer division, so the public board and this document can differ by a minute on the average.
+/// Not reconciled here — that is a visible decision of its own.
+pub fn gdp_advisory_from(
+    iata: &IataMap,
+    gdp: &GdpBody,
+    stats: &GdpStats,
+    window: (DateTime<Utc>, DateTime<Utc>),
+    ed: &PublishGdpRequest,
+    now: DateTime<Utc>,
+) -> GdpAdvisory {
+    let (from, to) = window;
+    GdpAdvisory {
+        // Constant per kind, not editorial: the reference's header line for every GDP.
+        header: "CDM GROUND DELAY PROGRAM".to_string(),
+        element: element_of(iata, &gdp.airport, gdp.artcc.as_deref()),
+        control_element: element_airport(iata, &gdp.airport),
+        // A GDP in OIS always meters an airport's arrivals, so the element is always an airport.
+        element_type: "APT".to_string(),
+        adl_time: now.format("%H%MZ").to_string(),
+        delay_assignment_mode: ed
+            .delay_assignment_mode
+            .clone()
+            .unwrap_or_else(|| "DAS".to_string()),
+        arrivals_estimated_for: day_window(from, to),
+        cumulative_program_period: day_window(from, to),
+        program_rate: program_rate(gdp.aar, &gdp.aar_steps),
+        pop_up_factor: ed.pop_up_factor.clone(),
+        flights_included: ed.flights_included.clone().unwrap_or_default(),
+        departure_scope: ed.departure_scope.clone(),
+        additional_dep_facilities_included: ed.additional_dep_facilities_included.clone(),
+        exempt_dep_facilities: ed.exempt_dep_facilities.clone(),
+        canadian_arpts_included: ed.canadian_arpts_included.clone(),
+        delay_assignment_table_applies_to: ed.delay_assignment_table_applies_to.clone(),
+        delay_limit: ed.delay_limit.clone(),
+        maximum_delay: Some(stats.max_delay_min.to_string()),
+        average_delay: Some(stats.avg_delay_min.to_string()),
+        impacting_condition: ed.impacting_condition.clone(),
+        comments: ed.comments.clone(),
+        period: compact_window(from, to),
+    }
+}
+
+/// `14/1430Z - 14/1630Z`, or `14/1430Z - UFN` for a stop with no stated end.
+///
+/// `UFN` ("until further notice") is the term the documents use for an open-ended stop, which is what a
+/// null `until` means on `tmu.ground_stops`. Printing a fabricated end time instead would be worse.
+fn day_window_open(from: DateTime<Utc>, to: Option<DateTime<Utc>>) -> String {
+    match to {
+        Some(t) => day_window(from, t),
+        None => format!("{} - UFN", from.format("%d/%H%MZ")),
+    }
+}
+
+/// `141430-141630`, or `141430-UFN`.
+fn compact_window_open(from: DateTime<Utc>, to: Option<DateTime<Utc>>) -> String {
+    match to {
+        Some(t) => compact_window(from, t),
+        None => format!("{}-UFN", from.format("%d%H%M")),
+    }
+}
+
+/// Build a Ground Stop advisory document from the program and the author's editorial fields.
+///
+/// Far less derives here than for a GDP, and that is the data's fault rather than an omission: a ground
+/// stop has no slot table and no delay computation anywhere, so every delay figure is author-supplied.
+/// `window` is the stop's resolved period.
+pub fn ground_stop_advisory_from(
+    iata: &IataMap,
+    gs: &GroundStopBody,
+    window: (DateTime<Utc>, Option<DateTime<Utc>>),
+    ed: &PublishGroundStopRequest,
+    now: DateTime<Utc>,
+) -> GroundStopAdvisory {
+    let (from, to) = window;
+    GroundStopAdvisory {
+        header: "CDM GROUND STOP".to_string(),
+        element: element_of(iata, &gs.airport, gs.artcc.as_deref()),
+        control_element: element_airport(iata, &gs.airport),
+        element_type: "APT".to_string(),
+        adl_time: now.format("%H%MZ").to_string(),
+        ground_stop_period: day_window_open(from, to),
+        cumulative_program_period: day_window_open(from, to),
+        flights_included: ed.flights_included.clone().unwrap_or_default(),
+        additional_dep_facilities_included: ed.additional_dep_facilities_included.clone(),
+        current_delays: ed.current_delays.clone(),
+        previous_delays: ed.previous_delays.clone(),
+        new_delays: ed.new_delays.clone(),
+        probability_of_extension: ed.probability_of_extension.clone(),
+        impacting_condition: ed.impacting_condition.clone(),
+        comments: ed.comments.clone(),
+        period: compact_window_open(from, to),
     }
 }
 

@@ -4837,6 +4837,84 @@ export interface components {
             trail?: number;
         };
         /**
+         * @description The structured fields a Ground Delay Program (GDP) advisory is built from, per the vATCSCC
+         *     reference quoted in #437.
+         *
+         *     Stored in `tmu.advisories.structured` and rendered to `body` by
+         *     [`crate::advisory::render_gdp`]. Optional fields follow `RerouteAdvisory`'s convention —
+         *     `Option<String>` with `#[serde(default)]`, so an absent field and an empty one behave alike.
+         *
+         *     # Every field is a string, including the numeric-looking ones
+         *
+         *     `PROGRAM RATE` is `40/40/40/30/25/20/20/36/54` — a per-hour profile, not a number — and
+         *     `DEPARTURE SCOPE` is `1200`, which the reference never defines as minutes, a tier or a code.
+         *     Typing either as an integer would commit to a reading of the document that the document does not
+         *     support. The advisory is a *document*: these are its lines, and #461's follow-up is where the
+         *     values get derived from `tmu.gdp` (whose `aar_steps` is the same profile in structured form).
+         */
+        GdpAdvisory: {
+            additional_dep_facilities_included?: string | null;
+            /** @description Aggregate Demand List time the program was built from, `1349Z`. */
+            adl_time: string;
+            arrivals_estimated_for: string;
+            average_delay?: string | null;
+            canadian_arpts_included?: string | null;
+            comments?: string | null;
+            control_element: string;
+            cumulative_program_period: string;
+            /**
+             * @description `DAS`, `GAAP` or `UDP` per #437. Not an enum: the reference names the three in prose without
+             *     ruling out a fourth, and a `kind`-style free string is this module's existing answer to that.
+             */
+            delay_assignment_mode: string;
+            delay_assignment_table_applies_to?: string | null;
+            delay_limit?: string | null;
+            departure_scope?: string | null;
+            /**
+             * @description The header's element slot — `JFK/ZNY`, the control element and its ARTCC.
+             *
+             *     Carried rather than derived, and **not** taken from `AdvisoryIdent::facility` the way
+             *     `render_reroute` takes its header element. Reroute puts the *issuing* facility there (`DCC`,
+             *     matching its `TMI ID: RRDCC004`); the GDP reference puts the control element there while also
+             *     printing `CTL ELEMENT: JFK` on its own line. The reference duplicates the airport across the
+             *     two positions, so this does too — the rule for joining a control element to its ARTCC is
+             *     stated nowhere, and one example is not enough to infer one.
+             */
+            element: string;
+            /**
+             * @description `APT` in the reference. Free-form because the field is named "element *type*" — a GDP can be
+             *     run on something other than an airport — and the reference lists no closed set.
+             */
+            element_type: string;
+            exempt_dep_facilities?: string | null;
+            /**
+             * @description `FLT INCL`, which the reference prints **twice** — `1stTier` then `CZY` — so this is a list
+             *     and each entry gets its own line. A Ground Stop prints one combined line
+             *     (`(Manual) ZHU ZJX ZMA ZME ZTL`), which is the same shape with one entry.
+             */
+            flights_included?: string[];
+            /**
+             * @description The header's trailing qualifier — `CDM GROUND DELAY PROGRAM` in the one available example.
+             *     Carried rather than hardcoded for the same reason `RerouteAdvisory::header` is: one sample is
+             *     not enough to assert that every GDP is a CDM GDP.
+             */
+            header: string;
+            impacting_condition?: string | null;
+            maximum_delay?: string | null;
+            /**
+             * @description The footer's period line, `141415-142315`.
+             *
+             *     Held as one string rather than a from/to pair: the reference prints it verbatim in a DDHHMM
+             *     form that `cumulative_program_period` also expresses as `14/1415Z - 14/2315Z`, and nothing
+             *     states which is derived from which. `RerouteValid` splits from/to because reroute's own
+             *     `VALID` line is assembled from them; here the two renderings of the same window differ in
+             *     format, so re-deriving one would be inventing a conversion.
+             */
+            period: string;
+            pop_up_factor?: string | null;
+            program_rate: string;
+        };
+        /**
          * @description The full GDP board: the program, its window, controlled + exempt flights, demand vs AAR,
          *     and delay stats — everything the frontend needs in one payload.
          */
@@ -4973,6 +5051,57 @@ export interface components {
             artccs: string[];
             national: boolean;
             permission: string;
+        };
+        /**
+         * @description The structured fields a Ground Stop (GS) advisory is built from, per the vATCSCC reference.
+         *
+         *     Stored in `tmu.advisories.structured` and rendered to `body` by
+         *     [`crate::advisory::render_ground_stop`].
+         *
+         *     Shares most of its shape with [`GdpAdvisory`] — same header, same `CTL ELEMENT`/`ELEMENT
+         *     TYPE`/`ADL TIME` opening, same `CUMULATIVE PROGRAM PERIOD`, same footer — but the two are
+         *     separate structs rather than one with optional halves. A GS has no delay-assignment mode, rate
+         *     or pop-up factor, and reports delays as three `TOTAL, MAXIMUM, AVERAGE` triplets where a GDP
+         *     reports a limit and two scalars. Merging them would make every field optional and let a
+         *     nonsensical advisory typecheck.
+         */
+        GroundStopAdvisory: {
+            additional_dep_facilities_included?: string | null;
+            adl_time: string;
+            comments?: string | null;
+            control_element: string;
+            cumulative_program_period: string;
+            /**
+             * @description The three delay triplets, each printed `TOTAL/MAXIMUM/AVERAGE` in minutes — `1240/414/81`.
+             *
+             *     Held as written rather than as three numbers: the reference's own annotation calls them
+             *     "Total, Current, Average" while the labels say "TOTAL, MAXIMUM, AVERAGE", so the document
+             *     disagrees with its own legend about what the middle figure is. Parsing would require picking
+             *     a side; printing the line verbatim does not.
+             */
+            current_delays?: string | null;
+            /**
+             * @description The header's element slot — `DFW/ZFW`, the control element and its ARTCC. See
+             *     [`GdpAdvisory::element`]; the GS reference puts the control element here too, which is what
+             *     makes that reading of the format more than a one-document guess.
+             */
+            element: string;
+            element_type: string;
+            /**
+             * @description `FLT INCL`. A list for the same reason [`GdpAdvisory::flights_included`] is; the GS reference
+             *     uses a single entry carrying its mode inline, `(Manual) ZHU ZJX ZMA ZME ZTL`.
+             */
+            flights_included?: string[];
+            /** @description When the first and last stopped aircraft are scheduled to depart. */
+            ground_stop_period: string;
+            /** @description The header's trailing qualifier — `CDM GROUND STOP` in the reference. */
+            header: string;
+            impacting_condition?: string | null;
+            new_delays?: string | null;
+            /** @description The footer's period line, `141430-141630`. */
+            period: string;
+            previous_delays?: string | null;
+            probability_of_extension?: string | null;
         };
         /** @description A ground stop: holds departures into `airport` from within `scope` until `until`. */
         GroundStopBody: {
@@ -5347,6 +5476,53 @@ export interface components {
              * @description null = until further notice.
              */
             stop_time?: string | null;
+        };
+        /**
+         * @description The parts of a generated GDP advisory that no data can supply (#508).
+         *
+         *     Publishing a GDP derives most of the document from `tmu.gdp`, but a metering engine cannot know
+         *     *why* a program exists, and several reference fields have no source at all:
+         *
+         *     - `DELAY LIMIT` is not `max_enroute_min` — that is an enroute *scope tier*, not a delay cap.
+         *     - `DEPARTURE SCOPE` is `1200` in the reference, which #507 recorded as undefined: not minutes, not a
+         *       tier, not a code. The program's `scope` is a list of departure ARTCCs, so putting it here would
+         *       assert a reading the document does not support. Left to the author deliberately.
+         *     - `IMPACTING CONDITION`, `COMMENTS`, `POP-UP FACTOR` and the facility lists are editorial by nature.
+         *
+         *     Every field is optional: a GDP must stay publishable in a hurry, and the renderer already prints a
+         *     bare `LABEL:` for an absent value.
+         */
+        PublishGdpRequest: {
+            additional_dep_facilities_included?: string | null;
+            canadian_arpts_included?: string | null;
+            comments?: string | null;
+            /** @description `DAS` | `GAAP` | `UDP`. Defaults to `DAS`, the ordinary case. */
+            delay_assignment_mode?: string | null;
+            delay_assignment_table_applies_to?: string | null;
+            delay_limit?: string | null;
+            departure_scope?: string | null;
+            exempt_dep_facilities?: string | null;
+            flights_included?: string[] | null;
+            impacting_condition?: string | null;
+            pop_up_factor?: string | null;
+        };
+        /**
+         * @description The editorial half of a generated Ground Stop advisory (#508).
+         *
+         *     A ground stop has **no delay data anywhere**: there is no slot table for one and no delay
+         *     computation in `feed/`, so all three `TOTAL/MAXIMUM/AVERAGE` triplets are author-supplied.
+         *     `previous_delays` is inherently historical — nothing records a prior revision's figures — so it
+         *     could not be derived even if the others were.
+         */
+        PublishGroundStopRequest: {
+            additional_dep_facilities_included?: string | null;
+            comments?: string | null;
+            current_delays?: string | null;
+            flights_included?: string[] | null;
+            impacting_condition?: string | null;
+            new_delays?: string | null;
+            previous_delays?: string | null;
+            probability_of_extension?: string | null;
         };
         /** @description The bot's push of every guild it's in (full replace of the snapshot). */
         PushGuildSnapshotRequest: {
@@ -6133,6 +6309,7 @@ export interface components {
             aar: number;
             /** @description Optional rate changes across the window (empty = flat AAR). */
             aar_steps?: components["schemas"]["AarStep"][];
+            advisory?: null | components["schemas"]["PublishGdpRequest"];
             end_time: string;
             exempt_airborne?: boolean;
             /**
@@ -13995,7 +14172,12 @@ export interface operations {
             };
             cookie?: never;
         };
-        requestBody?: never;
+        /** @description Optional editorial fields for the advisory generated on publish (#508). Omit the body entirely and the advisory still generates, with those lines blank. */
+        requestBody?: {
+            content: {
+                "application/json": null | components["schemas"]["PublishGdpRequest"];
+            };
+        };
         responses: {
             200: {
                 headers: {
@@ -14251,7 +14433,12 @@ export interface operations {
             };
             cookie?: never;
         };
-        requestBody?: never;
+        /** @description Optional editorial fields for the advisory generated on publish (#508). A ground stop has no delay data of its own, so its delay triplets are author-supplied. */
+        requestBody?: {
+            content: {
+                "application/json": null | components["schemas"]["PublishGroundStopRequest"];
+            };
+        };
         responses: {
             200: {
                 headers: {
