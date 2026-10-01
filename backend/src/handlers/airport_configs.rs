@@ -7,7 +7,7 @@ use axum::{
     extract::{Extension, Path, Query, State},
     http::StatusCode,
 };
-use chrono::{TimeZone, Utc};
+use chrono::{DateTime, TimeZone, Utc};
 use serde::Deserialize;
 
 use crate::{
@@ -50,25 +50,84 @@ pub async fn forecast_wind(
     let at =
         q.at.and_then(|s| Utc.timestamp_opt(s, 0).single())
             .unwrap_or_else(Utc::now);
-    let airports = state.feed.read().await.airports.clone();
-    match feed::forecast::wind_at(&airports, &icao, at).await {
-        Some(h) => Ok(Json(AirportForecastBody {
-            icao,
-            time: h.time,
-            wind_dir: h.dir,
-            wind_kt: h.spd_kt,
-            gust_kt: h.gust_kt,
-            source: "forecast".to_string(),
-        })),
-        None => Ok(Json(AirportForecastBody {
-            icao,
-            time: at,
-            wind_dir: None,
-            wind_kt: 0,
-            gust_kt: None,
-            source: "none".to_string(),
-        })),
+    let w = wind_for(&state, &icao, at).await;
+    Ok(Json(AirportForecastBody {
+        icao,
+        time: w.time,
+        wind_dir: w.dir,
+        wind_kt: w.spd_kt,
+        gust_kt: w.gust_kt,
+        source: w.source.to_string(),
+    }))
+}
+
+/// How near "now" a request has to be before the observed METAR answers it instead of the forecast.
+///
+/// A METAR describes the field as it is, so it is the better answer for now and useless for later. The
+/// window is generous relative to the 10-minute METAR cache and narrow relative to the forecast's hourly
+/// resolution, so "what is the wind doing" gets the observation and "what will it be at 2300Z" gets the
+/// model.
+const METAR_PREFERRED_WITHIN_MIN: i64 = 30;
+
+/// The wind an airport's configuration is matched against, and where it came from (#510).
+///
+/// **Observed wind wins for the present**: METAR is a ten-minute observation that degrades to its last
+/// cached value when the upstream fails, where the forecast is a two-hour-TTL 10-metre model value with
+/// no fallback at all. Beyond [`METAR_PREFERRED_WITHIN_MIN`] there is nothing to observe, so the
+/// forecast answers.
+///
+/// This is deliberately the **one** place that choice is made. `GET /forecast/{icao}` returns it and the
+/// AADC path calls it, so the backend and the client's `matchConfig` cannot end up matching
+/// configurations against different winds — which is how arrivals and departures would come to disagree
+/// for a reason nobody intended (#510 AC3).
+///
+/// `source` fills in `metar`, which [`AirportForecastBody`] has documented since #242 and no code ever
+/// emitted.
+pub(crate) async fn wind_for(state: &AppState, icao: &str, at: DateTime<Utc>) -> ResolvedWind {
+    let now = Utc::now();
+    if (at - now).num_minutes().abs() <= METAR_PREFERRED_WITHIN_MIN
+        && let Some(obs) = crate::handlers::runway::metar_for(state, icao)
+            .await
+            .and_then(|m| m.wind_obs)
+    {
+        return ResolvedWind {
+            time: now,
+            // The same calm rule the forecast applies, so a 2-knot wind is calm whichever source
+            // reported it and the airport does not change config with the weather provider.
+            dir: obs.dir.filter(|_| obs.spd_kt >= feed::forecast::CALM_KT),
+            spd_kt: obs.spd_kt,
+            gust_kt: obs.gust_kt,
+            source: "metar",
+        };
     }
+    let airports = state.feed.read().await.airports.clone();
+    match feed::forecast::wind_at(&airports, icao, at).await {
+        Some(h) => ResolvedWind {
+            time: h.time,
+            dir: h.dir,
+            spd_kt: h.spd_kt,
+            gust_kt: h.gust_kt,
+            source: "forecast",
+        },
+        // No observation and no forecast: say so rather than imply a direction. `dir: None` makes
+        // `favored_config` take the calm default, which is the defined no-wind answer (#510 AC4).
+        None => ResolvedWind {
+            time: at,
+            dir: None,
+            spd_kt: 0,
+            gust_kt: None,
+            source: "none",
+        },
+    }
+}
+
+/// A wind with its provenance. `source` is `metar` | `forecast` | `none`.
+pub(crate) struct ResolvedWind {
+    pub time: DateTime<Utc>,
+    pub dir: Option<i32>,
+    pub spd_kt: i32,
+    pub gust_kt: Option<i32>,
+    pub source: &'static str,
 }
 
 fn validate(req: &UpsertAirportConfigRequest) -> Result<(), ApiError> {
