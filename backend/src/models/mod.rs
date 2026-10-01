@@ -1967,6 +1967,18 @@ pub struct ReorderRequest {
     pub order: Vec<String>,
 }
 
+/// The two callsigns whose release times trade places (#514).
+///
+/// No FCA field: the FCA is in the route path, which is what makes a cross-FCA swap
+/// unrepresentable. A release is a slot in one FCA's metered sequence (`flow.fca_release` is keyed
+/// `(fca_id, callsign)`), so moving one into another FCA would hand that FCA's metering a fixed
+/// constraint it never sequenced.
+#[derive(Debug, Deserialize, ToSchema)]
+pub struct SwapReleaseRequest {
+    pub a: String,
+    pub b: String,
+}
+
 /// Route-fix tokens that don't resolve to a known nav fix/navaid/airway/procedure — likely typos in
 /// an FCA's route-fix filter.
 #[derive(Debug, Serialize, ToSchema)]
