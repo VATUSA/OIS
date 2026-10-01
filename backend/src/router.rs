@@ -435,6 +435,8 @@ pub fn build_router(state: AppState) -> Router {
             "/api/v1/flow/fcas/{id}/release/{callsign}",
             post(flow::mark_release).delete(flow::clear_release),
         )
+        // Trade two held release times without re-metering anyone else (#514)
+        .route("/api/v1/flow/fcas/{id}/swap", post(flow::swap_releases))
         // Manually drop a bogus flight from the flow picture (#342)
         .route(
             "/api/v1/flow/fcas/{id}/exclusions",

@@ -39,8 +39,8 @@ use crate::{
         AircraftRoute, AirportGateBody, DataStatus, FcaBody, FcaFlight, FixPrediction,
         FixValidationBody, FlightFcaCrossing, FlightGdp, FlightGroundStop, FlightImpact,
         FlightProgram, IdstFlight, IdstResponse, ReleaseRequest, ReorderRequest,
-        ResolveRouteRequest, ResolvedRoute, RouteBody, RouteWaypoint, TrafficAircraft,
-        UpsertFcaRequest, UpsertRouteRequest,
+        ResolveRouteRequest, ResolvedRoute, RouteBody, RouteWaypoint, SwapReleaseRequest,
+        TrafficAircraft, UpsertFcaRequest, UpsertRouteRequest,
     },
     repos::{flow as flow_repo, public as public_repo},
     state::AppState,
@@ -2377,6 +2377,56 @@ pub async fn clear_release(
     Ok(Json(finalize(&fca, flights, &metas)))
 }
 
+/// Trade two flights' release times.
+///
+/// The point of #434: two departures holding releases exchange slots, and the times they exchange
+/// are exactly the two that already existed — so nothing downstream renumbers and neither ends up
+/// later than it was.
+///
+/// # Not the reorder, and not a recompute
+///
+/// [`reorder_fca`] is the other way to change who goes first, and it is the wrong tool: manual mode
+/// re-chains every aircraft behind the one that moved (`feed::fca`), which is the opposite of
+/// trading two slots. This writes two `flow.fca_release` rows and nothing else; the metering engine
+/// reads them as `frozen_ms` on its next pass and sequences around them unchanged.
+///
+/// Returns a status rather than the re-metered list, unlike [`mark_release`]. Pinning a *new* time
+/// genuinely changes the sequence, so `mark_release` re-runs `build_candidates`; an exchange of two
+/// existing frozen times does not, and calling `build_candidates` here would be the very recompute
+/// this endpoint exists to avoid. Clients refetch, as they do after `reorder_fca`.
+#[utoipa::path(
+    post,
+    path = "/api/v1/flow/fcas/{id}/swap",
+    tag = "flow",
+    params(("id" = String, Path, description = "FCA id")),
+    request_body = SwapReleaseRequest,
+    responses((status = 200), (status = 400), (status = 401), (status = 404))
+)]
+pub async fn swap_releases(
+    State(state): State<AppState>,
+    _permission: RequirePermission<FlowFcaUpdate>,
+    Extension(current_user): Extension<Option<CurrentUser>>,
+    Path(id): Path<String>,
+    Json(payload): Json<SwapReleaseRequest>,
+) -> Result<StatusCode, ApiError> {
+    let user = current_user.as_ref().ok_or(ApiError::Unauthorized)?;
+    let pool = state.db.as_ref().ok_or(ApiError::ServiceUnavailable)?;
+    let a = payload.a.trim().to_ascii_uppercase();
+    let b = payload.b.trim().to_ascii_uppercase();
+    // A flight cannot trade with itself, and the repo's row count would read 1 rather than 2 —
+    // rejecting here says why instead of reporting a missing release.
+    if a.is_empty() || b.is_empty() || a == b {
+        return Err(ApiError::BadRequest);
+    }
+    // `false` means at least one of them holds no release: there is no time to trade, and inventing
+    // one is what this must not do.
+    if !flow_repo::swap_releases(pool, &id, &a, &b, &user.id).await? {
+        return Err(ApiError::NotFound);
+    }
+    state.publish(crate::realtime::topic::RELEASE);
+    Ok(StatusCode::OK)
+}
+
 #[utoipa::path(
     put,
     path = "/api/v1/flow/fcas/{id}/order",
@@ -4237,5 +4287,254 @@ mod fca_inclusion_tests {
                 );
             }
         }
+    }
+}
+
+/// #514 — trading two held release times without re-metering anyone else.
+///
+/// Worth knowing for anyone extending this: `mark_release` and `clear_release` have no tests of
+/// their own, so these are the first on the release path. They drive `repos::flow::swap_releases`
+/// for the data semantics and the real router for the two guards the handler owns.
+#[cfg(test)]
+mod release_swap_tests {
+    use std::collections::HashMap;
+
+    use sqlx::PgPool;
+
+    use crate::repos::flow as flow_repo;
+    use crate::scope_test_support::{seed_user, send, session_cookie, test_state};
+
+    /// Every `flow.fca` column has a default, so a name is the whole fixture.
+    async fn fca(pool: &PgPool) -> String {
+        sqlx::query_scalar::<_, String>(
+            "insert into flow.fca (name) values ('SWAP TEST') returning id",
+        )
+        .fetch_one(pool)
+        .await
+        .unwrap()
+    }
+
+    async fn times(pool: &PgPool, fca_id: &str, callsign: &str) -> Option<(i64, i64)> {
+        sqlx::query_as::<_, (i64, i64)>(
+            "select cta_ms, edct_ms from flow.fca_release where fca_id = $1 and callsign = $2",
+        )
+        .bind(fca_id)
+        .bind(callsign)
+        .fetch_optional(pool)
+        .await
+        .unwrap()
+    }
+
+    /// The feature, in one assertion: each flight ends up holding the other's times.
+    #[sqlx::test]
+    async fn two_releases_trade_their_times(pool: PgPool) {
+        let user = seed_user(&pool).await;
+        let id = fca(&pool).await;
+        flow_repo::upsert_release(&pool, &id, "AAL1", 1_000, 900, &user)
+            .await
+            .unwrap();
+        flow_repo::upsert_release(&pool, &id, "UAL2", 2_000, 1_900, &user)
+            .await
+            .unwrap();
+
+        assert!(
+            flow_repo::swap_releases(&pool, &id, "AAL1", "UAL2", &user)
+                .await
+                .unwrap()
+        );
+
+        assert_eq!(times(&pool, &id, "AAL1").await, Some((2_000, 1_900)));
+        assert_eq!(times(&pool, &id, "UAL2").await, Some((1_000, 900)));
+    }
+
+    /// The criterion the existing reorder fails by design: moving one aircraft must not shift
+    /// anybody else. `manual_order` re-chains everyone behind the mover; this touches two rows.
+    #[sqlx::test]
+    async fn a_third_flights_release_is_untouched(pool: PgPool) {
+        let user = seed_user(&pool).await;
+        let id = fca(&pool).await;
+        for (cs, cta, edct) in [
+            ("AAL1", 1_000, 900),
+            ("UAL2", 2_000, 1_900),
+            ("DAL3", 3_000, 2_900),
+        ] {
+            flow_repo::upsert_release(&pool, &id, cs, cta, edct, &user)
+                .await
+                .unwrap();
+        }
+
+        flow_repo::swap_releases(&pool, &id, "AAL1", "UAL2", &user)
+            .await
+            .unwrap();
+
+        assert_eq!(
+            times(&pool, &id, "DAL3").await,
+            Some((3_000, 2_900)),
+            "a flight not named in the swap must not move"
+        );
+    }
+
+    /// No slot is created or destroyed: the pair of times after the swap is the same pair as
+    /// before, so neither flight is later than the later of the two originals.
+    #[sqlx::test]
+    async fn neither_flight_ends_up_later_than_the_later_original(pool: PgPool) {
+        let user = seed_user(&pool).await;
+        let id = fca(&pool).await;
+        flow_repo::upsert_release(&pool, &id, "AAL1", 1_000, 900, &user)
+            .await
+            .unwrap();
+        flow_repo::upsert_release(&pool, &id, "UAL2", 2_000, 1_900, &user)
+            .await
+            .unwrap();
+
+        flow_repo::swap_releases(&pool, &id, "AAL1", "UAL2", &user)
+            .await
+            .unwrap();
+
+        let a = times(&pool, &id, "AAL1").await.unwrap();
+        let b = times(&pool, &id, "UAL2").await.unwrap();
+        assert_eq!(
+            a.0.max(b.0),
+            2_000,
+            "the later crossing time must be the one that already existed"
+        );
+        assert_eq!(a.1.max(b.1), 1_900, "likewise the later wheels-up");
+    }
+
+    /// The mechanism matters, not just the outcome: a swap must go through `flow.fca_release`,
+    /// which the engine reads as `frozen_ms`, and must leave the FCA's manual sequence alone. Had
+    /// this been built on `set_manual_order`, these two columns would move.
+    #[sqlx::test]
+    async fn the_swap_does_not_touch_the_manual_order(pool: PgPool) {
+        let user = seed_user(&pool).await;
+        let id = fca(&pool).await;
+        flow_repo::upsert_release(&pool, &id, "AAL1", 1_000, 900, &user)
+            .await
+            .unwrap();
+        flow_repo::upsert_release(&pool, &id, "UAL2", 2_000, 1_900, &user)
+            .await
+            .unwrap();
+
+        flow_repo::swap_releases(&pool, &id, "AAL1", "UAL2", &user)
+            .await
+            .unwrap();
+
+        let (order, manual) = sqlx::query_as::<_, (Vec<String>, bool)>(
+            "select manual_order, manual_seq from flow.fca where id = $1",
+        )
+        .bind(&id)
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        assert!(
+            order.is_empty(),
+            "manual order must stay untouched: {order:?}"
+        );
+        assert!(!manual, "the FCA must not be flipped into manual mode");
+    }
+
+    /// Inventing a time for an unreleased flight is the thing this must not do. The repo reports
+    /// `false` and — because the exchange is one statement whose self-join matched nothing — the
+    /// released side is left exactly as it was, so there is no partial swap.
+    #[sqlx::test]
+    async fn a_swap_with_one_unreleased_flight_is_rejected_and_writes_nothing(pool: PgPool) {
+        let user = seed_user(&pool).await;
+        let id = fca(&pool).await;
+        flow_repo::upsert_release(&pool, &id, "AAL1", 1_000, 900, &user)
+            .await
+            .unwrap();
+
+        assert!(
+            !flow_repo::swap_releases(&pool, &id, "AAL1", "NOPE9", &user)
+                .await
+                .unwrap()
+        );
+        assert_eq!(
+            times(&pool, &id, "AAL1").await,
+            Some((1_000, 900)),
+            "the released flight must be untouched"
+        );
+        assert!(times(&pool, &id, "NOPE9").await.is_none());
+    }
+
+    /// The repo guards a self-swap on its own, not only via the handler.
+    ///
+    /// `swap_releases` is `pub` and #511's ladder (plus any future UI) can call it directly, so its
+    /// contract has to hold without the handler's `a == b` check in front of it. This is also the
+    /// only case that distinguishes `rows_affected() == 2` from `> 0`: a missing release matches
+    /// **zero** rows either way, while a self-swap matches exactly one — so without this test,
+    /// relaxing that comparison passes the whole suite.
+    #[sqlx::test]
+    async fn the_repo_refuses_to_swap_a_flight_with_itself(pool: PgPool) {
+        let user = seed_user(&pool).await;
+        let id = fca(&pool).await;
+        flow_repo::upsert_release(&pool, &id, "AAL1", 1_000, 900, &user)
+            .await
+            .unwrap();
+
+        assert!(
+            !flow_repo::swap_releases(&pool, &id, "AAL1", "AAL1", &user)
+                .await
+                .unwrap(),
+            "one matched row is not a swap"
+        );
+        assert_eq!(times(&pool, &id, "AAL1").await, Some((1_000, 900)));
+    }
+
+    /// Through the real router, so `RequirePermission<FlowFcaUpdate>` is on the path. It cannot be
+    /// constructed in a test, so a direct handler call could not show the endpoint is gated at all.
+    #[sqlx::test]
+    async fn through_the_router_a_user_without_the_permission_is_refused(pool: PgPool) {
+        let state = test_state(pool.clone(), HashMap::new());
+        let user = seed_user(&pool).await;
+        let id = fca(&pool).await;
+        flow_repo::upsert_release(&pool, &id, "AAL1", 1_000, 900, &user)
+            .await
+            .unwrap();
+        flow_repo::upsert_release(&pool, &id, "UAL2", 2_000, 1_900, &user)
+            .await
+            .unwrap();
+        let cookie = session_cookie(&pool, &user).await;
+
+        let status = send(
+            &state,
+            http::Method::POST,
+            &format!("/api/v1/flow/fcas/{id}/swap"),
+            &cookie,
+            Some(serde_json::json!({"a": "AAL1", "b": "UAL2"})),
+        )
+        .await;
+        assert_eq!(status, http::StatusCode::UNAUTHORIZED);
+        // And nothing was written on the way to being refused.
+        assert_eq!(times(&pool, &id, "AAL1").await, Some((1_000, 900)));
+    }
+
+    /// A flight cannot trade with itself. Rejected in the handler so the error says why, rather
+    /// than reaching the repo and reporting a missing release.
+    #[sqlx::test]
+    async fn through_the_router_swapping_a_flight_with_itself_is_rejected(pool: PgPool) {
+        let state = test_state(pool.clone(), HashMap::new());
+        let user = seed_user(&pool).await;
+        crate::scope_test_support::grant(&pool, &user, "flow.fca.update", None).await;
+        let id = fca(&pool).await;
+        flow_repo::upsert_release(&pool, &id, "AAL1", 1_000, 900, &user)
+            .await
+            .unwrap();
+        let cookie = session_cookie(&pool, &user).await;
+
+        let status = send(
+            &state,
+            http::Method::POST,
+            &format!("/api/v1/flow/fcas/{id}/swap"),
+            &cookie,
+            Some(serde_json::json!({"a": "AAL1", "b": "aal1"})),
+        )
+        .await;
+        assert_eq!(
+            status,
+            http::StatusCode::BAD_REQUEST,
+            "case-insensitively the same flight"
+        );
+        assert_eq!(times(&pool, &id, "AAL1").await, Some((1_000, 900)));
     }
 }
