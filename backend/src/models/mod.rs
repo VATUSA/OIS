@@ -912,8 +912,11 @@ pub struct AirportGateBody {
     pub name: String,
     pub lat: f64,
     pub lon: f64,
-    /// `manual` | `osm` | `crc`.
+    /// `manual` | `osm` | `crc` | `faa` | `xplane`.
     pub source: String,
+    /// X-Plane stand type (`gate` | `tie_down` | `misc` | `hangar`) for imported stands; `None` for
+    /// hand-entered ones. Read-only: an operator adding a stand has no X-Plane type to declare.
+    pub kind: Option<String>,
     pub updated_at: DateTime<Utc>,
     /// Whether the requesting user may edit this airport's surface data (per their ARTCC scope).
     #[sqlx(default)]
@@ -1020,6 +1023,11 @@ pub struct FaaRepullResult {
     pub runways_inserted: usize,
     pub osm_taxiways_retired: usize,
     pub osm_ramps_retired: usize,
+    /// Stands newly inserted from the X-Plane extract (#431). Existing imported stands are refreshed
+    /// in place rather than replaced, so they are not counted here — see
+    /// `repos::xplane_gate_seed::seed_for_icao`.
+    pub gates_inserted: usize,
+    pub osm_gates_retired: usize,
 }
 
 /// A configurable aircraft performance profile (climb / cruise / descent schedules) used by the

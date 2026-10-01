@@ -22,6 +22,7 @@ const gate = (over: Partial<AirportGate>): AirportGate => ({
   lat: 38.85,
   lon: -77.04,
   source: "manual",
+  kind: null,
   editable: true,
   updated_at: "2026-01-01T00:00:00Z",
   ...over,

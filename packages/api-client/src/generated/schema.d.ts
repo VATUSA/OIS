@@ -3441,12 +3441,17 @@ export interface components {
             editable: boolean;
             icao: string;
             id: string;
+            /**
+             * @description X-Plane stand type (`gate` | `tie_down` | `misc` | `hangar`) for imported stands; `None` for
+             *     hand-entered ones. Read-only: an operator adding a stand has no X-Plane type to declare.
+             */
+            kind?: string | null;
             /** Format: double */
             lat: number;
             /** Format: double */
             lon: number;
             name: string;
-            /** @description `manual` | `osm` | `crc`. */
+            /** @description `manual` | `osm` | `crc` | `faa` | `xplane`. */
             source: string;
             /** Format: date-time */
             updated_at: string;
@@ -4271,6 +4276,13 @@ export interface components {
          *     extract (#232) — a permissioned, on-demand equivalent of #231's nationwide startup seed.
          */
         FaaRepullResult: {
+            /**
+             * @description Stands newly inserted from the X-Plane extract (#431). Existing imported stands are refreshed
+             *     in place rather than replaced, so they are not counted here — see
+             *     `repos::xplane_gate_seed::seed_for_icao`.
+             */
+            gates_inserted: number;
+            osm_gates_retired: number;
             osm_ramps_retired: number;
             osm_taxiways_retired: number;
             ramps_inserted: number;
