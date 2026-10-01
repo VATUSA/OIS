@@ -1740,6 +1740,7 @@ mod tests {
             lat,
             lon,
             source: "manual".to_string(),
+            kind: None,
             updated_at: Utc::now(),
             editable: false,
         }

@@ -28,3 +28,4 @@ pub mod taxi_insights;
 pub mod tmu;
 pub mod users;
 pub mod vatusa;
+pub mod xplane_gate_seed;

@@ -15,6 +15,10 @@ path = "src/main.rs"
 name = "faa-surface-importer"
 path = "src/bin/faa_surface_importer.rs"
 
+[[bin]]
+name = "xplane-gate-importer"
+path = "src/bin/xplane_gate_importer.rs"
+
 [dependencies]
 ois-core.workspace = true
 
@@ -51,6 +55,7 @@ reqwest.workspace = true
 # --- nav data (runtime NASR fetch + hot-swap) ---
 flate2 = "1"
 zip = { version = "8", default-features = false, features = ["deflate"] }
+base64 = "0.22"
 # Nav-fetch-only DNS resolver (A + AAAA itself, IPv4 first) — see feed/nav_dns.rs.
 hickory-resolver = { version = "0.26", features = ["tokio"] }
 arc-swap = "1"
