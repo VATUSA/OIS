@@ -55,6 +55,7 @@ import {AdminAccessControl} from "@/pages/admin/access-control";
 import {AdminAudit} from "@/pages/admin/audit";
 import {AdminJobs} from "@/pages/admin/jobs";
 import {AdminApiKeys} from "@/pages/admin/api-keys";
+import {AdminServiceAccounts} from "@/pages/admin/service-accounts";
 import {AdminDiscord} from "@/pages/admin/discord";
 
 const isTruthy = (v: unknown) => v === true || v === 1 || v === "1" || v === "true";
@@ -567,6 +568,13 @@ const adminApiKeysRoute = createRoute({
   component: AdminApiKeys,
 });
 
+const adminServiceAccountsRoute = createRoute({
+  getParentRoute: () => adminRoute,
+  path: "service-accounts",
+  staticData: { title: "Service accounts" },
+  component: AdminServiceAccounts,
+});
+
 const adminDiscordRoute = createRoute({
   getParentRoute: () => adminRoute,
   path: "discord",
@@ -638,6 +646,7 @@ const routeTree = rootRoute.addChildren([
     adminAuditRoute,
     adminJobsRoute,
     adminApiKeysRoute,
+    adminServiceAccountsRoute,
     adminDiscordRoute,
     planningRoute.addChildren([
       planningIndexRoute,

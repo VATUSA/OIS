@@ -232,6 +232,7 @@ use utoipa::OpenApi;
         crate::handlers::service_accounts::create_service_account,
         crate::handlers::service_accounts::rotate_service_account,
         crate::handlers::service_accounts::disable_service_account,
+        crate::handlers::service_accounts::list_service_account_roles,
         crate::handlers::service_accounts::set_service_account_roles,
         crate::handlers::api_keys::list_my_keys,
         crate::handlers::api_keys::grantable_permissions,

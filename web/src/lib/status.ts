@@ -34,6 +34,8 @@ const TONES = {
   availability: { available: "good", partial: "warn", unavailable: "bad" },
   /** API key state. */
   apiKey: { active: "good", disabled: "neutral", expired: "bad" },
+  /** Service-account (machine credential) lifecycle — no expiry, so no `expired`. */
+  serviceAccount: { active: "good", disabled: "neutral" },
 } as const satisfies Record<string, Record<string, Tone>>;
 
 export type StatusKind = keyof typeof TONES;

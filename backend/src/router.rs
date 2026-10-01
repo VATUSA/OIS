@@ -589,6 +589,10 @@ pub fn build_router(state: AppState) -> Router {
                 .post(service_accounts::create_service_account),
         )
         .route(
+            "/api/v1/admin/service-accounts/roles",
+            get(service_accounts::list_service_account_roles),
+        )
+        .route(
             "/api/v1/admin/service-accounts/{id}/rotate",
             post(service_accounts::rotate_service_account),
         )
