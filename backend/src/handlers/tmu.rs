@@ -1220,6 +1220,122 @@ mod tests {
         );
     }
 
+    /// The structured fields of a real reroute, taken from the #458 reference fixture rather than
+    /// hand-rolled, so the payload is one the renderer is already known to accept.
+    fn reroute_structured() -> serde_json::Value {
+        let fixture: serde_json::Value =
+            serde_json::from_str(include_str!("../../../fixtures/reroute-reference.json"))
+                .expect("the reroute reference fixture should parse");
+        fixture["cases"][0]["structured"].clone()
+    }
+
+    /// #503 — a structured reroute's document is rendered in `repos::tmu::create_advisory`, so
+    /// requiring a `body` here forced callers to send a placeholder that was immediately discarded
+    /// (PR #501 sent the literal "(rendered on save)").
+    #[sqlx::test]
+    async fn a_structured_reroute_create_needs_no_body(pool: PgPool) {
+        let state = test_state(pool.clone(), HashMap::new());
+        let user = seed_user(&pool).await;
+        let cookie = session_cookie(&pool, &user).await;
+        grant(&pool, &user, "tmu.adv.create", None).await;
+
+        let status = send(
+            &state,
+            http::Method::POST,
+            "/api/v1/tmu/advisories",
+            &cookie,
+            Some(serde_json::json!({
+                "facility": "DCC",
+                "kind": "reroute",
+                "body": "",
+                "structured": reroute_structured(),
+            })),
+        )
+        .await;
+        assert_eq!(status, http::StatusCode::OK);
+
+        // Asserting it *rendered*, not merely that the request was accepted: an empty body that passed
+        // validation and then stored nothing would be worse than the defect being fixed.
+        let advisories = crate::repos::tmu::list_advisories(&pool).await.unwrap();
+        assert_eq!(advisories.len(), 1);
+        let body = &advisories[0].body;
+        assert!(
+            !body.trim().is_empty(),
+            "the document should have been derived"
+        );
+        assert!(
+            body.contains("DCC") && body.contains("ADVZY"),
+            "the stored body should be the rendered advisory, got: {body}"
+        );
+    }
+
+    /// The other half of the asymmetry: with no `structured`, the body is the only thing that could
+    /// produce a document, so it is still required.
+    #[sqlx::test]
+    async fn a_raw_create_still_needs_a_body(pool: PgPool) {
+        let state = test_state(pool.clone(), HashMap::new());
+        let user = seed_user(&pool).await;
+        let cookie = session_cookie(&pool, &user).await;
+        grant(&pool, &user, "tmu.adv.create", None).await;
+
+        let status = send(
+            &state,
+            http::Method::POST,
+            "/api/v1/tmu/advisories",
+            &cookie,
+            Some(serde_json::json!({"facility": "DCC", "kind": "reroute", "body": "   "})),
+        )
+        .await;
+
+        assert_eq!(status, http::StatusCode::BAD_REQUEST);
+        assert!(
+            crate::repos::tmu::list_advisories(&pool)
+                .await
+                .unwrap()
+                .is_empty(),
+            "a rejected create must not have written anything"
+        );
+    }
+
+    /// The reason the check is gated on derivability and not on `structured` being present.
+    /// `advisory_body` renders only `reroute`; every other kind derives nothing and keeps the body it
+    /// was given. So a structured advisory of an unrenderable kind with an empty body would store an
+    /// **empty document** — the #499 bug. This is the guard against relaxing the rule too far.
+    #[sqlx::test]
+    async fn a_structured_create_of_an_underivable_kind_still_needs_a_body(pool: PgPool) {
+        let state = test_state(pool.clone(), HashMap::new());
+        let user = seed_user(&pool).await;
+        let cookie = session_cookie(&pool, &user).await;
+        grant(&pool, &user, "tmu.adv.create", None).await;
+
+        let status = send(
+            &state,
+            http::Method::POST,
+            "/api/v1/tmu/advisories",
+            &cookie,
+            Some(serde_json::json!({
+                "facility": "DCC",
+                "kind": "gdp",
+                "body": "",
+                "structured": {"anything": "the renderer does not know this kind"},
+            })),
+        )
+        .await;
+
+        assert_eq!(
+            status,
+            http::StatusCode::BAD_REQUEST,
+            "an unrenderable kind derives no document, so its body is still required"
+        );
+        assert!(
+            crate::repos::tmu::list_advisories(&pool)
+                .await
+                .unwrap()
+                .is_empty(),
+            "and nothing may be stored"
+        );
+    }
+
     /// Publishing is a separate permission from creating: drafting a document and issuing it are
     /// different levels of trust, which is why 0008_tmu.sql seeded them separately.
     #[sqlx::test]
@@ -1538,9 +1654,17 @@ pub async fn create_advisory(
     let user = current_user.as_ref().ok_or(ApiError::Unauthorized)?;
     let principal = Principal::require(current_user.as_ref(), current_api_key.as_ref())?;
     let pool = state.db.as_ref().ok_or(ApiError::ServiceUnavailable)?;
+    // `body` is only the source of truth when nothing will derive it: for a structured reroute the
+    // document is rendered in `repos::tmu::create_advisory`, so demanding one here forced the caller to
+    // invent a value that was then discarded (#503). Gated on *derivability* rather than on
+    // `structured` merely being present — a structured advisory of a kind we cannot render yet derives
+    // nothing, so its body is still the only source of the document. Keep this calling
+    // `derives_body` rather than inlining the condition: the two drifting apart is what would store an
+    // empty document (#499).
+    let body_required = !tmu_repo::derives_body(payload.kind.trim(), payload.structured.as_ref());
     if payload.facility.trim().is_empty()
         || payload.kind.trim().is_empty()
-        || payload.body.trim().is_empty()
+        || (body_required && payload.body.trim().is_empty())
     {
         return Err(ApiError::BadRequest);
     }
