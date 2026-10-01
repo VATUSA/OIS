@@ -328,12 +328,192 @@ pub async fn delete_airport_config(
 
 #[cfg(test)]
 mod tests {
-    use std::collections::HashSet;
+    use std::collections::{HashMap, HashSet};
 
     use sqlx::PgPool;
 
     use super::*;
     use crate::feed::facilities::Facility;
+
+    // --- the wind resolution point (#510 review) -------------------------------------------------
+    //
+    // `wind_for` is the one place the METAR-vs-forecast choice is made, which is what AC3 rests on, and
+    // it had no test: five mutations survived it — dropping the `CALM_KT` filter, moving the window to 0
+    // or to a week, and mislabelling either `source`. These are hermetic: `metar_for` returns a fresh
+    // cached entry *before* building any HTTP client, and `forecast::wind_at` returns on
+    // `airports.get(icao)?` for an airport the (empty) feed does not know, so nothing reaches the
+    // network.
+
+    /// A cached observation for `icao`, as `metar_for` would have left it.
+    fn seed_metar(state: &AppState, icao: &str, obs: Option<crate::feed::metar::MetarWind>) {
+        let info = crate::feed::metar::MetarInfo {
+            raw: format!("{icao} 00000KT"),
+            category: "VFR".to_string(),
+            wind: None,
+            wind_obs: obs,
+        };
+        state
+            .metar_cache
+            .lock()
+            .expect("metar cache")
+            .insert(icao.to_string(), (info, Utc::now().timestamp_millis()));
+    }
+
+    fn wind(dir: Option<i32>, spd_kt: i32) -> crate::feed::metar::MetarWind {
+        crate::feed::metar::MetarWind {
+            dir,
+            spd_kt,
+            gust_kt: None,
+        }
+    }
+
+    /// The observation answers for the present, and says so.
+    #[sqlx::test]
+    async fn an_observed_wind_answers_for_the_present(pool: PgPool) {
+        let state = test_state(pool, HashMap::new());
+        seed_metar(&state, "KTST", Some(wind(Some(270), 15)));
+
+        let w = wind_for(&state, "KTST", Utc::now()).await;
+
+        assert_eq!(w.source, "metar");
+        assert_eq!(w.dir, Some(270));
+        assert_eq!(w.spd_kt, 15);
+    }
+
+    /// A wind below `CALM_KT` reports **no direction**, exactly as the forecast path does.
+    ///
+    /// This is the filter the code comment exists for: without it a 2-knot observation keeps its
+    /// bearing while a 2-knot forecast does not, so the same airport matches a different configuration
+    /// depending on which source answered — the divergence AC3 is about. The speed is still reported,
+    /// because the banner shows it; only the direction is suppressed.
+    #[sqlx::test]
+    async fn a_sub_calm_observed_wind_reports_no_direction(pool: PgPool) {
+        let state = test_state(pool, HashMap::new());
+        seed_metar(&state, "KTST", Some(wind(Some(270), 2)));
+
+        let w = wind_for(&state, "KTST", Utc::now()).await;
+
+        assert_eq!(w.source, "metar", "still the observation, just a calm one");
+        assert_eq!(w.dir, None, "below CALM_KT there is no useful direction");
+        assert_eq!(w.spd_kt, 2, "the speed is still reported");
+    }
+
+    /// A variable wind has no bearing to match a configuration against, so it reads as calm.
+    #[sqlx::test]
+    async fn a_variable_observed_wind_reports_no_direction(pool: PgPool) {
+        let state = test_state(pool, HashMap::new());
+        seed_metar(&state, "KTST", Some(wind(None, 12)));
+
+        let w = wind_for(&state, "KTST", Utc::now()).await;
+
+        assert_eq!(w.source, "metar");
+        assert_eq!(w.dir, None);
+    }
+
+    /// The window has two edges, and both matter: inside it the observation wins, outside it there is
+    /// nothing to observe. Pinning only one side would leave "always prefer METAR" or "never prefer
+    /// METAR" indistinguishable from the intended rule.
+    #[sqlx::test]
+    async fn the_observation_is_preferred_only_near_now(pool: PgPool) {
+        let state = test_state(pool, HashMap::new());
+        seed_metar(&state, "KTST", Some(wind(Some(270), 15)));
+        let now = Utc::now();
+
+        let inside = wind_for(&state, "KTST", now + chrono::Duration::minutes(29)).await;
+        assert_eq!(
+            inside.source, "metar",
+            "29 minutes out is still the present"
+        );
+
+        // 45, not 31: `wind_for` recomputes `now` a few milliseconds later than this test did, and
+        // `num_minutes()` truncates, so a nominal 31 reads as 30 and still counts as the present. The
+        // window's exact edge is therefore fuzzy by a minute — immaterial for a weather observation, but
+        // a test should not pretend otherwise by sitting on it.
+        let outside = wind_for(&state, "KTST", now + chrono::Duration::minutes(45)).await;
+        assert_ne!(
+            outside.source, "metar",
+            "well beyond the window must not be answered by an observation of now"
+        );
+
+        // The window is an absolute distance, so it closes in both directions. Asserting only that the
+        // *recent* past still uses the observation proves nothing — a negative difference satisfies
+        // `<= 30` on its own, so dropping the `.abs()` would leave that assertion green. The far past is
+        // what pins it: an observation of now does not describe three quarters of an hour ago.
+        let recent_past = wind_for(&state, "KTST", now - chrono::Duration::minutes(29)).await;
+        assert_eq!(recent_past.source, "metar");
+        let distant_past = wind_for(&state, "KTST", now - chrono::Duration::minutes(45)).await;
+        assert_ne!(
+            distant_past.source, "metar",
+            "the window must close behind us as well as ahead"
+        );
+    }
+
+    /// #510 AC4 — no observation and no forecast is a *defined* answer, not an implied direction.
+    ///
+    /// Driven through a cached METAR that carries no wind group, which is the real shape of "we have an
+    /// observation but it tells us nothing about the wind", and leaves the test hermetic.
+    #[sqlx::test]
+    async fn no_wind_data_at_all_is_reported_as_none(pool: PgPool) {
+        let state = test_state(pool, HashMap::new());
+        seed_metar(&state, "KTST", None);
+
+        let w = wind_for(&state, "KTST", Utc::now()).await;
+
+        assert_eq!(w.source, "none", "neither observed nor forecast");
+        assert_eq!(w.dir, None, "no direction may be implied");
+        assert_eq!(w.spd_kt, 0);
+        assert_eq!(w.gust_kt, None);
+    }
+
+    /// The composition both consumers perform, end to end: observation -> resolution -> configuration.
+    ///
+    /// This replaces a test that asserted `favored_config(.., 270) != "south"` and nothing else — a
+    /// restatement of the containment case rather than a check of AC3. What AC3 actually guarantees is
+    /// that there is one resolution point, so the same observation always selects the same
+    /// configuration whichever caller asks. A sub-calm wind landing on the calm default is the
+    /// interesting half: it only happens if the `CALM_KT` filter survived the trip.
+    #[sqlx::test]
+    async fn an_observation_selects_the_configuration_both_callers_would_get(pool: PgPool) {
+        use crate::repos::airport_configs::favored_config;
+        let state = test_state(pool, HashMap::new());
+
+        let cfg = |id: &str, from: i32, to: i32, calm: bool| crate::models::AirportConfigBody {
+            id: id.to_string(),
+            icao: "KTST".to_string(),
+            name: id.to_string(),
+            aar: 30,
+            adr: 30,
+            landing_runways: vec![],
+            wind_from_deg: from,
+            wind_to_deg: to,
+            calm_default: calm,
+            artcc: "ZNY".to_string(),
+            updated_at: Utc::now(),
+            updated_by: None,
+            editable: true,
+        };
+        let configs = vec![
+            cfg("calm", 0, 0, true),
+            cfg("west", 240, 300, false),
+            cfg("south", 150, 210, false),
+        ];
+
+        seed_metar(&state, "KTST", Some(wind(Some(270), 15)));
+        let w = wind_for(&state, "KTST", Utc::now()).await;
+        assert_eq!(
+            favored_config(&configs, w.dir).map(|c| c.id.as_str()),
+            Some("west"),
+            "a 15-knot westerly selects west"
+        );
+
+        seed_metar(&state, "KTST", Some(wind(Some(270), 2)));
+        let calm_w = wind_for(&state, "KTST", Utc::now()).await;
+        assert_eq!(
+            favored_config(&configs, calm_w.dir).map(|c| c.id.as_str()),
+            Some("calm"),
+            "a 2-knot wind is calm, so it takes the calm default rather than west"
+        );
+    }
 
     async fn seed_user(pool: &PgPool) -> String {
         sqlx::query_scalar::<_, String>(

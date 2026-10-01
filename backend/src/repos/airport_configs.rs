@@ -341,29 +341,13 @@ mod tests {
         assert_eq!(favored_config(&configs, Some(225)).unwrap().id, "south");
     }
 
-    /// AC3's escape hatch, pinned: the wind-favoured config and the controller's active arrival runways
-    /// are allowed to disagree. A controller may hold a crosswind runway for noise, a closure, or a
-    /// tailwind within limits, so this is a valid operating state rather than an inconsistency — the
-    /// point is that nothing silently reconciles them behind an operator's back.
-    #[test]
-    fn arrivals_may_differ_from_the_wind_favoured_config() {
-        let configs = vec![
-            cfg("calm", 30, 0, 0, true),
-            cfg("south", 30, 150, 210, false),
-            cfg("west", 30, 240, 300, false),
-        ];
-        // The wind favours west...
-        let favoured = favored_config(&configs, Some(270)).unwrap();
-        assert_eq!(favoured.id, "west");
-        // ...while the arrival side is whatever `flow.runway_config.active_ends` holds, which this
-        // function neither reads nor constrains. Nothing here forces them to agree, and that is the
-        // documented behaviour rather than an oversight.
-        let controllers_choice = "south";
-        assert_ne!(
-            favoured.id, controllers_choice,
-            "a controller's active arrival config may legitimately differ from the wind's"
-        );
-    }
+    // AC3's escape hatch is documented on `favored_config` itself rather than asserted here. The test
+    // that used to sit in this place compared the favoured config against a hard-coded `"south"` and
+    // nothing else, which restates the containment case above rather than checking anything about
+    // arrivals — it never touched `flow.runway_config.active_ends`. What AC3 actually guarantees is that
+    // one function resolves the wind for every caller, so the same observation always selects the same
+    // configuration; that is pinned in `handlers::airport_configs::tests`, which drives the resolution
+    // point and then this function with its answer.
 
     #[test]
     fn favored_config_falls_back_to_first_when_no_calm_default_exists() {
