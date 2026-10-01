@@ -809,6 +809,22 @@ pub async fn create_advisory(
     Ok(id)
 }
 
+/// [`get_advisory`] inside a caller's transaction.
+///
+/// Needed because publish and cancel read the row back *after* updating it and *before* committing,
+/// to build the Discord payload from what was actually written rather than from what the caller
+/// hoped was written (VATUSA/OIS#459). Reading on the pool there would see the pre-update row.
+pub async fn get_advisory_tx(
+    tx: &mut Transaction<'_, Postgres>,
+    id: &str,
+) -> Result<Option<AdvisoryBody>, ApiError> {
+    sqlx::query_as::<_, AdvisoryBody>(&format!("{ADVISORY_SELECT} where id = $1"))
+        .bind(id)
+        .fetch_optional(&mut **tx)
+        .await
+        .map_err(|_| ApiError::Internal)
+}
+
 pub async fn get_advisory(pool: &PgPool, id: &str) -> Result<Option<AdvisoryBody>, ApiError> {
     sqlx::query_as::<_, AdvisoryBody>(&format!("{ADVISORY_SELECT} where id = $1"))
         .bind(id)
@@ -917,8 +933,12 @@ pub async fn update_advisory(
 }
 
 /// Publishes a draft. Returns false if it was not a draft (or is absent).
+///
+/// Takes the caller's transaction so the Discord post is enqueued atomically with the publish
+/// (VATUSA/OIS#459) — a post must not exist for an advisory that did not publish, and an advisory
+/// must not go live with nothing queued to announce it.
 pub async fn publish_advisory(
-    pool: &PgPool,
+    tx: &mut Transaction<'_, Postgres>,
     id: &str,
     published_by: &str,
 ) -> Result<bool, ApiError> {
@@ -929,7 +949,7 @@ pub async fn publish_advisory(
     )
     .bind(id)
     .bind(published_by)
-    .execute(pool)
+    .execute(&mut **tx)
     .await
     .map_err(|_| ApiError::Internal)?;
     Ok(result.rows_affected() > 0)
@@ -937,13 +957,19 @@ pub async fn publish_advisory(
 
 /// Cancels a draft or published advisory. Its number is **not** released: a published advisory was
 /// issued, and a cancelled draft that once held a number is not worth the ambiguity of reissuing it.
-pub async fn cancel_advisory(pool: &PgPool, id: &str) -> Result<bool, ApiError> {
+///
+/// Transactional for the same reason as [`publish_advisory`]: the correction post is enqueued with
+/// the cancellation.
+pub async fn cancel_advisory(
+    tx: &mut Transaction<'_, Postgres>,
+    id: &str,
+) -> Result<bool, ApiError> {
     let result = sqlx::query(
         "update tmu.advisories set status = 'cancelled' \
          where id = $1 and status in ('draft', 'published')",
     )
     .bind(id)
-    .execute(pool)
+    .execute(&mut **tx)
     .await
     .map_err(|_| ApiError::Internal)?;
     Ok(result.rows_affected() > 0)
@@ -1664,13 +1690,22 @@ mod tests {
     async fn a_published_or_cancelled_number_is_never_reissued(pool: PgPool) {
         let user = seed_user(&pool).await;
         let published = draft(&pool, "DCC").await;
-        assert!(publish_advisory(&pool, &published.id, &user).await.unwrap());
+        // Transactional since #459, so the Discord enqueue is atomic with the state change.
+        let mut tx = pool.begin().await.unwrap();
+        assert!(
+            publish_advisory(&mut tx, &published.id, &user)
+                .await
+                .unwrap()
+        );
+        tx.commit().await.unwrap();
 
         assert!(
             !delete_advisory(&pool, &published.id).await.unwrap(),
             "a published advisory must not be deletable"
         );
-        assert!(cancel_advisory(&pool, &published.id).await.unwrap());
+        let mut tx = pool.begin().await.unwrap();
+        assert!(cancel_advisory(&mut tx, &published.id).await.unwrap());
+        tx.commit().await.unwrap();
         assert!(!delete_advisory(&pool, &published.id).await.unwrap());
 
         assert_eq!(
