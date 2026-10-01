@@ -21,7 +21,6 @@ use crate::{
         require_permission::RequirePermission,
     },
     errors::ApiError,
-    feed,
     feed::facilities,
     feed::flow::{self, ProgramInputs},
     feed::taxi,
@@ -223,10 +222,12 @@ pub async fn airport_aadc(
     let now = Utc::now();
 
     let configs = config_repo::list_by_icao(pool, &icao).await?;
-    let airports = state.feed.read().await.airports.clone();
-    let wind_dir = feed::forecast::wind_at(&airports, &icao, now)
+    // The same resolution `GET /forecast/{icao}` serves, so this board and the client's own
+    // `matchConfig` always match a configuration against the same wind (#510): observed METAR for now,
+    // the forecast beyond it.
+    let wind_dir = crate::handlers::airport_configs::wind_for(&state, &icao, now)
         .await
-        .and_then(|h| h.dir);
+        .dir;
     let favored = config_repo::favored_config(&configs, wind_dir);
     let (aar, adr, config_id) = favored
         .map(|c| (c.aar, c.adr, Some(c.id.clone())))

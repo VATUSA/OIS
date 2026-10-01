@@ -8,8 +8,37 @@ pub struct MetarInfo {
     pub raw: String,
     /// `VFR` | `MVFR` | `IFR` | `LIFR`.
     pub category: String,
-    /// Human wind, e.g. `270@15G25kt`, if present.
+    /// Human wind, e.g. `270@15G25kt`, if present. Rendered verbatim by the Runway Balancer banner, so
+    /// its formatting is a wire format in practice — derived from [`MetarInfo::wind_obs`] rather than
+    /// parsed separately, so the two can never disagree.
     pub wind: Option<String>,
+    /// The same wind as numbers, for rules that have to compute with it (#510). Separate from the
+    /// display string because `RunwayBoard` exposes only the string, and this stays internal.
+    pub wind_obs: Option<MetarWind>,
+}
+
+/// An observed surface wind, in the units the METAR states it: degrees true and knots.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct MetarWind {
+    /// Degrees true, or `None` for a variable (`VRB`) wind — which has no single direction to match a
+    /// runway configuration against, so a caller must treat it like calm rather than guess one.
+    pub dir: Option<i32>,
+    pub spd_kt: i32,
+    pub gust_kt: Option<i32>,
+}
+
+impl MetarWind {
+    /// The banner string, e.g. `270@15G25kt` or `VRB@3kt`.
+    fn display(&self) -> String {
+        let dir = match self.dir {
+            Some(d) => format!("{d:03}"),
+            None => "VRB".to_string(),
+        };
+        match self.gust_kt {
+            Some(g) => format!("{dir}@{}G{g}kt", self.spd_kt),
+            None => format!("{dir}@{}kt", self.spd_kt),
+        }
+    }
 }
 
 /// Fetch the raw METAR for `icao` and parse category + wind.
@@ -34,9 +63,11 @@ pub async fn fetch_one(client: &reqwest::Client, icao: &str) -> Option<MetarInfo
     if raw.len() < 4 {
         return None;
     }
+    let wind_obs = parse_wind(&raw);
     Some(MetarInfo {
         category: flight_category(&raw).to_string(),
-        wind: parse_wind(&raw),
+        wind: wind_obs.as_ref().map(MetarWind::display),
+        wind_obs,
         raw,
     })
 }
@@ -96,7 +127,12 @@ fn parse_ceiling(tok: &str) -> Option<i32> {
 }
 
 /// Human wind from a `…KT` token (`10004KT`, `27015G25KT`, `VRB03KT`).
-fn parse_wind(metar: &str) -> Option<String> {
+/// The observed wind group, as numbers.
+///
+/// Returned structured rather than pre-formatted (#510): the direction is needed to match an airport
+/// configuration, and this function already had it — the previous version computed `dir`, `spd` and
+/// `gust` and then discarded them into a display string.
+fn parse_wind(metar: &str) -> Option<MetarWind> {
     for tok in metar.split_whitespace() {
         let Some(w) = tok.strip_suffix("KT") else {
             continue;
@@ -119,9 +155,12 @@ fn parse_wind(metar: &str) -> Option<String> {
         let Ok(spd) = spd.parse::<i32>() else {
             continue;
         };
-        return Some(match gust {
-            Some(g) => format!("{dir}@{spd}G{g}kt"),
-            None => format!("{dir}@{spd}kt"),
+        return Some(MetarWind {
+            // `VRB` is a real reading, not a parse failure: the wind is variable, so there is no
+            // direction. Kept as `None` so a caller cannot mistake a placeholder for a bearing.
+            dir: dir.parse::<i32>().ok(),
+            spd_kt: spd,
+            gust_kt: gust,
         });
     }
     None
@@ -140,15 +179,49 @@ mod tests {
         assert_eq!(flight_category("KJFK 10SM OVC008"), "IFR"); // ceiling-only (800 ft), good vis
     }
 
+    /// The display string every one of these used to assert is now derived from the numbers, so both
+    /// are pinned: a change to one that does not reach the other fails here.
     #[test]
     fn winds_parse() {
-        assert_eq!(parse_wind("KJFK 10004KT 10SM").as_deref(), Some("100@4kt"));
+        let w = parse_wind("KJFK 10004KT 10SM").expect("a wind group");
+        assert_eq!((w.dir, w.spd_kt, w.gust_kt), (Some(100), 4, None));
+        assert_eq!(w.display(), "100@4kt");
+
+        let g = parse_wind("KJFK 27015G25KT").expect("a gusting wind");
+        assert_eq!((g.dir, g.spd_kt, g.gust_kt), (Some(270), 15, Some(25)));
+        assert_eq!(g.display(), "270@15G25kt");
+
+        // `VRB` is a reading, not a failure: variable wind has no direction to match a configuration
+        // against, so `dir` is None and a caller must treat it as it treats calm.
+        let v = parse_wind("KJFK VRB03KT").expect("a variable wind");
+        assert_eq!((v.dir, v.spd_kt, v.gust_kt), (None, 3, None));
+        assert_eq!(v.display(), "VRB@3kt");
+
+        assert_eq!(parse_wind("KJFK 10SM CLR"), None, "no wind group at all");
+    }
+
+    /// AC2's remaining cases for #510.
+    #[test]
+    fn winds_parse_calm_and_malformed() {
+        // Calm is reported as a real group with zero speed, not as an absent one.
+        let calm = parse_wind("KJFK 00000KT 10SM").expect("calm is still a wind group");
+        assert_eq!((calm.dir, calm.spd_kt, calm.gust_kt), (Some(0), 0, None));
+        assert_eq!(calm.display(), "000@0kt");
+
+        // A malformed group is skipped, and a later well-formed one still parses — a junk token must
+        // not cost us the observation.
+        let after_junk = parse_wind("KJFK ///KT 27010KT").expect("the valid group after the junk");
+        assert_eq!(after_junk.dir, Some(270));
         assert_eq!(
-            parse_wind("KJFK 27015G25KT").as_deref(),
-            Some("270@15G25kt")
+            parse_wind("KJFK 270XXKT"),
+            None,
+            "unparseable speed yields nothing"
         );
-        assert_eq!(parse_wind("KJFK VRB03KT").as_deref(), Some("VRB@3kt"));
-        assert_eq!(parse_wind("KJFK 10SM CLR"), None);
+        assert_eq!(
+            parse_wind("KJFK 27015G/KT").map(|w| w.gust_kt),
+            Some(None),
+            "an unreadable gust drops the gust, keeping the direction and speed"
+        );
     }
 
     #[test]
@@ -166,9 +239,8 @@ mod tests {
         // A `KT` token split on a non-ASCII byte boundary must not panic (get(), not [..]).
         assert_eq!(parse_wind("KJFK 12€KT 10SM"), None);
         // A malformed leading wind token must not abort the search for a later valid one.
-        assert_eq!(
-            parse_wind("KJFK 100XXKT 27015KT").as_deref(),
-            Some("270@15kt")
-        );
+        let w = parse_wind("KJFK 100XXKT 27015KT").expect("the later valid group");
+        assert_eq!((w.dir, w.spd_kt), (Some(270), 15));
+        assert_eq!(w.display(), "270@15kt");
     }
 }
