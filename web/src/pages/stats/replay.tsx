@@ -10,6 +10,7 @@ import {
   QueryState,
   SegmentedControl,
   Select,
+  useConfirm,
   usePrompt,
 } from "@ois/ui";
 import {useNavigate, useSearch} from "@tanstack/react-router";
@@ -26,6 +27,7 @@ import {
   useCaptures,
   useProgressiveReplay,
   useReplayAtc,
+  useDeleteCapture,
   useSaveCapture,
 } from "@/lib/stats";
 import {webgl2Available} from "@/lib/webgl";
@@ -761,8 +763,11 @@ export function CaptureReplayPage() {
   const { data: me } = useMe();
   const canRead = hasPermission(me, "stats.data.read");
   const canSaveCapture = hasPermission(me, "stats.capture.update");
+  const canDeleteCapture = hasPermission(me, "stats.capture.delete");
   const prompt = usePrompt();
+  const confirm = useConfirm();
   const saveCapture = useSaveCapture();
+  const deleteCapture = useDeleteCapture();
 
   const search = useSearch({ strict: false }) as ReplaySearch;
   const navigate = useNavigate();
@@ -781,6 +786,37 @@ export function CaptureReplayPage() {
       ? { from: search.from, to: search.to }
       : defaultWindow(),
   );
+
+  async function deleteSelectedCapture() {
+    const capture = (captures.data ?? []).find((c) => c.id === captureId);
+    if (!capture) return;
+
+    // Name the event when there is one. An event's debrief and stats read from this window, so
+    // "delete this capture" means something much larger there than it does for an ad-hoc one (#432).
+    const description = capture.event_title
+      ? `This capture belongs to ${capture.event_title}. Deleting it releases its position data, and that event's replay will no longer be available. This cannot be undone.`
+      : "Deleting this capture releases its position data. Its replay will no longer be available, and this cannot be undone.";
+
+    if (
+      !(await confirm({
+        title: `Delete ${capture.event_title || capture.label || "capture"}?`,
+        description,
+        confirmText: "Delete",
+        destructive: true,
+      }))
+    ) {
+      return;
+    }
+
+    try {
+      await deleteCapture.mutateAsync(capture.id);
+      // Fall back to a custom window: the capture this page was showing no longer exists.
+      setCaptureId("");
+      patch({ capture: undefined, from: win.from, to: win.to });
+    } catch {
+      // surfaced via the mutation's onError toast
+    }
+  }
 
   async function saveAsCapture() {
     const label = (
@@ -857,6 +893,17 @@ export function CaptureReplayPage() {
             </option>
           ))}
         </Select>
+
+        {usingCapture && canDeleteCapture && (
+          <Button
+            size="sm"
+            variant="secondary"
+            onClick={() => void deleteSelectedCapture()}
+            disabled={deleteCapture.isPending}
+          >
+            Delete capture…
+          </Button>
+        )}
 
         {!usingCapture && (
           <>

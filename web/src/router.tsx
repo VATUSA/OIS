@@ -4,8 +4,10 @@ import {LayoutGrid, List, Rows3} from "lucide-react";
 
 import {FeedWatcher} from "@/components/feed-watcher";
 import {AppShell} from "@/components/shell/app-shell";
+import {WindowChromeBar} from "@/components/shell/window-chrome-bar";
 import type {RouteMeta} from "@/components/shell/page-meta";
 import {RestrictionAlerts} from "@/components/restriction-alerts";
+import {PrimaryWindowFeatures} from "@/components/primary-window-features";
 import {WhatsNew} from "@/components/whats-new";
 import {useMe} from "@/lib/auth";
 import {movedPath} from "@/lib/moved-paths";
@@ -13,6 +15,8 @@ import {AdvisoriesPage} from "@/pages/advisories";
 import {AdvisoriesFcaPage} from "@/pages/advisories/fcas";
 import {PilotPage} from "@/pages/pilot";
 import {PrivacyPage} from "@/pages/privacy";
+import {DownloadPage} from "@/pages/download";
+import {PopoutFcaLadderPage, PopoutWidgetPage} from "@/pages/popout";
 import {ProfilePage} from "@/pages/profile";
 import {SettingsPage} from "@/pages/settings";
 import {ApiKeysPage} from "@/pages/api-keys";
@@ -51,6 +55,7 @@ import {AdminAccessControl} from "@/pages/admin/access-control";
 import {AdminAudit} from "@/pages/admin/audit";
 import {AdminJobs} from "@/pages/admin/jobs";
 import {AdminApiKeys} from "@/pages/admin/api-keys";
+import {AdminServiceAccounts} from "@/pages/admin/service-accounts";
 import {AdminDiscord} from "@/pages/admin/discord";
 
 const isTruthy = (v: unknown) => v === true || v === 1 || v === "1" || v === "true";
@@ -71,6 +76,9 @@ function RootLayout() {
   if (me.isError) {
     return (
       <div className="flex min-h-dvh flex-col items-center justify-center gap-4 bg-ground px-6 text-center text-ink">
+        {/* This layout is outside `AppShell`, so it carries the frameless window's controls itself
+            (#423) — without them the window has no title bar and no way to close it. */}
+        <WindowChromeBar />
         <p className="text-xl font-bold">Can’t reach OIS</p>
         <p className="max-w-md text-sm text-ink-2">
           The server isn’t responding right now. This page keeps trying and will reconnect
@@ -83,8 +91,16 @@ function RootLayout() {
     );
   }
 
-  // Signed-out visitors land on the public homepage — no app shell, with the site footer.
-  if (pathname === "/" && !me.isLoading && me.data === null) return <LandingPage />;
+  // Signed-out visitors land on the public homepage — no app shell, with the site footer. Outside
+  // `AppShell` it has to carry the frameless window's controls itself (#423): this is the first screen
+  // a new desktop user sees, and without them the window cannot be closed from inside the app.
+  if (pathname === "/" && !me.isLoading && me.data === null)
+    return (
+      <>
+        <WindowChromeBar />
+        <LandingPage />
+      </>
+    );
 
   if (embed) {
     return (
@@ -95,9 +111,15 @@ function RootLayout() {
   }
   return (
     <>
+      {/* In-app and per-window: a toast or an alert is only visible in the window it fires in, so
+          a controller working in a route window (#350) still needs to see these. */}
       <FeedWatcher />
       <RestrictionAlerts />
       <WhatsNew />
+      {/* OS-global, so once per app rather than once per window: mounted in every window, a
+          notification fired per window and every window raced to rebuild the one tray menu. The
+          group keeps its own window gate, so that gate is covered by a test. */}
+      <PrimaryWindowFeatures />
       <AppShell>
         <Outlet />
       </AppShell>
@@ -146,6 +168,7 @@ const TMU_TAB_IDS = [
   "ground-stops",
   "gdp",
   "rate-calculator",
+  "advisories",
 ] as const;
 type TmuTabId = (typeof TMU_TAB_IDS)[number];
 
@@ -195,6 +218,10 @@ const fcaRoute = createRoute({
   path: "fca",
   component: FcaPage,
   staticData: { layout: "full", title: "FCA flow" },
+  // `?fca=<id>` selects that FCA on arrival — a desktop release/metering notification links here.
+  validateSearch: (search: Record<string, unknown>): { fca?: string } => ({
+    fca: typeof search.fca === "string" && search.fca ? search.fca : undefined,
+  }),
 });
 
 const runwayRoute = createRoute({
@@ -314,7 +341,31 @@ const apiKeysRoute = createRoute({
   component: ApiKeysPage,
 });
 
+// Pop-out mini-windows (#349). Opened by the desktop app with `?embed=1`, so RootLayout renders
+// them without the shell — just the panel, filling a small always-on-top window. Not linked from
+// anywhere in the UI; the pop-out button creates the window.
+const popoutWidgetRoute = createRoute({
+  getParentRoute: () => rootRoute,
+  path: "popout/widget/$boardId/$widgetId",
+  staticData: { layout: "full", title: "Panel" },
+  component: PopoutWidgetPage,
+});
+
+const popoutFcaRoute = createRoute({
+  getParentRoute: () => rootRoute,
+  path: "popout/fca/$fcaId",
+  staticData: { layout: "full", title: "Metering" },
+  component: PopoutFcaLadderPage,
+});
+
 // Public legal/info pages (linked from the footer).
+const downloadRoute = createRoute({
+  getParentRoute: () => rootRoute,
+  path: "download",
+  staticData: { title: "Download" },
+  component: DownloadPage,
+});
+
 const privacyRoute = createRoute({
   getParentRoute: () => rootRoute,
   path: "privacy",
@@ -518,6 +569,13 @@ const adminApiKeysRoute = createRoute({
   component: AdminApiKeys,
 });
 
+const adminServiceAccountsRoute = createRoute({
+  getParentRoute: () => adminRoute,
+  path: "service-accounts",
+  staticData: { title: "Service accounts" },
+  component: AdminServiceAccounts,
+});
+
 const adminDiscordRoute = createRoute({
   getParentRoute: () => adminRoute,
   path: "discord",
@@ -579,6 +637,9 @@ const routeTree = rootRoute.addChildren([
   profileRoute,
   settingsRoute,
   apiKeysRoute,
+  popoutWidgetRoute,
+  popoutFcaRoute,
+  downloadRoute,
   privacyRoute,
   adminRoute.addChildren([
     adminIndexRoute,
@@ -586,6 +647,7 @@ const routeTree = rootRoute.addChildren([
     adminAuditRoute,
     adminJobsRoute,
     adminApiKeysRoute,
+    adminServiceAccountsRoute,
     adminDiscordRoute,
     planningRoute.addChildren([
       planningIndexRoute,

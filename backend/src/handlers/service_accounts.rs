@@ -12,7 +12,6 @@ use uuid::Uuid;
 
 use crate::{
     auth::{
-        acl::SERVER_ADMIN_ROLE,
         permissions::{
             ServiceAccountsCreate, ServiceAccountsDelete, ServiceAccountsRead,
             ServiceAccountsUpdate,
@@ -122,6 +121,39 @@ pub async fn disable_service_account(
     Ok(StatusCode::NO_CONTENT)
 }
 
+/// The first requested role that may not be assigned, if any. Extracted so the rejection is
+/// testable without an HTTP harness — an empty request is valid and clears the account's roles.
+fn first_unassignable<'a>(
+    requested: &'a [String],
+    assignable: &BTreeSet<String>,
+) -> Option<&'a str> {
+    requested
+        .iter()
+        .map(String::as_str)
+        .find(|role| !assignable.contains(*role))
+}
+
+#[utoipa::path(
+    get,
+    path = "/api/v1/admin/service-accounts/roles",
+    tag = "service-accounts",
+    responses(
+        (status = 200, description = "Role names a service account may hold", body = Vec<String>),
+        (status = 401)
+    )
+)]
+/// The roles assignable to a service account — what the admin UI's picker renders. Gated on
+/// Update because holding it is what lets you act on the list.
+pub async fn list_service_account_roles(
+    State(state): State<AppState>,
+    _permission: RequirePermission<ServiceAccountsUpdate>,
+) -> Result<Json<Vec<String>>, ApiError> {
+    let pool = state.db.as_ref().ok_or(ApiError::ServiceUnavailable)?;
+    Ok(Json(
+        access_repo::fetch_service_account_assignable_roles(pool).await?,
+    ))
+}
+
 #[utoipa::path(
     put,
     path = "/api/v1/admin/service-accounts/{id}/roles",
@@ -138,15 +170,14 @@ pub async fn set_service_account_roles(
 ) -> Result<Json<ServiceAccountBody>, ApiError> {
     let pool = state.db.as_ref().ok_or(ApiError::ServiceUnavailable)?;
 
-    // Roles must exist and never include SERVER_ADMIN (env-bootstrapped only).
-    let known: BTreeSet<String> = access_repo::fetch_role_names(pool)
+    // Validated against the same list `list_service_account_roles` offers the picker, so the
+    // UI can never present a role this rejects. SERVER_ADMIN is already filtered out of it.
+    let assignable: BTreeSet<String> = access_repo::fetch_service_account_assignable_roles(pool)
         .await?
         .into_iter()
         .collect();
-    for role_name in &payload.role_names {
-        if role_name == SERVER_ADMIN_ROLE || !known.contains(role_name) {
-            return Err(ApiError::BadRequest);
-        }
+    if first_unassignable(&payload.role_names, &assignable).is_some() {
+        return Err(ApiError::BadRequest);
     }
 
     sa_repo::set_roles(pool, &id, &payload.role_names).await?;
@@ -154,4 +185,57 @@ pub async fn set_service_account_roles(
         .await?
         .ok_or(ApiError::NotFound)?;
     Ok(Json(account))
+}
+
+#[cfg(test)]
+mod tests {
+    use std::collections::BTreeSet;
+
+    use super::first_unassignable;
+
+    fn assignable(names: &[&str]) -> BTreeSet<String> {
+        names.iter().map(|n| n.to_string()).collect()
+    }
+
+    fn requested(names: &[&str]) -> Vec<String> {
+        names.iter().map(|n| n.to_string()).collect()
+    }
+
+    #[test]
+    fn a_machine_role_the_picker_offers_is_accepted() {
+        let ok = assignable(&["BOT", "SERVICE_APP", "NTMO"]);
+        assert_eq!(first_unassignable(&requested(&["BOT"]), &ok), None);
+        assert_eq!(first_unassignable(&requested(&["BOT", "NTMO"]), &ok), None);
+    }
+
+    /// SERVER_ADMIN is env-bootstrapped only, so it is filtered out of the assignable list and must
+    /// therefore be rejected here even though it is a perfectly real role.
+    #[test]
+    fn server_admin_is_rejected_because_it_is_never_assignable() {
+        let ok = assignable(&["BOT", "SERVICE_APP"]);
+        assert_eq!(
+            first_unassignable(&requested(&["SERVER_ADMIN"]), &ok),
+            Some("SERVER_ADMIN")
+        );
+        // Rejected even when smuggled in alongside a role that is allowed.
+        assert_eq!(
+            first_unassignable(&requested(&["BOT", "SERVER_ADMIN"]), &ok),
+            Some("SERVER_ADMIN")
+        );
+    }
+
+    #[test]
+    fn an_unknown_role_is_rejected() {
+        let ok = assignable(&["BOT"]);
+        assert_eq!(
+            first_unassignable(&requested(&["NOT_A_ROLE"]), &ok),
+            Some("NOT_A_ROLE")
+        );
+    }
+
+    /// Clearing an account's roles is a legitimate request, not an empty-input error.
+    #[test]
+    fn an_empty_request_clears_roles_rather_than_failing() {
+        assert_eq!(first_unassignable(&[], &assignable(&["BOT"])), None);
+    }
 }

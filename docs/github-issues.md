@@ -189,8 +189,20 @@ pointer rather than filing again.
 - **Agents do not self-assign, close issues, or merge PRs, and don't move an issue to Shippable or
   Done** — a human owns review, ship, and close. An agent may move **To Do → In build** when it
   genuinely starts, run the **Post build** wrap-up (client regen, migrations, `just ci`), and open
-  the PR (**Code Review**). Work lands on **`main`** per the project's no-branch rule (see
-  `AGENTS.md`).
+  the PR (**Code Review**). Work lands on **`next`**, the integration branch, per the project's
+  no-branch rule (see `AGENTS.md` § Git workflow); `main` is promoted from `next` separately.
+- **The columns say where work is. They do not gate the merge.** What gates a merge is green CI plus
+  the review loop — nothing checks a card's column before a PR can land, and nothing is going to:
+  enforcing it would need a project-scoped secret (Actions' default `GITHUB_TOKEN` cannot read
+  Projects v2) plus a Projects query on every PR event, against an API budget that board polling
+  already exhausts.
+
+  So a PR that merged while its card still read **Testing Queue** is a **bookkeeping error to
+  correct, not a policy breach**. Correcting it means **saying so on the issue** — an agent still
+  does not move a card to **Shippable** or **Done**, even when the PR is demonstrably merged, because
+  that transition is a human's (above). Leaving a merged issue sitting in **Returned** is the one
+  outcome to avoid: it reads as "needs rework" and invites a second agent to redo work that is
+  already on `next`.
 - **Comment sparingly** — an issue is a spec, not a chat log. Comment only at real moments: picking
   it up, hitting a genuine blocker (say what and why), or finishing (what changed + the verifying
   test). No running narration, no per-attempt logs, no flight/user IDs or "Reproduced YYYY-MM-DD"

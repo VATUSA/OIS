@@ -54,9 +54,33 @@ pub fn member_airports(map: &FacilityMap, id: &str) -> Vec<String> {
 
 /// The ARTCC (center) that owns `icao`, if the map knows it. `icao` must be uppercase.
 pub fn artcc_for_airport(map: &FacilityMap, icao: &str) -> Option<String> {
-    map.iter()
-        .find(|(_, f)| f.kind == "artcc" && f.airports.iter().any(|a| a == icao))
-        .map(|(id, _)| id.clone())
+    let owner = |icao: &str| {
+        map.iter()
+            .find(|(_, f)| f.kind == "artcc" && f.airports.iter().any(|a| a == icao))
+            .map(|(id, _)| id.clone())
+    };
+    // The restriction forms take a 3-letter FAA id (`DCA`) as readily as an ICAO (`KDCA`), but the
+    // map only lists ICAOs — so a 3-letter id is also tried as its contiguous-US ICAO. Unresolved, a
+    // ground stop entered as `DCA` stamped no ARTCC at all (VATUSA/OIS#405 review).
+    owner(icao).or_else(|| {
+        (icao.len() == 3)
+            .then(|| owner(&format!("K{icao}")))
+            .flatten()
+    })
+}
+
+/// The ARTCC that owns a *facility* id: a center is its own ARTCC, and a TRACON resolves through
+/// the airports underneath it (the map holds no parent link, only `kind` + `airports`). An id the
+/// map doesn't list is tried as a plain airport. `id` must be uppercase.
+///
+/// Where `artcc_for_airport` answers for a field, this answers for whatever a TMI names as its
+/// requesting/providing facility — which is a TRACON as often as a center.
+pub fn artcc_for_facility(map: &FacilityMap, id: &str) -> Option<String> {
+    match map.get(id) {
+        Some(f) if f.kind == "artcc" => Some(id.to_string()),
+        Some(f) => f.airports.iter().find_map(|a| artcc_for_airport(map, a)),
+        None => artcc_for_airport(map, id),
+    }
 }
 
 /// Spawn the daily refresh job. Fires once at startup, then every 24h; on failure it keeps
@@ -272,6 +296,26 @@ mod tests {
         let map = bundled();
         assert_eq!(artcc_for_airport(&map, "KJFK").as_deref(), Some("ZNY"));
         assert_eq!(artcc_for_airport(&map, "XXXX"), None);
+    }
+
+    #[test]
+    fn resolves_owning_artcc_for_a_facility() {
+        let map = bundled();
+        // A center is its own ARTCC.
+        assert_eq!(artcc_for_facility(&map, "ZNY").as_deref(), Some("ZNY"));
+        // A TRACON resolves through the airports underneath it — the map has no parent link.
+        assert_eq!(artcc_for_facility(&map, "N90").as_deref(), Some("ZNY"));
+        // An id the map doesn't list is tried as a plain airport.
+        assert_eq!(artcc_for_facility(&map, "KJFK").as_deref(), Some("ZNY"));
+        assert_eq!(artcc_for_facility(&map, "XXXX"), None);
+    }
+
+    #[test]
+    fn resolves_a_three_letter_faa_id_as_its_icao() {
+        let map = bundled();
+        assert_eq!(artcc_for_airport(&map, "JFK").as_deref(), Some("ZNY"));
+        assert_eq!(artcc_for_airport(&map, "KJFK").as_deref(), Some("ZNY"));
+        assert_eq!(artcc_for_airport(&map, "XXX"), None);
     }
 
     #[test]

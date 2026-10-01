@@ -1,0 +1,152 @@
+{
+  "note": "Shared NTML reference cases. The grammar is implemented twice - backend/src/tmi.rs (encode/render_english) and web/src/lib/ntml.ts (encodeNtml/decodeNtml) - and both test suites assert against this file, so an example is written once and neither side can quietly disagree with it. Add a case here and both suites pick it up with no test file edited. Every field is written out, null where absent, so a case reads as a complete restriction. The backend is authoritative: if a case and an implementation disagree, the backend decides which is wrong.",
+  "cases": [
+    {
+      "name": "camrn-mit-full",
+      "why": "The vATCSCC reference row, every field populated at once.",
+      "restriction": {
+        "element": "JFK",
+        "direction": "arrivals",
+        "via": "CAMRN",
+        "kind": "MIT",
+        "value": 20,
+        "text": null,
+        "qualifier": "NO STACKS",
+        "aircraft": "ALL",
+        "speed": {"op": "≤", "value": 210},
+        "altitude": {"op": "AOB", "value": 90},
+        "condition": "VOLUME",
+        "condition_detail": "VOLUME",
+        "exclude": ["PHL"]
+      },
+      "raw": "JFK arrivals via CAMRN 20MIT NO STACKS TYPE:ALL SPD:≤210 ALT:AOB090 VOLUME:VOLUME EXCL:PHL",
+      "english": "JFK arrivals via CAMRN: 20 miles-in-trail (no stacks, all aircraft, at or below 210kt, at or below FL090) — due to volume; excluding PHL"
+    },
+    {
+      "name": "enroute-stop",
+      "why": "Enroute emits no direction word, and a condition whose detail differs from its category renders both.",
+      "restriction": {
+        "element": "PHL",
+        "direction": "enroute",
+        "via": "J152",
+        "kind": "STOP",
+        "value": null,
+        "text": null,
+        "qualifier": null,
+        "aircraft": "ALL",
+        "speed": null,
+        "altitude": null,
+        "condition": "WEATHER",
+        "condition_detail": "THUNDERSTORMS",
+        "exclude": ["PNE"]
+      },
+      "raw": "PHL via J152 STOP TYPE:ALL WEATHER:THUNDERSTORMS EXCL:PNE",
+      "english": "PHL via J152: stop (all aircraft) — due to weather (thunderstorms); excluding PNE"
+    },
+    {
+      "name": "per-airport-departures",
+      "why": "A multi-airport element stays one comma-joined token, and a qualifier is emitted bare.",
+      "restriction": {
+        "element": "EWR,LGA",
+        "direction": "departures",
+        "via": "BIGGY",
+        "kind": "MIT",
+        "value": 15,
+        "text": null,
+        "qualifier": "PER AIRPORT",
+        "aircraft": "JET",
+        "speed": null,
+        "altitude": null,
+        "condition": "VOLUME",
+        "condition_detail": "VOLUME",
+        "exclude": []
+      },
+      "raw": "EWR,LGA departures via BIGGY 15MIT PER AIRPORT TYPE:JET VOLUME:VOLUME",
+      "english": "EWR,LGA departures via BIGGY: 15 miles-in-trail (per airport, jets only) — due to volume"
+    },
+    {
+      "name": "ascii-speed-op-alias",
+      "why": "The speed operator is a free string on the API, so ASCII <= and >= reach the codec as well as ≤ and ≥, and are trimmed before use. This case is why the fixture is shared: the two implementations disagreed here, on both the encoded line and the English.",
+      "restriction": {
+        "element": "BOS",
+        "direction": "arrivals",
+        "via": "ROBUC",
+        "kind": "MIT",
+        "value": 15,
+        "text": null,
+        "qualifier": null,
+        "aircraft": null,
+        "speed": {"op": "<= ", "value": 250},
+        "altitude": null,
+        "condition": null,
+        "condition_detail": null,
+        "exclude": []
+      },
+      "raw": "BOS arrivals via ROBUC 15MIT SPD:<=250",
+      "english": "BOS arrivals via ROBUC: 15 miles-in-trail (at or below 250kt)"
+    },
+    {
+      "name": "free-text",
+      "why": "TXT writes its text into the slot a kind keyword occupies, and does not uppercase it.",
+      "restriction": {
+        "element": "N90",
+        "direction": "enroute",
+        "via": null,
+        "kind": "TXT",
+        "value": null,
+        "text": "MANUAL SPACING IN EFFECT",
+        "qualifier": null,
+        "aircraft": null,
+        "speed": null,
+        "altitude": null,
+        "condition": null,
+        "condition_detail": null,
+        "exclude": []
+      },
+      "raw": "N90 MANUAL SPACING IN EFFECT",
+      "english": "N90: MANUAL SPACING IN EFFECT"
+    },
+    {
+      "name": "minimal",
+      "why": "The bare skeleton: nothing optional set, so no parenthesised modifiers and no trailing clauses.",
+      "restriction": {
+        "element": "ORD",
+        "direction": "departures",
+        "via": null,
+        "kind": "MIT",
+        "value": 10,
+        "text": null,
+        "qualifier": null,
+        "aircraft": null,
+        "speed": null,
+        "altitude": null,
+        "condition": null,
+        "condition_detail": null,
+        "exclude": []
+      },
+      "raw": "ORD departures 10MIT",
+      "english": "ORD departures: 10 miles-in-trail"
+    },
+    {
+      "name": "minit-aoa-multi-exclude",
+      "why": "MINIT reads as minutes not miles, an altitude at or above pads to three digits, and several exclusions join with a comma in the line but a comma-space in the English.",
+      "restriction": {
+        "element": "ATL",
+        "direction": "arrivals",
+        "via": null,
+        "kind": "MINIT",
+        "value": 3,
+        "text": null,
+        "qualifier": null,
+        "aircraft": "JET",
+        "speed": null,
+        "altitude": {"op": "AOA", "value": 240},
+        "condition": "WEATHER",
+        "condition_detail": "THUNDERSTORMS",
+        "exclude": ["MCO", "TPA"]
+      },
+      "raw": "ATL arrivals 3MINIT TYPE:JET ALT:AOA240 WEATHER:THUNDERSTORMS EXCL:MCO,TPA",
+      "english": "ATL arrivals: 3 minutes-in-trail (jets only, at or above FL240) — due to weather (thunderstorms); excluding MCO, TPA"
+    }
+  ]
+}

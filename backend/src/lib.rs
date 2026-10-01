@@ -1,3 +1,4 @@
+pub mod advisory;
 pub mod audit;
 pub mod auth;
 pub mod config;
@@ -6,6 +7,7 @@ pub mod feed;
 pub mod handlers;
 pub mod job_registry;
 pub mod jobs;
+pub mod metrics;
 pub mod models;
 pub mod openapi;
 pub mod realtime;
@@ -15,6 +17,7 @@ pub mod router;
 #[cfg(test)]
 pub(crate) mod scope_test_support;
 pub mod state;
+pub(crate) mod text;
 pub mod tmi;
 
 use std::net::SocketAddr;
@@ -34,6 +37,10 @@ pub async fn run() -> color_eyre::Result<()> {
 
     let state = state::AppState::from_env().await?;
     run_startup_migrations(&state).await?;
+
+    // Drains the Prometheus recorder on a timer (#382). Required even when nothing scrapes:
+    // the observability stack is opt-in, and an unscraped recorder retains every latency sample.
+    metrics::spawn_upkeep(state.metrics.clone());
 
     feed::spawn_poller(state.feed.clone());
     feed::facilities::spawn_refresh(state.facilities.clone());
@@ -55,6 +62,19 @@ pub async fn run() -> color_eyre::Result<()> {
     );
     if let Some(pool) = state.db.clone() {
         jobs::spawn_cleanup(state.jobs.clone(), pool.clone());
+        // One-time desktop sign-in codes expire in 60s; this removes the dead rows (#346).
+        jobs::spawn_desktop_auth_code_prune(state.jobs.clone(), pool.clone());
+        jobs::spawn_outbound_job_reaper(state.jobs.clone(), pool.clone());
+        jobs::spawn_audit_log_prune(state.jobs.clone(), pool.clone());
+        jobs::spawn_departure_runway_prune(state.jobs.clone(), pool.clone());
+        // Predict a departure runway for pending departures (#511). After the gates refresh above, so
+        // the first pass has a catalog to match stands against.
+        jobs::spawn_departure_runway_derive(
+            state.jobs.clone(),
+            pool.clone(),
+            state.feed.clone(),
+            state.gates.clone(),
+        );
         // Load configurable aircraft performance profiles and keep them current for the ETA model.
         jobs::spawn_aircraft_profiles_refresh(
             state.jobs.clone(),
@@ -73,6 +93,10 @@ pub async fn run() -> color_eyre::Result<()> {
         );
         // Seed airport ramp/taxiway geometry from the bundled FAA AM extract (#230/#231).
         jobs::spawn_faa_surface_seed(state.jobs.clone(), pool.clone());
+        // Seed airport parking stands from the bundled X-Plane extract (#431). After
+        // spawn_airport_gates_refresh above, so a seed's own cache reload is not immediately
+        // overwritten by a poll that started before the rows landed.
+        jobs::spawn_xplane_gate_seed(state.jobs.clone(), pool.clone(), state.gates.clone());
         // Learned taxi-observation samples, for feed::flow's ground-allowance estimate (#164
         // sub-issue E, kept DB-less).
         jobs::spawn_taxi_estimate_samples_refresh(
@@ -98,7 +122,7 @@ pub async fn run() -> color_eyre::Result<()> {
         jobs::spawn_event_fca_lifecycle(state.jobs.clone(), pool.clone(), state.events.clone());
         jobs::spawn_event_package_lifecycle(state.jobs.clone(), pool.clone(), state.events.clone());
         // ACE-claim reminder DMs at T-24h/T-6h before the event.
-        jobs::spawn_ace_reminder_scheduler(state.jobs.clone(), pool.clone());
+        jobs::spawn_ace_reminder_scheduler(state.jobs.clone(), pool.clone(), state.events.clone());
         // VATUSA member sync: register the roster-change webhook and periodically reconcile.
         feed::vatusa::spawn_register_webhooks(pool.clone());
         feed::vatusa::spawn_reconcile(pool);

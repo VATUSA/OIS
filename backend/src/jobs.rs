@@ -25,6 +25,7 @@ use crate::repos::airport_surface as airport_surface_repo;
 use crate::repos::events as events_repo;
 use crate::repos::flight_exclusions as flight_exclusions_repo;
 use crate::repos::flow as flow_repo;
+use crate::repos::integration as integration_repo;
 use crate::repos::stats as stats_repo;
 use crate::repos::tmu as tmu_repo;
 
@@ -40,6 +41,40 @@ const STATS_COMPACTION_INTERVAL: Duration = Duration::from_secs(60 * 60);
 const STATS_PRUNE_AFTER_DAYS: i64 = 14;
 /// Delay legs are tiny (one row per flight leg) and useful over a longer window than raw positions.
 const DELAY_LEG_RETAIN_DAYS: i64 = 30;
+
+/// How long a leased outbound job may stay `in_progress` before it is treated as abandoned (#446).
+///
+/// The bot leases, performs one Discord call and acks — seconds of work. Five minutes is far beyond
+/// any legitimate run, so a job still `in_progress` after it did not finish: its worker died between
+/// leasing and acking, and nothing else will ever move it.
+const OUTBOUND_JOB_LEASE_TIMEOUT_MINS: i64 = 5;
+
+/// How long `access.audit_logs` rows are kept (#444).
+///
+/// Six months: long enough to span a full VATUSA event season, so "what changed before that event"
+/// is still answerable, and short enough that the table stops growing without bound — it had no
+/// retention at all, and grew for the life of the deployment.
+///
+/// One window for every `resource_type` deliberately. A per-type table would have to track the types
+/// `audit::derive` invents from the request path, which nothing centrally registers, so it would
+/// drift silently the first time a route was added.
+const AUDIT_RETAIN_DAYS: i64 = 180;
+
+/// How often the departure-runway ladder runs (#511).
+///
+/// A minute, matching `FLIGHT_EXCLUSIONS_INTERVAL`: an assignment only has to be in place before a
+/// controller sequences the flight, and the ladder's inputs (a filed route, a parked position, a wind)
+/// do not move faster than that. The cost per pass is bounded by the fields that actually have a
+/// departure right now, not by the 185 that have a configuration.
+const DEPARTURE_RUNWAY_DERIVE_INTERVAL: Duration = Duration::from_secs(60);
+
+/// How long a departure-runway assignment outlives its last touch (#509).
+///
+/// Hours, not days: an assignment describes a flight that is about to depart, so one untouched for
+/// this long belongs to an aircraft that has gone. `flow.departure_runway_assignment` is the first
+/// callsign-keyed table with no parent row to cascade from — `flow.fca_release` and `tmu.gdp_slot`
+/// both vanish with their initiative — so this is the only thing that removes a row.
+const DEPARTURE_RUNWAY_RETAIN_HOURS: i64 = 12;
 
 /// Weekly compaction ladder for `stats.position`: `(age_days, keep_every)`. When a position's age
 /// first crosses `age_days`, keep only every `keep_every`-th sample of the survivors handed down
@@ -86,6 +121,12 @@ const FLIGHT_EXCLUSIONS_INTERVAL: Duration = Duration::from_secs(60);
 /// meaningful trigger is `run_interval`'s immediate first tick on every boot (picking up airports a
 /// redeployed extract newly covers), plus the admin Background Tasks page's (#40) on-demand run.
 const FAA_SURFACE_SEED_INTERVAL: Duration = Duration::from_secs(24 * 60 * 60);
+
+/// How often to run the X-Plane gate seed (#431). Like the FAA surface seed, it only fills airports
+/// with no `xplane` stands yet, so the interval isn't about freshness — the meaningful trigger is
+/// `run_interval`'s immediate first tick on every boot, plus the admin Background Tasks page's
+/// on-demand run.
+const XPLANE_GATE_SEED_INTERVAL: Duration = Duration::from_secs(24 * 60 * 60);
 
 /// How often to refresh the airport coordinate database (#216). Fast enough that a transient
 /// startup failure self-heals within minutes instead of requiring a restart; slow enough not to
@@ -413,6 +454,44 @@ pub fn spawn_airport_gates_refresh(
     ));
 }
 
+/// Seed airport parking stands from the bundled X-Plane Scenery Gateway extract (#431), taking gate
+/// coverage from one airport to 183.
+///
+/// Unlike the FAA surface layers, gates are **cached** in `AppState::gates` for the DB-less feed
+/// subsystem, so a successful seed reloads that cache immediately rather than leaving a freshly seeded
+/// airport unmatched until `spawn_airport_gates_refresh`'s next poll.
+pub fn spawn_xplane_gate_seed(
+    reg: Arc<JobRegistry>,
+    pool: PgPool,
+    gates: Arc<ArcSwap<std::collections::HashMap<String, Vec<AirportGateBody>>>>,
+) {
+    tokio::spawn(run_interval(
+        reg,
+        "xplane_gate_seed",
+        "Seed airport parking stands from the bundled X-Plane extract",
+        XPLANE_GATE_SEED_INTERVAL,
+        move || {
+            let (pool, gates) = (pool.clone(), gates.clone());
+            async move {
+                let summary = crate::repos::xplane_gate_seed::seed(&pool)
+                    .await
+                    .map_err(|e| format!("{e:?}"))?;
+                // Only reload the cache when something actually changed — a no-op run is the common
+                // case (every boot after the first), and re-reading every gate for nothing is waste.
+                if summary.gates_inserted > 0 || summary.osm_gates_retired > 0 {
+                    match airport_surface_repo::load_all_gates(&pool).await {
+                        Ok(by_icao) => gates.store(Arc::new(by_icao)),
+                        Err(e) => {
+                            return Err(format!("seeded, but the gate cache reload failed: {e:?}"));
+                        }
+                    }
+                }
+                Ok(summary.to_string())
+            }
+        },
+    ));
+}
+
 /// Keep the manual flight-exclusion cache current for the DB-less flow surfaces (#342), and run the
 /// auto-clear: an exclusion whose callsign has left the VATSIM feed is deleted, so a corrected or
 /// returning flight is never hidden forever. `expires_at` is the TTL backstop for a callsign that
@@ -624,6 +703,73 @@ pub fn spawn_capture_scheduler(reg: Arc<JobRegistry>, pool: PgPool) {
     ));
 }
 
+/// Freeze one event's movement counts over its own window (#433).
+///
+/// Movements are counted from `stats.flight_leg`, which is pruned at [`DELAY_LEG_RETAIN_DAYS`], so
+/// without this an event's numbers would quietly fall to zero a month after it ran. Taken over the
+/// event's own window, matching what the stats endpoint reports.
+///
+/// Best-effort: a failure here costs the frozen copy, not the capture lifecycle the scheduler is
+/// actually responsible for, and the endpoint still computes from legs until they age out. So it logs
+/// and returns rather than propagating. The next tick retries, since the missing row is exactly what
+/// makes the event match again.
+///
+/// Returns whether a row was actually written, so the pass's summary — which the admin Jobs page
+/// shows as `last_detail` — counts freezes rather than attempts.
+async fn snapshot_event_movements(
+    pool: &PgPool,
+    event_id: i64,
+    start_time: chrono::DateTime<Utc>,
+    end_time: chrono::DateTime<Utc>,
+) -> bool {
+    let icaos: Vec<String> = match events_repo::list_airport_rates(pool, event_id).await {
+        Ok(rates) => rates.into_iter().map(|r| r.icao).collect(),
+        Err(_) => {
+            tracing::warn!(
+                event = event_id,
+                "stats: snapshot skipped, airports unreadable"
+            );
+            return false;
+        }
+    };
+    if icaos.is_empty() {
+        return false;
+    }
+
+    match stats_repo::event_airport_breakdown(pool, &icaos, start_time, end_time).await {
+        Ok(rows) => {
+            // Never freeze an all-zero breakdown. For an event whose legs have already been pruned
+            // the recomputed movements are zero for that reason alone, and freezing them would make
+            // an artifact of retention permanent — the row is what makes the freeze pass stop
+            // matching the event, so no later pass could do better. Leaving it unfrozen costs nothing: the read
+            // path computes the same zero, and keeps the option open (#433 review).
+            if rows.iter().all(|r| r.arrivals + r.departures == 0) {
+                tracing::debug!(
+                    event = event_id,
+                    "stats: no observed movements to freeze, left to compute"
+                );
+                return false;
+            }
+            match stats_repo::snapshot_event_movements(pool, event_id, start_time, end_time, &rows)
+                .await
+            {
+                Ok(n) => {
+                    tracing::info!(event = event_id, airports = n, "stats: froze movements");
+                    true
+                }
+                Err(_) => {
+                    tracing::warn!(event = event_id, "stats: snapshot write failed");
+                    false
+                }
+            }
+        }
+        Err(_) => {
+            tracing::warn!(event = event_id, "stats: snapshot breakdown failed");
+            false
+        }
+    }
+}
+
 /// One capture-scheduler pass: open a capture for each event now inside its window, and close+save
 /// captures whose window has ended. Idempotent. Returns a summary of what changed.
 async fn capture_scheduler_once(pool: &PgPool) -> Result<String, String> {
@@ -669,10 +815,37 @@ async fn capture_scheduler_once(pool: &PgPool) -> Result<String, String> {
             _ => {}
         }
     }
-    Ok(if opened == 0 && saved == 0 {
+    // Freeze the movements of every finished event that isn't frozen yet (#433 review).
+    //
+    // This is deliberately one pass rather than a snapshot on the close transition plus a separate
+    // backfill. The close arm only fires for an event with an *open* capture, so on its own it could
+    // never reach anything that closed before `stats.event_movements` existed — those events kept
+    // computing from `stats.flight_leg` and fell to zero as their legs crossed
+    // DELAY_LEG_RETAIN_DAYS. Asking "which finished events have no snapshot" answers both cases
+    // with one query, and it runs in the same invocation as the close above, so a capture that
+    // closes on this tick is still frozen on this tick. A call in the close arm as well was
+    // redundant: deleting it left every test green, because this pass had already done the work.
+    //
+    // Idempotent and self-limiting — writing the row is what stops the event matching. Events whose
+    // legs are already gone are declined by the all-zero guard in `snapshot_event_movements`, and
+    // the query is bounded to the same retention horizon so it does not re-ask about them every
+    // minute for the life of the deployment.
+    let mut frozen = 0u32;
+    match stats_repo::events_missing_movement_snapshot(pool, DELAY_LEG_RETAIN_DAYS).await {
+        Ok(unfrozen) => {
+            for e in unfrozen {
+                if snapshot_event_movements(pool, e.event_id, e.start_time, e.end_time).await {
+                    frozen += 1;
+                }
+            }
+        }
+        Err(_) => tracing::warn!("stats: unfrozen-event query failed"),
+    }
+
+    Ok(if opened == 0 && saved == 0 && frozen == 0 {
         "no changes".to_string()
     } else {
-        format!("{opened} opened, {saved} saved")
+        format!("{opened} opened, {saved} saved, {frozen} frozen")
     })
 }
 
@@ -692,27 +865,36 @@ const ACE_REMINDER_TIERS: &[(i64, i64, &str)] = &[
 /// construction: each tick re-queries live state (crossed the threshold, event still upcoming, not
 /// already reminded), so a released claim or a cancelled request simply stops matching — no
 /// separate "cancel the scheduled reminder" step is needed. Runs every 15 minutes.
-pub fn spawn_ace_reminder_scheduler(reg: Arc<JobRegistry>, pool: PgPool) {
+pub fn spawn_ace_reminder_scheduler(reg: Arc<JobRegistry>, pool: PgPool, events: Events) {
     tokio::spawn(run_interval(
         reg,
         "ace_reminder_scheduler",
         "DM ACE claimers a reminder at T-24h/T-6h before their event",
         ACE_REMINDER_INTERVAL,
         move || {
-            let pool = pool.clone();
-            async move { ace_reminder_scheduler_once(&pool).await }
+            let (pool, events) = (pool.clone(), events.clone());
+            async move { ace_reminder_scheduler_once(&pool, &events).await }
         },
     ));
 }
 
-async fn ace_reminder_scheduler_once(pool: &PgPool) -> Result<String, String> {
+async fn ace_reminder_scheduler_once(pool: &PgPool, events: &Events) -> Result<String, String> {
     let mut sent = 0u32;
+    let mut in_window = 0i64;
     let mut tier_failed = false;
     // Each tier is queried and enqueued independently — a transient failure on one tier's query
     // must not skip the other tier's check for this cycle (they're unrelated thresholds), so errors
     // are logged and accumulated rather than propagated with `?`, which would abort the whole loop
     // on the first failure.
     for &(hours_after, hours_before, job_type) in ACE_REMINDER_TIERS {
+        // Every live claim in this tier's window, Discord or not — what decides the client nudge below.
+        match ace_repo::claims_in_reminder_window(pool, hours_after, hours_before).await {
+            Ok(n) => in_window += n,
+            Err(e) => {
+                tracing::warn!(job_type, error = ?e, "ace reminder window count failed");
+                tier_failed = true;
+            }
+        }
         let due = match ace_repo::claims_due_for_reminder(pool, hours_after, hours_before, job_type)
             .await
         {
@@ -742,6 +924,16 @@ async fn ace_reminder_scheduler_once(pool: &PgPool) -> Result<String, String> {
             }
         }
     }
+    // Nudge connected clients whenever any claim is inside a reminder window, so the desktop app can
+    // surface the reminder natively (#348). Not keyed on `sent`: that counts Discord DMs, so a desktop
+    // user without a linked Discord account was never nudged and never reminded. Payload-free: each
+    // client re-checks its own claims, and its notifier fires once per claim and tier.
+    if in_window > 0 {
+        let _ = events.send(WsEvent {
+            topic: topic::EVENT_REMINDER.to_string(),
+        });
+    }
+
     // Unconditional on `tier_failed`: a persistently-failing tier must always surface to the
     // JobRegistry as a failure, even in a cycle where the *other* tier had genuine hits — masking
     // it behind `sent == 0` would hide an ongoing problem for as long as the healthy tier keeps
@@ -786,6 +978,231 @@ pub fn spawn_cleanup(reg: Arc<JobRegistry>, pool: PgPool) {
             }
         },
     ));
+}
+
+/// Delete one-time desktop auth codes long past their 60-second life (VATUSA/OIS#346). Nothing
+/// else removes them, so without this the table only grows. Same cadence as the TMU cleanup.
+pub fn spawn_desktop_auth_code_prune(reg: Arc<JobRegistry>, pool: PgPool) {
+    tokio::spawn(run_interval(
+        reg,
+        "desktop_auth_code_prune",
+        "Delete expired one-time desktop sign-in codes",
+        CLEANUP_INTERVAL,
+        move || {
+            let pool = pool.clone();
+            async move {
+                crate::repos::auth::prune_desktop_auth_codes(&pool)
+                    .await
+                    .map(|n| format!("{n} deleted"))
+                    .map_err(|_| "prune failed".to_string())
+            }
+        },
+    ));
+}
+
+/// Return outbound jobs stranded `in_progress` to the queue (#446).
+///
+/// Only the bot acking a job moves it out of `in_progress`, so a worker that dies mid-job leaves it
+/// there forever — never retried, never delivered, and with no error to notice, because nothing
+/// failed. Every redeploy is a chance to hit that window.
+///
+/// The recovery reuses the failed-ack transition, so the retry policy lives in one place.
+pub fn spawn_outbound_job_reaper(reg: Arc<JobRegistry>, pool: PgPool) {
+    tokio::spawn(run_interval(
+        reg,
+        "outbound_job_reaper",
+        "Requeue Discord jobs whose worker never acked",
+        CLEANUP_INTERVAL,
+        move || {
+            let pool = pool.clone();
+            async move { outbound_job_reaper_once(&pool).await }
+        },
+    ));
+}
+
+/// Delete audit rows past [`AUDIT_RETAIN_DAYS`] (#444). Nothing removed them before, so the table
+/// only grew — most recently at the Discord bot's job-queue poll rate until #430 stopped that.
+///
+/// Its own job rather than another pass inside `stats_compaction_once`: an audit trail's retention is
+/// a policy decision, not stats housekeeping, and a separate entry is what makes it visible (and
+/// runnable) in the admin jobs view. Same cadence as the other cleanups.
+pub fn spawn_audit_log_prune(reg: Arc<JobRegistry>, pool: PgPool) {
+    tokio::spawn(run_interval(
+        reg,
+        "audit_log_prune",
+        "Delete audit-log rows past their retention window",
+        CLEANUP_INTERVAL,
+        move || {
+            let pool = pool.clone();
+            async move {
+                let before = Utc::now() - chrono::Duration::days(AUDIT_RETAIN_DAYS);
+                crate::repos::audit::prune_audit_logs(&pool, before)
+                    .await
+                    .map(|n| format!("{n} deleted"))
+                    .map_err(|_| "prune failed".to_string())
+            }
+        },
+    ));
+}
+
+/// Delete departure-runway assignments past [`DEPARTURE_RUNWAY_RETAIN_HOURS`] (#509).
+///
+/// Its own job rather than a pass inside the stats compaction, following `spawn_audit_log_prune`'s
+/// reasoning: retention here is a modelling consequence of the table's key, not stats housekeeping,
+/// and a separate entry is what makes it visible and runnable in the admin jobs view.
+pub fn spawn_departure_runway_prune(reg: Arc<JobRegistry>, pool: PgPool) {
+    tokio::spawn(run_interval(
+        reg,
+        "departure_runway_prune",
+        "Delete departure-runway assignments past their retention window",
+        CLEANUP_INTERVAL,
+        move || {
+            let pool = pool.clone();
+            async move { departure_runway_prune_once(&pool).await }
+        },
+    ));
+}
+
+/// One prune pass.
+///
+/// Split out of the spawn for the reason [`outbound_job_reaper_once`] records: the cutoff is
+/// computed from a constant, and a constant that no test can reach is exactly the kind of thing that
+/// gets "tuned" without anyone noticing what it turns off.
+async fn departure_runway_prune_once(pool: &PgPool) -> Result<String, String> {
+    let before = Utc::now() - chrono::Duration::hours(DEPARTURE_RUNWAY_RETAIN_HOURS);
+    crate::repos::departure_runway::prune(pool, before)
+        .await
+        .map(|n| format!("{n} deleted"))
+        .map_err(|_| "prune failed".to_string())
+}
+
+/// Predict a departure runway for every pending departure, and record which rung chose it (#511).
+///
+/// A job rather than the IDST read path, deliberately. The `config` rung needs the wind-favoured airport
+/// configuration, and resolving wind is one outbound Open-Meteo request per airport behind a
+/// process-global mutex — a cost `handlers::feed`'s national demand board explicitly refuses to pay on a
+/// read (see its `effective_aar` doc). IDST is a read, scoped to a whole ARTCC, polled every 30 s per
+/// controller. Here the same work happens once a minute for the whole system, and the read path just
+/// shows what is stored.
+pub fn spawn_departure_runway_derive(
+    reg: Arc<JobRegistry>,
+    pool: PgPool,
+    feed: FeedState,
+    gates: Arc<ArcSwap<std::collections::HashMap<String, Vec<crate::models::AirportGateBody>>>>,
+) {
+    tokio::spawn(run_interval(
+        reg,
+        "departure_runway_derive",
+        "Predict a departure runway for pending departures",
+        DEPARTURE_RUNWAY_DERIVE_INTERVAL,
+        move || {
+            let (pool, feed, gates) = (pool.clone(), feed.clone(), gates.clone());
+            async move { departure_runway_derive_once(&pool, &feed, &gates).await }
+        },
+    ));
+}
+
+/// One derive pass.
+///
+/// Split from the spawn for the reason the prune pass records: a constant no test can reach is the kind
+/// of thing that gets "tuned" without anyone noticing what it turns off.
+///
+/// Order matters for cost. The candidates are grouped by field **first**, so the wind is resolved only
+/// for airports that actually have a departure — tens, not the 185 that have a configuration — and the
+/// forecast's own two-hour cache makes repeat passes free. Reversing this (wind for every configured
+/// airport) is what would make the pass unaffordable.
+async fn departure_runway_derive_once(
+    pool: &PgPool,
+    feed: &FeedState,
+    gates: &Arc<ArcSwap<std::collections::HashMap<String, Vec<crate::models::AirportGateBody>>>>,
+) -> Result<String, String> {
+    use std::collections::HashMap;
+
+    // All the DB reading happens here, before any feed work — `feed::*` holds no pool (AGENTS.md).
+    let configs = crate::repos::airport_configs::list_all(pool)
+        .await
+        .map_err(|_| "could not load airport configs".to_string())?;
+    let mut by_icao: HashMap<String, Vec<crate::models::AirportConfigBody>> = HashMap::new();
+    for c in configs {
+        by_icao.entry(c.icao.clone()).or_default().push(c);
+    }
+
+    let (snapshot, airports) = {
+        let guard = feed.read().await;
+        (guard.snapshot.clone(), guard.airports.clone())
+    };
+    // No feed yet (startup, or an upstream outage) means nothing to predict for — not an error.
+    let Some(snapshot) = snapshot else {
+        return Ok("no feed snapshot yet".to_string());
+    };
+    let catalog = gates.load();
+    let candidates = crate::feed::departure_runway::candidates(&snapshot.data, &catalog);
+
+    // Group by field, so the wind is paid for once per airport that has a departure.
+    let mut per_field: HashMap<String, Vec<crate::feed::departure_runway::Candidate>> =
+        HashMap::new();
+    for c in candidates {
+        per_field.entry(c.icao.clone()).or_default().push(c);
+    }
+
+    let now = Utc::now();
+    let (mut written, mut skipped) = (0u64, 0u64);
+    for (icao, flights) in per_field {
+        let Some(configs) = by_icao.get(&icao) else {
+            // No configuration at all: the ladder has nothing to predict from, and saying so costs
+            // nothing. #511's first mandatory fallback.
+            skipped += flights.len() as u64;
+            continue;
+        };
+        let wind = crate::feed::forecast::wind_at(&airports, &icao, now)
+            .await
+            .and_then(|h| h.dir);
+        let favored = crate::repos::airport_configs::favored_config(configs, wind);
+        for c in flights {
+            match crate::feed::departure_runway::predict(
+                c.gate_name.as_deref(),
+                c.sid.as_deref(),
+                favored,
+            ) {
+                Some((runway, source)) => {
+                    // `assign` refuses a write that a higher rung already owns, so a controller's
+                    // manual override survives every pass without this caller checking for it.
+                    if crate::repos::departure_runway::assign(
+                        pool,
+                        &icao,
+                        &c.callsign,
+                        &runway,
+                        source,
+                        None,
+                    )
+                    .await
+                    .map_err(|_| "could not record a departure runway".to_string())?
+                    {
+                        written += 1;
+                    } else {
+                        skipped += 1;
+                    }
+                }
+                None => skipped += 1,
+            }
+        }
+    }
+    Ok(format!("{written} assigned, {skipped} left alone"))
+}
+
+/// One reaper pass: anything `in_progress` past [`OUTBOUND_JOB_LEASE_TIMEOUT_MINS`] goes back to the
+/// queue.
+///
+/// Split out of the spawn so the cutoff can be tested, mirroring `capture_scheduler_once` and
+/// `ace_reminder_scheduler_once`. `reap_stranded_jobs` takes the cutoff as a parameter, which is what
+/// makes its own tests precise — but it also meant the *constant* was outside every test, and a constant
+/// is exactly the kind of thing that gets "tuned" without anyone noticing what it turns off (#446 review).
+async fn outbound_job_reaper_once(pool: &PgPool) -> Result<String, String> {
+    let stranded_before = Utc::now() - chrono::Duration::minutes(OUTBOUND_JOB_LEASE_TIMEOUT_MINS);
+    integration_repo::reap_stranded_jobs(pool, stranded_before)
+        .await
+        .map(|n| format!("{n} requeued"))
+        .map_err(|_| "reap failed".to_string())
 }
 
 /// Drive event FCAs through their lifecycle: publish `planned` + auto ones ~30 min before their event
@@ -1045,5 +1462,647 @@ mod nav_health_tests {
                 .1,
             None
         );
+    }
+}
+
+#[cfg(test)]
+mod departure_runway_prune_tests {
+    use sqlx::PgPool;
+
+    use super::{DEPARTURE_RUNWAY_RETAIN_HOURS, departure_runway_prune_once};
+    use crate::repos::departure_runway::{RunwaySource, assign, get};
+
+    /// Ages are **absolute hours, not offsets from [`DEPARTURE_RUNWAY_RETAIN_HOURS`]**, and that is
+    /// the whole point of these two cases.
+    ///
+    /// Backdating by `RETAIN_HOURS + 1` reads as careful and is worthless: the row moves with the
+    /// constant, so the test passes for *any* value of it. Widening the horizon from 12 hours to a
+    /// year left both of these green when they were written that way — the exact failure
+    /// `outbound_job_reaper_once`'s doc warns about, reproduced while trying to avoid it.
+    ///
+    /// Fixed ages straddling the documented 12-hour horizon mean a change to the policy has to come
+    /// with a change here, which is what makes it deliberate.
+    const STALE_AGE_HOURS: i32 = 13;
+    const FRESH_AGE_HOURS: i32 = 11;
+
+    async fn age(pool: &PgPool, callsign: &str, hours: i32) {
+        sqlx::query(
+            "update flow.departure_runway_assignment \
+             set updated_at = now() - make_interval(hours => $2::int) where callsign = $1",
+        )
+        .bind(callsign)
+        .bind(hours)
+        .execute(pool)
+        .await
+        .unwrap();
+    }
+
+    /// Guards the constant itself. `STALE`/`FRESH` only straddle the horizon while it sits between
+    /// them, so this says out loud what those ages assume.
+    #[test]
+    fn the_fixed_ages_straddle_the_retention_horizon() {
+        assert!(
+            (FRESH_AGE_HOURS as i64) < DEPARTURE_RUNWAY_RETAIN_HOURS
+                && DEPARTURE_RUNWAY_RETAIN_HOURS < (STALE_AGE_HOURS as i64),
+            "retention is {DEPARTURE_RUNWAY_RETAIN_HOURS}h, which no longer sits between \
+             {FRESH_AGE_HOURS}h and {STALE_AGE_HOURS}h — update both the constant and these ages"
+        );
+    }
+
+    /// The pass, not `repos::departure_runway::prune` directly: `prune` takes its cutoff as a
+    /// parameter, so testing it alone proves nothing about the constant the job actually uses.
+    #[sqlx::test]
+    async fn the_pass_prunes_past_the_retention_horizon(pool: PgPool) {
+        assign(&pool, "KJFK", "STALE", "13R", RunwaySource::Auto, None)
+            .await
+            .unwrap();
+        assign(&pool, "KJFK", "FRESH", "13R", RunwaySource::Auto, None)
+            .await
+            .unwrap();
+        age(&pool, "STALE", STALE_AGE_HOURS).await;
+        age(&pool, "FRESH", FRESH_AGE_HOURS).await;
+
+        assert_eq!(
+            departure_runway_prune_once(&pool).await.unwrap(),
+            "1 deleted"
+        );
+        assert!(get(&pool, "KJFK", "STALE").await.unwrap().is_none());
+        assert!(
+            get(&pool, "KJFK", "FRESH").await.unwrap().is_some(),
+            "an assignment inside the horizon must survive the sweep"
+        );
+    }
+
+    /// A sweep with nothing stale must not touch the table — the delete is bounded by `updated_at`,
+    /// not a blanket clear.
+    #[sqlx::test]
+    async fn a_sweep_with_nothing_stale_deletes_nothing(pool: PgPool) {
+        assign(&pool, "KJFK", "FRESH", "13R", RunwaySource::Auto, None)
+            .await
+            .unwrap();
+        age(&pool, "FRESH", FRESH_AGE_HOURS).await;
+
+        assert_eq!(
+            departure_runway_prune_once(&pool).await.unwrap(),
+            "0 deleted"
+        );
+        assert!(get(&pool, "KJFK", "FRESH").await.unwrap().is_some());
+    }
+}
+
+#[cfg(test)]
+mod ace_reminder_tests {
+    use sqlx::PgPool;
+
+    use super::ace_reminder_scheduler_once;
+    use crate::realtime::topic;
+    use crate::repos::ace as ace_repo;
+
+    /// A claim coming due for someone with no linked Discord account still nudges connected clients,
+    /// so the desktop app can remind them. Keying the nudge on Discord DMs sent meant it never fired
+    /// for them at all (VATUSA/OIS#348 review).
+    #[sqlx::test]
+    async fn a_claim_due_without_discord_still_nudges_clients(pool: PgPool) {
+        let user = |name: &'static str| {
+            let pool = pool.clone();
+            async move {
+                sqlx::query_scalar::<_, String>(
+                    "insert into identity.users (full_name, display_name) values ($1, $1) returning id",
+                )
+                .bind(name)
+                .fetch_one(&pool)
+                .await
+                .unwrap()
+            }
+        };
+        let requester = user("Requester").await;
+        let claimer = user("No Discord").await;
+        sqlx::query(
+            "insert into events.event (id, title, start_time, end_time) \
+             values (9, 'Fly-In', now() + interval '5 hours', now() + interval '7 hours')",
+        )
+        .execute(&pool)
+        .await
+        .unwrap();
+        let mut tx = pool.begin().await.unwrap();
+        let request = ace_repo::create_request(&mut tx, 9, &requester, Some("ZDC"), None, 1, "")
+            .await
+            .unwrap();
+        tx.commit().await.unwrap();
+        let mut tx = pool.begin().await.unwrap();
+        ace_repo::claim_request(&mut tx, &request, &claimer, "", None, None)
+            .await
+            .unwrap();
+        tx.commit().await.unwrap();
+
+        let (events, mut received) = tokio::sync::broadcast::channel(8);
+        ace_reminder_scheduler_once(&pool, &events).await.unwrap();
+
+        let event = received.try_recv().expect("a reminder nudge was published");
+        assert_eq!(event.topic, topic::EVENT_REMINDER);
+    }
+}
+
+#[cfg(test)]
+mod capture_scheduler_tests {
+    use chrono::{DateTime, Utc};
+    use sqlx::PgPool;
+
+    use super::{capture_scheduler_once, snapshot_event_movements};
+    use crate::repos::stats as stats_repo;
+
+    const EVENT: i64 = 800;
+
+    /// Yesterday at `hour:minute`, not a fixed calendar date. This pass compares against
+    /// `Utc::now()`, and the backfill is deliberately bounded to the last `DELAY_LEG_RETAIN_DAYS`, so
+    /// a hard-coded date would silently drift out of both — first out of the retention window, and
+    /// eventually the test would be asserting nothing at all.
+    fn at(hour: u32, minute: u32) -> DateTime<Utc> {
+        (Utc::now() - chrono::Duration::days(1))
+            .date_naive()
+            .and_hms_opt(hour, minute, 0)
+            .expect("a valid time of day")
+            .and_utc()
+    }
+
+    /// An event that ran 12:00–14:00 with the default ±30 min capture padding, so its capture window
+    /// is 11:30–14:30. Both are in the past, so one scheduler pass closes the capture.
+    async fn seed(pool: &PgPool, capture_status: &str) {
+        sqlx::query(
+            "insert into events.event (id, title, start_time, end_time) values ($1, 'Test', $2, $3)",
+        )
+        .bind(EVENT)
+        .bind(at(12, 0))
+        .bind(at(14, 0))
+        .execute(pool)
+        .await
+        .unwrap();
+        sqlx::query("insert into events.airport_rate (event_id, icao) values ($1, 'KJFK')")
+            .bind(EVENT)
+            .execute(pool)
+            .await
+            .unwrap();
+        sqlx::query(
+            "insert into stats.event_capture (event_id, enabled, pre_minutes, post_minutes) \
+             values ($1, true, 30, 30)",
+        )
+        .bind(EVENT)
+        .execute(pool)
+        .await
+        .unwrap();
+        sqlx::query(
+            "insert into stats.capture (id, event_id, label, start_time, end_time, status) \
+             values ('cap-sched', $1, 'Test', $2, $3, $4)",
+        )
+        .bind(EVENT)
+        .bind(at(11, 30))
+        .bind((capture_status == "saved").then(|| at(14, 30)))
+        .bind(capture_status)
+        .execute(pool)
+        .await
+        .unwrap();
+    }
+
+    async fn leg(pool: &PgPool, kind: &str, cid: i32, end: DateTime<Utc>) {
+        sqlx::query(
+            "insert into stats.flight_leg \
+             (kind, airport, callsign, cid, start_time, end_time, duration_sec) \
+             values ($1, 'KJFK', $2, $3, $4, $5, 600)",
+        )
+        .bind(kind)
+        .bind(format!("TEST{cid}"))
+        .bind(cid)
+        .bind(end - chrono::Duration::minutes(10))
+        .bind(end)
+        .execute(pool)
+        .await
+        .unwrap();
+    }
+
+    /// Seed one leg inside the event and one inside the padding on either side of it.
+    async fn three_legs(pool: &PgPool) {
+        leg(pool, "departure", 1, at(11, 45)).await; // padding, before the event
+        leg(pool, "departure", 2, at(13, 0)).await; // inside the event
+        leg(pool, "arrival", 3, at(14, 15)).await; // padding, after the event
+    }
+
+    /// A capture that closes on this tick is frozen on this tick, over the **event's** window rather
+    /// than the capture's padded one.
+    ///
+    /// This is the seam the unit tests cannot reach: `stats_window_tests` writes a snapshot by hand
+    /// with the window it then asserts, and the `repos::stats` cases are *handed* a window rather than
+    /// choosing one. So passing the padded `window_start, window_end` — in scope at the call site —
+    /// left all 538 tests green while silently reintroducing #433's AC 4 bug on the frozen path, the
+    /// one that serves every event past leg retention (#433 review).
+    #[sqlx::test]
+    async fn the_scheduler_freezes_over_the_events_window_not_the_padded_capture(pool: PgPool) {
+        seed(&pool, "open").await;
+        three_legs(&pool).await;
+
+        capture_scheduler_once(&pool).await.unwrap();
+
+        let snap = stats_repo::event_movements_snapshot(&pool, EVENT)
+            .await
+            .unwrap()
+            .expect("closing the capture froze the movements");
+        assert_eq!(
+            (snap.window_start, snap.window_end),
+            (at(12, 0), at(14, 0)),
+            "the event's own window, not 11:30–14:30"
+        );
+        assert_eq!(
+            snap.rows[0].arrivals + snap.rows[0].departures,
+            1,
+            "only the movement inside the event window was frozen"
+        );
+    }
+
+    /// The other half of the same pass: an event whose capture was *already* saved. It never enters
+    /// the close arm again, so if freezing only happened there its counts would compute from legs and
+    /// fall to zero at `DELAY_LEG_RETAIN_DAYS` — correct numbers that quietly disappear, which is the
+    /// state every event on the board was in before this shipped (#433 review).
+    #[sqlx::test]
+    async fn an_event_that_closed_before_the_table_existed_is_still_frozen(pool: PgPool) {
+        seed(&pool, "saved").await;
+        three_legs(&pool).await;
+        assert!(
+            stats_repo::event_movements_snapshot(&pool, EVENT)
+                .await
+                .unwrap()
+                .is_none(),
+            "nothing frozen yet — this is the pre-deploy state"
+        );
+
+        capture_scheduler_once(&pool).await.unwrap();
+
+        let snap = stats_repo::event_movements_snapshot(&pool, EVENT)
+            .await
+            .unwrap()
+            .expect("the backfill froze it");
+        assert_eq!((snap.window_start, snap.window_end), (at(12, 0), at(14, 0)));
+        assert_eq!(snap.rows[0].arrivals + snap.rows[0].departures, 1);
+
+        // Idempotent and self-limiting: the row it just wrote is what stops the event matching.
+        assert_eq!(
+            stats_repo::events_missing_movement_snapshot(&pool, super::DELAY_LEG_RETAIN_DAYS)
+                .await
+                .unwrap()
+                .len(),
+            0
+        );
+    }
+
+    /// An event whose legs were already pruned recomputes to zero for that reason alone. Freezing
+    /// that would make an artifact of retention permanent, because the row is what stops the backfill
+    /// matching — so it is deliberately left unfrozen (#433 review).
+    #[sqlx::test]
+    async fn an_event_with_no_surviving_legs_is_not_frozen_at_zero(pool: PgPool) {
+        seed(&pool, "saved").await;
+        // The shape of a pruned event: the connections are still there (`stats.flight` is never
+        // pruned) so the breakdown is *not* empty — it is a row of zero movements beside a real pilot
+        // count, which is exactly what the page renders as "Movements 0 / Pilots 1".
+        sqlx::query(
+            "insert into stats.flight \
+             (session_id, cid, callsign, logon_time, first_seen, last_seen, status, departure, arrival) \
+             values (1, 1001, 'TEST1', $1, $1, $2, 'active', 'KJFK', 'KBOS')",
+        )
+        .bind(at(12, 10))
+        .bind(at(13, 40))
+        .execute(&pool)
+        .await
+        .unwrap();
+        let rows =
+            stats_repo::event_airport_breakdown(&pool, &["KJFK".to_string()], at(12, 0), at(14, 0))
+                .await
+                .unwrap();
+        assert_eq!(rows.len(), 1, "a row exists, it just has no movements");
+        assert_eq!(
+            (rows[0].arrivals, rows[0].departures, rows[0].unique_pilots),
+            (0, 0, 1)
+        );
+
+        assert!(
+            !snapshot_event_movements(&pool, EVENT, at(12, 0), at(14, 0)).await,
+            "it reports that it froze nothing, so the job summary stays honest"
+        );
+        assert!(
+            stats_repo::event_movements_snapshot(&pool, EVENT)
+                .await
+                .unwrap()
+                .is_none(),
+            "a zero-movement breakdown must not be frozen — freezing it would make the artifact \
+             permanent, since the row is what stops the backfill matching"
+        );
+    }
+}
+
+#[cfg(test)]
+mod outbound_job_reaper_tests {
+    use sqlx::PgPool;
+
+    use super::{OUTBOUND_JOB_LEASE_TIMEOUT_MINS, outbound_job_reaper_once};
+
+    async fn leased(pool: &PgPool, mins_ago: i64) -> String {
+        sqlx::query_scalar::<_, String>(
+            "insert into integration.outbound_jobs \
+             (job_type, status, attempt_count, last_attempt_at) \
+             values ('tmi_publish', 'in_progress', 1, now() - make_interval(mins => $1)) \
+             returning id",
+        )
+        .bind(mins_ago as i32)
+        .fetch_one(pool)
+        .await
+        .unwrap()
+    }
+
+    async fn status_of(pool: &PgPool, id: &str) -> String {
+        sqlx::query_scalar::<_, String>(
+            "select status from integration.outbound_jobs where id = $1",
+        )
+        .bind(id)
+        .fetch_one(pool)
+        .await
+        .unwrap()
+    }
+
+    /// The pass applies `OUTBOUND_JOB_LEASE_TIMEOUT_MINS` rather than taking a cutoff, so this is what
+    /// pins the constant: widen it and the stranded job stops being recovered, which is the bug back
+    /// (#446 review).
+    #[sqlx::test]
+    async fn the_pass_reaps_past_the_lease_and_leaves_a_fresh_lease_alone(pool: PgPool) {
+        let stranded = leased(&pool, OUTBOUND_JOB_LEASE_TIMEOUT_MINS + 5).await;
+        let working = leased(&pool, 1).await;
+
+        assert_eq!(
+            outbound_job_reaper_once(&pool).await.unwrap(),
+            "1 requeued",
+            "the summary the admin Jobs page shows must count what it actually did"
+        );
+
+        assert_eq!(status_of(&pool, &stranded).await, "pending");
+        assert_eq!(
+            status_of(&pool, &working).await,
+            "in_progress",
+            "a job inside its lease is being worked on, not abandoned"
+        );
+    }
+
+    /// Nothing to do is not a failure — the pass runs every CLEANUP_INTERVAL and almost always finds
+    /// nothing.
+    #[sqlx::test]
+    async fn an_empty_queue_is_not_an_error(pool: PgPool) {
+        assert_eq!(outbound_job_reaper_once(&pool).await.unwrap(), "0 requeued");
+    }
+}
+
+#[cfg(test)]
+mod registration_tests {
+    //! Every background pass defined here has to actually be started in `lib.rs`, and until now
+    //! nothing checked that.
+    //!
+    //! A job can be written, given a registry entry, unit-tested thoroughly, and simply never
+    //! spawned — and then the behaviour it exists for is silently absent while the whole suite
+    //! stays green. Deleting `spawn_outbound_job_reaper` from `lib.rs` left 536 passed / 0 failed.
+    //! Three cards in a row (#433, #436, #446) were returned for a gap of exactly this shape, so
+    //! this asserts the wiring itself rather than any one job: add a `spawn_*` and forget to start
+    //! it, and this fails.
+
+    const JOBS_RS: &str = include_str!("jobs.rs");
+    const LIB_RS: &str = include_str!("lib.rs");
+
+    /// Drop `//` comments, so prose naming a spawn is not mistaken for a call site — the false
+    /// positive a source scan gets wrong first.
+    fn without_line_comments(src: &str) -> String {
+        src.lines()
+            .map(|line| match line.find("//") {
+                Some(i) => &line[..i],
+                None => line,
+            })
+            .collect::<Vec<_>>()
+            .join("\n")
+    }
+
+    fn spawn_fn_names(src: &str) -> Vec<String> {
+        without_line_comments(src)
+            .lines()
+            .filter_map(|line| line.trim().strip_prefix("pub fn spawn_"))
+            .filter_map(|rest| rest.split(['(', '<']).next())
+            .map(|name| format!("spawn_{name}"))
+            .collect()
+    }
+
+    #[test]
+    fn every_background_job_is_started_in_lib() {
+        let names = spawn_fn_names(JOBS_RS);
+
+        // Without this the test passes by checking nothing the moment the matcher stops matching,
+        // which is the way a source scan rots.
+        assert!(
+            names.len() >= 10,
+            "only found {} spawn fns in jobs.rs, so the matcher has stopped matching: {names:?}",
+            names.len()
+        );
+        assert!(
+            names.iter().any(|n| n == "spawn_outbound_job_reaper"),
+            "the matcher no longer finds a spawn fn known to exist, so it is broken: {names:?}"
+        );
+
+        let lib = without_line_comments(LIB_RS);
+        let missing: Vec<&str> = names
+            .iter()
+            .map(String::as_str)
+            .filter(|name| !lib.contains(&format!("jobs::{name}(")))
+            .collect();
+
+        assert!(
+            missing.is_empty(),
+            "defined in jobs.rs but never started in lib.rs, so they silently never run: {missing:?}"
+        );
+    }
+}
+
+/// The derive pass (#511). Exercises the pass end to end — snapshot in, assignments out — rather than
+/// only the pure ladder, which `feed::departure_runway`'s own tests cover rung by rung.
+#[cfg(test)]
+mod departure_runway_derive_tests {
+    use chrono::Utc;
+    use sqlx::PgPool;
+    use std::collections::HashMap;
+
+    use super::departure_runway_derive_once;
+    use crate::models::{AirportGateBody, UpsertAirportConfigRequest};
+    use crate::repos::departure_runway::{RunwaySource, assign, get};
+
+    /// A connected, parked departure sitting on stand `A1` at KJFK.
+    fn snapshot_with_a_parked_departure() -> crate::feed::Snapshot {
+        let data: crate::feed::vatsim::VatsimData = serde_json::from_value(serde_json::json!({
+            "pilots": [{
+                "callsign": "AAL123",
+                "latitude": 40.6413,
+                "longitude": -73.7781,
+                "altitude": 13,
+                "groundspeed": 0,
+                "heading": 90,
+                "flight_plan": {
+                    "departure": "KJFK",
+                    "arrival": "KBOS",
+                    "aircraft_short": "B738",
+                    "route": "CAMRN4 J174 BOS"
+                }
+            }],
+            "prefiles": [],
+            "controllers": [],
+            "atis": []
+        }))
+        .expect("the fixture should deserialize");
+        crate::feed::Snapshot::of(data)
+    }
+
+    fn gates_at_kjfk() -> HashMap<String, Vec<AirportGateBody>> {
+        HashMap::from([(
+            "KJFK".to_string(),
+            vec![AirportGateBody {
+                id: "gate-uuid-1".into(),
+                icao: "KJFK".into(),
+                name: "A1".into(),
+                lat: 40.6413,
+                lon: -73.7781,
+                source: "manual".into(),
+                // Hand-entered, so no X-Plane stand type (#517).
+                kind: None,
+                updated_at: Utc::now(),
+                editable: false,
+            }],
+        )])
+    }
+
+    async fn state_with(pool: PgPool, snapshot: crate::feed::Snapshot) -> crate::state::AppState {
+        let state = crate::scope_test_support::test_state(pool, HashMap::new());
+        state.feed.write().await.snapshot = Some(std::sync::Arc::new(snapshot));
+        state.gates.store(std::sync::Arc::new(gates_at_kjfk()));
+        state
+    }
+
+    async fn seed_config(pool: &PgPool, actor: &str, req: UpsertAirportConfigRequest) {
+        crate::repos::airport_configs::create(pool, "KJFK", &req, "ZNY", actor)
+            .await
+            .expect("the config should insert");
+    }
+
+    fn config_with(
+        dep_runways: Vec<String>,
+        sid: Option<HashMap<String, String>>,
+    ) -> UpsertAirportConfigRequest {
+        UpsertAirportConfigRequest {
+            name: "South".into(),
+            aar: 30,
+            adr: 30,
+            landing_runways: vec![],
+            departure_runways: dep_runways,
+            sid_rules: sid,
+            gate_rules: None,
+            wind_from_deg: 0,
+            wind_to_deg: 360,
+            calm_default: true,
+        }
+    }
+
+    /// The pass records a runway for a parked departure, and records the rung that chose it.
+    #[sqlx::test]
+    async fn the_pass_assigns_from_a_sid_rule(pool: PgPool) {
+        let actor = crate::scope_test_support::seed_user(&pool).await;
+        seed_config(
+            &pool,
+            &actor,
+            config_with(
+                vec!["04L".into()],
+                Some(HashMap::from([("CAMRN".to_string(), "31L".to_string())])),
+            ),
+        )
+        .await;
+        let state = state_with(pool.clone(), snapshot_with_a_parked_departure()).await;
+
+        let report = departure_runway_derive_once(&pool, &state.feed, &state.gates)
+            .await
+            .expect("the pass should succeed");
+
+        let got = get(&pool, "KJFK", "AAL123")
+            .await
+            .unwrap()
+            .expect("an assignment");
+        assert_eq!(got.runway, "31L", "the filed CAMRN4 matched the CAMRN rule");
+        assert_eq!(got.source, RunwaySource::Rule.as_str());
+        assert!(report.contains("1 assigned"), "got: {report}");
+    }
+
+    /// #511's first mandatory fallback, through the pass: an airport with no configuration at all gets
+    /// no assignment, and the pass says so rather than failing.
+    #[sqlx::test]
+    async fn an_airport_with_no_config_gets_nothing(pool: PgPool) {
+        let state = state_with(pool.clone(), snapshot_with_a_parked_departure()).await;
+
+        let report = departure_runway_derive_once(&pool, &state.feed, &state.gates)
+            .await
+            .expect("the pass should succeed, not error");
+
+        assert!(get(&pool, "KJFK", "AAL123").await.unwrap().is_none());
+        assert!(report.contains("0 assigned"), "got: {report}");
+    }
+
+    /// #511 AC4, through the pass. A controller's manual override must survive a derive, and this is the
+    /// caller's half of that — `assign`'s SQL guard is what enforces it, and this proves the pass does
+    /// not somehow route around it.
+    #[sqlx::test]
+    async fn a_manual_override_survives_a_derive_pass(pool: PgPool) {
+        let actor = crate::scope_test_support::seed_user(&pool).await;
+        seed_config(
+            &pool,
+            &actor,
+            config_with(
+                vec!["04L".into()],
+                Some(HashMap::from([("CAMRN".to_string(), "31L".to_string())])),
+            ),
+        )
+        .await;
+        // A controller sets 22R by hand.
+        assert!(
+            assign(
+                &pool,
+                "KJFK",
+                "AAL123",
+                "22R",
+                RunwaySource::Manual,
+                Some(&actor)
+            )
+            .await
+            .unwrap()
+        );
+        let state = state_with(pool.clone(), snapshot_with_a_parked_departure()).await;
+
+        departure_runway_derive_once(&pool, &state.feed, &state.gates)
+            .await
+            .unwrap();
+
+        let got = get(&pool, "KJFK", "AAL123")
+            .await
+            .unwrap()
+            .expect("an assignment");
+        assert_eq!(
+            got.runway, "22R",
+            "the derive must not displace a manual override"
+        );
+        assert_eq!(got.source, RunwaySource::Manual.as_str());
+    }
+
+    /// An empty feed is a normal state at startup and during an upstream outage, not an error.
+    #[sqlx::test]
+    async fn no_snapshot_is_not_an_error(pool: PgPool) {
+        let state = crate::scope_test_support::test_state(pool.clone(), HashMap::new());
+
+        let report = departure_runway_derive_once(&pool, &state.feed, &state.gates)
+            .await
+            .expect("an empty feed must not fail the job");
+
+        assert!(report.contains("no feed snapshot"), "got: {report}");
     }
 }

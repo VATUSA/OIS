@@ -1,2 +1,2 @@
-export { createOisClient, type OisClient } from "./client";
+export { createOisClient, type OisClient, type TokenProvider } from "./client";
 export type { paths, components } from "./generated/schema";

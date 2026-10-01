@@ -1,0 +1,56 @@
+name: Auto-tag release
+
+# When a merge to main lands a NEW version, tag it `v<VERSION>`. That tag then fires the existing
+# tag-triggered pipeline — release.yml (GitHub Release + signed desktop installers + latest.json)
+# and build-images.yml (prod-tagged images) — so a version bump reaching main cuts the whole
+# release. A merge that does not change VERSION already has its tag, so this does nothing.
+#
+# Why a PAT and not GITHUB_TOKEN: a tag pushed with the default GITHUB_TOKEN does NOT trigger other
+# workflows (GitHub's loop-guard), so release.yml/build-images.yml would never run and no installers
+# would ever build — silently. The tag is therefore pushed with RELEASE_TAG_TOKEN, a PAT (or GitHub
+# App token) that needs only `contents: write` on THIS repo. Set it in
+# Settings → Secrets and variables → Actions.
+on:
+  push:
+    branches: [main]
+
+# The job pushes with the PAT, not GITHUB_TOKEN, so the workflow itself needs no write scope.
+permissions:
+  contents: read
+
+# Never let two pushes race to create the same tag.
+concurrency:
+  group: auto-tag-release
+  cancel-in-progress: false
+
+jobs:
+  tag:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          # Full history so the tag lands on this exact commit, and the PAT so the tag PUSH is
+          # attributed to a real actor and re-triggers release.yml + build-images.yml.
+          fetch-depth: 0
+          token: ${{ secrets.RELEASE_TAG_TOKEN }}
+
+      - name: Tag v<VERSION> when it is new
+        run: |
+          set -euo pipefail
+          version="$(tr -d '[:space:]' < VERSION)"
+          if [ -z "$version" ]; then
+            echo "::error::VERSION is empty — nothing to tag."
+            exit 1
+          fi
+          tag="v${version}"
+          if git ls-remote --exit-code --tags origin "refs/tags/${tag}" >/dev/null 2>&1; then
+            echo "Tag ${tag} already exists — VERSION unchanged, no release to cut."
+            exit 0
+          fi
+          # An annotated tag needs a tagger identity, which a fresh runner checkout has none of.
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git tag -a "${tag}" -m "Release ${tag}"
+          git push origin "${tag}"
+          echo "Pushed ${tag}. release.yml (Release + desktop installers) and build-images.yml" \
+               "(prod images) will now build it."

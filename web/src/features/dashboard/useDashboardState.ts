@@ -7,7 +7,13 @@ import {defaultCell, EMPTY_DASHBOARD, type DashboardState, type GridCell, type W
 const SAVE_DEBOUNCE_MS = 800;
 
 /** Coerce whatever the server returned into a valid DashboardState. */
-function normalize(raw: unknown): DashboardState {
+/**
+ * A board's stored blob as a usable state, or an empty board if it is missing or malformed.
+ *
+ * Exported because a pop-out window reads one widget out of a board without running the whole
+ * editing state machine (#349) — and it must apply the same validation, not a second copy of it.
+ */
+export function normalize(raw: unknown): DashboardState {
   const s = raw as DashboardState | null | undefined;
   if (!s || s.version !== 1 || !Array.isArray(s.widgets) || !Array.isArray(s.layout)) {
     return EMPTY_DASHBOARD;

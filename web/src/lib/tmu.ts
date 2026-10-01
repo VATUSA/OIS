@@ -23,6 +23,15 @@ export type TmiFilters = {
   to?: string;
 };
 
+/**
+ * Whether a TMI is in force: published, not a draft, expired or cancelled. The one predicate the
+ * dashboard and the menu-bar tray (#351) share, so the two can't count differently — the tray
+ * counted every TMI ever created while the dashboard beside it counted live ones.
+ */
+export function isActiveTmi(t: Tmi): boolean {
+  return t.status === "published";
+}
+
 export function useTmis(filters?: TmiFilters, { enabled = true }: { enabled?: boolean } = {}) {
   const at = useHistoricalAt();
   // Drop blank values so an empty filter bar is a plain unfiltered list. Filters don't apply in
@@ -128,6 +137,23 @@ export function usePrograms() {
       if (error || !data) throw new Error("failed to load programs");
       return data;
     },
+  });
+}
+
+/**
+ * Every airport's current arrival demand against its capacity, ranked by exceedance
+ * (VATUSA/OIS#475). One request for the whole country — the aggregation happens server-side,
+ * because the per-airport flow hooks fan out one request per ICAO (`lib/historical.ts`).
+ */
+export function useAirportDemand() {
+  return useQuery({
+    queryKey: ["tmu-demand"],
+    queryFn: async () => {
+      const { data, error } = await ois.GET("/api/v1/tmu/demand");
+      if (error || !data) throw new Error("failed to load demand");
+      return data;
+    },
+    refetchInterval: 60_000,
   });
 }
 
