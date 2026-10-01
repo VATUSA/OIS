@@ -867,13 +867,29 @@ pub async fn update_advisory(
     // `update_tmi`, so clearing it there can never discard anything a caller sent. Here the caller
     // supplies it, and a decoding sent *with* a new body describes the new body: it is not stale, so
     // the clear must yield to it rather than overwrite it.
+    //
+    // The same staleness runs the other way, which #488 left behind and #499 closes: a **new
+    // breakdown** with no decoding used to `coalesce` the old decoding forward, so a LAX→SFO reroute
+    // could carry prose describing the JFK→BOS one it replaced. A decoding not resent alongside a new
+    // breakdown is stale by exactly the argument above, so it goes too.
+    //
+    // Deliberately cleared rather than re-derived. `update_tmi` re-derives because `tmi::render_english`
+    // exists; there is no advisory equivalent, and the document body is already the human-readable
+    // form — an advisory's prose is nothing like a terse NTML line needing translation. Inventing a
+    // renderer to avoid a null would be answering a question nobody asked.
     let clear_breakdown = req.structured.is_none() && req.body.is_some();
+    // Whether a new breakdown arrived, which makes any decoding not sent with it stale.
+    let new_breakdown = req.structured.is_some();
     let result = sqlx::query(
         "update tmu.advisories set \
             kind = coalesce($2, kind), \
             body = coalesce($3, body), \
             structured = case when $6 then null else coalesce($4, structured) end, \
-            decoded = case when $6 then $5 else coalesce($5, decoded) end \
+            decoded = case \
+                when $6 then $5 \
+                when $7 then $5 \
+                else coalesce($5, decoded) \
+            end \
          where id = $1 and status = 'draft'",
     )
     .bind(id)
@@ -882,6 +898,7 @@ pub async fn update_advisory(
     .bind(req.structured.as_ref().map(sqlx::types::Json))
     .bind(req.decoded.as_deref())
     .bind(clear_breakdown)
+    .bind(new_breakdown)
     .execute(pool)
     .await
     .map_err(|_| ApiError::Internal)?;
@@ -1168,6 +1185,63 @@ mod tests {
         let structured = after.structured.expect("a supplied breakdown must survive");
         assert_eq!(structured["routes"][0]["from"], "EWR");
         assert_eq!(after.decoded.as_deref(), Some("EWR to ORD reroute"));
+    }
+
+    /// #499 AC1 and AC3: a new breakdown with no decoding must not keep the old decoding.
+    ///
+    /// The bug #488 left behind, on the other axis. `coalesce($5, decoded)` carried the previous prose
+    /// forward, so a LAX→SFO breakdown could ship describing the JFK→BOS one it replaced — a confident
+    /// wrong answer, which is exactly what #488 exists to stop.
+    #[sqlx::test]
+    async fn a_new_breakdown_without_a_decoding_leaves_none_behind(pool: PgPool) {
+        let before = structured_draft(&pool).await;
+        assert_eq!(before.decoded.as_deref(), Some("JFK to BOS reroute"));
+
+        assert!(
+            update_advisory(
+                &pool,
+                &before.id,
+                &UpdateAdvisoryRequest {
+                    structured: Some(serde_json::json!({"routes": [{"from": "LAX", "to": "SFO"}]})),
+                    ..adv_patch()
+                },
+            )
+            .await
+            .unwrap()
+        );
+
+        let after = get_advisory(&pool, &before.id).await.unwrap().unwrap();
+        let structured = after.structured.expect("the new breakdown must survive");
+        assert_eq!(structured["routes"][0]["from"], "LAX");
+        assert_eq!(
+            after.decoded, None,
+            "a decoding not resent with a new breakdown is stale — it described the old one"
+        );
+    }
+
+    /// #499 AC2: the clear must yield to a decoding that *was* sent, so this is not a blanket null.
+    /// Covered for the both-supplied case by `supplying_a_breakdown_replaces_it`; this pins the
+    /// decoding-only-with-a-breakdown shape, where `new_breakdown` is true and `$5` is not null.
+    #[sqlx::test]
+    async fn a_new_breakdown_with_a_decoding_stores_that_decoding(pool: PgPool) {
+        let before = structured_draft(&pool).await;
+
+        assert!(
+            update_advisory(
+                &pool,
+                &before.id,
+                &UpdateAdvisoryRequest {
+                    structured: Some(serde_json::json!({"routes": [{"from": "LAX", "to": "SFO"}]})),
+                    decoded: Some("LAX to SFO reroute".to_string()),
+                    ..adv_patch()
+                },
+            )
+            .await
+            .unwrap()
+        );
+
+        let after = get_advisory(&pool, &before.id).await.unwrap().unwrap();
+        assert_eq!(after.decoded.as_deref(), Some("LAX to SFO reroute"));
     }
 
     /// #488 AC2, second half, and the reason this cannot be a blanket clear: an edit that does not
