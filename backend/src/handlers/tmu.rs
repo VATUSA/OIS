@@ -598,6 +598,10 @@ pub async fn publish_ground_stop(
     let pool = state.db.as_ref().ok_or(ApiError::ServiceUnavailable)?;
     let editorial = editorial.map(|Json(e)| e).unwrap_or_default();
     let now = Utc::now();
+    // Read before the transaction opens: the document's three-letter element is looked up in the IATA
+    // index (#508 review), and holding the feed lock across the publish would serialise unrelated
+    // writes behind it.
+    let iata = state.feed.read().await.iata.clone();
 
     // One transaction for the publish and the generated advisory (#508): an advisory must not exist for
     // a stop that did not publish, or the reverse. Simpler than the GDP path -- a ground stop has no
@@ -613,7 +617,7 @@ pub async fn publish_ground_stop(
     // `tmu.ground_stop_until_ts`, the same resolver the cleanup job expires the stop with, so the
     // document cannot state an end the system does not enforce.
     let until = tmu_repo::ground_stop_until_instant(&mut tx, &id).await?;
-    let doc = crate::advisory::ground_stop_advisory_from(&gs, (now, until), &editorial, now);
+    let doc = crate::advisory::ground_stop_advisory_from(&iata, &gs, (now, until), &editorial, now);
     let req = CreateAdvisoryRequest {
         facility: "DCC".to_string(),
         kind: crate::models::ADVISORY_KIND_GROUND_STOP.to_string(),
@@ -1278,6 +1282,56 @@ mod tests {
         .fetch_all(pool)
         .await
         .unwrap()
+    }
+
+    /// The same wiring check as the GDP side: the feed's IATA index has to reach the document.
+    ///
+    /// Discarding the map the handler looked up left every ground-stop test green, because they all
+    /// publish at `KDFW`, where the `K`-strip fallback is already correct. `PHNL` is what separates the
+    /// real index from the fallback — it renders `HNL` only if the index arrived.
+    #[sqlx::test]
+    async fn the_feeds_iata_index_reaches_the_ground_stop_document(pool: PgPool) {
+        let state = test_state(pool.clone(), HashMap::new());
+        state.feed.write().await.iata = std::sync::Arc::new(
+            [("HNL".to_string(), "PHNL".to_string())]
+                .into_iter()
+                .collect(),
+        );
+        let user = seed_user(&pool).await;
+        let cookie = session_cookie(&pool, &user).await;
+        grant(&pool, &user, "tmu.groundstop.publish", None).await;
+        let id = tmu_repo::create_ground_stop(
+            &pool,
+            &CreateGroundStopRequest {
+                airport: "PHNL".into(),
+                scope: Some("ZAK".into()),
+                until: Some("2315".into()),
+            },
+            "ZAK",
+            Some("2315"),
+            &user,
+        )
+        .await
+        .unwrap();
+
+        send(
+            &state,
+            http::Method::POST,
+            &format!("/api/v1/tmu/ground-stops/{id}/publish"),
+            &cookie,
+            None,
+        )
+        .await;
+
+        let body = advisories_for_ground_stop(&pool, &id).await.remove(0).2;
+        assert!(
+            body.contains("CTL ELEMENT: HNL"),
+            "Honolulu's three-letter form must come from the feed's index; got:\n{body}"
+        );
+        assert!(
+            !body.contains("PHNL"),
+            "the raw ICAO must not appear in the document; got:\n{body}"
+        );
     }
 
     /// AC1/AC3 for a ground stop — publishing generates the document, and it carries the program's own

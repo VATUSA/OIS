@@ -493,17 +493,21 @@ pub async fn revise_gdp(
         let now = Utc::now();
         let (start, end, slots, stats) = frozen_slots_for(&state, &gdp, now).await?;
         let editorial = payload.advisory.unwrap_or_default();
+        let iata = state.feed.read().await.iata.clone();
         let mut tx = pool.begin().await.map_err(|_| ApiError::Internal)?;
         gdp_repo::replace_slots_in(&mut tx, &id, &slots).await?;
         tmu_repo::cancel_program_advisory_tx(&mut tx, tmu_repo::AdvisoryProgram::Gdp(&id)).await?;
         generate_gdp_advisory(
             &mut tx,
-            &gdp,
-            &stats,
-            (start, end),
-            &editorial,
+            GdpDocInput {
+                iata: &iata,
+                gdp: &gdp,
+                stats: &stats,
+                window: (start, end),
+                editorial: &editorial,
+                now,
+            },
             &user.id,
-            now,
         )
         .await?;
         tx.commit().await.map_err(|_| ApiError::Internal)?;
@@ -564,6 +568,10 @@ pub async fn publish_gdp(
     }
     let now = Utc::now();
     let (start, end, slots, stats) = frozen_slots_for(&state, &draft, now).await?;
+    // Read before the transaction opens, like every other feed read on this path: the document's
+    // three-letter element is looked up in the IATA index (#508 review), and holding the feed lock
+    // across the publish would serialise unrelated writes behind it.
+    let iata = state.feed.read().await.iata.clone();
 
     // One transaction for every write (#508): the publish, the frozen control times, and the generated
     // advisory. An advisory must not exist for a program that did not publish, or the reverse.
@@ -577,12 +585,15 @@ pub async fn publish_gdp(
     gdp_repo::replace_slots_in(&mut tx, &id, &slots).await?;
     generate_gdp_advisory(
         &mut tx,
-        &gdp,
-        &stats,
-        (start, end),
-        &editorial,
+        GdpDocInput {
+            iata: &iata,
+            gdp: &gdp,
+            stats: &stats,
+            window: (start, end),
+            editorial: &editorial,
+            now,
+        },
         &user.id,
-        now,
     )
     .await?;
     tx.commit().await.map_err(|_| ApiError::Internal)?;
@@ -599,16 +610,34 @@ pub async fn publish_gdp(
 ///
 /// Issued as `DCC`: these are vATCSCC documents, which both reference fixtures confirm. The facility
 /// drives the advisory-number sequence; the airport and ARTCC appear in the header's element slot.
+/// Everything the document is derived from, grouped rather than passed positionally.
+///
+/// Adding the feed's IATA index took the helper to eight arguments, which `clippy::too_many_arguments`
+/// rejects. Grouping beats an `allow`: the publish and revise paths both build one of these, so they
+/// cannot drift into disagreeing about the order of six same-ish references.
+struct GdpDocInput<'a> {
+    iata: &'a crate::feed::airports::IataMap,
+    gdp: &'a GdpBody,
+    stats: &'a gdp::GdpStats,
+    window: (DateTime<Utc>, DateTime<Utc>),
+    editorial: &'a PublishGdpRequest,
+    now: DateTime<Utc>,
+}
+
 async fn generate_gdp_advisory(
     tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
-    gdp: &GdpBody,
-    stats: &gdp::GdpStats,
-    window: (DateTime<Utc>, DateTime<Utc>),
-    editorial: &PublishGdpRequest,
+    input: GdpDocInput<'_>,
     author: &str,
-    now: DateTime<Utc>,
 ) -> Result<String, ApiError> {
-    let doc = crate::advisory::gdp_advisory_from(gdp, stats, window, editorial, now);
+    let GdpDocInput {
+        iata,
+        gdp,
+        stats,
+        window,
+        editorial,
+        now,
+    } = input;
+    let doc = crate::advisory::gdp_advisory_from(iata, gdp, stats, window, editorial, now);
     let req = CreateAdvisoryRequest {
         facility: "DCC".to_string(),
         kind: crate::models::ADVISORY_KIND_GDP.to_string(),
@@ -923,6 +952,7 @@ mod tests {
         // pass while proving something else entirely — which it did, until mutation testing showed it.
         let gdp = gdp_repo::get_gdp(&mut *tx, &id).await.unwrap().unwrap();
         let doc = crate::advisory::gdp_advisory_from(
+            &Default::default(),
             &gdp,
             &gdp::program_stats(&[]),
             (Utc::now(), Utc::now()),
@@ -996,6 +1026,60 @@ mod tests {
         assert!(
             body.contains("1415Z") && body.contains("2315Z"),
             "the program window should appear; got:\n{body}"
+        );
+    }
+
+    /// The element lookup has to survive the trip from the feed into the document, and nothing else
+    /// proves it does.
+    ///
+    /// The derivation's own unit tests pass a map directly, so discarding the one the handler looked up
+    /// — `gdp_advisory_from(&Default::default(), ..)` — left every test green: an empty index falls back
+    /// to the `K`-strip, and the other GDP tests all publish at `KJFK`, where the fallback is correct.
+    /// Publishing a *non-`K`* airport is what tells the two apart. `PHNL` renders `HNL` only if the real
+    /// index arrived; with an empty one it renders `PHNL`.
+    #[sqlx::test]
+    async fn the_feeds_iata_index_reaches_the_document(pool: PgPool) {
+        let state = test_state(pool.clone(), HashMap::new());
+        state.feed.write().await.iata = std::sync::Arc::new(
+            [("HNL".to_string(), "PHNL".to_string())]
+                .into_iter()
+                .collect(),
+        );
+        let user = seed_user(&pool).await;
+        let cookie = session_cookie(&pool, &user).await;
+        grant(&pool, &user, "tmu.gdp.publish", None).await;
+        let id = gdp_repo::create_gdp(
+            &pool,
+            "PHNL",
+            30,
+            "ZAK",
+            "1415",
+            "2315",
+            None,
+            false,
+            &[],
+            &user,
+        )
+        .await
+        .unwrap();
+
+        send(
+            &state,
+            http::Method::POST,
+            &format!("/api/v1/tmu/gdp/{id}/publish"),
+            &cookie,
+            None,
+        )
+        .await;
+
+        let body = advisories_for_gdp(&pool, &id).await.remove(0).2;
+        assert!(
+            body.contains("CTL ELEMENT: HNL"),
+            "Honolulu's three-letter form must come from the feed's index, not a K-strip; got:\n{body}"
+        );
+        assert!(
+            !body.contains("PHNL"),
+            "the raw ICAO must not appear in the document; got:\n{body}"
         );
     }
 
