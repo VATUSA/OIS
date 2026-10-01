@@ -42,7 +42,7 @@ use crate::{
         ResolveRouteRequest, ResolvedRoute, RouteBody, RouteWaypoint, TrafficAircraft,
         UpsertFcaRequest, UpsertRouteRequest,
     },
-    repos::{flow as flow_repo, public as public_repo},
+    repos::{departure_runway as departure_runway_repo, flow as flow_repo, public as public_repo},
     state::AppState,
 };
 
@@ -2155,6 +2155,16 @@ pub async fn list_idst(
         let releases = load_releases(pool, &fca.id).await?;
         fca_releases.push((fca, releases));
     }
+    // Predicted runways, read with the rest of the DB work up front (#511). Derived by
+    // `jobs::departure_runway_derive_once`, not here: the ladder's config rung needs a per-airport wind
+    // fetch, which this read — scoped to a whole ARTCC and polled every 30 s — cannot afford.
+    let mut predicted: std::collections::HashMap<(String, String), (String, String)> =
+        std::collections::HashMap::new();
+    for icao in &airports {
+        for a in departure_runway_repo::list_for_airport(pool, icao).await? {
+            predicted.insert((a.icao, a.callsign), (a.runway, a.source));
+        }
+    }
     let (snapshot, ap) = feed_view(&state).await;
     let Some(snap) = snapshot else {
         return Ok(empty(now));
@@ -2206,6 +2216,12 @@ pub async fn list_idst(
                 } else {
                     None
                 };
+                // The runway the derive job predicted for this aircraft at this field (#511). Keyed
+                // `(icao, callsign)` — not by FCA — so a flight metered by two FCAs shows one runway in
+                // both rows rather than two that could disagree.
+                let pick = predicted
+                    .get(&(f.dep.to_ascii_uppercase(), f.callsign.clone()))
+                    .cloned();
                 let item = IdstFlight {
                     callsign: f.callsign,
                     dep: f.dep,
@@ -2219,6 +2235,8 @@ pub async fn list_idst(
                     cross_time: f.cross_time,
                     edct,
                     released: f.released,
+                    runway: pick.as_ref().map(|(r, _)| r.clone()),
+                    runway_source: pick.as_ref().map(|(_, s)| s.clone()),
                 };
                 if item.released {
                     released.push(item);

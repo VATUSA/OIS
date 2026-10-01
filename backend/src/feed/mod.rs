@@ -7,6 +7,7 @@ pub mod airspace;
 mod cifp;
 pub mod coverage;
 pub mod delays;
+pub mod departure_runway;
 pub mod events;
 pub mod facilities;
 pub mod fca;
