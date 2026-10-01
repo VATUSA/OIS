@@ -1,6 +1,7 @@
 import {
   Activity,
   BarChart3,
+  Bot,
   CalendarClock,
   FileText,
   Film,
@@ -122,6 +123,12 @@ export const AREAS: readonly NavArea[] = [
           { label: "Audit", to: "/admin/audit", icon: ScrollText, permission: "audit.logs.read" },
           { label: "Jobs", to: "/admin/jobs", icon: Activity, permission: "system.jobs.read" },
           { label: "API Keys", to: "/admin/api-keys", icon: KeyRound, permission: "api_keys.key.read" },
+      {
+        label: "Service Accounts",
+        to: "/admin/service-accounts",
+        icon: Bot,
+        permission: "service_accounts.read",
+      },
           { label: "Discord", to: "/admin/discord", icon: MessageSquare, permission: "discord.config.read" },
         ],
       },

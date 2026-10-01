@@ -205,30 +205,40 @@ fn parse(src: &str) -> TraconData {
     TraconData::build(features)
 }
 
-/// Outer ring(s) as `[lat, lon]` from a Polygon or MultiPolygon (holes ignored), with off-globe
-/// vertices removed (see [`sanitize_ring`]).
+/// Outer ring(s) as `[lat, lon]` from a Polygon or MultiPolygon, with off-globe vertices removed
+/// (see [`sanitize_ring`]).
+///
+/// Interior rings (holes) are dropped, because `TraconData` carries a flat list of rings with no
+/// hole structure — representing them would mean reshaping that type, which is well beyond what a
+/// boundary reader should decide. Dropping them **is** a silent reshaping of a donut or multi-part
+/// TRACON, though, so it is logged: a shape drawn solid when it should have a hole is otherwise
+/// indistinguishable from correct data (VATUSA/OIS#481).
 fn outer_rings(id: &str, geom: &Geometry) -> Vec<Vec<[f64; 2]>> {
-    let outers: Vec<Vec<[f64; 2]>> = match geom.gtype.as_str() {
+    let polys: Vec<Vec<Vec<[f64; 2]>>> = match geom.gtype.as_str() {
         "Polygon" => serde_json::from_value::<Vec<Vec<[f64; 2]>>>(geom.coordinates.clone())
             .ok()
-            .and_then(|rings| rings.into_iter().next())
             .into_iter()
             .collect(),
         "MultiPolygon" => {
             serde_json::from_value::<Vec<Vec<Vec<[f64; 2]>>>>(geom.coordinates.clone())
-                .ok()
-                .map(|polys| {
-                    polys
-                        .into_iter()
-                        .filter_map(|rings| rings.into_iter().next())
-                        .collect()
-                })
                 .unwrap_or_default()
         }
         _ => Vec::new(),
     };
-    outers
+    let holes: usize = polys
+        .iter()
+        .map(|rings| rings.len().saturating_sub(1))
+        .sum();
+    if holes > 0 {
+        tracing::warn!(
+            tracon = id,
+            holes,
+            "tracon: dropped interior ring(s); the area will be drawn solid"
+        );
+    }
+    polys
         .into_iter()
+        .filter_map(|rings| rings.into_iter().next())
         .filter_map(|ring| sanitize_ring(id, ring))
         .collect()
 }

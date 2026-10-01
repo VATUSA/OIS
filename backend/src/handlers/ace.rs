@@ -21,7 +21,7 @@ use crate::{
     handlers::events::normalize_facility,
     models::{
         AceRequestBody, ClaimAceRequest, CreateAceRequestRequest, DecideAceRequestRequest,
-        EventBody,
+        EventBody, MyAceClaim,
     },
     repos::{
         ace as ace_repo, events as events_repo, facility_documents as facility_documents_repo,
@@ -246,6 +246,28 @@ pub(crate) async fn enqueue_claim_dm(
 #[derive(Deserialize)]
 pub struct RequestsQuery {
     status: Option<String>,
+}
+
+#[utoipa::path(
+    get,
+    path = "/api/v1/me/ace-claims",
+    tag = "ace",
+    responses((status = 200, body = Vec<MyAceClaim>), (status = 401), (status = 403))
+)]
+/// The signed-in user's claimed ACE positions for events still to come.
+///
+/// Gated on the existing claim permission — if you can claim a position, you can see the ones you
+/// hold — so no new permission marker is introduced. Scoped to the session user; the request never
+/// names whose claims to return.
+pub async fn my_ace_claims(
+    State(state): State<AppState>,
+    _permission: RequirePermission<AceRequestsClaim>,
+    Extension(current_user): Extension<Option<CurrentUser>>,
+) -> Result<Json<Vec<MyAceClaim>>, ApiError> {
+    let user = current_user.as_ref().ok_or(ApiError::Unauthorized)?;
+    let pool = state.db.as_ref().ok_or(ApiError::ServiceUnavailable)?;
+
+    Ok(Json(ace_repo::my_upcoming_claims(pool, &user.id).await?))
 }
 
 #[utoipa::path(

@@ -64,8 +64,8 @@ pub struct AlongRouteEta {
 /// from the surface and carry `ground_allowance_sec` (a learned per-gate/type/runway pushback+taxi
 /// estimate, #164 sub-issue E — `feed::taxi_estimate::estimate` falls back to [`GROUND_TAXI_SEC`]
 /// itself when data is thin, so callers always have a value to pass here). Ignored when `airborne`
-/// is true. `arr_elev_ft` is the destination's field elevation (see
-/// [`crate::feed::airports::field_elevation_ft`]), where the descent ends. An airborne aircraft's
+/// is true. The descent ends at `arr_icao`'s field elevation, resolved from `airports` by
+/// [`profile_from_here`] rather than passed in (#411). An airborne aircraft's
 /// prediction is anchored to `observed_gs_kt` when it is established at cruise
 /// ([`trajectory::VerticalProfile::anchor_to_observed_gs`]).
 #[allow(clippy::too_many_arguments)]
@@ -77,7 +77,8 @@ pub fn eta_along_route(
     observed_gs_kt: f64,
     cruise_alt_ft: f64,
     cruise_tas: f64,
-    arr_elev_ft: f64,
+    airports: &AirportDb,
+    arr_icao: &str,
     profile: &AircraftProfile,
     headwind: Option<f64>,
     ground_allowance_sec: f64,
@@ -90,7 +91,8 @@ pub fn eta_along_route(
         observed_gs_kt,
         cruise_alt_ft,
         cruise_tas,
-        arr_elev_ft,
+        airports,
+        arr_icao,
         profile,
         headwind,
     );
@@ -121,7 +123,8 @@ pub fn project_along_route(
     observed_gs_kt: f64,
     cruise_alt_ft: f64,
     cruise_tas: f64,
-    arr_elev_ft: f64,
+    airports: &AirportDb,
+    arr_icao: &str,
     profile: &AircraftProfile,
     headwind: Option<f64>,
     ground_allowance_sec: f64,
@@ -134,7 +137,8 @@ pub fn project_along_route(
         observed_gs_kt,
         cruise_alt_ft,
         cruise_tas,
-        arr_elev_ft,
+        airports,
+        arr_icao,
         profile,
         headwind,
     );
@@ -151,15 +155,22 @@ pub fn project_along_route(
 /// The vertical profile [`eta_along_route`] and [`project_along_route`] share: airborne aircraft
 /// start from their current altitude, anchored to their observed groundspeed; ground aircraft climb
 /// from the surface on the raw profile.
+///
+/// This is also the **one** place the descent's end altitude is resolved: it looks the arrival field
+/// elevation up from `airports` itself instead of taking it as an argument, so no caller can pass the
+/// wrong one — or drop it and silently get a sea-level descent, which five separate call sites could
+/// each do before #411. [`trajectory::VerticalProfile::build`] keeps the raw-`f64` entry point for the
+/// model's own tests, which is what keeps `feed::trajectory` free of any airport-db dependency.
 #[allow(clippy::too_many_arguments)]
-fn profile_from_here(
+pub fn profile_from_here(
     airborne: bool,
     route_len_nm: f64,
     cur_alt_ft: f64,
     observed_gs_kt: f64,
     cruise_alt_ft: f64,
     cruise_tas: f64,
-    arr_elev_ft: f64,
+    airports: &AirportDb,
+    arr_icao: &str,
     profile: &AircraftProfile,
     headwind: Option<f64>,
 ) -> trajectory::VerticalProfile {
@@ -167,7 +178,7 @@ fn profile_from_here(
     let vp = trajectory::VerticalProfile::build(
         start_alt,
         route_len_nm,
-        arr_elev_ft,
+        field_elevation_ft(airports, arr_icao),
         cruise_alt_ft,
         cruise_tas,
         profile,
@@ -254,7 +265,8 @@ pub fn arrival_eta(
         ac.gs as f64,
         ac.cruise_ft,
         ac.cruise_tas,
-        field_elevation_ft(airports, ac.arr),
+        airports,
+        ac.arr,
         profile,
         headwind,
         ground_allowance_sec,
@@ -372,7 +384,8 @@ mod tests {
             ac.gs as f64,
             ac.cruise_ft,
             ac.cruise_tas,
-            0.0,
+            &airports(),
+            "KMIA",
             &profile,
             hw,
             GROUND_TAXI_SEC,
@@ -466,7 +479,8 @@ mod tests {
             0.0,
             35_000.0,
             440.0,
-            0.0,
+            &airports(),
+            "KMIA",
             &profile,
             None,
             0.0,
@@ -480,7 +494,8 @@ mod tests {
             0.0,
             35_000.0,
             440.0,
-            0.0,
+            &airports(),
+            "KMIA",
             &profile,
             None,
             GROUND_TAXI_SEC * 10.0,
@@ -510,7 +525,8 @@ mod tests {
             0.0,
             35_000.0,
             440.0,
-            0.0,
+            &airports(),
+            "KMIA",
             &profile,
             None,
             allowance,
@@ -524,7 +540,8 @@ mod tests {
             0.0,
             35_000.0,
             440.0,
-            0.0,
+            &airports(),
+            "KMIA",
             &profile,
             None,
             GROUND_TAXI_SEC,
@@ -548,7 +565,8 @@ mod tests {
             0.0,
             35_000.0,
             440.0,
-            0.0,
+            &airports(),
+            "KMIA",
             &profile,
             None,
             GROUND_TAXI_SEC,
@@ -574,7 +592,8 @@ mod tests {
             observed_gs,
             35_000.0,
             440.0,
-            0.0,
+            &airports(),
+            "KMIA",
             &profile,
             None,
             0.0,
@@ -588,7 +607,8 @@ mod tests {
             observed_gs,
             35_000.0,
             440.0,
-            0.0,
+            &airports(),
+            "KMIA",
             &profile,
             None,
             0.0,
@@ -600,11 +620,66 @@ mod tests {
         );
     }
 
+    /// #411: `profile_from_here` is the one place an airborne prediction is anchored to its
+    /// observed groundspeed, and nothing proved that wiring — deleting the `if airborne` branch
+    /// left all 527 tests green. The only test that mentioned anchoring
+    /// (`project_along_route_agrees_with_eta_along_route`) cannot catch it: both of its sides run
+    /// through this same helper, so removing the anchoring moves both identically.
+    #[test]
+    fn an_airborne_prediction_is_anchored_to_the_observed_groundspeed() {
+        let profile = AircraftProfile::default();
+        let eta_at = |airborne: bool, observed_gs: f64| {
+            eta_along_route(
+                airborne,
+                300.0,
+                300.0,
+                if airborne { 35_000.0 } else { 0.0 },
+                observed_gs,
+                35_000.0,
+                440.0,
+                &airports(),
+                "KMIA",
+                &profile,
+                None,
+                0.0,
+                now(),
+            )
+            .eta
+        };
+
+        // Established at cruise (within ANCHOR_ALT_TOLERANCE_FT of it, above ANCHOR_MIN_GS_KT) and
+        // 30 kt faster than the 440 kt profile, so every predicted groundspeed scales to it.
+        let (fast, on_profile) = (eta_at(true, 470.0), eta_at(true, 440.0));
+        assert!(
+            fast < on_profile,
+            "an aircraft observed at 470 kt must arrive before one flying the 440 kt profile, got \
+             {fast} vs {on_profile} — equal means the anchoring never reached the profile"
+        );
+
+        // A ground aircraft is never anchored, so its observed groundspeed is inert.
+        assert_eq!(
+            eta_at(false, 470.0),
+            eta_at(false, 440.0),
+            "a ground aircraft must not be anchored to its observed groundspeed"
+        );
+    }
+
     #[test]
     fn project_along_route_clamps_at_the_destination() {
         let profile = AircraftProfile::default();
         let ahead = project_along_route(
-            true, 300.0, 35_000.0, 0.0, 35_000.0, 440.0, 0.0, &profile, None, 0.0, 999_999.0,
+            true,
+            300.0,
+            35_000.0,
+            0.0,
+            35_000.0,
+            440.0,
+            &airports(),
+            "KMIA",
+            &profile,
+            None,
+            0.0,
+            999_999.0,
         );
         assert_eq!(ahead, 300.0, "never projects past the destination itself");
     }
@@ -620,7 +695,8 @@ mod tests {
             0.0,
             35_000.0,
             440.0,
-            0.0,
+            &airports(),
+            "KMIA",
             &profile,
             None,
             GROUND_TAXI_SEC,
@@ -656,10 +732,12 @@ mod tests {
             .eta
         };
         let sea_level = at(0.0);
-        assert_ne!(
-            at(5431.0),
-            sea_level,
-            "the field elevation must reach the profile"
+        // #335: the *direction*, not merely "different". A higher field shortens the descent, so
+        // the arrival is strictly earlier — `assert_ne!` was also satisfied by an inverted sign.
+        assert!(
+            at(5431.0) < sea_level,
+            "a 5431 ft field must arrive earlier than a sea-level one, got {} vs {sea_level}",
+            at(5431.0)
         );
 
         let unknown_dest = ArrivalInput {
@@ -700,7 +778,8 @@ mod tests {
             0.0,
             35_000.0,
             cruise_tas,
-            0.0,
+            &airports(),
+            "KMIA",
             &profile,
             None,
             0.0,
@@ -741,7 +820,8 @@ mod tests {
             0.0,
             35_000.0,
             440.0,
-            0.0,
+            &airports(),
+            "KMIA",
             &profile,
             None,
             0.0,
@@ -755,7 +835,8 @@ mod tests {
             0.0,
             35_000.0,
             440.0,
-            0.0,
+            &airports(),
+            "KMIA",
             &profile,
             None,
             0.0,

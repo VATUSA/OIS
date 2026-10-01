@@ -8,6 +8,9 @@ import {areaForPath, groupForPath, itemForPath, visibleGroups} from "@/lib/nav";
 
 import {AppSidebar, MobileNavButton} from "./app-sidebar";
 import {CommandSearch} from "./command-search";
+import {UpdateBanner} from "@/components/update-banner";
+import {OpenInWindowButton} from "@/components/shell/open-in-window";
+import {useDragRegionProps} from "@/components/shell/window-controls";
 import {PageMetaProvider, usePageHeaderOverride, usePageTitle, useRouteMeta, useView} from "./page-meta";
 import {recordVisit} from "./recent-pages";
 
@@ -65,6 +68,7 @@ function Frame({ children }: { children: React.ReactNode }) {
   // cannot drift from the title on screen (VATUSA/OIS#312).
   const title = usePageTitle();
   const crumbs = useCrumbs(title);
+  const dragRegion = useDragRegionProps();
 
   useEffect(() => {
     if (title) recordVisit({ path: pathname, label: title });
@@ -74,7 +78,21 @@ function Frame({ children }: { children: React.ReactNode }) {
     <Shell
       sidebar={<AppSidebar collapsed={collapsed} onToggle={() => setCollapsed(!collapsed)} />}
       leading={<MobileNavButton />}
-      breadcrumbs={crumbs.length > 0 ? <Breadcrumbs items={crumbs} /> : undefined}
+      // The window's own buttons are not here: they belong at the window's top-left, which is the
+      // sidebar's chrome row (#419) — on macOS the OS draws them there itself and the page cannot move
+      // them. This row is still what *moves* the window, on every platform: macOS's `Overlay` title bar
+      // is transparent and sits over the content, so it needs the drag region as much as an
+      // undecorated Windows window does.
+      // Double-click-to-maximize is Tauri's own, not ours: `drag.js` already does it for a drag
+      // region and gets the macOS/Windows difference right, and a handler of ours on top toggled
+      // twice. Nothing is passed on the web build or in a route window — see useDragRegionProps.
+      topBarProps={dragRegion}
+      breadcrumbs={
+        <>
+          {crumbs.length > 0 && <Breadcrumbs items={crumbs} />}
+          <OpenInWindowButton />
+        </>
+      }
     >
       <ShellContent layout={meta.layout} header={<Header />}>
         {children}
@@ -87,7 +105,14 @@ function Frame({ children }: { children: React.ReactNode }) {
 export function AppShell({ children }: { children: React.ReactNode }) {
   return (
     <PageMetaProvider>
-      <Frame>{children}</Frame>
+      {/* Inside the frame, not above it. The banner is an in-flow strip, and anything in flow above
+          the shell pushes the sidebar's chrome row down while the OS keeps the macOS traffic lights
+          at the fixed window coordinates `trafficLightPosition` gives them (#419 review) — a staged
+          update put the real lights on top of the banner and left an empty gap in the row. */}
+      <Frame>
+        <UpdateBanner />
+        {children}
+      </Frame>
       <CommandSearch />
     </PageMetaProvider>
   );

@@ -22,21 +22,31 @@ One monorepo, four parts, one API:
 | Path | Stack | What it is |
 | --- | --- | --- |
 | `backend/` | Rust · Axum | The API and the authority for identity, permissions, and every domain. Postgres + sqlx, embedded migrations, self-served OpenAPI. |
-| `discord/` | Rust · serenity | The bot. Owns no data — drains an outbound-job queue and calls back via REST as a service account. *(designed, not built)* |
+| `discord/` | Rust · serenity | The bot. Owns no data — leases jobs from `integration.outbound_jobs` via `POST /api/v1/integration/jobs/lease`, performs the Discord side-effect, then acks with the ids it produced. Its button and modal interactions call back through the same API as a service account. |
 | `web/` | Vite · React | The site. TanStack Router + Query, consuming the OpenAPI-generated typed client. |
-| `desktop/` | Tauri | Native app *(Phase 5, not scaffolded)*. |
+| `desktop/` | Tauri · Rust | The native app. Not a second frontend — a webview shell (`src-tauri`) around the **same** `web/` bundle. *(shipping signed auto-updating builds; desktop-only features in progress)* |
 | `crates/ois-core` | Rust | DB-free domain + permission types (ported from osmium). |
 | `crates/ois-client` | Rust | Typed backend client used by the bot. |
 | `packages/api-client` | TypeScript | OpenAPI-generated client (`@ois/api-client`) for web + desktop. |
 | `packages/ui` | TypeScript | Shared shadcn/ui components + theme. |
 
-Two workspace managers coexist: a Cargo workspace (`backend`, `discord`, `crates/*`) and a
-pnpm + Turborepo workspace (`web`, `packages/*`). The root `justfile` ties cross-language tasks
-together. Design docs live in `docs/` (architecture + per-feature specs); user docs are a VitePress
-site in `docs-site/`. The backlog is `docs/IDEAS.md`; the phased plan is `docs/PLAN.md`.
+Two workspace managers coexist: a Cargo workspace (`backend`, `discord`, `crates/*`,
+`desktop/src-tauri`) and a pnpm + Turborepo workspace (`web`, `desktop`, `packages/*`). The root
+`justfile` ties cross-language tasks together. Design docs live in `docs/` (architecture +
+per-feature specs); user docs are a VitePress site in `docs-site/`. The backlog is
+`docs/IDEAS.md`; the phased plan is `docs/PLAN.md`.
 
 Rust: edition 2024, MSRV 1.85, **nightly** toolchain (for `-Zthreads` — no nightly *language*
 features, so `stable` remains a valid fallback).
+
+**On Linux, `just ci` needs the GTK/WebKit dev packages.** `just check` is
+`cargo check --workspace`, and the workspace includes the Tauri shell (`desktop/src-tauri`), whose
+Linux backend will not even `cargo check` without them — so a backend-only change still fails
+without this. macOS and Windows use the OS webview and need nothing extra.
+
+```bash
+sudo apt-get install -y libwebkit2gtk-4.1-dev libgtk-3-dev libayatana-appindicator3-dev librsvg2-dev
+```
 
 ---
 
@@ -54,6 +64,7 @@ models/     request/response + row types (serde + utoipa + sqlx::FromRow)
 auth/       RequirePermission extractor, principal resolution, permission markers
 jobs.rs     background workers (nav/winds refresh, lifecycle, cleanup, compaction…)
 job_registry.rs  in-memory job status + manual-trigger registry
+metrics.rs  Prometheus registry + the HTTP-metrics layer; GET /metrics projects AppState
 feed/       live VATSIM-feed subsystem (poller, nav, airports, trajectory, flow, runway…)
 realtime.rs in-process broadcast hub behind GET /api/v1/ws
 audit.rs    middleware that records every successful mutation
@@ -108,6 +119,11 @@ OIS_OPENAPI_URL=http://127.0.0.1:3001/docs/api/v1/openapi.json \
 
 New handlers must be registered in **both** `router.rs` (the route) and `openapi.rs` (the path +
 any new schema), or they won't appear in the generated client.
+
+The one deliberate exception is **`GET /metrics`** (#382): Prometheus text exposition, not JSON the
+SPA consumes, so it is registered in `router.rs` only and there is **no client regen** for it.
+Adding another endpoint outside the spec needs the same kind of justification — "the generated
+client could not use it if it wanted to" — not merely "the SPA doesn't call it yet".
 
 ### The trajectory / ETA model (one predictor, many callers)
 
@@ -204,6 +220,10 @@ an existing one) or the bug and fix are unambiguous.
   with file:line evidence, the blast-radius footer, and the scope tests for when a noticed problem
   becomes its own `technical-debt` ticket. Agents don't self-assign, close, or merge; other repos are
   read-only.
+- **The board sequences work; it does not gate the merge.** A PR lands on green CI plus review, not
+  on its card's column — see [`docs/github-issues.md`](docs/github-issues.md) § Lifecycle for the
+  rule and why there is no mechanical check. A merged PR whose card is still left of **Code Review**
+  is a bookkeeping error to flag on the issue, not a policy breach.
 
 ---
 
@@ -220,6 +240,7 @@ just backend       # cargo run -p ois-backend  (migrations apply on startup)
 just web           # pnpm --filter web dev      (Vite, default :5173)
 just bot           # cargo run -p ois-discord
 just docs          # VitePress user-docs dev server
+just desktop       # Tauri shell + web dev server, hot-reloaded into the webview
 
 # rust
 just check         # cargo check --workspace --all-targets
@@ -229,6 +250,9 @@ just test-rust     # cargo test --workspace --all-targets -- --test-threads=1
 
 # js
 just test-js       # pnpm test
+
+# desktop
+just desktop-build # bundle the Tauri app for the host platform
 
 # the full local gate (run before calling anything done)
 just ci            # fmt-check + cargo check + rust tests, then pnpm lint && pnpm typecheck
@@ -282,9 +306,11 @@ idempotent-friendly and numbered sequentially).
 - **Auth**: VATSIM Connect OAuth is the only human sign-in (no local passwords). Bearer tokens are
   user API keys (`ois_pat_…`, capped to the owner's live access) or service accounts (`ois_sa_…`).
   The VATUSA roster webhook is authenticated by HMAC over the body, no session/bearer.
-- **Blocked subsystems**: the Discord bot and transactional email are designed-only. Features that
-  need them (Discord DMs, reminder emails) can't be finished until those are built — say so rather
-  than stubbing.
+- **Blocked subsystems**: transactional email is designed-only — features needing it (reminder
+  emails) can't be finished until it is built; say so rather than stubbing. The Discord bot is
+  **not** in this category: it runs, drains the outbound-job queue, and sends DMs. Its one gap is
+  slash commands — it registers none and needs no privileged intents, so anything phrased as a chat
+  command needs that built first.
 - **Comments and commit bodies** describe the code as it is now, for a future reader — not a
   per-change narrative with dates/IDs. That history belongs in the commit message and the test.
 
@@ -326,5 +352,13 @@ The full list with dev defaults is in `.env.example`. The ones that gate functio
 - **VATUSA** (optional roster sync): `VATUSA_API_BASE`, `VATUSA_API_KEY`, `OIS_PUBLIC_URL`.
 - **Discord bot** (optional): `DISCORD_BOT_TOKEN`, `OIS_API_BASE`, `OIS_API_TOKEN`, `OIS_POLL_SECS`.
 - **Web/Vite dev**: `VITE_OIS_API_URL`, `OIS_OPENAPI_URL` (codegen source) — in `web/.env.local`.
+- **Observability** (optional, second compose file): `METRICS_TOKEN` gates `GET /metrics` when set;
+  `PROMETHEUS_PORT`, `PROMETHEUS_RETENTION`, `GRAFANA_PORT`, `GRAFANA_ADMIN_PASSWORD`. See
+  `docs/deploy.md`.
+- **Origins** — two lists, deliberately separate. `CORS_ALLOWED_ORIGINS` grants *credentialed* CORS
+  (the web app, and the Tauri webview's `tauri://localhost` / `http://tauri.localhost`) and is also
+  accepted for OAuth `return_to`. `OAUTH_RETURN_TO_ORIGINS` is `return_to`-only, no CORS — the
+  desktop app's loopback listener (`http://127.0.0.1:8765`) belongs here, because that port is bound
+  only while sign-in runs and anything else that binds it must not inherit API access (#346).
 
 Never put secrets in the repo; `.env` / `web/.env.local` are gitignored.

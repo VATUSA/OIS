@@ -776,7 +776,9 @@ fn ground_estimate(
     let cruise_tas = trajectory::capped_cruise_tas(parse_tas(&fp.cruise_tas), cruise, profile);
     let aircraft = (!fp.aircraft_short.is_empty()).then_some(fp.aircraft_short.as_str());
     let allowance =
-        resolve_ground_allowance_sec(gates, runways, taxi_samples, dep, aircraft, pilot_pos);
+        // `None`: the demand path has no assignment in hand. Wiring one would need a new AppState
+        // cache, since the feed holds no DB handle — out of #513's scope, and stated in its PR.
+        resolve_ground_allowance_sec(gates, runways, taxi_samples, dep, aircraft, pilot_pos, None);
     match (airports.get(dep).map(|a| (a.lat, a.lon)), arr) {
         (Some(dep_ll), Some(arr_ll)) => {
             let pred = predict::arrival_eta(
@@ -803,12 +805,17 @@ fn ground_estimate(
             (pred.route_nm, ft_min)
         }
         _ => {
-            let vp = trajectory::VerticalProfile::build(
-                0.0,
+            // `airborne = false`: a synthetic 300 nm climb from the surface, so the current
+            // altitude and observed groundspeed are inert here.
+            let vp = predict::profile_from_here(
+                false,
                 300.0,
-                super::airports::field_elevation_ft(airports, &fp.arrival),
+                0.0,
+                0.0,
                 cruise,
                 cruise_tas,
+                airports,
+                &fp.arrival,
                 profile,
                 None,
             );
@@ -969,6 +976,21 @@ impl GroundAllowanceBreakdown {
 /// the airport/default tier, so nothing is silently dropped. `aircraft` should be the raw
 /// `FlightPlan::aircraft_short` (unnormalized), matching exactly what `feed::taxi_observations`
 /// persisted, or the gate/type/runway tier will never match on type.
+///
+/// # `assigned` replaces the guess, it does not join it (#513)
+///
+/// An `assigned` runway is one somebody or something actually decided — a controller's override, a
+/// facility rule, or the active configuration, via #511's ladder. It **replaces** the heading inference
+/// outright rather than being weighed against it, because the two are not comparable evidence: the guess
+/// answers "which runway is this aircraft pointed at *right now*", which is only meaningful mid-taxi and
+/// is deliberately refused while parked. A decision outranks a geometric coincidence at any groundspeed.
+///
+/// This is what lets a **parked or prefiled** departure reach the gate/type/runway and airport/runway
+/// tiers at all. Those aircraft have no usable heading by definition, so before #513 every one of them
+/// fell to the airport/default tier — and this allowance is part of the modeled transit that
+/// `EDCT = CTA − transit` is built from, so the tier it lands in moves a controller's number.
+///
+/// `None` leaves the behaviour exactly as it was: the heading guess, still gated on [`TAXI_ROLL_GS_KT`].
 pub(crate) fn resolve_ground_allowance(
     gates: &HashMap<String, Vec<AirportGateBody>>,
     runways: &RunwayDb,
@@ -976,10 +998,11 @@ pub(crate) fn resolve_ground_allowance(
     dep: &str,
     aircraft: Option<&str>,
     pos: Option<(f64, f64, i64, i64)>,
+    assigned: Option<&str>,
 ) -> GroundAllowanceBreakdown {
     let empty: Vec<AirportGateBody> = Vec::new();
     let dep_samples = taxi_samples.get(dep).map(Vec::as_slice).unwrap_or(&[]);
-    let (gate_id, runway) = match pos {
+    let (gate_id, guessed) = match pos {
         Some((lat, lon, hdg, gs)) => (
             nearest_gate(gates.get(dep).unwrap_or(&empty), lat, lon),
             (gs > TAXI_ROLL_GS_KT)
@@ -988,6 +1011,12 @@ pub(crate) fn resolve_ground_allowance(
         ),
         None => (None, None),
     };
+    // A decision beats an inference, so `assigned` is tried first and the heading guess is only the
+    // fallback — never the other way round (#513).
+    let runway = assigned
+        .map(|r| r.trim().to_ascii_uppercase())
+        .filter(|r| !r.is_empty())
+        .or(guessed);
     let est = taxi_estimate::estimate(dep_samples, gate_id.as_deref(), aircraft, runway.as_deref());
     GroundAllowanceBreakdown {
         gate_id,
@@ -1007,8 +1036,9 @@ pub(crate) fn resolve_ground_allowance_sec(
     dep: &str,
     aircraft: Option<&str>,
     pos: Option<(f64, f64, i64, i64)>,
+    assigned: Option<&str>,
 ) -> f64 {
-    resolve_ground_allowance(gates, runways, taxi_samples, dep, aircraft, pos).total_sec()
+    resolve_ground_allowance(gates, runways, taxi_samples, dep, aircraft, pos, assigned).total_sec()
 }
 
 fn engine(ty: &str) -> Option<Engine> {
@@ -1735,6 +1765,7 @@ mod tests {
             lat,
             lon,
             source: "manual".to_string(),
+            kind: None,
             updated_at: Utc::now(),
             editable: false,
         }
@@ -1768,6 +1799,7 @@ mod tests {
             "KAAA",
             Some("B738"),
             Some((40.0, -74.0, 270, 20)),
+            None,
         );
         assert_eq!(allowance, predict::GROUND_TAXI_SEC + 300.0);
     }
@@ -1779,8 +1811,15 @@ mod tests {
         let gates = HashMap::from([("KAAA".to_string(), vec![gate("A1", 40.0, -74.0)])]);
         let runways = RunwayDb::default();
         let samples = HashMap::new();
-        let allowance =
-            resolve_ground_allowance_sec(&gates, &runways, &samples, "KAAA", Some("B738"), None);
+        let allowance = resolve_ground_allowance_sec(
+            &gates,
+            &runways,
+            &samples,
+            "KAAA",
+            Some("B738"),
+            None,
+            None,
+        );
         assert_eq!(allowance, predict::GROUND_TAXI_SEC + 300.0);
     }
 
@@ -1827,6 +1866,7 @@ mod tests {
             "KJFK",
             Some("B738"),
             Some((40.0, -74.0, end.hdg as i64, TAXI_ROLL_GS_KT)),
+            None,
         );
         // Airport-wide blend (median of the combined 10 samples), not the runway-specific 600s.
         assert_eq!(stationary, 360.0 + 50.0 + 40.0);
@@ -1838,9 +1878,217 @@ mod tests {
             "KJFK",
             Some("B738"),
             Some((40.0, -74.0, end.hdg as i64, TAXI_ROLL_GS_KT + 1)),
+            None,
         );
         // Once actually moving, the same heading legitimately resolves the gate/type/runway tier.
         assert_eq!(rolling, 600.0 + 50.0 + 40.0);
+    }
+
+    /// #513 AC2: a **parked** departure with an assigned runway reaches the gate/type/runway tier, where
+    /// the same aircraft without one falls to the airport-wide blend.
+    ///
+    /// This is the whole point of the epic. A parked aircraft's heading is refused on purpose, so before
+    /// #513 every parked and prefiled departure took the airport/default tier — and this allowance is
+    /// part of the modeled transit behind `EDCT = CTA − transit`.
+    #[test]
+    fn an_assigned_runway_reaches_the_runway_tier_while_parked() {
+        let runways = RunwayDb::load();
+        let gates = HashMap::from([("KJFK".to_string(), vec![gate("A1", 40.0, -74.0)])]);
+        // Five runway-specific samples at 600s, five airport-wide at 120s: the tiers differ, so which
+        // one was matched is visible in the number.
+        let mut rows: Vec<taxi_estimate::TaxiSample> = (0..5)
+            .map(|_| taxi_sample("A1", "B738", "04L", 600))
+            .collect();
+        rows.extend((0..5).map(|_| taxi_sample("B9", "A320", "22R", 120)));
+        let samples = HashMap::from([("KJFK".to_string(), rows)]);
+        // Stationary on stand A1 — no usable heading.
+        let parked = Some((40.0, -74.0, 0, 0));
+
+        let without = resolve_ground_allowance_sec(
+            &gates,
+            &runways,
+            &samples,
+            "KJFK",
+            Some("B738"),
+            parked,
+            None,
+        );
+        let with = resolve_ground_allowance_sec(
+            &gates,
+            &runways,
+            &samples,
+            "KJFK",
+            Some("B738"),
+            parked,
+            Some("04L"),
+        );
+
+        assert_ne!(
+            with, without,
+            "an assigned runway must change the estimate for a parked departure, or #513 did nothing"
+        );
+        assert_eq!(
+            with,
+            600.0 + 50.0 + 40.0,
+            "the assignment reaches the gate/type/runway tier (600s), not the airport blend"
+        );
+    }
+
+    /// #513 AC1: an assignment **replaces** the heading guess rather than sitting beside it. The aircraft
+    /// is rolling and pointed at 04L, so the guess would pick 04L — the assignment says 22R, and 22R is
+    /// what the estimate must use.
+    #[test]
+    fn an_assigned_runway_overrides_the_heading_guess_while_rolling() {
+        let runways = RunwayDb::load();
+        let end = runways
+            .ends_for("KJFK")
+            .into_iter()
+            .find(|e| e.id == "04L")
+            .expect("KJFK 04L is in the bundled runway data");
+        let gates = HashMap::from([("KJFK".to_string(), vec![gate("A1", 40.0, -74.0)])]);
+        // 04L samples are slow, 22R samples are fast: the runway actually used is legible in the total.
+        let mut rows: Vec<taxi_estimate::TaxiSample> = (0..5)
+            .map(|_| taxi_sample("A1", "B738", "04L", 900))
+            .collect();
+        rows.extend((0..5).map(|_| taxi_sample("A1", "B738", "22R", 300)));
+        let samples = HashMap::from([("KJFK".to_string(), rows)]);
+        // Rolling, pointed down 04L — exactly the case where the guess is trusted.
+        let rolling = Some((40.0, -74.0, end.hdg as i64, TAXI_ROLL_GS_KT + 1));
+
+        let breakdown = resolve_ground_allowance(
+            &gates,
+            &runways,
+            &samples,
+            "KJFK",
+            Some("B738"),
+            rolling,
+            Some("22R"),
+        );
+
+        assert_eq!(
+            breakdown.runway.as_deref(),
+            Some("22R"),
+            "the decision must win over the heading inference, not be averaged with it"
+        );
+    }
+
+    /// #513 AC4: with no assignment the heading guess still applies exactly as before.
+    #[test]
+    fn no_assignment_leaves_the_heading_guess_in_charge() {
+        let runways = RunwayDb::load();
+        let end = runways
+            .ends_for("KJFK")
+            .into_iter()
+            .find(|e| e.id == "04L")
+            .expect("KJFK 04L is in the bundled runway data");
+        let gates = HashMap::from([("KJFK".to_string(), vec![gate("A1", 40.0, -74.0)])]);
+        let rows: Vec<taxi_estimate::TaxiSample> = (0..5)
+            .map(|_| taxi_sample("A1", "B738", "04L", 600))
+            .collect();
+        let samples = HashMap::from([("KJFK".to_string(), rows)]);
+
+        let breakdown = resolve_ground_allowance(
+            &gates,
+            &runways,
+            &samples,
+            "KJFK",
+            Some("B738"),
+            Some((40.0, -74.0, end.hdg as i64, TAXI_ROLL_GS_KT + 1)),
+            None,
+        );
+
+        assert_eq!(
+            breakdown.runway.as_deref(),
+            Some("04L"),
+            "the guess still works"
+        );
+    }
+
+    /// An empty or whitespace assignment is treated as no assignment, not as a runway named "".
+    #[test]
+    fn a_blank_assignment_is_no_assignment() {
+        let runways = RunwayDb::load();
+        let gates = HashMap::from([("KJFK".to_string(), vec![gate("A1", 40.0, -74.0)])]);
+        let samples = HashMap::new();
+
+        for blank in ["", "   "] {
+            let breakdown = resolve_ground_allowance(
+                &gates,
+                &runways,
+                &samples,
+                "KJFK",
+                Some("B738"),
+                Some((40.0, -74.0, 0, 0)),
+                Some(blank),
+            );
+            assert_eq!(breakdown.runway, None, "{blank:?} must not become a runway");
+        }
+    }
+
+    /// An assignment is upper-cased, so a lower-case value from a rule still matches the stored samples.
+    #[test]
+    fn an_assignment_is_matched_case_insensitively() {
+        let runways = RunwayDb::load();
+        let gates = HashMap::from([("KJFK".to_string(), vec![gate("A1", 40.0, -74.0)])]);
+        let rows: Vec<taxi_estimate::TaxiSample> = (0..5)
+            .map(|_| taxi_sample("A1", "B738", "04L", 600))
+            .collect();
+        let samples = HashMap::from([("KJFK".to_string(), rows)]);
+
+        let breakdown = resolve_ground_allowance(
+            &gates,
+            &runways,
+            &samples,
+            "KJFK",
+            Some("B738"),
+            Some((40.0, -74.0, 0, 0)),
+            Some("04l"),
+        );
+
+        assert_eq!(breakdown.runway.as_deref(), Some("04L"));
+    }
+
+    /// #513 AC5: the number a controller sees actually moves. The EDCT is `CTA − modeled transit`, and
+    /// the transit includes this allowance — so two different assigned runways, whose learned samples
+    /// differ, must yield different totals. Without this the sub-issue cannot be shown to have changed
+    /// anything a controller reads.
+    #[test]
+    fn a_different_assigned_runway_moves_the_modeled_transit() {
+        let runways = RunwayDb::load();
+        let gates = HashMap::from([("KJFK".to_string(), vec![gate("A1", 40.0, -74.0)])]);
+        let mut rows: Vec<taxi_estimate::TaxiSample> = (0..5)
+            .map(|_| taxi_sample("A1", "B738", "04L", 900))
+            .collect();
+        rows.extend((0..5).map(|_| taxi_sample("A1", "B738", "22R", 300)));
+        let samples = HashMap::from([("KJFK".to_string(), rows)]);
+        let parked = Some((40.0, -74.0, 0, 0));
+
+        let slow = resolve_ground_allowance_sec(
+            &gates,
+            &runways,
+            &samples,
+            "KJFK",
+            Some("B738"),
+            parked,
+            Some("04L"),
+        );
+        let quick = resolve_ground_allowance_sec(
+            &gates,
+            &runways,
+            &samples,
+            "KJFK",
+            Some("B738"),
+            parked,
+            Some("22R"),
+        );
+
+        assert!(
+            slow > quick,
+            "the 900s runway must model a longer transit than the 300s one ({slow} vs {quick})"
+        );
+        // And the difference is the samples' difference, not a rounding artefact — a 600s swing in the
+        // transit is a 600s swing in the EDCT for this flight.
+        assert_eq!(slow - quick, 600.0);
     }
 
     /// #164 sub-issue F: debug mode reads `resolve_ground_allowance`'s breakdown directly, so it
@@ -1867,6 +2115,7 @@ mod tests {
             "KJFK",
             Some("B738"),
             Some((40.0, -74.0, end.hdg as i64, TAXI_ROLL_GS_KT + 1)),
+            None,
         );
         assert_eq!(breakdown.gate_id.as_deref(), Some("A1"));
         assert_eq!(breakdown.runway.as_deref(), Some("04L"));
@@ -1888,12 +2137,67 @@ mod tests {
             "KAAA",
             Some("B738"),
             Some((40.0, -74.0, 270, 20)),
+            None,
         );
         assert_eq!(default_breakdown.gate_id, None);
         assert_eq!(default_breakdown.runway, None);
         assert_eq!(
             default_breakdown.taxi.tier,
             taxi_estimate::EstimateTier::Default
+        );
+    }
+
+    /// #335: `ground_estimate`'s synthetic fallback — taken when the departure airport is missing
+    /// from the `AirportDb`, or the arrival coordinates are unknown — builds its own 300 nm profile
+    /// down to the arrival field's elevation, and reading sea level instead left the suite green.
+    /// Since #411 the fallback no longer resolves the elevation itself, so the mutation this pin
+    /// catches is neutering `predict::profile_from_here`'s `field_elevation_ft(airports, arr_icao)`
+    /// lookup to `0.0`.
+    #[test]
+    fn the_synthetic_ground_estimate_descends_to_the_arrival_field() {
+        let estimate = |elevation_ft: f64| {
+            let ap = AirportDb::from([(
+                "KDEN".to_string(),
+                Airport {
+                    elevation_ft,
+                    ..Airport::at(39.86, -104.67)
+                },
+            )]);
+            let fp = FlightPlan {
+                departure: "KJFK".into(),
+                arrival: "KDEN".into(),
+                altitude: "35000".into(),
+                cruise_tas: "440".into(),
+                ..Default::default()
+            };
+            // `arr: None` takes the synthetic branch; KJFK is absent from `ap` besides, which is
+            // the other way in.
+            ground_estimate(
+                &NavData::default(),
+                "KJFK",
+                None,
+                &fp,
+                &ap,
+                &Winds::default(),
+                &trajectory::AircraftProfile::default(),
+                None,
+                &HashMap::new(),
+                &RunwayDb::default(),
+                &HashMap::new(),
+                t0(),
+            )
+        };
+
+        let (sea_nm, sea_min) = estimate(0.0);
+        let (high_nm, high_min) = estimate(5431.0);
+
+        // The fallback is the fixed 300 nm synthetic route, not a resolved one.
+        assert_eq!(sea_nm, 300.0);
+        assert_eq!(high_nm, 300.0);
+        assert!(
+            high_min < sea_min,
+            "a 5431 ft field shortens the synthetic descent, so the flight time must come in below \
+             a sea-level one — got {high_min:.2} min vs {sea_min:.2} min"
         );
     }
 }

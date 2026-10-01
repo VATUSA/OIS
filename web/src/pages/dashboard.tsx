@@ -6,8 +6,9 @@ import {useMe} from "@/lib/auth";
 import {useUpcomingEvents} from "@/lib/events";
 import {useFeedStatus} from "@/lib/feed";
 import {hasPermission} from "@/lib/permissions";
-import {useGroundStops, usePrograms, useTmis} from "@/lib/tmu";
+import {isActiveTmi, useGroundStops, usePrograms, useTmis} from "@/lib/tmu";
 import {formatZuluFull, hhmmZulu} from "@/lib/time";
+import {EventBanner} from "@/components/event-banner";
 
 /** A card that frames one operational summary list, with a header and a "view all" link. */
 function Section({
@@ -95,13 +96,10 @@ function FeaturedEvent() {
   return (
     <Card className="overflow-hidden">
       <div className="flex flex-col gap-5 p-5 sm:flex-row">
-        {featured.banner_image_url && (
-          <img
-            src={featured.banner_image_url}
-            alt=""
-            className="h-32 w-full rounded-sm object-cover sm:h-auto sm:w-56"
-          />
-        )}
+        <EventBanner
+          eventId={featured.id}
+          className="h-32 w-full rounded-sm object-cover sm:h-auto sm:w-56"
+        />
         <div className="flex min-w-0 flex-1 flex-col gap-3">
           <div className="flex flex-wrap items-center gap-2">
             {live ? (
@@ -174,7 +172,7 @@ function Overview() {
   const gsList = (canGroundStops ? (groundStops.data ?? []) : []).filter(
     (g) => g.status !== "cancelled" && g.status !== "expired",
   );
-  const tmiList = (canTmis ? (tmis.data ?? []) : []).filter((t) => t.status === "published");
+  const tmiList = (canTmis ? (tmis.data ?? []) : []).filter(isActiveTmi);
 
   return (
     <div className="flex flex-col gap-6">

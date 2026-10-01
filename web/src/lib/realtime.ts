@@ -1,6 +1,7 @@
 import type {QueryClient} from "@tanstack/react-query";
 
 import {API_BASE} from "./api";
+import {getDesktopToken} from "./desktop-token";
 
 /**
  * Realtime nudges: the backend pushes a small `{topic}` over the websocket when operational data
@@ -17,7 +18,15 @@ const TOPIC_KEYS: Record<string, string[][]> = {
   "tmu.program": [["tmu-programs"], ["departures"], ["flow"]],
   "flow.cfr": [["departures"], ["flow"]],
   "events.availability": [["event-availability"]],
+  // Payload-free by design: each client refetches its own data and works out whether the change
+  // was about them. The socket is broadcast to every signed-in client, so it must not carry who.
+  "access.granted": [["me"]],
+  "events.reminder": [["my-ace-claims"]],
 };
+
+/** The subprotocol the server selects for a desktop client; the token travels beside it. */
+const WS_PROTOCOL = "ois.v1";
+const WS_BEARER_PREFIX = "ois.bearer.";
 
 /** Every distinct key across all topics — refetched once on (re)connect to catch up on anything that
  *  changed while the socket was down. */
@@ -53,14 +62,31 @@ export function connectRealtime(qc: QueryClient): () => void {
     retry += 1;
     timer = setTimeout(() => {
       timer = null;
-      open();
+      void open();
     }, delay);
   };
 
-  const open = () => {
+  const open = async () => {
     if (closed) return;
+
+    // The desktop app has no `ois_session` cookie — sign-in runs in the system browser, so the
+    // cookie is set there and never in the webview — and the WebSocket constructor cannot set an
+    // Authorization header. The subprotocol list is the one request header it *can* set, so the
+    // session token rides there. The server answers with the fixed `ois.v1` marker offered beside
+    // it — a handshake only completes if one offered protocol is echoed, and echoing the token
+    // itself would put the credential in the response too (`backend/src/realtime.rs`).
+    // Without this the upgrade 401s and the desktop app gets no realtime nudges at all.
+    let protocols: string[] | undefined;
     try {
-      ws = new WebSocket(wsUrl());
+      const token = await getDesktopToken();
+      if (token) protocols = [WS_PROTOCOL, `${WS_BEARER_PREFIX}${token}`];
+    } catch {
+      /* no desktop token available; fall through to cookie auth */
+    }
+    if (closed) return;
+
+    try {
+      ws = protocols ? new WebSocket(wsUrl(), protocols) : new WebSocket(wsUrl());
     } catch {
       schedule();
       return;
@@ -87,7 +113,7 @@ export function connectRealtime(qc: QueryClient): () => void {
     ws.onerror = () => ws?.close();
   };
 
-  open();
+  void open();
   return () => {
     closed = true;
     if (timer) clearTimeout(timer);

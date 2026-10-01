@@ -27,7 +27,10 @@ type Series = Vec<HourWind>;
 
 const TTL_MS: i64 = 2 * 60 * 60 * 1000;
 /// Below this we treat the wind as calm/variable and report no direction.
-const CALM_KT: i32 = 3;
+/// Below this the wind has no useful direction, so a configuration match falls to the calm default.
+/// `pub(crate)` since #510: the observed-METAR path must call a 2-knot wind calm exactly as this one
+/// does, or the same airport would match different configs depending on which source answered.
+pub(crate) const CALM_KT: i32 = 3;
 
 static CACHE: LazyLock<Mutex<HashMap<String, (Series, i64)>>> =
     LazyLock::new(|| Mutex::new(HashMap::new()));

@@ -11,8 +11,9 @@ use crate::{
     handlers::{
         access, ace, admin, aircraft_profiles, airport_configs, airport_surface, api_keys, atc,
         audit, auth, dashboards, docs, events, facilities, facility_documents, facility_map, feed,
-        flight_exclusions, flow, gdp, health, integration, jobs as jobs_handler, preferences,
-        public, runway, service_accounts, stats, taxi_insights, tmu, users, webhooks,
+        flight_exclusions, flow, gdp, health, integration, jobs as jobs_handler,
+        metrics as metrics_handler, preferences, public, runway, service_accounts, stats,
+        taxi_insights, tmu, users, webhooks,
     },
     openapi::ApiDoc,
     realtime,
@@ -22,6 +23,9 @@ use crate::{
 pub fn build_router(state: AppState) -> Router {
     Router::new()
         .route("/health", get(health::health))
+        // Prometheus scrape target (#382). Intentionally NOT in the OpenAPI spec or the typed
+        // client: it is text exposition for Prometheus, not JSON the SPA consumes.
+        .route("/metrics", get(metrics_handler::metrics))
         .route("/docs/api/v1/openapi.json", get(docs::openapi_json))
         // Interactive API docs (Swagger UI), served from the same generated spec. Try-it-out calls
         // hit the real endpoints and obey their auth (session cookie or bearer token).
@@ -29,7 +33,18 @@ pub fn build_router(state: AppState) -> Router {
         .route("/api/v1/auth/vatsim/login", get(auth::vatsim_login))
         .route("/api/v1/auth/vatsim/callback", get(auth::vatsim_callback))
         .route("/api/v1/auth/logout", post(auth::logout))
+        // Desktop auth (#346): the app trades the one-time code from the OAuth callback for a
+        // keychain-stored session token, then rotates it. Both are public in the router sense —
+        // exchange is authenticated by the single-use code, refresh by the token it rotates.
+        .route(
+            "/api/v1/auth/desktop/exchange",
+            post(auth::desktop_exchange),
+        )
+        .route("/api/v1/auth/desktop/refresh", post(auth::desktop_refresh))
         .route("/api/v1/me", get(auth::me))
+        // The signed-in user's own ACE claims — lets a client tell whether a reminder nudge
+        // (`events.reminder`) is about them, since the socket carries no payload (#348).
+        .route("/api/v1/me/ace-claims", get(ace::my_ace_claims))
         // The signed-in pilot's own live flight (CID-matched against the feed snapshot).
         .route("/api/v1/me/flight", get(flow::my_flight))
         .route(
@@ -114,6 +129,26 @@ pub fn build_router(state: AppState) -> Router {
         )
         .route("/api/v1/tmu/tmis/{id}/publish", post(tmu::publish_tmi))
         .route("/api/v1/tmu/tmis/{id}/cancel", post(tmu::cancel_tmi))
+        // Advisories — ADVZY documents (#457). Distinct from the pilot-facing `/advisories` board
+        // and from NTML; see docs/features/tmu-ntml-adv-tmi.md for which is which (#456).
+        .route(
+            "/api/v1/tmu/advisories",
+            get(tmu::list_advisories).post(tmu::create_advisory),
+        )
+        .route(
+            "/api/v1/tmu/advisories/{id}",
+            get(tmu::get_advisory)
+                .patch(tmu::update_advisory)
+                .delete(tmu::delete_advisory),
+        )
+        .route(
+            "/api/v1/tmu/advisories/{id}/publish",
+            post(tmu::publish_advisory),
+        )
+        .route(
+            "/api/v1/tmu/advisories/{id}/cancel",
+            post(tmu::cancel_advisory),
+        )
         // TMU — ground stops
         .route(
             "/api/v1/tmu/ground-stops",
@@ -154,6 +189,7 @@ pub fn build_router(state: AppState) -> Router {
         // Events (VATUSA cache — anchors per-event planning)
         .route("/api/v1/events", get(events::list_events))
         .route("/api/v1/events/{id}", get(events::get_event))
+        .route("/api/v1/events/{id}/banner", get(events::get_event_banner))
         .route(
             "/api/v1/events/{id}/dcc",
             get(events::get_event_dcc).put(events::update_event_dcc),
@@ -348,6 +384,7 @@ pub fn build_router(state: AppState) -> Router {
             "/api/v1/stats/captures",
             get(stats::list_captures).post(stats::save_capture),
         )
+        .route("/api/v1/stats/captures/{id}", delete(stats::delete_capture))
         .route(
             "/api/v1/stats/captures/{id}/replay",
             get(stats::capture_replay),
@@ -398,6 +435,8 @@ pub fn build_router(state: AppState) -> Router {
             "/api/v1/flow/fcas/{id}/release/{callsign}",
             post(flow::mark_release).delete(flow::clear_release),
         )
+        // Trade two held release times without re-metering anyone else (#514)
+        .route("/api/v1/flow/fcas/{id}/swap", post(flow::swap_releases))
         // Manually drop a bogus flight from the flow picture (#342)
         .route(
             "/api/v1/flow/fcas/{id}/exclusions",
@@ -457,6 +496,7 @@ pub fn build_router(state: AppState) -> Router {
         .route("/api/v1/feed/status", get(feed::feed_status))
         .route("/api/v1/tmu/flow/{icao}", get(feed::airport_flow))
         .route("/api/v1/tmu/flow/{icao}/aadc", get(feed::airport_aadc))
+        .route("/api/v1/tmu/demand", get(feed::airport_demand))
         .route("/api/v1/tmu/departures/{dep}", get(feed::list_departures))
         .route("/api/v1/tmu/taxi/{icao}", get(feed::taxi_stats))
         .route("/api/v1/tmu/cfr", post(feed::issue_cfr))
@@ -497,6 +537,10 @@ pub fn build_router(state: AppState) -> Router {
         .route(
             "/api/v1/integration/discord/tmi/{id}",
             get(integration::discord_tmi_info),
+        )
+        .route(
+            "/api/v1/integration/discord/advisory/{id}",
+            get(integration::discord_advisory_info),
         )
         .route(
             "/api/v1/integration/discord/availability/{id}",
@@ -551,6 +595,10 @@ pub fn build_router(state: AppState) -> Router {
                 .post(service_accounts::create_service_account),
         )
         .route(
+            "/api/v1/admin/service-accounts/roles",
+            get(service_accounts::list_service_account_roles),
+        )
+        .route(
             "/api/v1/admin/service-accounts/{id}/rotate",
             post(service_accounts::rotate_service_account),
         )
@@ -576,6 +624,11 @@ pub fn build_router(state: AppState) -> Router {
             state.clone(),
             resolve_current_user,
         ))
+        // HTTP metrics (#382). Outside resolve_current_user so the recorded latency covers auth
+        // resolution, the audit layer and the handler — everything the client actually waits for.
+        // Router::layer runs after routing, so `MatchedPath` is populated and requests are labelled
+        // by route template rather than raw path.
+        .layer(middleware::from_fn(crate::metrics::track_http))
         .layer(build_cors_layer())
         .with_state(state)
 }

@@ -23,15 +23,38 @@ const KNOWN_VERBS: &[&str] = &[
     "release", "share", "copy",
 ];
 
-/// resource_types whose handlers already write their own richer audit entry (so the generic
-/// middleware entry would just be a duplicate). Everything else is logged. `admin.users` is the
-/// access editor (`PUT /admin/users/{id}/access`), which records its own before/after entry.
+/// resource_types the generic middleware does not log: ones whose handlers already write their own
+/// richer entry, ones that aren't mutations, and ones whose entry identified nothing. Everything
+/// else is logged. `admin.users` is the access editor (`PUT /admin/users/{id}/access`), which
+/// records its own before/after entry.
+///
+/// Adding to this list blinds the audit trail for a route, so each entry says which of those three
+/// reasons applies — and they are not interchangeable.
 fn is_excluded(resource_type: &str) -> bool {
     // `flow.resolve-routes` is a read (POST only because it takes a list body), not a mutation.
     // `api-keys` / `admin.api-keys` handlers write their own richer before/after audit entries.
+    //
+    // `integration.jobs.lease` is excluded for the third reason, not the second: it *does* mutate —
+    // `repos::integration::lease_jobs` flips `pending → in_progress`, bumps `attempt_count` and sets
+    // `last_attempt_at`. What made its audit row worthless is that it carried no `resource_id`, so it
+    // never said which jobs were claimed, or whether any were. The Discord bot polls every 5s and the
+    // overwhelmingly common answer is an empty list, so this wrote ~17k identical, id-less rows a day
+    // per bot process and crowded every real mutation out of the default view (#430).
+    //
+    // The state change itself stays traceable: `ack` writes one row per job actually done, naming it.
+    // What is genuinely lost is a job leased and never acked — which has no audit trail now, and had
+    // an unidentifiable one before. That gap is #446's reaper, not this list's.
+    //
+    // Excluded as `integration.jobs.lease` specifically, *not* by adding "lease" to KNOWN_VERBS: that
+    // would collapse its resource_type to `integration.jobs`, which is the ack's, and silence the ack
+    // too.
     matches!(
         resource_type,
-        "admin.users" | "flow.resolve-routes" | "api-keys" | "admin.api-keys"
+        "admin.users"
+            | "flow.resolve-routes"
+            | "api-keys"
+            | "admin.api-keys"
+            | "integration.jobs.lease"
     )
 }
 
@@ -311,6 +334,41 @@ mod tests {
             ),
             ("create".into(), "tmu.gdp.slots".into(), Some("AAL1".into())),
         );
+    }
+
+    /// #430: the bot polls this every 5s and almost always claims nothing. Those rows have no
+    /// resource id, so they are indistinguishable from each other, and they buried every real
+    /// mutation in the audit view.
+    #[test]
+    fn the_job_queue_poll_is_not_audited() {
+        // It still derives as it always did — the middleware simply doesn't write it.
+        assert_eq!(
+            d(
+                Method::POST,
+                "/api/v1/integration/jobs/lease",
+                "/api/v1/integration/jobs/lease"
+            ),
+            ("create".into(), "integration.jobs.lease".into(), None),
+        );
+        assert!(is_excluded("integration.jobs.lease"));
+
+        // But acking a job it claimed still is: that one is proportional to real work, and it is
+        // what keeps a real job traceable. Excluding by resource_type is only safe because these
+        // two derive to *different* types — see `is_excluded`.
+        let ack = d(
+            Method::POST,
+            "/api/v1/integration/jobs/{id}/ack",
+            "/api/v1/integration/jobs/job-7/ack",
+        );
+        assert_eq!(
+            ack,
+            (
+                "ack".into(),
+                "integration.jobs".into(),
+                Some("job-7".into())
+            ),
+        );
+        assert!(!is_excluded(&ack.1));
     }
 
     #[test]

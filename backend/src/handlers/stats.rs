@@ -7,6 +7,7 @@ use std::sync::Arc;
 use axum::{
     Json,
     extract::{Extension, Path, Query, State},
+    http::StatusCode,
 };
 use chrono::{DateTime, Duration, Utc};
 use serde::Deserialize;
@@ -15,12 +16,15 @@ use serde_json::{Value, json};
 use crate::{
     auth::{
         context::CurrentUser,
-        permissions::{StatsCaptureUpdate, StatsRead, SystemJobsRead},
+        permissions::{StatsCaptureDelete, StatsCaptureUpdate, StatsRead, SystemJobsRead},
         require_permission::RequirePermission,
     },
     errors::ApiError,
     feed::stats::reconstruct::reconstruct_at,
-    handlers::{atc, feed as feed_handlers, flow as flow_handlers, runway as runway_handlers},
+    handlers::{
+        atc, feed as feed_handlers, flow as flow_handlers, restriction_artcc,
+        runway as runway_handlers,
+    },
     models::{
         AtcBoard, CaptureSummaryBody, DelaySummary, DeparturesResponse, NetworkPointBody,
         ReplayBody, ReplayChunkBody, ReplayFlightBody, ReplayPlan, SaveCaptureRequest,
@@ -328,6 +332,51 @@ pub async fn list_captures(
     Ok(Json(
         stats_repo::list_replayable_captures(pool(&state)?).await?,
     ))
+}
+
+/// Deletes a saved capture, releasing the position data it was pinning (#432).
+///
+/// A saved capture is not just a metadata row: `CAPTURE_GUARD` keeps every position inside its window
+/// out of compaction forever, so until now a mis-scoped capture was storage nobody could reclaim.
+///
+/// Gated on `stats.capture.delete` rather than `stats.capture.update`: saving a window and destroying
+/// one somebody else saved are different levels of trust.
+///
+/// An event-tied capture is deletable — blocking it would leave the worst case, a wrongly-scoped
+/// event capture, with no remedy at all. The consequence is made explicit where the person can act on
+/// it, in the replay page's confirmation, rather than by refusing here.
+///
+/// The one exception is an event capture that is still *open* and still inside the window the
+/// scheduler watches: discarding it makes the event look uncaptured, so the next scheduler pass opens
+/// a replacement and the positions stay pinned. Answering 409 is honest about that; the capture is
+/// saved when its window ends and can be deleted then (#432 review).
+#[utoipa::path(
+    delete,
+    path = "/api/v1/stats/captures/{id}",
+    tag = "stats",
+    params(("id" = String, Path, description = "Capture id")),
+    responses(
+        (status = 204),
+        (status = 401),
+        (status = 403),
+        (status = 404),
+        (status = 409, description = "The event's capture is still recording; it can be deleted once its window ends")
+    )
+)]
+pub async fn delete_capture(
+    State(state): State<AppState>,
+    _permission: RequirePermission<StatsCaptureDelete>,
+    Path(id): Path<String>,
+) -> Result<StatusCode, ApiError> {
+    let pool = state.db.as_ref().ok_or(ApiError::ServiceUnavailable)?;
+    if stats_repo::event_capture_is_live(pool, &id).await? {
+        return Err(ApiError::Conflict);
+    }
+    if stats_repo::discard_capture(pool, &id).await? {
+        Ok(StatusCode::NO_CONTENT)
+    } else {
+        Err(ApiError::NotFound)
+    }
 }
 
 /// Save an already-viewed window (an event's or an ad-hoc one) as a permanent, named capture, so
@@ -704,7 +753,13 @@ pub async fn hist_atc(
         (guard.airports.clone(), guard.iata.clone())
     };
     let tracons = state.tracons.load();
-    Ok(Json(atc::board_from(&data, &airports, &iata, &tracons)))
+    Ok(Json(atc::board_from(
+        &data,
+        &airports,
+        &iata,
+        &tracons,
+        &state.airspace,
+    )))
 }
 
 #[utoipa::path(
@@ -817,9 +872,9 @@ pub async fn hist_tmis(
     Query(q): Query<AtQuery>,
 ) -> Result<Json<Vec<crate::models::TmiBody>>, ApiError> {
     let p = pool(&state)?;
-    Ok(Json(
-        crate::repos::tmu::list_tmis_at(p, parse_at(&q)?).await?,
-    ))
+    let mut tmis = crate::repos::tmu::list_tmis_at(p, parse_at(&q)?).await?;
+    restriction_artcc::stamp_tmis(&*state.facilities.read().await, &mut tmis);
+    Ok(Json(tmis))
 }
 
 #[utoipa::path(
@@ -835,9 +890,9 @@ pub async fn hist_gdps(
     Query(q): Query<AtQuery>,
 ) -> Result<Json<Vec<crate::models::GdpBody>>, ApiError> {
     let p = pool(&state)?;
-    Ok(Json(
-        crate::repos::gdp::list_gdps_at(p, parse_at(&q)?).await?,
-    ))
+    let mut gdps = crate::repos::gdp::list_gdps_at(p, parse_at(&q)?).await?;
+    restriction_artcc::stamp_gdps(&*state.facilities.read().await, &mut gdps);
+    Ok(Json(gdps))
 }
 
 #[utoipa::path(
@@ -853,9 +908,9 @@ pub async fn hist_ground_stops(
     Query(q): Query<AtQuery>,
 ) -> Result<Json<Vec<crate::models::GroundStopBody>>, ApiError> {
     let p = pool(&state)?;
-    Ok(Json(
-        crate::repos::tmu::list_ground_stops_at(p, parse_at(&q)?).await?,
-    ))
+    let mut stops = crate::repos::tmu::list_ground_stops_at(p, parse_at(&q)?).await?;
+    restriction_artcc::stamp_ground_stops(&*state.facilities.read().await, &mut stops);
+    Ok(Json(stops))
 }
 
 /// Current `stats` schema disk usage and a naive, no-further-compaction projection — ops
@@ -872,4 +927,143 @@ pub async fn storage_forecast(
     _permission: RequirePermission<SystemJobsRead>,
 ) -> Result<Json<StorageForecastBody>, ApiError> {
     Ok(Json(stats_repo::storage_forecast(pool(&state)?).await?))
+}
+
+#[cfg(test)]
+mod tests {
+    use std::collections::HashMap;
+
+    use sqlx::PgPool;
+
+    use crate::scope_test_support::{grant, seed_user, send, session_cookie, test_state};
+
+    /// Insert a saved capture and return its id.
+    async fn saved_capture(pool: &PgPool) -> String {
+        sqlx::query_scalar::<_, String>(
+            "insert into stats.capture (label, start_time, end_time, status, relax_scope) \
+             values ('test window', now() - interval '1 hour', now(), 'saved', false) \
+             returning id",
+        )
+        .fetch_one(pool)
+        .await
+        .unwrap()
+    }
+
+    async fn status_of(pool: &PgPool, id: &str) -> String {
+        sqlx::query_scalar::<_, String>("select status from stats.capture where id = $1")
+            .bind(id)
+            .fetch_one(pool)
+            .await
+            .unwrap()
+    }
+
+    /// #432: deleting a saved replay releases position data that `CAPTURE_GUARD` was pinning
+    /// forever, so the gate on it matters. Sent through the real router, because
+    /// `RequirePermission` has a private field and cannot be exercised by calling the handler.
+    ///
+    /// A **missing permission is 401** in this codebase, not 403 — 403 is what a wrong facility
+    /// scope answers, and this permission is national. The issue's AC says 403; this asserts what
+    /// the router actually does, and that the row survives either way.
+    #[sqlx::test]
+    async fn deleting_a_capture_requires_the_permission(pool: PgPool) {
+        let state = test_state(pool.clone(), HashMap::new());
+        let id = saved_capture(&pool).await;
+
+        let user = seed_user(&pool).await;
+        let cookie = session_cookie(&pool, &user).await;
+        let uri = format!("/api/v1/stats/captures/{id}");
+
+        // Signed in, but without `stats.capture.delete`.
+        let refused = send(&state, http::Method::DELETE, &uri, &cookie, None).await;
+        assert_eq!(refused, http::StatusCode::UNAUTHORIZED);
+        assert_eq!(
+            status_of(&pool, &id).await,
+            "saved",
+            "a refused delete must not have touched the capture"
+        );
+
+        // Granting it is the only difference.
+        grant(&pool, &user, "stats.capture.delete", None).await;
+        let allowed = send(&state, http::Method::DELETE, &uri, &cookie, None).await;
+        assert_eq!(allowed, http::StatusCode::NO_CONTENT);
+        assert_eq!(
+            status_of(&pool, &id).await,
+            "discarded",
+            "the capture drops out of CAPTURE_GUARD so compaction can reclaim its positions"
+        );
+    }
+
+    /// #432 review: an event capture still recording answers 409 rather than a 204 the scheduler
+    /// would quietly undo — discarding it makes the event look uncaptured, so the next scheduler
+    /// pass opens a replacement and the positions stay pinned.
+    #[sqlx::test]
+    async fn an_event_capture_still_recording_cannot_be_deleted(pool: PgPool) {
+        let state = test_state(pool.clone(), HashMap::new());
+        sqlx::query(
+            "insert into events.event (id, title, start_time, end_time) \
+             values (501, 'E', now() - interval '10 minutes', now() + interval '1 hour')",
+        )
+        .execute(&pool)
+        .await
+        .unwrap();
+        sqlx::query("insert into stats.event_capture (event_id, enabled) values (501, true)")
+            .execute(&pool)
+            .await
+            .unwrap();
+        let id = sqlx::query_scalar::<_, String>(
+            "insert into stats.capture (event_id, label, start_time, status) \
+             values (501, 'E', now() - interval '40 minutes', 'open') returning id",
+        )
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+
+        let user = seed_user(&pool).await;
+        grant(&pool, &user, "stats.capture.delete", None).await;
+        let cookie = session_cookie(&pool, &user).await;
+        let uri = format!("/api/v1/stats/captures/{id}");
+
+        assert_eq!(
+            send(&state, http::Method::DELETE, &uri, &cookie, None).await,
+            http::StatusCode::CONFLICT
+        );
+        assert_eq!(
+            status_of(&pool, &id).await,
+            "open",
+            "refusing must leave the recording running, not half-discard it"
+        );
+
+        // Once its window has been closed and saved, the same call succeeds.
+        sqlx::query("update stats.capture set status = 'saved', end_time = now() where id = $1")
+            .bind(&id)
+            .execute(&pool)
+            .await
+            .unwrap();
+        assert_eq!(
+            send(&state, http::Method::DELETE, &uri, &cookie, None).await,
+            http::StatusCode::NO_CONTENT
+        );
+        assert_eq!(status_of(&pool, &id).await, "discarded");
+    }
+
+    /// Deleting the same capture twice is a 404, not a silent success — the second caller should be
+    /// told nothing happened.
+    #[sqlx::test]
+    async fn deleting_an_already_discarded_capture_is_not_found(pool: PgPool) {
+        let state = test_state(pool.clone(), HashMap::new());
+        let id = saved_capture(&pool).await;
+        let user = seed_user(&pool).await;
+        grant(&pool, &user, "stats.capture.delete", None).await;
+        let cookie = session_cookie(&pool, &user).await;
+        let uri = format!("/api/v1/stats/captures/{id}");
+
+        assert_eq!(
+            send(&state, http::Method::DELETE, &uri, &cookie, None).await,
+            http::StatusCode::NO_CONTENT
+        );
+        assert_eq!(
+            send(&state, http::Method::DELETE, &uri, &cookie, None).await,
+            http::StatusCode::NOT_FOUND
+        );
+    }
 }

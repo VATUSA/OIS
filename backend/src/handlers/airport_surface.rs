@@ -25,6 +25,7 @@ use crate::{
     },
     repos::airport_surface as surface_repo,
     repos::faa_surface_seed as faa_surface_seed_repo,
+    repos::xplane_gate_seed as xplane_gate_seed_repo,
     state::AppState,
 };
 
@@ -479,12 +480,38 @@ pub async fn repull_faa_surface(
     require_edit(&state, &principal, &icao).await?;
 
     let summary = faa_surface_seed_repo::seed_for_icao(pool, &icao).await?;
+
+    // Gates too (#431). The two extracts do not cover identical airport sets — the FAA extract has 185
+    // airports, the X-Plane one 183 — so an airport the Gateway has no record of must still get its
+    // FAA layers re-pulled rather than failing the whole request. `NotFound` is the gate seed's
+    // "not covered" signal and is the only error swallowed here.
+    let gates = match xplane_gate_seed_repo::seed_for_icao(pool, &icao).await {
+        Ok(g) => g,
+        Err(ApiError::NotFound) => {
+            tracing::info!(
+                icao,
+                "no X-Plane stands for this airport; re-pulled FAA layers only"
+            );
+            Default::default()
+        }
+        Err(e) => return Err(e),
+    };
+    // Gates are cached for the DB-less feed, so the re-pull must publish them itself — but only when
+    // it actually changed something. A reload re-reads every gate nationwide, which is pure waste for
+    // an airport the extract does not cover.
+    if gates.gates_inserted > 0 || gates.gates_refreshed > 0 || gates.osm_gates_retired > 0 {
+        refresh_gates_cache(&state, pool).await?;
+    }
+
     Ok(Json(FaaRepullResult {
         taxiways_inserted: summary.taxiways_inserted,
         ramps_inserted: summary.ramps_inserted,
         runways_inserted: summary.runways_inserted,
         osm_taxiways_retired: summary.osm_taxiways_retired,
         osm_ramps_retired: summary.osm_ramps_retired,
+        gates_inserted: gates.gates_inserted,
+        gates_refreshed: gates.gates_refreshed,
+        osm_gates_retired: gates.osm_gates_retired,
     }))
 }
 

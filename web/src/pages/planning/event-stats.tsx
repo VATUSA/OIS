@@ -44,6 +44,9 @@ function CaptureConfig({ eventId }: { eventId: number }) {
       setPre(String(cap.pre_minutes));
       setPost(String(cap.post_minutes));
     }
+    // Keyed on the saved values, not on `cap`: every refetch hands back a new object, and re-seeding
+    // on that would wipe whatever the user was typing (#329).
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [cap?.pre_minutes, cap?.post_minutes]);
 
   if (!cap) return <EmptyState icon={Loader2}>Loading…</EmptyState>;

@@ -1,10 +1,11 @@
 import {useNavigate, useSearch} from "@tanstack/react-router";
 import {EmptyState, Tabs} from "@ois/ui";
-import {Calculator, Clock, Gauge, OctagonPause, ShieldAlert} from "lucide-react";
+import {Calculator, Clock, FileText, Gauge, OctagonPause, ShieldAlert} from "lucide-react";
 
 import {usePageHeader} from "@/components/shell/page-meta";
 import {useMe} from "@/lib/auth";
 import {hasPermission} from "@/lib/permissions";
+import {AdvisoriesTab} from "@/pages/tmu/advisories";
 import {GdpTab} from "@/pages/tmu/gdp";
 import {GroundStopsTab} from "@/pages/tmu/ground-stops";
 import {ProgramsTab} from "@/pages/tmu/programs";
@@ -16,9 +17,17 @@ type Tab =
   | "restrictions"
   | "ground-stops"
   | "gdp"
-  | "rate-calculator";
+  | "rate-calculator"
+  | "advisories";
 
 type TabDef = { value: Tab; label: string; icon: typeof Gauge };
+
+/**
+ * The page title, naming the active tab. It is also what ⌘⇧F stores as a favorite's label, and
+ * `?tab=` is part of the favorite's key — so without the tab in the title, a favorite per tab read
+ * as a column of identical "TMU" rows (VATUSA/OIS#339).
+ */
+export const tmuTitle = (tabLabel: string | undefined) => (tabLabel ? `TMU · ${tabLabel}` : "TMU");
 
 export function TmuPage() {
   const { data: me } = useMe();
@@ -26,6 +35,7 @@ export function TmuPage() {
   const canRestrictions = hasPermission(me, "tmu.tmi.read");
   const canGroundStops = hasPermission(me, "tmu.groundstop.read");
   const canGdp = hasPermission(me, "tmu.gdp.read");
+  const canAdvisories = hasPermission(me, "tmu.adv.read");
 
   const tabs = [
     canPrograms && { value: "programs", label: "Programs", icon: Gauge },
@@ -33,6 +43,7 @@ export function TmuPage() {
     canGroundStops && { value: "ground-stops", label: "Ground stops", icon: OctagonPause },
     canGdp && { value: "gdp", label: "Ground delay", icon: Clock },
     canPrograms && { value: "rate-calculator", label: "Rate calculator", icon: Calculator },
+    canAdvisories && { value: "advisories", label: "Advisories", icon: FileText },
   ].filter(Boolean) as TabDef[];
 
   const { tab: requestedTab, facility } = useSearch({ strict: false }) as { tab?: Tab; facility?: string };
@@ -41,6 +52,7 @@ export function TmuPage() {
 
   // The board/table view switch only applies to the Programs tab.
   usePageHeader({
+    title: tmuTitle(tabs.find((t) => t.value === active)?.label),
     subtitle: "Airport rate programs and inter-facility restrictions.",
     views: active === "programs" ? undefined : null,
   });
@@ -74,6 +86,7 @@ export function TmuPage() {
       {active === "ground-stops" && <GroundStopsTab />}
       {active === "gdp" && <GdpTab />}
       {active === "rate-calculator" && <RateCalculatorTab />}
+      {active === "advisories" && <AdvisoriesTab />}
     </div>
   );
 }

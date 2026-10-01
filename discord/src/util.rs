@@ -10,6 +10,10 @@ pub(crate) const ACE_CLAIM_PREFIX: &str = "ace_claim:";
 /// (`jobs::tmi`) and the interaction handler that strips it (`interactions::tmi_structured`).
 pub(crate) const TMI_STRUCTURED_PREFIX: &str = "tmiV:";
 
+/// Custom-id prefix for the "View structured" button on an advisory post; shared by the button
+/// builder (`jobs::advisory`) and the handler that strips it (`interactions::adv_structured`).
+pub(crate) const ADV_STRUCTURED_PREFIX: &str = "advV:";
+
 /// Resolve the `channel_id` snowflake from a job payload.
 pub(crate) fn channel(p: &Value) -> Result<ChannelId, String> {
     let id: u64 = str_field(p, "channel_id")

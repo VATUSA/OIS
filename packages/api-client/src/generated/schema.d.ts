@@ -148,6 +148,26 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/v1/admin/service-accounts/roles": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * The roles assignable to a service account — what the admin UI's picker renders. Gated on
+         *     Update because holding it is what lets you act on the list.
+         */
+        get: operations["list_service_account_roles"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/v1/admin/service-accounts/{id}/disable": {
         parameters: {
             query?: never;
@@ -564,6 +584,53 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/v1/auth/desktop/exchange": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Trades the one-time code from the OAuth callback for a desktop session token.
+         * @description Public, like the OAuth callback itself — the code *is* the credential, and it is single-use and
+         *     short-lived. Unknown, expired and already-consumed codes are all reported identically so a probe
+         *     learns nothing from which it hit.
+         */
+        post: operations["desktop_exchange"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/auth/desktop/refresh": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Rotates the caller's desktop session, returning a new token and extending the expiry.
+         * @description Authenticated by the token being rotated — no permission gate, because holding a live desktop
+         *     session is the whole claim being made. Rotation means a token that leaked stops working as soon
+         *     as the app next refreshes.
+         *
+         *     Only `kind = 'desktop'` rows rotate: a stolen browser cookie cannot be traded up for a
+         *     long-lived keychain credential.
+         */
+        post: operations["desktop_refresh"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/v1/auth/logout": {
         parameters: {
             query?: never;
@@ -828,6 +895,32 @@ export interface paths {
             cookie?: never;
         };
         get: operations["get_event_availability"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/events/{id}/banner": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * Relays an event's banner image through the API (#429).
+         * @description Banners are third-party URLs mirrored from VATUSA, and organisers use whatever host they like —
+         *     five unrelated ones are in the data already. The bundled desktop app runs under a CSP whose
+         *     `img-src` cannot name them all without becoming `https:`, so the image is fetched here and served
+         *     from our own origin instead. The caller turns it into a `blob:` URL, which the policy does allow.
+         *
+         *     Guarded, because this makes the backend fetch a URL someone else controls: `https` only, public
+         *     addresses only, no redirects, a short timeout, a size cap, and an `image/*` response or nothing.
+         */
+        get: operations["get_event_banner"];
         put?: never;
         post?: never;
         delete?: never;
@@ -1526,6 +1619,40 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/v1/flow/fcas/{id}/swap": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Trade two flights' release times.
+         * @description The point of #434: two departures holding releases exchange slots, and the times they exchange
+         *     are exactly the two that already existed — so nothing downstream renumbers and neither ends up
+         *     later than it was.
+         *
+         *     # Not the reorder, and not a recompute
+         *
+         *     [`reorder_fca`] is the other way to change who goes first, and it is the wrong tool: manual mode
+         *     re-chains every aircraft behind the one that moved (`feed::fca`), which is the opposite of
+         *     trading two slots. This writes two `flow.fca_release` rows and nothing else; the metering engine
+         *     reads them as `frozen_ms` on its next pass and sequences around them unchanged.
+         *
+         *     Returns a status rather than the re-metered list, unlike [`mark_release`]. Pinning a *new* time
+         *     genuinely changes the sequence, so `mark_release` re-runs `build_candidates`; an exchange of two
+         *     existing frozen times does not, and calling `build_candidates` here would be the very recompute
+         *     this endpoint exists to avoid. Clients refetch, as they do after `reorder_fca`.
+         */
+        post: operations["swap_releases"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/v1/flow/fcas/{id}/traffic": {
         parameters: {
             query?: never;
@@ -1807,6 +1934,23 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/v1/integration/discord/advisory/{id}": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** What the bot needs to reply to a "View structured" button click on an advisory post. */
+        get: operations["discord_advisory_info"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/v1/integration/discord/availability/{id}": {
         parameters: {
             query?: never;
@@ -1942,6 +2086,28 @@ export interface paths {
             cookie?: never;
         };
         get: operations["me"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/me/ace-claims": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * The signed-in user's claimed ACE positions for events still to come.
+         * @description Gated on the existing claim permission — if you can claim a position, you can see the ones you
+         *     hold — so no new permission marker is introduced. Scoped to the session user; the request never
+         *     names whose claims to return.
+         */
+        get: operations["my_ace_claims"];
         put?: never;
         post?: never;
         delete?: never;
@@ -2103,6 +2269,39 @@ export interface paths {
          */
         post: operations["save_capture"];
         delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/stats/captures/{id}": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        post?: never;
+        /**
+         * Deletes a saved capture, releasing the position data it was pinning (#432).
+         * @description A saved capture is not just a metadata row: `CAPTURE_GUARD` keeps every position inside its window
+         *     out of compaction forever, so until now a mis-scoped capture was storage nobody could reclaim.
+         *
+         *     Gated on `stats.capture.delete` rather than `stats.capture.update`: saving a window and destroying
+         *     one somebody else saved are different levels of trust.
+         *
+         *     An event-tied capture is deletable — blocking it would leave the worst case, a wrongly-scoped
+         *     event capture, with no remedy at all. The consequence is made explicit where the person can act on
+         *     it, in the replay page's confirmation, rather than by refusing here.
+         *
+         *     The one exception is an event capture that is still *open* and still inside the window the
+         *     scheduler watches: discarding it makes the event look uncaptured, so the next scheduler pass opens
+         *     a replacement and the positions stay pinned. Answering 409 is honest about that; the capture is
+         *     saved when its window ends and can be deleted then (#432 review).
+         */
+        delete: operations["delete_capture"];
         options?: never;
         head?: never;
         patch?: never;
@@ -2458,6 +2657,76 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/v1/tmu/advisories": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get: operations["list_advisories"];
+        put?: never;
+        post: operations["create_advisory"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/tmu/advisories/{id}": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get: operations["get_advisory"];
+        put?: never;
+        post?: never;
+        /**
+         * Abandons a draft. `409` when it is not a draft — a published advisory is a document that went out,
+         *     and a cancelled one is a record of that; neither is deleted. Any draft can be abandoned, whether or
+         *     not its number is the top of the sequence; abandoning an older one simply leaves a gap (see
+         *     `repos::tmu::delete_advisory`).
+         */
+        delete: operations["delete_advisory"];
+        options?: never;
+        head?: never;
+        patch: operations["update_advisory"];
+        trace?: never;
+    };
+    "/api/v1/tmu/advisories/{id}/cancel": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        post: operations["cancel_advisory"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/tmu/advisories/{id}/publish": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        post: operations["publish_advisory"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/v1/tmu/cfr": {
         parameters: {
             query?: never;
@@ -2485,6 +2754,34 @@ export interface paths {
         put?: never;
         post?: never;
         delete: operations["release_cfr"];
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/tmu/demand": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * Current arrival demand vs capacity for every airport at once, ranked by exceedance
+         *     (VATUSA/OIS#475).
+         * @description Shaped like `flow::fca_counts`, not like the per-airport handlers above: a fixed three queries up
+         *     front, one brief feed read, then a *single* blocking task for the whole loop. Fanning
+         *     `flow_for` out per airport (as `public::get_board` does for the handful of metered fields) would
+         *     be two queries and a blocking task each.
+         *
+         *     Gated coarsely on `tmu.program.read` at any scope, like the sibling feed reads — the ranking is
+         *     derived from public VATSIM traffic, so a facility-scoped caller gets it too. "National" is a
+         *     menu-curation decision in the client, not a boundary here (VATUSA/OIS#474).
+         */
+        get: operations["airport_demand"];
+        put?: never;
+        post?: never;
+        delete?: never;
         options?: never;
         head?: never;
         patch?: never;
@@ -2983,6 +3280,18 @@ export interface components {
          *     (message/thread id); `error` explains a failure (triggers backoff + retry).
          */
         AckJobRequest: {
+            /**
+             * Format: int32
+             * @description The `attempt_count` this worker was leased under, echoed back so the ack can be matched to a
+             *     lease rather than to a status (VATUSA/OIS#472). `lease_jobs` increments it and returns it on
+             *     `OutboundJobBody`, so a worker always holds the value that identifies its own lease.
+             *
+             *     **Optional on purpose.** A new backend will be running against the old bot for as long as it
+             *     takes to deploy the second half, and a required field would reject every ack in that window —
+             *     turning a narrow race into total delivery failure. Absent means "fence on status alone",
+             *     exactly as before. (#436's payload-shape change is the precedent for getting this wrong.)
+             */
+            attempt?: number | null;
             error?: string | null;
             result?: Record<string, never> | null;
             success: boolean;
@@ -3022,6 +3331,28 @@ export interface components {
             display_name: string;
             rating?: string | null;
             roles: string[];
+        };
+        /**
+         * @description One advisory. `number` is its identity within `facility` on `issued_day` — see
+         *     `repos::tmu::allocate_advisory_number` for what that sequence promises.
+         */
+        AdvisoryBody: {
+            body: string;
+            /** Format: date-time */
+            created_at: string;
+            decoded?: string | null;
+            facility: string;
+            id: string;
+            /** Format: date */
+            issued_day: string;
+            kind: string;
+            /** Format: int32 */
+            number: number;
+            /** Format: date-time */
+            published_at?: string | null;
+            status: string;
+            /** @description The fields a form-built advisory came from; null when it was typed as raw text. */
+            structured?: unknown;
         };
         /**
          * @description A configurable aircraft performance profile (climb / cruise / descent schedules) used by the
@@ -3095,12 +3426,33 @@ export interface components {
             artcc: string;
             /** @description Used when the wind is light/variable or nothing matches (at most one per airport). */
             calm_default: boolean;
+            /**
+             * @description Runways departures are expected to use under this config — the departure side of
+             *     `landing_runways`, and the third rung of #511's prediction ladder (#509).
+             */
+            departure_runways: string[];
             /** @description Whether the requesting user may edit this airport's configs (per their ARTCC scope). */
             editable: boolean;
+            /**
+             * @description Departure gate/stand name → runway, e.g. `{"A1": "04L"}` (#512). Separate from `sid_rules`
+             *     because a gate and a SID can share a name and mean different things.
+             */
+            gate_rules: {
+                [key: string]: string;
+            };
             icao: string;
             id: string;
             landing_runways: string[];
             name: string;
+            /**
+             * @description Departure SID base → runway, e.g. `{"CAMRN": "31L"}` — the *second* rung of #511's ladder,
+             *     above `departure_runways` and below a manual override (#512). Keys are revision-stripped by
+             *     `feed::runway::star_base`, so `CAMRN4` and `CAMRN3` are one rule. Empty means no rules, which is
+             *     every airport until a facility configures one.
+             */
+            sid_rules: {
+                [key: string]: string;
+            };
             /** Format: date-time */
             updated_at: string;
             updated_by?: string | null;
@@ -3112,6 +3464,45 @@ export interface components {
             wind_from_deg: number;
             /** Format: int32 */
             wind_to_deg: number;
+        };
+        /**
+         * @description One airport's current arrival demand against the capacity it is ranked on
+         *     (`GET /tmu/demand`, VATUSA/OIS#475). One row per airport that has capacity data *and* at least
+         *     one inbound — an airport with no inbounds has zero demand and can never be over capacity, so it
+         *     is left out rather than ranked.
+         */
+        AirportDemandBody: {
+            /**
+             * Format: int32
+             * @description The capacity `demand_60min` is measured against — see `aar_source`.
+             */
+            aar: number;
+            /**
+             * @description Where `aar` came from: `"program"` when a metering program exists (the rate that actually
+             *     meters), else `"config"` — the airport's calm-default runway config.
+             *
+             *     Note `"config"` ignores wind: resolving the wind-favored config costs one outbound forecast
+             *     request per airport, which a national aggregate cannot afford. An airport under metering is
+             *     unaffected, because its program AAR wins.
+             */
+            aar_source: string;
+            /** Format: int32 */
+            airborne: number;
+            /**
+             * Format: int32
+             * @description Metered arrivals estimated to land within the next 60 minutes.
+             */
+            demand_60min: number;
+            /**
+             * Format: int32
+             * @description `demand_60min - aar`. Positive means over capacity; this is the ranking key.
+             */
+            exceedance: number;
+            /** Format: int32 */
+            ground: number;
+            icao: string;
+            /** Format: int32 */
+            inbound: number;
         };
         /** @description The forecast wind at an airport for a given time (Open-Meteo, or live METAR fallback). */
         AirportForecastBody: {
@@ -3142,12 +3533,17 @@ export interface components {
             editable: boolean;
             icao: string;
             id: string;
+            /**
+             * @description X-Plane stand type (`gate` | `tie_down` | `misc` | `hangar`) for imported stands; `None` for
+             *     hand-entered ones. Read-only: an operator adding a stand has no X-Plane type to declare.
+             */
+            kind?: string | null;
             /** Format: double */
             lat: number;
             /** Format: double */
             lon: number;
             name: string;
-            /** @description `manual` | `osm` | `crc`. */
+            /** @description `manual` | `osm` | `crc` | `faa` | `xplane`. */
             source: string;
             /** Format: date-time */
             updated_at: string;
@@ -3466,6 +3862,14 @@ export interface components {
             /** Format: int32 */
             slots?: number;
         };
+        CreateAdvisoryRequest: {
+            body: string;
+            decoded?: string | null;
+            /** @description The issuing facility. The advisory's number is a sequence within this. */
+            facility: string;
+            kind: string;
+            structured?: unknown;
+        };
         CreateApiKeyRequest: {
             description?: string | null;
             /** Format: date-time */
@@ -3709,6 +4113,22 @@ export interface components {
             to_metered: number;
             total: number;
         };
+        /** @description What the desktop app posts to trade its one-time OAuth code for a session token (#346). */
+        DesktopExchangeRequest: {
+            /** @description The single-use code the OAuth callback handed to the app's loopback listener. */
+            code: string;
+        };
+        /**
+         * @description A desktop session token and when it stops working.
+         *
+         *     Sent as `Authorization: Bearer <token>`; the app keeps it in the OS keychain. `expires_at` lets
+         *     it refresh ahead of time rather than waiting to be surprised by a 401.
+         */
+        DesktopSessionBody: {
+            /** Format: date-time */
+            expires_at: string;
+            token: string;
+        };
         /**
          * @description Bot interaction callback: a Discord user submitted the claim modal on an ACE request. The backend
          *     resolves the Discord id to the linked OIS user and claims a slot on their behalf. `start_hhmm` /
@@ -3735,6 +4155,19 @@ export interface components {
             time_options: string[];
             /** @description A human window label, e.g. `2300–0300z`. */
             window_label: string;
+        };
+        /**
+         * @description What the bot needs to reply to a "View structured" button click on an advisory post
+         *     (VATUSA/OIS#459).
+         */
+        DiscordAdvisoryInfoBody: {
+            /** @description Which document type this is — `reroute` today. */
+            kind: string;
+            /**
+             * @description The fields the document was built from; null when it was typed as raw text, which the bot
+             *     reports as such rather than showing an empty breakdown.
+             */
+            structured?: unknown;
         };
         /**
          * @description The bot relays an availability button press: which Discord user pressed which colour. The event
@@ -3948,6 +4381,18 @@ export interface components {
          *     extract (#232) — a permissioned, on-demand equivalent of #231's nationwide startup seed.
          */
         FaaRepullResult: {
+            /**
+             * @description Stands newly inserted from the X-Plane extract (#431). Existing imported stands are refreshed
+             *     in place rather than replaced, so they are not counted here — see
+             *     `repos::xplane_gate_seed::seed_for_icao`.
+             */
+            gates_inserted: number;
+            /**
+             * @description Stands refreshed in place. A healthy re-pull reports 0 inserted and every stand refreshed, so
+             *     both numbers are needed to tell "nothing to do" from "nothing happened".
+             */
+            gates_refreshed: number;
+            osm_gates_retired: number;
             osm_ramps_retired: number;
             osm_taxiways_retired: number;
             ramps_inserted: number;
@@ -4209,44 +4654,6 @@ export interface components {
             unknown: string[];
         };
         /**
-         * @description Everything currently affecting one flight (by callsign), for the public "my
-         *     flight" lookup and the FCA-map search. `found` is false when the callsign
-         *     isn't in the live feed.
-         */
-        FlightAdvisory: {
-            aircraft_type: string;
-            /** Format: int64 */
-            altitude: number;
-            arr: string;
-            callsign: string;
-            dep: string;
-            /**
-             * Format: date-time
-             * @description The latest expect-departure-clearance time across ground programs, if any.
-             */
-            edct?: string | null;
-            fcas: components["schemas"]["FlightFcaCrossing"][];
-            found: boolean;
-            gdp?: null | components["schemas"]["FlightGdp"];
-            ground_stop?: null | components["schemas"]["FlightGroundStop"];
-            /** Format: int64 */
-            groundspeed: number;
-            /** Format: int64 */
-            heading: number;
-            /** Format: double */
-            lat: number;
-            /** Format: double */
-            lon: number;
-            rate_program?: null | components["schemas"]["FlightProgram"];
-            /** @description `airborne` | `ground`. */
-            status: string;
-            /**
-             * Format: int64
-             * @description The binding (worst) predicted delay across all applicable initiatives.
-             */
-            total_delay_min: number;
-        };
-        /**
          * @description A manually excluded ("bogus") flight — one VATSIM callsign a controller has dropped from the flow
          *     picture because its data is garbage (issue #342). Scoped to the removing controller's ARTCC.
          *
@@ -4327,6 +4734,49 @@ export interface components {
             airport: string;
             scope: string;
             until?: string | null;
+        };
+        /**
+         * @description Everything currently affecting one flight (by callsign), for the public "my
+         *     flight" lookup and the FCA-map search. `found` is false when the callsign
+         *     isn't in the live feed.
+         *
+         *     Named `FlightImpact`, not `FlightAdvisory` (#456): it is a summary of which initiatives touch
+         *     this flight and what they cost it, not an advisory document. "Advisory" already meant two other
+         *     things here — the pilot-facing board at `/advisories`, and the authored vATCSCC ADVZY documents
+         *     of #437 — and a third use of the word in the type system was the one with no claim to it.
+         */
+        FlightImpact: {
+            aircraft_type: string;
+            /** Format: int64 */
+            altitude: number;
+            arr: string;
+            callsign: string;
+            dep: string;
+            /**
+             * Format: date-time
+             * @description The latest expect-departure-clearance time across ground programs, if any.
+             */
+            edct?: string | null;
+            fcas: components["schemas"]["FlightFcaCrossing"][];
+            found: boolean;
+            gdp?: null | components["schemas"]["FlightGdp"];
+            ground_stop?: null | components["schemas"]["FlightGroundStop"];
+            /** Format: int64 */
+            groundspeed: number;
+            /** Format: int64 */
+            heading: number;
+            /** Format: double */
+            lat: number;
+            /** Format: double */
+            lon: number;
+            rate_program?: null | components["schemas"]["FlightProgram"];
+            /** @description `airborne` | `ground`. */
+            status: string;
+            /**
+             * Format: int64
+             * @description The binding (worst) predicted delay across all applicable initiatives.
+             */
+            total_delay_min: number;
         };
         /** @description One flight-plan revision, for the flight-detail amendment history. */
         FlightPlanRevisionBody: {
@@ -4445,6 +4895,84 @@ export interface components {
             trail?: number;
         };
         /**
+         * @description The structured fields a Ground Delay Program (GDP) advisory is built from, per the vATCSCC
+         *     reference quoted in #437.
+         *
+         *     Stored in `tmu.advisories.structured` and rendered to `body` by
+         *     [`crate::advisory::render_gdp`]. Optional fields follow `RerouteAdvisory`'s convention —
+         *     `Option<String>` with `#[serde(default)]`, so an absent field and an empty one behave alike.
+         *
+         *     # Every field is a string, including the numeric-looking ones
+         *
+         *     `PROGRAM RATE` is `40/40/40/30/25/20/20/36/54` — a per-hour profile, not a number — and
+         *     `DEPARTURE SCOPE` is `1200`, which the reference never defines as minutes, a tier or a code.
+         *     Typing either as an integer would commit to a reading of the document that the document does not
+         *     support. The advisory is a *document*: these are its lines, and #461's follow-up is where the
+         *     values get derived from `tmu.gdp` (whose `aar_steps` is the same profile in structured form).
+         */
+        GdpAdvisory: {
+            additional_dep_facilities_included?: string | null;
+            /** @description Aggregate Demand List time the program was built from, `1349Z`. */
+            adl_time: string;
+            arrivals_estimated_for: string;
+            average_delay?: string | null;
+            canadian_arpts_included?: string | null;
+            comments?: string | null;
+            control_element: string;
+            cumulative_program_period: string;
+            /**
+             * @description `DAS`, `GAAP` or `UDP` per #437. Not an enum: the reference names the three in prose without
+             *     ruling out a fourth, and a `kind`-style free string is this module's existing answer to that.
+             */
+            delay_assignment_mode: string;
+            delay_assignment_table_applies_to?: string | null;
+            delay_limit?: string | null;
+            departure_scope?: string | null;
+            /**
+             * @description The header's element slot — `JFK/ZNY`, the control element and its ARTCC.
+             *
+             *     Carried rather than derived, and **not** taken from `AdvisoryIdent::facility` the way
+             *     `render_reroute` takes its header element. Reroute puts the *issuing* facility there (`DCC`,
+             *     matching its `TMI ID: RRDCC004`); the GDP reference puts the control element there while also
+             *     printing `CTL ELEMENT: JFK` on its own line. The reference duplicates the airport across the
+             *     two positions, so this does too — the rule for joining a control element to its ARTCC is
+             *     stated nowhere, and one example is not enough to infer one.
+             */
+            element: string;
+            /**
+             * @description `APT` in the reference. Free-form because the field is named "element *type*" — a GDP can be
+             *     run on something other than an airport — and the reference lists no closed set.
+             */
+            element_type: string;
+            exempt_dep_facilities?: string | null;
+            /**
+             * @description `FLT INCL`, which the reference prints **twice** — `1stTier` then `CZY` — so this is a list
+             *     and each entry gets its own line. A Ground Stop prints one combined line
+             *     (`(Manual) ZHU ZJX ZMA ZME ZTL`), which is the same shape with one entry.
+             */
+            flights_included?: string[];
+            /**
+             * @description The header's trailing qualifier — `CDM GROUND DELAY PROGRAM` in the one available example.
+             *     Carried rather than hardcoded for the same reason `RerouteAdvisory::header` is: one sample is
+             *     not enough to assert that every GDP is a CDM GDP.
+             */
+            header: string;
+            impacting_condition?: string | null;
+            maximum_delay?: string | null;
+            /**
+             * @description The footer's period line, `141415-142315`.
+             *
+             *     Held as one string rather than a from/to pair: the reference prints it verbatim in a DDHHMM
+             *     form that `cumulative_program_period` also expresses as `14/1415Z - 14/2315Z`, and nothing
+             *     states which is derived from which. `RerouteValid` splits from/to because reroute's own
+             *     `VALID` line is assembled from them; here the two renderings of the same window differ in
+             *     format, so re-deriving one would be inventing a conversion.
+             */
+            period: string;
+            pop_up_factor?: string | null;
+            program_rate: string;
+        };
+        /**
          * @description The full GDP board: the program, its window, controlled + exempt flights, demand vs AAR,
          *     and delay stats — everything the frontend needs in one payload.
          */
@@ -4486,6 +5014,11 @@ export interface components {
             /** @description Rate changes across the window (empty = flat AAR). */
             aar_steps: components["schemas"]["AarStep"][];
             airport: string;
+            /**
+             * @description The ARTCC that owns `airport`, resolved live from the facility map at request time; null when
+             *     the map doesn't know the field. Lets a client scope alerts to its own centre (#405).
+             */
+            artcc?: string | null;
             /** @description HHMM Zulu program window end. */
             end_time: string;
             exempt_airborne: boolean;
@@ -4577,9 +5110,65 @@ export interface components {
             national: boolean;
             permission: string;
         };
+        /**
+         * @description The structured fields a Ground Stop (GS) advisory is built from, per the vATCSCC reference.
+         *
+         *     Stored in `tmu.advisories.structured` and rendered to `body` by
+         *     [`crate::advisory::render_ground_stop`].
+         *
+         *     Shares most of its shape with [`GdpAdvisory`] — same header, same `CTL ELEMENT`/`ELEMENT
+         *     TYPE`/`ADL TIME` opening, same `CUMULATIVE PROGRAM PERIOD`, same footer — but the two are
+         *     separate structs rather than one with optional halves. A GS has no delay-assignment mode, rate
+         *     or pop-up factor, and reports delays as three `TOTAL, MAXIMUM, AVERAGE` triplets where a GDP
+         *     reports a limit and two scalars. Merging them would make every field optional and let a
+         *     nonsensical advisory typecheck.
+         */
+        GroundStopAdvisory: {
+            additional_dep_facilities_included?: string | null;
+            adl_time: string;
+            comments?: string | null;
+            control_element: string;
+            cumulative_program_period: string;
+            /**
+             * @description The three delay triplets, each printed `TOTAL/MAXIMUM/AVERAGE` in minutes — `1240/414/81`.
+             *
+             *     Held as written rather than as three numbers: the reference's own annotation calls them
+             *     "Total, Current, Average" while the labels say "TOTAL, MAXIMUM, AVERAGE", so the document
+             *     disagrees with its own legend about what the middle figure is. Parsing would require picking
+             *     a side; printing the line verbatim does not.
+             */
+            current_delays?: string | null;
+            /**
+             * @description The header's element slot — `DFW/ZFW`, the control element and its ARTCC. See
+             *     [`GdpAdvisory::element`]; the GS reference puts the control element here too, which is what
+             *     makes that reading of the format more than a one-document guess.
+             */
+            element: string;
+            element_type: string;
+            /**
+             * @description `FLT INCL`. A list for the same reason [`GdpAdvisory::flights_included`] is; the GS reference
+             *     uses a single entry carrying its mode inline, `(Manual) ZHU ZJX ZMA ZME ZTL`.
+             */
+            flights_included?: string[];
+            /** @description When the first and last stopped aircraft are scheduled to depart. */
+            ground_stop_period: string;
+            /** @description The header's trailing qualifier — `CDM GROUND STOP` in the reference. */
+            header: string;
+            impacting_condition?: string | null;
+            new_delays?: string | null;
+            /** @description The footer's period line, `141430-141630`. */
+            period: string;
+            previous_delays?: string | null;
+            probability_of_extension?: string | null;
+        };
         /** @description A ground stop: holds departures into `airport` from within `scope` until `until`. */
         GroundStopBody: {
             airport: string;
+            /**
+             * @description The ARTCC that owns `airport`, resolved live from the facility map at request time; null when
+             *     the map doesn't know the field. Lets a client scope alerts to its own centre (#405).
+             */
+            artcc?: string | null;
             id: string;
             /** Format: date-time */
             published_at?: string | null;
@@ -4619,6 +5208,17 @@ export interface components {
             fca_id: string;
             fca_name: string;
             released: boolean;
+            /**
+             * @description The predicted departure runway (#511), or null when nothing could predict one — no airport
+             *     configuration, or no rule and no configured default. Null is a real answer: a wrong runway would
+             *     narrow the learned taxi estimate to the wrong bucket and move the EDCT with it.
+             */
+            runway?: string | null;
+            /**
+             * @description Which rung of the ladder chose `runway`: `manual` | `rule` | `config`, so a controller can see
+             *     *why* it was predicted and whether a human set it. Null exactly when `runway` is.
+             */
+            runway_source?: string | null;
             /**
              * Format: int64
              * @description 1-based sequence in that FCA's metered order.
@@ -4708,7 +5308,33 @@ export interface components {
             rating?: string | null;
             role_names: string[];
             server_admin: boolean;
+            /**
+             * @description True when the member holds `tmu.program.read` nationally — a DCC/national user who should see
+             *     restrictions from every ARTCC, not only their own. `permissions` is a flat name tree with no
+             *     ARTCC dimension, so without this the client can't tell the two apart (#405).
+             */
+            tmu_national: boolean;
             vatusa?: null | components["schemas"]["VatusaProfile"];
+        };
+        /**
+         * @description One ACE position the signed-in user has claimed, for an event still to come.
+         *
+         *     Exists so a client can answer "is this reminder about me?" — the realtime nudge that precedes it
+         *     is payload-free by design, because it is broadcast to every signed-in client (#348).
+         */
+        MyAceClaim: {
+            claim_id: string;
+            /** Format: int64 */
+            event_id: number;
+            event_title: string;
+            /**
+             * @description Nullable in `ace.requests` — support can be requested without naming a position — so this
+             *     has to be optional. A non-Option String made `query_as` fail to decode for any user holding
+             *     such a claim, turning /api/v1/me/ace-claims into a permanent 500 for them (#348).
+             */
+            position?: string | null;
+            /** Format: date-time */
+            start_time: string;
         };
         /** @description A minimal `{ name }` body for creating/renaming collections + share responses. */
         NameRequest: {
@@ -4782,6 +5408,11 @@ export interface components {
              * @description Scheduled end; null = indefinite. Auto-removed an hour after this time.
              */
             active_until?: string | null;
+            /**
+             * @description The ARTCC that owns `icao`, resolved live from the facility map at request time; null when the
+             *     map doesn't know the field. Lets a client scope alerts to its own centre (#405).
+             */
+            artcc?: string | null;
             exclude_types: string[];
             exclude_wake: string[];
             gates: components["schemas"]["GateRule"][];
@@ -4915,6 +5546,53 @@ export interface components {
              */
             stop_time?: string | null;
         };
+        /**
+         * @description The parts of a generated GDP advisory that no data can supply (#508).
+         *
+         *     Publishing a GDP derives most of the document from `tmu.gdp`, but a metering engine cannot know
+         *     *why* a program exists, and several reference fields have no source at all:
+         *
+         *     - `DELAY LIMIT` is not `max_enroute_min` — that is an enroute *scope tier*, not a delay cap.
+         *     - `DEPARTURE SCOPE` is `1200` in the reference, which #507 recorded as undefined: not minutes, not a
+         *       tier, not a code. The program's `scope` is a list of departure ARTCCs, so putting it here would
+         *       assert a reading the document does not support. Left to the author deliberately.
+         *     - `IMPACTING CONDITION`, `COMMENTS`, `POP-UP FACTOR` and the facility lists are editorial by nature.
+         *
+         *     Every field is optional: a GDP must stay publishable in a hurry, and the renderer already prints a
+         *     bare `LABEL:` for an absent value.
+         */
+        PublishGdpRequest: {
+            additional_dep_facilities_included?: string | null;
+            canadian_arpts_included?: string | null;
+            comments?: string | null;
+            /** @description `DAS` | `GAAP` | `UDP`. Defaults to `DAS`, the ordinary case. */
+            delay_assignment_mode?: string | null;
+            delay_assignment_table_applies_to?: string | null;
+            delay_limit?: string | null;
+            departure_scope?: string | null;
+            exempt_dep_facilities?: string | null;
+            flights_included?: string[] | null;
+            impacting_condition?: string | null;
+            pop_up_factor?: string | null;
+        };
+        /**
+         * @description The editorial half of a generated Ground Stop advisory (#508).
+         *
+         *     A ground stop has **no delay data anywhere**: there is no slot table for one and no delay
+         *     computation in `feed/`, so all three `TOTAL/MAXIMUM/AVERAGE` triplets are author-supplied.
+         *     `previous_delays` is inherently historical — nothing records a prior revision's figures — so it
+         *     could not be derived even if the others were.
+         */
+        PublishGroundStopRequest: {
+            additional_dep_facilities_included?: string | null;
+            comments?: string | null;
+            current_delays?: string | null;
+            flights_included?: string[] | null;
+            impacting_condition?: string | null;
+            new_delays?: string | null;
+            previous_delays?: string | null;
+            probability_of_extension?: string | null;
+        };
         /** @description The bot's push of every guild it's in (full replace of the snapshot). */
         PushGuildSnapshotRequest: {
             guilds: components["schemas"]["DiscordGuildSnapshotBody"][];
@@ -4982,6 +5660,80 @@ export interface components {
              */
             t: number;
         };
+        /**
+         * @description The structured fields a Reroute (RR) advisory is built from, per the vATCSCC reference.
+         *
+         *     Stored in `tmu.advisories.structured` and rendered to `body` by
+         *     [`crate::advisory::render_reroute`]. Optional fields follow `NtmlRestriction`'s convention —
+         *     `Option<String>` with `#[serde(default)]`, so an absent field and an empty one behave alike.
+         */
+        RerouteAdvisory: {
+            associated_restrictions?: string | null;
+            facilities_included?: string | null;
+            /**
+             * @description The header's trailing qualifier — `FCA RQD/FL` and `ROUTE RQD/FL` both appear in the
+             *     reference. Carried explicitly rather than derived from `valid.basis`: the two correlate
+             *     across the two available examples, which is not enough to call it a rule.
+             */
+            header: string;
+            impacted_area: string;
+            include_traffic?: string | null;
+            modifications?: string | null;
+            name: string;
+            probability_of_extension?: string | null;
+            reason?: string | null;
+            remarks?: string | null;
+            routes: components["schemas"]["RerouteRoutes"];
+            valid: components["schemas"]["RerouteValid"];
+        };
+        /**
+         * @description A reroute's route table. The reference shows two shapes: one `ORIG/DEST/ROUTE` table, or a pair
+         *     of tables splitting the origin and destination halves of the route.
+         */
+        RerouteRoutes: {
+            /** @enum {string} */
+            kind: "single";
+            rows: components["schemas"]["RerouteRow"][];
+        } | {
+            destination: components["schemas"]["RerouteSegment"][];
+            /** @enum {string} */
+            kind: "segmented";
+            origin: components["schemas"]["RerouteSegment"][];
+        };
+        /** @description One row of a single-segment reroute's route table: `ORIG / DEST / ROUTE`. */
+        RerouteRow: {
+            dest: string;
+            orig: string;
+            /**
+             * @description The route string, mandatory segments already delimited with `><`. Stored and rendered
+             *     verbatim — the renderer never inserts or validates the markers.
+             */
+            route: string;
+        };
+        /**
+         * @description One row of a multi-segment reroute's origin- or destination-segment table, which carries no
+         *     `DEST` column.
+         */
+        RerouteSegment: {
+            orig: string;
+            route: string;
+        };
+        /**
+         * @description The reroute's valid period. `from`/`to` are `DDHHMM` as the document carries them — kept as
+         *     written rather than parsed, because the document is the contract and a round-trip through a
+         *     timestamp would have to invent a month and year the source never states.
+         */
+        RerouteValid: {
+            basis: components["schemas"]["RerouteValidBasis"];
+            from: string;
+            to: string;
+        };
+        /**
+         * @description What the reroute's valid period is measured from. The reference shows
+         *     `FCA ENTRY TIME FROM … TO …` and `ETD … TO …`, which render differently.
+         * @enum {string}
+         */
+        RerouteValidBasis: "fca_entry_time" | "etd";
         /** @description One flight to resolve a filed route for (batch route resolution for the replay map). */
         ResolveRouteRequest: {
             arr?: string;
@@ -5350,6 +6102,18 @@ export interface components {
              */
             total_bytes: number;
         };
+        /**
+         * @description The two callsigns whose release times trade places (#514).
+         *
+         *     No FCA field: the FCA is in the route path, which is what makes a cross-FCA swap
+         *     unrepresentable. A release is a slot in one FCA's metered sequence (`flow.fca_release` is keyed
+         *     `(fca_id, callsign)`), so moving one into another FCA would hand that FCA's metering a fixed
+         *     constraint it never sequenced.
+         */
+        SwapReleaseRequest: {
+            a: string;
+            b: string;
+        };
         /** @description A departure currently being timed at a field. */
         TaxiActive: {
             /** Format: int64 */
@@ -5495,10 +6259,17 @@ export interface components {
             id: string;
             /** @description Providing facility (ARTCC/TRACON). */
             providing: string;
+            providing_artcc?: string | null;
             /** Format: date-time */
             published_at?: string | null;
             /** @description Requesting facility (ARTCC/TRACON). */
             requesting: string;
+            /**
+             * @description The ARTCCs over `requesting`/`providing`, resolved live from the facility map at request time
+             *     (a TRACON resolves to its centre); null when the map doesn't know the facility. A centre cares
+             *     about a TMI from either side, so both are carried (#405).
+             */
+            requesting_artcc?: string | null;
             /** @description The canonical raw NTML line (typed directly, or encoded from `structured`). */
             restriction: string;
             /** Format: date-time */
@@ -5571,6 +6342,12 @@ export interface components {
             count: number;
             token: string;
         };
+        UpdateAdvisoryRequest: {
+            body?: string | null;
+            decoded?: string | null;
+            kind?: string | null;
+            structured?: unknown;
+        };
         UpdateDashboardRequest: {
             collection_id?: string | null;
             data: Record<string, never>;
@@ -5601,6 +6378,7 @@ export interface components {
             aar: number;
             /** @description Optional rate changes across the window (empty = flat AAR). */
             aar_steps?: components["schemas"]["AarStep"][];
+            advisory?: null | components["schemas"]["PublishGdpRequest"];
             end_time: string;
             exempt_airborne?: boolean;
             /**
@@ -5619,6 +6397,7 @@ export interface components {
             start_time?: string | null;
             /** Format: date-time */
             stop_time?: string | null;
+            structured?: null | components["schemas"]["NtmlRestriction"];
         };
         /**
          * @description The editor's SAVE payload. `reason` is required (audited). Each entry in `scopes`
@@ -5663,8 +6442,24 @@ export interface components {
             /** Format: int32 */
             adr: number;
             calm_default?: boolean;
+            departure_runways?: string[];
+            /** @description When present, replaces the gate→runway rules; **omit to keep them unchanged** (#512). */
+            gate_rules?: {
+                [key: string]: string;
+            } | null;
             landing_runways?: string[];
             name: string;
+            /**
+             * @description When present, replaces the SID→runway rules; **omit to keep them unchanged** (#512).
+             *
+             *     `Option` where every other field on this request is replace-always, and the asymmetry is
+             *     deliberate: this is a whole-config PUT, so a client that predates these fields would wipe an
+             *     ARTCC's rules on every unrelated save. That is the hazard `RunwayConfigRequest` documents — "one
+             *     controller toggling a runway can't clobber another's STAR rule" — and this is the same remedy.
+             */
+            sid_rules?: {
+                [key: string]: string;
+            } | null;
             /** Format: int32 */
             wind_from_deg: number;
             /** Format: int32 */
@@ -6110,6 +6905,32 @@ export interface operations {
                     [name: string]: unknown;
                 };
                 content?: never;
+            };
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+        };
+    };
+    list_service_account_roles: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Role names a service account may hold */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": string[];
+                };
             };
             401: {
                 headers: {
@@ -7455,6 +8276,64 @@ export interface operations {
             };
         };
     };
+    desktop_exchange: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["DesktopExchangeRequest"];
+            };
+        };
+        responses: {
+            /** @description A desktop session token */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["DesktopSessionBody"];
+                };
+            };
+            /** @description Unknown, expired, or already-used code */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+        };
+    };
+    desktop_refresh: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description A rotated desktop session token */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["DesktopSessionBody"];
+                };
+            };
+            /** @description Not a live desktop session */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+        };
+    };
     logout: {
         parameters: {
             query?: never;
@@ -8235,6 +9114,49 @@ export interface operations {
                 };
             };
             401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+        };
+    };
+    get_event_banner: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /** @description VATUSA event id */
+                id: number;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description The event's banner image */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "image/*": unknown;
+                };
+            };
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description No such event, or it has no banner */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description The banner's host did not return a usable image */
+            503: {
                 headers: {
                     [name: string]: unknown;
                 };
@@ -10350,6 +11272,48 @@ export interface operations {
             };
         };
     };
+    swap_releases: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /** @description FCA id */
+                id: string;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["SwapReleaseRequest"];
+            };
+        };
+        responses: {
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+        };
+    };
     fca_traffic: {
         parameters: {
             query?: {
@@ -11061,6 +12025,39 @@ export interface operations {
             };
         };
     };
+    discord_advisory_info: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["DiscordAdvisoryInfoBody"];
+                };
+            };
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+        };
+    };
     discord_availability: {
         parameters: {
             query?: never;
@@ -11329,6 +12326,37 @@ export interface operations {
             };
         };
     };
+    my_ace_claims: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["MyAceClaim"][];
+                };
+            };
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+        };
+    };
     get_my_discord: {
         parameters: {
             query?: never;
@@ -11368,7 +12396,7 @@ export interface operations {
                     [name: string]: unknown;
                 };
                 content: {
-                    "application/json": components["schemas"]["FlightAdvisory"];
+                    "application/json": components["schemas"]["FlightImpact"];
                 };
             };
             401: {
@@ -11481,7 +12509,7 @@ export interface operations {
                     [name: string]: unknown;
                 };
                 content: {
-                    "application/json": components["schemas"]["FlightAdvisory"];
+                    "application/json": components["schemas"]["FlightImpact"];
                 };
             };
         };
@@ -11634,6 +12662,51 @@ export interface operations {
                 content?: never;
             };
             404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+        };
+    };
+    delete_capture: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /** @description Capture id */
+                id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            204: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description The event's capture is still recording; it can be deleted once its window ends */
+            409: {
                 headers: {
                     [name: string]: unknown;
                 };
@@ -12472,6 +13545,233 @@ export interface operations {
             };
         };
     };
+    list_advisories: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["AdvisoryBody"][];
+                };
+            };
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+        };
+    };
+    create_advisory: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["CreateAdvisoryRequest"];
+            };
+        };
+        responses: {
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["AdvisoryBody"];
+                };
+            };
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+        };
+    };
+    get_advisory: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["AdvisoryBody"];
+                };
+            };
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+        };
+    };
+    delete_advisory: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            204: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            409: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+        };
+    };
+    update_advisory: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                id: string;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["UpdateAdvisoryRequest"];
+            };
+        };
+        responses: {
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["AdvisoryBody"];
+                };
+            };
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+        };
+    };
+    cancel_advisory: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["AdvisoryBody"];
+                };
+            };
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            409: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+        };
+    };
+    publish_advisory: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["AdvisoryBody"];
+                };
+            };
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            409: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+        };
+    };
     issue_cfr: {
         parameters: {
             query?: never;
@@ -12532,6 +13832,37 @@ export interface operations {
                 content?: never;
             };
             404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+        };
+    };
+    airport_demand: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["AirportDemandBody"][];
+                };
+            };
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            503: {
                 headers: {
                     [name: string]: unknown;
                 };
@@ -12952,7 +14283,12 @@ export interface operations {
             };
             cookie?: never;
         };
-        requestBody?: never;
+        /** @description Optional editorial fields for the advisory generated on publish (#508). Omit the body entirely and the advisory still generates, with those lines blank. */
+        requestBody?: {
+            content: {
+                "application/json": null | components["schemas"]["PublishGdpRequest"];
+            };
+        };
         responses: {
             200: {
                 headers: {
@@ -13208,7 +14544,12 @@ export interface operations {
             };
             cookie?: never;
         };
-        requestBody?: never;
+        /** @description Optional editorial fields for the advisory generated on publish (#508). A ground stop has no delay data of its own, so its delay triplets are author-supplied. */
+        requestBody?: {
+            content: {
+                "application/json": null | components["schemas"]["PublishGroundStopRequest"];
+            };
+        };
         responses: {
             200: {
                 headers: {

@@ -1,7 +1,7 @@
 [package]
 name = "ois-backend"
 # Local/fallback base only; the deployed build version comes from the root VERSION file via build.rs.
-version = "0.1.0"
+version = "0.1.4"
 edition.workspace = true
 license.workspace = true
 rust-version.workspace = true
@@ -14,6 +14,10 @@ path = "src/main.rs"
 [[bin]]
 name = "faa-surface-importer"
 path = "src/bin/faa_surface_importer.rs"
+
+[[bin]]
+name = "xplane-gate-importer"
+path = "src/bin/xplane_gate_importer.rs"
 
 [dependencies]
 ois-core.workspace = true
@@ -42,12 +46,26 @@ tracing-subscriber.workspace = true
 utoipa.workspace = true
 utoipa-swagger-ui.workspace = true
 
+metrics.workspace = true
+metrics-exporter-prometheus.workspace = true
+
 dotenvy.workspace = true
 reqwest.workspace = true
 
 # --- nav data (runtime NASR fetch + hot-swap) ---
 flate2 = "1"
 zip = { version = "8", default-features = false, features = ["deflate"] }
+base64 = "0.22"
 # Nav-fetch-only DNS resolver (A + AAAA itself, IPv4 first) — see feed/nav_dns.rs.
 hickory-resolver = { version = "0.26", features = ["tokio"] }
 arc-swap = "1"
+
+[dev-dependencies]
+# Only for driving the real `Router` through `ServiceExt::oneshot` in the HTTP-metrics test —
+# `MatchedPath` is opaque and can only be produced by actual routing, so the route-template
+# labelling cannot be tested without one. Already in the tree as an axum dependency.
+tower = { version = "0.5", features = ["util"] }
+# Paused-time control (`start_paused`, `advance`) so the metrics upkeep task can be driven through
+# its 60s timer instantly instead of the test sleeping for it. Test-only feature on the tokio the
+# crate already depends on.
+tokio = { workspace = true, features = ["test-util"] }

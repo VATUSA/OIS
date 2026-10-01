@@ -282,7 +282,8 @@ export function AirportRatesSection({ eventId, eventStart }: { eventId: number; 
         cell: (c) => <RemoveCell eventId={eventId} row={c.row.original} />,
       },
     ],
-    [eventId, atUnix],
+    // `drafts` is a ref-held Map, so listing it costs nothing — its identity never changes (#329).
+    [eventId, atUnix, drafts],
   );
 
   function add() {

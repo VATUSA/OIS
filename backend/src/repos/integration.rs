@@ -86,23 +86,47 @@ pub async fn lease_jobs(pool: &PgPool, limit: i64) -> Result<Vec<OutboundJobBody
 }
 
 /// Acknowledge a leased job. Success → `succeeded` (+ `result`). Failure → retry with linear backoff,
-/// or `failed` once `MAX_ATTEMPTS` is reached. Returns false if the id doesn't exist.
+/// or `failed` once `MAX_ATTEMPTS` is reached.
+///
+/// Both branches require the job to still be `in_progress` (#446 review). Before the reaper existed that
+/// was unnecessary — one leaser, one acker, and nothing else ever moved a row out of `in_progress`. The
+/// reaper breaks that on purpose, so an ack can now arrive from a worker that no longer owns the job.
+///
+/// What this guard closes is the case that loses a delivery: the job is back in `pending` (or already
+/// terminal) and the reaped worker acks anyway. Unfenced, a stale *success* marked that pending row
+/// `succeeded` — never delivered, never retried, the exact silent loss #446 exists to stop.
+///
+/// The status alone could not close the other half: once a successor has re-leased the job the row is
+/// `in_progress` again, and a status check cannot tell the two workers apart. `attempt` fences that
+/// (VATUSA/OIS#472) — `lease_jobs` increments `attempt_count` and returns it, so a worker echoes back
+/// the number identifying its own lease and a predecessor's late ack no longer matches.
+///
+/// `attempt` is `None` for a worker that doesn't send one, which falls back to the status-only fence.
+/// That is deliberate: a required value would reject every ack from an old bot during the window
+/// between deploying the two halves.
+///
+/// Returns false when nothing was updated: the id doesn't exist, or the ack is stale. The caller logs
+/// that rather than discarding it, because a stale ack means a worker ran past its lease.
 pub async fn ack_job(
     pool: &PgPool,
     id: &str,
     success: bool,
     result: Option<&Value>,
     error: Option<&str>,
+    attempt: Option<i32>,
 ) -> Result<bool, ApiError> {
     let res = if success {
         let result =
             result.map(|v| serde_json::to_string(v).unwrap_or_else(|_| "null".to_string()));
         sqlx::query(
             "update integration.outbound_jobs \
-             set status = 'succeeded', result = $2::jsonb, error = null where id = $1",
+             set status = 'succeeded', result = $2::jsonb, error = null \
+             where id = $1 and status = 'in_progress' \
+               and ($3::int is null or attempt_count = $3)",
         )
         .bind(id)
         .bind(result)
+        .bind(attempt)
         .execute(pool)
         .await
         .map_err(|_| ApiError::Internal)?
@@ -112,16 +136,60 @@ pub async fn ack_job(
              set status = case when attempt_count >= $2 then 'failed' else 'pending' end, \
                  next_attempt_at = now() + (interval '30 seconds' * least(attempt_count, 10)), \
                  error = $3 \
-             where id = $1",
+             where id = $1 and status = 'in_progress' \
+               and ($4::int is null or attempt_count = $4)",
         )
         .bind(id)
         .bind(MAX_ATTEMPTS)
         .bind(error)
+        .bind(attempt)
         .execute(pool)
         .await
         .map_err(|_| ApiError::Internal)?
     };
     Ok(res.rows_affected() > 0)
+}
+
+/// Return jobs stranded `in_progress` to the queue (#446).
+///
+/// `lease_jobs` marks a job `in_progress` and stamps `last_attempt_at`; only the bot acking it moves
+/// it on. So a worker that dies between leasing and acking — a redeploy, a crash, a dropped
+/// connection — leaves the job there permanently. It is never retried and never delivered: an event
+/// post or TMI that silently does not happen, with no error anywhere, because nothing ever failed.
+///
+/// A stranded job is treated exactly as a failed ack treats one — same backoff, same
+/// `MAX_ATTEMPTS` terminal — so there is one retry policy rather than two that can drift. The only
+/// difference is the error text, and it is written with `coalesce` so a real failure reason already
+/// recorded is not overwritten by this generic one.
+///
+/// `last_attempt_at is null` is included for completeness: the column is nullable, and a NULL never
+/// satisfies `<`, so such a row would be stranded permanently — the very bug this fixes. `lease_jobs` is
+/// the only writer of `in_progress` and always stamps it, so this is unreachable today; that is an
+/// invariant held by one call site rather than by the schema, and the guarantee here costs nothing to
+/// make unconditional (#446 review).
+///
+/// **Delivery is at-least-once, deliberately.** If the worker posted to Discord and died before
+/// acking, re-leasing posts again. Detecting that would need the bot to record the message before
+/// sending it, which is a larger change than this one; a duplicate post is recoverable by hand
+/// whereas a silently undelivered TMI is not, so the duplicate is the better failure to have.
+pub async fn reap_stranded_jobs(
+    pool: &PgPool,
+    stranded_before: DateTime<Utc>,
+) -> Result<u64, ApiError> {
+    sqlx::query(
+        "update integration.outbound_jobs \
+         set status = case when attempt_count >= $2 then 'failed' else 'pending' end, \
+             next_attempt_at = now() + (interval '30 seconds' * least(attempt_count, 10)), \
+             error = coalesce(error, 'lease expired: the worker never acked') \
+         where status = 'in_progress' \
+           and (last_attempt_at < $1 or last_attempt_at is null)",
+    )
+    .bind(stranded_before)
+    .bind(MAX_ATTEMPTS)
+    .execute(pool)
+    .await
+    .map(|r| r.rows_affected())
+    .map_err(|_| ApiError::Internal)
 }
 
 /// Shared by `channel_id`/`role_id`: resolve `name` to its Discord snowflake in `table` (`id_col`
@@ -194,6 +262,58 @@ pub async fn ec_discord_ids(pool: &PgPool, facility: &str) -> Result<Vec<String>
 
 /// The `result` payload of the most recent succeeded job for a subject + type — used to recover ids
 /// the bot returned on ack (e.g. the posted message id, needed by a follow-up job).
+/// The channel an advisory's publish post was actually sent to, if it was ever enqueued
+/// (VATUSA/OIS#459).
+///
+/// Same reasoning as [`published_channel_for_tmi`], and it bites harder here: advisory channels are
+/// resolved **with** the issuing facility, so re-deriving on cancel would route the correction by
+/// whatever the facility map says now. An advisory published under ZNY and cancelled after a
+/// realignment would have its cancellation land in a different guild from the document it corrects.
+///
+/// Deliberately not filtered on `status`, for the same reason: an advisory cancelled moments after
+/// publishing still has a `pending` job, and that job's channel is the right answer.
+pub async fn published_channel_for_advisory(
+    pool: &PgPool,
+    advisory_id: &str,
+) -> Result<Option<String>, ApiError> {
+    sqlx::query_scalar::<_, Option<String>>(
+        "select payload->>'channel_id' from integration.outbound_jobs \
+         where subject_type = 'advisory' and subject_id = $1 and job_type = 'adv_publish' \
+         order by created_at desc limit 1",
+    )
+    .bind(advisory_id)
+    .fetch_optional(pool)
+    .await
+    .map(Option::flatten)
+    .map_err(|_| ApiError::Internal)
+}
+
+/// The channel a TMI's publish post was actually sent to, if it was ever enqueued (#436 review).
+///
+/// A cancellation has to land beside the row it corrects, and re-deriving the channel does not get
+/// there: `publish_tmi` resolves it unscoped while `activate_package` resolves it with the event's
+/// facility, so `resolve_scoped_id` can legitimately answer with two different guilds for the same
+/// logical name. Reading it back off the publish job is exact and needs no decision about scoping.
+///
+/// Deliberately not filtered on `status`: a TMI cancelled moments after publishing has a job that is
+/// still `pending`, and that job's channel is still the right answer. `(subject_type, subject_id)` is
+/// indexed (`0048_integration_discord.sql:28`).
+pub async fn published_channel_for_tmi(
+    pool: &PgPool,
+    tmi_id: &str,
+) -> Result<Option<String>, ApiError> {
+    sqlx::query_scalar::<_, Option<String>>(
+        "select payload->>'channel_id' from integration.outbound_jobs \
+         where subject_type = 'tmi' and subject_id = $1 and job_type = 'tmi_publish' \
+         order by created_at desc limit 1",
+    )
+    .bind(tmi_id)
+    .fetch_optional(pool)
+    .await
+    .map(Option::flatten)
+    .map_err(|_| ApiError::Internal)
+}
+
 pub async fn succeeded_job_result(
     pool: &PgPool,
     subject_type: &str,
@@ -542,6 +662,114 @@ mod tests {
     use super::*;
     use crate::models::DiscordGuildConfigInput;
 
+    /// A job sitting `in_progress`, last touched `mins_ago`, with `attempt_count` attempts behind it.
+    async fn stranded_job(pool: &PgPool, mins_ago: i64, attempt_count: i32) -> String {
+        sqlx::query_scalar::<_, String>(
+            "insert into integration.outbound_jobs \
+             (job_type, status, attempt_count, last_attempt_at) \
+             values ('tmi_publish', 'in_progress', $1, now() - make_interval(mins => $2)) \
+             returning id",
+        )
+        .bind(attempt_count)
+        .bind(mins_ago as i32)
+        .fetch_one(pool)
+        .await
+        .unwrap()
+    }
+
+    async fn status_of(pool: &PgPool, id: &str) -> String {
+        sqlx::query_scalar::<_, String>(
+            "select status from integration.outbound_jobs where id = $1",
+        )
+        .bind(id)
+        .fetch_one(pool)
+        .await
+        .unwrap()
+    }
+
+    /// #446: only an ack moves a job out of `in_progress`, so a worker that died mid-job left it
+    /// there forever — never retried, never delivered, and with no error, because nothing failed.
+    #[sqlx::test]
+    async fn a_job_whose_worker_died_is_returned_to_the_queue(pool: PgPool) {
+        let stranded = stranded_job(&pool, 10, 1).await;
+        let working = stranded_job(&pool, 1, 1).await;
+        let cutoff = Utc::now() - chrono::Duration::minutes(5);
+
+        assert_eq!(reap_stranded_jobs(&pool, cutoff).await.unwrap(), 1);
+
+        assert_eq!(status_of(&pool, &stranded).await, "pending");
+        assert_eq!(
+            status_of(&pool, &working).await,
+            "in_progress",
+            "a job still inside its lease is being worked on, not abandoned"
+        );
+    }
+
+    /// The recovery reuses the failed-ack transition, so a stranded job that has already exhausted
+    /// its attempts becomes terminal rather than looping forever.
+    #[sqlx::test]
+    async fn a_stranded_job_out_of_attempts_becomes_failed(pool: PgPool) {
+        let exhausted = stranded_job(&pool, 10, MAX_ATTEMPTS).await;
+
+        reap_stranded_jobs(&pool, Utc::now() - chrono::Duration::minutes(5))
+            .await
+            .unwrap();
+
+        assert_eq!(status_of(&pool, &exhausted).await, "failed");
+    }
+
+    /// It must only ever touch `in_progress`. A pending job is waiting its turn and a succeeded one
+    /// is done; re-queueing either would deliver something twice for no reason.
+    #[sqlx::test]
+    async fn no_other_status_is_disturbed(pool: PgPool) {
+        for status in ["pending", "succeeded", "failed"] {
+            let id = sqlx::query_scalar::<_, String>(
+                "insert into integration.outbound_jobs (job_type, status, last_attempt_at) \
+                 values ('tmi_publish', $1, now() - interval '1 hour') returning id",
+            )
+            .bind(status)
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+
+            reap_stranded_jobs(&pool, Utc::now() - chrono::Duration::minutes(5))
+                .await
+                .unwrap();
+
+            assert_eq!(
+                status_of(&pool, &id).await,
+                status,
+                "{status} was disturbed"
+            );
+        }
+    }
+
+    /// A real failure reason already on the row is the useful one; the generic lease-expiry text
+    /// must not overwrite it.
+    #[sqlx::test]
+    async fn an_existing_error_is_not_overwritten(pool: PgPool) {
+        let id = stranded_job(&pool, 10, 1).await;
+        sqlx::query(
+            "update integration.outbound_jobs set error = 'channel not found' where id = $1",
+        )
+        .bind(&id)
+        .execute(&pool)
+        .await
+        .unwrap();
+
+        reap_stranded_jobs(&pool, Utc::now() - chrono::Duration::minutes(5))
+            .await
+            .unwrap();
+
+        let error: Option<String> =
+            sqlx::query_scalar("select error from integration.outbound_jobs where id = $1")
+                .bind(&id)
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+        assert_eq!(error.as_deref(), Some("channel not found"));
+    }
+
     #[sqlx::test]
     async fn event_thread_template_get_returns_the_seeded_default(pool: PgPool) {
         let body = get_event_thread_template(&pool).await.unwrap();
@@ -737,5 +965,176 @@ mod tests {
                 Some("dcc-ops-channel".to_string())
             );
         }
+    }
+
+    /// The lease fence, as far as a status check reaches (#446 review).
+    ///
+    /// This closes the case that loses a delivery outright: the reaper has returned the job to
+    /// `pending` and the reaped worker's ack then arrives. Unfenced, a stale *success* marked that
+    /// pending row `succeeded` — so the job was never delivered by anyone and nothing ever retried it,
+    /// which is precisely the silent loss #446 exists to stop. A stale *failure* burned an attempt and
+    /// pushed the backoff out for a job nobody was working.
+    ///
+    /// It covers only the status fence — these acks carry no lease token, which is also the
+    /// old-bot path. The re-leased case is `a_predecessors_ack_cannot_touch_a_re_leased_job` below.
+    #[sqlx::test]
+    async fn an_ack_from_a_reaped_worker_is_refused_while_the_job_waits(pool: PgPool) {
+        let id = stranded_job(&pool, 10, 1).await;
+        assert_eq!(
+            reap_stranded_jobs(&pool, Utc::now() - chrono::Duration::minutes(5))
+                .await
+                .unwrap(),
+            1
+        );
+        assert_eq!(status_of(&pool, &id).await, "pending");
+
+        assert!(
+            !ack_job(&pool, &id, true, None, None, None).await.unwrap(),
+            "a stale success must not apply; the bool is what lets the handler log it"
+        );
+        assert_eq!(
+            status_of(&pool, &id).await,
+            "pending",
+            "the job must still be waiting to be re-leased, not marked delivered"
+        );
+
+        assert!(
+            !ack_job(&pool, &id, false, None, Some("stale"), None)
+                .await
+                .unwrap()
+        );
+        assert_eq!(status_of(&pool, &id).await, "pending");
+
+        // The successor's ack, once it holds the job, still works — the fence blocks the stale one only.
+        sqlx::query("update integration.outbound_jobs set next_attempt_at = now() where id = $1")
+            .bind(&id)
+            .execute(&pool)
+            .await
+            .unwrap();
+        assert!(
+            lease_jobs(&pool, 10)
+                .await
+                .unwrap()
+                .iter()
+                .any(|j| j.id == id)
+        );
+        assert!(ack_job(&pool, &id, true, None, None, None).await.unwrap());
+        assert_eq!(status_of(&pool, &id).await, "succeeded");
+    }
+
+    /// The half a status fence cannot reach (VATUSA/OIS#472): once a successor has re-leased the job
+    /// the row is `in_progress` again, so only the lease token tells the two workers apart.
+    ///
+    /// Driven the way it actually happens — lease, reap, re-lease, then both acks arrive.
+    #[sqlx::test]
+    async fn a_predecessors_ack_cannot_touch_a_re_leased_job(pool: PgPool) {
+        let id = stranded_job(&pool, 10, 1).await;
+        // Worker A holds attempt 1. The reaper returns the job, and worker B takes it as attempt 2.
+        reap_stranded_jobs(&pool, Utc::now() - chrono::Duration::minutes(5))
+            .await
+            .unwrap();
+        // The reaper backs the job off; bring it forward so the successor can take it now.
+        sqlx::query("update integration.outbound_jobs set next_attempt_at = now() where id = $1")
+            .bind(&id)
+            .execute(&pool)
+            .await
+            .unwrap();
+        let b = lease_jobs(&pool, 10)
+            .await
+            .unwrap()
+            .into_iter()
+            .find(|j| j.id == id)
+            .expect("the successor leases it");
+        assert_eq!(b.attempt_count, 2, "the successor holds a later lease");
+        assert_eq!(status_of(&pool, &id).await, "in_progress");
+
+        // A's success arrives late. Unfenced this marked the job delivered while B was mid-flight,
+        // and B's own ack — carrying the real message id — was then refused.
+        assert!(
+            !ack_job(&pool, &id, true, None, None, Some(1))
+                .await
+                .unwrap(),
+            "a predecessor's success must not apply to its successor's lease"
+        );
+        assert_eq!(status_of(&pool, &id).await, "in_progress");
+
+        // A's failure is refused too: unfenced it returned a job B was holding to `pending`, so a
+        // third worker could take it while B was still running.
+        assert!(
+            !ack_job(&pool, &id, false, None, Some("stale"), Some(1))
+                .await
+                .unwrap()
+        );
+        assert_eq!(status_of(&pool, &id).await, "in_progress");
+
+        // B's ack still applies, and its result is the one recorded.
+        let result = serde_json::json!({"message_id": "123"});
+        assert!(
+            ack_job(&pool, &id, true, Some(&result), None, Some(2))
+                .await
+                .unwrap()
+        );
+        assert_eq!(status_of(&pool, &id).await, "succeeded");
+        let stored: Option<Value> =
+            sqlx::query_scalar("select result from integration.outbound_jobs where id = $1")
+                .bind(&id)
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+        assert_eq!(
+            stored,
+            Some(result),
+            "the successor's result is the one kept"
+        );
+    }
+
+    /// An ack with no lease token must behave exactly as before, or deploying the backend ahead of
+    /// the bot would reject every ack and turn a narrow race into total delivery failure.
+    #[sqlx::test]
+    async fn an_ack_without_a_lease_token_still_applies(pool: PgPool) {
+        let id = stranded_job(&pool, 10, 1).await;
+        assert_eq!(status_of(&pool, &id).await, "in_progress");
+        assert!(
+            ack_job(&pool, &id, true, None, None, None).await.unwrap(),
+            "an old bot sends no attempt and must keep working"
+        );
+        assert_eq!(status_of(&pool, &id).await, "succeeded");
+    }
+
+    /// A terminal job is not ackable either, which is the other half of what the fence buys: a late ack
+    /// cannot resurrect a job that already failed out of its attempts.
+    #[sqlx::test]
+    async fn an_ack_against_a_terminal_job_is_refused(pool: PgPool) {
+        let id = stranded_job(&pool, 10, MAX_ATTEMPTS).await;
+        reap_stranded_jobs(&pool, Utc::now() - chrono::Duration::minutes(5))
+            .await
+            .unwrap();
+        assert_eq!(status_of(&pool, &id).await, "failed");
+
+        assert!(!ack_job(&pool, &id, true, None, None, None).await.unwrap());
+        assert_eq!(status_of(&pool, &id).await, "failed");
+    }
+
+    /// An `in_progress` row whose `last_attempt_at` is NULL would never satisfy `<`, so it would be
+    /// stranded permanently — the bug this reaper exists to fix (#446 review). Unreachable through
+    /// `lease_jobs`, which always stamps it; pinned because that is an invariant of one call site rather
+    /// than of the schema, and the column is nullable.
+    #[sqlx::test]
+    async fn an_in_progress_job_with_no_lease_stamp_is_still_reaped(pool: PgPool) {
+        let id = sqlx::query_scalar::<_, String>(
+            "insert into integration.outbound_jobs (job_type, status, attempt_count) \
+             values ('tmi_publish', 'in_progress', 1) returning id",
+        )
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+
+        assert_eq!(
+            reap_stranded_jobs(&pool, Utc::now() - chrono::Duration::minutes(5))
+                .await
+                .unwrap(),
+            1
+        );
+        assert_eq!(status_of(&pool, &id).await, "pending");
     }
 }
