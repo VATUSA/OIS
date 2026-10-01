@@ -17,6 +17,7 @@ pub mod router;
 #[cfg(test)]
 pub(crate) mod scope_test_support;
 pub mod state;
+pub(crate) mod text;
 pub mod tmi;
 
 use std::net::SocketAddr;
