@@ -708,6 +708,22 @@ async fn allocate_advisory_number(
     .map_err(|_| ApiError::Internal)
 }
 
+/// Whether a create or edit can derive its document from `structured` — i.e. whether `body` is
+/// redundant for this request.
+///
+/// [`advisory_body`] and `handlers::tmu::create_advisory`'s validation must agree on this, so they
+/// share one statement of it rather than each testing `kind` for itself (#503).
+///
+/// The sharing is the load-bearing part, and it is worth being precise about why. If the two *drift* —
+/// the handler treating any `structured` request as needing no body while this still renders only
+/// `reroute` — then a structured advisory of an unrenderable kind passes validation with an empty body,
+/// derives nothing, and **stores an empty document**: the #499 bug. Verified by mutation: making that
+/// one-sided change turns `a_structured_create_of_an_underivable_kind_still_needs_a_body` from 400 to
+/// 200. Changing the rule *here* stays safe, because both callers move with it.
+pub(crate) fn derives_body(kind: &str, structured: Option<&serde_json::Value>) -> bool {
+    kind == crate::models::ADVISORY_KIND_REROUTE && structured.is_some()
+}
+
 /// The body to store for an advisory.
 ///
 /// A **typed** advisory's document is re-derived from its fields rather than trusted from the
@@ -727,7 +743,7 @@ fn advisory_body(
     structured: Option<&serde_json::Value>,
     ident: &crate::advisory::AdvisoryIdent,
 ) -> Result<Option<String>, ApiError> {
-    if kind != crate::models::ADVISORY_KIND_REROUTE {
+    if !derives_body(kind, structured) {
         return Ok(None);
     }
     let Some(value) = structured else {
