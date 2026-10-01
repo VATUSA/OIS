@@ -164,3 +164,40 @@ describe("AdminServiceAccounts (VATUSA/OIS#531)", () => {
     expect(put).not.toHaveBeenCalled();
   });
 });
+
+/**
+ * AC2's last clause — "Nothing persists it client-side" — is the one no behavioural test can see. The
+ * tests above prove the token is *shown* once; none of them would notice a `localStorage.setItem`
+ * beside the reveal, and adding one leaves all of them green.
+ *
+ * It matters more than a usual missing guard because of what the value is: a bearer credential in web
+ * storage turns a one-time reveal into a permanently exfiltratable secret, readable by any future XSS
+ * long after the admin closed the modal. The reveal's whole safety property is that the plaintext
+ * exists only in a React state that dies with the component.
+ *
+ * So this reads the source, in the same spirit as `features/dashboard/nas-template-gate.test.ts` and
+ * `components/map/lib/desktop-events.guard.test.ts` (#439): crude on purpose, and aimed at the one
+ * thing that must not silently change.
+ */
+describe("the token never reaches client storage (VATUSA/OIS#531 AC2)", () => {
+  const FILES = [
+    "src/pages/admin/service-accounts.tsx",
+    "src/lib/service-accounts.ts",
+  ];
+
+  // Matches a *write* to any persistent store. Reads are no safer here — there is nothing legitimate
+  // to read back — so the pattern deliberately catches both.
+  const STORAGE = /\b(localStorage|sessionStorage|indexedDB|openDatabase)\b|document\s*\.\s*cookie/;
+
+  it.each(FILES)("%s touches no persistent storage API", async (file) => {
+    const { readFile } = await import("node:fs/promises");
+    const { resolve } = await import("node:path");
+    const src = await readFile(resolve(process.cwd(), file), "utf8");
+
+    const hit = STORAGE.exec(src);
+    expect(
+      hit?.[0],
+      `${file} must not persist a service-account token client-side (AC2); found ${hit?.[0]}`,
+    ).toBeUndefined();
+  });
+});
