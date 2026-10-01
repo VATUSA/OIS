@@ -4282,6 +4282,11 @@ export interface components {
              *     `repos::xplane_gate_seed::seed_for_icao`.
              */
             gates_inserted: number;
+            /**
+             * @description Stands refreshed in place. A healthy re-pull reports 0 inserted and every stand refreshed, so
+             *     both numbers are needed to tell "nothing to do" from "nothing happened".
+             */
+            gates_refreshed: number;
             osm_gates_retired: number;
             osm_ramps_retired: number;
             osm_taxiways_retired: number;

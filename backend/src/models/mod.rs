@@ -1027,6 +1027,9 @@ pub struct FaaRepullResult {
     /// in place rather than replaced, so they are not counted here — see
     /// `repos::xplane_gate_seed::seed_for_icao`.
     pub gates_inserted: usize,
+    /// Stands refreshed in place. A healthy re-pull reports 0 inserted and every stand refreshed, so
+    /// both numbers are needed to tell "nothing to do" from "nothing happened".
+    pub gates_refreshed: usize,
     pub osm_gates_retired: usize,
 }
 

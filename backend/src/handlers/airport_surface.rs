@@ -496,8 +496,12 @@ pub async fn repull_faa_surface(
         }
         Err(e) => return Err(e),
     };
-    // Gates are cached for the DB-less feed, so the re-pull must publish them itself.
-    refresh_gates_cache(&state, pool).await?;
+    // Gates are cached for the DB-less feed, so the re-pull must publish them itself — but only when
+    // it actually changed something. A reload re-reads every gate nationwide, which is pure waste for
+    // an airport the extract does not cover.
+    if gates.gates_inserted > 0 || gates.gates_refreshed > 0 || gates.osm_gates_retired > 0 {
+        refresh_gates_cache(&state, pool).await?;
+    }
 
     Ok(Json(FaaRepullResult {
         taxiways_inserted: summary.taxiways_inserted,
@@ -506,6 +510,7 @@ pub async fn repull_faa_surface(
         osm_taxiways_retired: summary.osm_taxiways_retired,
         osm_ramps_retired: summary.osm_ramps_retired,
         gates_inserted: gates.gates_inserted,
+        gates_refreshed: gates.gates_refreshed,
         osm_gates_retired: gates.osm_gates_retired,
     }))
 }

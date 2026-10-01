@@ -72,6 +72,10 @@ pub struct GateSeedSummary {
     pub airports_seeded: usize,
     pub airports_skipped: usize,
     pub gates_inserted: usize,
+    /// Stands updated in place by a re-pull (always 0 for the boot seed, which only ever inserts).
+    /// Reported separately because a healthy re-pull refreshes every stand and inserts none — without
+    /// this an operator sees `gates_inserted: 0` and concludes the re-pull did nothing.
+    pub gates_refreshed: usize,
     pub osm_gates_retired: usize,
 }
 
@@ -131,6 +135,7 @@ pub async fn seed(pool: &PgPool) -> Result<GateSeedSummary, ApiError> {
         airports_seeded: to_seed.len(),
         airports_skipped: extract.len() - to_seed.len(),
         gates_inserted,
+        gates_refreshed: 0,
         osm_gates_retired,
     })
 }
@@ -217,6 +222,7 @@ pub async fn seed_for_icao(pool: &PgPool, icao: &str) -> Result<GateSeedSummary,
         airports_seeded: 1,
         airports_skipped: 0,
         gates_inserted: inserted,
+        gates_refreshed: updated,
         osm_gates_retired,
     })
 }
@@ -528,6 +534,23 @@ mod tests {
         .await
         .unwrap();
         assert_eq!(surviving, 1, "the row itself must be updated, not replaced");
+    }
+
+    /// A re-pull of an airport whose stands all already exist inserts nothing and refreshes
+    /// everything. Both counts are reported so that reads as "up to date", not "did nothing".
+    #[sqlx::test]
+    async fn a_repull_reports_what_it_refreshed_not_just_what_it_inserted(pool: PgPool) {
+        let icao = a_covered_icao();
+        seed(&pool).await.unwrap();
+        let stands = gate_count(&pool, &icao, "xplane").await as usize;
+
+        let summary = seed_for_icao(&pool, &icao).await.unwrap();
+
+        assert_eq!(summary.gates_inserted, 0, "nothing is new");
+        assert_eq!(
+            summary.gates_refreshed, stands,
+            "but every stand was refreshed, and the operator has to be able to see that"
+        );
     }
 
     #[sqlx::test]
