@@ -1,3 +1,4 @@
+pub mod advisory;
 pub mod audit;
 pub mod auth;
 pub mod config;
@@ -16,6 +17,7 @@ pub mod router;
 #[cfg(test)]
 pub(crate) mod scope_test_support;
 pub mod state;
+pub(crate) mod text;
 pub mod tmi;
 
 use std::net::SocketAddr;
@@ -62,6 +64,17 @@ pub async fn run() -> color_eyre::Result<()> {
         jobs::spawn_cleanup(state.jobs.clone(), pool.clone());
         // One-time desktop sign-in codes expire in 60s; this removes the dead rows (#346).
         jobs::spawn_desktop_auth_code_prune(state.jobs.clone(), pool.clone());
+        jobs::spawn_outbound_job_reaper(state.jobs.clone(), pool.clone());
+        jobs::spawn_audit_log_prune(state.jobs.clone(), pool.clone());
+        jobs::spawn_departure_runway_prune(state.jobs.clone(), pool.clone());
+        // Predict a departure runway for pending departures (#511). After the gates refresh above, so
+        // the first pass has a catalog to match stands against.
+        jobs::spawn_departure_runway_derive(
+            state.jobs.clone(),
+            pool.clone(),
+            state.feed.clone(),
+            state.gates.clone(),
+        );
         // Load configurable aircraft performance profiles and keep them current for the ETA model.
         jobs::spawn_aircraft_profiles_refresh(
             state.jobs.clone(),
@@ -80,6 +93,10 @@ pub async fn run() -> color_eyre::Result<()> {
         );
         // Seed airport ramp/taxiway geometry from the bundled FAA AM extract (#230/#231).
         jobs::spawn_faa_surface_seed(state.jobs.clone(), pool.clone());
+        // Seed airport parking stands from the bundled X-Plane extract (#431). After
+        // spawn_airport_gates_refresh above, so a seed's own cache reload is not immediately
+        // overwritten by a poll that started before the rows landed.
+        jobs::spawn_xplane_gate_seed(state.jobs.clone(), pool.clone(), state.gates.clone());
         // Learned taxi-observation samples, for feed::flow's ground-allowance estimate (#164
         // sub-issue E, kept DB-less).
         jobs::spawn_taxi_estimate_samples_refresh(

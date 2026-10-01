@@ -1,4 +1,5 @@
-import {can} from "@/lib/platform";
+import {safeUnlisten} from "@/lib/desktop-events";
+import {can, isMainWindow} from "@/lib/platform";
 import {clampToMonitors, toLogical, type Monitor, type Rect} from "@/lib/popout-geometry";
 import {forgetWindow, rememberWindow, rememberedWindows} from "@/lib/window-registry";
 
@@ -233,8 +234,26 @@ async function openWindow(kind: WindowKind, spec: PopoutSpec): Promise<boolean> 
       }, GEOMETRY_SETTLE_MS);
     };
 
-    await win.onMoved(remember);
-    await win.onResized(remember);
+    const offMoved = await win.onMoved(remember);
+    const offResized = await win.onResized(remember);
+
+    // Release them when the window they describe is gone. Without this every window opened in a
+    // session left two listeners registered for the life of *this* webview (VATUSA/OIS#439).
+    //
+    // Deliberately `tauri://destroyed` and not `onCloseRequested`: an opener-side *close* listener
+    // is what made a route window unclosable in #350 — Tauri blocks a close while any webview holds
+    // one for that window, and never drops the listeners of a webview that was destroyed or
+    // reloaded. Destroyed fires after the window is gone and takes no part in that handshake.
+    // `popout.dom.test.ts` guards the distinction.
+    //
+    // `once` removes itself after firing, so its own handle needs no retaining. Awaited all the
+    // same: unawaited, a failure to register would escape the `catch` below instead of reporting
+    // the open as failed, and would leave the two listeners above with nothing to release them.
+    await win.once("tauri://destroyed", () => {
+      safeUnlisten(offMoved);
+      safeUnlisten(offResized);
+      window.clearTimeout(settle);
+    });
 
     // Forgetting it again on close is the window's own job — see `forgetOnClose`.
     if (remembered) rememberWindow({id: spec.id, route: spec.route, title: spec.title});
@@ -258,6 +277,9 @@ export async function closePopout(id: string): Promise<void> {
   }
 }
 
+/** This webview's own close listener, kept so a repeat call can replace rather than stack it. */
+let offClose: (() => unknown) | undefined;
+
 /**
  * In a route window, forgets it when the user closes it — closing a window is how you say "not
  * next time", so that has to stick. A no-op in every other window.
@@ -277,7 +299,11 @@ export async function forgetOnClose(): Promise<void> {
     const current = getCurrentWindow();
     if (!current.label.startsWith(ROUTE.labelPrefix)) return;
 
-    await current.onCloseRequested(() => {
+    // This listener is meant to die with the window it guards, which it does — but the handle was
+    // being dropped, so a second call in the same webview stacked a second listener with the first
+    // unreachable (VATUSA/OIS#439). Keeping it makes re-entry idempotent.
+    safeUnlisten(offClose);
+    offClose = await current.onCloseRequested(() => {
       for (const win of rememberedWindows()) {
         if (routeWindowLabel(win.id) === current.label) forgetWindow(win.id);
       }
@@ -298,12 +324,9 @@ export async function forgetOnClose(): Promise<void> {
 export async function restoreWindows(): Promise<number> {
   if (!can("multiWindow")) return 0;
 
-  try {
-    const {getCurrentWindow} = await import("@tauri-apps/api/window");
-    if (getCurrentWindow().label !== "main") return 0;
-  } catch {
-    return 0;
-  }
+  // The rule lives in `platform.ts` (#403), including its "couldn't tell" answer: `isMainWindow()`
+  // resolves false when the window can't be read, which restores nothing — as the local `catch` did.
+  if (!(await isMainWindow())) return 0;
 
   // One at a time, not in parallel: window placement is deterministic this way, and opening a
   // handful of native windows simultaneously is not something to ask a window manager to do at

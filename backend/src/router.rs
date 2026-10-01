@@ -129,6 +129,26 @@ pub fn build_router(state: AppState) -> Router {
         )
         .route("/api/v1/tmu/tmis/{id}/publish", post(tmu::publish_tmi))
         .route("/api/v1/tmu/tmis/{id}/cancel", post(tmu::cancel_tmi))
+        // Advisories — ADVZY documents (#457). Distinct from the pilot-facing `/advisories` board
+        // and from NTML; see docs/features/tmu-ntml-adv-tmi.md for which is which (#456).
+        .route(
+            "/api/v1/tmu/advisories",
+            get(tmu::list_advisories).post(tmu::create_advisory),
+        )
+        .route(
+            "/api/v1/tmu/advisories/{id}",
+            get(tmu::get_advisory)
+                .patch(tmu::update_advisory)
+                .delete(tmu::delete_advisory),
+        )
+        .route(
+            "/api/v1/tmu/advisories/{id}/publish",
+            post(tmu::publish_advisory),
+        )
+        .route(
+            "/api/v1/tmu/advisories/{id}/cancel",
+            post(tmu::cancel_advisory),
+        )
         // TMU — ground stops
         .route(
             "/api/v1/tmu/ground-stops",
@@ -169,6 +189,7 @@ pub fn build_router(state: AppState) -> Router {
         // Events (VATUSA cache — anchors per-event planning)
         .route("/api/v1/events", get(events::list_events))
         .route("/api/v1/events/{id}", get(events::get_event))
+        .route("/api/v1/events/{id}/banner", get(events::get_event_banner))
         .route(
             "/api/v1/events/{id}/dcc",
             get(events::get_event_dcc).put(events::update_event_dcc),
@@ -363,6 +384,7 @@ pub fn build_router(state: AppState) -> Router {
             "/api/v1/stats/captures",
             get(stats::list_captures).post(stats::save_capture),
         )
+        .route("/api/v1/stats/captures/{id}", delete(stats::delete_capture))
         .route(
             "/api/v1/stats/captures/{id}/replay",
             get(stats::capture_replay),
@@ -413,6 +435,8 @@ pub fn build_router(state: AppState) -> Router {
             "/api/v1/flow/fcas/{id}/release/{callsign}",
             post(flow::mark_release).delete(flow::clear_release),
         )
+        // Trade two held release times without re-metering anyone else (#514)
+        .route("/api/v1/flow/fcas/{id}/swap", post(flow::swap_releases))
         // Manually drop a bogus flight from the flow picture (#342)
         .route(
             "/api/v1/flow/fcas/{id}/exclusions",
@@ -472,6 +496,7 @@ pub fn build_router(state: AppState) -> Router {
         .route("/api/v1/feed/status", get(feed::feed_status))
         .route("/api/v1/tmu/flow/{icao}", get(feed::airport_flow))
         .route("/api/v1/tmu/flow/{icao}/aadc", get(feed::airport_aadc))
+        .route("/api/v1/tmu/demand", get(feed::airport_demand))
         .route("/api/v1/tmu/departures/{dep}", get(feed::list_departures))
         .route("/api/v1/tmu/taxi/{icao}", get(feed::taxi_stats))
         .route("/api/v1/tmu/cfr", post(feed::issue_cfr))
@@ -512,6 +537,10 @@ pub fn build_router(state: AppState) -> Router {
         .route(
             "/api/v1/integration/discord/tmi/{id}",
             get(integration::discord_tmi_info),
+        )
+        .route(
+            "/api/v1/integration/discord/advisory/{id}",
+            get(integration::discord_advisory_info),
         )
         .route(
             "/api/v1/integration/discord/availability/{id}",
@@ -564,6 +593,10 @@ pub fn build_router(state: AppState) -> Router {
             "/api/v1/admin/service-accounts",
             get(service_accounts::list_service_accounts)
                 .post(service_accounts::create_service_account),
+        )
+        .route(
+            "/api/v1/admin/service-accounts/roles",
+            get(service_accounts::list_service_account_roles),
         )
         .route(
             "/api/v1/admin/service-accounts/{id}/rotate",

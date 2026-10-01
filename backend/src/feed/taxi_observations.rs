@@ -543,6 +543,15 @@ fn process(
 /// or a pilot connecting at the hold short), or the airport may have no gates on file — so the
 /// phases go back to unmeasured rather than voting a zero into the estimator's pool (#287). A
 /// measured push is kept either way.
+///
+/// #431 widened gate coverage from one airport to 183, which is what makes this rule bite in
+/// practice: before it, nearly every departure fell into the `known_stand == false` branch and had its
+/// zero discarded. The rule itself is unchanged — a match at any stand keeps the zero. The imported
+/// stands do carry a `kind` (`gate` | `tie_down` | `misc` | `hangar`, on `flow.airport_gate`), which is
+/// the hook for a future refinement: an aircraft at a tie-down is expected to taxi out under its own
+/// power, so a zero there is a genuine measurement, whereas a zero at an airline gate is more likely a
+/// session that began after pushback finished. Tightening the gate case was considered and deliberately
+/// deferred — it would discard legitimate power-out stands.
 fn phases_at_stand(
     pushback_sec: Option<i32>,
     startup_sec: Option<i32>,

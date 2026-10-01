@@ -22,6 +22,7 @@ import {
 import {MapCanvas} from "../MapCanvas";
 import {useMapCamera} from "../hooks/useMapCamera";
 import {useMapPalette} from "../lib/colors";
+import {surfaceTooltip} from "../lib/tooltip";
 import {haversine, normPoints, toDeckPath, type LatLng} from "../lib/geo";
 import {SurfaceEditorPanel, type SurfaceDraft} from "./editor-panel";
 import {MIN_SURFACE_POINTS, buildSurfaceDraftLayers, buildSurfaceLayers, type SurfaceKind} from "./layers";
@@ -307,6 +308,7 @@ export function SurfaceMap({
         onResize={camera.onResize}
         controller={controller}
         layers={layers}
+        getTooltip={surfaceTooltip()}
         onClick={handleClick}
         onDragStart={handleDragStart}
         onDrag={handleDrag}

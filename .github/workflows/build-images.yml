@@ -87,7 +87,13 @@ jobs:
           tags: ${{ steps.meta.outputs.tags }}
           labels: ${{ steps.meta.outputs.labels }}
           cache-from: type=gha,scope=${{ matrix.name }}
-          cache-to: type=gha,mode=max,scope=${{ matrix.name }}
+          # `ignore-error=true` because a cache *write* failing must not fail a build whose image is
+          # already pushed. The export runs after the push, and GHA's cache service drops blobs under
+          # it — `error writing layer blob: not_found` on the backend, which exports by far the most
+          # (`mode=max` keeps the whole `cargo chef cook` dependency layer, the one worth caching).
+          # That took the job red and, through `needs: build`, skipped the deploy for an image that
+          # had shipped fine. Now it warns and the next run just rebuilds what it could not store.
+          cache-to: type=gha,mode=max,ignore-error=true,scope=${{ matrix.name }}
 
       # Scans the tag just pushed (informationally — the image is already pushed above, so this
       # can't block publishing, only mark the run). Gates on CRITICAL only: HIGH OS-package CVEs in

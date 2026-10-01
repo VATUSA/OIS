@@ -13,6 +13,25 @@ export interface ChangelogEntry {
  */
 export const CHANGELOG: ChangelogEntry[] = [
   {
+    id: "2026-10-01-advisories-and-departure-runways",
+    date: "2026-10-01",
+    title: "Advisories, departure runways, and a national view",
+    highlights: [
+      "You can now write ADVZY advisories in OIS — Reroute, Ground Delay Program and Ground Stop — and publish them to their own Discord channel. Cancel one and a correction is posted beneath it rather than the original being rewritten.",
+      "Publishing a GDP or Ground Stop writes its advisory for you, numbered per facility.",
+      "TMI posts are proper NTML lines now, carrying the log time, valid window and requesting/providing facilities. Editing a published TMI posts a corrected row, and cancellations post too.",
+      "IDST predicts a departure runway for parked and prefiled flights, your ARTCC can declare the gate and SID rules behind it, and the assigned runway feeds taxi and ETE estimates instead of being guessed from heading.",
+      "Two held departures can swap release times without re-metering.",
+      "A new National (NAS) board ranks airports by demand against capacity across the country, and a dashboard widget can be scoped to the NAS rather than one facility.",
+      "Gate data now covers every airport instead of one, so taxi estimates are far closer to reality, and the surface map shows stand detail.",
+      "Event movement counts come from observed departures and arrivals over the event's own window, so they are no longer inflated by filed flight plans that never flew.",
+      "A saved replay can be deleted once you are done with it, releasing the stored positions it was holding.",
+      "Admins can create a service account and give it roles from the UI.",
+      "Map fixes: the bundled ARTCC boundaries are repaired, an ATC pill wins its own hover, and a centre nobody is working is no longer shaded.",
+      "On the desktop app, macOS windows use the real traffic lights and Windows windows keep their controls everywhere — including before you sign in.",
+    ],
+  },
+  {
     id: "2026-09-16-console-redesign",
     date: "2026-09-16",
     title: "A redesigned OIS",

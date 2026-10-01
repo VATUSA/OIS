@@ -23,7 +23,7 @@ use crate::{
     },
     errors::ApiError,
     feed::{
-        airports::{Airport, AirportDb, field_elevation_ft},
+        airports::{Airport, AirportDb},
         airspace::Boundaries,
         facilities, fca, flow as feed_flow,
         nav::NavData,
@@ -37,12 +37,12 @@ use crate::{
     jobs,
     models::{
         AircraftRoute, AirportGateBody, DataStatus, FcaBody, FcaFlight, FixPrediction,
-        FixValidationBody, FlightAdvisory, FlightFcaCrossing, FlightGdp, FlightGroundStop,
+        FixValidationBody, FlightFcaCrossing, FlightGdp, FlightGroundStop, FlightImpact,
         FlightProgram, IdstFlight, IdstResponse, ReleaseRequest, ReorderRequest,
-        ResolveRouteRequest, ResolvedRoute, RouteBody, RouteWaypoint, TrafficAircraft,
-        UpsertFcaRequest, UpsertRouteRequest,
+        ResolveRouteRequest, ResolvedRoute, RouteBody, RouteWaypoint, SwapReleaseRequest,
+        TrafficAircraft, UpsertFcaRequest, UpsertRouteRequest,
     },
-    repos::{flow as flow_repo, public as public_repo},
+    repos::{departure_runway as departure_runway_repo, flow as flow_repo, public as public_repo},
     state::AppState,
 };
 
@@ -796,12 +796,12 @@ pub async fn data_status(State(state): State<AppState>) -> Json<DataStatus> {
     path = "/api/v1/public/flight/{callsign}",
     tag = "public",
     params(("callsign" = String, Path, description = "Aircraft callsign")),
-    responses((status = 200, body = FlightAdvisory))
+    responses((status = 200, body = FlightImpact))
 )]
 pub async fn flight_advisory(
     State(state): State<AppState>,
     Path(callsign): Path<String>,
-) -> Result<Json<FlightAdvisory>, ApiError> {
+) -> Result<Json<FlightImpact>, ApiError> {
     let cs = callsign.trim().to_ascii_uppercase();
     Ok(Json(build_flight_advisory(&state, cs).await?))
 }
@@ -811,7 +811,7 @@ pub async fn flight_advisory(
 pub(crate) async fn build_flight_advisory(
     state: &AppState,
     cs: String,
-) -> Result<FlightAdvisory, ApiError> {
+) -> Result<FlightImpact, ApiError> {
     let pool = state.db.as_ref().ok_or(ApiError::ServiceUnavailable)?;
 
     // Locate the flight in the live feed (clone just the fields we need).
@@ -833,7 +833,7 @@ pub(crate) async fn build_flight_advisory(
             })
     });
     let Some((lat, lon, altitude, groundspeed, heading, fp)) = hit else {
-        return Ok(FlightAdvisory {
+        return Ok(FlightImpact {
             callsign: cs,
             found: false,
             ..Default::default()
@@ -845,7 +845,7 @@ pub(crate) async fn build_flight_advisory(
         .unwrap_or_default();
     let airborne = groundspeed >= 50;
 
-    let mut adv = FlightAdvisory {
+    let mut adv = FlightImpact {
         callsign: cs.clone(),
         found: true,
         dep: fp.as_ref().map(|f| f.departure.clone()).unwrap_or_default(),
@@ -1004,12 +1004,12 @@ pub(crate) async fn build_flight_advisory(
     get,
     path = "/api/v1/me/flight",
     tag = "public",
-    responses((status = 200, body = FlightAdvisory), (status = 401))
+    responses((status = 200, body = FlightImpact), (status = 401))
 )]
 pub async fn my_flight(
     State(state): State<AppState>,
     Extension(current_user): Extension<Option<CurrentUser>>,
-) -> Result<Json<FlightAdvisory>, ApiError> {
+) -> Result<Json<FlightImpact>, ApiError> {
     let user = current_user.as_ref().ok_or(ApiError::Unauthorized)?;
     let cs = {
         let (snapshot, _) = feed_view(&state).await;
@@ -1023,7 +1023,7 @@ pub async fn my_flight(
     };
     match cs {
         Some(cs) => Ok(Json(build_flight_advisory(&state, cs).await?)),
-        None => Ok(Json(FlightAdvisory {
+        None => Ok(Json(FlightImpact {
             found: false,
             ..Default::default()
         })),
@@ -1326,16 +1326,22 @@ pub(crate) fn project_traffic(
                 profile,
             );
             let headwind = winds.route_headwind(&path, p.altitude as f64);
-            let vp = trajectory::VerticalProfile::build(
-                p.altitude as f64,
+            // Everything that reaches here is airborne — the early return above bails out on
+            // `!airborne` — so the pilot is projected from the altitude they report and anchored
+            // to the groundspeed they report. Passed through rather than hardcoded so that guard
+            // stays the single thing deciding it.
+            let vp = predict::profile_from_here(
+                airborne,
                 route_len_nm,
-                field_elevation_ft(airports, &fp.arrival),
+                p.altitude as f64,
+                p.groundspeed as f64,
                 cruise_ft,
                 cruise_tas,
+                airports,
+                &fp.arrival,
                 profile,
                 headwind,
-            )
-            .anchor_to_observed_gs(p.groundspeed as f64);
+            );
             let target_d = vp.distance_after(route_len_nm, offset_sec);
             let ahead_nm = (route_len_nm - target_d).max(0.0);
             let (pos, heading) = fca::point_and_heading_at(&path, ahead_nm);
@@ -1462,6 +1468,7 @@ fn fix_predictions(
         0.0
     } else {
         let aircraft = (!fp.aircraft_short.is_empty()).then_some(fp.aircraft_short.as_str());
+        // `None`: the per-fix prediction path has no assignment in hand (#513's stated limit).
         feed_flow::resolve_ground_allowance_sec(
             &state.gates.load_full(),
             &state.runways,
@@ -1469,24 +1476,22 @@ fn fix_predictions(
             &dep,
             aircraft,
             pilot_pos,
+            None,
         )
     };
 
-    let start_alt = if airborne { cur_alt_ft } else { 0.0 };
-    let vp = trajectory::VerticalProfile::build(
-        start_alt,
+    let vp = predict::profile_from_here(
+        airborne,
         route_len,
-        field_elevation_ft(airports, &fp.arrival),
+        cur_alt_ft,
+        gs as f64,
         cruise_alt,
         cruise_tas,
+        airports,
+        &fp.arrival,
         profile,
         headwind,
     );
-    let vp = if airborne {
-        vp.anchor_to_observed_gs(gs as f64)
-    } else {
-        vp
-    };
 
     let arr_ll = airports.get(&fp.arrival.to_ascii_uppercase()).map(
         |&Airport {
@@ -1643,6 +1648,20 @@ fn fca_debug(
     }
 }
 
+/// The runway #511's ladder assigned to this aircraft at this field, if any.
+///
+/// Keyed `(icao, callsign)` rather than by FCA, matching the store: a flight metered by two FCAs has one
+/// assignment, so both of its rows model the same runway rather than two that could disagree.
+fn assigned_runway<'a>(
+    assigned: &'a HashMap<(String, String), (String, String)>,
+    dep: &str,
+    callsign: &str,
+) -> Option<&'a str> {
+    assigned
+        .get(&(dep.to_ascii_uppercase(), callsign.to_string()))
+        .map(|(runway, _source)| runway.as_str())
+}
+
 /// Build the crossing candidates for an FCA from a live snapshot (no metering yet).
 #[allow(clippy::too_many_arguments)]
 fn build_candidates(
@@ -1658,6 +1677,10 @@ fn build_candidates(
     runways: &RunwayDb,
     taxi_samples: &HashMap<String, Vec<taxi_estimate::TaxiSample>>,
     exclusions: &ExclusionSet,
+    // Runways already assigned by #511's ladder, keyed `(icao, callsign)` — the same map `list_idst`
+    // reads. An entry replaces the heading guess in the ground allowance (#513), which is what lets a
+    // parked or prefiled departure reach the runway taxi tiers at all.
+    assigned: &HashMap<(String, String), (String, String)>,
     now: DateTime<Utc>,
     debug: bool,
 ) -> (Vec<FcaFlight>, Vec<fca::MeterInput>) {
@@ -1715,6 +1738,7 @@ fn build_candidates(
                 &dep,
                 aircraft,
                 Some((p.latitude, p.longitude, p.heading, p.groundspeed)),
+                assigned_runway(assigned, &dep, &p.callsign),
             ))
         };
         let allowance = ground_taxi.as_ref().map(|b| b.total_sec()).unwrap_or(0.0);
@@ -1726,7 +1750,8 @@ fn build_candidates(
             p.groundspeed as f64,
             cruise,
             cruise_tas,
-            field_elevation_ft(airports, &fp.arrival),
+            airports,
+            &fp.arrival,
             profile,
             headwind,
             allowance,
@@ -1815,8 +1840,15 @@ fn build_candidates(
         // airport/default tier.
         let dep = fp.departure.to_ascii_uppercase();
         let aircraft = (!fp.aircraft_short.is_empty()).then_some(fp.aircraft_short.as_str());
-        let ground_taxi =
-            feed_flow::resolve_ground_allowance(gates, runways, taxi_samples, &dep, aircraft, None);
+        let ground_taxi = feed_flow::resolve_ground_allowance(
+            gates,
+            runways,
+            taxi_samples,
+            &dep,
+            aircraft,
+            None,
+            assigned_runway(assigned, &dep, &pf.callsign),
+        );
         let allowance = ground_taxi.total_sec();
         let pred = predict::eta_along_route(
             false,
@@ -1826,7 +1858,8 @@ fn build_candidates(
             0.0,
             cruise,
             cruise_tas,
-            field_elevation_ft(airports, &fp.arrival),
+            airports,
+            &fp.arrival,
             profile,
             headwind,
             allowance,
@@ -2032,6 +2065,7 @@ async fn metered_flights(
             runways.as_ref(),
             taxi_estimate_samples.as_ref(),
             flight_exclusions.as_ref(),
+            &Default::default(),
             now,
             debug,
         );
@@ -2150,6 +2184,16 @@ pub async fn list_idst(
         let releases = load_releases(pool, &fca.id).await?;
         fca_releases.push((fca, releases));
     }
+    // Predicted runways, read with the rest of the DB work up front (#511). Derived by
+    // `jobs::departure_runway_derive_once`, not here: the ladder's config rung needs a per-airport wind
+    // fetch, which this read — scoped to a whole ARTCC and polled every 30 s — cannot afford.
+    let mut predicted: std::collections::HashMap<(String, String), (String, String)> =
+        std::collections::HashMap::new();
+    for icao in &airports {
+        for a in departure_runway_repo::list_for_airport(pool, icao).await? {
+            predicted.insert((a.icao, a.callsign), (a.runway, a.source));
+        }
+    }
     let (snapshot, ap) = feed_view(&state).await;
     let Some(snap) = snapshot else {
         return Ok(empty(now));
@@ -2181,6 +2225,7 @@ pub async fn list_idst(
                 runways.as_ref(),
                 taxi_estimate_samples.as_ref(),
                 flight_exclusions.as_ref(),
+                &predicted,
                 now,
                 false,
             );
@@ -2201,6 +2246,12 @@ pub async fn list_idst(
                 } else {
                     None
                 };
+                // The runway the derive job predicted for this aircraft at this field (#511). Keyed
+                // `(icao, callsign)` — not by FCA — so a flight metered by two FCAs shows one runway in
+                // both rows rather than two that could disagree.
+                let pick = predicted
+                    .get(&(f.dep.to_ascii_uppercase(), f.callsign.clone()))
+                    .cloned();
                 let item = IdstFlight {
                     callsign: f.callsign,
                     dep: f.dep,
@@ -2214,6 +2265,8 @@ pub async fn list_idst(
                     cross_time: f.cross_time,
                     edct,
                     released: f.released,
+                    runway: pick.as_ref().map(|(r, _)| r.clone()),
+                    runway_source: pick.as_ref().map(|(_, s)| s.clone()),
                 };
                 if item.released {
                     released.push(item);
@@ -2288,6 +2341,7 @@ pub async fn mark_release(
             state.runways.as_ref(),
             state.taxi_estimate_samples.load_full().as_ref(),
             state.flight_exclusions.load_full().as_ref(),
+            &Default::default(),
             now,
             false,
         )
@@ -2362,6 +2416,7 @@ pub async fn clear_release(
             state.runways.as_ref(),
             state.taxi_estimate_samples.load_full().as_ref(),
             state.flight_exclusions.load_full().as_ref(),
+            &Default::default(),
             now,
             false,
         )
@@ -2370,6 +2425,56 @@ pub async fn clear_release(
         return Ok(Json(Vec::new()));
     };
     Ok(Json(finalize(&fca, flights, &metas)))
+}
+
+/// Trade two flights' release times.
+///
+/// The point of #434: two departures holding releases exchange slots, and the times they exchange
+/// are exactly the two that already existed — so nothing downstream renumbers and neither ends up
+/// later than it was.
+///
+/// # Not the reorder, and not a recompute
+///
+/// [`reorder_fca`] is the other way to change who goes first, and it is the wrong tool: manual mode
+/// re-chains every aircraft behind the one that moved (`feed::fca`), which is the opposite of
+/// trading two slots. This writes two `flow.fca_release` rows and nothing else; the metering engine
+/// reads them as `frozen_ms` on its next pass and sequences around them unchanged.
+///
+/// Returns a status rather than the re-metered list, unlike [`mark_release`]. Pinning a *new* time
+/// genuinely changes the sequence, so `mark_release` re-runs `build_candidates`; an exchange of two
+/// existing frozen times does not, and calling `build_candidates` here would be the very recompute
+/// this endpoint exists to avoid. Clients refetch, as they do after `reorder_fca`.
+#[utoipa::path(
+    post,
+    path = "/api/v1/flow/fcas/{id}/swap",
+    tag = "flow",
+    params(("id" = String, Path, description = "FCA id")),
+    request_body = SwapReleaseRequest,
+    responses((status = 200), (status = 400), (status = 401), (status = 404))
+)]
+pub async fn swap_releases(
+    State(state): State<AppState>,
+    _permission: RequirePermission<FlowFcaUpdate>,
+    Extension(current_user): Extension<Option<CurrentUser>>,
+    Path(id): Path<String>,
+    Json(payload): Json<SwapReleaseRequest>,
+) -> Result<StatusCode, ApiError> {
+    let user = current_user.as_ref().ok_or(ApiError::Unauthorized)?;
+    let pool = state.db.as_ref().ok_or(ApiError::ServiceUnavailable)?;
+    let a = payload.a.trim().to_ascii_uppercase();
+    let b = payload.b.trim().to_ascii_uppercase();
+    // A flight cannot trade with itself, and the repo's row count would read 1 rather than 2 —
+    // rejecting here says why instead of reporting a missing release.
+    if a.is_empty() || b.is_empty() || a == b {
+        return Err(ApiError::BadRequest);
+    }
+    // `false` means at least one of them holds no release: there is no time to trade, and inventing
+    // one is what this must not do.
+    if !flow_repo::swap_releases(pool, &id, &a, &b, &user.id).await? {
+        return Err(ApiError::NotFound);
+    }
+    state.publish(crate::realtime::topic::RELEASE);
+    Ok(StatusCode::OK)
 }
 
 #[utoipa::path(
@@ -2675,9 +2780,51 @@ mod project_traffic_tests {
         assert!(out.is_empty());
     }
 
-    /// #335: the arrival field's elevation must reach `project_traffic`'s own
-    /// `VerticalProfile::build` call, which takes it as an explicit argument — nothing failed when
-    /// that argument regressed to sea level.
+    /// #411: `project_traffic` now hands the reported altitude and groundspeed to
+    /// `profile_from_here` as **adjacent** `f64` arguments of one call. Before, they went to two
+    /// different functions (`VerticalProfile::build`'s `start_alt_ft` and
+    /// `anchor_to_observed_gs`'s argument) and could not be transposed; now they can be, and
+    /// transposing them compiles and left the whole suite green. Pin that the projection starts
+    /// from the altitude the pilot reports: a cruising aircraft stays near cruise rather than
+    /// climbing away from its groundspeed read as feet.
+    #[test]
+    fn a_projection_starts_from_the_reported_altitude_not_the_groundspeed() {
+        let ap = crate::feed::airports::AirportDb::from([
+            ("KJFK".to_string(), Airport::at(40.64, -73.78)),
+            ("KDCA".to_string(), Airport::at(38.85, -77.04)),
+        ]);
+        // At cruise and above ANCHOR_MIN_GS_KT, so the anchoring path is live too.
+        let pilot = Pilot {
+            altitude: 35_000,
+            groundspeed: 470,
+            ..airborne_pilot()
+        };
+        let data = VatsimData {
+            pilots: vec![pilot],
+            ..Default::default()
+        };
+        let out = project_traffic(
+            &data,
+            &NavData::load(),
+            &ap,
+            &ProfileTable::default(),
+            &Winds::default(),
+            &HashMap::new(),
+            60,
+        );
+        assert_eq!(out.len(), 1);
+        assert!(
+            out[0].alt > 20_000,
+            "a pilot reporting 35000 ft must project from that altitude, got {} ft — a low value \
+             means the groundspeed was read as the starting altitude",
+            out[0].alt
+        );
+    }
+
+    /// #335: the arrival field's elevation must reach the profile `project_traffic` builds —
+    /// nothing failed when it regressed to sea level. Since #411 the site no longer resolves the
+    /// elevation itself, so the mutation this pin catches is neutering
+    /// `predict::profile_from_here`'s `field_elevation_ft(airports, arr_icao)` lookup to `0.0`.
     ///
     /// The projection has to land **inside the descent** to be sensitive at all: above
     /// top-of-descent the profile samples never reference the field elevation, so the altitude
@@ -2898,6 +3045,7 @@ mod prefile_skip_integration_tests {
                 &RunwayDb::default(),
                 &HashMap::new(),
                 ex,
+                &Default::default(),
                 Utc::now(),
                 false,
             );
@@ -2951,6 +3099,7 @@ mod prefile_skip_integration_tests {
             &RunwayDb::default(),
             &HashMap::new(),
             &HashMap::new(),
+            &Default::default(),
             Utc::now(),
             false,
         );
@@ -3052,6 +3201,7 @@ mod prefile_fix_predictions_tests {
             &fp.departure,
             None,
             None,
+            None,
         );
         predict::arrival_eta(
             nav,
@@ -3133,9 +3283,11 @@ mod prefile_fix_predictions_tests {
         assert!(prefile_fix_predictions(&st, &nav, &ap, &fp, now()).is_empty());
     }
 
-    /// #335: the fix table's terminal altitude is the arrival field's elevation. `fix_predictions`
-    /// hands the elevation to `VerticalProfile::build` as an explicit argument, so replacing that
-    /// argument with `0.0` left the whole suite green while the arrival fix quietly read sea level.
+    /// #335: the fix table's terminal altitude is the arrival field's elevation, and reading sea
+    /// level instead left the whole suite green while the arrival fix quietly sat at 0 ft. Since
+    /// #411 `fix_predictions` no longer resolves the elevation itself, so the mutation this pin
+    /// catches is neutering `predict::profile_from_here`'s `field_elevation_ft(airports, arr_icao)`
+    /// lookup to `0.0`.
     #[tokio::test]
     async fn the_fix_table_terminates_at_the_arrival_field_elevation() {
         let (st, nav) = (state(), NavData::load());
@@ -3606,6 +3758,7 @@ mod mit_cross_speed_wiring_tests {
             &RunwayDb::default(),
             &HashMap::new(),
             &ExclusionSet::new(),
+            &Default::default(),
             Utc::now(),
             false,
         );
@@ -3698,6 +3851,7 @@ mod mit_cross_speed_wiring_tests {
             &RunwayDb::default(),
             &HashMap::new(),
             &ExclusionSet::new(),
+            &Default::default(),
             Utc::now(),
             false,
         );
@@ -3753,6 +3907,7 @@ mod mit_cross_speed_wiring_tests {
             &RunwayDb::default(),
             &HashMap::new(),
             &ExclusionSet::new(),
+            &Default::default(),
             Utc::now(),
             true, // debug on
         );
@@ -3779,11 +3934,13 @@ mod mit_cross_speed_wiring_tests {
         }
     }
 
-    /// #335: **both** candidate-build loops hand the arrival field elevation to
-    /// `predict::eta_along_route` as an explicit argument, and neither was covered — replacing both
-    /// with `0.0` left the suite green, which would revert every FCA-metering STA to a sea-level
-    /// descent. Asserted per loop for the same reason `cross_speed_for` is: a fixture that only
-    /// exercised `pilots` would leave the prefile site free to regress.
+    /// #335: **both** candidate-build loops time their crossing against the arrival field's
+    /// elevation, and neither was covered — reading sea level left the suite green, which would
+    /// revert every FCA-metering STA to a sea-level descent. Since #411 neither loop resolves the
+    /// elevation itself, so the mutation this pin catches is neutering
+    /// `predict::profile_from_here`'s `field_elevation_ft(airports, arr_icao)` lookup to `0.0`.
+    /// Asserted per loop for the same reason `cross_speed_for` is: a fixture that only exercised
+    /// `pilots` would leave the prefile site free to regress.
     ///
     /// The gate must sit **inside the descent**. Above top-of-descent the profile samples never
     /// reference the field elevation, so an enroute crossing is elevation-independent and the
@@ -3821,6 +3978,7 @@ mod mit_cross_speed_wiring_tests {
                 &RunwayDb::default(),
                 &HashMap::new(),
                 &ExclusionSet::new(),
+                &Default::default(),
                 now,
                 false,
             );
@@ -4165,6 +4323,7 @@ mod fca_inclusion_tests {
                 &RunwayDb::default(),
                 &HashMap::new(),
                 &empty,
+                &Default::default(),
                 Utc::now(),
                 false,
             );
@@ -4186,5 +4345,254 @@ mod fca_inclusion_tests {
                 );
             }
         }
+    }
+}
+
+/// #514 — trading two held release times without re-metering anyone else.
+///
+/// Worth knowing for anyone extending this: `mark_release` and `clear_release` have no tests of
+/// their own, so these are the first on the release path. They drive `repos::flow::swap_releases`
+/// for the data semantics and the real router for the two guards the handler owns.
+#[cfg(test)]
+mod release_swap_tests {
+    use std::collections::HashMap;
+
+    use sqlx::PgPool;
+
+    use crate::repos::flow as flow_repo;
+    use crate::scope_test_support::{seed_user, send, session_cookie, test_state};
+
+    /// Every `flow.fca` column has a default, so a name is the whole fixture.
+    async fn fca(pool: &PgPool) -> String {
+        sqlx::query_scalar::<_, String>(
+            "insert into flow.fca (name) values ('SWAP TEST') returning id",
+        )
+        .fetch_one(pool)
+        .await
+        .unwrap()
+    }
+
+    async fn times(pool: &PgPool, fca_id: &str, callsign: &str) -> Option<(i64, i64)> {
+        sqlx::query_as::<_, (i64, i64)>(
+            "select cta_ms, edct_ms from flow.fca_release where fca_id = $1 and callsign = $2",
+        )
+        .bind(fca_id)
+        .bind(callsign)
+        .fetch_optional(pool)
+        .await
+        .unwrap()
+    }
+
+    /// The feature, in one assertion: each flight ends up holding the other's times.
+    #[sqlx::test]
+    async fn two_releases_trade_their_times(pool: PgPool) {
+        let user = seed_user(&pool).await;
+        let id = fca(&pool).await;
+        flow_repo::upsert_release(&pool, &id, "AAL1", 1_000, 900, &user)
+            .await
+            .unwrap();
+        flow_repo::upsert_release(&pool, &id, "UAL2", 2_000, 1_900, &user)
+            .await
+            .unwrap();
+
+        assert!(
+            flow_repo::swap_releases(&pool, &id, "AAL1", "UAL2", &user)
+                .await
+                .unwrap()
+        );
+
+        assert_eq!(times(&pool, &id, "AAL1").await, Some((2_000, 1_900)));
+        assert_eq!(times(&pool, &id, "UAL2").await, Some((1_000, 900)));
+    }
+
+    /// The criterion the existing reorder fails by design: moving one aircraft must not shift
+    /// anybody else. `manual_order` re-chains everyone behind the mover; this touches two rows.
+    #[sqlx::test]
+    async fn a_third_flights_release_is_untouched(pool: PgPool) {
+        let user = seed_user(&pool).await;
+        let id = fca(&pool).await;
+        for (cs, cta, edct) in [
+            ("AAL1", 1_000, 900),
+            ("UAL2", 2_000, 1_900),
+            ("DAL3", 3_000, 2_900),
+        ] {
+            flow_repo::upsert_release(&pool, &id, cs, cta, edct, &user)
+                .await
+                .unwrap();
+        }
+
+        flow_repo::swap_releases(&pool, &id, "AAL1", "UAL2", &user)
+            .await
+            .unwrap();
+
+        assert_eq!(
+            times(&pool, &id, "DAL3").await,
+            Some((3_000, 2_900)),
+            "a flight not named in the swap must not move"
+        );
+    }
+
+    /// No slot is created or destroyed: the pair of times after the swap is the same pair as
+    /// before, so neither flight is later than the later of the two originals.
+    #[sqlx::test]
+    async fn neither_flight_ends_up_later_than_the_later_original(pool: PgPool) {
+        let user = seed_user(&pool).await;
+        let id = fca(&pool).await;
+        flow_repo::upsert_release(&pool, &id, "AAL1", 1_000, 900, &user)
+            .await
+            .unwrap();
+        flow_repo::upsert_release(&pool, &id, "UAL2", 2_000, 1_900, &user)
+            .await
+            .unwrap();
+
+        flow_repo::swap_releases(&pool, &id, "AAL1", "UAL2", &user)
+            .await
+            .unwrap();
+
+        let a = times(&pool, &id, "AAL1").await.unwrap();
+        let b = times(&pool, &id, "UAL2").await.unwrap();
+        assert_eq!(
+            a.0.max(b.0),
+            2_000,
+            "the later crossing time must be the one that already existed"
+        );
+        assert_eq!(a.1.max(b.1), 1_900, "likewise the later wheels-up");
+    }
+
+    /// The mechanism matters, not just the outcome: a swap must go through `flow.fca_release`,
+    /// which the engine reads as `frozen_ms`, and must leave the FCA's manual sequence alone. Had
+    /// this been built on `set_manual_order`, these two columns would move.
+    #[sqlx::test]
+    async fn the_swap_does_not_touch_the_manual_order(pool: PgPool) {
+        let user = seed_user(&pool).await;
+        let id = fca(&pool).await;
+        flow_repo::upsert_release(&pool, &id, "AAL1", 1_000, 900, &user)
+            .await
+            .unwrap();
+        flow_repo::upsert_release(&pool, &id, "UAL2", 2_000, 1_900, &user)
+            .await
+            .unwrap();
+
+        flow_repo::swap_releases(&pool, &id, "AAL1", "UAL2", &user)
+            .await
+            .unwrap();
+
+        let (order, manual) = sqlx::query_as::<_, (Vec<String>, bool)>(
+            "select manual_order, manual_seq from flow.fca where id = $1",
+        )
+        .bind(&id)
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        assert!(
+            order.is_empty(),
+            "manual order must stay untouched: {order:?}"
+        );
+        assert!(!manual, "the FCA must not be flipped into manual mode");
+    }
+
+    /// Inventing a time for an unreleased flight is the thing this must not do. The repo reports
+    /// `false` and — because the exchange is one statement whose self-join matched nothing — the
+    /// released side is left exactly as it was, so there is no partial swap.
+    #[sqlx::test]
+    async fn a_swap_with_one_unreleased_flight_is_rejected_and_writes_nothing(pool: PgPool) {
+        let user = seed_user(&pool).await;
+        let id = fca(&pool).await;
+        flow_repo::upsert_release(&pool, &id, "AAL1", 1_000, 900, &user)
+            .await
+            .unwrap();
+
+        assert!(
+            !flow_repo::swap_releases(&pool, &id, "AAL1", "NOPE9", &user)
+                .await
+                .unwrap()
+        );
+        assert_eq!(
+            times(&pool, &id, "AAL1").await,
+            Some((1_000, 900)),
+            "the released flight must be untouched"
+        );
+        assert!(times(&pool, &id, "NOPE9").await.is_none());
+    }
+
+    /// The repo guards a self-swap on its own, not only via the handler.
+    ///
+    /// `swap_releases` is `pub` and #511's ladder (plus any future UI) can call it directly, so its
+    /// contract has to hold without the handler's `a == b` check in front of it. This is also the
+    /// only case that distinguishes `rows_affected() == 2` from `> 0`: a missing release matches
+    /// **zero** rows either way, while a self-swap matches exactly one — so without this test,
+    /// relaxing that comparison passes the whole suite.
+    #[sqlx::test]
+    async fn the_repo_refuses_to_swap_a_flight_with_itself(pool: PgPool) {
+        let user = seed_user(&pool).await;
+        let id = fca(&pool).await;
+        flow_repo::upsert_release(&pool, &id, "AAL1", 1_000, 900, &user)
+            .await
+            .unwrap();
+
+        assert!(
+            !flow_repo::swap_releases(&pool, &id, "AAL1", "AAL1", &user)
+                .await
+                .unwrap(),
+            "one matched row is not a swap"
+        );
+        assert_eq!(times(&pool, &id, "AAL1").await, Some((1_000, 900)));
+    }
+
+    /// Through the real router, so `RequirePermission<FlowFcaUpdate>` is on the path. It cannot be
+    /// constructed in a test, so a direct handler call could not show the endpoint is gated at all.
+    #[sqlx::test]
+    async fn through_the_router_a_user_without_the_permission_is_refused(pool: PgPool) {
+        let state = test_state(pool.clone(), HashMap::new());
+        let user = seed_user(&pool).await;
+        let id = fca(&pool).await;
+        flow_repo::upsert_release(&pool, &id, "AAL1", 1_000, 900, &user)
+            .await
+            .unwrap();
+        flow_repo::upsert_release(&pool, &id, "UAL2", 2_000, 1_900, &user)
+            .await
+            .unwrap();
+        let cookie = session_cookie(&pool, &user).await;
+
+        let status = send(
+            &state,
+            http::Method::POST,
+            &format!("/api/v1/flow/fcas/{id}/swap"),
+            &cookie,
+            Some(serde_json::json!({"a": "AAL1", "b": "UAL2"})),
+        )
+        .await;
+        assert_eq!(status, http::StatusCode::UNAUTHORIZED);
+        // And nothing was written on the way to being refused.
+        assert_eq!(times(&pool, &id, "AAL1").await, Some((1_000, 900)));
+    }
+
+    /// A flight cannot trade with itself. Rejected in the handler so the error says why, rather
+    /// than reaching the repo and reporting a missing release.
+    #[sqlx::test]
+    async fn through_the_router_swapping_a_flight_with_itself_is_rejected(pool: PgPool) {
+        let state = test_state(pool.clone(), HashMap::new());
+        let user = seed_user(&pool).await;
+        crate::scope_test_support::grant(&pool, &user, "flow.fca.update", None).await;
+        let id = fca(&pool).await;
+        flow_repo::upsert_release(&pool, &id, "AAL1", 1_000, 900, &user)
+            .await
+            .unwrap();
+        let cookie = session_cookie(&pool, &user).await;
+
+        let status = send(
+            &state,
+            http::Method::POST,
+            &format!("/api/v1/flow/fcas/{id}/swap"),
+            &cookie,
+            Some(serde_json::json!({"a": "AAL1", "b": "aal1"})),
+        )
+        .await;
+        assert_eq!(
+            status,
+            http::StatusCode::BAD_REQUEST,
+            "case-insensitively the same flight"
+        );
+        assert_eq!(times(&pool, &id, "AAL1").await, Some((1_000, 900)));
     }
 }

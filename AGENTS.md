@@ -22,9 +22,9 @@ One monorepo, four parts, one API:
 | Path | Stack | What it is |
 | --- | --- | --- |
 | `backend/` | Rust · Axum | The API and the authority for identity, permissions, and every domain. Postgres + sqlx, embedded migrations, self-served OpenAPI. |
-| `discord/` | Rust · serenity | The bot. Owns no data — drains an outbound-job queue and calls back via REST as a service account. *(designed, not built)* |
+| `discord/` | Rust · serenity | The bot. Owns no data — leases jobs from `integration.outbound_jobs` via `POST /api/v1/integration/jobs/lease`, performs the Discord side-effect, then acks with the ids it produced. Its button and modal interactions call back through the same API as a service account. |
 | `web/` | Vite · React | The site. TanStack Router + Query, consuming the OpenAPI-generated typed client. |
-| `desktop/` | Tauri · Rust | The native app. Not a second frontend — a webview shell (`src-tauri`) around the **same** `web/` bundle. *(shell scaffolded; desktop features in progress)* |
+| `desktop/` | Tauri · Rust | The native app. Not a second frontend — a webview shell (`src-tauri`) around the **same** `web/` bundle. *(shipping signed auto-updating builds; desktop-only features in progress)* |
 | `crates/ois-core` | Rust | DB-free domain + permission types (ported from osmium). |
 | `crates/ois-client` | Rust | Typed backend client used by the bot. |
 | `packages/api-client` | TypeScript | OpenAPI-generated client (`@ois/api-client`) for web + desktop. |
@@ -220,6 +220,10 @@ an existing one) or the bug and fix are unambiguous.
   with file:line evidence, the blast-radius footer, and the scope tests for when a noticed problem
   becomes its own `technical-debt` ticket. Agents don't self-assign, close, or merge; other repos are
   read-only.
+- **The board sequences work; it does not gate the merge.** A PR lands on green CI plus review, not
+  on its card's column — see [`docs/github-issues.md`](docs/github-issues.md) § Lifecycle for the
+  rule and why there is no mechanical check. A merged PR whose card is still left of **Code Review**
+  is a bookkeeping error to flag on the issue, not a policy breach.
 
 ---
 
@@ -302,9 +306,11 @@ idempotent-friendly and numbered sequentially).
 - **Auth**: VATSIM Connect OAuth is the only human sign-in (no local passwords). Bearer tokens are
   user API keys (`ois_pat_…`, capped to the owner's live access) or service accounts (`ois_sa_…`).
   The VATUSA roster webhook is authenticated by HMAC over the body, no session/bearer.
-- **Blocked subsystems**: the Discord bot and transactional email are designed-only. Features that
-  need them (Discord DMs, reminder emails) can't be finished until those are built — say so rather
-  than stubbing.
+- **Blocked subsystems**: transactional email is designed-only — features needing it (reminder
+  emails) can't be finished until it is built; say so rather than stubbing. The Discord bot is
+  **not** in this category: it runs, drains the outbound-job queue, and sends DMs. Its one gap is
+  slash commands — it registers none and needs no privileged intents, so anything phrased as a chat
+  command needs that built first.
 - **Comments and commit bodies** describe the code as it is now, for a future reader — not a
   per-change narrative with dates/IDs. That history belongs in the commit message and the test.
 

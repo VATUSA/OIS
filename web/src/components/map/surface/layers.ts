@@ -100,9 +100,13 @@ export function buildSurfaceLayers(
         getLineColor: [...palette.ink, 220] as RGBA,
         getLineWidth: 1,
         lineWidthUnits: "pixels",
-        getRadius: 5,
+        // #517: a non-gate stand draws smaller, so a GA field's tie-downs are distinguishable from its
+        // terminal gates at a glance and not only on hover. Size rather than colour — DESIGN.md allows
+        // one accent. A null `kind` (every manual/osm/crc row) keeps the original radius, so nothing
+        // already on an operator's screen moves.
+        getRadius: (d) => (d.kind && d.kind !== "gate" ? 3 : 5),
         radiusUnits: "pixels",
-        radiusMinPixels: 4,
+        radiusMinPixels: 3,
       }),
     );
   }

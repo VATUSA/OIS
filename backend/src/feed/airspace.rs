@@ -29,6 +29,16 @@ impl Boundaries {
         self.polys.len()
     }
 
+    /// Whether we hold boundary geometry for ARTCC `code` at all.
+    ///
+    /// Distinct from "is this a real US ARTCC": `ZAK` (Oakland Oceanic) and `ZSU` (San Juan) are
+    /// both real and neither has a polygon in the bundled set. Callers that need to *draw* a
+    /// facility must ask this; callers deciding whether a controller is American must not
+    /// (VATUSA/OIS#482).
+    pub fn has(&self, code: &str) -> bool {
+        self.polys.contains_key(&code.to_ascii_uppercase())
+    }
+
     /// Whether `(lat, lon)` lies inside any polygon of ARTCC `code`.
     pub fn contains(&self, code: &str, lat: f64, lon: f64) -> bool {
         self.polys

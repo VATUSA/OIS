@@ -279,6 +279,21 @@ pub async fn fetch_role_names(pool: &PgPool) -> Result<Vec<String>, ApiError> {
         .map_err(|_| ApiError::Internal)
 }
 
+/// Roles a service account may hold: every role in the catalog except SERVER_ADMIN,
+/// which is env-bootstrapped only. This is the single source for both the picker the
+/// admin UI renders and `set_service_account_roles`' validation, so the two cannot
+/// drift — unlike `ASSIGNABLE_USER_ROLES`, which is the *human* editor's list and
+/// deliberately omits the machine roles (BOT / SERVICE_APP).
+pub async fn fetch_service_account_assignable_roles(
+    pool: &PgPool,
+) -> Result<Vec<String>, ApiError> {
+    Ok(fetch_role_names(pool)
+        .await?
+        .into_iter()
+        .filter(|name| name != crate::auth::acl::SERVER_ADMIN_ROLE)
+        .collect())
+}
+
 /// A user's national (unscoped) direct permission grants — the set the national
 /// editor owns. Facility-scoped grants (artcc_id not null) are left untouched.
 pub async fn fetch_user_direct_permission_names(
@@ -621,5 +636,28 @@ mod tests {
         assert!(none.is_empty());
         assert!(!none.allows(Some("ZLA")));
         assert!(!none.allows(Some("ZDC")));
+    }
+
+    /// AC3's real guarantee: the picker's list must contain BOT, or the UI cannot grant the
+    /// Discord bot its role (VATUSA/OIS#531, which unblocks #445). ASSIGNABLE_USER_ROLES — the
+    /// *human* editor's list, which `/access/catalog` serves — deliberately omits it, and that is
+    /// exactly the trap this function exists to avoid.
+    #[sqlx::test]
+    async fn service_account_roles_offer_bot_but_never_server_admin(pool: sqlx::PgPool) {
+        let roles = super::fetch_service_account_assignable_roles(&pool)
+            .await
+            .unwrap();
+
+        assert!(roles.iter().any(|r| r == "BOT"), "BOT missing: {roles:?}");
+        assert!(
+            !roles
+                .iter()
+                .any(|r| r == crate::auth::acl::SERVER_ADMIN_ROLE),
+            "SERVER_ADMIN must stay env-bootstrapped only: {roles:?}"
+        );
+        assert!(
+            !super::ASSIGNABLE_USER_ROLES.contains(&"BOT"),
+            "if BOT ever becomes user-assignable this function's reason to exist is gone"
+        );
     }
 }

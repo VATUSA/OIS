@@ -435,6 +435,53 @@ pub async fn upsert_release(
     Ok(())
 }
 
+/// Exchange two releases' frozen times within one FCA (#514).
+///
+/// Returns whether the swap happened — `false` means at least one of the two callsigns holds no
+/// release, and nothing was written.
+///
+/// # One statement, deliberately
+///
+/// `update … from` over the same table is atomic by itself and reads the **pre-statement snapshot**,
+/// so each row receives the other's values. A read-then-write pair would need an explicit
+/// transaction and could still interleave with a concurrent [`upsert_release`], leaving one row
+/// holding the other's time and the other holding its own.
+///
+/// `rows_affected() == 2` is the success condition rather than a separate existence check: if either
+/// callsign has no release the self-join matches nothing, zero rows change, and a partial swap is
+/// impossible. Passing the same callsign twice matches one row, which is also not 2 — though the
+/// handler rejects that earlier with a clearer error.
+///
+/// # Why this is not the reorder
+///
+/// `set_manual_order` is the other way to change who goes first, and it is defined to re-chain
+/// everyone behind the moved aircraft (`feed::fca`'s manual branch). This touches two rows and
+/// nothing else, which is what lets two flights trade slots without renumbering the field.
+pub async fn swap_releases(
+    pool: &PgPool,
+    fca_id: &str,
+    a: &str,
+    b: &str,
+    actor: &str,
+) -> Result<bool, ApiError> {
+    let result = sqlx::query(
+        "update flow.fca_release r \
+            set cta_ms = o.cta_ms, edct_ms = o.edct_ms, updated_by = $4 \
+           from flow.fca_release o \
+          where r.fca_id = $1 and o.fca_id = $1 \
+            and ((r.callsign = $2 and o.callsign = $3) \
+              or (r.callsign = $3 and o.callsign = $2))",
+    )
+    .bind(fca_id)
+    .bind(a)
+    .bind(b)
+    .bind(actor)
+    .execute(pool)
+    .await
+    .map_err(|_| ApiError::Internal)?;
+    Ok(result.rows_affected() == 2)
+}
+
 pub async fn delete_release(pool: &PgPool, fca_id: &str, callsign: &str) -> Result<bool, ApiError> {
     let result = sqlx::query("delete from flow.fca_release where fca_id = $1 and callsign = $2")
         .bind(fca_id)

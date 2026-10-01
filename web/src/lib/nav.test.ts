@@ -73,6 +73,7 @@ const REQUIRED: Record<string, readonly string[]> = {
   "/admin/audit": ["audit.logs.read"],
   "/admin/jobs": ["system.jobs.read"],
   "/admin/api-keys": ["api_keys.key.read"],
+  "/admin/service-accounts": ["service_accounts.read"],
   "/admin/discord": ["discord.config.read"],
 };
 
@@ -147,7 +148,14 @@ describe("canOpenPath", () => {
     const planner = holding("events.plan.read");
     expect(canOpenPath(planner, "/admin/planning/events/123")).toBe(true);
     expect(canOpenPath(planner, "/admin")).toBe(true);
-    for (const page of ["/admin/access", "/admin/audit", "/admin/jobs", "/admin/api-keys", "/admin/discord"]) {
+    for (const page of [
+      "/admin/access",
+      "/admin/audit",
+      "/admin/jobs",
+      "/admin/api-keys",
+      "/admin/service-accounts",
+      "/admin/discord",
+    ]) {
       expect(canOpenPath(planner, page)).toBe(false);
     }
     expect(canOpenPath(holding("audit.logs.read"), "/admin/audit")).toBe(true);

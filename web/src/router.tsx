@@ -4,6 +4,7 @@ import {LayoutGrid, List, Rows3} from "lucide-react";
 
 import {FeedWatcher} from "@/components/feed-watcher";
 import {AppShell} from "@/components/shell/app-shell";
+import {WindowChromeBar} from "@/components/shell/window-chrome-bar";
 import type {RouteMeta} from "@/components/shell/page-meta";
 import {RestrictionAlerts} from "@/components/restriction-alerts";
 import {PrimaryWindowFeatures} from "@/components/primary-window-features";
@@ -54,6 +55,7 @@ import {AdminAccessControl} from "@/pages/admin/access-control";
 import {AdminAudit} from "@/pages/admin/audit";
 import {AdminJobs} from "@/pages/admin/jobs";
 import {AdminApiKeys} from "@/pages/admin/api-keys";
+import {AdminServiceAccounts} from "@/pages/admin/service-accounts";
 import {AdminDiscord} from "@/pages/admin/discord";
 
 const isTruthy = (v: unknown) => v === true || v === 1 || v === "1" || v === "true";
@@ -74,6 +76,9 @@ function RootLayout() {
   if (me.isError) {
     return (
       <div className="flex min-h-dvh flex-col items-center justify-center gap-4 bg-ground px-6 text-center text-ink">
+        {/* This layout is outside `AppShell`, so it carries the frameless window's controls itself
+            (#423) — without them the window has no title bar and no way to close it. */}
+        <WindowChromeBar />
         <p className="text-xl font-bold">Can’t reach OIS</p>
         <p className="max-w-md text-sm text-ink-2">
           The server isn’t responding right now. This page keeps trying and will reconnect
@@ -86,8 +91,16 @@ function RootLayout() {
     );
   }
 
-  // Signed-out visitors land on the public homepage — no app shell, with the site footer.
-  if (pathname === "/" && !me.isLoading && me.data === null) return <LandingPage />;
+  // Signed-out visitors land on the public homepage — no app shell, with the site footer. Outside
+  // `AppShell` it has to carry the frameless window's controls itself (#423): this is the first screen
+  // a new desktop user sees, and without them the window cannot be closed from inside the app.
+  if (pathname === "/" && !me.isLoading && me.data === null)
+    return (
+      <>
+        <WindowChromeBar />
+        <LandingPage />
+      </>
+    );
 
   if (embed) {
     return (
@@ -155,6 +168,7 @@ const TMU_TAB_IDS = [
   "ground-stops",
   "gdp",
   "rate-calculator",
+  "advisories",
 ] as const;
 type TmuTabId = (typeof TMU_TAB_IDS)[number];
 
@@ -555,6 +569,13 @@ const adminApiKeysRoute = createRoute({
   component: AdminApiKeys,
 });
 
+const adminServiceAccountsRoute = createRoute({
+  getParentRoute: () => adminRoute,
+  path: "service-accounts",
+  staticData: { title: "Service accounts" },
+  component: AdminServiceAccounts,
+});
+
 const adminDiscordRoute = createRoute({
   getParentRoute: () => adminRoute,
   path: "discord",
@@ -626,6 +647,7 @@ const routeTree = rootRoute.addChildren([
     adminAuditRoute,
     adminJobsRoute,
     adminApiKeysRoute,
+    adminServiceAccountsRoute,
     adminDiscordRoute,
     planningRoute.addChildren([
       planningIndexRoute,

@@ -1,10 +1,11 @@
 import {useNavigate, useSearch} from "@tanstack/react-router";
 import {EmptyState, Tabs} from "@ois/ui";
-import {Calculator, Clock, Gauge, OctagonPause, ShieldAlert} from "lucide-react";
+import {Calculator, Clock, FileText, Gauge, OctagonPause, ShieldAlert} from "lucide-react";
 
 import {usePageHeader} from "@/components/shell/page-meta";
 import {useMe} from "@/lib/auth";
 import {hasPermission} from "@/lib/permissions";
+import {AdvisoriesTab} from "@/pages/tmu/advisories";
 import {GdpTab} from "@/pages/tmu/gdp";
 import {GroundStopsTab} from "@/pages/tmu/ground-stops";
 import {ProgramsTab} from "@/pages/tmu/programs";
@@ -16,7 +17,8 @@ type Tab =
   | "restrictions"
   | "ground-stops"
   | "gdp"
-  | "rate-calculator";
+  | "rate-calculator"
+  | "advisories";
 
 type TabDef = { value: Tab; label: string; icon: typeof Gauge };
 
@@ -33,6 +35,7 @@ export function TmuPage() {
   const canRestrictions = hasPermission(me, "tmu.tmi.read");
   const canGroundStops = hasPermission(me, "tmu.groundstop.read");
   const canGdp = hasPermission(me, "tmu.gdp.read");
+  const canAdvisories = hasPermission(me, "tmu.adv.read");
 
   const tabs = [
     canPrograms && { value: "programs", label: "Programs", icon: Gauge },
@@ -40,6 +43,7 @@ export function TmuPage() {
     canGroundStops && { value: "ground-stops", label: "Ground stops", icon: OctagonPause },
     canGdp && { value: "gdp", label: "Ground delay", icon: Clock },
     canPrograms && { value: "rate-calculator", label: "Rate calculator", icon: Calculator },
+    canAdvisories && { value: "advisories", label: "Advisories", icon: FileText },
   ].filter(Boolean) as TabDef[];
 
   const { tab: requestedTab, facility } = useSearch({ strict: false }) as { tab?: Tab; facility?: string };
@@ -82,6 +86,7 @@ export function TmuPage() {
       {active === "ground-stops" && <GroundStopsTab />}
       {active === "gdp" && <GdpTab />}
       {active === "rate-calculator" && <RateCalculatorTab />}
+      {active === "advisories" && <AdvisoriesTab />}
     </div>
   );
 }

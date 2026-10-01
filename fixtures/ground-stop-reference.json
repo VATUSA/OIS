@@ -1,0 +1,37 @@
+{
+  "note": "Shared Ground Stop advisory (ADVZY) reference cases. Transcribed from the vATCSCC TMI reference PDF cited by VATUSA/OIS#437 (the 'TMIs' document, 4 example advisories: GDP 002, Ground Stop 003, Reroute 004/005). The renderer is backend/src/advisory.rs (render_ground_stop). Same rules as gdp-reference.json: the backend is authoritative, every field is written out, and deviations are recorded per case.",
+  "cases": [
+    {
+      "name": "advzy-003-ground-stop",
+      "why": "The reference Ground Stop, every field populated. The three delay triplets are the point: CURRENT, PREVIOUS and NEW each print TOTAL/MAXIMUM/AVERAGE, and swapping two of those labels would change what a controller reads off the document while every other test stayed green. FLT INCL carries its mode inline here -- `(Manual) ZHU ...` -- which is why values print as typed rather than through `clean`: upper-casing would make it `(MANUAL)`.",
+      "deviation": "One, as in the GDP case: the source's two blank lines before the period line are rendered as one, matching the other two types.",
+      "ident": {
+        "facility": "DCC",
+        "number": 3,
+        "issued_day": "2020-04-14",
+        "signed_at": "2020-04-14T13:54:00Z"
+      },
+      "structured": {
+        "header": "CDM GROUND STOP",
+        "element": "DFW/ZFW",
+        "control_element": "DFW",
+        "element_type": "APT",
+        "adl_time": "1354Z",
+        "ground_stop_period": "14/1430Z - 14/1630Z",
+        "cumulative_program_period": "14/1430Z - 14/1630Z",
+        "flights_included": [
+          "(Manual) ZHU ZJX ZMA ZME ZTL"
+        ],
+        "additional_dep_facilities_included": "KDEN",
+        "current_delays": "1240/414/81",
+        "previous_delays": "636/211/70",
+        "new_delays": "1876/625/151",
+        "probability_of_extension": "MEDIUM",
+        "impacting_condition": "EQUIPMENT / STARS",
+        "comments": "BLAH",
+        "period": "141430-141630"
+      },
+      "rendered": "vATCSCC ADVZY 003 DFW/ZFW 04/14/2020 CDM GROUND STOP\nCTL ELEMENT: DFW\nELEMENT TYPE: APT\nADL TIME: 1354Z\nGROUND STOP PERIOD: 14/1430Z - 14/1630Z\nCUMULATIVE PROGRAM PERIOD: 14/1430Z - 14/1630Z\nFLT INCL: (Manual) ZHU ZJX ZMA ZME ZTL\nADDITIONAL DEP FACILITIES INCLUDED: KDEN\nCURRENT TOTAL, MAXIMUM, AVERAGE DELAYS: 1240/414/81\nPREVIOUS TOTAL, MAXIMUM, AVERAGE DELAYS: 636/211/70\nNEW TOTAL, MAXIMUM, AVERAGE DELAYS: 1876/625/151\nPROBABILITY OF EXTENSION: MEDIUM\nIMPACTING CONDITION: EQUIPMENT / STARS\nCOMMENTS: BLAH\n\n141430-141630\n20/04/14 13:54"
+    }
+  ]
+}
