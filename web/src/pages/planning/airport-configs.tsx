@@ -19,15 +19,7 @@ import {ArrowLeft, Building2, Gauge, Lock, Plane, Plus, Settings2, Wind, X} from
 import {usePageHeader, useView} from "@/components/shell/page-meta";
 import {useMe} from "@/lib/auth";
 import {useFacilities} from "@/lib/admin";
-import {
-  type AirportConfig,
-  type UpsertAirportConfig,
-  useAirportConfigs,
-  useAllAirportConfigs,
-  useCreateAirportConfig,
-  useDeleteAirportConfig,
-  useUpdateAirportConfig,
-} from "@/lib/airport-configs";
+import { formatRules, parseRules, type AirportConfig, type UpsertAirportConfig, useAirportConfigs, useAllAirportConfigs, useCreateAirportConfig, useDeleteAirportConfig, useUpdateAirportConfig } from "@/lib/airport-configs";
 import {hasPermission} from "@/lib/permissions";
 
 const clampRate = (n: number) => Math.max(0, Math.min(200, Math.round(n)));
@@ -43,6 +35,8 @@ const BLANK: UpsertAirportConfig = {
   adr: 30,
   landing_runways: [],
   departure_runways: [],
+  sid_rules: {},
+  gate_rules: {},
   wind_from_deg: 0,
   wind_to_deg: 360,
   calm_default: false,
@@ -76,6 +70,10 @@ function ConfigForm({
   // commas you type between runways. Parse to the array only when saving.
   const [runwaysText, setRunwaysText] = useState(() => (initial.landing_runways ?? []).join(", "));
   const [depRunwaysText, setDepRunwaysText] = useState(() => (initial.departure_runways ?? []).join(", "));
+  // Rules are edited as `KEY=RUNWAY` pairs, free text for the same reason the runway fields are:
+  // parsing each keystroke would eat the separators you are still typing.
+  const [sidRulesText, setSidRulesText] = useState(() => formatRules(initial.sid_rules));
+  const [gateRulesText, setGateRulesText] = useState(() => formatRules(initial.gate_rules));
   const parseRunways = (s: string) =>
     s
       .split(/[,\s]+/)
@@ -86,6 +84,8 @@ function ConfigForm({
       ...f,
       landing_runways: parseRunways(runwaysText),
       departure_runways: parseRunways(depRunwaysText),
+      sid_rules: parseRules(sidRulesText),
+      gate_rules: parseRules(gateRulesText),
     });
 
   return (
@@ -127,6 +127,22 @@ function ConfigForm({
             value={depRunwaysText}
             onChange={(e) => setDepRunwaysText(e.target.value)}
             placeholder="26R, 28"
+          />
+        </Field>
+        <Field label="SID rules" className="col-span-2">
+          <Input
+            className="font-mono"
+            value={sidRulesText}
+            onChange={(e) => setSidRulesText(e.target.value)}
+            placeholder="CAMRN=26R, HAPIE=28"
+          />
+        </Field>
+        <Field label="Gate rules" className="col-span-2">
+          <Input
+            className="font-mono"
+            value={gateRulesText}
+            onChange={(e) => setGateRulesText(e.target.value)}
+            placeholder="A1=26R, C12=28"
           />
         </Field>
         <Field label="Wind from °">
@@ -265,6 +281,8 @@ function AirportConfigs({ icao, onBack }: { icao: string; onBack: () => void }) 
                             adr: cfg.adr,
                             landing_runways: cfg.landing_runways,
                             departure_runways: cfg.departure_runways,
+                            sid_rules: cfg.sid_rules,
+                            gate_rules: cfg.gate_rules,
                             wind_from_deg: cfg.wind_from_deg,
                             wind_to_deg: cfg.wind_to_deg,
                             calm_default: cfg.calm_default,

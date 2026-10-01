@@ -879,6 +879,16 @@ pub struct AirportConfigBody {
     /// Runways departures are expected to use under this config — the departure side of
     /// `landing_runways`, and the third rung of #511's prediction ladder (#509).
     pub departure_runways: Vec<String>,
+    /// Departure SID base → runway, e.g. `{"CAMRN": "31L"}` — the *second* rung of #511's ladder,
+    /// above `departure_runways` and below a manual override (#512). Keys are revision-stripped by
+    /// `feed::runway::star_base`, so `CAMRN4` and `CAMRN3` are one rule. Empty means no rules, which is
+    /// every airport until a facility configures one.
+    #[schema(value_type = std::collections::HashMap<String, String>)]
+    pub sid_rules: sqlx::types::Json<std::collections::HashMap<String, String>>,
+    /// Departure gate/stand name → runway, e.g. `{"A1": "04L"}` (#512). Separate from `sid_rules`
+    /// because a gate and a SID can share a name and mean different things.
+    #[schema(value_type = std::collections::HashMap<String, String>)]
+    pub gate_rules: sqlx::types::Json<std::collections::HashMap<String, String>>,
     /// Favored-wind rule: applies when the surface wind direction is within [from, to] (wrap-around
     /// allowed). Ignored when `calm_default`.
     pub wind_from_deg: i32,
@@ -902,6 +912,19 @@ pub struct UpsertAirportConfigRequest {
     pub landing_runways: Vec<String>,
     #[serde(default)]
     pub departure_runways: Vec<String>,
+    /// When present, replaces the SID→runway rules; **omit to keep them unchanged** (#512).
+    ///
+    /// `Option` where every other field on this request is replace-always, and the asymmetry is
+    /// deliberate: this is a whole-config PUT, so a client that predates these fields would wipe an
+    /// ARTCC's rules on every unrelated save. That is the hazard `RunwayConfigRequest` documents — "one
+    /// controller toggling a runway can't clobber another's STAR rule" — and this is the same remedy.
+    #[serde(default)]
+    #[schema(value_type = Option<std::collections::HashMap<String, String>>)]
+    pub sid_rules: Option<std::collections::HashMap<String, String>>,
+    /// When present, replaces the gate→runway rules; **omit to keep them unchanged** (#512).
+    #[serde(default)]
+    #[schema(value_type = Option<std::collections::HashMap<String, String>>)]
+    pub gate_rules: Option<std::collections::HashMap<String, String>>,
     pub wind_from_deg: i32,
     pub wind_to_deg: i32,
     #[serde(default)]
@@ -1990,6 +2013,13 @@ pub struct IdstFlight {
     /// Frozen wheels-up (EDCT) once released; null while unscheduled.
     pub edct: Option<DateTime<Utc>>,
     pub released: bool,
+    /// The predicted departure runway (#511), or null when nothing could predict one — no airport
+    /// configuration, or no rule and no configured default. Null is a real answer: a wrong runway would
+    /// narrow the learned taxi estimate to the wrong bucket and move the EDCT with it.
+    pub runway: Option<String>,
+    /// Which rung of the ladder chose `runway`: `manual` | `rule` | `config`, so a controller can see
+    /// *why* it was predicted and whether a human set it. Null exactly when `runway` is.
+    pub runway_source: Option<String>,
 }
 
 /// The IDST board: FCA-metered ground departures in scope, split by release state.

@@ -12,7 +12,7 @@ import {
   MetricCard,
   StatusPill,
 } from "@ois/ui";
-import {Clock, Plane, RefreshCw, Route} from "lucide-react";
+import {Clock, Plane, RefreshCw, Route, Navigation} from "lucide-react";
 
 import {usePageHeader} from "@/components/shell/page-meta";
 import {useMe} from "@/lib/auth";
@@ -129,6 +129,27 @@ const COLUMNS: DataColumn<IdstFlight>[] = [
     accessorKey: "fca_name",
     header: "FCA",
     cell: (c) => <StatusPill tone="neutral">{c.row.original.fca_name}</StatusPill>,
+  },
+  {
+    id: "runway",
+    accessorFn: (f) => f.runway ?? "",
+    header: "Rwy",
+    icon: Navigation,
+    mono: true,
+    cell: (c) => {
+      const f = c.row.original;
+      // No prediction is a real answer, not a gap: nothing could derive one (no airport configuration,
+      // or no rule and no configured default). Showing a dash rather than blank says so.
+      if (!f.runway) return <span className="text-ink-3">—</span>;
+      return (
+        <span className="whitespace-nowrap font-mono text-xs">
+          {f.runway}
+          {/* The rung that chose it, so a controller can see *why* — and in particular whether a human
+              set it by hand (#511 AC1). */}
+          {f.runway_source ? <span className="ml-1.5 text-ink-3">{f.runway_source}</span> : null}
+        </span>
+      );
+    },
   },
   {
     id: "edct",

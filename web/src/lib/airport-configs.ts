@@ -114,3 +114,29 @@ export function matchConfig(
   }
   return configs.find((c) => c.calm_default) ?? configs[0];
 }
+
+/** A `{ key: runway }` rule map as the editor's `KEY=RUNWAY, KEY=RUNWAY` text. */
+export function formatRules(rules: Record<string, string> | undefined | null): string {
+  return Object.entries(rules ?? {})
+    .map(([k, v]) => `${k}=${v}`)
+    .join(", ");
+}
+
+/**
+ * The editor's `KEY=RUNWAY` text back to a rule map (#512).
+ *
+ * Keys and runways are upper-cased, matching how the runway fields already normalise and how the
+ * backend compares them — a rule typed `camrn=26r` is the same rule as `CAMRN=26R`, and treating them
+ * as different would be a trap rather than a safeguard. A fragment with no `=`, or an empty half, is
+ * dropped rather than stored as a rule pointing nowhere.
+ */
+export function parseRules(text: string): Record<string, string> {
+  const out: Record<string, string> = {};
+  for (const part of text.split(/[,\n]+/)) {
+    const [rawKey, rawRunway] = part.split("=");
+    const key = rawKey?.trim().toUpperCase();
+    const runway = rawRunway?.trim().toUpperCase();
+    if (key && runway) out[key] = runway;
+  }
+  return out;
+}
