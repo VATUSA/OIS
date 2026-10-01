@@ -22,8 +22,12 @@ use crate::{
     feed::flow,
     feed::gdp::{self, GdpBoard, GdpFlightView},
     handlers::restriction_artcc,
-    models::{AarStep, CreateGdpRequest, GdpBody, UpdateGdpRequest},
+    models::{
+        AarStep, CreateAdvisoryRequest, CreateGdpRequest, GdpBody, PublishGdpRequest,
+        UpdateGdpRequest,
+    },
     repos::gdp as gdp_repo,
+    repos::tmu as tmu_repo,
     state::AppState,
 };
 
@@ -225,13 +229,27 @@ async fn fresh_assignments(
 /// Freeze control times: run fresh RBS off the current feed with the program's current
 /// params and persist the controlled slots (replacing any existing ones). Used on publish
 /// and when revising a published program.
-async fn freeze_slots(
+/// The frozen slot rows, the resolved program window, and the delay statistics for `gdp` — computed
+/// entirely from the live feed, touching no database.
+///
+/// Split out of [`freeze_slots`] for #508. Publishing must write the slots and the generated advisory in
+/// one transaction, and this is the expensive part: `fresh_assignments` runs the feed and RBS. Holding a
+/// Postgres transaction open across it would contend with every other advisory create at the facility,
+/// so the caller runs this *first* and opens the transaction afterwards with the results in hand.
+async fn frozen_slots_for(
     state: &AppState,
-    pool: &sqlx::PgPool,
     gdp: &GdpBody,
     now: DateTime<Utc>,
-) -> Result<(), ApiError> {
-    let (_s, _e, assignments) = fresh_assignments(state, gdp, now).await?;
+) -> Result<
+    (
+        DateTime<Utc>,
+        DateTime<Utc>,
+        Vec<gdp_repo::GdpSlotRow>,
+        gdp::GdpStats,
+    ),
+    ApiError,
+> {
+    let (start_ms, end_ms, assignments) = fresh_assignments(state, gdp, now).await?;
     let slots: Vec<gdp_repo::GdpSlotRow> = assignments
         .iter()
         .filter(|a| a.controlled)
@@ -244,7 +262,12 @@ async fn freeze_slots(
             delay_min: a.delay_min as i32,
         })
         .collect();
-    gdp_repo::replace_slots(pool, &gdp.id, &slots).await
+    // The same assignments the slots came from, so the document's MAXIMUM/AVERAGE DELAY describe
+    // exactly the rows that were frozen.
+    let stats = gdp::program_stats(&assignments);
+    let start = DateTime::from_timestamp_millis(start_ms).ok_or(ApiError::Internal)?;
+    let end = DateTime::from_timestamp_millis(end_ms).ok_or(ApiError::Internal)?;
+    Ok((start, end, slots, stats))
 }
 
 /// Run RBS off the current feed for `gdp`, applying frozen control times when published.
@@ -457,9 +480,37 @@ pub async fn revise_gdp(
     let gdp = gdp_repo::get_gdp(pool, &id)
         .await?
         .ok_or(ApiError::NotFound)?;
-    // A live program re-rations + re-freezes with the new parameters.
+    // A live program re-rations + re-freezes with the new parameters, and its advisory no longer
+    // describes it: the delay figures have moved. #461 settled that an advisory is cancelled and
+    // reissued rather than rewritten, so that is what happens here (#508 AC4).
+    //
+    // The parameter update above is its own statement, deliberately: converting `update_gdp` to take a
+    // transaction as well would be a wider change than this issue needs, and the failure mode is benign
+    // -- if the freeze-and-reissue below fails, the program carries its new parameters with its previous
+    // advisory still live, which is exactly today's behaviour. The cancel and the reissue are atomic
+    // with each other, which is the part that matters: a program is never left with no live advisory.
     if gdp.status == "published" {
-        freeze_slots(&state, pool, &gdp, Utc::now()).await?;
+        let now = Utc::now();
+        let (start, end, slots, stats) = frozen_slots_for(&state, &gdp, now).await?;
+        let editorial = payload.advisory.unwrap_or_default();
+        let iata = state.feed.read().await.iata.clone();
+        let mut tx = pool.begin().await.map_err(|_| ApiError::Internal)?;
+        gdp_repo::replace_slots_in(&mut tx, &id, &slots).await?;
+        tmu_repo::cancel_program_advisory_tx(&mut tx, tmu_repo::AdvisoryProgram::Gdp(&id)).await?;
+        generate_gdp_advisory(
+            &mut tx,
+            GdpDocInput {
+                iata: &iata,
+                gdp: &gdp,
+                stats: &stats,
+                window: (start, end),
+                editorial: &editorial,
+                now,
+            },
+            &user.id,
+        )
+        .await?;
+        tx.commit().await.map_err(|_| ApiError::Internal)?;
     }
     Ok(Json(build_board(&state, pool, &gdp).await?))
 }
@@ -488,6 +539,11 @@ pub async fn get_gdp_board(
     path = "/api/v1/tmu/gdp/{id}/publish",
     tag = "tmu",
     params(("id" = String, Path, description = "GDP id")),
+    request_body(
+        content = Option<PublishGdpRequest>,
+        description = "Optional editorial fields for the advisory generated on publish (#508). Omit \
+                       the body entirely and the advisory still generates, with those lines blank."
+    ),
     responses((status = 200, body = GdpBoard), (status = 401), (status = 409), (status = 503))
 )]
 pub async fn publish_gdp(
@@ -495,20 +551,108 @@ pub async fn publish_gdp(
     _permission: RequirePermission<TmuGdpPublish>,
     Extension(current_user): Extension<Option<CurrentUser>>,
     Path(id): Path<String>,
+    editorial: Option<Json<PublishGdpRequest>>,
 ) -> Result<Json<GdpBoard>, ApiError> {
     let user = current_user.as_ref().ok_or(ApiError::Unauthorized)?;
     let pool = state.db.as_ref().ok_or(ApiError::ServiceUnavailable)?;
-    if !gdp_repo::publish_gdp(pool, &id, &user.id).await? {
-        return Err(ApiError::Conflict); // not a draft (or absent)
-    }
-    let gdp = gdp_repo::get_gdp(pool, &id)
+    let editorial = editorial.map(|Json(e)| e).unwrap_or_default();
+
+    // Read the draft before publishing: the feed and RBS work below needs the program, and it must run
+    // outside the transaction (see `frozen_slots_for`). The authoritative draft check is the UPDATE
+    // inside the transaction — this one only avoids the expensive work for an obvious non-draft.
+    let draft = gdp_repo::get_gdp(pool, &id)
         .await?
         .ok_or(ApiError::NotFound)?;
+    if draft.status != "draft" {
+        return Err(ApiError::Conflict);
+    }
+    let now = Utc::now();
+    let (start, end, slots, stats) = frozen_slots_for(&state, &draft, now).await?;
+    // Read before the transaction opens, like every other feed read on this path: the document's
+    // three-letter element is looked up in the IATA index (#508 review), and holding the feed lock
+    // across the publish would serialise unrelated writes behind it.
+    let iata = state.feed.read().await.iata.clone();
 
-    // Freeze control times off the current feed so issued EDCTs hold.
-    freeze_slots(&state, pool, &gdp, Utc::now()).await?;
+    // One transaction for every write (#508): the publish, the frozen control times, and the generated
+    // advisory. An advisory must not exist for a program that did not publish, or the reverse.
+    let mut tx = pool.begin().await.map_err(|_| ApiError::Internal)?;
+    if !gdp_repo::publish_gdp(&mut *tx, &id, &user.id).await? {
+        return Err(ApiError::Conflict); // not a draft (or absent), or lost a race
+    }
+    let gdp = gdp_repo::get_gdp(&mut *tx, &id)
+        .await?
+        .ok_or(ApiError::NotFound)?;
+    gdp_repo::replace_slots_in(&mut tx, &id, &slots).await?;
+    generate_gdp_advisory(
+        &mut tx,
+        GdpDocInput {
+            iata: &iata,
+            gdp: &gdp,
+            stats: &stats,
+            window: (start, end),
+            editorial: &editorial,
+            now,
+        },
+        &user.id,
+    )
+    .await?;
+    tx.commit().await.map_err(|_| ApiError::Internal)?;
 
     Ok(Json(build_board(&state, pool, &gdp).await?))
+}
+
+/// Create the GDP's advisory inside the publish transaction (#508, carrying #461's AC3).
+///
+/// The document is derived from the program rather than retyped, because a GDP advisory and its
+/// `tmu.gdp` row are the same event. `structured` carries the fields and the stored `body` is their
+/// rendering — `repos::tmu::create_advisory_tx` renders it, since the advisory *number* is allocated in
+/// this transaction and the document carries it.
+///
+/// Issued as `DCC`: these are vATCSCC documents, which both reference fixtures confirm. The facility
+/// drives the advisory-number sequence; the airport and ARTCC appear in the header's element slot.
+/// Everything the document is derived from, grouped rather than passed positionally.
+///
+/// Adding the feed's IATA index took the helper to eight arguments, which `clippy::too_many_arguments`
+/// rejects. Grouping beats an `allow`: the publish and revise paths both build one of these, so they
+/// cannot drift into disagreeing about the order of six same-ish references.
+struct GdpDocInput<'a> {
+    iata: &'a crate::feed::airports::IataMap,
+    gdp: &'a GdpBody,
+    stats: &'a gdp::GdpStats,
+    window: (DateTime<Utc>, DateTime<Utc>),
+    editorial: &'a PublishGdpRequest,
+    now: DateTime<Utc>,
+}
+
+async fn generate_gdp_advisory(
+    tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+    input: GdpDocInput<'_>,
+    author: &str,
+) -> Result<String, ApiError> {
+    let GdpDocInput {
+        iata,
+        gdp,
+        stats,
+        window,
+        editorial,
+        now,
+    } = input;
+    let doc = crate::advisory::gdp_advisory_from(iata, gdp, stats, window, editorial, now);
+    let req = CreateAdvisoryRequest {
+        facility: "DCC".to_string(),
+        kind: crate::models::ADVISORY_KIND_GDP.to_string(),
+        // Empty: the body is rendered from `structured` during creation, never supplied here.
+        body: String::new(),
+        structured: Some(serde_json::to_value(&doc).map_err(|_| ApiError::Internal)?),
+        decoded: None,
+    };
+    tmu_repo::create_advisory_tx(
+        tx,
+        &req,
+        author,
+        Some(tmu_repo::AdvisoryProgram::Gdp(&gdp.id)),
+    )
+    .await
 }
 
 #[utoipa::path(
@@ -679,4 +823,397 @@ pub async fn compress_gdp(
     }
     gdp_repo::replace_slots(pool, &gdp.id, &new_slots).await?;
     Ok(Json(build_board(&state, pool, &gdp).await?))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::scope_test_support::{grant, seed_user, send, session_cookie, test_state};
+    use sqlx::PgPool;
+    use std::collections::HashMap;
+
+    /// A draft GDP with distinctive derived values, so a test can tell a real derivation from a
+    /// hard-coded one: `KJFK` must shorten to `JFK`, and the stepped rates must appear in order.
+    async fn draft_gdp(pool: &PgPool, author: &str) -> String {
+        gdp_repo::create_gdp(
+            pool,
+            "KJFK",
+            40,
+            "ZBW ZDC",
+            "1415",
+            "2315",
+            None,
+            false,
+            &[
+                AarStep {
+                    start_time: "1415".into(),
+                    aar: 40,
+                },
+                AarStep {
+                    start_time: "1615".into(),
+                    aar: 30,
+                },
+                AarStep {
+                    start_time: "1815".into(),
+                    aar: 25,
+                },
+            ],
+            author,
+        )
+        .await
+        .unwrap()
+    }
+
+    async fn advisories_for_gdp(pool: &PgPool, gdp_id: &str) -> Vec<(String, String, String)> {
+        sqlx::query_as::<_, (String, String, String)>(
+            "select id, status, body from tmu.advisories where gdp_id = $1 order by number",
+        )
+        .bind(gdp_id)
+        .fetch_all(pool)
+        .await
+        .unwrap()
+    }
+
+    /// AC1 — publishing a GDP produces its advisory, in the same transaction as the publish.
+    #[sqlx::test]
+    async fn publishing_a_gdp_generates_its_advisory(pool: PgPool) {
+        let state = test_state(pool.clone(), HashMap::new());
+        let user = seed_user(&pool).await;
+        let cookie = session_cookie(&pool, &user).await;
+        grant(&pool, &user, "tmu.gdp.publish", None).await;
+        let id = draft_gdp(&pool, &user).await;
+
+        let status = send(
+            &state,
+            http::Method::POST,
+            &format!("/api/v1/tmu/gdp/{id}/publish"),
+            &cookie,
+            None,
+        )
+        .await;
+        assert_eq!(status, http::StatusCode::OK);
+
+        let advisories = advisories_for_gdp(&pool, &id).await;
+        assert_eq!(
+            advisories.len(),
+            1,
+            "exactly one advisory, linked to the program"
+        );
+        assert!(
+            !advisories[0].2.trim().is_empty(),
+            "the document should have been rendered, not left empty"
+        );
+    }
+
+    /// AC1, the other direction — a publish that conflicts must leave no advisory behind. The whole
+    /// point of the single transaction.
+    #[sqlx::test]
+    async fn a_conflicting_publish_generates_no_advisory(pool: PgPool) {
+        let state = test_state(pool.clone(), HashMap::new());
+        let user = seed_user(&pool).await;
+        let cookie = session_cookie(&pool, &user).await;
+        grant(&pool, &user, "tmu.gdp.publish", None).await;
+        let id = draft_gdp(&pool, &user).await;
+        let uri = format!("/api/v1/tmu/gdp/{id}/publish");
+
+        assert_eq!(
+            send(&state, http::Method::POST, &uri, &cookie, None).await,
+            http::StatusCode::OK
+        );
+        // Second publish: already published, so nothing may be written.
+        assert_eq!(
+            send(&state, http::Method::POST, &uri, &cookie, None).await,
+            http::StatusCode::CONFLICT
+        );
+
+        assert_eq!(
+            advisories_for_gdp(&pool, &id).await.len(),
+            1,
+            "the refused publish must not have issued a second advisory"
+        );
+    }
+
+    /// AC1's real guarantee, which the happy-path tests cannot show: if anything in the transaction
+    /// fails, the publish itself is rolled back. Two sequential transactions would look identical on a
+    /// successful publish — the difference only appears when a later write fails, so that is what this
+    /// induces, by linking the advisory to a program id that violates the foreign key.
+    ///
+    /// Drives the repo layer directly rather than the router: the point is the transaction boundary, and
+    /// there is no way to make the handler's own advisory insert fail from outside.
+    #[sqlx::test]
+    async fn a_failed_advisory_write_rolls_the_publish_back(pool: PgPool) {
+        let user = seed_user(&pool).await;
+        let id = draft_gdp(&pool, &user).await;
+
+        let mut tx = pool.begin().await.unwrap();
+        assert!(gdp_repo::publish_gdp(&mut *tx, &id, &user).await.unwrap());
+        // A *valid* document, derived the way the handler derives it. A stub payload would make
+        // `advisory_body` reject it before the foreign key was ever reached, and the test would then
+        // pass while proving something else entirely — which it did, until mutation testing showed it.
+        let gdp = gdp_repo::get_gdp(&mut *tx, &id).await.unwrap().unwrap();
+        let doc = crate::advisory::gdp_advisory_from(
+            &Default::default(),
+            &gdp,
+            &gdp::program_stats(&[]),
+            (Utc::now(), Utc::now()),
+            &PublishGdpRequest::default(),
+            Utc::now(),
+        );
+        let req = CreateAdvisoryRequest {
+            facility: "DCC".into(),
+            kind: crate::models::ADVISORY_KIND_GDP.into(),
+            body: String::new(),
+            structured: Some(serde_json::to_value(&doc).unwrap()),
+            decoded: None,
+        };
+        let failed = tmu_repo::create_advisory_tx(
+            &mut tx,
+            &req,
+            &user,
+            Some(tmu_repo::AdvisoryProgram::Gdp("no-such-program")),
+        )
+        .await;
+        assert!(
+            failed.is_err(),
+            "the bogus program link should violate the FK"
+        );
+        drop(tx); // the transaction is abandoned, exactly as the handler's `?` would
+
+        let after = gdp_repo::get_gdp(&pool, &id).await.unwrap().unwrap();
+        assert_eq!(
+            after.status, "draft",
+            "the publish must have rolled back with the failed advisory write"
+        );
+        assert!(
+            advisories_for_gdp(&pool, &id).await.is_empty(),
+            "and no advisory may survive"
+        );
+    }
+
+    /// AC3 — **the anti-drift test.** The document must carry the program's own values, so that
+    /// changing the program changes the document. Mutating any of these derivations to a constant turns
+    /// this red.
+    #[sqlx::test]
+    async fn the_advisory_carries_the_programs_values(pool: PgPool) {
+        let state = test_state(pool.clone(), HashMap::new());
+        let user = seed_user(&pool).await;
+        let cookie = session_cookie(&pool, &user).await;
+        grant(&pool, &user, "tmu.gdp.publish", None).await;
+        let id = draft_gdp(&pool, &user).await;
+
+        send(
+            &state,
+            http::Method::POST,
+            &format!("/api/v1/tmu/gdp/{id}/publish"),
+            &cookie,
+            None,
+        )
+        .await;
+
+        let body = advisories_for_gdp(&pool, &id).await.remove(0).2;
+        assert!(
+            body.contains("CTL ELEMENT: JFK"),
+            "the ICAO KJFK should print as the document's three-letter form; got:\n{body}"
+        );
+        assert!(
+            body.contains("PROGRAM RATE: 40/30/25"),
+            "the stepped rates should come from the program's aar_steps, in order; got:\n{body}"
+        );
+        assert!(
+            body.contains("CDM GROUND DELAY PROGRAM"),
+            "the GDP header line; got:\n{body}"
+        );
+        assert!(
+            body.contains("1415Z") && body.contains("2315Z"),
+            "the program window should appear; got:\n{body}"
+        );
+    }
+
+    /// The element lookup has to survive the trip from the feed into the document, and nothing else
+    /// proves it does.
+    ///
+    /// The derivation's own unit tests pass a map directly, so discarding the one the handler looked up
+    /// — `gdp_advisory_from(&Default::default(), ..)` — left every test green: an empty index falls back
+    /// to the `K`-strip, and the other GDP tests all publish at `KJFK`, where the fallback is correct.
+    /// Publishing a *non-`K`* airport is what tells the two apart. `PHNL` renders `HNL` only if the real
+    /// index arrived; with an empty one it renders `PHNL`.
+    #[sqlx::test]
+    async fn the_feeds_iata_index_reaches_the_document(pool: PgPool) {
+        let state = test_state(pool.clone(), HashMap::new());
+        state.feed.write().await.iata = std::sync::Arc::new(
+            [("HNL".to_string(), "PHNL".to_string())]
+                .into_iter()
+                .collect(),
+        );
+        let user = seed_user(&pool).await;
+        let cookie = session_cookie(&pool, &user).await;
+        grant(&pool, &user, "tmu.gdp.publish", None).await;
+        let id = gdp_repo::create_gdp(
+            &pool,
+            "PHNL",
+            30,
+            "ZAK",
+            "1415",
+            "2315",
+            None,
+            false,
+            &[],
+            &user,
+        )
+        .await
+        .unwrap();
+
+        send(
+            &state,
+            http::Method::POST,
+            &format!("/api/v1/tmu/gdp/{id}/publish"),
+            &cookie,
+            None,
+        )
+        .await;
+
+        let body = advisories_for_gdp(&pool, &id).await.remove(0).2;
+        assert!(
+            body.contains("CTL ELEMENT: HNL"),
+            "Honolulu's three-letter form must come from the feed's index, not a K-strip; got:\n{body}"
+        );
+        assert!(
+            !body.contains("PHNL"),
+            "the raw ICAO must not appear in the document; got:\n{body}"
+        );
+    }
+
+    /// AC2 — the editorial fields the data cannot supply arrive on the publish request and reach the
+    /// document.
+    #[sqlx::test]
+    async fn editorial_fields_sent_at_publish_reach_the_document(pool: PgPool) {
+        let state = test_state(pool.clone(), HashMap::new());
+        let user = seed_user(&pool).await;
+        let cookie = session_cookie(&pool, &user).await;
+        grant(&pool, &user, "tmu.gdp.publish", None).await;
+        let id = draft_gdp(&pool, &user).await;
+
+        let status = send(
+            &state,
+            http::Method::POST,
+            &format!("/api/v1/tmu/gdp/{id}/publish"),
+            &cookie,
+            Some(serde_json::json!({
+                "delay_limit": "240",
+                "impacting_condition": "WEATHER / THUNDERSTORMS",
+                "pop_up_factor": "MEDIUM",
+                "delay_assignment_mode": "GAAP",
+            })),
+        )
+        .await;
+        assert_eq!(status, http::StatusCode::OK);
+
+        let body = advisories_for_gdp(&pool, &id).await.remove(0).2;
+        assert!(body.contains("DELAY LIMIT: 240"), "got:\n{body}");
+        assert!(
+            body.contains("IMPACTING CONDITION: WEATHER / THUNDERSTORMS"),
+            "got:\n{body}"
+        );
+        assert!(body.contains("POP-UP FACTOR: MEDIUM"), "got:\n{body}");
+        assert!(
+            body.contains("DELAY ASSIGNMENT MODE: GAAP"),
+            "the supplied mode should override the DAS default; got:\n{body}"
+        );
+    }
+
+    /// A GDP must stay publishable in a hurry, so the editorial body is optional and its absence falls
+    /// back to the documented default rather than failing.
+    #[sqlx::test]
+    async fn publishing_without_an_editorial_body_still_generates(pool: PgPool) {
+        let state = test_state(pool.clone(), HashMap::new());
+        let user = seed_user(&pool).await;
+        let cookie = session_cookie(&pool, &user).await;
+        grant(&pool, &user, "tmu.gdp.publish", None).await;
+        let id = draft_gdp(&pool, &user).await;
+
+        send(
+            &state,
+            http::Method::POST,
+            &format!("/api/v1/tmu/gdp/{id}/publish"),
+            &cookie,
+            None,
+        )
+        .await;
+
+        let body = advisories_for_gdp(&pool, &id).await.remove(0).2;
+        assert!(
+            body.contains("DELAY ASSIGNMENT MODE: DAS"),
+            "the default mode; got:\n{body}"
+        );
+        assert!(
+            body.contains("DELAY LIMIT:"),
+            "an absent editorial field still prints its bare label; got:\n{body}"
+        );
+    }
+
+    /// AC4 — #461 settled that an advisory is cancelled and reissued, never rewritten. Revising a
+    /// published program must therefore retire its advisory and issue a fresh one.
+    #[sqlx::test]
+    async fn revising_a_published_gdp_reissues_its_advisory(pool: PgPool) {
+        let state = test_state(pool.clone(), HashMap::new());
+        let user = seed_user(&pool).await;
+        let cookie = session_cookie(&pool, &user).await;
+        grant(&pool, &user, "tmu.gdp.publish", None).await;
+        grant(&pool, &user, "tmu.gdp.create", None).await;
+        let id = draft_gdp(&pool, &user).await;
+        send(
+            &state,
+            http::Method::POST,
+            &format!("/api/v1/tmu/gdp/{id}/publish"),
+            &cookie,
+            None,
+        )
+        .await;
+        let first = advisories_for_gdp(&pool, &id).await;
+        assert_eq!(first.len(), 1);
+
+        let status = send(
+            &state,
+            http::Method::PUT,
+            &format!("/api/v1/tmu/gdp/{id}"),
+            &cookie,
+            Some(serde_json::json!({
+                "aar": 20,
+                "scope": "ZBW ZDC",
+                "start_time": "1415",
+                "end_time": "2315",
+                "exempt_airborne": false,
+                "aar_steps": [],
+            })),
+        )
+        .await;
+        assert_eq!(status, http::StatusCode::OK);
+
+        let after = advisories_for_gdp(&pool, &id).await;
+        assert_eq!(
+            after.len(),
+            2,
+            "the old advisory is kept, cancelled, and a new one issued"
+        );
+        let old = after
+            .iter()
+            .find(|a| a.0 == first[0].0)
+            .expect("the original");
+        assert_eq!(
+            old.1, "cancelled",
+            "the previous advisory is cancelled, not rewritten"
+        );
+        assert_eq!(
+            old.2, first[0].2,
+            "and its document is left exactly as issued"
+        );
+        let live: Vec<&(String, String, String)> =
+            after.iter().filter(|a| a.1 != "cancelled").collect();
+        assert_eq!(live.len(), 1, "exactly one live advisory remains");
+        assert!(
+            live[0].2.contains("PROGRAM RATE: 20"),
+            "the reissued document carries the revised rate; got:\n{}",
+            live[0].2
+        );
+    }
 }

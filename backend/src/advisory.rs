@@ -32,8 +32,11 @@
 
 use chrono::{DateTime, NaiveDate, Utc};
 
+use crate::feed::airports::IataMap;
+use crate::feed::gdp::GdpStats;
 use crate::models::{
-    GdpAdvisory, GroundStopAdvisory, RerouteAdvisory, RerouteRoutes, RerouteValidBasis,
+    AarStep, GdpAdvisory, GdpBody, GroundStopAdvisory, GroundStopBody, PublishGdpRequest,
+    PublishGroundStopRequest, RerouteAdvisory, RerouteRoutes, RerouteValidBasis,
 };
 
 fn clean(s: &str) -> String {
@@ -733,5 +736,308 @@ mod ground_stop_tests {
                 assert_eq!(line, line.trim_end(), "case {} line {}", case.name, i + 1);
             }
         }
+    }
+}
+
+// ---- generating a document from a program (#508) ----------------------------------------------
+//
+// #461 settled that a GDP advisory and its `tmu.gdp` row are the same event, so the document is
+// derived here rather than retyped by the author. These functions are the mapping, and they live
+// beside the renderers because this is document construction — they touch no database.
+
+/// The three-letter form the documents use for an airport — `KJFK` → `JFK`, `PHNL` → `HNL`,
+/// `TJSJ` → `SJU`.
+///
+/// Looked up in the feed's IATA index rather than derived by stripping a character, because the US is
+/// not all `K`: `feed::stats::US_ICAO_PREFIXES` lists eight prefixes, and `data/facilities.json` carries
+/// PANC, PHNL, TJSJ, PAFA and PHOG. No string rule can do it either — `PHNL` → `HNL` drops two
+/// characters and `TJSJ` → `SJU` is not a substring of its ICAO at all.
+///
+/// `IataMap` is IATA → ICAO, so this is a reverse scan. Linear over ~28k entries and deliberately not
+/// indexed: it runs twice per *publish*, an operator action measured in a handful per hour, and adding a
+/// third airport map would reach the fetch, `FeedInner` and the refresh job for no measurable gain.
+///
+/// Falls back to the old `K`-strip when the index has no entry — an empty map in tests, or a feed that
+/// has not loaded yet. A wrong-looking element beats an empty one in a published document, and for the
+/// contiguous US the fallback is already correct.
+fn element_airport(iata: &IataMap, icao: &str) -> String {
+    let t = icao.trim().to_ascii_uppercase();
+    if let Some((code, _)) = iata.iter().find(|(_, mapped)| **mapped == t) {
+        return code.clone();
+    }
+    match t.strip_prefix('K') {
+        Some(rest) if t.len() == 4 => rest.to_string(),
+        _ => t,
+    }
+}
+
+/// `JFK/ZNY` — the header's element slot. Falls back to the airport alone when the program has no
+/// ARTCC stamped (`GdpBody::artcc` is filled from the live facility map, not a column, so it can be
+/// absent).
+fn element_of(iata: &IataMap, airport: &str, artcc: Option<&str>) -> String {
+    let apt = element_airport(iata, airport);
+    match artcc.map(str::trim).filter(|a| !a.is_empty()) {
+        Some(a) => format!("{apt}/{}", a.to_ascii_uppercase()),
+        None => apt,
+    }
+}
+
+/// `14/1415Z - 14/2315Z` — the form `ARRIVALS ESTIMATED FOR` and `CUMULATIVE PROGRAM PERIOD` take.
+fn day_window(from: DateTime<Utc>, to: DateTime<Utc>) -> String {
+    format!("{} - {}", from.format("%d/%H%MZ"), to.format("%d/%H%MZ"))
+}
+
+/// `141415-142315` — the compact form the footer `PERIOD` takes.
+fn compact_window(from: DateTime<Utc>, to: DateTime<Utc>) -> String {
+    format!("{}-{}", from.format("%d%H%M"), to.format("%d%H%M"))
+}
+
+/// `40/40/30` — the per-hour rate profile.
+///
+/// The reference shows nine values for a nine-hour program. We emit one per configured step, which is
+/// the same information in the program's own terms; expanding a stepped rate into one value per clock
+/// hour would require inventing how a step that starts mid-hour is reported. A program with no steps
+/// emits its single AAR.
+fn program_rate(aar: i32, steps: &[AarStep]) -> String {
+    if steps.is_empty() {
+        return aar.to_string();
+    }
+    steps
+        .iter()
+        .map(|s| s.aar.to_string())
+        .collect::<Vec<_>>()
+        .join("/")
+}
+
+#[cfg(test)]
+mod derivation_tests {
+    use super::*;
+    use chrono::TimeZone;
+
+    /// The feed's index, as `feed::airports::fetch` builds it: IATA → ICAO.
+    fn iata() -> IataMap {
+        ["JFK:KJFK", "HNL:PHNL", "SJU:TJSJ", "ANC:PANC", "YYZ:CYYZ"]
+            .iter()
+            .map(|e| {
+                let (code, icao) = e.split_once(':').unwrap();
+                (code.to_string(), icao.to_string())
+            })
+            .collect()
+    }
+
+    fn at(day: u32, hour: u32, min: u32) -> DateTime<Utc> {
+        Utc.with_ymd_and_hms(2020, 4, day, hour, min, 0).unwrap()
+    }
+
+    /// The documents use the three-letter form, and the US is not all `K`: PANC, PHNL, TJSJ, PAFA and
+    /// PHOG are all in `data/facilities.json`. A `K`-strip gets `KJFK` right and every one of those
+    /// wrong — `PHNL` drops two characters and `TJSJ → SJU` shares no substring with its ICAO.
+    #[test]
+    fn the_element_airport_is_looked_up_not_stripped() {
+        let m = iata();
+        assert_eq!(element_airport(&m, "KJFK"), "JFK");
+        assert_eq!(element_airport(&m, "PHNL"), "HNL", "Honolulu is VATUSA");
+        assert_eq!(
+            element_airport(&m, "TJSJ"),
+            "SJU",
+            "no string rule produces this"
+        );
+        assert_eq!(element_airport(&m, "PANC"), "ANC", "Anchorage is VATUSA");
+        assert_eq!(element_airport(&m, "CYYZ"), "YYZ");
+        assert_eq!(
+            element_airport(&m, " kjfk "),
+            "JFK",
+            "trimmed and upper-cased"
+        );
+    }
+
+    /// With no index — an empty map in a test, or a feed that has not loaded — the old `K`-strip
+    /// stands, because a wrong-looking element beats an empty one in a published document. It must not
+    /// mangle a non-`K` code into nonsense while doing so.
+    #[test]
+    fn an_unknown_airport_falls_back_without_mangling() {
+        let empty = IataMap::new();
+        assert_eq!(element_airport(&empty, "KJFK"), "JFK");
+        assert_eq!(
+            element_airport(&empty, "PHNL"),
+            "PHNL",
+            "not \"HNL\", and not \"HNL\"-by-luck"
+        );
+        assert_eq!(element_airport(&empty, "TJSJ"), "TJSJ");
+        assert_eq!(
+            element_airport(&empty, "JFK"),
+            "JFK",
+            "already three letters"
+        );
+        assert_eq!(element_airport(&empty, "KSFO"), "SFO");
+    }
+
+    #[test]
+    fn the_element_slot_carries_the_artcc_when_there_is_one() {
+        let m = iata();
+        assert_eq!(element_of(&m, "KJFK", Some("ZNY")), "JFK/ZNY");
+        assert_eq!(element_of(&m, "PHNL", Some("zak")), "HNL/ZAK");
+        assert_eq!(element_of(&m, "KJFK", None), "JFK");
+        assert_eq!(element_of(&m, "KJFK", Some("  ")), "JFK", "blank is absent");
+    }
+
+    /// **Order is the point.** A window printed end-first reads as a program that finishes before it
+    /// starts, and an assertion that each timestamp merely *appears* cannot tell the two apart — which
+    /// is how a swapped `from`/`to` survived the handler test it was supposed to be caught by.
+    #[test]
+    fn the_day_window_prints_start_then_end() {
+        assert_eq!(
+            day_window(at(14, 14, 15), at(14, 23, 15)),
+            "14/1415Z - 14/2315Z"
+        );
+        assert_ne!(
+            day_window(at(14, 14, 15), at(14, 23, 15)),
+            day_window(at(14, 23, 15), at(14, 14, 15)),
+            "a swapped window must not render identically"
+        );
+    }
+
+    /// The footer `PERIOD` is day-hour-minute, not any other arrangement of the same digits.
+    #[test]
+    fn the_compact_window_is_day_then_time() {
+        assert_eq!(
+            compact_window(at(14, 14, 15), at(15, 2, 30)),
+            "141415-150230"
+        );
+    }
+
+    /// Open-ended forms: a ground stop with no resolved end is `UFN`, not a blank or a guess.
+    #[test]
+    fn an_open_ended_window_renders_ufn() {
+        let from = at(14, 14, 15);
+        assert_eq!(
+            day_window_open(from, Some(at(14, 23, 15))),
+            "14/1415Z - 14/2315Z"
+        );
+        assert!(day_window_open(from, None).contains("UFN"));
+        assert!(compact_window_open(from, None).contains("UFN"));
+    }
+
+    /// One value per configured step, in order, falling back to the single AAR when there are none.
+    #[test]
+    fn the_program_rate_lists_each_step_in_order() {
+        let step = |aar| AarStep {
+            start_time: "1400".to_string(),
+            aar,
+        };
+        assert_eq!(
+            program_rate(40, &[step(40), step(30), step(25)]),
+            "40/30/25"
+        );
+        assert_ne!(
+            program_rate(40, &[step(40), step(30), step(25)]),
+            program_rate(40, &[step(25), step(30), step(40)]),
+            "reversing the steps must not render identically"
+        );
+        assert_eq!(program_rate(44, &[]), "44", "no steps means the single AAR");
+    }
+}
+
+/// Build a GDP advisory document from the program, its frozen-slot statistics, and the author's
+/// editorial fields.
+///
+/// `window` is the program's resolved start/end — passed in rather than recomputed here, because the
+/// caller has already resolved it to freeze the slots and two answers to the same question is how the
+/// document and the program drift.
+///
+/// `stats` comes from [`crate::feed::gdp::program_stats`] over the same assignments that were frozen,
+/// so `MAXIMUM`/`AVERAGE DELAY` describe exactly the rows in `tmu.gdp_slot`. Note that
+/// `repos::public` aggregates the same two figures in SQL with `round(avg(...))` where `program_stats`
+/// uses integer division, so the public board and this document can differ by a minute on the average.
+/// Not reconciled here — that is a visible decision of its own.
+pub fn gdp_advisory_from(
+    iata: &IataMap,
+    gdp: &GdpBody,
+    stats: &GdpStats,
+    window: (DateTime<Utc>, DateTime<Utc>),
+    ed: &PublishGdpRequest,
+    now: DateTime<Utc>,
+) -> GdpAdvisory {
+    let (from, to) = window;
+    GdpAdvisory {
+        // Constant per kind, not editorial: the reference's header line for every GDP.
+        header: "CDM GROUND DELAY PROGRAM".to_string(),
+        element: element_of(iata, &gdp.airport, gdp.artcc.as_deref()),
+        control_element: element_airport(iata, &gdp.airport),
+        // A GDP in OIS always meters an airport's arrivals, so the element is always an airport.
+        element_type: "APT".to_string(),
+        adl_time: now.format("%H%MZ").to_string(),
+        delay_assignment_mode: ed
+            .delay_assignment_mode
+            .clone()
+            .unwrap_or_else(|| "DAS".to_string()),
+        arrivals_estimated_for: day_window(from, to),
+        cumulative_program_period: day_window(from, to),
+        program_rate: program_rate(gdp.aar, &gdp.aar_steps),
+        pop_up_factor: ed.pop_up_factor.clone(),
+        flights_included: ed.flights_included.clone().unwrap_or_default(),
+        departure_scope: ed.departure_scope.clone(),
+        additional_dep_facilities_included: ed.additional_dep_facilities_included.clone(),
+        exempt_dep_facilities: ed.exempt_dep_facilities.clone(),
+        canadian_arpts_included: ed.canadian_arpts_included.clone(),
+        delay_assignment_table_applies_to: ed.delay_assignment_table_applies_to.clone(),
+        delay_limit: ed.delay_limit.clone(),
+        maximum_delay: Some(stats.max_delay_min.to_string()),
+        average_delay: Some(stats.avg_delay_min.to_string()),
+        impacting_condition: ed.impacting_condition.clone(),
+        comments: ed.comments.clone(),
+        period: compact_window(from, to),
+    }
+}
+
+/// `14/1430Z - 14/1630Z`, or `14/1430Z - UFN` for a stop with no stated end.
+///
+/// `UFN` ("until further notice") is the term the documents use for an open-ended stop, which is what a
+/// null `until` means on `tmu.ground_stops`. Printing a fabricated end time instead would be worse.
+fn day_window_open(from: DateTime<Utc>, to: Option<DateTime<Utc>>) -> String {
+    match to {
+        Some(t) => day_window(from, t),
+        None => format!("{} - UFN", from.format("%d/%H%MZ")),
+    }
+}
+
+/// `141430-141630`, or `141430-UFN`.
+fn compact_window_open(from: DateTime<Utc>, to: Option<DateTime<Utc>>) -> String {
+    match to {
+        Some(t) => compact_window(from, t),
+        None => format!("{}-UFN", from.format("%d%H%M")),
+    }
+}
+
+/// Build a Ground Stop advisory document from the program and the author's editorial fields.
+///
+/// Far less derives here than for a GDP, and that is the data's fault rather than an omission: a ground
+/// stop has no slot table and no delay computation anywhere, so every delay figure is author-supplied.
+/// `window` is the stop's resolved period.
+pub fn ground_stop_advisory_from(
+    iata: &IataMap,
+    gs: &GroundStopBody,
+    window: (DateTime<Utc>, Option<DateTime<Utc>>),
+    ed: &PublishGroundStopRequest,
+    now: DateTime<Utc>,
+) -> GroundStopAdvisory {
+    let (from, to) = window;
+    GroundStopAdvisory {
+        header: "CDM GROUND STOP".to_string(),
+        element: element_of(iata, &gs.airport, gs.artcc.as_deref()),
+        control_element: element_airport(iata, &gs.airport),
+        element_type: "APT".to_string(),
+        adl_time: now.format("%H%MZ").to_string(),
+        ground_stop_period: day_window_open(from, to),
+        cumulative_program_period: day_window_open(from, to),
+        flights_included: ed.flights_included.clone().unwrap_or_default(),
+        additional_dep_facilities_included: ed.additional_dep_facilities_included.clone(),
+        current_delays: ed.current_delays.clone(),
+        previous_delays: ed.previous_delays.clone(),
+        new_delays: ed.new_delays.clone(),
+        probability_of_extension: ed.probability_of_extension.clone(),
+        impacting_condition: ed.impacting_condition.clone(),
+        comments: ed.comments.clone(),
+        period: compact_window_open(from, to),
     }
 }

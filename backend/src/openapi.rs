@@ -299,6 +299,8 @@ use utoipa::OpenApi;
         crate::models::CreateGroundStopRequest,
         crate::models::GdpBody,
         crate::models::CreateGdpRequest,
+        crate::models::PublishGdpRequest,
+        crate::models::PublishGroundStopRequest,
         crate::models::UpdateGdpRequest,
         crate::models::AarStep,
         crate::feed::gdp::GdpBoard,

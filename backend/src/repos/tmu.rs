@@ -397,12 +397,39 @@ pub async fn list_ground_stops_at(
     .map_err(|_| ApiError::Internal)
 }
 
-pub async fn get_ground_stop(pool: &PgPool, id: &str) -> Result<Option<GroundStopBody>, ApiError> {
+pub async fn get_ground_stop<'e, E>(
+    executor: E,
+    id: &str,
+) -> Result<Option<GroundStopBody>, ApiError>
+where
+    E: sqlx::Executor<'e, Database = Postgres>,
+{
     sqlx::query_as::<_, GroundStopBody>(&format!("{GS_SELECT} where g.id = $1"))
         .bind(id)
-        .fetch_optional(pool)
+        .fetch_optional(executor)
         .await
         .map_err(|_| ApiError::Internal)
+}
+
+/// The absolute instant a ground stop's `until` resolves to, or `None` for "until further notice".
+///
+/// Delegates to `tmu.ground_stop_until_ts` (migration `0014`) rather than resolving the bare HHMM in
+/// Rust. That function is what the cleanup job uses to expire a stop, and it resolves relative to
+/// `created_at` — not to now — so a draft created at 1500 and published at 1700 with `until` 1630 ends
+/// *tomorrow* at 1630 by the system's reckoning. Reimplementing the rule here would make the generated
+/// advisory state an end the system does not enforce, which is the drift #508 exists to prevent.
+pub(crate) async fn ground_stop_until_instant(
+    tx: &mut Transaction<'_, Postgres>,
+    id: &str,
+) -> Result<Option<DateTime<Utc>>, ApiError> {
+    sqlx::query_scalar::<_, Option<DateTime<Utc>>>(
+        "select tmu.ground_stop_until_ts(created_at, until) from tmu.ground_stops where id = $1",
+    )
+    .bind(id)
+    .fetch_optional(&mut **tx)
+    .await
+    .map(Option::flatten)
+    .map_err(|_| ApiError::Internal)
 }
 
 pub async fn create_ground_stop(
@@ -426,18 +453,21 @@ pub async fn create_ground_stop(
 }
 
 /// Publishes a draft ground stop. Returns false if it isn't currently a draft.
-pub async fn publish_ground_stop(
-    pool: &PgPool,
+pub async fn publish_ground_stop<'e, E>(
+    executor: E,
     id: &str,
     published_by: &str,
-) -> Result<bool, ApiError> {
+) -> Result<bool, ApiError>
+where
+    E: sqlx::Executor<'e, Database = Postgres>,
+{
     let result = sqlx::query(
         "update tmu.ground_stops set status = 'published', published_by = $2, published_at = now() \
          where id = $1 and status = 'draft'",
     )
     .bind(id)
     .bind(published_by)
-    .execute(pool)
+    .execute(executor)
     .await
     .map_err(|_| ApiError::Internal)?;
     Ok(result.rows_affected() > 0)
@@ -771,11 +801,37 @@ pub async fn create_advisory(
     req: &CreateAdvisoryRequest,
     created_by: &str,
 ) -> Result<String, ApiError> {
+    let mut tx = pool.begin().await.map_err(|_| ApiError::Internal)?;
+    let id = create_advisory_tx(&mut tx, req, created_by, None).await?;
+    tx.commit().await.map_err(|_| ApiError::Internal)?;
+    Ok(id)
+}
+
+/// Which program an advisory was generated from (#508), or `None` for a hand-authored one. Written to
+/// `tmu.advisories.gdp_id` / `ground_stop_id` (migration `0088`) so the revise path can find a
+/// program's live advisory to cancel it.
+#[derive(Debug, Clone, Copy)]
+pub(crate) enum AdvisoryProgram<'a> {
+    Gdp(&'a str),
+    GroundStop(&'a str),
+}
+
+/// [`create_advisory`] on a transaction the caller owns.
+///
+/// Split out for #508: publishing a GDP or Ground Stop generates its advisory in the *same*
+/// transaction as the publish and the slot freeze, so that an advisory cannot exist for a program that
+/// did not publish, or the reverse. [`allocate_advisory_number`] already takes the transaction and
+/// holds its advisory lock for the rest of it — which is why the caller must do any feed or RBS work
+/// *before* opening the transaction, not inside it.
+pub(crate) async fn create_advisory_tx(
+    tx: &mut Transaction<'_, Postgres>,
+    req: &CreateAdvisoryRequest,
+    created_by: &str,
+    program: Option<AdvisoryProgram<'_>>,
+) -> Result<String, ApiError> {
     let facility = req.facility.trim().to_ascii_uppercase();
     let day = Utc::now().date_naive();
-
-    let mut tx = pool.begin().await.map_err(|_| ApiError::Internal)?;
-    let number = allocate_advisory_number(&mut tx, &facility, day).await?;
+    let number = allocate_advisory_number(tx, &facility, day).await?;
     // Rendered here rather than in the handler because the number is allocated in this transaction:
     // the document carries it twice (header and TMI ID), and re-deriving it outside would be a
     // second answer to a question the database has already settled.
@@ -790,10 +846,16 @@ pub async fn create_advisory(
         },
     )?
     .unwrap_or_else(|| req.body.trim().to_string());
+    let (gdp_id, ground_stop_id) = match program {
+        Some(AdvisoryProgram::Gdp(id)) => (Some(id), None),
+        Some(AdvisoryProgram::GroundStop(id)) => (None, Some(id)),
+        None => (None, None),
+    };
     let id = sqlx::query_scalar::<_, String>(
         "insert into tmu.advisories \
-         (facility, issued_day, number, kind, body, structured, decoded, created_by) \
-         values ($1, $2, $3, $4, $5, $6, $7, $8) returning id",
+         (facility, issued_day, number, kind, body, structured, decoded, created_by, \
+          gdp_id, ground_stop_id) \
+         values ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10) returning id",
     )
     .bind(&facility)
     .bind(day)
@@ -803,11 +865,41 @@ pub async fn create_advisory(
     .bind(req.structured.as_ref().map(sqlx::types::Json))
     .bind(req.decoded.as_deref())
     .bind(created_by)
-    .fetch_one(&mut *tx)
+    .bind(gdp_id)
+    .bind(ground_stop_id)
+    .fetch_one(&mut **tx)
     .await
     .map_err(|_| ApiError::Internal)?;
-    tx.commit().await.map_err(|_| ApiError::Internal)?;
     Ok(id)
+}
+
+/// Cancels the live (draft or published) advisory generated from `program`, returning how many were
+/// cancelled.
+///
+/// #461 settled that an advisory is cancelled and reissued rather than rewritten, so revising a
+/// published program cancels its current advisory and issues a new one in the same transaction. In
+/// practice this cancels at most one row — there is only ever one live advisory per program — but it is
+/// written as a set operation rather than asserting that, because an unexpected second row should be
+/// retired too, not left live alongside the new one.
+pub(crate) async fn cancel_program_advisory_tx(
+    tx: &mut Transaction<'_, Postgres>,
+    program: AdvisoryProgram<'_>,
+) -> Result<u64, ApiError> {
+    let (column, id) = match program {
+        AdvisoryProgram::Gdp(id) => ("gdp_id", id),
+        AdvisoryProgram::GroundStop(id) => ("ground_stop_id", id),
+    };
+    // `column` is one of two internal literals, never user input.
+    let sql = format!(
+        "update tmu.advisories set status = 'cancelled' \
+         where {column} = $1 and status in ('draft', 'published')"
+    );
+    Ok(sqlx::query(&sql)
+        .bind(id)
+        .execute(&mut **tx)
+        .await
+        .map_err(|_| ApiError::Internal)?
+        .rows_affected())
 }
 
 pub async fn get_advisory(pool: &PgPool, id: &str) -> Result<Option<AdvisoryBody>, ApiError> {
