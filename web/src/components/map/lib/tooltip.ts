@@ -114,3 +114,58 @@ export function mapTooltip({ aircraft = true }: { aircraft?: boolean } = {}) {
 
 const ALL_TOOLTIP = mapTooltip();
 const ATC_ONLY_TOOLTIP = mapTooltip({ aircraft: false });
+
+/**
+ * Hover card for a parking stand on the airport surface map (#517).
+ *
+ * #431 took gate coverage from one airport to 183, and most of what it imported is not a terminal
+ * gate: 7,129 of 12,962 stands are GA tie-downs. The kind is stored and served but was displayed
+ * nowhere, so an operator editing surface data at a GA-heavy field saw a mass of identical dots. This
+ * is the "what am I looking at" half; `buildSurfaceLayers` draws non-gate stands smaller for the
+ * at-a-glance half.
+ *
+ * Shares `mapTooltip`'s card shape and token-only style on purpose — the surface card should look like
+ * the traffic and ATC cards an operator already reads, not like a second design.
+ */
+export function surfaceTooltip() {
+  const style = {
+    background: "var(--panel)",
+    color: "var(--ink)",
+    border: "1px solid var(--line)",
+    fontSize: "12px",
+    padding: "6px 8px",
+    borderRadius: "6px",
+    boxShadow: "none",
+    maxWidth: "260px",
+  };
+  return (info: PickingInfo) => {
+    if (info.layer?.id !== "surface-gates") return null;
+    const d = info.object as { name?: string; kind?: string | null; source?: string } | undefined;
+    if (!d?.name) return null;
+    return { html: standHtml(d), style };
+  };
+}
+
+/**
+ * The stand card's markup: name, kind badge, source.
+ *
+ * Everything interpolated goes through `esc`. A stand name is both operator-editable and imported from
+ * a community-contributed X-Plane extract, and this is rendered as `html` — so an unescaped name would
+ * be a stored-XSS vector, not merely a display bug.
+ *
+ * An absent `kind` drops the badge entirely rather than rendering an empty one. Every `manual`, `osm`
+ * and `crc` row has no kind, and labelling them would assert a stand type nothing ever imported.
+ */
+function standHtml(d: { name?: string; kind?: string | null; source?: string }): string {
+  const muted = "var(--ink-2)";
+  const mono = "'JetBrains Mono',ui-monospace,monospace";
+  // `var(--ink-3)` rather than a second hue: DESIGN.md allows one accent, and the kind is a
+  // classification rather than a status, so it should not compete with the accent for attention.
+  const badge = d.kind
+    ? `<span style="background:var(--ink-3);color:var(--ground);border-radius:6px;padding:0 3px;font:700 10px ${mono}">${esc(d.kind)}</span> `
+    : "";
+  const source = d.source
+    ? `<div style="color:${muted};margin-top:1px">${esc(d.source)}</div>`
+    : "";
+  return `<div style="font:700 13px ${mono}">${badge}${esc(d.name ?? "")}</div>${source}`;
+}
