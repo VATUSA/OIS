@@ -137,34 +137,196 @@ fn read_keychain() -> Result<Option<String>, String> {
     }
 }
 
-/// Stores the session token in the OS keychain, replacing any previous one.
+/// Where the session token lives, which is not the same place on every platform.
+///
+/// **macOS does not use the keychain** (#535). Its login keychain attaches a per-item ACL naming the
+/// application allowed to read the entry, and identifies that application by its code-signing
+/// identity. Unsigned builds have no stable identity — the cdhash differs on every build — so macOS
+/// stops recognising the app that wrote the token and falls back to asking the user for their login
+/// password. A Developer ID certificate would fix that; not having one, the token goes somewhere with
+/// no ACL instead, where no prompt is possible.
+///
+/// **Windows and Linux keep their credential stores.** Neither has this behaviour and neither prompts
+/// anybody today, so moving them to a file would trade real OS protection for nothing.
+///
+/// On macOS the file's permissions are the protection. Encrypting it would need a key that also lives
+/// on this disk, which is obfuscation rather than a control, so it is written plainly and
+/// `desktop/README.md` says what it is. The exposure is bounded by the token rotating on every launch
+/// (`web/src/lib/desktop-auth.ts`), so a copy taken from disk has a short life.
+#[cfg(target_os = "macos")]
+mod store {
+    use std::{
+        fs,
+        io::Write,
+        os::unix::fs::{OpenOptionsExt, PermissionsExt},
+        path::{Path, PathBuf},
+    };
+
+    use tauri::{AppHandle, Manager};
+
+    /// Owner read/write only. The whole security story for this file.
+    const FILE_MODE: u32 = 0o600;
+
+    /// What the session file says.
+    ///
+    /// `Missing` is distinct from `SignedOut` on purpose: a missing file means this install has not
+    /// been migrated off the keychain yet, while an empty one means migration happened and nobody is
+    /// signed in. Collapsing the two would send every signed-out launch back through the keychain and
+    /// prompt every time — the bug this is closing.
+    #[derive(Debug, PartialEq)]
+    pub(super) enum Stored {
+        Missing,
+        SignedOut,
+        Token(String),
+    }
+
+    pub(super) fn read_file(path: &Path) -> Result<Stored, String> {
+        match fs::read_to_string(path) {
+            Ok(contents) => {
+                let token = contents.trim();
+                Ok(if token.is_empty() {
+                    Stored::SignedOut
+                } else {
+                    Stored::Token(token.to_string())
+                })
+            }
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(Stored::Missing),
+            // Anything else — unreadable, a directory, bad encoding — reads as signed out rather
+            // than taking the app down. The user can sign in again, which rewrites the file.
+            Err(_) => Ok(Stored::SignedOut),
+        }
+    }
+
+    /// Writes the token, creating the file 0600. An empty `token` is the signed-out marker.
+    pub(super) fn write_file(path: &Path, token: &str) -> Result<(), String> {
+        if let Some(parent) = path.parent() {
+            fs::create_dir_all(parent).map_err(|e| format!("could not create {parent:?}: {e}"))?;
+        }
+        let mut file = fs::OpenOptions::new()
+            .write(true)
+            .create(true)
+            .truncate(true)
+            .mode(FILE_MODE)
+            .open(path)
+            .map_err(|e| format!("could not open the session file: {e}"))?;
+        file.write_all(token.as_bytes())
+            .map_err(|e| format!("could not write the session file: {e}"))?;
+        // `mode` only applies when *creating*, so an existing file keeps whatever it had. Set it
+        // again so a file from an earlier, looser write is tightened rather than trusted.
+        fs::set_permissions(path, fs::Permissions::from_mode(FILE_MODE))
+            .map_err(|e| format!("could not set permissions on the session file: {e}"))?;
+        Ok(())
+    }
+
+    /// Reads the file, migrating off the keychain the first time.
+    ///
+    /// The migration read is the **one and only** keychain prompt a user will ever see, and only
+    /// users upgrading from a build that stored there get even that. Whatever happens, the file is
+    /// written — so migration is attempted exactly once and a signed-out user is never sent back
+    /// through the keychain.
+    ///
+    /// The keychain entry is deleted only when the read actually produced a token: deleting is
+    /// ACL-gated too, so attempting it after a failed read risks a *second* prompt, which is the one
+    /// thing this change exists to prevent. An entry left behind is inert, because the file's
+    /// existence means it is never read again.
+    pub(super) fn read_or_migrate(
+        path: &Path,
+        read_keychain: impl FnOnce() -> Result<Option<String>, String>,
+        delete_keychain: impl FnOnce() -> Result<(), String>,
+    ) -> Result<Option<String>, String> {
+        match read_file(path)? {
+            Stored::Token(token) => Ok(Some(token)),
+            Stored::SignedOut => Ok(None),
+            Stored::Missing => {
+                // A dismissed or broken read is signed out. The write below still marks migration
+                // done, so this costs one prompt in total, not one per launch.
+                let migrated = read_keychain().unwrap_or_default();
+                write_file(path, migrated.as_deref().unwrap_or(""))?;
+                if migrated.is_some() {
+                    let _ = delete_keychain();
+                }
+                Ok(migrated)
+            }
+        }
+    }
+
+    fn session_path(app: &AppHandle) -> Result<PathBuf, String> {
+        Ok(app
+            .path()
+            .app_data_dir()
+            .map_err(|e| format!("could not resolve the app data directory: {e}"))?
+            .join("session"))
+    }
+
+    pub(super) fn write_token(app: &AppHandle, token: &str) -> Result<(), String> {
+        write_file(&session_path(app)?, token)
+    }
+
+    pub(super) fn read_token(app: &AppHandle) -> Result<Option<String>, String> {
+        read_or_migrate(
+            &session_path(app)?,
+            super::read_keychain,
+            super::delete_keychain,
+        )
+    }
+
+    /// Signing out truncates the file rather than removing it — the file's existence is what records
+    /// that migration already happened.
+    pub(super) fn clear_token(app: &AppHandle) -> Result<(), String> {
+        write_file(&session_path(app)?, "")
+    }
+}
+
+/// Windows and Linux keep the OS credential store; see [`store`] on macOS for why it differs there.
+#[cfg(not(target_os = "macos"))]
+mod store {
+    use tauri::AppHandle;
+
+    pub(super) fn write_token(_app: &AppHandle, token: &str) -> Result<(), String> {
+        super::entry()?
+            .set_password(token)
+            .map_err(|e| format!("could not save to the keychain: {e}"))
+    }
+
+    pub(super) fn read_token(_app: &AppHandle) -> Result<Option<String>, String> {
+        super::read_keychain()
+    }
+
+    pub(super) fn clear_token(_app: &AppHandle) -> Result<(), String> {
+        super::delete_keychain()
+    }
+}
+
+/// Removes the keychain entry. A missing entry is not an error.
+fn delete_keychain() -> Result<(), String> {
+    match entry()?.delete_credential() {
+        Ok(()) | Err(keyring::Error::NoEntry) => Ok(()),
+        Err(e) => Err(format!("could not clear the keychain: {e}")),
+    }
+}
+
+/// Stores the session token, replacing any previous one.
 #[tauri::command]
-pub fn store_token(token: String) -> Result<(), String> {
-    entry()?
-        .set_password(&token)
-        .map_err(|e| format!("could not save to the keychain: {e}"))?;
+pub fn store_token(app: tauri::AppHandle, token: String) -> Result<(), String> {
+    store::write_token(&app, &token)?;
     *lock(&CACHED_TOKEN) = Some(Some(token));
     Ok(())
 }
 
 /// Reads the stored session token, or `None` when nobody is signed in.
 ///
-/// Hits the keychain once per process; see [`CACHED_TOKEN`].
+/// Reads the underlying store once per process; see [`CACHED_TOKEN`].
 #[tauri::command]
-pub fn get_token() -> Result<Option<String>, String> {
-    cached_or_read(&CACHED_TOKEN, read_keychain)
+pub fn get_token(app: tauri::AppHandle) -> Result<Option<String>, String> {
+    cached_or_read(&CACHED_TOKEN, || store::read_token(&app))
 }
 
 /// Removes the stored token. Signing out when already signed out is not an error.
 #[tauri::command]
-pub fn delete_token() -> Result<(), String> {
-    match entry()?.delete_credential() {
-        Ok(()) | Err(keyring::Error::NoEntry) => {
-            *lock(&CACHED_TOKEN) = Some(None);
-            Ok(())
-        }
-        Err(e) => Err(format!("could not clear the keychain: {e}")),
-    }
+pub fn delete_token(app: tauri::AppHandle) -> Result<(), String> {
+    store::clear_token(&app)?;
+    *lock(&CACHED_TOKEN) = Some(None);
+    Ok(())
 }
 
 /// Runs the interactive half of sign-in and returns the one-time code.
@@ -674,5 +836,196 @@ mod tests {
             cached_or_read(&cache, || panic!("must not read")).unwrap(),
             Some("ois_dsk_abc".to_string())
         );
+    }
+
+    /// The macOS file store and the one-time migration off the keychain (#535 AC1). These exercise
+    /// the pure path/closure forms, so no test touches a real keychain or the app data directory.
+    #[cfg(target_os = "macos")]
+    mod macos_store {
+        use std::{cell::Cell, fs, os::unix::fs::PermissionsExt, path::PathBuf};
+
+        use super::super::store::{Stored, read_file, read_or_migrate, write_file};
+
+        /// A unique scratch path per test, so cases cannot collide.
+        fn scratch(name: &str) -> PathBuf {
+            let dir = std::env::temp_dir()
+                .join(format!("ois-session-test-{name}-{}", std::process::id()));
+            let _ = fs::remove_dir_all(&dir);
+            dir.join("session")
+        }
+
+        fn mode_of(path: &PathBuf) -> u32 {
+            fs::metadata(path).expect("stat").permissions().mode() & 0o777
+        }
+
+        #[test]
+        fn a_token_round_trips_through_the_file() {
+            let path = scratch("round-trip");
+            write_file(&path, "ois_dsk_abc").unwrap();
+            assert_eq!(
+                read_file(&path).unwrap(),
+                Stored::Token("ois_dsk_abc".into())
+            );
+        }
+
+        /// Permissions are the entire protection for this file, so the bits are asserted rather than
+        /// assuming a successful write implies a safe one.
+        #[test]
+        fn the_file_is_owner_only() {
+            let path = scratch("mode");
+            write_file(&path, "ois_dsk_abc").unwrap();
+            assert_eq!(
+                mode_of(&path),
+                0o600,
+                "the token must not be world- or group-readable"
+            );
+        }
+
+        /// And a file left loose by anything else is tightened on the next write, not trusted.
+        #[test]
+        fn an_existing_loose_file_is_tightened() {
+            let path = scratch("tighten");
+            write_file(&path, "first").unwrap();
+            fs::set_permissions(&path, fs::Permissions::from_mode(0o644)).unwrap();
+
+            write_file(&path, "second").unwrap();
+            assert_eq!(mode_of(&path), 0o600);
+        }
+
+        #[test]
+        fn an_empty_file_means_signed_out_not_missing() {
+            let path = scratch("empty");
+            write_file(&path, "").unwrap();
+            assert_eq!(read_file(&path).unwrap(), Stored::SignedOut);
+        }
+
+        #[test]
+        fn no_file_at_all_means_not_yet_migrated() {
+            assert_eq!(read_file(&scratch("absent")).unwrap(), Stored::Missing);
+        }
+
+        /// The load-bearing one: an upgrading user keeps their session, and the keychain entry is
+        /// removed so no stale bearer token is left behind.
+        #[test]
+        fn the_first_read_migrates_the_token_out_of_the_keychain() {
+            let path = scratch("migrate");
+            let deleted = Cell::new(false);
+
+            let token = read_or_migrate(
+                &path,
+                || Ok(Some("ois_dsk_from_keychain".to_string())),
+                || {
+                    deleted.set(true);
+                    Ok(())
+                },
+            )
+            .unwrap();
+
+            assert_eq!(token.as_deref(), Some("ois_dsk_from_keychain"));
+            assert_eq!(
+                read_file(&path).unwrap(),
+                Stored::Token("ois_dsk_from_keychain".into())
+            );
+            assert!(deleted.get(), "the keychain entry must not be left behind");
+            assert_eq!(mode_of(&path), 0o600);
+        }
+
+        /// The regression this change exists to prevent. If migration were re-attempted, every
+        /// launch would hit the ACL-gated keychain and prompt again — which is the original bug.
+        #[test]
+        fn migration_happens_once_even_when_it_finds_nothing() {
+            let path = scratch("once");
+            let reads = Cell::new(0);
+
+            for _ in 0..3 {
+                let token = read_or_migrate(
+                    &path,
+                    || {
+                        reads.set(reads.get() + 1);
+                        Ok(None)
+                    },
+                    || Ok(()),
+                )
+                .unwrap();
+                assert_eq!(token, None);
+            }
+
+            assert_eq!(
+                reads.get(),
+                1,
+                "the keychain must be consulted exactly once, ever"
+            );
+        }
+
+        /// A dismissed prompt reads as signed out *and* still closes migration, so dismissing it
+        /// costs one prompt in total rather than one per launch.
+        #[test]
+        fn a_dismissed_keychain_prompt_reads_as_signed_out_and_still_settles() {
+            let path = scratch("dismissed");
+            let reads = Cell::new(0);
+            let deleted = Cell::new(false);
+
+            let first = read_or_migrate(
+                &path,
+                || {
+                    reads.set(reads.get() + 1);
+                    Err("user dismissed the keychain prompt".to_string())
+                },
+                || {
+                    deleted.set(true);
+                    Ok(())
+                },
+            )
+            .unwrap();
+            assert_eq!(first, None);
+            assert_eq!(read_file(&path).unwrap(), Stored::SignedOut);
+            assert!(
+                !deleted.get(),
+                "deleting is ACL-gated too, so it must not be attempted after a failed read"
+            );
+
+            let second =
+                read_or_migrate(&path, || panic!("must not read again"), || Ok(())).unwrap();
+            assert_eq!(second, None);
+            assert_eq!(reads.get(), 1);
+        }
+
+        /// Signing out must leave the marker, or the next launch re-migrates and prompts.
+        #[test]
+        fn signing_out_keeps_the_marker_file() {
+            let path = scratch("sign-out");
+            write_file(&path, "ois_dsk_abc").unwrap();
+
+            write_file(&path, "").unwrap(); // what clear_token does
+
+            assert!(
+                path.exists(),
+                "the file is the record that migration already happened"
+            );
+            assert_eq!(read_file(&path).unwrap(), Stored::SignedOut);
+            let token =
+                read_or_migrate(&path, || panic!("must not read the keychain"), || Ok(())).unwrap();
+            assert_eq!(token, None);
+        }
+
+        #[test]
+        fn an_unreadable_file_reads_as_signed_out_rather_than_panicking() {
+            // A directory where the file should be: readable as neither token nor absent.
+            let path = scratch("corrupt");
+            fs::create_dir_all(&path).unwrap();
+            assert_eq!(read_file(&path).unwrap(), Stored::SignedOut);
+        }
+
+        /// Surrounding whitespace is not part of the token — a trailing newline from an editor or an
+        /// earlier writer must not change what is sent as the bearer.
+        #[test]
+        fn surrounding_whitespace_is_not_part_of_the_token() {
+            let path = scratch("trim");
+            write_file(&path, "  ois_dsk_abc\n").unwrap();
+            assert_eq!(
+                read_file(&path).unwrap(),
+                Stored::Token("ois_dsk_abc".into())
+            );
+        }
     }
 }
