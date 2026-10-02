@@ -3529,8 +3529,22 @@ export interface components {
          *     already covered by the bundled OurAirports data in `feed::runway_db`.
          */
         AirportGateBody: {
+            /**
+             * @description Aircraft classes the stand accepts, e.g. `["heavy", "jets"]`. `None` where the source recorded
+             *     no restriction — which is not the same as accepting nothing.
+             */
+            aircraft_classes?: string[] | null;
+            /** @description Airline codes associated with the stand, e.g. `["aal", "dal"]`. */
+            airline_codes?: string[] | null;
             /** @description Whether the requesting user may edit this airport's surface data (per their ARTCC scope). */
             editable: boolean;
+            /**
+             * Format: double
+             * @description Stand heading, degrees true, normalised into `[0, 360)`. `None` for hand-entered stands and
+             *     for imported ones whose pack predates VATUSA/OIS#541. Read-only, like the rest of the X-Plane
+             *     detail below: these describe the source's data, not an operator's intent.
+             */
+            heading?: number | null;
             icao: string;
             id: string;
             /**
@@ -3543,6 +3557,13 @@ export interface components {
             /** Format: double */
             lon: number;
             name: string;
+            /**
+             * @description How the stand is operated, e.g. `airline`, `cargo`, `general_aviation`. Community-contributed
+             *     free text, so treat an unfamiliar value as information rather than an error.
+             */
+            operation_type?: string | null;
+            /** @description ICAO aerodrome reference code letter (`A`..`F`) — the widest aircraft the stand takes. */
+            size_code?: string | null;
             /** @description `manual` | `osm` | `crc` | `faa` | `xplane`. */
             source: string;
             /** Format: date-time */
