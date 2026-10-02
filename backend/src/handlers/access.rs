@@ -1172,6 +1172,53 @@ mod group_tests {
         );
     }
 
+    /// The member list's search filter. Added with the endpoint, so it gets a test with it rather
+    /// than being a query parameter nobody has exercised.
+    #[sqlx::test]
+    async fn the_member_list_can_be_searched(pool: PgPool) {
+        make_group(&pool, "SEARCHABLE").await;
+        for (cid, name) in [(111111, "Alice Able"), (222222, "Bob Baker")] {
+            let id = seed_user(&pool).await;
+            sqlx::query("update identity.users set cid = $1, display_name = $2 where id = $3")
+                .bind(cid)
+                .bind(name)
+                .bind(&id)
+                .execute(&pool)
+                .await
+                .unwrap();
+            let mut tx = pool.begin().await.unwrap();
+            access_repo::set_user_role_manual_scoped(&mut tx, &id, "SEARCHABLE", true, None)
+                .await
+                .unwrap();
+            tx.commit().await.unwrap();
+        }
+
+        let all = access_repo::fetch_group_members(&pool, "SEARCHABLE", "", 25, 0)
+            .await
+            .unwrap();
+        assert_eq!(all.len(), 2);
+
+        let by_name = access_repo::fetch_group_members(&pool, "SEARCHABLE", "alice", 25, 0)
+            .await
+            .unwrap();
+        assert_eq!(by_name.len(), 1);
+        assert_eq!(by_name[0].cid, 111111);
+
+        let by_cid = access_repo::fetch_group_members(&pool, "SEARCHABLE", "2222", 25, 0)
+            .await
+            .unwrap();
+        assert_eq!(by_cid.len(), 1);
+        assert_eq!(by_cid[0].cid, 222222);
+
+        // And the count agrees with the page, or pagination lies.
+        assert_eq!(
+            access_repo::count_group_members(&pool, "SEARCHABLE", "alice")
+                .await
+                .unwrap(),
+            1
+        );
+    }
+
     /// AC3: the actor must be able to make the grant *at that scope*. A ZDC-scoped EC may create an
     /// EC at ZDC and nowhere else — which is the capability #546 exists to give them.
     #[sqlx::test]
@@ -1396,6 +1443,10 @@ pub async fn list_group_members(
 }
 
 /// Add or remove one membership. `held` decides which, so both paths share every check.
+///
+/// Returns `204`. It used to return the first page of members, which cost two extra queries per write
+/// for a body the client never reads — it invalidates and refetches — and which claimed `page: 1`
+/// whatever page the caller was actually on.
 async fn change_membership(
     state: &AppState,
     actor: &CurrentUser,
@@ -1403,7 +1454,7 @@ async fn change_membership(
     name: &str,
     payload: GroupMemberRequest,
     held: bool,
-) -> Result<Json<GroupMemberPage>, ApiError> {
+) -> Result<axum::http::StatusCode, ApiError> {
     let pool = state.db.as_ref().ok_or(ApiError::ServiceUnavailable)?;
 
     let reason = payload.reason.trim();
@@ -1473,24 +1524,7 @@ async fn change_membership(
     .await?;
 
     state.publish(crate::realtime::topic::ACCESS_GRANTED);
-
-    let items = access_repo::fetch_group_members(pool, name, "", 25, 0)
-        .await?
-        .into_iter()
-        .map(|row| GroupMemberBody {
-            cid: row.cid,
-            display_name: row.display_name,
-            rating: row.rating,
-            artcc_id: row.artcc_id,
-        })
-        .collect();
-    let total = access_repo::count_group_members(pool, name, "").await?;
-    Ok(Json(GroupMemberPage {
-        items,
-        total,
-        page: 1,
-        page_size: 25,
-    }))
+    Ok(axum::http::StatusCode::NO_CONTENT)
 }
 
 #[utoipa::path(
@@ -1499,7 +1533,7 @@ async fn change_membership(
     tag = "access",
     params(("name" = String, Path, description = "Group name")),
     request_body = GroupMemberRequest,
-    responses((status = 200, body = GroupMemberPage), (status = 400), (status = 401), (status = 403), (status = 404))
+    responses((status = 204), (status = 400), (status = 401), (status = 403), (status = 404))
 )]
 pub async fn add_group_member(
     State(state): State<AppState>,
@@ -1508,7 +1542,7 @@ pub async fn add_group_member(
     Path(name): Path<String>,
     headers: HeaderMap,
     Json(payload): Json<GroupMemberRequest>,
-) -> Result<Json<GroupMemberPage>, ApiError> {
+) -> Result<axum::http::StatusCode, ApiError> {
     let user = current_user.as_ref().ok_or(ApiError::Unauthorized)?;
     change_membership(&state, user, &headers, &name, payload, true).await
 }
@@ -1519,7 +1553,7 @@ pub async fn add_group_member(
     tag = "access",
     params(("name" = String, Path, description = "Group name")),
     request_body = GroupMemberRequest,
-    responses((status = 200, body = GroupMemberPage), (status = 400), (status = 401), (status = 403), (status = 404))
+    responses((status = 204), (status = 400), (status = 401), (status = 403), (status = 404))
 )]
 pub async fn remove_group_member(
     State(state): State<AppState>,
@@ -1528,7 +1562,7 @@ pub async fn remove_group_member(
     Path(name): Path<String>,
     headers: HeaderMap,
     Json(payload): Json<GroupMemberRequest>,
-) -> Result<Json<GroupMemberPage>, ApiError> {
+) -> Result<axum::http::StatusCode, ApiError> {
     let user = current_user.as_ref().ok_or(ApiError::Unauthorized)?;
     change_membership(&state, user, &headers, &name, payload, false).await
 }

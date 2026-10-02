@@ -128,18 +128,18 @@ export function useChangeMembership(held: boolean) {
   const qc = useQueryClient();
   const toast = useToast();
   return useMutation({
-    mutationFn: async (args: {name: string; body: GroupMemberRequest}) => {
+    mutationFn: async (args: {name: string; body: GroupMemberRequest}): Promise<void> => {
       const call = held ? ois.POST : ois.DELETE;
-      const {data, error, response} = await call("/api/v1/admin/groups/{name}/members", {
+      // 204, so there is no body to read — the list is refetched by the invalidation below.
+      const {error, response} = await call("/api/v1/admin/groups/{name}/members", {
         params: {path: {name: args.name}},
         body: args.body,
       });
-      if (error || !data) {
+      if (error) {
         const err = new Error("membership change failed") as Error & {status?: number};
         err.status = response?.status;
         throw err;
       }
-      return data;
     },
     onSuccess: () => qc.invalidateQueries({queryKey: GROUPS}),
     onError: (error: Error & {status?: number}) => {

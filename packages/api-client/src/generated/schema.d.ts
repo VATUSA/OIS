@@ -7133,13 +7133,11 @@ export interface operations {
             };
         };
         responses: {
-            200: {
+            204: {
                 headers: {
                     [name: string]: unknown;
                 };
-                content: {
-                    "application/json": components["schemas"]["GroupMemberPage"];
-                };
+                content?: never;
             };
             400: {
                 headers: {
@@ -7183,13 +7181,11 @@ export interface operations {
             };
         };
         responses: {
-            200: {
+            204: {
                 headers: {
                     [name: string]: unknown;
                 };
-                content: {
-                    "application/json": components["schemas"]["GroupMemberPage"];
-                };
+                content?: never;
             };
             400: {
                 headers: {
