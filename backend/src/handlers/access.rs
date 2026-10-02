@@ -496,15 +496,25 @@ async fn enforce_group_scope(
     let after_set: BTreeSet<&String> = after.iter().collect();
 
     for name in before_set.symmetric_difference(&after_set) {
+        // **Unrestricted national holding, not "holds it somewhere".** `role_permissions` carries no
+        // scope by design (`0091`: scope lives on the membership), so a permission placed in a group
+        // reaches every holder *at their own membership scope* — including national. An actor who
+        // holds it only at ZDC would therefore be authorising a national grant they cannot make
+        // directly, which is the escalation AC4's "a permission **or scope** they don't hold" names.
+        //
+        // `allows(None)` is exactly "national with no exceptions": a scoped grant fails it, and so
+        // does a national grant carved by a deny (#543). A facility-scoped editor can still manage
+        // *membership* at their own scope (#546); what they cannot do is change what the group means
+        // for everyone.
         let holds = held
             .get(name.as_str())
-            .is_some_and(|scope| !scope.is_empty());
+            .is_some_and(|scope| scope.allows(None));
         if !holds {
             tracing::warn!(
                 actor = actor.id.as_str(),
                 group = role_name,
                 permission = name.as_str(),
-                "refused a group edit touching a permission the actor does not hold"
+                "refused a group edit touching a permission the actor does not hold nationally"
             );
             return Err(ApiError::Forbidden);
         }
@@ -932,6 +942,76 @@ mod group_tests {
             .await
             .is_ok()
         );
+    }
+
+    /// **The escalation this gate missed on first write** (found in review of `3214639`).
+    ///
+    /// `role_permissions` carries no scope, so a permission put into a group reaches every holder at
+    /// *their* membership scope — including national. An actor holding it only at ZDC would therefore
+    /// be authorising a national grant they cannot make directly. The old check asked "do you hold it
+    /// anywhere", which returned `Ok(())` here.
+    ///
+    /// Reachable in practice because the user-side editor's own guard is scope-blind (#559), so the
+    /// same actor could then grant the group nationally.
+    #[sqlx::test]
+    async fn a_scoped_holder_cannot_put_a_permission_into_a_scopeless_group(pool: PgPool) {
+        let user = seed_user(&pool).await;
+        grant(&pool, &user, "access.groups.update", None).await;
+        // Held at ZDC only — not nationally.
+        grant(&pool, &user, "tmu.program.update", Some("ZDC")).await;
+        make_group(&pool, "TARGET_GRP").await;
+        let state = test_state(pool, std::collections::HashMap::new());
+
+        let result = enforce_group_scope(
+            &state,
+            &actor(&user),
+            "TARGET_GRP",
+            &[],
+            &["tmu.program.update".to_string()],
+        )
+        .await;
+        assert!(
+            matches!(result, Err(ApiError::Forbidden)),
+            "a ZDC-only holder must not define what a scope-less group grants, got {result:?}"
+        );
+    }
+
+    /// And a national grant **carved by a deny** is not unrestricted national either — `allows(None)`
+    /// is the question, not `is_national()`, so the deny dimension from #543 still composes.
+    #[sqlx::test]
+    async fn a_nationally_denied_holder_cannot_either(pool: PgPool) {
+        let user = seed_user(&pool).await;
+        grant(&pool, &user, "access.groups.update", None).await;
+        make_group(&pool, "SRC_GRP").await;
+        sqlx::query(
+            "insert into access.role_permissions (role_name, permission_name) \
+             values ('SRC_GRP', 'tmu.program.update')",
+        )
+        .execute(&pool)
+        .await
+        .unwrap();
+        sqlx::query("insert into access.user_roles (user_id, role_name) values ($1, 'SRC_GRP')")
+            .bind(&user)
+            .execute(&pool)
+            .await
+            .unwrap();
+        // National via the group, then carved at ZDC: national-except-ZDC is not unrestricted.
+        crate::scope_test_support::deny_scoped(&pool, &user, "tmu.program.update", Some("ZDC"))
+            .await;
+        make_group(&pool, "DEST_GRP").await;
+        let state = test_state(pool, std::collections::HashMap::new());
+
+        assert!(matches!(
+            enforce_group_scope(
+                &state,
+                &actor(&user),
+                "DEST_GRP",
+                &[],
+                &["tmu.program.update".to_string()]
+            )
+            .await,
+            Err(ApiError::Forbidden)
+        ));
     }
 
     /// The symmetric-difference property, copied from `enforce_actor_scope`: **removing** a

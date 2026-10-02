@@ -50,7 +50,7 @@ const DESKTOP_STATE_MAX_LEN: usize = 128;
 const DESKTOP_SESSION_TOKEN_PREFIX: &str = "ois_dsk_";
 
 /// The group every signed-in user holds. Its permission set lives in `access.role_permissions`
-/// (migration 0092) rather than being copied onto each user — editing the group changes everyone's
+/// (migration 0094) rather than being copied onto each user — editing the group changes everyone's
 /// baseline with no backfill, which is the whole point of #542.
 const BASELINE_ROLE: &str = "USER";
 
