@@ -1107,4 +1107,268 @@ mod tests {
                 .is_empty()
         );
     }
+
+    // ---- VATUSA/OIS#544: the seeded group defaults ----
+
+    /// The domain rules migration 0092 seeded, as `web/src/lib/presets.ts` defines them. `None` means
+    /// every permission in the catalogue.
+    const SEEDED_ROLE_DOMAINS: &[(&str, Option<&[&str]>)] = &[
+        ("VATUSA_STAFF", None),
+        (
+            "DCC_STAFF",
+            Some(&["tmu", "flow", "events", "ace", "stats"]),
+        ),
+        ("EC", Some(&["tmu", "flow", "events", "ace", "stats"])),
+        ("AEC", Some(&["tmu", "flow", "events", "ace", "stats"])),
+        ("NTMO", Some(&["tmu", "flow", "stats"])),
+        ("EVENTS_TEAM", Some(&["events", "ace"])),
+        ("ACE", Some(&["ace"])),
+    ];
+
+    /// Grants a role holds that its preset's domains do **not** cover — the presets were never the
+    /// whole truth, and this test found that out (#544).
+    ///
+    /// `NTMO` has carried `events.availability.update` since `0052_event_availability.sql:26`, added
+    /// deliberately: *"NTMOs and DCC staff may respond by default"*. The NTMO preset grants
+    /// `tmu/flow/stats` only, so aligning the seed to the preset would have quietly taken that
+    /// capability away from every NTMO. It is kept, and named here so the next reader sees a decision
+    /// rather than an anomaly. `DCC_STAFF` needs no entry: its domains already include `events`.
+    const DOCUMENTED_EXTRAS: &[(&str, &[&str])] = &[("NTMO", &["events.availability.update"])];
+
+    /// AC1 + AC2. Each seeded group must equal the live-catalogue expansion of its preset's domains.
+    ///
+    /// **This test is also the drift alarm.** Seeding turned a rule the presets evaluated against the
+    /// *current* catalogue into a fixed row set, so a permission added later would not reach any group
+    /// — silently, and most consequentially for `VATUSA_STAFF`, which is supposed to mean "everything".
+    /// Adding permission 81 therefore fails here until someone decides which groups get it. That is the
+    /// intended cost, and it matches how OIS already treats a new permission (marker + catalog + row).
+    #[sqlx::test]
+    async fn seeded_roles_match_the_preset_domains(pool: sqlx::PgPool) {
+        let catalog: Vec<String> = sqlx::query_scalar("select name from access.permissions")
+            .fetch_all(&pool)
+            .await
+            .unwrap();
+        assert!(!catalog.is_empty(), "the catalogue seed must have run");
+
+        for (role, domains) in SEEDED_ROLE_DOMAINS {
+            let mut expected: std::collections::BTreeSet<String> = match domains {
+                None => catalog.iter().cloned().collect(),
+                Some(allowed) => catalog
+                    .iter()
+                    .filter(|name| {
+                        let domain = name.split('.').next().unwrap_or("");
+                        allowed.contains(&domain)
+                    })
+                    .cloned()
+                    .collect(),
+            };
+            for (extra_role, names) in DOCUMENTED_EXTRAS {
+                if extra_role == role {
+                    expected.extend(names.iter().map(|n| (*n).to_string()));
+                }
+            }
+
+            let actual: std::collections::BTreeSet<String> = sqlx::query_scalar(
+                "select permission_name from access.role_permissions where role_name = $1",
+            )
+            .bind(role)
+            .fetch_all(&pool)
+            .await
+            .unwrap()
+            .into_iter()
+            .collect();
+
+            assert_eq!(
+                actual, expected,
+                "{role}: seeded set has drifted from the preset's domains plus documented extras. If a role legitimately holds something outside its domains, add it to DOCUMENTED_EXTRAS with the reason. If you just added a \
+                 permission, decide which groups should carry it and extend migration 0092."
+            );
+            assert!(!actual.is_empty(), "{role} must bundle something (#544)");
+        }
+    }
+
+    /// The baseline every signed-in user gets, now held by the `USER` group rather than copied onto
+    /// each user as five direct rows.
+    #[sqlx::test]
+    async fn the_user_group_carries_the_signed_in_baseline(pool: sqlx::PgPool) {
+        let baseline: std::collections::BTreeSet<String> = sqlx::query_scalar(
+            "select permission_name from access.role_permissions where role_name = 'USER'",
+        )
+        .fetch_all(&pool)
+        .await
+        .unwrap()
+        .into_iter()
+        .collect();
+
+        for name in [
+            "auth.profile.read",
+            "auth.profile.update",
+            "auth.sessions.delete",
+            "access.self.read",
+            "users.directory.read",
+        ] {
+            assert!(baseline.contains(name), "the USER group must carry {name}");
+        }
+    }
+
+    /// A member of the group resolves to its whole set through the #543 resolver — the property that
+    /// makes groups worth having: edit the group, every holder changes, no backfill.
+    #[sqlx::test]
+    async fn a_group_member_resolves_to_the_groups_permissions(pool: sqlx::PgPool) {
+        let user: String = sqlx::query_scalar(
+            "insert into identity.users (full_name, display_name) values ('T', 'T') returning id",
+        )
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        sqlx::query("insert into access.user_roles (user_id, role_name) values ($1, 'NTMO')")
+            .bind(&user)
+            .execute(&pool)
+            .await
+            .unwrap();
+
+        let effective = super::fetch_effective_permissions(&pool, &user)
+            .await
+            .unwrap();
+
+        // NTMO is tmu/flow/stats, so a TMU permission is in.
+        assert!(
+            effective.keys().any(|n| n.starts_with("tmu.")),
+            "an NTMO member holds the tmu domain"
+        );
+        // The events domain is not NTMO's, with one documented exception — see DOCUMENTED_EXTRAS.
+        // Asserting on a specific broad permission rather than the whole `events.` prefix, so this
+        // test says what it means instead of accidentally depending on that exception.
+        assert!(
+            !effective.contains_key("events.plan.read"),
+            "NTMO does not bundle the events domain"
+        );
+        assert!(
+            effective.contains_key("events.availability.update"),
+            "except the availability grant 0052 gave it deliberately"
+        );
+        assert!(effective.values().all(|scope| scope.is_national()));
+    }
+
+    /// Migration 0092's cleanup of the redundant baseline rows.
+    ///
+    /// Like `permission_backfill_repoints_existing_events_config_update_grants` in
+    /// `handlers/airport_surface.rs`, this re-runs the migration's own `delete` directly: the
+    /// migration ran against whatever rows existed at migration time and cannot see rows a test
+    /// inserts afterwards, so the query logic is what there is to prove. Specifically that it is
+    /// **narrow** — only the five names the `USER` group now supplies, only at national scope, and
+    /// only for users who actually hold the role, so it cannot strip access from someone the grant
+    /// above missed.
+    #[sqlx::test]
+    async fn the_baseline_cleanup_removes_only_what_the_group_now_supplies(pool: sqlx::PgPool) {
+        let in_group: String = sqlx::query_scalar(
+            "insert into identity.users (full_name, display_name) values ('A', 'A') returning id",
+        )
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        let orphan: String = sqlx::query_scalar(
+            "insert into identity.users (full_name, display_name) values ('B', 'B') returning id",
+        )
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+
+        // The pre-#544 world: direct baseline rows on both users, but only one is in the group.
+        sqlx::query("insert into access.user_roles (user_id, role_name) values ($1, 'USER')")
+            .bind(&in_group)
+            .execute(&pool)
+            .await
+            .unwrap();
+        for user in [&in_group, &orphan] {
+            for name in [
+                "auth.profile.read",
+                "auth.profile.update",
+                "auth.sessions.delete",
+                "access.self.read",
+                "users.directory.read",
+            ] {
+                crate::scope_test_support::grant(&pool, user, name, None).await;
+            }
+            // Two rows the cleanup must not touch: a non-baseline grant, and a scoped one.
+            crate::scope_test_support::grant(&pool, user, "tmu.program.update", None).await;
+            crate::scope_test_support::grant(&pool, user, "access.self.read", Some("ZDC")).await;
+        }
+
+        sqlx::query(
+            "delete from access.user_permissions up \
+             where up.artcc_id is null and up.granted is true \
+               and up.permission_name in ('auth.profile.read', 'auth.profile.update', \
+                   'auth.sessions.delete', 'access.self.read', 'users.directory.read') \
+               and exists (select 1 from access.user_roles ur \
+                   where ur.user_id = up.user_id and ur.role_name = 'USER' \
+                     and ur.artcc_id is null)",
+        )
+        .execute(&pool)
+        .await
+        .unwrap();
+
+        let remaining = |user: &str| {
+            let pool = pool.clone();
+            let user = user.to_string();
+            async move {
+                sqlx::query_scalar::<_, String>(
+                    "select permission_name || coalesce(':' || artcc_id, '') \
+                     from access.user_permissions where user_id = $1 order by 1",
+                )
+                .bind(user)
+                .fetch_all(&pool)
+                .await
+                .unwrap()
+            }
+        };
+
+        // In the group: the five national baseline rows are gone; the others survive.
+        assert_eq!(
+            remaining(&in_group).await,
+            vec![
+                "access.self.read:ZDC".to_string(),
+                "tmu.program.update".to_string()
+            ],
+            "only the redundant national baseline rows should go"
+        );
+
+        // Not in the group: nothing is touched, because the group is not supplying it.
+        assert_eq!(
+            remaining(&orphan).await.len(),
+            7,
+            "a user the USER grant missed must keep their own rows"
+        );
+    }
+
+    /// A facility-scoped membership narrows the whole group, which is the design's point: scope lives
+    /// on the membership row, not on the bundle, so one `EC` group serves every ARTCC.
+    #[sqlx::test]
+    async fn a_facility_scoped_membership_narrows_the_whole_group(pool: sqlx::PgPool) {
+        let user: String = sqlx::query_scalar(
+            "insert into identity.users (full_name, display_name) values ('T', 'T') returning id",
+        )
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        sqlx::query(
+            "insert into access.user_roles (user_id, role_name, artcc_id) values ($1, 'EC', 'ZDC')",
+        )
+        .bind(&user)
+        .execute(&pool)
+        .await
+        .unwrap();
+
+        let effective = super::fetch_effective_permissions(&pool, &user)
+            .await
+            .unwrap();
+        let scope = effective
+            .get("flow.route.update")
+            .expect("EC bundles the flow domain");
+        assert!(scope.allows(Some("ZDC")));
+        assert!(
+            !scope.allows(Some("ZNY")),
+            "a ZDC membership grants nothing at ZNY"
+        );
+    }
 }

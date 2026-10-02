@@ -49,15 +49,10 @@ const DESKTOP_STATE_MAX_LEN: usize = 128;
 /// Marks a session token as belonging to the desktop app; `auth::middleware` dispatches on it.
 const DESKTOP_SESSION_TOKEN_PREFIX: &str = "ois_dsk_";
 
-/// Baseline self-service permissions every non-SERVER_ADMIN user is entitled to.
-/// Seeded on first login; every name here must exist in `access.permissions`.
-const BASELINE_SELF_SERVICE_PERMISSIONS: &[&str] = &[
-    "auth.profile.read",
-    "auth.profile.update",
-    "auth.sessions.delete",
-    "access.self.read",
-    "users.directory.read",
-];
+/// The group every signed-in user holds. Its permission set lives in `access.role_permissions`
+/// (migration 0092) rather than being copied onto each user — editing the group changes everyone's
+/// baseline with no backfill, which is the whole point of #542.
+const BASELINE_ROLE: &str = "USER";
 
 #[derive(Deserialize)]
 pub struct LoginQuery {
@@ -476,8 +471,8 @@ async fn bootstrap_login_user(
     Ok((user.id, user.was_new_user))
 }
 
-/// Reconciles the SERVER_ADMIN role against `OIS_SERVER_ADMIN_CID` on every login and
-/// seeds baseline self-service permissions for new (or just-demoted) users.
+/// Reconciles the SERVER_ADMIN role against `OIS_SERVER_ADMIN_CID` on every login, and gives a new
+/// (or just-demoted) user the baseline by putting them in the [`BASELINE_ROLE`] group.
 async fn ensure_user_login_access(
     pool: &sqlx::PgPool,
     user_id: &str,
@@ -499,11 +494,11 @@ async fn ensure_user_login_access(
     let demoted = access_repo::revoke_server_admin(&mut tx, user_id).await?;
 
     if was_new_user || demoted {
-        let baseline: Vec<String> = BASELINE_SELF_SERVICE_PERMISSIONS
-            .iter()
-            .map(|permission| permission.to_string())
-            .collect();
-        access_repo::replace_user_permissions(&mut tx, user_id, &baseline).await?;
+        // The baseline now arrives through the `USER` group, not as five direct rows (#544). The
+        // wipe stays: a demotion must leave a former admin holding no national grants of their own,
+        // and `replace_user_permissions` with an empty set is exactly that clearing.
+        access_repo::replace_user_permissions(&mut tx, user_id, &[]).await?;
+        access_repo::set_user_role_manual(&mut tx, user_id, BASELINE_ROLE, true).await?;
     }
 
     tx.commit().await.map_err(|_| ApiError::Internal)?;
@@ -685,6 +680,91 @@ mod tests {
 
         let body = build_me_body(&state, &current_user(&none)).await.unwrap();
         assert!(!body.tmu_national, "no grant is not national");
+    }
+
+    /// AC3 of #544: the baseline arrives as **group membership**, not as per-user rows.
+    ///
+    /// That is the property that makes the group model worth having — editing `USER`'s permission set
+    /// changes every signed-in user's baseline with no backfill. The old path wrote five
+    /// `access.user_permissions` rows per user, which is exactly the duplication the epic removes.
+    #[sqlx::test]
+    async fn a_new_user_gets_the_baseline_from_the_user_group_not_direct_rows(pool: PgPool) {
+        let user = seed_user(&pool).await;
+
+        super::ensure_user_login_access(&pool, &user, 9_999_999, true)
+            .await
+            .unwrap();
+
+        let roles: Vec<String> = sqlx::query_scalar(
+            "select role_name from access.user_roles where user_id = $1 and artcc_id is null",
+        )
+        .bind(&user)
+        .fetch_all(&pool)
+        .await
+        .unwrap();
+        assert!(roles.iter().any(|r| r == "USER"), "got roles {roles:?}");
+
+        let direct: i64 =
+            sqlx::query_scalar("select count(*) from access.user_permissions where user_id = $1")
+                .bind(&user)
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+        assert_eq!(direct, 0, "no permission should be copied onto the user");
+
+        // And the baseline still actually resolves, through the group.
+        let effective = access_repo::fetch_effective_permissions(&pool, &user)
+            .await
+            .unwrap();
+        for name in [
+            "auth.profile.read",
+            "auth.profile.update",
+            "auth.sessions.delete",
+            "access.self.read",
+            "users.directory.read",
+        ] {
+            assert!(effective.contains_key(name), "baseline missing {name}");
+        }
+    }
+
+    /// A demotion must still clear the ex-admin's own national grants — the reason the wipe survived
+    /// the move to a group. Without it a former admin would keep everything they had been granted
+    /// directly while appearing to be reset to baseline.
+    #[sqlx::test]
+    async fn a_demotion_clears_direct_grants_and_leaves_only_the_group(pool: PgPool) {
+        let user = seed_user(&pool).await;
+        grant(&pool, &user, "tmu.program.update", None).await;
+        sqlx::query(
+            "insert into access.user_roles (user_id, role_name) values ($1, 'SERVER_ADMIN')",
+        )
+        .bind(&user)
+        .execute(&pool)
+        .await
+        .unwrap();
+
+        super::ensure_user_login_access(&pool, &user, 9_999_999, false)
+            .await
+            .unwrap();
+
+        let direct: i64 =
+            sqlx::query_scalar("select count(*) from access.user_permissions where user_id = $1")
+                .bind(&user)
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+        assert_eq!(direct, 0, "a demotion clears direct national grants");
+
+        let effective = access_repo::fetch_effective_permissions(&pool, &user)
+            .await
+            .unwrap();
+        assert!(
+            !effective.contains_key("tmu.program.update"),
+            "the demoted admin keeps nothing beyond the baseline"
+        );
+        assert!(
+            effective.contains_key("access.self.read"),
+            "but keeps the baseline"
+        );
     }
 
     /// `/me` could contradict itself (VATUSA/OIS#543): `tmu_national` came from the scoped resolver,
