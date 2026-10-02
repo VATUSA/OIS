@@ -70,6 +70,7 @@ const REQUIRED: Record<string, readonly string[]> = {
   "/admin/historical/delays": ["stats.data.read"],
   "/admin/historical/taxi": ["stats.data.read"],
   "/admin/access": ["access.users.read"],
+  "/admin/groups": ["access.groups.read"],
   "/admin/audit": ["audit.logs.read"],
   "/admin/jobs": ["system.jobs.read"],
   "/admin/api-keys": ["api_keys.key.read"],

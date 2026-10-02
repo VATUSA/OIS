@@ -278,6 +278,157 @@ pub async fn fetch_access_catalog_names(pool: &PgPool) -> Result<Vec<String>, Ap
         .map_err(|_| ApiError::Internal)
 }
 
+/// Groups whose membership or contents code depends on, so the group editor must not touch them
+/// (VATUSA/OIS#545).
+///
+/// Protected by **name**, not by `access.roles.is_system`. That column exists (`0003_access.sql:9`)
+/// but defaults to `true` and every migration inserts `(name, description)` only, so all eleven rows
+/// claim to be system roles — enforcing on it would freeze every group. A constant is also honest
+/// about *why* these four are protected: each literal is referenced by code, and an admin cannot flip
+/// a constant.
+///
+/// - `SERVER_ADMIN` — `is_server_admin`, the env bootstrap, and the view's cross join.
+/// - `USER` — granted at login and carries the signed-in baseline (#544).
+/// - `BOT` / `SERVICE_APP` — back service accounts, whose *only* permission source is
+///   `role_permissions`, with no cache: emptying `BOT` stops the Discord bot on its next request.
+pub const SYSTEM_ROLES: &[&str] = &["SERVER_ADMIN", "USER", "BOT", "SERVICE_APP"];
+
+/// Whether `role_name` is a protected system group.
+pub fn is_system_role(role_name: &str) -> bool {
+    SYSTEM_ROLES.contains(&role_name)
+}
+
+/// Groups a staff user may be assigned, read from the catalogue rather than a constant.
+///
+/// Replaces [`ASSIGNABLE_USER_ROLES`] at its call sites (#545). The constant could not see a group
+/// created through the editor, so a new group was assignable to nobody until someone edited Rust and
+/// deployed — which made "create a group, no deploy" untrue. Same reasoning as
+/// [`fetch_service_account_assignable_roles`]: deriving the list from the DB is what stops the picker
+/// and the validator disagreeing.
+pub async fn fetch_assignable_role_names(pool: &PgPool) -> Result<Vec<String>, ApiError> {
+    Ok(fetch_role_names(pool)
+        .await?
+        .into_iter()
+        .filter(|name| !is_system_role(name))
+        .collect())
+}
+
+/// One group as the editor lists it: what it grants, and how many principals hold it.
+#[derive(Debug, sqlx::FromRow)]
+pub struct GroupRow {
+    pub name: String,
+    pub description: Option<String>,
+    pub permission_count: i64,
+    pub user_count: i64,
+    pub service_account_count: i64,
+}
+
+/// Every group with its permission count and holder counts.
+///
+/// The counts are what make the delete guard and the blast radius legible: editing a group changes
+/// every holder at once, and a service-account holder is one a user-facing editor would not otherwise
+/// show.
+pub async fn fetch_groups(pool: &PgPool) -> Result<Vec<GroupRow>, ApiError> {
+    sqlx::query_as::<_, GroupRow>(
+        r#"
+        select
+            r.name,
+            r.description,
+            (select count(*) from access.role_permissions rp where rp.role_name = r.name)
+                as permission_count,
+            (select count(distinct ur.user_id) from access.user_roles ur where ur.role_name = r.name)
+                as user_count,
+            (select count(distinct sar.service_account_id) from access.service_account_roles sar
+                where sar.role_name = r.name) as service_account_count
+        from access.roles r
+        order by r.name
+        "#,
+    )
+    .fetch_all(pool)
+    .await
+    .map_err(|_| ApiError::Internal)
+}
+
+/// The permission names a group grants. Empty for a group that bundles nothing.
+pub async fn fetch_group_permissions(
+    pool: &PgPool,
+    role_name: &str,
+) -> Result<Vec<String>, ApiError> {
+    sqlx::query_scalar::<_, String>(
+        "select permission_name from access.role_permissions          where role_name = $1 order by permission_name",
+    )
+    .bind(role_name)
+    .fetch_all(pool)
+    .await
+    .map_err(|_| ApiError::Internal)
+}
+
+/// Whether a group exists.
+pub async fn group_exists(pool: &PgPool, role_name: &str) -> Result<bool, ApiError> {
+    sqlx::query_scalar::<_, bool>("select exists(select 1 from access.roles where name = $1)")
+        .bind(role_name)
+        .fetch_one(pool)
+        .await
+        .map_err(|_| ApiError::Internal)
+}
+
+/// Replaces a group's permission set. Every holder's access changes on their next request — there is
+/// no per-user copy to backfill, which is the point of groups (#542).
+pub async fn replace_group_permissions(
+    tx: &mut Transaction<'_, Postgres>,
+    role_name: &str,
+    names: &[String],
+) -> Result<(), ApiError> {
+    sqlx::query("delete from access.role_permissions where role_name = $1")
+        .bind(role_name)
+        .execute(&mut **tx)
+        .await
+        .map_err(|_| ApiError::Internal)?;
+
+    for name in names {
+        sqlx::query(
+            "insert into access.role_permissions (role_name, permission_name) values ($1, $2)",
+        )
+        .bind(role_name)
+        .bind(name)
+        .execute(&mut **tx)
+        .await
+        .map_err(|_| ApiError::Internal)?;
+    }
+    Ok(())
+}
+
+/// Creates a group. `is_system` is left at its default rather than set: the column is not what
+/// protects anything (see [`SYSTEM_ROLES`]), and writing it would imply otherwise.
+pub async fn create_group(
+    tx: &mut Transaction<'_, Postgres>,
+    role_name: &str,
+    description: Option<&str>,
+) -> Result<(), ApiError> {
+    sqlx::query("insert into access.roles (name, description) values ($1, $2)")
+        .bind(role_name)
+        .bind(description)
+        .execute(&mut **tx)
+        .await
+        .map_err(|_| ApiError::Internal)?;
+    Ok(())
+}
+
+/// Deletes a group. The caller must have established it has no holders: the foreign keys are
+/// `on delete cascade` (`0003_access.sql:23,33`), so this would otherwise silently take every
+/// membership and every bundled permission with it.
+pub async fn delete_group(
+    tx: &mut Transaction<'_, Postgres>,
+    role_name: &str,
+) -> Result<(), ApiError> {
+    sqlx::query("delete from access.roles where name = $1")
+        .bind(role_name)
+        .execute(&mut **tx)
+        .await
+        .map_err(|_| ApiError::Internal)?;
+    Ok(())
+}
+
 /// All role names in the catalog.
 pub async fn fetch_role_names(pool: &PgPool) -> Result<Vec<String>, ApiError> {
     sqlx::query_scalar::<_, String>("select name from access.roles order by name")

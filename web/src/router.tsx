@@ -52,6 +52,7 @@ const HistoricalDashboardPage = lazyRouteComponent(
 import {AdminLayout} from "@/pages/admin/layout";
 import {AdminOverview} from "@/pages/admin/overview";
 import {AdminAccessControl} from "@/pages/admin/access-control";
+import {AdminGroups} from "@/pages/admin/groups";
 import {AdminAudit} from "@/pages/admin/audit";
 import {AdminJobs} from "@/pages/admin/jobs";
 import {AdminApiKeys} from "@/pages/admin/api-keys";
@@ -540,6 +541,13 @@ const adminIndexRoute = createRoute({
   component: AdminOverview,
 });
 
+const adminGroupsRoute = createRoute({
+  getParentRoute: () => adminRoute,
+  path: "groups",
+  staticData: { title: "Groups" },
+  component: AdminGroups,
+});
+
 const adminAccessRoute = createRoute({
   getParentRoute: () => adminRoute,
   path: "access",
@@ -644,6 +652,7 @@ const routeTree = rootRoute.addChildren([
   adminRoute.addChildren([
     adminIndexRoute,
     adminAccessRoute,
+    adminGroupsRoute,
     adminAuditRoute,
     adminJobsRoute,
     adminApiKeysRoute,

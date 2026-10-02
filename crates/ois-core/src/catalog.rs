@@ -70,6 +70,8 @@ pub fn draft_new_permission_names() -> Vec<&'static str> {
         "access.catalog.read",
         "access.users.read",
         "access.users.update",
+        "access.groups.read",
+        "access.groups.update",
         // --- users: directory (ported from osmium) ---
         "users.directory.read",
         // --- audit log (ported from osmium) ---
