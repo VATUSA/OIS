@@ -1,7 +1,7 @@
 -- @formatter:off
 -- Give the assignable roles real permission sets, so a role name means something (VATUSA/OIS#544).
 --
--- Before this, access.role_permissions held 9 rows across 5 roles in 91 migrations, and four of the
+-- Before this, access.role_permissions held 9 rows across 5 roles in 93 migrations, and four of the
 -- seven assignable roles — VATUSA_STAFF, EVENTS_TEAM, EC, AEC — bundled nothing at all. Every
 -- capability therefore arrived as a per-user direct row, expanded from the presets in
 -- web/src/lib/presets.ts, which then drifted from the preset definition permanently.

@@ -1283,7 +1283,7 @@ mod tests {
 
     // ---- VATUSA/OIS#544: the seeded group defaults ----
 
-    /// The domain rules migration 0092 seeded, as `web/src/lib/presets.ts` defines them. `None` means
+    /// The domain rules migration 0094 seeded, as `web/src/lib/presets.ts` defines them. `None` means
     /// every permission in the catalogue.
     const SEEDED_ROLE_DOMAINS: &[(&str, Option<&[&str]>)] = &[
         ("VATUSA_STAFF", None),
@@ -1354,7 +1354,7 @@ mod tests {
             assert_eq!(
                 actual, expected,
                 "{role}: seeded set has drifted from the preset's domains plus documented extras. If a role legitimately holds something outside its domains, add it to DOCUMENTED_EXTRAS with the reason. If you just added a \
-                 permission, decide which groups should carry it and extend migration 0092."
+                 permission, decide which groups should carry it and extend migration 0094."
             );
             assert!(!actual.is_empty(), "{role} must bundle something (#544)");
         }
@@ -1423,7 +1423,7 @@ mod tests {
         assert!(effective.values().all(|scope| scope.is_national()));
     }
 
-    /// Migration 0092's cleanup of the redundant baseline rows.
+    /// Migration 0094's cleanup of the redundant baseline rows.
     ///
     /// Like `permission_backfill_repoints_existing_events_config_update_grants` in
     /// `handlers/airport_surface.rs`, this re-runs the migration's own `delete` directly: the
