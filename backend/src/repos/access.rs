@@ -323,26 +323,53 @@ pub struct GroupRow {
     pub service_account_count: i64,
 }
 
+/// The group projection, shared so the list and the single-row read cannot disagree.
+const GROUP_SELECT: &str = r#"
+    select
+        r.name,
+        r.description,
+        (select count(*) from access.role_permissions rp where rp.role_name = r.name)
+            as permission_count,
+        (select count(distinct ur.user_id) from access.user_roles ur where ur.role_name = r.name)
+            as user_count,
+        (select count(distinct sar.service_account_id) from access.service_account_roles sar
+            where sar.role_name = r.name) as service_account_count
+    from access.roles r
+"#;
+
 /// Every group with its permission count and holder counts.
 ///
 /// The counts are what make the delete guard and the blast radius legible: editing a group changes
 /// every holder at once, and a service-account holder is one a user-facing editor would not otherwise
 /// show.
 pub async fn fetch_groups(pool: &PgPool) -> Result<Vec<GroupRow>, ApiError> {
-    sqlx::query_as::<_, GroupRow>(
-        r#"
-        select
-            r.name,
-            r.description,
-            (select count(*) from access.role_permissions rp where rp.role_name = r.name)
-                as permission_count,
-            (select count(distinct ur.user_id) from access.user_roles ur where ur.role_name = r.name)
-                as user_count,
-            (select count(distinct sar.service_account_id) from access.service_account_roles sar
-                where sar.role_name = r.name) as service_account_count
-        from access.roles r
-        order by r.name
-        "#,
+    sqlx::query_as::<_, GroupRow>(&format!("{GROUP_SELECT} order by r.name"))
+        .fetch_all(pool)
+        .await
+        .map_err(|_| ApiError::Internal)
+}
+
+/// One group, or `None` when it does not exist.
+///
+/// Separate from [`fetch_groups`] rather than filtering its result in Rust: the handlers need a single
+/// group four times over, and scanning every role with three correlated subqueries to pick one row is
+/// work for nothing.
+pub async fn fetch_group(pool: &PgPool, role_name: &str) -> Result<Option<GroupRow>, ApiError> {
+    sqlx::query_as::<_, GroupRow>(&format!("{GROUP_SELECT} where r.name = $1"))
+        .bind(role_name)
+        .fetch_optional(pool)
+        .await
+        .map_err(|_| ApiError::Internal)
+}
+
+/// Every group's permissions, as `(role_name, permission_name)`.
+///
+/// One query for the whole listing. Asking per group was an N+1 — twelve round trips to render eleven
+/// groups — and the set is small enough that grouping in Rust is free.
+pub async fn fetch_all_group_permissions(pool: &PgPool) -> Result<Vec<(String, String)>, ApiError> {
+    sqlx::query_as::<_, (String, String)>(
+        "select role_name, permission_name from access.role_permissions \
+         order by role_name, permission_name",
     )
     .fetch_all(pool)
     .await
@@ -361,15 +388,6 @@ pub async fn fetch_group_permissions(
     .fetch_all(pool)
     .await
     .map_err(|_| ApiError::Internal)
-}
-
-/// Whether a group exists.
-pub async fn group_exists(pool: &PgPool, role_name: &str) -> Result<bool, ApiError> {
-    sqlx::query_scalar::<_, bool>("select exists(select 1 from access.roles where name = $1)")
-        .bind(role_name)
-        .fetch_one(pool)
-        .await
-        .map_err(|_| ApiError::Internal)
 }
 
 /// Replaces a group's permission set. Every holder's access changes on their next request — there is

@@ -533,11 +533,19 @@ pub async fn list_groups(
     _permission: RequirePermission<AccessGroupsRead>,
 ) -> Result<Json<Vec<GroupBody>>, ApiError> {
     let pool = state.db.as_ref().ok_or(ApiError::ServiceUnavailable)?;
-    let mut out = Vec::new();
-    for row in access_repo::fetch_groups(pool).await? {
-        let permissions = access_repo::fetch_group_permissions(pool, &row.name).await?;
-        out.push(group_body(row, permissions));
+    // Two queries for the whole listing, not one per group.
+    let mut by_group: BTreeMap<String, Vec<String>> = BTreeMap::new();
+    for (role_name, permission_name) in access_repo::fetch_all_group_permissions(pool).await? {
+        by_group.entry(role_name).or_default().push(permission_name);
     }
+    let out = access_repo::fetch_groups(pool)
+        .await?
+        .into_iter()
+        .map(|row| {
+            let permissions = by_group.get(&row.name).cloned().unwrap_or_default();
+            group_body(row, permissions)
+        })
+        .collect();
     Ok(Json(out))
 }
 
@@ -567,7 +575,8 @@ pub async fn create_group(
         return Err(ApiError::BadRequest);
     }
     // A new group must not shadow a protected name, even if that name does not exist yet.
-    if access_repo::is_system_role(&name) || access_repo::group_exists(pool, &name).await? {
+    if access_repo::is_system_role(&name) || access_repo::fetch_group(pool, &name).await?.is_some()
+    {
         return Err(ApiError::Conflict);
     }
 
@@ -581,10 +590,8 @@ pub async fn create_group(
     access_repo::create_group(&mut tx, &name, description).await?;
     tx.commit().await.map_err(|_| ApiError::Internal)?;
 
-    let row = access_repo::fetch_groups(pool)
+    let row = access_repo::fetch_group(pool, &name)
         .await?
-        .into_iter()
-        .find(|row| row.name == name)
         .ok_or(ApiError::Internal)?;
     let body = group_body(row, Vec::new());
 
@@ -633,9 +640,6 @@ pub async fn update_group(
     if access_repo::is_system_role(&name) {
         return Err(ApiError::Forbidden);
     }
-    if !access_repo::group_exists(pool, &name).await? {
-        return Err(ApiError::NotFound);
-    }
 
     let catalog: BTreeSet<String> = access_repo::fetch_access_catalog_names(pool)
         .await?
@@ -657,12 +661,11 @@ pub async fn update_group(
         return Err(ApiError::BadRequest);
     }
 
-    let before_permissions = access_repo::fetch_group_permissions(pool, &name).await?;
-    let before_row = access_repo::fetch_groups(pool)
+    // Doubles as the existence check — a missing group is a 404 here rather than a separate query.
+    let before_row = access_repo::fetch_group(pool, &name)
         .await?
-        .into_iter()
-        .find(|row| row.name == name)
         .ok_or(ApiError::NotFound)?;
+    let before_permissions = access_repo::fetch_group_permissions(pool, &name).await?;
     let before_body = group_body(before_row, before_permissions.clone());
 
     enforce_group_scope(&state, user, &name, &before_permissions, &requested).await?;
@@ -671,10 +674,8 @@ pub async fn update_group(
     access_repo::replace_group_permissions(&mut tx, &name, &requested).await?;
     tx.commit().await.map_err(|_| ApiError::Internal)?;
 
-    let after_row = access_repo::fetch_groups(pool)
+    let after_row = access_repo::fetch_group(pool, &name)
         .await?
-        .into_iter()
-        .find(|row| row.name == name)
         .ok_or(ApiError::Internal)?;
     let after_permissions = access_repo::fetch_group_permissions(pool, &name).await?;
     let body = group_body(after_row, after_permissions);
@@ -718,10 +719,8 @@ pub async fn delete_group(
     if access_repo::is_system_role(&name) {
         return Err(ApiError::Forbidden);
     }
-    let row = access_repo::fetch_groups(pool)
+    let row = access_repo::fetch_group(pool, &name)
         .await?
-        .into_iter()
-        .find(|row| row.name == name)
         .ok_or(ApiError::NotFound)?;
 
     // Refused rather than cascaded. The foreign keys are `on delete cascade`, so deleting a held
