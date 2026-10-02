@@ -18,6 +18,7 @@ import {
   useUpdateAirportRunway,
   useUpdateAirportTaxiway,
 } from "@/lib/airport-surface";
+import {useAirportPosition} from "@/lib/airport-configs";
 
 import {MapCanvas} from "../MapCanvas";
 import {useMapCamera} from "../hooks/useMapCamera";
@@ -92,25 +93,44 @@ export function SurfaceMap({
     updateRunway.isPending ||
     deleteRunway.isPending;
 
-  // No airport-lookup source exists to center the map on `icao` directly (runway ends have no
-  // lat/lon anywhere in this codebase). Once, on first load, fly to the loaded geometry's bounds
-  // instead — a no-op (stays at the default CONUS view) for a brand-new airport with no data yet.
-  const centered = useRef(false);
+  // Centre on the airport, refining to its geometry when there is any (#540).
+  //
+  // This used to fit to the loaded geometry alone, with a comment explaining that no airport-lookup
+  // source existed. One does now — the coordinates were always in memory for ETA maths, they just
+  // had no route — so an airport with no surface data yet centres properly instead of leaving the
+  // map on the CONUS view, which is the complaint this issue was filed about. The FAA extract covers
+  // 185 fields, so "no geometry" is the common case, not an edge one.
+  const { data: position } = useAirportPosition(icao);
+  // Keyed on the ICAO rather than a bare boolean, so switching airports re-centres. The page
+  // remounts this on `icao` change today, but a flag that only ever fires once per mount is the
+  // kind of thing that silently stops working the moment that changes.
+  const centeredFor = useRef<string | null>(null);
   useEffect(() => {
-    if (centered.current) return;
+    if (centeredFor.current === icao) return;
+
     const pts: [number, number][] = [
       ...toDeckPath(surface.gates.map((g): LatLng => [g.lat, g.lon])),
       ...[...surface.taxiways, ...surface.runways, ...surface.ramp_areas].flatMap((p) =>
         p.rings.flatMap((ring) => toDeckPath(ring as LatLng[])),
       ),
     ];
+
+    // Geometry is the better target when it exists: it frames what the user is about to edit,
+    // rather than the field's published centre.
     if (pts.length > 0) {
-      centered.current = true;
+      centeredFor.current = icao;
       camera.fitBounds(pts, { padding: 60, maxZoom: 16 });
+      return;
     }
-    // `camera.fitBounds` is a stable ref-backed callback (see useMapCamera) — safe to omit.
+    if (position) {
+      centeredFor.current = icao;
+      camera.flyTo({ longitude: position.lon, latitude: position.lat, zoom: 13 });
+    }
+    // Neither yet — leave the camera alone and run again when the position or geometry arrives.
+
+    // `camera.*` are stable ref-backed callbacks (see useMapCamera) — safe to omit.
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [surface]);
+  }, [surface, position, icao]);
 
   const startNew = (kind: SurfaceKind) => {
     // A stale timestamp from finishing a *previous* draft's double-click must not make this
