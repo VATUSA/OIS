@@ -2169,6 +2169,35 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/v1/public/airports/{icao}": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * An airport's coordinates, for pointing a map at it.
+         * @description Public, under `/api/v1/public/`, for the same reason the desktop-download redirect is: these are
+         *     reference coordinates, the surface viewer needs no permission to open, and a GET with no
+         *     `RequirePermission` reads as an oversight anywhere else in `router.rs`.
+         *
+         *     One ICAO rather than the whole map. The caller needs the airport it is already showing, and
+         *     returning every entry to centre a map is the same mistake as shipping the 1.1 MB stand extract to
+         *     the browser.
+         *
+         *     `503` when the feed has not loaded the database yet — distinct from `404`, which means the
+         *     dataset genuinely has no such airport, so a client can tell "try again" from "wrong code".
+         */
+        get: operations["get_airport"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/v1/public/board": {
         parameters: {
             query?: never;
@@ -3547,6 +3576,20 @@ export interface components {
             source: string;
             /** Format: date-time */
             updated_at: string;
+        };
+        /** @description One airport's position. */
+        AirportPositionBody: {
+            /**
+             * Format: double
+             * @description Field elevation, feet MSL.
+             */
+            elevation_ft: number;
+            /** @description Uppercase ICAO, echoed so a caller can key a cache on the response alone. */
+            icao: string;
+            /** Format: double */
+            lat: number;
+            /** Format: double */
+            lon: number;
         };
         /**
          * @description An airport ramp or apron area. `rings` is an array of rings, each an array of `[lat, lon]`.
@@ -12466,6 +12509,42 @@ export interface operations {
                 content?: never;
             };
             401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+        };
+    };
+    get_airport: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /** @description ICAO identifier, case-insensitive */
+                icao: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["AirportPositionBody"];
+                };
+            };
+            /** @description No such airport in the dataset */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description The airport database has not loaded yet */
+            503: {
                 headers: {
                     [name: string]: unknown;
                 };
