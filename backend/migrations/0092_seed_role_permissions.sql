@@ -67,6 +67,12 @@ on conflict do nothing;
 
 -- Grant USER to everyone who already has an account. Without this the rows above reach nobody,
 -- because nothing has ever granted the role.
+--
+-- Deliberately unfiltered by identity.users.status. That column exists (0002:12, ACTIVE/INACTIVE/
+-- SUSPENDED) but **no code reads or writes it** — nothing sets a status and nothing gates on one, so
+-- every row is ACTIVE by default. Filtering here would imply an enforcement that does not exist, and
+-- would quietly cost a user their baseline if a status were ever set without the gate being wired.
+-- When suspension becomes real, it belongs in the login path, not in who holds the baseline group.
 insert into access.user_roles (user_id, role_name)
 select u.id, 'USER'
 from identity.users u
