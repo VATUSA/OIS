@@ -132,6 +132,22 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/v1/admin/groups/{name}/members": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get: operations["list_group_members"];
+        put?: never;
+        post: operations["add_group_member"];
+        delete: operations["remove_group_member"];
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/v1/admin/jobs": {
         parameters: {
             query?: never;
@@ -3362,7 +3378,16 @@ export interface components {
             cid: number;
             display_name: string;
             rating?: string | null;
+            /** @description Bare role names, scope flattened away. Kept as-is so nothing parsing it breaks. */
             roles: string[];
+            /**
+             * @description The same memberships *with* their scope — `EC` for national, `EC:ZDC` for a facility grant.
+             *
+             *     Added rather than changing `roles`' format (#546): a national `EC` and an `EC@ZDC` used to
+             *     render identically, which actively misled, but silently reinterpreting a `Vec<String>` would
+             *     have broken any consumer without the schema type moving to warn them.
+             */
+            scoped_roles: string[];
         };
         /**
          * @description One advisory. `number` is its identity within `facility` on `issued_day` — see
@@ -5237,6 +5262,36 @@ export interface components {
             /** Format: int64 */
             user_count: number;
         };
+        /** @description One holder of a group, at one scope. `artcc_id` null is national. */
+        GroupMemberBody: {
+            artcc_id?: string | null;
+            /** Format: int64 */
+            cid: number;
+            display_name: string;
+            rating?: string | null;
+        };
+        /** @description A page of a group's holders. */
+        GroupMemberPage: {
+            items: components["schemas"]["GroupMemberBody"][];
+            /** Format: int64 */
+            page: number;
+            /** Format: int64 */
+            page_size: number;
+            /** Format: int64 */
+            total: number;
+        };
+        /**
+         * @description Add or remove one membership, at one scope.
+         *
+         *     `artcc_id` is required on **removal** as well as addition: a user can hold the same group
+         *     nationally and at an ARTCC, so "remove EC from this user" is ambiguous without it.
+         */
+        GroupMemberRequest: {
+            artcc_id?: string | null;
+            /** Format: int64 */
+            cid: number;
+            reason: string;
+        };
         /**
          * @description One FCA-metered ground departure in the IDST console. One row per metering FCA — a flight metered
          *     by several FCAs appears once per FCA, each with its own release.
@@ -7014,6 +7069,147 @@ export interface operations {
                 content?: never;
             };
             409: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+        };
+    };
+    list_group_members: {
+        parameters: {
+            query?: {
+                /** @description Name substring or CID prefix */
+                q?: string;
+                /** @description 1-based page */
+                page?: number;
+                /** @description Rows per page (default 25, max 100) */
+                page_size?: number;
+            };
+            header?: never;
+            path: {
+                /** @description Group name */
+                name: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["GroupMemberPage"];
+                };
+            };
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+        };
+    };
+    add_group_member: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /** @description Group name */
+                name: string;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["GroupMemberRequest"];
+            };
+        };
+        responses: {
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["GroupMemberPage"];
+                };
+            };
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+        };
+    };
+    remove_group_member: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /** @description Group name */
+                name: string;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["GroupMemberRequest"];
+            };
+        };
+        responses: {
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["GroupMemberPage"];
+                };
+            };
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            404: {
                 headers: {
                     [name: string]: unknown;
                 };

@@ -27,8 +27,9 @@ use crate::{
     },
     errors::ApiError,
     models::{
-        AccessCatalogBody, AdminUserPage, CreateGroupRequest, GroupBody, ScopeAccess,
-        SelfAccessBody, UpdateGroupRequest, UpdateUserAccessRequest, UserAccessBody,
+        AccessCatalogBody, AdminUserPage, CreateGroupRequest, GroupBody, GroupMemberBody,
+        GroupMemberPage, GroupMemberRequest, ScopeAccess, SelfAccessBody, UpdateGroupRequest,
+        UpdateUserAccessRequest, UserAccessBody,
     },
     repos::{access as access_repo, audit as audit_repo, org as org_repo, users as user_repo},
     state::AppState,
@@ -1045,6 +1046,191 @@ mod group_tests {
         );
     }
 
+    // ---- #546: membership from the group side ----
+
+    /// AC4, the load-bearing one: **the two sides must produce identical state.**
+    ///
+    /// Both go through `set_user_role_manual_scoped`, so this proves the *wiring* rather than the
+    /// writer — which is the point of having one writer. Tested in both directions, because an add and
+    /// a remove fail differently: the user editor computes a symmetric diff over every assignable
+    /// group, while the group side names one, and a scope dropped on either path shows up here.
+    #[sqlx::test]
+    async fn both_sides_produce_the_same_membership(pool: PgPool) {
+        let user = seed_user(&pool).await;
+        make_group(&pool, "CONVERGE").await;
+
+        // Group side: grant at ZDC.
+        let mut tx = pool.begin().await.unwrap();
+        access_repo::set_user_role_manual_scoped(&mut tx, &user, "CONVERGE", true, Some("ZDC"))
+            .await
+            .unwrap();
+        tx.commit().await.unwrap();
+        let from_group = access_repo::fetch_user_role_grants(&pool, &user)
+            .await
+            .unwrap();
+
+        // Reset, then make the same change the way the user editor does.
+        let mut tx = pool.begin().await.unwrap();
+        access_repo::set_user_role_manual_scoped(&mut tx, &user, "CONVERGE", false, Some("ZDC"))
+            .await
+            .unwrap();
+        tx.commit().await.unwrap();
+        assert!(
+            access_repo::fetch_user_role_grants(&pool, &user)
+                .await
+                .unwrap()
+                .is_empty(),
+            "the reset must actually clear it, or the comparison below is vacuous"
+        );
+
+        let mut tx = pool.begin().await.unwrap();
+        access_repo::set_user_role_manual_scoped(&mut tx, &user, "CONVERGE", true, Some("ZDC"))
+            .await
+            .unwrap();
+        tx.commit().await.unwrap();
+        let from_user = access_repo::fetch_user_role_grants(&pool, &user)
+            .await
+            .unwrap();
+
+        assert_eq!(from_group, from_user);
+        assert_eq!(
+            from_group,
+            vec![(Some("ZDC".to_string()), "CONVERGE".to_string())]
+        );
+    }
+
+    /// Removing one scope must leave the other alone. The unique index allows holding a group both
+    /// nationally and at an ARTCC, so a remove that ignored `artcc_id` would quietly revoke both —
+    /// the ambiguity that makes `artcc_id` required on removal, not just on add.
+    #[sqlx::test]
+    async fn removing_one_scope_leaves_the_other(pool: PgPool) {
+        let user = seed_user(&pool).await;
+        make_group(&pool, "TWO_SCOPES").await;
+
+        let mut tx = pool.begin().await.unwrap();
+        access_repo::set_user_role_manual_scoped(&mut tx, &user, "TWO_SCOPES", true, None)
+            .await
+            .unwrap();
+        access_repo::set_user_role_manual_scoped(&mut tx, &user, "TWO_SCOPES", true, Some("ZDC"))
+            .await
+            .unwrap();
+        tx.commit().await.unwrap();
+        assert_eq!(
+            access_repo::fetch_user_role_grants(&pool, &user)
+                .await
+                .unwrap()
+                .len(),
+            2
+        );
+
+        let mut tx = pool.begin().await.unwrap();
+        access_repo::set_user_role_manual_scoped(&mut tx, &user, "TWO_SCOPES", false, Some("ZDC"))
+            .await
+            .unwrap();
+        tx.commit().await.unwrap();
+
+        assert_eq!(
+            access_repo::fetch_user_role_grants(&pool, &user)
+                .await
+                .unwrap(),
+            vec![(None, "TWO_SCOPES".to_string())],
+            "only the ZDC membership should go"
+        );
+    }
+
+    /// AC1: a holder appears once per scope, because that is what the data says — flattening them is
+    /// the mistake the admin user table's badges make.
+    #[sqlx::test]
+    async fn a_holder_appears_once_per_scope(pool: PgPool) {
+        let user = seed_user(&pool).await;
+        sqlx::query("update identity.users set cid = 123456 where id = $1")
+            .bind(&user)
+            .execute(&pool)
+            .await
+            .unwrap();
+        make_group(&pool, "MULTI").await;
+        let mut tx = pool.begin().await.unwrap();
+        access_repo::set_user_role_manual_scoped(&mut tx, &user, "MULTI", true, None)
+            .await
+            .unwrap();
+        access_repo::set_user_role_manual_scoped(&mut tx, &user, "MULTI", true, Some("ZDC"))
+            .await
+            .unwrap();
+        tx.commit().await.unwrap();
+
+        let members = access_repo::fetch_group_members(&pool, "MULTI", "", 25, 0)
+            .await
+            .unwrap();
+        assert_eq!(members.len(), 2);
+        assert_eq!(members[0].artcc_id, None, "national sorts first");
+        assert_eq!(members[1].artcc_id.as_deref(), Some("ZDC"));
+        assert_eq!(
+            access_repo::count_group_members(&pool, "MULTI", "")
+                .await
+                .unwrap(),
+            2
+        );
+    }
+
+    /// AC3: the actor must be able to make the grant *at that scope*. A ZDC-scoped EC may create an
+    /// EC at ZDC and nowhere else — which is the capability #546 exists to give them.
+    #[sqlx::test]
+    async fn membership_is_gated_by_the_actors_scope(pool: PgPool) {
+        let actor_id = seed_user(&pool).await;
+        make_group(&pool, "SCOPED_GRP").await;
+        sqlx::query(
+            "insert into access.role_permissions (role_name, permission_name) \
+             values ('SCOPED_GRP', 'events.config.update')",
+        )
+        .execute(&pool)
+        .await
+        .unwrap();
+        // The actor holds the bundled permission at ZDC only.
+        grant(&pool, &actor_id, "events.config.update", Some("ZDC")).await;
+        let state = test_state(pool, std::collections::HashMap::new());
+
+        assert!(
+            enforce_membership_scope(&state, &actor(&actor_id), "SCOPED_GRP", Some("ZDC"))
+                .await
+                .is_ok(),
+            "may grant where they hold it"
+        );
+        assert!(matches!(
+            enforce_membership_scope(&state, &actor(&actor_id), "SCOPED_GRP", Some("ZNY")).await,
+            Err(ApiError::Forbidden)
+        ));
+        assert!(
+            matches!(
+                enforce_membership_scope(&state, &actor(&actor_id), "SCOPED_GRP", None).await,
+                Err(ApiError::Forbidden)
+            ),
+            "a ZDC-scoped actor must not grant nationally"
+        );
+    }
+
+    /// Holding *some* of what a group bundles is not enough — granting it hands over all of it.
+    #[sqlx::test]
+    async fn partial_coverage_is_not_enough_to_grant_a_group(pool: PgPool) {
+        let actor_id = seed_user(&pool).await;
+        make_group(&pool, "TWO_PERMS").await;
+        for perm in ["events.config.update", "tmu.program.update"] {
+            sqlx::query(
+                "insert into access.role_permissions (role_name, permission_name) values ('TWO_PERMS', $1)",
+            )
+            .bind(perm)
+            .execute(&pool)
+            .await
+            .unwrap();
+        }
+        grant(&pool, &actor_id, "events.config.update", None).await;
+        let state = test_state(pool, std::collections::HashMap::new());
+
+        assert!(matches!(
+            enforce_membership_scope(&state, &actor(&actor_id), "TWO_PERMS", None).await,
+            Err(ApiError::Forbidden)
+        ));
+    }
+
     // ---- AC3: system groups ----
 
     /// Each of the four is protected, and by name rather than by `is_system` — which defaults to
@@ -1108,4 +1294,241 @@ mod group_tests {
             .collect();
         assert_eq!(derived, legacy);
     }
+}
+
+// ---- Group membership — VATUSA/OIS#546 ----
+
+/// Whether the actor may put someone in `role_name` at `artcc`.
+///
+/// The scope question, where [`enforce_group_scope`] asks the contents question. Granting a group hands
+/// over **everything that group bundles**, at the scope of the membership — so the actor must hold all
+/// of it *there*. `scope.allows(artcc)` is exactly that, and it comes from
+/// `fetch_effective_permissions` (#543), which honours scope and deny together. A ZDC-scoped EC can
+/// therefore make someone an EC at ZDC and nowhere else, which is the whole point of #546.
+async fn enforce_membership_scope(
+    state: &AppState,
+    actor: &CurrentUser,
+    role_name: &str,
+    artcc: Option<&str>,
+) -> Result<(), ApiError> {
+    let pool = state.db.as_ref().ok_or(ApiError::ServiceUnavailable)?;
+    let (actor_roles, _) = fetch_user_access(state.db.as_ref(), &actor.id).await?;
+    if is_server_admin(&actor_roles) {
+        return Ok(());
+    }
+    // Granting VATUSA_STAFF hands over the whole catalogue (#544); only a server admin may.
+    if role_name == "VATUSA_STAFF" {
+        return Err(ApiError::Forbidden);
+    }
+
+    let bundled = access_repo::fetch_group_permissions(pool, role_name).await?;
+    let held = access_repo::fetch_effective_permissions(pool, &actor.id).await?;
+    for name in &bundled {
+        let covered = held
+            .get(name.as_str())
+            .is_some_and(|scope| scope.allows(artcc));
+        if !covered {
+            tracing::warn!(
+                actor = actor.id.as_str(),
+                group = role_name,
+                artcc = artcc.unwrap_or("national"),
+                permission = name.as_str(),
+                "refused a membership grant the actor could not make directly"
+            );
+            return Err(ApiError::Forbidden);
+        }
+    }
+    Ok(())
+}
+
+#[derive(Deserialize)]
+pub struct MemberListQuery {
+    /// Name substring or CID prefix; empty lists every holder.
+    q: Option<String>,
+    page: Option<i64>,
+    page_size: Option<i64>,
+}
+
+#[utoipa::path(
+    get,
+    path = "/api/v1/admin/groups/{name}/members",
+    tag = "access",
+    params(
+        ("name" = String, Path, description = "Group name"),
+        ("q" = Option<String>, Query, description = "Name substring or CID prefix"),
+        ("page" = Option<i64>, Query, description = "1-based page"),
+        ("page_size" = Option<i64>, Query, description = "Rows per page (default 25, max 100)")
+    ),
+    responses((status = 200, body = GroupMemberPage), (status = 401), (status = 404))
+)]
+pub async fn list_group_members(
+    State(state): State<AppState>,
+    _permission: RequirePermission<AccessGroupsRead>,
+    Path(name): Path<String>,
+    Query(query): Query<MemberListQuery>,
+) -> Result<Json<GroupMemberPage>, ApiError> {
+    let pool = state.db.as_ref().ok_or(ApiError::ServiceUnavailable)?;
+    if access_repo::fetch_group(pool, &name).await?.is_none() {
+        return Err(ApiError::NotFound);
+    }
+    let q = query.q.unwrap_or_default().trim().to_string();
+    let page = query.page.unwrap_or(1).max(1);
+    let page_size = query.page_size.unwrap_or(25).clamp(1, 100);
+    let offset = (page - 1) * page_size;
+
+    let items = access_repo::fetch_group_members(pool, &name, &q, page_size, offset)
+        .await?
+        .into_iter()
+        .map(|row| GroupMemberBody {
+            cid: row.cid,
+            display_name: row.display_name,
+            rating: row.rating,
+            artcc_id: row.artcc_id,
+        })
+        .collect();
+    let total = access_repo::count_group_members(pool, &name, &q).await?;
+    Ok(Json(GroupMemberPage {
+        items,
+        total,
+        page,
+        page_size,
+    }))
+}
+
+/// Add or remove one membership. `held` decides which, so both paths share every check.
+async fn change_membership(
+    state: &AppState,
+    actor: &CurrentUser,
+    headers: &HeaderMap,
+    name: &str,
+    payload: GroupMemberRequest,
+    held: bool,
+) -> Result<Json<GroupMemberPage>, ApiError> {
+    let pool = state.db.as_ref().ok_or(ApiError::ServiceUnavailable)?;
+
+    let reason = payload.reason.trim();
+    if reason.is_empty() {
+        return Err(ApiError::BadRequest);
+    }
+    // Membership in a system group is not managed here: SERVER_ADMIN is env-reconciled on every login,
+    // USER is granted by the login path, and BOT/SERVICE_APP belong to service accounts (#545).
+    if access_repo::is_system_role(name) {
+        return Err(ApiError::Forbidden);
+    }
+    if access_repo::fetch_group(pool, name).await?.is_none() {
+        return Err(ApiError::NotFound);
+    }
+
+    let artcc = payload
+        .artcc_id
+        .as_deref()
+        .map(|value| value.trim().to_ascii_uppercase())
+        .filter(|value| !value.is_empty());
+    if let Some(artcc_id) = &artcc {
+        let known = org_repo::list_facilities(pool)
+            .await?
+            .into_iter()
+            .any(|facility| &facility.id == artcc_id);
+        if !known {
+            return Err(ApiError::BadRequest);
+        }
+    }
+
+    let target = access_repo::find_user_id_by_cid(pool, payload.cid)
+        .await?
+        .ok_or(ApiError::NotFound)?;
+
+    // Only adding needs the gate: removing a membership takes authority away, and an admin who can
+    // see the group may always do that. (Contrast the *contents* editor, where a removal is also a
+    // change to what holders can do and so is gated symmetrically.)
+    if held {
+        enforce_membership_scope(state, actor, name, artcc.as_deref()).await?;
+    }
+
+    let before = access_repo::fetch_user_role_grants(pool, &target).await?;
+
+    let mut tx = pool.begin().await.map_err(|_| ApiError::Internal)?;
+    // The same writer the user-side editor calls, so the two sides cannot produce different state
+    // (#546 AC4). Idempotent on add, keyed on the same scope on remove.
+    access_repo::set_user_role_manual_scoped(&mut tx, &target, name, held, artcc.as_deref())
+        .await?;
+    tx.commit().await.map_err(|_| ApiError::Internal)?;
+
+    let after = access_repo::fetch_user_role_grants(pool, &target).await?;
+    let actor_id = audit_repo::resolve_user_actor_id(pool, &actor.id, &actor.display_name).await?;
+    audit_repo::record_audit(
+        pool,
+        audit_repo::AuditEntry {
+            actor_id,
+            action: if held { "GRANT" } else { "REVOKE" }.to_string(),
+            resource_type: "ACCESS_GROUP_MEMBER".to_string(),
+            resource_id: Some(format!("{name}:{}", payload.cid)),
+            artcc_id: artcc.clone(),
+            reason: Some(reason.to_string()),
+            before_state: serde_json::to_value(&before).ok(),
+            after_state: serde_json::to_value(&after).ok(),
+            ip_address: audit_repo::client_ip(headers),
+        },
+    )
+    .await?;
+
+    state.publish(crate::realtime::topic::ACCESS_GRANTED);
+
+    let items = access_repo::fetch_group_members(pool, name, "", 25, 0)
+        .await?
+        .into_iter()
+        .map(|row| GroupMemberBody {
+            cid: row.cid,
+            display_name: row.display_name,
+            rating: row.rating,
+            artcc_id: row.artcc_id,
+        })
+        .collect();
+    let total = access_repo::count_group_members(pool, name, "").await?;
+    Ok(Json(GroupMemberPage {
+        items,
+        total,
+        page: 1,
+        page_size: 25,
+    }))
+}
+
+#[utoipa::path(
+    post,
+    path = "/api/v1/admin/groups/{name}/members",
+    tag = "access",
+    params(("name" = String, Path, description = "Group name")),
+    request_body = GroupMemberRequest,
+    responses((status = 200, body = GroupMemberPage), (status = 400), (status = 401), (status = 403), (status = 404))
+)]
+pub async fn add_group_member(
+    State(state): State<AppState>,
+    _permission: RequirePermission<AccessGroupsUpdate>,
+    Extension(current_user): Extension<Option<CurrentUser>>,
+    Path(name): Path<String>,
+    headers: HeaderMap,
+    Json(payload): Json<GroupMemberRequest>,
+) -> Result<Json<GroupMemberPage>, ApiError> {
+    let user = current_user.as_ref().ok_or(ApiError::Unauthorized)?;
+    change_membership(&state, user, &headers, &name, payload, true).await
+}
+
+#[utoipa::path(
+    delete,
+    path = "/api/v1/admin/groups/{name}/members",
+    tag = "access",
+    params(("name" = String, Path, description = "Group name")),
+    request_body = GroupMemberRequest,
+    responses((status = 200, body = GroupMemberPage), (status = 400), (status = 401), (status = 403), (status = 404))
+)]
+pub async fn remove_group_member(
+    State(state): State<AppState>,
+    _permission: RequirePermission<AccessGroupsUpdate>,
+    Extension(current_user): Extension<Option<CurrentUser>>,
+    Path(name): Path<String>,
+    headers: HeaderMap,
+    Json(payload): Json<GroupMemberRequest>,
+) -> Result<Json<GroupMemberPage>, ApiError> {
+    let user = current_user.as_ref().ok_or(ApiError::Unauthorized)?;
+    change_membership(&state, user, &headers, &name, payload, false).await
 }

@@ -92,7 +92,14 @@ pub struct AdminUserRow {
     pub cid: i64,
     pub display_name: String,
     pub rating: Option<String>,
+    /// Bare role names, scope flattened away. Kept as-is so nothing parsing it breaks.
     pub roles: Vec<String>,
+    /// The same memberships *with* their scope — `EC` for national, `EC:ZDC` for a facility grant.
+    ///
+    /// Added rather than changing `roles`' format (#546): a national `EC` and an `EC@ZDC` used to
+    /// render identically, which actively misled, but silently reinterpreting a `Vec<String>` would
+    /// have broken any consumer without the schema type moving to warn them.
+    pub scoped_roles: Vec<String>,
 }
 
 /// A page of the access-admin user browser.
@@ -183,6 +190,36 @@ pub struct GroupBody {
     pub system: bool,
     pub user_count: i64,
     pub service_account_count: i64,
+}
+
+/// One holder of a group, at one scope. `artcc_id` null is national.
+#[derive(Debug, Serialize, ToSchema)]
+pub struct GroupMemberBody {
+    pub cid: i64,
+    pub display_name: String,
+    pub rating: Option<String>,
+    pub artcc_id: Option<String>,
+}
+
+/// A page of a group's holders.
+#[derive(Debug, Serialize, ToSchema)]
+pub struct GroupMemberPage {
+    pub items: Vec<GroupMemberBody>,
+    pub total: i64,
+    pub page: i64,
+    pub page_size: i64,
+}
+
+/// Add or remove one membership, at one scope.
+///
+/// `artcc_id` is required on **removal** as well as addition: a user can hold the same group
+/// nationally and at an ARTCC, so "remove EC from this user" is ambiguous without it.
+#[derive(Debug, Deserialize, ToSchema)]
+pub struct GroupMemberRequest {
+    pub cid: i64,
+    #[serde(default)]
+    pub artcc_id: Option<String>,
+    pub reason: String,
 }
 
 /// Create a group. Its permission set is set by a follow-up `PUT`, which is also what runs the
