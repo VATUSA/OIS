@@ -1037,10 +1037,14 @@ mod tests {
         assert!(!scope.is_national());
     }
 
-    /// SERVER_ADMIN is national whatever else is on the row, and a deny must not narrow it —
-    /// it stays env-bootstrapped and un-narrowable.
+    /// SERVER_ADMIN carries the whole catalogue nationally, with no grant rows of its own.
+    ///
+    /// Only that — there is deliberately no deny here. The *role* is un-narrowable because it is
+    /// env-bootstrapped, but a deny row is a different lever and it still applies to an admin: see
+    /// `a_deny_narrows_even_a_server_admin` below, which is the other half of this behaviour and
+    /// must not be reconciled with this one by weakening either.
     #[sqlx::test]
-    async fn a_server_admin_is_national_and_cannot_be_denied_away(pool: sqlx::PgPool) {
+    async fn a_server_admin_is_national_by_default(pool: sqlx::PgPool) {
         let user: String = sqlx::query_scalar(
             "insert into identity.users (full_name, display_name) values ('T', 'T') returning id",
         )
