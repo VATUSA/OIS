@@ -281,7 +281,11 @@ export function SurfaceMap({
 
   const handleDragStart = (info: PickingInfo, event: unknown) => {
     if (draft && info.layer?.id === "surface-draft-vertices" && info.index != null && info.index >= 0) {
-      dragIndex.current = info.index;
+      // The handle's own vertex index, not deck's index into the layer data. Those diverge as
+      // soon as the handles are capped (`handleVertices`), and reading the wrong one moves a
+      // different vertex than the one under the cursor (#538).
+      dragIndex.current =
+        (info.object as { index?: number } | undefined)?.index ?? info.index;
       setDraggingVertex(true);
       (event as { stopPropagation?: () => void })?.stopPropagation?.();
     }
