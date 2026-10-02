@@ -61,9 +61,14 @@ pub async fn fetch_service_account_access(
 }
 
 /// An API key's *capped* effective permissions: the key's granted set intersected with the owner's
-/// current effective access. A permission survives only if (a) the owner effectively holds it (the
-/// effective view honors explicit denies), (b) it isn't denylisted for keys, and (c) the intersection
-/// of the owner's scope and the key's granted scope for it is non-empty. Keys hold no roles.
+/// current effective access. A permission survives only if the owner still effectively holds it at
+/// some scope, it isn't denylisted for keys, and the intersection of the owner's scope with the key's
+/// granted scope is non-empty. Keys hold no roles.
+///
+/// One owner resolution for the whole key (#543). This used to run *two* queries per key permission
+/// inside the loop — the effective-name set for the deny semantics and `permission_scope` for the
+/// scope — because neither resolver answered both halves. Now one call does, and the per-permission
+/// query is gone.
 pub async fn fetch_api_key_access(
     pool: Option<&PgPool>,
     api_key: &crate::auth::context::CurrentApiKey,
@@ -72,20 +77,18 @@ pub async fn fetch_api_key_access(
         return Ok((Vec::new(), Vec::new()));
     };
 
-    let owner_names: std::collections::HashSet<String> =
-        access_repo::fetch_user_permission_names(pool, &api_key.owner_user_id)
-            .await?
-            .into_iter()
-            .collect();
+    let owner = access_repo::fetch_effective_permissions(pool, &api_key.owner_user_id).await?;
     let key_names = api_keys_repo::fetch_key_permission_names(pool, &api_key.id).await?;
 
     let mut effective = Vec::new();
     for name in key_names {
-        if !owner_names.contains(&name) || api_keys_repo::is_forbidden_for_key(&name) {
+        if api_keys_repo::is_forbidden_for_key(&name) {
             continue;
         }
-        let owner_scope =
-            access_repo::permission_scope(pool, &api_key.owner_user_id, &name).await?;
+        // Absent, or present but denied down to nothing, both mean the owner no longer holds it.
+        let Some(owner_scope) = owner.get(&name).filter(|scope| !scope.is_empty()) else {
+            continue;
+        };
         let key_scope = api_keys_repo::key_granted_scope(pool, &api_key.id, &name).await?;
         if !owner_scope.intersect(&key_scope).is_empty() {
             effective.push(name);

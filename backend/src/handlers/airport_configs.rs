@@ -507,7 +507,7 @@ mod tests {
         // though KORD's *stored* value also says ZDC.
         let rows = config_repo::list_all(&pool).await.unwrap();
         let filtered =
-            annotate_and_filter(rows, &facilities, &PermissionScope::National, Some("ZDC"));
+            annotate_and_filter(rows, &facilities, &PermissionScope::national(), Some("ZDC"));
         assert_eq!(
             filtered.iter().map(|r| r.icao.as_str()).collect::<Vec<_>>(),
             ["KDCA"]
