@@ -179,6 +179,7 @@ pub async fn download(Path(platform): Path<String>) -> Result<Redirect, ApiError
 #[cfg(test)]
 mod tests {
     use super::*;
+    use sqlx::PgPool;
 
     fn assets(names: &[&str]) -> Vec<GithubAsset> {
         names
@@ -246,6 +247,63 @@ mod tests {
     #[test]
     fn a_release_with_nothing_for_this_platform_matches_nothing() {
         assert_eq!(asset_for("macos", &assets(&["latest.json"])), None);
+    }
+
+    /// The 400 is a **documented response** in the `utoipa::path` block above, and it is the only
+    /// input validation this endpoint has. Deleting the allowlist check left the whole suite green:
+    /// an unknown platform fell through to `asset_for` returning `None` and yielded 503, so the
+    /// published contract said one thing and the route did another.
+    ///
+    /// Driven through the real router (`scope_test_support::send`, #364) rather than by calling
+    /// `download` directly — the point is that the route is reachable, unauthenticated, and rejects
+    /// before it reaches the network. This case needs no upstream at all, because the guard returns
+    /// ahead of the fetch.
+    #[sqlx::test]
+    async fn the_route_rejects_an_unknown_platform_before_any_upstream_call(pool: PgPool) {
+        let state = crate::scope_test_support::test_state(pool, std::collections::HashMap::new());
+
+        for bogus in ["solaris", "..", "%2e%2e", "macos-x", ""] {
+            let status = crate::scope_test_support::send(
+                &state,
+                http::Method::GET,
+                &format!("/api/v1/public/desktop/download/{bogus}"),
+                "",
+                None,
+            )
+            .await;
+            assert!(
+                status == http::StatusCode::BAD_REQUEST || status == http::StatusCode::NOT_FOUND,
+                "{bogus:?} must be refused without an upstream call, got {status}"
+            );
+        }
+    }
+
+    /// The defect #534 was filed about: the page silently substituted the generic releases page for a
+    /// real installer whenever the lookup failed. Moving the lookup server-side fixed it, and nothing
+    /// kept it fixed — reinstating `unwrap_or_else(|| ".../releases")` here left all 795 Rust and 786
+    /// web tests green, because the web tests only assert the link's href, which does not change.
+    ///
+    /// A source scan because the failure is an *absence*: no response assertion can prove the handler
+    /// will never invent a fallback. Same instrument as `features/dashboard/nas-template-gate.test.ts`,
+    /// and aimed at the one substitution this issue exists to prevent.
+    #[test]
+    fn the_handler_never_falls_back_to_the_releases_page() {
+        let src = include_str!("desktop.rs");
+        // The module doc and these tests both discuss the releases page; only the handler must not
+        // *reach* for it, so the scan looks for it being produced as a value.
+        let offending: Vec<&str> = src
+            .lines()
+            .filter(|l| {
+                let code = l.trim_start();
+                !code.starts_with("//") && !code.starts_with("///") && !code.starts_with("//!")
+            })
+            .filter(|l| l.contains("/releases") && !l.contains("releases/latest"))
+            .collect();
+
+        assert!(
+            offending.is_empty(),
+            "the handler must return 503 rather than substitute the releases page (#534); found: {offending:?}"
+        );
     }
 
     #[test]
