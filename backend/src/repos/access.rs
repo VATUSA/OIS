@@ -1065,4 +1065,46 @@ mod tests {
             "national authority covers a resource with no owning ARTCC"
         );
     }
+
+    /// An explicit deny narrows even a SERVER_ADMIN — and that is **pre-existing** behaviour, not
+    /// something #543 introduced: the old view's anti-join ran over the whole candidate set,
+    /// `server_admin_permissions` included, so a deny removed the permission from an admin too.
+    ///
+    /// Pinned because a resolver rewrite is exactly where it could be lost, and because
+    /// "SERVER_ADMIN is untouchable" is an easy thing to assume. What is untouchable is the *role*:
+    /// it stays env-bootstrapped. A deny row is a different lever, and it still works.
+    #[sqlx::test]
+    async fn a_deny_narrows_even_a_server_admin(pool: sqlx::PgPool) {
+        let user: String = sqlx::query_scalar(
+            "insert into identity.users (full_name, display_name) values ('T', 'T') returning id",
+        )
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        sqlx::query(
+            "insert into access.user_roles (user_id, role_name) values ($1, 'SERVER_ADMIN')",
+        )
+        .bind(&user)
+        .execute(&pool)
+        .await
+        .unwrap();
+        crate::scope_test_support::deny_scoped(&pool, &user, "events.config.update", Some("ZDC"))
+            .await;
+
+        let scope = super::permission_scope(&pool, &user, "events.config.update")
+            .await
+            .unwrap();
+        assert!(scope.is_national(), "still national overall");
+        assert!(!scope.allows(Some("ZDC")), "but not at the denied ARTCC");
+        assert!(scope.allows(Some("ZNY")), "and untouched elsewhere");
+
+        // A national deny takes it away entirely, as it did before.
+        crate::scope_test_support::deny_scoped(&pool, &user, "events.rate.update", None).await;
+        assert!(
+            super::permission_scope(&pool, &user, "events.rate.update")
+                .await
+                .unwrap()
+                .is_empty()
+        );
+    }
 }
