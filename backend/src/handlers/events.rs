@@ -25,12 +25,12 @@ use crate::{
     feed,
     models::{
         AddPackageItemRequest, AirportRateBody, AirportStatBody, CombinedStatBody,
-        CreateGroundStopRequest, CreatePackageRequest, CreateTmiRequest, DccRequestBody,
-        EventAvailabilityBody, EventBody, EventCaptureBody, EventDebriefBody, EventStatsBody,
-        FacilitySupportBody, FcaBody, KeyCountBody, SetFcaAutoRequest, Tier1GenerateResult,
-        TmiPackageBody, UpdateDccRequest, UpdateEventCaptureRequest, UpdateEventDebriefRequest,
-        UpsertAirportRateRequest, UpsertFacilitySupportRequest, UpsertFcaRequest,
-        UpsertProgramRequest,
+        CreateAdvisoryRequest, CreateGroundStopRequest, CreatePackageRequest, CreateTmiRequest,
+        DccRequestBody, EventAvailabilityBody, EventBody, EventCaptureBody, EventDebriefBody,
+        EventStatsBody, FacilitySupportBody, FcaBody, KeyCountBody, SetFcaAutoRequest,
+        Tier1GenerateResult, TmiPackageBody, UpdateDccRequest, UpdateEventCaptureRequest,
+        UpdateEventDebriefRequest, UpsertAirportRateRequest, UpsertFacilitySupportRequest,
+        UpsertFcaRequest, UpsertProgramRequest,
     },
     repos::{
         access as access_repo, ace as ace_repo, availability as availability_repo,
@@ -75,6 +75,28 @@ struct GroundStopItem {
     scope: Option<String>,
     #[serde(default)]
     until: Option<String>,
+}
+
+/// An ADVZY advisory planned for an event (#537).
+///
+/// Mirrors `RestrictionItem`: it carries the structured fields the authoring UI produces, so a
+/// planner sees the real document before the event goes live, and activation renders it through the
+/// same path `POST /tmu/advisories` uses rather than a second renderer.
+///
+/// `valid_from`/`valid_to` are the **enforceable** window, not the period printed in the document.
+/// They are required here — unlike on `CreateAdvisoryRequest`, where they are optional for the
+/// existing callers — because an advisory with no window would never be removed, and automatic
+/// removal is half of what this issue asks for.
+#[derive(Debug, Deserialize, Serialize)]
+struct AdvisoryItem {
+    facility: String,
+    kind: String,
+    #[serde(default)]
+    body: String,
+    #[serde(default)]
+    structured: Option<Value>,
+    valid_from: DateTime<Utc>,
+    valid_to: DateTime<Utc>,
 }
 
 /// Validate + normalize a package item's payload for its kind (canonical for storage).
@@ -123,8 +145,48 @@ fn normalize_item(kind: &str, payload: Value) -> Result<Value, ApiError> {
                 .filter(|s| !s.is_empty());
             serde_json::to_value(g).map_err(|_| ApiError::Internal)
         }
+        "advisory" => {
+            let mut a: AdvisoryItem =
+                serde_json::from_value(payload).map_err(|_| ApiError::BadRequest)?;
+            // Uppercased for the same reason the restriction arm uppercases its ARTCCs: the facility
+            // is matched against the facility map and scoped permission grants, both keyed uppercase.
+            a.facility = a.facility.trim().to_ascii_uppercase();
+            a.kind = a.kind.trim().to_string();
+            a.body = a.body.trim().to_string();
+            if a.facility.is_empty() || a.kind.is_empty() {
+                return Err(ApiError::BadRequest);
+            }
+            // An inverted or empty window would either never fire or fire immediately; neither is
+            // something a planner can have meant, and both are silent once the package is activated.
+            if a.valid_to <= a.valid_from {
+                return Err(ApiError::BadRequest);
+            }
+            // The document is the contract when nothing will render it — the same rule
+            // `create_advisory` applies via `derives_body`, kept consistent so a kind that renders
+            // nothing cannot be stored with an empty document (#499).
+            if !crate::repos::tmu::derives_body(&a.kind, a.structured.as_ref()) && a.body.is_empty()
+            {
+                return Err(ApiError::BadRequest);
+            }
+            serde_json::to_value(a).map_err(|_| ApiError::Internal)
+        }
         _ => Err(ApiError::BadRequest),
     }
+}
+
+/// The facility an `advisory` item will issue under, for the scope check at authoring time.
+///
+/// Returns `None` for every other kind, so a caller can gate on "is this an advisory" and the
+/// facility lookup in one step.
+fn advisory_item_facility(kind: &str, payload: &Value) -> Option<String> {
+    if kind != "advisory" {
+        return None;
+    }
+    payload
+        .get("facility")
+        .and_then(Value::as_str)
+        .map(|f| f.trim().to_ascii_uppercase())
+        .filter(|f| !f.is_empty())
 }
 
 const DCC_STATUSES: [&str; 3] = ["not_needed", "requested", "confirmed"];
@@ -993,6 +1055,8 @@ pub async fn delete_event_package(
 pub async fn add_event_package_item(
     State(state): State<AppState>,
     _permission: RequirePermission<EventsPlanUpdate>,
+    Extension(current_user): Extension<Option<CurrentUser>>,
+    Extension(current_api_key): Extension<Option<CurrentApiKey>>,
     Path((id, package_id)): Path<(i64, String)>,
     Json(payload): Json<AddPackageItemRequest>,
 ) -> Result<Json<Vec<TmiPackageBody>>, ApiError> {
@@ -1001,6 +1065,18 @@ pub async fn add_event_package_item(
         return Err(ApiError::Conflict); // can't edit an activated package
     }
     let canonical = normalize_item(&payload.kind, payload.payload)?;
+    // An advisory is a numbered, facility-attributed DCC document, so `EventsPlanUpdate` alone is not
+    // enough authority to plan one: without this a ZDC planner could queue an advisory to be issued
+    // in ZNY's name. `create_advisory` already enforces exactly this on the direct path, and this is
+    // the same check against the same permission (#537).
+    //
+    // It is enforced **here, at authoring**, because that is the one moment a principal is guaranteed
+    // to exist. `auto_publish` activates a package from a 60-second job with no user at all, so an
+    // activation-time check cannot be the only gate without leaving auto-publish ungated.
+    if let Some(facility) = advisory_item_facility(&payload.kind, &canonical) {
+        let principal = Principal::require(current_user.as_ref(), current_api_key.as_ref())?;
+        require_advisory_authority(&state, &principal, &facility).await?;
+    }
     events_repo::add_package_item(pool, &package_id, &payload.kind, &canonical).await?;
     Ok(Json(events_repo::list_packages(pool, id).await?))
 }
@@ -1043,15 +1119,72 @@ pub async fn activate_event_package(
     State(state): State<AppState>,
     _permission: RequirePermission<EventsPlanUpdate>,
     Extension(current_user): Extension<Option<CurrentUser>>,
+    Extension(current_api_key): Extension<Option<CurrentApiKey>>,
     Path((id, package_id)): Path<(i64, String)>,
 ) -> Result<Json<Vec<TmiPackageBody>>, ApiError> {
     let user = current_user.as_ref().ok_or(ApiError::Unauthorized)?;
+    let principal = Principal::require(current_user.as_ref(), current_api_key.as_ref())?;
     let pool = state.db.as_ref().ok_or(ApiError::ServiceUnavailable)?;
     if package_status(pool, id, &package_id).await? != "draft" {
         return Err(ApiError::Conflict); // already activated
     }
+    // Re-checked here, not only when the item was added (#537). The item could have been queued by a
+    // planner whose scope has since been narrowed, and activation is the moment the document actually
+    // gets issued under a facility's name.
+    //
+    // Deliberately in the handler rather than inside `activate_package`: the other caller is
+    // `spawn_event_package_lifecycle`'s auto-publish, which runs with no principal at all and so
+    // cannot perform this check. Putting it here makes that asymmetry visible at the two call sites
+    // instead of hiding it behind an `Option<Principal>` that is always `None` for one of them. The
+    // add-time check is what covers the auto-publish path.
+    require_advisory_scope_for_package(&state, &principal, pool, &package_id).await?;
     activate_package(pool, id, &package_id, &user.id).await?;
     Ok(Json(events_repo::list_packages(pool, id).await?))
+}
+
+/// `tmu.adv.create`, for `facility`, keeping this codebase's 401/403 split.
+///
+/// `handlers::tmu::require_advisory_scope` answers only "does the scope allow it", returning 403 for
+/// both "not held at all" and "held, but elsewhere" — correct there, because every one of its callers
+/// has already run `RequirePermission<TmuAdvCreate>` and so turned the first case into a 401 before
+/// it is reached. This handler cannot do that: the route serves four item kinds and only one of them
+/// needs the advisory permission, so the extractor would tighten the other three.
+///
+/// So the two cases are separated here instead: an empty scope is the permission being absent (401),
+/// and a non-empty scope that does not cover the facility is the wrong facility (403). That is the
+/// convention stated at `handlers::tmu`'s advisory tests — "401 for every absent permission, and 403
+/// is reserved for a wrong facility scope".
+async fn require_advisory_authority(
+    state: &AppState,
+    principal: &Principal,
+    facility: &str,
+) -> Result<(), ApiError> {
+    let scope = principal.permission_scope(state, "tmu.adv.create").await?;
+    if scope.is_empty() {
+        return Err(ApiError::Unauthorized);
+    }
+    if !scope.allows(Some(facility)) {
+        return Err(ApiError::Forbidden);
+    }
+    Ok(())
+}
+
+/// Check `tmu.adv.create` scope for every `advisory` item in a package.
+///
+/// Returns `Forbidden` on the first item the principal cannot issue for, leaving the package a draft:
+/// a partial activation is worse than a refused one, so this runs before anything is materialized.
+async fn require_advisory_scope_for_package(
+    state: &AppState,
+    principal: &Principal,
+    pool: &sqlx::PgPool,
+    package_id: &str,
+) -> Result<(), ApiError> {
+    for item in events_repo::list_package_items(pool, package_id).await? {
+        if let Some(facility) = advisory_item_facility(&item.kind, &item.payload.0) {
+            require_advisory_authority(state, principal, &facility).await?;
+        }
+    }
+    Ok(())
 }
 
 /// Materialize a draft package's items into the live TMU tables (programs/restrictions/ground stops),
@@ -1148,6 +1281,61 @@ pub(crate) async fn activate_package(
                 tmu_repo::publish_ground_stop(pool, &gs_id, actor).await?;
                 gs_id
             }
+            "advisory" => {
+                let a: AdvisoryItem =
+                    serde_json::from_value(payload).map_err(|_| ApiError::Internal)?;
+                let req = CreateAdvisoryRequest {
+                    facility: a.facility.clone(),
+                    kind: a.kind.clone(),
+                    body: a.body.clone(),
+                    structured: a.structured.clone(),
+                    decoded: None,
+                    // The planned window, carried through to the column the cleanup pass reads.
+                    valid_from: Some(a.valid_from),
+                    valid_to: Some(a.valid_to),
+                };
+
+                // Resolved **before** the transaction, for the reason `create_advisory_tx` documents:
+                // it allocates the number behind `pg_advisory_xact_lock(facility:day)` and holds that
+                // lock for the rest of the transaction. A channel lookup inside it would hold the
+                // facility's numbering lock across an unrelated query, and with several advisory items
+                // in one package those locks queue up behind each other.
+                //
+                // Scoped to the issuing facility, as `publish_advisory` does: an advisory has exactly
+                // one owner, unlike a TMI with its requesting and providing ARTCCs.
+                let channel = integration_repo::channel_id(
+                    pool,
+                    crate::handlers::tmu::ADV_CHANNEL,
+                    Some(&a.facility),
+                )
+                .await?;
+
+                // One transaction per item: create, publish and enqueue together so an advisory can
+                // never be live with nothing queued to announce it, or queued without being live —
+                // then committed, which releases the numbering lock before the next item takes it.
+                let mut tx = pool.begin().await.map_err(|_| ApiError::Internal)?;
+                let adv_id = tmu_repo::create_advisory_tx(&mut tx, &req, actor, None).await?;
+                if !tmu_repo::publish_advisory(&mut tx, &adv_id, actor).await? {
+                    // It was created in this transaction, so this cannot be "already published".
+                    return Err(ApiError::Internal);
+                }
+                let adv = tmu_repo::get_advisory_tx(&mut tx, &adv_id)
+                    .await?
+                    .ok_or(ApiError::Internal)?;
+                if let Some(channel_id) = channel {
+                    let job = crate::handlers::tmu::advisory_publish_job(&channel_id, &adv);
+                    integration_repo::enqueue_job(
+                        &mut tx,
+                        "adv_publish",
+                        &job,
+                        Some("advisory"),
+                        Some(adv.id.as_str()),
+                    )
+                    .await?;
+                }
+                tx.commit().await.map_err(|_| ApiError::Internal)?;
+                adv_id
+            }
             _ => continue,
         };
         events_repo::set_item_live_ref(pool, &item.id, &live_ref).await?;
@@ -1203,6 +1391,15 @@ pub(crate) async fn deactivate_package(
             }
             "ground_stop" => {
                 tmu_repo::cancel_ground_stop(pool, reference).await?;
+            }
+            "advisory" => {
+                // `cancel_advisory` takes a transaction while the arms above take the pool. Opening
+                // one here rather than changing that signature: three other callers depend on it,
+                // and two of them cancel an advisory inside the same transaction as the program
+                // publish it belongs to, which is the property that signature exists to give them.
+                let mut tx = pool.begin().await.map_err(|_| ApiError::Internal)?;
+                tmu_repo::cancel_advisory(&mut tx, reference).await?;
+                tx.commit().await.map_err(|_| ApiError::Internal)?;
             }
             _ => {}
         }
@@ -2156,5 +2353,426 @@ mod tests {
         .unwrap();
         assert_eq!(item["requesting"], "ZDC");
         assert_eq!(item["providing"], "ZNY");
+    }
+}
+
+#[cfg(test)]
+mod advisory_package_tests {
+    //! Advisory items in an event TMI package (VATUSA/OIS#537).
+
+    use chrono::{Duration, Utc};
+    use serde_json::json;
+    use sqlx::PgPool;
+
+    use super::*;
+
+    const EVENT: i64 = 737;
+
+    async fn seed_event(pool: &PgPool) -> String {
+        // The shared seeder rather than a hand-written insert: `identity.users` has `full_name`,
+        // not `first_name`/`last_name`, and guessing its columns is how this failed first time.
+        let user = crate::scope_test_support::seed_user(pool).await;
+        sqlx::query(
+            "insert into events.event (id, title, start_time, end_time, facility) \
+             values ($1, 'Advisory Test', now(), now() + interval '2 hours', 'ZDC')",
+        )
+        .bind(EVENT)
+        .execute(pool)
+        .await
+        .unwrap();
+        user
+    }
+
+    /// A valid advisory item payload, `n` distinguishing its document text.
+    fn item(facility: &str, n: u32) -> serde_json::Value {
+        let from = Utc::now();
+        json!({
+            "facility": facility,
+            "kind": "reroute",
+            "body": format!("vATCSCC ADVZY {n}"),
+            "valid_from": from,
+            "valid_to": from + Duration::hours(2),
+        })
+    }
+
+    async fn package_with(pool: &PgPool, actor: &str, items: &[serde_json::Value]) -> String {
+        let pkg = events_repo::create_package(pool, EVENT, "Plan", actor)
+            .await
+            .unwrap();
+        for it in items {
+            let canonical = normalize_item("advisory", it.clone()).unwrap();
+            events_repo::add_package_item(pool, &pkg, "advisory", &canonical)
+                .await
+                .unwrap();
+        }
+        pkg
+    }
+
+    async fn advisories(pool: &PgPool) -> Vec<(String, i32, String, String)> {
+        sqlx::query_as("select id, number, status, facility from tmu.advisories order by number")
+            .fetch_all(pool)
+            .await
+            .unwrap()
+    }
+
+    /// AC2: activation issues *and publishes* the advisory, numbered for its facility.
+    #[sqlx::test]
+    async fn activating_a_package_issues_and_publishes_the_advisory(pool: PgPool) {
+        let actor = seed_event(&pool).await;
+        let pkg = package_with(&pool, &actor, &[item("DCC", 1)]).await;
+
+        activate_package(&pool, EVENT, &pkg, &actor).await.unwrap();
+
+        let rows = advisories(&pool).await;
+        assert_eq!(rows.len(), 1, "one advisory");
+        assert_eq!(rows[0].1, 1, "numbered from 1 for this facility and day");
+        assert_eq!(
+            rows[0].2, "published",
+            "activation publishes, not just drafts"
+        );
+        assert_eq!(rows[0].3, "DCC");
+
+        // `live_ref` is what lets deactivation cancel exactly what activation created. Read from the
+        // table rather than the API body, which does not expose it.
+        let live_ref: Option<String> = sqlx::query_scalar(
+            "select live_ref from events.tmi_package_item where package_id = $1",
+        )
+        .bind(&pkg)
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        assert_eq!(
+            live_ref.as_deref(),
+            Some(rows[0].0.as_str()),
+            "the item points at the advisory it created"
+        );
+    }
+
+    /// AC5: several advisory items in one package all activate, each numbered, none lost. The
+    /// numbering lock is per facility-day, so these contend on the same lock by construction.
+    #[sqlx::test]
+    async fn a_package_with_several_advisories_activates_completely(pool: PgPool) {
+        let actor = seed_event(&pool).await;
+        let pkg = package_with(
+            &pool,
+            &actor,
+            &[item("DCC", 1), item("DCC", 2), item("DCC", 3)],
+        )
+        .await;
+
+        activate_package(&pool, EVENT, &pkg, &actor).await.unwrap();
+
+        let rows = advisories(&pool).await;
+        assert_eq!(rows.len(), 3, "no item was skipped or lost to the lock");
+        let numbers: Vec<i32> = rows.iter().map(|r| r.1).collect();
+        assert_eq!(
+            numbers,
+            [1, 2, 3],
+            "each took the next number, none duplicated"
+        );
+        assert!(
+            rows.iter().all(|r| r.2 == "published"),
+            "all published, not left as drafts"
+        );
+        let unlinked: i64 = sqlx::query_scalar(
+            "select count(*) from events.tmi_package_item \
+             where package_id = $1 and live_ref is null",
+        )
+        .bind(&pkg)
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        assert_eq!(unlinked, 0, "every item recorded its live_ref");
+    }
+
+    /// AC4: deactivation cancels it.
+    #[sqlx::test]
+    async fn deactivating_a_package_cancels_its_advisory(pool: PgPool) {
+        let actor = seed_event(&pool).await;
+        let pkg = package_with(&pool, &actor, &[item("DCC", 1)]).await;
+        activate_package(&pool, EVENT, &pkg, &actor).await.unwrap();
+
+        deactivate_package(&pool, &pkg, &actor).await.unwrap();
+
+        assert_eq!(advisories(&pool).await[0].2, "cancelled");
+    }
+
+    /// AC4 for several: deactivation must cancel *all* of them, not just the first.
+    #[sqlx::test]
+    async fn deactivating_cancels_every_advisory_in_the_package(pool: PgPool) {
+        let actor = seed_event(&pool).await;
+        let pkg = package_with(&pool, &actor, &[item("DCC", 1), item("DCC", 2)]).await;
+        activate_package(&pool, EVENT, &pkg, &actor).await.unwrap();
+
+        deactivate_package(&pool, &pkg, &actor).await.unwrap();
+
+        let rows = advisories(&pool).await;
+        assert_eq!(rows.len(), 2);
+        assert!(rows.iter().all(|r| r.2 == "cancelled"), "both cancelled");
+    }
+
+    /// AC1: the window reaches the column the cleanup pass reads. Without this the advisory would
+    /// activate correctly and then never be removed, which is half the issue unfixed.
+    #[sqlx::test]
+    async fn the_planned_window_is_stored_on_the_advisory(pool: PgPool) {
+        let actor = seed_event(&pool).await;
+        let pkg = package_with(&pool, &actor, &[item("DCC", 1)]).await;
+
+        activate_package(&pool, EVENT, &pkg, &actor).await.unwrap();
+
+        let (from, to): (Option<DateTime<Utc>>, Option<DateTime<Utc>>) =
+            sqlx::query_as("select valid_from, valid_to from tmu.advisories")
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+        assert!(from.is_some(), "valid_from stored");
+        let to = to.expect("valid_to stored");
+        assert!(to > Utc::now(), "and it is the planned future end");
+    }
+
+    // --- normalize_item (no DB) ---
+
+    /// The facility is matched against the facility map and scoped grants, both keyed uppercase —
+    /// the same reason the restriction arm uppercases its ARTCCs.
+    #[test]
+    fn an_advisory_items_facility_is_uppercased() {
+        let it = normalize_item("advisory", item(" dcc ", 1)).unwrap();
+        assert_eq!(it["facility"], "DCC");
+    }
+
+    /// An inverted or empty window would either never fire or fire the instant the package went
+    /// live, and both are silent once activated.
+    #[test]
+    fn an_inverted_or_empty_window_is_rejected() {
+        let now = Utc::now();
+        for (from, to) in [(now, now), (now, now - Duration::hours(1))] {
+            let bad = json!({
+                "facility": "DCC", "kind": "reroute", "body": "x",
+                "valid_from": from, "valid_to": to,
+            });
+            assert!(
+                normalize_item("advisory", bad).is_err(),
+                "valid_to <= valid_from must not be storable"
+            );
+        }
+    }
+
+    /// A window is required here even though `CreateAdvisoryRequest` leaves it optional: an advisory
+    /// with none would never be auto-removed, and removal is half of what #537 asks for.
+    #[test]
+    fn an_advisory_item_without_a_window_is_rejected() {
+        let no_window = json!({"facility": "DCC", "kind": "reroute", "body": "x"});
+        assert!(normalize_item("advisory", no_window).is_err());
+    }
+
+    /// The same rule `create_advisory` applies through `derives_body`: when nothing will render the
+    /// document, the text is the only source of it, so an empty one cannot be stored (#499).
+    #[test]
+    fn an_unrenderable_kind_still_needs_a_body() {
+        let from = Utc::now();
+        let bare = json!({
+            "facility": "DCC", "kind": "afp", "body": "   ",
+            "valid_from": from, "valid_to": from + Duration::hours(1),
+        });
+        assert!(normalize_item("advisory", bare).is_err());
+    }
+
+    /// `advisory` has to be claimed by `normalize_item` as well as by the check constraint; an
+    /// unknown kind must still be refused.
+    #[test]
+    fn an_unknown_kind_is_still_rejected() {
+        assert!(normalize_item("wat", item("DCC", 1)).is_err());
+    }
+}
+
+#[cfg(test)]
+mod advisory_permission_tests {
+    //! AC6: planning an advisory needs `tmu.adv.create` for the issuing facility, not just
+    //! `EventsPlanUpdate` (VATUSA/OIS#537).
+    //!
+    //! Driven through the real router, so the extractors and the scope check are the ones that run in
+    //! production. A missing permission is 401 and a wrong facility is 403, as everywhere else in this
+    //! codebase.
+
+    use std::collections::HashMap;
+
+    use axum::http;
+    use chrono::{Duration, Utc};
+    use serde_json::json;
+    use sqlx::PgPool;
+
+    use crate::scope_test_support::{grant, seed_user, send, session_cookie, test_state};
+
+    const EVENT: i64 = 738;
+
+    async fn seed(pool: &PgPool) -> (String, String, String) {
+        let user = seed_user(pool).await;
+        let cookie = session_cookie(pool, &user).await;
+        sqlx::query(
+            "insert into events.event (id, title, start_time, end_time, facility) \
+             values ($1, 'Perm Test', now(), now() + interval '2 hours', 'ZDC')",
+        )
+        .bind(EVENT)
+        .execute(pool)
+        .await
+        .unwrap();
+        let pkg = crate::repos::events::create_package(pool, EVENT, "Plan", &user)
+            .await
+            .unwrap();
+        (user, cookie, pkg)
+    }
+
+    fn advisory_item(facility: &str) -> serde_json::Value {
+        let from = Utc::now();
+        json!({
+            "kind": "advisory",
+            "payload": {
+                "facility": facility,
+                "kind": "reroute",
+                "body": "vATCSCC ADVZY",
+                "valid_from": from,
+                "valid_to": from + Duration::hours(2),
+            }
+        })
+    }
+
+    async fn add(
+        state: &crate::state::AppState,
+        pkg: &str,
+        cookie: &str,
+        facility: &str,
+    ) -> http::StatusCode {
+        send(
+            state,
+            http::Method::POST,
+            &format!("/api/v1/events/{EVENT}/packages/{pkg}/items"),
+            cookie,
+            Some(advisory_item(facility)),
+        )
+        .await
+    }
+
+    async fn item_count(pool: &PgPool, pkg: &str) -> i64 {
+        sqlx::query_scalar("select count(*) from events.tmi_package_item where package_id = $1")
+            .bind(pkg)
+            .fetch_one(pool)
+            .await
+            .unwrap()
+    }
+
+    /// The hole this closes: `EventsPlanUpdate` alone would let a planner queue a numbered DCC
+    /// document. It must not be enough on its own.
+    #[sqlx::test]
+    async fn events_plan_update_alone_cannot_plan_an_advisory(pool: PgPool) {
+        let state = test_state(pool.clone(), HashMap::new());
+        let (user, cookie, pkg) = seed(&pool).await;
+        grant(&pool, &user, "events.plan.update", None).await;
+
+        let refused = add(&state, &pkg, &cookie, "DCC").await;
+
+        assert_eq!(refused, http::StatusCode::UNAUTHORIZED);
+        assert_eq!(
+            item_count(&pool, &pkg).await,
+            0,
+            "a refused add must not have written the item"
+        );
+    }
+
+    /// With both permissions nationally, it goes through.
+    #[sqlx::test]
+    async fn both_permissions_allow_planning_an_advisory(pool: PgPool) {
+        let state = test_state(pool.clone(), HashMap::new());
+        let (user, cookie, pkg) = seed(&pool).await;
+        grant(&pool, &user, "events.plan.update", None).await;
+        grant(&pool, &user, "tmu.adv.create", None).await;
+
+        let allowed = add(&state, &pkg, &cookie, "DCC").await;
+
+        assert_eq!(allowed, http::StatusCode::OK);
+        assert_eq!(item_count(&pool, &pkg).await, 1);
+    }
+
+    /// The actual escalation #537 names: a planner scoped to ZDC must not queue an advisory that
+    /// would be issued in ZNY's name. 403, because the permission is held — just not here.
+    #[sqlx::test]
+    async fn a_scoped_planner_cannot_plan_an_advisory_for_another_facility(pool: PgPool) {
+        let state = test_state(pool.clone(), HashMap::new());
+        let (user, cookie, pkg) = seed(&pool).await;
+        grant(&pool, &user, "events.plan.update", None).await;
+        grant(&pool, &user, "tmu.adv.create", Some("ZDC")).await;
+
+        let refused = add(&state, &pkg, &cookie, "ZNY").await;
+        assert_eq!(refused, http::StatusCode::FORBIDDEN);
+        assert_eq!(item_count(&pool, &pkg).await, 0);
+
+        // ...but their own facility is fine, which is what makes the check a scope check rather than
+        // a blanket refusal.
+        let allowed = add(&state, &pkg, &cookie, "ZDC").await;
+        assert_eq!(allowed, http::StatusCode::OK);
+        assert_eq!(item_count(&pool, &pkg).await, 1);
+    }
+
+    /// The gate is specific to advisory items: a ground-stop item must still need only the events
+    /// permission, or this change would have quietly tightened the other three kinds.
+    #[sqlx::test]
+    async fn the_advisory_gate_does_not_apply_to_other_kinds(pool: PgPool) {
+        let state = test_state(pool.clone(), HashMap::new());
+        let (user, cookie, pkg) = seed(&pool).await;
+        grant(&pool, &user, "events.plan.update", None).await;
+
+        let allowed = send(
+            &state,
+            http::Method::POST,
+            &format!("/api/v1/events/{EVENT}/packages/{pkg}/items"),
+            &cookie,
+            Some(json!({"kind": "ground_stop", "payload": {"airport": "KDCA"}})),
+        )
+        .await;
+
+        assert_eq!(
+            allowed,
+            http::StatusCode::OK,
+            "no tmu.adv.create granted, and none needed for a ground stop"
+        );
+    }
+
+    /// Activation re-checks, so an item queued while in scope cannot be issued after that scope is
+    /// withdrawn. The package stays a draft rather than partly activating.
+    #[sqlx::test]
+    async fn activation_rechecks_the_scope(pool: PgPool) {
+        let state = test_state(pool.clone(), HashMap::new());
+        let (user, cookie, pkg) = seed(&pool).await;
+        grant(&pool, &user, "events.plan.update", None).await;
+        grant(&pool, &user, "tmu.adv.create", Some("ZDC")).await;
+        assert_eq!(
+            add(&state, &pkg, &cookie, "ZDC").await,
+            http::StatusCode::OK
+        );
+
+        // The grant is withdrawn between planning and activation.
+        sqlx::query(
+            "delete from access.user_permissions \
+             where user_id = $1 and permission_name = 'tmu.adv.create'",
+        )
+        .bind(&user)
+        .execute(&pool)
+        .await
+        .unwrap();
+
+        let refused = send(
+            &state,
+            http::Method::POST,
+            &format!("/api/v1/events/{EVENT}/packages/{pkg}/activate"),
+            &cookie,
+            None,
+        )
+        .await;
+
+        assert_ne!(refused, http::StatusCode::OK, "activation must refuse");
+        let advisories = crate::repos::tmu::list_advisories(&pool).await.unwrap();
+        assert!(
+            advisories.is_empty(),
+            "and nothing was issued: a refused activation leaves no document behind"
+        );
     }
 }

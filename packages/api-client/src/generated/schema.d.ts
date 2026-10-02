@@ -3353,6 +3353,18 @@ export interface components {
             status: string;
             /** @description The fields a form-built advisory came from; null when it was typed as raw text. */
             structured?: unknown;
+            /**
+             * Format: date-time
+             * @description The enforceable validity window (#537).
+             *
+             *     Distinct from the period printed inside the document: this is set once at authoring from the
+             *     same input and is never re-derived by parsing the document text, which is why the rendered
+             *     period can stay verbatim `DDHHMM` as it always has. `None` for advisories authored before
+             *     #537 and for any kind with no window, and such an advisory is never auto-cancelled.
+             */
+            valid_from?: string | null;
+            /** Format: date-time */
+            valid_to?: string | null;
         };
         /**
          * @description A configurable aircraft performance profile (climb / cruise / descent schedules) used by the
@@ -3869,6 +3881,14 @@ export interface components {
             facility: string;
             kind: string;
             structured?: unknown;
+            /**
+             * Format: date-time
+             * @description The enforceable window (#537). Optional, so every existing caller is unaffected: an advisory
+             *     without one simply never auto-cancels, which is the behaviour before #537.
+             */
+            valid_from?: string | null;
+            /** Format: date-time */
+            valid_to?: string | null;
         };
         CreateApiKeyRequest: {
             description?: string | null;

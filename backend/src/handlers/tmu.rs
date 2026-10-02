@@ -677,6 +677,12 @@ pub async fn publish_ground_stop(
         body: String::new(),
         structured: Some(serde_json::to_value(&doc).map_err(|_| ApiError::Internal)?),
         decoded: None,
+        // No window (#537). A generated advisory's life is the program's life, and that is already
+        // enforced through `gdp_id`/`ground_stop_id`: the cleanup pass cancels it when the source
+        // expires. Setting `valid_to` here as well would be a second mechanism claiming the same
+        // expiry, which is the drift `ground_stop_until_ts` is used above to avoid.
+        valid_from: None,
+        valid_to: None,
     };
     tmu_repo::create_advisory_tx(
         &mut tx,
@@ -1059,6 +1065,8 @@ mod tests {
                 body: "vATCSCC ADVZY".into(),
                 structured: None,
                 decoded: None,
+                valid_from: None,
+                valid_to: None,
             },
             &author,
         )
@@ -2073,7 +2081,7 @@ pub async fn get_advisory(
 /// `tmu.adv.update` and `tmu.adv.publish` are graded separately everywhere else, but the *scope*
 /// question is the same one for both: is this principal allowed to act for this facility at all.
 /// Checking the permission the caller was already gated on keeps the two answers from diverging.
-async fn require_advisory_scope(
+pub(crate) async fn require_advisory_scope(
     state: &AppState,
     principal: &Principal,
     permission: &str,

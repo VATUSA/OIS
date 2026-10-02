@@ -582,6 +582,9 @@ pub async fn prune_stale_cfrs(pool: &PgPool) -> Result<(), ApiError> {
 pub struct CleanupStats {
     pub expired: u64,
     pub deleted: u64,
+    /// Advisories cancelled by this pass (#537) — counted separately because an advisory is neither
+    /// expired nor deleted: it is cancelled, which is a document state the others do not have.
+    pub advisories_cancelled: u64,
 }
 
 /// Auto-expire finished restrictions/ground stops, then delete anything that ended (or was
@@ -665,12 +668,57 @@ pub async fn run_cleanup(pool: &PgPool) -> Result<CleanupStats, ApiError> {
     .await
     .map_err(internal)?;
 
+    // 3. Advisories (#537). Cancelled rather than deleted or soft-dismissed: the docs already state
+    // the rule — "A published advisory is never edited — it is cancelled and reissued" — and
+    // cancelling is what fires the `adv_cancel` job, so the standing Discord post gets corrected
+    // instead of being left asserting a restriction that has lapsed.
+    //
+    // Two reasons an advisory stops being current, kept as separate statements because they are
+    // genuinely different facts rather than one rule with a branch.
+
+    // (a) Its own window has passed, plus a grace period. `GRACE` is the "about 30 minutes" the
+    // request asked for; the pass runs every `TMU_CLEANUP_INTERVAL`, so the real removal lands in
+    // [30, 35) minutes. Only advisories that actually carry a window are touched — a NULL `valid_to`
+    // means "no window", and must not read as "infinitely overdue".
+    let c_window = sqlx::query(
+        "update tmu.advisories set status = 'cancelled' \
+         where status in ('draft', 'published') \
+           and valid_to is not null \
+           and valid_to < now() - interval '30 minutes'",
+    )
+    .execute(pool)
+    .await
+    .map_err(internal)?;
+
+    // (b) The program it was generated from is over. `cancel_program_advisory_tx` only ever runs on a
+    // *user* revising or cancelling a program, so a GDP or ground stop that simply timed out left its
+    // advisory `published` forever — a real pre-existing bug, folded in here because this is the pass
+    // that would otherwise expire some advisories and not these.
+    //
+    // Safe to run after the deletes above despite `gdp_id`/`ground_stop_id` being
+    // `on delete set null`: both deletes require `published_at is null`, and an advisory is only
+    // generated for a *published* program, so no program with an advisory is reachable by them.
+    let c_program = sqlx::query(
+        "update tmu.advisories a set status = 'cancelled' \
+         where a.status in ('draft', 'published') \
+           and (exists (select 1 from tmu.gdp g \
+                         where g.id = a.gdp_id \
+                           and g.status in ('expired', 'cancelled')) \
+             or exists (select 1 from tmu.ground_stops s \
+                         where s.id = a.ground_stop_id \
+                           and s.status in ('expired', 'cancelled')))",
+    )
+    .execute(pool)
+    .await
+    .map_err(internal)?;
+
     Ok(CleanupStats {
         expired: e_tmi.rows_affected() + e_gs.rows_affected() + e_gdp.rows_affected(),
         deleted: d_tmi.rows_affected()
             + d_gs.rows_affected()
             + d_pgm.rows_affected()
             + d_gdp.rows_affected(),
+        advisories_cancelled: c_window.rows_affected() + c_program.rows_affected(),
     })
 }
 
@@ -697,7 +745,7 @@ pub async fn prune_history(pool: &PgPool, before: DateTime<Utc>) -> Result<u64, 
 // --- advisories (ADVZY documents, #457) ---
 
 const ADVISORY_SELECT: &str = "select id, facility, issued_day, number, kind, body, structured, \
-    decoded, status, published_at, created_at from tmu.advisories";
+    decoded, status, valid_from, valid_to, published_at, created_at from tmu.advisories";
 
 /// Take the next advisory number for `facility` on today's **Zulu** day.
 ///
@@ -888,8 +936,8 @@ pub(crate) async fn create_advisory_tx(
     let id = sqlx::query_scalar::<_, String>(
         "insert into tmu.advisories \
          (facility, issued_day, number, kind, body, structured, decoded, created_by, \
-          gdp_id, ground_stop_id) \
-         values ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10) returning id",
+          gdp_id, ground_stop_id, valid_from, valid_to) \
+         values ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12) returning id",
     )
     .bind(&facility)
     .bind(day)
@@ -901,6 +949,10 @@ pub(crate) async fn create_advisory_tx(
     .bind(created_by)
     .bind(gdp_id)
     .bind(ground_stop_id)
+    // Stored verbatim from the request, never derived from `body`. The printed period stays the
+    // document's own text; this is the window a job may act on (#537).
+    .bind(req.valid_from)
+    .bind(req.valid_to)
     .fetch_one(&mut **tx)
     .await
     .map_err(|_| ApiError::Internal)?;
@@ -1159,6 +1211,8 @@ mod tests {
                 body: "vATCSCC ADVZY".to_string(),
                 structured: None,
                 decoded: None,
+                valid_from: None,
+                valid_to: None,
             },
             &user,
         )
@@ -1206,6 +1260,8 @@ mod tests {
                 body: "vATCSCC ADVZY 001 REROUTE".to_string(),
                 structured: Some(serde_json::json!({"routes": [{"from": "JFK", "to": "BOS"}]})),
                 decoded: Some("JFK to BOS reroute".to_string()),
+                valid_from: None,
+                valid_to: None,
             },
             &user,
         )
@@ -1249,6 +1305,8 @@ mod tests {
                     "period": "141415-142315",
                 })),
                 decoded: None,
+                valid_from: None,
+                valid_to: None,
             },
             &user,
         )
@@ -1319,6 +1377,8 @@ mod tests {
                     "period": "141430-141630",
                 })),
                 decoded: None,
+                valid_from: None,
+                valid_to: None,
             },
             &user,
         )
@@ -1433,6 +1493,8 @@ mod tests {
                 body: String::new(),
                 structured: Some(reroute_structured()),
                 decoded: None,
+                valid_from: None,
+                valid_to: None,
             },
             &user,
         )
@@ -1647,6 +1709,8 @@ mod tests {
                 body: "IGNORE ME".into(),
                 structured: Some(reroute_structured()),
                 decoded: None,
+                valid_from: None,
+                valid_to: None,
             },
         )
         .await;
@@ -1677,6 +1741,8 @@ mod tests {
                 body: "x".into(),
                 structured: Some(reroute_structured()),
                 decoded: None,
+                valid_from: None,
+                valid_to: None,
             },
         )
         .await;
@@ -1688,6 +1754,8 @@ mod tests {
                 body: "x".into(),
                 structured: Some(reroute_structured()),
                 decoded: None,
+                valid_from: None,
+                valid_to: None,
             },
         )
         .await;
@@ -1709,6 +1777,8 @@ mod tests {
                 body: "x".into(),
                 structured: Some(reroute_structured()),
                 decoded: None,
+                valid_from: None,
+                valid_to: None,
             },
         )
         .await;
@@ -1723,6 +1793,8 @@ mod tests {
                 body: structured.body.clone(),
                 structured: None,
                 decoded: None,
+                valid_from: None,
+                valid_to: None,
             },
         )
         .await;
@@ -1746,6 +1818,8 @@ mod tests {
                 body: "SOME OTHER DOCUMENT".into(),
                 structured: Some(reroute_structured()),
                 decoded: None,
+                valid_from: None,
+                valid_to: None,
             },
         )
         .await;
@@ -1764,6 +1838,8 @@ mod tests {
                 body: "x".into(),
                 structured: Some(serde_json::json!({"nope": true})),
                 decoded: None,
+                valid_from: None,
+                valid_to: None,
             },
             &user,
         )
@@ -1783,6 +1859,8 @@ mod tests {
                 body: "x".into(),
                 structured: Some(reroute_structured()),
                 decoded: None,
+                valid_from: None,
+                valid_to: None,
             },
         )
         .await;
@@ -1826,6 +1904,8 @@ mod tests {
                 body: "SOME OTHER DOCUMENT".into(),
                 structured: None,
                 decoded: None,
+                valid_from: None,
+                valid_to: None,
             },
         )
         .await;
@@ -1886,6 +1966,8 @@ mod tests {
             body: "vATCSCC ADVZY".to_string(),
             structured: None,
             decoded: None,
+            valid_from: None,
+            valid_to: None,
         };
 
         // Spawned, not just awaited together: each create needs its own task to contend for a
@@ -2347,5 +2429,210 @@ mod tests {
         let listed = crate::repos::gdp::list_gdps(&pool).await.unwrap();
         assert!(!listed.iter().any(|g| g.id == id));
         assert!(row_exists(&pool, "tmu.gdp", &id).await);
+    }
+
+    // --- advisory expiry (#537) -------------------------------------------------------------------
+
+    /// The grace period `run_cleanup` applies after `valid_to`, as minutes. Named so the fixtures
+    /// below can straddle it without being *derived* from it: a fixture computed off this constant
+    /// would move with it and pass for any value, which is exactly how a widened constant gets
+    /// shipped unnoticed.
+    const GRACE_MIN: i64 = 30;
+
+    /// Create an advisory with an explicit window, `age_min` minutes past its `valid_to`.
+    async fn advisory_ending_min_ago(pool: &PgPool, age_min: i64) -> String {
+        let user = seed_user(pool).await;
+        let valid_to = Utc::now() - chrono::Duration::minutes(age_min);
+        create_advisory(
+            pool,
+            &CreateAdvisoryRequest {
+                facility: "DCC".to_string(),
+                kind: "reroute".to_string(),
+                body: "vATCSCC ADVZY".to_string(),
+                structured: None,
+                decoded: None,
+                valid_from: Some(valid_to - chrono::Duration::hours(1)),
+                valid_to: Some(valid_to),
+            },
+            &user,
+        )
+        .await
+        .unwrap()
+    }
+
+    async fn status_of(pool: &PgPool, id: &str) -> String {
+        sqlx::query_scalar::<_, String>("select status from tmu.advisories where id = $1")
+            .bind(id)
+            .fetch_one(pool)
+            .await
+            .unwrap()
+    }
+
+    /// Absolute ages straddling the documented grace period, not ages derived from `GRACE_MIN` — plus
+    /// a guard that fails loudly if the constant moves out from between them.
+    const INSIDE_GRACE_MIN: i64 = 20;
+    const PAST_GRACE_MIN: i64 = 40;
+
+    // Checked at compile time rather than in a test: all three are constants, so this can fail the
+    // build instead of waiting for someone to run the suite — and clippy correctly refuses a runtime
+    // assertion over a constant comparison.
+    const _: () = assert!(
+        INSIDE_GRACE_MIN < GRACE_MIN && GRACE_MIN < PAST_GRACE_MIN,
+        "the advisory grace period is no longer between the two expiry fixtures — update \
+         INSIDE_GRACE_MIN and PAST_GRACE_MIN, and the SQL interval in run_cleanup that they test"
+    );
+
+    /// AC3/AC7: past the window plus the grace period, the advisory is cancelled.
+    #[sqlx::test]
+    async fn cleanup_cancels_an_advisory_past_its_window(pool: PgPool) {
+        let id = advisory_ending_min_ago(&pool, PAST_GRACE_MIN).await;
+
+        let stats = run_cleanup(&pool).await.unwrap();
+
+        assert_eq!(status_of(&pool, &id).await, "cancelled");
+        assert_eq!(stats.advisories_cancelled, 1, "and it is counted");
+    }
+
+    /// AC7's other half: inside the grace period it is left alone. Without this, widening the
+    /// interval to zero would still look correct.
+    #[sqlx::test]
+    async fn cleanup_spares_an_advisory_inside_the_grace_period(pool: PgPool) {
+        let id = advisory_ending_min_ago(&pool, INSIDE_GRACE_MIN).await;
+
+        let stats = run_cleanup(&pool).await.unwrap();
+
+        assert_eq!(status_of(&pool, &id).await, "draft", "still within grace");
+        assert_eq!(stats.advisories_cancelled, 0);
+    }
+
+    /// A still-current advisory must not be touched at all — the case a bad `>`/`<` would break.
+    #[sqlx::test]
+    async fn cleanup_spares_an_advisory_whose_window_is_open(pool: PgPool) {
+        let id = advisory_ending_min_ago(&pool, -60).await; // ends in an hour
+
+        run_cleanup(&pool).await.unwrap();
+
+        assert_eq!(status_of(&pool, &id).await, "draft");
+    }
+
+    /// NULL `valid_to` means "no window", which must not read as "infinitely overdue". Every advisory
+    /// written before #537 is in this state, so getting it wrong would cancel the lot on first boot.
+    #[sqlx::test]
+    async fn cleanup_never_touches_an_advisory_with_no_window(pool: PgPool) {
+        let adv = draft(&pool, "DCC").await;
+        assert!(adv.valid_to.is_none(), "the fixture has no window");
+
+        let stats = run_cleanup(&pool).await.unwrap();
+
+        assert_eq!(status_of(&pool, &adv.id).await, "draft");
+        assert_eq!(stats.advisories_cancelled, 0);
+    }
+
+    /// A cancelled advisory must not be re-counted on every later pass — the count drives a log line,
+    /// and a pass that claims work it did not do is worse than a quiet one.
+    #[sqlx::test]
+    async fn cleanup_does_not_recount_an_already_cancelled_advisory(pool: PgPool) {
+        advisory_ending_min_ago(&pool, PAST_GRACE_MIN).await;
+        assert_eq!(run_cleanup(&pool).await.unwrap().advisories_cancelled, 1);
+
+        let second = run_cleanup(&pool).await.unwrap();
+
+        assert_eq!(second.advisories_cancelled, 0, "nothing left to cancel");
+    }
+
+    /// Create a published ground stop and the advisory generated from it, linked as the real publish
+    /// path links them.
+    async fn published_gs_with_advisory(pool: &PgPool) -> (String, String) {
+        let user = seed_user(pool).await;
+        let gs_id = sqlx::query_scalar::<_, String>(
+            "insert into tmu.ground_stops (airport, scope, status, published_at, created_by) \
+             values ('KDCA', 'ALL', 'published', now(), $1) returning id",
+        )
+        .bind(&user)
+        .fetch_one(pool)
+        .await
+        .unwrap();
+
+        let mut tx = pool.begin().await.unwrap();
+        let adv_id = create_advisory_tx(
+            &mut tx,
+            &CreateAdvisoryRequest {
+                facility: "DCC".to_string(),
+                kind: "reroute".to_string(),
+                body: "vATCSCC ADVZY".to_string(),
+                structured: None,
+                decoded: None,
+                // A generated advisory carries no window of its own — its life is the program's.
+                valid_from: None,
+                valid_to: None,
+            },
+            &user,
+            Some(AdvisoryProgram::GroundStop(&gs_id)),
+        )
+        .await
+        .unwrap();
+        tx.commit().await.unwrap();
+        (gs_id, adv_id)
+    }
+
+    /// The pre-existing bug this change folds in: `cancel_program_advisory_tx` only ever ran on a
+    /// *user* revising or cancelling a program, so a ground stop that simply timed out left its
+    /// advisory `published` forever.
+    #[sqlx::test]
+    async fn cleanup_cancels_the_advisory_of_an_expired_ground_stop(pool: PgPool) {
+        let (gs_id, adv_id) = published_gs_with_advisory(&pool).await;
+        sqlx::query("update tmu.ground_stops set status = 'expired' where id = $1")
+            .bind(&gs_id)
+            .execute(&pool)
+            .await
+            .unwrap();
+
+        run_cleanup(&pool).await.unwrap();
+
+        assert_eq!(status_of(&pool, &adv_id).await, "cancelled");
+        // And the program row is still there, which is what makes the link usable: `run_cleanup`'s
+        // deletes require `published_at is null`, and this one published.
+        let gs_left: i64 =
+            sqlx::query_scalar("select count(*) from tmu.ground_stops where id = $1")
+                .bind(&gs_id)
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+        assert_eq!(
+            gs_left, 1,
+            "a published program survives the cleanup deletes"
+        );
+    }
+
+    /// While the program is live, its advisory must stay live — otherwise the pass would cancel every
+    /// generated advisory on the first tick after it was issued.
+    #[sqlx::test]
+    async fn cleanup_spares_the_advisory_of_a_live_ground_stop(pool: PgPool) {
+        let (_gs_id, adv_id) = published_gs_with_advisory(&pool).await;
+
+        run_cleanup(&pool).await.unwrap();
+
+        assert_eq!(status_of(&pool, &adv_id).await, "draft");
+    }
+
+    /// A hand-authored advisory has no program link, so the program arm must not reach it. Without
+    /// this, a `left join` written instead of `exists` would cancel everything.
+    #[sqlx::test]
+    async fn the_program_arm_ignores_a_hand_authored_advisory(pool: PgPool) {
+        let (gs_id, _) = published_gs_with_advisory(&pool).await;
+        let unlinked = draft(&pool, "DCC").await;
+        sqlx::query("update tmu.ground_stops set status = 'expired' where id = $1")
+            .bind(&gs_id)
+            .execute(&pool)
+            .await
+            .unwrap();
+
+        run_cleanup(&pool).await.unwrap();
+
+        assert_eq!(
+            status_of(&pool, &unlinked.id).await,
+            "draft",
+            "no gdp_id and no ground_stop_id means no program expiry applies"
+        );
     }
 }
