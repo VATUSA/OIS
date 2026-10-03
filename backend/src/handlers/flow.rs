@@ -1,13 +1,15 @@
 //! Flow handlers — FCA CRUD + a lightweight live-traffic feed for the FCA map.
 
 use std::collections::{HashMap, HashSet};
-use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, PoisonError};
 
 use axum::{
     Json,
+    body::Bytes,
     extract::{Extension, Path, Query, State},
-    http::StatusCode,
+    http::{StatusCode, header},
+    response::{IntoResponse, Response},
 };
 use chrono::{DateTime, Duration, Utc};
 use serde::Deserialize;
@@ -23,6 +25,7 @@ use crate::{
     },
     errors::ApiError,
     feed::{
+        TrafficCache,
         airports::{Airport, AirportDb},
         airspace::Boundaries,
         facilities, fca, flow as feed_flow,
@@ -1149,14 +1152,37 @@ pub async fn data_refresh(
     tag = "flow",
     responses((status = 200, body = Vec<TrafficAircraft>), (status = 401))
 )]
-pub async fn list_traffic(State(state): State<AppState>) -> Json<Vec<TrafficAircraft>> {
-    let snapshot = state.feed.read().await.snapshot.clone();
+pub async fn list_traffic(State(state): State<AppState>) -> Result<Response, ApiError> {
+    let (snapshot, cache) = {
+        let feed = state.feed.read().await;
+        (feed.snapshot.clone(), feed.traffic_cache.clone())
+    };
+    let Some(snapshot) = snapshot else {
+        return Ok(json_body(Bytes::from_static(b"[]")));
+    };
     let exclusions = state.flight_exclusions.load_full();
-    let aircraft = snapshot
+    // Held while building, so concurrent misses after a snapshot swap build once and the rest reuse it.
+    let mut cache = cache.lock().unwrap_or_else(PoisonError::into_inner);
+    if let Some(hit) = cache
         .as_ref()
-        .map(|snap| traffic_from(&snap.data, exclusions.as_ref()))
-        .unwrap_or_default();
-    Json(aircraft)
+        .filter(|c| Arc::ptr_eq(&c.snapshot, &snapshot) && Arc::ptr_eq(&c.exclusions, &exclusions))
+    {
+        return Ok(json_body(hit.body.clone()));
+    }
+    let body = Bytes::from(
+        serde_json::to_vec(&traffic_from(&snapshot.data, &exclusions))
+            .map_err(|_| ApiError::Internal)?,
+    );
+    *cache = Some(TrafficCache {
+        snapshot,
+        exclusions,
+        body: body.clone(),
+    });
+    Ok(json_body(body))
+}
+
+fn json_body(body: Bytes) -> Response {
+    ([(header::CONTENT_TYPE, "application/json")], body).into_response()
 }
 
 #[derive(Deserialize)]
@@ -2676,6 +2702,70 @@ mod project_traffic_tests {
         assert!(
             super::traffic_from(&data, &excluded_elsewhere).is_empty(),
             "the global traffic surface hides a callsign any facility removed"
+        );
+    }
+
+    /// #588 AC3: `/flow/traffic` serves the same list to every caller until the poller swaps the
+    /// snapshot or the exclusions change, so it is built once per change — not once per request.
+    #[tokio::test]
+    async fn live_traffic_is_built_once_per_snapshot_and_exclusion_change() {
+        use super::list_traffic;
+        use axum::{extract::State, response::Response};
+        use std::sync::Arc;
+
+        let state = crate::state::AppState::without_db();
+        let snapshot = |pilots| {
+            Some(Arc::new(crate::feed::Snapshot::of(VatsimData {
+                pilots,
+                ..Default::default()
+            })))
+        };
+        state.feed.write().await.snapshot = snapshot(vec![airborne_pilot()]);
+        let built = || async {
+            let cache = state.feed.read().await.traffic_cache.clone();
+            let cache = cache.lock().unwrap();
+            cache.as_ref().map(|c| c.body.as_ptr()).unwrap()
+        };
+        let body = |response: Response| async {
+            axum::body::to_bytes(response.into_body(), 1 << 20)
+                .await
+                .unwrap()
+        };
+
+        let first = body(list_traffic(State(state.clone())).await.unwrap()).await;
+        let first_build = built().await;
+        let again = body(list_traffic(State(state.clone())).await.unwrap()).await;
+        assert_eq!(first, again);
+        assert_eq!(
+            built().await,
+            first_build,
+            "an unchanged feed reuses the built body"
+        );
+        assert!(
+            String::from_utf8_lossy(&first).contains("TEST1"),
+            "sanity: the aircraft is in the list"
+        );
+
+        state.feed.write().await.snapshot = snapshot(vec![]);
+        let swapped = body(list_traffic(State(state.clone())).await.unwrap()).await;
+        assert_eq!(
+            &swapped[..],
+            b"[]",
+            "a new snapshot is rebuilt, not served stale"
+        );
+
+        state.feed.write().await.snapshot = snapshot(vec![airborne_pilot()]);
+        let before_exclusion = body(list_traffic(State(state.clone())).await.unwrap()).await;
+        assert!(String::from_utf8_lossy(&before_exclusion).contains("TEST1"));
+        state.flight_exclusions.store(Arc::new(HashMap::from([(
+            "ZNY".to_string(),
+            std::collections::HashSet::from(["TEST1".to_string()]),
+        )])));
+        let excluded = body(list_traffic(State(state.clone())).await.unwrap()).await;
+        assert_eq!(
+            &excluded[..],
+            b"[]",
+            "an exclusion change is rebuilt, not served stale"
         );
     }
 
