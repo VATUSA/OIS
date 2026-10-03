@@ -633,9 +633,12 @@ pub async fn replace_user_permissions_scoped(
     artcc_id: Option<&str>,
     names: &[String],
 ) -> Result<(), ApiError> {
+    // Grants only. The access editor has no notion of a deny, so replacing a scope must never remove
+    // one: it used to delete every row here, which meant saving a user's ZDC scope *unchanged* silently
+    // stripped their ZDC denies and widened their access, with no guard ever seeing it (#559).
     sqlx::query(
         "delete from access.user_permissions \
-         where user_id = $1 and artcc_id is not distinct from $2",
+         where user_id = $1 and artcc_id is not distinct from $2 and granted is true",
     )
     .bind(user_id)
     .bind(artcc_id)
@@ -644,9 +647,14 @@ pub async fn replace_user_permissions_scoped(
     .map_err(|_| ApiError::Internal)?;
 
     for name in names {
+        // An explicit grant where a deny exists replaces it, rather than violating the unique index on
+        // `(user_id, permission_name, coalesce(artcc_id, ''))`. That is the editor deliberately
+        // granting, and `enforce_actor_scope` has already required the actor to hold it at this scope.
         sqlx::query(
             "insert into access.user_permissions (user_id, permission_name, granted, artcc_id) \
-             values ($1, $2, true, $3)",
+             values ($1, $2, true, $3) \
+             on conflict (user_id, permission_name, coalesce(artcc_id, '')) \
+             do update set granted = true",
         )
         .bind(user_id)
         .bind(name)
