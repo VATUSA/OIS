@@ -5293,6 +5293,17 @@ export interface components {
             reason: string;
         };
         /**
+         * @description One group the caller holds, as a template for an API key's permissions (#550).
+         *
+         *     No scope: `role_permissions` carries none — scope lives on the membership — and a key is capped by
+         *     its owner's live access when it is created, so expanding a template cannot grant more than its
+         *     owner holds.
+         */
+        HeldGroupBody: {
+            name: string;
+            permissions: string[];
+        };
+        /**
          * @description One FCA-metered ground departure in the IDST console. One row per metering FCA — a flight metered
          *     by several FCAs appears once per FCA, each with its own release.
          */
@@ -6061,6 +6072,15 @@ export interface components {
         };
         /** @description The acting user's own effective access (staff debug view). */
         SelfAccessBody: {
+            /**
+             * @description The groups the caller holds, each with the permissions it grants (#550).
+             *
+             *     This is what an API key is templated from now that presets are gone. It lists only the
+             *     caller's own groups, so it needs nothing beyond `access.self.read` — unlike the admin group
+             *     listing, which needs `access.groups.read` and so would have left most key creators with no bulk
+             *     path at all.
+             */
+            groups: components["schemas"]["HeldGroupBody"][];
             permissions: Record<string, never>;
             role_names: string[];
             server_admin: boolean;

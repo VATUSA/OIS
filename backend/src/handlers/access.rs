@@ -28,8 +28,8 @@ use crate::{
     errors::ApiError,
     models::{
         AccessCatalogBody, AdminUserPage, CreateGroupRequest, GroupBody, GroupMemberBody,
-        GroupMemberPage, GroupMemberRequest, ScopeAccess, SelfAccessBody, UpdateGroupRequest,
-        UpdateUserAccessRequest, UserAccessBody,
+        GroupMemberPage, GroupMemberRequest, HeldGroupBody, ScopeAccess, SelfAccessBody,
+        UpdateGroupRequest, UpdateUserAccessRequest, UserAccessBody,
     },
     repos::{access as access_repo, audit as audit_repo, org as org_repo, users as user_repo},
     state::AppState,
@@ -109,11 +109,42 @@ pub async fn get_self_access(
 ) -> Result<Json<SelfAccessBody>, ApiError> {
     let user = current_user.as_ref().ok_or(ApiError::Unauthorized)?;
     let (roles, permissions) = fetch_user_access(state.db.as_ref(), &user.id).await?;
+    let groups = held_groups(state.db.as_ref(), &roles).await?;
     Ok(Json(SelfAccessBody {
         server_admin: is_server_admin(&roles),
         role_names: roles,
         permissions: crate::auth::acl::permission_tree_from_paths(&permissions),
+        groups,
     }))
+}
+
+/// The caller's groups with their permissions, for templating an API key (#550).
+///
+/// Reuses the one-query `fetch_all_group_permissions` the admin listing uses rather than asking per
+/// group, and filters to `roles` in Rust: the role set is small and the alternative is an N+1.
+/// A group that bundles nothing still appears, with an empty list, so the picker can show it rather
+/// than the caller wondering where a role they hold went.
+async fn held_groups(
+    pool: Option<&sqlx::PgPool>,
+    roles: &[String],
+) -> Result<Vec<HeldGroupBody>, ApiError> {
+    let Some(pool) = pool else {
+        return Ok(Vec::new());
+    };
+    let mut by_role: std::collections::BTreeMap<&str, Vec<String>> =
+        roles.iter().map(|r| (r.as_str(), Vec::new())).collect();
+    for (role, permission) in access_repo::fetch_all_group_permissions(pool).await? {
+        if let Some(list) = by_role.get_mut(role.as_str()) {
+            list.push(permission);
+        }
+    }
+    Ok(by_role
+        .into_iter()
+        .map(|(name, permissions)| HeldGroupBody {
+            name: name.to_string(),
+            permissions,
+        })
+        .collect())
 }
 
 #[utoipa::path(
@@ -1926,4 +1957,115 @@ pub async fn remove_group_member(
 ) -> Result<axum::http::StatusCode, ApiError> {
     let user = current_user.as_ref().ok_or(ApiError::Unauthorized)?;
     change_membership(&state, user, &headers, &name, payload, false).await
+}
+
+#[cfg(test)]
+mod held_group_tests {
+    //! AC4 of VATUSA/OIS#550: an API key is templated from the groups its creator holds, so
+    //! `access/self` has to list them — through the real router, not by calling the helper.
+
+    use std::collections::HashMap;
+
+    use axum::http;
+    use sqlx::PgPool;
+
+    use crate::scope_test_support::{grant, seed_user, send_json, session_cookie, test_state};
+
+    async fn hold(pool: &PgPool, user_id: &str, role: &str, artcc: Option<&str>) {
+        sqlx::query(
+            "insert into access.user_roles (user_id, role_name, artcc_id) values ($1, $2, $3)",
+        )
+        .bind(user_id)
+        .bind(role)
+        .bind(artcc)
+        .execute(pool)
+        .await
+        .unwrap();
+    }
+
+    async fn group_permissions(pool: &PgPool, role: &str) -> Vec<String> {
+        sqlx::query_scalar(
+            "select permission_name from access.role_permissions where role_name = $1 order by 1",
+        )
+        .bind(role)
+        .fetch_all(pool)
+        .await
+        .unwrap()
+    }
+
+    /// The groups held — at any scope — come back with exactly the permissions each grants.
+    #[sqlx::test]
+    async fn self_access_lists_the_callers_groups_with_their_permissions(pool: PgPool) {
+        let state = test_state(pool.clone(), HashMap::new());
+        let user = seed_user(&pool).await;
+        let cookie = session_cookie(&pool, &user).await;
+        grant(&pool, &user, "access.self.read", None).await;
+        hold(&pool, &user, "NTMO", Some("ZDC")).await;
+        hold(&pool, &user, "EVENTS_TEAM", None).await;
+
+        let (status, body) =
+            send_json(&state, http::Method::GET, "/api/v1/access/self", &cookie).await;
+
+        assert_eq!(status, http::StatusCode::OK);
+        let groups = body["groups"].as_array().expect("a groups array");
+        let by_name: HashMap<&str, Vec<String>> = groups
+            .iter()
+            .map(|g| {
+                let perms = g["permissions"]
+                    .as_array()
+                    .unwrap()
+                    .iter()
+                    .map(|p| p.as_str().unwrap().to_string())
+                    .collect();
+                (g["name"].as_str().unwrap(), perms)
+            })
+            .collect();
+        assert_eq!(by_name.len(), 2, "exactly the two held groups: {by_name:?}");
+        assert_eq!(by_name["NTMO"], group_permissions(&pool, "NTMO").await);
+        assert_eq!(
+            by_name["EVENTS_TEAM"],
+            group_permissions(&pool, "EVENTS_TEAM").await
+        );
+        assert!(
+            !by_name["NTMO"].is_empty(),
+            "a facility-scoped membership still yields its template"
+        );
+    }
+
+    /// Only the caller's own groups: a key can only be templated from what its creator holds, and
+    /// listing someone else's — or every group — would be the admin listing this deliberately isn't.
+    #[sqlx::test]
+    async fn self_access_lists_no_group_the_caller_does_not_hold(pool: PgPool) {
+        let state = test_state(pool.clone(), HashMap::new());
+        let user = seed_user(&pool).await;
+        let other = seed_user(&pool).await;
+        let cookie = session_cookie(&pool, &user).await;
+        grant(&pool, &user, "access.self.read", None).await;
+        hold(&pool, &other, "VATUSA_STAFF", None).await;
+
+        let (_, body) = send_json(&state, http::Method::GET, "/api/v1/access/self", &cookie).await;
+
+        assert_eq!(
+            body["groups"].as_array().map(|g| g.len()),
+            Some(0),
+            "another user's VATUSA_STAFF must not appear"
+        );
+    }
+
+    /// It needs only `access.self.read` — the whole reason this is on `access/self` and not the admin
+    /// listing, which needs `access.groups.read` and would have left most key creators without one.
+    #[sqlx::test]
+    async fn a_non_admin_can_read_their_own_groups(pool: PgPool) {
+        let state = test_state(pool.clone(), HashMap::new());
+        let user = seed_user(&pool).await;
+        let cookie = session_cookie(&pool, &user).await;
+        grant(&pool, &user, "access.self.read", None).await;
+        hold(&pool, &user, "NTMO", None).await;
+
+        let (status, body) =
+            send_json(&state, http::Method::GET, "/api/v1/access/self", &cookie).await;
+
+        assert_eq!(status, http::StatusCode::OK, "no access.groups.read needed");
+        assert_eq!(body["groups"][0]["name"], "NTMO");
+    }
 }
