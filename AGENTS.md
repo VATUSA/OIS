@@ -255,7 +255,7 @@ just test-js       # pnpm test
 just desktop-build # bundle the Tauri app for the host platform
 
 # the full local gate (run before calling anything done)
-just ci            # fmt-check + cargo check + rust tests, then pnpm lint && pnpm typecheck
+just ci            # migration-version check + fmt-check + cargo check + rust tests, then pnpm lint && pnpm typecheck
 ```
 
 First-time setup: `cp .env.example .env`, fill the VATSIM OAuth block, `pnpm install`. `.env` is read
@@ -293,8 +293,15 @@ idempotent-friendly and numbered sequentially).
 ## Conventions & gotchas
 
 - **Migrations** are `backend/migrations/NNNN_name.sql`, embedded via `sqlx::migrate!` and applied on
-  startup. Number sequentially after the current highest; never renumber or edit an applied
-  migration — add a new one. Text UUID PKs (`gen_random_uuid()::text`), `created_at`/`updated_at`
+  startup. Never renumber or edit an applied migration — add a new one.
+  **The number is contended when several PRs are open.** Two PRs that each take "the next free
+  number" can both merge, and sqlx then applies *both* files: the second violates the version primary
+  key and the backend fails to start half-migrated. So pick a number above the highest on **every
+  open PR**, not just your base, and recheck right before you commit:
+  `for b in $(gh pr list --state open --json headRefName --jq '.[].headRefName') next; do git ls-tree -r --name-only origin/$b -- backend/migrations; done | grep -oE '[0-9]{4}_' | sort -u | tail -3`
+  (after `git fetch`). On a collision, renumber **upward** past all of them — a gap in the sequence is
+  harmless, only a duplicate is fatal. `just check-migrations` (in `just ci`), the `migrations` CI
+  job, and a gate on the image build all fail on a duplicate (#569). Text UUID PKs (`gen_random_uuid()::text`), `created_at`/`updated_at`
   timestamptz with a `platform.touch_updated_at()` trigger, check-constrained status enums, FK
   cascade where a child can't outlive its parent.
 - **Config that must reach the feed** (aircraft profiles, e.g.) is cached in `AppState` behind
