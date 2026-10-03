@@ -128,30 +128,62 @@ publish an update the installed app would reject.
 Without the Apple/Windows certificates the build still succeeds, but the OS warns on first launch.
 The updater signature above is what gates an update **applying** — a different thing from OS signing.
 
-#### The macOS certificate is not only cosmetic: it is why the keychain asks for a password
-
-The first-launch warning is the *visible* cost of shipping unsigned. The expensive one is the login
-keychain (#535):
-
-1. The session token is stored with `keyring::Entry` (`src-tauri/src/auth.rs`), which on macOS writes
-   to the **legacy login keychain**.
-2. macOS attaches a **per-item ACL** to that entry naming the application allowed to read it, and
-   identifies the application by its **code-signing identity**.
-3. An unsigned build has no stable identity — at best an ad-hoc signature, whose cdhash differs on
-   **every build**.
-4. So the app asking to read the token is not, as far as macOS is concerned, the app that wrote it. It
-   falls back to asking the user to authorise with their **login password**.
-5. Because `createUpdaterArtifacts: true` replaces the `.app` on every release, the identity rotates
-   for **existing** users too — this is not only a fresh-install problem.
-
-So `APPLE_SIGNING_IDENTITY` and friends are what make the saved session usable without a password
-prompt. Until they are set, expect the prompt; the frontend and shell are hardened so it cannot
-*repeat* (one read per process, and a dismissed read is not retried — `web/src/lib/desktop-token.ts`
-and `get_token` in `src-tauri/src/auth.rs`), but only a stable signing identity removes it.
+Unsigned on macOS used to cost more than a warning, and the history is worth keeping (#535).
 
 ⚠️ Add each Apple env line in `.github/workflows/release.yml` **only once its secret is set**. A
 *present-but-blank* `APPLE_CERTIFICATE` makes the bundler attempt signing and fail on `security
 import`, which is what broke the v0.1.1 build.
+
+## Where the session token is stored
+
+**This is not the same place on every platform, and macOS is the odd one out.**
+
+| Platform | Store |
+| --- | --- |
+| macOS | `~/Library/Application Support/net.vatusa.ois/session`, mode `0600` |
+| Windows | Credential Manager, via `keyring` |
+| Linux | Secret Service, via `keyring` |
+
+### Why macOS does not use the keychain
+
+It used to, and it asked the user for their **login password** over and over:
+
+1. The token was stored with `keyring::Entry`, which on macOS writes to the **legacy login keychain**.
+2. macOS attaches a **per-item ACL** to that entry naming the application allowed to read it, and
+   identifies that application by its **code-signing identity**.
+3. An unsigned build has no stable identity — at best an ad-hoc signature, whose cdhash differs on
+   **every build**.
+4. So the app asking to read the token was not, as far as macOS was concerned, the app that wrote it.
+   It fell back to asking the user to authorise with their login password.
+5. And because `createUpdaterArtifacts: true` replaces the `.app` on every release, the identity
+   rotated for **existing** users too — never only a fresh-install problem.
+
+A Developer ID certificate fixes that by giving the app a stable identity. **We don't have one**, so
+the token goes somewhere with no ACL instead: a file. No ACL, no prompt, signed or not.
+
+Windows and Linux keep their credential stores. Neither behaves this way and neither prompts anybody,
+so moving them would trade real OS protection for nothing.
+
+### What protects the file
+
+**Its permissions, and nothing else.** `0600` means only the user's own account can read it. A process
+already running as that user can read it, which the keychain would have prevented — that is the real
+cost of this trade, and it is stated rather than dressed up. Encrypting the file would require a key
+that also lives on this disk, which is obfuscation, not a control.
+
+What bounds the exposure is that the token **rotates on every launch** (`web/src/lib/desktop-auth.ts`),
+so a copy lifted from disk has a short life.
+
+### Upgrading from a build that used the keychain
+
+The first read after updating finds no file, so it reads the keychain once, writes what it finds to the
+file, and deletes the keychain entry. **That is the last keychain prompt a user will ever see**, and
+only users upgrading get even that. If it is dismissed or fails, the result is "signed out" and signing
+in again writes the file — the keychain is not consulted a second time.
+
+The file is **truncated, not deleted**, on sign-out: its existence is what records that the migration
+already happened. Deleting it would send the next launch back through the keychain and reintroduce the
+prompt.
 
 ## Replacing the alert sounds
 
