@@ -161,12 +161,105 @@ async fn run_startup_migrations(
 
 #[cfg(test)]
 mod tests {
+    use std::collections::BTreeMap;
+
     /// Not a behavior test — a guardrail. `#[sqlx::test]` applies every embedded migration (in
     /// order) against a fresh database as its own setup step before the body runs; reaching this
     /// line at all is the assertion. Otherwise a broken/out-of-order migration is only discovered
     /// when a real backend boots against a real DB.
+    ///
+    /// It also catches two migrations sharing a version, once both are in the tree: sqlx applies both
+    /// and the second violates `_sqlx_migrations`' primary key. That failure is a constraint dump,
+    /// though, so `migration_versions_are_unique` below exists to say the same thing readably (#569).
     #[sqlx::test]
     async fn migrations_apply_cleanly(_pool: sqlx::PgPool) {}
+
+    /// Every version claimed by more than one migration file, with the files that claim it.
+    ///
+    /// The version is the prefix before the first `_`, which is how sqlx reads a
+    /// `NNNN_name.sql` filename.
+    fn duplicate_versions<'a>(
+        names: impl IntoIterator<Item = &'a str>,
+    ) -> Vec<(String, Vec<String>)> {
+        let mut by_version: BTreeMap<String, Vec<String>> = BTreeMap::new();
+        for name in names.into_iter().filter(|n| n.ends_with(".sql")) {
+            let version = name.split('_').next().unwrap_or(name).to_string();
+            by_version
+                .entry(version)
+                .or_default()
+                .push(name.to_string());
+        }
+        by_version
+            .into_iter()
+            .filter(|(_, files)| files.len() > 1)
+            .collect()
+    }
+
+    /// Two migrations with the same version do not fail cleanly. sqlx sorts without deduplicating
+    /// and snapshots the applied set before the apply loop, so **both** run, the second violates
+    /// `_sqlx_migrations`' primary key, and startup leaves the database half-migrated.
+    ///
+    /// A collision usually arrives when two open PRs each pick "the next free number" and both merge
+    /// (#569 — three in one evening). Neither branch has a duplicate on its own, so this fires on the
+    /// merged tree: the push-to-`next` CI run, or `just ci` after pulling. Unlike the PK violation
+    /// above, it needs no database and names the files to renumber. A gap in the sequence is
+    /// harmless; only a repeat is fatal.
+    #[test]
+    fn migration_versions_are_unique() {
+        let dir = concat!(env!("CARGO_MANIFEST_DIR"), "/migrations");
+        let mut names: Vec<String> = std::fs::read_dir(dir)
+            .expect("backend/migrations is readable")
+            .map(|e| {
+                e.expect("a directory entry")
+                    .file_name()
+                    .to_string_lossy()
+                    .into_owned()
+            })
+            .collect();
+
+        // `read_dir` order is unspecified; sorted so a failure names the files the same way every run.
+        names.sort();
+        let dupes = duplicate_versions(names.iter().map(String::as_str));
+
+        assert!(
+            dupes.is_empty(),
+            "{}",
+            dupes
+                .iter()
+                .map(|(v, files)| format!(
+                    "duplicate migration version {v}: {} — renumber all but one above every \
+                     open PR's highest (see AGENTS.md § Migrations)",
+                    files.join(", ")
+                ))
+                .collect::<Vec<_>>()
+                .join("\n")
+        );
+    }
+
+    /// The check above passes vacuously if this helper stops finding duplicates, so it is exercised
+    /// directly: a real repeat, a harmless gap, and a name containing a second `_`.
+    #[test]
+    fn the_duplicate_check_notices_a_duplicate() {
+        let names = [
+            "0089_departure_runway.sql",
+            "0090_departure_runway_rules.sql",
+            "0090_some_other_thing.sql",
+            "0093_after_a_gap.sql",
+            "README.md",
+        ];
+
+        assert_eq!(
+            duplicate_versions(names),
+            vec![(
+                "0090".to_string(),
+                vec![
+                    "0090_departure_runway_rules.sql".to_string(),
+                    "0090_some_other_thing.sql".to_string(),
+                ],
+            )],
+            "only the repeated 0090 is a duplicate; the 0091-0092 gap and non-SQL files are not"
+        );
+    }
 }
 
 #[cfg(test)]
