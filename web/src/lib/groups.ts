@@ -153,3 +153,69 @@ export function useChangeMembership(held: boolean) {
     },
   });
 }
+
+export type VatusaRoleMapping = components["schemas"]["VatusaRoleMappingBody"];
+export type VatusaRoleMappingList = components["schemas"]["VatusaRoleMappingList"];
+export type CreateVatusaRoleMappingRequest =
+  components["schemas"]["CreateVatusaRoleMappingRequest"];
+
+/** Under `GROUPS`, so invalidating the groups also refetches these (and vice versa). */
+export const VATUSA_ROLE_MAPPINGS = [...GROUPS, "vatusa-role-mappings"] as const;
+
+/** Every VATUSA role → group mapping, plus the VATUSA roles seen in synced members (#548). */
+export function useVatusaRoleMappings() {
+  return useQuery({
+    queryKey: VATUSA_ROLE_MAPPINGS,
+    queryFn: async (): Promise<VatusaRoleMappingList> => {
+      const {data, error} = await ois.GET("/api/v1/admin/vatusa-role-mappings");
+      if (error || !data) throw new Error("failed to load VATUSA role mappings");
+      return data;
+    },
+  });
+}
+
+/**
+ * Add or remove a mapping. Either changes access for every synced member holding that VATUSA role,
+ * immediately, so the whole groups tree is invalidated — member lists move too. The server rejects
+ * (403) a mapping to a group the caller couldn't grant directly.
+ */
+export function useAddVatusaRoleMapping() {
+  const qc = useQueryClient();
+  const toast = useToast();
+  return useMutation({
+    mutationFn: async (body: CreateVatusaRoleMappingRequest): Promise<VatusaRoleMapping> => {
+      const {data, error, response} = await ois.POST("/api/v1/admin/vatusa-role-mappings", {body});
+      if (error || !data) {
+        const err = new Error("mapping failed") as Error & {status?: number};
+        err.status = response?.status;
+        throw err;
+      }
+      return data;
+    },
+    onSuccess: () => qc.invalidateQueries({queryKey: GROUPS}),
+    onError: (error: Error & {status?: number}) => {
+      toast.error(
+        error.status === 403
+          ? "You can only map a group where you hold everything it bundles"
+          : error.status === 409
+            ? "That VATUSA role already grants this group"
+            : "Couldn’t add the VATUSA role",
+      );
+    },
+  });
+}
+
+export function useRemoveVatusaRoleMapping() {
+  const qc = useQueryClient();
+  const toast = useToast();
+  return useMutation({
+    mutationFn: async (id: number): Promise<void> => {
+      const {error} = await ois.DELETE("/api/v1/admin/vatusa-role-mappings/{id}", {
+        params: {path: {id}},
+      });
+      if (error) throw new Error("mapping removal failed");
+    },
+    onSuccess: () => qc.invalidateQueries({queryKey: GROUPS}),
+    onError: () => toast.error("Couldn’t remove the VATUSA role"),
+  });
+}

@@ -1,8 +1,7 @@
 # VATUSA sync and role mapping
 
-> **Status: member sync built; role → group mapping built backend-only (#548, 2026-10).** The mapping
-> table and the reconciler ship with **no mappings seeded**, so they grant nobody anything until a
-> mapping is added. The admin page for editing mappings is the second half of #548.
+> **Status: built (#548, 2026-10).** Member sync, the role → group mapping, and its editor. Mappings
+> ship **unseeded** — VATUSA grants nobody anything until an admin adds a mapping.
 
 ## What is synced
 
@@ -37,6 +36,19 @@ ingest.
 
 A sign-in and a webhook for the same person cannot race: `upsert_member` updates the member's
 `identity.users` row first, and that row lock holds until commit, so their syncs run one at a time.
+
+### Editing mappings
+
+Each non-system group's card on **Admin → Groups** has a *VATUSA roles* section
+(`/api/v1/admin/vatusa-role-mappings`). Adding or removing a mapping re-reconciles every synced member
+holding that VATUSA role **immediately**, from their stored roles — no VATUSA call, no waiting for the
+next sync. The role picker offers only roles seen in synced members.
+
+A mapping grants its group to everyone holding the role, so changing one takes the same gate as setting
+the group's whole contents: the editor must hold every permission the group grants, nationally and
+unrestricted (`VATUSA_STAFF` is server-admin only). **System groups — `SERVER_ADMIN`, `USER`, `BOT`,
+`SERVICE_APP` — can never be mapped**, even by a server admin: `SERVER_ADMIN` has no `role_permissions`
+for the gate to check, so without that refusal VATUSA could become a source of server admins.
 
 ## Known gap: does the webhook fire for role changes?
 

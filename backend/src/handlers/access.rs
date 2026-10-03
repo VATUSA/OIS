@@ -28,11 +28,15 @@ use crate::{
     },
     errors::ApiError,
     models::{
-        AccessCatalogBody, AdminUserPage, CreateGroupRequest, GroupBody, GroupMemberBody,
-        GroupMemberPage, GroupMemberRequest, SelfAccessBody, UpdateGroupRequest,
-        UpdateUserAccessRequest, UserAccessBody,
+        AccessCatalogBody, AdminUserPage, CreateGroupRequest, CreateVatusaRoleMappingRequest,
+        GroupBody, GroupMemberBody, GroupMemberPage, GroupMemberRequest, SelfAccessBody,
+        UpdateGroupRequest, UpdateUserAccessRequest, UserAccessBody, VatusaRoleMappingBody,
+        VatusaRoleMappingList,
     },
-    repos::{access as access_repo, audit as audit_repo, org as org_repo, users as user_repo},
+    repos::{
+        access as access_repo, audit as audit_repo, org as org_repo, users as user_repo,
+        vatusa as vatusa_repo,
+    },
     state::AppState,
 };
 
@@ -770,6 +774,221 @@ async fn audit_group(
         },
     )
     .await
+}
+
+// --- VATUSA role → group mappings (#548) ---
+
+/// A mapping grants its group to everyone holding a VATUSA role, so changing one is at least as
+/// powerful as editing the group itself. It takes the same gate as an edit that would set the group's
+/// entire contents: the actor must hold every permission the group grants, nationally and
+/// unrestricted, and only a server admin may touch `VATUSA_STAFF`.
+///
+/// System groups are refused before that, and must be: `SERVER_ADMIN` grants through the effective
+/// permissions view rather than `role_permissions`, so it has no contents to check and would sail
+/// through the gate — a mapping to it would make VATUSA a source of server admins.
+async fn enforce_mapping_scope(
+    state: &AppState,
+    actor: &CurrentUser,
+    role_name: &str,
+) -> Result<(), ApiError> {
+    if access_repo::is_system_role(role_name) {
+        return Err(ApiError::Forbidden);
+    }
+    let pool = state.db.as_ref().ok_or(ApiError::ServiceUnavailable)?;
+    let contents = access_repo::fetch_group_permissions(pool, role_name).await?;
+    enforce_group_scope(state, actor, role_name, &[], &contents).await
+}
+
+async fn audit_mapping(
+    pool: &sqlx::PgPool,
+    actor: &CurrentUser,
+    headers: &HeaderMap,
+    action: &str,
+    mapping: &VatusaRoleMappingBody,
+    reason: Option<&str>,
+) -> Result<(), ApiError> {
+    let actor_id = audit_repo::resolve_user_actor_id(pool, &actor.id, &actor.display_name).await?;
+    let state = serde_json::json!({
+        "vatusa_role": mapping.vatusa_role,
+        "facility": mapping.facility,
+        "role_name": mapping.role_name,
+    });
+    let (before_state, after_state) = if action == "DELETE" {
+        (Some(state), None)
+    } else {
+        (None, Some(state))
+    };
+    audit_repo::record_audit(
+        pool,
+        audit_repo::AuditEntry {
+            actor_id,
+            action: action.to_string(),
+            resource_type: "VATUSA_ROLE_MAPPING".to_string(),
+            resource_id: Some(mapping.id.to_string()),
+            artcc_id: None,
+            reason: reason.map(ToOwned::to_owned),
+            before_state,
+            after_state,
+            ip_address: audit_repo::client_ip(headers),
+        },
+    )
+    .await
+}
+
+#[utoipa::path(
+    get,
+    path = "/api/v1/admin/vatusa-role-mappings",
+    tag = "access",
+    responses((status = 200, body = VatusaRoleMappingList), (status = 401), (status = 403))
+)]
+pub async fn list_vatusa_role_mappings(
+    State(state): State<AppState>,
+    _permission: RequirePermission<AccessGroupsRead>,
+) -> Result<Json<VatusaRoleMappingList>, ApiError> {
+    let pool = state.db.as_ref().ok_or(ApiError::ServiceUnavailable)?;
+    Ok(Json(VatusaRoleMappingList {
+        mappings: vatusa_repo::fetch_role_mappings(pool).await?,
+        known_vatusa_roles: vatusa_repo::fetch_known_vatusa_roles(pool).await?,
+    }))
+}
+
+#[utoipa::path(
+    post,
+    path = "/api/v1/admin/vatusa-role-mappings",
+    tag = "access",
+    request_body = CreateVatusaRoleMappingRequest,
+    responses(
+        (status = 200, body = VatusaRoleMappingBody),
+        (status = 400), (status = 401), (status = 403), (status = 404), (status = 409)
+    )
+)]
+pub async fn create_vatusa_role_mapping(
+    State(state): State<AppState>,
+    _permission: RequirePermission<AccessGroupsUpdate>,
+    Extension(current_user): Extension<Option<CurrentUser>>,
+    headers: HeaderMap,
+    Json(payload): Json<CreateVatusaRoleMappingRequest>,
+) -> Result<Json<VatusaRoleMappingBody>, ApiError> {
+    let user = current_user.as_ref().ok_or(ApiError::Unauthorized)?;
+    create_mapping(&state, user, &headers, payload)
+        .await
+        .map(Json)
+}
+
+/// The body of `create_vatusa_role_mapping`, free of extractors so tests drive it directly (the
+/// `change_membership` pattern).
+async fn create_mapping(
+    state: &AppState,
+    user: &CurrentUser,
+    headers: &HeaderMap,
+    payload: CreateVatusaRoleMappingRequest,
+) -> Result<VatusaRoleMappingBody, ApiError> {
+    let pool = state.db.as_ref().ok_or(ApiError::ServiceUnavailable)?;
+
+    // Normalised exactly as VATUSA roles are on ingest, or the mapping would never match.
+    let vatusa_role = payload.vatusa_role.trim().to_ascii_uppercase();
+    let facility = payload
+        .facility
+        .as_deref()
+        .map(str::trim)
+        .filter(|f| !f.is_empty())
+        .map(str::to_ascii_uppercase);
+    let role_name = payload.role_name.trim().to_ascii_uppercase();
+    let reason = payload.reason.trim();
+    if reason.is_empty()
+        || vatusa_role.is_empty()
+        || vatusa_role.len() > 16
+        || !vatusa_role.chars().all(|c| c.is_ascii_alphanumeric())
+    {
+        return Err(ApiError::BadRequest);
+    }
+    // `ZHQ` is the division, which is not a facility row (it maps to a national grant).
+    if let Some(f) = facility.as_deref()
+        && f != "ZHQ"
+        && org_repo::find_facility(pool, f).await?.is_none()
+    {
+        return Err(ApiError::BadRequest);
+    }
+
+    enforce_mapping_scope(state, user, &role_name).await?;
+    access_repo::fetch_group(pool, &role_name)
+        .await?
+        .ok_or(ApiError::NotFound)?;
+
+    let mut tx = pool.begin().await.map_err(|_| ApiError::Internal)?;
+    let id =
+        vatusa_repo::create_role_mapping(&mut tx, &vatusa_role, facility.as_deref(), &role_name)
+            .await?;
+    let reconciled =
+        vatusa_repo::reconcile_members_holding(&mut tx, &vatusa_role, facility.as_deref()).await?;
+    tx.commit().await.map_err(|_| ApiError::Internal)?;
+    tracing::info!(
+        vatusa_role,
+        role_name,
+        reconciled,
+        "VATUSA role mapping added"
+    );
+
+    let body = vatusa_repo::fetch_role_mapping(pool, id)
+        .await?
+        .ok_or(ApiError::Internal)?;
+    audit_mapping(pool, user, headers, "CREATE", &body, Some(reason)).await?;
+    state.publish(crate::realtime::topic::ACCESS_GRANTED);
+    Ok(body)
+}
+
+#[utoipa::path(
+    delete,
+    path = "/api/v1/admin/vatusa-role-mappings/{id}",
+    tag = "access",
+    params(("id" = i64, Path, description = "Mapping id")),
+    responses((status = 204), (status = 401), (status = 403), (status = 404))
+)]
+pub async fn delete_vatusa_role_mapping(
+    State(state): State<AppState>,
+    _permission: RequirePermission<AccessGroupsUpdate>,
+    Extension(current_user): Extension<Option<CurrentUser>>,
+    Path(id): Path<i64>,
+    headers: HeaderMap,
+) -> Result<axum::http::StatusCode, ApiError> {
+    let user = current_user.as_ref().ok_or(ApiError::Unauthorized)?;
+    delete_mapping(&state, user, &headers, id).await?;
+    Ok(axum::http::StatusCode::NO_CONTENT)
+}
+
+async fn delete_mapping(
+    state: &AppState,
+    user: &CurrentUser,
+    headers: &HeaderMap,
+    id: i64,
+) -> Result<(), ApiError> {
+    let pool = state.db.as_ref().ok_or(ApiError::ServiceUnavailable)?;
+
+    let mapping = vatusa_repo::fetch_role_mapping(pool, id)
+        .await?
+        .ok_or(ApiError::NotFound)?;
+    // Removing a mapping revokes the group from everyone it reached — the same power as adding it.
+    enforce_mapping_scope(state, user, &mapping.role_name).await?;
+
+    let mut tx = pool.begin().await.map_err(|_| ApiError::Internal)?;
+    vatusa_repo::delete_role_mapping(&mut tx, id).await?;
+    let reconciled = vatusa_repo::reconcile_members_holding(
+        &mut tx,
+        &mapping.vatusa_role,
+        mapping.facility.as_deref(),
+    )
+    .await?;
+    tx.commit().await.map_err(|_| ApiError::Internal)?;
+    tracing::info!(
+        vatusa_role = mapping.vatusa_role.as_str(),
+        role_name = mapping.role_name.as_str(),
+        reconciled,
+        "VATUSA role mapping removed"
+    );
+
+    audit_mapping(pool, user, headers, "DELETE", &mapping, None).await?;
+    state.publish(crate::realtime::topic::ACCESS_GRANTED);
+    Ok(())
 }
 
 #[cfg(test)]
@@ -1935,4 +2154,385 @@ pub async fn remove_group_member(
 ) -> Result<axum::http::StatusCode, ApiError> {
     let user = current_user.as_ref().ok_or(ApiError::Unauthorized)?;
     change_membership(&state, user, &headers, &name, payload, false).await
+}
+
+#[cfg(test)]
+mod mapping_tests {
+    use sqlx::PgPool;
+
+    use super::*;
+    use crate::scope_test_support::{grant, seed_user, test_state};
+
+    const MEMBER_CID: i64 = 1_548_100;
+
+    fn actor(id: &str) -> CurrentUser {
+        CurrentUser {
+            id: id.to_string(),
+            cid: 0,
+            email: String::new(),
+            display_name: "Test Actor".to_string(),
+            rating: None,
+            primary_role: None,
+        }
+    }
+
+    async fn admin(pool: &PgPool) -> CurrentUser {
+        let id = seed_user(pool).await;
+        sqlx::query(
+            "insert into access.user_roles (user_id, role_name, source) \
+             values ($1, 'SERVER_ADMIN', 'system')",
+        )
+        .bind(&id)
+        .execute(pool)
+        .await
+        .unwrap();
+        actor(&id)
+    }
+
+    /// A member already synced from VATUSA, holding `DATM@ZDC` in the stored roles.
+    async fn synced_member(pool: &PgPool) -> String {
+        let id: String = sqlx::query_scalar(
+            "insert into identity.users (full_name, display_name, cid) \
+             values ('M', 'M', $1) returning id",
+        )
+        .bind(MEMBER_CID)
+        .fetch_one(pool)
+        .await
+        .unwrap();
+        sqlx::query(
+            "insert into identity.vatusa_roles (cid, facility, role) values ($1, 'ZDC', 'DATM')",
+        )
+        .bind(MEMBER_CID)
+        .execute(pool)
+        .await
+        .unwrap();
+        id
+    }
+
+    fn request(
+        vatusa_role: &str,
+        facility: Option<&str>,
+        group: &str,
+    ) -> CreateVatusaRoleMappingRequest {
+        CreateVatusaRoleMappingRequest {
+            vatusa_role: vatusa_role.to_string(),
+            facility: facility.map(str::to_string),
+            role_name: group.to_string(),
+            reason: "test".to_string(),
+        }
+    }
+
+    async fn roles_of(pool: &PgPool, user: &str) -> Vec<(String, Option<String>, String)> {
+        sqlx::query_as(
+            "select role_name, artcc_id, source from access.user_roles \
+             where user_id = $1 order by role_name, source",
+        )
+        .bind(user)
+        .fetch_all(pool)
+        .await
+        .unwrap()
+    }
+
+    async fn mapping_count(pool: &PgPool) -> i64 {
+        sqlx::query_scalar("select count(*) from access.vatusa_role_mappings")
+            .fetch_one(pool)
+            .await
+            .unwrap()
+    }
+
+    /// AC5's "changing it re-reconciles": a new mapping reaches members who already synced, now — not
+    /// at their next sync, which the AC8 gap can put days away — and the grant is audited naming the
+    /// VATUSA role, beside the audit of the mapping itself.
+    #[sqlx::test]
+    async fn adding_a_mapping_grants_already_synced_members_immediately(pool: PgPool) {
+        let actor = admin(&pool).await;
+        let member = synced_member(&pool).await;
+        let state = test_state(pool.clone(), std::collections::HashMap::new());
+
+        create_mapping(
+            &state,
+            &actor,
+            &HeaderMap::new(),
+            request("DATM", None, "EC"),
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(
+            roles_of(&pool, &member).await,
+            vec![(
+                "EC".to_string(),
+                Some("ZDC".to_string()),
+                "vatusa".to_string()
+            )]
+        );
+        // Audited as an admin edit is (#546 AC6): USER_ACCESS, keyed on the member.
+        let reason: String = sqlx::query_scalar(
+            "select reason from access.audit_logs \
+             where resource_type = 'USER_ACCESS' and resource_id = $1 and actor_id = 'vatusa-sync'",
+        )
+        .bind(&member)
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        assert!(reason.contains("DATM@ZDC"), "{reason}");
+        let mapping_audits: i64 = sqlx::query_scalar(
+            "select count(*) from access.audit_logs \
+             where resource_type = 'VATUSA_ROLE_MAPPING' and action = 'CREATE'",
+        )
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        assert_eq!(mapping_audits, 1);
+    }
+
+    /// Removing a mapping revokes what it granted, immediately — and only that: a hand-made grant of
+    /// the same group at the same scope survives.
+    #[sqlx::test]
+    async fn deleting_a_mapping_is_gated_like_creating_one(pool: PgPool) {
+        // A delete reconciles the group away from every member it reached, so it carries the same power
+        // as creating the mapping and needs the same authority. The create side was pinned; this side
+        // was not — removing `enforce_mapping_scope` from `delete_mapping` left the suite green (#548
+        // review), which would let any holder of the coarse, scope-blind `access.groups.update` strip a
+        // national mapping from everyone at once.
+        let admin = admin(&pool).await;
+        let member = synced_member(&pool).await;
+        let state = test_state(pool.clone(), std::collections::HashMap::new());
+        let mapping = create_mapping(
+            &state,
+            &admin,
+            &HeaderMap::new(),
+            request("DATM", None, "EC"),
+        )
+        .await
+        .unwrap();
+        let synced = || {
+            let pool = pool.clone();
+            let member = member.clone();
+            async move {
+                roles_of(&pool, &member)
+                    .await
+                    .into_iter()
+                    .filter(|(_, _, source)| source == "vatusa")
+                    .count()
+            }
+        };
+        assert_eq!(synced().await, 1, "the mapping reached the member");
+
+        // An editor holding everything EC bundles, but only at ZDC — enough to pass the coarse gate,
+        // not enough to act on a mapping that reaches every facility.
+        let scoped = seed_user(&pool).await;
+        grant(&pool, &scoped, "access.groups.update", None).await;
+        let bundle: Vec<String> = sqlx::query_scalar(
+            "select permission_name from access.role_permissions where role_name = 'EC'",
+        )
+        .fetch_all(&pool)
+        .await
+        .unwrap();
+        assert!(
+            !bundle.is_empty(),
+            "EC must bundle something for this to mean anything"
+        );
+        for permission in &bundle {
+            grant(&pool, &scoped, permission, Some("ZDC")).await;
+        }
+
+        let refused = delete_mapping(&state, &actor(&scoped), &HeaderMap::new(), mapping.id).await;
+        assert!(matches!(refused, Err(ApiError::Forbidden)), "{refused:?}");
+        assert_eq!(
+            mapping_count(&pool).await,
+            1,
+            "a refused delete must leave the mapping"
+        );
+        assert_eq!(
+            synced().await,
+            1,
+            "and must not have revoked anyone's grant"
+        );
+
+        // The gate narrows; it does not disable deletion.
+        delete_mapping(&state, &admin, &HeaderMap::new(), mapping.id)
+            .await
+            .unwrap();
+        assert_eq!(mapping_count(&pool).await, 0);
+        assert_eq!(
+            synced().await,
+            0,
+            "an authorised delete revokes the synced grant"
+        );
+    }
+
+    #[sqlx::test]
+    async fn removing_a_mapping_revokes_only_the_synced_grant(pool: PgPool) {
+        let actor = admin(&pool).await;
+        let member = synced_member(&pool).await;
+        sqlx::query(
+            "insert into access.user_roles (user_id, role_name, artcc_id, source) \
+             values ($1, 'EC', 'ZDC', 'manual')",
+        )
+        .bind(&member)
+        .execute(&pool)
+        .await
+        .unwrap();
+        let state = test_state(pool.clone(), std::collections::HashMap::new());
+        let mapping = create_mapping(
+            &state,
+            &actor,
+            &HeaderMap::new(),
+            request("DATM", None, "EC"),
+        )
+        .await
+        .unwrap();
+
+        delete_mapping(&state, &actor, &HeaderMap::new(), mapping.id)
+            .await
+            .unwrap();
+
+        assert_eq!(
+            roles_of(&pool, &member).await,
+            vec![(
+                "EC".to_string(),
+                Some("ZDC".to_string()),
+                "manual".to_string()
+            )]
+        );
+    }
+
+    /// The one escalation this feature could open. `SERVER_ADMIN` grants through the effective
+    /// permissions view, not `role_permissions`, so it has no contents for the group gate to check —
+    /// without the explicit refusal, any group editor could make VATUSA a source of server admins.
+    /// Refused even to a server admin: no system group is VATUSA's to grant.
+    #[sqlx::test]
+    async fn a_mapping_to_a_system_group_is_refused(pool: PgPool) {
+        let actor = admin(&pool).await;
+        let state = test_state(pool.clone(), std::collections::HashMap::new());
+
+        for group in ["SERVER_ADMIN", "USER", "BOT", "SERVICE_APP"] {
+            let result = create_mapping(
+                &state,
+                &actor,
+                &HeaderMap::new(),
+                request("ATM", None, group),
+            )
+            .await;
+            assert!(
+                matches!(result, Err(ApiError::Forbidden)),
+                "{group}: {result:?}"
+            );
+        }
+        assert_eq!(mapping_count(&pool).await, 0);
+    }
+
+    /// A non-admin editor must hold everything the group grants — mapping a group is granting it.
+    #[sqlx::test]
+    async fn an_editor_who_lacks_the_groups_permissions_is_refused(pool: PgPool) {
+        let user = seed_user(&pool).await;
+        grant(&pool, &user, "access.groups.update", None).await;
+        sqlx::query("insert into access.roles (name, description) values ('MAP_GROUP', 't')")
+            .execute(&pool)
+            .await
+            .unwrap();
+        sqlx::query(
+            "insert into access.role_permissions (role_name, permission_name) \
+             values ('MAP_GROUP', 'tmu.ntml.create')",
+        )
+        .execute(&pool)
+        .await
+        .unwrap();
+        let state = test_state(pool.clone(), std::collections::HashMap::new());
+
+        let result = create_mapping(
+            &state,
+            &actor(&user),
+            &HeaderMap::new(),
+            request("ATM", None, "MAP_GROUP"),
+        )
+        .await;
+        assert!(matches!(result, Err(ApiError::Forbidden)), "{result:?}");
+
+        // The scope half: holding it at ZDC only is not enough, because the mapping reaches members
+        // at every facility (and nationally, via ZHQ).
+        grant(&pool, &user, "tmu.ntml.create", Some("ZDC")).await;
+        let result = create_mapping(
+            &state,
+            &actor(&user),
+            &HeaderMap::new(),
+            request("ATM", None, "MAP_GROUP"),
+        )
+        .await;
+        assert!(matches!(result, Err(ApiError::Forbidden)), "{result:?}");
+
+        // Holding it nationally is.
+        grant(&pool, &user, "tmu.ntml.create", None).await;
+        create_mapping(
+            &state,
+            &actor(&user),
+            &HeaderMap::new(),
+            request("ATM", None, "MAP_GROUP"),
+        )
+        .await
+        .unwrap();
+    }
+
+    /// Codes are normalised as ingest normalises them, or a mapping typed `datm` would never match.
+    #[sqlx::test]
+    async fn input_is_normalised_and_validated(pool: PgPool) {
+        let actor = admin(&pool).await;
+        let state = test_state(pool.clone(), std::collections::HashMap::new());
+        let create = |r: CreateVatusaRoleMappingRequest| {
+            let (state, actor) = (state.clone(), actor.clone());
+            async move { create_mapping(&state, &actor, &HeaderMap::new(), r).await }
+        };
+
+        let body = create(request(" datm ", Some(" zdc "), "ec"))
+            .await
+            .unwrap();
+        assert_eq!(
+            (
+                body.vatusa_role.as_str(),
+                body.facility.as_deref(),
+                body.role_name.as_str()
+            ),
+            ("DATM", Some("ZDC"), "EC")
+        );
+        create(request("WM", Some("ZHQ"), "EC"))
+            .await
+            .expect("ZHQ is the division, not a facility row, and is allowed");
+
+        for bad in [
+            request("ATM", Some("ZZZ"), "EC"),
+            request("D ATM", None, "EC"),
+            request("", None, "EC"),
+            CreateVatusaRoleMappingRequest {
+                reason: " ".to_string(),
+                ..request("ATM", None, "EC")
+            },
+        ] {
+            assert!(matches!(create(bad).await, Err(ApiError::BadRequest)));
+        }
+        assert!(matches!(
+            create(request("ATM", None, "NO_SUCH_GROUP")).await,
+            Err(ApiError::NotFound)
+        ));
+        assert!(matches!(
+            create(request("datm", Some("ZDC"), "EC")).await,
+            Err(ApiError::Conflict)
+        ));
+    }
+
+    /// The editor's picker offers the VATUSA roles actually seen, once each.
+    #[sqlx::test]
+    async fn known_vatusa_roles_are_the_distinct_roles_seen(pool: PgPool) {
+        sqlx::query(
+            "insert into identity.vatusa_roles (cid, facility, role) \
+             values (1, 'ZDC', 'MTR'), (2, 'ZDC', 'ATM'), (3, 'ZNY', 'ATM')",
+        )
+        .execute(&pool)
+        .await
+        .unwrap();
+        assert_eq!(
+            vatusa_repo::fetch_known_vatusa_roles(&pool).await.unwrap(),
+            vec!["ATM".to_string(), "MTR".to_string()]
+        );
+    }
 }

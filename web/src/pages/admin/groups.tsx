@@ -12,6 +12,9 @@ import {
   useGroupMembers,
   useGroups,
   useSaveGroup,
+  useAddVatusaRoleMapping,
+  useRemoveVatusaRoleMapping,
+  useVatusaRoleMappings,
 } from "@/lib/groups";
 import {useMe} from "@/lib/auth";
 import {hasPermission} from "@/lib/permissions";
@@ -215,6 +218,124 @@ function Members({group, facilities}: {group: Group; facilities: {id: string; na
   );
 }
 
+/**
+ * Which VATUSA roles grant this group (#548). Adding one grants the group, at once, to every synced
+ * member holding that VATUSA role — scoped to the facility they hold it at, and nationally for a
+ * `ZHQ` (division) role. Only roles actually seen in synced members are offered: a role name typed
+ * by hand that VATUSA never sends would silently match nobody.
+ */
+export function VatusaRoles({
+  group,
+  facilities,
+}: {
+  group: Group;
+  facilities: {id: string; name: string}[];
+}) {
+  const mappings = useVatusaRoleMappings();
+  const add = useAddVatusaRoleMapping();
+  const remove = useRemoveVatusaRoleMapping();
+  const [role, setRole] = useState("");
+  const [facility, setFacility] = useState("");
+  const [reason, setReason] = useState("");
+
+  const mine = (mappings.data?.mappings ?? []).filter((m) => m.role_name === group.name);
+  const known = mappings.data?.known_vatusa_roles ?? [];
+
+  return (
+    <div className="flex flex-col gap-3 border-t border-line-soft pt-4">
+      <span className={labelClass}>VATUSA roles — {mine.length}</span>
+
+      {mine.length === 0 && (
+        <p className="text-xs text-ink-3">No VATUSA role grants this group.</p>
+      )}
+
+      <div className="flex flex-col gap-1">
+        {mine.map((m) => (
+          <div
+            key={m.id}
+            className="flex items-center justify-between gap-3 rounded-xs bg-panel-2 px-2.5 py-1.5"
+          >
+            <div className="flex items-center gap-2">
+              <span className="font-mono text-sm font-semibold text-ink">{m.vatusa_role}</span>
+              <StatusPill tone={m.facility ? "brand" : "neutral"}>
+                {m.facility ?? "any facility"}
+              </StatusPill>
+            </div>
+            <ConfirmButton variant="ghost" onConfirm={() => remove.mutate(m.id)}>
+              Remove
+            </ConfirmButton>
+          </div>
+        ))}
+      </div>
+
+      <div className="flex flex-wrap items-end gap-2">
+        <label className="flex flex-col gap-1">
+          <span className={labelClass}>VATUSA role</span>
+          <select
+            value={role}
+            onChange={(e) => setRole(e.target.value)}
+            className="rounded-xs border border-line bg-panel-2 px-2 py-1.5 text-sm text-ink"
+          >
+            <option value="">Choose…</option>
+            {known.map((r) => (
+              <option key={r} value={r}>
+                {r}
+              </option>
+            ))}
+          </select>
+        </label>
+        <label className="flex flex-col gap-1">
+          <span className={labelClass}>Held at</span>
+          <select
+            value={facility}
+            onChange={(e) => setFacility(e.target.value)}
+            className="rounded-xs border border-line bg-panel-2 px-2 py-1.5 text-sm text-ink"
+          >
+            <option value="">Any facility</option>
+            <option value="ZHQ">ZHQ (division)</option>
+            {facilities.map((f) => (
+              <option key={f.id} value={f.id}>
+                {f.id}
+              </option>
+            ))}
+          </select>
+        </label>
+        <label className="flex min-w-48 flex-1 flex-col gap-1">
+          <span className={labelClass}>Reason</span>
+          <Input value={reason} onChange={(e) => setReason(e.target.value)} />
+        </label>
+        <Button
+          disabled={!role || reason.trim().length === 0 || add.isPending}
+          onClick={() =>
+            add.mutate(
+              {
+                vatusa_role: role,
+                facility: facility || undefined,
+                role_name: group.name,
+                reason: reason.trim(),
+              },
+              {onSuccess: () => {
+                setRole("");
+                setFacility("");
+                setReason("");
+              }},
+            )
+          }
+        >
+          Add VATUSA role
+        </Button>
+      </div>
+      <p className="text-xs text-warning">
+        Adding grants this group now to every synced member holding that role, at the facility they
+        hold it — nationally for a ZHQ role. Removing revokes it the same way.
+      </p>
+      {mappings.isSuccess && known.length === 0 && (
+        <p className="text-xs text-ink-3">No VATUSA roles have been synced yet.</p>
+      )}
+    </div>
+  );
+}
+
 function GroupCard({
   group,
   catalog,
@@ -293,6 +414,7 @@ function GroupCard({
         </>
       )}
       <Members group={group} facilities={facilities} />
+      {!group.system && <VatusaRoles group={group} facilities={facilities} />}
     </Card>
   );
 }
