@@ -13,8 +13,11 @@ pub use ois_core::permissions::{
 
 use serde_json::Value;
 
+use std::collections::BTreeMap;
+
 use crate::{
     errors::ApiError,
+    models::{ScopeAccess, UserAccessBody},
     repos::{access as access_repo, api_keys as api_keys_repo},
 };
 
@@ -27,6 +30,63 @@ pub fn is_server_admin(roles: &[String]) -> bool {
 pub fn permission_tree_from_names(names: &[String]) -> Result<Value, ApiError> {
     let paths = access_repo::permission_names_to_permissions(names.to_vec())?;
     Ok(permission_tree_from_paths(&paths))
+}
+
+/// Groups direct grants + role assignments into per-scope `ScopeAccess` (national first).
+///
+/// The snapshot every `USER_ACCESS` audit entry records either side of a change — the user editor,
+/// the group side (#546 AC6), and VATUSA sync (#548) — so it lives here rather than in a handler,
+/// where the sync's repo layer could not share it.
+pub fn user_access_body(
+    user_id: &str,
+    cid: i64,
+    grants: Vec<(Option<String>, String)>,
+    roles: Vec<(Option<String>, String)>,
+) -> Result<UserAccessBody, ApiError> {
+    let national_roles: Vec<String> = roles
+        .iter()
+        .filter(|(artcc, _)| artcc.is_none())
+        .map(|(_, role)| role.clone())
+        .collect();
+    let server_admin = is_server_admin(&national_roles);
+
+    let mut map: BTreeMap<Option<String>, (Vec<String>, Vec<String>)> = BTreeMap::new();
+    map.entry(None).or_default(); // national scope always present
+    for (artcc, role) in roles {
+        map.entry(artcc).or_default().0.push(role);
+    }
+    for (artcc, permission) in grants {
+        map.entry(artcc).or_default().1.push(permission);
+    }
+
+    let mut scopes = Vec::with_capacity(map.len());
+    for (artcc_id, (role_names, perm_names)) in map {
+        scopes.push(ScopeAccess {
+            artcc_id,
+            role_names,
+            permissions: permission_tree_from_names(&perm_names)?,
+        });
+    }
+
+    Ok(UserAccessBody {
+        id: user_id.to_string(),
+        cid,
+        server_admin,
+        scopes,
+    })
+}
+
+/// A server admin holds the whole catalogue nationally, through the effective-permissions view rather
+/// than stored grants — so a snapshot shows it explicitly, or it would read as holding nothing.
+pub fn apply_server_admin_catalog(
+    body: &mut UserAccessBody,
+    catalog: &[String],
+) -> Result<(), ApiError> {
+    let tree = permission_tree_from_names(catalog)?;
+    if let Some(national) = body.scopes.iter_mut().find(|s| s.artcc_id.is_none()) {
+        national.permissions = tree;
+    }
+    Ok(())
 }
 
 pub async fn fetch_user_access(

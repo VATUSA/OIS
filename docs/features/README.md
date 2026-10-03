@@ -11,6 +11,7 @@ surface, and its Discord touchpoints.
 |--------------------------------------------------|----------------------|---------------------------------|
 | [access-control.md](access-control.md)           | access               | built                           |
 | [api-keys.md](api-keys.md)                        | access (api_keys)    | built                           |
+| [vatusa-sync.md](vatusa-sync.md)                 | access, identity     | built (mapping UI pending)      |
 | [stats-replay.md](stats-replay.md)               | stats                | built                           |
 | [events-workflow.md](events-workflow.md)         | events               | built (diverged from original spec) |
 | [tmu-ntml-adv-tmi.md](tmu-ntml-adv-tmi.md)       | tmu                  | built (diverged from original spec) |
