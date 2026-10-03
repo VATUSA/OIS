@@ -323,9 +323,13 @@ fn scope_permission_names(tree: &serde_json::Value) -> Result<Vec<String>, ApiEr
     normalize_permission_tree(tree).ok_or(ApiError::BadRequest)
 }
 
-/// Self-scope guard: a non-SERVER_ADMIN actor may only add/remove direct grants and
-/// roles they themselves hold, and only within the scopes they are editing. Diffs
+/// Self-scope guard: a non-SERVER_ADMIN actor may only add/remove direct grants they themselves
+/// hold **at that scope**, and roles they hold, and only within the scopes they are editing. Diffs
 /// against the target's current grants so untouched scopes/permissions aren't disturbed.
+///
+/// Denies need no modelling here because the editor cannot change them: the save replaces grants only
+/// (`replace_user_permissions_scoped`). The roles half is still name-only — the same scope-blindness,
+/// tracked separately (#559 follow-up).
 async fn enforce_actor_scope(
     state: &AppState,
     actor: &CurrentUser,
@@ -333,14 +337,15 @@ async fn enforce_actor_scope(
     before_grants: &[(Option<String>, String)],
     before_roles: &[(Option<String>, String)],
 ) -> Result<(), ApiError> {
-    let (actor_roles, actor_permissions) = fetch_user_access(state.db.as_ref(), &actor.id).await?;
+    let (actor_roles, _) = fetch_user_access(state.db.as_ref(), &actor.id).await?;
     if is_server_admin(&actor_roles) {
         return Ok(());
     }
-    let actor_perm_names: BTreeSet<String> = actor_permissions
-        .iter()
-        .map(|path| path.as_db_value())
-        .collect();
+    // The actor's authority **per permission, per scope, after denies** — from the unified resolver
+    // (#543), not from permission names (#559). Names alone made a ZDC-scoped editor read as national,
+    // and a permission they had been denied still read as theirs to delegate.
+    let pool = state.db.as_ref().ok_or(ApiError::ServiceUnavailable)?;
+    let actor_authority = access_repo::fetch_effective_permissions(pool, &actor.id).await?;
 
     // Permissions: only scopes present in the payload are changed.
     let payload_scopes: BTreeSet<Option<String>> = norm_scopes
@@ -361,9 +366,18 @@ async fn enforce_actor_scope(
         .filter(|(artcc, _)| payload_scopes.contains(artcc))
         .cloned()
         .collect();
-    for (_, name) in requested_perms.symmetric_difference(&existing_perms) {
-        if !actor_perm_names.contains(name) {
-            return Err(ApiError::Unauthorized);
+    // Adding *or* removing a grant at a scope needs the actor to hold it there. `allows(None)` — a
+    // national grant — needs **unrestricted** national holding, so someone holding P "nationally except
+    // ZNY" cannot hand out a national P and leak ZNY through it.
+    //
+    // 401 when the actor holds the permission nowhere, 403 when they hold it but not at this scope: the
+    // codebase's split between "absent" and "wrong facility".
+    for (artcc, name) in requested_perms.symmetric_difference(&existing_perms) {
+        match actor_authority.get(name) {
+            None => return Err(ApiError::Unauthorized),
+            Some(scope) if scope.is_empty() => return Err(ApiError::Unauthorized),
+            Some(scope) if !scope.allows(artcc.as_deref()) => return Err(ApiError::Forbidden),
+            Some(_) => {}
         }
     }
 
@@ -438,4 +452,253 @@ fn build_user_access_body(
         server_admin,
         scopes,
     })
+}
+
+#[cfg(test)]
+mod escalation_guard_tests {
+    //! VATUSA/OIS#559: `enforce_actor_scope` — the access editor's no-escalation gate — had no tests at
+    //! all. These drive the real route, `POST /api/v1/admin/users/{cid}/access`, adversarially: each one
+    //! is an attempt to grant what the actor does not hold, at a scope they do not hold it at.
+
+    use std::collections::HashMap;
+
+    use axum::http;
+    use serde_json::{Value, json};
+    use sqlx::PgPool;
+
+    use crate::scope_test_support::{
+        deny_scoped, grant, seed_user, send, session_cookie, test_state,
+    };
+
+    /// The permission being fought over. A real catalog entry, so validation passes and the guard is
+    /// what decides.
+    const P: &str = "tmu.program.update";
+    const TARGET_CID: i64 = 9_000_559;
+
+    fn tree() -> Value {
+        json!({"tmu": {"program": ["update"]}})
+    }
+
+    struct World {
+        state: crate::state::AppState,
+        pool: PgPool,
+        actor: String,
+        cookie: String,
+        target: String,
+    }
+
+    /// An actor who may use the editor at all (`access.users.update`), and a target to edit.
+    async fn world(pool: PgPool) -> World {
+        let state = test_state(pool.clone(), HashMap::new());
+        let actor = seed_user(&pool).await;
+        grant(&pool, &actor, "access.users.update", None).await;
+        let cookie = session_cookie(&pool, &actor).await;
+        let target: String = sqlx::query_scalar(
+            "insert into identity.users (cid, full_name, display_name) \
+             values ($1, 'Target', 'Target') returning id",
+        )
+        .bind(TARGET_CID)
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        World {
+            state,
+            pool,
+            actor,
+            cookie,
+            target,
+        }
+    }
+
+    /// Save one scope of the target's access: `artcc = None` is national.
+    async fn save(w: &World, artcc: Option<&str>, permissions: Value) -> http::StatusCode {
+        send(
+            &w.state,
+            http::Method::POST,
+            &format!("/api/v1/admin/users/{TARGET_CID}/access"),
+            &w.cookie,
+            Some(json!({
+                "reason": "test",
+                "scopes": [{"artcc_id": artcc, "permissions": permissions}],
+            })),
+        )
+        .await
+    }
+
+    /// The target's direct rows for `P`, as `scope:grant|deny`.
+    async fn rows(w: &World) -> Vec<String> {
+        sqlx::query_scalar(
+            "select coalesce(artcc_id, 'national') || ':' || \
+                    case when granted then 'grant' else 'deny' end \
+             from access.user_permissions where user_id = $1 and permission_name = $2 order by 1",
+        )
+        .bind(&w.target)
+        .bind(P)
+        .fetch_all(&w.pool)
+        .await
+        .unwrap()
+    }
+
+    // ---- AC1: scope --------------------------------------------------------------------------------
+
+    /// The escalation itself. Names alone made a ZDC-scoped editor read as national.
+    #[sqlx::test]
+    async fn a_zdc_editor_cannot_grant_at_another_artcc(pool: PgPool) {
+        let w = world(pool).await;
+        grant(&w.pool, &w.actor, P, Some("ZDC")).await;
+
+        assert_eq!(
+            save(&w, Some("ZNY"), tree()).await,
+            http::StatusCode::FORBIDDEN
+        );
+        assert!(rows(&w).await.is_empty(), "a refused save writes nothing");
+    }
+
+    #[sqlx::test]
+    async fn a_zdc_editor_cannot_grant_nationally(pool: PgPool) {
+        let w = world(pool).await;
+        grant(&w.pool, &w.actor, P, Some("ZDC")).await;
+
+        assert_eq!(save(&w, None, tree()).await, http::StatusCode::FORBIDDEN);
+        assert!(rows(&w).await.is_empty());
+    }
+
+    /// The positive control: the gate narrows, it does not disable. Without this, a guard that refused
+    /// everything would pass the two tests above.
+    #[sqlx::test]
+    async fn a_zdc_editor_can_grant_at_zdc(pool: PgPool) {
+        let w = world(pool).await;
+        grant(&w.pool, &w.actor, P, Some("ZDC")).await;
+
+        assert_eq!(save(&w, Some("ZDC"), tree()).await, http::StatusCode::OK);
+        assert_eq!(rows(&w).await, ["ZDC:grant"]);
+    }
+
+    /// The diff is symmetric, so *taking* a grant away needs the same authority as giving it.
+    #[sqlx::test]
+    async fn a_zdc_editor_cannot_revoke_at_another_artcc(pool: PgPool) {
+        let w = world(pool).await;
+        grant(&w.pool, &w.actor, P, Some("ZDC")).await;
+        grant(&w.pool, &w.target, P, Some("ZNY")).await;
+
+        assert_eq!(
+            save(&w, Some("ZNY"), json!({})).await,
+            http::StatusCode::FORBIDDEN
+        );
+        assert_eq!(
+            rows(&w).await,
+            ["ZNY:grant"],
+            "the ZNY grant survives the refused save"
+        );
+    }
+
+    // ---- AC2: denies -------------------------------------------------------------------------------
+
+    /// A ZDC grant plus a **national** deny resolves to holding P nowhere — the deny wins. By name the
+    /// actor still "has" P, which is exactly what the old guard checked. 401, the "absent" answer.
+    /// (A grant and a deny at the *same* scope can't coexist — the unique index forbids it.)
+    #[sqlx::test]
+    async fn an_actor_denied_a_permission_cannot_grant_it(pool: PgPool) {
+        let w = world(pool).await;
+        grant(&w.pool, &w.actor, P, Some("ZDC")).await;
+        deny_scoped(&w.pool, &w.actor, P, None).await;
+
+        assert_eq!(
+            save(&w, Some("ZDC"), tree()).await,
+            http::StatusCode::UNAUTHORIZED
+        );
+        assert!(rows(&w).await.is_empty());
+    }
+
+    /// National except ZNY: a national grant to someone else would hand them ZNY, which the actor does
+    /// not hold. So it needs **unrestricted** national holding — while ZDC is fine.
+    #[sqlx::test]
+    async fn national_except_one_artcc_cannot_grant_nationally(pool: PgPool) {
+        let w = world(pool).await;
+        grant(&w.pool, &w.actor, P, None).await;
+        deny_scoped(&w.pool, &w.actor, P, Some("ZNY")).await;
+
+        assert_eq!(save(&w, None, tree()).await, http::StatusCode::FORBIDDEN);
+        assert_eq!(
+            save(&w, Some("ZNY"), tree()).await,
+            http::StatusCode::FORBIDDEN
+        );
+        assert_eq!(save(&w, Some("ZDC"), tree()).await, http::StatusCode::OK);
+        assert_eq!(rows(&w).await, ["ZDC:grant"]);
+    }
+
+    // ---- AC3: untouched scopes ---------------------------------------------------------------------
+
+    /// A ZDC-only save must leave the target's ZNY grant alone, even though the actor could never have
+    /// touched ZNY. The guard only weighs what the save changes.
+    #[sqlx::test]
+    async fn a_save_leaves_scopes_it_does_not_name_alone(pool: PgPool) {
+        let w = world(pool).await;
+        grant(&w.pool, &w.actor, P, Some("ZDC")).await;
+        grant(&w.pool, &w.target, P, Some("ZNY")).await;
+
+        assert_eq!(save(&w, Some("ZDC"), tree()).await, http::StatusCode::OK);
+        assert_eq!(rows(&w).await, ["ZDC:grant", "ZNY:grant"]);
+    }
+
+    // ---- AC4: SERVER_ADMIN -------------------------------------------------------------------------
+
+    #[sqlx::test]
+    async fn a_server_admin_bypasses_the_guard(pool: PgPool) {
+        let w = world(pool).await;
+        sqlx::query(
+            "insert into access.user_roles (user_id, role_name) values ($1, 'SERVER_ADMIN')",
+        )
+        .bind(&w.actor)
+        .execute(&w.pool)
+        .await
+        .unwrap();
+
+        assert_eq!(save(&w, None, tree()).await, http::StatusCode::OK);
+        assert_eq!(rows(&w).await, ["national:grant"]);
+    }
+
+    // ---- the save no longer strips denies ----------------------------------------------------------
+
+    /// An unchanged save used to delete the target's deny in that scope — widening their access with no
+    /// guard involved, because the editor cannot express a deny and the diff never saw one.
+    #[sqlx::test]
+    async fn an_unchanged_save_keeps_the_targets_deny(pool: PgPool) {
+        let w = world(pool).await;
+        grant(&w.pool, &w.actor, P, None).await;
+        grant(&w.pool, &w.actor, "tmu.ntml.update", None).await;
+        deny_scoped(&w.pool, &w.target, P, Some("ZDC")).await;
+
+        // Saves ZDC with a different permission; P is not mentioned.
+        let other = json!({"tmu": {"ntml": ["update"]}});
+        assert_eq!(save(&w, Some("ZDC"), other).await, http::StatusCode::OK);
+
+        assert_eq!(rows(&w).await, ["ZDC:deny"], "the deny survives the save");
+    }
+
+    /// An explicit grant over a deny replaces it — the editor deliberately granting — rather than
+    /// failing on the unique index. Gated like any grant: the actor holds P at ZDC.
+    #[sqlx::test]
+    async fn an_explicit_grant_over_a_deny_replaces_it(pool: PgPool) {
+        let w = world(pool).await;
+        grant(&w.pool, &w.actor, P, Some("ZDC")).await;
+        deny_scoped(&w.pool, &w.target, P, Some("ZDC")).await;
+
+        assert_eq!(save(&w, Some("ZDC"), tree()).await, http::StatusCode::OK);
+        assert_eq!(rows(&w).await, ["ZDC:grant"]);
+    }
+
+    /// ...and refused when the actor could not grant it there anyway, leaving the deny in place.
+    #[sqlx::test]
+    async fn a_grant_over_a_deny_is_still_gated(pool: PgPool) {
+        let w = world(pool).await;
+        grant(&w.pool, &w.actor, P, Some("ZNY")).await;
+        deny_scoped(&w.pool, &w.target, P, Some("ZDC")).await;
+
+        assert_eq!(
+            save(&w, Some("ZDC"), tree()).await,
+            http::StatusCode::FORBIDDEN
+        );
+        assert_eq!(rows(&w).await, ["ZDC:deny"]);
+    }
 }
