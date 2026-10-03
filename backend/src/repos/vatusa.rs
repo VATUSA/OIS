@@ -1,14 +1,16 @@
 //! Persistence for VATUSA member sync — member detail on `identity.users`, the mirrored
 //! roles/visits tables, and the per-facility webhook secrets.
 
-use std::collections::HashSet;
+use std::collections::{BTreeMap, BTreeSet, HashSet};
 
 use chrono::{DateTime, Utc};
-use sqlx::PgPool;
+use sqlx::{PgPool, Postgres, Transaction};
 
 use crate::errors::ApiError;
 use crate::feed::vatusa::VatusaMember;
 use crate::models::{VatusaProfile, VatusaRoleEntry};
+use crate::repos::access::{self as access_repo, GrantSource};
+use crate::repos::audit as audit_repo;
 
 /// The member's VATUSA details (for their profile / `/me`), or `None` if never synced.
 pub async fn fetch_profile(pool: &PgPool, cid: i64) -> Result<Option<VatusaProfile>, ApiError> {
@@ -93,13 +95,25 @@ pub async fn upsert_member(pool: &PgPool, m: &VatusaMember) -> Result<(), ApiErr
     .await
     .map_err(|_| ApiError::Internal)?;
 
+    // The update above holds this member's `identity.users` row lock until commit, so overlapping
+    // syncs for one member (sign-in + webhook) run one after another from here on — the reconciler
+    // below never races itself, and needs no lock of its own (#548).
+    //
+    // What the member's roles justified *before* this sync: the audit trail names the VATUSA role
+    // that caused a removal, and after the rewrite below that role is gone from the table.
+    let justified_before = desired_vatusa_grants(&mut tx, m.cid).await?;
+
     sqlx::query("delete from identity.vatusa_roles where cid = $1")
         .bind(m.cid)
         .execute(&mut *tx)
         .await
         .map_err(|_| ApiError::Internal)?;
     for role in &m.roles {
-        if role.facility.is_empty() || role.role.is_empty() {
+        // Stored verbatim before #548; now it is joined against org.facilities and the mappings, so
+        // " zdc " must arrive as "ZDC".
+        let facility = role.facility.trim().to_uppercase();
+        let role_name = role.role.trim().to_uppercase();
+        if facility.is_empty() || role_name.is_empty() {
             continue;
         }
         let granted = role
@@ -113,8 +127,8 @@ pub async fn upsert_member(pool: &PgPool, m: &VatusaMember) -> Result<(), ApiErr
              on conflict (cid, facility, role) do nothing",
         )
         .bind(m.cid)
-        .bind(&role.facility)
-        .bind(&role.role)
+        .bind(&facility)
+        .bind(&role_name)
         .bind(granted)
         .execute(&mut *tx)
         .await
@@ -148,6 +162,11 @@ pub async fn upsert_member(pool: &PgPool, m: &VatusaMember) -> Result<(), ApiErr
         .fetch_optional(&mut *tx)
         .await
         .map_err(|_| ApiError::Internal)?;
+    if let Some(user_id) = &user_id {
+        let justified_now = desired_vatusa_grants(&mut tx, m.cid).await?;
+        reconcile_vatusa_grants(&mut tx, user_id, m.cid, &justified_before, &justified_now).await?;
+    }
+
     if let Some(user_id) = user_id {
         let discord_id = m
             .discord_id
@@ -194,6 +213,139 @@ pub async fn upsert_member(pool: &PgPool, m: &VatusaMember) -> Result<(), ApiErr
     }
 
     tx.commit().await.map_err(|_| ApiError::Internal)
+}
+
+/// Group grants a member's VATUSA roles call for, keyed by `(group, scope)`, each with the VATUSA
+/// roles that justify it (`DATM@ZDC`) — the audit trail names them.
+type JustifiedGrants = BTreeMap<(String, Option<String>), Vec<String>>;
+
+/// The grants `access.vatusa_role_mappings` derives from the member's current VATUSA roles (#548).
+///
+/// Scope is the facility the VATUSA role is held at, with two cases decided in the query so the
+/// `access.user_roles` FK can never be hit: a division role (`ZHQ`, not an ARTCC) is a **national**
+/// grant, and any other facility missing from `org.facilities` is skipped.
+async fn desired_vatusa_grants(
+    tx: &mut Transaction<'_, Postgres>,
+    cid: i64,
+) -> Result<JustifiedGrants, ApiError> {
+    let rows = sqlx::query_as::<_, (String, Option<String>, Vec<String>)>(
+        r#"
+        select m.role_name,
+               case when vr.facility = 'ZHQ' then null else f.id end as artcc_id,
+               array_agg(distinct vr.role || '@' || vr.facility
+                         order by vr.role || '@' || vr.facility) as because
+        from identity.vatusa_roles vr
+        join access.vatusa_role_mappings m
+          on m.vatusa_role = vr.role and (m.facility is null or m.facility = vr.facility)
+        left join org.facilities f on f.id = vr.facility
+        where vr.cid = $1 and (vr.facility = 'ZHQ' or f.id is not null)
+        group by 1, 2
+        "#,
+    )
+    .bind(cid)
+    .fetch_all(&mut **tx)
+    .await
+    .map_err(|_| ApiError::Internal)?;
+    Ok(rows
+        .into_iter()
+        .map(|(group, scope, because)| ((group, scope), because))
+        .collect())
+}
+
+/// Make the member's `source = 'vatusa'` group grants equal what their VATUSA roles justify, auditing
+/// every change. Compares against the rows actually held rather than the previous sync's view, so a
+/// mapping edited between syncs, or a sync that failed half-way, converges on the next run.
+///
+/// Every write goes through `set_user_role_scoped(…, GrantSource::Vatusa)`, which only ever touches
+/// `vatusa` rows — a hand-made grant of the same group at the same scope is a separate row (0098) and
+/// survives a demotion.
+async fn reconcile_vatusa_grants(
+    tx: &mut Transaction<'_, Postgres>,
+    user_id: &str,
+    cid: i64,
+    justified_before: &JustifiedGrants,
+    justified_now: &JustifiedGrants,
+) -> Result<(), ApiError> {
+    let held: BTreeSet<(String, Option<String>)> = sqlx::query_as(
+        "select role_name, artcc_id from access.user_roles \
+         where user_id = $1 and source = 'vatusa'",
+    )
+    .bind(user_id)
+    .fetch_all(&mut **tx)
+    .await
+    .map_err(|_| ApiError::Internal)?
+    .into_iter()
+    .collect();
+
+    for ((group, scope), because) in justified_now {
+        if held.contains(&(group.clone(), scope.clone())) {
+            continue;
+        }
+        access_repo::set_user_role_scoped(
+            tx,
+            user_id,
+            group,
+            true,
+            scope.as_deref(),
+            GrantSource::Vatusa,
+        )
+        .await?;
+        let reason = format!("VATUSA sync: holds {}", because.join(", "));
+        audit_sync_change(tx, "GRANT", group, scope, cid, reason).await?;
+    }
+
+    for (group, scope) in &held {
+        if justified_now.contains_key(&(group.clone(), scope.clone())) {
+            continue;
+        }
+        access_repo::set_user_role_scoped(
+            tx,
+            user_id,
+            group,
+            false,
+            scope.as_deref(),
+            GrantSource::Vatusa,
+        )
+        .await?;
+        // A removal is caused by a role the member no longer holds — or, when nothing justified it
+        // even before this sync, by its mapping having been removed.
+        let reason = match justified_before.get(&(group.clone(), scope.clone())) {
+            Some(because) => format!("VATUSA sync: no longer holds {}", because.join(", ")),
+            None => "VATUSA sync: no mapped VATUSA role supports it".to_string(),
+        };
+        audit_sync_change(tx, "REVOKE", group, scope, cid, reason).await?;
+    }
+    Ok(())
+}
+
+/// The audit actor seeded by migration 0100.
+const VATUSA_SYNC_ACTOR: &str = "vatusa-sync";
+
+/// Same shape as a hand-made membership change (`handlers::access::change_membership`), so sync
+/// grants appear beside manual ones under the same `ACCESS_GROUP_MEMBER` dossier filter.
+async fn audit_sync_change(
+    tx: &mut Transaction<'_, Postgres>,
+    action: &str,
+    group: &str,
+    scope: &Option<String>,
+    cid: i64,
+    reason: String,
+) -> Result<(), ApiError> {
+    audit_repo::record_audit(
+        &mut **tx,
+        audit_repo::AuditEntry {
+            actor_id: Some(VATUSA_SYNC_ACTOR.to_string()),
+            action: action.to_string(),
+            resource_type: "ACCESS_GROUP_MEMBER".to_string(),
+            resource_id: Some(format!("{group}:{cid}")),
+            artcc_id: scope.clone(),
+            reason: Some(reason),
+            before_state: None,
+            after_state: None,
+            ip_address: None,
+        },
+    )
+    .await
 }
 
 /// CIDs from the given set that we actually have a user row for.
@@ -274,4 +426,256 @@ pub async fn webhook_secret(pool: &PgPool, facility: &str) -> Result<Option<Stri
     .fetch_optional(pool)
     .await
     .map_err(|_| ApiError::Internal)
+}
+
+#[cfg(test)]
+mod tests {
+    use sqlx::PgPool;
+
+    use super::upsert_member;
+    use crate::feed::vatusa::VatusaMember;
+
+    const CID: i64 = 1_548_000;
+
+    async fn seed_user(pool: &PgPool) -> String {
+        sqlx::query_scalar(
+            "insert into identity.users (full_name, display_name, cid) \
+             values ('T', 'T', $1) returning id",
+        )
+        .bind(CID)
+        .fetch_one(pool)
+        .await
+        .unwrap()
+    }
+
+    async fn map(pool: &PgPool, vatusa_role: &str, facility: Option<&str>, group: &str) {
+        sqlx::query(
+            "insert into access.vatusa_role_mappings (vatusa_role, facility, role_name) \
+             values ($1, $2, $3)",
+        )
+        .bind(vatusa_role)
+        .bind(facility)
+        .bind(group)
+        .execute(pool)
+        .await
+        .unwrap();
+    }
+
+    /// A sync as VATUSA would deliver it — built through serde, the same path the HTTP fetch takes.
+    async fn sync(pool: &PgPool, roles: &[(&str, &str)]) {
+        let roles: Vec<_> = roles
+            .iter()
+            .map(|(role, facility)| serde_json::json!({ "role": role, "facility": facility }))
+            .collect();
+        let member: VatusaMember =
+            serde_json::from_value(serde_json::json!({ "cid": CID, "roles": roles })).unwrap();
+        upsert_member(pool, &member).await.unwrap();
+    }
+
+    async fn grants(pool: &PgPool, user: &str) -> Vec<(String, Option<String>, String)> {
+        sqlx::query_as(
+            "select role_name, artcc_id, source from access.user_roles \
+             where user_id = $1 order by role_name, artcc_id nulls first, source",
+        )
+        .bind(user)
+        .fetch_all(pool)
+        .await
+        .unwrap()
+    }
+
+    fn vatusa(group: &str, scope: Option<&str>) -> (String, Option<String>, String) {
+        (
+            group.to_string(),
+            scope.map(str::to_string),
+            "vatusa".to_string(),
+        )
+    }
+
+    /// (action, artcc_id, reason, actor_id) for every sync-written membership audit row.
+    async fn sync_audits(pool: &PgPool) -> Vec<(String, Option<String>, String, String)> {
+        sqlx::query_as(
+            "select action, artcc_id, reason, actor_id from access.audit_logs \
+             where resource_type = 'ACCESS_GROUP_MEMBER' and actor_id = 'vatusa-sync' \
+             order by created_at, action",
+        )
+        .fetch_all(pool)
+        .await
+        .unwrap()
+    }
+
+    /// AC1: a member holding `DATM@ZDC` receives the mapped group, scoped to ZDC, owned by the sync.
+    #[sqlx::test]
+    async fn a_mapped_role_grants_the_group_at_its_facility(pool: PgPool) {
+        let user = seed_user(&pool).await;
+        map(&pool, "DATM", None, "EC").await;
+
+        sync(&pool, &[("DATM", "ZDC")]).await;
+
+        assert_eq!(grants(&pool, &user).await, vec![vatusa("EC", Some("ZDC"))]);
+    }
+
+    /// AC2: losing the VATUSA role removes exactly the grant it caused — not a hand-made grant of the
+    /// same group at the same scope, and not another synced grant.
+    #[sqlx::test]
+    async fn losing_the_role_removes_only_its_grant(pool: PgPool) {
+        let user = seed_user(&pool).await;
+        map(&pool, "DATM", None, "EC").await;
+        map(&pool, "INS", None, "NTMO").await;
+        sqlx::query(
+            "insert into access.user_roles (user_id, role_name, artcc_id, source) \
+             values ($1, 'EC', 'ZDC', 'manual')",
+        )
+        .bind(&user)
+        .execute(&pool)
+        .await
+        .unwrap();
+
+        sync(&pool, &[("DATM", "ZDC"), ("INS", "ZDC")]).await;
+        sync(&pool, &[("INS", "ZDC")]).await;
+
+        assert_eq!(
+            grants(&pool, &user).await,
+            vec![
+                (
+                    "EC".to_string(),
+                    Some("ZDC".to_string()),
+                    "manual".to_string()
+                ),
+                vatusa("NTMO", Some("ZDC")),
+            ]
+        );
+    }
+
+    /// AC4: a division role (`ZHQ`, not an ARTCC) is a national grant; a facility OIS doesn't know is
+    /// skipped — neither can reach the `access.user_roles` FK.
+    #[sqlx::test]
+    async fn division_roles_are_national_and_unknown_facilities_are_skipped(pool: PgPool) {
+        let user = seed_user(&pool).await;
+        map(&pool, "WM", None, "VATUSA_STAFF").await;
+        map(&pool, "DATM", None, "EC").await;
+
+        sync(&pool, &[("WM", "ZHQ"), ("DATM", "ZZZ")]).await;
+
+        assert_eq!(
+            grants(&pool, &user).await,
+            vec![vatusa("VATUSA_STAFF", None)]
+        );
+    }
+
+    /// The national decision for `ZHQ` must not depend on `ZHQ` being absent from `org.facilities`:
+    /// without the explicit case, adding it as a facility one day would silently turn every division
+    /// grant into a ZHQ-scoped one. (Today the left join alone yields NULL, which hid this.)
+    #[sqlx::test]
+    async fn division_roles_stay_national_even_if_zhq_becomes_a_facility(pool: PgPool) {
+        let user = seed_user(&pool).await;
+        map(&pool, "WM", None, "VATUSA_STAFF").await;
+        sqlx::query("insert into org.facilities (id, name) values ('ZHQ', 'VATUSA HQ')")
+            .execute(&pool)
+            .await
+            .unwrap();
+
+        sync(&pool, &[("WM", "ZHQ")]).await;
+
+        assert_eq!(
+            grants(&pool, &user).await,
+            vec![vatusa("VATUSA_STAFF", None)]
+        );
+    }
+
+    /// AC6: every sync-driven change is audited by the `vatusa-sync` actor, naming the VATUSA role that
+    /// caused it — including a removal, whose role is already gone from `identity.vatusa_roles`.
+    #[sqlx::test]
+    async fn every_change_is_audited_naming_the_vatusa_role(pool: PgPool) {
+        seed_user(&pool).await;
+        map(&pool, "DATM", None, "EC").await;
+
+        sync(&pool, &[("DATM", "ZDC")]).await;
+        sync(&pool, &[]).await;
+
+        let audits = sync_audits(&pool).await;
+        assert_eq!(audits.len(), 2, "one grant, one revoke: {audits:?}");
+        let (action, scope, reason, actor) = &audits[0];
+        assert_eq!(
+            (action.as_str(), scope.as_deref(), actor.as_str()),
+            ("GRANT", Some("ZDC"), "vatusa-sync")
+        );
+        assert!(reason.contains("DATM@ZDC"), "{reason}");
+        let (action, _, reason, _) = &audits[1];
+        assert_eq!(action, "REVOKE");
+        assert!(reason.contains("no longer holds DATM@ZDC"), "{reason}");
+    }
+
+    /// A mapping pinned to a facility applies only there; one without a facility applies anywhere.
+    #[sqlx::test]
+    async fn a_facility_specific_mapping_applies_only_at_that_facility(pool: PgPool) {
+        let user = seed_user(&pool).await;
+        map(&pool, "ATM", Some("ZDC"), "EC").await;
+
+        sync(&pool, &[("ATM", "ZNY"), ("ATM", "ZDC")]).await;
+
+        assert_eq!(grants(&pool, &user).await, vec![vatusa("EC", Some("ZDC"))]);
+    }
+
+    /// The facility used to be stored verbatim; it is now joined against `org.facilities` and the
+    /// mappings, so whitespace and case must not decide whether someone gets access.
+    #[sqlx::test]
+    async fn facilities_are_normalised_on_ingest(pool: PgPool) {
+        let user = seed_user(&pool).await;
+        map(&pool, "DATM", None, "EC").await;
+
+        sync(&pool, &[("datm", " zdc ")]).await;
+
+        assert_eq!(grants(&pool, &user).await, vec![vatusa("EC", Some("ZDC"))]);
+        let stored: (String, String) =
+            sqlx::query_as("select role, facility from identity.vatusa_roles where cid = $1")
+                .bind(CID)
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+        assert_eq!(stored, ("DATM".to_string(), "ZDC".to_string()));
+    }
+
+    /// Re-syncing an unchanged member writes nothing and audits nothing — the six-hourly job must not
+    /// fill the dossier with no-op churn.
+    #[sqlx::test]
+    async fn a_repeat_sync_changes_nothing(pool: PgPool) {
+        seed_user(&pool).await;
+        map(&pool, "DATM", None, "EC").await;
+
+        sync(&pool, &[("DATM", "ZDC")]).await;
+        sync(&pool, &[("DATM", "ZDC")]).await;
+
+        assert_eq!(sync_audits(&pool).await.len(), 1);
+    }
+
+    /// Deleting a mapping revokes what it granted on the member's next sync, and the audit says why.
+    #[sqlx::test]
+    async fn a_removed_mapping_revokes_on_the_next_sync(pool: PgPool) {
+        let user = seed_user(&pool).await;
+        map(&pool, "DATM", None, "EC").await;
+        sync(&pool, &[("DATM", "ZDC")]).await;
+
+        sqlx::query("delete from access.vatusa_role_mappings")
+            .execute(&pool)
+            .await
+            .unwrap();
+        sync(&pool, &[("DATM", "ZDC")]).await;
+
+        assert!(grants(&pool, &user).await.is_empty());
+        let audits = sync_audits(&pool).await;
+        assert!(
+            audits[1].2.contains("no mapped VATUSA role supports it"),
+            "{audits:?}"
+        );
+    }
+
+    /// Mappings are seeded with nothing, so deploying this grants nobody anything (owner decision).
+    #[sqlx::test]
+    async fn no_mappings_are_seeded(pool: PgPool) {
+        let count: i64 = sqlx::query_scalar("select count(*) from access.vatusa_role_mappings")
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+        assert_eq!(count, 0);
+    }
 }
