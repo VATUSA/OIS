@@ -363,7 +363,9 @@ const popoutFcaRoute = createRoute({
 const downloadRoute = createRoute({
   getParentRoute: () => rootRoute,
   path: "download",
-  staticData: { title: "Download" },
+  // "Desktop app" everywhere — the footer, the sidebar and ⌘K all already call it that, and this
+  // title is what the breadcrumb and the window title render (#534).
+  staticData: { title: "Desktop app" },
   component: DownloadPage,
 });
 

@@ -129,7 +129,13 @@ pub async fn put_config(
     validate(&req)?;
     require_edit(&state, &principal, &facility_id).await?;
 
-    config_repo::upsert(pool, &facility_id, &req, principal.user_id()).await?;
+    config_repo::upsert(
+        pool,
+        &facility_id,
+        &req,
+        principal.user_id().ok_or(ApiError::Forbidden)?,
+    )
+    .await?;
     Ok(Json(FacilityMapConfigBody {
         facility_id,
         rules: req.rules,

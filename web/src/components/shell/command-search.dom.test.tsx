@@ -159,6 +159,36 @@ async function mountSearch({ me, favorites }: { me?: unknown; favorites?: unknow
   };
 }
 
+describe("the desktop-app entry (VATUSA/OIS#534)", () => {
+  /**
+   * AC1/AC6. Before #534 the only link to `/download` anywhere was in the footer, and `Footer`
+   * renders solely on the signed-out landing page — so a signed-in user had no route to the page at
+   * all: no sidebar item, no ⌘K hit, and breadcrumbs that fell through to a bare `Home › Download`.
+   *
+   * Asserted through the palette because it builds its list from the real `account` array rather
+   * than a fixture, so this fails if the entry is dropped or its path changes.
+   */
+  it("offers it to a signed-in user", async () => {
+    await mountSearch({ me: ME });
+    // The palette shows a subset until queried, as every other page-lookup case here does.
+    paletteType("desktop");
+
+    expect(document.body.textContent).toContain("Desktop app");
+  });
+
+  /**
+   * The entry is deliberately permission-less — anyone signed in may install the app — so this is
+   * about being signed in, not about holding anything. A signed-out visitor still has the footer
+   * link, which is the path they actually arrive by.
+   */
+  it("does not offer it to a signed-out visitor", async () => {
+    await mountSearch();
+    paletteType("desktop");
+
+    expect(document.body.textContent).not.toContain("Desktop app");
+  });
+});
+
 describe("command search, signed out (VATUSA/OIS#312)", () => {
   // M16: without `onToggleStar` no row renders a star, so a signed-out visitor is never offered one.
   it("offers no favorite star on any row", async () => {

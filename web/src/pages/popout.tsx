@@ -65,7 +65,7 @@ export function PopoutFcaLadderPage() {
       </div>
       <div className="min-h-0 flex-1 overflow-auto p-2">
         <QueryState isLoading={traffic.isLoading} isError={traffic.isError}>
-          <Ladder flights={traffic.data ?? []} now={now} />
+          <Ladder flights={traffic.data ?? []} now={now} name={fca?.name ?? "FCA"} />
         </QueryState>
       </div>
     </div>
