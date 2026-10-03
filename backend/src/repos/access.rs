@@ -1627,6 +1627,18 @@ mod tests {
         .expect("the NTMO group grants something")
     }
 
+    /// A permission the seeded `NTMO` group does not grant — a bespoke grant beside it.
+    async fn a_permission_ntmo_lacks(pool: &sqlx::PgPool) -> String {
+        sqlx::query_scalar(
+            "select name from access.permissions where name not in \
+             (select permission_name from access.role_permissions where role_name = 'NTMO') \
+             order by name limit 1",
+        )
+        .fetch_one(pool)
+        .await
+        .expect("NTMO does not grant the whole catalogue")
+    }
+
     async fn user(pool: &sqlx::PgPool, name: &str) -> String {
         sqlx::query_scalar(
             "insert into identity.users (full_name, display_name) values ($1, $1) returning id",
@@ -1716,12 +1728,28 @@ mod tests {
         crate::scope_test_support::grant(&pool, &with_deny, &p, None).await;
         crate::scope_test_support::deny_scoped(&pool, &with_deny, &p, Some("ZNY")).await;
 
+        // A group AND a grant it does not give — the commonest real shape, since 0094 puts everyone
+        // in `USER`. Only the covered row may go: a cleanup that stopped matching the permission
+        // would take the bespoke one with it.
+        let group_and_bespoke = user(&pool, "group+bespoke").await;
+        let other = a_permission_ntmo_lacks(&pool).await;
+        hold(&pool, &group_and_bespoke, "NTMO", None).await;
+        crate::scope_test_support::grant(&pool, &group_and_bespoke, &p, None).await;
+        crate::scope_test_support::grant(&pool, &group_and_bespoke, &other, None).await;
+
+        // NOT redundant: a grant at a different facility from the membership's.
+        let other_facility = user(&pool, "zny/zdc").await;
+        hold(&pool, &other_facility, "NTMO", Some("ZDC")).await;
+        crate::scope_test_support::grant(&pool, &other_facility, &p, Some("ZNY")).await;
+
         let everyone = [
             &national_under_national,
             &facility_under_national,
             &national_under_facility,
             &bespoke,
             &with_deny,
+            &group_and_bespoke,
+            &other_facility,
         ];
         let mut before = Vec::new();
         for u in everyone {
@@ -1768,6 +1796,16 @@ mod tests {
             direct_rows(&pool, &with_deny).await,
             [format!("{p}:ZNY:DENY")],
             "the grant goes, the deny stays"
+        );
+        assert_eq!(
+            direct_rows(&pool, &group_and_bespoke).await,
+            [format!("{other}:national")],
+            "the covered grant goes, the one no held group gives stays"
+        );
+        assert_eq!(
+            direct_rows(&pool, &other_facility).await,
+            [format!("{p}:ZNY")],
+            "a membership at ZDC does not cover a grant at ZNY"
         );
     }
 
@@ -1819,6 +1857,131 @@ mod tests {
             direct_rows(&pool, &u).await,
             [format!("{p}:national")],
             "the direct grant survives losing SERVER_ADMIN later"
+        );
+    }
+
+    /// The AC3 audit run against real data before 0099 ships (`backend/audits/0099_collapse_effect.sql`).
+    const COLLAPSE_AUDIT: &str = include_str!("../../audits/0099_collapse_effect.sql");
+
+    /// The audit's text between `-- BEGIN {name}` and `-- END {name}`, so the tests run the file's
+    /// own SQL rather than a copy of it.
+    fn collapse_audit_block(name: &str) -> &'static str {
+        let begin = format!("-- BEGIN {name}\n");
+        let start = COLLAPSE_AUDIT.find(&begin).expect("the block opens") + begin.len();
+        let len = COLLAPSE_AUDIT[start..]
+            .find(&format!("-- END {name}"))
+            .expect("the block closes");
+        &COLLAPSE_AUDIT[start..start + len]
+    }
+
+    /// SETUP, then `migration`, then DIFF — what the audit does — in a transaction that rolls back.
+    /// Returns the diff as `change:name:permission:scope`.
+    async fn run_collapse_audit(pool: &sqlx::PgPool, migration: &str) -> Vec<String> {
+        let mut tx = pool.begin().await.unwrap();
+        sqlx::raw_sql(collapse_audit_block("SETUP"))
+            .execute(&mut *tx)
+            .await
+            .expect("the audit's setup runs");
+        sqlx::raw_sql(migration)
+            .execute(&mut *tx)
+            .await
+            .expect("the migration runs");
+        let rows: Vec<(String, String, String, String, String)> =
+            sqlx::query_as(collapse_audit_block("DIFF"))
+                .fetch_all(&mut *tx)
+                .await
+                .expect("the audit's diff runs");
+        tx.rollback().await.unwrap();
+        rows.into_iter()
+            .map(|(change, _, name, permission, scope)| {
+                format!("{change}:{name}:{permission}:{scope}")
+            })
+            .collect()
+    }
+
+    /// Everyone the cleanup touches or must not touch, in one population: a covered national grant, a
+    /// covered facility grant, a national grant under a facility membership, a grant at another
+    /// facility, a bespoke grant beside a group, and a grant beside a deny.
+    async fn collapse_population(pool: &sqlx::PgPool) -> (String, String) {
+        let p = an_ntmo_permission(pool).await;
+        let other = a_permission_ntmo_lacks(pool).await;
+        let u = user(pool, "population").await;
+        hold(pool, &u, "NTMO", None).await;
+        crate::scope_test_support::grant(pool, &u, &p, None).await;
+        crate::scope_test_support::grant(pool, &u, &other, None).await;
+        crate::scope_test_support::deny_scoped(pool, &u, &p, Some("ZNY")).await;
+        let v = user(pool, "facility").await;
+        hold(pool, &v, "NTMO", Some("ZDC")).await;
+        crate::scope_test_support::grant(pool, &v, &p, Some("ZDC")).await;
+        crate::scope_test_support::grant(pool, &v, &p, Some("ZNY")).await;
+        crate::scope_test_support::grant(pool, &v, &other, None).await;
+        (p, other)
+    }
+
+    /// The audit reports nothing for 0099 as it ships — and the migration did remove rows, so the
+    /// empty diff is not the trivial one.
+    #[sqlx::test]
+    async fn the_0099_audit_reports_no_change_for_the_shipped_migration(pool: sqlx::PgPool) {
+        collapse_population(&pool).await;
+        let before: i64 = sqlx::query_scalar("select count(*) from access.user_permissions")
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+
+        assert_eq!(
+            run_collapse_audit(&pool, COLLAPSE_MIGRATION).await,
+            Vec::<String>::new()
+        );
+
+        // Rolled back, so the rows are all still here — and the migration itself does remove some.
+        let mut tx = pool.begin().await.unwrap();
+        sqlx::raw_sql(COLLAPSE_MIGRATION)
+            .execute(&mut *tx)
+            .await
+            .unwrap();
+        let after: i64 = sqlx::query_scalar("select count(*) from access.user_permissions")
+            .fetch_one(&mut *tx)
+            .await
+            .unwrap();
+        tx.rollback().await.unwrap();
+        assert!(
+            after < before,
+            "0099 removes the covered grants ({before} -> {after})"
+        );
+    }
+
+    /// The audit is not decoration: run against the two plausible mistakes the migration's own guards
+    /// exist to prevent, it names exactly who would lose what. Without this, an audit that always
+    /// returned nothing would pass the test above.
+    #[sqlx::test]
+    async fn the_0099_audit_catches_a_migration_that_drops_bespoke_grants(pool: sqlx::PgPool) {
+        let (p, other) = collapse_population(&pool).await;
+
+        let any_permission =
+            COLLAPSE_MIGRATION.replace("        and rp.permission_name = up.permission_name\n", "");
+        assert_ne!(any_permission, COLLAPSE_MIGRATION, "the mutation applies");
+        let mut lost = run_collapse_audit(&pool, &any_permission).await;
+        lost.sort();
+        // `population` holds NTMO nationally, so the mutated delete takes its bespoke grant and with
+        // it every scope. `facility`'s bespoke grant is national under a ZDC-only membership, which
+        // the scope clause still refuses to treat as covering — so it survives even this mutation.
+        let mut expected = vec![
+            format!("lost:population:{other}:NATIONAL"),
+            format!("lost:population:{other}:ZDC"),
+            format!("lost:population:{other}:ZNY"),
+        ];
+        expected.sort();
+        assert_eq!(lost, expected, "a cleanup that ignored the permission");
+
+        let any_facility = COLLAPSE_MIGRATION.replace(
+            "(ur.artcc_id is null or ur.artcc_id = up.artcc_id)",
+            "(ur.artcc_id is null or up.artcc_id is not null)",
+        );
+        assert_ne!(any_facility, COLLAPSE_MIGRATION, "the mutation applies");
+        assert_eq!(
+            run_collapse_audit(&pool, &any_facility).await,
+            [format!("lost:facility:{p}:ZNY")],
+            "a cleanup that let a ZDC membership cover a ZNY grant"
         );
     }
 }
