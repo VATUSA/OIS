@@ -2185,6 +2185,33 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/v1/public/desktop/download/{platform}": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * Redirect to the current installer for `platform`.
+         * @description Public by design — you download the app before you have any reason to be signed in — which is why
+         *     it sits under `/api/v1/public/`, beside the other unauthenticated reference endpoints. A GET with
+         *     no `RequirePermission` anywhere else in `router.rs` would read as an oversight.
+         *
+         *     `503` rather than a redirect to the releases page when the lookup fails: a silent substitution is
+         *     exactly the behaviour this issue was filed about. The page keeps an explicit "all releases" link
+         *     for the cases this cannot serve. `ServiceUnavailable` is reused rather than adding a `BadGateway`
+         *     variant for one handler — the download genuinely cannot be served, which is what 503 says.
+         */
+        get: operations["download"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/v1/public/flight/{callsign}": {
         parameters: {
             query?: never;
@@ -12530,6 +12557,41 @@ export interface operations {
                 content: {
                     "application/json": components["schemas"]["PublicBoard"];
                 };
+            };
+        };
+    };
+    download: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /** @description macos | windows | linux */
+                platform: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Redirect to the installer */
+            307: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description Unknown platform */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description The release could not be resolved upstream */
+            503: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
             };
         };
     };

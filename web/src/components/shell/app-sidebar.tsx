@@ -33,6 +33,7 @@ import {
   Search,
   Settings as SettingsIcon,
   User as UserIcon,
+  Download as DownloadIcon,
 } from "lucide-react";
 
 import {SignInButton} from "@/components/sign-in-button";
@@ -190,6 +191,15 @@ function UserGroup() {
           <Link to="/api-keys" />
         </SidebarItem>
       )}
+      {/*
+        Deliberately permission-less: `canSeeItem` treats an item with neither `permission` nor
+        `anyOf` as public, and anyone signed in may install the app. Before #534 the only link to
+        this page was in the footer, which renders solely on the signed-out landing page — so a
+        signed-in user had no route to it at all.
+      */}
+      <SidebarItem asChild icon={DownloadIcon} label="Desktop app">
+        <Link to="/download" />
+      </SidebarItem>
       {/* Confirms in place like a delete: first click arms it, a second click signs out. */}
       <SidebarTooltip label="Sign out">
       <ConfirmButton
