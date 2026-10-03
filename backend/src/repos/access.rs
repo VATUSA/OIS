@@ -176,18 +176,36 @@ pub async fn fetch_service_account_role_names(
 }
 
 /// Every `(permission_name, artcc_id)` a service account holds right now: its live roles' permissions
-/// at the role's ARTCC, plus its direct grants (#584). `$1` is the account id. The gate
+/// at the role's ARTCC, plus its direct grants (#584). The gate
 /// ([`fetch_service_account_permission_names`]) and the handler-side scope
-/// ([`service_account_permission_scope`]) both read this one fragment, so they cannot disagree.
-const SERVICE_ACCOUNT_GRANTS: &str = "\
-    select rp.permission_name, sar.artcc_id
-    from access.service_account_roles sar
-    join access.role_permissions rp on rp.role_name = sar.role_name
-    where sar.service_account_id = $1 and (sar.ends_at is null or sar.ends_at > now())
-    union
-    select permission_name, artcc_id
-    from access.service_account_permissions
-    where service_account_id = $1";
+/// ([`service_account_permission_scope`]) both derive from this, so they cannot disagree.
+///
+/// A permission a service account may never hold (`api_keys.*`, `service_accounts.*`) is dropped
+/// here, however it arrived — a role assigned before #584 capped roles, or one widened later — so the
+/// denylist holds at request time, not only when a grant is written.
+pub async fn fetch_service_account_grants(
+    pool: &PgPool,
+    service_account_id: &str,
+) -> Result<Vec<(String, Option<String>)>, ApiError> {
+    let rows = sqlx::query_as::<_, (String, Option<String>)>(
+        "select rp.permission_name, sar.artcc_id
+         from access.service_account_roles sar
+         join access.role_permissions rp on rp.role_name = sar.role_name
+         where sar.service_account_id = $1 and (sar.ends_at is null or sar.ends_at > now())
+         union
+         select permission_name, artcc_id
+         from access.service_account_permissions
+         where service_account_id = $1",
+    )
+    .bind(service_account_id)
+    .fetch_all(pool)
+    .await
+    .map_err(|_| ApiError::Internal)?;
+    Ok(rows
+        .into_iter()
+        .filter(|(name, _)| !crate::repos::api_keys::is_forbidden_for_service_account(name))
+        .collect())
+}
 
 /// A service account's scope for `permission_name` (#583, #584). National only for a grant held with
 /// no ARTCC, by role or directly; otherwise the ARTCCs its grants name.
@@ -196,14 +214,12 @@ pub async fn service_account_permission_scope(
     service_account_id: &str,
     permission_name: &str,
 ) -> Result<PermissionScope, ApiError> {
-    let artccs: Vec<Option<String>> = sqlx::query_scalar(&format!(
-        "select distinct g.artcc_id from ({SERVICE_ACCOUNT_GRANTS}) g where g.permission_name = $2"
-    ))
-    .bind(service_account_id)
-    .bind(permission_name)
-    .fetch_all(pool)
-    .await
-    .map_err(|_| ApiError::Internal)?;
+    let artccs: Vec<Option<String>> = fetch_service_account_grants(pool, service_account_id)
+        .await?
+        .into_iter()
+        .filter(|(name, _)| name == permission_name)
+        .map(|(_, artcc)| artcc)
+        .collect();
     if artccs.iter().any(Option::is_none) {
         return Ok(PermissionScope::National);
     }
@@ -216,13 +232,13 @@ pub async fn fetch_service_account_permission_names(
     pool: &PgPool,
     service_account_id: &str,
 ) -> Result<Vec<String>, ApiError> {
-    sqlx::query_scalar::<_, String>(&format!(
-        "select distinct g.permission_name from ({SERVICE_ACCOUNT_GRANTS}) g order by 1"
-    ))
-    .bind(service_account_id)
-    .fetch_all(pool)
-    .await
-    .map_err(|_| ApiError::Internal)
+    let names: std::collections::BTreeSet<String> =
+        fetch_service_account_grants(pool, service_account_id)
+            .await?
+            .into_iter()
+            .map(|(name, _)| name)
+            .collect();
+    Ok(names.into_iter().collect())
 }
 
 pub fn permission_names_to_permissions(

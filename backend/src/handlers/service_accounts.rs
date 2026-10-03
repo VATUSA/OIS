@@ -113,17 +113,32 @@ pub async fn create_service_account(
     tag = "service-accounts",
     params(("id" = String, Path, description = "Service account id")),
     request_body(content = Option<RotateServiceAccountRequest>, description = "Optional lifetime; default 90 days"),
-    responses((status = 200, description = "Rotated; new token shown once", body = ServiceAccountTokenBody), (status = 400), (status = 401), (status = 404))
+    responses((status = 200, description = "Rotated; new token shown once", body = ServiceAccountTokenBody), (status = 400), (status = 401), (status = 403), (status = 404))
 )]
+/// Revoke the live token and issue a new one. Whoever rotates *receives* the token, and with it the
+/// account's authority — so, like a grant, it is capped: the admin must hold everything the account
+/// holds, at its scope (#584). Otherwise `service_accounts.update` alone would be a way to take BOT.
 pub async fn rotate_service_account(
     State(state): State<AppState>,
     _permission: RequirePermission<ServiceAccountsUpdate>,
+    Extension(current_user): Extension<Option<CurrentUser>>,
     Path(id): Path<String>,
     payload: Option<Json<RotateServiceAccountRequest>>,
 ) -> Result<Json<ServiceAccountTokenBody>, ApiError> {
+    let admin = current_user.as_ref().ok_or(ApiError::Unauthorized)?;
     let pool = state.db.as_ref().ok_or(ApiError::ServiceUnavailable)?;
     let Json(payload) = payload.unwrap_or_default();
     let expires_at = expiry_from(payload.expires_in_days, Utc::now())?;
+
+    let held = access_repo::fetch_service_account_grants(pool, &id).await?;
+    keys_repo::validate_grants(
+        pool,
+        &admin.id,
+        &held,
+        keys_repo::is_forbidden_for_service_account,
+    )
+    .await?;
+
     let token = generate_token();
     sa_repo::rotate_credential(pool, &id, &access_repo::sha256_hex(&token), expires_at).await?;
     let account = sa_repo::get_service_account(pool, &id)
