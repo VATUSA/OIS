@@ -106,10 +106,7 @@ pub fn build_router(state: AppState) -> Router {
             get(flow::flight_advisory),
         )
         // Inbound VATUSA roster-change webhook — no session; verified by HMAC signature.
-        .route(
-            "/api/v1/webhooks/vatusa/{facility}",
-            post(webhooks::vatusa_webhook),
-        )
+        .route("/api/v1/webhooks/vatusa", post(webhooks::vatusa_webhook))
         // Access editor
         .route("/api/v1/access/catalog", get(access::get_access_catalog))
         .route("/api/v1/access/self", get(access::get_self_access))

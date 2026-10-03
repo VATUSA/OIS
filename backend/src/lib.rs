@@ -16,6 +16,7 @@ pub mod reqlog;
 pub mod router;
 #[cfg(test)]
 pub(crate) mod scope_test_support;
+pub mod secrets;
 pub mod state;
 pub(crate) mod text;
 pub mod tmi;
@@ -123,9 +124,9 @@ pub async fn run() -> color_eyre::Result<()> {
         jobs::spawn_event_package_lifecycle(state.jobs.clone(), pool.clone(), state.events.clone());
         // ACE-claim reminder DMs at T-24h/T-6h before the event.
         jobs::spawn_ace_reminder_scheduler(state.jobs.clone(), pool.clone(), state.events.clone());
-        // VATUSA member sync: register the roster-change webhook and periodically reconcile.
-        feed::vatusa::spawn_register_webhooks(pool.clone());
-        feed::vatusa::spawn_reconcile(state.jobs.clone(), pool);
+        // VATUSA: register the division webhook, and pull the whole division daily (#605).
+        feed::vatusa::spawn_register_webhook(pool.clone());
+        feed::vatusa::spawn_division_pull(state.jobs.clone(), pool);
     }
 
     let app = router::build_router(state);

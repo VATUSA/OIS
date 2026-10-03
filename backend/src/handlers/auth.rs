@@ -196,7 +196,7 @@ pub async fn vatsim_callback(
 
     let pool = state.db.as_ref().ok_or(ApiError::ServiceUnavailable)?;
 
-    let (user_id, was_new_user) = bootstrap_login_user(
+    let (user_id, first_sign_in) = bootstrap_login_user(
         pool,
         profile.cid,
         &profile.email,
@@ -211,7 +211,7 @@ pub async fn vatsim_callback(
         "oauth user sync completed"
     );
 
-    ensure_user_login_access(pool, &user_id, profile.cid, was_new_user).await?;
+    ensure_user_login_access(pool, &user_id, profile.cid, first_sign_in).await?;
 
     // Sync VATUSA details and the access their roles map to *before* issuing the session, so a
     // first-ever login is already correct (#548). Bounded and best-effort: a slow or failing VATUSA
@@ -444,7 +444,7 @@ async fn build_me_body(state: &AppState, user: &CurrentUser) -> Result<MeBody, A
 }
 
 /// Upserts the identity row + audit actor for a logging-in user, returning
-/// `(user_id, was_new_user)`.
+/// `(user_id, first_sign_in)`.
 async fn bootstrap_login_user(
     pool: &sqlx::PgPool,
     cid: i64,
@@ -469,7 +469,7 @@ async fn bootstrap_login_user(
 
     tx.commit().await.map_err(|_| ApiError::Internal)?;
 
-    Ok((user.id, user.was_new_user))
+    Ok((user.id, user.first_sign_in))
 }
 
 /// Reconciles the SERVER_ADMIN role against `OIS_SERVER_ADMIN_CID` on every login, and gives a new
@@ -478,7 +478,7 @@ async fn ensure_user_login_access(
     pool: &sqlx::PgPool,
     user_id: &str,
     cid: i64,
-    was_new_user: bool,
+    first_sign_in: bool,
 ) -> Result<(), ApiError> {
     if configured_server_admin_cids().contains(&cid) {
         let mut tx = pool.begin().await.map_err(|_| ApiError::Internal)?;
@@ -494,7 +494,7 @@ async fn ensure_user_login_access(
     let mut tx = pool.begin().await.map_err(|_| ApiError::Internal)?;
     let demoted = access_repo::revoke_server_admin(&mut tx, user_id).await?;
 
-    if was_new_user || demoted {
+    if first_sign_in || demoted {
         // The baseline now arrives through the `USER` group, not as five direct rows (#544). The
         // wipe stays: a demotion must leave a former admin holding no national grants of their own,
         // and `replace_user_permissions` with an empty set is exactly that clearing.
@@ -518,7 +518,7 @@ async fn ensure_user_login_access(
             cid,
             "revoked server admin on login; reset to baseline"
         );
-    } else if was_new_user {
+    } else if first_sign_in {
         tracing::info!(user_id, cid, "baseline access seeded for new user");
     }
 
