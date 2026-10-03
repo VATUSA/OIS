@@ -279,12 +279,14 @@ pub async fn update_user_access(
         if let Some(role_names) = scope.roles.as_ref() {
             for role_name in &assignable_roles {
                 let held = role_names.iter().any(|r| r == role_name);
-                access_repo::set_user_role_manual_scoped(
+                access_repo::set_user_role_scoped(
                     &mut tx,
                     &target_user_id,
                     role_name,
                     held,
                     scope.artcc.as_deref(),
+                    // The access editor is a human acting: a save never claims to be sync (#547).
+                    access_repo::GrantSource::Manual,
                 )
                 .await?;
             }
@@ -832,7 +834,7 @@ mod group_tests {
 
     async fn make_admin(pool: &PgPool, user_id: &str) {
         sqlx::query(
-            "insert into access.user_roles (user_id, role_name) values ($1, 'SERVER_ADMIN')",
+            "insert into access.user_roles (user_id, role_name, source) values ($1, 'SERVER_ADMIN', 'system')",
         )
         .bind(user_id)
         .execute(pool)
@@ -857,7 +859,7 @@ mod group_tests {
         let user = seed_user(&pool).await;
         grant(&pool, &user, "access.groups.update", None).await;
         make_group(&pool, "TEST_GROUP").await;
-        sqlx::query("insert into access.user_roles (user_id, role_name) values ($1, 'TEST_GROUP')")
+        sqlx::query("insert into access.user_roles (user_id, role_name, source) values ($1, 'TEST_GROUP', 'manual')")
             .bind(&user)
             .execute(&pool)
             .await
@@ -990,7 +992,7 @@ mod group_tests {
         .execute(&pool)
         .await
         .unwrap();
-        sqlx::query("insert into access.user_roles (user_id, role_name) values ($1, 'SRC_GRP')")
+        sqlx::query("insert into access.user_roles (user_id, role_name, source) values ($1, 'SRC_GRP', 'manual')")
             .bind(&user)
             .execute(&pool)
             .await
@@ -1059,7 +1061,7 @@ mod group_tests {
         .execute(&pool)
         .await
         .unwrap();
-        sqlx::query("insert into access.user_roles (user_id, role_name) values ($1, 'DENY_SRC')")
+        sqlx::query("insert into access.user_roles (user_id, role_name, source) values ($1, 'DENY_SRC', 'manual')")
             .bind(&user)
             .execute(&pool)
             .await
@@ -1141,9 +1143,16 @@ mod group_tests {
 
         // Group side: grant at ZDC.
         let mut tx = pool.begin().await.unwrap();
-        access_repo::set_user_role_manual_scoped(&mut tx, &user, "CONVERGE", true, Some("ZDC"))
-            .await
-            .unwrap();
+        access_repo::set_user_role_scoped(
+            &mut tx,
+            &user,
+            "CONVERGE",
+            true,
+            Some("ZDC"),
+            access_repo::GrantSource::Manual,
+        )
+        .await
+        .unwrap();
         tx.commit().await.unwrap();
         let from_group = access_repo::fetch_user_role_grants(&pool, &user)
             .await
@@ -1151,9 +1160,16 @@ mod group_tests {
 
         // Reset, then make the same change the way the user editor does.
         let mut tx = pool.begin().await.unwrap();
-        access_repo::set_user_role_manual_scoped(&mut tx, &user, "CONVERGE", false, Some("ZDC"))
-            .await
-            .unwrap();
+        access_repo::set_user_role_scoped(
+            &mut tx,
+            &user,
+            "CONVERGE",
+            false,
+            Some("ZDC"),
+            access_repo::GrantSource::Manual,
+        )
+        .await
+        .unwrap();
         tx.commit().await.unwrap();
         assert!(
             access_repo::fetch_user_role_grants(&pool, &user)
@@ -1164,9 +1180,16 @@ mod group_tests {
         );
 
         let mut tx = pool.begin().await.unwrap();
-        access_repo::set_user_role_manual_scoped(&mut tx, &user, "CONVERGE", true, Some("ZDC"))
-            .await
-            .unwrap();
+        access_repo::set_user_role_scoped(
+            &mut tx,
+            &user,
+            "CONVERGE",
+            true,
+            Some("ZDC"),
+            access_repo::GrantSource::Manual,
+        )
+        .await
+        .unwrap();
         tx.commit().await.unwrap();
         let from_user = access_repo::fetch_user_role_grants(&pool, &user)
             .await
@@ -1188,12 +1211,26 @@ mod group_tests {
         make_group(&pool, "TWO_SCOPES").await;
 
         let mut tx = pool.begin().await.unwrap();
-        access_repo::set_user_role_manual_scoped(&mut tx, &user, "TWO_SCOPES", true, None)
-            .await
-            .unwrap();
-        access_repo::set_user_role_manual_scoped(&mut tx, &user, "TWO_SCOPES", true, Some("ZDC"))
-            .await
-            .unwrap();
+        access_repo::set_user_role_scoped(
+            &mut tx,
+            &user,
+            "TWO_SCOPES",
+            true,
+            None,
+            access_repo::GrantSource::Manual,
+        )
+        .await
+        .unwrap();
+        access_repo::set_user_role_scoped(
+            &mut tx,
+            &user,
+            "TWO_SCOPES",
+            true,
+            Some("ZDC"),
+            access_repo::GrantSource::Manual,
+        )
+        .await
+        .unwrap();
         tx.commit().await.unwrap();
         assert_eq!(
             access_repo::fetch_user_role_grants(&pool, &user)
@@ -1204,9 +1241,16 @@ mod group_tests {
         );
 
         let mut tx = pool.begin().await.unwrap();
-        access_repo::set_user_role_manual_scoped(&mut tx, &user, "TWO_SCOPES", false, Some("ZDC"))
-            .await
-            .unwrap();
+        access_repo::set_user_role_scoped(
+            &mut tx,
+            &user,
+            "TWO_SCOPES",
+            false,
+            Some("ZDC"),
+            access_repo::GrantSource::Manual,
+        )
+        .await
+        .unwrap();
         tx.commit().await.unwrap();
 
         assert_eq!(
@@ -1230,12 +1274,26 @@ mod group_tests {
             .unwrap();
         make_group(&pool, "MULTI").await;
         let mut tx = pool.begin().await.unwrap();
-        access_repo::set_user_role_manual_scoped(&mut tx, &user, "MULTI", true, None)
-            .await
-            .unwrap();
-        access_repo::set_user_role_manual_scoped(&mut tx, &user, "MULTI", true, Some("ZDC"))
-            .await
-            .unwrap();
+        access_repo::set_user_role_scoped(
+            &mut tx,
+            &user,
+            "MULTI",
+            true,
+            None,
+            access_repo::GrantSource::Manual,
+        )
+        .await
+        .unwrap();
+        access_repo::set_user_role_scoped(
+            &mut tx,
+            &user,
+            "MULTI",
+            true,
+            Some("ZDC"),
+            access_repo::GrantSource::Manual,
+        )
+        .await
+        .unwrap();
         tx.commit().await.unwrap();
 
         let members = access_repo::fetch_group_members(&pool, "MULTI", "", 25, 0)
@@ -1267,9 +1325,16 @@ mod group_tests {
                 .await
                 .unwrap();
             let mut tx = pool.begin().await.unwrap();
-            access_repo::set_user_role_manual_scoped(&mut tx, &id, "SEARCHABLE", true, None)
-                .await
-                .unwrap();
+            access_repo::set_user_role_scoped(
+                &mut tx,
+                &id,
+                "SEARCHABLE",
+                true,
+                None,
+                access_repo::GrantSource::Manual,
+            )
+            .await
+            .unwrap();
             tx.commit().await.unwrap();
         }
 
@@ -1581,8 +1646,15 @@ async fn change_membership(
     let mut tx = pool.begin().await.map_err(|_| ApiError::Internal)?;
     // The same writer the user-side editor calls, so the two sides cannot produce different state
     // (#546 AC4). Idempotent on add, keyed on the same scope on remove.
-    access_repo::set_user_role_manual_scoped(&mut tx, &target, name, held, artcc.as_deref())
-        .await?;
+    access_repo::set_user_role_scoped(
+        &mut tx,
+        &target,
+        name,
+        held,
+        artcc.as_deref(),
+        access_repo::GrantSource::Manual,
+    )
+    .await?;
     tx.commit().await.map_err(|_| ApiError::Internal)?;
 
     let after = access_repo::fetch_user_role_grants(pool, &target).await?;

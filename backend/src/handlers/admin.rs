@@ -189,15 +189,15 @@ mod tests {
             sqlx::query(sql).execute(pool).await.unwrap();
         }
         sqlx::query(
-            "insert into access.user_roles (user_id, role_name) values ($1, 'SUMMARY_TEST')",
+            "insert into access.user_roles (user_id, role_name, source) values ($1, 'SUMMARY_TEST', 'manual')",
         )
         .bind(user)
         .execute(pool)
         .await
         .unwrap();
         sqlx::query(
-            "insert into access.user_permissions (user_id, permission_name, granted) \
-             select $1, name, false from access.permissions \
+            "insert into access.user_permissions (user_id, permission_name, granted, source) \
+             select $1, name, false, 'manual' from access.permissions \
              where name in ('audit.logs.read', 'access.users.read', 'system.jobs.read')",
         )
         .bind(user)
