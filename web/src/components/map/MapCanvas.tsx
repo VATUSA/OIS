@@ -1,4 +1,4 @@
-import {useEffect} from "react";
+import {useEffect, useState} from "react";
 import DeckGL from "@deck.gl/react";
 import {MapView} from "@deck.gl/core";
 import type {Layer, MapViewState, PickingInfo} from "@deck.gl/core";
@@ -64,6 +64,76 @@ interface MapCanvasProps {
   fallback?: React.ReactNode;
 }
 
+/** A hover card: the HTML `getTooltip` produced, plus where the cursor was. */
+type HoverCard = {
+  html: string;
+  style?: Record<string, string>;
+  /** Cursor position in canvas pixels, and the canvas size, both straight from deck's `info`. */
+  x: number;
+  y: number;
+  width: number;
+  height: number;
+};
+
+/** Gap between the cursor and the card's nearest corner. */
+const CARD_GAP = 12;
+/**
+ * The largest a card is assumed to get, used only to decide *which side* of the cursor it opens on.
+ *
+ * The flip itself is exact — `translate(-100%)` uses the card's real width — so these only need to be
+ * roughly right: too small and a card near the edge opens outward and gets clipped, too large and it
+ * flips inward a little early. Measuring the card instead would mean rendering it, measuring, then
+ * moving it, which is a visible jump.
+ */
+const CARD_MAX = { width: 280, height: 160 };
+
+/**
+ * Where the card sits, and which way it opens.
+ *
+ * The container is `overflow-hidden` (see `className`'s default), so a card that would extend past an
+ * edge is not merely ugly — it is cut off, which is the whole bug this is fixing. Near the right or
+ * bottom edge the card therefore opens back toward the cursor instead.
+ */
+function cardPlacement(card: HoverCard) {
+  const flipX = card.x + CARD_GAP + CARD_MAX.width > card.width;
+  const flipY = card.y + CARD_GAP + CARD_MAX.height > card.height;
+  return {
+    left: card.x + (flipX ? -CARD_GAP : CARD_GAP),
+    top: card.y + (flipY ? -CARD_GAP : CARD_GAP),
+    transform: `translate(${flipX ? "-100%" : "0"}, ${flipY ? "-100%" : "0"})`,
+  };
+}
+
+/**
+ * The hover card, rendered by us rather than by deck.gl's tooltip widget (#539).
+ *
+ * deck 9.4.0's widget offsets the card by `getCanvasBounds()`, which measures against
+ * `.deck-widgets-root` — a div `@deck.gl/react` creates with no style at all, so it is a zero-height
+ * block sitting at the *bottom* of the map. Every card was therefore translated a full map-height
+ * upward inside an `overflow: hidden` box and was never visible, which is why eight successive fixes
+ * to `getTooltip`'s *content* changed nothing.
+ *
+ * Owning the element also puts it above the page toolbars (`z-[500]`/`z-[650]`), which deck's widget
+ * could not be: deck's wrapper sets `zIndex: 0`, establishing a stacking context that traps its
+ * tooltip container at `zIndex: 2` underneath them.
+ *
+ * `dangerouslySetInnerHTML` is the same trust boundary deck used (`el.innerHTML = displayInfo.html`),
+ * not a new one — `lib/tooltip.ts` escapes every interpolated value through its `esc()`.
+ */
+function MapTooltip({ card }: { card: HoverCard }) {
+  const { left, top, transform } = cardPlacement(card);
+  return (
+    <div
+      data-testid="map-tooltip"
+      // Above the toolbars the callers pass as `children`, and never a pointer target itself —
+      // a card under the cursor would otherwise steal the next hover and flicker.
+      className="pointer-events-none absolute z-[700] max-w-[280px] rounded-md border border-line bg-panel-2 px-2 py-1.5 text-xs text-ink shadow-none"
+      style={{ left, top, transform, ...card.style }}
+      dangerouslySetInnerHTML={{ __html: card.html }}
+    />
+  );
+}
+
 /**
  * The dumb map shell: DeckGL (world-copy-repeating) with a MapLibre CARTO vector basemap + the aeroway
  * airport-layout overlay + a WebGL2-unavailable fallback. Knows nothing about aircraft/FCAs — it just
@@ -89,6 +159,7 @@ export function MapCanvas({
 }: MapCanvasProps) {
   const { resolvedTheme } = useTheme();
   const { ok: webglOk, retry } = useWebglAvailable();
+  const [hovered, setHovered] = useState<HoverCard | null>(null);
 
   // Nudge deck.gl to re-measure once layout has settled (0-sized-at-mount safety).
   useEffect(() => {
@@ -114,7 +185,28 @@ export function MapCanvas({
         onViewStateChange={(onViewStateChange ?? NOOP) as never}
         controller={controller}
         layers={layers}
-        getTooltip={getTooltip as never}
+        // NOT `getTooltip`: deck 9.4.0 paints that card off-screen (see `MapTooltip`). The same
+        // function is still the source of the content — only who positions it has changed, so every
+        // caller keeps passing `getTooltip` exactly as before.
+        onHover={((info: PickingInfo) => {
+          const card = getTooltip?.(info) ?? null;
+          setHovered(
+            card
+              ? {
+                  ...card,
+                  x: info.x,
+                  y: info.y,
+                  // From deck rather than the DOM: no layout read on every pointermove, and a test
+                  // can set it.
+                  width: info.viewport?.width ?? 0,
+                  height: info.viewport?.height ?? 0,
+                }
+              : null,
+          );
+        }) as never}
+        // deck's default is 0, and the aircraft glyph is a 48x48 masked silhouette drawn at ~26px —
+        // so without this only the thin aeroplane-shaped opaque pixels are hoverable at all (#539).
+        pickingRadius={4}
         onClick={onClick as never}
         onDragStart={onDragStart as never}
         onDrag={onDrag as never}
@@ -144,6 +236,7 @@ export function MapCanvas({
         </MapLibre>
       </DeckGL>
       {children}
+      {hovered && <MapTooltip card={hovered} />}
     </div>
   );
 }
