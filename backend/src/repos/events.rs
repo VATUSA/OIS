@@ -515,17 +515,23 @@ pub async fn mark_package_archived(
 }
 
 /// Toggle a package's auto-publish flag.
+/// Arm or disarm auto-publish, recording `actor` as `updated_by` — the user the lifecycle job then
+/// activates as (#537 review).
 pub async fn set_package_auto(
     pool: &PgPool,
     package_id: &str,
     auto: bool,
+    actor: &str,
 ) -> Result<bool, ApiError> {
-    let r = sqlx::query("update events.tmi_package set auto_publish = $2 where id = $1")
-        .bind(package_id)
-        .bind(auto)
-        .execute(pool)
-        .await
-        .map_err(|_| ApiError::Internal)?;
+    let r = sqlx::query(
+        "update events.tmi_package set auto_publish = $2, updated_by = $3 where id = $1",
+    )
+    .bind(package_id)
+    .bind(auto)
+    .bind(actor)
+    .execute(pool)
+    .await
+    .map_err(|_| ApiError::Internal)?;
     Ok(r.rows_affected() > 0)
 }
 

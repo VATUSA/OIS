@@ -680,16 +680,19 @@ pub async fn run_cleanup(pool: &PgPool) -> Result<CleanupStats, ApiError> {
     // request asked for; the pass runs every `TMU_CLEANUP_INTERVAL`, so the real removal lands in
     // [30, 35) minutes. Only advisories that actually carry a window are touched — a NULL `valid_to`
     // means "no window", and must not read as "infinitely overdue".
-    let c_window = sqlx::query(
+    // Both statements run in one transaction with the Discord corrections they imply, so a crash can
+    // never leave an advisory cancelled here while its post still stands there.
+    let mut tx = pool.begin().await.map_err(internal)?;
+    let mut cancelled: Vec<String> = sqlx::query_scalar(
         "update tmu.advisories set status = 'cancelled' \
          where status in ('draft', 'published') \
            and valid_to is not null \
-           and valid_to < now() - interval '30 minutes'",
+           and valid_to < now() - interval '30 minutes' \
+         returning id",
     )
-    .execute(pool)
+    .fetch_all(&mut *tx)
     .await
     .map_err(internal)?;
-
     // (b) The program it was generated from is over. `cancel_program_advisory_tx` only ever runs on a
     // *user* revising or cancelling a program, so a GDP or ground stop that simply timed out left its
     // advisory `published` forever — a real pre-existing bug, folded in here because this is the pass
@@ -698,19 +701,49 @@ pub async fn run_cleanup(pool: &PgPool) -> Result<CleanupStats, ApiError> {
     // Safe to run after the deletes above despite `gdp_id`/`ground_stop_id` being
     // `on delete set null`: both deletes require `published_at is null`, and an advisory is only
     // generated for a *published* program, so no program with an advisory is reachable by them.
-    let c_program = sqlx::query(
-        "update tmu.advisories a set status = 'cancelled' \
-         where a.status in ('draft', 'published') \
-           and (exists (select 1 from tmu.gdp g \
-                         where g.id = a.gdp_id \
-                           and g.status in ('expired', 'cancelled')) \
-             or exists (select 1 from tmu.ground_stops s \
-                         where s.id = a.ground_stop_id \
-                           and s.status in ('expired', 'cancelled')))",
-    )
-    .execute(pool)
-    .await
-    .map_err(internal)?;
+    cancelled.extend(
+        sqlx::query_scalar::<_, String>(
+            "update tmu.advisories a set status = 'cancelled' \
+             where a.status in ('draft', 'published') \
+               and (exists (select 1 from tmu.gdp g \
+                             where g.id = a.gdp_id \
+                               and g.status in ('expired', 'cancelled')) \
+                 or exists (select 1 from tmu.ground_stops s \
+                             where s.id = a.ground_stop_id \
+                               and s.status in ('expired', 'cancelled'))) \
+             returning a.id",
+        )
+        .fetch_all(&mut *tx)
+        .await
+        .map_err(internal)?,
+    );
+
+    // Withdraw what was posted, beside the post it corrects (#537 review). The cancellation is only
+    // worth anything if Discord stops asserting the advisory, and `adv_cancel` is otherwise enqueued
+    // by nothing but the manual cancel handler. The channel is the one the publish went to, not one
+    // re-derived from today's facility map — the reason `handlers::tmu::cancel_advisory` gives. The
+    // `adv_publish` record is also what answers *whether* anything was posted: a draft never has one,
+    // and neither does an advisory published while Discord was unconfigured.
+    for id in &cancelled {
+        let Some(channel_id) =
+            crate::repos::integration::published_channel_for_advisory(pool, id).await?
+        else {
+            continue;
+        };
+        let Some(adv) = get_advisory_tx(&mut tx, id).await? else {
+            continue;
+        };
+        let job = crate::advisory::cancel_job_payload(&channel_id, &adv);
+        crate::repos::integration::enqueue_job(
+            &mut tx,
+            "adv_cancel",
+            &job,
+            Some("advisory"),
+            Some(id),
+        )
+        .await?;
+    }
+    tx.commit().await.map_err(internal)?;
 
     Ok(CleanupStats {
         expired: e_tmi.rows_affected() + e_gs.rows_affected() + e_gdp.rows_affected(),
@@ -718,7 +751,7 @@ pub async fn run_cleanup(pool: &PgPool) -> Result<CleanupStats, ApiError> {
             + d_gs.rows_affected()
             + d_pgm.rows_affected()
             + d_gdp.rows_affected(),
-        advisories_cancelled: c_window.rows_affected() + c_program.rows_affected(),
+        advisories_cancelled: cancelled.len() as u64,
     })
 }
 
@@ -2601,6 +2634,103 @@ mod tests {
         assert_eq!(
             gs_left, 1,
             "a published program survives the cleanup deletes"
+        );
+    }
+
+    /// Publish `adv_id` and record its `adv_publish` post the way `handlers::tmu::publish_advisory`
+    /// does. The outbound job is the only record of whether — and where — an advisory was posted.
+    async fn post_advisory(pool: &PgPool, adv_id: &str, channel: &str) {
+        let user = crate::scope_test_support::seed_user(pool).await;
+        let mut tx = pool.begin().await.unwrap();
+        assert!(publish_advisory(&mut tx, adv_id, &user).await.unwrap());
+        let adv = get_advisory_tx(&mut tx, adv_id).await.unwrap().unwrap();
+        crate::repos::integration::enqueue_job(
+            &mut tx,
+            "adv_publish",
+            &crate::advisory::publish_job_payload(channel, &adv),
+            Some("advisory"),
+            Some(adv_id),
+        )
+        .await
+        .unwrap();
+        tx.commit().await.unwrap();
+    }
+
+    /// The channels of every `adv_cancel` correction enqueued for `adv_id`.
+    async fn cancel_jobs(pool: &PgPool, adv_id: &str) -> Vec<String> {
+        sqlx::query_scalar(
+            "select coalesce(payload->>'channel_id', '') from integration.outbound_jobs \
+             where job_type = 'adv_cancel' and subject_type = 'advisory' and subject_id = $1",
+        )
+        .bind(adv_id)
+        .fetch_all(pool)
+        .await
+        .unwrap()
+    }
+
+    /// A posted advisory the cleanup cancels is withdrawn from Discord, in the channel it was posted to
+    /// (#537 review). Before, the status changed and the post stood indefinitely, asserting an advisory
+    /// that had lapsed — the outcome cancellation was chosen over a soft-dismiss to avoid.
+    #[sqlx::test]
+    async fn cleanup_withdraws_a_posted_advisory_from_discord(pool: PgPool) {
+        let id = advisory_ending_min_ago(&pool, PAST_GRACE_MIN).await;
+        post_advisory(&pool, &id, "chan-posted").await;
+
+        run_cleanup(&pool).await.unwrap();
+
+        assert_eq!(status_of(&pool, &id).await, "cancelled");
+        assert_eq!(
+            cancel_jobs(&pool, &id).await,
+            vec!["chan-posted".to_string()],
+            "exactly one correction, beside the post it corrects"
+        );
+
+        // The next pass finds nothing left to cancel, so it posts nothing again.
+        run_cleanup(&pool).await.unwrap();
+        assert_eq!(cancel_jobs(&pool, &id).await.len(), 1);
+    }
+
+    /// Nothing was posted, so there is nothing to withdraw — for a draft, and for a published advisory
+    /// whose post was never enqueued (Discord unconfigured). A correction to a post that does not
+    /// exist would be noise in the channel.
+    #[sqlx::test]
+    async fn cleanup_posts_nothing_for_an_advisory_that_was_never_posted(pool: PgPool) {
+        let draft = advisory_ending_min_ago(&pool, PAST_GRACE_MIN).await;
+        let unposted = advisory_ending_min_ago(&pool, PAST_GRACE_MIN).await;
+        let user = crate::scope_test_support::seed_user(&pool).await;
+        let mut tx = pool.begin().await.unwrap();
+        assert!(publish_advisory(&mut tx, &unposted, &user).await.unwrap());
+        tx.commit().await.unwrap();
+
+        run_cleanup(&pool).await.unwrap();
+
+        for id in [&draft, &unposted] {
+            assert_eq!(status_of(&pool, id).await, "cancelled");
+            assert!(
+                cancel_jobs(&pool, id).await.is_empty(),
+                "no post, so no correction"
+            );
+        }
+    }
+
+    /// The program arm withdraws too: a ground stop that simply timed out has its posted advisory
+    /// corrected, not just its row.
+    #[sqlx::test]
+    async fn cleanup_withdraws_the_posted_advisory_of_an_expired_ground_stop(pool: PgPool) {
+        let (gs_id, adv_id) = published_gs_with_advisory(&pool).await;
+        post_advisory(&pool, &adv_id, "chan-gs").await;
+        sqlx::query("update tmu.ground_stops set status = 'expired' where id = $1")
+            .bind(&gs_id)
+            .execute(&pool)
+            .await
+            .unwrap();
+
+        run_cleanup(&pool).await.unwrap();
+
+        assert_eq!(status_of(&pool, &adv_id).await, "cancelled");
+        assert_eq!(
+            cancel_jobs(&pool, &adv_id).await,
+            vec!["chan-gs".to_string()]
         );
     }
 

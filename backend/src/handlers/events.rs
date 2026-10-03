@@ -1075,7 +1075,9 @@ pub async fn add_event_package_item(
     // activation-time check cannot be the only gate without leaving auto-publish ungated.
     if let Some(facility) = advisory_item_facility(&payload.kind, &canonical) {
         let principal = Principal::require(current_user.as_ref(), current_api_key.as_ref())?;
-        require_advisory_authority(&state, &principal, &facility).await?;
+        // `create`, not `publish`: adding an item drafts a document, it does not issue one. Issuing
+        // happens at activation, which checks `ADVISORY_ISSUE` (#537 review).
+        require_advisory_authority(&state, &principal, &facility, "tmu.adv.create").await?;
     }
     events_repo::add_package_item(pool, &package_id, &payload.kind, &canonical).await?;
     Ok(Json(events_repo::list_packages(pool, id).await?))
@@ -1132,11 +1134,10 @@ pub async fn activate_event_package(
     // planner whose scope has since been narrowed, and activation is the moment the document actually
     // gets issued under a facility's name.
     //
-    // Deliberately in the handler rather than inside `activate_package`: the other caller is
-    // `spawn_event_package_lifecycle`'s auto-publish, which runs with no principal at all and so
-    // cannot perform this check. Putting it here makes that asymmetry visible at the two call sites
-    // instead of hiding it behind an `Option<Principal>` that is always `None` for one of them. The
-    // add-time check is what covers the auto-publish path.
+    // Checked here as well as inside `activate_package` for the principal's sake: an API key's scope is
+    // its owner's intersected with the key's own grant, which only the principal knows, and this is
+    // also where the 401/403 distinction is made. `activate_package` repeats the rule against the user
+    // id it acts as, which is what covers the auto-publish job.
     require_advisory_scope_for_package(&state, &principal, pool, &package_id).await?;
     activate_package(pool, id, &package_id, &user.id).await?;
     Ok(Json(events_repo::list_packages(pool, id).await?))
@@ -1158,8 +1159,9 @@ async fn require_advisory_authority(
     state: &AppState,
     principal: &Principal,
     facility: &str,
+    permission: &str,
 ) -> Result<(), ApiError> {
-    let scope = principal.permission_scope(state, "tmu.adv.create").await?;
+    let scope = principal.permission_scope(state, permission).await?;
     if scope.is_empty() {
         return Err(ApiError::Unauthorized);
     }
@@ -1169,10 +1171,18 @@ async fn require_advisory_authority(
     Ok(())
 }
 
-/// Check `tmu.adv.create` scope for every `advisory` item in a package.
+/// The permission that issuing an advisory needs, by any route (#537 review).
 ///
-/// Returns `Forbidden` on the first item the principal cannot issue for, leaving the package a draft:
-/// a partial activation is worse than a refused one, so this runs before anything is materialized.
+/// Activation does not only create the advisory — it creates **and publishes** it and enqueues the
+/// `adv_publish` post. The direct API gates those separately (`create_advisory` on `TmuAdvCreate`,
+/// `publish_advisory` on `TmuAdvPublish`) precisely so someone can draft a document without being able
+/// to issue it. Checking only `create` here let a package route collapse that split.
+const ADVISORY_ISSUE: &str = "tmu.adv.publish";
+
+/// Check the principal may issue every `advisory` item in a package.
+///
+/// Returns on the first item the principal cannot issue for, leaving the package a draft: a partial
+/// activation is worse than a refused one, so this runs before anything is materialized.
 async fn require_advisory_scope_for_package(
     state: &AppState,
     principal: &Principal,
@@ -1181,7 +1191,35 @@ async fn require_advisory_scope_for_package(
 ) -> Result<(), ApiError> {
     for item in events_repo::list_package_items(pool, package_id).await? {
         if let Some(facility) = advisory_item_facility(&item.kind, &item.payload.0) {
-            require_advisory_authority(state, principal, &facility).await?;
+            require_advisory_authority(state, principal, &facility, ADVISORY_ISSUE).await?;
+        }
+    }
+    Ok(())
+}
+
+/// The same check, made against the user `activate_package` acts as.
+///
+/// This is what covers `auto_publish`. The lifecycle job is not principal-less: it activates as the
+/// package's `updated_by`, a real user id, so it can be held to the same rule as a person pressing
+/// Activate. Without it, a scope withdrawn between planning and the event was honoured on one
+/// activation path and ignored on the other.
+async fn require_actor_may_issue_package(
+    pool: &sqlx::PgPool,
+    actor: &str,
+    package_id: &str,
+) -> Result<(), ApiError> {
+    let items = events_repo::list_package_items(pool, package_id).await?;
+    let facilities: Vec<String> = items
+        .iter()
+        .filter_map(|item| advisory_item_facility(&item.kind, &item.payload.0))
+        .collect();
+    if facilities.is_empty() {
+        return Ok(());
+    }
+    let scope = crate::repos::access::permission_scope(pool, actor, ADVISORY_ISSUE).await?;
+    for facility in &facilities {
+        if !scope.allows(Some(facility)) {
+            return Err(ApiError::Forbidden);
         }
     }
     Ok(())
@@ -1197,6 +1235,9 @@ pub(crate) async fn activate_package(
     package_id: &str,
     actor: &str,
 ) -> Result<(), ApiError> {
+    // Both callers — the Activate handler and the auto-publish job — come through here, so this is the
+    // one place an advisory item's issuer is checked for every path (#537 review).
+    require_actor_may_issue_package(pool, actor, package_id).await?;
     let event = events_repo::get(pool, event_id)
         .await?
         .ok_or(ApiError::NotFound)?;
@@ -1323,7 +1364,7 @@ pub(crate) async fn activate_package(
                     .await?
                     .ok_or(ApiError::Internal)?;
                 if let Some(channel_id) = channel {
-                    let job = crate::handlers::tmu::advisory_publish_job(&channel_id, &adv);
+                    let job = crate::advisory::publish_job_payload(&channel_id, &adv);
                     integration_repo::enqueue_job(
                         &mut tx,
                         "adv_publish",
@@ -1422,16 +1463,28 @@ pub(crate) async fn deactivate_package(
 pub async fn set_event_package_auto(
     State(state): State<AppState>,
     _permission: RequirePermission<EventsPlanUpdate>,
+    Extension(current_user): Extension<Option<CurrentUser>>,
+    Extension(current_api_key): Extension<Option<CurrentApiKey>>,
     Path((id, package_id)): Path<(i64, String)>,
     Json(payload): Json<SetFcaAutoRequest>,
 ) -> Result<Json<Vec<TmiPackageBody>>, ApiError> {
+    let principal = Principal::require(current_user.as_ref(), current_api_key.as_ref())?;
     let pool = state.db.as_ref().ok_or(ApiError::ServiceUnavailable)?;
     // Ownership: the package must belong to this event.
     match events_repo::get_package_owner(pool, &package_id).await? {
         Some((event_id, _)) if event_id == id => {}
         _ => return Err(ApiError::NotFound),
     }
-    events_repo::set_package_auto(pool, &package_id, payload.auto_publish).await?;
+    // Arming auto-publish schedules an issuance, so it needs the authority to issue (#537 review).
+    // Otherwise someone refused a manual activation could arm the package and let the job do it.
+    // Disarming needs nothing more than the events permission: it can only prevent an issuance.
+    if payload.auto_publish {
+        require_advisory_scope_for_package(&state, &principal, pool, &package_id).await?;
+    }
+    // Recorded as the package's `updated_by`, which is who the job activates as — so the person who
+    // chose automatic issuance is the one held to the rule, and the one the advisory is attributed to.
+    events_repo::set_package_auto(pool, &package_id, payload.auto_publish, principal.user_id())
+        .await?;
     Ok(Json(events_repo::list_packages(pool, id).await?))
 }
 
@@ -2372,6 +2425,11 @@ mod advisory_package_tests {
         // The shared seeder rather than a hand-written insert: `identity.users` has `full_name`,
         // not `first_name`/`last_name`, and guessing its columns is how this failed first time.
         let user = crate::scope_test_support::seed_user(pool).await;
+        // The user these tests activate as. `activate_package` now holds its actor to
+        // `ADVISORY_ISSUE` for every advisory item, on every path (#537 review), so the actor has to
+        // be someone entitled to issue — as the real handler's caller and the auto-publish job's
+        // `updated_by` both must be.
+        crate::scope_test_support::grant(pool, &user, "tmu.adv.publish", None).await;
         sqlx::query(
             "insert into events.event (id, title, start_time, end_time, facility) \
              values ($1, 'Advisory Test', now(), now() + interval '2 hours', 'ZDC')",
@@ -2744,6 +2802,7 @@ mod advisory_permission_tests {
         let (user, cookie, pkg) = seed(&pool).await;
         grant(&pool, &user, "events.plan.update", None).await;
         grant(&pool, &user, "tmu.adv.create", Some("ZDC")).await;
+        grant(&pool, &user, "tmu.adv.publish", Some("ZDC")).await;
         assert_eq!(
             add(&state, &pkg, &cookie, "ZDC").await,
             http::StatusCode::OK
@@ -2752,7 +2811,7 @@ mod advisory_permission_tests {
         // The grant is withdrawn between planning and activation.
         sqlx::query(
             "delete from access.user_permissions \
-             where user_id = $1 and permission_name = 'tmu.adv.create'",
+             where user_id = $1 and permission_name = 'tmu.adv.publish'",
         )
         .bind(&user)
         .execute(&pool)
@@ -2773,6 +2832,197 @@ mod advisory_permission_tests {
         assert!(
             advisories.is_empty(),
             "and nothing was issued: a refused activation leaves no document behind"
+        );
+    }
+
+    async fn published_count(pool: &PgPool) -> i64 {
+        sqlx::query_scalar("select count(*) from tmu.advisories where status = 'published'")
+            .fetch_one(pool)
+            .await
+            .unwrap()
+    }
+
+    /// One pass of the auto-publish job, as `jobs::event_package_lifecycle_once` runs it: select the
+    /// due packages and activate each as its `updated_by`.
+    async fn run_auto_publish_pass(pool: &PgPool) {
+        for (package_id, event_id, actor) in
+            crate::repos::events::auto_due_packages(pool).await.unwrap()
+        {
+            let _ = super::activate_package(pool, event_id, &package_id, &actor).await;
+        }
+    }
+
+    async fn arm(
+        state: &crate::state::AppState,
+        pkg: &str,
+        cookie: &str,
+        on: bool,
+    ) -> http::StatusCode {
+        send(
+            state,
+            http::Method::PUT,
+            &format!("/api/v1/events/{EVENT}/packages/{pkg}/auto"),
+            cookie,
+            Some(json!({ "auto_publish": on })),
+        )
+        .await
+    }
+
+    async fn activate(state: &crate::state::AppState, pkg: &str, cookie: &str) -> http::StatusCode {
+        send(
+            state,
+            http::Method::POST,
+            &format!("/api/v1/events/{EVENT}/packages/{pkg}/activate"),
+            cookie,
+            None,
+        )
+        .await
+    }
+
+    /// Activation creates **and publishes**, so it needs `tmu.adv.publish` — the permission the direct
+    /// `POST /tmu/advisories/{id}/publish` requires. With only `tmu.adv.create`, the package route used
+    /// to publish what the direct route refuses (#537 review).
+    #[sqlx::test]
+    async fn activation_needs_the_publish_permission_not_just_create(pool: PgPool) {
+        let state = test_state(pool.clone(), HashMap::new());
+        let (user, cookie, pkg) = seed(&pool).await;
+        grant(&pool, &user, "events.plan.update", None).await;
+        grant(&pool, &user, "tmu.adv.create", Some("ZDC")).await;
+        assert_eq!(
+            add(&state, &pkg, &cookie, "ZDC").await,
+            http::StatusCode::OK
+        );
+
+        assert_eq!(
+            activate(&state, &pkg, &cookie).await,
+            http::StatusCode::UNAUTHORIZED,
+            "drafting rights do not include issuing"
+        );
+        assert_eq!(published_count(&pool).await, 0);
+
+        // ...and with the right to publish, it goes through — so the refusal above is the permission,
+        // not a broken activation.
+        grant(&pool, &user, "tmu.adv.publish", Some("ZDC")).await;
+        assert_eq!(activate(&state, &pkg, &cookie).await, http::StatusCode::OK);
+        assert_eq!(published_count(&pool).await, 1);
+    }
+
+    /// Arming auto-publish schedules an issuance, so someone refused a manual activation must not be
+    /// able to arm one instead and let the job issue it for them (#537 review).
+    #[sqlx::test]
+    async fn a_planner_who_cannot_issue_cannot_arm_auto_publish(pool: PgPool) {
+        let state = test_state(pool.clone(), HashMap::new());
+        let (author, author_cookie, pkg) = seed(&pool).await;
+        grant(&pool, &author, "events.plan.update", None).await;
+        grant(&pool, &author, "tmu.adv.create", Some("ZDC")).await;
+        assert_eq!(
+            add(&state, &pkg, &author_cookie, "ZDC").await,
+            http::StatusCode::OK
+        );
+
+        let planner = seed_user(&pool).await;
+        let planner_cookie = session_cookie(&pool, &planner).await;
+        grant(&pool, &planner, "events.plan.update", None).await;
+
+        assert_ne!(
+            activate(&state, &pkg, &planner_cookie).await,
+            http::StatusCode::OK
+        );
+        assert_eq!(
+            arm(&state, &pkg, &planner_cookie, true).await,
+            http::StatusCode::UNAUTHORIZED,
+            "the same person may not arm what they may not activate"
+        );
+        run_auto_publish_pass(&pool).await;
+        assert_eq!(published_count(&pool).await, 0, "and so nothing is issued");
+
+        // Disarming can only prevent an issuance, so the events permission is enough for it.
+        assert_eq!(
+            arm(&state, &pkg, &planner_cookie, false).await,
+            http::StatusCode::OK
+        );
+    }
+
+    /// The case `activation_rechecks_the_scope` covers for the Activate button, through the job: a
+    /// scope withdrawn between arming and the event stops the issuance (#537 review).
+    #[sqlx::test]
+    async fn auto_publish_rechecks_a_withdrawn_scope(pool: PgPool) {
+        let state = test_state(pool.clone(), HashMap::new());
+        let (user, cookie, pkg) = seed(&pool).await;
+        grant(&pool, &user, "events.plan.update", None).await;
+        grant(&pool, &user, "tmu.adv.create", Some("ZDC")).await;
+        grant(&pool, &user, "tmu.adv.publish", Some("ZDC")).await;
+        assert_eq!(
+            add(&state, &pkg, &cookie, "ZDC").await,
+            http::StatusCode::OK
+        );
+        assert_eq!(arm(&state, &pkg, &cookie, true).await, http::StatusCode::OK);
+
+        sqlx::query(
+            "delete from access.user_permissions \
+             where user_id = $1 and permission_name = 'tmu.adv.publish'",
+        )
+        .bind(&user)
+        .execute(&pool)
+        .await
+        .unwrap();
+
+        run_auto_publish_pass(&pool).await;
+        assert_eq!(
+            published_count(&pool).await,
+            0,
+            "the job is held to the same rule"
+        );
+        let status: String =
+            sqlx::query_scalar("select status from events.tmi_package where id = $1")
+                .bind(&pkg)
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+        assert_eq!(
+            status, "draft",
+            "and the package is left a draft, not partly activated"
+        );
+    }
+
+    /// The job acts as whoever **armed** the package, not whoever wrote the item. Here the author keeps
+    /// their rights and only the armer loses theirs; the job must refuse. Without arming recording its
+    /// actor, the job would check the author, find them entitled, and issue.
+    #[sqlx::test]
+    async fn auto_publish_acts_as_the_person_who_armed_it(pool: PgPool) {
+        let state = test_state(pool.clone(), HashMap::new());
+        let (author, author_cookie, pkg) = seed(&pool).await;
+        grant(&pool, &author, "events.plan.update", None).await;
+        grant(&pool, &author, "tmu.adv.create", Some("ZDC")).await;
+        grant(&pool, &author, "tmu.adv.publish", Some("ZDC")).await;
+        assert_eq!(
+            add(&state, &pkg, &author_cookie, "ZDC").await,
+            http::StatusCode::OK
+        );
+
+        let armer = seed_user(&pool).await;
+        let armer_cookie = session_cookie(&pool, &armer).await;
+        grant(&pool, &armer, "events.plan.update", None).await;
+        grant(&pool, &armer, "tmu.adv.publish", Some("ZDC")).await;
+        assert_eq!(
+            arm(&state, &pkg, &armer_cookie, true).await,
+            http::StatusCode::OK
+        );
+
+        sqlx::query(
+            "delete from access.user_permissions \
+             where user_id = $1 and permission_name = 'tmu.adv.publish'",
+        )
+        .bind(&armer)
+        .execute(&pool)
+        .await
+        .unwrap();
+
+        run_auto_publish_pass(&pool).await;
+        assert_eq!(
+            published_count(&pool).await,
+            0,
+            "the armer lost the right to issue, so the job must not issue on their behalf"
         );
     }
 }

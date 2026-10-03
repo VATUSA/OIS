@@ -101,35 +101,6 @@ pub(crate) fn tmi_publish_job(channel_id: &str, tmi: &TmiBody) -> serde_json::Va
     })
 }
 
-/// The `adv_publish` job payload: the rendered document plus what the bot needs to post it.
-///
-/// The document is the **stored** `body`, not a re-render. It is what was reviewed and published, and
-/// re-rendering here would let the post differ from the row — the same reason `tmi_publish_job`
-/// assembles the row in one place. The bot stays a dumb renderer: it fences and splits, and decides
-/// nothing about content (#436's invariant, VATUSA/OIS#459).
-pub(crate) fn advisory_publish_job(channel_id: &str, adv: &AdvisoryBody) -> serde_json::Value {
-    json!({
-        "channel_id": channel_id,
-        "advisory_id": adv.id,
-        "document": adv.body,
-    })
-}
-
-/// The `adv_cancel` job payload: a short correction, not a re-post of the document.
-pub(crate) fn advisory_cancel_job(channel_id: &str, adv: &AdvisoryBody) -> serde_json::Value {
-    json!({
-        "channel_id": channel_id,
-        "advisory_id": adv.id,
-        "document": crate::advisory::render_cancellation(&crate::advisory::AdvisoryIdent {
-            facility: adv.facility.clone(),
-            number: adv.number,
-            issued_day: adv.issued_day,
-            // Stamped now: this is the moment the cancellation is being logged.
-            signed_at: chrono::Utc::now(),
-        }),
-    })
-}
-
 #[derive(Debug, Default, Deserialize)]
 pub struct TmiListQuery {
     status: Option<String>,
@@ -2212,7 +2183,7 @@ pub async fn publish_advisory(
     if let Some(channel_id) = channel {
         // In the same tx as the publish: a post must not exist for an advisory that did not publish,
         // and an advisory must not go live with nothing queued to announce it.
-        let job = advisory_publish_job(&channel_id, &adv);
+        let job = crate::advisory::publish_job_payload(&channel_id, &adv);
         integration_repo::enqueue_job(
             &mut tx,
             "adv_publish",
@@ -2260,7 +2231,7 @@ pub async fn cancel_advisory(
         .await?
         .ok_or(ApiError::NotFound)?;
     if let Some(channel_id) = channel {
-        let job = advisory_cancel_job(&channel_id, &adv);
+        let job = crate::advisory::cancel_job_payload(&channel_id, &adv);
         integration_repo::enqueue_job(&mut tx, "adv_cancel", &job, Some("advisory"), Some(&adv.id))
             .await?;
     } else {
