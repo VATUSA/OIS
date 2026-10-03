@@ -21,6 +21,7 @@ const PUBLIC: &[(&str, &str, &str)] = &[
     ("auth", "vatsim_login", "starts sign-in, so there is no credential yet"),
     ("auth", "vatsim_callback", "completes sign-in, so there is no credential yet"),
     ("auth", "desktop_exchange", "trades a one-time desktop code for a session; the code is the credential"),
+    ("desktop", "download", "the desktop installer redirect on the public download page"),
     ("facilities", "list_facilities", "public facility metadata (the facility map)"),
     ("facilities", "get_facility", "public facility metadata (the facility map)"),
     ("flow", "list_fcas", "the public FCA overview (/advisories/fcas)"),
