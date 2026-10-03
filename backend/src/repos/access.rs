@@ -182,21 +182,30 @@ pub async fn fetch_service_account_role_names(
     .map_err(|_| ApiError::Internal)
 }
 
-/// A service account's scope for `permission_name`, from its live roles (#583). National only for a
-/// role held with no ARTCC; otherwise the ARTCCs its roles name. The same "live" test as
-/// [`fetch_service_account_permission_names`], so the scope never covers a role the gate ignores.
+/// Every `(permission_name, artcc_id)` a service account holds right now: its live roles' permissions
+/// at the role's ARTCC, plus its direct grants (#584). `$1` is the account id. The gate
+/// ([`fetch_service_account_permission_names`]) and the handler-side scope
+/// ([`service_account_permission_scope`]) both read this one fragment, so they cannot disagree.
+const SERVICE_ACCOUNT_GRANTS: &str = "\
+    select rp.permission_name, sar.artcc_id
+    from access.service_account_roles sar
+    join access.role_permissions rp on rp.role_name = sar.role_name
+    where sar.service_account_id = $1 and (sar.ends_at is null or sar.ends_at > now())
+    union
+    select permission_name, artcc_id
+    from access.service_account_permissions
+    where service_account_id = $1";
+
+/// A service account's scope for `permission_name` (#583, #584). National only for a grant held with
+/// no ARTCC, by role or directly; otherwise the ARTCCs its grants name.
 pub async fn service_account_permission_scope(
     pool: &PgPool,
     service_account_id: &str,
     permission_name: &str,
 ) -> Result<PermissionScope, ApiError> {
-    let artccs: Vec<Option<String>> = sqlx::query_scalar(
-        "select distinct sar.artcc_id
-         from access.service_account_roles sar
-         join access.role_permissions rp on rp.role_name = sar.role_name
-         where sar.service_account_id = $1 and rp.permission_name = $2
-           and (sar.ends_at is null or sar.ends_at > now())",
-    )
+    let artccs: Vec<Option<String>> = sqlx::query_scalar(&format!(
+        "select distinct g.artcc_id from ({SERVICE_ACCOUNT_GRANTS}) g where g.permission_name = $2"
+    ))
     .bind(service_account_id)
     .bind(permission_name)
     .fetch_all(pool)
@@ -214,16 +223,9 @@ pub async fn fetch_service_account_permission_names(
     pool: &PgPool,
     service_account_id: &str,
 ) -> Result<Vec<String>, ApiError> {
-    sqlx::query_scalar::<_, String>(
-        r#"
-        select distinct rp.permission_name
-        from access.service_account_roles sar
-        join access.role_permissions rp on rp.role_name = sar.role_name
-        where sar.service_account_id = $1
-          and (sar.ends_at is null or sar.ends_at > now())
-        order by rp.permission_name
-        "#,
-    )
+    sqlx::query_scalar::<_, String>(&format!(
+        "select distinct g.permission_name from ({SERVICE_ACCOUNT_GRANTS}) g order by 1"
+    ))
     .bind(service_account_id)
     .fetch_all(pool)
     .await
@@ -327,6 +329,21 @@ pub async fn fetch_service_account_assignable_roles(
         .into_iter()
         .filter(|name| name != crate::auth::acl::SERVER_ADMIN_ROLE)
         .collect())
+}
+
+/// The distinct permissions the given roles grant — what assigning them would hand over.
+pub async fn fetch_role_permission_names(
+    pool: &PgPool,
+    role_names: &[String],
+) -> Result<Vec<String>, ApiError> {
+    sqlx::query_scalar::<_, String>(
+        "select distinct permission_name from access.role_permissions \
+         where role_name = any($1) order by permission_name",
+    )
+    .bind(role_names)
+    .fetch_all(pool)
+    .await
+    .map_err(|_| ApiError::Internal)
 }
 
 /// A user's national (unscoped) direct permission grants — the set the national
