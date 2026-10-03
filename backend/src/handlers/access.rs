@@ -406,8 +406,21 @@ async fn enforce_actor_scope(
         .filter(|(artcc, role)| role_scopes.contains(artcc) && assignable_roles.contains(role))
         .cloned()
         .collect();
-    for (_, role) in requested_roles.symmetric_difference(&existing_roles) {
-        if !actor_roles.contains(role) {
+    // The actor's role holdings **with scope** (#577). Names alone let an editor holding `EC` only at
+    // ZDC assign `EC` nationally, or at ZNY — and once roles carry real permission sets (#544), a role
+    // assignment is a bulk grant. Adding or removing a role at a scope needs the actor to hold that
+    // role nationally, or at that same ARTCC; a national assignment needs a national holding. Roles
+    // have no deny rows, so there is no deny dimension here, unlike the permissions half above.
+    let pool = state.db.as_ref().ok_or(ApiError::ServiceUnavailable)?;
+    let actor_role_holdings: BTreeSet<(Option<String>, String)> =
+        access_repo::fetch_user_role_grants(pool, &actor.id)
+            .await?
+            .into_iter()
+            .collect();
+    for (artcc, role) in requested_roles.symmetric_difference(&existing_roles) {
+        let national = actor_role_holdings.contains(&(None, role.clone()));
+        let here = artcc.is_some() && actor_role_holdings.contains(&(artcc.clone(), role.clone()));
+        if !(national || here) {
             return Err(ApiError::Forbidden);
         }
     }
@@ -1926,4 +1939,193 @@ pub async fn remove_group_member(
 ) -> Result<axum::http::StatusCode, ApiError> {
     let user = current_user.as_ref().ok_or(ApiError::Unauthorized)?;
     change_membership(&state, user, &headers, &name, payload, false).await
+}
+
+#[cfg(test)]
+mod role_guard_tests {
+    //! VATUSA/OIS#577: the access editor's **roles** half checked role names only, so an editor holding
+    //! `EC` at ZDC could assign `EC` nationally. Driven through `POST /api/v1/admin/users/{cid}/access`.
+
+    use std::collections::HashMap;
+
+    use axum::http;
+    use serde_json::json;
+    use sqlx::PgPool;
+
+    use crate::scope_test_support::{grant, seed_user, send, session_cookie, test_state};
+
+    const ROLE: &str = "EC";
+    const TARGET_CID: i64 = 9_000_577;
+
+    struct World {
+        state: crate::state::AppState,
+        pool: PgPool,
+        actor: String,
+        cookie: String,
+        target: String,
+    }
+
+    async fn world(pool: PgPool) -> World {
+        let state = test_state(pool.clone(), HashMap::new());
+        let actor = seed_user(&pool).await;
+        grant(&pool, &actor, "access.users.update", None).await;
+        let cookie = session_cookie(&pool, &actor).await;
+        let target: String = sqlx::query_scalar(
+            "insert into identity.users (cid, full_name, display_name) \
+             values ($1, 'Target', 'Target') returning id",
+        )
+        .bind(TARGET_CID)
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        World {
+            state,
+            pool,
+            actor,
+            cookie,
+            target,
+        }
+    }
+
+    async fn hold(pool: &PgPool, user: &str, role: &str, artcc: Option<&str>) {
+        sqlx::query(
+            "insert into access.user_roles (user_id, role_name, artcc_id) values ($1, $2, $3)",
+        )
+        .bind(user)
+        .bind(role)
+        .bind(artcc)
+        .execute(pool)
+        .await
+        .unwrap();
+    }
+
+    /// Save one scope's role set for the target. No permissions change.
+    async fn save_roles(w: &World, artcc: Option<&str>, roles: &[&str]) -> http::StatusCode {
+        send(
+            &w.state,
+            http::Method::POST,
+            &format!("/api/v1/admin/users/{TARGET_CID}/access"),
+            &w.cookie,
+            Some(json!({
+                "reason": "test",
+                "scopes": [{"artcc_id": artcc, "permissions": {}, "role_names": roles}],
+            })),
+        )
+        .await
+    }
+
+    /// The target's `ROLE` holdings, as scopes.
+    async fn target_roles(w: &World) -> Vec<String> {
+        sqlx::query_scalar(
+            "select coalesce(artcc_id, 'national') from access.user_roles \
+             where user_id = $1 and role_name = $2 order by 1",
+        )
+        .bind(&w.target)
+        .bind(ROLE)
+        .fetch_all(&w.pool)
+        .await
+        .unwrap()
+    }
+
+    // ---- AC1 ---------------------------------------------------------------------------------------
+
+    #[sqlx::test]
+    async fn a_zdc_holder_cannot_assign_the_role_at_another_artcc(pool: PgPool) {
+        let w = world(pool).await;
+        hold(&w.pool, &w.actor, ROLE, Some("ZDC")).await;
+
+        assert_eq!(
+            save_roles(&w, Some("ZNY"), &[ROLE]).await,
+            http::StatusCode::FORBIDDEN
+        );
+        assert!(
+            target_roles(&w).await.is_empty(),
+            "a refused save writes nothing"
+        );
+    }
+
+    #[sqlx::test]
+    async fn a_zdc_holder_cannot_assign_the_role_nationally(pool: PgPool) {
+        let w = world(pool).await;
+        hold(&w.pool, &w.actor, ROLE, Some("ZDC")).await;
+
+        assert_eq!(
+            save_roles(&w, None, &[ROLE]).await,
+            http::StatusCode::FORBIDDEN
+        );
+        assert!(target_roles(&w).await.is_empty());
+    }
+
+    /// The positive control: the gate narrows, it does not disable.
+    #[sqlx::test]
+    async fn a_zdc_holder_can_assign_the_role_at_zdc(pool: PgPool) {
+        let w = world(pool).await;
+        hold(&w.pool, &w.actor, ROLE, Some("ZDC")).await;
+
+        assert_eq!(
+            save_roles(&w, Some("ZDC"), &[ROLE]).await,
+            http::StatusCode::OK
+        );
+        assert_eq!(target_roles(&w).await, ["ZDC"]);
+    }
+
+    /// A national holding covers every ARTCC.
+    #[sqlx::test]
+    async fn a_national_holder_can_assign_the_role_anywhere(pool: PgPool) {
+        let w = world(pool).await;
+        hold(&w.pool, &w.actor, ROLE, None).await;
+
+        assert_eq!(
+            save_roles(&w, Some("ZNY"), &[ROLE]).await,
+            http::StatusCode::OK
+        );
+        assert_eq!(save_roles(&w, None, &[ROLE]).await, http::StatusCode::OK);
+        assert_eq!(target_roles(&w).await, ["national", "ZNY"]);
+    }
+
+    // ---- AC2 ---------------------------------------------------------------------------------------
+
+    /// Removal is in the symmetric diff, so it needs the same authority as assignment.
+    #[sqlx::test]
+    async fn a_zdc_holder_cannot_remove_the_role_at_another_artcc(pool: PgPool) {
+        let w = world(pool).await;
+        hold(&w.pool, &w.actor, ROLE, Some("ZDC")).await;
+        hold(&w.pool, &w.target, ROLE, Some("ZNY")).await;
+
+        assert_eq!(
+            save_roles(&w, Some("ZNY"), &[]).await,
+            http::StatusCode::FORBIDDEN
+        );
+        assert_eq!(
+            target_roles(&w).await,
+            ["ZNY"],
+            "the refused removal left it in place"
+        );
+    }
+
+    // ---- AC3 ---------------------------------------------------------------------------------------
+
+    #[sqlx::test]
+    async fn a_save_leaves_roles_at_scopes_it_does_not_name_alone(pool: PgPool) {
+        let w = world(pool).await;
+        hold(&w.pool, &w.actor, ROLE, Some("ZDC")).await;
+        hold(&w.pool, &w.target, ROLE, Some("ZNY")).await;
+
+        assert_eq!(
+            save_roles(&w, Some("ZDC"), &[ROLE]).await,
+            http::StatusCode::OK
+        );
+        assert_eq!(target_roles(&w).await, ["ZDC", "ZNY"]);
+    }
+
+    // ---- AC4 ---------------------------------------------------------------------------------------
+
+    #[sqlx::test]
+    async fn a_server_admin_bypasses_the_role_guard(pool: PgPool) {
+        let w = world(pool).await;
+        hold(&w.pool, &w.actor, "SERVER_ADMIN", None).await;
+
+        assert_eq!(save_roles(&w, None, &[ROLE]).await, http::StatusCode::OK);
+        assert_eq!(target_roles(&w).await, ["national"]);
+    }
 }
