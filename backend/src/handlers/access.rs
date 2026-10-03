@@ -406,10 +406,28 @@ async fn enforce_actor_scope(
         .filter(|(artcc, role)| role_scopes.contains(artcc) && assignable_roles.contains(role))
         .cloned()
         .collect();
-    for (_, role) in requested_roles.symmetric_difference(&existing_roles) {
-        if !actor_roles.contains(role) {
+    // The actor's role holdings **with scope** (#577). Names alone let an editor holding `EC` only at
+    // ZDC assign `EC` nationally, or at ZNY — and once roles carry real permission sets (#544), a role
+    // assignment is a bulk grant. Adding or removing a role at a scope needs the actor to hold that
+    // role nationally, or at that same ARTCC; a national assignment needs a national holding.
+    //
+    // Holding the role is not enough on its own (#577 review): it is a bulk grant, so the actor must
+    // also be able to grant **everything it bundles** at that scope — a deny on one of its permissions
+    // must stop them handing it on — and only a server admin may grant `VATUSA_STAFF`. That is exactly
+    // the group route's `enforce_membership_scope`, so both editors ask the same question.
+    let pool = state.db.as_ref().ok_or(ApiError::ServiceUnavailable)?;
+    let actor_role_holdings: BTreeSet<(Option<String>, String)> =
+        access_repo::fetch_user_role_grants(pool, &actor.id)
+            .await?
+            .into_iter()
+            .collect();
+    for (artcc, role) in requested_roles.symmetric_difference(&existing_roles) {
+        let national = actor_role_holdings.contains(&(None, role.clone()));
+        let here = artcc.is_some() && actor_role_holdings.contains(&(artcc.clone(), role.clone()));
+        if !(national || here) {
             return Err(ApiError::Forbidden);
         }
+        enforce_membership_scope(state, actor, role, artcc.as_deref()).await?;
     }
 
     Ok(())
@@ -1926,4 +1944,300 @@ pub async fn remove_group_member(
 ) -> Result<axum::http::StatusCode, ApiError> {
     let user = current_user.as_ref().ok_or(ApiError::Unauthorized)?;
     change_membership(&state, user, &headers, &name, payload, false).await
+}
+
+#[cfg(test)]
+mod role_guard_tests {
+    //! VATUSA/OIS#577: the access editor's **roles** half checked role names only, so an editor holding
+    //! `EC` at ZDC could assign `EC` nationally. Driven through `POST /api/v1/admin/users/{cid}/access`.
+
+    use std::collections::HashMap;
+
+    use axum::http;
+    use serde_json::json;
+    use sqlx::PgPool;
+
+    use crate::scope_test_support::{grant, seed_user, send, session_cookie, test_state};
+
+    const ROLE: &str = "EC";
+    const TARGET_CID: i64 = 9_000_577;
+
+    struct World {
+        state: crate::state::AppState,
+        pool: PgPool,
+        actor: String,
+        cookie: String,
+        target: String,
+    }
+
+    async fn world(pool: PgPool) -> World {
+        let state = test_state(pool.clone(), HashMap::new());
+        let actor = seed_user(&pool).await;
+        grant(&pool, &actor, "access.users.update", None).await;
+        let cookie = session_cookie(&pool, &actor).await;
+        let target: String = sqlx::query_scalar(
+            "insert into identity.users (cid, full_name, display_name) \
+             values ($1, 'Target', 'Target') returning id",
+        )
+        .bind(TARGET_CID)
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        World {
+            state,
+            pool,
+            actor,
+            cookie,
+            target,
+        }
+    }
+
+    async fn hold(pool: &PgPool, user: &str, role: &str, artcc: Option<&str>) {
+        sqlx::query(
+            "insert into access.user_roles (user_id, role_name, artcc_id) values ($1, $2, $3)",
+        )
+        .bind(user)
+        .bind(role)
+        .bind(artcc)
+        .execute(pool)
+        .await
+        .unwrap();
+    }
+
+    /// Save one scope's role set for the target. No permissions change.
+    async fn save_roles(w: &World, artcc: Option<&str>, roles: &[&str]) -> http::StatusCode {
+        send(
+            &w.state,
+            http::Method::POST,
+            &format!("/api/v1/admin/users/{TARGET_CID}/access"),
+            &w.cookie,
+            Some(json!({
+                "reason": "test",
+                "scopes": [{"artcc_id": artcc, "permissions": {}, "role_names": roles}],
+            })),
+        )
+        .await
+    }
+
+    /// The target's `ROLE` holdings, as scopes.
+    async fn target_roles(w: &World) -> Vec<String> {
+        sqlx::query_scalar(
+            "select coalesce(artcc_id, 'national') from access.user_roles \
+             where user_id = $1 and role_name = $2 order by 1",
+        )
+        .bind(&w.target)
+        .bind(ROLE)
+        .fetch_all(&w.pool)
+        .await
+        .unwrap()
+    }
+
+    // ---- AC1 ---------------------------------------------------------------------------------------
+
+    #[sqlx::test]
+    async fn a_zdc_holder_cannot_assign_the_role_at_another_artcc(pool: PgPool) {
+        let w = world(pool).await;
+        hold(&w.pool, &w.actor, ROLE, Some("ZDC")).await;
+
+        assert_eq!(
+            save_roles(&w, Some("ZNY"), &[ROLE]).await,
+            http::StatusCode::FORBIDDEN
+        );
+        assert!(
+            target_roles(&w).await.is_empty(),
+            "a refused save writes nothing"
+        );
+    }
+
+    #[sqlx::test]
+    async fn a_zdc_holder_cannot_assign_the_role_nationally(pool: PgPool) {
+        let w = world(pool).await;
+        hold(&w.pool, &w.actor, ROLE, Some("ZDC")).await;
+
+        assert_eq!(
+            save_roles(&w, None, &[ROLE]).await,
+            http::StatusCode::FORBIDDEN
+        );
+        assert!(target_roles(&w).await.is_empty());
+    }
+
+    /// The positive control: the gate narrows, it does not disable.
+    #[sqlx::test]
+    async fn a_zdc_holder_can_assign_the_role_at_zdc(pool: PgPool) {
+        let w = world(pool).await;
+        hold(&w.pool, &w.actor, ROLE, Some("ZDC")).await;
+
+        assert_eq!(
+            save_roles(&w, Some("ZDC"), &[ROLE]).await,
+            http::StatusCode::OK
+        );
+        assert_eq!(target_roles(&w).await, ["ZDC"]);
+    }
+
+    /// A national holding covers every ARTCC.
+    #[sqlx::test]
+    async fn a_national_holder_can_assign_the_role_anywhere(pool: PgPool) {
+        let w = world(pool).await;
+        hold(&w.pool, &w.actor, ROLE, None).await;
+
+        assert_eq!(
+            save_roles(&w, Some("ZNY"), &[ROLE]).await,
+            http::StatusCode::OK
+        );
+        assert_eq!(save_roles(&w, None, &[ROLE]).await, http::StatusCode::OK);
+        assert_eq!(target_roles(&w).await, ["national", "ZNY"]);
+    }
+
+    // ---- AC2 ---------------------------------------------------------------------------------------
+
+    /// Removal is in the symmetric diff, so it needs the same authority as assignment.
+    #[sqlx::test]
+    async fn a_zdc_holder_cannot_remove_the_role_at_another_artcc(pool: PgPool) {
+        let w = world(pool).await;
+        hold(&w.pool, &w.actor, ROLE, Some("ZDC")).await;
+        hold(&w.pool, &w.target, ROLE, Some("ZNY")).await;
+
+        assert_eq!(
+            save_roles(&w, Some("ZNY"), &[]).await,
+            http::StatusCode::FORBIDDEN
+        );
+        assert_eq!(
+            target_roles(&w).await,
+            ["ZNY"],
+            "the refused removal left it in place"
+        );
+    }
+
+    // ---- AC3 ---------------------------------------------------------------------------------------
+
+    #[sqlx::test]
+    async fn a_save_leaves_roles_at_scopes_it_does_not_name_alone(pool: PgPool) {
+        let w = world(pool).await;
+        hold(&w.pool, &w.actor, ROLE, Some("ZDC")).await;
+        hold(&w.pool, &w.target, ROLE, Some("ZNY")).await;
+
+        assert_eq!(
+            save_roles(&w, Some("ZDC"), &[ROLE]).await,
+            http::StatusCode::OK
+        );
+        assert_eq!(target_roles(&w).await, ["ZDC", "ZNY"]);
+    }
+
+    // ---- #577 review: a role is a bulk grant ------------------------------------------------------
+
+    /// Holding `EC` at ZDC is not enough to hand it on at ZDC if the actor is **denied** one of the
+    /// permissions it bundles there — assigning it would give the target what the actor cannot have.
+    #[sqlx::test]
+    async fn a_deny_on_a_bundled_permission_stops_the_assignment(pool: PgPool) {
+        let w = world(pool).await;
+        hold(&w.pool, &w.actor, ROLE, Some("ZDC")).await;
+        let denied = "tmu.ntml.create";
+        let bundled: bool = sqlx::query_scalar(
+            "select exists(select 1 from access.role_permissions where role_name = $1 and permission_name = $2)",
+        )
+        .bind(ROLE)
+        .bind(denied)
+        .fetch_one(&w.pool)
+        .await
+        .unwrap();
+        assert!(bundled, "precondition: {ROLE} bundles {denied}");
+        sqlx::query(
+            "insert into access.user_permissions (user_id, permission_name, granted, artcc_id) \
+             values ($1, $2, false, 'ZDC')",
+        )
+        .bind(&w.actor)
+        .bind(denied)
+        .execute(&w.pool)
+        .await
+        .unwrap();
+
+        assert_eq!(
+            save_roles(&w, Some("ZDC"), &[ROLE]).await,
+            http::StatusCode::FORBIDDEN
+        );
+        assert!(
+            target_roles(&w).await.is_empty(),
+            "the target did not gain the denied permission"
+        );
+    }
+
+    /// `VATUSA_STAFF` bundles the whole catalogue; only a server admin may grant it (#546), even to
+    /// someone holding it themselves.
+    #[sqlx::test]
+    async fn only_a_server_admin_may_assign_vatusa_staff(pool: PgPool) {
+        let w = world(pool).await;
+        hold(&w.pool, &w.actor, "VATUSA_STAFF", None).await;
+
+        assert_eq!(
+            save_roles(&w, None, &["VATUSA_STAFF"]).await,
+            http::StatusCode::FORBIDDEN
+        );
+        let held: i64 = sqlx::query_scalar(
+            "select count(*) from access.user_roles where user_id = $1 and role_name = 'VATUSA_STAFF'",
+        )
+        .bind(&w.target)
+        .fetch_one(&w.pool)
+        .await
+        .unwrap();
+        assert_eq!(held, 0);
+    }
+
+    /// The other half: the bundle alone is not enough either. An actor holding every permission
+    /// `EC` grants at ZDC, but not `EC` itself, still may not assign it.
+    #[sqlx::test]
+    async fn the_bundle_without_the_role_cannot_assign_it(pool: PgPool) {
+        let w = world(pool).await;
+        grant_bundle(&w, Some("ZDC")).await;
+
+        assert_eq!(
+            save_roles(&w, Some("ZDC"), &[ROLE]).await,
+            http::StatusCode::FORBIDDEN
+        );
+        assert!(target_roles(&w).await.is_empty());
+    }
+
+    /// Holding the role at ZDC, plus its whole bundle nationally, is still not holding the role at
+    /// ZNY or nationally. The bundle gate passes here, so the role's scope decides alone.
+    #[sqlx::test]
+    async fn the_role_elsewhere_plus_the_bundle_cannot_assign_it(pool: PgPool) {
+        let w = world(pool).await;
+        hold(&w.pool, &w.actor, ROLE, Some("ZDC")).await;
+        grant_bundle(&w, None).await;
+
+        assert_eq!(
+            save_roles(&w, Some("ZNY"), &[ROLE]).await,
+            http::StatusCode::FORBIDDEN
+        );
+        assert_eq!(
+            save_roles(&w, None, &[ROLE]).await,
+            http::StatusCode::FORBIDDEN
+        );
+        assert!(target_roles(&w).await.is_empty());
+    }
+
+    /// Grant the actor every permission `ROLE` bundles, directly, at `artcc` (`None` = nationally).
+    async fn grant_bundle(w: &World, artcc: Option<&str>) {
+        let bundle: Vec<String> = sqlx::query_scalar(
+            "select permission_name from access.role_permissions where role_name = $1",
+        )
+        .bind(ROLE)
+        .fetch_all(&w.pool)
+        .await
+        .unwrap();
+        assert!(!bundle.is_empty(), "EC is seeded with a bundle (0094)");
+        for name in &bundle {
+            grant(&w.pool, &w.actor, name, artcc).await;
+        }
+    }
+
+    // ---- AC4 ---------------------------------------------------------------------------------------
+
+    #[sqlx::test]
+    async fn a_server_admin_bypasses_the_role_guard(pool: PgPool) {
+        let w = world(pool).await;
+        hold(&w.pool, &w.actor, "SERVER_ADMIN", None).await;
+
+        assert_eq!(save_roles(&w, None, &[ROLE]).await, http::StatusCode::OK);
+        assert_eq!(target_roles(&w).await, ["national"]);
+    }
 }
