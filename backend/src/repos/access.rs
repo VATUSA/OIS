@@ -664,10 +664,12 @@ pub async fn revoke_server_admin(
     user_id: &str,
 ) -> Result<bool, ApiError> {
     let result = sqlx::query(
-        // `system`: the row this reconciliation created. A SERVER_ADMIN granted some other way is not
-        // this function's to remove (#547).
+        // Every SERVER_ADMIN row, whatever its source. The role is env-driven by definition and this
+        // reconciliation is its only owner: neither editor can assign a system group, so a row from any
+        // other source can only be stale — and leaving one would make an admin removed from
+        // OIS_SERVER_ADMIN_CID impossible to demote (#547 review).
         "delete from access.user_roles \
-         where user_id = $1 and role_name = 'SERVER_ADMIN' and source = 'system'",
+         where user_id = $1 and role_name = 'SERVER_ADMIN'",
     )
     .bind(user_id)
     .execute(&mut **tx)
@@ -1202,6 +1204,102 @@ mod tests {
         .expect_err("the backfill default must not survive on user_permissions");
     }
 
+    /// An admin made by the env reconciliation **before** 0098 must still be demotable after it. The
+    /// backfill marks hand-made rows `manual`; a SERVER_ADMIN row was never hand-made, and the demotion
+    /// on login is the only way the role is ever taken away. Driven through the real migration file
+    /// and the real revoke, from the pre-0098 shape.
+    #[sqlx::test]
+    async fn an_admin_from_before_0098_is_still_demoted(pool: sqlx::PgPool) {
+        const MIGRATION_0098: &str = include_str!("../../migrations/0098_grant_provenance.sql");
+
+        let user: String = sqlx::query_scalar(
+            "insert into identity.users (full_name, display_name) values ('A', 'A') returning id",
+        )
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        for table in ["access.user_roles", "access.user_permissions"] {
+            sqlx::query(&format!("alter table {table} drop column source"))
+                .execute(&pool)
+                .await
+                .unwrap();
+        }
+        sqlx::query(
+            "insert into access.user_roles (user_id, role_name) values ($1, 'SERVER_ADMIN')",
+        )
+        .bind(&user)
+        .execute(&pool)
+        .await
+        .unwrap();
+        sqlx::raw_sql(MIGRATION_0098).execute(&pool).await.unwrap();
+
+        let source: String = sqlx::query_scalar(
+            "select source from access.user_roles where user_id = $1 and role_name = 'SERVER_ADMIN'",
+        )
+        .bind(&user)
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        assert_eq!(
+            source, "system",
+            "the env reconciliation's row backfills as its own"
+        );
+
+        // The deploy-day sequence: a still-configured admin logs in (adds nothing — the row is
+        // already `system`), then is removed from the env and logs in again.
+        let mut tx = pool.begin().await.unwrap();
+        super::assign_server_admin(&mut tx, &user).await.unwrap();
+        tx.commit().await.unwrap();
+        let mut tx = pool.begin().await.unwrap();
+        let demoted = super::revoke_server_admin(&mut tx, &user).await.unwrap();
+        tx.commit().await.unwrap();
+
+        assert!(demoted, "the revoke reports a demotion");
+        assert!(
+            !super::permission_scope(&pool, &user, "access.users.update")
+                .await
+                .unwrap()
+                .is_national(),
+            "and the catalogue is gone with it"
+        );
+    }
+
+    /// The revoke is the role's only owner, so it takes **every** SERVER_ADMIN row — a stale one of
+    /// any source included. Pins the revoke independently of the backfill above.
+    #[sqlx::test]
+    async fn the_demotion_removes_a_server_admin_row_of_any_source(pool: sqlx::PgPool) {
+        let user: String = sqlx::query_scalar(
+            "insert into identity.users (full_name, display_name) values ('A', 'A') returning id",
+        )
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        for source in ["manual", "system"] {
+            sqlx::query(
+                "insert into access.user_roles (user_id, role_name, source) \
+                 values ($1, 'SERVER_ADMIN', $2)",
+            )
+            .bind(&user)
+            .bind(source)
+            .execute(&pool)
+            .await
+            .unwrap();
+        }
+
+        let mut tx = pool.begin().await.unwrap();
+        assert!(super::revoke_server_admin(&mut tx, &user).await.unwrap());
+        tx.commit().await.unwrap();
+
+        let left: i64 = sqlx::query_scalar(
+            "select count(*) from access.user_roles where user_id = $1 and role_name = 'SERVER_ADMIN'",
+        )
+        .bind(&user)
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        assert_eq!(left, 0);
+    }
+
     /// AC2, against the writer the sync will call. The sync itself is #548 and not built yet, but
     /// `set_user_role_scoped` is, and it is where the guarantee lives: the same **role** at the same
     /// **scope**, held both by hand and by sync, must lose only the synced row when the sync revokes.
@@ -1300,8 +1398,9 @@ mod tests {
         );
     }
 
-    /// The `SERVER_ADMIN` env reconciliation owns its row as `system`, so neither a sync nor an admin
-    /// save can take it away — and its revoke only removes what it granted.
+    /// The `SERVER_ADMIN` env reconciliation writes its row as `system`, so neither a sync nor an admin
+    /// save can take it away. Its revoke removes every SERVER_ADMIN row, not only this one — see
+    /// `the_demotion_removes_a_server_admin_row_of_any_source`.
     #[sqlx::test]
     async fn the_server_admin_reconciliation_owns_a_system_row(pool: sqlx::PgPool) {
         let user: String = sqlx::query_scalar(
@@ -1324,34 +1423,6 @@ mod tests {
         .await
         .unwrap();
         assert_eq!(source, "system");
-
-        // A hand-made SERVER_ADMIN is a separate row, and the reconciliation's revoke leaves it.
-        sqlx::query(
-            "insert into access.user_roles (user_id, role_name, source) \
-             values ($1, 'SERVER_ADMIN', 'manual')",
-        )
-        .bind(&user)
-        .execute(&pool)
-        .await
-        .expect("a manual row coexists with the system one");
-
-        let mut tx = pool.begin().await.unwrap();
-        super::revoke_server_admin(&mut tx, &user).await.unwrap();
-        tx.commit().await.unwrap();
-
-        let remaining: Vec<String> = sqlx::query_scalar(
-            "select source from access.user_roles \
-             where user_id = $1 and role_name = 'SERVER_ADMIN'",
-        )
-        .bind(&user)
-        .fetch_all(&pool)
-        .await
-        .unwrap();
-        assert_eq!(
-            remaining,
-            vec!["manual".to_string()],
-            "the env reconciliation must revoke only its own grant"
-        );
     }
 
     #[test]

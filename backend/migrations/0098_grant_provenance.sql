@@ -37,6 +37,14 @@ alter table access.user_permissions
 -- forgets `source` silently claims to be a human grant, which on these two tables is precisely the
 -- confusion this migration exists to end. Without a default, `not null` makes that insert fail
 -- instead — the guarantee becomes the schema's rather than a convention someone has to remember.
+-- ...except SERVER_ADMIN. Every SERVER_ADMIN membership was created by the env reconciliation in
+-- handlers/auth.rs, never by hand (neither editor can assign a system group), and that reconciliation
+-- is the role's only owner. Left as 'manual', an admin removed from OIS_SERVER_ADMIN_CID after this
+-- deploy would keep the role: the next login adds a 'system' row beside the backfilled one, and the
+-- demotion removes only that. Idempotent, so the file stays re-runnable.
+update access.user_roles set source = 'system'
+    where role_name = 'SERVER_ADMIN' and source <> 'system';
+
 alter table access.user_roles alter column source drop default;
 alter table access.user_permissions alter column source drop default;
 
