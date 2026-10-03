@@ -37,4 +37,6 @@ pub mod webhooks;
 #[cfg(test)]
 mod actor_ratchet_tests;
 #[cfg(test)]
+mod auth_annotation_tests;
+#[cfg(test)]
 mod machine_actor_tests;

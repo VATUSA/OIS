@@ -256,8 +256,9 @@ fn validate_fca(req: &UpsertFcaRequest) -> Result<(), ApiError> {
     get,
     path = "/api/v1/flow/fcas",
     tag = "flow",
-    responses((status = 200, body = Vec<FcaBody>), (status = 401))
+    responses((status = 200, body = Vec<FcaBody>))
 )]
+/// Public by design, no credential (#586): the public FCA overview (/advisories/fcas) lists FCAs signed out.
 pub async fn list_fcas(State(state): State<AppState>) -> Result<Json<Vec<FcaBody>>, ApiError> {
     let pool = state.db.as_ref().ok_or(ApiError::ServiceUnavailable)?;
     Ok(Json(flow_repo::list_fcas(pool).await?))
@@ -390,8 +391,9 @@ pub struct RoutesQuery {
     path = "/api/v1/flow/routes",
     tag = "flow",
     params(("artcc" = Option<String>, Query, description = "Scope to one ARTCC (+ global routes)")),
-    responses((status = 200, body = Vec<RouteBody>), (status = 401))
+    responses((status = 200, body = Vec<RouteBody>))
 )]
+/// Public by design, no credential (#586): the public FCA overview and facility map draw routes signed out.
 pub async fn list_routes(
     State(state): State<AppState>,
     Query(q): Query<RoutesQuery>,
@@ -540,8 +542,9 @@ pub async fn delete_route(
     get,
     path = "/api/v1/flow/counts",
     tag = "flow",
-    responses((status = 200, body = std::collections::HashMap<String, i64>), (status = 401))
+    responses((status = 200, body = std::collections::HashMap<String, i64>))
 )]
+/// Public by design, no credential (#586): the public FCA overview (/advisories/fcas) shows FCA counts signed out.
 pub async fn fca_counts(
     State(state): State<AppState>,
 ) -> Result<Json<HashMap<String, i64>>, ApiError> {
@@ -633,8 +636,9 @@ pub async fn fca_counts(
     path = "/api/v1/flow/aircraft/{callsign}/route",
     tag = "flow",
     params(("callsign" = String, Path, description = "Aircraft callsign")),
-    responses((status = 200, body = AircraftRoute), (status = 401), (status = 404))
+    responses((status = 200, body = AircraftRoute), (status = 404))
 )]
+/// Public by design, no credential (#586): the public FCA overview and facility map draw a selected flight's route signed out.
 pub async fn aircraft_route(
     State(state): State<AppState>,
     Path(callsign): Path<String>,
@@ -794,8 +798,9 @@ fn build_data_status(state: &AppState) -> DataStatus {
     get,
     path = "/api/v1/flow/data-status",
     tag = "flow",
-    responses((status = 200, body = DataStatus), (status = 401))
+    responses((status = 200, body = DataStatus))
 )]
+/// Public by design, no credential (#586): the public FCA overview shows data freshness signed out.
 pub async fn data_status(State(state): State<AppState>) -> Json<DataStatus> {
     Json(build_data_status(&state))
 }
@@ -1048,8 +1053,9 @@ pub async fn my_flight(
     get,
     path = "/api/v1/flow/route-coverage",
     tag = "flow",
-    responses((status = 200, body = crate::feed::coverage::CoverageReport), (status = 401), (status = 503))
+    responses((status = 200, body = crate::feed::coverage::CoverageReport), (status = 503))
 )]
+/// Public by design, no credential (#586): the public FCA overview's coverage panel renders signed out.
 pub async fn route_coverage(
     State(state): State<AppState>,
 ) -> Result<Json<crate::feed::coverage::CoverageReport>, ApiError> {
@@ -1159,8 +1165,9 @@ pub async fn data_refresh(
     get,
     path = "/api/v1/flow/traffic",
     tag = "flow",
-    responses((status = 200, body = Vec<TrafficAircraft>), (status = 401))
+    responses((status = 200, body = Vec<TrafficAircraft>))
 )]
+/// Public by design, no credential (#586): live traffic on the public FCA overview, facility map and /pilot, signed out.
 pub async fn list_traffic(State(state): State<AppState>) -> Json<Vec<TrafficAircraft>> {
     let snapshot = state.feed.read().await.snapshot.clone();
     let exclusions = state.flight_exclusions.load_full();
@@ -1182,8 +1189,9 @@ pub struct ProjectQuery {
     path = "/api/v1/flow/traffic/projected",
     tag = "flow",
     params(("offset_sec" = i64, Query, description = "Seconds ahead to project (0-5400)")),
-    responses((status = 200, body = Vec<TrafficAircraft>), (status = 400), (status = 401))
+    responses((status = 200, body = Vec<TrafficAircraft>), (status = 400))
 )]
+/// Public by design, no credential (#586): the public FCA overview's time slider projects traffic signed out.
 pub async fn projected_traffic(
     State(state): State<AppState>,
     Query(q): Query<ProjectQuery>,
@@ -2104,8 +2112,9 @@ pub struct TrafficQuery {
         ("id" = String, Path, description = "FCA id"),
         ("debug" = Option<bool>, Query, description = "Include per-flight ETA/metering debug detail")
     ),
-    responses((status = 200, body = Vec<FcaFlight>), (status = 401), (status = 404))
+    responses((status = 200, body = Vec<FcaFlight>), (status = 404))
 )]
+/// Public by design, no credential (#586): the public FCA overview (/advisories/fcas) shows each FCA's traffic signed out.
 pub async fn fca_traffic(
     State(state): State<AppState>,
     Path(id): Path<String>,

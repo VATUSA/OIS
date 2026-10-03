@@ -118,10 +118,29 @@ Active `flow` permissions the handlers actually gate on:
 | `flow.runway.update` | edit runway config / STAR rules / assignments / saved configs | TMU staff |
 | `flow.facility_map.update` | edit a facility map's aircraft color rules (**facility-scoped**; `facility_id` IS the ARTCC) | facility staff |
 
-**Read exposure.** Most flow reads are currently **unauthenticated** — the public FCA
-overview and facility map reuse the same handlers, so `list_fcas`, `fca_traffic`,
-`fca_counts`, `list_routes`, `aircraft_route`, `list_traffic`, `data_status`,
-`route_coverage`, and the ATC overlay carry no `RequirePermission`. IDST is the one flow
+**Read exposure.** Most flow reads are **public by design** (#586) — the signed-out FCA
+overview (`/advisories/fcas`), facility map and `/pilot` reuse the same handlers, so these
+answer with no credential:
+
+| Endpoint | Handler |
+|---|---|
+| `GET /flow/traffic` | `list_traffic` |
+| `GET /flow/traffic/projected` | `projected_traffic` |
+| `GET /flow/fcas` | `list_fcas` |
+| `GET /flow/fcas/{id}/traffic` | `fca_traffic` |
+| `GET /flow/counts` | `fca_counts` |
+| `GET /flow/routes` | `list_routes` |
+| `GET /flow/aircraft/{callsign}/route` | `aircraft_route` |
+| `GET /flow/route-coverage` | `route_coverage` |
+| `GET /flow/data-status` | `data_status` |
+| `GET /flow/atc` | `atc::list_atc` |
+| `GET /flow/facilities` | `atc::list_flow_facilities` |
+| `GET /public/flight/{callsign}` | `flight_advisory` |
+
+Their OpenAPI annotations advertise no `401`, and `handlers/auth_annotation_tests.rs` keeps it that
+way: a handler that answers without a credential must be listed there with its reason, one that
+advertises `401` must actually take a credential, and every `RequirePermission` handler must
+advertise `401`. Gating any of these breaks the signed-out pages above. IDST is the one flow
 read that is gated (`flow.fca.read`). `resolve-routes` gates on `stats.data.read` (it is
 consumed by the replay map). `data-refresh` gates on `flow.fca.update`.
 
