@@ -787,7 +787,7 @@ pub async fn release_cfr(
     };
     let by = principal.attribution(&state).await?;
     release_authority::authorize(&principal, by.actor_id.as_deref(), Some(&holder))?;
-    if !tmu_repo::delete_issued_cfr(pool, &callsign, version).await? {
+    if !tmu_repo::delete_issued_cfr(pool, &callsign, version, by.machine_actor()).await? {
         return Err(ApiError::PreconditionFailed {
             etag: Some(holder.version),
         });

@@ -85,7 +85,7 @@ engine then treats it as a fixed constraint that unreleased ground traffic float
 | `edct_ms` | bigint | release / wheels-up time, epoch ms |
 | `updated_by` | text | → `identity.users(id)`; set only when a person wrote it |
 | `updated_by_actor` | text | → `access.actors(id)`; who wrote it, person or machine *(0102, #583)* |
-| `version` | bigint | bumped by every write, for `If-Match` *(0103, #585)* — see "External release writers" |
+| `version` | bigint | bumped by every write, for `If-Match` *(0105, #585)* — see "External release writers" |
 
 ### `flow.route` — shared reference routes *(migration 0028, reshaped 0029)*
 

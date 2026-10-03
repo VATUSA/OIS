@@ -512,6 +512,7 @@ pub async fn upsert_release(
                  cta_ms = $3, edct_ms = $4, updated_by = $5, updated_by_actor = $6,
                  version = version + 1
              where fca_id = $1 and callsign = $2 and version = $7
+               and ($8::text is null or updated_by_actor = $8)
              returning version"
         }
     };
@@ -523,8 +524,10 @@ pub async fn upsert_release(
         .bind(&by.user_id)
         .bind(&by.actor_id);
     // `$7` exists only in the conditional update; binding it elsewhere is a parameter-count error.
+    // `$7`/`$8` exist only in the conditional update; binding them elsewhere is a parameter-count
+    // error. `$8` is the machine that must already hold the row (#585 review).
     let query = match expect {
-        Some(Expect::Version(v)) => query.bind(v),
+        Some(Expect::Version(v)) => query.bind(v).bind(by.machine_actor()),
         _ => query,
     };
     query
@@ -569,33 +572,40 @@ pub async fn swap_releases(
            from flow.fca_release o \
           where r.fca_id = $1 and o.fca_id = $1 \
             and ((r.callsign = $2 and o.callsign = $3) \
-              or (r.callsign = $3 and o.callsign = $2))",
+              or (r.callsign = $3 and o.callsign = $2)) \
+            and ($6::text is null or (r.updated_by_actor = $6 and o.updated_by_actor = $6))",
     )
     .bind(fca_id)
     .bind(a)
     .bind(b)
     .bind(&by.user_id)
     .bind(&by.actor_id)
+    // A machine may swap only two releases it holds itself, decided in the write (#585 review).
+    .bind(by.machine_actor())
     .execute(pool)
     .await
     .map_err(|_| ApiError::Internal)?;
     Ok(result.rows_affected() == 2)
 }
 
-/// Clear a release, only at `version` when given (#585). Returns whether a row was removed.
+/// Clear a release, only at `version` when given and, for a machine, only if `owner` holds it
+/// (#585). Returns whether a row was removed.
 pub async fn delete_release(
     pool: &PgPool,
     fca_id: &str,
     callsign: &str,
     version: Option<i64>,
+    owner: Option<&str>,
 ) -> Result<bool, ApiError> {
     let result = sqlx::query(
         "delete from flow.fca_release \
-         where fca_id = $1 and callsign = $2 and ($3::bigint is null or version = $3)",
+         where fca_id = $1 and callsign = $2 and ($3::bigint is null or version = $3) \
+           and ($4::text is null or updated_by_actor = $4)",
     )
     .bind(fca_id)
     .bind(callsign)
     .bind(version)
+    .bind(owner)
     .execute(pool)
     .await
     .map_err(|_| ApiError::Internal)?;

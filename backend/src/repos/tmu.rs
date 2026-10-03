@@ -552,6 +552,7 @@ pub async fn upsert_issued_cfr(
                 airport = $2, wheels_up = $3, issued_by = $4, issued_by_actor = $5, \
                 issued_at = now(), version = version + 1 \
              where callsign = $1 and version = $6 \
+               and ($7::text is null or issued_by_actor = $7) \
              returning version"
         }
     };
@@ -561,8 +562,9 @@ pub async fn upsert_issued_cfr(
         .bind(wheels_up)
         .bind(&by.user_id)
         .bind(&by.actor_id);
+    // `$7` is the machine that must already hold the CFR (#585 review).
     let query = match expect {
-        Some(Expect::Version(v)) => query.bind(v),
+        Some(Expect::Version(v)) => query.bind(v).bind(by.machine_actor()),
         _ => query,
     };
     query
@@ -612,12 +614,15 @@ pub async fn delete_issued_cfr(
     pool: &PgPool,
     callsign: &str,
     version: Option<i64>,
+    owner: Option<&str>,
 ) -> Result<bool, ApiError> {
     let result = sqlx::query(
-        "delete from tmu.issued_cfrs where callsign = $1 and ($2::bigint is null or version = $2)",
+        "delete from tmu.issued_cfrs where callsign = $1 and ($2::bigint is null or version = $2) \
+           and ($3::text is null or issued_by_actor = $3)",
     )
     .bind(callsign)
     .bind(version)
+    .bind(owner)
     .execute(pool)
     .await
     .map_err(|_| ApiError::Internal)?;

@@ -1228,3 +1228,243 @@ async fn a_stale_if_match_cannot_release_a_cfr_or_clear_a_release(pool: PgPool) 
         "the release still stands"
     );
 }
+
+// ---- #585 review: the holder is part of every machine write, not a read before it --------------
+//
+// The handlers read the holder and refuse with 409 before writing, which gives the caller a precise
+// answer. But between that read and the write a person can take the row over, and versions restart
+// at 1 after a clear and re-mark, so a machine's `If-Match` can match a row it does not hold. These
+// drive the repo writes with exactly that stale state — a version that matches, on a row someone else
+// holds — and require the write itself to refuse.
+
+/// The attribution a service account writes with, and a person's for the same database.
+async fn machine_and_person(
+    pool: &PgPool,
+) -> (
+    crate::auth::principal::Attribution,
+    crate::auth::principal::Attribution,
+) {
+    let (sa, _) = service_account(pool, "flow.fca.update", None).await;
+    let machine = crate::auth::principal::Attribution {
+        user_id: None,
+        actor_id: crate::repos::audit::resolve_service_account_actor_id(pool, &sa, "vTBFM")
+            .await
+            .unwrap(),
+    };
+    let user = seed_user(pool).await;
+    let person = crate::auth::principal::Attribution {
+        actor_id: crate::repos::audit::resolve_user_actor_id(pool, &user, "Controller")
+            .await
+            .unwrap(),
+        user_id: Some(user),
+    };
+    (machine, person)
+}
+
+#[sqlx::test]
+async fn a_machine_conditional_write_never_lands_on_a_persons_release(pool: PgPool) {
+    use crate::repos::flow::{self as flow_repo, Expect};
+    let id = fca(&pool).await;
+    let (machine, person) = machine_and_person(&pool).await;
+    let v = flow_repo::upsert_release(&pool, &id, "AAL1", 1_000, 1_000, &person, None)
+        .await
+        .unwrap()
+        .expect("a person's write is unconditional");
+
+    // The version matches; the holder does not.
+    let written = flow_repo::upsert_release(
+        &pool,
+        &id,
+        "AAL1",
+        9_000,
+        9_000,
+        &machine,
+        Some(Expect::Version(v)),
+    )
+    .await
+    .unwrap();
+    assert_eq!(written, None, "refused in the write");
+    assert!(
+        !flow_repo::delete_release(&pool, &id, "AAL1", Some(v), machine.machine_actor())
+            .await
+            .unwrap(),
+        "a machine's clear at the matching version does not remove a person's release"
+    );
+    assert_eq!(
+        release_attribution(&pool, &id, "AAL1").await,
+        Some((person.user_id.clone(), person.actor_id.clone())),
+        "still the person's, untouched"
+    );
+}
+
+#[sqlx::test]
+async fn a_machine_swap_never_takes_a_persons_release(pool: PgPool) {
+    use crate::repos::flow as flow_repo;
+    let id = fca(&pool).await;
+    let (machine, person) = machine_and_person(&pool).await;
+    flow_repo::upsert_release(
+        &pool,
+        &id,
+        "OWN1",
+        1_000,
+        1_000,
+        &machine,
+        Some(flow_repo::Expect::Absent),
+    )
+    .await
+    .unwrap()
+    .unwrap();
+    flow_repo::upsert_release(&pool, &id, "PER2", 2_000, 2_000, &person, None)
+        .await
+        .unwrap()
+        .unwrap();
+
+    assert!(
+        !flow_repo::swap_releases(&pool, &id, "OWN1", "PER2", &machine)
+            .await
+            .unwrap()
+    );
+    let cta: i64 = sqlx::query_scalar(
+        "select cta_ms from flow.fca_release where fca_id = $1 and callsign = 'PER2'",
+    )
+    .bind(&id)
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    assert_eq!(cta, 2_000, "the person's time is not traded away");
+    assert_eq!(
+        release_attribution(&pool, &id, "PER2").await,
+        Some((person.user_id.clone(), person.actor_id.clone()))
+    );
+
+    // The control: a person may swap them, and a machine may swap two it holds.
+    flow_repo::upsert_release(
+        &pool,
+        &id,
+        "OWN3",
+        3_000,
+        3_000,
+        &machine,
+        Some(flow_repo::Expect::Absent),
+    )
+    .await
+    .unwrap()
+    .unwrap();
+    assert!(
+        flow_repo::swap_releases(&pool, &id, "OWN1", "OWN3", &machine)
+            .await
+            .unwrap()
+    );
+    assert!(
+        flow_repo::swap_releases(&pool, &id, "OWN1", "PER2", &person)
+            .await
+            .unwrap()
+    );
+}
+
+#[sqlx::test]
+async fn a_machine_conditional_write_still_reaches_its_own_release(pool: PgPool) {
+    use crate::repos::flow::{self as flow_repo, Expect};
+    let id = fca(&pool).await;
+    let (machine, _) = machine_and_person(&pool).await;
+    let v = flow_repo::upsert_release(
+        &pool,
+        &id,
+        "OWN1",
+        1_000,
+        1_000,
+        &machine,
+        Some(Expect::Absent),
+    )
+    .await
+    .unwrap()
+    .unwrap();
+    let v2 = flow_repo::upsert_release(
+        &pool,
+        &id,
+        "OWN1",
+        2_000,
+        2_000,
+        &machine,
+        Some(Expect::Version(v)),
+    )
+    .await
+    .unwrap();
+    assert_eq!(v2, Some(v + 1));
+    assert!(
+        flow_repo::delete_release(&pool, &id, "OWN1", Some(v + 1), machine.machine_actor())
+            .await
+            .unwrap()
+    );
+}
+
+#[sqlx::test]
+async fn a_machine_conditional_cfr_write_never_lands_on_a_persons_cfr(pool: PgPool) {
+    use crate::repos::flow::Expect;
+    use crate::repos::tmu as tmu_repo;
+    let (machine, person) = machine_and_person(&pool).await;
+    let at = Utc::now() + Duration::hours(1);
+    let v = tmu_repo::upsert_issued_cfr(&pool, "AAL1", "KDCA", at, &person, None)
+        .await
+        .unwrap()
+        .unwrap();
+
+    assert_eq!(
+        tmu_repo::upsert_issued_cfr(
+            &pool,
+            "AAL1",
+            "KDCA",
+            at + Duration::minutes(5),
+            &machine,
+            Some(Expect::Version(v))
+        )
+        .await
+        .unwrap(),
+        None
+    );
+    assert!(
+        !tmu_repo::delete_issued_cfr(&pool, "AAL1", Some(v), machine.machine_actor())
+            .await
+            .unwrap()
+    );
+    assert_eq!(
+        cfr_attribution(&pool, "AAL1").await,
+        (person.user_id.clone(), person.actor_id.clone())
+    );
+
+    // Its own CFR it can replace and release.
+    let own =
+        tmu_repo::upsert_issued_cfr(&pool, "UAL2", "KDCA", at, &machine, Some(Expect::Absent))
+            .await
+            .unwrap()
+            .unwrap();
+    assert!(
+        tmu_repo::delete_issued_cfr(&pool, "UAL2", Some(own), machine.machine_actor())
+            .await
+            .unwrap()
+    );
+}
+
+#[test]
+fn only_a_machine_attribution_names_an_owner_and_a_missing_actor_fails_closed() {
+    use crate::auth::principal::Attribution;
+    let person = Attribution {
+        user_id: Some("u".into()),
+        actor_id: Some("a".into()),
+    };
+    assert_eq!(person.machine_actor(), None);
+    let machine = Attribution {
+        user_id: None,
+        actor_id: Some("m".into()),
+    };
+    assert_eq!(machine.machine_actor(), Some("m"));
+    let unresolved = Attribution {
+        user_id: None,
+        actor_id: None,
+    };
+    assert_eq!(
+        unresolved.machine_actor(),
+        Some(""),
+        "matches no row rather than every row"
+    );
+}

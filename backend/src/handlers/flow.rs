@@ -2470,11 +2470,14 @@ pub async fn clear_release(
         None => None,
     };
     let holder = flow_repo::release_holder(pool, &id, &callsign).await?;
+    let by = principal.attribution(&state).await?;
     if holder.is_some() {
-        let by = principal.attribution(&state).await?;
         release_authority::authorize(&principal, by.actor_id.as_deref(), holder.as_ref())?;
     }
-    if !flow_repo::delete_release(pool, &id, &callsign, version).await? && version.is_some() {
+    // The read above gives the caller a precise refusal; the delete enforces it (#585 review).
+    let deleted =
+        flow_repo::delete_release(pool, &id, &callsign, version, by.machine_actor()).await?;
+    if !deleted && version.is_some() {
         return Err(ApiError::PreconditionFailed {
             etag: holder.map(|h| h.version),
         });
@@ -2561,6 +2564,14 @@ pub async fn swap_releases(
     // `false` means at least one of them holds no release: there is no time to trade, and inventing
     // one is what this must not do.
     if !flow_repo::swap_releases(pool, &id, &a, &b, &by).await? {
+        // For a machine the write also required it to hold both. If someone took one over between
+        // the check above and the write, say so rather than claiming there is no release (#585 review).
+        if by.machine_actor().is_some() {
+            for callsign in [&a, &b] {
+                let holder = flow_repo::release_holder(pool, &id, callsign).await?;
+                release_authority::authorize(&principal, by.actor_id.as_deref(), holder.as_ref())?;
+            }
+        }
         return Err(ApiError::NotFound);
     }
     state.publish(crate::realtime::topic::RELEASE);
