@@ -77,6 +77,10 @@ accepted). CORS exposes all four. `/health`, `/metrics` and `/docs` are not limi
   deployment behind one proxy must set 1. The audit log and `api_keys.last_used_ip` use the
   same address.
 - Credentials are resolved before the limiter runs, so an unrecognised token is charged to its IP.
+  Because a refused request has already been resolved, resolving must stay cheap: a credential's
+  `last_used_at` (and an API key's `last_used_ip`) is written **at most once a minute**, so a caller far
+  over its limit costs one indexed read per request and no writes. "Last used" is accurate to the
+  minute.
 
 ## Auditing
 

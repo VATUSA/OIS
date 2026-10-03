@@ -302,6 +302,199 @@ mod tests {
         );
     }
 
+    /// Counts row updates on both credential tables, so a test can see writes a refused request causes.
+    async fn count_credential_writes(pool: &PgPool) {
+        sqlx::raw_sql(
+            "create table public.credential_writes (tbl text); \
+             create function public.note_credential_write() returns trigger language plpgsql as \
+               $$ begin insert into public.credential_writes values (tg_table_name); return new; end $$; \
+             create trigger note_write after update on access.api_keys \
+               for each row execute function public.note_credential_write(); \
+             create trigger note_write after update on access.service_account_credentials \
+               for each row execute function public.note_credential_write();",
+        )
+        .execute(pool)
+        .await
+        .unwrap();
+    }
+
+    async fn credential_writes(pool: &PgPool, table: &str) -> i64 {
+        sqlx::query_scalar("select count(*) from public.credential_writes where tbl = $1")
+            .bind(table)
+            .fetch_one(pool)
+            .await
+            .unwrap()
+    }
+
+    /// #588 AC5. The caller is resolved before the limiter can refuse, and resolving a credential stamps
+    /// its `last_used_at`. Unthrottled, a key polling far over its limit wrote its row on every refused
+    /// request — load on the pool everyone shares, which the limit exists to prevent.
+    #[sqlx::test]
+    async fn a_credential_over_its_limit_does_not_write_on_every_refused_request(pool: PgPool) {
+        let user = seed_user(&pool).await;
+        let key_token = "ois_pat_flood-key";
+        sqlx::query(
+            "insert into access.api_keys (owner_user_id, name, prefix, secret_hash) \
+             values ($1, 'flood', 'ois_pat_floo', $2)",
+        )
+        .bind(&user)
+        .bind(crate::repos::access::sha256_hex(key_token))
+        .execute(&pool)
+        .await
+        .unwrap();
+        let sa_token = "ois_sa_flood-account";
+        crate::repos::service_accounts::create_service_account(
+            &pool,
+            "flood",
+            "Flood",
+            None,
+            &crate::repos::access::sha256_hex(sa_token),
+        )
+        .await
+        .unwrap();
+        count_credential_writes(&pool).await;
+        let router = router(test_state(pool.clone(), Default::default()));
+
+        for (token, table) in [
+            (key_token, "api_keys"),
+            (sa_token, "service_account_credentials"),
+        ] {
+            let bearer = format!("Bearer {token}");
+            let headers = [
+                ("x-forwarded-for", "203.0.113.1"),
+                ("authorization", bearer.as_str()),
+            ];
+            let mut refused = 0;
+            for _ in 0..12 {
+                if call(&router, TRAFFIC, &headers).await.status()
+                    == http::StatusCode::TOO_MANY_REQUESTS
+                {
+                    refused += 1;
+                }
+            }
+            assert_eq!(
+                refused, 10,
+                "{table}: the bucket of two is spent, the rest refused"
+            );
+            assert_eq!(
+                credential_writes(&pool, table).await,
+                1,
+                "{table}: twelve requests in a minute stamp last-used once, not once per request"
+            );
+        }
+    }
+
+    /// The other side of the once-a-minute throttle: a first use is recorded, and a stamp older than a
+    /// minute is refreshed — "last used" must not freeze at the first request ever made.
+    #[sqlx::test]
+    async fn last_used_is_recorded_on_first_use_and_refreshed_once_a_minute_has_passed(
+        pool: PgPool,
+    ) {
+        let user = seed_user(&pool).await;
+        let token = "ois_pat_lastused";
+        let key_id: String = sqlx::query_scalar(
+            "insert into access.api_keys (owner_user_id, name, prefix, secret_hash) \
+             values ($1, 'lastused', 'ois_pat_last', $2) returning id",
+        )
+        .bind(&user)
+        .bind(crate::repos::access::sha256_hex(token))
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        let sa_token = "ois_sa_lastused";
+        let sa_id = crate::repos::service_accounts::create_service_account(
+            &pool,
+            "lastused",
+            "Last used",
+            None,
+            &crate::repos::access::sha256_hex(sa_token),
+        )
+        .await
+        .unwrap();
+        let router = router(test_state(pool.clone(), Default::default()));
+        let key_stamp = || async {
+            sqlx::query_as::<_, (Option<chrono::DateTime<chrono::Utc>>, Option<String>)>(
+                "select last_used_at, host(last_used_ip) from access.api_keys where id = $1",
+            )
+            .bind(&key_id)
+            .fetch_one(&pool)
+            .await
+            .unwrap()
+        };
+        let sa_stamp = || async {
+            sqlx::query_scalar::<_, Option<chrono::DateTime<chrono::Utc>>>(
+                "select last_used_at from access.service_account_credentials \
+                 where service_account_id = $1",
+            )
+            .bind(&sa_id)
+            .fetch_one(&pool)
+            .await
+            .unwrap()
+        };
+        let key_bearer = format!("Bearer {token}");
+        let sa_bearer = format!("Bearer {sa_token}");
+
+        call(
+            &router,
+            TRAFFIC,
+            &[
+                ("x-forwarded-for", "203.0.113.7"),
+                ("authorization", key_bearer.as_str()),
+            ],
+        )
+        .await;
+        call(&router, TRAFFIC, &[("authorization", sa_bearer.as_str())]).await;
+        let (key_used, key_ip) = key_stamp().await;
+        assert!(key_used.is_some(), "a key's first use is recorded");
+        assert_eq!(key_ip.as_deref(), Some("203.0.113.7"));
+        assert!(
+            sa_stamp().await.is_some(),
+            "a service account's first use is recorded"
+        );
+
+        // Two minutes ago: past the throttle, so the next use must refresh it.
+        let two_minutes_ago = chrono::Utc::now() - chrono::Duration::minutes(2);
+        sqlx::query("update access.api_keys set last_used_at = $2 where id = $1")
+            .bind(&key_id)
+            .bind(two_minutes_ago)
+            .execute(&pool)
+            .await
+            .unwrap();
+        sqlx::query(
+            "update access.service_account_credentials set last_used_at = $2 \
+             where service_account_id = $1",
+        )
+        .bind(&sa_id)
+        .bind(two_minutes_ago)
+        .execute(&pool)
+        .await
+        .unwrap();
+        call(
+            &router,
+            TRAFFIC,
+            &[
+                ("x-forwarded-for", "203.0.113.8"),
+                ("authorization", key_bearer.as_str()),
+            ],
+        )
+        .await;
+        call(&router, TRAFFIC, &[("authorization", sa_bearer.as_str())]).await;
+        let (key_used, key_ip) = key_stamp().await;
+        assert!(
+            key_used.unwrap() > two_minutes_ago,
+            "a stale key stamp is refreshed"
+        );
+        assert_eq!(
+            key_ip.as_deref(),
+            Some("203.0.113.8"),
+            "with the address of the refreshing use"
+        );
+        assert!(
+            sa_stamp().await.unwrap() > two_minutes_ago,
+            "a stale service-account stamp is refreshed"
+        );
+    }
+
     /// Health checks, metrics scrapes and the docs must not fail because a caller is over its limit.
     #[tokio::test]
     async fn paths_outside_the_api_are_never_limited() {
