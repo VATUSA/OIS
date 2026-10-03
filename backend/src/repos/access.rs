@@ -80,9 +80,11 @@ pub async fn find_current_service_account_by_bearer_token(
     .map_err(|_| ApiError::Internal)?;
 
     if let Some(account) = account.as_ref() {
+        // At most once a minute (#588), for the same reason as an API key's `last_used_at` below.
         sqlx::query(
             "update access.service_account_credentials set last_used_at = now() \
-             where service_account_id = $1 and secret_hash = $2",
+             where service_account_id = $1 and secret_hash = $2 \
+               and (last_used_at is null or last_used_at < now() - interval '1 minute')",
         )
         .bind(&account.id)
         .bind(token_hash)
@@ -95,7 +97,7 @@ pub async fn find_current_service_account_by_bearer_token(
 }
 
 /// Resolve an `ois_pat_…` bearer token to its API key, if active/unrevoked/unexpired and the owner
-/// is still an active user. Updates `last_used_at`/`last_used_ip` on a hit. The key's *authority* is
+/// is still an active user. Updates `last_used_at`/`last_used_ip` on a hit, at most once a minute. The key's *authority* is
 /// resolved separately and capped by the owner — see `repos::api_keys` and `auth::principal`.
 pub async fn find_current_api_key_by_bearer_token(
     pool: &PgPool,
@@ -123,9 +125,15 @@ pub async fn find_current_api_key_by_bearer_token(
 
     if let Some(key) = key.as_ref() {
         // `last_used_ip` is inet; a malformed forwarded header simply leaves it null.
+        //
+        // At most once a minute (#588). This runs before the rate limiter can refuse the request (the
+        // limiter needs the resolved key to pick its bucket), so an unconditional write would let a key
+        // polling far over its limit still write this row on every refused request, queueing on its row
+        // lock in the pool everyone shares. "Last used" is accurate to the minute.
         sqlx::query(
             "update access.api_keys set last_used_at = now(), \
-             last_used_ip = coalesce($2::inet, last_used_ip) where id = $1",
+             last_used_ip = coalesce($2::inet, last_used_ip) where id = $1 \
+               and (last_used_at is null or last_used_at < now() - interval '1 minute')",
         )
         .bind(&key.id)
         .bind(client_ip)

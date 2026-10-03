@@ -23,6 +23,10 @@ pub enum ApiError {
     NotFound,
     #[error("conflict")]
     Conflict,
+    /// The caller's rate-limit bucket is empty (#588). Raised only by `rate_limit::enforce`, which adds
+    /// the `Retry-After` / `RateLimit-*` headers.
+    #[error("too many requests")]
+    TooManyRequests,
     #[error("service unavailable")]
     ServiceUnavailable,
     #[error("internal server error")]
@@ -49,6 +53,7 @@ impl IntoResponse for ApiError {
             Self::Forbidden => (StatusCode::FORBIDDEN, "forbidden"),
             Self::NotFound => (StatusCode::NOT_FOUND, "not_found"),
             Self::Conflict => (StatusCode::CONFLICT, "conflict"),
+            Self::TooManyRequests => (StatusCode::TOO_MANY_REQUESTS, "too_many_requests"),
             Self::ServiceUnavailable => (StatusCode::SERVICE_UNAVAILABLE, "service_unavailable"),
             Self::Internal => (StatusCode::INTERNAL_SERVER_ERROR, "internal_error"),
         };

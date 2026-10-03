@@ -29,6 +29,21 @@ curl -H "Authorization: Bearer ois_pat_xxxxxxxx…" \
 
 The full API is described by the OpenAPI document at **`/docs/api/v1/openapi.json`** — point your client generator at it.
 
+### Rate limits
+
+Each key has its own allowance — **300 requests per minute** by default, available as a burst and
+refilling evenly. Every response tells you where you stand:
+
+| Header | Meaning |
+| --- | --- |
+| `RateLimit-Limit` | requests per minute this key is allowed |
+| `RateLimit-Remaining` | requests left right now |
+| `RateLimit-Reset` | seconds until the full allowance is back |
+
+Go over it and you get **`429 Too Many Requests`** with a **`Retry-After`** header: wait that many
+seconds before trying again — retrying sooner is simply refused again. Polling an endpoint more often
+than its data changes (live traffic updates about every 15 seconds) only spends your allowance.
+
 ::: tip User keys vs. service accounts
 A `ois_pat_…` token is a **user** key, owned by and capped to a person. Machine clients that aren't tied to a person (a bot, shared tooling) use **service accounts** (`ois_sa_…`), which an administrator manages separately.
 :::

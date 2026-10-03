@@ -1,3 +1,5 @@
+use std::sync::Arc;
+
 use axum::{
     Router, middleware,
     routing::{delete, get, patch, post, put},
@@ -16,11 +18,18 @@ use crate::{
         service_accounts, stats, taxi_insights, tmu, users, webhooks,
     },
     openapi::ApiDoc,
+    rate_limit::{self, RateLimits},
     realtime,
     state::AppState,
 };
 
+/// The router with rate limits from the environment. Startup uses [`build_router_with_limits`] so it
+/// can also prune the buckets; this is for callers that build a throwaway router (tests).
 pub fn build_router(state: AppState) -> Router {
+    build_router_with_limits(state, Arc::new(RateLimits::from_env()))
+}
+
+pub fn build_router_with_limits(state: AppState, limits: Arc<RateLimits>) -> Router {
     Router::new()
         .route("/health", get(health::health))
         // Prometheus scrape target (#382). Intentionally NOT in the OpenAPI spec or the typed
@@ -623,6 +632,10 @@ pub fn build_router(state: AppState) -> Router {
             state.clone(),
             crate::audit::audit_mutations,
         ))
+        // Rate limiting (#588). Inside resolve_current_user, so the caller is known and choosing the
+        // bucket costs no query; inside reqlog, metrics and CORS, so a 429 is logged, counted and still
+        // readable cross-origin.
+        .layer(middleware::from_fn_with_state(limits, rate_limit::enforce))
         // Dev request log — one line per request. Outside audit (so its latency covers the
         // whole request), inside resolve_current_user (so it can name the actor).
         .layer(middleware::from_fn(crate::reqlog::log_requests))
