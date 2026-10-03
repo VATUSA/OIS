@@ -28,10 +28,15 @@ const TRAFFIC_DOMAINS = ["tmu", "flow", "stats"] as const;
 const EVENT_DOMAINS = ["events", "ace"] as const;
 
 /**
- * The baseline every signed-in user holds via the `USER` role. Presets grant these at NATIONAL scope
- * so the result matches a normal user's defaults — this matters for the facility-EC preset (whose other
- * grants are facility-scoped) and for API keys (which get no roles at all, so no baseline otherwise).
- * Mirror of the `USER` role's `role_permissions`; keep in sync if that role's grants change.
+ * The baseline a preset grants on top of its domain permissions, at NATIONAL scope.
+ *
+ * This is **not** a mirror of the `USER` role, though it used to claim to be. Since #544 the signed-in
+ * baseline lives in that role's `access.role_permissions` (migration 0092) and reaches users through
+ * group membership, with nothing copied per user. **API keys hold no roles at all**, so for a key this
+ * list is the only way a preset yields the defaults a user has — which is why it survives here rather
+ * than being deleted with the rest of the duplication.
+ *
+ * It goes away with this whole file in sub-issue H, when presets are replaced by the groups.
  */
 export const BASE_PERMISSIONS = ["ace.requests.create"] as const;
 
