@@ -95,6 +95,8 @@ backend.
 
 ## Not yet
 
-- **Scope-filtered effective view** — the global effective-permissions computation still
-  resolves grants without applying their `artcc_id` scope; scope is only enforced where a
-  handler opts into the per-permission check above.
+- **Scope enforcement in the remaining handlers** — the effective-permissions resolver now
+  applies `artcc_id` scope and denies together (#543), but the *coarse* `RequirePermission<P>`
+  gate is scope-blind by design, so a permission is only narrowed where a handler opts into the
+  per-permission check above. For the rest, a facility-scoped grant still behaves as national.
+  See [../architecture/permissions.md](../architecture/permissions.md) for the two-stage contract.

@@ -428,10 +428,9 @@ async fn build_me_body(state: &AppState, user: &CurrentUser) -> Result<MeBody, A
     // `permissions` is a flat name tree with no ARTCC dimension, so a client can't tell a national
     // (DCC) reader from a facility-scoped one. Resolve that one question here (#405).
     let tmu_national = match state.db.as_ref() {
-        Some(pool) => matches!(
-            access_repo::permission_scope(pool, &user.id, TMU_READ_PERMISSION).await?,
-            access_repo::PermissionScope::National
-        ),
+        Some(pool) => access_repo::permission_scope(pool, &user.id, TMU_READ_PERMISSION)
+            .await?
+            .is_national(),
         None => false,
     };
     Ok(MeBody {
@@ -686,5 +685,50 @@ mod tests {
 
         let body = build_me_body(&state, &current_user(&none)).await.unwrap();
         assert!(!body.tmu_national, "no grant is not national");
+    }
+
+    /// `/me` could contradict itself (VATUSA/OIS#543): `tmu_national` came from the scoped resolver,
+    /// which never read denies, while `permissions` came from the view, which did. So a national
+    /// grant plus a deny reported `tmu_national: true` beside a permission tree that omitted the
+    /// very same permission. One resolver means the two cannot disagree.
+    #[sqlx::test]
+    async fn a_denied_reader_is_neither_national_nor_in_the_permission_tree(pool: PgPool) {
+        let user = seed_user(&pool).await;
+        // The allow comes from a role: `access.user_permissions` is unique on
+        // `(user_id, permission_name, coalesce(artcc_id, ''))`, so a direct allow and a direct deny
+        // cannot both exist at national scope. In practice a deny always overrides a role-derived
+        // grant, which is exactly the shape #542 creates.
+        sqlx::query("insert into access.roles (name) values ('TMU_TEST') on conflict do nothing")
+            .execute(&pool)
+            .await
+            .unwrap();
+        sqlx::query(
+            "insert into access.role_permissions (role_name, permission_name) values ('TMU_TEST', $1)",
+        )
+        .bind(TMU_READ_PERMISSION)
+        .execute(&pool)
+        .await
+        .unwrap();
+        sqlx::query("insert into access.user_roles (user_id, role_name) values ($1, 'TMU_TEST')")
+            .bind(&user)
+            .execute(&pool)
+            .await
+            .unwrap();
+        crate::scope_test_support::deny_scoped(&pool, &user, TMU_READ_PERMISSION, None).await;
+
+        let state = test_state(pool, HashMap::new());
+        let body = build_me_body(&state, &current_user(&user)).await.unwrap();
+
+        assert!(
+            !body.tmu_national,
+            "a denied permission cannot still read as national authority"
+        );
+        let names = access_repo::fetch_user_permission_names(state.db.as_ref().unwrap(), &user)
+            .await
+            .unwrap();
+        assert!(
+            !names.iter().any(|n| n == TMU_READ_PERMISSION),
+            "and it must be absent from the permission tree too — the two answers must agree"
+        );
     }
 }

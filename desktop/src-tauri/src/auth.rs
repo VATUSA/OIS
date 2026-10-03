@@ -13,7 +13,10 @@
 use std::{
     io::{Read, Write},
     net::TcpListener,
-    sync::atomic::{AtomicU64, Ordering},
+    sync::{
+        Mutex,
+        atomic::{AtomicU64, Ordering},
+    },
     time::{Duration, Instant},
 };
 
@@ -80,19 +83,53 @@ fn entry() -> Result<keyring::Entry, String> {
         .map_err(|e| format!("keychain unavailable: {e}"))
 }
 
-/// Stores the session token in the OS keychain, replacing any previous one.
-#[tauri::command]
-pub fn store_token(token: String) -> Result<(), String> {
-    entry()?
-        .set_password(&token)
-        .map_err(|e| format!("could not save to the keychain: {e}"))
+/// The token, cached for the life of the process.
+///
+/// Every Tauri webview loads its own copy of the frontend, so each pop-out (#349) and each restored
+/// route window has its own in-memory cache and used to make its own `get_token` call — N windows
+/// meant N keychain reads. On macOS every read is ACL-gated and can put up a login-password prompt,
+/// so that multiplied the prompts (#535). Caching here makes it one read per process however many
+/// windows ask. [`store_token`] and [`delete_token`] keep it in step, since both already know the
+/// value they wrote.
+///
+/// The outer `Option` is "have we read yet?"; the inner one is "is there a token?", so a genuine
+/// signed-out answer is cached rather than re-read.
+static CACHED_TOKEN: Mutex<Option<Option<String>>> = Mutex::new(None);
+
+/// Takes the cache lock, recovering a poisoned one.
+///
+/// A panic while holding this lock would otherwise make every later keychain call fail; the cached
+/// value is a plain `Option<String>` that cannot be left half-written, so there is no invariant for
+/// poisoning to protect.
+fn lock<T>(cache: &Mutex<T>) -> std::sync::MutexGuard<'_, T> {
+    cache
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
 }
 
-/// Reads the stored session token, or `None` when nobody is signed in.
+/// The cached token, reading through `read` only on the first call.
 ///
-/// A missing entry is the ordinary signed-out case, not an error.
-#[tauri::command]
-pub fn get_token() -> Result<Option<String>, String> {
+/// Takes the cache by reference rather than reaching for [`CACHED_TOKEN`] so a test can exercise it
+/// with a local cache and a counting reader — no keychain, and no dependence on test ordering.
+///
+/// A failing read is **not** cached: the loop it would otherwise cause is stopped on the frontend
+/// (`web/src/lib/desktop-token.ts`), and poisoning the process cache would mean a transient keychain
+/// error could never recover without a restart.
+fn cached_or_read(
+    cache: &Mutex<Option<Option<String>>>,
+    read: impl FnOnce() -> Result<Option<String>, String>,
+) -> Result<Option<String>, String> {
+    let mut guard = lock(cache);
+    if let Some(token) = guard.as_ref() {
+        return Ok(token.clone());
+    }
+    let token = read()?;
+    *guard = Some(token.clone());
+    Ok(token)
+}
+
+/// Reads the keychain itself, with a missing entry meaning signed out rather than an error.
+fn read_keychain() -> Result<Option<String>, String> {
     match entry()?.get_password() {
         Ok(token) => Ok(Some(token)),
         Err(keyring::Error::NoEntry) => Ok(None),
@@ -100,11 +137,32 @@ pub fn get_token() -> Result<Option<String>, String> {
     }
 }
 
+/// Stores the session token in the OS keychain, replacing any previous one.
+#[tauri::command]
+pub fn store_token(token: String) -> Result<(), String> {
+    entry()?
+        .set_password(&token)
+        .map_err(|e| format!("could not save to the keychain: {e}"))?;
+    *lock(&CACHED_TOKEN) = Some(Some(token));
+    Ok(())
+}
+
+/// Reads the stored session token, or `None` when nobody is signed in.
+///
+/// Hits the keychain once per process; see [`CACHED_TOKEN`].
+#[tauri::command]
+pub fn get_token() -> Result<Option<String>, String> {
+    cached_or_read(&CACHED_TOKEN, read_keychain)
+}
+
 /// Removes the stored token. Signing out when already signed out is not an error.
 #[tauri::command]
 pub fn delete_token() -> Result<(), String> {
     match entry()?.delete_credential() {
-        Ok(()) | Err(keyring::Error::NoEntry) => Ok(()),
+        Ok(()) | Err(keyring::Error::NoEntry) => {
+            *lock(&CACHED_TOKEN) = Some(None);
+            Ok(())
+        }
         Err(e) => Err(format!("could not clear the keychain: {e}")),
     }
 }
@@ -1072,6 +1130,83 @@ mod tests {
         assert!(
             start.elapsed() < Duration::from_secs(1),
             "an idle drain must not wait for a connection"
+        );
+    }
+
+    /// AC5: one keychain read per process, however many webviews ask. Each pop-out and each restored
+    /// route window used to make its own call, and on macOS every call is ACL-gated and can prompt.
+    #[test]
+    fn the_keychain_is_read_once_however_many_callers() {
+        let cache = Mutex::new(None);
+        let reads = std::cell::Cell::new(0);
+        let read = || {
+            reads.set(reads.get() + 1);
+            Ok(Some("ois_dsk_abc".to_string()))
+        };
+
+        assert_eq!(
+            cached_or_read(&cache, read).unwrap(),
+            Some("ois_dsk_abc".to_string())
+        );
+        assert_eq!(
+            cached_or_read(&cache, read).unwrap(),
+            Some("ois_dsk_abc".to_string())
+        );
+        assert_eq!(reads.get(), 1, "second caller must not reach the keychain");
+    }
+
+    /// Signed out is an answer worth caching: re-reading it is another ACL-gated hit for a result
+    /// that cannot have changed without `store_token`.
+    #[test]
+    fn an_empty_keychain_is_cached_rather_than_re_read() {
+        let cache = Mutex::new(None);
+        let reads = std::cell::Cell::new(0);
+        let read = || {
+            reads.set(reads.get() + 1);
+            Ok(None)
+        };
+
+        assert_eq!(cached_or_read(&cache, read).unwrap(), None);
+        assert_eq!(cached_or_read(&cache, read).unwrap(), None);
+        assert_eq!(reads.get(), 1);
+    }
+
+    /// A failure must NOT be cached here. The retry loop is stopped in the frontend; caching the
+    /// error in the shell as well would mean a transient keychain fault could never recover without
+    /// restarting the app.
+    #[test]
+    fn a_failed_read_is_not_cached_so_it_can_recover() {
+        let cache = Mutex::new(None);
+        let attempts = std::cell::Cell::new(0);
+
+        let first = cached_or_read(&cache, || {
+            attempts.set(attempts.get() + 1);
+            Err("keychain unavailable".to_string())
+        });
+        assert!(first.is_err());
+
+        let second = cached_or_read(&cache, || {
+            attempts.set(attempts.get() + 1);
+            Ok(Some("ois_dsk_recovered".to_string()))
+        });
+        assert_eq!(second.unwrap(), Some("ois_dsk_recovered".to_string()));
+        assert_eq!(attempts.get(), 2, "a failure must leave the cache unset");
+    }
+
+    /// A poisoned lock must not take the keychain down with it — the cached value is a plain
+    /// `Option<String>` with no invariant for poisoning to protect.
+    #[test]
+    fn a_poisoned_cache_still_serves() {
+        let cache = Mutex::new(Some(Some("ois_dsk_abc".to_string())));
+        let _ = std::panic::catch_unwind(|| {
+            let _guard = cache.lock().unwrap();
+            panic!("poison it");
+        });
+        assert!(cache.is_poisoned());
+
+        assert_eq!(
+            cached_or_read(&cache, || panic!("must not read")).unwrap(),
+            Some("ois_dsk_abc".to_string())
         );
     }
 }
