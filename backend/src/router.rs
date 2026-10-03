@@ -118,6 +118,15 @@ pub fn build_router(state: AppState) -> Router {
             "/api/v1/admin/users/{cid}/access",
             get(access::get_user_access).post(access::update_user_access),
         )
+        // Group (role) management — #545
+        .route(
+            "/api/v1/admin/groups",
+            get(access::list_groups).post(access::create_group),
+        )
+        .route(
+            "/api/v1/admin/groups/{name}",
+            put(access::update_group).delete(access::delete_group),
+        )
         // TMU — Traffic Management Initiatives
         .route(
             "/api/v1/tmu/tmis",
