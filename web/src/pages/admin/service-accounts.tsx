@@ -6,22 +6,36 @@ import {
   DataTable,
   Input,
   Modal,
+  Select,
   StatusPill,
   useToast,
 } from "@ois/ui";
-import {Bot, Check, Clock, Copy, Plus, ShieldCheck, X} from "lucide-react";
+import {Bot, Check, Clock, Copy, KeyRound, Plus, ShieldCheck, X} from "lucide-react";
 
+import {
+  PermissionPicker,
+  type PermSelection,
+  buildPermissionInputs,
+  selectionFromPermissions,
+  selectionIsValid,
+} from "@/components/api-keys/permission-picker";
 import {usePageHeader} from "@/components/shell/page-meta";
+import {useFacilities} from "@/lib/admin";
 import {useMe} from "@/lib/auth";
 import {hasPermission} from "@/lib/permissions";
 import {toneOf} from "@/lib/status";
 import {timeAgo} from "@/lib/time";
 import {
+  DEFAULT_EXPIRY_DAYS,
+  EXPIRY_CHOICES,
   type ServiceAccount,
   type ServiceAccountToken,
   useAssignableRoles,
   useCreateServiceAccount,
+  useGrantableServiceAccountPermissions,
+  useRotateServiceAccount,
   useServiceAccounts,
+  useSetServiceAccountPermissions,
   useSetServiceAccountRoles,
   withReveal,
   withoutReveal,
@@ -74,6 +88,23 @@ function RolePicker({
         );
       })}
     </div>
+  );
+}
+
+/** How long a new credential lives. The backend refuses anything past 365 days. */
+function ExpirySelect({value, onChange}: {value: number; onChange: (days: number) => void}) {
+  return (
+    <Select
+      aria-label="Token expires in"
+      value={String(value)}
+      onChange={(e) => onChange(Number(e.target.value))}
+    >
+      {EXPIRY_CHOICES.map((days) => (
+        <option key={days} value={days}>
+          {days} days
+        </option>
+      ))}
+    </Select>
   );
 }
 
@@ -158,13 +189,18 @@ function CreateForm({
   const [name, setName] = useState("");
   const [description, setDescription] = useState("");
   const [selected, setSelected] = useState<Set<string>>(() => new Set());
+  const [expiresInDays, setExpiresInDays] = useState(DEFAULT_EXPIRY_DAYS);
   const [busy, setBusy] = useState(false);
 
   const submit = async () => {
     setBusy(true);
     let token: ServiceAccountToken;
     try {
-      token = await create({name: name.trim(), description: description.trim() || undefined});
+      token = await create({
+        name: name.trim(),
+        description: description.trim() || undefined,
+        expires_in_days: expiresInDays,
+      });
     } catch {
       setBusy(false);
       return; // the hook already surfaced a toast
@@ -205,10 +241,14 @@ function CreateForm({
             placeholder="What this client is for"
           />
         </label>
+        <label className="flex flex-col gap-1">
+          <span className={labelClass}>Token expires in</span>
+          <ExpirySelect value={expiresInDays} onChange={setExpiresInDays} />
+        </label>
       </div>
       <div className="flex flex-col gap-2">
         <span className={labelClass}>
-          Roles — an account with none can authenticate but do nothing
+          Roles — or grant specific permissions per ARTCC from the table once created
         </span>
         <RolePicker roles={roles.data ?? []} selected={selected} onChange={setSelected} />
       </div>
@@ -261,6 +301,105 @@ function EditRoles({account, onDone}: {account: ServiceAccount; onDone: () => vo
   );
 }
 
+/**
+ * Grant an account specific permissions at specific ARTCCs. The picker offers only what the signed-in
+ * admin holds, at the scope they hold it — the backend refuses anything more. A full replace.
+ */
+function EditPermissions({account, onDone}: {account: ServiceAccount; onDone: () => void}) {
+  const grantable = useGrantableServiceAccountPermissions();
+  const facilities = useFacilities();
+  const setPermissions = useSetServiceAccountPermissions();
+  const [selection, setSelection] = useState<PermSelection>(() =>
+    selectionFromPermissions(account.permissions),
+  );
+
+  return (
+    <Modal
+      open
+      onClose={onDone}
+      title={`Permissions · ${account.name}`}
+      description="You can grant only what you hold yourself, at the ARTCCs you hold it."
+      size="lg"
+      footer={
+        <>
+          <Button variant="ghost" onClick={onDone}>
+            Cancel
+          </Button>
+          <Button
+            disabled={setPermissions.isPending || !selectionIsValid(selection)}
+            onClick={() =>
+              setPermissions.mutate(
+                {id: account.id, body: {permissions: buildPermissionInputs(selection)}},
+                {onSuccess: onDone},
+              )
+            }
+          >
+            Save permissions
+          </Button>
+        </>
+      }
+    >
+      <PermissionPicker
+        grantable={grantable.data ?? []}
+        facilities={facilities.data ?? []}
+        selection={selection}
+        onChange={setSelection}
+      />
+    </Modal>
+  );
+}
+
+/** Revoke the live token and issue a new one, with a fresh lifetime. */
+function RotateToken({
+  account,
+  onRotated,
+  onDone,
+}: {
+  account: ServiceAccount;
+  onRotated: (t: ServiceAccountToken) => void;
+  onDone: () => void;
+}) {
+  const rotate = useRotateServiceAccount();
+  const [expiresInDays, setExpiresInDays] = useState(DEFAULT_EXPIRY_DAYS);
+
+  return (
+    <Modal
+      open
+      onClose={onDone}
+      title={`Rotate token · ${account.name}`}
+      description="The current token stops working immediately. The new one is shown once."
+      footer={
+        <>
+          <Button variant="ghost" onClick={onDone}>
+            Cancel
+          </Button>
+          <Button
+            disabled={rotate.isPending}
+            onClick={() =>
+              rotate.mutate(
+                {id: account.id, expiresInDays},
+                {
+                  onSuccess: (t) => {
+                    onRotated(t);
+                    onDone();
+                  },
+                },
+              )
+            }
+          >
+            Rotate token
+          </Button>
+        </>
+      }
+    >
+      <label className="flex flex-col gap-1">
+        <span className={labelClass}>New token expires in</span>
+        <ExpirySelect value={expiresInDays} onChange={setExpiresInDays} />
+      </label>
+    </Modal>
+  );
+}
+
 export function AdminServiceAccounts() {
   const {data: me} = useMe();
   const accounts = useServiceAccounts();
@@ -270,6 +409,8 @@ export function AdminServiceAccounts() {
   // reveal must say so rather than imply a working credential.
   const [rolesFailed, setRolesFailed] = useState<ReadonlySet<string>>(() => new Set());
   const [editing, setEditing] = useState<ServiceAccount | null>(null);
+  const [granting, setGranting] = useState<ServiceAccount | null>(null);
+  const [rotating, setRotating] = useState<ServiceAccount | null>(null);
   const canCreate = hasPermission(me, "service_accounts.create");
   const canUpdate = hasPermission(me, "service_accounts.update");
 
@@ -324,9 +465,24 @@ export function AdminServiceAccounts() {
         cell: (c) => {
           const roles = c.row.original.roles;
           return roles.length === 0 ? (
-            <span className="text-xs text-warning">none</span>
+            <span className="text-xs text-ink-3">none</span>
           ) : (
             <span className="font-mono text-xs text-ink-2">{roles.join(", ")}</span>
+          );
+        },
+      },
+      {
+        id: "permissions",
+        header: "Permissions",
+        icon: KeyRound,
+        cell: (c) => {
+          const perms = c.row.original.permissions;
+          return perms.length === 0 ? (
+            <span className="text-xs text-ink-3">none</span>
+          ) : (
+            <span className="font-mono text-xs text-ink-2">
+              {perms.map((p) => `${p.permission}@${p.artcc_id ?? "national"}`).join(", ")}
+            </span>
           );
         },
       },
@@ -335,8 +491,22 @@ export function AdminServiceAccounts() {
         header: "Last used",
         icon: Clock,
         mono: true,
-        cell: (c) =>
-          c.row.original.last_used_at ? timeAgo(c.row.original.last_used_at) : "never",
+        cell: (c) => (
+          <div className="flex items-center gap-2">
+            {c.row.original.last_used_at ? timeAgo(c.row.original.last_used_at) : "never"}
+            {c.row.original.stale && (
+              <StatusPill tone="warn">
+                stale
+              </StatusPill>
+            )}
+          </div>
+        ),
+      },
+      {
+        id: "expires",
+        header: "Expires",
+        mono: true,
+        cell: (c) => (c.row.original.expires_at ? shortDate(c.row.original.expires_at) : "—"),
       },
       {
         accessorKey: "created_at",
@@ -350,9 +520,19 @@ export function AdminServiceAccounts() {
               id: "actions",
               header: "",
               cell: (c) => (
-                <Button variant="outline" onClick={() => setEditing(c.row.original)}>
-                  Roles
-                </Button>
+                <div className="flex gap-2">
+                  <Button variant="outline" onClick={() => setEditing(c.row.original)}>
+                    Roles
+                  </Button>
+                  <Button variant="outline" onClick={() => setGranting(c.row.original)}>
+                    Permissions
+                  </Button>
+                  {c.row.original.status === "active" && (
+                    <Button variant="outline" onClick={() => setRotating(c.row.original)}>
+                      Rotate
+                    </Button>
+                  )}
+                </div>
               ),
             } as DataColumn<ServiceAccount>,
           ]
@@ -401,6 +581,14 @@ export function AdminServiceAccounts() {
       )}
 
       {editing && <EditRoles account={editing} onDone={() => setEditing(null)} />}
+      {granting && <EditPermissions account={granting} onDone={() => setGranting(null)} />}
+      {rotating && (
+        <RotateToken
+          account={rotating}
+          onRotated={(t) => reveal(t, true)}
+          onDone={() => setRotating(null)}
+        />
+      )}
     </div>
   );
 }
