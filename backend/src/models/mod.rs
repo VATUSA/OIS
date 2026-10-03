@@ -2147,6 +2147,9 @@ pub struct FcaFlight {
     pub edct: Option<DateTime<Utc>>,
     /// True when this aircraft has a frozen (issued) CFR release.
     pub released: bool,
+    /// The release's version, for `If-Match` (#585); null when not released.
+    #[serde(default)]
+    pub release_version: Option<i64>,
     pub groundspeed: i64,
     pub altitude: i64,
     pub heading: i64,
@@ -2261,6 +2264,9 @@ pub struct IdstFlight {
     /// Frozen wheels-up (EDCT) once released; null while unscheduled.
     pub edct: Option<DateTime<Utc>>,
     pub released: bool,
+    /// The display name of the service account or API key that issued this release, or null when a
+    /// person did (or it is not released) — so a controller can see a time came from a tool (#585).
+    pub released_by_machine: Option<String>,
     /// The predicted departure runway (#511), or null when nothing could predict one — no airport
     /// configuration, or no rule and no configured default. Null is a real answer: a wrong runway would
     /// narrow the learned taxi estimate to the wrong bucket and move the EDCT with it.

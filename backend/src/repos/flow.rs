@@ -374,6 +374,71 @@ pub async fn set_manual_order(
 
 // --- frozen CFR releases ---
 
+/// A writer's precondition on a release (#585): `If-None-Match: *` is [`Expect::Absent`], and
+/// `If-Match: N` is [`Expect::Version`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Expect {
+    Absent,
+    Version(i64),
+}
+
+/// Who holds a release now, and at what version (#585). `machine` is the holding actor's id and name
+/// when a service account or API key wrote it last; `None` means a person did, including a legacy row
+/// that predates actor attribution.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ReleaseHolder {
+    pub version: i64,
+    pub machine: Option<(String, String)>,
+}
+
+const HOLDER_SELECT: &str = "select r.callsign, r.version, \
+        case when a.actor_type in ('service_account', 'api_key') then a.id end, \
+        case when a.actor_type in ('service_account', 'api_key') then a.display_name end \
+     from flow.fca_release r left join access.actors a on a.id = r.updated_by_actor";
+
+fn holder_of(version: i64, id: Option<String>, name: Option<String>) -> ReleaseHolder {
+    ReleaseHolder {
+        version,
+        machine: id.map(|id| (id, name.unwrap_or_default())),
+    }
+}
+
+/// The holder of one release, or `None` when the flight is not released.
+pub async fn release_holder(
+    pool: &PgPool,
+    fca_id: &str,
+    callsign: &str,
+) -> Result<Option<ReleaseHolder>, ApiError> {
+    let row = sqlx::query_as::<_, (String, i64, Option<String>, Option<String>)>(&format!(
+        "{HOLDER_SELECT} where r.fca_id = $1 and r.callsign = $2"
+    ))
+    .bind(fca_id)
+    .bind(callsign)
+    .fetch_optional(pool)
+    .await
+    .map_err(|_| ApiError::Internal)?;
+    Ok(row.map(|(_, v, id, name)| holder_of(v, id, name)))
+}
+
+/// Every release's holder in one FCA, by callsign — read alongside the metering input, never part of
+/// it, so provenance and versions cannot change a computed time.
+pub async fn release_holders(
+    pool: &PgPool,
+    fca_id: &str,
+) -> Result<HashMap<String, ReleaseHolder>, ApiError> {
+    let rows = sqlx::query_as::<_, (String, i64, Option<String>, Option<String>)>(&format!(
+        "{HOLDER_SELECT} where r.fca_id = $1"
+    ))
+    .bind(fca_id)
+    .fetch_all(pool)
+    .await
+    .map_err(|_| ApiError::Internal)?;
+    Ok(rows
+        .into_iter()
+        .map(|(cs, v, id, name)| (cs, holder_of(v, id, name)))
+        .collect())
+}
+
 /// Frozen releases for an FCA as (callsign, cta_ms, edct_ms).
 pub async fn list_releases(
     pool: &PgPool,
@@ -411,6 +476,9 @@ pub async fn releases_for_callsigns(
     Ok(rows.into_iter().collect())
 }
 
+/// Write a release, returning its new version — or `None` when `expect` did not hold, in which case
+/// nothing was written (#585). The precondition is checked **in the write itself**, so there is no
+/// window between reading the version and changing the row.
 pub async fn upsert_release(
     pool: &PgPool,
     fca_id: &str,
@@ -418,24 +486,51 @@ pub async fn upsert_release(
     cta_ms: i64,
     edct_ms: i64,
     by: &Attribution,
-) -> Result<(), ApiError> {
-    sqlx::query(
-        "insert into flow.fca_release (fca_id, callsign, cta_ms, edct_ms, updated_by, updated_by_actor)
-         values ($1, $2, $3, $4, $5, $6)
-         on conflict (fca_id, callsign) do update set
-             cta_ms = excluded.cta_ms, edct_ms = excluded.edct_ms,
-             updated_by = excluded.updated_by, updated_by_actor = excluded.updated_by_actor",
-    )
-    .bind(fca_id)
-    .bind(callsign)
-    .bind(cta_ms)
-    .bind(edct_ms)
-    .bind(&by.user_id)
-    .bind(&by.actor_id)
-    .execute(pool)
-    .await
-    .map_err(|_| ApiError::Internal)?;
-    Ok(())
+    expect: Option<Expect>,
+) -> Result<Option<i64>, ApiError> {
+    let sql = match expect {
+        // Unconditional (a person, as before): create or replace.
+        None => {
+            "insert into flow.fca_release as r (fca_id, callsign, cta_ms, edct_ms, updated_by, updated_by_actor)
+             values ($1, $2, $3, $4, $5, $6)
+             on conflict (fca_id, callsign) do update set
+                 cta_ms = excluded.cta_ms, edct_ms = excluded.edct_ms,
+                 updated_by = excluded.updated_by, updated_by_actor = excluded.updated_by_actor,
+                 version = r.version + 1
+             returning r.version"
+        }
+        // Create only: an existing release makes this a no-op, so a retry cannot issue twice.
+        Some(Expect::Absent) => {
+            "insert into flow.fca_release (fca_id, callsign, cta_ms, edct_ms, updated_by, updated_by_actor)
+             values ($1, $2, $3, $4, $5, $6)
+             on conflict (fca_id, callsign) do nothing
+             returning version"
+        }
+        // Replace only the version the writer last saw.
+        Some(Expect::Version(_)) => {
+            "update flow.fca_release set
+                 cta_ms = $3, edct_ms = $4, updated_by = $5, updated_by_actor = $6,
+                 version = version + 1
+             where fca_id = $1 and callsign = $2 and version = $7
+             returning version"
+        }
+    };
+    let query = sqlx::query_scalar::<_, i64>(sql)
+        .bind(fca_id)
+        .bind(callsign)
+        .bind(cta_ms)
+        .bind(edct_ms)
+        .bind(&by.user_id)
+        .bind(&by.actor_id);
+    // `$7` exists only in the conditional update; binding it elsewhere is a parameter-count error.
+    let query = match expect {
+        Some(Expect::Version(v)) => query.bind(v),
+        _ => query,
+    };
+    query
+        .fetch_optional(pool)
+        .await
+        .map_err(|_| ApiError::Internal)
 }
 
 /// Exchange two releases' frozen times within one FCA (#514).
@@ -469,7 +564,8 @@ pub async fn swap_releases(
 ) -> Result<bool, ApiError> {
     let result = sqlx::query(
         "update flow.fca_release r \
-            set cta_ms = o.cta_ms, edct_ms = o.edct_ms, updated_by = $4, updated_by_actor = $5 \
+            set cta_ms = o.cta_ms, edct_ms = o.edct_ms, updated_by = $4, updated_by_actor = $5, \
+                version = r.version + 1 \
            from flow.fca_release o \
           where r.fca_id = $1 and o.fca_id = $1 \
             and ((r.callsign = $2 and o.callsign = $3) \
@@ -486,12 +582,22 @@ pub async fn swap_releases(
     Ok(result.rows_affected() == 2)
 }
 
-pub async fn delete_release(pool: &PgPool, fca_id: &str, callsign: &str) -> Result<bool, ApiError> {
-    let result = sqlx::query("delete from flow.fca_release where fca_id = $1 and callsign = $2")
-        .bind(fca_id)
-        .bind(callsign)
-        .execute(pool)
-        .await
-        .map_err(|_| ApiError::Internal)?;
+/// Clear a release, only at `version` when given (#585). Returns whether a row was removed.
+pub async fn delete_release(
+    pool: &PgPool,
+    fca_id: &str,
+    callsign: &str,
+    version: Option<i64>,
+) -> Result<bool, ApiError> {
+    let result = sqlx::query(
+        "delete from flow.fca_release \
+         where fca_id = $1 and callsign = $2 and ($3::bigint is null or version = $3)",
+    )
+    .bind(fca_id)
+    .bind(callsign)
+    .bind(version)
+    .execute(pool)
+    .await
+    .map_err(|_| ApiError::Internal)?;
     Ok(result.rows_affected() > 0)
 }
