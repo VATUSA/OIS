@@ -30,7 +30,7 @@ use crate::{
     state::AppState,
 };
 
-const MAX_PERMISSIONS: usize = 200;
+pub(crate) const MAX_PERMISSIONS: usize = 200;
 
 /// Mint a token and its public display prefix (`ois_pat_` + 6 hex).
 fn generate_token() -> (String, String) {
@@ -44,7 +44,7 @@ fn generate_token() -> (String, String) {
 }
 
 /// Normalize the requested grants: trim permission names, upper-case ARTCC ids, drop blanks.
-fn to_pairs(permissions: &[ApiKeyPermissionInput]) -> Vec<(String, Option<String>)> {
+pub(crate) fn to_pairs(permissions: &[ApiKeyPermissionInput]) -> Vec<(String, Option<String>)> {
     permissions
         .iter()
         .map(|p| {
@@ -153,29 +153,9 @@ pub async fn grantable_permissions(
 
     // Everything the owner effectively holds, minus what a key may never hold, with the scope they
     // can delegate for each (national ⇒ any ARTCC; otherwise the specific set).
-    let names = access_repo::fetch_user_permission_names(pool, &user.id).await?;
-    let mut out = Vec::new();
-    for permission in names {
-        if keys_repo::is_forbidden_for_key(&permission) {
-            continue;
-        }
-        let (national, artccs) =
-            match access_repo::permission_scope(pool, &user.id, &permission).await? {
-                access_repo::PermissionScope::National => (true, Vec::new()),
-                access_repo::PermissionScope::Facilities(set) => {
-                    let mut v: Vec<String> = set.into_iter().collect();
-                    v.sort();
-                    (false, v)
-                }
-            };
-        out.push(GrantablePermissionBody {
-            permission,
-            national,
-            artccs,
-        });
-    }
-    out.sort_by(|a, b| a.permission.cmp(&b.permission));
-    Ok(Json(out))
+    Ok(Json(
+        keys_repo::grantable_for(pool, &user.id, keys_repo::is_forbidden_for_key).await?,
+    ))
 }
 
 #[utoipa::path(

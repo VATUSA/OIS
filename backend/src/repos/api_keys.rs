@@ -10,7 +10,7 @@ use sqlx::PgPool;
 
 use crate::{
     errors::ApiError,
-    models::{ApiKeyBody, ApiKeyPermissionBody},
+    models::{ApiKeyBody, ApiKeyPermissionBody, GrantablePermissionBody},
     repos::access::{self as access_repo, PermissionScope},
 };
 
@@ -19,10 +19,23 @@ use crate::{
 /// the permission's first segment (its domain).
 pub const API_KEY_FORBIDDEN_DOMAINS: &[&str] = &["api_keys"];
 
+/// Permission domains a service account may NEVER hold (#584): like a key, a machine must not be able
+/// to mint credentials — of either kind.
+pub const SERVICE_ACCOUNT_FORBIDDEN_DOMAINS: &[&str] = &["api_keys", "service_accounts"];
+
+fn domain_in(permission_name: &str, domains: &[&str]) -> bool {
+    let domain = permission_name.split('.').next().unwrap_or("");
+    domains.contains(&domain)
+}
+
 /// Whether `permission_name` is off-limits for API keys (its domain is in the denylist).
 pub fn is_forbidden_for_key(permission_name: &str) -> bool {
-    let domain = permission_name.split('.').next().unwrap_or("");
-    API_KEY_FORBIDDEN_DOMAINS.contains(&domain)
+    domain_in(permission_name, API_KEY_FORBIDDEN_DOMAINS)
+}
+
+/// Whether `permission_name` is off-limits for service accounts.
+pub fn is_forbidden_for_service_account(permission_name: &str) -> bool {
+    domain_in(permission_name, SERVICE_ACCOUNT_FORBIDDEN_DOMAINS)
 }
 
 #[cfg(test)]
@@ -96,25 +109,70 @@ pub async fn validate_subset(
     owner_user_id: &str,
     requested: &[(String, Option<String>)],
 ) -> Result<(), ApiError> {
-    let owner_names: HashSet<String> =
-        access_repo::fetch_user_permission_names(pool, owner_user_id)
+    validate_grants(pool, owner_user_id, requested, is_forbidden_for_key).await
+}
+
+/// [`validate_subset`] with the denylist as a parameter: every requested grant must be within
+/// `granter_user_id`'s live authority and not `forbidden`. A service account has no owner, so its
+/// grants are checked against the admin making them, on every write (#584).
+pub async fn validate_grants(
+    pool: &PgPool,
+    granter_user_id: &str,
+    requested: &[(String, Option<String>)],
+    forbidden: fn(&str) -> bool,
+) -> Result<(), ApiError> {
+    let granter_names: HashSet<String> =
+        access_repo::fetch_user_permission_names(pool, granter_user_id)
             .await?
             .into_iter()
             .collect();
 
     for (permission_name, artcc_id) in requested {
-        if is_forbidden_for_key(permission_name) {
+        if forbidden(permission_name) {
             return Err(ApiError::BadRequest);
         }
-        if !owner_names.contains(permission_name) {
+        if !granter_names.contains(permission_name) {
             return Err(ApiError::Forbidden);
         }
-        let scope = access_repo::permission_scope(pool, owner_user_id, permission_name).await?;
+        let scope = access_repo::permission_scope(pool, granter_user_id, permission_name).await?;
         if !scope.allows(artcc_id.as_deref()) {
             return Err(ApiError::Forbidden);
         }
     }
     Ok(())
+}
+
+/// What `user_id` may delegate: everything they effectively hold that isn't `forbidden`, with the
+/// scope they hold it at (national ⇒ any ARTCC). The picker's source for both API keys and service
+/// accounts, so it offers exactly what [`validate_grants`] accepts.
+pub async fn grantable_for(
+    pool: &PgPool,
+    user_id: &str,
+    forbidden: fn(&str) -> bool,
+) -> Result<Vec<GrantablePermissionBody>, ApiError> {
+    let names = access_repo::fetch_user_permission_names(pool, user_id).await?;
+    let mut out = Vec::new();
+    for permission in names {
+        if forbidden(&permission) {
+            continue;
+        }
+        let (national, artccs) =
+            match access_repo::permission_scope(pool, user_id, &permission).await? {
+                PermissionScope::National => (true, Vec::new()),
+                PermissionScope::Facilities(set) => {
+                    let mut v: Vec<String> = set.into_iter().collect();
+                    v.sort();
+                    (false, v)
+                }
+            };
+        out.push(GrantablePermissionBody {
+            permission,
+            national,
+            artccs,
+        });
+    }
+    out.sort_by(|a, b| a.permission.cmp(&b.permission));
+    Ok(out)
 }
 
 #[cfg(test)]
