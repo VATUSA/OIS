@@ -5,6 +5,8 @@ import {useToast} from "@ois/ui";
 import {ois} from "./api";
 
 export type Group = components["schemas"]["GroupBody"];
+export type GroupMemberPage = components["schemas"]["GroupMemberPage"];
+export type GroupMemberRequest = components["schemas"]["GroupMemberRequest"];
 export type CreateGroupRequest = components["schemas"]["CreateGroupRequest"];
 export type UpdateGroupRequest = components["schemas"]["UpdateGroupRequest"];
 
@@ -96,6 +98,57 @@ export function useDeleteGroup() {
         error.status === 409
           ? "That group still has members — remove them first"
           : "Couldn’t delete the group",
+      );
+    },
+  });
+}
+
+/** A page of a group's holders, each with the scope they hold it at. */
+export function useGroupMembers(name: string, page = 1) {
+  return useQuery({
+    queryKey: [...GROUPS, name, "members", page],
+    queryFn: async (): Promise<GroupMemberPage> => {
+      const {data, error} = await ois.GET("/api/v1/admin/groups/{name}/members", {
+        params: {path: {name}, query: {page}},
+      });
+      if (error || !data) throw new Error("failed to load members");
+      return data;
+    },
+  });
+}
+
+/**
+ * Add or remove one membership, at one scope.
+ *
+ * `artcc_id` matters on **removal** as well: a user can hold the same group nationally and at an
+ * ARTCC, so omitting it would be ambiguous. The server rejects (403) a grant the caller could not
+ * make directly.
+ */
+export function useChangeMembership(held: boolean) {
+  const qc = useQueryClient();
+  const toast = useToast();
+  return useMutation({
+    mutationFn: async (args: {name: string; body: GroupMemberRequest}): Promise<void> => {
+      const call = held ? ois.POST : ois.DELETE;
+      // 204, so there is no body to read — the list is refetched by the invalidation below.
+      const {error, response} = await call("/api/v1/admin/groups/{name}/members", {
+        params: {path: {name: args.name}},
+        body: args.body,
+      });
+      if (error) {
+        const err = new Error("membership change failed") as Error & {status?: number};
+        err.status = response?.status;
+        throw err;
+      }
+    },
+    onSuccess: () => qc.invalidateQueries({queryKey: GROUPS}),
+    onError: (error: Error & {status?: number}) => {
+      toast.error(
+        error.status === 403
+          ? "You can only grant a group where you hold everything it bundles"
+          : held
+            ? "Couldn’t add the member"
+            : "Couldn’t remove the member",
       );
     },
   });
