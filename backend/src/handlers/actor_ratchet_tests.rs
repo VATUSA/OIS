@@ -81,6 +81,8 @@ const CURRENT_USER_HANDLERS: &[(&str, &str, Intent)] = &[
     ("events", "upsert_event_rate", Pending),
     ("events", "delete_event_rate", Pending),
     ("events", "create_event_package", Pending),
+    ("events", "add_event_package_item", Pending),
+    ("events", "set_event_package_auto", Pending),
     ("events", "activate_event_package", Pending),
     ("events", "deactivate_event_package", Pending),
     ("events", "create_event_fca", Pending),

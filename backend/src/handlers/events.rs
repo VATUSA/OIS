@@ -1548,8 +1548,13 @@ pub async fn set_event_package_auto(
     }
     // Recorded as the package's `updated_by`, which is who the job activates as — so the person who
     // chose automatic issuance is the one held to the rule, and the one the advisory is attributed to.
-    events_repo::set_package_auto(pool, &package_id, payload.auto_publish, principal.user_id())
-        .await?;
+    events_repo::set_package_auto(
+        pool,
+        &package_id,
+        payload.auto_publish,
+        principal.user_id().ok_or(ApiError::Forbidden)?,
+    )
+    .await?;
     Ok(Json(events_repo::list_packages(pool, id).await?))
 }
 
