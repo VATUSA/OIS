@@ -6,9 +6,10 @@ use std::collections::{BTreeMap, BTreeSet, HashSet};
 use chrono::{DateTime, Utc};
 use sqlx::{PgPool, Postgres, Transaction};
 
+use crate::auth::acl;
 use crate::errors::ApiError;
 use crate::feed::vatusa::VatusaMember;
-use crate::models::{VatusaProfile, VatusaRoleEntry};
+use crate::models::{UserAccessBody, VatusaProfile, VatusaRoleEntry};
 use crate::repos::access::{self as access_repo, GrantSource};
 use crate::repos::audit as audit_repo;
 
@@ -252,13 +253,19 @@ async fn desired_vatusa_grants(
         .collect())
 }
 
-/// Make the member's `source = 'vatusa'` group grants equal what their VATUSA roles justify, auditing
-/// every change. Compares against the rows actually held rather than the previous sync's view, so a
-/// mapping edited between syncs, or a sync that failed half-way, converges on the next run.
+/// Make the member's `source = 'vatusa'` group grants equal what their VATUSA roles justify. Compares
+/// against the rows actually held rather than the previous sync's view, so a mapping edited between
+/// syncs, or a sync that failed half-way, converges on the next run.
 ///
 /// Every write goes through `set_user_role_scoped(…, GrantSource::Vatusa)`, which only ever touches
 /// `vatusa` rows — a hand-made grant of the same group at the same scope is a separate row (0098) and
 /// survives a demotion.
+///
+/// A sync that changes anything is audited **exactly as an admin edit is** (#546 AC6): one `UPDATE` on
+/// `USER_ACCESS`, keyed on the member, with the full access snapshot either side — so one query finds
+/// a controller's whole access history, by hand or by sync. The actor is `VATUSA sync` and the reason
+/// names each change and the VATUSA role behind it (#548 AC6). A sync that changes nothing writes
+/// nothing.
 async fn reconcile_vatusa_grants(
     tx: &mut Transaction<'_, Postgres>,
     user_id: &str,
@@ -277,10 +284,21 @@ async fn reconcile_vatusa_grants(
     .into_iter()
     .collect();
 
-    for ((group, scope), because) in justified_now {
-        if held.contains(&(group.clone(), scope.clone())) {
-            continue;
-        }
+    let grants: Vec<_> = justified_now
+        .iter()
+        .filter(|(key, _)| !held.contains(*key))
+        .collect();
+    let revokes: Vec<_> = held
+        .iter()
+        .filter(|key| !justified_now.contains_key(*key))
+        .collect();
+    if grants.is_empty() && revokes.is_empty() {
+        return Ok(());
+    }
+
+    let before = access_snapshot(tx, user_id, cid).await?;
+    let mut changes = Vec::with_capacity(grants.len() + revokes.len());
+    for ((group, scope), because) in grants {
         access_repo::set_user_role_scoped(
             tx,
             user_id,
@@ -290,14 +308,13 @@ async fn reconcile_vatusa_grants(
             GrantSource::Vatusa,
         )
         .await?;
-        let reason = format!("VATUSA sync: holds {}", because.join(", "));
-        audit_sync_change(tx, "GRANT", group, scope, cid, reason).await?;
+        changes.push(format!(
+            "granted {group} {} (holds {})",
+            scope_label(scope),
+            because.join(", ")
+        ));
     }
-
-    for (group, scope) in &held {
-        if justified_now.contains_key(&(group.clone(), scope.clone())) {
-            continue;
-        }
+    for key @ (group, scope) in revokes {
         access_repo::set_user_role_scoped(
             tx,
             user_id,
@@ -307,46 +324,58 @@ async fn reconcile_vatusa_grants(
             GrantSource::Vatusa,
         )
         .await?;
-        // A removal is caused by a role the member no longer holds — or, when nothing justified it
-        // even before this sync, by its mapping having been removed.
-        let reason = match justified_before.get(&(group.clone(), scope.clone())) {
-            Some(because) => format!("VATUSA sync: no longer holds {}", because.join(", ")),
-            None => "VATUSA sync: no mapped VATUSA role supports it".to_string(),
+        // Caused by a role the member no longer holds — or, when nothing justified it even before
+        // this sync, by its mapping having been removed.
+        let why = match justified_before.get(key) {
+            Some(because) => format!("no longer holds {}", because.join(", ")),
+            None => "no mapped VATUSA role supports it".to_string(),
         };
-        audit_sync_change(tx, "REVOKE", group, scope, cid, reason).await?;
+        changes.push(format!("revoked {group} {} ({why})", scope_label(scope)));
     }
-    Ok(())
-}
+    let after = access_snapshot(tx, user_id, cid).await?;
 
-/// The audit actor seeded by migration 0100.
-const VATUSA_SYNC_ACTOR: &str = "vatusa-sync";
-
-/// Same shape as a hand-made membership change (`handlers::access::change_membership`), so sync
-/// grants appear beside manual ones under the same `ACCESS_GROUP_MEMBER` dossier filter.
-async fn audit_sync_change(
-    tx: &mut Transaction<'_, Postgres>,
-    action: &str,
-    group: &str,
-    scope: &Option<String>,
-    cid: i64,
-    reason: String,
-) -> Result<(), ApiError> {
     audit_repo::record_audit(
         &mut **tx,
         audit_repo::AuditEntry {
             actor_id: Some(VATUSA_SYNC_ACTOR.to_string()),
-            action: action.to_string(),
-            resource_type: "ACCESS_GROUP_MEMBER".to_string(),
-            resource_id: Some(format!("{group}:{cid}")),
-            artcc_id: scope.clone(),
-            reason: Some(reason),
-            before_state: None,
-            after_state: None,
+            action: "UPDATE".to_string(),
+            resource_type: "USER_ACCESS".to_string(),
+            resource_id: Some(user_id.to_string()),
+            artcc_id: None,
+            reason: Some(format!("VATUSA sync: {}", changes.join("; "))),
+            before_state: serde_json::to_value(&before).ok(),
+            after_state: serde_json::to_value(&after).ok(),
             ip_address: None,
         },
     )
     .await
 }
+
+fn scope_label(scope: &Option<String>) -> String {
+    scope
+        .as_deref()
+        .map_or_else(|| "nationally".to_string(), |artcc| format!("at {artcc}"))
+}
+
+/// The member's access as the user editor shows it, read inside the transaction so it sees the
+/// sync's own writes — the same snapshot an admin edit records.
+async fn access_snapshot(
+    tx: &mut Transaction<'_, Postgres>,
+    user_id: &str,
+    cid: i64,
+) -> Result<UserAccessBody, ApiError> {
+    let grants = access_repo::fetch_user_direct_grants(&mut **tx, user_id).await?;
+    let roles = access_repo::fetch_user_role_grants(&mut **tx, user_id).await?;
+    let mut body = acl::user_access_body(user_id, cid, grants, roles)?;
+    if body.server_admin {
+        let catalog = access_repo::fetch_access_catalog_names(&mut **tx).await?;
+        acl::apply_server_admin_catalog(&mut body, &catalog)?;
+    }
+    Ok(body)
+}
+
+/// The audit actor seeded by migration 0100.
+const VATUSA_SYNC_ACTOR: &str = "vatusa-sync";
 
 /// CIDs from the given set that we actually have a user row for.
 pub async fn known_cids(pool: &PgPool, cids: &[i64]) -> Result<Vec<i64>, ApiError> {
@@ -492,11 +521,13 @@ mod tests {
     }
 
     /// (action, artcc_id, reason, actor_id) for every sync-written membership audit row.
+    /// (action, resource_id, reason, actor_id) for every sync-written access audit entry — the same
+    /// `USER_ACCESS` key an admin edit uses (#546 AC6).
     async fn sync_audits(pool: &PgPool) -> Vec<(String, Option<String>, String, String)> {
         sqlx::query_as(
-            "select action, artcc_id, reason, actor_id from access.audit_logs \
-             where resource_type = 'ACCESS_GROUP_MEMBER' and actor_id = 'vatusa-sync' \
-             order by created_at, action",
+            "select action, resource_id, reason, actor_id from access.audit_logs \
+             where resource_type = 'USER_ACCESS' and actor_id = 'vatusa-sync' \
+             order by created_at, id",
         )
         .fetch_all(pool)
         .await
@@ -582,27 +613,54 @@ mod tests {
         );
     }
 
-    /// AC6: every sync-driven change is audited by the `vatusa-sync` actor, naming the VATUSA role that
-    /// caused it — including a removal, whose role is already gone from `identity.vatusa_roles`.
+    /// AC6: every sync that changes access is audited exactly as an admin edit is — `UPDATE` on
+    /// `USER_ACCESS`, keyed on the member, with the access snapshot either side — by the `VATUSA sync`
+    /// actor, naming the VATUSA role behind each change. That includes a removal, whose role is already
+    /// gone from `identity.vatusa_roles` by the time it is written.
     #[sqlx::test]
     async fn every_change_is_audited_naming_the_vatusa_role(pool: PgPool) {
-        seed_user(&pool).await;
+        let user = seed_user(&pool).await;
         map(&pool, "DATM", None, "EC").await;
 
         sync(&pool, &[("DATM", "ZDC")]).await;
         sync(&pool, &[]).await;
 
         let audits = sync_audits(&pool).await;
-        assert_eq!(audits.len(), 2, "one grant, one revoke: {audits:?}");
-        let (action, scope, reason, actor) = &audits[0];
+        assert_eq!(audits.len(), 2, "one per changing sync: {audits:?}");
+        for (action, resource, _, actor) in &audits {
+            assert_eq!(
+                (action.as_str(), resource.as_deref(), actor.as_str()),
+                ("UPDATE", Some(user.as_str()), "vatusa-sync")
+            );
+        }
         assert_eq!(
-            (action.as_str(), scope.as_deref(), actor.as_str()),
-            ("GRANT", Some("ZDC"), "vatusa-sync")
+            audits[0].2,
+            "VATUSA sync: granted EC at ZDC (holds DATM@ZDC)"
         );
-        assert!(reason.contains("DATM@ZDC"), "{reason}");
-        let (action, _, reason, _) = &audits[1];
-        assert_eq!(action, "REVOKE");
-        assert!(reason.contains("no longer holds DATM@ZDC"), "{reason}");
+        assert_eq!(
+            audits[1].2,
+            "VATUSA sync: revoked EC at ZDC (no longer holds DATM@ZDC)"
+        );
+
+        // The snapshots are the user editor's: the grant appears in the ZDC scope's roles after it.
+        let (before, after): (serde_json::Value, serde_json::Value) = sqlx::query_as(
+            "select before_state, after_state from access.audit_logs \
+             where resource_type = 'USER_ACCESS' and actor_id = 'vatusa-sync' \
+             order by created_at, id limit 1",
+        )
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        let zdc_roles = |state: &serde_json::Value| {
+            state["scopes"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .find(|s| s["artcc_id"] == "ZDC")
+                .map(|s| s["role_names"].clone())
+        };
+        assert_eq!(zdc_roles(&before), None);
+        assert_eq!(zdc_roles(&after), Some(serde_json::json!(["EC"])));
     }
 
     /// A mapping pinned to a facility applies only there; one without a facility applies anywhere.

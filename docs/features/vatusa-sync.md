@@ -30,8 +30,10 @@ ingest.
 - any other facility OIS doesn't know is **skipped**, so the `access.user_roles` FK is never hit;
 - only `vatusa` rows are added or removed — a hand-made grant of the same group survives a demotion
   (see provenance in [`../architecture/permissions.md`](../architecture/permissions.md));
-- every change is audited as `GRANT`/`REVOKE` on `ACCESS_GROUP_MEMBER` by the `VATUSA sync` actor, with
-  a reason naming the VATUSA role(s) that caused it.
+- a sync that changes anything is audited **exactly as an admin edit is**: one `UPDATE` on
+  `USER_ACCESS`, keyed on the member, with the full access snapshot either side — so one query finds
+  a controller's whole history, by hand or by sync. The actor is `VATUSA sync`; the reason names each
+  change and the VATUSA role behind it (`VATUSA sync: granted EC at ZDC (holds DATM@ZDC)`)
 
 A sign-in and a webhook for the same person cannot race: `upsert_member` updates the member's
 `identity.users` row first, and that row lock holds until commit, so their syncs run one at a time.
