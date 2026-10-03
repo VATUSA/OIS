@@ -8,7 +8,7 @@ use sqlx::{PgPool, Postgres, Transaction};
 
 use crate::errors::ApiError;
 use crate::feed::vatusa::VatusaMember;
-use crate::models::{VatusaProfile, VatusaRoleEntry};
+use crate::models::{VatusaProfile, VatusaRoleEntry, VatusaRoleMappingBody};
 use crate::repos::access::{self as access_repo, GrantSource};
 use crate::repos::audit as audit_repo;
 
@@ -346,6 +346,135 @@ async fn audit_sync_change(
         },
     )
     .await
+}
+
+// --- Role → group mappings (#548) ---
+
+type MappingRow = (i64, String, Option<String>, String, DateTime<Utc>);
+
+fn mapping_body(
+    (id, vatusa_role, facility, role_name, created_at): MappingRow,
+) -> VatusaRoleMappingBody {
+    VatusaRoleMappingBody {
+        id,
+        vatusa_role,
+        facility,
+        role_name,
+        created_at,
+    }
+}
+
+const MAPPING_SELECT: &str =
+    "select id, vatusa_role, facility, role_name, created_at from access.vatusa_role_mappings";
+
+pub async fn fetch_role_mappings(pool: &PgPool) -> Result<Vec<VatusaRoleMappingBody>, ApiError> {
+    let rows = sqlx::query_as::<_, MappingRow>(&format!(
+        "{MAPPING_SELECT} order by role_name, vatusa_role, facility nulls first"
+    ))
+    .fetch_all(pool)
+    .await
+    .map_err(|_| ApiError::Internal)?;
+    Ok(rows.into_iter().map(mapping_body).collect())
+}
+
+pub async fn fetch_role_mapping(
+    pool: &PgPool,
+    id: i64,
+) -> Result<Option<VatusaRoleMappingBody>, ApiError> {
+    let row = sqlx::query_as::<_, MappingRow>(&format!("{MAPPING_SELECT} where id = $1"))
+        .bind(id)
+        .fetch_optional(pool)
+        .await
+        .map_err(|_| ApiError::Internal)?;
+    Ok(row.map(mapping_body))
+}
+
+/// The VATUSA roles seen in synced members, for the mapping editor's picker.
+pub async fn fetch_known_vatusa_roles(pool: &PgPool) -> Result<Vec<String>, ApiError> {
+    sqlx::query_scalar("select distinct role from identity.vatusa_roles order by role")
+        .fetch_all(pool)
+        .await
+        .map_err(|_| ApiError::Internal)
+}
+
+/// Insert a mapping, or `Conflict` if the same one exists. Race-free: the unique index decides.
+pub async fn create_role_mapping(
+    tx: &mut Transaction<'_, Postgres>,
+    vatusa_role: &str,
+    facility: Option<&str>,
+    role_name: &str,
+) -> Result<i64, ApiError> {
+    sqlx::query_scalar(
+        "insert into access.vatusa_role_mappings (vatusa_role, facility, role_name) \
+         values ($1, $2, $3) \
+         on conflict (vatusa_role, (coalesce(facility, '')), role_name) do nothing \
+         returning id",
+    )
+    .bind(vatusa_role)
+    .bind(facility)
+    .bind(role_name)
+    .fetch_optional(&mut **tx)
+    .await
+    .map_err(|_| ApiError::Internal)?
+    .ok_or(ApiError::Conflict)
+}
+
+pub async fn delete_role_mapping(
+    tx: &mut Transaction<'_, Postgres>,
+    id: i64,
+) -> Result<(), ApiError> {
+    sqlx::query("delete from access.vatusa_role_mappings where id = $1")
+        .bind(id)
+        .execute(&mut **tx)
+        .await
+        .map_err(|_| ApiError::Internal)?;
+    Ok(())
+}
+
+/// Re-reconcile every member a mapping change can affect — those whose stored VATUSA roles include
+/// `vatusa_role` (at `facility`, when the mapping has one) — so the change takes effect now rather
+/// than at each member's next sync. Uses the stored roles; no VATUSA call. Returns how many.
+pub async fn reconcile_members_holding(
+    tx: &mut Transaction<'_, Postgres>,
+    vatusa_role: &str,
+    facility: Option<&str>,
+) -> Result<usize, ApiError> {
+    let cids: Vec<i64> = sqlx::query_scalar(
+        "select distinct vr.cid from identity.vatusa_roles vr \
+         join identity.users u on u.cid = vr.cid \
+         where vr.role = $1 and ($2::text is null or vr.facility = $2) \
+         order by vr.cid",
+    )
+    .bind(vatusa_role)
+    .bind(facility)
+    .fetch_all(&mut **tx)
+    .await
+    .map_err(|_| ApiError::Internal)?;
+    for &cid in &cids {
+        reconcile_member_access(tx, cid).await?;
+    }
+    Ok(cids.len())
+}
+
+/// Reconcile one member from their stored VATUSA roles. Takes the member's `identity.users` row lock —
+/// the lock a sync holds — so this and a concurrent sync for the same member run one after the other.
+async fn reconcile_member_access(
+    tx: &mut Transaction<'_, Postgres>,
+    cid: i64,
+) -> Result<(), ApiError> {
+    let Some(user_id) =
+        sqlx::query_scalar::<_, String>("select id from identity.users where cid = $1 for update")
+            .bind(cid)
+            .fetch_optional(&mut **tx)
+            .await
+            .map_err(|_| ApiError::Internal)?
+    else {
+        return Ok(());
+    };
+    let justified_now = desired_vatusa_grants(tx, cid).await?;
+    // No "before": the member's roles didn't change, a mapping did — so a removal's reason is that no
+    // mapping supports the grant any more, which is what the reconciler says when it has no prior view.
+    reconcile_vatusa_grants(tx, &user_id, cid, &BTreeMap::new(), &justified_now).await
 }
 
 /// CIDs from the given set that we actually have a user row for.

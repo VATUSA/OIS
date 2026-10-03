@@ -222,6 +222,36 @@ pub struct GroupMemberRequest {
     pub reason: String,
 }
 
+/// One VATUSA role → OIS group mapping (#548). A member holding `vatusa_role` — at `facility`, or at
+/// any facility when it is null — is granted `role_name`, scoped to where they hold the VATUSA role.
+#[derive(Debug, Serialize, ToSchema)]
+pub struct VatusaRoleMappingBody {
+    pub id: i64,
+    pub vatusa_role: String,
+    pub facility: Option<String>,
+    pub role_name: String,
+    pub created_at: DateTime<Utc>,
+}
+
+/// Every mapping, plus the VATUSA roles actually seen in synced members — the editor offers those
+/// rather than free text, so a role name that would never match can't be entered.
+#[derive(Debug, Serialize, ToSchema)]
+pub struct VatusaRoleMappingList {
+    pub mappings: Vec<VatusaRoleMappingBody>,
+    pub known_vatusa_roles: Vec<String>,
+}
+
+/// Add a mapping. Codes are trimmed and uppercased, as VATUSA roles are on ingest. `reason` is
+/// required and audited.
+#[derive(Debug, Deserialize, ToSchema)]
+pub struct CreateVatusaRoleMappingRequest {
+    pub vatusa_role: String,
+    #[serde(default)]
+    pub facility: Option<String>,
+    pub role_name: String,
+    pub reason: String,
+}
+
 /// Create a group. Its permission set is set by a follow-up `PUT`, which is also what runs the
 /// no-escalation gate over the contents.
 #[derive(Debug, Deserialize, ToSchema)]
