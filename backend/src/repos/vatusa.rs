@@ -577,6 +577,59 @@ mod tests {
         );
     }
 
+    /// The sync owns only its own rows, so "what is already held" means held **by the sync**. A
+    /// hand-made grant of the mapped group at the same scope must not stop the sync from writing its
+    /// own row — or removing the manual one later would take the member's access with it until the
+    /// next sync — and a manual grant no mapping supports is not the sync's to revoke, so a sync that
+    /// changes nothing records nothing. `losing_the_role_removes_only_its_grant` has this fixture but
+    /// asserts only the end state, where reading every source looks the same.
+    #[sqlx::test]
+    async fn a_manual_grant_neither_stands_in_for_the_sync_nor_is_revoked_by_it(pool: PgPool) {
+        let user = seed_user(&pool).await;
+        map(&pool, "DATM", None, "EC").await;
+        for (role, artcc) in [("EC", Some("ZDC")), ("NTMO", None)] {
+            sqlx::query(
+                "insert into access.user_roles (user_id, role_name, artcc_id, source) \
+                 values ($1, $2, $3, 'manual')",
+            )
+            .bind(&user)
+            .bind(role)
+            .bind(artcc)
+            .execute(&pool)
+            .await
+            .unwrap();
+        }
+
+        sync(&pool, &[("DATM", "ZDC")]).await;
+        let held = grants(&pool, &user).await;
+        assert!(
+            held.contains(&vatusa("EC", Some("ZDC"))),
+            "the sync writes its own EC@ZDC beside the manual one: {held:?}"
+        );
+        assert!(
+            held.contains(&("NTMO".to_string(), None, "manual".to_string())),
+            "and leaves the unmapped manual grant alone: {held:?}"
+        );
+
+        let audits = |pool: PgPool, user: String| async move {
+            sqlx::query_scalar::<_, i64>(
+                "select count(*) from access.audit_logs \
+                 where resource_type = 'USER_ACCESS' and resource_id = $1",
+            )
+            .bind(&user)
+            .fetch_one(&pool)
+            .await
+            .unwrap()
+        };
+        let before = audits(pool.clone(), user.clone()).await;
+        sync(&pool, &[("DATM", "ZDC")]).await;
+        assert_eq!(
+            audits(pool.clone(), user.clone()).await,
+            before,
+            "a repeat sync that changes nothing records nothing — not a revoke of the manual NTMO"
+        );
+    }
+
     /// AC4: a division role (`ZHQ`, not an ARTCC) is a national grant; a facility OIS doesn't know is
     /// skipped — neither can reach the `access.user_roles` FK.
     #[sqlx::test]
