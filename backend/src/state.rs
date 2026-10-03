@@ -9,8 +9,8 @@ use tokio::sync::broadcast;
 
 use crate::feed::{
     self, FeedState, airspace::Boundaries, facilities::FacilityState, nav::NavData,
-    runway_db::RunwayDb, taxi_estimate, tracon::TraconState, trajectory::ProfileTable,
-    winds::Winds,
+    runway_db::RunwayDb, sectors::SectorTable, taxi_estimate, tracon::TraconState,
+    trajectory::ProfileTable, winds::Winds,
 };
 use crate::models::AirportGateBody;
 
@@ -39,6 +39,11 @@ pub struct AppState {
     /// legacy default table and is reloaded from the DB by `jobs::spawn_aircraft_profiles_refresh`,
     /// so it sits behind an `ArcSwap` for lock-free reads (incl. from the DB-less feed subsystem).
     pub aircraft_profiles: Arc<ArcSwap<ProfileTable>>,
+    /// ATC sector volumes for the Airspace Monitor (#594). Starts empty and is reloaded from the DB
+    /// by `jobs::spawn_airspace_sectors_refresh`; its only writer is the offline importer, so a new
+    /// import appears on the next tick (see `feed::sectors`). Behind `ArcSwap` for lock-free reads
+    /// from the DB-less feed subsystem.
+    pub airspace_sectors: Arc<ArcSwap<SectorTable>>,
     /// Airport surface gates/parking positions, keyed by ICAO. Starts empty and is reloaded from
     /// the DB by `jobs::spawn_airport_gates_refresh` (and force-reloaded on every gate write by
     /// `handlers::airport_surface`), so it sits behind an `ArcSwap` for lock-free reads from the
@@ -101,6 +106,7 @@ impl AppState {
         let runways = Arc::new(RunwayDb::load());
         let winds = Arc::new(ArcSwap::from_pointee(Winds::default()));
         let aircraft_profiles = Arc::new(ArcSwap::from_pointee(ProfileTable::default()));
+        let airspace_sectors = Arc::new(ArcSwap::from_pointee(SectorTable::default()));
         let gates = Arc::new(ArcSwap::from_pointee(HashMap::new()));
         let flight_exclusions = Arc::new(ArcSwap::from_pointee(HashMap::new()));
         let taxi_estimate_samples = Arc::new(ArcSwap::from_pointee(HashMap::new()));
@@ -142,6 +148,7 @@ impl AppState {
                 runways,
                 winds,
                 aircraft_profiles,
+                airspace_sectors,
                 gates,
                 flight_exclusions,
                 taxi_estimate_samples,
@@ -166,6 +173,7 @@ impl AppState {
             runways,
             winds,
             aircraft_profiles,
+            airspace_sectors,
             gates,
             flight_exclusions,
             taxi_estimate_samples,
@@ -191,6 +199,7 @@ impl AppState {
             runways: Arc::new(RunwayDb::load()),
             winds: Arc::new(ArcSwap::from_pointee(Winds::default())),
             aircraft_profiles: Arc::new(ArcSwap::from_pointee(ProfileTable::default())),
+            airspace_sectors: Arc::new(ArcSwap::from_pointee(SectorTable::default())),
             gates: Arc::new(ArcSwap::from_pointee(HashMap::new())),
             flight_exclusions: Arc::new(ArcSwap::from_pointee(HashMap::new())),
             taxi_estimate_samples: Arc::new(ArcSwap::from_pointee(HashMap::new())),

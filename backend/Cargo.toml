@@ -19,6 +19,10 @@ path = "src/bin/faa_surface_importer.rs"
 name = "xplane-gate-importer"
 path = "src/bin/xplane_gate_importer.rs"
 
+[[bin]]
+name = "airspace-sector-importer"
+path = "src/bin/airspace_sector_importer.rs"
+
 [dependencies]
 ois-core.workspace = true
 

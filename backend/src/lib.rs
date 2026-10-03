@@ -81,6 +81,12 @@ pub async fn run() -> color_eyre::Result<()> {
             pool.clone(),
             state.aircraft_profiles.clone(),
         );
+        // ATC sector volumes for the Airspace Monitor (#594), imported offline.
+        jobs::spawn_airspace_sectors_refresh(
+            state.jobs.clone(),
+            pool.clone(),
+            state.airspace_sectors.clone(),
+        );
         // Airport surface gates, for feed::taxi_observations's gate matching (kept DB-less).
         jobs::spawn_airport_gates_refresh(state.jobs.clone(), pool.clone(), state.gates.clone());
         // Manually excluded ("bogus") flights, for the DB-less flow surfaces (#342). Also runs the

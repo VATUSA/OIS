@@ -22,6 +22,7 @@ pub mod neighbors;
 pub mod predict;
 pub mod runway;
 pub mod runway_db;
+pub mod sectors;
 pub mod stats;
 pub mod taxi;
 pub mod taxi_estimate;

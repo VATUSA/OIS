@@ -4,6 +4,7 @@ pub mod admin;
 pub mod aircraft_profiles;
 pub mod airport_configs;
 pub mod airport_surface;
+pub mod airspace_sectors;
 pub mod api_keys;
 pub mod audit;
 pub mod auth;
