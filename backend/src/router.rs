@@ -127,6 +127,12 @@ pub fn build_router(state: AppState) -> Router {
             "/api/v1/admin/groups/{name}",
             put(access::update_group).delete(access::delete_group),
         )
+        .route(
+            "/api/v1/admin/groups/{name}/members",
+            get(access::list_group_members)
+                .post(access::add_group_member)
+                .delete(access::remove_group_member),
+        )
         // TMU — Traffic Management Initiatives
         .route(
             "/api/v1/tmu/tmis",

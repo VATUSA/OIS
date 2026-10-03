@@ -390,6 +390,65 @@ pub async fn fetch_group_permissions(
     .map_err(|_| ApiError::Internal)
 }
 
+/// One holder of a group, at one scope.
+///
+/// A user can appear twice: the unique index is on `(user_id, role_name, coalesce(artcc_id, ''))`, so
+/// holding `EC` nationally *and* at ZDC is two rows and shows as two rows. Flattening them would be
+/// the same mistake the admin user table's role badges make.
+#[derive(Debug, sqlx::FromRow)]
+pub struct GroupMemberRow {
+    pub cid: i64,
+    pub display_name: String,
+    pub rating: Option<String>,
+    pub artcc_id: Option<String>,
+}
+
+/// Match clause shared by the member list and its count, so the two cannot disagree about who is in
+/// the page. Mirrors `repos/users.rs`'s `USER_FILTER` rather than inventing a second shape.
+const MEMBER_FILTER: &str = "ur.role_name = $1 and u.cid is not null and ( \
+    $2 = '' \
+    or u.display_name ilike '%' || $2 || '%' \
+    or u.full_name ilike '%' || $2 || '%' \
+    or cast(u.cid as text) like $2 || '%' )";
+
+/// One page of a group's holders, each with the scope they hold it at.
+pub async fn fetch_group_members(
+    pool: &PgPool,
+    role_name: &str,
+    q: &str,
+    limit: i64,
+    offset: i64,
+) -> Result<Vec<GroupMemberRow>, ApiError> {
+    sqlx::query_as::<_, GroupMemberRow>(&format!(
+        "select u.cid, u.display_name, u.rating, ur.artcc_id \
+         from access.user_roles ur \
+         join identity.users u on u.id = ur.user_id \
+         where {MEMBER_FILTER} \
+         order by u.display_name asc, ur.artcc_id asc nulls first \
+         limit $3 offset $4"
+    ))
+    .bind(role_name)
+    .bind(q)
+    .bind(limit)
+    .bind(offset)
+    .fetch_all(pool)
+    .await
+    .map_err(|_| ApiError::Internal)
+}
+
+/// How many holder rows a group has, for pagination.
+pub async fn count_group_members(pool: &PgPool, role_name: &str, q: &str) -> Result<i64, ApiError> {
+    sqlx::query_scalar::<_, i64>(&format!(
+        "select count(*) from access.user_roles ur \
+         join identity.users u on u.id = ur.user_id where {MEMBER_FILTER}"
+    ))
+    .bind(role_name)
+    .bind(q)
+    .fetch_one(pool)
+    .await
+    .map_err(|_| ApiError::Internal)
+}
+
 /// Replaces a group's permission set. Every holder's access changes on their next request — there is
 /// no per-user copy to backfill, which is the point of groups (#542).
 pub async fn replace_group_permissions(
