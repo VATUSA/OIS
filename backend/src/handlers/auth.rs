@@ -498,7 +498,15 @@ async fn ensure_user_login_access(
         // wipe stays: a demotion must leave a former admin holding no national grants of their own,
         // and `replace_user_permissions` with an empty set is exactly that clearing.
         access_repo::replace_user_permissions(&mut tx, user_id, &[]).await?;
-        access_repo::set_user_role_manual(&mut tx, user_id, BASELINE_ROLE, true).await?;
+        // `System`: OIS grants the baseline group itself, so sync and admins both leave it alone.
+        access_repo::set_user_role(
+            &mut tx,
+            user_id,
+            BASELINE_ROLE,
+            true,
+            access_repo::GrantSource::System,
+        )
+        .await?;
     }
 
     tx.commit().await.map_err(|_| ApiError::Internal)?;
@@ -735,7 +743,7 @@ mod tests {
         let user = seed_user(&pool).await;
         grant(&pool, &user, "tmu.program.update", None).await;
         sqlx::query(
-            "insert into access.user_roles (user_id, role_name) values ($1, 'SERVER_ADMIN')",
+            "insert into access.user_roles (user_id, role_name, source) values ($1, 'SERVER_ADMIN', 'system')",
         )
         .bind(&user)
         .execute(&pool)
@@ -789,7 +797,7 @@ mod tests {
         .execute(&pool)
         .await
         .unwrap();
-        sqlx::query("insert into access.user_roles (user_id, role_name) values ($1, 'TMU_TEST')")
+        sqlx::query("insert into access.user_roles (user_id, role_name, source) values ($1, 'TMU_TEST', 'manual')")
             .bind(&user)
             .execute(&pool)
             .await

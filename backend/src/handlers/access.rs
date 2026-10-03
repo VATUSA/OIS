@@ -279,12 +279,14 @@ pub async fn update_user_access(
         if let Some(role_names) = scope.roles.as_ref() {
             for role_name in &assignable_roles {
                 let held = role_names.iter().any(|r| r == role_name);
-                access_repo::set_user_role_manual_scoped(
+                access_repo::set_user_role_scoped(
                     &mut tx,
                     &target_user_id,
                     role_name,
                     held,
                     scope.artcc.as_deref(),
+                    // The access editor is a human acting: a save never claims to be sync (#547).
+                    access_repo::GrantSource::Manual,
                 )
                 .await?;
             }
@@ -832,7 +834,7 @@ mod group_tests {
 
     async fn make_admin(pool: &PgPool, user_id: &str) {
         sqlx::query(
-            "insert into access.user_roles (user_id, role_name) values ($1, 'SERVER_ADMIN')",
+            "insert into access.user_roles (user_id, role_name, source) values ($1, 'SERVER_ADMIN', 'system')",
         )
         .bind(user_id)
         .execute(pool)
@@ -857,7 +859,7 @@ mod group_tests {
         let user = seed_user(&pool).await;
         grant(&pool, &user, "access.groups.update", None).await;
         make_group(&pool, "TEST_GROUP").await;
-        sqlx::query("insert into access.user_roles (user_id, role_name) values ($1, 'TEST_GROUP')")
+        sqlx::query("insert into access.user_roles (user_id, role_name, source) values ($1, 'TEST_GROUP', 'manual')")
             .bind(&user)
             .execute(&pool)
             .await
@@ -990,7 +992,7 @@ mod group_tests {
         .execute(&pool)
         .await
         .unwrap();
-        sqlx::query("insert into access.user_roles (user_id, role_name) values ($1, 'SRC_GRP')")
+        sqlx::query("insert into access.user_roles (user_id, role_name, source) values ($1, 'SRC_GRP', 'manual')")
             .bind(&user)
             .execute(&pool)
             .await
@@ -1059,7 +1061,7 @@ mod group_tests {
         .execute(&pool)
         .await
         .unwrap();
-        sqlx::query("insert into access.user_roles (user_id, role_name) values ($1, 'DENY_SRC')")
+        sqlx::query("insert into access.user_roles (user_id, role_name, source) values ($1, 'DENY_SRC', 'manual')")
             .bind(&user)
             .execute(&pool)
             .await
@@ -1131,7 +1133,7 @@ mod group_tests {
     /// AC4: the user-side and group-side editors produce identical state for the same change, in
     /// both directions — and record it identically (AC6).
     ///
-    /// Driven through both real routes, not the shared writer: calling `set_user_role_manual_scoped`
+    /// Driven through both real routes, not the shared writer: calling `set_user_role_scoped`
     /// twice would pass whatever either handler did with the scope. An add and a remove fail
     /// differently — the user editor computes a symmetric diff over every assignable group, while the
     /// group side names one — so both are compared, and so is each audit entry, minus the holder's
@@ -1140,7 +1142,7 @@ mod group_tests {
     async fn both_sides_produce_the_same_membership(pool: PgPool) {
         let admin = seed_user(&pool).await;
         sqlx::query(
-            "insert into access.user_roles (user_id, role_name) values ($1, 'SERVER_ADMIN')",
+            "insert into access.user_roles (user_id, role_name, source) values ($1, 'SERVER_ADMIN', 'system')",
         )
         .bind(&admin)
         .execute(&pool)
@@ -1270,7 +1272,7 @@ mod group_tests {
         let actor_id = seed_user(&pool).await;
         grant(&pool, &actor_id, "access.groups.update", None).await;
         let target = holder(&pool, 9_990_301).await;
-        sqlx::query("insert into access.user_roles (user_id, role_name) values ($1, 'USER')")
+        sqlx::query("insert into access.user_roles (user_id, role_name, source) values ($1, 'USER', 'system')")
             .bind(&target)
             .execute(&pool)
             .await
@@ -1316,7 +1318,7 @@ mod group_tests {
         }
         let admin = seed_user(&pool).await;
         sqlx::query(
-            "insert into access.user_roles (user_id, role_name) values ($1, 'SERVER_ADMIN')",
+            "insert into access.user_roles (user_id, role_name, source) values ($1, 'SERVER_ADMIN', 'system')",
         )
         .bind(&admin)
         .execute(&pool)
@@ -1365,12 +1367,26 @@ mod group_tests {
         make_group(&pool, "TWO_SCOPES").await;
 
         let mut tx = pool.begin().await.unwrap();
-        access_repo::set_user_role_manual_scoped(&mut tx, &user, "TWO_SCOPES", true, None)
-            .await
-            .unwrap();
-        access_repo::set_user_role_manual_scoped(&mut tx, &user, "TWO_SCOPES", true, Some("ZDC"))
-            .await
-            .unwrap();
+        access_repo::set_user_role_scoped(
+            &mut tx,
+            &user,
+            "TWO_SCOPES",
+            true,
+            None,
+            access_repo::GrantSource::Manual,
+        )
+        .await
+        .unwrap();
+        access_repo::set_user_role_scoped(
+            &mut tx,
+            &user,
+            "TWO_SCOPES",
+            true,
+            Some("ZDC"),
+            access_repo::GrantSource::Manual,
+        )
+        .await
+        .unwrap();
         tx.commit().await.unwrap();
         assert_eq!(
             access_repo::fetch_user_role_grants(&pool, &user)
@@ -1381,9 +1397,16 @@ mod group_tests {
         );
 
         let mut tx = pool.begin().await.unwrap();
-        access_repo::set_user_role_manual_scoped(&mut tx, &user, "TWO_SCOPES", false, Some("ZDC"))
-            .await
-            .unwrap();
+        access_repo::set_user_role_scoped(
+            &mut tx,
+            &user,
+            "TWO_SCOPES",
+            false,
+            Some("ZDC"),
+            access_repo::GrantSource::Manual,
+        )
+        .await
+        .unwrap();
         tx.commit().await.unwrap();
 
         assert_eq!(
@@ -1407,12 +1430,26 @@ mod group_tests {
             .unwrap();
         make_group(&pool, "MULTI").await;
         let mut tx = pool.begin().await.unwrap();
-        access_repo::set_user_role_manual_scoped(&mut tx, &user, "MULTI", true, None)
-            .await
-            .unwrap();
-        access_repo::set_user_role_manual_scoped(&mut tx, &user, "MULTI", true, Some("ZDC"))
-            .await
-            .unwrap();
+        access_repo::set_user_role_scoped(
+            &mut tx,
+            &user,
+            "MULTI",
+            true,
+            None,
+            access_repo::GrantSource::Manual,
+        )
+        .await
+        .unwrap();
+        access_repo::set_user_role_scoped(
+            &mut tx,
+            &user,
+            "MULTI",
+            true,
+            Some("ZDC"),
+            access_repo::GrantSource::Manual,
+        )
+        .await
+        .unwrap();
         tx.commit().await.unwrap();
 
         let members = access_repo::fetch_group_members(&pool, "MULTI", "", 25, 0)
@@ -1444,9 +1481,16 @@ mod group_tests {
                 .await
                 .unwrap();
             let mut tx = pool.begin().await.unwrap();
-            access_repo::set_user_role_manual_scoped(&mut tx, &id, "SEARCHABLE", true, None)
-                .await
-                .unwrap();
+            access_repo::set_user_role_scoped(
+                &mut tx,
+                &id,
+                "SEARCHABLE",
+                true,
+                None,
+                access_repo::GrantSource::Manual,
+            )
+            .await
+            .unwrap();
             tx.commit().await.unwrap();
         }
 
@@ -1542,8 +1586,8 @@ mod group_tests {
                 .await
                 .unwrap();
                 sqlx::query(
-                    "insert into access.user_roles (user_id, role_name, artcc_id) \
-                     values ($1, 'SCOPED_GRP', $2)",
+                    "insert into access.user_roles (user_id, role_name, artcc_id, source) \
+                     values ($1, 'SCOPED_GRP', $2, 'manual')",
                 )
                 .bind(&id)
                 .bind(artcc)
@@ -1856,8 +1900,15 @@ async fn change_membership(
     let mut tx = pool.begin().await.map_err(|_| ApiError::Internal)?;
     // The same writer the user-side editor calls, so the two sides cannot produce different state
     // (#546 AC4). Idempotent on add, keyed on the same scope on remove.
-    access_repo::set_user_role_manual_scoped(&mut tx, &target, name, held, artcc.as_deref())
-        .await?;
+    access_repo::set_user_role_scoped(
+        &mut tx,
+        &target,
+        name,
+        held,
+        artcc.as_deref(),
+        access_repo::GrantSource::Manual,
+    )
+    .await?;
     tx.commit().await.map_err(|_| ApiError::Internal)?;
 
     let mut after = build_user_access_body(

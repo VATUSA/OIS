@@ -164,8 +164,8 @@ mod handshake_tests {
             .unwrap();
         }
         sqlx::query(
-            "insert into access.user_permissions (user_id, permission_name, granted) \
-             values ('ws-user', 'ace.requests.claim', true)",
+            "insert into access.user_permissions (user_id, permission_name, granted, source) \
+             values ('ws-user', 'ace.requests.claim', true, 'manual')",
         )
         .execute(&pool)
         .await
