@@ -1255,14 +1255,63 @@ pub(crate) async fn activate_package(
     )
     .await?;
 
-    // Materialize each draft item into the live TMU tables, recording a `live_ref` so the package
-    // can later be deactivated (cancelling exactly what it created).
+    // ## One transaction for the whole package (#537 review)
+    //
+    // Every item, every `live_ref` and `mark_package_activated` commit together or not at all. Each item
+    // used to commit on its own, so a failure on item N left 1…N-1 live while the package stayed a draft,
+    // and a retry published them **again**: a second numbered advisory, with the first orphaned
+    // (referenced by no item, so deactivation could never withdraw it). Auto-publish re-selects draft
+    // packages every tick, so one bad item republished everything before it on every tick.
+    //
+    // ### Pre-pass, outside the transaction
+    //
+    // Every payload is parsed and every Discord channel resolved **before** anything is written. A
+    // malformed item fails here with nothing touched. And no unrelated query runs inside the transaction,
+    // where `create_advisory_tx` holds `pg_advisory_xact_lock(facility:day)` for the advisory numbering.
+    // Those locks are now held until the package commits rather than per item — milliseconds — which only
+    // delays another advisory being created for the *same facility and day* while this one activates.
+    enum Prepared {
+        Program(ProgramItem),
+        // Boxed: it is far larger than the others (clippy::large_enum_variant).
+        Restriction(Box<RestrictionItem>),
+        GroundStop(GroundStopItem),
+        // The advisory channel is scoped to the issuing facility, as `publish_advisory` does: an
+        // advisory has exactly one owner, unlike a TMI with its requesting and providing ARTCCs.
+        Advisory(AdvisoryItem, Option<String>),
+    }
+    let mut prepared: Vec<(String, Prepared)> = Vec::with_capacity(items.len());
     for item in &items {
         let payload = item.payload.0.clone();
-        let live_ref = match item.kind.as_str() {
-            "program" => {
-                let p: ProgramItem =
-                    serde_json::from_value(payload).map_err(|_| ApiError::Internal)?;
+        let parse_err = |_| ApiError::Internal;
+        let p = match item.kind.as_str() {
+            "program" => Prepared::Program(serde_json::from_value(payload).map_err(parse_err)?),
+            "restriction" => Prepared::Restriction(Box::new(
+                serde_json::from_value(payload).map_err(parse_err)?,
+            )),
+            "ground_stop" => {
+                Prepared::GroundStop(serde_json::from_value(payload).map_err(parse_err)?)
+            }
+            "advisory" => {
+                let a: AdvisoryItem = serde_json::from_value(payload).map_err(parse_err)?;
+                let channel = integration_repo::channel_id(
+                    pool,
+                    crate::handlers::tmu::ADV_CHANNEL,
+                    Some(&a.facility),
+                )
+                .await?;
+                Prepared::Advisory(a, channel)
+            }
+            _ => continue,
+        };
+        prepared.push((item.id.clone(), p));
+    }
+
+    // Materialize each item into the live TMU tables, recording a `live_ref` so the package can later be
+    // deactivated (cancelling exactly what it created). An early `?` drops `tx`, which rolls back.
+    let mut tx = pool.begin().await.map_err(|_| ApiError::Internal)?;
+    for (item_id, item) in prepared {
+        let live_ref = match item {
+            Prepared::Program(p) => {
                 let req = UpsertProgramRequest {
                     aar: p.aar,
                     trail: p.trail,
@@ -1274,13 +1323,12 @@ pub(crate) async fn activate_package(
                     // planned programs auto-expire an hour after the event ends
                     active_until: Some(event.end_time),
                 };
-                tmu_repo::upsert_program(pool, &p.icao, &req, &[], actor).await?;
+                tmu_repo::upsert_program(&mut *tx, &p.icao, &req, &[], actor).await?;
                 // Programs are keyed by ICAO; that's the handle for later cleanup.
                 p.icao
             }
-            "restriction" => {
-                let r: RestrictionItem =
-                    serde_json::from_value(payload).map_err(|_| ApiError::Internal)?;
+            Prepared::Restriction(r) => {
+                let r = *r;
                 let req = CreateTmiRequest {
                     requesting: r.requesting,
                     providing: r.providing,
@@ -1290,8 +1338,7 @@ pub(crate) async fn activate_package(
                     stop_time: r.stop_time,
                 };
                 // Activation goes live: create then publish so the restriction is active.
-                let tmi_id = tmu_repo::create_tmi(pool, &req, actor).await?;
-                let mut tx = pool.begin().await.map_err(|_| ApiError::Internal)?;
+                let tmi_id = tmu_repo::create_tmi(&mut *tx, &req, actor).await?;
                 let tmi = tmu_repo::publish_tmi(&mut tx, &tmi_id, actor).await?;
                 if let (Some(tmi), Some(channel_id)) = (tmi, tmu_channel.clone()) {
                     let job = crate::handlers::tmu::tmi_publish_job(&channel_id, &tmi);
@@ -1304,12 +1351,9 @@ pub(crate) async fn activate_package(
                     )
                     .await?;
                 }
-                tx.commit().await.map_err(|_| ApiError::Internal)?;
                 tmi_id
             }
-            "ground_stop" => {
-                let g: GroundStopItem =
-                    serde_json::from_value(payload).map_err(|_| ApiError::Internal)?;
+            Prepared::GroundStop(g) => {
                 let scope = g.scope.clone().unwrap_or_default();
                 let req = CreateGroundStopRequest {
                     airport: g.airport.clone(),
@@ -1317,14 +1361,12 @@ pub(crate) async fn activate_package(
                     until: g.until.clone(),
                 };
                 let gs_id =
-                    tmu_repo::create_ground_stop(pool, &req, &scope, g.until.as_deref(), actor)
+                    tmu_repo::create_ground_stop(&mut *tx, &req, &scope, g.until.as_deref(), actor)
                         .await?;
-                tmu_repo::publish_ground_stop(pool, &gs_id, actor).await?;
+                tmu_repo::publish_ground_stop(&mut *tx, &gs_id, actor).await?;
                 gs_id
             }
-            "advisory" => {
-                let a: AdvisoryItem =
-                    serde_json::from_value(payload).map_err(|_| ApiError::Internal)?;
+            Prepared::Advisory(a, channel) => {
                 let req = CreateAdvisoryRequest {
                     facility: a.facility.clone(),
                     kind: a.kind.clone(),
@@ -1335,26 +1377,8 @@ pub(crate) async fn activate_package(
                     valid_from: Some(a.valid_from),
                     valid_to: Some(a.valid_to),
                 };
-
-                // Resolved **before** the transaction, for the reason `create_advisory_tx` documents:
-                // it allocates the number behind `pg_advisory_xact_lock(facility:day)` and holds that
-                // lock for the rest of the transaction. A channel lookup inside it would hold the
-                // facility's numbering lock across an unrelated query, and with several advisory items
-                // in one package those locks queue up behind each other.
-                //
-                // Scoped to the issuing facility, as `publish_advisory` does: an advisory has exactly
-                // one owner, unlike a TMI with its requesting and providing ARTCCs.
-                let channel = integration_repo::channel_id(
-                    pool,
-                    crate::handlers::tmu::ADV_CHANNEL,
-                    Some(&a.facility),
-                )
-                .await?;
-
-                // One transaction per item: create, publish and enqueue together so an advisory can
-                // never be live with nothing queued to announce it, or queued without being live —
-                // then committed, which releases the numbering lock before the next item takes it.
-                let mut tx = pool.begin().await.map_err(|_| ApiError::Internal)?;
+                // Create, publish and enqueue together so an advisory is never live with nothing
+                // queued to announce it, or queued without being live.
                 let adv_id = tmu_repo::create_advisory_tx(&mut tx, &req, actor, None).await?;
                 if !tmu_repo::publish_advisory(&mut tx, &adv_id, actor).await? {
                     // It was created in this transaction, so this cannot be "already published".
@@ -1374,15 +1398,14 @@ pub(crate) async fn activate_package(
                     )
                     .await?;
                 }
-                tx.commit().await.map_err(|_| ApiError::Internal)?;
                 adv_id
             }
-            _ => continue,
         };
-        events_repo::set_item_live_ref(pool, &item.id, &live_ref).await?;
+        events_repo::set_item_live_ref(&mut *tx, &item_id, &live_ref).await?;
     }
 
-    events_repo::mark_package_activated(pool, package_id, actor).await?;
+    events_repo::mark_package_activated(&mut *tx, package_id, actor).await?;
+    tx.commit().await.map_err(|_| ApiError::Internal)?;
     Ok(())
 }
 
@@ -3024,5 +3047,217 @@ mod advisory_permission_tests {
             0,
             "the armer lost the right to issue, so the job must not issue on their behalf"
         );
+    }
+}
+
+#[cfg(test)]
+mod atomic_activation_tests {
+    //! VATUSA/OIS#537 review: activating a package must be all-or-nothing (AC5's "no partial
+    //! activation"). Each item used to commit on its own, so a failure on item N left 1…N-1 live, and a
+    //! retry republished them — a second numbered advisory, with the first orphaned.
+    //!
+    //! The failure is injected **inside** the transaction, by a trigger that refuses one marked
+    //! advisory. A malformed payload would not do: the pre-pass rejects that before anything is written,
+    //! so it would pass even with per-item commits and prove nothing about the transaction.
+
+    use chrono::{Duration, Utc};
+    use serde_json::json;
+    use sqlx::PgPool;
+
+    use super::*;
+
+    const EVENT: i64 = 5370;
+    const BOOM: &str = "BOOM";
+
+    async fn seed(pool: &PgPool) -> String {
+        let actor = crate::scope_test_support::seed_user(pool).await;
+        crate::scope_test_support::grant(pool, &actor, "tmu.adv.publish", None).await;
+        sqlx::query(
+            "insert into events.event (id, title, start_time, end_time, facility) \
+             values ($1, 'Atomic Test', now(), now() + interval '2 hours', 'ZDC')",
+        )
+        .bind(EVENT)
+        .execute(pool)
+        .await
+        .unwrap();
+        actor
+    }
+
+    /// A failure partway through the transaction: refuse any advisory whose body is `BOOM`.
+    async fn arm_the_failure(pool: &PgPool) {
+        sqlx::raw_sql(
+            "create function t537_boom() returns trigger language plpgsql as $$ \
+             begin if new.body = 'BOOM' then raise exception 'injected'; end if; return new; end $$; \
+             create trigger t537_boom before insert on tmu.advisories \
+             for each row execute function t537_boom();",
+        )
+        .execute(pool)
+        .await
+        .unwrap();
+    }
+
+    async fn disarm_the_failure(pool: &PgPool) {
+        sqlx::raw_sql("drop trigger t537_boom on tmu.advisories; drop function t537_boom();")
+            .execute(pool)
+            .await
+            .unwrap();
+    }
+
+    fn advisory(body: &str) -> serde_json::Value {
+        let from = Utc::now();
+        json!({
+            "facility": "DCC", "kind": "reroute", "body": body,
+            "valid_from": from, "valid_to": from + Duration::hours(2),
+        })
+    }
+
+    async fn add(pool: &PgPool, pkg: &str, kind: &str, payload: serde_json::Value) {
+        let canonical = normalize_item(kind, payload).unwrap();
+        events_repo::add_package_item(pool, pkg, kind, &canonical)
+            .await
+            .unwrap();
+    }
+
+    async fn count(pool: &PgPool, sql: &str) -> i64 {
+        sqlx::query_scalar(sql).fetch_one(pool).await.unwrap()
+    }
+
+    async fn status(pool: &PgPool, pkg: &str) -> String {
+        sqlx::query_scalar("select status from events.tmi_package where id = $1")
+            .bind(pkg)
+            .fetch_one(pool)
+            .await
+            .unwrap()
+    }
+
+    /// The review's reproduction, with the failure inside the transaction.
+    #[sqlx::test]
+    async fn a_failed_activation_leaves_nothing_and_a_retry_publishes_each_item_once(pool: PgPool) {
+        let actor = seed(&pool).await;
+        let pkg = events_repo::create_package(&pool, EVENT, "Plan", &actor)
+            .await
+            .unwrap();
+        add(&pool, &pkg, "advisory", advisory("vATCSCC ADVZY ONE")).await;
+        add(&pool, &pkg, "advisory", advisory(BOOM)).await;
+        arm_the_failure(&pool).await;
+
+        assert!(activate_package(&pool, EVENT, &pkg, &actor).await.is_err());
+
+        // Nothing from the first attempt survives — not even item 1, which was written before item 2
+        // failed.
+        assert_eq!(count(&pool, "select count(*) from tmu.advisories").await, 0);
+        assert_eq!(
+            count(&pool, "select count(*) from integration.outbound_jobs").await,
+            0,
+            "no publish job enqueued for anything"
+        );
+        assert_eq!(status(&pool, &pkg).await, "draft");
+        assert_eq!(
+            count(
+                &pool,
+                "select count(*) from events.tmi_package_item where live_ref is not null"
+            )
+            .await,
+            0
+        );
+
+        // Repair the bad item and retry.
+        disarm_the_failure(&pool).await;
+        sqlx::query(
+            "update events.tmi_package_item set payload = jsonb_set(payload, '{body}', '\"vATCSCC ADVZY TWO\"') \
+             where payload->>'body' = $1",
+        )
+        .bind(BOOM)
+        .execute(&pool)
+        .await
+        .unwrap();
+        activate_package(&pool, EVENT, &pkg, &actor).await.unwrap();
+
+        let numbers: Vec<i32> =
+            sqlx::query_scalar("select number from tmu.advisories order by number")
+                .fetch_all(&pool)
+                .await
+                .unwrap();
+        assert_eq!(
+            numbers,
+            [1, 2],
+            "each item published exactly once — no duplicate"
+        );
+        assert_eq!(
+            count(
+                &pool,
+                "select count(*) from tmu.advisories a where not exists \
+                 (select 1 from events.tmi_package_item i where i.live_ref = a.id)"
+            )
+            .await,
+            0,
+            "no orphan: every advisory is referenced by an item, so deactivation can withdraw it"
+        );
+        assert_eq!(status(&pool, &pkg).await, "activated");
+    }
+
+    /// The package's own status flip is inside the transaction too. If `mark_package_activated` ran after
+    /// the commit, a failure there would leave every item live under a package still marked draft —
+    /// which auto-publish re-selects every tick, and re-materialises.
+    #[sqlx::test]
+    async fn a_failure_marking_the_package_rolls_back_its_items(pool: PgPool) {
+        let actor = seed(&pool).await;
+        let pkg = events_repo::create_package(&pool, EVENT, "Plan", &actor)
+            .await
+            .unwrap();
+        add(&pool, &pkg, "advisory", advisory("vATCSCC ADVZY ONE")).await;
+        sqlx::raw_sql(
+            "create function t537_mark() returns trigger language plpgsql as $$ \
+             begin if new.status = 'activated' then raise exception 'injected'; end if; return new; end $$; \
+             create trigger t537_mark before update on events.tmi_package \
+             for each row execute function t537_mark();",
+        )
+        .execute(&pool)
+        .await
+        .unwrap();
+
+        assert!(activate_package(&pool, EVENT, &pkg, &actor).await.is_err());
+
+        assert_eq!(count(&pool, "select count(*) from tmu.advisories").await, 0);
+        assert_eq!(status(&pool, &pkg).await, "draft");
+    }
+
+    /// Every kind is inside the transaction, not only advisories: a late failure must leave no
+    /// program, TMI or ground stop behind either.
+    #[sqlx::test]
+    async fn a_late_failure_rolls_back_every_kind_of_item(pool: PgPool) {
+        let actor = seed(&pool).await;
+        let pkg = events_repo::create_package(&pool, EVENT, "Plan", &actor)
+            .await
+            .unwrap();
+        let now = Utc::now();
+        add(&pool, &pkg, "program", json!({"icao": "KDCA", "aar": 30})).await;
+        add(
+            &pool,
+            &pkg,
+            "restriction",
+            json!({"requesting": "ZDC", "providing": "ZNY", "restriction": "20 MIT",
+                   "start_time": now, "stop_time": now + Duration::hours(2)}),
+        )
+        .await;
+        add(&pool, &pkg, "ground_stop", json!({"airport": "KIAD"})).await;
+        add(&pool, &pkg, "advisory", advisory(BOOM)).await;
+        arm_the_failure(&pool).await;
+
+        assert!(activate_package(&pool, EVENT, &pkg, &actor).await.is_err());
+
+        for table in [
+            "tmu.programs",
+            "tmu.tmis",
+            "tmu.ground_stops",
+            "tmu.advisories",
+        ] {
+            assert_eq!(
+                count(&pool, &format!("select count(*) from {table}")).await,
+                0,
+                "{table} kept a row from a failed activation"
+            );
+        }
+        assert_eq!(status(&pool, &pkg).await, "draft");
     }
 }

@@ -2,7 +2,7 @@
 //! sync job pulls in; per-event planning tables (added in later passes) reference it.
 
 use chrono::{DateTime, Utc};
-use sqlx::PgPool;
+use sqlx::{PgPool, Postgres};
 
 use serde_json::Value;
 
@@ -441,18 +441,21 @@ pub async fn delete_package_item(
     Ok(result.rows_affected() > 0)
 }
 
-pub async fn mark_package_activated(
-    pool: &PgPool,
+pub async fn mark_package_activated<'e, E>(
+    executor: E,
     package_id: &str,
     actor: &str,
-) -> Result<(), ApiError> {
+) -> Result<(), ApiError>
+where
+    E: sqlx::Executor<'e, Database = Postgres>,
+{
     sqlx::query(
         "update events.tmi_package set status = 'activated', activated_at = now(), \
          updated_by = $2 where id = $1",
     )
     .bind(package_id)
     .bind(actor)
-    .execute(pool)
+    .execute(executor)
     .await
     .map_err(|_| ApiError::Internal)?;
     Ok(())
@@ -460,15 +463,18 @@ pub async fn mark_package_activated(
 
 /// Record the live row an item materialized to (its tmu id, or ICAO for programs) so a later
 /// deactivation can cancel exactly what was created.
-pub async fn set_item_live_ref(
-    pool: &PgPool,
+pub async fn set_item_live_ref<'e, E>(
+    executor: E,
     item_id: &str,
     live_ref: &str,
-) -> Result<(), ApiError> {
+) -> Result<(), ApiError>
+where
+    E: sqlx::Executor<'e, Database = Postgres>,
+{
     sqlx::query("update events.tmi_package_item set live_ref = $2 where id = $1")
         .bind(item_id)
         .bind(live_ref)
-        .execute(pool)
+        .execute(executor)
         .await
         .map_err(|_| ApiError::Internal)?;
     Ok(())

@@ -79,11 +79,14 @@ pub async fn list_tmis_at(pool: &PgPool, at: DateTime<Utc>) -> Result<Vec<TmiBod
     .map_err(|_| ApiError::Internal)
 }
 
-pub async fn create_tmi(
-    pool: &PgPool,
+pub async fn create_tmi<'e, E>(
+    executor: E,
     req: &CreateTmiRequest,
     created_by: &str,
-) -> Result<String, ApiError> {
+) -> Result<String, ApiError>
+where
+    E: sqlx::Executor<'e, Database = Postgres>,
+{
     // A structured TMI stores its parsed fields + the decoded English; a raw one leaves both null.
     let decoded = req.structured.as_ref().map(crate::tmi::render_english);
     sqlx::query_scalar::<_, String>(
@@ -99,7 +102,7 @@ pub async fn create_tmi(
     .bind(req.start_time)
     .bind(req.stop_time)
     .bind(created_by)
-    .fetch_one(pool)
+    .fetch_one(executor)
     .await
     .map_err(|_| ApiError::Internal)
 }
@@ -322,13 +325,16 @@ pub async fn get_program(pool: &PgPool, icao: &str) -> Result<Option<ProgramBody
 }
 
 /// Creates or replaces the program for an airport (vatflow "SET PROGRAM").
-pub async fn upsert_program(
-    pool: &PgPool,
+pub async fn upsert_program<'e, E>(
+    executor: E,
     icao: &str,
     req: &UpsertProgramRequest,
     gates: &[GateRule],
     actor: &str,
-) -> Result<(), ApiError> {
+) -> Result<(), ApiError>
+where
+    E: sqlx::Executor<'e, Database = Postgres>,
+{
     sqlx::query(
         "insert into tmu.programs \
          (icao, aar, trail, mit, gates, exclude_wake, exclude_types, jets_only, active_until, created_by, updated_by) \
@@ -349,7 +355,7 @@ pub async fn upsert_program(
     .bind(req.jets_only)
     .bind(req.active_until)
     .bind(actor)
-    .execute(pool)
+    .execute(executor)
     .await
     .map_err(|_| ApiError::Internal)?;
     Ok(())
@@ -432,13 +438,16 @@ pub(crate) async fn ground_stop_until_instant(
     .map_err(|_| ApiError::Internal)
 }
 
-pub async fn create_ground_stop(
-    pool: &PgPool,
+pub async fn create_ground_stop<'e, E>(
+    executor: E,
     req: &CreateGroundStopRequest,
     scope: &str,
     until: Option<&str>,
     actor: &str,
-) -> Result<String, ApiError> {
+) -> Result<String, ApiError>
+where
+    E: sqlx::Executor<'e, Database = Postgres>,
+{
     sqlx::query_scalar::<_, String>(
         "insert into tmu.ground_stops (airport, scope, until, created_by, updated_by) \
          values ($1, $2, $3, $4, $4) returning id",
@@ -447,7 +456,7 @@ pub async fn create_ground_stop(
     .bind(scope)
     .bind(until)
     .bind(actor)
-    .fetch_one(pool)
+    .fetch_one(executor)
     .await
     .map_err(|_| ApiError::Internal)
 }
