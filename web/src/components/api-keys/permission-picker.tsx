@@ -1,8 +1,8 @@
-import {useMemo, useState} from "react";
+import {useMemo} from "react";
+import {ConfirmButton, Select} from "@ois/ui";
 
 import type {ApiKeyPermission, ApiKeyPermissionInput, GrantablePermission} from "@/lib/api-keys";
-import {ACCESS_PRESETS, type AccessPreset, BASE_PERMISSIONS, presetPermissions} from "@/lib/presets";
-import {PresetBar} from "@/components/access/preset-bar";
+import {type HeldGroup, useHeldGroups} from "@/lib/groups";
 import {
   PermissionScopeTree,
   type ScopeItem,
@@ -44,162 +44,39 @@ export function selectionIsValid(selection: PermSelection): boolean {
 }
 
 /**
- * What a preset grants this creator beyond the sign-in baseline — the same set `togglePreset`
- * writes. The baseline is excluded because every preset adds it: counting it made a preset with
- * nothing of its own (e.g. ACE Team for a creator holding no `ace.*` beyond the baseline) read as
- * applied as soon as any other preset was clicked (#264). A facility preset grants nothing until a
- * facility is chosen, and then only what the creator can delegate at it.
+ * The selection after starting from `group` (#550).
+ *
+ * A **one-way merge**: each of the group's permissions the caller can delegate is added at its
+ * default scope, and **anything already selected is left exactly as it is**. That is the whole fix for
+ * the two bugs presets had:
+ *
+ * - **#275** — stacking presets silently narrowed scopes, because applying one *rewrote* an existing
+ *   grant at its own scope. Here an existing entry is never touched, so it can only stay as broad as
+ *   it was.
+ * - **#264** — "is this preset applied?" was reverse-engineered from the selection, and any preset
+ *   selecting all permissions read as applied. There is no applied state here at all: starting from a
+ *   group is an action, not a toggle, so there is nothing to infer.
+ *
+ * A permission the group grants but the caller cannot delegate is skipped: `grantable` is already
+ * the cap, and the server re-checks against the owner's live access when the key is created.
  */
-export function presetOwnPermissions(
-  preset: AccessPreset,
+export function mergeGroupIntoSelection(
+  group: HeldGroup,
   grantable: GrantablePermission[],
-  baseNames: readonly string[],
-  facility: string,
-): string[] {
-  if (preset.scope === "facility" && !facility) return [];
-  const byName = new Map(grantable.map((g) => [g.permission, g] as const));
-  const base = new Set(baseNames);
-  return presetPermissions(
-    preset,
-    grantable.map((g) => g.permission),
-  ).filter((p) => {
-    if (base.has(p)) return false;
-    if (preset.scope !== "facility") return true;
-    const g = byName.get(p)!;
-    return g.national || g.artccs.includes(facility);
-  });
-}
-
-/** Whether scope `a` includes all of scope `b`. */
-function covers(a: ScopeSel, b: ScopeSel): boolean {
-  return a.national || (!b.national && b.artccs.every((x) => a.artccs.includes(x)));
-}
-
-/** Whether a preset is fully applied: it grants something of its own, all of it is selected at the
- * scope the preset writes, and so is the baseline. A national preset's own perms must cover the
- * creator's full held scope — so a facility preset's ARTCC-scoped grants never make a national preset
- * read as applied (#264). A facility preset's own perms must each include the facility or be national
- * (a national grant covers it, #275), with at least one actually at the facility — so national grants
- * alone never light it (#264). */
-export function presetApplied(
-  preset: AccessPreset,
-  grantable: GrantablePermission[],
-  baseNames: readonly string[],
-  facility: string,
-  selection: PermSelection,
-): boolean {
-  const own = presetOwnPermissions(preset, grantable, baseNames, facility);
-  if (own.length === 0 || !baseNames.every((p) => selection.has(p))) return false;
-  if (preset.scope === "facility") {
-    const sels = own.map((p) => selection.get(p));
-    return (
-      sels.every((s) => s && (s.national || s.artccs.includes(facility))) &&
-      sels.some((s) => s && !s.national)
-    );
-  }
-  const byName = new Map(grantable.map((g) => [g.permission, g] as const));
-  return own.every((p) => {
-    const s = selection.get(p);
-    return !!s && covers(s, defaultScope(byName.get(p)!)); // the creator's full held scope
-  });
-}
-
-/** Whether a preset's chip is enabled: it grants something of its own. A facility preset with no
- * facility chosen stays enabled here — PresetBar already gates it with "Pick a facility first". */
-export function presetCanApply(
-  preset: AccessPreset,
-  grantable: GrantablePermission[],
-  baseNames: readonly string[],
-  facility: string,
-): boolean {
-  return (
-    (preset.scope === "facility" && !facility) ||
-    presetOwnPermissions(preset, grantable, baseNames, facility).length > 0
-  );
-}
-
-/** The selection after clicking a preset. Applied: subtracts what it contributes (a facility
- * preset's ARTCC, a national preset's perms) but keeps what the other applied presets grant, and
- * drops the baseline only once nothing still needs it. Otherwise: merges its perms in at the
- * preset's scope without narrowing existing grants (#275). */
-export function togglePresetSelection(
-  preset: AccessPreset,
-  grantable: GrantablePermission[],
-  baseNames: readonly string[],
-  facility: string,
   selection: PermSelection,
 ): PermSelection {
   const byName = new Map(grantable.map((g) => [g.permission, g] as const));
-  const own = presetOwnPermissions(preset, grantable, baseNames, facility);
   const next = new Map(selection);
-  if (presetApplied(preset, grantable, baseNames, facility, selection)) {
-    // The scope a preset applied at `at` ("" for national) writes for one of its perms.
-    const scopeOf = (o: AccessPreset, at: string, p: string): ScopeSel =>
-      o.scope === "facility" ? { national: false, artccs: [at] } : defaultScope(byName.get(p)!);
-    const self = preset.scope === "facility" ? facility : "";
-    // Every other preset applied nationally or at an ARTCC in the selection keeps its grants — except
-    // one whose grants all lie inside this preset's (itself, or e.g. NTMO inside VATUSA Admin) or that
-    // contains this preset's (e.g. DCC Staff over NTMO). Either can't be told apart from this preset
-    // in the selection, and keeping the containing one's grants would leave this chip lit — a click
-    // is never ignored, so it goes unlit too.
-    const selArtccs = [...new Set([...selection.values()].flatMap((s) => s.artccs))];
-    const others = ACCESS_PRESETS.flatMap((o) =>
-      (o.scope === "facility" ? selArtccs : [""]).map((at) => ({
-        o,
-        at,
-        own: presetOwnPermissions(o, grantable, baseNames, at),
-      })),
-    ).filter(
-      ({ o, at, own: theirs }) =>
-        presetApplied(o, grantable, baseNames, at, selection) &&
-        !theirs.every((p) => own.includes(p) && covers(scopeOf(preset, self, p), scopeOf(o, at, p))) &&
-        !own.every((p) => theirs.includes(p) && covers(scopeOf(o, at, p), scopeOf(preset, self, p))),
-    );
-    for (const p of own) {
-      const s = next.get(p)!;
-      // A facility preset never granted a national scope, so leaves one alone.
-      let kept: ScopeSel =
-        preset.scope !== "facility"
-          ? { national: false, artccs: [] }
-          : s.national
-            ? s
-            : { national: false, artccs: s.artccs.filter((a) => a !== facility) };
-      for (const { o, at, own: theirs } of others) {
-        if (!theirs.includes(p)) continue;
-        const add = scopeOf(o, at, p);
-        kept =
-          kept.national || add.national
-            ? { national: true, artccs: [] }
-            : { national: false, artccs: [...new Set([...kept.artccs, ...add.artccs])] };
-      }
-      if (kept.national || kept.artccs.length > 0) next.set(p, kept);
-      else next.delete(p);
-    }
-    // Keep the baseline while another preset (including this one at another ARTCC) is still applied,
-    // or any of this preset's perms remain (e.g. national grants a facility preset left alone).
-    if (others.length === 0 && !own.some((p) => next.has(p))) {
-      for (const p of baseNames) next.delete(p);
-    }
-    return next;
+  for (const permission of group.permissions) {
+    const g = byName.get(permission);
+    if (!g || next.has(permission)) continue;
+    next.set(permission, defaultScope(g));
   }
-  for (const p of own) {
-    if (preset.scope === "facility") {
-      // Add the chosen facility to what's selected; a national grant already covers it.
-      const s = next.get(p);
-      if (s?.national) continue;
-      const artccs = s?.artccs ?? [];
-      next.set(p, { national: false, artccs: artccs.includes(facility) ? artccs : [...artccs, facility] });
-    } else {
-      next.set(p, defaultScope(byName.get(p)!)); // national where held nationally, else all their ARTCCs
-    }
-  }
-  // Baseline is always national (applied after domain so it wins for any overlap — national ⊇ facility).
-  for (const p of baseNames) next.set(p, defaultScope(byName.get(p)!));
   return next;
 }
 
 /**
- * Permission picker for API keys: a presets bar over the shared grouped scope tree. Each checked
+ * Permission picker for API keys: a "start from a group" control over the shared grouped scope tree. Each checked
  * permission gets a scope control (National or specific ARTCCs) bounded by what the caller can
  * delegate (`grantable`).
  */
@@ -214,26 +91,15 @@ export function PermissionPicker({
   selection: PermSelection;
   onChange: (next: PermSelection) => void;
 }) {
-  const [presetFacility, setPresetFacility] = useState(""); // for facility presets
-
-  // --- Presets: bundle the caller's grantable permissions. Keys hold no roles, so preset.roles is
-  // ignored; a preset can never exceed what the caller can delegate (it's drawn from `grantable`).
-  const grantableByName = useMemo(
-    () => new Map(grantable.map((g) => [g.permission, g] as const)),
-    [grantable],
-  );
-  // The sign-in baseline (BASE_PERMISSIONS) — always national — plus the preset's domain perms at its
-  // scope. Keys hold no roles, so this is the only way a preset key gets the defaults a user has.
-  const baseNames = useMemo(
-    () => BASE_PERMISSIONS.filter((p) => grantableByName.has(p)),
-    [grantableByName],
-  );
-  const isPresetApplied = (preset: AccessPreset) =>
-    presetApplied(preset, grantable, baseNames, presetFacility, selection);
-  const canApplyPreset = (preset: AccessPreset) =>
-    presetCanApply(preset, grantable, baseNames, presetFacility);
-  const togglePreset = (preset: AccessPreset) =>
-    onChange(togglePresetSelection(preset, grantable, baseNames, presetFacility, selection));
+  const held = useHeldGroups();
+  // Only groups that would add something: a group whose permissions are all undelegable, or already
+  // selected, is noise in the list.
+  const startable = useMemo(() => {
+    const delegable = new Set(grantable.map((g) => g.permission));
+    return (held.data ?? []).filter((group) =>
+      group.permissions.some((p) => delegable.has(p) && !selection.has(p)),
+    );
+  }, [held.data, grantable, selection]);
 
   const items: ScopeItem[] = useMemo(
     () =>
@@ -254,16 +120,43 @@ export function PermissionPicker({
 
   return (
     <div className="flex flex-col gap-2">
-      <PresetBar
-        isApplied={isPresetApplied}
-        canApply={canApplyPreset}
-        onToggle={togglePreset}
-        facility={presetFacility}
-        facilities={facilities}
-        onFacility={setPresetFacility}
-        onRemoveAll={() => onChange(new Map())}
-        removeAllWarn="Clear every permission on this key?"
-      />
+      <div className="flex flex-wrap items-center gap-2 rounded-md border border-line bg-panel p-2.5">
+        {/* An action, not a toggle: choosing a group merges it in and the control resets. There is
+            deliberately no "applied" state to show — inferring one is what #264 was. */}
+        <Select
+          size="sm"
+          value=""
+          disabled={startable.length === 0}
+          onChange={(e) => {
+            const group = startable.find((g) => g.name === e.target.value);
+            if (group) onChange(mergeGroupIntoSelection(group, grantable, selection));
+          }}
+          aria-label="Start from one of your groups"
+          title="Add every permission one of your groups grants"
+        >
+          <option value="">
+            {held.isLoading
+              ? "Loading your groups…"
+              : startable.length === 0
+                ? "No group adds anything"
+                : "Start from a group…"}
+          </option>
+          {startable.map((g) => (
+            <option key={g.name} value={g.name}>
+              {g.name}
+            </option>
+          ))}
+        </Select>
+        <ConfirmButton
+          size="sm"
+          variant="ghost"
+          className="ml-auto"
+          warn="Clear every permission on this key?"
+          onConfirm={() => onChange(new Map())}
+        >
+          Remove all
+        </ConfirmButton>
+      </div>
       <PermissionScopeTree
         items={items}
         facilities={facilities}

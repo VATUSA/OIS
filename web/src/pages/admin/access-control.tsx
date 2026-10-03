@@ -1,14 +1,5 @@
 import {useEffect, useMemo, useState} from "react";
-import {
-  Button,
-  Card,
-  type DataColumn,
-  DataTable,
-  FilterBar,
-  Input,
-  QueryState,
-  StatusPill,
-} from "@ois/ui";
+import {Button, Card, ConfirmButton, DataTable, FilterBar, Input, QueryState, StatusPill, type DataColumn} from "@ois/ui";
 import {Award, Hash, Save, Search, ShieldCheck, User} from "lucide-react";
 
 import {
@@ -22,8 +13,6 @@ import {
   useSaveUserAccess,
   useUserAccess,
 } from "@/lib/access";
-import {type AccessPreset, BASE_PERMISSIONS, presetPermissions} from "@/lib/presets";
-import {PresetBar} from "@/components/access/preset-bar";
 import {usePageHeader} from "@/components/shell/page-meta";
 import {
   PermissionScopeTree,
@@ -103,7 +92,6 @@ export function AdminAccessControl() {
   const [permSel, setPermSel] = useState<ScopeSelection>(new Map());
   const [roleSel, setRoleSel] = useState<ScopeSelection>(new Map());
   const [reason, setReason] = useState("");
-  const [presetFacility, setPresetFacility] = useState(""); // for facility presets
 
   // Scope keys present when this user's access loaded — always re-sent on save so a scope emptied
   // in the UI is actually cleared server-side (untouched scopes are otherwise preserved).
@@ -126,7 +114,6 @@ export function AdminAccessControl() {
     setRoleSel(roles);
     setOriginalScopeKeys([...original]);
     setReason("");
-    setPresetFacility("");
     save.reset();
   }, [access.data]); // eslint-disable-line react-hooks/exhaustive-deps
 
@@ -159,67 +146,6 @@ export function AdminAccessControl() {
     [allPerms, anyScope],
   );
   const assignableRoles = useMemo(() => catalog.data?.roles ?? [], [catalog.data]);
-
-  // --- Presets: one-click bundles toggled on/off. National presets apply at national scope;
-  // facility presets apply at the facility chosen here. Every preset also grants the sign-in
-  // baseline (BASE_PERMISSIONS) at national scope.
-  function presetTarget(preset: AccessPreset): ScopeKey | null {
-    if (preset.scope === "national") return "";
-    return presetFacility || null; // facility preset needs a facility chosen
-  }
-  /** Preset contributions: {perms, roles} at the target scope + baseline perms at national. */
-  function presetParts(
-    preset: AccessPreset,
-    target: ScopeKey,
-  ): { key: ScopeKey; perms: string[]; roles: string[] }[] {
-    const domain = presetPermissions(preset, allPerms);
-    const base = [...BASE_PERMISSIONS];
-    if (target === "") {
-      return [{ key: "", perms: [...new Set([...domain, ...base])], roles: preset.roles }];
-    }
-    return [
-      { key: target, perms: domain, roles: preset.roles },
-      { key: "", perms: base, roles: [] },
-    ];
-  }
-  function isPresetApplied(preset: AccessPreset): boolean {
-    const target = presetTarget(preset);
-    if (target == null) return false;
-    return presetParts(preset, target).every(({ key, perms, roles }) => {
-      return (
-        perms.every((p) => hasScope(permSel.get(p), key)) &&
-        roles.every((r) => hasScope(roleSel.get(r), key))
-      );
-    });
-  }
-  function togglePreset(preset: AccessPreset) {
-    const target = presetTarget(preset);
-    if (target == null) return;
-    const on = !isPresetApplied(preset);
-    const parts = presetParts(preset, target);
-    setPermSel((prev) => {
-      const next = new Map(prev);
-      for (const { key, perms } of parts) {
-        for (const p of perms) {
-          const s = withScope(next.get(p), key, on);
-          if (s) next.set(p, s);
-          else next.delete(p);
-        }
-      }
-      return next;
-    });
-    setRoleSel((prev) => {
-      const next = new Map(prev);
-      for (const { key, roles } of parts) {
-        for (const r of roles) {
-          const s = withScope(next.get(r), key, on);
-          if (s) next.set(r, s);
-          else next.delete(r);
-        }
-      }
-      return next;
-    });
-  }
 
   function toggleRole(role: string, on: boolean) {
     setRoleSel((prev) => {
@@ -365,19 +291,19 @@ export function AdminAccessControl() {
             {access.data.server_admin && <StatusPill tone="good">Server admin</StatusPill>}
           </div>
 
-          {/* Presets — one-click bundles, toggled on/off. Each grants its role + perms at the
-              chosen scope, plus the sign-in baseline nationally. */}
+          {/* Groups are assigned below and on the group's own page (#546). The preset bar that used
+              to sit here is gone (#550); "Remove all" was the one part of it that wasn't a preset. */}
           <section className="flex flex-col gap-2">
-            <PresetBar
-              isApplied={isPresetApplied}
-              onToggle={togglePreset}
-              facility={presetFacility}
-              facilities={facilities}
-              onFacility={setPresetFacility}
-              onRemoveAll={removeAll}
-              removeAllWarn="Clear every role and permission for this user (all scopes)?"
-              size="lg"
-            />
+            <div className="flex justify-end">
+              <ConfirmButton
+                size="sm"
+                variant="ghost"
+                warn="Clear every role and permission for this user (all scopes)?"
+                onConfirm={removeAll}
+              >
+                Remove all
+              </ConfirmButton>
+            </div>
             <p className="text-xs text-ink-3">
               Each permission and role below is granted at National scope or specific ARTCCs — pick
               the scope under each one. Nothing is saved until you enter a reason and hit Save.
