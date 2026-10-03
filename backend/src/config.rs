@@ -129,14 +129,16 @@ pub fn rate_limit_per_min(name: &str, default: u32) -> NonZeroU32 {
         .unwrap_or(NonZeroU32::MIN)
 }
 
-/// How many reverse proxies we run in front of the backend (`TRUSTED_PROXY_HOPS`, default 1, minimum 1).
-/// Each appends one `X-Forwarded-For` entry, so the client's address is this many from the right;
-/// anything further left came from the client and can be forged (#588). Set it to 2 behind, e.g.,
-/// Cloudflare → ingress.
+/// How many reverse proxies we run in front of the backend (`TRUSTED_PROXY_HOPS`, minimum 1). Each
+/// appends one `X-Forwarded-For` entry, so the client's address is this many from the right; anything
+/// further left came from the client and can be forged (#588).
+///
+/// The default, 2, is production's Cloudflare → Traefik chain. A deployment behind a single proxy (the
+/// compose stack behind one Caddy/nginx) must set 1, or every caller is keyed on the proxy's address.
 pub fn trusted_proxy_hops() -> usize {
     trimmed_env("TRUSTED_PROXY_HOPS")
         .and_then(|v| v.parse::<usize>().ok())
-        .unwrap_or(1)
+        .unwrap_or(2)
         .max(1)
 }
 

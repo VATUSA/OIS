@@ -72,8 +72,9 @@ back); a refused one is `429 too_many_requests` with `Retry-After` (seconds unti
 accepted). CORS exposes all four. `/health`, `/metrics` and `/docs` are not limited.
 
 - **Per process.** Buckets live in memory, so with N backend replicas a caller can reach N× its limit.
-- **Client IP** is read `TRUSTED_PROXY_HOPS` (default 1) entries from the right of `X-Forwarded-For`,
-  since anything further left is client-supplied. The audit log and `api_keys.last_used_ip` use the
+- **Client IP** is read `TRUSTED_PROXY_HOPS` entries from the right of `X-Forwarded-For`, since anything
+  further left is client-supplied. The default, 2, matches production (Cloudflare → Traefik); a
+  deployment behind one proxy must set 1. The audit log and `api_keys.last_used_ip` use the
   same address.
 - Credentials are resolved before the limiter runs, so an unrecognised token is charged to its IP.
 
