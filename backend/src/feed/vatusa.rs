@@ -308,9 +308,11 @@ pub fn division_members(pulled: ControllersAndRoles) -> Vec<repo::DivisionMember
 
 /// Store a pulled division: chunked bulk upserts, then clear whoever has left.
 ///
-/// **Refuses a response that looks truncated** — empty, or under half the members already synced —
-/// without writing anything. Absence from the pull removes a controller's VATUSA roles and the access
-/// mapped from them, so a partial response applied blindly would be a mass revocation.
+/// **Refuses a response that looks truncated** — empty, under half the members already synced, or
+/// under half the role grants already stored — without writing anything. Absence from the pull
+/// removes a controller's VATUSA roles and the access mapped from them, so a partial response applied
+/// blindly would be a mass revocation. `roles` is a separate array from `controllers`, so a full
+/// roster with a lost or cut-off role list must be caught on its own.
 pub async fn apply_division(
     pool: &PgPool,
     members: &[repo::DivisionMember],
@@ -323,6 +325,16 @@ pub async fn apply_division(
             "refused a division pull of {} controllers against {known} already synced — \
              it looks truncated, and applying it would strip roles from everyone missing",
             members.len()
+        ));
+    }
+    let stored_roles = repo::count_stored_roles(pool)
+        .await
+        .map_err(|e| e.to_string())?;
+    let pulled_roles: usize = members.iter().map(|m| m.roles.len()).sum();
+    if (pulled_roles as i64) < stored_roles / 2 {
+        return Err(format!(
+            "refused a division pull of {pulled_roles} role grants against {stored_roles} stored — \
+             its role list looks truncated, and applying it would revoke the access they map to"
         ));
     }
 
@@ -982,6 +994,43 @@ mod tests {
             [("ZDC".into(), "MTR".into())]
         );
         assert_eq!(stored_roles(&pool, everyone[0]).await.len(), 1);
+    }
+
+    /// `roles` is its own array: a pull with every controller but a lost or cut-off role list passes
+    /// the controller check, and applied it would revoke the mapped access of the whole division.
+    #[sqlx::test]
+    async fn a_pull_with_a_truncated_role_list_is_refused(pool: PgPool) {
+        map(&pool, "MTR", "EC").await;
+        let everyone: Vec<i64> = (1_605_600..1_605_610).collect();
+        let roster = || everyone.iter().map(|c| controller(*c, "ZDC")).collect();
+        let all_roles = || everyone.iter().map(|c| role(*c, "ZDC", "MTR")).collect();
+        apply_division(&pool, &pulled(roster(), all_roles()))
+            .await
+            .unwrap();
+
+        for cut in [
+            vec![],
+            everyone[..4]
+                .iter()
+                .map(|c| role(*c, "ZDC", "MTR"))
+                .collect(),
+        ] {
+            let refused = apply_division(&pool, &pulled(roster(), cut)).await;
+            assert!(refused.is_err_and(|e| e.contains("role list looks truncated")));
+        }
+        for cid in &everyone {
+            assert_eq!(held(&pool, *cid).await.len(), 1, "{cid} kept their access");
+        }
+
+        // The floor is half: losing a few roles is a real change, and applies.
+        let most: Vec<_> = everyone[..6]
+            .iter()
+            .map(|c| role(*c, "ZDC", "MTR"))
+            .collect();
+        apply_division(&pool, &pulled(roster(), most))
+            .await
+            .unwrap();
+        assert!(held(&pool, everyone[9]).await.is_empty());
     }
 
     /// The one remaining v2 call is sign-in's (AC8). Counted across the whole backend source, so a

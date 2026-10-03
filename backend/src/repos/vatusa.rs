@@ -551,6 +551,14 @@ pub async fn count_synced_members(pool: &PgPool) -> Result<i64, ApiError> {
         .map_err(|_| ApiError::Internal)
 }
 
+/// How many VATUSA role grants are stored — the role half of the pull's truncation check.
+pub async fn count_stored_roles(pool: &PgPool) -> Result<i64, ApiError> {
+    sqlx::query_scalar("select count(*) from identity.vatusa_roles")
+        .fetch_one(pool)
+        .await
+        .map_err(|_| ApiError::Internal)
+}
+
 /// Apply one chunk of the division pull in one transaction, as a handful of bulk statements rather
 /// than ~10 per member: seed or refresh the users, diff (not replace) their roles and visits, and
 /// re-reconcile the VATUSA-mapped access (#548) of exactly the members whose roles changed. Returns

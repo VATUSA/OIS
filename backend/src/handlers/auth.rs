@@ -496,9 +496,12 @@ async fn ensure_user_login_access(
 
     if first_sign_in || demoted {
         // The baseline now arrives through the `USER` group, not as five direct rows (#544). The
-        // wipe stays: a demotion must leave a former admin holding no national grants of their own,
-        // and `replace_user_permissions` with an empty set is exactly that clearing.
-        access_repo::replace_user_permissions(&mut tx, user_id, &[]).await?;
+        // wipe is for demotion only: a former admin must hold no national grants of their own. A
+        // first sign-in is not a blank slate any more — an admin may have granted (or denied) a user
+        // seeded by the VATUSA pull before they ever signed in (#605), and that must survive it.
+        if demoted {
+            access_repo::replace_user_permissions(&mut tx, user_id, &[]).await?;
+        }
         // `System`: OIS grants the baseline group itself, so sync and admins both leave it alone.
         access_repo::set_user_role(
             &mut tx,
@@ -734,6 +737,44 @@ mod tests {
         ] {
             assert!(effective.contains_key(name), "baseline missing {name}");
         }
+    }
+
+    /// A user seeded by the VATUSA pull (#605) can be found by exact CID and granted — or denied —
+    /// access before they ever sign in. Their first sign-in adds the baseline and must keep both.
+    #[sqlx::test]
+    async fn a_first_sign_in_keeps_access_granted_before_it(pool: PgPool) {
+        let user = seed_user(&pool).await;
+        grant(&pool, &user, "tmu.program.update", None).await;
+        crate::scope_test_support::deny_scoped(&pool, &user, "tmu.ntml.create", None).await;
+
+        super::ensure_user_login_access(&pool, &user, 9_999_999, true)
+            .await
+            .unwrap();
+
+        let direct: Vec<(String, bool)> = sqlx::query_as(
+            "select permission_name, granted from access.user_permissions \
+             where user_id = $1 order by permission_name",
+        )
+        .bind(&user)
+        .fetch_all(&pool)
+        .await
+        .unwrap();
+        assert_eq!(
+            direct,
+            [
+                ("tmu.ntml.create".to_string(), false),
+                ("tmu.program.update".to_string(), true)
+            ],
+            "the pre-sign-in grant and deny both survive"
+        );
+        let has_user: bool = sqlx::query_scalar(
+            "select exists(select 1 from access.user_roles where user_id = $1 and role_name = 'USER')",
+        )
+        .bind(&user)
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        assert!(has_user, "and the baseline still arrives");
     }
 
     /// A demotion must still clear the ex-admin's own national grants — the reason the wipe survived
