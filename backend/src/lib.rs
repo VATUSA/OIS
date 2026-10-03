@@ -168,3 +168,68 @@ mod tests {
     #[sqlx::test]
     async fn migrations_apply_cleanly(_pool: sqlx::PgPool) {}
 }
+
+#[cfg(test)]
+mod honolulu_migration_tests {
+    //! VATUSA/OIS#556: `0101_honolulu_is_hcf.sql` repoints stored `'ZHN'` to `'HCF'`. It finds its
+    //! columns from `information_schema` at deploy time, so the test builds a table of its own to drive
+    //! every branch — including the unique-collision fallback — and uses one real table to show the
+    //! discovery reaches the live schema.
+
+    const MIGRATION: &str = include_str!("../migrations/0101_honolulu_is_hcf.sql");
+
+    #[sqlx::test]
+    async fn stored_zhn_becomes_hcf_and_a_collision_is_left_alone(pool: sqlx::PgPool) {
+        // A table shaped like the risky ones: an ARTCC column inside a unique key.
+        sqlx::query(
+            "create table public.t556 (k int not null, artcc text not null, note text, \
+             unique (k, artcc))",
+        )
+        .execute(&pool)
+        .await
+        .unwrap();
+        sqlx::query(
+            "insert into public.t556 (k, artcc, note) values \
+             (1, 'ZHN', 'plain'), \
+             (2, 'ZHN', 'collides'), (2, 'HCF', 'twin'), \
+             (3, 'ZDC', 'untouched')",
+        )
+        .execute(&pool)
+        .await
+        .unwrap();
+        // A real table, so the information_schema discovery is shown to reach the actual schema.
+        sqlx::query(
+            "insert into identity.vatusa_webhooks (facility, webhook_id, secret, url) \
+             values ('ZHN', 1, 's', 'https://example.invalid')",
+        )
+        .execute(&pool)
+        .await
+        .unwrap();
+
+        sqlx::raw_sql(MIGRATION)
+            .execute(&pool)
+            .await
+            .expect("the migration never fails startup");
+
+        let rows: Vec<(String, String)> =
+            sqlx::query_as("select note, artcc from public.t556 order by k, note")
+                .fetch_all(&pool)
+                .await
+                .unwrap();
+        assert_eq!(
+            rows,
+            [
+                ("plain".into(), "HCF".into()),
+                ("collides".into(), "ZHN".into()),
+                ("twin".into(), "HCF".into()),
+                ("untouched".into(), "ZDC".into()),
+            ],
+            "the plain row moves, the colliding one stays beside its twin, other ids are untouched"
+        );
+        let webhook: String = sqlx::query_scalar("select facility from identity.vatusa_webhooks")
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+        assert_eq!(webhook, "HCF", "a real column, found by discovery");
+    }
+}
