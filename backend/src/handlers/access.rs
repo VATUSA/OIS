@@ -1130,75 +1130,231 @@ mod group_tests {
 
     // ---- #546: membership from the group side ----
 
-    /// AC4, the load-bearing one: **the two sides must produce identical state.**
+    /// AC4: the user-side and group-side editors produce identical state for the same change, in
+    /// both directions — and record it identically (AC6).
     ///
-    /// Both go through `set_user_role_manual_scoped`, so this proves the *wiring* rather than the
-    /// writer — which is the point of having one writer. Tested in both directions, because an add and
-    /// a remove fail differently: the user editor computes a symmetric diff over every assignable
-    /// group, while the group side names one, and a scope dropped on either path shows up here.
+    /// Driven through both real routes, not the shared writer: calling `set_user_role_scoped`
+    /// twice would pass whatever either handler did with the scope. An add and a remove fail
+    /// differently — the user editor computes a symmetric diff over every assignable group, while the
+    /// group side names one — so both are compared, and so is each audit entry, minus the holder's
+    /// own id and CID.
     #[sqlx::test]
     async fn both_sides_produce_the_same_membership(pool: PgPool) {
-        let user = seed_user(&pool).await;
-        make_group(&pool, "CONVERGE").await;
-
-        // Group side: grant at ZDC.
-        let mut tx = pool.begin().await.unwrap();
-        access_repo::set_user_role_scoped(
-            &mut tx,
-            &user,
-            "CONVERGE",
-            true,
-            Some("ZDC"),
-            access_repo::GrantSource::Manual,
+        let admin = seed_user(&pool).await;
+        sqlx::query(
+            "insert into access.user_roles (user_id, role_name, source) values ($1, 'SERVER_ADMIN', 'system')",
         )
+        .bind(&admin)
+        .execute(&pool)
         .await
         .unwrap();
-        tx.commit().await.unwrap();
-        let from_group = access_repo::fetch_user_role_grants(&pool, &user)
+        make_group(&pool, "CONVERGE").await;
+        let via_group = holder(&pool, 9_990_201).await;
+        let via_user = holder(&pool, 9_990_202).await;
+        // A direct grant outside the edited scope, so each snapshot carries more than the group —
+        // an audit that recorded only role grants would differ here.
+        for id in [&via_group, &via_user] {
+            grant(&pool, id, "events.config.update", None).await;
+        }
+        let cookie = crate::scope_test_support::session_cookie(&pool, &admin).await;
+        let state = test_state(pool.clone(), std::collections::HashMap::new());
+
+        for held in [true, false] {
+            let method = if held {
+                http::Method::POST
+            } else {
+                http::Method::DELETE
+            };
+            let from_group = crate::scope_test_support::send(
+                &state,
+                method,
+                "/api/v1/admin/groups/CONVERGE/members",
+                &cookie,
+                Some(serde_json::json!({"cid": 9_990_201, "artcc_id": "ZDC", "reason": "ac4"})),
+            )
+            .await;
+            assert_eq!(
+                from_group,
+                http::StatusCode::NO_CONTENT,
+                "group side, held = {held}"
+            );
+
+            let roles: Vec<&str> = if held { vec!["CONVERGE"] } else { vec![] };
+            let from_user = crate::scope_test_support::send(
+                &state,
+                http::Method::POST,
+                "/api/v1/admin/users/9990202/access",
+                &cookie,
+                Some(serde_json::json!({
+                    "reason": "ac4",
+                    "scopes": [{"artcc_id": "ZDC", "permissions": {}, "role_names": roles}],
+                })),
+            )
+            .await;
+            assert_eq!(from_user, http::StatusCode::OK, "user side, held = {held}");
+
+            let group_state = access_repo::fetch_user_role_grants(&pool, &via_group)
+                .await
+                .unwrap();
+            let user_state = access_repo::fetch_user_role_grants(&pool, &via_user)
+                .await
+                .unwrap();
+            assert_eq!(group_state, user_state, "held = {held}");
+            let expected = if held {
+                vec![(Some("ZDC".to_string()), "CONVERGE".to_string())]
+            } else {
+                vec![]
+            };
+            assert_eq!(group_state, expected, "held = {held}");
+
+            let (group_entry, user_entry) = (
+                latest_access_audit(&pool, &via_group).await,
+                latest_access_audit(&pool, &via_user).await,
+            );
+            assert_eq!(
+                group_entry, user_entry,
+                "the audit entries differ, held = {held}"
+            );
+        }
+    }
+
+    async fn holder(pool: &PgPool, cid: i64) -> String {
+        sqlx::query_scalar(
+            "insert into identity.users (cid, full_name, display_name) \
+             values ($1, 'H', 'H') returning id",
+        )
+        .bind(cid)
+        .fetch_one(pool)
+        .await
+        .unwrap()
+    }
+
+    /// The newest audit entry recorded against `user_id` as a `USER_ACCESS` resource — the key a
+    /// person's access history is found by — with the holder's own id and CID blanked so two holders'
+    /// entries compare equal when the same change was made to each.
+    async fn latest_access_audit(pool: &PgPool, user_id: &str) -> serde_json::Value {
+        let (action, artcc, before, after): (
+            String,
+            Option<String>,
+            Option<serde_json::Value>,
+            Option<serde_json::Value>,
+        ) = sqlx::query_as(
+            "select action, artcc_id, before_state, after_state from access.audit_logs \
+             where resource_type = 'USER_ACCESS' and resource_id = $1 \
+             order by created_at desc, id desc limit 1",
+        )
+        .bind(user_id)
+        .fetch_optional(pool)
+        .await
+        .unwrap()
+        .unwrap_or_else(|| panic!("no USER_ACCESS audit entry for {user_id}"));
+        let blank = |state: Option<serde_json::Value>| {
+            let mut state = state.expect("both sides record a snapshot");
+            state["id"] = serde_json::Value::Null;
+            state["cid"] = serde_json::Value::Null;
+            state
+        };
+        serde_json::json!({
+            "action": action,
+            "artcc_id": artcc,
+            "before": blank(before),
+            "after": blank(after),
+        })
+    }
+
+    /// System groups are not managed from the group side — and nothing else stops it. The scope gate
+    /// asks whether the actor holds everything a group bundles, and `SERVER_ADMIN` bundles no rows (it
+    /// reaches the catalogue through the effective view's cross join), so for it the gate passes
+    /// trivially. Without the system-group refusal, any `access.groups.update` holder could make
+    /// anyone a server admin. Every system group, both directions, through the real route.
+    #[sqlx::test]
+    async fn system_groups_are_refused_from_the_group_side(pool: PgPool) {
+        let actor_id = seed_user(&pool).await;
+        grant(&pool, &actor_id, "access.groups.update", None).await;
+        let target = holder(&pool, 9_990_301).await;
+        sqlx::query("insert into access.user_roles (user_id, role_name, source) values ($1, 'USER', 'system')")
+            .bind(&target)
+            .execute(&pool)
             .await
             .unwrap();
+        let cookie = crate::scope_test_support::session_cookie(&pool, &actor_id).await;
+        let state = test_state(pool.clone(), std::collections::HashMap::new());
+        let body = serde_json::json!({"cid": 9_990_301, "artcc_id": null, "reason": "probe"});
 
-        // Reset, then make the same change the way the user editor does.
-        let mut tx = pool.begin().await.unwrap();
-        access_repo::set_user_role_scoped(
-            &mut tx,
-            &user,
-            "CONVERGE",
-            false,
-            Some("ZDC"),
-            access_repo::GrantSource::Manual,
+        for group in access_repo::SYSTEM_ROLES {
+            for method in [http::Method::POST, http::Method::DELETE] {
+                let status = crate::scope_test_support::send(
+                    &state,
+                    method.clone(),
+                    &format!("/api/v1/admin/groups/{group}/members"),
+                    &cookie,
+                    Some(body.clone()),
+                )
+                .await;
+                assert_eq!(status, http::StatusCode::FORBIDDEN, "{method} {group}");
+            }
+        }
+        assert_eq!(
+            access_repo::fetch_user_role_grants(&pool, &target)
+                .await
+                .unwrap(),
+            vec![(None, "USER".to_string())],
+            "the holder gained a system group or lost their USER baseline"
+        );
+    }
+
+    /// `VATUSA_STAFF` hands over the whole catalogue (#544), so only a server admin may grant it —
+    /// even to an actor who holds every permission it bundles, which is the case the bundle check
+    /// alone would allow. The server admin is the control: the refusal is about who, not the group.
+    #[sqlx::test]
+    async fn only_a_server_admin_grants_vatusa_staff(pool: PgPool) {
+        let actor_id = seed_user(&pool).await;
+        let catalogue: Vec<String> = sqlx::query_scalar("select name from access.permissions")
+            .fetch_all(&pool)
+            .await
+            .unwrap();
+        for name in &catalogue {
+            grant(&pool, &actor_id, name, None).await;
+        }
+        let admin = seed_user(&pool).await;
+        sqlx::query(
+            "insert into access.user_roles (user_id, role_name, source) values ($1, 'SERVER_ADMIN', 'system')",
         )
+        .bind(&admin)
+        .execute(&pool)
         .await
         .unwrap();
-        tx.commit().await.unwrap();
+        let target = holder(&pool, 9_990_401).await;
+        let state = test_state(pool.clone(), std::collections::HashMap::new());
+        let body = serde_json::json!({"cid": 9_990_401, "artcc_id": null, "reason": "staff"});
+        let post = |user: String| {
+            let (state, pool, body) = (state.clone(), pool.clone(), body.clone());
+            async move {
+                let cookie = crate::scope_test_support::session_cookie(&pool, &user).await;
+                crate::scope_test_support::send(
+                    &state,
+                    http::Method::POST,
+                    "/api/v1/admin/groups/VATUSA_STAFF/members",
+                    &cookie,
+                    Some(body),
+                )
+                .await
+            }
+        };
+
+        assert_eq!(post(actor_id).await, http::StatusCode::FORBIDDEN);
         assert!(
-            access_repo::fetch_user_role_grants(&pool, &user)
+            access_repo::fetch_user_role_grants(&pool, &target)
                 .await
                 .unwrap()
-                .is_empty(),
-            "the reset must actually clear it, or the comparison below is vacuous"
+                .is_empty()
         );
-
-        let mut tx = pool.begin().await.unwrap();
-        access_repo::set_user_role_scoped(
-            &mut tx,
-            &user,
-            "CONVERGE",
-            true,
-            Some("ZDC"),
-            access_repo::GrantSource::Manual,
-        )
-        .await
-        .unwrap();
-        tx.commit().await.unwrap();
-        let from_user = access_repo::fetch_user_role_grants(&pool, &user)
-            .await
-            .unwrap();
-
-        assert_eq!(from_group, from_user);
+        assert_eq!(post(admin).await, http::StatusCode::NO_CONTENT);
         assert_eq!(
-            from_group,
-            vec![(Some("ZDC".to_string()), "CONVERGE".to_string())]
+            access_repo::fetch_user_role_grants(&pool, &target)
+                .await
+                .unwrap(),
+            vec![(None, "VATUSA_STAFF".to_string())]
         );
     }
 
@@ -1397,6 +1553,97 @@ mod group_tests {
                 Err(ApiError::Forbidden)
             ),
             "a ZDC-scoped actor must not grant nationally"
+        );
+    }
+
+    /// Removal is gated by scope exactly as addition is. Driven through the real `DELETE` route, because
+    /// the gap this pins was invisible below it: the coarse `RequirePermission<AccessGroupsUpdate>` is
+    /// scope-blind by design (#543), so a ZDC-scoped admin passed it and removed a ZNY member and a
+    /// national member, both with 204. Removing authority at a scope you do not hold is exercising it.
+    #[sqlx::test]
+    async fn removal_is_gated_by_the_actors_scope(pool: PgPool) {
+        let actor_id = seed_user(&pool).await;
+        grant(&pool, &actor_id, "access.groups.update", Some("ZDC")).await;
+        grant(&pool, &actor_id, "events.config.update", Some("ZDC")).await;
+        make_group(&pool, "SCOPED_GRP").await;
+        sqlx::query(
+            "insert into access.role_permissions (role_name, permission_name) \
+             values ('SCOPED_GRP', 'events.config.update')",
+        )
+        .execute(&pool)
+        .await
+        .unwrap();
+
+        let member = |cid: i64, artcc: Option<&'static str>| {
+            let pool = pool.clone();
+            async move {
+                let id: String = sqlx::query_scalar(
+                    "insert into identity.users (cid, full_name, display_name) \
+                     values ($1, 'M', 'M') returning id",
+                )
+                .bind(cid)
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+                sqlx::query(
+                    "insert into access.user_roles (user_id, role_name, artcc_id, source) \
+                     values ($1, 'SCOPED_GRP', $2, 'manual')",
+                )
+                .bind(&id)
+                .bind(artcc)
+                .execute(&pool)
+                .await
+                .unwrap();
+            }
+        };
+        member(9_990_001, Some("ZNY")).await;
+        member(9_990_002, None).await;
+        member(9_990_003, Some("ZDC")).await;
+
+        let cookie = crate::scope_test_support::session_cookie(&pool, &actor_id).await;
+        let state = test_state(pool.clone(), std::collections::HashMap::new());
+        let remove = |body: serde_json::Value| {
+            let (state, cookie) = (state.clone(), cookie.clone());
+            async move {
+                crate::scope_test_support::send(
+                    &state,
+                    http::Method::DELETE,
+                    "/api/v1/admin/groups/SCOPED_GRP/members",
+                    &cookie,
+                    Some(body),
+                )
+                .await
+            }
+        };
+
+        assert_eq!(
+            remove(serde_json::json!({"cid": 9_990_001, "artcc_id": "ZNY", "reason": "t"})).await,
+            http::StatusCode::FORBIDDEN,
+            "a ZDC-scoped admin must not remove a ZNY member"
+        );
+        assert_eq!(
+            remove(serde_json::json!({"cid": 9_990_002, "reason": "t"})).await,
+            http::StatusCode::FORBIDDEN,
+            "nor a national one"
+        );
+        // Still able to act inside their own scope — the gate narrows, it does not disable.
+        assert_eq!(
+            remove(serde_json::json!({"cid": 9_990_003, "artcc_id": "ZDC", "reason": "t"})).await,
+            http::StatusCode::NO_CONTENT,
+            "a ZDC-scoped admin may remove a ZDC member"
+        );
+
+        let left: Vec<Option<String>> = sqlx::query_scalar(
+            "select artcc_id from access.user_roles where role_name = 'SCOPED_GRP' \
+             order by artcc_id nulls first",
+        )
+        .fetch_all(&pool)
+        .await
+        .unwrap();
+        assert_eq!(
+            left,
+            vec![None, Some("ZNY".to_string())],
+            "only the ZDC member was removed"
         );
     }
 
@@ -1634,14 +1881,21 @@ async fn change_membership(
         .await?
         .ok_or(ApiError::NotFound)?;
 
-    // Only adding needs the gate: removing a membership takes authority away, and an admin who can
-    // see the group may always do that. (Contrast the *contents* editor, where a removal is also a
-    // change to what holders can do and so is gated symmetrically.)
-    if held {
-        enforce_membership_scope(state, actor, name, artcc.as_deref()).await?;
-    }
+    // Gated in both directions. Removing a membership is a change to what that holder can do, at that
+    // scope, and an actor with no authority there cannot strip it any more than they could grant it —
+    // the principle the contents editor already follows (#545). Without this, a ZDC-scoped admin could
+    // remove ZNY and national holders, because the coarse `RequirePermission` is scope-blind (#543).
+    enforce_membership_scope(state, actor, name, artcc.as_deref()).await?;
 
-    let before = access_repo::fetch_user_role_grants(pool, &target).await?;
+    // Audited exactly as the user editor audits (#546 AC6): a `USER_ACCESS` entry keyed on the
+    // holder, with the full access snapshot either side, so one query finds a person's access history
+    // whichever editor made the change.
+    let before = build_user_access_body(
+        &target,
+        payload.cid,
+        access_repo::fetch_user_direct_grants(pool, &target).await?,
+        access_repo::fetch_user_role_grants(pool, &target).await?,
+    )?;
 
     let mut tx = pool.begin().await.map_err(|_| ApiError::Internal)?;
     // The same writer the user-side editor calls, so the two sides cannot produce different state
@@ -1657,16 +1911,22 @@ async fn change_membership(
     .await?;
     tx.commit().await.map_err(|_| ApiError::Internal)?;
 
-    let after = access_repo::fetch_user_role_grants(pool, &target).await?;
+    let mut after = build_user_access_body(
+        &target,
+        payload.cid,
+        access_repo::fetch_user_direct_grants(pool, &target).await?,
+        access_repo::fetch_user_role_grants(pool, &target).await?,
+    )?;
+    fill_server_admin_permissions(pool, &mut after).await?;
     let actor_id = audit_repo::resolve_user_actor_id(pool, &actor.id, &actor.display_name).await?;
     audit_repo::record_audit(
         pool,
         audit_repo::AuditEntry {
             actor_id,
-            action: if held { "GRANT" } else { "REVOKE" }.to_string(),
-            resource_type: "ACCESS_GROUP_MEMBER".to_string(),
-            resource_id: Some(format!("{name}:{}", payload.cid)),
-            artcc_id: artcc.clone(),
+            action: "UPDATE".to_string(),
+            resource_type: "USER_ACCESS".to_string(),
+            resource_id: Some(target.clone()),
+            artcc_id: None,
             reason: Some(reason.to_string()),
             before_state: serde_json::to_value(&before).ok(),
             after_state: serde_json::to_value(&after).ok(),
