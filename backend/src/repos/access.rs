@@ -1116,12 +1116,21 @@ mod tests {
         .expect_err("an unknown source must violate the check constraint");
     }
 
-    /// AC4: rows that predate the migration read as `manual`. `#[sqlx::test]` applies every migration
-    /// before any test data exists, so the backfill cannot be observed by inserting afterwards —
-    /// re-running the migration's own statements against a pre-migration row is the house pattern
-    /// (see `handlers::airport_surface::tests`).
+    /// AC4: rows that predate the migration read as `manual`.
+    ///
+    /// `#[sqlx::test]` applies every migration before any test data exists, so the backfill cannot be
+    /// observed by inserting afterwards. This puts both tables back how `0098` found them and then runs
+    /// **the real migration file** (`include_str!`), not a copy typed into the test. A copy is what this
+    /// test used to hold, and changing `0098` to backfill `'vatusa'` left it — and every other test —
+    /// green (#547 review). That value matters more than any other here: a wrong backfill marks every
+    /// hand-made grant as synced, and the first sync then revokes them as its own.
+    ///
+    /// Re-runnable because `0098` is written with `if not exists` / `if exists` throughout; dropping
+    /// `source` also drops the indexes and check constraint built on it, which the file recreates.
     #[sqlx::test]
     async fn the_backfill_marks_pre_existing_rows_manual(pool: sqlx::PgPool) {
+        const MIGRATION_0098: &str = include_str!("../../migrations/0098_grant_provenance.sql");
+
         let user: String = sqlx::query_scalar(
             "insert into identity.users (full_name, display_name) values ('T', 'T') returning id",
         )
@@ -1129,41 +1138,128 @@ mod tests {
         .await
         .unwrap();
 
-        // Put the column back how 0098 found it, with a row that has no provenance.
-        sqlx::query("alter table access.user_roles drop column source")
-            .execute(&pool)
-            .await
-            .unwrap();
+        // Put both tables back how 0098 found them, each holding a row with no provenance.
+        for table in ["access.user_roles", "access.user_permissions"] {
+            sqlx::query(&format!("alter table {table} drop column source"))
+                .execute(&pool)
+                .await
+                .unwrap();
+        }
         sqlx::query("insert into access.user_roles (user_id, role_name) values ($1, 'NTMO')")
             .bind(&user)
             .execute(&pool)
             .await
             .unwrap();
+        sqlx::query(
+            "insert into access.user_permissions (user_id, permission_name, granted) \
+             values ($1, 'events.config.update', true)",
+        )
+        .bind(&user)
+        .execute(&pool)
+        .await
+        .unwrap();
 
-        // 0098's statements, in order.
-        for stmt in [
-            "alter table access.user_roles add column source text not null default 'manual' \
-             check (source in ('manual', 'vatusa', 'system'))",
-            "alter table access.user_roles alter column source drop default",
-        ] {
-            sqlx::query(stmt).execute(&pool).await.unwrap();
-        }
+        sqlx::raw_sql(MIGRATION_0098).execute(&pool).await.unwrap();
 
-        let source: String = sqlx::query_scalar(
+        let role_source: String = sqlx::query_scalar(
             "select source from access.user_roles where user_id = $1 and role_name = 'NTMO'",
         )
         .bind(&user)
         .fetch_one(&pool)
         .await
         .unwrap();
-        assert_eq!(source, "manual", "an existing grant backfills as hand-made");
+        let perm_source: String = sqlx::query_scalar(
+            "select source from access.user_permissions \
+             where user_id = $1 and permission_name = 'events.config.update'",
+        )
+        .bind(&user)
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        assert_eq!(
+            role_source, "manual",
+            "an existing role grant backfills as hand-made"
+        );
+        assert_eq!(
+            perm_source, "manual",
+            "an existing permission grant backfills as hand-made"
+        );
 
-        // …and the default really is gone afterwards, which is what makes AC1 the schema's job.
+        // …and the default really is gone afterwards, on both tables, which is what makes AC1 the
+        // schema's job rather than every author's memory.
         sqlx::query("insert into access.user_roles (user_id, role_name) values ($1, 'USER')")
             .bind(&user)
             .execute(&pool)
             .await
-            .expect_err("the backfill default must not survive the migration");
+            .expect_err("the backfill default must not survive on user_roles");
+        sqlx::query(
+            "insert into access.user_permissions (user_id, permission_name, granted) \
+             values ($1, 'tmu.program.update', true)",
+        )
+        .bind(&user)
+        .execute(&pool)
+        .await
+        .expect_err("the backfill default must not survive on user_permissions");
+    }
+
+    /// AC2, against the writer the sync will call. The sync itself is #548 and not built yet, but
+    /// `set_user_role_scoped` is, and it is where the guarantee lives: the same **role** at the same
+    /// **scope**, held both by hand and by sync, must lose only the synced row when the sync revokes.
+    ///
+    /// The earlier `a_sync_revoke_removes_only_its_own_row` runs a hand-typed delete on
+    /// `user_permissions` with two *different* permissions, so it pins none of that — removing
+    /// `and source = $4` from this writer left the whole suite green (#547 review).
+    #[sqlx::test]
+    async fn a_sync_role_revoke_leaves_the_manual_grant_at_the_same_scope(pool: sqlx::PgPool) {
+        let user: String = sqlx::query_scalar(
+            "insert into identity.users (full_name, display_name) values ('T', 'T') returning id",
+        )
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+
+        let mut tx = pool.begin().await.unwrap();
+        for source in [super::GrantSource::Manual, super::GrantSource::Vatusa] {
+            super::set_user_role_scoped(&mut tx, &user, "NTMO", true, Some("ZDC"), source)
+                .await
+                .unwrap();
+        }
+        tx.commit().await.unwrap();
+
+        let rows = |pool: sqlx::PgPool, user: String| async move {
+            sqlx::query_scalar::<_, String>(
+                "select source from access.user_roles \
+                 where user_id = $1 and role_name = 'NTMO' and artcc_id = 'ZDC' order by source",
+            )
+            .bind(user)
+            .fetch_all(&pool)
+            .await
+            .unwrap()
+        };
+        assert_eq!(
+            rows(pool.clone(), user.clone()).await,
+            vec!["manual".to_string(), "vatusa".to_string()],
+            "both sources coexist at one scope"
+        );
+
+        let mut tx = pool.begin().await.unwrap();
+        super::set_user_role_scoped(
+            &mut tx,
+            &user,
+            "NTMO",
+            false,
+            Some("ZDC"),
+            super::GrantSource::Vatusa,
+        )
+        .await
+        .unwrap();
+        tx.commit().await.unwrap();
+
+        assert_eq!(
+            rows(pool.clone(), user.clone()).await,
+            vec!["manual".to_string()],
+            "a sync revoke must remove its own row and leave the hand-made one"
+        );
     }
 
     /// Since a manual and a synced grant of the same role at the same scope are now two rows, the
