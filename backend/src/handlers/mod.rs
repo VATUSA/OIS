@@ -32,3 +32,8 @@ pub mod taxi_insights;
 pub mod tmu;
 pub mod users;
 pub mod webhooks;
+
+#[cfg(test)]
+mod actor_ratchet_tests;
+#[cfg(test)]
+mod machine_actor_tests;

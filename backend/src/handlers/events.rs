@@ -637,7 +637,7 @@ pub async fn upsert_event_facility(
         &facility,
         &payload.level,
         notes.trim(),
-        principal.user_id(),
+        principal.user_id().ok_or(ApiError::Forbidden)?,
     )
     .await?;
     let mut row = events_repo::get_facility_support(pool, id, &facility)
@@ -851,7 +851,7 @@ pub async fn upsert_event_rate(
         artcc.as_deref().unwrap_or(""),
         payload.config_id.as_deref(),
         source,
-        principal.user_id(),
+        principal.user_id().ok_or(ApiError::Forbidden)?,
     )
     .await?;
     let mut row = events_repo::get_airport_rate(pool, id, &icao)
