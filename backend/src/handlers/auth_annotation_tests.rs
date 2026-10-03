@@ -92,6 +92,14 @@ fn handlers_in(file: &str, src: &str) -> Vec<Handler> {
             .find(FN)
             .map(|i| annotation_end + i + FN.len())
             .expect("an annotation is followed by its handler");
+        // A handler that isn't `pub async fn` would otherwise be judged by the next one's signature.
+        let next_annotation = src[annotation_end..]
+            .find(ANNOTATION)
+            .map(|i| annotation_end + i);
+        assert!(
+            next_annotation.is_none_or(|next| name_start < next),
+            "{file}.rs: the annotation at byte {start} isn't on a `pub async fn`; the scan can't pair it"
+        );
         let params_start = src[name_start..].find('(').map(|i| name_start + i).unwrap();
         let name = src[name_start..params_start].split('<').next().unwrap();
         let params = squash(&src[params_start..balanced(src, params_start + 1)]);
@@ -113,6 +121,11 @@ fn scan() -> Vec<Handler> {
     let mut out = Vec::new();
     for entry in std::fs::read_dir(dir).unwrap() {
         let path = entry.unwrap().path();
+        // Only top-level files are read; a handler moved into a subdirectory would go unchecked.
+        assert!(
+            !path.is_dir(),
+            "{path:?}: the scan doesn't descend into handler subdirectories"
+        );
         let file = path.file_stem().unwrap().to_string_lossy().into_owned();
         // Test modules hold source-scan literals like this one's, not handlers.
         if path.extension().is_some_and(|e| e == "rs") && !file.ends_with("_tests") {
