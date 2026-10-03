@@ -96,8 +96,9 @@ pub fn draft_new_permission_names() -> Vec<&'static str> {
         "events.debrief.read",             // read the post-event debrief
         "events.debrief.create",           // write a post-event debrief entry
         "events.availability.update",      // indicate availability on a DCC event thread
-        // --- tmu: NTML / ADV / TMI (ntml/adv/delays were never implemented — see
-        // docs/features/tmu-ntml-adv-tmi.md; program/groundstop/cfr are the real, live ones) ---
+        // --- tmu: NTML / ADV / TMI (see docs/features/tmu-ntml-adv-tmi.md). `tmu.adv.*` are live as
+        // of #457-#461 and gate the ADVZY handlers; `tmu.ntml.*` and `tmu.delays.read` are still
+        // seeded-but-unused. program/groundstop/cfr are live. ---
         "tmu.ntml.read",
         "tmu.ntml.create",
         "tmu.ntml.update",
