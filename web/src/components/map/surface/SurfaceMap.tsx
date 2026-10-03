@@ -26,6 +26,8 @@ import {useMapPalette} from "../lib/colors";
 import {surfaceTooltip} from "../lib/tooltip";
 import {haversine, normPoints, toDeckPath, type LatLng} from "../lib/geo";
 import {SurfaceEditorPanel, type SurfaceDraft} from "./editor-panel";
+import {StandDetailCard} from "./stand-detail";
+import type {AirportGate} from "@/lib/airport-surface";
 import {MIN_SURFACE_POINTS, buildSurfaceDraftLayers, buildSurfaceLayers, type SurfaceKind} from "./layers";
 
 const KINDS: { kind: SurfaceKind; label: string }[] = [
@@ -62,6 +64,8 @@ export function SurfaceMap({
   const [phase, setPhase] = useState<"draw" | "edit">("draw");
   const dragIndex = useRef<number | null>(null);
   const [draggingVertex, setDraggingVertex] = useState(false);
+  /** The stand a read-only viewer clicked, shown in a detail card. */
+  const [inspected, setInspected] = useState<AirportGate | null>(null);
   // The double-click-finish timer (see handleClick). Reset in startNew/startEditExisting so a
   // timestamp from finishing one draft can't make the very next draft's first click look doubled.
   const lastClickT = useRef(0);
@@ -131,6 +135,11 @@ export function SurfaceMap({
     // `camera.*` are stable ref-backed callbacks (see useMapCamera) — safe to omit.
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [surface, position, icao]);
+
+  // Re-read the inspected stand from the live surface rather than holding the clicked object: a
+  // refetch (or a re-pull that fills in the new X-Plane fields) would otherwise leave the card
+  // showing a snapshot. Also closes it if the stand goes away.
+  const inspectedGate = inspected ? (surface.gates.find((g) => g.id === inspected.id) ?? null) : null;
 
   const startNew = (kind: SurfaceKind) => {
     // A stale timestamp from finishing a *previous* draft's double-click must not make this
@@ -293,15 +302,25 @@ export function SurfaceMap({
       return;
     }
     if (draft) return; // phase "edit": dragging handles is the only interaction, handled separately
-    if (!editable) return;
     const kind = layerIdToKind(info.layer?.id);
     const id = (info.object as { id?: string } | undefined)?.id;
+    // Without `flow.surface_data.update` this used to return here, so a click did nothing whatsoever
+    // and the only way to identify a stand was the hover tooltip. Show the stand's detail instead
+    // (#541). Editors still get the editor, which is the point of holding the permission.
+    if (!editable) {
+      if (kind === "gate" && id) setInspected(info.object as AirportGate);
+      return;
+    }
     if (kind && id) startEditExisting(kind, id);
   };
 
   const handleDragStart = (info: PickingInfo, event: unknown) => {
     if (draft && info.layer?.id === "surface-draft-vertices" && info.index != null && info.index >= 0) {
-      dragIndex.current = info.index;
+      // The handle's own vertex index, not deck's index into the layer data. Those diverge as
+      // soon as the handles are capped (`handleVertices`), and reading the wrong one moves a
+      // different vertex than the one under the cursor (#538).
+      dragIndex.current =
+        (info.object as { index?: number } | undefined)?.index ?? info.index;
       setDraggingVertex(true);
       (event as { stopPropagation?: () => void })?.stopPropagation?.();
     }
@@ -343,6 +362,11 @@ export function SurfaceMap({
                 {label}
               </Button>
             ))}
+          </div>
+        )}
+        {inspectedGate && !draft && (
+          <div className="absolute right-3 top-3 w-72">
+            <StandDetailCard gate={inspectedGate} onClose={() => setInspected(null)} />
           </div>
         )}
         {draft && (

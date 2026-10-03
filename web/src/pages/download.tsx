@@ -1,32 +1,40 @@
-// The public download page for the OIS desktop app (#347). Linked from the footer and reachable
-// signed out — you download the app before you have any reason to be signed in.
+// The download page for the OIS desktop app (#347), reachable signed out — you download the app
+// before you have any reason to be signed in — and from the sidebar's User group once signed in
+// (#534).
 //
-// Installers live on GitHub Releases (the repo is public, so that is a free CDN and needs no auth).
-// Asset filenames carry the version, so the exact URLs can't be hardcoded; this reads the latest
-// release from the public API instead and falls back to the releases page if that call fails —
-// offline, or GitHub's 60/hr unauthenticated rate limit — so the page is never a dead end.
+// Each row links to `/api/v1/public/desktop/download/{platform}`, which resolves the current
+// release's installer server-side and redirects to it. That replaced a browser-side call to
+// `api.github.com` (#534), which failed in two ordinary situations and silently degraded every row
+// to the generic releases page:
+//
+//   * the host is absent from the desktop app's CSP `connect-src`, so inside the app it was blocked;
+//   * GitHub's unauthenticated limit is 60 requests/hour per IP.
+//
+// There is no fetch here any more. A row's destination no longer depends on a call succeeding, so
+// "it looks like a direct download but isn't" is no longer a state this page can be in.
 
 import * as React from "react";
 import {Apple, Download, Monitor, Terminal} from "lucide-react";
 
 import {usePageHeader} from "@/components/shell/page-meta";
 
+/** Kept as an explicit secondary link, never as a silent substitute for a platform row. */
 const RELEASES_URL = "https://github.com/VATUSA/OIS/releases";
-const LATEST_API = "https://api.github.com/repos/VATUSA/OIS/releases/latest";
 
 type Platform = {
   id: "macos" | "windows" | "linux";
   label: string;
   icon: typeof Apple;
-  /** Extensions Tauri's bundler produces for this platform, best first. */
-  extensions: string[];
 };
 
 const PLATFORMS: Platform[] = [
-  { id: "macos", label: "macOS", icon: Apple, extensions: [".dmg"] },
-  { id: "windows", label: "Windows", icon: Monitor, extensions: ["-setup.exe", ".msi"] },
-  { id: "linux", label: "Linux", icon: Terminal, extensions: [".AppImage", ".deb"] },
+  { id: "macos", label: "macOS", icon: Apple },
+  { id: "windows", label: "Windows", icon: Monitor },
+  { id: "linux", label: "Linux", icon: Terminal },
 ];
+
+/** The server-side resolver. Which asset a platform maps to is decided in `handlers::desktop`. */
+const downloadHref = (platform: Platform["id"]) => `/api/v1/public/desktop/download/${platform}`;
 
 /** Best guess at the visitor's OS, only ever used to decide what to put first. */
 function detectPlatform(): Platform["id"] | undefined {
@@ -38,46 +46,11 @@ function detectPlatform(): Platform["id"] | undefined {
   return undefined;
 }
 
-type Release = { version: string; assets: Partial<Record<Platform["id"], string>> };
-
-async function fetchLatestRelease(signal: AbortSignal): Promise<Release> {
-  const response = await fetch(LATEST_API, { signal, headers: { Accept: "application/vnd.github+json" } });
-  if (!response.ok) throw new Error(`GitHub returned ${response.status}`);
-
-  const body = (await response.json()) as {
-    tag_name?: string;
-    assets?: { name: string; browser_download_url: string }[];
-  };
-
-  const assets: Release["assets"] = {};
-  for (const platform of PLATFORMS) {
-    for (const extension of platform.extensions) {
-      const match = body.assets?.find((a) => a.name.endsWith(extension));
-      if (match) {
-        assets[platform.id] = match.browser_download_url;
-        break;
-      }
-    }
-  }
-
-  return { version: body.tag_name ?? "", assets };
-}
-
-function PlatformRow({
-  platform,
-  href,
-  primary,
-}: {
-  platform: Platform;
-  href: string | undefined;
-  primary: boolean;
-}) {
+function PlatformRow({ platform, primary }: { platform: Platform; primary: boolean }) {
   const Icon = platform.icon;
   return (
     <a
-      href={href ?? RELEASES_URL}
-      target="_blank"
-      rel="noreferrer"
+      href={downloadHref(platform.id)}
       className={[
         "flex items-center gap-3 rounded-md border border-line px-4 py-3 transition-colors",
         primary ? "bg-card hover:bg-chip" : "bg-panel-2 hover:bg-card",
@@ -96,19 +69,7 @@ export function DownloadPage() {
     subtitle: "Install the OIS desktop app. It keeps itself up to date once installed.",
   });
 
-  const [release, setRelease] = React.useState<Release | undefined>();
-  const [failed, setFailed] = React.useState(false);
   const detected = React.useMemo(detectPlatform, []);
-
-  React.useEffect(() => {
-    const controller = new AbortController();
-    fetchLatestRelease(controller.signal)
-      .then(setRelease)
-      .catch((error: unknown) => {
-        if (!controller.signal.aborted) setFailed(error instanceof Error);
-      });
-    return () => controller.abort();
-  }, []);
 
   // Detected platform first; the rest keep their declared order.
   const ordered = React.useMemo(
@@ -119,35 +80,28 @@ export function DownloadPage() {
   return (
     <div className="flex w-full max-w-2xl flex-col gap-4">
       <section className="flex flex-col gap-3">
-        {release?.version && (
-          <span className="font-mono text-sm text-ink-3">{release.version}</span>
-        )}
-
-        {failed && (
-          <p className="text-sm text-ink-2">
-            Couldn&apos;t reach GitHub to look up the latest build. Every installer is on the{" "}
-            <a
-              href={RELEASES_URL}
-              target="_blank"
-              rel="noreferrer"
-              className="text-brand-ink underline underline-offset-2 hover:text-ink"
-            >
-              releases page
-            </a>
-            .
-          </p>
-        )}
-
         <div className="flex flex-col gap-2">
           {ordered.map((platform) => (
             <PlatformRow
               key={platform.id}
               platform={platform}
-              href={release?.assets[platform.id]}
               primary={platform.id === detected}
             />
           ))}
         </div>
+
+        {/*
+          The installers are deliberately not OS-code-signed yet — `.github/workflows/release.yml`
+          documents the decision — so the first launch shows a publisher warning. Saying so here is
+          the difference between a user thinking the download is broken and knowing what to click.
+          This note goes away with the signing work (#535).
+        */}
+        <p className="text-sm text-ink-3">
+          The installers aren&apos;t signed yet, so the first launch shows a warning about an
+          unidentified developer. On macOS, open it from Finder with <strong>right-click → Open</strong>;
+          on Windows, choose <strong>More info → Run anyway</strong>. Updates after that are
+          automatic and verified.
+        </p>
 
         <p className="text-sm text-ink-3">
           Looking for an older build, or a format not listed here? See{" "}

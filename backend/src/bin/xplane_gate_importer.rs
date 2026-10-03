@@ -16,9 +16,9 @@
 //! every layer name for `stand|park|gate|dock|bay|ramp|position`. So the MIT-clean, public-domain
 //! source that supplies taxiways, aprons and runways cannot supply gates (VATUSA/OIS#431 AC1).
 //!
-//! The Gateway is the practical machine-readable alternative, and it is richer than what we store:
-//! row `1300` gives position, heading, stand type and aircraft class, row `1301` the ICAO width code
-//! and airline codes. **Its licence is unstated** — there is no licence file in a scenery pack, the
+//! The Gateway is the practical machine-readable alternative: row `1300` gives position, heading,
+//! stand type and aircraft class, row `1301` the ICAO width code, operation type and airline codes.
+//! All of it is imported. **Its licence is unstated** — there is no licence file in a scenery pack, the
 //! Gateway is a single-page app so its terms are not machine-readable, and the data is
 //! community-contributed rather than surveyed. Using it is a risk the project owner accepted
 //! deliberately, over CRC/vNAS profiles and over re-litigating OSM's ODbL; the reasoning is recorded
@@ -31,7 +31,9 @@
 //! `faa_surface.json` are fetched, so both extracts describe the same airport set.
 //!
 //! ```json
-//! { "KDCA": [ { "name": "E57", "lat": 38.858, "lon": -77.043, "kind": "gate", "heading": 209.1 } ] }
+//! { "KDCA": [ { "name": "E57", "lat": 38.858, "lon": -77.043, "kind": "gate", "heading": 209.1,
+//!               "aircraft_classes": ["jets"], "size_code": "B", "operation_type": "airline",
+//!               "airline_codes": ["aal", "dal"] } ] }
 //! ```
 //!
 //! `kind` is X-Plane's stand type verbatim (`gate` | `tie_down` | `misc` | `hangar`). All four are
@@ -41,8 +43,9 @@
 //!
 //! `heading` is **normalised** into `[0, 360)`. The Gateway serves it unnormalised — `-510.9`,
 //! `-377.8` and `-397.3` all appear in KDCA's first three rows — so a consumer that trusted it raw
-//! would compute nonsense. It is carried here but **not stored**: the model has no heading column and
-//! nothing would read it (VATUSA/OIS#431 scopes name/lat/lon/kind).
+//! would compute nonsense. It **is** stored as of VATUSA/OIS#541, along with row `1301`'s width code,
+//! operation type and airline codes, and row `1300`'s aircraft classes. #431 originally scoped this
+//! to name/lat/lon/kind; #541 widened it to keep what the source gives us.
 //!
 //! Stand names are made **unique within an airport**: 121 of the 183 airports repeat a name (KATW has
 //! two stands called "South Ramp"). Duplicates get a ` #2`, ` #3` … suffix. This is not cosmetic — the
@@ -99,6 +102,19 @@ struct Stand {
     lon: f64,
     kind: String,
     heading: f64,
+    /// Row `1300`'s aircraft-class field, split on `|` — `heavy|jets` becomes `["heavy", "jets"]`.
+    /// Empty when the field is `all` or absent, which is the source's way of saying "no restriction".
+    aircraft_classes: Vec<String>,
+    /// Row `1301`'s ICAO code letter (`A`..`F`), where the row exists and carries a plausible one.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    size_code: Option<String>,
+    /// Row `1301`'s operation type, e.g. `airline`, `cargo`, `general_aviation`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    operation_type: Option<String>,
+    /// Row `1301`'s airline codes, lowercase as served — `["aal", "dal"]`.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    #[serde(default)]
+    airline_codes: Vec<String>,
 }
 
 fn client() -> reqwest::Client {
@@ -109,17 +125,25 @@ fn client() -> reqwest::Client {
         .expect("http client should build")
 }
 
-/// Parse the `1300` startup-location rows out of an `apt.dat`.
+/// Parse the `1300` startup-location rows out of an `apt.dat`, with the `1301` metadata row that
+/// follows each one.
 ///
-/// Row shape: `1300 <lat> <lon> <heading> <type> <aircraft classes> <name...>`. The name is the rest
-/// of the line — stand names contain spaces ("South Ramp", "Bohlke International Airways/Hanger") —
-/// so it is joined rather than taken as one field.
+/// Row shapes:
+/// - `1300 <lat> <lon> <heading> <type> <aircraft classes> <name...>`
+/// - `1301 <ICAO width code> <operation type> <airline codes...>`
 ///
-/// `1301` rows (ICAO width code, operation type, airline codes) are deliberately ignored: nothing in
-/// the model stores them, and parsing data we discard would invite someone to trust it later.
+/// The name is the rest of the `1300` line — stand names contain spaces ("South Ramp", "Bohlke
+/// International Airways/Hanger") — so it is joined rather than taken as one field.
+///
+/// A `1301` **belongs to the `1300` above it**; the format has no key tying them together, so it is
+/// read as the next line rather than looked up. It is optional: a `1300` with no `1301` after it is
+/// normal and yields `None` for the size code and operation type. Across the airports sampled while
+/// writing this (KDCA, KSFO, KJFK, KORD, KATL) every `1300` had one, but 10 of KDCA's 75 carried no
+/// airline codes, so absence is handled per-field rather than per-row.
 fn parse_stands(dat: &str) -> Vec<Stand> {
     let mut out = Vec::new();
-    for line in dat.lines() {
+    let lines: Vec<&str> = dat.lines().collect();
+    for (i, line) in lines.iter().enumerate() {
         let parts: Vec<&str> = line.split_whitespace().collect();
         if parts.first() != Some(&"1300") || parts.len() < 7 {
             continue;
@@ -135,6 +159,10 @@ fn parse_stands(dat: &str) -> Vec<Stand> {
         if name.trim().is_empty() {
             continue;
         }
+        let meta = lines
+            .get(i + 1)
+            .map(|l| l.split_whitespace().collect::<Vec<_>>());
+        let meta = meta.filter(|m| m.first() == Some(&"1301"));
         out.push(Stand {
             name,
             lat,
@@ -142,9 +170,47 @@ fn parse_stands(dat: &str) -> Vec<Stand> {
             kind: parts[4].to_string(),
             // Normalised here, once, so no consumer has to know the source serves it unbounded.
             heading: normalise_heading(heading),
+            aircraft_classes: parse_classes(parts[5]),
+            size_code: meta
+                .as_ref()
+                .and_then(|m| m.get(1))
+                .and_then(|c| parse_size_code(c)),
+            operation_type: meta
+                .as_ref()
+                .and_then(|m| m.get(2))
+                .map(|t| t.to_ascii_lowercase()),
+            airline_codes: meta
+                .as_ref()
+                .map(|m| m.iter().skip(3).map(|c| c.to_ascii_lowercase()).collect())
+                .unwrap_or_default(),
         });
     }
     out
+}
+
+/// Split row `1300`'s aircraft-class field on `|`.
+///
+/// `all` is the source's "no restriction" and carries no more information than an empty list, so it
+/// is not stored as a class — a consumer asking "does this stand take a heavy?" should not have to
+/// know `all` is a magic value.
+fn parse_classes(field: &str) -> Vec<String> {
+    if field.eq_ignore_ascii_case("all") {
+        return Vec::new();
+    }
+    field
+        .split('|')
+        .map(|c| c.trim().to_ascii_lowercase())
+        .filter(|c| !c.is_empty())
+        .collect()
+}
+
+/// Accept a `1301` width code only if it is a single ICAO code letter, `A`..`F`.
+///
+/// The field is community-contributed, so it is validated rather than trusted: the DB has a
+/// `^[A-F]$` check on the column, and an import must not be the thing that trips it.
+fn parse_size_code(field: &str) -> Option<String> {
+    let up = field.trim().to_ascii_uppercase();
+    matches!(up.as_str(), "A" | "B" | "C" | "D" | "E" | "F").then_some(up)
 }
 
 /// Make every name in `stands` unique, in file order, by suffixing repeats ` #2`, ` #3` …
@@ -311,8 +377,8 @@ mod tests {
         assert_eq!(stands[1].kind, "tie_down");
     }
 
-    /// `1301` carries the width code and airline list; we store neither, so it must not be mistaken
-    /// for a stand of its own.
+    /// `1301` carries the width code and airline list. We store both as of #541, but it is metadata
+    /// *about* the `1300` above it — it must not become a stand of its own.
     #[test]
     fn only_1300_rows_become_stands() {
         let dat = "1300  38.1 -77.1 90 gate jets A1\n\
@@ -322,6 +388,8 @@ mod tests {
         let stands = parse_stands(dat);
         assert_eq!(stands.len(), 1);
         assert_eq!(stands[0].name, "A1");
+        assert_eq!(stands[0].size_code.as_deref(), Some("B"));
+        assert_eq!(stands[0].airline_codes, ["aal", "dal"]);
     }
 
     /// Repeated names would make the seed's `(icao, name)` re-pull match ambiguous, and an ambiguous
@@ -353,5 +421,100 @@ mod tests {
         let stands = parse_stands(dat);
         assert_eq!(stands.len(), 1, "only the well-formed row survives");
         assert_eq!(stands[0].name, "B2");
+    }
+
+    /// The real shape, verbatim from KDCA's pack: a `1301` directly under its `1300`.
+    #[test]
+    fn a_1301_row_attaches_to_the_stand_above_it() {
+        let stands = parse_stands(
+            "1300  38.85853226 -077.04336496 -510.9 gate jets E57\n\
+             1301 B airline aal dal\n",
+        );
+
+        assert_eq!(stands.len(), 1);
+        let s = &stands[0];
+        assert_eq!(s.aircraft_classes, ["jets"]);
+        assert_eq!(s.size_code.as_deref(), Some("B"));
+        assert_eq!(s.operation_type.as_deref(), Some("airline"));
+        assert_eq!(s.airline_codes, ["aal", "dal"]);
+    }
+
+    /// The format has no key tying a `1301` to its stand — only position in the file. So a metadata
+    /// row must land on the stand *above* it and never leak onto the next one.
+    #[test]
+    fn metadata_does_not_leak_to_the_following_stand() {
+        let stands = parse_stands(
+            "1300 38.1 -77.1 90 gate heavy|jets A1\n\
+             1301 E cargo fdx\n\
+             1300 38.2 -77.2 90 tie_down props B2\n",
+        );
+
+        assert_eq!(stands.len(), 2);
+        assert_eq!(stands[0].size_code.as_deref(), Some("E"));
+        assert_eq!(stands[0].airline_codes, ["fdx"]);
+        assert_eq!(
+            stands[1].size_code, None,
+            "B2 has no 1301 of its own and must not inherit A1's"
+        );
+        assert_eq!(stands[1].operation_type, None);
+        assert!(stands[1].airline_codes.is_empty());
+    }
+
+    /// A `1300` with no `1301` after it is normal, and so is a `1301` with no airline codes — 10 of
+    /// KDCA's 75 stands carry none. Absence is per-field, not per-row.
+    #[test]
+    fn missing_metadata_is_absent_not_fabricated() {
+        let stands = parse_stands(
+            "1300 38.1 -77.1 90 gate jets A1\n\
+             1301 C airline\n\
+             1300 38.2 -77.2 90 gate jets B2\n",
+        );
+
+        assert_eq!(stands[0].size_code.as_deref(), Some("C"));
+        assert!(
+            stands[0].airline_codes.is_empty(),
+            "a 1301 can stop after the operation type"
+        );
+        assert_eq!(stands[1].size_code, None);
+    }
+
+    /// Classes are pipe-delimited, and `all` is the source's "no restriction" — storing it as a class
+    /// would make a consumer ask "does this take a heavy?" and get the wrong answer.
+    #[test]
+    fn aircraft_classes_split_on_the_pipe_and_drop_all() {
+        assert_eq!(
+            parse_classes("heavy|jets|turboprops|props"),
+            ["heavy", "jets", "turboprops", "props"]
+        );
+        assert_eq!(parse_classes("jets"), ["jets"]);
+        assert!(
+            parse_classes("all").is_empty(),
+            "`all` carries no more than an empty list"
+        );
+        assert!(
+            parse_classes("ALL").is_empty(),
+            "and it is not case-sensitive"
+        );
+        assert!(parse_classes("").is_empty());
+        assert_eq!(
+            parse_classes("Heavy|JETS"),
+            ["heavy", "jets"],
+            "normalised to lowercase"
+        );
+    }
+
+    /// The width code is community-contributed and the column has a `^[A-F]$` check. An import must
+    /// not be the thing that trips that constraint.
+    #[test]
+    fn an_implausible_width_code_is_rejected_rather_than_stored() {
+        assert_eq!(parse_size_code("B").as_deref(), Some("B"));
+        assert_eq!(parse_size_code("f").as_deref(), Some("F"), "uppercased");
+        for bad in ["G", "Z", "BB", "1", "", "-", "B1"] {
+            assert_eq!(
+                parse_size_code(bad),
+                None,
+                "{bad} is not an ICAO code letter"
+            );
+        }
     }
 }

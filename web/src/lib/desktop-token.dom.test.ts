@@ -71,6 +71,37 @@ describe("getDesktopToken", () => {
 
     await expect(getDesktopToken()).resolves.toBeUndefined();
   });
+
+  /**
+   * The loop this issue is about (VATUSA/OIS#535 AC4). On macOS a keychain read is ACL-gated and can
+   * put up a login-password prompt; dismissing it rejects `get_token`. The token is resolved per API
+   * request and `useMe` retries every 5s on error, so a read that leaves no trace re-prompts for as
+   * long as the app is open. One failed read must mean one failed read.
+   */
+  it("a rejected read is not retried on the next request", async () => {
+    onDesktop = true;
+    invokeDesktop.mockRejectedValue(new Error("user dismissed the keychain prompt"));
+    const {getDesktopToken} = await freshModule();
+
+    await expect(getDesktopToken()).resolves.toBeUndefined();
+    await expect(getDesktopToken()).resolves.toBeUndefined();
+    await expect(getDesktopToken()).resolves.toBeUndefined();
+
+    expect(invokeDesktop).toHaveBeenCalledTimes(1);
+  });
+
+  it("an empty keychain is not re-read either", async () => {
+    // Signed out is a settled answer: only `setDesktopToken` can change it, so re-reading would be
+    // one more ACL-gated keychain hit for a result that cannot have moved.
+    onDesktop = true;
+    invokeDesktop.mockResolvedValue(null);
+    const {getDesktopToken} = await freshModule();
+
+    await expect(getDesktopToken()).resolves.toBeUndefined();
+    await expect(getDesktopToken()).resolves.toBeUndefined();
+
+    expect(invokeDesktop).toHaveBeenCalledTimes(1);
+  });
 });
 
 describe("setDesktopToken", () => {
@@ -94,6 +125,30 @@ describe("setDesktopToken", () => {
 
     await expect(getDesktopToken()).resolves.toBeUndefined();
     expect(invokeDesktop).toHaveBeenCalledTimes(1);
+  });
+
+  /**
+   * The recovery path for AC4's sticky flag. A failed read leaves the user on the sign-in screen;
+   * signing in calls `setDesktopToken` (`desktop-auth.ts:22`). If that did not re-open reads, a
+   * single dismissed prompt would wedge the app as signed-out until it was restarted — the flag
+   * would have traded a prompt loop for a dead end.
+   */
+  it("re-opens reads after a failure, so signing in recovers", async () => {
+    onDesktop = true;
+    invokeDesktop.mockRejectedValueOnce(new Error("user dismissed the keychain prompt"));
+    const {getDesktopToken, setDesktopToken} = await freshModule();
+
+    await expect(getDesktopToken()).resolves.toBeUndefined();
+    expect(invokeDesktop).toHaveBeenCalledTimes(1);
+
+    setDesktopToken("ois_dsk_after_sign_in");
+    await expect(getDesktopToken()).resolves.toBe("ois_dsk_after_sign_in");
+
+    // And a later logout leaves the keychain readable again rather than permanently settled.
+    setDesktopToken(undefined);
+    invokeDesktop.mockResolvedValue("ois_dsk_from_keychain");
+    await expect(getDesktopToken()).resolves.toBe("ois_dsk_from_keychain");
+    expect(invokeDesktop).toHaveBeenCalledTimes(2);
   });
 
   // A keychain read started just before logout resolves after it. Writing its result into the cache

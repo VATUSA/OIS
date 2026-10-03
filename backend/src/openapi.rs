@@ -42,6 +42,7 @@ use utoipa::OpenApi;
         crate::handlers::facility_documents::delete_facility_document,
         crate::handlers::public::get_board,
         crate::handlers::airports::get_airport,
+        crate::handlers::desktop::download,
         crate::handlers::flow::flight_advisory,
         crate::handlers::flow::my_flight,
         crate::handlers::access::get_access_catalog,

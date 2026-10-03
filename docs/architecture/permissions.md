@@ -33,16 +33,42 @@ Ported from osmium, plus the `artcc_id` scope column:
 
 ### Effective permissions
 
-A DB view (osmium's `v_effective_user_permissions`) unions:
-role-derived ∪ SERVER_ADMIN (cross-join of *all* permissions) ∪ direct grants, then subtracts explicit denies. OIS adds
-the scope predicate: a grant with
-`artcc_id = NULL` is national; a scoped grant applies only to actions on resources in that ARTCC.
+**One resolver**, `repos::access::fetch_effective_permissions`. It reads
+`access.v_effective_user_permissions` — which emits one `(permission, artcc_id, granted)` row per
+grant or deny, carrying the scope — and composes them into a `PermissionScope` per permission.
+`permission_scope()` and `fetch_user_permission_names()` are both thin views onto it and hold no SQL
+of their own.
 
-Per-domain scope enforcement has begun: handlers enforce ARTCC scope at runtime via
-`access_repo::permission_scope(...).allows(Some(facility_id))` — already wired for
-`flow.facility_map.update`, `events.rate.update`, `events.config.update`, and
-`events.support.update`. It rolls out domain by domain; the global effective-permissions
-view still does not pre-filter by scope, so scoped enforcement lives in the handlers.
+There used to be two implementations, and they disagreed (#543): the view honoured denies but dropped
+`artcc_id` on every arm, so **a deny scoped to one ARTCC revoked the permission nationally**, while
+`permission_scope()` honoured scope and never read `granted = false` at all. Each was blind to
+precisely what the other saw.
+
+**The deny rule.** A deny removes the permission **at its own scope**; a national deny
+(`artcc_id is null`) removes it **everywhere**, even where a scoped allow exists. So a national allow
+with a deny at ZDC is "everywhere except ZDC" — which is why `PermissionScope::National` carries an
+`except` set rather than being a bare marker. This is what the deny bullet above has always promised:
+an explicit deny beats any allow.
+
+**A resource with no resolvable owning ARTCC** (`allows(None)`) is permitted only at *unrestricted*
+national scope. A holder carrying any scoped deny fails closed there, because there is no ARTCC to
+test the deny against.
+
+### The two-stage gate — a contract, not an accident
+
+`RequirePermission<P>` is **deliberately scope-blind** (#543). It runs in an axum extractor, where the
+ARTCC does not exist yet: it arrives as a path segment, a body field, or a live `owning_artcc` lookup.
+So the gate answers one question — *do you hold this permission anywhere?* — and rejects with **401**.
+The ARTCC is then the handler's to enforce, with `scope.allows(Some(artcc))`, rejecting with **403**.
+
+That 401/403 split is load-bearing: it is how a test can tell which gate answered.
+
+The exposure this leaves is worth stating plainly. Only the handlers that opt in enforce scope —
+`flow.facility_map.update`, `events.config.update`, `events.rate.update`, `events.support.update`,
+`facilities.docs.update`, `flow.surface_data.update`, `flow.route.update` / `.delete`,
+`tmu.adv.update` / `.publish`, the flight-exclusion permission, and `events.capture.*`. **For every
+other permission a facility-scoped grant still behaves as national**, because nothing downstream of
+the coarse gate narrows it. Closing that is per-domain work, not a resolver change.
 
 ## Enforcement
 

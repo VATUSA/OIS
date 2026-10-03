@@ -180,3 +180,85 @@ mod tests {
         assert!(!b.contains("ZAU", 33.94, -118.4), "LAX is not inside ZAU");
     }
 }
+
+#[cfg(test)]
+mod boundary_identity_tests {
+    //! VATUSA/OIS#556: every bundled boundary must be a facility OIS knows, or a deliberate exception.
+    //! Honolulu was split — `HCF` in `org.facilities`, `ZHN` in the boundaries — and nothing noticed.
+
+    use std::collections::BTreeSet;
+
+    /// Polygons OIS draws but has no facility for. Each needs a reason, so adding one is a decision.
+    const NOT_OIS_FACILITIES: &[(&str, &str)] = &[(
+        "ZUA",
+        "Guam CERAP: not a VATUSA facility, kept for the map only (#556)",
+    )];
+
+    fn bundled_ids() -> BTreeSet<String> {
+        let json: serde_json::Value =
+            serde_json::from_str(include_str!("../../data/artcc-boundaries.json")).unwrap();
+        json["features"]
+            .as_array()
+            .expect("a FeatureCollection")
+            .iter()
+            .map(|f| {
+                f["properties"]["id"]
+                    .as_str()
+                    .expect("every feature has an id")
+                    .to_string()
+            })
+            .collect()
+    }
+
+    #[sqlx::test]
+    async fn every_bundled_boundary_is_a_known_facility_or_a_listed_exception(pool: sqlx::PgPool) {
+        let facilities: BTreeSet<String> =
+            sqlx::query_scalar::<_, String>("select id from org.facilities")
+                .fetch_all(&pool)
+                .await
+                .unwrap()
+                .into_iter()
+                .collect();
+        let exceptions: BTreeSet<&str> = NOT_OIS_FACILITIES.iter().map(|(id, _)| *id).collect();
+
+        let unknown: Vec<String> = bundled_ids()
+            .into_iter()
+            .filter(|id| !facilities.contains(id) && !exceptions.contains(id.as_str()))
+            .collect();
+
+        assert!(
+            unknown.is_empty(),
+            "boundary ids with no org.facilities row and no listed reason: {unknown:?} — rename the \
+             feature to the facility's OIS id, or add it to NOT_OIS_FACILITIES with why"
+        );
+    }
+
+    /// An exception that has since become a facility would hide a real split, so the list must not go
+    /// stale in that direction either.
+    #[sqlx::test]
+    async fn no_listed_exception_is_actually_a_facility(pool: sqlx::PgPool) {
+        for (id, _) in NOT_OIS_FACILITIES {
+            let is_facility: bool =
+                sqlx::query_scalar("select exists (select 1 from org.facilities where id = $1)")
+                    .bind(id)
+                    .fetch_one(&pool)
+                    .await
+                    .unwrap();
+            assert!(
+                !is_facility,
+                "{id} is a facility now; drop it from NOT_OIS_FACILITIES"
+            );
+        }
+    }
+
+    /// The web map and the backend carry their own copy. They must stay byte-identical, or a rename
+    /// in one silently leaves the other drawing — or filtering on — the old id.
+    #[test]
+    fn the_web_and_backend_boundary_copies_are_identical() {
+        assert!(
+            include_bytes!("../../data/artcc-boundaries.json")[..]
+                == include_bytes!("../../../web/src/assets/artcc-boundaries.json")[..],
+            "backend/data and web/src/assets artcc-boundaries.json have diverged"
+        );
+    }
+}

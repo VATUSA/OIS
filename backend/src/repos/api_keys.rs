@@ -3,8 +3,6 @@
 //! access" validation used when a key is created or edited. The capped effective set (key grants ∩
 //! owner's current access) is assembled in `auth::acl::fetch_api_key_access`.
 
-use std::collections::HashSet;
-
 use chrono::{DateTime, Utc};
 use sqlx::PgPool;
 
@@ -78,7 +76,7 @@ pub async fn key_granted_scope(
     .map_err(|_| ApiError::Internal)?;
 
     if rows.iter().any(Option::is_none) {
-        Ok(PermissionScope::National)
+        Ok(PermissionScope::national())
     } else {
         Ok(PermissionScope::Facilities(
             rows.into_iter().flatten().collect(),
@@ -96,20 +94,17 @@ pub async fn validate_subset(
     owner_user_id: &str,
     requested: &[(String, Option<String>)],
 ) -> Result<(), ApiError> {
-    let owner_names: HashSet<String> =
-        access_repo::fetch_user_permission_names(pool, owner_user_id)
-            .await?
-            .into_iter()
-            .collect();
+    // One resolution for the whole request (#543): `scope.allows` now carries the deny semantics
+    // that the separate name-set check used to supply, so there is nothing left to cross-check.
+    let owner = access_repo::fetch_effective_permissions(pool, owner_user_id).await?;
 
     for (permission_name, artcc_id) in requested {
         if is_forbidden_for_key(permission_name) {
             return Err(ApiError::BadRequest);
         }
-        if !owner_names.contains(permission_name) {
+        let Some(scope) = owner.get(permission_name) else {
             return Err(ApiError::Forbidden);
-        }
-        let scope = access_repo::permission_scope(pool, owner_user_id, permission_name).await?;
+        };
         if !scope.allows(artcc_id.as_deref()) {
             return Err(ApiError::Forbidden);
         }
@@ -268,8 +263,12 @@ mod validate_subset_tests {
         ));
     }
 
-    /// Isolates the owner-holds check: the ZDC grant still gives a ZDC scope (`permission_scope`
-    /// doesn't read denies), so only the effective-permission name check rejects it.
+    /// A national deny beats the ZDC allow, so the owner holds nothing to delegate.
+    ///
+    /// This used to pass for a different reason, and the old comment said so: `permission_scope`
+    /// did not read denies, so the ZDC scope survived and only a separate name check rejected the
+    /// request. Since #543 the single resolver subtracts the deny itself, so the scope is empty and
+    /// the rejection comes from the scope check — which is why that name check could be removed.
     #[sqlx::test]
     async fn a_denied_permission_is_forbidden_even_where_its_scope_would_allow(pool: PgPool) {
         let user = seed_user(&pool).await;

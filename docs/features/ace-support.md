@@ -117,10 +117,10 @@ Notes:
 
 - The **service account** the Discord bot authenticates as must hold `ace.requests.claim` so button clicks can call back
   in on behalf of the linked user (per the locked Discord decision — the bot never touches Postgres).
-- **ARTCC scope**: assignments carry a nullable `artcc_id` (NULL = national). Scope is stored but
-  `access.v_effective_user_permissions` does not yet enforce it (documented Phase-0 gap); whether claim/decide are
-  scope-limited is under Open questions. Any scope narrowing is an explicit data-dependent check in the handler, not the
-  coarse `RequirePermission` gate.
+- **ARTCC scope**: assignments carry a nullable `artcc_id` (NULL = national). The resolver honours that
+  scope and composes it with denies (#543); whether claim/decide are scope-limited is under Open
+  questions. Any scope narrowing is an explicit data-dependent check in the handler, not the coarse
+  `RequirePermission` gate, which is scope-blind by design.
 
 ## API
 

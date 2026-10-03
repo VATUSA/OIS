@@ -1,7 +1,7 @@
 //! Access-control queries: session/service-account resolution, effective permissions,
 //! and the login-time role/permission reconciliation.
 
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 
 use sha2::{Digest, Sha256};
 use sqlx::{PgPool, Postgres, Transaction};
@@ -147,18 +147,25 @@ pub async fn fetch_user_role_names(pool: &PgPool, user_id: &str) -> Result<Vec<S
     .map_err(|_| ApiError::Internal)
 }
 
+/// The names a user effectively holds — the coarse answer `RequirePermission<P>` needs.
+///
+/// Derived from [`fetch_effective_permissions`] rather than read straight off the view, because
+/// the view now also emits deny rows and carries scope; a name survives here when the user holds
+/// it at **some** scope. That is the documented contract of the coarse gate: it answers "do you
+/// hold this anywhere" (401 if not), and the handler enforces the ARTCC (403). See
+/// `docs/architecture/permissions.md`.
 pub async fn fetch_user_permission_names(
     pool: &PgPool,
     user_id: &str,
 ) -> Result<Vec<String>, ApiError> {
-    sqlx::query_scalar::<_, String>(
-        "select permission_name from access.v_effective_user_permissions \
-         where user_id = $1 order by permission_name",
-    )
-    .bind(user_id)
-    .fetch_all(pool)
-    .await
-    .map_err(|_| ApiError::Internal)
+    let mut names: Vec<String> = fetch_effective_permissions(pool, user_id)
+        .await?
+        .into_iter()
+        .filter(|(_, scope)| !scope.is_empty())
+        .map(|(name, _)| name)
+        .collect();
+    names.sort(); // the old view read was `order by permission_name`; callers may rely on it
+    Ok(names)
 }
 
 pub async fn fetch_service_account_role_names(
@@ -173,6 +180,34 @@ pub async fn fetch_service_account_role_names(
     .fetch_all(pool)
     .await
     .map_err(|_| ApiError::Internal)
+}
+
+/// A service account's scope for `permission_name`, from its live roles (#583). National only for a
+/// role held with no ARTCC; otherwise the ARTCCs its roles name. The same "live" test as
+/// [`fetch_service_account_permission_names`], so the scope never covers a role the gate ignores.
+pub async fn service_account_permission_scope(
+    pool: &PgPool,
+    service_account_id: &str,
+    permission_name: &str,
+) -> Result<PermissionScope, ApiError> {
+    let artccs: Vec<Option<String>> = sqlx::query_scalar(
+        "select distinct sar.artcc_id
+         from access.service_account_roles sar
+         join access.role_permissions rp on rp.role_name = sar.role_name
+         where sar.service_account_id = $1 and rp.permission_name = $2
+           and (sar.ends_at is null or sar.ends_at > now())",
+    )
+    .bind(service_account_id)
+    .bind(permission_name)
+    .fetch_all(pool)
+    .await
+    .map_err(|_| ApiError::Internal)?;
+    if artccs.iter().any(Option::is_none) {
+        return Ok(PermissionScope::National);
+    }
+    Ok(PermissionScope::Facilities(
+        artccs.into_iter().flatten().collect(),
+    ))
 }
 
 pub async fn fetch_service_account_permission_names(
@@ -416,36 +451,65 @@ pub async fn fetch_user_direct_grants(
     .map_err(|_| ApiError::Internal)
 }
 
-/// A user's authority for one permission: national (every ARTCC) or a specific set.
+/// A user's authority for one permission: national (every ARTCC, minus any explicitly denied)
+/// or a specific set of ARTCCs.
+///
+/// `National { except }` exists because a national allow minus a scoped deny is "everywhere but
+/// ZDC", which a plain facility set cannot express without enumerating every facility — and
+/// enumerating would silently turn a national holder into a scoped one, changing what
+/// [`PermissionScope::allows`] answers for a resource with no resolvable owning ARTCC
+/// (VATUSA/OIS#543). An empty `except` is plain national.
 #[derive(Debug, Clone)]
 pub enum PermissionScope {
-    National,
+    National { except: HashSet<String> },
     Facilities(HashSet<String>),
 }
 
 impl PermissionScope {
+    /// National with no exceptions — the common case, and what `SERVER_ADMIN` always gets.
+    pub fn national() -> Self {
+        PermissionScope::National {
+            except: HashSet::new(),
+        }
+    }
+
+    /// Whether this is national authority at all, exceptions aside. Callers that need to know
+    /// "is this a national reader" (rather than "may they act here") ask this.
+    pub fn is_national(&self) -> bool {
+        matches!(self, PermissionScope::National { .. })
+    }
+
     /// Whether this scope covers `artcc`. `None` (an airport with no resolvable owning
-    /// ARTCC) is editable only at national scope.
+    /// ARTCC) is editable only at unrestricted national scope — a holder carrying any scoped
+    /// deny fails closed there, because there is no ARTCC to test the deny against.
     pub fn allows(&self, artcc: Option<&str>) -> bool {
         match self {
-            PermissionScope::National => true,
+            PermissionScope::National { except } => match artcc {
+                Some(a) => !except.contains(a),
+                None => except.is_empty(),
+            },
             PermissionScope::Facilities(set) => artcc.is_some_and(|a| set.contains(a)),
         }
     }
 
-    /// Covers nothing — an empty facility set. `National` and any non-empty set cover something.
+    /// Covers nothing — an empty facility set. National covers something whatever its
+    /// exceptions, since a national deny collapses to `Facilities(∅)` rather than an exception.
     pub fn is_empty(&self) -> bool {
         matches!(self, PermissionScope::Facilities(set) if set.is_empty())
     }
 
     /// The narrower of two scopes — used to cap an API key at its owner's authority.
-    /// `National` is the identity; two facility sets intersect to their common ARTCCs.
+    /// Exceptions accumulate; a facility set loses anything the other side excepts.
     pub fn intersect(&self, other: &PermissionScope) -> PermissionScope {
         match (self, other) {
-            (PermissionScope::National, PermissionScope::National) => PermissionScope::National,
-            (PermissionScope::National, PermissionScope::Facilities(set))
-            | (PermissionScope::Facilities(set), PermissionScope::National) => {
-                PermissionScope::Facilities(set.clone())
+            (PermissionScope::National { except: a }, PermissionScope::National { except: b }) => {
+                PermissionScope::National {
+                    except: a.union(b).cloned().collect(),
+                }
+            }
+            (PermissionScope::National { except }, PermissionScope::Facilities(set))
+            | (PermissionScope::Facilities(set), PermissionScope::National { except }) => {
+                PermissionScope::Facilities(set.difference(except).cloned().collect())
             }
             (PermissionScope::Facilities(a), PermissionScope::Facilities(b)) => {
                 PermissionScope::Facilities(a.intersection(b).cloned().collect())
@@ -454,54 +518,114 @@ impl PermissionScope {
     }
 }
 
-/// Resolve which ARTCCs a user effectively holds `permission_name` in. Server admins and
-/// anyone with a national (unscoped) grant — direct or via a role — get `National`;
-/// otherwise the set of ARTCC ids from their scoped grants (direct + role-derived).
+/// One row of the effective-permissions view: a permission, the scope it applies at
+/// (`None` = national), and whether it grants or denies.
+struct EffectiveRow {
+    permission_name: String,
+    artcc_id: Option<String>,
+    granted: bool,
+}
+
+/// Compose raw (permission, scope, granted) facts into the authority held for each permission.
+///
+/// The single place the deny rule lives (VATUSA/OIS#543). A deny removes the permission **at its
+/// own scope**; a national deny removes it **everywhere**, even where a scoped allow exists —
+/// `docs/architecture/permissions.md`'s long-standing promise that an explicit deny beats any
+/// allow, now actually implemented. Pure, so the matrix is testable without a database.
+fn compose(rows: Vec<EffectiveRow>) -> HashMap<String, PermissionScope> {
+    // Per permission: national allow seen, scoped allows, national deny seen, scoped denies.
+    struct Facts {
+        national_allow: bool,
+        national_deny: bool,
+        allows: HashSet<String>,
+        denies: HashSet<String>,
+    }
+    let mut facts: HashMap<String, Facts> = HashMap::new();
+
+    for row in rows {
+        let entry = facts.entry(row.permission_name).or_insert_with(|| Facts {
+            national_allow: false,
+            national_deny: false,
+            allows: HashSet::new(),
+            denies: HashSet::new(),
+        });
+        match (row.artcc_id, row.granted) {
+            (None, true) => entry.national_allow = true,
+            (None, false) => entry.national_deny = true,
+            (Some(artcc), true) => {
+                entry.allows.insert(artcc);
+            }
+            (Some(artcc), false) => {
+                entry.denies.insert(artcc);
+            }
+        }
+    }
+
+    facts
+        .into_iter()
+        .map(|(name, f)| {
+            let scope = if f.national_deny {
+                // Beats everything, including a scoped allow.
+                PermissionScope::Facilities(HashSet::new())
+            } else if f.national_allow {
+                PermissionScope::National {
+                    except: f.denies.clone(),
+                }
+            } else {
+                PermissionScope::Facilities(f.allows.difference(&f.denies).cloned().collect())
+            };
+            (name, scope)
+        })
+        .collect()
+}
+
+/// Every permission the user effectively holds, with the scope they hold it at.
+///
+/// **The one resolver.** Before #543 there were two — a SQL view that honoured denies but dropped
+/// `artcc_id`, so a scoped deny revoked nationally, and `permission_scope()` which honoured scope
+/// but never read `granted = false`. Both of those are gone; everything funnels through here, so
+/// the two dimensions cannot drift apart again.
+///
+/// One query per user rather than one per permission: callers that previously asked about several
+/// permissions in a loop (the API-key cap, the grantable-permissions list) now resolve once.
+pub async fn fetch_effective_permissions(
+    pool: &PgPool,
+    user_id: &str,
+) -> Result<HashMap<String, PermissionScope>, ApiError> {
+    let rows = sqlx::query_as::<_, (String, Option<String>, bool)>(
+        "select permission_name, artcc_id, granted \
+         from access.v_effective_user_permissions where user_id = $1",
+    )
+    .bind(user_id)
+    .fetch_all(pool)
+    .await
+    .map_err(|_| ApiError::Internal)?;
+
+    Ok(compose(
+        rows.into_iter()
+            .map(|(permission_name, artcc_id, granted)| EffectiveRow {
+                permission_name,
+                artcc_id,
+                granted,
+            })
+            .collect(),
+    ))
+}
+
+/// Resolve which ARTCCs a user effectively holds `permission_name` in.
+///
+/// A thin lookup into [`fetch_effective_permissions`] — it holds no SQL of its own, which is the
+/// point of #543. A permission the user does not hold resolves to the empty facility set, so
+/// callers keep failing closed.
 pub async fn permission_scope(
     pool: &PgPool,
     user_id: &str,
     permission_name: &str,
 ) -> Result<PermissionScope, ApiError> {
-    let national: bool = sqlx::query_scalar::<_, bool>(
-        "select exists(
-             select 1 from access.user_roles
-                 where user_id = $1 and role_name = 'SERVER_ADMIN'
-             union all
-             select 1 from access.user_permissions
-                 where user_id = $1 and permission_name = $2
-                   and granted = true and artcc_id is null
-             union all
-             select 1 from access.user_roles ur
-                 join access.role_permissions rp on rp.role_name = ur.role_name
-                 where ur.user_id = $1 and rp.permission_name = $2 and ur.artcc_id is null
-         )",
-    )
-    .bind(user_id)
-    .bind(permission_name)
-    .fetch_one(pool)
-    .await
-    .map_err(|_| ApiError::Internal)?;
-
-    if national {
-        return Ok(PermissionScope::National);
-    }
-
-    let scoped = sqlx::query_scalar::<_, String>(
-        "select artcc_id from access.user_permissions
-             where user_id = $1 and permission_name = $2
-               and granted = true and artcc_id is not null
-         union
-         select ur.artcc_id from access.user_roles ur
-             join access.role_permissions rp on rp.role_name = ur.role_name
-             where ur.user_id = $1 and rp.permission_name = $2 and ur.artcc_id is not null",
-    )
-    .bind(user_id)
-    .bind(permission_name)
-    .fetch_all(pool)
-    .await
-    .map_err(|_| ApiError::Internal)?;
-
-    Ok(PermissionScope::Facilities(scoped.into_iter().collect()))
+    Ok(fetch_effective_permissions(pool, user_id)
+        .await?
+        .remove(permission_name)
+        .unwrap_or_else(|| PermissionScope::Facilities(HashSet::new())))
 }
 
 /// All role grants, as `(artcc_id, role_name)`. `artcc_id = None` is national.
@@ -587,6 +711,8 @@ pub async fn ensure_user_actor(
 
 #[cfg(test)]
 mod tests {
+    use std::collections::HashSet;
+
     use super::PermissionScope;
 
     fn facilities(ids: &[&str]) -> PermissionScope {
@@ -595,7 +721,7 @@ mod tests {
 
     #[test]
     fn is_empty_only_for_empty_facility_set() {
-        assert!(!PermissionScope::National.is_empty());
+        assert!(!PermissionScope::national().is_empty());
         assert!(!facilities(&["ZDC"]).is_empty());
         assert!(facilities(&[]).is_empty());
     }
@@ -603,18 +729,19 @@ mod tests {
     #[test]
     fn intersect_national_is_identity() {
         // National ∩ X = X (a key with a national grant is capped to the owner's scope, and vice versa).
-        assert!(matches!(
-            PermissionScope::National.intersect(&PermissionScope::National),
-            PermissionScope::National
-        ));
         assert!(
-            PermissionScope::National
+            PermissionScope::national()
+                .intersect(&PermissionScope::national())
+                .is_national()
+        );
+        assert!(
+            PermissionScope::national()
                 .intersect(&facilities(&["ZDC", "ZNY"]))
                 .allows(Some("ZDC"))
         );
         assert!(
             facilities(&["ZDC"])
-                .intersect(&PermissionScope::National)
+                .intersect(&PermissionScope::national())
                 .allows(Some("ZDC"))
         );
     }
@@ -658,6 +785,358 @@ mod tests {
         assert!(
             !super::ASSIGNABLE_USER_ROLES.contains(&"BOT"),
             "if BOT ever becomes user-assignable this function's reason to exist is gone"
+        );
+    }
+
+    // ---- VATUSA/OIS#543: the one resolver, over both dimensions ----
+
+    fn row(permission: &str, artcc: Option<&str>, granted: bool) -> super::EffectiveRow {
+        super::EffectiveRow {
+            permission_name: permission.to_string(),
+            artcc_id: artcc.map(str::to_string),
+            granted,
+        }
+    }
+
+    fn scope_of(rows: Vec<super::EffectiveRow>) -> PermissionScope {
+        super::compose(rows)
+            .remove("p")
+            .unwrap_or_else(|| PermissionScope::Facilities(HashSet::new()))
+    }
+
+    /// AC4 — the matrix the two old resolvers each answered half of. {national, scoped} ×
+    /// {grant, deny}, with the role-derived and SERVER_ADMIN arms covered by the DB tests below
+    /// (they differ only in which view arm produces the row, not in how it composes).
+    #[test]
+    fn the_deny_rule_over_the_whole_matrix() {
+        // (rows, artcc under test, expected) — `None` artcc is a resource with no owning ARTCC.
+        let cases: Vec<(&str, Vec<super::EffectiveRow>, Option<&str>, bool)> = vec![
+            ("nothing at all", vec![], Some("ZDC"), false),
+            (
+                "national allow",
+                vec![row("p", None, true)],
+                Some("ZDC"),
+                true,
+            ),
+            (
+                "national allow, unknown artcc",
+                vec![row("p", None, true)],
+                None,
+                true,
+            ),
+            (
+                "scoped allow, same artcc",
+                vec![row("p", Some("ZDC"), true)],
+                Some("ZDC"),
+                true,
+            ),
+            // The original bug's mirror: a grant scoped to ZDC must NOT read as national.
+            (
+                "scoped allow, other artcc",
+                vec![row("p", Some("ZDC"), true)],
+                Some("ZNY"),
+                false,
+            ),
+            (
+                "scoped allow, unknown artcc",
+                vec![row("p", Some("ZDC"), true)],
+                None,
+                false,
+            ),
+            // A deny at its own scope removes it there.
+            (
+                "scoped allow + same-scope deny",
+                vec![row("p", Some("ZDC"), true), row("p", Some("ZDC"), false)],
+                Some("ZDC"),
+                false,
+            ),
+            // AC1, the headline: a deny at ZDC must not reach ZNY.
+            (
+                "two scoped allows + one scoped deny",
+                vec![
+                    row("p", Some("ZDC"), true),
+                    row("p", Some("ZNY"), true),
+                    row("p", Some("ZDC"), false),
+                ],
+                Some("ZNY"),
+                true,
+            ),
+            // A national deny beats a scoped allow — deny wins at or above its scope.
+            (
+                "scoped allow + national deny",
+                vec![row("p", Some("ZDC"), true), row("p", None, false)],
+                Some("ZDC"),
+                false,
+            ),
+            // And a scoped deny carves a hole in a national allow rather than erasing it.
+            (
+                "national allow + scoped deny, elsewhere",
+                vec![row("p", None, true), row("p", Some("ZDC"), false)],
+                Some("ZNY"),
+                true,
+            ),
+            (
+                "national allow + scoped deny, at the denied artcc",
+                vec![row("p", None, true), row("p", Some("ZDC"), false)],
+                Some("ZDC"),
+                false,
+            ),
+            // Fail closed: with no ARTCC to test the deny against, a carved national scope
+            // cannot be shown to allow the action.
+            (
+                "national allow + scoped deny, unknown artcc",
+                vec![row("p", None, true), row("p", Some("ZDC"), false)],
+                None,
+                false,
+            ),
+            (
+                "national allow + national deny",
+                vec![row("p", None, true), row("p", None, false)],
+                Some("ZDC"),
+                false,
+            ),
+        ];
+
+        for (name, rows, artcc, expected) in cases {
+            let scope = scope_of(rows);
+            assert_eq!(
+                scope.allows(artcc),
+                expected,
+                "{name}: allows({artcc:?}) should be {expected} — got {scope:?}"
+            );
+        }
+    }
+
+    /// A permission denied outright holds nothing, so the coarse gate drops it rather than
+    /// admitting the caller and relying on a handler check that may not exist.
+    #[test]
+    fn a_wholly_denied_permission_is_empty_not_merely_narrow() {
+        assert!(scope_of(vec![row("p", None, true), row("p", None, false)]).is_empty());
+        assert!(
+            scope_of(vec![
+                row("p", Some("ZDC"), true),
+                row("p", Some("ZDC"), false)
+            ])
+            .is_empty()
+        );
+        // But a carved national scope still holds something, so it must not be dropped.
+        assert!(!scope_of(vec![row("p", None, true), row("p", Some("ZDC"), false)]).is_empty());
+    }
+
+    #[test]
+    fn permissions_compose_independently_of_each_other() {
+        let resolved = super::compose(vec![
+            row("kept", None, true),
+            row("dropped", None, true),
+            row("dropped", None, false),
+        ]);
+        assert!(resolved["kept"].is_national());
+        assert!(resolved["dropped"].is_empty());
+    }
+
+    /// AC1 + AC2 through the real view: a deny scoped to one ARTCC must not revoke the permission
+    /// at another, and `permission_scope` must read denies at all — it never did.
+    ///
+    /// The allow comes from a **role** at two ARTCCs and the deny is a direct row at one of them.
+    /// That pairing matters: `access.user_permissions` has a unique index on
+    /// `(user_id, permission_name, coalesce(artcc_id, ''))`, so a direct allow and a direct deny
+    /// cannot coexist at the same scope — a role-derived allow is the only way to reach the
+    /// same-scope conflict, and it is also the shape #542 creates (groups carry the permissions,
+    /// a direct deny is the per-user override).
+    #[sqlx::test]
+    async fn a_scoped_deny_does_not_revoke_the_permission_elsewhere(pool: sqlx::PgPool) {
+        let user: String = sqlx::query_scalar(
+            "insert into identity.users (full_name, display_name) values ('T', 'T') returning id",
+        )
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        sqlx::query("insert into access.roles (name) values ('DENY_TEST') on conflict do nothing")
+            .execute(&pool)
+            .await
+            .unwrap();
+        sqlx::query(
+            "insert into access.role_permissions (role_name, permission_name) \
+             values ('DENY_TEST', 'events.config.update')",
+        )
+        .execute(&pool)
+        .await
+        .unwrap();
+        for artcc in ["ZDC", "ZNY"] {
+            sqlx::query(
+                "insert into access.user_roles (user_id, role_name, artcc_id) \
+                 values ($1, 'DENY_TEST', $2)",
+            )
+            .bind(&user)
+            .bind(artcc)
+            .execute(&pool)
+            .await
+            .unwrap();
+        }
+        crate::scope_test_support::deny_scoped(&pool, &user, "events.config.update", Some("ZDC"))
+            .await;
+
+        let scope = super::permission_scope(&pool, &user, "events.config.update")
+            .await
+            .unwrap();
+
+        // Against the old name-only anti-join this was a global subtraction: ZNY died with ZDC.
+        assert!(
+            !scope.allows(Some("ZDC")),
+            "the denied ARTCC must be refused"
+        );
+        assert!(
+            scope.allows(Some("ZNY")),
+            "a deny at ZDC must not reach ZNY"
+        );
+
+        // And the coarse gate still admits them, because they hold it somewhere.
+        let names = super::fetch_user_permission_names(&pool, &user)
+            .await
+            .unwrap();
+        assert!(names.iter().any(|n| n == "events.config.update"));
+    }
+
+    /// The other half of the rule: a **national** deny beats a scoped allow, so the permission is
+    /// gone everywhere and the coarse gate stops admitting the caller at all.
+    #[sqlx::test]
+    async fn a_national_deny_removes_a_scoped_grant_everywhere(pool: sqlx::PgPool) {
+        let user: String = sqlx::query_scalar(
+            "insert into identity.users (full_name, display_name) values ('T', 'T') returning id",
+        )
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        crate::scope_test_support::grant(&pool, &user, "events.config.update", Some("ZDC")).await;
+        crate::scope_test_support::deny_scoped(&pool, &user, "events.config.update", None).await;
+
+        let scope = super::permission_scope(&pool, &user, "events.config.update")
+            .await
+            .unwrap();
+        assert!(scope.is_empty(), "a national deny beats a scoped allow");
+        assert!(!scope.allows(Some("ZDC")));
+
+        let names = super::fetch_user_permission_names(&pool, &user)
+            .await
+            .unwrap();
+        assert!(
+            !names.iter().any(|n| n == "events.config.update"),
+            "holding it nowhere means the coarse gate must not admit them"
+        );
+    }
+
+    /// The scoped dimension the view used to drop: a grant at one ARTCC is not national.
+    #[sqlx::test]
+    async fn a_role_scoped_grant_is_not_national(pool: sqlx::PgPool) {
+        let user: String = sqlx::query_scalar(
+            "insert into identity.users (full_name, display_name) values ('T', 'T') returning id",
+        )
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        sqlx::query("insert into access.roles (name) values ('SCOPE_TEST') on conflict do nothing")
+            .execute(&pool)
+            .await
+            .unwrap();
+        sqlx::query(
+            "insert into access.role_permissions (role_name, permission_name) \
+             values ('SCOPE_TEST', 'events.config.update')",
+        )
+        .execute(&pool)
+        .await
+        .unwrap();
+        sqlx::query(
+            "insert into access.user_roles (user_id, role_name, artcc_id) \
+             values ($1, 'SCOPE_TEST', 'ZDC')",
+        )
+        .bind(&user)
+        .execute(&pool)
+        .await
+        .unwrap();
+
+        let scope = super::permission_scope(&pool, &user, "events.config.update")
+            .await
+            .unwrap();
+        assert!(scope.allows(Some("ZDC")));
+        assert!(
+            !scope.allows(Some("ZNY")),
+            "a ZDC-scoped role must not grant at ZNY"
+        );
+        assert!(!scope.is_national());
+    }
+
+    /// SERVER_ADMIN carries the whole catalogue nationally, with no grant rows of its own.
+    ///
+    /// Only that — there is deliberately no deny here. The *role* is un-narrowable because it is
+    /// env-bootstrapped, but a deny row is a different lever and it still applies to an admin: see
+    /// `a_deny_narrows_even_a_server_admin` below, which is the other half of this behaviour and
+    /// must not be reconciled with this one by weakening either.
+    #[sqlx::test]
+    async fn a_server_admin_is_national_by_default(pool: sqlx::PgPool) {
+        let user: String = sqlx::query_scalar(
+            "insert into identity.users (full_name, display_name) values ('T', 'T') returning id",
+        )
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        sqlx::query(
+            "insert into access.user_roles (user_id, role_name) values ($1, 'SERVER_ADMIN')",
+        )
+        .bind(&user)
+        .execute(&pool)
+        .await
+        .unwrap();
+
+        let scope = super::permission_scope(&pool, &user, "events.config.update")
+            .await
+            .unwrap();
+        assert!(scope.is_national());
+        assert!(scope.allows(Some("ZDC")));
+        assert!(
+            scope.allows(None),
+            "national authority covers a resource with no owning ARTCC"
+        );
+    }
+
+    /// An explicit deny narrows even a SERVER_ADMIN — and that is **pre-existing** behaviour, not
+    /// something #543 introduced: the old view's anti-join ran over the whole candidate set,
+    /// `server_admin_permissions` included, so a deny removed the permission from an admin too.
+    ///
+    /// Pinned because a resolver rewrite is exactly where it could be lost, and because
+    /// "SERVER_ADMIN is untouchable" is an easy thing to assume. What is untouchable is the *role*:
+    /// it stays env-bootstrapped. A deny row is a different lever, and it still works.
+    #[sqlx::test]
+    async fn a_deny_narrows_even_a_server_admin(pool: sqlx::PgPool) {
+        let user: String = sqlx::query_scalar(
+            "insert into identity.users (full_name, display_name) values ('T', 'T') returning id",
+        )
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        sqlx::query(
+            "insert into access.user_roles (user_id, role_name) values ($1, 'SERVER_ADMIN')",
+        )
+        .bind(&user)
+        .execute(&pool)
+        .await
+        .unwrap();
+        crate::scope_test_support::deny_scoped(&pool, &user, "events.config.update", Some("ZDC"))
+            .await;
+
+        let scope = super::permission_scope(&pool, &user, "events.config.update")
+            .await
+            .unwrap();
+        assert!(scope.is_national(), "still national overall");
+        assert!(!scope.allows(Some("ZDC")), "but not at the denied ARTCC");
+        assert!(scope.allows(Some("ZNY")), "and untouched elsewhere");
+
+        // A national deny takes it away entirely, as it did before.
+        crate::scope_test_support::deny_scoped(&pool, &user, "events.rate.update", None).await;
+        assert!(
+            super::permission_scope(&pool, &user, "events.rate.update")
+                .await
+                .unwrap()
+                .is_empty()
         );
     }
 }

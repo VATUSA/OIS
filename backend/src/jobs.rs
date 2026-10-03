@@ -31,6 +31,18 @@ use crate::repos::tmu as tmu_repo;
 
 const CLEANUP_INTERVAL: Duration = Duration::from_secs(15 * 60);
 
+/// How often the TMU cleanup pass runs.
+///
+/// Separate from `CLEANUP_INTERVAL` as of VATUSA/OIS#537, which asked that an advisory be removed
+/// "about 30 minutes" after its validity ends. The pass is what decides that, so its cadence is the
+/// tolerance: at 5 minutes removal lands in **[30, 35)** minutes rather than [30, 45).
+///
+/// The shared constant is left at 15 minutes deliberately. Its other four users
+/// (`desktop_auth_code_prune`, `outbound_job_reaper`, `audit_log_prune`, `departure_runway_prune`)
+/// work on horizons of 12 hours and longer, where running three times as often changes no outcome
+/// and only adds load.
+const TMU_CLEANUP_INTERVAL: Duration = Duration::from_secs(5 * 60);
+
 /// How often to run the event-FCA auto-publish / auto-archive pass.
 const EVENT_FCA_INTERVAL: Duration = Duration::from_secs(60);
 
@@ -948,29 +960,32 @@ async fn ace_reminder_scheduler_once(pool: &PgPool, events: &Events) -> Result<S
     })
 }
 
-/// Periodically expire finished TMIs/ground stops and delete ones that ended over an hour
-/// ago. Runs once at startup, then every 15 minutes.
+/// Periodically expire finished TMIs/ground stops, delete ones that ended over an hour ago, and
+/// cancel advisories whose window has passed. Runs once at startup, then every
+/// `TMU_CLEANUP_INTERVAL`.
 pub fn spawn_cleanup(reg: Arc<JobRegistry>, pool: PgPool) {
     tokio::spawn(run_interval(
         reg,
         "tmu_cleanup",
-        "Expire + delete finished TMIs / ground stops",
-        CLEANUP_INTERVAL,
+        "Expire + delete finished TMIs / ground stops, cancel lapsed advisories",
+        TMU_CLEANUP_INTERVAL,
         move || {
             let pool = pool.clone();
             async move {
                 match tmu_repo::run_cleanup(&pool).await {
                     Ok(stats) => {
-                        if stats.expired > 0 || stats.deleted > 0 {
+                        if stats.expired > 0 || stats.deleted > 0 || stats.advisories_cancelled > 0
+                        {
                             tracing::info!(
                                 expired = stats.expired,
                                 deleted = stats.deleted,
+                                advisories_cancelled = stats.advisories_cancelled,
                                 "tmu cleanup pass"
                             );
                         }
                         Ok(format!(
-                            "{} expired, {} deleted",
-                            stats.expired, stats.deleted
+                            "{} expired, {} deleted, {} advisories cancelled",
+                            stats.expired, stats.deleted, stats.advisories_cancelled
                         ))
                     }
                     Err(_) => Err("cleanup pass failed".to_string()),
@@ -1970,6 +1985,12 @@ mod departure_runway_derive_tests {
                 source: "manual".into(),
                 // Hand-entered, so no X-Plane stand type (#517).
                 kind: None,
+                // Hand-entered, so none of the X-Plane detail either (#541).
+                heading: None,
+                size_code: None,
+                operation_type: None,
+                aircraft_classes: None,
+                airline_codes: None,
                 updated_at: Utc::now(),
                 editable: false,
             }],
