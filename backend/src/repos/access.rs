@@ -203,7 +203,7 @@ pub async fn service_account_permission_scope(
     .await
     .map_err(|_| ApiError::Internal)?;
     if artccs.iter().any(Option::is_none) {
-        return Ok(PermissionScope::National);
+        return Ok(PermissionScope::national());
     }
     Ok(PermissionScope::Facilities(
         artccs.into_iter().flatten().collect(),
