@@ -1451,7 +1451,28 @@ pub(crate) async fn deactivate_package(
                 tmu_repo::delete_program(pool, reference).await?;
             }
             "restriction" => {
-                tmu_repo::cancel_tmi(pool, reference).await?;
+                // Deactivation ends a TMI **before** the window its post printed. Without a correction
+                // the NTML channel keeps showing it as in force (#568). Posted only where the original
+                // was posted, and only if this call is what ended it: one that already expired had its
+                // end printed, and one never posted has nothing to correct.
+                let mut tx = pool.begin().await.map_err(|_| ApiError::Internal)?;
+                let ended = tmu_repo::cancel_tmi(&mut *tx, reference).await?;
+                if ended
+                    && let Some(channel_id) =
+                        integration_repo::published_channel_for_tmi(pool, reference).await?
+                    && let Some(tmi) = tmu_repo::get_tmi(pool, reference).await?
+                {
+                    let job = crate::handlers::tmu::tmi_cancel_job(&channel_id, &tmi);
+                    integration_repo::enqueue_job(
+                        &mut tx,
+                        "tmi_cancel",
+                        &job,
+                        Some("tmi"),
+                        Some(reference),
+                    )
+                    .await?;
+                }
+                tx.commit().await.map_err(|_| ApiError::Internal)?;
             }
             "ground_stop" => {
                 tmu_repo::cancel_ground_stop(pool, reference).await?;
@@ -1462,7 +1483,24 @@ pub(crate) async fn deactivate_package(
                 // and two of them cancel an advisory inside the same transaction as the program
                 // publish it belongs to, which is the property that signature exists to give them.
                 let mut tx = pool.begin().await.map_err(|_| ApiError::Internal)?;
-                tmu_repo::cancel_advisory(&mut tx, reference).await?;
+                let ended = tmu_repo::cancel_advisory(&mut tx, reference).await?;
+                // Withdraw the post, as the cleanup pass does for an advisory that lapses (#537
+                // review, recorded there as belonging here — #568).
+                if ended
+                    && let Some(channel_id) =
+                        integration_repo::published_channel_for_advisory(pool, reference).await?
+                    && let Some(adv) = tmu_repo::get_advisory_tx(&mut tx, reference).await?
+                {
+                    let job = crate::advisory::cancel_job_payload(&channel_id, &adv);
+                    integration_repo::enqueue_job(
+                        &mut tx,
+                        "adv_cancel",
+                        &job,
+                        Some("advisory"),
+                        Some(reference),
+                    )
+                    .await?;
+                }
                 tx.commit().await.map_err(|_| ApiError::Internal)?;
             }
             _ => {}
@@ -3259,5 +3297,182 @@ mod atomic_activation_tests {
             );
         }
         assert_eq!(status(&pool, &pkg).await, "draft");
+    }
+}
+
+#[cfg(test)]
+mod deactivation_correction_tests {
+    //! VATUSA/OIS#568 (as re-scoped): deactivating a package ends its TMIs and advisories **before** the
+    //! end their posts printed, so it must post a correction. Driven through real activation, so the
+    //! channel a correction goes to is the one the original publish job recorded.
+
+    use chrono::{Duration, Utc};
+    use serde_json::json;
+    use sqlx::PgPool;
+
+    use super::*;
+
+    const EVENT: i64 = 568;
+    const NTML: &str = "900000000000000568";
+    const ADV: &str = "900000000000000569";
+
+    /// An actor entitled to issue advisories (activation checks it, #537), an event, and — when
+    /// `post` — a guild mapping both logical channels, so activation actually posts.
+    async fn seed(pool: &PgPool, post: bool) -> String {
+        let actor = crate::scope_test_support::seed_user(pool).await;
+        crate::scope_test_support::grant(pool, &actor, "tmu.adv.publish", None).await;
+        sqlx::query(
+            "insert into events.event (id, title, start_time, end_time, facility) \
+             values ($1, 'Deactivation Test', now(), now() + interval '2 hours', 'ZDC')",
+        )
+        .bind(EVENT)
+        .execute(pool)
+        .await
+        .unwrap();
+        if post {
+            let config: String = sqlx::query_scalar(
+                "insert into integration.discord_configs (name, guild_id) values ('g', '1') returning id",
+            )
+            .fetch_one(pool)
+            .await
+            .unwrap();
+            for (name, channel) in [
+                (crate::handlers::tmu::NTML_CHANNEL, NTML),
+                (crate::handlers::tmu::ADV_CHANNEL, ADV),
+            ] {
+                sqlx::query(
+                    "insert into integration.discord_channels (config_id, name, channel_id) \
+                     values ($1, $2, $3)",
+                )
+                .bind(&config)
+                .bind(name)
+                .bind(channel)
+                .execute(pool)
+                .await
+                .unwrap();
+            }
+        }
+        actor
+    }
+
+    /// A package with one restriction and one advisory, activated.
+    async fn activated(pool: &PgPool, actor: &str) -> String {
+        let pkg = events_repo::create_package(pool, EVENT, "Plan", actor)
+            .await
+            .unwrap();
+        let now = Utc::now();
+        let restriction = normalize_item(
+            "restriction",
+            json!({
+                "requesting": "ZDC", "providing": "ZNY", "restriction": "20 MIT",
+                "start_time": now, "stop_time": now + Duration::hours(2),
+            }),
+        )
+        .unwrap();
+        events_repo::add_package_item(pool, &pkg, "restriction", &restriction)
+            .await
+            .unwrap();
+        let advisory = normalize_item(
+            "advisory",
+            json!({
+                "facility": "DCC", "kind": "reroute", "body": "vATCSCC ADVZY",
+                "valid_from": now, "valid_to": now + Duration::hours(2),
+            }),
+        )
+        .unwrap();
+        events_repo::add_package_item(pool, &pkg, "advisory", &advisory)
+            .await
+            .unwrap();
+        activate_package(pool, EVENT, &pkg, actor).await.unwrap();
+        pkg
+    }
+
+    /// `(job_type, channel_id)` of every correction enqueued.
+    async fn corrections(pool: &PgPool) -> Vec<(String, String)> {
+        sqlx::query_as(
+            "select job_type, payload->>'channel_id' from integration.outbound_jobs \
+             where job_type in ('tmi_cancel', 'adv_cancel') order by job_type",
+        )
+        .fetch_all(pool)
+        .await
+        .unwrap()
+    }
+
+    /// The fix. Each item ended early gets exactly one correction, in the channel its post went to.
+    #[sqlx::test]
+    async fn deactivating_a_package_posts_a_correction_for_each_item(pool: PgPool) {
+        let actor = seed(&pool, true).await;
+        let pkg = activated(&pool, &actor).await;
+        assert!(
+            corrections(&pool).await.is_empty(),
+            "nothing corrected before deactivation"
+        );
+
+        deactivate_package(&pool, &pkg, &actor).await.unwrap();
+
+        assert_eq!(
+            corrections(&pool).await,
+            [
+                ("adv_cancel".to_string(), ADV.to_string()),
+                ("tmi_cancel".to_string(), NTML.to_string()),
+            ]
+        );
+    }
+
+    /// The TMI correction is the same NTML cancellation line the manual cancel posts, not a bespoke
+    /// one — so the log reads the same whichever path ended it.
+    #[sqlx::test]
+    async fn the_tmi_correction_is_the_ntml_cancellation_line(pool: PgPool) {
+        let actor = seed(&pool, true).await;
+        let pkg = activated(&pool, &actor).await;
+
+        deactivate_package(&pool, &pkg, &actor).await.unwrap();
+
+        let ntml: String = sqlx::query_scalar(
+            "select payload->>'ntml' from integration.outbound_jobs where job_type = 'tmi_cancel'",
+        )
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        let restriction: String = sqlx::query_scalar("select restriction from tmu.tmis")
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+        let expected =
+            crate::tmi::ntml_cancel_line(Utc::now(), &restriction, Some("ZDC"), Some("ZNY"));
+        // The timestamp prefix differs by the seconds between the two calls; the rest must match.
+        let tail = |s: &str| s.split_once(' ').map(|(_, rest)| rest.to_string());
+        assert_eq!(tail(&ntml), tail(&expected));
+    }
+
+    /// Nothing posted means nothing to correct — never a CNX for something that never went out.
+    #[sqlx::test]
+    async fn an_item_that_was_never_posted_gets_no_correction(pool: PgPool) {
+        let actor = seed(&pool, false).await;
+        let pkg = activated(&pool, &actor).await;
+
+        deactivate_package(&pool, &pkg, &actor).await.unwrap();
+
+        assert!(corrections(&pool).await.is_empty());
+    }
+
+    /// Only an item **this** deactivation ends is corrected. One already over — expired on schedule,
+    /// with its end printed, or cancelled by hand — must not get a second, late cancellation.
+    #[sqlx::test]
+    async fn an_item_already_ended_is_not_corrected_again(pool: PgPool) {
+        let actor = seed(&pool, true).await;
+        let pkg = activated(&pool, &actor).await;
+        sqlx::query("update tmu.tmis set status = 'expired'")
+            .execute(&pool)
+            .await
+            .unwrap();
+        sqlx::query("update tmu.advisories set status = 'cancelled'")
+            .execute(&pool)
+            .await
+            .unwrap();
+
+        deactivate_package(&pool, &pkg, &actor).await.unwrap();
+
+        assert!(corrections(&pool).await.is_empty());
     }
 }
