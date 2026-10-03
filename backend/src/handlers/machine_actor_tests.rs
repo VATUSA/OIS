@@ -135,17 +135,28 @@ async fn call(
     auth: &str,
     body: Option<Value>,
 ) -> (http::StatusCode, Value) {
+    call_with(state, method, uri, &[auth], body).await
+}
+
+/// [`call`] carrying several credentials at once — each a bearer (`Authorization`) or a cookie.
+async fn call_with(
+    state: &AppState,
+    method: http::Method,
+    uri: &str,
+    auth: &[&str],
+    body: Option<Value>,
+) -> (http::StatusCode, Value) {
     use tower::ServiceExt;
 
-    let header = if auth.starts_with("Bearer ") {
-        http::header::AUTHORIZATION
-    } else {
-        http::header::COOKIE
-    };
-    let builder = http::Request::builder()
-        .method(method)
-        .uri(uri)
-        .header(header, auth);
+    let mut builder = http::Request::builder().method(method).uri(uri);
+    for credential in auth {
+        let header = if credential.starts_with("Bearer ") {
+            http::header::AUTHORIZATION
+        } else {
+            http::header::COOKIE
+        };
+        builder = builder.header(header, *credential);
+    }
     let request = match body {
         Some(b) => builder
             .header(http::header::CONTENT_TYPE, "application/json")
@@ -346,6 +357,43 @@ async fn a_user_session_still_attributes_the_user(pool: PgPool) {
     assert!(actor.is_some());
     assert_eq!(cfr_attribution(&pool, "AAL1").await, (Some(user), actor));
     assert_eq!(body["issued_by"], "Scope Test User");
+}
+
+/// #583 review: a request can carry a session cookie **and** a service-account bearer — the middleware
+/// resolves both, and `ensure_permission` authorises the **user**. The write must then be attributed
+/// to that user too. Otherwise anyone holding a service-account token could make their own actions
+/// look machine-made, in the row and in the audit log.
+#[sqlx::test]
+async fn a_request_carrying_a_session_and_a_service_account_is_the_users(pool: PgPool) {
+    let state = test_state(pool.clone(), HashMap::new());
+    let user = seed_user(&pool).await;
+    grant(&pool, &user, "tmu.cfr.assign", None).await;
+    let cookie = session_cookie(&pool, &user).await;
+    let (sa, bearer) = service_account(&pool, "tmu.cfr.assign", None).await;
+
+    let (status, body) = call_with(
+        &state,
+        http::Method::POST,
+        "/api/v1/tmu/cfr",
+        &[&cookie, &bearer],
+        Some(issue_body()),
+    )
+    .await;
+    assert_eq!(status, http::StatusCode::OK, "{body}");
+
+    let user_actor = actor_of(&pool, "user_id", &user).await;
+    assert!(user_actor.is_some());
+    assert_eq!(
+        cfr_attribution(&pool, "AAL1").await,
+        (Some(user), user_actor.clone()),
+        "the user who was authorised is the one named"
+    );
+    assert_eq!(audited_actor(&pool).await, user_actor);
+    assert_eq!(
+        actor_of(&pool, "service_account_id", &sa).await,
+        None,
+        "the service account was never acted as"
+    );
 }
 
 // ---- mark / swap / clear a release ----------------------------------------------------------------

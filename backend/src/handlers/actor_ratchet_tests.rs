@@ -21,7 +21,7 @@ use Intent::{Pending, UserOnly};
 #[rustfmt::skip]
 const CURRENT_USER_HANDLERS: &[(&str, &str, Intent)] = &[
     ("access", "get_self_access", UserOnly("the caller's own access summary")),
-    ("access", "update_user_access", Pending),
+    ("access", "update_user_access", UserOnly("editing a person's access is a human act; a key's denylist covers only api_keys.*, so a machine here could grant access")),
     ("ace", "my_ace_claims", UserOnly("a controller's own ACE claims")),
     ("ace", "create_request", Pending),
     ("ace", "claim_request", UserOnly("a controller claims an ACE request for themselves")),
