@@ -2289,6 +2289,80 @@ mod mapping_tests {
     /// Removing a mapping revokes what it granted, immediately — and only that: a hand-made grant of
     /// the same group at the same scope survives.
     #[sqlx::test]
+    async fn deleting_a_mapping_is_gated_like_creating_one(pool: PgPool) {
+        // A delete reconciles the group away from every member it reached, so it carries the same power
+        // as creating the mapping and needs the same authority. The create side was pinned; this side
+        // was not — removing `enforce_mapping_scope` from `delete_mapping` left the suite green (#548
+        // review), which would let any holder of the coarse, scope-blind `access.groups.update` strip a
+        // national mapping from everyone at once.
+        let admin = admin(&pool).await;
+        let member = synced_member(&pool).await;
+        let state = test_state(pool.clone(), std::collections::HashMap::new());
+        let mapping = create_mapping(
+            &state,
+            &admin,
+            &HeaderMap::new(),
+            request("DATM", None, "EC"),
+        )
+        .await
+        .unwrap();
+        let synced = || {
+            let pool = pool.clone();
+            let member = member.clone();
+            async move {
+                roles_of(&pool, &member)
+                    .await
+                    .into_iter()
+                    .filter(|(_, _, source)| source == "vatusa")
+                    .count()
+            }
+        };
+        assert_eq!(synced().await, 1, "the mapping reached the member");
+
+        // An editor holding everything EC bundles, but only at ZDC — enough to pass the coarse gate,
+        // not enough to act on a mapping that reaches every facility.
+        let scoped = seed_user(&pool).await;
+        grant(&pool, &scoped, "access.groups.update", None).await;
+        let bundle: Vec<String> = sqlx::query_scalar(
+            "select permission_name from access.role_permissions where role_name = 'EC'",
+        )
+        .fetch_all(&pool)
+        .await
+        .unwrap();
+        assert!(
+            !bundle.is_empty(),
+            "EC must bundle something for this to mean anything"
+        );
+        for permission in &bundle {
+            grant(&pool, &scoped, permission, Some("ZDC")).await;
+        }
+
+        let refused = delete_mapping(&state, &actor(&scoped), &HeaderMap::new(), mapping.id).await;
+        assert!(matches!(refused, Err(ApiError::Forbidden)), "{refused:?}");
+        assert_eq!(
+            mapping_count(&pool).await,
+            1,
+            "a refused delete must leave the mapping"
+        );
+        assert_eq!(
+            synced().await,
+            1,
+            "and must not have revoked anyone's grant"
+        );
+
+        // The gate narrows; it does not disable deletion.
+        delete_mapping(&state, &admin, &HeaderMap::new(), mapping.id)
+            .await
+            .unwrap();
+        assert_eq!(mapping_count(&pool).await, 0);
+        assert_eq!(
+            synced().await,
+            0,
+            "an authorised delete revokes the synced grant"
+        );
+    }
+
+    #[sqlx::test]
     async fn removing_a_mapping_revokes_only_the_synced_grant(pool: PgPool) {
         let actor = admin(&pool).await;
         let member = synced_member(&pool).await;
