@@ -11244,6 +11244,13 @@ export interface operations {
                 };
                 content?: never;
             };
+            /** @description The FCA's ARTCC is outside the caller's scope */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
             404: {
                 headers: {
                     [name: string]: unknown;
@@ -11310,6 +11317,13 @@ export interface operations {
                 };
                 content?: never;
             };
+            /** @description The FCA's ARTCC is outside the caller's scope */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
             404: {
                 headers: {
                     [name: string]: unknown;
@@ -11368,6 +11382,13 @@ export interface operations {
                 content?: never;
             };
             401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description The FCA's ARTCC is outside the caller's scope */
+            403: {
                 headers: {
                     [name: string]: unknown;
                 };
@@ -13878,6 +13899,13 @@ export interface operations {
                 };
                 content?: never;
             };
+            /** @description The airport's ARTCC is outside the caller's scope */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
             /** @description `held_by_person` / `held_by_other_machine`: a machine may not replace it */
             409: {
                 headers: {
@@ -13929,6 +13957,13 @@ export interface operations {
                 content?: never;
             };
             401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description The airport's ARTCC is outside the caller's scope */
+            403: {
                 headers: {
                     [name: string]: unknown;
                 };
