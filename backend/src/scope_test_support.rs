@@ -86,6 +86,30 @@ pub(crate) fn principal_for(user_id: &str) -> Principal {
     })
 }
 
+/// Deny `user_id` `permission_name`, nationally (`artcc = None`) or at one ARTCC.
+///
+/// The counterpart to [`grant`], which hardcodes `granted = true` and so could not express a deny
+/// at all — which is why the scope × deny interaction went untested until #543. Note the unique
+/// index is on `(user_id, permission_name, coalesce(artcc_id, ''))`, so a deny and an allow cannot
+/// coexist at the *same* scope; a national deny beside a scoped allow is the interesting case.
+pub(crate) async fn deny_scoped(
+    pool: &PgPool,
+    user_id: &str,
+    permission_name: &str,
+    artcc: Option<&str>,
+) {
+    sqlx::query(
+        "insert into access.user_permissions (user_id, permission_name, granted, artcc_id) \
+         values ($1, $2, false, $3)",
+    )
+    .bind(user_id)
+    .bind(permission_name)
+    .bind(artcc)
+    .execute(pool)
+    .await
+    .unwrap();
+}
+
 /// Grant `user_id` `permission_name`, nationally (`artcc = None`) or scoped to one ARTCC —
 /// a direct `access.user_permissions` row, deliberately bypassing roles for a minimal setup.
 pub(crate) async fn grant(
