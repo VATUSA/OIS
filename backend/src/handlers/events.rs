@@ -1430,14 +1430,18 @@ pub(crate) async fn deactivate_package(
             "restriction" => {
                 // Deactivation ends a TMI **before** the window its post printed. Without a correction
                 // the NTML channel keeps showing it as in force (#568). Posted only where the original
-                // was posted, and only if this call is what ended it: one that already expired had its
-                // end printed, and one never posted has nothing to correct.
+                // was posted, only if this call is what ended it, and only if that was **early**: a
+                // TMI's natural end is printed in its window, so it gets no CNX (the owner's re-scope).
+                // `ended` alone cannot tell the two apart. The event-end archive runs every 60 s and the
+                // TMU cleanup expires a lapsed TMI only every 5 min, so a restriction planned until the
+                // event ends is usually still `published` when the archive reaches it.
                 let mut tx = pool.begin().await.map_err(|_| ApiError::Internal)?;
                 let ended = tmu_repo::cancel_tmi(&mut *tx, reference).await?;
                 if ended
                     && let Some(channel_id) =
                         integration_repo::published_channel_for_tmi(pool, reference).await?
                     && let Some(tmi) = tmu_repo::get_tmi(pool, reference).await?
+                    && tmi.stop_time.is_none_or(|end| end > Utc::now())
                 {
                     let job = crate::handlers::tmu::tmi_cancel_job(&channel_id, &tmi);
                     integration_repo::enqueue_job(
@@ -3219,6 +3223,70 @@ mod deactivation_correction_tests {
         deactivate_package(&pool, &pkg, &actor).await.unwrap();
 
         assert!(corrections(&pool).await.is_empty());
+    }
+
+    /// A package with one restriction running `start..stop`, activated. `stop = None` is open-ended.
+    async fn activated_restriction(
+        pool: &PgPool,
+        actor: &str,
+        start: chrono::DateTime<Utc>,
+        stop: Option<chrono::DateTime<Utc>>,
+    ) -> String {
+        let pkg = events_repo::create_package(pool, EVENT, "Plan", actor)
+            .await
+            .unwrap();
+        let restriction = normalize_item(
+            "restriction",
+            json!({
+                "requesting": "ZDC", "providing": "ZNY", "restriction": "20 MIT",
+                "start_time": start, "stop_time": stop,
+            }),
+        )
+        .unwrap();
+        events_repo::add_package_item(pool, &pkg, "restriction", &restriction)
+            .await
+            .unwrap();
+        activate_package(pool, EVENT, &pkg, actor).await.unwrap();
+        pkg
+    }
+
+    /// A TMI whose printed window has already closed ended on schedule, not early — even when the
+    /// archive reaches it before the 5-minute cleanup has marked it expired, which is the usual case
+    /// for a restriction planned until the event ends. Its post already says when it ended.
+    #[sqlx::test]
+    async fn a_tmi_past_its_printed_end_gets_no_correction(pool: PgPool) {
+        let actor = seed(&pool, true).await;
+        let now = Utc::now();
+        let pkg = activated_restriction(
+            &pool,
+            &actor,
+            now - Duration::hours(3),
+            Some(now - Duration::minutes(1)),
+        )
+        .await;
+        let status: String = sqlx::query_scalar("select status from tmu.tmis")
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+        assert_eq!(status, "published", "the cleanup has not expired it yet");
+
+        deactivate_package(&pool, &pkg, &actor).await.unwrap();
+
+        assert!(corrections(&pool).await.is_empty());
+    }
+
+    /// An open-ended TMI printed no end at all, so any deactivation ends it early.
+    #[sqlx::test]
+    async fn an_open_ended_tmi_is_corrected(pool: PgPool) {
+        let actor = seed(&pool, true).await;
+        let pkg = activated_restriction(&pool, &actor, Utc::now(), None).await;
+
+        deactivate_package(&pool, &pkg, &actor).await.unwrap();
+
+        assert_eq!(
+            corrections(&pool).await,
+            [("tmi_cancel".to_string(), NTML.to_string())]
+        );
     }
 
     /// Only an item **this** deactivation ends is corrected. One already over — expired on schedule,
