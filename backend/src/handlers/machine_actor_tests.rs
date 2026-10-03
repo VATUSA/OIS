@@ -18,7 +18,7 @@ use crate::auth::principal::Principal;
 use crate::feed::airports::Airport;
 use crate::feed::vatsim::{FlightPlan, Prefile, VatsimData};
 use crate::repos::access::{PermissionScope, sha256_hex};
-use crate::scope_test_support::{grant, seed_user, session_cookie, test_state};
+use crate::scope_test_support::{artcc, grant, seed_user, session_cookie, test_state};
 use crate::state::AppState;
 
 const ROLE: &str = "T583_MACHINE";
@@ -1467,4 +1467,291 @@ fn only_a_machine_attribution_names_an_owner_and_a_missing_actor_fails_closed() 
         Some(""),
         "matches no row rather than every row"
     );
+}
+
+// ---- #626: release and CFR writes honour the caller's ARTCC scope ---------------------------------
+
+/// KDCA belongs to ZDC and KJFK to ZNY, so a CFR's airport resolves to an owning ARTCC.
+async fn with_facilities(state: AppState) -> AppState {
+    *state.facilities.write().await = HashMap::from([
+        ("ZDC".to_string(), artcc(&["KDCA"])),
+        ("ZNY".to_string(), artcc(&["KJFK"])),
+    ]);
+    state
+}
+
+/// The crossing FCA of [`fca`], owned by `artcc`.
+async fn fca_in(pool: &PgPool, artcc: &str) -> String {
+    let id = fca(pool).await;
+    sqlx::query("update flow.fca set artcc = $2 where id = $1")
+        .bind(&id)
+        .bind(artcc)
+        .execute(pool)
+        .await
+        .unwrap();
+    id
+}
+
+/// Narrow a service account's role to `artcc` — so it holds what it wrote while national.
+async fn narrow(pool: &PgPool, service_account: &str, artcc: &str) {
+    sqlx::query(
+        "update access.service_account_roles set artcc_id = $2 where service_account_id = $1",
+    )
+    .bind(service_account)
+    .bind(artcc)
+    .execute(pool)
+    .await
+    .unwrap();
+}
+
+fn cfr_body(callsign: &str, airport: &str) -> Value {
+    json!({ "callsign": callsign, "airport": airport })
+}
+
+async fn cfr_airport(pool: &PgPool, callsign: &str) -> Option<String> {
+    sqlx::query_scalar("select airport from tmu.issued_cfrs where callsign = $1")
+        .bind(callsign)
+        .fetch_optional(pool)
+        .await
+        .unwrap()
+}
+
+/// AC1: a ZDC-scoped holder — service account, person and API key — releases on a ZDC FCA only.
+#[sqlx::test]
+async fn a_scoped_holder_marks_a_release_only_in_its_artcc(pool: PgPool) {
+    let state = crossing_state(pool.clone()).await;
+    let (_, sa) = service_account(&pool, "flow.fca.update", Some("ZDC")).await;
+    let user = seed_user(&pool).await;
+    grant(&pool, &user, "flow.fca.update", Some("ZDC")).await;
+    let person = session_cookie(&pool, &user).await;
+    // A key granted the permission nationally is still capped by its ZDC-scoped owner.
+    let (key_id, key) = api_key(&pool, "flow.fca.update").await;
+    sqlx::query(
+        "update access.user_permissions set artcc_id = 'ZDC' where user_id = \
+         (select owner_user_id from access.api_keys where id = $1)",
+    )
+    .bind(&key_id)
+    .execute(&pool)
+    .await
+    .unwrap();
+
+    for auth in [&sa, &person, &key] {
+        let zny = fca_in(&pool, "ZNY").await;
+        let (status, _) = call_with(
+            &state,
+            http::Method::POST,
+            &format!("/api/v1/flow/fcas/{zny}/release/TEST1"),
+            &[auth, "If-None-Match: *"],
+            Some(json!({})),
+        )
+        .await;
+        assert_eq!(status, http::StatusCode::FORBIDDEN, "{auth}");
+        assert_eq!(release_attribution(&pool, &zny, "TEST1").await, None);
+
+        let zdc = fca_in(&pool, "ZDC").await;
+        let (status, body) = call_with(
+            &state,
+            http::Method::POST,
+            &format!("/api/v1/flow/fcas/{zdc}/release/TEST1"),
+            &[auth, "If-None-Match: *"],
+            Some(json!({})),
+        )
+        .await;
+        assert_eq!(status, http::StatusCode::OK, "{auth}: {body}");
+    }
+}
+
+#[sqlx::test]
+async fn a_scoped_holder_clears_a_release_only_in_its_artcc(pool: PgPool) {
+    let state = test_state(pool.clone(), HashMap::new());
+    let (sa, auth) = service_account(&pool, "flow.fca.update", Some("ZDC")).await;
+    let (zny, zdc) = (fca_in(&pool, "ZNY").await, fca_in(&pool, "ZDC").await);
+    seed_owned_release(&pool, &zny, "AAL1", 1_000, &sa).await;
+    seed_owned_release(&pool, &zdc, "AAL1", 1_000, &sa).await;
+
+    for (fca_id, want) in [
+        (&zny, http::StatusCode::FORBIDDEN),
+        (&zdc, http::StatusCode::OK),
+    ] {
+        let (status, _) = call_with(
+            &state,
+            http::Method::DELETE,
+            &format!("/api/v1/flow/fcas/{fca_id}/release/AAL1"),
+            &[&auth, "If-Match: \"1\""],
+            None,
+        )
+        .await;
+        assert_eq!(status, want);
+    }
+    assert!(
+        release_attribution(&pool, &zny, "AAL1").await.is_some(),
+        "ZNY's stands"
+    );
+    assert!(
+        release_attribution(&pool, &zdc, "AAL1").await.is_none(),
+        "ZDC's cleared"
+    );
+}
+
+#[sqlx::test]
+async fn a_scoped_holder_swaps_releases_only_in_its_artcc(pool: PgPool) {
+    let state = test_state(pool.clone(), HashMap::new());
+    let (sa, auth) = service_account(&pool, "flow.fca.update", Some("ZDC")).await;
+    let (zny, zdc) = (fca_in(&pool, "ZNY").await, fca_in(&pool, "ZDC").await);
+    for fca_id in [&zny, &zdc] {
+        seed_owned_release(&pool, fca_id, "AAL1", 1_000, &sa).await;
+        seed_owned_release(&pool, fca_id, "UAL2", 2_000, &sa).await;
+    }
+    let cta = |fca_id: String| {
+        let pool = pool.clone();
+        async move {
+            let v: i64 = sqlx::query_scalar(
+                "select cta_ms from flow.fca_release where fca_id = $1 and callsign = 'AAL1'",
+            )
+            .bind(fca_id)
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+            v
+        }
+    };
+
+    for (fca_id, want) in [
+        (&zny, http::StatusCode::FORBIDDEN),
+        (&zdc, http::StatusCode::OK),
+    ] {
+        let (status, _) = call(
+            &state,
+            http::Method::POST,
+            &format!("/api/v1/flow/fcas/{fca_id}/swap"),
+            &auth,
+            Some(json!({"a": "AAL1", "b": "UAL2"})),
+        )
+        .await;
+        assert_eq!(status, want);
+    }
+    assert_eq!(cta(zny).await, 1_000, "ZNY's untouched");
+    assert_eq!(cta(zdc).await, 2_000, "ZDC's swapped");
+}
+
+/// AC2: a CFR is gated on its airport's owning ARTCC.
+#[sqlx::test]
+async fn a_scoped_holder_issues_a_cfr_only_in_its_artcc(pool: PgPool) {
+    let state = with_facilities(test_state(pool.clone(), HashMap::new())).await;
+    let (_, auth) = service_account(&pool, "tmu.cfr.assign", Some("ZDC")).await;
+
+    for (callsign, airport, want) in [
+        ("AAL1", "KJFK", http::StatusCode::FORBIDDEN),
+        ("AAL2", "KDCA", http::StatusCode::OK),
+    ] {
+        let (status, _) = call_with(
+            &state,
+            http::Method::POST,
+            CFR,
+            &[&auth, "If-None-Match: *"],
+            Some(cfr_body(callsign, airport)),
+        )
+        .await;
+        assert_eq!(status, want, "{airport}");
+    }
+    assert_eq!(cfr_airport(&pool, "AAL1").await, None);
+    assert_eq!(cfr_airport(&pool, "AAL2").await.as_deref(), Some("KDCA"));
+}
+
+/// Re-issuing can't move another facility's CFR into scope: the airport it is moved from counts too.
+#[sqlx::test]
+async fn a_scoped_holder_cannot_move_an_out_of_scope_cfr(pool: PgPool) {
+    let state = with_facilities(test_state(pool.clone(), HashMap::new())).await;
+    let (sa, auth) = service_account(&pool, "tmu.cfr.assign", None).await;
+    let (status, _) = call_with(
+        &state,
+        http::Method::POST,
+        CFR,
+        &[&auth, "If-None-Match: *"],
+        Some(cfr_body("AAL1", "KJFK")),
+    )
+    .await;
+    assert_eq!(status, http::StatusCode::OK);
+    narrow(&pool, &sa, "ZDC").await;
+
+    let (status, _) = call_with(
+        &state,
+        http::Method::POST,
+        CFR,
+        &[&auth, "If-Match: \"1\""],
+        Some(cfr_body("AAL1", "KDCA")),
+    )
+    .await;
+    assert_eq!(status, http::StatusCode::FORBIDDEN);
+    assert_eq!(cfr_airport(&pool, "AAL1").await.as_deref(), Some("KJFK"));
+}
+
+#[sqlx::test]
+async fn a_scoped_holder_releases_a_cfr_only_in_its_artcc(pool: PgPool) {
+    let state = with_facilities(test_state(pool.clone(), HashMap::new())).await;
+    let (sa, auth) = service_account(&pool, "tmu.cfr.assign", None).await;
+    for (callsign, airport) in [("AAL1", "KJFK"), ("AAL2", "KDCA")] {
+        let (status, _) = call_with(
+            &state,
+            http::Method::POST,
+            CFR,
+            &[&auth, "If-None-Match: *"],
+            Some(cfr_body(callsign, airport)),
+        )
+        .await;
+        assert_eq!(status, http::StatusCode::OK);
+    }
+    narrow(&pool, &sa, "ZDC").await;
+
+    for (callsign, want) in [
+        ("AAL1", http::StatusCode::FORBIDDEN),
+        ("AAL2", http::StatusCode::NO_CONTENT),
+    ] {
+        let (status, _) = call_with(
+            &state,
+            http::Method::DELETE,
+            &format!("{CFR}/{callsign}"),
+            &[&auth, "If-Match: \"1\""],
+            None,
+        )
+        .await;
+        assert_eq!(status, want, "{callsign}");
+    }
+    assert_eq!(cfr_airport(&pool, "AAL1").await.as_deref(), Some("KJFK"));
+    assert_eq!(cfr_airport(&pool, "AAL2").await, None);
+}
+
+/// AC3: a national holder is unaffected — it writes on a ZNY FCA and at a ZNY airport.
+#[sqlx::test]
+async fn a_national_holder_writes_in_any_artcc(pool: PgPool) {
+    let state = with_facilities(crossing_state(pool.clone()).await).await;
+    let (_, auth) = service_account(&pool, "flow.fca.update", None).await;
+    sqlx::query(
+        "insert into access.role_permissions (role_name, permission_name) \
+         values ($1, 'tmu.cfr.assign')",
+    )
+    .bind(ROLE)
+    .execute(&pool)
+    .await
+    .unwrap();
+    let zny = fca_in(&pool, "ZNY").await;
+
+    let (status, body) = call_with(
+        &state,
+        http::Method::POST,
+        &format!("/api/v1/flow/fcas/{zny}/release/TEST1"),
+        &[&auth, "If-None-Match: *"],
+        Some(json!({})),
+    )
+    .await;
+    assert_eq!(status, http::StatusCode::OK, "{body}");
+    let (status, body) = call_with(
+        &state,
+        http::Method::POST,
+        CFR,
+        &[&auth, "If-None-Match: *"],
+        Some(cfr_body("AAL1", "KJFK")),
+    )
+    .await;
+    assert_eq!(status, http::StatusCode::OK, "{body}");
 }
