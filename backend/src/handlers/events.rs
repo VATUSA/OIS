@@ -3196,6 +3196,66 @@ mod atomic_activation_tests {
         assert_eq!(status(&pool, &pkg).await, "activated");
     }
 
+    /// Two activations that both saw the package as a draft — the auto-publish tick and an Activate
+    /// click, or a double click — must not both publish. The handler's draft check runs outside the
+    /// transaction, so the guard is the status flip itself: exactly one wins, the other gets `Conflict`
+    /// and rolls back, and the package's one advisory is the one its item references.
+    #[sqlx::test]
+    async fn two_concurrent_activations_publish_once(pool: PgPool) {
+        let actor = seed(&pool).await;
+        let pkg = events_repo::create_package(&pool, EVENT, "Plan", &actor)
+            .await
+            .unwrap();
+        add(&pool, &pkg, "advisory", advisory("vATCSCC ADVZY ONE")).await;
+
+        let (a, b) = tokio::join!(
+            activate_package(&pool, EVENT, &pkg, &actor),
+            activate_package(&pool, EVENT, &pkg, &actor),
+        );
+
+        let outcomes = [a, b];
+        assert_eq!(outcomes.iter().filter(|r| r.is_ok()).count(), 1, "one wins");
+        assert!(
+            outcomes
+                .iter()
+                .any(|r| matches!(r, Err(ApiError::Conflict))),
+            "the other is refused as already activated"
+        );
+        assert_eq!(
+            count(&pool, "select count(*) from tmu.advisories").await,
+            1,
+            "the loser's advisory was rolled back"
+        );
+        assert_eq!(
+            count(
+                &pool,
+                "select count(*) from tmu.advisories a where exists \
+                 (select 1 from events.tmi_package_item i where i.live_ref = a.id)"
+            )
+            .await,
+            1,
+            "and the survivor is the one the package references — nothing orphaned"
+        );
+        assert_eq!(status(&pool, &pkg).await, "activated");
+    }
+
+    /// The same guard, sequentially: activating an already-activated package changes nothing.
+    #[sqlx::test]
+    async fn activating_an_active_package_again_changes_nothing(pool: PgPool) {
+        let actor = seed(&pool).await;
+        let pkg = events_repo::create_package(&pool, EVENT, "Plan", &actor)
+            .await
+            .unwrap();
+        add(&pool, &pkg, "advisory", advisory("vATCSCC ADVZY ONE")).await;
+        activate_package(&pool, EVENT, &pkg, &actor).await.unwrap();
+
+        assert!(matches!(
+            activate_package(&pool, EVENT, &pkg, &actor).await,
+            Err(ApiError::Conflict)
+        ));
+        assert_eq!(count(&pool, "select count(*) from tmu.advisories").await, 1);
+    }
+
     /// The package's own status flip is inside the transaction too. If `mark_package_activated` ran after
     /// the commit, a failure there would leave every item live under a package still marked draft —
     /// which auto-publish re-selects every tick, and re-materialises.

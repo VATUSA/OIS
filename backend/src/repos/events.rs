@@ -449,15 +449,22 @@ pub async fn mark_package_activated<'e, E>(
 where
     E: sqlx::Executor<'e, Database = Postgres>,
 {
-    sqlx::query(
+    // Only a draft. This flip is the guard against two activations that both saw `draft` — the
+    // auto-publish tick and an Activate click, or a double click — because the handler's status check
+    // runs outside the activation transaction. The loser blocks on this row until the winner commits,
+    // then updates nothing, and its `Conflict` rolls back every item it materialized (#537 review).
+    let result = sqlx::query(
         "update events.tmi_package set status = 'activated', activated_at = now(), \
-         updated_by = $2 where id = $1",
+         updated_by = $2 where id = $1 and status = 'draft'",
     )
     .bind(package_id)
     .bind(actor)
     .execute(executor)
     .await
     .map_err(|_| ApiError::Internal)?;
+    if result.rows_affected() == 0 {
+        return Err(ApiError::Conflict);
+    }
     Ok(())
 }
 
