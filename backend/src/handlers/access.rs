@@ -2182,6 +2182,54 @@ mod role_guard_tests {
         assert_eq!(held, 0);
     }
 
+    /// The other half: the bundle alone is not enough either. An actor holding every permission
+    /// `EC` grants at ZDC, but not `EC` itself, still may not assign it.
+    #[sqlx::test]
+    async fn the_bundle_without_the_role_cannot_assign_it(pool: PgPool) {
+        let w = world(pool).await;
+        grant_bundle(&w, Some("ZDC")).await;
+
+        assert_eq!(
+            save_roles(&w, Some("ZDC"), &[ROLE]).await,
+            http::StatusCode::FORBIDDEN
+        );
+        assert!(target_roles(&w).await.is_empty());
+    }
+
+    /// Holding the role at ZDC, plus its whole bundle nationally, is still not holding the role at
+    /// ZNY or nationally. The bundle gate passes here, so the role's scope decides alone.
+    #[sqlx::test]
+    async fn the_role_elsewhere_plus_the_bundle_cannot_assign_it(pool: PgPool) {
+        let w = world(pool).await;
+        hold(&w.pool, &w.actor, ROLE, Some("ZDC")).await;
+        grant_bundle(&w, None).await;
+
+        assert_eq!(
+            save_roles(&w, Some("ZNY"), &[ROLE]).await,
+            http::StatusCode::FORBIDDEN
+        );
+        assert_eq!(
+            save_roles(&w, None, &[ROLE]).await,
+            http::StatusCode::FORBIDDEN
+        );
+        assert!(target_roles(&w).await.is_empty());
+    }
+
+    /// Grant the actor every permission `ROLE` bundles, directly, at `artcc` (`None` = nationally).
+    async fn grant_bundle(w: &World, artcc: Option<&str>) {
+        let bundle: Vec<String> = sqlx::query_scalar(
+            "select permission_name from access.role_permissions where role_name = $1",
+        )
+        .bind(ROLE)
+        .fetch_all(&w.pool)
+        .await
+        .unwrap();
+        assert!(!bundle.is_empty(), "EC is seeded with a bundle (0094)");
+        for name in &bundle {
+            grant(&w.pool, &w.actor, name, artcc).await;
+        }
+    }
+
     // ---- AC4 ---------------------------------------------------------------------------------------
 
     #[sqlx::test]
