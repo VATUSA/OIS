@@ -1,5 +1,6 @@
 //! TMU persistence — Traffic Management Initiatives (TMIs).
 
+use crate::auth::principal::Attribution;
 use sqlx::{PgPool, Postgres, Transaction};
 
 use std::collections::HashMap;
@@ -524,19 +525,21 @@ pub async fn upsert_issued_cfr(
     callsign: &str,
     airport: &str,
     wheels_up: DateTime<Utc>,
-    actor: &str,
+    by: &Attribution,
 ) -> Result<(), ApiError> {
     sqlx::query(
-        "insert into tmu.issued_cfrs (callsign, airport, wheels_up, issued_by) \
-         values ($1, $2, $3, $4) \
+        "insert into tmu.issued_cfrs (callsign, airport, wheels_up, issued_by, issued_by_actor) \
+         values ($1, $2, $3, $4, $5) \
          on conflict (callsign) do update set \
             airport = excluded.airport, wheels_up = excluded.wheels_up, \
-            issued_by = excluded.issued_by, issued_at = now()",
+            issued_by = excluded.issued_by, issued_by_actor = excluded.issued_by_actor, \
+            issued_at = now()",
     )
     .bind(callsign)
     .bind(airport)
     .bind(wheels_up)
-    .bind(actor)
+    .bind(&by.user_id)
+    .bind(&by.actor_id)
     .execute(pool)
     .await
     .map_err(|_| ApiError::Internal)?;
@@ -548,8 +551,10 @@ pub async fn get_issued_cfr(
     callsign: &str,
 ) -> Result<Option<IssuedCfrBody>, ApiError> {
     sqlx::query_as::<_, IssuedCfrBody>(
-        "select c.callsign, c.airport, c.wheels_up, u.display_name as issued_by, c.issued_at \
+        "select c.callsign, c.airport, c.wheels_up, \
+                coalesce(u.display_name, a.display_name) as issued_by, c.issued_at \
          from tmu.issued_cfrs c left join identity.users u on u.id = c.issued_by \
+         left join access.actors a on a.id = c.issued_by_actor \
          where c.callsign = $1",
     )
     .bind(callsign)

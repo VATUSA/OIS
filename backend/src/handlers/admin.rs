@@ -42,6 +42,9 @@ async fn build_summary(
     let (_, effective) = match principal {
         Principal::User(u) => acl::fetch_user_access(Some(pool), &u.id).await?,
         Principal::ApiKey(k) => acl::fetch_api_key_access(Some(pool), k).await?,
+        Principal::ServiceAccount(sa) => {
+            acl::fetch_service_account_access(Some(pool), &sa.id).await?
+        }
     };
     let holds = |permission: PermissionPath| effective.contains(&permission);
 

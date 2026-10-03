@@ -175,6 +175,34 @@ pub async fn fetch_service_account_role_names(
     .map_err(|_| ApiError::Internal)
 }
 
+/// A service account's scope for `permission_name`, from its live roles (#583). National only for a
+/// role held with no ARTCC; otherwise the ARTCCs its roles name. The same "live" test as
+/// [`fetch_service_account_permission_names`], so the scope never covers a role the gate ignores.
+pub async fn service_account_permission_scope(
+    pool: &PgPool,
+    service_account_id: &str,
+    permission_name: &str,
+) -> Result<PermissionScope, ApiError> {
+    let artccs: Vec<Option<String>> = sqlx::query_scalar(
+        "select distinct sar.artcc_id
+         from access.service_account_roles sar
+         join access.role_permissions rp on rp.role_name = sar.role_name
+         where sar.service_account_id = $1 and rp.permission_name = $2
+           and (sar.ends_at is null or sar.ends_at > now())",
+    )
+    .bind(service_account_id)
+    .bind(permission_name)
+    .fetch_all(pool)
+    .await
+    .map_err(|_| ApiError::Internal)?;
+    if artccs.iter().any(Option::is_none) {
+        return Ok(PermissionScope::National);
+    }
+    Ok(PermissionScope::Facilities(
+        artccs.into_iter().flatten().collect(),
+    ))
+}
+
 pub async fn fetch_service_account_permission_names(
     pool: &PgPool,
     service_account_id: &str,
