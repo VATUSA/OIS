@@ -1,12 +1,16 @@
-//! VATUSA member sync. On sign-in we fetch a member's details from the VATUSA API (v2) and
-//! store them; to keep them fresh we register a per-facility outbound webhook (v3) and refetch
-//! any of our users whose roster changes. A periodic reconciliation backstops the webhooks,
-//! which are delivered once with no retries.
+//! VATUSA member sync.
 //!
-//! Everything here no-ops unless `VATUSA_API_KEY` is configured; webhook registration
-//! additionally requires `OIS_PUBLIC_URL` (the receiver must be a public HTTPS endpoint).
+//! - **Daily, the whole division** over v3 (`GET /v3/division/controllers`, #605): every controller is
+//!   seeded or refreshed with their roles and visits, and the access mapped from those roles (#548) is
+//!   reconciled. Also run on demand — from Background Tasks, or when a verified webhook delivery says
+//!   the roster changed.
+//! - **At sign-in, one person** over v2 — the one remaining v2 call, kept deliberately: v3 carries no
+//!   `discord_id` (which the bot needs for DMs), and it makes a brand-new member's first sign-in
+//!   correct before the next daily pull.
+//!
+//! Everything here no-ops unless `VATUSA_API_KEY` is configured; the webhook additionally needs
+//! `OIS_PUBLIC_URL` (the receiver must be public HTTPS) and `OIS_SECRET_KEY` (its secret is encrypted).
 
-use std::collections::HashSet;
 use std::future::Future;
 use std::sync::Arc;
 use std::time::Duration;
@@ -15,16 +19,10 @@ use chrono::{DateTime, Utc};
 use serde::{Deserialize, Deserializer};
 use sqlx::PgPool;
 
-use crate::config::{ois_public_url, vatusa_api_base, vatusa_api_key};
+use crate::config::{ois_public_url, ois_secret_key, vatusa_api_base, vatusa_api_key};
 use crate::job_registry::{JobRegistry, run_interval};
 use crate::repos::vatusa as repo;
 
-/// How often the reconciliation job refreshes the least-recently-synced members.
-const RECONCILE_INTERVAL: Duration = Duration::from_secs(6 * 3600);
-/// Members refreshed per reconciliation tick (keeps VATUSA request volume modest).
-const RECONCILE_BATCH: i64 = 200;
-/// The reconcile job's name on the admin Background Tasks page.
-pub const RECONCILE_JOB: &str = "vatusa_reconcile";
 /// How long sign-in waits for VATUSA before continuing without it (#548).
 const LOGIN_SYNC_BUDGET: Duration = Duration::from_secs(5);
 
@@ -146,8 +144,10 @@ fn client() -> reqwest::Client {
         .expect("failed to build VATUSA HTTP client")
 }
 
-/// Fetch one member's details from the VATUSA v2 API. `api_key` is passed as `?apikey=` so
-/// staff-only fields (email, visits) are populated.
+/// Fetch one member's details from the VATUSA v2 API — **the one remaining v2 call** (#605), used only
+/// at sign-in, for `discord_id` (which v3 does not carry) and a brand-new member's first sign-in.
+/// `api_key` is passed as `?apikey=` so visits are populated. (Email is not parsed: sign-in has it from
+/// VATSIM Connect.)
 async fn fetch_member(
     http: &reqwest::Client,
     api_key: &str,
@@ -165,9 +165,8 @@ async fn fetch_member(
     Ok(env.data)
 }
 
-/// Fetch a member and persist their details/roles/visits. The reusable unit shared by the
-/// sign-in hook, the webhook receiver, and reconciliation. Best-effort: errors are returned
-/// for the caller to log, never to fail the surrounding flow.
+/// Fetch a member and persist their details/roles/visits — sign-in's sync. Best-effort: errors are
+/// returned for the caller to log, never to fail the surrounding flow.
 pub async fn sync_member(pool: &PgPool, cid: i64) -> Result<(), String> {
     let Some(api_key) = vatusa_api_key() else {
         return Ok(()); // sync disabled
@@ -214,7 +213,7 @@ async fn completes_within(
     }
 }
 
-/// Fire-and-forget a member sync (the webhook receiver, and sign-in's fallback when VATUSA is slow).
+/// Fire-and-forget a member sync — sign-in's fallback when VATUSA is slower than its budget.
 pub fn spawn_member_sync(pool: PgPool, cid: i64) {
     if vatusa_api_key().is_none() {
         return;
@@ -226,167 +225,325 @@ pub fn spawn_member_sync(pool: PgPool, cid: i64) {
     });
 }
 
-// --- Webhook registration (v3) ---
+// --- v3 division pull (#605) ---
+
+/// `GET /v3/division/controllers` — the whole division and every role grant, in one response with no
+/// envelope and no pagination. Fields OIS doesn't store are not modelled.
+#[derive(Debug, Deserialize)]
+pub struct ControllersAndRoles {
+    pub controllers: Vec<DivisionController>,
+    /// Flat across the division — not nested per controller.
+    pub roles: Vec<UserRole>,
+}
 
 #[derive(Debug, Deserialize)]
-struct CreateWebhookResponse {
-    id: i64,
-    secret: String,
+pub struct DivisionController {
+    pub cid: i64,
+    pub display_name: String,
+    pub controller_rating: i32,
+    #[serde(default)]
+    pub facility: String,
+    #[serde(default)]
+    pub visiting_facilities: Vec<String>,
+    /// The nearest v3 has to v2's `facility_join`: when they moved to their current facility.
+    #[serde(default)]
+    pub last_transfer_time: Option<DateTime<Utc>>,
 }
 
-/// Register (once) a per-facility webhook pointing at our receiver, persisting each returned
-/// secret. Runs at startup; skips facilities already registered in `identity.vatusa_webhooks`.
-pub fn spawn_register_webhooks(pool: PgPool) {
-    let (Some(api_key), Some(public_url)) = (vatusa_api_key(), ois_public_url()) else {
-        tracing::info!("VATUSA webhooks not registered (VATUSA_API_KEY / OIS_PUBLIC_URL unset)");
+#[derive(Debug, Deserialize)]
+pub struct UserRole {
+    pub cid: i64,
+    /// A facility code, or `*` for a division-wide grant (stored as `ZHQ`).
+    pub facility: String,
+    pub role: String,
+    /// Unix seconds.
+    pub granted_at: i64,
+}
+
+/// The pull's name on the admin Background Tasks page.
+pub const PULL_JOB: &str = "vatusa_division_pull";
+const PULL_INTERVAL: Duration = Duration::from_secs(24 * 3600);
+/// One transaction per this many controllers: a single transaction over the whole division bloats the
+/// WAL, one per controller is thousands of commits.
+const PULL_CHUNK: usize = 500;
+
+/// The response, normalised and sorted by CID (the order `apply_division_chunk` must lock rows in).
+/// Roles for a CID that isn't in `controllers` are dropped — there is no one to attach them to.
+pub fn division_members(pulled: ControllersAndRoles) -> Vec<repo::DivisionMember> {
+    let mut roles: std::collections::HashMap<i64, Vec<_>> = std::collections::HashMap::new();
+    for r in pulled.roles {
+        let (facility, role) = (
+            repo::normalise_facility(&r.facility),
+            r.role.trim().to_uppercase(),
+        );
+        if facility.is_empty() || role.is_empty() {
+            continue;
+        }
+        let at = DateTime::from_timestamp(r.granted_at, 0);
+        roles.entry(r.cid).or_default().push((facility, role, at));
+    }
+    let mut members: Vec<_> = pulled
+        .controllers
+        .into_iter()
+        .map(|c| repo::DivisionMember {
+            cid: c.cid,
+            display_name: c.display_name.trim().to_string(),
+            rating_numeric: c.controller_rating,
+            rating_short: rating_to_short(c.controller_rating).map(str::to_string),
+            facility: repo::normalise_facility(&c.facility),
+            facility_join: c.last_transfer_time,
+            visits: c
+                .visiting_facilities
+                .iter()
+                .map(|f| repo::normalise_facility(f))
+                .filter(|f| !f.is_empty())
+                .collect(),
+            roles: roles.remove(&c.cid).unwrap_or_default(),
+        })
+        .collect();
+    members.sort_by_key(|m| m.cid);
+    members.dedup_by_key(|m| m.cid);
+    members
+}
+
+/// Store a pulled division: chunked bulk upserts, then clear whoever has left.
+///
+/// **Refuses a response that looks truncated** — empty, or under half the members already synced —
+/// without writing anything. Absence from the pull removes a controller's VATUSA roles and the access
+/// mapped from them, so a partial response applied blindly would be a mass revocation.
+pub async fn apply_division(
+    pool: &PgPool,
+    members: &[repo::DivisionMember],
+) -> Result<String, String> {
+    let known = repo::count_synced_members(pool)
+        .await
+        .map_err(|e| e.to_string())?;
+    if members.is_empty() || (members.len() as i64) < known / 2 {
+        return Err(format!(
+            "refused a division pull of {} controllers against {known} already synced — \
+             it looks truncated, and applying it would strip roles from everyone missing",
+            members.len()
+        ));
+    }
+
+    let (mut seeded, mut changed) = (0, 0);
+    for chunk in members.chunks(PULL_CHUNK) {
+        let (s, c) = repo::apply_division_chunk(pool, chunk)
+            .await
+            .map_err(|e| format!("store division chunk: {e}"))?;
+        seeded += s;
+        changed += c;
+    }
+    let present: Vec<i64> = members.iter().map(|m| m.cid).collect();
+    let departed = repo::clear_departed(pool, &present)
+        .await
+        .map_err(|e| format!("clear departed members: {e}"))?;
+    Ok(format!(
+        "{} controllers ({seeded} new); roles changed for {changed}; {departed} departed",
+        members.len()
+    ))
+}
+
+/// A client for the division pull: a multi-megabyte body, so a much longer timeout than the per-user
+/// client's 15 s — which covers the whole request, body included, and would fail only in production.
+fn division_client() -> reqwest::Client {
+    reqwest::Client::builder()
+        .user_agent("ois-backend/0.1 (+https://vatusa.net)")
+        .timeout(Duration::from_secs(120))
+        .build()
+        .expect("failed to build VATUSA HTTP client")
+}
+
+async fn fetch_division(api_key: &str) -> Result<ControllersAndRoles, String> {
+    division_client()
+        .get(format!("{}/v3/division/controllers", vatusa_api_base()))
+        .header("x-api-key", api_key)
+        .send()
+        .await
+        .and_then(reqwest::Response::error_for_status)
+        .map_err(|e| format!("VATUSA division pull failed: {e}"))?
+        .json()
+        .await
+        .map_err(|e| format!("VATUSA division pull returned an unreadable body: {e}"))
+}
+
+/// Pull the division daily (and on demand: from Background Tasks, or when a verified webhook delivery
+/// says the roster changed). Replaces the old 6-hourly reconcile, which refreshed ≤ 800 already-signed-in
+/// members a day over v2, one fetch each.
+pub fn spawn_division_pull(reg: Arc<JobRegistry>, pool: PgPool) {
+    let Some(api_key) = vatusa_api_key() else {
         return;
     };
-    tokio::spawn(async move {
-        if let Err(e) = register_webhooks(&pool, &api_key, &public_url).await {
-            tracing::warn!("VATUSA webhook registration failed: {e}");
+    tokio::spawn(division_pull_job(reg, move || {
+        let (pool, api_key) = (pool.clone(), api_key.clone());
+        async move {
+            let pulled = fetch_division(&api_key).await?;
+            let summary = apply_division(&pool, &division_members(pulled)).await?;
+            // Daily is also when a webhook VATUSA dropped, or one whose secret we can no longer
+            // decrypt, gets replaced. Its failure is reported but doesn't fail the pull.
+            match ensure_webhook(&pool, &api_key).await {
+                Ok(()) => Ok(summary),
+                Err(e) => Ok(format!("{summary}; webhook: {e}")),
+            }
         }
-    });
+    }));
 }
 
-async fn register_webhooks(pool: &PgPool, api_key: &str, public_url: &str) -> Result<(), String> {
-    let facilities = repo::active_facilities(pool)
-        .await
-        .map_err(|e| format!("load facilities: {e}"))?;
-    let existing = repo::registered_facilities(pool)
-        .await
-        .map_err(|e| format!("load registered webhooks: {e}"))?;
-    let http = client();
-    let base = format!("{}/v3/webhooks", vatusa_api_base());
-    let mut created = 0;
-    for facility in facilities {
-        if existing.contains(&facility) {
-            continue;
-        }
-        let url = format!("{public_url}/api/v1/webhooks/vatusa/{facility}");
-        let resp = http
-            .post(&base)
-            .header("x-api-key", api_key)
-            .json(&serde_json::json!({ "url": url, "facility": facility }))
-            .send()
-            .await
-            .map_err(|e| format!("create webhook for {facility}: {e}"))?;
-        if !resp.status().is_success() {
-            tracing::warn!(
-                "VATUSA webhook create for {facility} returned {}",
-                resp.status()
-            );
-            continue;
-        }
-        let body: CreateWebhookResponse = resp
-            .json()
-            .await
-            .map_err(|e| format!("parse webhook response for {facility}: {e}"))?;
-        repo::upsert_webhook(pool, &facility, body.id, &body.secret, &url)
-            .await
-            .map_err(|e| format!("persist webhook for {facility}: {e}"))?;
-        created += 1;
-    }
-    tracing::info!(created, "VATUSA webhooks registered");
-    Ok(())
-}
-
-// --- Reconciliation ---
-
-/// Periodically refresh the least-recently-synced members — a backstop for missed webhook
-/// deliveries (which are single-attempt, no-retry) and for non-roster changes (rating, name)
-/// that don't emit a webhook.
-pub fn spawn_reconcile(reg: Arc<JobRegistry>, pool: PgPool) {
-    if vatusa_api_key().is_none() {
-        return;
-    }
-    tokio::spawn(reconcile_job(reg, pool));
-}
-
-/// The reconcile loop as a registered job (#548): it appears on the admin Background Tasks page, can
-/// be triggered from there, and a tick in which any member failed shows as a failure — before, it ran
-/// on a bare interval and a wedged sync was visible only in the logs.
-async fn reconcile_job(reg: Arc<JobRegistry>, pool: PgPool) {
+/// The registered, triggerable job around a pull. The pull itself is an argument so tests can register
+/// the job without its first tick reaching VATUSA.
+async fn division_pull_job<F, Fut>(reg: Arc<JobRegistry>, pull: F)
+where
+    F: FnMut() -> Fut,
+    Fut: Future<Output = Result<String, String>>,
+{
     run_interval(
         reg,
-        RECONCILE_JOB,
-        "Refresh the least-recently-synced VATUSA members and their mapped access",
-        RECONCILE_INTERVAL,
-        move || {
-            let pool = pool.clone();
-            async move { reconcile_once(&pool).await }
-        },
+        PULL_JOB,
+        "Pull every VATUSA controller and role grant, and re-check the division webhook",
+        PULL_INTERVAL,
+        pull,
     )
     .await;
 }
 
-async fn reconcile_once(pool: &PgPool) -> Result<String, String> {
-    let cids = repo::stale_member_cids(pool, RECONCILE_BATCH)
-        .await
-        .map_err(|e| e.to_string())?;
-    let total = cids.len();
-    let mut failed = 0;
-    for cid in cids {
-        if let Err(e) = sync_member(pool, cid).await {
-            tracing::warn!("{e}");
-            failed += 1;
-        }
-    }
-    if failed > 0 {
-        Err(format!("{failed} of {total} members failed to sync"))
-    } else {
-        Ok(format!("{total} members refreshed"))
-    }
+// --- The division webhook (v3, #605) ---
+
+#[derive(Debug, Deserialize)]
+struct CreateWebhookResponse {
+    secret: String,
 }
 
-/// Extract the affected CIDs from a `roster_change` webhook payload. For `controllers` rows the
-/// CID is the primary key; for `visits` rows it's carried in the value snapshots.
-pub fn changed_cids(data: &serde_json::Value) -> HashSet<i64> {
-    let mut cids = HashSet::new();
-    let table = data
-        .get("table_name")
-        .and_then(|v| v.as_str())
-        .unwrap_or("");
-    if table == "controllers"
-        && let Some(pk) = data.get("row_pk").and_then(serde_json::Value::as_i64)
+#[derive(Debug, Deserialize)]
+struct WebhookInfo {
+    id: i64,
+    url: String,
+}
+
+/// Where VATUSA delivers to: one division webhook (v3 scopes webhooks to the calling key).
+pub fn webhook_url(public_url: &str) -> String {
+    format!(
+        "{}/api/v1/webhooks/vatusa",
+        public_url.trim_end_matches('/')
+    )
+}
+
+/// Register the division webhook at startup (when configured). Also re-checked after every pull.
+pub fn spawn_register_webhook(pool: PgPool) {
+    let Some(api_key) = vatusa_api_key() else {
+        return;
+    };
+    tokio::spawn(async move {
+        if let Err(e) = ensure_webhook(&pool, &api_key).await {
+            tracing::warn!("VATUSA webhook: {e}");
+        }
+    });
+}
+
+/// Make sure exactly one usable division webhook exists, ours.
+///
+/// Usable means: stored, decryptable with today's key, pointing at today's URL, and still listed by
+/// VATUSA. Otherwise every webhook on VATUSA's side that points at our receiver — the 22 legacy
+/// per-facility ones included — is deleted, a fresh one is created, its id is read back from the list
+/// (creating returns only the secret, and only once), and the secret is stored encrypted.
+///
+/// Needs `OIS_PUBLIC_URL` and `OIS_SECRET_KEY`; without either it does nothing and says so — the
+/// daily pull still keeps everyone current, just without push notifications.
+async fn ensure_webhook(pool: &PgPool, api_key: &str) -> Result<(), String> {
+    let Some(public_url) = ois_public_url() else {
+        return Err("not registered: OIS_PUBLIC_URL is unset".into());
+    };
+    let Some(key) = ois_secret_key() else {
+        return Err("not registered: OIS_SECRET_KEY is unset or invalid".into());
+    };
+    let target = webhook_url(&public_url);
+    let http = client();
+    let base = format!("{}/v3/webhooks", vatusa_api_base());
+
+    let list = |http: reqwest::Client, base: String| async move {
+        http.get(&base)
+            .header("x-api-key", api_key)
+            .send()
+            .await
+            .and_then(reqwest::Response::error_for_status)
+            .map_err(|e| format!("list webhooks: {e}"))?
+            .json::<Vec<WebhookInfo>>()
+            .await
+            .map_err(|e| format!("list webhooks: {e}"))
+    };
+    let listed = list(http.clone(), base.clone()).await?;
+
+    let stored = repo::fetch_webhook(pool)
+        .await
+        .map_err(|e| format!("load stored webhook: {e}"))?;
+    if let Some(row) = &stored
+        && row.url == target
+        && row.key_version == crate::secrets::KEY_VERSION
+        && crate::secrets::decrypt(&key, &row.secret_ciphertext).is_some()
+        && row
+            .vatusa_id
+            .is_some_and(|id| listed.iter().any(|w| w.id == id))
     {
-        cids.insert(pk);
+        return Ok(());
     }
-    for key in ["old_value", "new_value"] {
-        if let Some(cid) = data
-            .get(key)
-            .and_then(|v| v.get("cid"))
-            .and_then(serde_json::Value::as_i64)
-        {
-            cids.insert(cid);
+
+    let receiver_prefix = webhook_url(&public_url);
+    for stale in listed
+        .iter()
+        .filter(|w| w.url.starts_with(&receiver_prefix))
+    {
+        let deleted = http
+            .delete(format!("{base}/{}", stale.id))
+            .header("x-api-key", api_key)
+            .send()
+            .await
+            .and_then(reqwest::Response::error_for_status);
+        if let Err(e) = deleted {
+            tracing::warn!(
+                id = stale.id,
+                url = stale.url,
+                "delete stale VATUSA webhook: {e}"
+            );
         }
     }
-    cids
+
+    let created: CreateWebhookResponse = http
+        .post(&base)
+        .header("x-api-key", api_key)
+        .json(&serde_json::json!({ "url": target }))
+        .send()
+        .await
+        .and_then(reqwest::Response::error_for_status)
+        .map_err(|e| format!("create webhook: {e}"))?
+        .json()
+        .await
+        .map_err(|e| format!("create webhook: {e}"))?;
+    let vatusa_id = list(http, base).await.ok().and_then(|after| {
+        after
+            .into_iter()
+            .filter(|w| w.url == target)
+            .map(|w| w.id)
+            .max()
+    });
+
+    repo::store_webhook(
+        pool,
+        &repo::StoredWebhook {
+            vatusa_id,
+            url: target,
+            secret_ciphertext: crate::secrets::encrypt(&key, &created.secret),
+            key_version: crate::secrets::KEY_VERSION,
+        },
+    )
+    .await
+    .map_err(|e| format!("store webhook: {e}"))?;
+    tracing::info!(vatusa_id, "VATUSA division webhook registered");
+    Ok(())
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
     use serde_json::json;
-
-    #[test]
-    fn changed_cids_controllers_uses_row_pk() {
-        let data = json!({
-            "table_name": "controllers", "operation": "UPDATE", "row_pk": 800007,
-            "old_value": { "facility": "ZAE" }, "new_value": { "facility": "ZDC" }
-        });
-        assert!(changed_cids(&data).contains(&800007));
-    }
-
-    #[test]
-    fn changed_cids_visits_uses_cid_not_row_pk() {
-        let data = json!({
-            "table_name": "visits", "operation": "INSERT", "row_pk": 42,
-            "old_value": null, "new_value": { "cid": 1234567, "facility": "ZDC" }
-        });
-        let cids = changed_cids(&data);
-        assert!(cids.contains(&1234567));
-        assert!(!cids.contains(&42)); // row_pk is the visit id here, not a CID
-    }
 
     #[test]
     fn short_rating_prefers_field_then_maps_numeric() {
@@ -478,20 +635,410 @@ mod tests {
         );
     }
 
-    /// AC7 (#548): the reconcile loop is a registered job, so it is listed on Background Tasks.
+    // ---- #605: the division pull ----
+
+    fn controller(cid: i64, facility: &str) -> serde_json::Value {
+        json!({
+            "cid": cid, "display_name": format!("Controller {cid}"), "controller_rating": 5,
+            "instructor_rating": 0, "facility": facility, "visiting_facilities": [],
+            "last_competency_date": null, "last_promotion_time": null, "last_transfer_time": null,
+        })
+    }
+
+    fn role(cid: i64, facility: &str, role: &str) -> serde_json::Value {
+        json!({ "id": 1, "cid": cid, "facility": facility, "role": role,
+                "grantor_cid": 1, "granted_at": 1_700_000_000 })
+    }
+
+    /// A pull as v3 serves it, through serde — the same path the HTTP response takes.
+    fn pulled(
+        controllers: Vec<serde_json::Value>,
+        roles: Vec<serde_json::Value>,
+    ) -> Vec<repo::DivisionMember> {
+        division_members(
+            serde_json::from_value(json!({ "controllers": controllers, "roles": roles })).unwrap(),
+        )
+    }
+
+    async fn held(pool: &PgPool, cid: i64) -> Vec<(String, Option<String>, String)> {
+        sqlx::query_as(
+            "select r.role_name, r.artcc_id, r.source from access.user_roles r \
+             join identity.users u on u.id = r.user_id where u.cid = $1 \
+             order by r.role_name, r.source",
+        )
+        .bind(cid)
+        .fetch_all(pool)
+        .await
+        .unwrap()
+    }
+
+    async fn stored_roles(pool: &PgPool, cid: i64) -> Vec<(String, String)> {
+        sqlx::query_as(
+            "select facility, role from identity.vatusa_roles where cid = $1 order by facility, role",
+        )
+        .bind(cid)
+        .fetch_all(pool)
+        .await
+        .unwrap()
+    }
+
+    async fn map(pool: &PgPool, vatusa_role: &str, group: &str) {
+        sqlx::query(
+            "insert into access.vatusa_role_mappings (vatusa_role, role_name) values ($1, $2)",
+        )
+        .bind(vatusa_role)
+        .bind(group)
+        .execute(pool)
+        .await
+        .unwrap();
+    }
+
+    /// v3's codes arrive as VATUSA spells them; OIS stores one canonical form. `*` (v3's division-wide
+    /// marker) becomes `ZHQ`, so the national mapping case keeps working (AC4).
+    #[test]
+    fn the_pull_is_normalised_before_it_is_stored() {
+        let members = pulled(
+            vec![
+                controller(3, " zdc "),
+                controller(1, "ZNY"),
+                controller(1, "ZNY"),
+            ],
+            vec![
+                role(3, "*", " wm "),
+                role(3, "zdc", "datm"),
+                role(99, "ZDC", "ATM"),
+            ],
+        );
+        assert_eq!(
+            members.iter().map(|m| m.cid).collect::<Vec<_>>(),
+            [1, 3],
+            "sorted, deduped"
+        );
+        let m = &members[1];
+        assert_eq!(m.facility, "ZDC");
+        assert_eq!(m.rating_short.as_deref(), Some("C1"));
+        let roles: Vec<_> = m
+            .roles
+            .iter()
+            .map(|(f, r, _)| (f.as_str(), r.as_str()))
+            .collect();
+        assert_eq!(roles, [("ZHQ", "WM"), ("ZDC", "DATM")]);
+        assert!(m.roles[0].2.is_some(), "granted_at is unix seconds");
+        // A role for a CID not in the pull has no one to attach to.
+        assert!(members.iter().all(|m| m.cid != 99));
+    }
+
+    /// AC2: every controller is seeded with roles and visits, across several transactions, and running
+    /// the same pull again changes nothing — no duplicates, no churn, no audit noise.
     #[sqlx::test]
-    async fn the_reconcile_job_is_on_the_background_tasks_page(pool: PgPool) {
+    async fn the_pull_seeds_the_division_and_a_rerun_is_idempotent(pool: PgPool) {
+        let controllers: Vec<_> = (1..=1_200)
+            .map(|cid| controller(1_605_000 + cid, "ZDC"))
+            .collect();
+        let mut with_visits = controllers.clone();
+        with_visits[0]["visiting_facilities"] = json!(["zny"]);
+        let members = pulled(with_visits, vec![role(1_605_001, "ZDC", "MTR")]);
+
+        let summary = apply_division(&pool, &members).await.unwrap();
+        assert!(
+            summary.starts_with("1200 controllers (1200 new); roles changed for 1;"),
+            "{summary}"
+        );
+
+        let users: i64 = sqlx::query_scalar(
+            "select count(*) from identity.users where cid between 1605001 and 1606200",
+        )
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        assert_eq!(users, 1_200, "three chunks of 500, every controller seeded");
+        assert_eq!(
+            stored_roles(&pool, 1_605_001).await,
+            [("ZDC".into(), "MTR".into())]
+        );
+        let visit: String =
+            sqlx::query_scalar("select facility from identity.vatusa_visits where cid = 1605001")
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+        assert_eq!(visit, "ZNY");
+
+        let again = apply_division(&pool, &members).await.unwrap();
+        assert!(
+            again.starts_with("1200 controllers (0 new); roles changed for 0"),
+            "{again}"
+        );
+        let users_after: i64 = sqlx::query_scalar("select count(*) from identity.users")
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+        assert_eq!(users_after, users);
+    }
+
+    /// A seeded user has never signed in, keeps no audit actor, and gets VATUSA-mapped access before
+    /// their first sign-in — a division role (`*`) reaching them as a national grant (AC4).
+    #[sqlx::test]
+    async fn a_division_role_grants_national_access_before_first_sign_in(pool: PgPool) {
+        map(&pool, "WM", "VATUSA_STAFF").await;
+
+        apply_division(
+            &pool,
+            &pulled(
+                vec![controller(1_605_100, "ZHQ")],
+                vec![role(1_605_100, "*", "WM")],
+            ),
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(
+            held(&pool, 1_605_100).await,
+            [("VATUSA_STAFF".to_string(), None, "vatusa".to_string())]
+        );
+        let (signed_in, actors): (Option<chrono::DateTime<Utc>>, i64) = sqlx::query_as(
+            "select u.last_login_at, (select count(*) from access.actors a where a.user_id = u.id) \
+             from identity.users u where u.cid = 1605100",
+        )
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        assert_eq!((signed_in, actors), (None, 0));
+    }
+
+    /// Losing a VATUSA role in the pull revokes the access mapped from it, and the audit names the role
+    /// that was lost — the pull captures what the old roles justified before it rewrites them.
+    #[sqlx::test]
+    async fn a_role_lost_in_the_pull_revokes_its_access_and_names_it(pool: PgPool) {
+        map(&pool, "DATM", "EC").await;
+        let present = || vec![controller(1_605_200, "ZDC")];
+        apply_division(
+            &pool,
+            &pulled(present(), vec![role(1_605_200, "ZDC", "DATM")]),
+        )
+        .await
+        .unwrap();
+        assert_eq!(held(&pool, 1_605_200).await.len(), 1);
+
+        apply_division(&pool, &pulled(present(), vec![]))
+            .await
+            .unwrap();
+
+        assert!(held(&pool, 1_605_200).await.is_empty());
+        let reason: String = sqlx::query_scalar(
+            "select reason from access.audit_logs where actor_id = 'vatusa-sync' \
+             order by created_at desc, id desc limit 1",
+        )
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        assert_eq!(
+            reason,
+            "VATUSA sync: revoked EC at ZDC (no longer holds DATM@ZDC)"
+        );
+    }
+
+    /// A controller missing from a (plausible) pull has left the division: their stored roles go, and
+    /// the access mapped from them with it. Everyone still present is untouched.
+    #[sqlx::test]
+    async fn a_departed_controller_loses_their_roles(pool: PgPool) {
+        map(&pool, "DATM", "EC").await;
+        let roles = |cids: &[i64]| cids.iter().map(|c| role(*c, "ZDC", "DATM")).collect();
+        let everyone: Vec<i64> = (1_605_300..1_605_304).collect();
+        apply_division(
+            &pool,
+            &pulled(
+                everyone.iter().map(|c| controller(*c, "ZDC")).collect(),
+                roles(&everyone),
+            ),
+        )
+        .await
+        .unwrap();
+
+        let staying = &everyone[1..];
+        let summary = apply_division(
+            &pool,
+            &pulled(
+                staying.iter().map(|c| controller(*c, "ZDC")).collect(),
+                roles(staying),
+            ),
+        )
+        .await
+        .unwrap();
+
+        assert!(summary.ends_with("1 departed"), "{summary}");
+        assert!(stored_roles(&pool, everyone[0]).await.is_empty());
+        assert!(held(&pool, everyone[0]).await.is_empty());
+        assert_eq!(held(&pool, everyone[1]).await.len(), 1);
+    }
+
+    /// AC5. v3 carries no `discord_id`. The bot resolves DMs through this mapping, which sign-in
+    /// refreshes over v2 — the pull must leave it exactly as it found it, because absence of a field is
+    /// not a cleared link.
+    #[sqlx::test]
+    async fn the_pull_never_clears_a_discord_link(pool: PgPool) {
+        let user: String = sqlx::query_scalar(
+            "insert into identity.users (full_name, display_name, cid, last_login_at) \
+             values ('Signed In', 'Signed In', 1605400, now()) returning id",
+        )
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        sqlx::query(
+            "insert into integration.external_sync_mappings \
+                 (system_code, entity_type, local_id, external_id, metadata) \
+             values ('discord', 'user', $1, '123456789012345678', '{\"source\":\"vatusa\"}'::jsonb)",
+        )
+        .bind(&user)
+        .execute(&pool)
+        .await
+        .unwrap();
+
+        apply_division(&pool, &pulled(vec![controller(1_605_400, "ZDC")], vec![]))
+            .await
+            .unwrap();
+
+        let link: Option<String> = sqlx::query_scalar(
+            "select external_id from integration.external_sync_mappings \
+             where system_code = 'discord' and local_id = $1",
+        )
+        .bind(&user)
+        .fetch_optional(&pool)
+        .await
+        .unwrap();
+        assert_eq!(link.as_deref(), Some("123456789012345678"));
+        let name: String = sqlx::query_scalar("select full_name from identity.users where id = $1")
+            .bind(&user)
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+        assert_eq!(
+            name, "Signed In",
+            "names are sign-in's to own, from VATSIM Connect"
+        );
+    }
+
+    /// The home-controller flag shown on the profile: sign-in sets VATUSA's own value over v2, which
+    /// the pull can only approximate (home facility is a real ARTCC). The pull fills it for seeded
+    /// users and never overrides one sign-in set, or the profile would flip between the two daily.
+    #[sqlx::test]
+    async fn the_pull_does_not_override_sign_ins_home_controller_flag(pool: PgPool) {
+        sqlx::query(
+            "insert into identity.users (full_name, display_name, cid, last_login_at, \
+                 flag_home_controller) values ('A', 'A', 1605450, now(), true)",
+        )
+        .execute(&pool)
+        .await
+        .unwrap();
+
+        apply_division(
+            &pool,
+            &pulled(
+                vec![controller(1_605_450, "ZAE"), controller(1_605_451, "ZDC")],
+                vec![],
+            ),
+        )
+        .await
+        .unwrap();
+
+        let flags: Vec<(i64, Option<bool>)> = sqlx::query_as(
+            "select cid, flag_home_controller from identity.users \
+             where cid in (1605450, 1605451) order by cid",
+        )
+        .fetch_all(&pool)
+        .await
+        .unwrap();
+        assert_eq!(flags, [(1_605_450, Some(true)), (1_605_451, Some(true))]);
+    }
+
+    /// Absence from the pull strips roles, so a truncated response would be a mass revocation. One that
+    /// is empty, or under half the members already synced, is refused before anything is written.
+    #[sqlx::test]
+    async fn a_truncated_pull_is_refused_without_writing(pool: PgPool) {
+        let everyone: Vec<i64> = (1_605_500..1_605_510).collect();
+        apply_division(
+            &pool,
+            &pulled(
+                everyone.iter().map(|c| controller(*c, "ZDC")).collect(),
+                everyone.iter().map(|c| role(*c, "ZDC", "MTR")).collect(),
+            ),
+        )
+        .await
+        .unwrap();
+
+        let three = pulled(
+            everyone[..3]
+                .iter()
+                .map(|c| controller(*c, "ZDC"))
+                .collect(),
+            vec![],
+        );
+        let refused = apply_division(&pool, &three).await;
+        assert!(refused.is_err_and(|e| e.contains("looks truncated")));
+        assert!(apply_division(&pool, &[]).await.is_err());
+
+        // Nothing was applied: everyone missing from the bad pull still holds their role.
+        assert_eq!(
+            stored_roles(&pool, everyone[9]).await,
+            [("ZDC".into(), "MTR".into())]
+        );
+        assert_eq!(stored_roles(&pool, everyone[0]).await.len(), 1);
+    }
+
+    /// The one remaining v2 call is sign-in's (AC8). Counted across the whole backend source, so a
+    /// second one — or the old per-member reconcile coming back — fails here.
+    #[test]
+    fn exactly_one_v2_call_remains() {
+        let needle = concat!("/v", "2/");
+        fn walk(dir: &std::path::Path, needle: &str, hits: &mut Vec<String>) {
+            for entry in std::fs::read_dir(dir).unwrap() {
+                let path = entry.unwrap().path();
+                if path.is_dir() {
+                    walk(&path, needle, hits);
+                } else if path.extension().is_some_and(|e| e == "rs") {
+                    let text = std::fs::read_to_string(&path).unwrap();
+                    for (n, line) in text.lines().enumerate() {
+                        // Calls, not mentions: a doc comment naming the path is not a request.
+                        if line.contains(needle) && !line.trim_start().starts_with("//") {
+                            hits.push(format!("{}:{}", path.display(), n + 1));
+                        }
+                    }
+                }
+            }
+        }
+        let mut hits = Vec::new();
+        walk(
+            &std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src"),
+            needle,
+            &mut hits,
+        );
+        assert_eq!(
+            hits.len(),
+            1,
+            "expected only sign-in's fetch_member: {hits:?}"
+        );
+        assert!(hits[0].contains("feed/vatusa.rs"), "{hits:?}");
+    }
+
+    /// The division pull is a registered, triggerable job (#605 AC1): listed on Background Tasks and
+    /// runnable on demand there or by a webhook delivery. Registered here with a stand-in pull, so its
+    /// immediate first tick never reaches VATUSA.
+    #[tokio::test]
+    async fn the_division_pull_is_a_triggerable_background_task() {
         let reg = Arc::new(JobRegistry::new());
-        let job = tokio::spawn(reconcile_job(reg.clone(), pool));
-        let mut listed = false;
+        let job = tokio::spawn(division_pull_job(reg.clone(), || async {
+            Ok("stand-in".to_string())
+        }));
+        let mut listed = None;
         for _ in 0..100 {
-            if reg.snapshot().iter().any(|j| j.name == RECONCILE_JOB) {
-                listed = true;
+            listed = reg.snapshot().into_iter().find(|j| j.name == PULL_JOB);
+            if listed.is_some() {
                 break;
             }
             tokio::time::sleep(Duration::from_millis(10)).await;
         }
+        let listed = listed.expect("the division pull must be registered");
+        assert!(listed.triggerable, "it must be runnable on demand");
+        assert!(reg.trigger(PULL_JOB));
         job.abort();
-        assert!(listed, "{RECONCILE_JOB} must be registered");
     }
 }
