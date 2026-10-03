@@ -1985,6 +1985,12 @@ mod departure_runway_derive_tests {
                 source: "manual".into(),
                 // Hand-entered, so no X-Plane stand type (#517).
                 kind: None,
+                // Hand-entered, so none of the X-Plane detail either (#541).
+                heading: None,
+                size_code: None,
+                operation_type: None,
+                aircraft_classes: None,
+                airline_codes: None,
                 updated_at: Utc::now(),
                 editable: false,
             }],
