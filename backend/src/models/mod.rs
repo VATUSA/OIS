@@ -172,6 +172,36 @@ pub struct ScopeAccess {
     pub permissions: Value,
 }
 
+/// One group as the group editor lists it.
+#[derive(Debug, Serialize, ToSchema)]
+pub struct GroupBody {
+    pub name: String,
+    pub description: Option<String>,
+    /// Flat list — `role_permissions` carries no ARTCC scope; scope lives on the membership.
+    pub permissions: Vec<String>,
+    /// True for the groups code depends on, which cannot be edited or deleted here.
+    pub system: bool,
+    pub user_count: i64,
+    pub service_account_count: i64,
+}
+
+/// Create a group. Its permission set is set by a follow-up `PUT`, which is also what runs the
+/// no-escalation gate over the contents.
+#[derive(Debug, Deserialize, ToSchema)]
+pub struct CreateGroupRequest {
+    pub name: String,
+    #[serde(default)]
+    pub description: Option<String>,
+    pub reason: String,
+}
+
+/// Replace a group's permission set. `reason` is required and audited, matching the user editor.
+#[derive(Debug, Deserialize, ToSchema)]
+pub struct UpdateGroupRequest {
+    pub permissions: Vec<String>,
+    pub reason: String,
+}
+
 /// The editor's SAVE payload. `reason` is required (audited). Each entry in `scopes`
 /// replaces that scope's direct permission grants; when its `role_names` is present it
 /// also replaces the assignable-role set at that scope. Scopes not listed are untouched.
