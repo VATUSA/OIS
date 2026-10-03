@@ -85,6 +85,23 @@ fn skipped_post(channel: &str, what: &str, tmi_id: &str) {
 /// they previously built this object separately. A corrected row must be assembled exactly like the
 /// original; the two drifting is how the channel ends up showing a line the row never had. The bot
 /// stays a dumb renderer: everything about NTML's shape is decided here (#436).
+/// The `tmi_cancel` job payload: the NTML cancellation line, stamped now.
+///
+/// Shared by the manual cancel and event-package deactivation (#568), so a TMI ended early reads the
+/// same in the NTML log whichever path ended it.
+pub(crate) fn tmi_cancel_job(channel_id: &str, tmi: &TmiBody) -> serde_json::Value {
+    json!({
+        "channel_id": channel_id,
+        "tmi_id": tmi.id,
+        "ntml": crate::tmi::ntml_cancel_line(
+            chrono::Utc::now(),
+            &tmi.restriction,
+            Some(&tmi.requesting),
+            Some(&tmi.providing),
+        ),
+    })
+}
+
 pub(crate) fn tmi_publish_job(channel_id: &str, tmi: &TmiBody) -> serde_json::Value {
     json!({
         "channel_id": channel_id,
@@ -343,16 +360,7 @@ pub async fn cancel_tmi(
         // A cancel is its own NTML row rather than an edit of the original (#436): the channel is a
         // chronological log, and the original entry did happen. Enqueued in the same tx as the
         // cancel, so the post can't exist for a TMI that is still live.
-        let job = json!({
-            "channel_id": channel_id,
-            "tmi_id": tmi.id,
-            "ntml": crate::tmi::ntml_cancel_line(
-                chrono::Utc::now(),
-                &tmi.restriction,
-                Some(&tmi.requesting),
-                Some(&tmi.providing),
-            ),
-        });
+        let job = tmi_cancel_job(&channel_id, &tmi);
         integration_repo::enqueue_job(&mut tx, "tmi_cancel", &job, Some("tmi"), Some(&tmi.id))
             .await?;
     } else {
