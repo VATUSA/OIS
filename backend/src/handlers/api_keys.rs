@@ -127,6 +127,7 @@ async fn audit_key(
 
 #[utoipa::path(
     get, path = "/api/v1/api-keys", tag = "api-keys",
+    security(("bearer" = ["api_keys.key.create"])),
     responses((status = 200, body = Vec<ApiKeyBody>), (status = 401))
 )]
 pub async fn list_my_keys(
@@ -141,6 +142,7 @@ pub async fn list_my_keys(
 
 #[utoipa::path(
     get, path = "/api/v1/api-keys/grantable-permissions", tag = "api-keys",
+    security(("bearer" = ["api_keys.key.create"])),
     responses((status = 200, body = Vec<GrantablePermissionBody>), (status = 401))
 )]
 pub async fn grantable_permissions(
@@ -187,6 +189,7 @@ pub async fn grantable_permissions(
 
 #[utoipa::path(
     post, path = "/api/v1/api-keys", tag = "api-keys",
+    security(("bearer" = ["api_keys.key.create"])),
     request_body = CreateApiKeyRequest,
     responses((status = 200, description = "Created; token shown once", body = ApiKeyTokenBody), (status = 400), (status = 401), (status = 403))
 )]
@@ -247,6 +250,7 @@ pub async fn create_key(
 
 #[utoipa::path(
     get, path = "/api/v1/api-keys/{id}", tag = "api-keys",
+    security(("bearer" = ["api_keys.key.create"])),
     params(("id" = String, Path)),
     responses((status = 200, body = ApiKeyBody), (status = 401), (status = 404))
 )]
@@ -267,6 +271,7 @@ pub async fn get_my_key(
 
 #[utoipa::path(
     post, path = "/api/v1/api-keys/{id}/rotate", tag = "api-keys",
+    security(("bearer" = ["api_keys.key.create"])),
     params(("id" = String, Path)),
     responses((status = 200, description = "Rotated; new token shown once", body = ApiKeyTokenBody), (status = 401), (status = 404))
 )]
@@ -294,6 +299,7 @@ pub async fn rotate_key(
 
 #[utoipa::path(
     put, path = "/api/v1/api-keys/{id}/permissions", tag = "api-keys",
+    security(("bearer" = ["api_keys.key.create"])),
     params(("id" = String, Path)), request_body = SetApiKeyPermissionsRequest,
     responses((status = 200, body = ApiKeyBody), (status = 400), (status = 401), (status = 403), (status = 404))
 )]
@@ -336,6 +342,7 @@ pub async fn set_key_permissions(
 
 #[utoipa::path(
     post, path = "/api/v1/api-keys/{id}/disable", tag = "api-keys",
+    security(("bearer" = ["api_keys.key.create"])),
     params(("id" = String, Path)),
     responses((status = 204), (status = 401), (status = 404))
 )]
@@ -356,6 +363,7 @@ pub async fn disable_my_key(
 
 #[utoipa::path(
     delete, path = "/api/v1/api-keys/{id}", tag = "api-keys",
+    security(("bearer" = ["api_keys.key.create"])),
     params(("id" = String, Path)),
     responses((status = 204), (status = 401), (status = 404))
 )]
@@ -395,6 +403,7 @@ pub struct AuditPageQuery {
 
 #[utoipa::path(
     get, path = "/api/v1/api-keys/{id}/audit", tag = "api-keys",
+    security(("bearer" = [])),
     params(
         ("id" = String, Path),
         ("page" = Option<i64>, Query), ("page_size" = Option<i64>, Query)
@@ -460,6 +469,7 @@ pub struct AdminKeysQuery {
 
 #[utoipa::path(
     get, path = "/api/v1/admin/api-keys", tag = "api-keys",
+    security(("bearer" = ["api_keys.key.read"])),
     params(("owner_cid" = Option<i64>, Query, description = "Filter to one owner's keys")),
     responses((status = 200, body = Vec<ApiKeyBody>), (status = 401))
 )]
@@ -474,6 +484,7 @@ pub async fn admin_list_keys(
 
 #[utoipa::path(
     post, path = "/api/v1/admin/api-keys/{id}/disable", tag = "api-keys",
+    security(("bearer" = ["api_keys.key.delete"])),
     params(("id" = String, Path)), request_body = RevokeApiKeyRequest,
     responses((status = 204), (status = 401), (status = 404))
 )]
@@ -508,6 +519,7 @@ pub async fn admin_disable_key(
 
 #[utoipa::path(
     delete, path = "/api/v1/admin/api-keys/{id}", tag = "api-keys",
+    security(("bearer" = ["api_keys.key.delete"])),
     params(("id" = String, Path)),
     responses((status = 204), (status = 401), (status = 404))
 )]

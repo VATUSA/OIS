@@ -37,6 +37,7 @@ pub struct ForecastQuery {
 
 #[utoipa::path(
     get, path = "/api/v1/forecast/{icao}", tag = "events",
+    security(("bearer" = ["events.plan.read"])),
     params(("icao" = String, Path), ("at" = Option<i64>, Query)),
     responses((status = 200, body = AirportForecastBody), (status = 401))
 )]
@@ -193,6 +194,7 @@ pub struct ConfigListQuery {
 
 #[utoipa::path(
     get, path = "/api/v1/airport-configs", tag = "events",
+    security(("bearer" = ["events.plan.read"])),
     params(("artcc" = Option<String>, Query, description = "Scope to one owning ARTCC")),
     responses((status = 200, body = Vec<AirportConfigBody>), (status = 401))
 )]
@@ -245,6 +247,7 @@ fn annotate_and_filter(
 
 #[utoipa::path(
     get, path = "/api/v1/airport-configs/{icao}", tag = "events",
+    security(("bearer" = ["events.plan.read"])),
     params(("icao" = String, Path)),
     responses((status = 200, body = Vec<AirportConfigBody>), (status = 401))
 )]
@@ -269,6 +272,7 @@ pub async fn list_airport_configs(
 
 #[utoipa::path(
     post, path = "/api/v1/airport-configs/{icao}", tag = "events",
+    security(("bearer" = ["events.config.update"])),
     params(("icao" = String, Path)), request_body = UpsertAirportConfigRequest,
     responses((status = 200, body = AirportConfigBody), (status = 400), (status = 401), (status = 403))
 )]
@@ -301,6 +305,7 @@ pub async fn create_airport_config(
 
 #[utoipa::path(
     put, path = "/api/v1/airport-configs/{icao}/{id}", tag = "events",
+    security(("bearer" = ["events.config.update"])),
     params(("icao" = String, Path), ("id" = String, Path)), request_body = UpsertAirportConfigRequest,
     responses((status = 200, body = AirportConfigBody), (status = 400), (status = 401), (status = 403), (status = 404))
 )]
@@ -350,6 +355,7 @@ pub async fn update_airport_config(
 
 #[utoipa::path(
     delete, path = "/api/v1/airport-configs/{icao}/{id}", tag = "events",
+    security(("bearer" = ["events.config.update"])),
     params(("icao" = String, Path), ("id" = String, Path)),
     responses((status = 204), (status = 401), (status = 403), (status = 404))
 )]

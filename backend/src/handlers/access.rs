@@ -43,6 +43,7 @@ pub struct UserListQuery {
     get,
     path = "/api/v1/admin/users",
     tag = "access",
+    security(("bearer" = ["access.users.read"])),
     params(
         ("q" = Option<String>, Query, description = "Name substring or CID prefix"),
         ("page" = Option<i64>, Query, description = "1-based page (default 1)"),
@@ -75,6 +76,7 @@ pub async fn list_users(
     get,
     path = "/api/v1/access/catalog",
     tag = "access",
+    security(("bearer" = ["access.catalog.read"])),
     responses((status = 200, body = AccessCatalogBody), (status = 401))
 )]
 pub async fn get_access_catalog(
@@ -97,6 +99,7 @@ pub async fn get_access_catalog(
     get,
     path = "/api/v1/access/self",
     tag = "access",
+    security(("bearer" = ["access.self.read"])),
     responses((status = 200, body = SelfAccessBody), (status = 401))
 )]
 pub async fn get_self_access(
@@ -117,6 +120,7 @@ pub async fn get_self_access(
     get,
     path = "/api/v1/admin/users/{cid}/access",
     tag = "access",
+    security(("bearer" = ["access.users.read"])),
     params(("cid" = i64, Path, description = "VATSIM CID")),
     responses((status = 200, body = UserAccessBody), (status = 401), (status = 404))
 )]
@@ -157,6 +161,7 @@ async fn fill_server_admin_permissions(
     post,
     path = "/api/v1/admin/users/{cid}/access",
     tag = "access",
+    security(("bearer" = ["access.users.update"])),
     params(("cid" = i64, Path, description = "VATSIM CID")),
     request_body = UpdateUserAccessRequest,
     responses((status = 200, body = UserAccessBody), (status = 400), (status = 401), (status = 403), (status = 404))

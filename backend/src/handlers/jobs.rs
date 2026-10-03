@@ -20,6 +20,7 @@ use crate::{
 
 #[utoipa::path(
     get, path = "/api/v1/admin/jobs", tag = "system",
+    security(("bearer" = ["system.jobs.read"])),
     responses((status = 200, body = Vec<JobStatus>), (status = 401))
 )]
 pub async fn list_jobs(
@@ -31,6 +32,7 @@ pub async fn list_jobs(
 
 #[utoipa::path(
     post, path = "/api/v1/admin/jobs/{name}/run", tag = "system",
+    security(("bearer" = ["system.jobs.update"])),
     params(("name" = String, Path, description = "Job name")),
     responses((status = 202), (status = 401), (status = 404))
 )]

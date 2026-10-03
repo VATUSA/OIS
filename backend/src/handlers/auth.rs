@@ -80,6 +80,7 @@ pub struct CallbackQuery {
     get,
     path = "/api/v1/me",
     tag = "auth",
+    security(("bearer" = ["auth.profile.read"])),
     responses((status = 200, body = MeBody), (status = 401))
 )]
 pub async fn me(
@@ -290,6 +291,7 @@ pub async fn vatsim_callback(
     post,
     path = "/api/v1/auth/logout",
     tag = "auth",
+    security(("bearer" = ["auth.sessions.delete"])),
     responses((status = 204, description = "Session revoked"), (status = 401))
 )]
 pub async fn logout(
@@ -391,6 +393,7 @@ pub async fn desktop_exchange(
     post,
     path = "/api/v1/auth/desktop/refresh",
     tag = "auth",
+    security(("bearer" = [])),
     responses(
         (status = 200, body = DesktopSessionBody, description = "A rotated desktop session token"),
         (status = 401, description = "Not a live desktop session")

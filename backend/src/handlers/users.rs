@@ -24,6 +24,7 @@ pub struct UserSearchQuery {
     get,
     path = "/api/v1/users",
     tag = "users",
+    security(("bearer" = ["users.directory.read"])),
     params(
         ("q" = Option<String>, Query, description = "Name substring or CID prefix"),
         ("limit" = Option<i64>, Query, description = "Max results (default 20, max 50)")

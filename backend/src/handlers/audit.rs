@@ -43,6 +43,7 @@ fn clean(value: Option<&String>) -> Option<String> {
     get,
     path = "/api/v1/admin/audit",
     tag = "audit",
+    security(("bearer" = ["audit.logs.read"])),
     params(
         ("resource_type" = Option<String>, Query, description = "Filter by resource type"),
         ("resource_id" = Option<String>, Query, description = "Filter by resource id (the acted-on target)"),

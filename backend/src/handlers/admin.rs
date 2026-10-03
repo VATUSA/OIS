@@ -20,6 +20,7 @@ use crate::{
     get,
     path = "/api/v1/admin/summary",
     tag = "system",
+    security(("bearer" = [])),
     responses((status = 200, body = AdminSummaryBody), (status = 401))
 )]
 pub async fn get_admin_summary(

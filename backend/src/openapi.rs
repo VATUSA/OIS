@@ -1,13 +1,44 @@
 //! OpenAPI document for the OIS API. Emitted at `/docs/api/v1/openapi.json`; the web
 //! + desktop clients are generated from it (see docs/architecture/api-conventions.md).
 
-use utoipa::OpenApi;
+use utoipa::{
+    Modify, OpenApi,
+    openapi::security::{HttpAuthScheme, HttpBuilder, SecurityScheme},
+};
 
+/// The one credential the document describes (#587). Every gated path carries
+/// `security(("bearer" = ["<permission>"]))`, so a path's scope *is* the permission it requires;
+/// `handlers/auth_annotation_tests.rs` holds each scope to its handler's `RequirePermission`.
+struct BearerAuth;
+
+impl Modify for BearerAuth {
+    fn modify(&self, openapi: &mut utoipa::openapi::OpenApi) {
+        let components = openapi.components.get_or_insert_with(Default::default);
+        components.add_security_scheme(
+            "bearer",
+            SecurityScheme::Http(
+                HttpBuilder::new()
+                    .scheme(HttpAuthScheme::Bearer)
+                    .description(Some(
+                        "`Authorization: Bearer <token>`, where the token is a personal API key \
+                         (`ois_pat_…`), a service account (`ois_sa_…`) or a desktop session \
+                         (`ois_dsk_…`). A path's scopes name the permission it requires; an API \
+                         key is further capped by its owner's live access. In a browser on the same \
+                         origin, the `ois_session` cookie authenticates too.",
+                    ))
+                    .build(),
+            ),
+        );
+    }
+}
+
+// `info.version` is left to utoipa's default, `CARGO_PKG_VERSION` — the release version — so a
+// published spec names the build it describes.
 #[derive(OpenApi)]
 #[openapi(
+    modifiers(&BearerAuth),
     info(
         title = "OIS API",
-        version = "0.1.0",
         description = "VATUSA Event Operational Information System API"
     ),
     paths(

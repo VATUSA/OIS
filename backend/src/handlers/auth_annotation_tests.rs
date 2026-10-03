@@ -9,6 +9,12 @@
 //! - **(b)** taking `RequirePermission` ⇒ it advertises 401;
 //! - **(c)** taking no auth extractor ⇒ it is in [`PUBLIC`] with a reason — and nothing listed there
 //!   has quietly gained one, so the list can't rot.
+//!
+//! #587 adds the document's other half, its security requirements:
+//!
+//! - **(d)** a `RequirePermission<M>` handler declares `security(("bearer" = ["<M's permission>"]))`
+//!   — exactly that, so a path's scope is the grant an integrator must request;
+//! - **(e)** a handler that takes no credential declares no `security`.
 
 use std::collections::BTreeSet;
 
@@ -59,6 +65,10 @@ struct Handler {
     advertises_401: bool,
     takes_permission: bool,
     takes_auth: bool,
+    /// The `M` of a `RequirePermission<M>` parameter.
+    marker: Option<String>,
+    /// The annotation's `security(...)` argument, whitespace removed.
+    security: Option<String>,
 }
 
 /// From `open` (just past an opening paren) to just past its matching close.
@@ -104,6 +114,14 @@ fn handlers_in(file: &str, src: &str) -> Vec<Handler> {
         let params_start = src[name_start..].find('(').map(|i| name_start + i).unwrap();
         let name = src[name_start..params_start].split('<').next().unwrap();
         let params = squash(&src[params_start..balanced(src, params_start + 1)]);
+        let marker = params
+            .split("RequirePermission<")
+            .nth(1)
+            .map(|rest| rest.split('>').next().unwrap().to_string());
+        let security = annotation.find("security(").map(|i| {
+            let open = i + "security(".len();
+            annotation[open..balanced(&annotation, open) - 1].to_string()
+        });
 
         out.push(Handler {
             file: file.to_string(),
@@ -111,6 +129,8 @@ fn handlers_in(file: &str, src: &str) -> Vec<Handler> {
             advertises_401: annotation.contains("status=401"),
             takes_permission: params.contains("RequirePermission<"),
             takes_auth: AUTH_EXTRACTORS.iter().any(|e| params.contains(e)),
+            marker,
+            security,
         });
         at = annotation_end;
     }
@@ -195,4 +215,43 @@ fn every_unauthenticated_handler_is_public_on_purpose() {
         "these are in PUBLIC but now take a credential: {stale:?}"
     );
     assert!(PUBLIC.iter().all(|(_, _, why)| !why.trim().is_empty()));
+}
+
+#[test]
+fn every_gated_handler_declares_the_permission_it_requires() {
+    let permissions: std::collections::HashMap<String, String> =
+        crate::auth::permissions::marker_permissions()
+            .into_iter()
+            .collect();
+    let wrong: Vec<String> = scan()
+        .iter()
+        .filter_map(|h| {
+            let marker = h.marker.as_ref()?;
+            let permission = permissions
+                .get(marker)
+                .unwrap_or_else(|| panic!("{marker} has no permission marker line"));
+            let expected = format!(r#"("bearer"=["{permission}"])"#);
+            (h.security.as_deref() != Some(expected.as_str())).then(|| {
+                format!(
+                    "{}::{} needs security({expected}), has {:?}",
+                    h.file, h.name, h.security
+                )
+            })
+        })
+        .collect();
+    assert!(
+        wrong.is_empty(),
+        "a gated path must declare exactly the permission its RequirePermission checks: {wrong:#?}"
+    );
+}
+
+#[test]
+fn no_public_handler_declares_security() {
+    let claimed = ids(scan()
+        .iter()
+        .filter(|h| !h.takes_auth && h.security.is_some()));
+    assert!(
+        claimed.is_empty(),
+        "these take no credential but declare security, so Swagger would ask for one: {claimed:?}"
+    );
 }

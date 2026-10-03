@@ -153,6 +153,7 @@ impl TmiListQuery {
     get,
     path = "/api/v1/tmu/tmis",
     tag = "tmu",
+    security(("bearer" = ["tmu.tmi.read"])),
     params(
         ("status" = Option<String>, Query, description = "Filter by status (draft|published|expired|cancelled)"),
         ("type" = Option<String>, Query, description = "Filter by structured restriction kind (MIT, MINIT, STOP, …); excludes raw-typed TMIs"),
@@ -177,6 +178,7 @@ pub async fn list_tmis(
     post,
     path = "/api/v1/tmu/tmis",
     tag = "tmu",
+    security(("bearer" = ["tmu.tmi.create"])),
     request_body = CreateTmiRequest,
     responses((status = 200, body = TmiBody), (status = 400), (status = 401))
 )]
@@ -218,6 +220,7 @@ pub async fn create_tmi(
     patch,
     path = "/api/v1/tmu/tmis/{id}",
     tag = "tmu",
+    security(("bearer" = ["tmu.tmi.update"])),
     params(("id" = String, Path, description = "TMI id")),
     request_body = UpdateTmiRequest,
     responses((status = 200, body = TmiBody), (status = 400), (status = 401), (status = 404))
@@ -286,6 +289,7 @@ pub async fn update_tmi(
     post,
     path = "/api/v1/tmu/tmis/{id}/publish",
     tag = "tmu",
+    security(("bearer" = ["tmu.tmi.publish"])),
     params(("id" = String, Path, description = "TMI id")),
     responses((status = 200, body = TmiBody), (status = 401), (status = 409))
 )]
@@ -328,6 +332,7 @@ pub async fn publish_tmi(
     post,
     path = "/api/v1/tmu/tmis/{id}/cancel",
     tag = "tmu",
+    security(("bearer" = ["tmu.tmi.publish"])),
     params(("id" = String, Path, description = "TMI id")),
     responses((status = 200, body = TmiBody), (status = 401), (status = 409))
 )]
@@ -375,6 +380,7 @@ pub async fn cancel_tmi(
     delete,
     path = "/api/v1/tmu/tmis/{id}",
     tag = "tmu",
+    security(("bearer" = ["tmu.tmi.delete"])),
     params(("id" = String, Path, description = "TMI id")),
     responses((status = 204), (status = 401), (status = 404))
 )]
@@ -455,6 +461,7 @@ fn normalize_program(payload: &mut UpsertProgramRequest) -> Result<Vec<GateRule>
     get,
     path = "/api/v1/tmu/programs",
     tag = "tmu",
+    security(("bearer" = ["tmu.program.read"])),
     responses((status = 200, body = Vec<ProgramBody>), (status = 401))
 )]
 pub async fn list_programs(
@@ -471,6 +478,7 @@ pub async fn list_programs(
     put,
     path = "/api/v1/tmu/programs/{icao}",
     tag = "tmu",
+    security(("bearer" = ["tmu.program.update"])),
     params(("icao" = String, Path, description = "Airport ICAO")),
     request_body = UpsertProgramRequest,
     responses((status = 200, body = ProgramBody), (status = 400), (status = 401))
@@ -500,6 +508,7 @@ pub async fn upsert_program(
     delete,
     path = "/api/v1/tmu/programs/{icao}",
     tag = "tmu",
+    security(("bearer" = ["tmu.program.delete"])),
     params(("icao" = String, Path, description = "Airport ICAO")),
     responses((status = 204), (status = 401), (status = 404))
 )]
@@ -558,6 +567,7 @@ fn normalize_until(raw: Option<&str>) -> Result<Option<String>, ApiError> {
     get,
     path = "/api/v1/tmu/ground-stops",
     tag = "tmu",
+    security(("bearer" = ["tmu.groundstop.read"])),
     responses((status = 200, body = Vec<GroundStopBody>), (status = 401))
 )]
 pub async fn list_ground_stops(
@@ -574,6 +584,7 @@ pub async fn list_ground_stops(
     post,
     path = "/api/v1/tmu/ground-stops",
     tag = "tmu",
+    security(("bearer" = ["tmu.groundstop.create"])),
     request_body = CreateGroundStopRequest,
     responses((status = 200, body = GroundStopBody), (status = 400), (status = 401))
 )]
@@ -611,6 +622,7 @@ pub async fn create_ground_stop(
     post,
     path = "/api/v1/tmu/ground-stops/{id}/publish",
     tag = "tmu",
+    security(("bearer" = ["tmu.groundstop.publish"])),
     params(("id" = String, Path, description = "Ground stop id")),
     request_body(
         content = Option<PublishGroundStopRequest>,
@@ -680,6 +692,7 @@ pub async fn publish_ground_stop(
     post,
     path = "/api/v1/tmu/ground-stops/{id}/cancel",
     tag = "tmu",
+    security(("bearer" = ["tmu.groundstop.publish"])),
     params(("id" = String, Path, description = "Ground stop id")),
     responses((status = 200, body = GroundStopBody), (status = 401), (status = 409))
 )]
@@ -703,6 +716,7 @@ pub async fn cancel_ground_stop(
     delete,
     path = "/api/v1/tmu/ground-stops/{id}",
     tag = "tmu",
+    security(("bearer" = ["tmu.groundstop.delete"])),
     params(("id" = String, Path, description = "Ground stop id")),
     responses((status = 204), (status = 401), (status = 404))
 )]
@@ -2026,6 +2040,7 @@ mod tests {
 
 #[utoipa::path(
     get, path = "/api/v1/tmu/advisories", tag = "tmu",
+    security(("bearer" = ["tmu.adv.read"])),
     responses((status = 200, body = Vec<AdvisoryBody>), (status = 401))
 )]
 pub async fn list_advisories(
@@ -2038,6 +2053,7 @@ pub async fn list_advisories(
 
 #[utoipa::path(
     get, path = "/api/v1/tmu/advisories/{id}", tag = "tmu",
+    security(("bearer" = ["tmu.adv.read"])),
     params(("id" = String, Path)),
     responses((status = 200, body = AdvisoryBody), (status = 401), (status = 404))
 )]
@@ -2091,6 +2107,7 @@ async fn advisory_facility(pool: &sqlx::PgPool, id: &str) -> Result<String, ApiE
 
 #[utoipa::path(
     post, path = "/api/v1/tmu/advisories", tag = "tmu",
+    security(("bearer" = ["tmu.adv.create"])),
     request_body = CreateAdvisoryRequest,
     responses((status = 200, body = AdvisoryBody), (status = 400), (status = 401))
 )]
@@ -2136,6 +2153,7 @@ pub async fn create_advisory(
 
 #[utoipa::path(
     patch, path = "/api/v1/tmu/advisories/{id}", tag = "tmu",
+    security(("bearer" = ["tmu.adv.update"])),
     params(("id" = String, Path)), request_body = UpdateAdvisoryRequest,
     responses((status = 200, body = AdvisoryBody), (status = 401), (status = 404))
 )]
@@ -2162,6 +2180,7 @@ pub async fn update_advisory(
 
 #[utoipa::path(
     post, path = "/api/v1/tmu/advisories/{id}/publish", tag = "tmu",
+    security(("bearer" = ["tmu.adv.publish"])),
     params(("id" = String, Path)),
     responses((status = 200, body = AdvisoryBody), (status = 401), (status = 409))
 )]
@@ -2209,6 +2228,7 @@ pub async fn publish_advisory(
 
 #[utoipa::path(
     post, path = "/api/v1/tmu/advisories/{id}/cancel", tag = "tmu",
+    security(("bearer" = ["tmu.adv.publish"])),
     params(("id" = String, Path)),
     responses((status = 200, body = AdvisoryBody), (status = 401), (status = 409))
 )]
@@ -2255,6 +2275,7 @@ pub async fn cancel_advisory(
 /// `repos::tmu::delete_advisory`).
 #[utoipa::path(
     delete, path = "/api/v1/tmu/advisories/{id}", tag = "tmu",
+    security(("bearer" = ["tmu.adv.update"])),
     params(("id" = String, Path)),
     responses((status = 204), (status = 401), (status = 409))
 )]
