@@ -126,7 +126,32 @@ publish an update the installed app would reject.
 | `OIS_DESKTOP_API_URL` | **Yes** | The production API origin the shipped app talks to, e.g. `https://api.example.org` (no path, no trailing slash). Added to the CSP `connect-src` as `https://` and `wss://`. The release fails without it. |
 
 Without the Apple/Windows certificates the build still succeeds, but the OS warns on first launch.
-Those are about *installing*; the updater signature above is what gates an update **applying**.
+The updater signature above is what gates an update **applying** — a different thing from OS signing.
+
+#### The macOS certificate is not only cosmetic: it is why the keychain asks for a password
+
+The first-launch warning is the *visible* cost of shipping unsigned. The expensive one is the login
+keychain (#535):
+
+1. The session token is stored with `keyring::Entry` (`src-tauri/src/auth.rs`), which on macOS writes
+   to the **legacy login keychain**.
+2. macOS attaches a **per-item ACL** to that entry naming the application allowed to read it, and
+   identifies the application by its **code-signing identity**.
+3. An unsigned build has no stable identity — at best an ad-hoc signature, whose cdhash differs on
+   **every build**.
+4. So the app asking to read the token is not, as far as macOS is concerned, the app that wrote it. It
+   falls back to asking the user to authorise with their **login password**.
+5. Because `createUpdaterArtifacts: true` replaces the `.app` on every release, the identity rotates
+   for **existing** users too — this is not only a fresh-install problem.
+
+So `APPLE_SIGNING_IDENTITY` and friends are what make the saved session usable without a password
+prompt. Until they are set, expect the prompt; the frontend and shell are hardened so it cannot
+*repeat* (one read per process, and a dismissed read is not retried — `web/src/lib/desktop-token.ts`
+and `get_token` in `src-tauri/src/auth.rs`), but only a stable signing identity removes it.
+
+⚠️ Add each Apple env line in `.github/workflows/release.yml` **only once its secret is set**. A
+*present-but-blank* `APPLE_CERTIFICATE` makes the bundler attempt signing and fail on `security
+import`, which is what broke the v0.1.1 build.
 
 ## Replacing the alert sounds
 
