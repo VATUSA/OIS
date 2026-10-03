@@ -205,6 +205,43 @@ describe("TGUI and classic show the same sequence (AC5)", () => {
   });
 });
 
+// ---- AC3: every value drawn traces to the field it claims ------------------------------------------
+
+// The AC5 tests above compare only the schedule rail. These pin the rest of each adapter's mapping, so
+// the ETA rail cannot quietly draw the schedule (the two rails would agree and the TGUI would mean
+// nothing), and no marker is read from the wrong field. The fixtures make every field distinct.
+describe("the adapters draw each value from its own field (AC3)", () => {
+  it("FCA: ETA rail ← eta, schedule ← cross_time, delay ← delay_sec, committed ← released", () => {
+    const flights = [
+      fca("REL", 30, { eta: at(26), delay_sec: 240, released: true }),
+      fca("OPEN", 40, { eta: at(39), delay_sec: 90, released: false }),
+    ];
+    const items = tguiColumn(flights, NOW, "X").items;
+    const rel = items.find((i) => i.key === "REL")!;
+    expect([rel.etaTime, rel.etaMin, rel.staTime, rel.staMin]).toEqual([at(26), 26, at(30), 30]);
+    expect(rel.delayMin).toBe(4);
+    expect(rel.committed).toBe(true);
+    const open = items.find((i) => i.key === "OPEN")!;
+    expect([open.etaMin, open.staMin, open.delayMin, open.committed]).toEqual([39, 40, 1.5, false]);
+  });
+
+  it("airport: ETA rail ← eta, schedule ← sta, delay ← delay_min, committed ← cfr_issued, wake ← category", () => {
+    const flow = {
+      icao: "KDCA",
+      flights: [
+        arrival("CFR", 20, "BEARR", { eta: at(14), delay_min: 6, cfr_issued: true, category: "H" }),
+        arrival("FREE", 25, "BEARR", { eta: at(24), delay_min: 1, cfr_issued: false, category: "L" }),
+      ],
+    } as unknown as Flow;
+    const [col] = airportTguiColumns(airportLadderItems(flow, undefined, NOW), NOW);
+    const cfr = col.items.find((i) => i.key === "CFR")!;
+    expect([cfr.etaTime, cfr.etaMin, cfr.staTime, cfr.staMin]).toEqual([at(14), 14, at(20), 20]);
+    expect([cfr.delayMin, cfr.committed, cfr.wake]).toEqual([6, true, "H"]);
+    const free = col.items.find((i) => i.key === "FREE")!;
+    expect([free.etaMin, free.staMin, free.delayMin, free.committed, free.wake]).toEqual([24, 25, 1, false, "L"]);
+  });
+});
+
 // ---- AC2: one setting reaches every ladder, the pop-out included ---------------------------------
 
 describe("ladder.style switches every arrival ladder (AC2)", () => {
