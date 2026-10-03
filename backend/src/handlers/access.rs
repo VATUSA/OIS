@@ -409,8 +409,12 @@ async fn enforce_actor_scope(
     // The actor's role holdings **with scope** (#577). Names alone let an editor holding `EC` only at
     // ZDC assign `EC` nationally, or at ZNY — and once roles carry real permission sets (#544), a role
     // assignment is a bulk grant. Adding or removing a role at a scope needs the actor to hold that
-    // role nationally, or at that same ARTCC; a national assignment needs a national holding. Roles
-    // have no deny rows, so there is no deny dimension here, unlike the permissions half above.
+    // role nationally, or at that same ARTCC; a national assignment needs a national holding.
+    //
+    // Holding the role is not enough on its own (#577 review): it is a bulk grant, so the actor must
+    // also be able to grant **everything it bundles** at that scope — a deny on one of its permissions
+    // must stop them handing it on — and only a server admin may grant `VATUSA_STAFF`. That is exactly
+    // the group route's `enforce_membership_scope`, so both editors ask the same question.
     let pool = state.db.as_ref().ok_or(ApiError::ServiceUnavailable)?;
     let actor_role_holdings: BTreeSet<(Option<String>, String)> =
         access_repo::fetch_user_role_grants(pool, &actor.id)
@@ -423,6 +427,7 @@ async fn enforce_actor_scope(
         if !(national || here) {
             return Err(ApiError::Forbidden);
         }
+        enforce_membership_scope(state, actor, role, artcc.as_deref()).await?;
     }
 
     Ok(())
@@ -2116,6 +2121,65 @@ mod role_guard_tests {
             http::StatusCode::OK
         );
         assert_eq!(target_roles(&w).await, ["ZDC", "ZNY"]);
+    }
+
+    // ---- #577 review: a role is a bulk grant ------------------------------------------------------
+
+    /// Holding `EC` at ZDC is not enough to hand it on at ZDC if the actor is **denied** one of the
+    /// permissions it bundles there — assigning it would give the target what the actor cannot have.
+    #[sqlx::test]
+    async fn a_deny_on_a_bundled_permission_stops_the_assignment(pool: PgPool) {
+        let w = world(pool).await;
+        hold(&w.pool, &w.actor, ROLE, Some("ZDC")).await;
+        let denied = "tmu.ntml.create";
+        let bundled: bool = sqlx::query_scalar(
+            "select exists(select 1 from access.role_permissions where role_name = $1 and permission_name = $2)",
+        )
+        .bind(ROLE)
+        .bind(denied)
+        .fetch_one(&w.pool)
+        .await
+        .unwrap();
+        assert!(bundled, "precondition: {ROLE} bundles {denied}");
+        sqlx::query(
+            "insert into access.user_permissions (user_id, permission_name, granted, artcc_id) \
+             values ($1, $2, false, 'ZDC')",
+        )
+        .bind(&w.actor)
+        .bind(denied)
+        .execute(&w.pool)
+        .await
+        .unwrap();
+
+        assert_eq!(
+            save_roles(&w, Some("ZDC"), &[ROLE]).await,
+            http::StatusCode::FORBIDDEN
+        );
+        assert!(
+            target_roles(&w).await.is_empty(),
+            "the target did not gain the denied permission"
+        );
+    }
+
+    /// `VATUSA_STAFF` bundles the whole catalogue; only a server admin may grant it (#546), even to
+    /// someone holding it themselves.
+    #[sqlx::test]
+    async fn only_a_server_admin_may_assign_vatusa_staff(pool: PgPool) {
+        let w = world(pool).await;
+        hold(&w.pool, &w.actor, "VATUSA_STAFF", None).await;
+
+        assert_eq!(
+            save_roles(&w, None, &["VATUSA_STAFF"]).await,
+            http::StatusCode::FORBIDDEN
+        );
+        let held: i64 = sqlx::query_scalar(
+            "select count(*) from access.user_roles where user_id = $1 and role_name = 'VATUSA_STAFF'",
+        )
+        .bind(&w.target)
+        .fetch_one(&w.pool)
+        .await
+        .unwrap();
+        assert_eq!(held, 0);
     }
 
     // ---- AC4 ---------------------------------------------------------------------------------------
