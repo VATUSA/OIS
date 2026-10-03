@@ -277,6 +277,85 @@ async fn no_one_can_grant_a_machine_credential_management(pool: PgPool) {
     assert!(grants_of(&pool, &id).await.is_empty());
 }
 
+/// Whoever rotates receives the token, so rotating is acquiring the account's authority. A ZDC admin
+/// may rotate an account that reaches only ZDC, never one that reaches ZNY.
+#[sqlx::test]
+async fn an_admin_cannot_rotate_an_account_that_outranks_them(pool: PgPool) {
+    let state = test_state(pool.clone(), HashMap::new());
+    let cookie = zdc_admin(&pool).await;
+
+    let zny = account(&pool).await;
+    direct_grant(&pool, &zny, FCA, Some("ZNY")).await;
+    let status = send(
+        &state,
+        Method::POST,
+        &format!("/api/v1/admin/service-accounts/{zny}/rotate"),
+        &cookie,
+        None,
+    )
+    .await;
+    assert_eq!(
+        status, 403,
+        "rotating would hand a ZDC admin a ZNY credential"
+    );
+    let live: i64 = sqlx::query_scalar(
+        "select count(*) from access.service_account_credentials where service_account_id = $1",
+    )
+    .bind(&zny)
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    assert_eq!(live, 0, "no credential was issued");
+
+    let zdc: String = sqlx::query_scalar(
+        "insert into access.service_accounts (key, name) values ('zdc', 'ZDC') returning id",
+    )
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    direct_grant(&pool, &zdc, FCA, Some("ZDC")).await;
+    let status = send(
+        &state,
+        Method::POST,
+        &format!("/api/v1/admin/service-accounts/{zdc}/rotate"),
+        &cookie,
+        None,
+    )
+    .await;
+    assert_eq!(status, 200);
+}
+
+/// A role widened after it was assigned (or assigned before roles were capped) must still never let a
+/// machine hold credential management: the denylist applies when a request is authorised, too.
+#[sqlx::test]
+async fn a_forbidden_permission_reached_through_a_role_is_never_held(pool: PgPool) {
+    let id = account(&pool).await;
+    role(
+        &pool,
+        &[FCA, "service_accounts.update", "api_keys.key.create"],
+    )
+    .await;
+    // Straight to the repo: this is the state an old or widened assignment leaves behind.
+    sa_repo::set_roles(&pool, &id, &[ROLE.to_string()])
+        .await
+        .unwrap();
+
+    let names = fetch_service_account_permission_names(&pool, &id)
+        .await
+        .unwrap();
+    assert_eq!(
+        names,
+        vec![FCA.to_string()],
+        "only the allowed permission survives"
+    );
+    assert!(
+        service_account_permission_scope(&pool, &id, "service_accounts.update")
+            .await
+            .unwrap()
+            .is_empty()
+    );
+}
+
 // --- AC4: expiry and staleness ---
 
 #[sqlx::test]

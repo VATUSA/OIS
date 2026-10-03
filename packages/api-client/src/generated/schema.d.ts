@@ -249,6 +249,11 @@ export interface paths {
         };
         get?: never;
         put?: never;
+        /**
+         * Revoke the live token and issue a new one. Whoever rotates *receives* the token, and with it the
+         *     account's authority — so, like a grant, it is capped: the admin must hold everything the account
+         *     holds, at its scope (#584). Otherwise `service_accounts.update` alone would be a way to take BOT.
+         */
         post: operations["rotate_service_account"];
         delete?: never;
         options?: never;
@@ -7262,6 +7267,12 @@ export interface operations {
                 content?: never;
             };
             401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            403: {
                 headers: {
                     [name: string]: unknown;
                 };
