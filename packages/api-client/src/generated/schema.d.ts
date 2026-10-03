@@ -6322,7 +6322,7 @@ export interface components {
         /** @description One draft TMI inside a package (kind + the create-shape payload for that kind). */
         TmiPackageItemBody: {
             id: string;
-            /** @description program | restriction | ground_stop */
+            /** @description program | restriction | ground_stop | advisory */
             kind: string;
             payload: Record<string, never>;
         };
