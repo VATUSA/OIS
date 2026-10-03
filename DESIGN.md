@@ -178,8 +178,10 @@ a **documented exception to non-negotiable #9**, under all of these conditions:
   four states (signed in, waiting, timed out, superseded). Deliberately **dark-only**, with no
   `prefers-color-scheme` branch: the app window it hands back to is unconditionally dark
   (`tauri.conf.json`'s `backgroundColor: "#08080a"`, which is `--ground`), so honouring a light OS
-  preference would flash a light page on the way into a dark app. Its token copy is asserted by
-  tests in that module, which is the only thing standing between the copy and silent drift.
+  preference would flash a light page on the way into a dark app. Its colours are held to
+  `globals.css` by `the_inlined_tokens_match_the_stylesheet`, which reads the stylesheet itself — the
+  only thing standing between the copy and silent drift. `--r-lg` comes from the token table above,
+  which `globals.css` does not define, and the font stacks are system-fallback approximations.
 
 ## Components (one each, tokens only)
 

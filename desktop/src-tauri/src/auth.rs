@@ -303,7 +303,8 @@ impl CallbackState {
             Self::SignedIn => ("Signed in", "You can close this tab and return to OIS."),
             Self::Waiting => (
                 "Waiting for sign-in",
-                "Finish signing in with VATSIM in the other tab. You can leave this one open.",
+                "Finish signing in with VATSIM in the other tab. This page won't change — if OIS \
+                 doesn't sign you in, start again from the app.",
             ),
             Self::TimedOut => (
                 "Sign-in timed out",
@@ -363,8 +364,11 @@ fn escape_html(value: &str) -> String {
 ///   imported by the web entry point, so they are unreachable from here; the stacks below name
 ///   Inter and JetBrains Mono first for the machines that have them and fall back to system UI.
 ///
-/// The values below are a **copy**. `packages/ui/src/styles/globals.css` (`.dark`) is the source of
-/// truth — if a token moves there, this copy is stale and nothing will tell you.
+/// The colours below are a **copy**. `packages/ui/src/styles/globals.css` (`.dark`) is the source of
+/// truth, and `the_inlined_tokens_match_the_stylesheet` reads it: if a token moves there, that test
+/// fails until this copy follows. `--r-lg` comes from `DESIGN.md`'s token table instead — the
+/// stylesheet does not define it — and the font stacks approximate `--font-sans`/`--font-mono` with
+/// system fallbacks, since this page has no network to load the real faces.
 ///
 /// ## Dark-only
 ///
@@ -383,7 +387,7 @@ fn callback_page(state: CallbackState) -> String {
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>OIS — {heading}</title>
 <style>
-  /* Copied from packages/ui/src/styles/globals.css (.dark) — see callback_page's docs. */
+  /* Colours copied from packages/ui/src/styles/globals.css (.dark) and held to it by a test; --r-lg from DESIGN.md; font stacks approximate. See callback_page's docs. */
   :root {{
     --ground: #08080a;
     --card: #16161b;
@@ -811,19 +815,83 @@ mod tests {
         }
     }
 
-    /// AC1: the OIS surface, by token value. These are copies of
-    /// `packages/ui/src/styles/globals.css` (`.dark`) and this is what catches the copy going stale
-    /// in the direction that matters — the page silently not looking like OIS.
+    /// The page's token copy, held to the stylesheet it was copied from.
+    ///
+    /// `DESIGN.md` allows this page to inline tokens only because a test stands between the copy and
+    /// drift. The test that used to sit here asserted the page contained hex values typed into the
+    /// *test*, which pinned one copy to another: changing `--card` in `globals.css` left all 32 tests
+    /// green (#536 review). This reads the stylesheet itself, so moving a token there fails here until
+    /// the page follows.
     #[test]
-    fn the_page_uses_the_ois_dark_surface() {
+    fn the_inlined_tokens_match_the_stylesheet() {
+        const STYLESHEET: &str = include_str!("../../../packages/ui/src/styles/globals.css");
+        // Inlined with no stylesheet counterpart, each deliberately. Anything else the page inlines
+        // must come from `.dark`, so a new copied token cannot slip in unchecked.
+        const NOT_FROM_THE_STYLESHEET: &[&str] = &[
+            "--r-lg", // `DESIGN.md`'s token table; `globals.css` does not define it
+            "--sans", // approximates `--font-sans` with system fallbacks: this page has no network
+            "--mono", // approximates `--font-mono`, for the same reason
+        ];
+
+        let stylesheet = declarations(block_after(STYLESHEET, "\n.dark {"));
         let html = callback_page(CallbackState::Waiting);
+        let page = declarations(block_after(&html, ":root {"));
         assert!(
-            html.contains("#08080a"),
-            "--ground, matching the app window"
+            page.len() >= 6,
+            "the page's token block was not parsed: {page:?}"
         );
-        assert!(html.contains("#16161b"), "--card");
-        assert!(html.contains("#26262d"), "--line");
-        assert!(html.contains("#f3f3f5"), "--ink");
+
+        for (name, value) in &page {
+            if NOT_FROM_THE_STYLESHEET.contains(&name.as_str()) {
+                continue;
+            }
+            let source = stylesheet.get(name).unwrap_or_else(|| {
+                panic!(
+                    "{name} is inlined but globals.css's .dark block does not define it — copy it \
+                     from there, or list it with a reason in NOT_FROM_THE_STYLESHEET"
+                )
+            });
+            assert_eq!(value, source, "{name} has drifted from globals.css");
+        }
+    }
+
+    /// The text of the first `{ … }` block after `opener`.
+    fn block_after<'a>(text: &'a str, opener: &str) -> &'a str {
+        let start = text
+            .find(opener)
+            .unwrap_or_else(|| panic!("no `{opener}` block"))
+            + opener.len();
+        let end = text[start..].find('}').expect("an unterminated block") + start;
+        &text[start..end]
+    }
+
+    /// The custom properties declared in a CSS block, with `/* … */` comments removed first — a
+    /// comment directly before a declaration would otherwise swallow its name and drop it silently.
+    fn declarations(block: &str) -> std::collections::BTreeMap<String, String> {
+        let mut code = String::with_capacity(block.len());
+        let mut rest = block;
+        while let Some(open) = rest.find("/*") {
+            code.push_str(&rest[..open]);
+            rest = rest[open..]
+                .find("*/")
+                .map_or("", |close| &rest[open + close + 2..]);
+        }
+        code.push_str(rest);
+        code.split(';')
+            .filter_map(|declaration| {
+                let (name, value) = declaration.trim().split_once(':')?;
+                let name = name.trim();
+                name.starts_with("--")
+                    .then(|| (name.to_string(), value.trim().to_string()))
+            })
+            .collect()
+    }
+
+    #[test]
+    fn declarations_skip_comments_rather_than_the_token_after_them() {
+        let parsed = declarations("/* surfaces */ --ground: #08080a; --card:  #16161b ;");
+        assert_eq!(parsed.get("--ground").map(String::as_str), Some("#08080a"));
+        assert_eq!(parsed.get("--card").map(String::as_str), Some("#16161b"));
     }
 
     /// `DESIGN.md`: elevation is a surface step plus a hairline, never a shadow, and never a
