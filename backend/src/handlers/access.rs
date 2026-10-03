@@ -1335,6 +1335,97 @@ mod group_tests {
         );
     }
 
+    /// Removal is gated by scope exactly as addition is. Driven through the real `DELETE` route, because
+    /// the gap this pins was invisible below it: the coarse `RequirePermission<AccessGroupsUpdate>` is
+    /// scope-blind by design (#543), so a ZDC-scoped admin passed it and removed a ZNY member and a
+    /// national member, both with 204. Removing authority at a scope you do not hold is exercising it.
+    #[sqlx::test]
+    async fn removal_is_gated_by_the_actors_scope(pool: PgPool) {
+        let actor_id = seed_user(&pool).await;
+        grant(&pool, &actor_id, "access.groups.update", Some("ZDC")).await;
+        grant(&pool, &actor_id, "events.config.update", Some("ZDC")).await;
+        make_group(&pool, "SCOPED_GRP").await;
+        sqlx::query(
+            "insert into access.role_permissions (role_name, permission_name) \
+             values ('SCOPED_GRP', 'events.config.update')",
+        )
+        .execute(&pool)
+        .await
+        .unwrap();
+
+        let member = |cid: i64, artcc: Option<&'static str>| {
+            let pool = pool.clone();
+            async move {
+                let id: String = sqlx::query_scalar(
+                    "insert into identity.users (cid, full_name, display_name) \
+                     values ($1, 'M', 'M') returning id",
+                )
+                .bind(cid)
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+                sqlx::query(
+                    "insert into access.user_roles (user_id, role_name, artcc_id) \
+                     values ($1, 'SCOPED_GRP', $2)",
+                )
+                .bind(&id)
+                .bind(artcc)
+                .execute(&pool)
+                .await
+                .unwrap();
+            }
+        };
+        member(9_990_001, Some("ZNY")).await;
+        member(9_990_002, None).await;
+        member(9_990_003, Some("ZDC")).await;
+
+        let cookie = crate::scope_test_support::session_cookie(&pool, &actor_id).await;
+        let state = test_state(pool.clone(), std::collections::HashMap::new());
+        let remove = |body: serde_json::Value| {
+            let (state, cookie) = (state.clone(), cookie.clone());
+            async move {
+                crate::scope_test_support::send(
+                    &state,
+                    http::Method::DELETE,
+                    "/api/v1/admin/groups/SCOPED_GRP/members",
+                    &cookie,
+                    Some(body),
+                )
+                .await
+            }
+        };
+
+        assert_eq!(
+            remove(serde_json::json!({"cid": 9_990_001, "artcc_id": "ZNY", "reason": "t"})).await,
+            http::StatusCode::FORBIDDEN,
+            "a ZDC-scoped admin must not remove a ZNY member"
+        );
+        assert_eq!(
+            remove(serde_json::json!({"cid": 9_990_002, "reason": "t"})).await,
+            http::StatusCode::FORBIDDEN,
+            "nor a national one"
+        );
+        // Still able to act inside their own scope — the gate narrows, it does not disable.
+        assert_eq!(
+            remove(serde_json::json!({"cid": 9_990_003, "artcc_id": "ZDC", "reason": "t"})).await,
+            http::StatusCode::NO_CONTENT,
+            "a ZDC-scoped admin may remove a ZDC member"
+        );
+
+        let left: Vec<Option<String>> = sqlx::query_scalar(
+            "select artcc_id from access.user_roles where role_name = 'SCOPED_GRP' \
+             order by artcc_id nulls first",
+        )
+        .fetch_all(&pool)
+        .await
+        .unwrap();
+        assert_eq!(
+            left,
+            vec![None, Some("ZNY".to_string())],
+            "only the ZDC member was removed"
+        );
+    }
+
     /// Holding *some* of what a group bundles is not enough — granting it hands over all of it.
     #[sqlx::test]
     async fn partial_coverage_is_not_enough_to_grant_a_group(pool: PgPool) {
@@ -1569,12 +1660,11 @@ async fn change_membership(
         .await?
         .ok_or(ApiError::NotFound)?;
 
-    // Only adding needs the gate: removing a membership takes authority away, and an admin who can
-    // see the group may always do that. (Contrast the *contents* editor, where a removal is also a
-    // change to what holders can do and so is gated symmetrically.)
-    if held {
-        enforce_membership_scope(state, actor, name, artcc.as_deref()).await?;
-    }
+    // Gated in both directions. Removing a membership is a change to what that holder can do, at that
+    // scope, and an actor with no authority there cannot strip it any more than they could grant it —
+    // the principle the contents editor already follows (#545). Without this, a ZDC-scoped admin could
+    // remove ZNY and national holders, because the coarse `RequirePermission` is scope-blind (#543).
+    enforce_membership_scope(state, actor, name, artcc.as_deref()).await?;
 
     let before = access_repo::fetch_user_role_grants(pool, &target).await?;
 
