@@ -10,6 +10,17 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
+  # Two PRs that each picked "the next free number" can both merge, leaving two migrations with one
+  # version: sqlx applies both and the backend fails to start half-migrated (#569). On a PR this runs
+  # against GitHub's merge ref (head merged into the current base), so a collision with anything
+  # already on the base fails here. Required on `next` by ruleset; `build-images.yml` runs the same
+  # check on every push, which catches the race where another PR merged after this one was checked.
+  migrations:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - run: .github/scripts/check-migration-versions.sh
+
   rust:
     runs-on: ubuntu-latest
     # Backs #[sqlx::test] repo tests: one throwaway database per test, migrations applied
