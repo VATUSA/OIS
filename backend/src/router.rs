@@ -11,9 +11,9 @@ use crate::{
     handlers::{
         access, ace, admin, aircraft_profiles, airport_configs, airport_surface, airports,
         api_keys, atc, audit, auth, dashboards, desktop, docs, events, facilities,
-        facility_documents, facility_map, feed, flight_exclusions, flow, gdp, health,
-        integration, jobs as jobs_handler, metrics as metrics_handler, preferences, public,
-        runway, service_accounts, stats, taxi_insights, tmu, users, webhooks,
+        facility_documents, facility_map, feed, flight_exclusions, flow, gdp, health, integration,
+        jobs as jobs_handler, metrics as metrics_handler, preferences, public, runway,
+        service_accounts, stats, taxi_insights, tmu, users, webhooks,
     },
     openapi::ApiDoc,
     realtime,
