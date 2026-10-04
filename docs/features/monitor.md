@@ -62,11 +62,16 @@ a positive band, at least one ring, each closed with ≥ 4 points, in range, no 
 crossing edges. The only writer is `repos::airspace_sectors::replace_artcc`, which replaces one ARTCC's
 volumes in a transaction.
 
-**`flow.sector_map`** (`0116_sector_monitor_alert_parameters.sql`): MAP **overrides only**, primary key
+**`flow.sector_map`** (`0116_sector_monitor_alert_parameters.sql`): per-sector MAPs, primary key
 `(artcc, sector_id)`, `map > 0`. A sector with no row uses `DEFAULT_MAP = 10` (`feed/sectors.rs`), taken
 from vTBFM, which tunes down from real high-sector values of about 16–20 for VATSIM traffic. There is no
-foreign key to `flow.airspace_sector`, so a re-import never cascades away an override. There is no delete:
-setting the default is the reset.
+foreign key to `flow.airspace_sector`, so a re-import never cascades away an override.
+
+**There is no way to remove an override yet (#706).** The only write is an upsert. Entering the default on
+a sector **with no row** is a no-op, but entering it on a sector that **has** an override stores the
+default as an ordinary row. That sector then reports `overridden: true`, and stays at 10 even if
+`DEFAULT_MAP` later changes. #706 makes entering the default delete the row. When it lands, this paragraph
+becomes "setting the default removes the override".
 
 **`flow.sector_consolidation`** (`0118_sector_consolidation.sql`): `(artcc, sector_id) →
 target_sector_id`, `sector_id <> target_sector_id`. It is kept **flat**: a target is never itself a
