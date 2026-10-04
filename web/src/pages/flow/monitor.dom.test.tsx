@@ -8,9 +8,17 @@ import {afterEach, beforeAll, describe, expect, it, vi} from "vitest";
 const get = vi.hoisted(() => vi.fn());
 // The generated client captures `fetch` at load, so mock the client and seed the cache (#387).
 vi.mock("@/lib/api", () => ({ois: {GET: get, PUT: vi.fn(), DELETE: vi.fn()}}));
+vi.mock("@/components/shell/page-meta", () => ({usePageHeader: () => {}}));
+vi.mock("@/lib/admin", () => ({useFacilities: () => ({data: [{id: "ZDC", name: "Washington", active: true}]})}));
 
-import {MonitorTable} from "./monitor";
-import {type MonitorBin, type MonitorRow, type MonitorTable as Table, monitorKey} from "@/lib/monitor";
+import {MonitorPage, MonitorTable} from "./monitor";
+import {
+  type MonitorBin,
+  type MonitorRow,
+  type MonitorTable as Table,
+  monitorKey,
+  monitorNeighboursKey,
+} from "@/lib/monitor";
 
 declare global {
   var IS_REACT_ACT_ENVIRONMENT: boolean;
@@ -45,7 +53,7 @@ function row(id: string, alertNow: "green" | "amber" | "red"): MonitorRow {
   return {sector_id: id, name: null, map: 10, consolidated: [], staffed: false, bins};
 }
 
-async function mount(table: Table) {
+async function mount(table: Table, viewOnly = false) {
   const qc = new QueryClient({defaultOptions: {queries: {retry: false, refetchOnMount: false, staleTime: Infinity}}});
   qc.setQueryData(monitorKey("ZDC"), table);
   get.mockResolvedValue({data: table});
@@ -57,7 +65,7 @@ async function mount(table: Table) {
     root.render(
       <QueryClientProvider client={qc}>
         <ToastProvider>
-          <MonitorTable artcc="ZDC" />
+          <MonitorTable artcc="ZDC" viewOnly={viewOnly} />
         </ToastProvider>
       </QueryClientProvider>,
     );
@@ -117,5 +125,43 @@ describe("Airspace Monitor page (#601)", () => {
     const host = await mount(table(false, [row("02", "green")]));
     expect(host.textContent).toContain("Nothing alerting");
     expect(host.querySelector("tbody")).toBeNull();
+  });
+
+  /** #712 AC2: a neighbour's table is view-only even where the server would let this caller edit. */
+  it("keeps a neighbour's table inert even for an editor", async () => {
+    const host = await mount(table(true, [row("02", "red"), row("03", "amber")]), true);
+    expect(host.querySelector('input[aria-label="02 alert parameter"]')).toBeNull();
+    await rightClickFirstRow(host);
+    expect(document.querySelector('[role="menuitem"]')).toBeNull();
+  });
+
+  /** #712 AC1: the selected ARTCC's table first, then each neighbour collapsed until opened. */
+  it("shows the ARTCC's table and its neighbours collapsed", async () => {
+    localStorage.setItem("ois.monitor.artcc", JSON.stringify("ZDC"));
+    const qc = new QueryClient({defaultOptions: {queries: {retry: false, refetchOnMount: false, staleTime: Infinity}}});
+    qc.setQueryData(monitorKey("ZDC"), table(false, [row("02", "red")]));
+    // The server would let this caller edit ZNY (a national editor): the neighbour must stay inert anyway.
+    qc.setQueryData(monitorKey("ZNY"), {...table(true, [row("10", "red")]), artcc: "ZNY"});
+    qc.setQueryData(monitorNeighboursKey("ZDC"), ["ZNY"]);
+    const host = document.createElement("div");
+    document.body.appendChild(host);
+    const root = createRoot(host);
+    roots.push({root, host});
+    await act(async () => {
+      root.render(
+        <QueryClientProvider client={qc}>
+          <ToastProvider>
+            <MonitorPage />
+          </ToastProvider>
+        </QueryClientProvider>,
+      );
+    });
+    const toggle = [...host.querySelectorAll("button")].find((b) => b.textContent === "ZNY")!;
+    expect(toggle.getAttribute("aria-expanded")).toBe("false");
+    expect(host.querySelectorAll("table")).toHaveLength(1);
+    await act(async () => toggle.click());
+    expect(toggle.getAttribute("aria-expanded")).toBe("true");
+    expect(host.querySelectorAll("table")).toHaveLength(2);
+    expect(host.querySelector('input[aria-label="10 alert parameter"]')).toBeNull();
   });
 });

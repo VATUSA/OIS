@@ -16,7 +16,7 @@ import {
   cn,
   useLocalStorage,
 } from "@ois/ui";
-import {ArrowDown, ArrowUp, Gauge, Hash, Radio} from "lucide-react";
+import {ArrowDown, ArrowUp, ChevronDown, ChevronRight, Gauge, Hash, Radio} from "lucide-react";
 
 import {SectorMapCell} from "@/components/sector-map-cell";
 import {usePageHeader} from "@/components/shell/page-meta";
@@ -33,6 +33,7 @@ import {
   moveRow,
   sliceBins,
   useConsolidate,
+  useMonitorNeighbours,
   useMonitorTable,
   useReleaseSector,
 } from "@/lib/monitor";
@@ -45,9 +46,10 @@ type RowMenu = {sector: MonitorRow; x: number; y: number};
 /**
  * One ARTCC's Monitor table (#601), from `GET /api/v1/flow/monitor/{artcc}` (#701). Everything a viewer
  * adjusts — Time Range, the alert filter, row order — is per browser and per centre; none of it
- * refetches. MAP edits and the row menu work only where the server says this caller may edit.
+ * refetches. MAP edits and the row menu work only where the server says this caller may edit, and
+ * never on a neighbour's table (`viewOnly`).
  */
-export function MonitorTable({artcc}: {artcc: string}) {
+export function MonitorTable({artcc, viewOnly = false}: {artcc: string; viewOnly?: boolean}) {
   const monitor = useMonitorTable(artcc);
   const [hours, setHours] = useLocalStorage<number>(`ois.monitor.${artcc}.range`, DEFAULT_TIME_RANGE);
   const [alertHours, setAlertHours] = useLocalStorage<number>(`ois.monitor.${artcc}.alert`, DEFAULT_ALERT_WINDOW);
@@ -56,7 +58,8 @@ export function MonitorTable({artcc}: {artcc: string}) {
   const consolidate = useConsolidate(artcc);
   const release = useReleaseSector(artcc);
 
-  const editable = monitor.data?.editable ?? false;
+  // A neighbour's table is theirs to change, never yours, whatever the server would allow (#712).
+  const editable = !viewOnly && (monitor.data?.editable ?? false);
   const allRows = useMemo(() => monitor.data?.rows ?? [], [monitor.data]);
   const ordered = useMemo(() => {
     const byId = new Map(allRows.map((r) => [r.sector_id, r]));
@@ -222,6 +225,26 @@ export function MonitorTable({artcc}: {artcc: string}) {
   );
 }
 
+/** One first-tier neighbour, collapsed until opened; its table only loads once it is (#712). */
+function NeighbourTable({artcc}: {artcc: string}) {
+  const [open, setOpen] = useState(false);
+  return (
+    <section className="flex flex-col gap-2">
+      <Button
+        variant="ghost"
+        size="sm"
+        aria-expanded={open}
+        onClick={() => setOpen((o) => !o)}
+        className="self-start font-mono"
+      >
+        {open ? <ChevronDown /> : <ChevronRight />}
+        {artcc}
+      </Button>
+      {open && <MonitorTable artcc={artcc} viewOnly />}
+    </section>
+  );
+}
+
 /** Airspace Monitor (#601): pick an ARTCC, watch its sectors load against their MAPs. */
 export function MonitorPage() {
   usePageHeader({
@@ -234,6 +257,7 @@ export function MonitorPage() {
     [facilities.data],
   );
   const [artcc, setArtcc] = useLocalStorage<string>("ois.monitor.artcc", "");
+  const neighbours = useMonitorNeighbours(artcc);
   useEffect(() => {
     if (!artcc && artccs.length) setArtcc(artccs[0].id);
   }, [artcc, artccs, setArtcc]);
@@ -250,6 +274,9 @@ export function MonitorPage() {
         </Select>
       </FilterBar>
       {artcc && <MonitorTable key={artcc} artcc={artcc} />}
+      {(neighbours.data ?? []).map((n) => (
+        <NeighbourTable key={`${artcc}:${n}`} artcc={n} />
+      ))}
     </div>
   );
 }
