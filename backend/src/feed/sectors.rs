@@ -287,6 +287,29 @@ pub(crate) mod tests {
         assert_eq!(ids(70_000.0), Vec::<&str>::new());
     }
 
+    /// A volume can have several parts: the importer makes one ring per `MultiPolygon` part. A point
+    /// in any part is inside; one between the parts is not. A single-ring fixture can't tell `any`
+    /// from `all`, so this one has two.
+    #[test]
+    fn a_point_in_either_part_of_a_multi_part_volume_is_inside() {
+        let mut v = high();
+        v.rings.push(vec![
+            [40.0, -77.0],
+            [40.0, -76.0],
+            [41.0, -76.0],
+            [41.0, -77.0],
+            [40.0, -77.0],
+        ]);
+        for alt in [Some(25_000.0), None] {
+            assert!(v.contains(38.5, -76.5, alt), "the first part, at {alt:?}");
+            assert!(v.contains(40.5, -76.5, alt), "the second part, at {alt:?}");
+            assert!(
+                !v.contains(39.5, -76.5, alt),
+                "the gap between them, at {alt:?}"
+            );
+        }
+    }
+
     #[test]
     fn a_volume_with_no_rings_is_rejected() {
         let mut v = volume("ZDC", "01001");
