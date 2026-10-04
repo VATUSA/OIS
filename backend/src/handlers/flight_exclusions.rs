@@ -115,7 +115,7 @@ pub async fn list_flight_exclusions(
 
 #[utoipa::path(
     post, path = "/api/v1/flow/fcas/{id}/exclusions/{callsign}", tag = "flow",
-    security(("session" = ["flow.fca.update"]), ("api_key" = ["flow.fca.update"])),
+    security(("session" = ["flow.fca.update"])),
     params(("id" = String, Path), ("callsign" = String, Path)),
     request_body = ExcludeFlightRequest,
     responses((status = 200, body = FlightExclusionBody), (status = 401), (status = 403), (status = 404))

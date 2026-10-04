@@ -2107,7 +2107,7 @@ async fn advisory_facility(pool: &sqlx::PgPool, id: &str) -> Result<String, ApiE
 
 #[utoipa::path(
     post, path = "/api/v1/tmu/advisories", tag = "tmu",
-    security(("session" = ["tmu.adv.create"]), ("api_key" = ["tmu.adv.create"])),
+    security(("session" = ["tmu.adv.create"])),
     request_body = CreateAdvisoryRequest,
     responses((status = 200, body = AdvisoryBody), (status = 400), (status = 401))
 )]
@@ -2180,7 +2180,7 @@ pub async fn update_advisory(
 
 #[utoipa::path(
     post, path = "/api/v1/tmu/advisories/{id}/publish", tag = "tmu",
-    security(("session" = ["tmu.adv.publish"]), ("api_key" = ["tmu.adv.publish"])),
+    security(("session" = ["tmu.adv.publish"])),
     params(("id" = String, Path)),
     responses((status = 200, body = AdvisoryBody), (status = 401), (status = 409))
 )]

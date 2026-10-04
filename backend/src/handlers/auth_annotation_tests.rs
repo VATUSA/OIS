@@ -238,11 +238,18 @@ fn every_unauthenticated_handler_is_public_on_purpose() {
 /// | --- | --- |
 /// | `Actor` (or `Principal::require_any`), or only `RequirePermission` | session, api_key, service_account |
 /// | `Principal::require` | session, api_key |
-/// | `Extension<Option<CurrentUser>>` / `SessionToken` | session |
+/// | `Extension<Option<CurrentUser>>` / `SessionToken`, or a body that demands the session user | session |
+///
+/// A body that refuses without a session user (`current_user.as_ref().ok_or(ApiError::Unauthorized)`)
+/// is session-only **whatever else it calls**: four handlers did that before `Principal::require`, so
+/// an API key was refused on the first line while the spec offered it (#587 review).
 fn expected_schemes(h: &Handler) -> &'static [&'static str] {
     const ALL: &[&str] = &["session", "api_key", "service_account"];
+    let body: String = h.body.split_whitespace().collect();
     if h.params.contains(":Actor") || h.body.contains("Principal::require_any") {
         ALL
+    } else if body.contains("current_user.as_ref().ok_or(ApiError::Unauthorized)") {
+        &["session"]
     } else if h.body.contains("Principal::require(") || h.body.contains("Principal::optional(") {
         &["session", "api_key"]
     } else if h.params.contains("CurrentUser") || h.params.contains("SessionToken") {

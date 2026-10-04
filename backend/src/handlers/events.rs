@@ -1128,7 +1128,7 @@ pub async fn delete_event_package_item(
     post,
     path = "/api/v1/events/{id}/packages/{package_id}/activate",
     tag = "events",
-    security(("session" = ["events.plan.update"]), ("api_key" = ["events.plan.update"])),
+    security(("session" = ["events.plan.update"])),
     params(
         ("id" = i64, Path, description = "VATUSA event id"),
         ("package_id" = String, Path, description = "Package id")

@@ -580,3 +580,28 @@ async fn a_service_account_is_refused_where_the_spec_does_not_offer_it(pool: PgP
 
     assert_eq!(status, http::StatusCode::UNAUTHORIZED);
 }
+
+/// #587 review: a handler that demands the session user before anything else refuses an API key, so
+/// the document must not offer one. Creating an advisory is such a handler: an API key holding exactly
+/// the permission the path names is refused, and the path declares only `session`.
+#[sqlx::test]
+async fn a_session_first_handler_neither_accepts_nor_offers_an_api_key(pool: PgPool) {
+    let state = test_state(pool.clone(), HashMap::new());
+    let (_, key) = api_key(&pool, "tmu.adv.create").await;
+    let (status, _) = call(
+        &state,
+        http::Method::POST,
+        "/api/v1/tmu/advisories",
+        &key,
+        Some(json!({"facility": "DCC", "kind": "reroute", "body": "vATCSCC ADVZY"})),
+    )
+    .await;
+    assert_eq!(status, http::StatusCode::UNAUTHORIZED);
+
+    let spec =
+        serde_json::to_value(<crate::openapi::ApiDoc as utoipa::OpenApi>::openapi()).unwrap();
+    assert_eq!(
+        spec["paths"]["/api/v1/tmu/advisories"]["post"]["security"],
+        json!([{ "session": ["tmu.adv.create"] }]),
+    );
+}
