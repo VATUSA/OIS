@@ -22,6 +22,7 @@ use Intent::{Pending, UserOnly};
 const CURRENT_USER_HANDLERS: &[(&str, &str, Intent)] = &[
     ("access", "get_self_access", UserOnly("the caller's own access summary")),
     ("access", "update_user_access", UserOnly("editing a person's access is a human act; a key's denylist covers only api_keys.*, so a machine here could grant access")),
+    ("access", "resync_user_vatusa", UserOnly("re-attaching a person to VATUSA role sync changes their access, like update_user_access; a machine here could grant access")),
     ("access", "create_group", UserOnly("editing what a group grants is a human act, like update_user_access; a machine here could grant access")),
     ("access", "update_group", UserOnly("editing what a group grants is a human act, like update_user_access; a machine here could grant access")),
     ("access", "delete_group", UserOnly("editing what a group grants is a human act, like update_user_access; a machine here could grant access")),

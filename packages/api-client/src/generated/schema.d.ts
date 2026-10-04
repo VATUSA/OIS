@@ -407,6 +407,47 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/v1/admin/users/{cid}/vatusa": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * A member's VATUSA side for the access editor (#549): whether they're on role sync, their VATUSA
+         *     roles, and exactly what a Resync would change.
+         */
+        get: operations["get_user_vatusa"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/admin/users/{cid}/vatusa/resync": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Put a hand-managed member back on VATUSA role sync and reconcile them now (#549 AC3). Needs
+         *     `access.users.update` **nationally**: re-attaching lets VATUSA mappings change the member's grants
+         *     at any scope.
+         */
+        post: operations["resync_user_vatusa"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/v1/admin/vatusa-role-mappings": {
         parameters: {
             query?: never;
@@ -3571,6 +3612,11 @@ export interface components {
              *     have broken any consumer without the schema type moving to warn them.
              */
             scoped_roles: string[];
+            /**
+             * Format: date-time
+             * @description Set while the user is off VATUSA role sync because an admin edited their access by hand (#549).
+             */
+            vatusa_detached_at?: string | null;
         };
         /**
          * @description One advisory. `number` is its identity within `facility` on `issued_day` — see
@@ -7062,6 +7108,27 @@ export interface components {
             display_name: string;
             rating?: string | null;
         };
+        /** @description A member's VATUSA side in the admin access editor (#549). */
+        UserVatusaBody: {
+            /**
+             * Format: date-time
+             * @description Set while the member is off VATUSA role sync because an admin edited their access by hand.
+             *     `None` = synced.
+             */
+            detached_at?: string | null;
+            /** @description Who first detached them (display name), if still known. */
+            detached_by?: string | null;
+            profile?: null | components["schemas"]["VatusaProfile"];
+            /** @description Group grants a Resync would add (VATUSA-sourced). */
+            resync_grants: components["schemas"]["VatusaGrantChange"][];
+            /** @description VATUSA-sourced group grants a Resync would remove. Hand-made grants are never removed. */
+            resync_revokes: components["schemas"]["VatusaGrantChange"][];
+        };
+        /** @description One group grant a Resync would change. `artcc_id` `None` = national. */
+        VatusaGrantChange: {
+            artcc_id?: string | null;
+            group: string;
+        };
         /** @description A signed-in member's VATUSA details, surfaced on their profile. */
         VatusaProfile: {
             /** Format: date-time */
@@ -7075,6 +7142,10 @@ export interface components {
             synced_at?: string | null;
             /** @description Facilities the member visits. */
             visits: string[];
+        };
+        /** @description Put a hand-managed member back on VATUSA role sync. The reason is recorded in the audit log. */
+        VatusaResyncRequest: {
+            reason: string;
         };
         /** @description One VATUSA role, e.g. `INS` at `ZDC`. */
         VatusaRoleEntry: {
@@ -8201,6 +8272,90 @@ export interface operations {
                 };
                 content: {
                     "application/json": components["schemas"]["UserAccessBody"];
+                };
+            };
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+        };
+    };
+    get_user_vatusa: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /** @description VATSIM CID */
+                cid: number;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["UserVatusaBody"];
+                };
+            };
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+        };
+    };
+    resync_user_vatusa: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /** @description VATSIM CID */
+                cid: number;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["VatusaResyncRequest"];
+            };
+        };
+        responses: {
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["UserVatusaBody"];
                 };
             };
             400: {

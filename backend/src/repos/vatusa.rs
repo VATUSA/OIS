@@ -253,6 +253,122 @@ async fn desired_vatusa_grants(
         .collect())
 }
 
+/// What reconciling would change for a member: the VATUSA-justified grants they don't hold as
+/// `source = 'vatusa'` rows, and the `vatusa` rows nothing justifies any more. Shared by the reconcile
+/// and the admin's Resync preview (#549), so the preview is exactly what a Resync applies.
+type PendingChanges = (
+    Vec<((String, Option<String>), Vec<String>)>,
+    Vec<(String, Option<String>)>,
+);
+
+async fn pending_changes(
+    tx: &mut Transaction<'_, Postgres>,
+    user_id: &str,
+    justified_now: &JustifiedGrants,
+) -> Result<PendingChanges, ApiError> {
+    let held: BTreeSet<(String, Option<String>)> = sqlx::query_as(
+        "select role_name, artcc_id from access.user_roles \
+         where user_id = $1 and source = 'vatusa'",
+    )
+    .bind(user_id)
+    .fetch_all(&mut **tx)
+    .await
+    .map_err(|_| ApiError::Internal)?
+    .into_iter()
+    .collect();
+    let grants = justified_now
+        .iter()
+        .filter(|(key, _)| !held.contains(*key))
+        .map(|(key, because)| (key.clone(), because.clone()))
+        .collect();
+    let revokes = held
+        .into_iter()
+        .filter(|key| !justified_now.contains_key(key))
+        .collect();
+    Ok((grants, revokes))
+}
+
+async fn is_detached(tx: &mut Transaction<'_, Postgres>, user_id: &str) -> Result<bool, ApiError> {
+    sqlx::query_scalar(
+        "select vatusa_roles_detached_at is not null from identity.users where id = $1",
+    )
+    .bind(user_id)
+    .fetch_optional(&mut **tx)
+    .await
+    .map(|d| d.unwrap_or(false))
+    .map_err(|_| ApiError::Internal)
+}
+
+/// Take a member off VATUSA role sync because an admin edited their access by hand (#549). Records
+/// who and when only the first time, and returns whether this call is the one that detached them —
+/// so the caller audits the detach once, not on every later edit.
+pub async fn detach_roles(
+    tx: &mut Transaction<'_, Postgres>,
+    user_id: &str,
+    by_user_id: &str,
+) -> Result<bool, ApiError> {
+    sqlx::query(
+        "update identity.users set vatusa_roles_detached_at = now(), vatusa_roles_detached_by = $2 \
+         where id = $1 and vatusa_roles_detached_at is null",
+    )
+    .bind(user_id)
+    .bind(by_user_id)
+    .execute(&mut **tx)
+    .await
+    .map(|r| r.rows_affected() > 0)
+    .map_err(|_| ApiError::Internal)
+}
+
+/// A member's role-sync state for the admin view: when and by whom they were detached, or `None` while
+/// synced.
+pub async fn detached_state(
+    pool: &PgPool,
+    user_id: &str,
+) -> Result<Option<(DateTime<Utc>, Option<String>)>, ApiError> {
+    sqlx::query_as::<_, (Option<DateTime<Utc>>, Option<String>)>(
+        "select u.vatusa_roles_detached_at, b.display_name \
+         from identity.users u left join identity.users b on b.id = u.vatusa_roles_detached_by \
+         where u.id = $1",
+    )
+    .bind(user_id)
+    .fetch_optional(pool)
+    .await
+    .map(|row| row.and_then(|(at, by)| at.map(|at| (at, by))))
+    .map_err(|_| ApiError::Internal)
+}
+
+/// What a Resync would change for the member: `(grants, revokes)` as `(group, scope)` pairs, from a
+/// transaction that is rolled back — nothing is written (#549 AC3).
+pub async fn preview_resync(
+    pool: &PgPool,
+    user_id: &str,
+    cid: i64,
+) -> Result<PendingChanges, ApiError> {
+    let mut tx = pool.begin().await.map_err(|_| ApiError::Internal)?;
+    let justified_now = desired_vatusa_grants(&mut tx, cid).await?;
+    let changes = pending_changes(&mut tx, user_id, &justified_now).await?;
+    tx.rollback().await.map_err(|_| ApiError::Internal)?;
+    Ok(changes)
+}
+
+/// Put a member back on VATUSA role sync and reconcile them now (#549 AC3), in the caller's
+/// transaction. The reconcile audits its own changes as `VATUSA sync`, as any sync does.
+pub async fn resync(
+    tx: &mut Transaction<'_, Postgres>,
+    user_id: &str,
+    cid: i64,
+) -> Result<(), ApiError> {
+    sqlx::query(
+        "update identity.users set vatusa_roles_detached_at = null, vatusa_roles_detached_by = null \
+         where id = $1",
+    )
+    .bind(user_id)
+    .execute(&mut **tx)
+    .await
+    .map_err(|_| ApiError::Internal)?;
+    reconcile_member(tx, cid, &BTreeMap::new()).await
+}
+
 /// Make the member's `source = 'vatusa'` group grants equal what their VATUSA roles justify. Compares
 /// against the rows actually held rather than the previous sync's view, so a mapping edited between
 /// syncs, or a sync that failed half-way, converges on the next run.
@@ -273,32 +389,19 @@ async fn reconcile_vatusa_grants(
     justified_before: &JustifiedGrants,
     justified_now: &JustifiedGrants,
 ) -> Result<(), ApiError> {
-    let held: BTreeSet<(String, Option<String>)> = sqlx::query_as(
-        "select role_name, artcc_id from access.user_roles \
-         where user_id = $1 and source = 'vatusa'",
-    )
-    .bind(user_id)
-    .fetch_all(&mut **tx)
-    .await
-    .map_err(|_| ApiError::Internal)?
-    .into_iter()
-    .collect();
-
-    let grants: Vec<_> = justified_now
-        .iter()
-        .filter(|(key, _)| !held.contains(*key))
-        .collect();
-    let revokes: Vec<_> = held
-        .iter()
-        .filter(|key| !justified_now.contains_key(*key))
-        .collect();
+    // A hand-managed member is off role sync until a Resync (#549). Every reconcile — sign-in, the
+    // division pull, a mapping edit — comes through here, so this one check covers them all.
+    if is_detached(tx, user_id).await? {
+        return Ok(());
+    }
+    let (grants, revokes) = pending_changes(tx, user_id, justified_now).await?;
     if grants.is_empty() && revokes.is_empty() {
         return Ok(());
     }
 
     let before = access_snapshot(tx, user_id, cid).await?;
     let mut changes = Vec::with_capacity(grants.len() + revokes.len());
-    for ((group, scope), because) in grants {
+    for ((group, scope), because) in &grants {
         access_repo::set_user_role_scoped(
             tx,
             user_id,
@@ -314,7 +417,7 @@ async fn reconcile_vatusa_grants(
             because.join(", ")
         ));
     }
-    for key @ (group, scope) in revokes {
+    for key @ (group, scope) in &revokes {
         access_repo::set_user_role_scoped(
             tx,
             user_id,
@@ -821,7 +924,7 @@ pub async fn store_webhook(pool: &PgPool, webhook: &StoredWebhook) -> Result<(),
 mod tests {
     use sqlx::PgPool;
 
-    use super::upsert_member;
+    use super::{detach_roles, detached_state, preview_resync, resync, upsert_member};
     use crate::feed::vatusa::VatusaMember;
 
     const CID: i64 = 1_548_000;
@@ -1148,5 +1251,82 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(count, 0);
+    }
+
+    async fn detach(pool: &PgPool, user: &str) {
+        let mut tx = pool.begin().await.unwrap();
+        assert!(detach_roles(&mut tx, user, user).await.unwrap());
+        tx.commit().await.unwrap();
+    }
+
+    /// #549 AC1 + AC4: once detached, a sync leaves the member's groups alone — though their VATUSA
+    /// roles changed — while their identity details and stored VATUSA roles keep syncing.
+    #[sqlx::test]
+    async fn a_detached_member_keeps_their_groups_while_their_details_still_sync(pool: PgPool) {
+        let user = seed_user(&pool).await;
+        map(&pool, "DATM", None, "EC").await;
+        map(&pool, "TMU", None, "AEC").await;
+        sync(&pool, &[("DATM", "ZDC")]).await;
+        assert_eq!(grants(&pool, &user).await, [vatusa("EC", Some("ZDC"))]);
+
+        detach(&pool, &user).await;
+        let member: VatusaMember = serde_json::from_value(serde_json::json!({
+            "cid": CID, "fname": "New", "lname": "Name", "facility": "ZNY",
+            "roles": [{ "role": "TMU", "facility": "ZDC" }],
+        }))
+        .unwrap();
+        upsert_member(&pool, &member).await.unwrap();
+
+        assert_eq!(
+            grants(&pool, &user).await,
+            [vatusa("EC", Some("ZDC"))],
+            "no AEC granted, no EC revoked"
+        );
+        let (name, facility): (String, Option<String>) =
+            sqlx::query_as("select full_name, home_facility from identity.users where id = $1")
+                .bind(&user)
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+        assert_eq!(
+            (name.as_str(), facility.as_deref()),
+            ("New Name", Some("ZNY"))
+        );
+        let stored: Vec<String> =
+            sqlx::query_scalar("select role from identity.vatusa_roles where cid = $1")
+                .bind(CID)
+                .fetch_all(&pool)
+                .await
+                .unwrap();
+        assert_eq!(stored, ["TMU"], "the VATUSA roles themselves still sync");
+
+        // The preview is what a Resync would do, from the roles stored while detached…
+        let (add, remove) = preview_resync(&pool, &user, CID).await.unwrap();
+        let add: Vec<_> = add.into_iter().map(|(key, _)| key).collect();
+        assert_eq!(add, [("AEC".to_string(), Some("ZDC".to_string()))]);
+        assert_eq!(remove, [("EC".to_string(), Some("ZDC".to_string()))]);
+        // …and it wrote nothing.
+        assert_eq!(grants(&pool, &user).await, [vatusa("EC", Some("ZDC"))]);
+
+        let mut tx = pool.begin().await.unwrap();
+        resync(&mut tx, &user, CID).await.unwrap();
+        tx.commit().await.unwrap();
+        assert_eq!(grants(&pool, &user).await, [vatusa("AEC", Some("ZDC"))]);
+        assert!(detached_state(&pool, &user).await.unwrap().is_none());
+    }
+
+    /// Who and when are the first detach's: a second hand edit doesn't move them, and says so.
+    #[sqlx::test]
+    async fn only_the_first_edit_detaches(pool: PgPool) {
+        let user = seed_user(&pool).await;
+        detach(&pool, &user).await;
+        let first = detached_state(&pool, &user).await.unwrap().unwrap().0;
+        let mut tx = pool.begin().await.unwrap();
+        assert!(!detach_roles(&mut tx, &user, &user).await.unwrap());
+        tx.commit().await.unwrap();
+        assert_eq!(
+            detached_state(&pool, &user).await.unwrap().unwrap().0,
+            first
+        );
     }
 }
