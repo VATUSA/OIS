@@ -86,6 +86,30 @@ pub(crate) fn principal_for(user_id: &str) -> Principal {
     })
 }
 
+/// Deny `user_id` `permission_name`, nationally (`artcc = None`) or at one ARTCC.
+///
+/// The counterpart to [`grant`], which hardcodes `granted = true` and so could not express a deny
+/// at all — which is why the scope × deny interaction went untested until #543. Note the unique
+/// index is on `(user_id, permission_name, coalesce(artcc_id, ''))`, so a deny and an allow cannot
+/// coexist at the *same* scope; a national deny beside a scoped allow is the interesting case.
+pub(crate) async fn deny_scoped(
+    pool: &PgPool,
+    user_id: &str,
+    permission_name: &str,
+    artcc: Option<&str>,
+) {
+    sqlx::query(
+        "insert into access.user_permissions (user_id, permission_name, granted, artcc_id, source) \
+         values ($1, $2, false, $3, 'manual')",
+    )
+    .bind(user_id)
+    .bind(permission_name)
+    .bind(artcc)
+    .execute(pool)
+    .await
+    .unwrap();
+}
+
 /// Grant `user_id` `permission_name`, nationally (`artcc = None`) or scoped to one ARTCC —
 /// a direct `access.user_permissions` row, deliberately bypassing roles for a minimal setup.
 pub(crate) async fn grant(
@@ -95,8 +119,8 @@ pub(crate) async fn grant(
     artcc: Option<&str>,
 ) {
     sqlx::query(
-        "insert into access.user_permissions (user_id, permission_name, granted, artcc_id) \
-         values ($1, $2, true, $3)",
+        "insert into access.user_permissions (user_id, permission_name, granted, artcc_id, source) \
+         values ($1, $2, true, $3, 'manual')",
     )
     .bind(user_id)
     .bind(permission_name)
@@ -158,4 +182,34 @@ pub(crate) async fn send(
         .await
         .unwrap()
         .status()
+}
+
+/// [`send`], but also returning the decoded JSON body (`Null` when there isn't one).
+///
+/// For a test that has to check *what* a handler returned, not only that it answered — the wiring,
+/// rather than a helper called directly.
+pub(crate) async fn send_json(
+    state: &AppState,
+    method: http::Method,
+    uri: &str,
+    cookie: &str,
+) -> (http::StatusCode, serde_json::Value) {
+    use tower::ServiceExt;
+
+    let request = http::Request::builder()
+        .method(method)
+        .uri(uri)
+        .header(http::header::COOKIE, cookie)
+        .body(axum::body::Body::empty())
+        .unwrap();
+    let response = crate::router::build_router(state.clone())
+        .oneshot(request)
+        .await
+        .unwrap();
+    let status = response.status();
+    let bytes = axum::body::to_bytes(response.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    let body = serde_json::from_slice(&bytes).unwrap_or(serde_json::Value::Null);
+    (status, body)
 }

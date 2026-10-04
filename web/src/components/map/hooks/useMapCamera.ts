@@ -46,7 +46,13 @@ export function useMapCamera(
     }
     return initial;
   });
+  // A placeholder until deck reports the real canvas. `sized` says whether that has happened:
+  // `onResize` fires *after* effects, so a fit requested during a mount effect would otherwise
+  // solve against these numbers and produce the wrong zoom and aspect (#540).
   const size = useRef({ width: 800, height: 600 });
+  const sized = useRef(false);
+  /** A fit asked for before the canvas had a real size, replayed once it does. */
+  const heldFit = useRef<Parameters<MapCamera["fitBounds"]> | null>(null);
 
   // Keep the latest persist config in a ref so the (stable) onViewStateChange sees toggles live.
   const persistRef = useRef(opts);
@@ -84,15 +90,34 @@ export function useMapCamera(
   }, []);
 
   const onResize = useCallback((s: { width: number; height: number }) => {
-    if (s.width > 0 && s.height > 0) size.current = s;
+    if (s.width <= 0 || s.height <= 0) return;
+    size.current = s;
+    sized.current = true;
+    // A fit that arrived before the canvas did now has real numbers to solve against.
+    const held = heldFit.current;
+    if (held) {
+      heldFit.current = null;
+      applyFit.current(...held);
+    }
   }, []);
 
   const flyTo = useCallback<MapCamera["flyTo"]>((target) => {
     setViewState((vs) => ({ ...vs, ...target, ...TRANSITION }));
   }, []);
 
+  // Held in a ref so `onResize` can replay a fit without either callback depending on the other —
+  // both must stay `useCallback([])`-stable, which is what lets a caller capture them once.
+  const applyFit = useRef<MapCamera["fitBounds"]>(() => {});
+
   const fitBounds = useCallback<MapCamera["fitBounds"]>((pts, opts) => {
     if (pts.length === 0) return;
+    // Nothing has told us how big the canvas is, so solving now would use the placeholder above.
+    // Hold the request; `onResize` replays it. `MapCanvas` dispatches a synthetic resize shortly
+    // after mount, so this always lands rather than being dropped.
+    if (!sized.current) {
+      heldFit.current = [pts, opts];
+      return;
+    }
     let minLon = Infinity;
     let minLat = Infinity;
     let maxLon = -Infinity;
@@ -109,9 +134,14 @@ export function useMapCamera(
       return;
     }
     try {
-      // Seed from the live viewState ref (not the render-captured value) and the current canvas size,
-      // so this callback stays stable — callers that capture it once (e.g. a mount-time auto-fit
-      // effect) still solve against the up-to-date size instead of a stale 800×600 default.
+      // Seed from the live viewState ref rather than the render-captured value, so this callback
+      // stays stable.
+      //
+      // This comment used to claim that a caller capturing `fitBounds` once — "e.g. a mount-time
+      // auto-fit effect" — would still solve against an up-to-date size. That was wrong, and it is
+      // why the fault looked handled: `size.current` is only written by `onResize`, which fires
+      // after effects, so a mount-time fit read the 800×600 placeholder. The guard above is what
+      // actually makes the claim true (#540).
       const vp = new WebMercatorViewport({ ...latest.current, ...size.current });
       const { longitude, latitude, zoom } = vp.fitBounds(
         [
@@ -132,6 +162,7 @@ export function useMapCamera(
     }
     // `latest`/`size` are refs, so this stays stable across camera moves.
   }, [flyTo]);
+  applyFit.current = fitBounds;
 
   const home = useCallback(() => setViewState({ ...US_HOME, ...TRANSITION }), []);
 

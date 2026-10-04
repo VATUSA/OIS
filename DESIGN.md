@@ -46,7 +46,9 @@ headers. It should feel calm, precise, and obviously the same product on every s
 8. **Air in headers, density in tables.** Page headers and margins breathe; data tables are
    deliberately dense. Both are correct — don't pad a 500-row table like a marketing page.
 9. **Tokens only — never inline a value.** Every colour, radius, space, and font size comes from a
-   token. A hardcoded hex or px in a component is a bug; it's what makes a system drift.
+   token. A hardcoded hex or px in a component is a bug; it's what makes a system drift. The sole
+   exception is a page that physically cannot load the stylesheet — see § "Standalone pages outside
+   the app", which lists every one and the conditions they must meet.
 
 ---
 
@@ -150,8 +152,36 @@ rule about *this stylesheet*; it does not mean the app is a hard-cornered rectan
   sidebar. Inside: the page header (700 title + count chip + subtitle, with a segmented view switch)
   and the content. Don't repeat the page's name in section headings.
 
-Every signed-in page renders inside this shell. The only page outside it is the signed-out homepage,
-which keeps the public landing and the site footer (the footer appears nowhere else).
+Every signed-in page renders inside this shell. The only pages outside it are the signed-out
+homepage — which keeps the public landing and the site footer (the footer appears nowhere else) —
+and the standalone pages below.
+
+### Standalone pages outside the app
+
+A page served by something other than the web app cannot reach `packages/ui`'s stylesheet, the
+shell, or the self-hosted fonts. Such a page is allowed to inline a copy of the tokens it needs, as
+a **documented exception to non-negotiable #9**, under all of these conditions:
+
+- It is genuinely unable to load the stylesheet — not merely inconvenient. The test is whether the
+  page would still have to work with **no network at all**.
+- The inlined values carry a comment naming `packages/ui/src/styles/globals.css` as the source of
+  truth, so the next reader knows the copy can go stale and that the stylesheet wins.
+- Everything else in the system still applies: one accent, no gradients, no shadows (elevation is a
+  surface step plus a hairline), 1px `--line` hairlines, the 400/600/700 ladder with 500 banned,
+  `--r-lg` on panels, and a solid `--brand` pill with dark ink for a primary button.
+- It is listed here.
+
+**The list:**
+
+- **The desktop sign-in callback tab** (`desktop/src-tauri/src/auth.rs`, `callback_page`). Served by
+  the Tauri app's own loopback listener on `127.0.0.1:8765` as a single self-contained string, in
+  four states (signed in, waiting, timed out, superseded). Deliberately **dark-only**, with no
+  `prefers-color-scheme` branch: the app window it hands back to is unconditionally dark
+  (`tauri.conf.json`'s `backgroundColor: "#08080a"`, which is `--ground`), so honouring a light OS
+  preference would flash a light page on the way into a dark app. Its colours are held to
+  `globals.css` by `the_inlined_tokens_match_the_stylesheet`, which reads the stylesheet itself — the
+  only thing standing between the copy and silent drift. `--r-lg` comes from the token table above,
+  which `globals.css` does not define, and the font stacks are system-fallback approximations.
 
 ## Components (one each, tokens only)
 
@@ -207,6 +237,8 @@ Report each miss as `file:line — rule → fix`.
 - [ ] Tables use `DataTable`; charts use the `@ois/ui` chart components; overlays use `Dialog`/`Sheet`.
 - [ ] Links and nav items the user can't use are not rendered.
 - [ ] Legible in both dark and light.
+- [ ] A page listed under § "Standalone pages outside the app" is exempt from the hex, shell and
+      dark/light rows above — check it against the conditions there instead, not against this list.
 
 ---
 

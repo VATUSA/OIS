@@ -7,6 +7,8 @@
 //! additionally requires `OIS_PUBLIC_URL` (the receiver must be a public HTTPS endpoint).
 
 use std::collections::HashSet;
+use std::future::Future;
+use std::sync::Arc;
 use std::time::Duration;
 
 use chrono::{DateTime, Utc};
@@ -14,12 +16,17 @@ use serde::{Deserialize, Deserializer};
 use sqlx::PgPool;
 
 use crate::config::{ois_public_url, vatusa_api_base, vatusa_api_key};
+use crate::job_registry::{JobRegistry, run_interval};
 use crate::repos::vatusa as repo;
 
 /// How often the reconciliation job refreshes the least-recently-synced members.
 const RECONCILE_INTERVAL: Duration = Duration::from_secs(6 * 3600);
 /// Members refreshed per reconciliation tick (keeps VATUSA request volume modest).
 const RECONCILE_BATCH: i64 = 200;
+/// The reconcile job's name on the admin Background Tasks page.
+pub const RECONCILE_JOB: &str = "vatusa_reconcile";
+/// How long sign-in waits for VATUSA before continuing without it (#548).
+const LOGIN_SYNC_BUDGET: Duration = Duration::from_secs(5);
 
 // --- VATUSA v2 /user/{cid} response ---
 
@@ -173,8 +180,41 @@ pub async fn sync_member(pool: &PgPool, cid: i64) -> Result<(), String> {
         .map_err(|e| format!("VATUSA upsert for {cid} failed: {e}"))
 }
 
-/// Fire-and-forget a member sync (used on the sign-in path so login latency isn't tied to
-/// VATUSA availability).
+/// Sync a member as part of sign-in, **awaited**, so a first-ever login already holds the access its
+/// VATUSA roles map to when the session is issued (#548). Before, the sync was detached and a new
+/// user's first session saw an empty role table.
+///
+/// Bounded by `LOGIN_SYNC_BUDGET`: if VATUSA is slow, sign-in proceeds and the sync finishes in the
+/// background. A VATUSA error is logged and sign-in proceeds — login never fails because of VATUSA.
+pub async fn sync_member_on_login(pool: &PgPool, cid: i64) {
+    if vatusa_api_key().is_none() {
+        return;
+    }
+    if !completes_within(LOGIN_SYNC_BUDGET, sync_member(pool, cid)).await {
+        spawn_member_sync(pool.clone(), cid);
+    }
+}
+
+/// Whether `sync` finished — successfully or not — inside `budget`. Split from
+/// `sync_member_on_login` so the bound is testable without calling VATUSA.
+async fn completes_within(
+    budget: Duration,
+    sync: impl Future<Output = Result<(), String>>,
+) -> bool {
+    match tokio::time::timeout(budget, sync).await {
+        Ok(Ok(())) => true,
+        Ok(Err(e)) => {
+            tracing::warn!("{e}");
+            true
+        }
+        Err(_) => {
+            tracing::warn!("VATUSA sync exceeded the sign-in budget; finishing in the background");
+            false
+        }
+    }
+}
+
+/// Fire-and-forget a member sync (the webhook receiver, and sign-in's fallback when VATUSA is slow).
 pub fn spawn_member_sync(pool: PgPool, cid: i64) {
     if vatusa_api_key().is_none() {
         return;
@@ -255,35 +295,47 @@ async fn register_webhooks(pool: &PgPool, api_key: &str, public_url: &str) -> Re
 /// Periodically refresh the least-recently-synced members — a backstop for missed webhook
 /// deliveries (which are single-attempt, no-retry) and for non-roster changes (rating, name)
 /// that don't emit a webhook.
-pub fn spawn_reconcile(pool: PgPool) {
+pub fn spawn_reconcile(reg: Arc<JobRegistry>, pool: PgPool) {
     if vatusa_api_key().is_none() {
         return;
     }
-    tokio::spawn(async move {
-        let mut ticker = tokio::time::interval(RECONCILE_INTERVAL);
-        loop {
-            ticker.tick().await;
-            match reconcile_once(&pool).await {
-                Ok(n) if n > 0 => tracing::info!(refreshed = n, "VATUSA reconciliation tick"),
-                Ok(_) => {}
-                Err(e) => tracing::warn!("VATUSA reconciliation failed: {e}"),
-            }
-        }
-    });
+    tokio::spawn(reconcile_job(reg, pool));
 }
 
-async fn reconcile_once(pool: &PgPool) -> Result<usize, String> {
+/// The reconcile loop as a registered job (#548): it appears on the admin Background Tasks page, can
+/// be triggered from there, and a tick in which any member failed shows as a failure — before, it ran
+/// on a bare interval and a wedged sync was visible only in the logs.
+async fn reconcile_job(reg: Arc<JobRegistry>, pool: PgPool) {
+    run_interval(
+        reg,
+        RECONCILE_JOB,
+        "Refresh the least-recently-synced VATUSA members and their mapped access",
+        RECONCILE_INTERVAL,
+        move || {
+            let pool = pool.clone();
+            async move { reconcile_once(&pool).await }
+        },
+    )
+    .await;
+}
+
+async fn reconcile_once(pool: &PgPool) -> Result<String, String> {
     let cids = repo::stale_member_cids(pool, RECONCILE_BATCH)
         .await
         .map_err(|e| e.to_string())?;
-    let mut ok = 0;
+    let total = cids.len();
+    let mut failed = 0;
     for cid in cids {
-        match sync_member(pool, cid).await {
-            Ok(()) => ok += 1,
-            Err(e) => tracing::warn!("{e}"),
+        if let Err(e) = sync_member(pool, cid).await {
+            tracing::warn!("{e}");
+            failed += 1;
         }
     }
-    Ok(ok)
+    if failed > 0 {
+        Err(format!("{failed} of {total} members failed to sync"))
+    } else {
+        Ok(format!("{total} members refreshed"))
+    }
 }
 
 /// Extract the affected CIDs from a `roster_change` webhook payload. For `controllers` rows the
@@ -353,5 +405,93 @@ mod tests {
         let no: VatusaMember =
             serde_json::from_value(json!({ "cid": 1, "flag_homecontroller": false })).unwrap();
         assert!(!no.flag_homecontroller);
+    }
+
+    /// AC3 (#548): the login sync is *awaited* — when `completes_within` returns, the mapped grant
+    /// already exists, so the session issued next carries it. Driven with an in-process sync rather
+    /// than the HTTP fetch, which is the only part replaced.
+    #[sqlx::test]
+    async fn the_login_sync_has_landed_by_the_time_it_returns(pool: PgPool) {
+        let user: String = sqlx::query_scalar(
+            "insert into identity.users (full_name, display_name, cid) \
+             values ('T', 'T', 1548001) returning id",
+        )
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        sqlx::query(
+            "insert into access.vatusa_role_mappings (vatusa_role, role_name) values ('DATM', 'EC')",
+        )
+        .execute(&pool)
+        .await
+        .unwrap();
+        let member: VatusaMember = serde_json::from_value(json!({
+            "cid": 1548001, "roles": [{ "role": "DATM", "facility": "ZDC" }]
+        }))
+        .unwrap();
+
+        let sync = async {
+            repo::upsert_member(&pool, &member)
+                .await
+                .map_err(|e| e.to_string())
+        };
+        assert!(completes_within(LOGIN_SYNC_BUDGET, sync).await);
+
+        let held: Vec<String> = sqlx::query_scalar(
+            "select role_name from access.user_roles where user_id = $1 and source = 'vatusa'",
+        )
+        .bind(&user)
+        .fetch_all(&pool)
+        .await
+        .unwrap();
+        assert_eq!(held, vec!["EC".to_string()]);
+    }
+
+    /// A VATUSA that never answers cannot hold sign-in hostage: the budget ends the wait.
+    #[tokio::test]
+    async fn a_hung_vatusa_is_abandoned_at_the_budget() {
+        let started = std::time::Instant::now();
+        let hung = std::future::pending::<Result<(), String>>();
+        assert!(!completes_within(Duration::from_millis(50), hung).await);
+        assert!(started.elapsed() < Duration::from_secs(2));
+    }
+
+    /// The wiring half of AC3, which a unit test of the helper cannot see: sign-in must await the sync
+    /// *before* issuing the session, and must no longer fire-and-forget it. Reverting `auth.rs` to the
+    /// detached `spawn_member_sync` fails this.
+    #[test]
+    fn sign_in_awaits_the_sync_before_issuing_the_session() {
+        let auth = include_str!("../handlers/auth.rs");
+        let sync = auth
+            .find("sync_member_on_login(pool, profile.cid).await")
+            .expect("sign-in must await sync_member_on_login");
+        let session = auth
+            .find("insert_session(")
+            .expect("sign-in issues a session");
+        assert!(
+            sync < session,
+            "the sync must land before the session is issued"
+        );
+        assert!(
+            !auth.contains("spawn_member_sync"),
+            "sign-in must not detach the VATUSA sync"
+        );
+    }
+
+    /// AC7 (#548): the reconcile loop is a registered job, so it is listed on Background Tasks.
+    #[sqlx::test]
+    async fn the_reconcile_job_is_on_the_background_tasks_page(pool: PgPool) {
+        let reg = Arc::new(JobRegistry::new());
+        let job = tokio::spawn(reconcile_job(reg.clone(), pool));
+        let mut listed = false;
+        for _ in 0..100 {
+            if reg.snapshot().iter().any(|j| j.name == RECONCILE_JOB) {
+                listed = true;
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+        job.abort();
+        assert!(listed, "{RECONCILE_JOB} must be registered");
     }
 }

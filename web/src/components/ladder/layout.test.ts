@@ -122,3 +122,44 @@ describe("fitHorizontal", () => {
     expect(fitHorizontal([], widthOf, 2, 100)).toEqual({ shown: [], overflowCount: 0 });
   });
 });
+
+// VATUSA/OIS#557: the TGUI ladder places each of its rails with these same primitives, at its own
+// dimensions (60 min × 6 px, rows of 18 px, a 10 px floor, 8 px top pad). The invariants the classic
+// ladder earned (#62/#64/#81) must hold for a rail too.
+describe("a TGUI rail (#557 AC4)", () => {
+  const H = 60 * 6;
+  const yOf = (min: number) => H - (Math.max(0, Math.min(min, 60)) / 60) * H;
+  const rail = { yOf, rowGap: 18, minGap: 10, height: H, pad: 8 };
+
+  it("never stretches under density: 40 slots stay inside [pad, H], NOW stays pinned at the bottom", () => {
+    const buckets = Array.from({ length: 40 }, (_, i) => [item(`a${i}`, i * 0.1, `t${i}`)]);
+    const placed = placeSlots(buckets, rail);
+    expect(placed[0].y).toBe(H);
+    for (const { y } of placed) {
+      expect(y).toBeGreaterThanOrEqual(rail.pad);
+      expect(y).toBeLessThanOrEqual(H);
+    }
+  });
+
+  it("pushes a packed slot up, never down — each sits at or above its true time", () => {
+    const buckets = [0, 0.2, 0.4, 0.6, 30].map((m, i) => [item(`a${i}`, m, `t${i}`)]);
+    const placed = placeSlots(buckets, rail);
+    placed.forEach(({ y, bucket }, i) => {
+      expect(y).toBeLessThanOrEqual(yOf(bucket[0].min));
+      if (i > 0) expect(y).toBeLessThan(placed[i - 1].y);
+    });
+    // A slot with room is not moved at all.
+    expect(placed[4].y).toBe(yOf(30));
+  });
+
+  it("gives six same-time aircraft one slot, and fits them to the rail's width with an overflow", () => {
+    const same = Array.from({ length: 6 }, (_, i) => item(`a${i}`, 20, "t"));
+    const buckets = bucketByTime(same);
+    expect(buckets).toHaveLength(1);
+    expect(placeSlots(buckets, rail)).toHaveLength(1);
+
+    const { shown, overflowCount } = fitHorizontal(buckets[0], () => 50, 4, 85);
+    expect(shown).toHaveLength(1);
+    expect(overflowCount).toBe(5);
+  });
+});

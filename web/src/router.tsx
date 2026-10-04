@@ -52,6 +52,7 @@ const HistoricalDashboardPage = lazyRouteComponent(
 import {AdminLayout} from "@/pages/admin/layout";
 import {AdminOverview} from "@/pages/admin/overview";
 import {AdminAccessControl} from "@/pages/admin/access-control";
+import {AdminGroups} from "@/pages/admin/groups";
 import {AdminAudit} from "@/pages/admin/audit";
 import {AdminJobs} from "@/pages/admin/jobs";
 import {AdminApiKeys} from "@/pages/admin/api-keys";
@@ -362,7 +363,9 @@ const popoutFcaRoute = createRoute({
 const downloadRoute = createRoute({
   getParentRoute: () => rootRoute,
   path: "download",
-  staticData: { title: "Download" },
+  // "Desktop app" everywhere — the footer, the sidebar and ⌘K all already call it that, and this
+  // title is what the breadcrumb and the window title render (#534).
+  staticData: { title: "Desktop app" },
   component: DownloadPage,
 });
 
@@ -540,6 +543,13 @@ const adminIndexRoute = createRoute({
   component: AdminOverview,
 });
 
+const adminGroupsRoute = createRoute({
+  getParentRoute: () => adminRoute,
+  path: "groups",
+  staticData: { title: "Groups" },
+  component: AdminGroups,
+});
+
 const adminAccessRoute = createRoute({
   getParentRoute: () => adminRoute,
   path: "access",
@@ -644,6 +654,7 @@ const routeTree = rootRoute.addChildren([
   adminRoute.addChildren([
     adminIndexRoute,
     adminAccessRoute,
+    adminGroupsRoute,
     adminAuditRoute,
     adminJobsRoute,
     adminApiKeysRoute,

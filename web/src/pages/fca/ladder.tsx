@@ -2,6 +2,9 @@ import {type FcaFlight} from "@/lib/fca";
 import {flightStatus} from "@/lib/status";
 import {hhmmZulu} from "@/lib/time";
 import {ArrivalLadder} from "@/components/ladder/ArrivalLadder";
+import {TguiLadder} from "@/components/ladder/TguiLadder";
+import type {TguiColumn} from "@/components/ladder/tgui";
+import {useSetting} from "@/lib/settings";
 
 /**
  * The FCA metering ladder — every crossing plotted by its metered time, now at the bottom.
@@ -43,7 +46,46 @@ export function ladderItems(flights: FcaFlight[], now: number) {
     .map((x) => ({ key: x.f.callsign, min: x.min, time: x.f.cross_time as string, data: x.f }));
 }
 
-export function Ladder({ flights, now }: { flights: FcaFlight[]; now: number }) {
+/**
+ * The same flights as one TGUI column (#557). Built from [`ladderItems`], so the schedule rail holds
+ * exactly the flights, at exactly the times, the classic ladder plots — one sequence, two renderings.
+ */
+export function tguiColumn(flights: FcaFlight[], now: number, name: string): TguiColumn {
+  return {
+    id: "fca",
+    name,
+    kind: "FCA",
+    items: ladderItems(flights, now).map(({ key, min, time, data: f }) => ({
+      key,
+      callsign: f.callsign,
+      etaMin: minutesUntil(f.eta, now),
+      etaTime: f.eta ?? null,
+      staMin: min,
+      staTime: time,
+      delayMin: f.delay_sec / 60,
+      committed: f.released,
+    })),
+  };
+}
+
+/**
+ * The FCA ladder, in whichever style the user chose (`ladder.style`). The choice is read **here**,
+ * not by the callers, so the detail panel and the pop-out can never disagree (#349, #557).
+ */
+export function Ladder({ flights, now, name = "FCA" }: { flights: FcaFlight[]; now: number; name?: string }) {
+  const style = useSetting<string>("ladder.style", "classic");
+  // Render nothing until the setting is known, rather than flash the classic ladder and then swap.
+  if (style.isLoading) return null;
+  if (style.value === "tgui") {
+    return (
+      <TguiLadder
+        columns={[tguiColumn(flights, now, name)]}
+        now={now}
+        win={LADDER_WIN}
+        emptyMessage={`No crossings in the next ${LADDER_WIN} min.`}
+      />
+    );
+  }
   const items = ladderItems(flights, now);
 
   return (

@@ -69,6 +69,12 @@ fn facility_kind(facility: i32) -> Option<&'static str> {
 /// drop them from stats collection. The map filters on [`Boundaries::has`] at its own call site
 /// instead (VATUSA/OIS#482).
 pub(crate) fn center_artcc(prefix: &str) -> Option<String> {
+    // Honolulu is `HCF` in OIS — `org.facilities`, VATUSA, grants and the boundary assets all say so
+    // (#556). `ZHN` is the old FAA-style spelling some data still uses; it is checked **before** the
+    // bare-`Zxx` branch below, which would otherwise return it verbatim as an id no facility has.
+    if prefix == "ZHN" {
+        return Some("HCF".to_string());
+    }
     if prefix.len() == 3
         && prefix.starts_with('Z')
         && prefix.bytes().all(|b| b.is_ascii_alphanumeric())
@@ -103,7 +109,10 @@ pub(crate) fn center_artcc(prefix: &str) -> Option<String> {
         "SEA" => "ZSE",
         "SLC" => "ZLC",
         "ANC" => "ZAN",
-        "HCF" => "ZHN",
+        // VATSpy lists **both** prefixes for Honolulu (`PHZH|Honolulu|HNL` and `…|HCF`), and the
+        // controller actually on the network logs on as `HNL_*` — which was missing, so they were
+        // never drawn and never counted as a US controller (#556).
+        "HNL" | "HCF" => "HCF",
         "SJU" => "ZSU",
         _ => return None,
     };
@@ -432,5 +441,45 @@ mod tests {
     #[test]
     fn a_bermuda_controller_no_longer_shades_new_york() {
         assert!(board_with(&["BDA_CTR"]).centers.is_empty());
+    }
+
+    /// VATUSA/OIS#556. VATSpy lists two prefixes for Honolulu (`PHZH|Honolulu|HNL` and `…|HCF`), and
+    /// the controller actually on the network logs on as `HNL_*` — `HNL_02_CTR` was online while this
+    /// was written, and resolved to nothing. Every spelling now lands on OIS's one id, `HCF`.
+    #[test]
+    fn every_honolulu_prefix_resolves_to_hcf() {
+        for prefix in ["HNL", "HCF", "ZHN"] {
+            assert_eq!(center_artcc(prefix).as_deref(), Some("HCF"), "{prefix}");
+        }
+    }
+
+    /// `ZHN` must be caught before the bare-`Zxx` branch, which otherwise returns it verbatim. The
+    /// branch itself still works for every other centre.
+    #[test]
+    fn the_zhn_alias_is_not_swallowed_by_the_bare_zxx_branch() {
+        assert_eq!(center_artcc("ZHN").as_deref(), Some("HCF"));
+        assert_eq!(center_artcc("ZLA").as_deref(), Some("ZLA"));
+        assert_eq!(center_artcc("ZUA").as_deref(), Some("ZUA"));
+    }
+
+    /// The board shades a centre only if the boundary set has that id, so `HCF` has to be in it — and
+    /// Honolulu itself has to fall inside the polygon.
+    #[test]
+    fn an_hnl_centre_has_a_boundary_to_draw() {
+        let boundaries = crate::feed::airspace::Boundaries::load();
+        let id = center_artcc("HNL").expect("HNL resolves");
+
+        assert!(
+            boundaries.has(&id),
+            "the board filters on `has`, so this is what makes it drawn"
+        );
+        assert!(
+            boundaries.contains(&id, 21.32, -157.92),
+            "PHNL sits inside the HCF polygon"
+        );
+        assert!(
+            !boundaries.has("ZHN"),
+            "and no stale ZHN feature is left behind"
+        );
     }
 }

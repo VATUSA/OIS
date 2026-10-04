@@ -42,6 +42,9 @@ async fn build_summary(
     let (_, effective) = match principal {
         Principal::User(u) => acl::fetch_user_access(Some(pool), &u.id).await?,
         Principal::ApiKey(k) => acl::fetch_api_key_access(Some(pool), k).await?,
+        Principal::ServiceAccount(sa) => {
+            acl::fetch_service_account_access(Some(pool), &sa.id).await?
+        }
     };
     let holds = |permission: PermissionPath| effective.contains(&permission);
 
@@ -189,15 +192,15 @@ mod tests {
             sqlx::query(sql).execute(pool).await.unwrap();
         }
         sqlx::query(
-            "insert into access.user_roles (user_id, role_name) values ($1, 'SUMMARY_TEST')",
+            "insert into access.user_roles (user_id, role_name, source) values ($1, 'SUMMARY_TEST', 'manual')",
         )
         .bind(user)
         .execute(pool)
         .await
         .unwrap();
         sqlx::query(
-            "insert into access.user_permissions (user_id, permission_name, granted) \
-             select $1, name, false from access.permissions \
+            "insert into access.user_permissions (user_id, permission_name, granted, source) \
+             select $1, name, false, 'manual' from access.permissions \
              where name in ('audit.logs.read', 'access.users.read', 'system.jobs.read')",
         )
         .bind(user)

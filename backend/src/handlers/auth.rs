@@ -49,15 +49,10 @@ const DESKTOP_STATE_MAX_LEN: usize = 128;
 /// Marks a session token as belonging to the desktop app; `auth::middleware` dispatches on it.
 const DESKTOP_SESSION_TOKEN_PREFIX: &str = "ois_dsk_";
 
-/// Baseline self-service permissions every non-SERVER_ADMIN user is entitled to.
-/// Seeded on first login; every name here must exist in `access.permissions`.
-const BASELINE_SELF_SERVICE_PERMISSIONS: &[&str] = &[
-    "auth.profile.read",
-    "auth.profile.update",
-    "auth.sessions.delete",
-    "access.self.read",
-    "users.directory.read",
-];
+/// The group every signed-in user holds. Its permission set lives in `access.role_permissions`
+/// (migration 0094) rather than being copied onto each user — editing the group changes everyone's
+/// baseline with no backfill, which is the whole point of #542.
+const BASELINE_ROLE: &str = "USER";
 
 #[derive(Deserialize)]
 pub struct LoginQuery {
@@ -218,9 +213,10 @@ pub async fn vatsim_callback(
 
     ensure_user_login_access(pool, &user_id, profile.cid, was_new_user).await?;
 
-    // Enrich with VATUSA member details in the background (best-effort — login never waits on,
-    // nor fails because of, VATUSA availability). No-ops when VATUSA_API_KEY is unset.
-    crate::feed::vatusa::spawn_member_sync(pool.clone(), profile.cid);
+    // Sync VATUSA details and the access their roles map to *before* issuing the session, so a
+    // first-ever login is already correct (#548). Bounded and best-effort: a slow or failing VATUSA
+    // never fails the login. No-ops when VATUSA_API_KEY is unset.
+    crate::feed::vatusa::sync_member_on_login(pool, profile.cid).await;
 
     let session_token = Uuid::new_v4().to_string();
     auth_repo::insert_session(pool, &session_token, &user_id).await?;
@@ -428,10 +424,9 @@ async fn build_me_body(state: &AppState, user: &CurrentUser) -> Result<MeBody, A
     // `permissions` is a flat name tree with no ARTCC dimension, so a client can't tell a national
     // (DCC) reader from a facility-scoped one. Resolve that one question here (#405).
     let tmu_national = match state.db.as_ref() {
-        Some(pool) => matches!(
-            access_repo::permission_scope(pool, &user.id, TMU_READ_PERMISSION).await?,
-            access_repo::PermissionScope::National
-        ),
+        Some(pool) => access_repo::permission_scope(pool, &user.id, TMU_READ_PERMISSION)
+            .await?
+            .is_national(),
         None => false,
     };
     Ok(MeBody {
@@ -477,8 +472,8 @@ async fn bootstrap_login_user(
     Ok((user.id, user.was_new_user))
 }
 
-/// Reconciles the SERVER_ADMIN role against `OIS_SERVER_ADMIN_CID` on every login and
-/// seeds baseline self-service permissions for new (or just-demoted) users.
+/// Reconciles the SERVER_ADMIN role against `OIS_SERVER_ADMIN_CID` on every login, and gives a new
+/// (or just-demoted) user the baseline by putting them in the [`BASELINE_ROLE`] group.
 async fn ensure_user_login_access(
     pool: &sqlx::PgPool,
     user_id: &str,
@@ -500,11 +495,19 @@ async fn ensure_user_login_access(
     let demoted = access_repo::revoke_server_admin(&mut tx, user_id).await?;
 
     if was_new_user || demoted {
-        let baseline: Vec<String> = BASELINE_SELF_SERVICE_PERMISSIONS
-            .iter()
-            .map(|permission| permission.to_string())
-            .collect();
-        access_repo::replace_user_permissions(&mut tx, user_id, &baseline).await?;
+        // The baseline now arrives through the `USER` group, not as five direct rows (#544). The
+        // wipe stays: a demotion must leave a former admin holding no national grants of their own,
+        // and `replace_user_permissions` with an empty set is exactly that clearing.
+        access_repo::replace_user_permissions(&mut tx, user_id, &[]).await?;
+        // `System`: OIS grants the baseline group itself, so sync and admins both leave it alone.
+        access_repo::set_user_role(
+            &mut tx,
+            user_id,
+            BASELINE_ROLE,
+            true,
+            access_repo::GrantSource::System,
+        )
+        .await?;
     }
 
     tx.commit().await.map_err(|_| ApiError::Internal)?;
@@ -686,5 +689,135 @@ mod tests {
 
         let body = build_me_body(&state, &current_user(&none)).await.unwrap();
         assert!(!body.tmu_national, "no grant is not national");
+    }
+
+    /// AC3 of #544: the baseline arrives as **group membership**, not as per-user rows.
+    ///
+    /// That is the property that makes the group model worth having — editing `USER`'s permission set
+    /// changes every signed-in user's baseline with no backfill. The old path wrote five
+    /// `access.user_permissions` rows per user, which is exactly the duplication the epic removes.
+    #[sqlx::test]
+    async fn a_new_user_gets_the_baseline_from_the_user_group_not_direct_rows(pool: PgPool) {
+        let user = seed_user(&pool).await;
+
+        super::ensure_user_login_access(&pool, &user, 9_999_999, true)
+            .await
+            .unwrap();
+
+        let roles: Vec<String> = sqlx::query_scalar(
+            "select role_name from access.user_roles where user_id = $1 and artcc_id is null",
+        )
+        .bind(&user)
+        .fetch_all(&pool)
+        .await
+        .unwrap();
+        assert!(roles.iter().any(|r| r == "USER"), "got roles {roles:?}");
+
+        let direct: i64 =
+            sqlx::query_scalar("select count(*) from access.user_permissions where user_id = $1")
+                .bind(&user)
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+        assert_eq!(direct, 0, "no permission should be copied onto the user");
+
+        // And the baseline still actually resolves, through the group.
+        let effective = access_repo::fetch_effective_permissions(&pool, &user)
+            .await
+            .unwrap();
+        for name in [
+            "auth.profile.read",
+            "auth.profile.update",
+            "auth.sessions.delete",
+            "access.self.read",
+            "users.directory.read",
+        ] {
+            assert!(effective.contains_key(name), "baseline missing {name}");
+        }
+    }
+
+    /// A demotion must still clear the ex-admin's own national grants — the reason the wipe survived
+    /// the move to a group. Without it a former admin would keep everything they had been granted
+    /// directly while appearing to be reset to baseline.
+    #[sqlx::test]
+    async fn a_demotion_clears_direct_grants_and_leaves_only_the_group(pool: PgPool) {
+        let user = seed_user(&pool).await;
+        grant(&pool, &user, "tmu.program.update", None).await;
+        sqlx::query(
+            "insert into access.user_roles (user_id, role_name, source) values ($1, 'SERVER_ADMIN', 'system')",
+        )
+        .bind(&user)
+        .execute(&pool)
+        .await
+        .unwrap();
+
+        super::ensure_user_login_access(&pool, &user, 9_999_999, false)
+            .await
+            .unwrap();
+
+        let direct: i64 =
+            sqlx::query_scalar("select count(*) from access.user_permissions where user_id = $1")
+                .bind(&user)
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+        assert_eq!(direct, 0, "a demotion clears direct national grants");
+
+        let effective = access_repo::fetch_effective_permissions(&pool, &user)
+            .await
+            .unwrap();
+        assert!(
+            !effective.contains_key("tmu.program.update"),
+            "the demoted admin keeps nothing beyond the baseline"
+        );
+        assert!(
+            effective.contains_key("access.self.read"),
+            "but keeps the baseline"
+        );
+    }
+
+    /// `/me` could contradict itself (VATUSA/OIS#543): `tmu_national` came from the scoped resolver,
+    /// which never read denies, while `permissions` came from the view, which did. So a national
+    /// grant plus a deny reported `tmu_national: true` beside a permission tree that omitted the
+    /// very same permission. One resolver means the two cannot disagree.
+    #[sqlx::test]
+    async fn a_denied_reader_is_neither_national_nor_in_the_permission_tree(pool: PgPool) {
+        let user = seed_user(&pool).await;
+        // The allow comes from a role: `access.user_permissions` is unique on
+        // `(user_id, permission_name, coalesce(artcc_id, ''))`, so a direct allow and a direct deny
+        // cannot both exist at national scope. In practice a deny always overrides a role-derived
+        // grant, which is exactly the shape #542 creates.
+        sqlx::query("insert into access.roles (name) values ('TMU_TEST') on conflict do nothing")
+            .execute(&pool)
+            .await
+            .unwrap();
+        sqlx::query(
+            "insert into access.role_permissions (role_name, permission_name) values ('TMU_TEST', $1)",
+        )
+        .bind(TMU_READ_PERMISSION)
+        .execute(&pool)
+        .await
+        .unwrap();
+        sqlx::query("insert into access.user_roles (user_id, role_name, source) values ($1, 'TMU_TEST', 'manual')")
+            .bind(&user)
+            .execute(&pool)
+            .await
+            .unwrap();
+        crate::scope_test_support::deny_scoped(&pool, &user, TMU_READ_PERMISSION, None).await;
+
+        let state = test_state(pool, HashMap::new());
+        let body = build_me_body(&state, &current_user(&user)).await.unwrap();
+
+        assert!(
+            !body.tmu_national,
+            "a denied permission cannot still read as national authority"
+        );
+        let names = access_repo::fetch_user_permission_names(state.db.as_ref().unwrap(), &user)
+            .await
+            .unwrap();
+        assert!(
+            !names.iter().any(|n| n == TMU_READ_PERMISSION),
+            "and it must be absent from the permission tree too — the two answers must agree"
+        );
     }
 }
