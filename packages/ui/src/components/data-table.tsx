@@ -68,6 +68,12 @@ export type DataTableProps<T extends RowData> = {
   serverPagination?: ServerPagination;
   selection?: Selection;
   onRowClick?: (row: T) => void;
+  /** Right-click on a row (e.g. a row menu). The handler decides whether to `preventDefault`. */
+  onRowContextMenu?: (row: T, event: React.MouseEvent<HTMLTableRowElement>) => void;
+  /** `false` turns column sorting off, so rows stay in the order `data` gives them (default on). */
+  sortable?: boolean;
+  /** Rows rendered in a `<tfoot>` under the body — e.g. a column-label row for a wide grid. */
+  footer?: React.ReactNode;
   rowClassName?: (row: T) => string | undefined;
   /** Keep the header visible while rows scroll; pair with `maxHeight` so the table owns the scroll. */
   stickyHeader?: boolean;
@@ -102,6 +108,9 @@ export function DataTable<T extends RowData>({
   serverPagination,
   selection,
   onRowClick,
+  onRowContextMenu,
+  sortable: sortingAllowed = true,
+  footer,
   rowClassName,
   stickyHeader = false,
   maxHeight,
@@ -116,7 +125,7 @@ export function DataTable<T extends RowData>({
   const [ownSort, setOwnSort] = React.useState<SortingState>(initialSort ?? []);
   // A server page is one slice of the API's ordering; sorting it locally would misrepresent the
   // whole set, so server-paged tables keep the API's order.
-  const sortable = serverPagination == null;
+  const sortable = serverPagination == null && sortingAllowed;
   const sorting = sortable ? (sort ?? ownSort) : [];
   const [expanded, setExpanded] = React.useState(false);
   const [page, setPage] = React.useState(1);
@@ -229,6 +238,7 @@ export function DataTable<T extends RowData>({
                   key={row.id}
                   aria-selected={selection ? on : undefined}
                   onClick={clickable ? () => onRow(row) : undefined}
+                  onContextMenu={onRowContextMenu ? (e) => onRowContextMenu(row.original, e) : undefined}
                   className={cn(
                     "border-b border-line-soft last:border-b-0",
                     clickable && "cursor-pointer hover:bg-panel-2",
@@ -267,6 +277,7 @@ export function DataTable<T extends RowData>({
               );
             })}
           </tbody>
+          {footer != null && <tfoot className="border-t border-line bg-card">{footer}</tfoot>}
         </table>
       </div>
       <TableFooter

@@ -109,6 +109,11 @@ export const AREAS: readonly NavArea[] = [
         ],
       },
       {
+        label: "Flow",
+        prefix: "/admin/flow",
+        items: [{ label: "Monitor", to: "/admin/flow/monitor", icon: Radar, permission: "flow.monitor.read" }],
+      },
+      {
         label: "Historical",
         prefix: "/admin/historical",
         items: [
