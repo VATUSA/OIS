@@ -153,6 +153,16 @@ describe("sectorTooltip (#602)", () => {
     expect(html).toContain("&lt;img src=x onerror=&quot;alert(1)&quot;&gt;");
   });
 
+  /**
+   * Every imported text field reaches the html card, not just the name: the sector id and ARTCC come from
+   * the same source data. (The tier is safe — the database constrains it to four values.)
+   */
+  it.each(["sector_id", "artcc"] as const)("escapes markup in the %s too", (field) => {
+    const html = sectorHtml({ ...volume, [field]: '<img src=x onerror="alert(1)">' });
+    expect(html).not.toContain("<img");
+    expect(html).toContain("&lt;img src=x onerror=&quot;alert(1)&quot;&gt;");
+  });
+
   it("answers only for the sector layer", () => {
     expect(sectorTooltip()(pick("surface-gates", { volume }))).toBeNull();
     expect(sectorTooltip()(pick("airspace-sectors", {}))).toBeNull();
