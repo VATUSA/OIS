@@ -4976,6 +4976,36 @@ mod release_swap_tests {
         assert_eq!(times(&pool, &id, "UAL2").await, Some((1_000, 900)));
     }
 
+    /// The common IDST release is an aircraft connected at the gate, which the feed lists under
+    /// `pilots`, not `prefiles`; its departure must be found there too, or every connected flight's
+    /// swap is refused as `departure_unknown` (#56 review).
+    #[sqlx::test]
+    async fn two_connected_departures_on_one_runway_swap(pool: PgPool) {
+        use crate::feed::vatsim::{FlightPlan, Pilot, VatsimData};
+        let (state, id, cookie) = swap_case(&pool, &[]).await;
+        state.feed.write().await.snapshot =
+            Some(std::sync::Arc::new(crate::feed::Snapshot::of(VatsimData {
+                pilots: ["AAL1", "UAL2"]
+                    .into_iter()
+                    .map(|callsign| Pilot {
+                        callsign: callsign.into(),
+                        flight_plan: Some(FlightPlan {
+                            departure: "KJFK".into(),
+                            ..Default::default()
+                        }),
+                        ..Default::default()
+                    })
+                    .collect(),
+                ..Default::default()
+            })));
+        runway(&pool, "KJFK", "AAL1", "31L").await;
+        runway(&pool, "KJFK", "UAL2", "31L").await;
+
+        assert_eq!(swap(&state, &id, &cookie).await.0, http::StatusCode::OK);
+        assert_eq!(times(&pool, &id, "AAL1").await, Some((2_000, 1_900)));
+        assert_eq!(times(&pool, &id, "UAL2").await, Some((1_000, 900)));
+    }
+
     /// Each refusal names why, and writes nothing.
     #[sqlx::test]
     async fn a_swap_across_runways_or_airports_is_refused_and_writes_nothing(pool: PgPool) {
