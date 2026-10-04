@@ -150,6 +150,8 @@ pub fn draft_new_permission_names() -> Vec<&'static str> {
         "flow.surface_data.update", // manage an airport's gates/ramp areas/taxiways (facility-scoped)
         "flow.aircraft_profiles.read", // view aircraft performance profiles
         "flow.aircraft_profiles.update", // manage aircraft performance profiles (national)
+        "flow.monitor.read",        // view Airspace Monitor sectors and their alert parameters
+        "flow.monitor.update",      // set a sector's Monitor Alert Parameter (facility-scoped)
         // --- system: background-jobs viewer (read status; update = trigger a run) ---
         "system.jobs.read",
         "system.jobs.update",
