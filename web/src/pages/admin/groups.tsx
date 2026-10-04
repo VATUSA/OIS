@@ -4,7 +4,18 @@ import {Plus, ShieldCheck} from "lucide-react";
 
 import {usePageHeader} from "@/components/shell/page-meta";
 import {useCatalog, flattenTree} from "@/lib/access";
-import {type Group, useCreateGroup, useDeleteGroup, useGroups, useSaveGroup} from "@/lib/groups";
+import {
+  type Group,
+  useChangeMembership,
+  useCreateGroup,
+  useDeleteGroup,
+  useGroupMembers,
+  useGroups,
+  useSaveGroup,
+  useAddVatusaRoleMapping,
+  useRemoveVatusaRoleMapping,
+  useVatusaRoleMappings,
+} from "@/lib/groups";
 import {useMe} from "@/lib/auth";
 import {hasPermission} from "@/lib/permissions";
 
@@ -78,7 +89,262 @@ function PermissionList({
   );
 }
 
-function GroupCard({group, catalog}: {group: Group; catalog: string[]}) {
+/**
+ * Who holds this group, and where.
+ *
+ * Each scope is its own row because each is its own membership — a user holding `EC` nationally *and*
+ * at ZDC has two grants, and showing one row would repeat the flattening the admin user table's badges
+ * do. Removal therefore names the scope, not just the person.
+ */
+function Members({group, facilities}: {group: Group; facilities: {id: string; name: string}[]}) {
+  const [page, setPage] = useState(1);
+  const members = useGroupMembers(group.name, page);
+  const add = useChangeMembership(true);
+  const remove = useChangeMembership(false);
+  const [cid, setCid] = useState("");
+  const [artcc, setArtcc] = useState("");
+  const [reason, setReason] = useState("");
+
+  const canAdd = /^\d{5,8}$/.test(cid.trim()) && reason.trim().length > 0;
+  const total = members.data?.total ?? 0;
+  const pageSize = members.data?.page_size ?? 25;
+  const pages = Math.max(1, Math.ceil(total / pageSize));
+
+  return (
+    <div className="flex flex-col gap-3 border-t border-line-soft pt-4">
+      <span className={labelClass}>Members — {total}</span>
+
+      {members.data?.items.length === 0 && (
+        <p className="text-xs text-ink-3">Nobody holds this group.</p>
+      )}
+
+      <div className="flex flex-col gap-1">
+        {(members.data?.items ?? []).map((m) => (
+          <div
+            key={`${m.cid}:${m.artcc_id ?? ""}`}
+            className="flex items-center justify-between gap-3 rounded-xs bg-panel-2 px-2.5 py-1.5"
+          >
+            <div className="flex items-center gap-2">
+              <span className="text-sm font-semibold text-ink">{m.display_name}</span>
+              <span className="font-mono text-xs text-ink-3">{m.cid}</span>
+              <StatusPill tone={m.artcc_id ? "brand" : "neutral"}>
+                {m.artcc_id ?? "national"}
+              </StatusPill>
+            </div>
+            {!group.system && (
+              <ConfirmButton
+                variant="ghost"
+                onConfirm={() =>
+                  remove.mutate({
+                    name: group.name,
+                    body: {
+                      cid: m.cid,
+                      artcc_id: m.artcc_id,
+                      reason: `Removed from ${group.name}`,
+                    },
+                  })
+                }
+              >
+                Remove
+              </ConfirmButton>
+            )}
+          </div>
+        ))}
+      </div>
+
+      {pages > 1 && (
+        <div className="flex items-center gap-2">
+          <Button variant="outline" disabled={page <= 1} onClick={() => setPage(page - 1)}>
+            Previous
+          </Button>
+          <span className="font-mono text-xs text-ink-3">
+            {page} / {pages}
+          </span>
+          <Button variant="outline" disabled={page >= pages} onClick={() => setPage(page + 1)}>
+            Next
+          </Button>
+        </div>
+      )}
+
+      {!group.system && (
+        <div className="flex flex-wrap items-end gap-2">
+          <label className="flex flex-col gap-1">
+            <span className={labelClass}>CID</span>
+            <Input value={cid} onChange={(e) => setCid(e.target.value)} placeholder="1234567" />
+          </label>
+          <label className="flex flex-col gap-1">
+            <span className={labelClass}>Scope</span>
+            <select
+              value={artcc}
+              onChange={(e) => setArtcc(e.target.value)}
+              className="rounded-xs border border-line bg-panel-2 px-2 py-1.5 text-sm text-ink"
+            >
+              <option value="">National</option>
+              {facilities.map((f) => (
+                <option key={f.id} value={f.id}>
+                  {f.id}
+                </option>
+              ))}
+            </select>
+          </label>
+          <label className="flex min-w-48 flex-1 flex-col gap-1">
+            <span className={labelClass}>Reason</span>
+            <Input value={reason} onChange={(e) => setReason(e.target.value)} />
+          </label>
+          <Button
+            disabled={!canAdd || add.isPending}
+            onClick={() =>
+              add.mutate(
+                {
+                  name: group.name,
+                  body: {
+                    cid: Number(cid.trim()),
+                    artcc_id: artcc || undefined,
+                    reason: reason.trim(),
+                  },
+                },
+                {onSuccess: () => {
+                  setCid("");
+                  setReason("");
+                }},
+              )
+            }
+          >
+            Add member
+          </Button>
+        </div>
+      )}
+    </div>
+  );
+}
+
+/**
+ * Which VATUSA roles grant this group (#548). Adding one grants the group, at once, to every synced
+ * member holding that VATUSA role — scoped to the facility they hold it at, and nationally for a
+ * `ZHQ` (division) role. Only roles actually seen in synced members are offered: a role name typed
+ * by hand that VATUSA never sends would silently match nobody.
+ */
+export function VatusaRoles({
+  group,
+  facilities,
+}: {
+  group: Group;
+  facilities: {id: string; name: string}[];
+}) {
+  const mappings = useVatusaRoleMappings();
+  const add = useAddVatusaRoleMapping();
+  const remove = useRemoveVatusaRoleMapping();
+  const [role, setRole] = useState("");
+  const [facility, setFacility] = useState("");
+  const [reason, setReason] = useState("");
+
+  const mine = (mappings.data?.mappings ?? []).filter((m) => m.role_name === group.name);
+  const known = mappings.data?.known_vatusa_roles ?? [];
+
+  return (
+    <div className="flex flex-col gap-3 border-t border-line-soft pt-4">
+      <span className={labelClass}>VATUSA roles — {mine.length}</span>
+
+      {mine.length === 0 && (
+        <p className="text-xs text-ink-3">No VATUSA role grants this group.</p>
+      )}
+
+      <div className="flex flex-col gap-1">
+        {mine.map((m) => (
+          <div
+            key={m.id}
+            className="flex items-center justify-between gap-3 rounded-xs bg-panel-2 px-2.5 py-1.5"
+          >
+            <div className="flex items-center gap-2">
+              <span className="font-mono text-sm font-semibold text-ink">{m.vatusa_role}</span>
+              <StatusPill tone={m.facility ? "brand" : "neutral"}>
+                {m.facility ?? "any facility"}
+              </StatusPill>
+            </div>
+            <ConfirmButton variant="ghost" onConfirm={() => remove.mutate(m.id)}>
+              Remove
+            </ConfirmButton>
+          </div>
+        ))}
+      </div>
+
+      <div className="flex flex-wrap items-end gap-2">
+        <label className="flex flex-col gap-1">
+          <span className={labelClass}>VATUSA role</span>
+          <select
+            value={role}
+            onChange={(e) => setRole(e.target.value)}
+            className="rounded-xs border border-line bg-panel-2 px-2 py-1.5 text-sm text-ink"
+          >
+            <option value="">Choose…</option>
+            {known.map((r) => (
+              <option key={r} value={r}>
+                {r}
+              </option>
+            ))}
+          </select>
+        </label>
+        <label className="flex flex-col gap-1">
+          <span className={labelClass}>Held at</span>
+          <select
+            value={facility}
+            onChange={(e) => setFacility(e.target.value)}
+            className="rounded-xs border border-line bg-panel-2 px-2 py-1.5 text-sm text-ink"
+          >
+            <option value="">Any facility</option>
+            <option value="ZHQ">ZHQ (division)</option>
+            {facilities.map((f) => (
+              <option key={f.id} value={f.id}>
+                {f.id}
+              </option>
+            ))}
+          </select>
+        </label>
+        <label className="flex min-w-48 flex-1 flex-col gap-1">
+          <span className={labelClass}>Reason</span>
+          <Input value={reason} onChange={(e) => setReason(e.target.value)} />
+        </label>
+        <Button
+          disabled={!role || reason.trim().length === 0 || add.isPending}
+          onClick={() =>
+            add.mutate(
+              {
+                vatusa_role: role,
+                facility: facility || undefined,
+                role_name: group.name,
+                reason: reason.trim(),
+              },
+              {onSuccess: () => {
+                setRole("");
+                setFacility("");
+                setReason("");
+              }},
+            )
+          }
+        >
+          Add VATUSA role
+        </Button>
+      </div>
+      <p className="text-xs text-warning">
+        Adding grants this group now to every synced member holding that role, at the facility they
+        hold it — nationally for a ZHQ role. Removing revokes it the same way.
+      </p>
+      {mappings.isSuccess && known.length === 0 && (
+        <p className="text-xs text-ink-3">No VATUSA roles have been synced yet.</p>
+      )}
+    </div>
+  );
+}
+
+function GroupCard({
+  group,
+  catalog,
+  facilities,
+}: {
+  group: Group;
+  catalog: string[];
+  facilities: {id: string; name: string}[];
+}) {
   const save = useSaveGroup();
   const del = useDeleteGroup();
   const [selected, setSelected] = useState<Set<string>>(() => new Set(group.permissions));
@@ -147,6 +413,8 @@ function GroupCard({group, catalog}: {group: Group; catalog: string[]}) {
           )}
         </>
       )}
+      <Members group={group} facilities={facilities} />
+      {!group.system && <VatusaRoles group={group} facilities={facilities} />}
     </Card>
   );
 }
@@ -248,7 +516,12 @@ export function AdminGroups() {
     <div className="flex flex-col gap-4">
       {creating && <CreateForm onDone={() => setCreating(false)} />}
       {(groups.data ?? []).map((group) => (
-        <GroupCard key={group.name} group={group} catalog={catalogNames} />
+        <GroupCard
+          key={group.name}
+          group={group}
+          catalog={catalogNames}
+          facilities={catalog.data?.facilities ?? []}
+        />
       ))}
       {!canEdit && (
         <p className="text-xs text-ink-3">

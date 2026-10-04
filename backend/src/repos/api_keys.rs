@@ -8,7 +8,7 @@ use sqlx::PgPool;
 
 use crate::{
     errors::ApiError,
-    models::{ApiKeyBody, ApiKeyPermissionBody},
+    models::{ApiKeyBody, ApiKeyPermissionBody, GrantablePermissionBody},
     repos::access::{self as access_repo, PermissionScope},
 };
 
@@ -17,10 +17,23 @@ use crate::{
 /// the permission's first segment (its domain).
 pub const API_KEY_FORBIDDEN_DOMAINS: &[&str] = &["api_keys"];
 
+/// Permission domains a service account may NEVER hold (#584): like a key, a machine must not be able
+/// to mint credentials — of either kind.
+pub const SERVICE_ACCOUNT_FORBIDDEN_DOMAINS: &[&str] = &["api_keys", "service_accounts"];
+
+fn domain_in(permission_name: &str, domains: &[&str]) -> bool {
+    let domain = permission_name.split('.').next().unwrap_or("");
+    domains.contains(&domain)
+}
+
 /// Whether `permission_name` is off-limits for API keys (its domain is in the denylist).
 pub fn is_forbidden_for_key(permission_name: &str) -> bool {
-    let domain = permission_name.split('.').next().unwrap_or("");
-    API_KEY_FORBIDDEN_DOMAINS.contains(&domain)
+    domain_in(permission_name, API_KEY_FORBIDDEN_DOMAINS)
+}
+
+/// Whether `permission_name` is off-limits for service accounts.
+pub fn is_forbidden_for_service_account(permission_name: &str) -> bool {
+    domain_in(permission_name, SERVICE_ACCOUNT_FORBIDDEN_DOMAINS)
 }
 
 #[cfg(test)]
@@ -94,15 +107,27 @@ pub async fn validate_subset(
     owner_user_id: &str,
     requested: &[(String, Option<String>)],
 ) -> Result<(), ApiError> {
+    validate_grants(pool, owner_user_id, requested, is_forbidden_for_key).await
+}
+
+/// [`validate_subset`] with the denylist as a parameter: every requested grant must be within
+/// `granter_user_id`'s live authority and not `forbidden`. A service account has no owner, so its
+/// grants are checked against the admin making them, on every write (#584).
+pub async fn validate_grants(
+    pool: &PgPool,
+    granter_user_id: &str,
+    requested: &[(String, Option<String>)],
+    forbidden: fn(&str) -> bool,
+) -> Result<(), ApiError> {
     // One resolution for the whole request (#543): `scope.allows` now carries the deny semantics
     // that the separate name-set check used to supply, so there is nothing left to cross-check.
-    let owner = access_repo::fetch_effective_permissions(pool, owner_user_id).await?;
+    let granter = access_repo::fetch_effective_permissions(pool, granter_user_id).await?;
 
     for (permission_name, artcc_id) in requested {
-        if is_forbidden_for_key(permission_name) {
+        if forbidden(permission_name) {
             return Err(ApiError::BadRequest);
         }
-        let Some(scope) = owner.get(permission_name) else {
+        let Some(scope) = granter.get(permission_name) else {
             return Err(ApiError::Forbidden);
         };
         if !scope.allows(artcc_id.as_deref()) {
@@ -110,6 +135,43 @@ pub async fn validate_subset(
         }
     }
     Ok(())
+}
+
+/// What `user_id` may delegate: everything they effectively hold that isn't `forbidden`, with the
+/// scope they hold it at (national ⇒ any ARTCC). The picker's source for both API keys and service
+/// accounts, so it offers exactly what [`validate_grants`] accepts.
+pub async fn grantable_for(
+    pool: &PgPool,
+    user_id: &str,
+    forbidden: fn(&str) -> bool,
+) -> Result<Vec<GrantablePermissionBody>, ApiError> {
+    let held = access_repo::fetch_effective_permissions(pool, user_id).await?;
+    let mut out = Vec::new();
+    for (permission, scope) in held {
+        // Denied down to nothing is not held, so there is nothing to delegate.
+        if forbidden(&permission) || scope.is_empty() {
+            continue;
+        }
+        let (national, artccs) = match scope {
+            // `GrantablePermissionBody` has no way to say "national except ZDC", so a holder
+            // carrying a scoped deny is reported as non-national with no ARTCCs: it under-offers
+            // rather than inviting them to delegate where they are denied (VATUSA/OIS#543).
+            PermissionScope::National { except } if except.is_empty() => (true, Vec::new()),
+            PermissionScope::National { .. } => (false, Vec::new()),
+            PermissionScope::Facilities(set) => {
+                let mut v: Vec<String> = set.into_iter().collect();
+                v.sort();
+                (false, v)
+            }
+        };
+        out.push(GrantablePermissionBody {
+            permission,
+            national,
+            artccs,
+        });
+    }
+    out.sort_by(|a, b| a.permission.cmp(&b.permission));
+    Ok(out)
 }
 
 #[cfg(test)]
@@ -128,8 +190,8 @@ mod validate_subset_tests {
 
     async fn deny(pool: &PgPool, user_id: &str, perm: &str) {
         sqlx::query(
-            "insert into access.user_permissions (user_id, permission_name, granted) \
-             values ($1, $2, false)",
+            "insert into access.user_permissions (user_id, permission_name, granted, source) \
+             values ($1, $2, false, 'manual')",
         )
         .bind(user_id)
         .bind(perm)
@@ -139,12 +201,14 @@ mod validate_subset_tests {
     }
 
     async fn assign_role(pool: &PgPool, user_id: &str, role: &str) {
-        sqlx::query("insert into access.user_roles (user_id, role_name) values ($1, $2)")
-            .bind(user_id)
-            .bind(role)
-            .execute(pool)
-            .await
-            .unwrap();
+        sqlx::query(
+            "insert into access.user_roles (user_id, role_name, source) values ($1, $2, 'manual')",
+        )
+        .bind(user_id)
+        .bind(role)
+        .execute(pool)
+        .await
+        .unwrap();
     }
 
     #[sqlx::test]
@@ -241,7 +305,7 @@ mod validate_subset_tests {
         const ROLE_PERM: &str = "ace.requests.decide";
         let user = seed_user(&pool).await;
         sqlx::query(
-            "insert into access.user_roles (user_id, role_name, artcc_id) values ($1, 'ACE', 'ZDC')",
+            "insert into access.user_roles (user_id, role_name, artcc_id, source) values ($1, 'ACE', 'ZDC', 'manual')",
         )
         .bind(&user)
         .execute(&pool)

@@ -22,4 +22,5 @@ export const IMPLEMENTED: Readonly<Record<Capability, boolean>> = Object.freeze(
   audioAlerts: true, // #353 — audio alerts (shipped)
   windowControls: true, // #402 — frameless window + our own minimize/maximize/close (shipped)
   fileDialogs: false, // #354 — native export/import dialogs
+  diagnostics: true, // #629 — a log file and "Send diagnostics" (shipped)
 });

@@ -97,6 +97,14 @@ tauri-winrt-notification = "0.7"
 # under Tauri's own Windows backend.
 windows-sys = { version = "0.61", features = ["Win32_Graphics_Dwm", "Win32_Foundation"] }
 
+# Desktop diagnostics (#629): a rotating, redacted log file in the OS log directory, and the
+# user-initiated "Send diagnostics" upload. The plugin is the only new crate; `log` and `regex` are
+# already in the tree, and the upload reuses the workspace reqwest with its multipart feature.
+# Pinned: 2.10 requires tauri 2.12, and taking it would drag a whole Tauri upgrade in with it.
+tauri-plugin-log = "=2.9.1"
+log = "0.4"
+regex = "1"
+
 # --- discord bot ---
 serenity = { version = "0.12", default-features = false, features = ["client", "gateway", "native_tls_backend", "model"] }
 

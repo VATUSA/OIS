@@ -162,7 +162,13 @@ const COLUMNS: DataColumn<IdstFlight>[] = [
     cell: (c) => {
       const f = c.row.original;
       return f.released ? (
-        <span className="whitespace-nowrap text-success">RLSD {hhmmZ(f.edct)}</span>
+        <span className="whitespace-nowrap text-success">
+          RLSD {hhmmZ(f.edct)}
+          {/* A time an external tool issued says so, so it is never unexplained (#585). */}
+          {f.released_by_machine ? (
+            <span data-release-source className="text-ink-3"> · via {f.released_by_machine}</span>
+          ) : null}
+        </span>
       ) : (
         <span className="whitespace-nowrap text-ink-2">
           EDCT {hhmmZ(f.edct)}
@@ -173,7 +179,7 @@ const COLUMNS: DataColumn<IdstFlight>[] = [
   },
 ];
 
-function FlightTable({
+export function FlightTable({
   title,
   flights,
   selKey,
@@ -245,6 +251,12 @@ function SelectedPanel({ selected, canEdit }: { selected: IdstFlight | null; can
               <dt className="text-ink-2">{selected.released ? "EDCT (wheels-up)" : "Proposed EDCT"}</dt>
               <dd className={`font-mono ${selected.released ? "text-success" : ""}`}>{hhmmZ(selected.edct)}</dd>
             </div>
+            {selected.released_by_machine ? (
+              <div className="flex justify-between py-1.5">
+                <dt className="text-ink-2">Released by</dt>
+                <dd className="font-mono">{selected.released_by_machine}</dd>
+              </div>
+            ) : null}
           </dl>
 
           {canEdit ? (

@@ -1,6 +1,7 @@
 //! TMU persistence — Traffic Management Initiatives (TMIs).
 
 use crate::auth::principal::Attribution;
+use crate::repos::flow::{Expect, ReleaseHolder};
 use sqlx::{PgPool, Postgres, Transaction};
 
 use std::collections::HashMap;
@@ -529,30 +530,84 @@ pub async fn all_issued_cfrs(
     .map_err(|_| ApiError::Internal)
 }
 
+/// Every issued CFR's version (callsign -> version), for the departures list's `cfr_version`.
+pub async fn issued_cfr_versions(pool: &PgPool) -> Result<HashMap<String, i64>, ApiError> {
+    let rows = sqlx::query_as::<_, (String, i64)>("select callsign, version from tmu.issued_cfrs")
+        .fetch_all(pool)
+        .await
+        .map_err(|_| ApiError::Internal)?;
+    Ok(rows.into_iter().collect())
+}
+
+/// Issue (or re-issue) a CFR, returning its new version — or `None` when `expect` did not hold and
+/// nothing was written (#585). Same contract as `flow_repo::upsert_release`.
 pub async fn upsert_issued_cfr(
     pool: &PgPool,
     callsign: &str,
     airport: &str,
     wheels_up: DateTime<Utc>,
     by: &Attribution,
-) -> Result<(), ApiError> {
-    sqlx::query(
-        "insert into tmu.issued_cfrs (callsign, airport, wheels_up, issued_by, issued_by_actor) \
-         values ($1, $2, $3, $4, $5) \
-         on conflict (callsign) do update set \
-            airport = excluded.airport, wheels_up = excluded.wheels_up, \
-            issued_by = excluded.issued_by, issued_by_actor = excluded.issued_by_actor, \
-            issued_at = now()",
+    expect: Option<Expect>,
+) -> Result<Option<i64>, ApiError> {
+    let sql = match expect {
+        None => {
+            "insert into tmu.issued_cfrs as c (callsign, airport, wheels_up, issued_by, issued_by_actor) \
+             values ($1, $2, $3, $4, $5) \
+             on conflict (callsign) do update set \
+                airport = excluded.airport, wheels_up = excluded.wheels_up, \
+                issued_by = excluded.issued_by, issued_by_actor = excluded.issued_by_actor, \
+                issued_at = now(), version = c.version + 1 \
+             returning c.version"
+        }
+        Some(Expect::Absent) => {
+            "insert into tmu.issued_cfrs (callsign, airport, wheels_up, issued_by, issued_by_actor) \
+             values ($1, $2, $3, $4, $5) \
+             on conflict (callsign) do nothing \
+             returning version"
+        }
+        Some(Expect::Version(_)) => {
+            "update tmu.issued_cfrs set \
+                airport = $2, wheels_up = $3, issued_by = $4, issued_by_actor = $5, \
+                issued_at = now(), version = version + 1 \
+             where callsign = $1 and version = $6 \
+               and ($7::text is null or issued_by_actor = $7) \
+             returning version"
+        }
+    };
+    let query = sqlx::query_scalar::<_, i64>(sql)
+        .bind(callsign)
+        .bind(airport)
+        .bind(wheels_up)
+        .bind(&by.user_id)
+        .bind(&by.actor_id);
+    // `$7` is the machine that must already hold the CFR (#585 review).
+    let query = match expect {
+        Some(Expect::Version(v)) => query.bind(v).bind(by.machine_actor()),
+        _ => query,
+    };
+    query
+        .fetch_optional(pool)
+        .await
+        .map_err(|_| ApiError::Internal)
+}
+
+/// Who holds a CFR now, and at what version — see `flow_repo::ReleaseHolder` (#585).
+pub async fn cfr_holder(pool: &PgPool, callsign: &str) -> Result<Option<ReleaseHolder>, ApiError> {
+    let row = sqlx::query_as::<_, (i64, Option<String>, Option<String>)>(
+        "select c.version, \
+            case when a.actor_type in ('service_account', 'api_key') then a.id end, \
+            case when a.actor_type in ('service_account', 'api_key') then a.display_name end \
+         from tmu.issued_cfrs c left join access.actors a on a.id = c.issued_by_actor \
+         where c.callsign = $1",
     )
     .bind(callsign)
-    .bind(airport)
-    .bind(wheels_up)
-    .bind(&by.user_id)
-    .bind(&by.actor_id)
-    .execute(pool)
+    .fetch_optional(pool)
     .await
     .map_err(|_| ApiError::Internal)?;
-    Ok(())
+    Ok(row.map(|(version, id, name)| ReleaseHolder {
+        version,
+        machine: id.map(|id| (id, name.unwrap_or_default())),
+    }))
 }
 
 pub async fn get_issued_cfr(
@@ -572,12 +627,25 @@ pub async fn get_issued_cfr(
     .map_err(|_| ApiError::Internal)
 }
 
-pub async fn delete_issued_cfr(pool: &PgPool, callsign: &str) -> Result<bool, ApiError> {
-    let result = sqlx::query("delete from tmu.issued_cfrs where callsign = $1")
-        .bind(callsign)
-        .execute(pool)
-        .await
-        .map_err(|_| ApiError::Internal)?;
+/// Release (delete) a CFR, only at `version` when given and, for a machine, only if it already
+/// holds it (#585). The holder comes from `by`, not the caller, for the reason `delete_release`
+/// gives. Returns whether a row was removed.
+pub async fn delete_issued_cfr(
+    pool: &PgPool,
+    callsign: &str,
+    version: Option<i64>,
+    by: &Attribution,
+) -> Result<bool, ApiError> {
+    let result = sqlx::query(
+        "delete from tmu.issued_cfrs where callsign = $1 and ($2::bigint is null or version = $2) \
+           and ($3::text is null or issued_by_actor = $3)",
+    )
+    .bind(callsign)
+    .bind(version)
+    .bind(by.machine_actor())
+    .execute(pool)
+    .await
+    .map_err(|_| ApiError::Internal)?;
     Ok(result.rows_affected() > 0)
 }
 

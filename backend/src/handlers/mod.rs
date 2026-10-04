@@ -11,6 +11,7 @@ pub mod audit;
 pub mod auth;
 pub mod dashboards;
 pub mod desktop;
+pub mod diagnostics;
 pub mod docs;
 pub mod events;
 pub mod facilities;
@@ -26,6 +27,7 @@ pub mod jobs;
 pub mod metrics;
 pub mod preferences;
 pub mod public;
+pub mod release_authority;
 pub mod restriction_artcc;
 pub mod runway;
 pub mod service_accounts;
@@ -39,3 +41,5 @@ pub mod webhooks;
 mod actor_ratchet_tests;
 #[cfg(test)]
 mod machine_actor_tests;
+#[cfg(test)]
+mod service_account_grant_tests;
