@@ -7,7 +7,7 @@
 --
 -- Every existing row, and every job enqueued today, is the Discord bot's — hence the default.
 --
--- 0111 rather than 0103-0110: those are claimed by unmerged branches (#584, #585, #605 and others).
+-- 0112 rather than 0103-0111: those are claimed by unmerged branches (#584, #585, #605, #594 and others).
 
 alter table integration.outbound_jobs
     add column if not exists consumer text not null default 'discord';
