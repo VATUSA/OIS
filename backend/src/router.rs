@@ -504,7 +504,7 @@ pub fn build_router_with_limits(state: AppState, limits: Arc<RateLimits>) -> Rou
         )
         .route(
             "/api/v1/flow/monitor/{artcc}/consolidations",
-            get(monitor::list_consolidations),
+            get(monitor::list_consolidations).post(monitor::consolidate_all_sectors),
         )
         .route(
             "/api/v1/flow/monitor/{artcc}/consolidations/{sector_id}",

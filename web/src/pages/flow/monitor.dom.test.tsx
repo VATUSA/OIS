@@ -6,8 +6,9 @@ import {ToastProvider} from "@ois/ui";
 import {afterEach, beforeAll, describe, expect, it, vi} from "vitest";
 
 const get = vi.hoisted(() => vi.fn());
+const post = vi.hoisted(() => vi.fn());
 // The generated client captures `fetch` at load, so mock the client and seed the cache (#387).
-vi.mock("@/lib/api", () => ({ois: {GET: get, PUT: vi.fn(), DELETE: vi.fn()}}));
+vi.mock("@/lib/api", () => ({ois: {GET: get, POST: post, PUT: vi.fn(), DELETE: vi.fn()}}));
 vi.mock("@/components/shell/page-meta", () => ({usePageHeader: () => {}}));
 vi.mock("@/lib/admin", () => ({useFacilities: () => ({data: [{id: "ZDC", name: "Washington", active: true}]})}));
 
@@ -37,6 +38,7 @@ afterEach(() => {
   document.body.innerHTML = "";
   localStorage.clear();
   get.mockReset();
+  post.mockReset();
 });
 
 const AS_OF = "2026-10-04T14:07:00Z";
@@ -98,6 +100,25 @@ describe("Airspace Monitor page (#601)", () => {
     await rightClickFirstRow(host);
     const items = [...document.querySelectorAll('[role="menuitem"]')].map((el) => el.textContent);
     expect(items).toContain("Consolidate into 03");
+  });
+
+  /** #713: the bulk consolidations, for the right-clicked row, as one request each. */
+  it("offers both bulk consolidations and sends the chosen one in one request", async () => {
+    post.mockResolvedValue({response: {ok: true}});
+    const host = await mount(table(true, [row("02", "red"), row("03", "amber")]));
+    await rightClickFirstRow(host);
+    const items = [...document.querySelectorAll<HTMLElement>('[role="menuitem"]')];
+    expect(items.map((el) => el.textContent)).toEqual(
+      expect.arrayContaining(["All into 02", "All into 02 except consolidated"]),
+    );
+    await act(async () => {
+      items.find((el) => el.textContent === "All into 02 except consolidated")!.click();
+    });
+    expect(post).toHaveBeenCalledTimes(1);
+    expect(post).toHaveBeenCalledWith("/api/v1/flow/monitor/{artcc}/consolidations", {
+      params: {path: {artcc: "ZDC"}},
+      body: {target_sector_id: "02", mode: "except_consolidated"},
+    });
   });
 
   it("says when there is no sector data yet", async () => {

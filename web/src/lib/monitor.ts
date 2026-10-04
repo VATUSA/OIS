@@ -70,6 +70,26 @@ export function useConsolidate(artcc: string) {
   });
 }
 
+/**
+ * Work many sectors at `target` at once (#713), in one server-side transaction: every other sector
+ * (`all`), or only those in no consolidation yet (`except_consolidated`).
+ */
+export function useConsolidateAll(artcc: string) {
+  const qc = useQueryClient();
+  const toast = useToast();
+  return useMutation({
+    mutationFn: async ({ target, mode }: { target: string; mode: "all" | "except_consolidated" }) => {
+      const { response } = await ois.POST("/api/v1/flow/monitor/{artcc}/consolidations", {
+        params: { path: { artcc } },
+        body: { target_sector_id: target, mode },
+      });
+      if (!response.ok) throw new Error("bulk consolidate failed");
+    },
+    onSuccess: () => qc.invalidateQueries({ queryKey: monitorKey(artcc) }),
+    onError: () => toast.error("Couldn’t consolidate the sectors"),
+  });
+}
+
 /** Give `sectorId` back its own row. */
 export function useReleaseSector(artcc: string) {
   const qc = useQueryClient();

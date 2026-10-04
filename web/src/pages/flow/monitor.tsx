@@ -33,6 +33,7 @@ import {
   moveRow,
   sliceBins,
   useConsolidate,
+  useConsolidateAll,
   useMonitorNeighbours,
   useMonitorTable,
   useReleaseSector,
@@ -57,6 +58,7 @@ export function MonitorTable({artcc, viewOnly = false}: {artcc: string; viewOnly
   const [menu, setMenu] = useState<RowMenu | null>(null);
   const consolidate = useConsolidate(artcc);
   const release = useReleaseSector(artcc);
+  const consolidateAll = useConsolidateAll(artcc);
 
   // A neighbour's table is theirs to change, never yours, whatever the server would allow (#712).
   const editable = !viewOnly && (monitor.data?.editable ?? false);
@@ -218,6 +220,15 @@ export function MonitorTable({artcc, viewOnly = false}: {artcc: string; viewOnly
                 Release {source}
               </DropdownMenuItem>
             ))}
+            <DropdownMenuSeparator />
+            <DropdownMenuItem onSelect={() => consolidateAll.mutate({target: menu.sector.sector_id, mode: "all"})}>
+              All into {menu.sector.sector_id}
+            </DropdownMenuItem>
+            <DropdownMenuItem
+              onSelect={() => consolidateAll.mutate({target: menu.sector.sector_id, mode: "except_consolidated"})}
+            >
+              All into {menu.sector.sector_id} except consolidated
+            </DropdownMenuItem>
           </DropdownMenuContent>
         )}
       </DropdownMenu>
