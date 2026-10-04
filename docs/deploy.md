@@ -73,6 +73,19 @@ DB. It fails the command (non-zero exit) only once that budget is spent without 
 200" check would miss that. A failing `just deploy` means the new containers
 are already running but unhealthy; docker doesn't automatically revert.
 
+## After a deploy: confirm the VATUSA webhook
+
+Check that the division webhook is **registered**, not just that nothing warned (#688). A run that never
+reached VATUSA warns about nothing either. The backend log should show one of:
+
+- `VATUSA division webhook registered` (it created one), or
+- `VATUSA division webhook already registered` (the stored one is still valid).
+
+Anything else is a failure: a `VATUSA webhook:` warning, which now carries VATUSA's own response body (a
+`400` names what VATUSA objected to, e.g. a bad API key), or a `not registered:` line for a missing
+`OIS_PUBLIC_URL`/`OIS_SECRET_KEY`, or **no line at all**. Until it registers, roster changes reach OIS
+only through the daily pull.
+
 ## The Discord bot (optional)
 
 The bot is a separate compose service, opt-in via a profile:

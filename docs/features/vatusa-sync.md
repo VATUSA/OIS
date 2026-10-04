@@ -54,6 +54,9 @@ There is no re-encryption path, by design — the webhook is disposable.
 Without `OIS_PUBLIC_URL` or `OIS_SECRET_KEY` there is simply no webhook; the daily pull keeps everyone
 current regardless.
 
+Every check logs registration positively (`… registered` / `… already registered`), and a failed VATUSA
+call logs VATUSA's response body. `docs/deploy.md` has the post-deploy check (#688).
+
 ### Replay protection
 
 The HMAC proves who signed a body, not when, so a captured delivery would verify forever (#627). The
