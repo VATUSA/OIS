@@ -15,6 +15,7 @@ pub mod flow;
 pub mod forecast;
 pub mod gdp;
 pub mod metar;
+pub mod monitor;
 pub mod nav;
 mod nav_dns;
 pub mod nav_source;
