@@ -81,6 +81,13 @@ impl Events {
         });
     }
 
+    /// Nudges this process's sockets only. For a signal every replica raises for itself — the feed
+    /// tick (#648): each replica polls VATSIM and installs its own snapshot, so fanning its tick out
+    /// would tell every client N times, some before their own replica has the data.
+    pub fn publish_local(&self, topic: &str) {
+        self.deliver(topic);
+    }
+
     fn deliver(&self, topic: &str) {
         // An error only means nobody on this process is listening right now.
         let _ = self.local.send(WsEvent {
