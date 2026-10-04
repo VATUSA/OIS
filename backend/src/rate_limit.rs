@@ -8,7 +8,13 @@
 //!
 //! The buckets live in this process, so with several backend replicas each enforces its own allowance.
 
-use std::{net::IpAddr, num::NonZeroU32, sync::Arc, time::Duration};
+use std::{
+    collections::HashMap,
+    net::IpAddr,
+    num::NonZeroU32,
+    sync::{Arc, Mutex},
+    time::{Duration, Instant},
+};
 
 use axum::{
     extract::{Request, State},
@@ -61,6 +67,12 @@ pub struct RateLimits {
     user: Limiter,
     /// Unauthenticated callers, by IP. A signed-out map tab polls ~15/min.
     anonymous: Limiter,
+    /// Inbound webhook deliveries that **failed** (a 4xx: bad signature, unknown facility), by IP, at
+    /// the anonymous allowance. A genuine delivery is never charged; see [`enforce`].
+    webhook_failures: Limiter,
+    /// IPs whose webhook failures are spent, refused until the given instant without reaching the
+    /// handler, whose first act is a database read.
+    webhook_blocked: Mutex<HashMap<Option<IpAddr>, Instant>>,
 }
 
 impl RateLimits {
@@ -69,6 +81,8 @@ impl RateLimits {
             credential: limiter(credential),
             user: limiter(user),
             anonymous: limiter(anonymous),
+            webhook_failures: limiter(anonymous),
+            webhook_blocked: Mutex::new(HashMap::new()),
         }
     }
 
@@ -93,8 +107,7 @@ impl RateLimits {
         if let Some(Some(user)) = extensions.get::<Option<CurrentUser>>() {
             return (&self.user, Caller::User(user.id.clone()));
         }
-        let ip = crate::repos::audit::client_ip(request.headers()).and_then(|ip| ip.parse().ok());
-        (&self.anonymous, Caller::Ip(ip))
+        (&self.anonymous, Caller::Ip(client_ip(request)))
     }
 
     /// Forget callers whose bucket has refilled, so the maps don't grow with every IP ever seen.
@@ -102,7 +115,35 @@ impl RateLimits {
         self.credential.retain_recent();
         self.user.retain_recent();
         self.anonymous.retain_recent();
+        self.webhook_failures.retain_recent();
+        let now = Instant::now();
+        if let Ok(mut blocked) = self.webhook_blocked.lock() {
+            blocked.retain(|_, until| *until > now);
+        }
     }
+
+    /// How long `ip` is still refused for having spent its webhook failures, if it is.
+    fn webhook_block(&self, ip: Option<IpAddr>) -> Option<Duration> {
+        let blocked = self.webhook_blocked.lock().ok()?;
+        let until = *blocked.get(&ip)?;
+        until.checked_duration_since(Instant::now())
+    }
+
+    /// Charge a failed delivery to its sender; once their failures are spent, refuse them until a
+    /// failure's worth has refilled.
+    fn charge_webhook_failure(&self, ip: Option<IpAddr>) {
+        if let Err(denied) = self.webhook_failures.check_key(&Caller::Ip(ip)) {
+            let wait = denied.wait_time_from(self.webhook_failures.clock().now());
+            if let Ok(mut blocked) = self.webhook_blocked.lock() {
+                blocked.insert(ip, Instant::now() + wait);
+            }
+        }
+    }
+}
+
+/// The caller's address, as the anonymous bucket keys it.
+fn client_ip(request: &Request) -> Option<IpAddr> {
+    crate::repos::audit::client_ip(request.headers()).and_then(|ip| ip.parse().ok())
 }
 
 /// Prune idle buckets once a minute — a full bucket is indistinguishable from a forgotten one.
@@ -116,7 +157,8 @@ pub fn spawn_cleanup(limits: Arc<RateLimits>) {
     });
 }
 
-/// Inbound, HMAC-authenticated webhooks — never rate-limited (see [`enforce`]).
+/// Inbound, HMAC-authenticated webhooks: genuine deliveries are never rate-limited, failed ones are
+/// (see [`enforce`]).
 const WEBHOOK_PREFIX: &str = "/api/v1/webhooks/";
 
 /// Middleware: charge the request to its caller's bucket, or refuse it with `429`.
@@ -132,10 +174,27 @@ pub async fn enforce(
     // Inbound webhooks are not clients and cannot back off: VATUSA delivers each roster change once,
     // with no retry (`feed/vatusa.rs`), and every facility's delivery arrives from the same servers.
     // Charged to the anonymous IP bucket, a bulk roster change would lose deliveries silently — and
-    // after #548 those deliveries drive access. They are authenticated by the per-facility HMAC
-    // instead, which a flood of forged requests cannot pass (#588 review).
+    // after #548 those deliveries drive access. So a genuine delivery is never charged (#588 review).
+    //
+    // A *failed* one is. The handler reads the facility's secret from the database before it can
+    // verify anything, so an uncharged forged flood would be unlimited database load. Failures (a 4xx)
+    // are charged to the sender's IP at the anonymous allowance, and once those are spent the sender is
+    // refused here, before the handler, until they refill. A server-side 5xx is not the sender's fault
+    // and is not charged.
     if request.uri().path().starts_with(WEBHOOK_PREFIX) {
-        return next.run(request).await;
+        let ip = client_ip(&request);
+        if let Some(wait) = limits.webhook_block(ip) {
+            let mut response = ApiError::TooManyRequests.into_response();
+            response
+                .headers_mut()
+                .insert(RETRY_AFTER, HeaderValue::from(whole_seconds(wait).max(1)));
+            return response;
+        }
+        let response = next.run(request).await;
+        if response.status().is_client_error() {
+            limits.charge_webhook_failure(ip);
+        }
+        return response;
     }
     let (limiter, caller) = limits.bucket(&request);
     match limiter.check_key(&caller) {
@@ -506,7 +565,85 @@ mod tests {
         );
     }
 
-    /// Health checks, metrics scrapes and the docs must not fail because a caller is over its limit.
+    /// A webhook POST, signed with `secret` when given.
+    async fn deliver(
+        router: &Router,
+        facility: &str,
+        sender: &str,
+        secret: Option<&str>,
+    ) -> http::StatusCode {
+        use hmac::{Hmac, KeyInit, Mac};
+        let body = r#"{"type":"ping"}"#;
+        let signature = match secret {
+            Some(secret) => {
+                let mut mac = Hmac::<sha2::Sha256>::new_from_slice(secret.as_bytes()).unwrap();
+                mac.update(body.as_bytes());
+                format!("sha256={}", hex::encode(mac.finalize().into_bytes()))
+            }
+            None => "sha256=00".to_string(),
+        };
+        let request = http::Request::builder()
+            .method(http::Method::POST)
+            .uri(format!("/api/v1/webhooks/vatusa/{facility}"))
+            .header("x-forwarded-for", sender)
+            .header("content-type", "application/json")
+            .header("x-mithril-signature", signature)
+            .body(Body::from(body))
+            .unwrap();
+        router.clone().oneshot(request).await.unwrap().status()
+    }
+
+    /// The exemption covers genuine deliveries only. The handler reads the facility's secret before it
+    /// can verify anything, so forged deliveries (bad signature, unknown facility) are charged to their
+    /// sender, and once that is spent they are refused before the handler and its database read.
+    #[sqlx::test]
+    async fn forged_webhook_deliveries_are_limited_and_genuine_ones_never_are(pool: PgPool) {
+        sqlx::query(
+            "insert into identity.vatusa_webhooks (facility, webhook_id, secret, url) \
+             values ('ZDC', 1, 's3cret', 'https://example.invalid')",
+        )
+        .execute(&pool)
+        .await
+        .unwrap();
+        let router = router(test_state(pool, Default::default()));
+        let (vatusa, forger) = ("198.51.100.7", "203.0.113.66");
+
+        for _ in 0..5 {
+            assert_eq!(
+                deliver(&router, "ZDC", vatusa, Some("s3cret")).await,
+                http::StatusCode::OK,
+                "a genuine delivery is never charged, past any allowance"
+            );
+        }
+        assert_eq!(
+            deliver(&router, "ZDC", vatusa, None).await,
+            http::StatusCode::UNAUTHORIZED,
+            "and spent none: the sender's first failure is still heard, not refused"
+        );
+
+        // A bucket of two: the third failure spends it, and from then on the forger is refused.
+        for (attempt, facility) in [(1, "ZDC"), (2, "ZXX"), (3, "ZDC")] {
+            assert_ne!(
+                deliver(&router, facility, forger, None).await,
+                http::StatusCode::TOO_MANY_REQUESTS,
+                "failure {attempt} reaches the handler"
+            );
+        }
+        for facility in ["ZDC", "ZXX"] {
+            assert_eq!(
+                deliver(&router, facility, forger, None).await,
+                http::StatusCode::TOO_MANY_REQUESTS,
+                "a forger whose failures are spent is refused before the handler ({facility})"
+            );
+        }
+
+        assert_eq!(
+            deliver(&router, "ZDC", vatusa, Some("s3cret")).await,
+            http::StatusCode::OK,
+            "and VATUSA's next genuine delivery still lands"
+        );
+    }
+
     /// #588 review: a burst of VATUSA roster webhooks — every facility's, from one sender address —
     /// is never refused for rate, because VATUSA does not retry a delivery. And the exemption spends
     /// nothing: the same address's ordinary anonymous allowance is untouched by it.
@@ -540,6 +677,7 @@ mod tests {
         );
     }
 
+    /// Health checks, metrics scrapes and the docs must not fail because a caller is over its limit.
     #[tokio::test]
     async fn paths_outside_the_api_are_never_limited() {
         let router = router(AppState::without_db());
