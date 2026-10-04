@@ -1688,6 +1688,22 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/v1/flow/airspace/sectors": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get: operations["list_sectors"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/v1/flow/atc": {
         parameters: {
             query?: never;
@@ -6747,6 +6763,25 @@ export interface components {
             /** @description Whether the caller may set this ARTCC's MAPs (`flow.monitor.update`, nationally or scoped). */
             editable: boolean;
             sectors: components["schemas"]["SectorMapBody"][];
+        };
+        /**
+         * @description One ATC sector volume as the admin sector map draws it (#602): a stored row of
+         *     `flow.airspace_sector` (#594), straight from the in-memory cache.
+         */
+        SectorVolumeBody: {
+            artcc: string;
+            /** Format: int32 */
+            base_alt_ft: number;
+            name?: string | null;
+            /** @description Closed `[lat, lon]` rings, one per polygon part. */
+            rings: number[][][];
+            sector_id: string;
+            /** @description `low`, `high`, `ultra_high` or `approach`. */
+            tier: string;
+            /** Format: int32 */
+            top_alt_ft: number;
+            /** @description The source's id for this piece; a sector can be several volumes. */
+            volume_id: string;
         };
         /** @description The acting user's own effective access (staff debug view). */
         SelfAccessBody: {
@@ -13714,6 +13749,41 @@ export interface operations {
                 content?: never;
             };
             404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description Rate limit exceeded: back off for `Retry-After` seconds. Every limited response carries `RateLimit-Limit`, `RateLimit-Remaining` and `RateLimit-Reset`. */
+            429: {
+                headers: {
+                    /** @description Seconds until the next request will be accepted. */
+                    "Retry-After"?: string;
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+        };
+    };
+    list_sectors: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["SectorVolumeBody"][];
+                };
+            };
+            /** @description Not signed in, or without `flow.sectors.read` */
+            401: {
                 headers: {
                     [name: string]: unknown;
                 };

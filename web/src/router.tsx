@@ -39,6 +39,7 @@ import {EventPlanningPage} from "@/pages/planning/event";
 import {EventFcaBuilderPage} from "@/pages/planning/event-fcas";
 import {MonitorPage} from "@/pages/flow/monitor";
 import {AircraftProfilesPage} from "@/pages/planning/aircraft-profiles";
+import {SectorsPage} from "@/pages/flow/sectors";
 import {SectorMapsPage} from "@/pages/planning/sector-maps";
 import {AirportConfigsPage} from "@/pages/planning/airport-configs";
 import {AirportSurfacePage} from "@/pages/planning/airport-surface";
@@ -395,13 +396,20 @@ const adminRoute = createRoute({
   staticData: { layout: "wide" },
 });
 
-// --- Flow (sector loading) ---
+// --- Flow (sector loading, and the sector data behind it) ---
 
 const adminFlowRoute = createRoute({
   getParentRoute: () => adminRoute,
   path: "flow",
   component: Outlet,
   staticData: { layout: "wide" },
+});
+
+const adminFlowSectorsRoute = createRoute({
+  getParentRoute: () => adminFlowRoute,
+  path: "sectors",
+  staticData: { title: "Sectors" },
+  component: SectorsPage,
 });
 
 const adminFlowMonitorRoute = createRoute({
@@ -701,7 +709,7 @@ const routeTree = rootRoute.addChildren([
     adminApiKeysRoute,
     adminServiceAccountsRoute,
     adminDiscordRoute,
-    adminFlowRoute.addChildren([adminFlowMonitorRoute]),
+    adminFlowRoute.addChildren([adminFlowMonitorRoute, adminFlowSectorsRoute]),
     planningRoute.addChildren([
       planningIndexRoute,
       planningEventsRoute,

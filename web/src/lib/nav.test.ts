@@ -64,6 +64,7 @@ const REQUIRED: Record<string, readonly string[]> = {
   "/admin/planning/facility-documents": ["facilities.docs.read"],
   "/admin/planning/airport-surface": ["events.plan.read"],
   "/admin/planning/aircraft-profiles": ["flow.aircraft_profiles.read"],
+  "/admin/flow/sectors": ["flow.sectors.read"],
   "/admin/planning/sector-maps": ["flow.monitor.read"],
   "/admin/flow/monitor": ["flow.monitor.read"],
   "/admin/historical": ["stats.data.read"],

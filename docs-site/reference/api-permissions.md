@@ -156,6 +156,7 @@ always matches the running API.
 | `/api/v1/flow/aircraft-profiles/{kind}/{key}` | DELETE | `flow.aircraft_profiles.update` |
 | `/api/v1/flow/aircraft-profiles/{kind}/{key}` | PUT | `flow.aircraft_profiles.update` |
 | `/api/v1/flow/aircraft/{callsign}/route` | GET | — (no permission marker) |
+| `/api/v1/flow/airspace/sectors` | GET | `flow.sectors.read` |
 | `/api/v1/flow/atc` | GET | — (no permission marker) |
 | `/api/v1/flow/counts` | GET | — (no permission marker) |
 | `/api/v1/flow/data-refresh` | POST | `flow.fca.update` |

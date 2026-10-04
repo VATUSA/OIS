@@ -14,10 +14,10 @@ use crate::{
     config::build_cors_layer,
     handlers::{
         access, ace, admin, aircraft_profiles, airport_configs, airport_surface, airports,
-        api_keys, atc, audit, auth, dashboards, desktop, diagnostics, docs, events, facilities,
-        facility_documents, facility_map, feed, flight_exclusions, flow, gdp, health, integration,
-        jobs as jobs_handler, metrics as metrics_handler, monitor, preferences, public, runway,
-        service_accounts, stats, taxi_insights, tmu, users, webhooks,
+        airspace_sectors, api_keys, atc, audit, auth, dashboards, desktop, diagnostics, docs,
+        events, facilities, facility_documents, facility_map, feed, flight_exclusions, flow, gdp,
+        health, integration, jobs as jobs_handler, metrics as metrics_handler, monitor,
+        preferences, public, runway, service_accounts, stats, taxi_insights, tmu, users, webhooks,
     },
     openapi::ApiDoc,
     rate_limit::{self, RateLimits},
@@ -416,6 +416,11 @@ pub fn build_router_with_limits(state: AppState, limits: Arc<RateLimits>) -> Rou
         .route(
             "/api/v1/flow/aircraft-profiles/{kind}/{key}",
             put(aircraft_profiles::upsert_profile).delete(aircraft_profiles::delete_profile),
+        )
+        // ATC sector volumes for the admin sector map (#602), from the in-memory cache
+        .route(
+            "/api/v1/flow/airspace/sectors",
+            get(airspace_sectors::list_sectors),
         )
         // Persisted VATSIM stats (historical read API)
         .route("/api/v1/stats/network/history", get(stats::network_history))

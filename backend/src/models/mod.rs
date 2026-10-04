@@ -1518,6 +1518,24 @@ pub struct FaaRepullResult {
     pub osm_gates_retired: usize,
 }
 
+/// One ATC sector volume as the admin sector map draws it (#602): a stored row of
+/// `flow.airspace_sector` (#594), straight from the in-memory cache.
+#[derive(Debug, Clone, Serialize, ToSchema)]
+pub struct SectorVolumeBody {
+    pub artcc: String,
+    pub sector_id: String,
+    /// The source's id for this piece; a sector can be several volumes.
+    pub volume_id: String,
+    pub name: Option<String>,
+    /// `low`, `high`, `ultra_high` or `approach`.
+    pub tier: String,
+    pub base_alt_ft: i32,
+    pub top_alt_ft: i32,
+    /// Closed `[lat, lon]` rings, one per polygon part.
+    #[schema(value_type = Vec<Vec<Vec<f64>>>)]
+    pub rings: Vec<Vec<[f64; 2]>>,
+}
+
 /// A configurable aircraft performance profile (climb / cruise / descent schedules) used by the
 /// trajectory / ETA model. Keyed by `kind` (`type` / `wake` / `default`) + `key` (ICAO type, wake
 /// token, or empty). See migration 0059 and `feed::trajectory`.

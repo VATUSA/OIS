@@ -4,7 +4,7 @@ import {describe, expect, it} from "vitest";
 import {DELAY_THRESHOLD_SEC, fmtDelaySec} from "@/lib/fca";
 import type {AtcAnchor} from "../layers/atc";
 import type {MatchedFlight} from "../layers/matched";
-import {mapTooltip, nearerIsAircraft, tooltipFor} from "./tooltip";
+import {flightLevel, mapTooltip, nearerIsAircraft, sectorHtml, sectorTooltip, tooltipFor} from "./tooltip";
 import type {NormAircraft} from "./types";
 
 const pick = (layerId: string, object: unknown) => ({ layer: { id: layerId }, object }) as unknown as PickingInfo;
@@ -169,5 +169,53 @@ describe("tooltipFor", () => {
     const t = tooltipFor({ tooltips: true, aircraft: true })!;
     expect(html(t(pick("aircraft", plane)))).toContain("AAL1");
     expect(html(t(pick("atc-hover", tower)))).toContain("ORD_TWR");
+  });
+});
+
+describe("sectorTooltip (#602)", () => {
+  const volume = {
+    artcc: "ZDC",
+    sector_id: "32",
+    volume_id: "03201",
+    name: "Gordonsville 32",
+    tier: "high",
+    base_alt_ft: 24_000,
+    top_alt_ft: 35_000,
+    rings: [],
+  };
+
+  it("names the sector, its tier and vertical band", () => {
+    const card = sectorTooltip()(pick("airspace-sectors", { volume }));
+    expect(card?.html).toContain("ZDC 32 · High");
+    expect(card?.html).toContain("Gordonsville 32");
+    expect(card?.html).toContain("FL240–FL350");
+  });
+
+  /** The name comes from imported data and the card is rendered as html. */
+  it("escapes a sector name that contains markup", () => {
+    const html = sectorHtml({ ...volume, name: '<img src=x onerror="alert(1)">' });
+    expect(html).not.toContain("<img");
+    expect(html).toContain("&lt;img src=x onerror=&quot;alert(1)&quot;&gt;");
+  });
+
+  /**
+   * Every imported text field reaches the html card, not just the name: the sector id and ARTCC come from
+   * the same source data. (The tier is safe — the database constrains it to four values.)
+   */
+  it.each(["sector_id", "artcc"] as const)("escapes markup in the %s too", (field) => {
+    const html = sectorHtml({ ...volume, [field]: '<img src=x onerror="alert(1)">' });
+    expect(html).not.toContain("<img");
+    expect(html).toContain("&lt;img src=x onerror=&quot;alert(1)&quot;&gt;");
+  });
+
+  it("answers only for the sector layer", () => {
+    expect(sectorTooltip()(pick("surface-gates", { volume }))).toBeNull();
+    expect(sectorTooltip()(pick("airspace-sectors", {}))).toBeNull();
+  });
+
+  it("calls a floor at the surface SFC and pads flight levels", () => {
+    expect(flightLevel(0)).toBe("SFC");
+    expect(flightLevel(5_000)).toBe("FL050");
+    expect(flightLevel(60_000)).toBe("FL600");
   });
 });
