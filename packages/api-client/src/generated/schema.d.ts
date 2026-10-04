@@ -1973,7 +1973,12 @@ export interface paths {
         };
         get: operations["list_consolidations"];
         put?: never;
-        post?: never;
+        /**
+         * Consolidate many of this ARTCC's sectors into one at once (#713): every other sector, or only those in
+         *     no consolidation yet. One transaction — a refused or failed save changes nothing — gated like the
+         *     single-sector write. See [`consolidations_repo::consolidate_all`].
+         */
+        post: operations["consolidate_all_sectors"];
         delete?: never;
         options?: never;
         head?: never;
@@ -2033,6 +2038,27 @@ export interface paths {
          *     is a no-op (204, nothing written). There is no delete — typing the default is the reset.
          */
         put: operations["set_sector_map"];
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/flow/monitor/{artcc}/neighbours": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * `artcc`'s first-tier neighbours (#712): the ARTCCs whose Monitor tables follow its own, collapsed
+         *     and view-only. Restricted to facilities OIS runs (active), which drops the Canadian and oceanic
+         *     FIRs in the adjacency data, as the ACE fan-out does (`events::generate_tier1`).
+         */
+        get: operations["monitor_neighbours"];
+        put?: never;
         post?: never;
         delete?: never;
         options?: never;
@@ -4266,6 +4292,17 @@ export interface components {
             /** Format: int32 */
             value: number;
         };
+        /**
+         * @description Which sectors a bulk consolidation moves.
+         * @enum {string}
+         */
+        BulkConsolidateMode: "all" | "except_consolidated";
+        /** @description Consolidate many of an ARTCC's sectors into one at once (#713), all or nothing. */
+        BulkConsolidateRequest: {
+            mode: components["schemas"]["BulkConsolidateMode"];
+            /** @description The sector everything is worked at. */
+            target_sector_id: string;
+        };
         /** @description A saved/open capture window (for the replay picker). */
         CaptureSummaryBody: {
             /** Format: date-time */
@@ -6000,6 +6037,12 @@ export interface components {
              * @description The bin's start, an absolute Zulu quarter-hour.
              */
             start: string;
+        };
+        /** @description An ARTCC's first-tier neighbours (#712), whose Monitor tables are shown view-only beneath its own. */
+        MonitorNeighboursBody: {
+            artcc: string;
+            /** @description Directly bordering ARTCCs that OIS runs, sorted. */
+            neighbours: string[];
         };
         /** @description One row of an ARTCC's Airspace Monitor (#701): a sector, or a sector with others consolidated into it. */
         MonitorRowBody: {
@@ -14637,6 +14680,65 @@ export interface operations {
             };
         };
     };
+    consolidate_all_sectors: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                artcc: string;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["BulkConsolidateRequest"];
+            };
+        };
+        responses: {
+            204: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description The caller's `flow.monitor.update` does not cover this ARTCC */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description The target isn't one of this ARTCC's sectors */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description `except_consolidated`, and the target is itself worked elsewhere */
+            409: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description Rate limit exceeded: back off for `Retry-After` seconds. Every limited response carries `RateLimit-Limit`, `RateLimit-Remaining` and `RateLimit-Reset`. */
+            429: {
+                headers: {
+                    /** @description Seconds until the next request will be accepted. */
+                    "Retry-After"?: string;
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+        };
+    };
     consolidate_sector: {
         parameters: {
             query?: never;
@@ -14836,6 +14938,48 @@ export interface operations {
                 headers: {
                     /** @description Seconds until the next request will be accepted. */
                     "Retry-After"?: string;
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+        };
+    };
+    monitor_neighbours: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                artcc: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["MonitorNeighboursBody"];
+                };
+            };
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description Rate limit exceeded: back off for `Retry-After` seconds. Every limited response carries `RateLimit-Limit`, `RateLimit-Remaining` and `RateLimit-Reset`. */
+            429: {
+                headers: {
+                    /** @description Seconds until the next request will be accepted. */
+                    "Retry-After"?: string;
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            503: {
+                headers: {
                     [name: string]: unknown;
                 };
                 content?: never;

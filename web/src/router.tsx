@@ -37,6 +37,7 @@ import {TmuPage} from "@/pages/tmu";
 import {PlanningEventsPage} from "@/pages/planning/events";
 import {EventPlanningPage} from "@/pages/planning/event";
 import {EventFcaBuilderPage} from "@/pages/planning/event-fcas";
+import {MonitorPage} from "@/pages/flow/monitor";
 import {AircraftProfilesPage} from "@/pages/planning/aircraft-profiles";
 import {SectorMapsPage} from "@/pages/planning/sector-maps";
 import {AirportConfigsPage} from "@/pages/planning/airport-configs";
@@ -394,6 +395,22 @@ const adminRoute = createRoute({
   staticData: { layout: "wide" },
 });
 
+// --- Flow (sector loading) ---
+
+const adminFlowRoute = createRoute({
+  getParentRoute: () => adminRoute,
+  path: "flow",
+  component: Outlet,
+  staticData: { layout: "wide" },
+});
+
+const adminFlowMonitorRoute = createRoute({
+  getParentRoute: () => adminFlowRoute,
+  path: "monitor",
+  staticData: { title: "Airspace Monitor" },
+  component: MonitorPage,
+});
+
 // --- Planning (pre-event) ---
 
 const planningRoute = createRoute({
@@ -684,6 +701,7 @@ const routeTree = rootRoute.addChildren([
     adminApiKeysRoute,
     adminServiceAccountsRoute,
     adminDiscordRoute,
+    adminFlowRoute.addChildren([adminFlowMonitorRoute]),
     planningRoute.addChildren([
       planningIndexRoute,
       planningEventsRoute,
