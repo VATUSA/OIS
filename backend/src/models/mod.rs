@@ -84,6 +84,35 @@ pub struct VatusaRoleEntry {
     pub role: String,
 }
 
+/// A member's VATUSA side in the admin access editor (#549).
+#[derive(Debug, Serialize, ToSchema)]
+pub struct UserVatusaBody {
+    /// Set while the member is off VATUSA role sync because an admin edited their access by hand.
+    /// `None` = synced.
+    pub detached_at: Option<DateTime<Utc>>,
+    /// Who first detached them (display name), if still known.
+    pub detached_by: Option<String>,
+    /// Their VATUSA details and roles, or `None` if never synced.
+    pub profile: Option<VatusaProfile>,
+    /// Group grants a Resync would add (VATUSA-sourced).
+    pub resync_grants: Vec<VatusaGrantChange>,
+    /// VATUSA-sourced group grants a Resync would remove. Hand-made grants are never removed.
+    pub resync_revokes: Vec<VatusaGrantChange>,
+}
+
+/// One group grant a Resync would change. `artcc_id` `None` = national.
+#[derive(Debug, Serialize, ToSchema)]
+pub struct VatusaGrantChange {
+    pub group: String,
+    pub artcc_id: Option<String>,
+}
+
+/// Put a hand-managed member back on VATUSA role sync. The reason is recorded in the audit log.
+#[derive(Debug, Deserialize, ToSchema)]
+pub struct VatusaResyncRequest {
+    pub reason: String,
+}
+
 /// A lightweight user match for the directory search.
 #[derive(Debug, Serialize, ToSchema, sqlx::FromRow)]
 pub struct UserSummary {
@@ -107,6 +136,8 @@ pub struct AdminUserRow {
     /// render identically, which actively misled, but silently reinterpreting a `Vec<String>` would
     /// have broken any consumer without the schema type moving to warn them.
     pub scoped_roles: Vec<String>,
+    /// Set while the user is off VATUSA role sync because an admin edited their access by hand (#549).
+    pub vatusa_detached_at: Option<DateTime<Utc>>,
 }
 
 /// A page of the access-admin user browser.

@@ -51,6 +51,8 @@ always matches the running API.
 | `/api/v1/admin/users` | GET | `access.users.read` |
 | `/api/v1/admin/users/{cid}/access` | GET | `access.users.read` |
 | `/api/v1/admin/users/{cid}/access` | POST | `access.users.update` |
+| `/api/v1/admin/users/{cid}/vatusa` | GET | `access.users.read` |
+| `/api/v1/admin/users/{cid}/vatusa/resync` | POST | `access.users.update` |
 | `/api/v1/admin/vatusa-role-mappings` | GET | `access.groups.read` |
 | `/api/v1/admin/vatusa-role-mappings` | POST | `access.groups.update` |
 | `/api/v1/admin/vatusa-role-mappings/{id}` | DELETE | `access.groups.update` |

@@ -137,6 +137,15 @@ pub fn build_router_with_limits(state: AppState, limits: Arc<RateLimits>) -> Rou
             "/api/v1/admin/users/{cid}/access",
             get(access::get_user_access).post(access::update_user_access),
         )
+        // A member's VATUSA side, and putting them back on VATUSA role sync — #549
+        .route(
+            "/api/v1/admin/users/{cid}/vatusa",
+            get(access::get_user_vatusa),
+        )
+        .route(
+            "/api/v1/admin/users/{cid}/vatusa/resync",
+            post(access::resync_user_vatusa),
+        )
         // Group (role) management — #545
         .route(
             "/api/v1/admin/groups",
