@@ -44,6 +44,12 @@ pub mod topic {
     /// An ACE claim reminder came due. Mirrors the Discord DM the scheduler already sends, so the
     /// desktop app is a second delivery channel for the same decision (#348).
     pub const EVENT_REMINDER: &str = "events.reminder";
+    /// An ACE support request was created, claimed, released, decided or deleted (#645). Every viewer's
+    /// board refetches, so two controllers don't race the same request on a stale view.
+    pub const ACE: &str = "events.ace";
+    /// A runway configuration was changed, saved or deleted (#646) — low-frequency, but it changes
+    /// what every arrival is sequenced against, so other clients see it at once.
+    pub const RUNWAY: &str = "flow.runway";
 }
 
 /// The subprotocol a desktop client offers beside its token, and the only one ever selected.

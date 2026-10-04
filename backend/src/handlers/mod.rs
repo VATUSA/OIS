@@ -36,6 +36,9 @@ pub mod users;
 pub mod webhooks;
 
 #[cfg(test)]
+mod topic_publish_tests;
+
+#[cfg(test)]
 mod actor_ratchet_tests;
 #[cfg(test)]
 mod machine_actor_tests;
