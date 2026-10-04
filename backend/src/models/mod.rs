@@ -946,6 +946,10 @@ pub struct DepartureFlight {
     pub delay_min: i64,
     pub cfr: Option<DateTime<Utc>>,
     pub cfr_issued: bool,
+    /// The issued CFR's version, for `If-Match` on `POST`/`DELETE /tmu/cfr` (#585); null when no CFR
+    /// is issued for this callsign.
+    #[serde(default)]
+    pub cfr_version: Option<i64>,
     pub seq: Option<i64>,
 }
 

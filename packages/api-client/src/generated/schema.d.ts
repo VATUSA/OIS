@@ -4302,6 +4302,12 @@ export interface components {
             /** Format: date-time */
             cfr?: string | null;
             cfr_issued: boolean;
+            /**
+             * Format: int64
+             * @description The issued CFR's version, for `If-Match` on `POST`/`DELETE /tmu/cfr` (#585); null when no CFR
+             *     is issued for this callsign.
+             */
+            cfr_version?: number | null;
             /** Format: int64 */
             delay_min: number;
             /** @description Origin airport ICAO (a facility query spans several). */
@@ -12107,6 +12113,13 @@ export interface operations {
                 content?: never;
             };
             404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description `held_by_person` / `held_by_other_machine`: a machine may not trade it */
+            409: {
                 headers: {
                     [name: string]: unknown;
                 };

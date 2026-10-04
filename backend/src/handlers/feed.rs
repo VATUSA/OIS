@@ -600,10 +600,16 @@ pub(crate) async fn departures_response(
                 delay_min: m.delay_min,
                 cfr,
                 cfr_issued: m.cfr_issued || fca_cfr.is_some(),
+                cfr_version: None,
                 seq: m.seq,
             }
         })
         .collect();
+    // Each issued CFR's version, so a writer can send `If-Match` without provoking a 412 (#585 QA).
+    let versions = tmu_repo::issued_cfr_versions(pool).await?;
+    for d in &mut departures {
+        d.cfr_version = versions.get(&d.callsign).copied();
+    }
     // Metered (with a CFR) first, ordered by release; unmetered fall to the bottom.
     departures.sort_by_key(|r| r.cfr.map(|c| c.timestamp_millis()).unwrap_or(i64::MAX));
 

@@ -2510,7 +2510,11 @@ pub async fn clear_release(
     let Some((flights, metas)) = built else {
         return Ok(Json(Vec::new()));
     };
-    Ok(Json(finalize(&fca, flights, &metas)))
+    // The other flights' versions, as `mark_release` and the traffic list return them: a writer
+    // reading this list must not see a released flight with `release_version: null` (#585 QA).
+    let mut flights = finalize(&fca, flights, &metas);
+    annotate_releases(&mut flights, &flow_repo::release_holders(pool, &id).await?);
+    Ok(Json(flights))
 }
 
 /// Trade two flights' release times.
@@ -2536,7 +2540,10 @@ pub async fn clear_release(
     tag = "flow",
     params(("id" = String, Path, description = "FCA id")),
     request_body = SwapReleaseRequest,
-    responses((status = 200), (status = 400), (status = 401), (status = 404))
+    responses(
+        (status = 200), (status = 400), (status = 401), (status = 404),
+        (status = 409, description = "`held_by_person` / `held_by_other_machine`: a machine may not trade it"),
+    )
 )]
 pub async fn swap_releases(
     State(state): State<AppState>,

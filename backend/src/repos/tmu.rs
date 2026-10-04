@@ -530,6 +530,15 @@ pub async fn all_issued_cfrs(
     .map_err(|_| ApiError::Internal)
 }
 
+/// Every issued CFR's version (callsign -> version), for the departures list's `cfr_version`.
+pub async fn issued_cfr_versions(pool: &PgPool) -> Result<HashMap<String, i64>, ApiError> {
+    let rows = sqlx::query_as::<_, (String, i64)>("select callsign, version from tmu.issued_cfrs")
+        .fetch_all(pool)
+        .await
+        .map_err(|_| ApiError::Internal)?;
+    Ok(rows.into_iter().collect())
+}
+
 /// Issue (or re-issue) a CFR, returning its new version — or `None` when `expect` did not hold and
 /// nothing was written (#585). Same contract as `flow_repo::upsert_release`.
 pub async fn upsert_issued_cfr(
