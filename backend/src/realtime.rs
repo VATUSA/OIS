@@ -113,6 +113,12 @@ impl Subscription {
 /// The subprotocol a desktop client offers beside its token, and the only one ever selected.
 pub const WS_PROTOCOL: &str = "ois.v1";
 
+/// The largest message a client may send. The only thing a client says is a subscribe frame, and one
+/// naming every topic is under 200 bytes. Without a cap axum allows 64 MiB, which `Subscription::apply`
+/// would parse into a `Vec<String>` and echo back — about 1 GB for one frame from any signed-in
+/// caller. A larger message, whole or in fragments, closes the socket.
+const MAX_CLIENT_MESSAGE: usize = 4096;
+
 /// `GET /api/v1/ws` — upgrade to a websocket that streams realtime nudges. Requires a signed-in user
 /// (the `ois_session` cookie, or a desktop token) or a live API key or service account (#589): the
 /// router's auth middleware resolves them from the upgrade GET just as for a REST handler. Any caller
@@ -135,6 +141,7 @@ pub async fn ws(
     // the response headers as well. A web client offers nothing, and nothing is selected.
     let rx = state.events.subscribe();
     ws.protocols([WS_PROTOCOL])
+        .max_message_size(MAX_CLIENT_MESSAGE)
         .on_upgrade(move |socket| pump(socket, rx))
         .into_response()
 }
@@ -528,6 +535,68 @@ mod handshake_tests {
             r#"{"topic":"flow.release"}"#,
             "the TMI nudge was filtered out and the release still arrives"
         );
+    }
+
+    /// The socket is gone, and nothing was said on the way out: a frame the server refused must not
+    /// have been parsed and answered.
+    async fn assert_closed_unanswered(client: &mut Client) {
+        loop {
+            match tokio::time::timeout(std::time::Duration::from_secs(5), client.next())
+                .await
+                .expect("the server acts on the frame within 5s")
+            {
+                Some(Ok(Message::Text(text))) => panic!("an oversized frame was answered: {text}"),
+                Some(Ok(Message::Ping(_) | Message::Pong(_))) => continue,
+                _ => return, // closed, reset or ended
+            }
+        }
+    }
+
+    /// Uncapped, one 64 MiB subscribe frame of junk names cost the server about 1 GB (#589 QA). Sizes
+    /// are absolute, not derived from `MAX_CLIENT_MESSAGE`, so raising the cap fails here too.
+    #[sqlx::test]
+    async fn an_oversized_frame_closes_the_socket_unanswered(pool: PgPool) {
+        let (addr, _) = serve(pool).await;
+        let mut client = connect_as_service_account(addr).await;
+
+        // 4,015 bytes: just under 4 KiB, and still answered.
+        let fits = format!("{{\"subscribe\":[{}]}}", vec!["\"zz\""; 800].join(","));
+        assert_eq!(fits.len(), 4_015);
+        client.send(Message::Text(fits.into())).await.unwrap();
+        assert!(
+            next_text(&mut client)
+                .await
+                .starts_with(r#"{"error":"unknown_topic""#)
+        );
+
+        client
+            .send(Message::Text(" ".repeat(64 * 1024).into()))
+            .await
+            .ok();
+        assert_closed_unanswered(&mut client).await;
+    }
+
+    /// The same limit holds for a message sent in pieces: sixteen 1 KiB continuation frames, each
+    /// under the cap, still make a 16 KiB message.
+    #[sqlx::test]
+    async fn a_fragmented_oversized_message_closes_the_socket_unanswered(pool: PgPool) {
+        use tokio_tungstenite::tungstenite::protocol::frame::{
+            Frame,
+            coding::{Data, OpCode},
+        };
+
+        let (addr, _) = serve(pool).await;
+        let mut client = connect_as_service_account(addr).await;
+
+        let piece = " ".repeat(1024);
+        for i in 0..16 {
+            let opcode = if i == 0 { Data::Text } else { Data::Continue };
+            let frame = Frame::message(piece.clone(), OpCode::Data(opcode), i == 15);
+            if client.send(Message::Frame(frame)).await.is_err() {
+                break; // already closed mid-message
+            }
+        }
+        assert_closed_unanswered(&mut client).await;
     }
 
     #[sqlx::test]
