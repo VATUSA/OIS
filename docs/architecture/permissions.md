@@ -23,13 +23,60 @@ Ported from osmium, plus the `artcc_id` scope column:
 
 - `roles`, `permissions` — the catalogs.
 - `role_permissions` — role → permission.
-- `user_roles (user_id, role_name, artcc_id?)` — role grant, optionally scoped to an ARTCC.
-- `user_permissions (user_id, permission_name, granted, artcc_id?)` — direct grant,
+- `user_roles (user_id, role_name, artcc_id?, source)` — role grant, optionally scoped to an ARTCC.
+- `user_permissions (user_id, permission_name, granted, artcc_id?, source)` — direct grant,
   `granted=false` is an explicit **deny** that beats any allow.
 - `service_accounts` + `service_account_credentials` + `service_account_roles` — machine clients (the bot). Already
   carry a `scope_type`/`scope_key` dimension.
 - `actors`, `audit_logs` — who did what; the "Recorded as a dossier entry" line in the access editor writes here with
   the required `reason`.
+
+### Provenance (`source`)
+
+Both grant tables carry `source` — `manual`, `vatusa`, or `system` — naming **who created the row and
+therefore whose row it is to remove**. Without it a VATUSA sync had only two options, both wrong:
+write authoritatively and silently undo every hand-made grant on each run, or write additively and
+never clean up after a demotion.
+
+| `source` | Written by |
+|---|---|
+| `manual` | an admin in the access editor; a group membership set by hand |
+| `vatusa` | the VATUSA sync, which may reconcile it away |
+| `system` | OIS itself — the `SERVER_ADMIN` env reconciliation, and the `USER` baseline group |
+
+Two rules make it work:
+
+- **Every writer declares it.** The column is `not null` with **no default** (the default in
+  `0098` exists only to backfill existing rows as `manual`, and the migration then drops it). A writer
+  that forgets fails the insert instead of silently claiming to be a human grant.
+- **Each owner deletes only its own rows.** `replace_user_permissions_scoped` — the admin editor's
+  save — deletes the scope's `manual` rows and rewrites them; `set_user_role_scoped` takes the source
+  on both the grant and the revoke side. So a sync reconciles without touching anything set by hand.
+
+The accepted consequence: **an admin cannot un-grant a synced role from the editor.** If VATUSA says
+someone is an EC, the editor does not get to silently disagree until the next sync puts it back —
+removing it means detaching the user from sync. The alternative is the editor and the sync fighting,
+last writer winning, with no way to tell which rows were whose.
+
+One consequence to be aware of, and the reason provenance needs to reach the UI: the editor shows
+*effective* state, so it cannot yet tell a synced grant from a hand-made one. An admin who opens the
+editor and saves an unchanged form writes a `manual` row beside the existing `vatusa` one — pinning
+that grant, so a later demotion no longer removes the access. This is strictly better than the old
+behaviour (which deleted the synced row outright), but it means **surfacing `source` in the access
+editor is a prerequisite for trusting sync-driven revocation**, not a cosmetic follow-up.
+
+Uniqueness is keyed on `(user, name, scope, source)`, so a manual and a synced grant of the same thing
+coexist as separate rows and a demotion removes only one of them. The two grant readers
+(`fetch_user_role_grants`, `fetch_user_direct_grants`) therefore `select distinct`, so the editor still
+lists such an entry once.
+
+**No reader consults `source`.** The effective-permissions view and `fetch_effective_permissions`
+ignore it entirely, so a grant's authority never depends on who created it. Provenance answers only
+"whose row is this to remove?".
+
+Time bounds (`starts_at`/`ends_at`) were considered and **deferred**: nothing yet needs time-bounded
+membership, and adding the column would make every reader filter on it for a value no writer sets.
+`service_account_roles` has them because machine credentials expire; a human's role does not, yet.
 
 ### Effective permissions
 

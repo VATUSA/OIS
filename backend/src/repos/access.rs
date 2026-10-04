@@ -575,49 +575,87 @@ pub async fn fetch_user_direct_permission_names(
 
 /// Grants or revokes a single national (unscoped) role for a user. Only touches
 /// national grants so facility-scoped role assignments are preserved.
-pub async fn set_user_role_manual(
+pub async fn set_user_role(
     tx: &mut Transaction<'_, Postgres>,
     user_id: &str,
     role_name: &str,
     held: bool,
+    source: GrantSource,
 ) -> Result<(), ApiError> {
-    set_user_role_manual_scoped(tx, user_id, role_name, held, None).await
+    set_user_role_scoped(tx, user_id, role_name, held, None, source).await
+}
+
+/// Who created a grant, and therefore whose row it is to remove (VATUSA/OIS#547).
+///
+/// Typed rather than a string so a writer cannot mistype it, and so adding a source is a compile
+/// error at every call site rather than a value that silently fails a check constraint at runtime.
+///
+/// Deliberately **not** consulted by any reader: the `0091` effective-permissions view and
+/// [`fetch_effective_permissions`] ignore it, so a grant's authority never depends on who created it
+/// and #543's single-resolver property is untouched. This answers only "whose row is this to remove?".
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum GrantSource {
+    /// An admin set it by hand — the access editor, or a group membership (#546).
+    Manual,
+    /// The VATUSA sync owns it and may reconcile it away (#548).
+    Vatusa,
+    /// OIS itself set it: the `SERVER_ADMIN` env reconciliation, and the `USER` baseline group (#544).
+    System,
+}
+
+impl GrantSource {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            GrantSource::Manual => "manual",
+            GrantSource::Vatusa => "vatusa",
+            GrantSource::System => "system",
+        }
+    }
 }
 
 /// Grants or revokes a single role at one scope (`artcc_id = None` national). Only
 /// touches that scope; other scopes' assignments are preserved.
-pub async fn set_user_role_manual_scoped(
+/// `source` names **whose row this is**, on both the grant and the revoke side. So an admin revoking
+/// removes only the manual row and a VATUSA demotion removes only its own — which is how a sync
+/// reconciles without touching anything set by hand (#547). The old name claimed "manual" while
+/// being the generic primitive; a machine caller was indistinguishable from an admin.
+pub async fn set_user_role_scoped(
     tx: &mut Transaction<'_, Postgres>,
     user_id: &str,
     role_name: &str,
     held: bool,
     artcc_id: Option<&str>,
+    source: GrantSource,
 ) -> Result<(), ApiError> {
     if held {
         sqlx::query(
             r#"
-            insert into access.user_roles (user_id, role_name, artcc_id)
-            select $1, $2, $3
+            insert into access.user_roles (user_id, role_name, artcc_id, source)
+            select $1, $2, $3, $4
             where not exists (
                 select 1 from access.user_roles
                 where user_id = $1 and role_name = $2 and artcc_id is not distinct from $3
+                  and source = $4
             )
             "#,
         )
         .bind(user_id)
         .bind(role_name)
         .bind(artcc_id)
+        .bind(source.as_str())
         .execute(&mut **tx)
         .await
         .map_err(|_| ApiError::Internal)?;
     } else {
         sqlx::query(
             "delete from access.user_roles \
-             where user_id = $1 and role_name = $2 and artcc_id is not distinct from $3",
+             where user_id = $1 and role_name = $2 and artcc_id is not distinct from $3 \
+               and source = $4",
         )
         .bind(user_id)
         .bind(role_name)
         .bind(artcc_id)
+        .bind(source.as_str())
         .execute(&mut **tx)
         .await
         .map_err(|_| ApiError::Internal)?;
@@ -632,11 +670,12 @@ pub async fn assign_server_admin(
 ) -> Result<(), ApiError> {
     sqlx::query(
         r#"
-        insert into access.user_roles (user_id, role_name)
-        select $1, 'SERVER_ADMIN'
+        insert into access.user_roles (user_id, role_name, source)
+        select $1, 'SERVER_ADMIN', 'system'
         where not exists (
             select 1 from access.user_roles
             where user_id = $1 and role_name = 'SERVER_ADMIN' and artcc_id is null
+              and source = 'system'
         )
         "#,
     )
@@ -653,7 +692,10 @@ pub async fn revoke_server_admin(
     user_id: &str,
 ) -> Result<bool, ApiError> {
     let result = sqlx::query(
-        "delete from access.user_roles where user_id = $1 and role_name = 'SERVER_ADMIN'",
+        // `system`: the row this reconciliation created. A SERVER_ADMIN granted some other way is not
+        // this function's to remove (#547).
+        "delete from access.user_roles \
+         where user_id = $1 and role_name = 'SERVER_ADMIN' and source = 'system'",
     )
     .bind(user_id)
     .execute(&mut **tx)
@@ -669,7 +711,8 @@ pub async fn fetch_user_direct_grants(
     user_id: &str,
 ) -> Result<Vec<(Option<String>, String)>, ApiError> {
     sqlx::query_as::<_, (Option<String>, String)>(
-        "select artcc_id, permission_name from access.user_permissions \
+        // `distinct` for the same reason as `fetch_user_role_grants` (#547).
+        "select distinct artcc_id, permission_name from access.user_permissions \
          where user_id = $1 and granted = true \
          order by artcc_id nulls first, permission_name",
     )
@@ -862,7 +905,9 @@ pub async fn fetch_user_role_grants(
     user_id: &str,
 ) -> Result<Vec<(Option<String>, String)>, ApiError> {
     sqlx::query_as::<_, (Option<String>, String)>(
-        "select artcc_id, role_name from access.user_roles \
+        // `distinct`: since #547 a manual and a synced grant of the same role at the same scope are
+        // two rows, and the editor must list it once.
+        "select distinct artcc_id, role_name from access.user_roles \
          where user_id = $1 order by artcc_id nulls first, role_name",
     )
     .bind(user_id)
@@ -893,8 +938,13 @@ pub async fn replace_user_permissions_scoped(
     // one: it used to delete every row here, which meant saving a user's ZDC scope *unchanged* silently
     // stripped their ZDC denies and widened their access, with no guard ever seeing it (#559).
     sqlx::query(
+        // **Only the manual rows.** Before #547 this deleted everything at the scope, so the first
+        // admin save after a sync wiped every synced grant — the likeliest silent access-loss bug in
+        // the epic. The accepted consequence: an admin cannot un-grant a synced role here; they
+        // detach the user from sync (#549).
         "delete from access.user_permissions \
-         where user_id = $1 and artcc_id is not distinct from $2 and granted is true",
+         where user_id = $1 and artcc_id is not distinct from $2 \
+            and source = 'manual' and granted is true",
     )
     .bind(user_id)
     .bind(artcc_id)
@@ -903,13 +953,16 @@ pub async fn replace_user_permissions_scoped(
     .map_err(|_| ApiError::Internal)?;
 
     for name in names {
-        // An explicit grant where a deny exists replaces it, rather than violating the unique index on
-        // `(user_id, permission_name, coalesce(artcc_id, ''))`. That is the editor deliberately
-        // granting, and `enforce_actor_scope` has already required the actor to hold it at this scope.
+        // An explicit grant where a *manual* deny exists replaces it, rather than violating the unique
+        // index, which 0098 widened to `(user_id, permission_name, coalesce(artcc_id, ''), source)`.
+        // Keying the conflict on `source` too means this can only ever collide with the editor's own
+        // row: a synced grant at the same scope is a separate row and is left to the sync to reconcile.
+        // `enforce_actor_scope` has already required the actor to hold it at this scope.
         sqlx::query(
-            "insert into access.user_permissions (user_id, permission_name, granted, artcc_id) \
-             values ($1, $2, true, $3) \
-             on conflict (user_id, permission_name, coalesce(artcc_id, '')) \
+            "insert into access.user_permissions \
+                 (user_id, permission_name, granted, artcc_id, source) \
+             values ($1, $2, true, $3, 'manual') \
+             on conflict (user_id, permission_name, coalesce(artcc_id, ''), source) \
              do update set granted = true",
         )
         .bind(user_id)
@@ -953,6 +1006,391 @@ mod tests {
 
     fn facilities(ids: &[&str]) -> PermissionScope {
         PermissionScope::Facilities(ids.iter().map(|s| s.to_string()).collect())
+    }
+
+    /// A provenance helper: make a row that a given source owns. Tests say what they mean, and a
+    /// `vatusa` row is otherwise three lines of SQL each time (VATUSA/OIS#547).
+    #[cfg(test)]
+    async fn seed_grant(
+        pool: &sqlx::PgPool,
+        user_id: &str,
+        permission_name: &str,
+        artcc: Option<&str>,
+        source: &str,
+    ) {
+        sqlx::query(
+            "insert into access.user_permissions \
+                 (user_id, permission_name, granted, artcc_id, source) \
+             values ($1, $2, true, $3, $4)",
+        )
+        .bind(user_id)
+        .bind(permission_name)
+        .bind(artcc)
+        .bind(source)
+        .execute(pool)
+        .await
+        .unwrap();
+    }
+
+    #[cfg(test)]
+    async fn sources_of(pool: &sqlx::PgPool, user_id: &str) -> Vec<(String, String)> {
+        sqlx::query_as::<_, (String, String)>(
+            "select permission_name, source from access.user_permissions \
+             where user_id = $1 order by permission_name, source",
+        )
+        .bind(user_id)
+        .fetch_all(pool)
+        .await
+        .unwrap()
+    }
+
+    /// AC3, and the one the issue calls the likeliest silent access-loss bug in the epic: before #547
+    /// `replace_user_permissions_scoped` deleted *everything* at the scope, so the first admin save
+    /// after a sync wiped every synced grant. Against the old unconditional delete this test fails.
+    #[sqlx::test]
+    async fn an_admin_save_leaves_synced_grants_alone(pool: sqlx::PgPool) {
+        let user: String = sqlx::query_scalar(
+            "insert into identity.users (full_name, display_name) values ('T', 'T') returning id",
+        )
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+
+        seed_grant(&pool, &user, "events.config.update", None, "vatusa").await;
+        seed_grant(&pool, &user, "ace.requests.claim", None, "manual").await;
+
+        // The admin saves a different set entirely — the editor is authoritative over its own rows.
+        let mut tx = pool.begin().await.unwrap();
+        super::replace_user_permissions_scoped(
+            &mut tx,
+            &user,
+            None,
+            &["tmu.ntml.create".to_string()],
+        )
+        .await
+        .unwrap();
+        tx.commit().await.unwrap();
+
+        let rows = sources_of(&pool, &user).await;
+        assert_eq!(
+            rows,
+            vec![
+                ("events.config.update".to_string(), "vatusa".to_string()),
+                ("tmu.ntml.create".to_string(), "manual".to_string()),
+            ],
+            "the synced grant must survive an admin save, and the admin's own prior row must not"
+        );
+    }
+
+    /// AC2: sync reconciles only what it owns. The mirror of the test above — a VATUSA revoke at a
+    /// scope leaves a manual grant at that same scope standing.
+    #[sqlx::test]
+    async fn a_sync_revoke_removes_only_its_own_row(pool: sqlx::PgPool) {
+        let user: String = sqlx::query_scalar(
+            "insert into identity.users (full_name, display_name) values ('T', 'T') returning id",
+        )
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+
+        seed_grant(&pool, &user, "events.config.update", Some("ZDC"), "vatusa").await;
+        seed_grant(&pool, &user, "ace.requests.claim", Some("ZDC"), "manual").await;
+
+        // What a reconciliation does (#548): withdraw this source's rows at the scope.
+        sqlx::query(
+            "delete from access.user_permissions \
+             where user_id = $1 and artcc_id is not distinct from $2 and source = 'vatusa'",
+        )
+        .bind(&user)
+        .bind(Some("ZDC"))
+        .execute(&pool)
+        .await
+        .unwrap();
+
+        assert_eq!(
+            sources_of(&pool, &user).await,
+            vec![("ace.requests.claim".to_string(), "manual".to_string())],
+            "a sync revoke must not reach a hand-made grant at the same scope"
+        );
+    }
+
+    /// AC1 structurally. The migration adds `source` with a default only to backfill, then drops it,
+    /// so a writer that forgets fails `not null` instead of silently claiming to be a human grant.
+    /// This asserts the schema enforces it rather than trusting every author to remember.
+    #[sqlx::test]
+    async fn an_insert_without_a_source_is_rejected(pool: sqlx::PgPool) {
+        let user: String = sqlx::query_scalar(
+            "insert into identity.users (full_name, display_name) values ('T', 'T') returning id",
+        )
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+
+        for table in ["access.user_roles", "access.user_permissions"] {
+            let column = if table.ends_with("roles") {
+                "role_name"
+            } else {
+                "permission_name"
+            };
+            let err = sqlx::query(&format!(
+                "insert into {table} (user_id, {column}) values ($1, 'USER')"
+            ))
+            .bind(&user)
+            .execute(&pool)
+            .await
+            .expect_err("omitting source must fail: the backfill default is dropped");
+            assert!(
+                err.to_string().contains("source"),
+                "{table}: expected a not-null violation naming source, got {err}"
+            );
+        }
+
+        // And a source outside the three is refused by the check constraint.
+        sqlx::query(
+            "insert into access.user_roles (user_id, role_name, source) values ($1, 'USER', 'guess')",
+        )
+        .bind(&user)
+        .execute(&pool)
+        .await
+        .expect_err("an unknown source must violate the check constraint");
+    }
+
+    /// AC4: rows that predate the migration read as `manual`.
+    ///
+    /// `#[sqlx::test]` applies every migration before any test data exists, so the backfill cannot be
+    /// observed by inserting afterwards. This puts both tables back how `0098` found them and then runs
+    /// **the real migration file** (`include_str!`), not a copy typed into the test. A copy is what this
+    /// test used to hold, and changing `0098` to backfill `'vatusa'` left it — and every other test —
+    /// green (#547 review). That value matters more than any other here: a wrong backfill marks every
+    /// hand-made grant as synced, and the first sync then revokes them as its own.
+    ///
+    /// Re-runnable because `0098` is written with `if not exists` / `if exists` throughout; dropping
+    /// `source` also drops the indexes and check constraint built on it, which the file recreates.
+    #[sqlx::test]
+    async fn the_backfill_marks_pre_existing_rows_manual(pool: sqlx::PgPool) {
+        const MIGRATION_0098: &str = include_str!("../../migrations/0098_grant_provenance.sql");
+
+        let user: String = sqlx::query_scalar(
+            "insert into identity.users (full_name, display_name) values ('T', 'T') returning id",
+        )
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+
+        // Put both tables back how 0098 found them, each holding a row with no provenance.
+        for table in ["access.user_roles", "access.user_permissions"] {
+            sqlx::query(&format!("alter table {table} drop column source"))
+                .execute(&pool)
+                .await
+                .unwrap();
+        }
+        sqlx::query("insert into access.user_roles (user_id, role_name) values ($1, 'NTMO')")
+            .bind(&user)
+            .execute(&pool)
+            .await
+            .unwrap();
+        sqlx::query(
+            "insert into access.user_permissions (user_id, permission_name, granted) \
+             values ($1, 'events.config.update', true)",
+        )
+        .bind(&user)
+        .execute(&pool)
+        .await
+        .unwrap();
+
+        sqlx::raw_sql(MIGRATION_0098).execute(&pool).await.unwrap();
+
+        let role_source: String = sqlx::query_scalar(
+            "select source from access.user_roles where user_id = $1 and role_name = 'NTMO'",
+        )
+        .bind(&user)
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        let perm_source: String = sqlx::query_scalar(
+            "select source from access.user_permissions \
+             where user_id = $1 and permission_name = 'events.config.update'",
+        )
+        .bind(&user)
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        assert_eq!(
+            role_source, "manual",
+            "an existing role grant backfills as hand-made"
+        );
+        assert_eq!(
+            perm_source, "manual",
+            "an existing permission grant backfills as hand-made"
+        );
+
+        // …and the default really is gone afterwards, on both tables, which is what makes AC1 the
+        // schema's job rather than every author's memory.
+        sqlx::query("insert into access.user_roles (user_id, role_name) values ($1, 'USER')")
+            .bind(&user)
+            .execute(&pool)
+            .await
+            .expect_err("the backfill default must not survive on user_roles");
+        sqlx::query(
+            "insert into access.user_permissions (user_id, permission_name, granted) \
+             values ($1, 'tmu.program.update', true)",
+        )
+        .bind(&user)
+        .execute(&pool)
+        .await
+        .expect_err("the backfill default must not survive on user_permissions");
+    }
+
+    /// AC2, against the writer the sync will call. The sync itself is #548 and not built yet, but
+    /// `set_user_role_scoped` is, and it is where the guarantee lives: the same **role** at the same
+    /// **scope**, held both by hand and by sync, must lose only the synced row when the sync revokes.
+    ///
+    /// The earlier `a_sync_revoke_removes_only_its_own_row` runs a hand-typed delete on
+    /// `user_permissions` with two *different* permissions, so it pins none of that — removing
+    /// `and source = $4` from this writer left the whole suite green (#547 review).
+    #[sqlx::test]
+    async fn a_sync_role_revoke_leaves_the_manual_grant_at_the_same_scope(pool: sqlx::PgPool) {
+        let user: String = sqlx::query_scalar(
+            "insert into identity.users (full_name, display_name) values ('T', 'T') returning id",
+        )
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+
+        let mut tx = pool.begin().await.unwrap();
+        for source in [super::GrantSource::Manual, super::GrantSource::Vatusa] {
+            super::set_user_role_scoped(&mut tx, &user, "NTMO", true, Some("ZDC"), source)
+                .await
+                .unwrap();
+        }
+        tx.commit().await.unwrap();
+
+        let rows = |pool: sqlx::PgPool, user: String| async move {
+            sqlx::query_scalar::<_, String>(
+                "select source from access.user_roles \
+                 where user_id = $1 and role_name = 'NTMO' and artcc_id = 'ZDC' order by source",
+            )
+            .bind(user)
+            .fetch_all(&pool)
+            .await
+            .unwrap()
+        };
+        assert_eq!(
+            rows(pool.clone(), user.clone()).await,
+            vec!["manual".to_string(), "vatusa".to_string()],
+            "both sources coexist at one scope"
+        );
+
+        let mut tx = pool.begin().await.unwrap();
+        super::set_user_role_scoped(
+            &mut tx,
+            &user,
+            "NTMO",
+            false,
+            Some("ZDC"),
+            super::GrantSource::Vatusa,
+        )
+        .await
+        .unwrap();
+        tx.commit().await.unwrap();
+
+        assert_eq!(
+            rows(pool.clone(), user.clone()).await,
+            vec!["manual".to_string()],
+            "a sync revoke must remove its own row and leave the hand-made one"
+        );
+    }
+
+    /// Since a manual and a synced grant of the same role at the same scope are now two rows, the
+    /// grant readers must still report it once — otherwise the access editor lists the role twice.
+    /// This is the cost the unique-index change buys, and it is pinned rather than remembered.
+    #[sqlx::test]
+    async fn the_grant_readers_collapse_two_sources_into_one_entry(pool: sqlx::PgPool) {
+        let user: String = sqlx::query_scalar(
+            "insert into identity.users (full_name, display_name) values ('T', 'T') returning id",
+        )
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+
+        for source in ["manual", "vatusa"] {
+            sqlx::query(
+                "insert into access.user_roles (user_id, role_name, artcc_id, source) \
+                 values ($1, 'EC', 'ZDC', $2)",
+            )
+            .bind(&user)
+            .bind(source)
+            .execute(&pool)
+            .await
+            .unwrap();
+
+            seed_grant(&pool, &user, "ace.requests.claim", Some("ZDC"), source).await;
+        }
+
+        assert_eq!(
+            super::fetch_user_role_grants(&pool, &user).await.unwrap(),
+            vec![(Some("ZDC".to_string()), "EC".to_string())],
+            "a role held from two sources is still one entry in the editor"
+        );
+        assert_eq!(
+            super::fetch_user_direct_grants(&pool, &user).await.unwrap(),
+            vec![(Some("ZDC".to_string()), "ace.requests.claim".to_string())],
+            "and so is a direct permission"
+        );
+    }
+
+    /// The `SERVER_ADMIN` env reconciliation owns its row as `system`, so neither a sync nor an admin
+    /// save can take it away — and its revoke only removes what it granted.
+    #[sqlx::test]
+    async fn the_server_admin_reconciliation_owns_a_system_row(pool: sqlx::PgPool) {
+        let user: String = sqlx::query_scalar(
+            "insert into identity.users (full_name, display_name) values ('T', 'T') returning id",
+        )
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+
+        let mut tx = pool.begin().await.unwrap();
+        super::assign_server_admin(&mut tx, &user).await.unwrap();
+        tx.commit().await.unwrap();
+
+        let source: String = sqlx::query_scalar(
+            "select source from access.user_roles \
+             where user_id = $1 and role_name = 'SERVER_ADMIN'",
+        )
+        .bind(&user)
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        assert_eq!(source, "system");
+
+        // A hand-made SERVER_ADMIN is a separate row, and the reconciliation's revoke leaves it.
+        sqlx::query(
+            "insert into access.user_roles (user_id, role_name, source) \
+             values ($1, 'SERVER_ADMIN', 'manual')",
+        )
+        .bind(&user)
+        .execute(&pool)
+        .await
+        .expect("a manual row coexists with the system one");
+
+        let mut tx = pool.begin().await.unwrap();
+        super::revoke_server_admin(&mut tx, &user).await.unwrap();
+        tx.commit().await.unwrap();
+
+        let remaining: Vec<String> = sqlx::query_scalar(
+            "select source from access.user_roles \
+             where user_id = $1 and role_name = 'SERVER_ADMIN'",
+        )
+        .bind(&user)
+        .fetch_all(&pool)
+        .await
+        .unwrap();
+        assert_eq!(
+            remaining,
+            vec!["manual".to_string()],
+            "the env reconciliation must revoke only its own grant"
+        );
     }
 
     #[test]
@@ -1200,8 +1638,8 @@ mod tests {
         .unwrap();
         for artcc in ["ZDC", "ZNY"] {
             sqlx::query(
-                "insert into access.user_roles (user_id, role_name, artcc_id) \
-                 values ($1, 'DENY_TEST', $2)",
+                "insert into access.user_roles (user_id, role_name, artcc_id, source) \
+                 values ($1, 'DENY_TEST', $2, 'manual')",
             )
             .bind(&user)
             .bind(artcc)
@@ -1282,8 +1720,8 @@ mod tests {
         .await
         .unwrap();
         sqlx::query(
-            "insert into access.user_roles (user_id, role_name, artcc_id) \
-             values ($1, 'SCOPE_TEST', 'ZDC')",
+            "insert into access.user_roles (user_id, role_name, artcc_id, source) \
+             values ($1, 'SCOPE_TEST', 'ZDC', 'manual')",
         )
         .bind(&user)
         .execute(&pool)
@@ -1316,7 +1754,7 @@ mod tests {
         .await
         .unwrap();
         sqlx::query(
-            "insert into access.user_roles (user_id, role_name) values ($1, 'SERVER_ADMIN')",
+            "insert into access.user_roles (user_id, role_name, source) values ($1, 'SERVER_ADMIN', 'system')",
         )
         .bind(&user)
         .execute(&pool)
@@ -1350,7 +1788,7 @@ mod tests {
         .await
         .unwrap();
         sqlx::query(
-            "insert into access.user_roles (user_id, role_name) values ($1, 'SERVER_ADMIN')",
+            "insert into access.user_roles (user_id, role_name, source) values ($1, 'SERVER_ADMIN', 'system')",
         )
         .bind(&user)
         .execute(&pool)
@@ -1489,7 +1927,7 @@ mod tests {
         .fetch_one(&pool)
         .await
         .unwrap();
-        sqlx::query("insert into access.user_roles (user_id, role_name) values ($1, 'NTMO')")
+        sqlx::query("insert into access.user_roles (user_id, role_name, source) values ($1, 'NTMO', 'manual')")
             .bind(&user)
             .execute(&pool)
             .await
@@ -1555,15 +1993,19 @@ mod tests {
 
         // The pre-#544 world: direct baseline rows on both users, but only one is in the group.
         for user in [&in_group, &denied] {
-            sqlx::query("insert into access.user_roles (user_id, role_name) values ($1, 'USER')")
-                .bind(user)
-                .execute(&pool)
-                .await
-                .unwrap();
+            sqlx::query(
+                "insert into access.user_roles (user_id, role_name, source) \
+                 values ($1, 'USER', 'manual')",
+            )
+            .bind(user)
+            .execute(&pool)
+            .await
+            .unwrap();
         }
         sqlx::query(
-            "insert into access.user_permissions (user_id, permission_name, granted, artcc_id) \
-             values ($1, 'users.directory.read', false, null)",
+            "insert into access.user_permissions \
+                 (user_id, permission_name, granted, artcc_id, source) \
+             values ($1, 'users.directory.read', false, null, 'manual')",
         )
         .bind(&denied)
         .execute(&pool)
@@ -1711,7 +2153,8 @@ mod tests {
             let pool = pool.clone();
             async move {
                 sqlx::query(
-                    "insert into access.user_roles (user_id, role_name, artcc_id) values ($1, $2, $3)",
+                    "insert into access.user_roles (user_id, role_name, artcc_id, source) \
+                     values ($1, $2, $3, 'manual')",
                 )
                 .bind(user)
                 .bind(role)
@@ -1786,6 +2229,19 @@ mod tests {
         .collect();
 
         let mut tx = pool.begin().await.unwrap();
+        // 0094 predates `source` (0098), so its inserts do not name it — and 0098 drops the column's
+        // backfill default on purpose, so replaying 0094 against a fully-migrated schema violates
+        // `not null`. Restore the default for the replay only: the rollback below undoes it along with
+        // everything else, and 0094's statements stay byte-identical, which is what makes this test
+        // run what production ran.
+        for table in ["access.user_roles", "access.user_permissions"] {
+            sqlx::query(&format!(
+                "alter table {table} alter column source set default 'manual'"
+            ))
+            .execute(&mut *tx)
+            .await
+            .unwrap();
+        }
         sqlx::query(audit_block("SNAPSHOT"))
             .execute(&mut *tx)
             .await
@@ -1870,7 +2326,7 @@ mod tests {
         .await
         .unwrap();
         sqlx::query(
-            "insert into access.user_roles (user_id, role_name, artcc_id) values ($1, 'EC', 'ZDC')",
+            "insert into access.user_roles (user_id, role_name, artcc_id, source) values ($1, 'EC', 'ZDC', 'manual')",
         )
         .bind(&user)
         .execute(&pool)
