@@ -268,7 +268,7 @@ async fn apply_and_tick(
     )
     .await
     {
-        events.publish(crate::realtime::topic::FEED_TICK);
+        events.publish_local(crate::realtime::topic::FEED_TICK);
     }
 }
 
@@ -360,6 +360,60 @@ mod tests {
             },
             ..Default::default()
         }
+    }
+
+    /// The feed tick stays on the replica that raised it (#648): every replica polls and installs its
+    /// own snapshot, so a fanned-out tick would reach each client once per replica — some before their
+    /// own replica had the data. Two hubs on one database stand in for two replicas.
+    #[sqlx::test]
+    async fn a_feed_tick_does_not_cross_to_other_replicas(pool: sqlx::PgPool) {
+        use tokio::time::timeout;
+
+        let a = crate::realtime::Events::new(Some(pool.clone()));
+        let b = crate::realtime::Events::new(Some(pool.clone()));
+        a.start_listener().await.unwrap();
+        b.start_listener().await.unwrap();
+        let (mut on_a, mut on_b) = (a.subscribe(), b.subscribe());
+
+        let state = new_state();
+        let (mut last, mut stale) = (None, 0u32);
+        apply_and_tick(
+            &state,
+            &a,
+            fetched("2026-10-04T00:00:00Z"),
+            Utc::now(),
+            Duration::ZERO,
+            &mut last,
+            &mut stale,
+        )
+        .await;
+        assert_eq!(
+            on_a.try_recv().unwrap().topic,
+            crate::realtime::topic::FEED_TICK,
+            "this replica's own clients hear it"
+        );
+
+        // A fanned-out nudge sent after the tick: once B has it, a fanned-out tick would have arrived.
+        a.publish(crate::realtime::topic::RELEASE);
+        let mut heard = Vec::new();
+        loop {
+            let event = timeout(Duration::from_secs(10), on_b.recv())
+                .await
+                .expect("the other replica hears the marker")
+                .unwrap();
+            if event.topic == crate::realtime::topic::RELEASE {
+                break;
+            }
+            heard.push(event.topic);
+        }
+        tokio::time::sleep(Duration::from_millis(500)).await;
+        while let Ok(event) = on_b.try_recv() {
+            heard.push(event.topic);
+        }
+        assert!(
+            !heard.iter().any(|t| t == crate::realtime::topic::FEED_TICK),
+            "the other replica heard: {heard:?}"
+        );
     }
 
     /// Through the real success path: one tick per new publish, none for a repeat or a garbage
