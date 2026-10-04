@@ -18,7 +18,7 @@ use crate::{
         permissions::{
             FlowFcaDelete, FlowFcaRead, FlowFcaUpdate, FlowRouteDelete, FlowRouteUpdate, StatsRead,
         },
-        principal::Actor,
+        principal::{Actor, Principal},
         require_permission::RequirePermission,
     },
     errors::ApiError,
@@ -369,6 +369,24 @@ fn resolve_route_body(nav: &NavData, airports: &AirportDb, row: flow_repo::Route
 /// Permission names for route edit/delete scope checks (the caller must hold these for the route's ARTCC).
 const ROUTE_UPDATE_PERM: &str = "flow.route.update";
 const ROUTE_DELETE_PERM: &str = "flow.route.delete";
+/// The release writes' permission, checked against the FCA's owning ARTCC (#626).
+const FCA_UPDATE_PERM: &str = "flow.fca.update";
+
+/// Refuse a release write on an FCA outside the caller's `flow.fca.update` scope (#626). An FCA with
+/// no `artcc` is writable only nationally, as a global shared route is.
+async fn require_fca_scope(
+    state: &AppState,
+    principal: &Principal,
+    fca: &FcaBody,
+) -> Result<(), ApiError> {
+    let artcc = flow_repo::norm_artcc(Some(&fca.artcc));
+    let scope = principal.permission_scope(state, FCA_UPDATE_PERM).await?;
+    if scope.allows(artcc.as_deref()) {
+        Ok(())
+    } else {
+        Err(ApiError::Forbidden)
+    }
+}
 
 /// Protective margin added to the separation when **issuing** a release (#356).
 ///
@@ -2328,7 +2346,9 @@ pub async fn list_idst(
     request_body = ReleaseRequest,
     responses(
         (status = 200, body = Vec<FcaFlight>, description = "Released; `ETag` is the new version"),
-        (status = 400), (status = 401), (status = 404),
+        (status = 400), (status = 401),
+        (status = 403, description = "The FCA's ARTCC is outside the caller's scope"),
+        (status = 404),
         (status = 409, description = "`held_by_person` / `held_by_other_machine`: a machine may not replace it"),
         (status = 412, description = "The precondition failed; `ETag` is the current version"),
         (status = 428, description = "A machine sent neither `If-Match` nor `If-None-Match`")
@@ -2346,6 +2366,7 @@ pub async fn mark_release(
     let fca = flow_repo::get_fca(pool, &id)
         .await?
         .ok_or(ApiError::NotFound)?;
+    require_fca_scope(&state, &principal, &fca).await?;
     let callsign = callsign.to_ascii_uppercase();
     // Who may write it, and on what condition, before any metering work (#585).
     let expect = release_authority::precondition(&headers, &principal)?;
@@ -2426,7 +2447,9 @@ pub async fn mark_release(
         ("If-Match" = Option<String>, Header, description = "Clear only this release version (#585)")
     ),
     responses(
-        (status = 200, body = Vec<FcaFlight>), (status = 400), (status = 401), (status = 404),
+        (status = 200, body = Vec<FcaFlight>), (status = 400), (status = 401),
+        (status = 403, description = "The FCA's ARTCC is outside the caller's scope"),
+        (status = 404),
         (status = 409, description = "`held_by_person` / `held_by_other_machine`: a machine may not clear it"),
         (status = 412, description = "The precondition failed; `ETag` is the current version"),
         (status = 428, description = "A machine sent no `If-Match`")
@@ -2443,6 +2466,7 @@ pub async fn clear_release(
     let fca = flow_repo::get_fca(pool, &id)
         .await?
         .ok_or(ApiError::NotFound)?;
+    require_fca_scope(&state, &principal, &fca).await?;
     let callsign = callsign.to_ascii_uppercase();
     // A machine may clear only its own release, and only the version it last saw (#585). "Clear if
     // absent" means nothing, so `If-None-Match` is refused rather than read as a no-op.
@@ -2523,7 +2547,9 @@ pub async fn clear_release(
     params(("id" = String, Path, description = "FCA id")),
     request_body = SwapReleaseRequest,
     responses(
-        (status = 200), (status = 400), (status = 401), (status = 404),
+        (status = 200), (status = 400), (status = 401),
+        (status = 403, description = "The FCA's ARTCC is outside the caller's scope"),
+        (status = 404),
         (status = 409, description = "`held_by_person` / `held_by_other_machine`: a machine may not trade it"),
     )
 )]
@@ -2542,6 +2568,10 @@ pub async fn swap_releases(
     if a.is_empty() || b.is_empty() || a == b {
         return Err(ApiError::BadRequest);
     }
+    let fca = flow_repo::get_fca(pool, &id)
+        .await?
+        .ok_or(ApiError::NotFound)?;
+    require_fca_scope(&state, &principal, &fca).await?;
     // A swap changes both releases, so a machine needs authority over both (#585). It takes no
     // precondition: it trades two current times rather than writing one the caller computed.
     let by = principal.attribution(&state).await?;

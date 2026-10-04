@@ -1,7 +1,8 @@
 import {useEffect, useMemo, useState} from "react";
 import {Button, Card, ConfirmButton, Input, StatusPill, useToast} from "@ois/ui";
-import {Plus, ShieldCheck} from "lucide-react";
+import {ChevronDown, ChevronRight, Plus, ShieldCheck} from "lucide-react";
 
+import {PermissionTree} from "@/components/access/scope-tree";
 import {usePageHeader} from "@/components/shell/page-meta";
 import {useCatalog, flattenTree} from "@/lib/access";
 import {
@@ -23,71 +24,6 @@ const SUBTITLE =
   "What each group grants. Editing a group changes every holder's access at once — no per-user re-save.";
 
 const labelClass = "text-xs font-semibold text-ink-2";
-
-/**
- * The permission checkboxes for one group, grouped by domain.
- *
- * Flat rather than the shared `PermissionScopeTree`: `access.role_permissions` carries **no ARTCC
- * scope**. Scope lives on the membership (`access.user_roles.artcc_id`), which is what lets one `EC`
- * group mean "EC at ZDC" for one person and national for another. Rendering a scope control here
- * would imply a dimension the data does not have.
- */
-function PermissionList({
-  all,
-  selected,
-  disabled,
-  onChange,
-}: {
-  all: string[];
-  selected: Set<string>;
-  disabled?: boolean;
-  onChange: (next: Set<string>) => void;
-}) {
-  const byDomain = useMemo(() => {
-    const map = new Map<string, string[]>();
-    for (const name of all) {
-      const domain = name.split(".")[0] ?? "other";
-      map.set(domain, [...(map.get(domain) ?? []), name]);
-    }
-    return [...map.entries()].sort(([a], [b]) => a.localeCompare(b));
-  }, [all]);
-
-  return (
-    <div className="flex flex-col gap-4">
-      {byDomain.map(([domain, names]) => (
-        <div key={domain} className="flex flex-col gap-1.5">
-          <span className={labelClass}>{domain}</span>
-          <div className="flex flex-wrap gap-2">
-            {names.map((name) => {
-              const on = selected.has(name);
-              return (
-                <label
-                  key={name}
-                  className={`flex items-center gap-2 rounded-xs border border-line bg-panel-2 px-2.5 py-1 ${
-                    disabled ? "opacity-60" : "cursor-pointer"
-                  }`}
-                >
-                  <input
-                    type="checkbox"
-                    checked={on}
-                    disabled={disabled}
-                    onChange={() => {
-                      const next = new Set(selected);
-                      if (on) next.delete(name);
-                      else next.add(name);
-                      onChange(next);
-                    }}
-                  />
-                  <span className="font-mono text-xs text-ink">{name}</span>
-                </label>
-              );
-            })}
-          </div>
-        </div>
-      ))}
-    </div>
-  );
-}
 
 /**
  * Who holds this group, and where.
@@ -349,6 +285,11 @@ function GroupCard({
   const del = useDeleteGroup();
   const [selected, setSelected] = useState<Set<string>>(() => new Set(group.permissions));
   const [reason, setReason] = useState("");
+  // Collapsed on load (VATUSA/OIS#681). The body mounts on first open and is only hidden after, so
+  // an unsaved edit, a half-typed member and the filter all survive collapsing the card.
+  const [open, setOpen] = useState(false);
+  const [opened, setOpened] = useState(false);
+  const items = useMemo(() => catalog.map((name) => ({name})), [catalog]);
 
   useEffect(() => {
     setSelected(new Set(group.permissions));
@@ -365,7 +306,24 @@ function GroupCard({
       <div className="flex flex-wrap items-start justify-between gap-3">
         <div className="flex flex-col gap-1">
           <div className="flex items-center gap-2">
-            <h2 className="text-xl font-bold text-ink">{group.name}</h2>
+            <h2 className="text-xl font-bold text-ink">
+              <button
+                type="button"
+                aria-expanded={open}
+                onClick={() => {
+                  setOpen(!open);
+                  setOpened(true);
+                }}
+                className="flex items-center gap-2 text-left"
+              >
+                {open ? (
+                  <ChevronDown className="size-4 text-ink-3" />
+                ) : (
+                  <ChevronRight className="size-4 text-ink-3" />
+                )}
+                {group.name}
+              </button>
+            </h2>
             {group.system && <StatusPill tone="neutral">system</StatusPill>}
           </div>
           {group.description && <p className="text-sm text-ink-2">{group.description}</p>}
@@ -381,40 +339,57 @@ function GroupCard({
         )}
       </div>
 
-      {group.system ? (
-        <p className="text-xs text-ink-3">
-          Code depends on this group’s name and contents, so it isn’t editable here.
-        </p>
-      ) : (
-        <>
-          <PermissionList all={catalog} selected={selected} onChange={setSelected} />
-          <div className="flex flex-wrap items-end gap-2">
-            <label className="flex min-w-60 flex-1 flex-col gap-1">
-              <span className={labelClass}>Reason (recorded in the audit log)</span>
-              <Input value={reason} onChange={(e) => setReason(e.target.value)} />
-            </label>
-            <Button
-              disabled={!dirty || reason.trim().length === 0 || save.isPending}
-              onClick={() =>
-                save.mutate({
-                  name: group.name,
-                  body: {permissions: [...selected], reason: reason.trim()},
-                })
-              }
-            >
-              Save
-            </Button>
-          </div>
-          {holders > 0 && (
-            <p className="text-xs text-warning">
-              {holders} principal{holders === 1 ? "" : "s"} hold this group — saving changes their
-              access immediately.
+      {opened && (
+        <div hidden={!open} className={open ? "flex flex-col gap-4" : "hidden"}>
+          {group.system ? (
+            <p className="text-xs text-ink-3">
+              Code depends on this group’s name and contents, so it isn’t editable here.
             </p>
+          ) : (
+            <>
+              {/* No scope slot: `access.role_permissions` carries no ARTCC scope. Scope lives on the
+                  membership (`access.user_roles.artcc_id`), which is what lets one `EC` group mean "EC at
+                  ZDC" for one person and national for another — a scope control here would imply a
+                  dimension the data does not have. */}
+              <PermissionTree
+                items={items}
+                isSelected={(name) => selected.has(name)}
+                onToggle={(it, on) => {
+                  const next = new Set(selected);
+                  if (on) next.add(it.name);
+                  else next.delete(it.name);
+                  setSelected(next);
+                }}
+              />
+              <div className="flex flex-wrap items-end gap-2">
+                <label className="flex min-w-60 flex-1 flex-col gap-1">
+                  <span className={labelClass}>Reason (recorded in the audit log)</span>
+                  <Input value={reason} onChange={(e) => setReason(e.target.value)} />
+                </label>
+                <Button
+                  disabled={!dirty || reason.trim().length === 0 || save.isPending}
+                  onClick={() =>
+                    save.mutate({
+                      name: group.name,
+                      body: {permissions: [...selected], reason: reason.trim()},
+                    })
+                  }
+                >
+                  Save
+                </Button>
+              </div>
+              {holders > 0 && (
+                <p className="text-xs text-warning">
+                  {holders} principal{holders === 1 ? "" : "s"} hold this group — saving changes their
+                  access immediately.
+                </p>
+              )}
+            </>
           )}
-        </>
+          <Members group={group} facilities={facilities} />
+          {!group.system && <VatusaRoles group={group} facilities={facilities} />}
+        </div>
       )}
-      <Members group={group} facilities={facilities} />
-      {!group.system && <VatusaRoles group={group} facilities={facilities} />}
     </Card>
   );
 }

@@ -190,15 +190,17 @@ export const SidebarItem = React.forwardRef<
     icon: LucideIcon;
     label: React.ReactNode;
     count?: React.ReactNode;
+    /** Extra classes for the icon — e.g. a hover treatment DESIGN.md names as an exception. */
+    iconClassName?: string;
   }
->(({ asChild, icon: Icon, label, count, className, children, ...props }, ref) => {
+>(({ asChild, icon: Icon, label, count, iconClassName, className, children, ...props }, ref) => {
   const Comp = asChild ? Slot : "a";
   return (
     <SidebarTooltip label={label}>
     <Comp
       ref={ref}
       className={cn(
-        "group/item flex items-center gap-2.5 rounded-sm px-2.5 py-2 text-[13px] text-ink-2 transition-colors hover:bg-panel-2 hover:text-ink",
+        "group/item flex w-full items-center gap-2.5 rounded-sm px-2.5 py-2 text-left text-[13px] text-ink-2 transition-colors hover:bg-panel-2 hover:text-ink",
         "aria-[current=page]:bg-panel-2 aria-[current=page]:text-ink data-[status=active]:bg-panel-2 data-[status=active]:text-ink [&.active]:bg-panel-2 [&.active]:text-ink",
         "group-data-[collapsed]/sidebar:justify-center group-data-[collapsed]/sidebar:px-0",
         className,
@@ -209,10 +211,10 @@ export const SidebarItem = React.forwardRef<
         React.cloneElement(
           children as React.ReactElement<{ children?: React.ReactNode }>,
           undefined,
-          <ItemInner icon={Icon} label={label} count={count} />,
+          <ItemInner icon={Icon} label={label} count={count} iconClassName={iconClassName} />,
         )
       ) : (
-        <ItemInner icon={Icon} label={label} count={count} />
+        <ItemInner icon={Icon} label={label} count={count} iconClassName={iconClassName} />
       )}
     </Comp>
     </SidebarTooltip>
@@ -220,10 +222,25 @@ export const SidebarItem = React.forwardRef<
 });
 SidebarItem.displayName = "SidebarItem";
 
-function ItemInner({ icon: Icon, label, count }: { icon: LucideIcon; label: React.ReactNode; count?: React.ReactNode }) {
+function ItemInner({
+  icon: Icon,
+  label,
+  count,
+  iconClassName,
+}: {
+  icon: LucideIcon;
+  label: React.ReactNode;
+  count?: React.ReactNode;
+  iconClassName?: string;
+}) {
   return (
     <>
-      <Icon className="size-[17px] shrink-0 text-ink-3 group-hover/item:text-ink-2 group-aria-[current=page]/item:text-brand-ink group-data-[status=active]/item:text-brand-ink group-[.active]/item:text-brand-ink" />
+      <Icon
+        className={cn(
+          "size-[17px] shrink-0 text-ink-3 group-hover/item:text-ink-2 group-aria-[current=page]/item:text-brand-ink group-data-[status=active]/item:text-brand-ink group-[.active]/item:text-brand-ink",
+          iconClassName,
+        )}
+      />
       <span className="min-w-0 flex-1 truncate group-data-[collapsed]/sidebar:sr-only">{label}</span>
       {count != null && (
         <span className="font-mono text-[11px] text-ink-3 group-data-[collapsed]/sidebar:hidden">{count}</span>

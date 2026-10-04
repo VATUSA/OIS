@@ -280,7 +280,7 @@ fn markdown_files(dir: &Path, out: &mut Vec<PathBuf>) {
 
 /// Every API request in a fenced code block: the method from `curl -X` (GET otherwise), and the path
 /// up to its query string. Prose and inline code are not examples; `/docs/api/v1/…` is the spec, not
-/// the API.
+/// the API, and a `ws://`/`wss://` URL is the realtime socket, which is no OpenAPI operation.
 fn examples_in(file: &Path) -> Vec<Example> {
     let src = std::fs::read_to_string(file).unwrap();
     let mut out = Vec::new();
@@ -299,7 +299,7 @@ fn examples_in(file: &Path) -> Vec<Example> {
                         .unwrap_or("GET")
                         .to_ascii_uppercase();
                     for (at, _) in command.match_indices("/api/v1/") {
-                        if command[..at].ends_with("/docs") {
+                        if command[..at].ends_with("/docs") || is_websocket_url(&command[..at]) {
                             continue;
                         }
                         let path: String = command[at..]
@@ -324,6 +324,16 @@ fn examples_in(file: &Path) -> Vec<Example> {
         }
     }
     out
+}
+
+/// Whether the URL ending at this point (everything before `/api/v1/…`) is a websocket one — the
+/// scheme of the last word, after any opening quote or bracket.
+fn is_websocket_url(before: &str) -> bool {
+    let url = before
+        .rsplit(|c: char| c.is_whitespace() || matches!(c, '"' | '\'' | '(' | '[' | '`'))
+        .next()
+        .unwrap_or("");
+    url.starts_with("ws://") || url.starts_with("wss://")
 }
 
 fn docs_examples(root: &Path) -> Vec<Example> {
@@ -367,6 +377,23 @@ fn every_docs_example_is_a_documented_operation() {
         bad.is_empty(),
         "docs examples that are not real operations: {bad:?}"
     );
+}
+
+/// The realtime socket is documented with `wss://…/api/v1/ws`, which is no OpenAPI operation; it is
+/// not an example to check — but an HTTP call in the same block still is.
+#[test]
+fn a_websocket_url_is_not_an_api_example() {
+    let dir = std::env::temp_dir().join(format!("ois-docs-ws-{}", uuid::Uuid::new_v4().simple()));
+    std::fs::create_dir_all(&dir).unwrap();
+    std::fs::write(
+        dir.join("page.md"),
+        "```js\nnew WebSocket(\"wss://<your-ois-host>/api/v1/ws\", [\"ois.v1\"]);\nconst s = new WebSocket('ws://localhost:8080/api/v1/ws');\n```\n\n```bash\ncurl https://ois/api/v1/flow/no-such-thing\n```\n",
+    )
+    .unwrap();
+    let examples = docs_examples(&dir);
+    std::fs::remove_dir_all(&dir).unwrap();
+    let paths: Vec<_> = examples.iter().map(|e| e.path.as_str()).collect();
+    assert_eq!(paths, ["/api/v1/flow/no-such-thing"]);
 }
 
 /// The check itself works: a page with a made-up endpoint is caught. A throwaway directory, so no real
