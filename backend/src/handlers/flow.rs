@@ -14,12 +14,14 @@ use serde::Deserialize;
 
 use crate::{
     auth::{
-        context::{CurrentApiKey, CurrentUser},
+        context::{CurrentApiKey, CurrentServiceAccount, CurrentUser},
+        middleware::ensure_permission,
         permissions::{
-            FlowFcaDelete, FlowFcaRead, FlowFcaUpdate, FlowRouteDelete, FlowRouteUpdate, StatsRead,
+            EventsPlanRead, FlowFcaDelete, FlowFcaRead, FlowFcaUpdate, FlowRouteDelete,
+            FlowRouteUpdate, StatsRead,
         },
         principal::{Actor, Principal},
-        require_permission::RequirePermission,
+        require_permission::{Permission, RequirePermission},
     },
     errors::ApiError,
     feed::{
@@ -2115,8 +2117,16 @@ pub struct TrafficQuery {
     responses((status = 200, body = Vec<FcaFlight>), (status = 404))
 )]
 /// Public by design, no credential (#586): the public FCA overview (/advisories/fcas) shows each FCA's traffic signed out.
+///
+/// Public only for an FCA the public list shows. An unpublished event FCA is served to a planner
+/// (`events.plan.read`, the gate on `GET /events/{id}/fcas`, whose FCAs tab counts its crossings), and a
+/// deleted one to any signed-in caller (historical replay can still select it). Anyone else gets 404,
+/// not 403, so the route never confirms that a hidden FCA exists.
 pub async fn fca_traffic(
     State(state): State<AppState>,
+    Extension(current_user): Extension<Option<CurrentUser>>,
+    Extension(current_service_account): Extension<Option<CurrentServiceAccount>>,
+    Extension(current_api_key): Extension<Option<CurrentApiKey>>,
     Path(id): Path<String>,
     Query(q): Query<TrafficQuery>,
 ) -> Result<Json<Vec<FcaFlight>>, ApiError> {
@@ -2124,6 +2134,26 @@ pub async fn fca_traffic(
     let fca = flow_repo::get_fca(pool, &id)
         .await?
         .ok_or(ApiError::NotFound)?;
+    let signed_in =
+        current_user.is_some() || current_service_account.is_some() || current_api_key.is_some();
+    if flow_repo::fca_is_deleted(pool, &id).await? && !signed_in {
+        return Err(ApiError::NotFound);
+    }
+    let unpublished_event =
+        fca.event_id.is_some() && fca.event_status.as_deref() != Some("published");
+    if unpublished_event
+        && ensure_permission(
+            &state,
+            current_user.as_ref(),
+            current_service_account.as_ref(),
+            current_api_key.as_ref(),
+            EventsPlanRead::path(),
+        )
+        .await
+        .is_err()
+    {
+        return Err(ApiError::NotFound);
+    }
     let releases = load_releases(pool, &id).await?;
     let now = Utc::now();
     Ok(Json(
@@ -4693,5 +4723,95 @@ mod release_swap_tests {
             "case-insensitively the same flight"
         );
         assert_eq!(times(&pool, &id, "AAL1").await, Some((1_000, 900)));
+    }
+}
+
+/// #586: `GET /flow/fcas/{id}/traffic` is public, but only for an FCA the public list shows. Hidden ones
+/// (an unpublished event FCA, a deleted FCA) are 404 to an anonymous caller, through the real router.
+#[cfg(test)]
+mod fca_traffic_visibility_tests {
+    use std::collections::HashMap;
+
+    use http::{Method, StatusCode};
+    use sqlx::PgPool;
+
+    use crate::scope_test_support::{grant, seed_user, send, session_cookie, test_state};
+
+    async fn seed(pool: &PgPool) {
+        sqlx::query(
+            "insert into events.event (id, title, start_time, end_time) values \
+               (586, 'Visibility event', now() + interval '1 day', now() + interval '2 days')",
+        )
+        .execute(pool)
+        .await
+        .unwrap();
+        sqlx::query(
+            "insert into flow.fca (id, name, enabled, deleted_at, event_id, event_status) values \
+               ('v-live',     'Live',            true, null,  null, null), \
+               ('v-pubevent', 'Published event', true, null,  586,  'published'), \
+               ('v-planned',  'Planned event',   true, null,  586,  'planned'), \
+               ('v-archived', 'Archived event',  true, null,  586,  'archived'), \
+               ('v-deleted',  'Soft-deleted',    true, now(), null, null)",
+        )
+        .execute(pool)
+        .await
+        .unwrap();
+    }
+
+    fn uri(id: &str) -> String {
+        format!("/api/v1/flow/fcas/{id}/traffic")
+    }
+
+    #[sqlx::test]
+    async fn an_anonymous_caller_sees_only_what_the_public_list_shows(pool: PgPool) {
+        seed(&pool).await;
+        let state = test_state(pool, HashMap::new());
+        for id in ["v-live", "v-pubevent"] {
+            assert_eq!(
+                send(&state, Method::GET, &uri(id), "", None).await,
+                StatusCode::OK,
+                "{id} is on the public list, so its traffic is public"
+            );
+        }
+        for id in ["v-planned", "v-archived", "v-deleted"] {
+            assert_eq!(
+                send(&state, Method::GET, &uri(id), "", None).await,
+                StatusCode::NOT_FOUND,
+                "{id} is hidden from the public list, so it doesn't exist to an anonymous caller"
+            );
+        }
+    }
+
+    /// The two signed-in readers the hidden FCAs still have: the event manager's FCAs tab counts a
+    /// planned FCA's crossings, and historical replay can still select a since-deleted FCA.
+    #[sqlx::test]
+    async fn planners_see_unpublished_event_fcas_and_signed_in_callers_see_deleted_ones(
+        pool: PgPool,
+    ) {
+        seed(&pool).await;
+        let planner = seed_user(&pool).await;
+        grant(&pool, &planner, "events.plan.read", None).await;
+        let planner = session_cookie(&pool, &planner).await;
+        let other = seed_user(&pool).await;
+        let other = session_cookie(&pool, &other).await;
+        let state = test_state(pool, HashMap::new());
+
+        for id in ["v-planned", "v-archived"] {
+            assert_eq!(
+                send(&state, Method::GET, &uri(id), &planner, None).await,
+                StatusCode::OK,
+                "a planner reads {id}"
+            );
+            assert_eq!(
+                send(&state, Method::GET, &uri(id), &other, None).await,
+                StatusCode::NOT_FOUND,
+                "signed in without events.plan.read, {id} still doesn't exist"
+            );
+        }
+        assert_eq!(
+            send(&state, Method::GET, &uri("v-deleted"), &other, None).await,
+            StatusCode::OK,
+            "any signed-in caller reads a deleted FCA (historical replay)"
+        );
     }
 }

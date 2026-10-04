@@ -137,6 +137,12 @@ answer with no credential:
 | `GET /flow/facilities` | `atc::list_flow_facilities` |
 | `GET /public/flight/{callsign}` | `flight_advisory` |
 
+`GET /flow/fcas/{id}/traffic` is public only for an FCA that `GET /flow/fcas` lists. For a **hidden**
+FCA it answers `404` to an anonymous caller, as if the FCA didn't exist. An unpublished event FCA
+(planned or archived) is served to a caller holding `events.plan.read`, the gate on
+`GET /events/{id}/fcas`, whose FCAs tab counts its crossings. A deleted FCA is served to any signed-in
+caller, because historical replay can still select it.
+
 Their OpenAPI annotations advertise no `401`, and `handlers/auth_annotation_tests.rs` keeps it that
 way: a handler that answers without a credential must be listed there with its reason, one that
 advertises `401` must actually take a credential, and every `RequirePermission` handler must

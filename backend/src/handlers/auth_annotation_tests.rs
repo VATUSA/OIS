@@ -39,6 +39,14 @@ const PUBLIC: &[(&str, &str, &str)] = &[
     ("public", "get_board", "the public advisories board"),
 ];
 
+/// Public handlers that also read an **optional** caller identity, only to show a signed-in caller
+/// more. An anonymous request still succeeds, so each stays in [`PUBLIC`], and the scan would otherwise
+/// misread its identity extractor as a gate.
+const PUBLIC_WITH_OPTIONAL_IDENTITY: &[(&str, &str)] = &[
+    // Hidden (unpublished-event or deleted) FCAs are served to planners / signed-in callers only (#586).
+    ("flow", "fca_traffic"),
+];
+
 /// Handlers that advertise 401 without an auth extractor, because they reject a bad credential they
 /// receive in the body rather than through the request's identity.
 const ADVERTISE_401_WITHOUT_EXTRACTOR: &[(&str, &str)] = &[("auth", "desktop_exchange")];
@@ -190,10 +198,26 @@ fn every_unauthenticated_handler_is_public_on_purpose() {
         "these answer without a credential but aren't in PUBLIC — gate them, or list them with \
          the reason they're public: {unlisted:?}"
     );
-    let stale = &listed - &open;
+    let optional: BTreeSet<String> = PUBLIC_WITH_OPTIONAL_IDENTITY
+        .iter()
+        .map(|(f, n)| format!("{f}::{n}"))
+        .collect();
+    let stale = &(&listed - &open) - &optional;
     assert!(
         stale.is_empty(),
         "these are in PUBLIC but now take a credential: {stale:?}"
     );
+    // The exception list can't rot either: each entry is public and really does read an identity.
+    let identity_readers = ids(scan().iter().filter(|h| h.takes_auth));
+    for id in &optional {
+        assert!(
+            listed.contains(id),
+            "{id} reads an optional identity but isn't in PUBLIC"
+        );
+        assert!(
+            identity_readers.contains(id),
+            "{id} no longer reads an identity; drop it from PUBLIC_WITH_OPTIONAL_IDENTITY"
+        );
+    }
     assert!(PUBLIC.iter().all(|(_, _, why)| !why.trim().is_empty()));
 }
