@@ -1942,6 +1942,28 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/v1/flow/monitor/{artcc}": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * `artcc`'s Airspace Monitor (#701): every sector's peak occupancy per 15-minute bin over six hours,
+         *     classified against its MAP, with consolidations and vNAS staffing. Computed on request from the
+         *     live feed and the cached sectors, MAPs and consolidations, so nothing about it is stored. Live
+         *     flights are projected along their routes by the shared trajectory model (`feed::monitor_tracks`).
+         */
+        get: operations["monitor_table"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/v1/flow/monitor/{artcc}/consolidations": {
         parameters: {
             query?: never;
@@ -5962,6 +5984,46 @@ export interface components {
             vatusa?: null | components["schemas"]["VatusaProfile"];
         };
         /**
+         * @description One 15-minute bin of a Monitor row (#701): the peak one-minute counts and the alert they earn
+         *     against the row's MAP. `combined` is active and proposed counted minute by minute, never summed peaks.
+         */
+        MonitorBinBody: {
+            /** Format: int64 */
+            active: number;
+            alert: components["schemas"]["SectorAlert"];
+            /** Format: int64 */
+            combined: number;
+            /** Format: int64 */
+            proposed: number;
+            /**
+             * Format: date-time
+             * @description The bin's start, an absolute Zulu quarter-hour.
+             */
+            start: string;
+        };
+        /** @description One row of an ARTCC's Airspace Monitor (#701): a sector, or a sector with others consolidated into it. */
+        MonitorRowBody: {
+            /** @description Six hours of bins, the first being the quarter-hour that contains `as_of`. */
+            bins: components["schemas"]["MonitorBinBody"][];
+            /** @description The sectors worked at this one; non-empty marks a combined row. */
+            consolidated: string[];
+            /** Format: int32 */
+            map: number;
+            name?: string | null;
+            sector_id: string;
+            /** @description Someone is working this sector now (vNAS). Shown, never used to hide a row. */
+            staffed: boolean;
+        };
+        /** @description An ARTCC's Airspace Monitor (#701), computed from the live feed on request. */
+        MonitorTableBody: {
+            artcc: string;
+            /** Format: date-time */
+            as_of: string;
+            /** @description Whether the caller may change this ARTCC's MAPs and consolidations. */
+            editable: boolean;
+            rows: components["schemas"]["MonitorRowBody"][];
+        };
+        /**
          * @description One ACE position the signed-in user has claimed, for an event still to come.
          *
          *     Exists so a client can answer "is this reminder about me?" — the realtime nudge that precedes it
@@ -6600,6 +6662,11 @@ export interface components {
             permissions: Record<string, never>;
             role_names?: string[] | null;
         };
+        /**
+         * @description One cell of the Monitor.
+         * @enum {string}
+         */
+        SectorAlert: "green" | "amber" | "red";
         /** @description A sector worked at another sector's position (#599). */
         SectorConsolidationBody: {
             sector_id: string;
@@ -14486,6 +14553,48 @@ export interface operations {
                 headers: {
                     /** @description Seconds until the next request will be accepted. */
                     "Retry-After"?: string;
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+        };
+    };
+    monitor_table: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                artcc: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["MonitorTableBody"];
+                };
+            };
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description Rate limit exceeded: back off for `Retry-After` seconds. Every limited response carries `RateLimit-Limit`, `RateLimit-Remaining` and `RateLimit-Reset`. */
+            429: {
+                headers: {
+                    /** @description Seconds until the next request will be accepted. */
+                    "Retry-After"?: string;
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            503: {
+                headers: {
                     [name: string]: unknown;
                 };
                 content?: never;

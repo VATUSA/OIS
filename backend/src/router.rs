@@ -498,6 +498,7 @@ pub fn build_router_with_limits(state: AppState, limits: Arc<RateLimits>) -> Rou
             "/api/v1/flow/fcas/{id}/exclusions/{callsign}",
             post(flight_exclusions::exclude_flight).delete(flight_exclusions::restore_flight),
         )
+        .route("/api/v1/flow/monitor/{artcc}", get(monitor::monitor_table))
         .route(
             "/api/v1/flow/monitor/{artcc}/maps",
             get(monitor::list_sector_maps),

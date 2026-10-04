@@ -3336,6 +3336,42 @@ pub struct SectorMapBody {
     pub overridden: bool,
 }
 
+/// One 15-minute bin of a Monitor row (#701): the peak one-minute counts and the alert they earn
+/// against the row's MAP. `combined` is active and proposed counted minute by minute, never summed peaks.
+#[derive(Debug, Serialize, ToSchema)]
+pub struct MonitorBinBody {
+    /// The bin's start, an absolute Zulu quarter-hour.
+    pub start: DateTime<Utc>,
+    pub active: i64,
+    pub proposed: i64,
+    pub combined: i64,
+    pub alert: crate::feed::monitor_alert::SectorAlert,
+}
+
+/// One row of an ARTCC's Airspace Monitor (#701): a sector, or a sector with others consolidated into it.
+#[derive(Debug, Serialize, ToSchema)]
+pub struct MonitorRowBody {
+    pub sector_id: String,
+    pub name: Option<String>,
+    pub map: i32,
+    /// The sectors worked at this one; non-empty marks a combined row.
+    pub consolidated: Vec<String>,
+    /// Someone is working this sector now (vNAS). Shown, never used to hide a row.
+    pub staffed: bool,
+    /// Six hours of bins, the first being the quarter-hour that contains `as_of`.
+    pub bins: Vec<MonitorBinBody>,
+}
+
+/// An ARTCC's Airspace Monitor (#701), computed from the live feed on request.
+#[derive(Debug, Serialize, ToSchema)]
+pub struct MonitorTableBody {
+    pub artcc: String,
+    /// Whether the caller may change this ARTCC's MAPs and consolidations.
+    pub editable: bool,
+    pub as_of: DateTime<Utc>,
+    pub rows: Vec<MonitorRowBody>,
+}
+
 /// An ARTCC's sectors with their Monitor Alert Parameters (#598).
 #[derive(Debug, Serialize, ToSchema)]
 pub struct SectorMapsBody {

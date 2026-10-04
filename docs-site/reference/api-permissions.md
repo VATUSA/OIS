@@ -174,6 +174,7 @@ always matches the running API.
 | `/api/v1/flow/fcas/{id}/swap` | POST | `flow.fca.update` |
 | `/api/v1/flow/fcas/{id}/traffic` | GET | — (no permission marker) |
 | `/api/v1/flow/idst` | GET | `flow.fca.read` |
+| `/api/v1/flow/monitor/{artcc}` | GET | `flow.monitor.read` |
 | `/api/v1/flow/monitor/{artcc}/consolidations` | GET | `flow.monitor.read` |
 | `/api/v1/flow/monitor/{artcc}/consolidations/{sector_id}` | DELETE | `flow.monitor.update` |
 | `/api/v1/flow/monitor/{artcc}/consolidations/{sector_id}` | PUT | `flow.monitor.update` |
