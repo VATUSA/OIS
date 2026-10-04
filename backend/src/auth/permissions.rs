@@ -113,6 +113,10 @@ permission!(
     ["flow", "aircraft_profiles"],
     Update
 );
+// Airspace Monitor (#593): read sectors and their alert parameters; set a sector's MAP
+// (facility-scoped, checked in `handlers::monitor`).
+permission!(FlowMonitorRead, ["flow", "monitor"], Read);
+permission!(FlowMonitorUpdate, ["flow", "monitor"], Update);
 
 // tmu advisories (ADVZY documents) — the catalog strings and migration rows have existed since
 // 0008_tmu.sql; these are the markers that finally let a handler gate on them (#457).
@@ -124,6 +128,10 @@ permission!(TmuAdvPublish, ["tmu", "adv"], Publish);
 permission!(StatsRead, ["stats", "data"], Read);
 permission!(StatsCaptureUpdate, ["stats", "capture"], Update);
 permission!(StatsCaptureDelete, ["stats", "capture"], Delete);
+
+// desktop diagnostics reports (#629): staff read them, and delete one on request.
+permission!(DiagnosticsReportsRead, ["diagnostics", "reports"], Read);
+permission!(DiagnosticsReportsDelete, ["diagnostics", "reports"], Delete);
 
 #[cfg(test)]
 mod sync_tests {

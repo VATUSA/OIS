@@ -99,6 +99,10 @@ docs:
 docs-build:
     pnpm --filter docs-site build
 
+# Regenerate the API permission map (docs-site/reference/api-permissions.md) from the handlers
+docs-permissions:
+    OIS_REGENERATE_DOCS=1 cargo test -p ois-backend --lib docs_tests::the_published_permission_map_is_current
+
 # --- everything ---
 # Full local stack: infra + backend + web + bot
 dev: up

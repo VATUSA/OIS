@@ -86,6 +86,13 @@ access, and reaches the backend over the compose network (`OIS_API_BASE=http://b
 `.env`'s discord section documents `DISCORD_BOT_TOKEN`, `OIS_API_TOKEN` (a service-account token,
 not a user key), and `OIS_POLL_SECS`. Leaving the profile off (the default) runs OIS without it.
 
+**The bot's service account key must be `discord`** (#656). The job queue hands a service account only
+its own consumer's jobs, and the consumer is the account's key, so a bot whose account has another key
+leases nothing. Migration `0115` renames it on deploy when exactly one active account holds a current
+`BOT` grant and none is keyed `discord` yet. It leaves anything else alone (no bot account, two
+candidates), and then you set it yourself in the admin UI, or with one statement:
+`update access.service_accounts set key = 'discord' where id = '<the bot account id>';`
+
 ## Observability (optional)
 
 Prometheus + Grafana ship as a **second compose file**, so a deployment that doesn't want them

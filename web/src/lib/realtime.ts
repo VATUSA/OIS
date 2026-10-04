@@ -9,13 +9,14 @@ import {getDesktopToken} from "./desktop-token";
  * waiting for their poll. Purely additive — if the socket never connects, polling still keeps
  * everything correct. Keep these topics in sync with `backend/src/realtime.rs` `topic`.
  */
-const TOPIC_KEYS: Record<string, string[][]> = {
+export const TOPIC_KEYS: Record<string, string[][]> = {
   "flow.release": [["idst"], ["fca-traffic"], ["departures"]],
   "flow.fca": [["fcas"], ["fca-traffic"], ["fca-counts"], ["idst"], ["event-fcas"]],
   "tmu.gdp": [["gdps"], ["gdp-board"], ["departures"]],
   "tmu.tmi": [["tmis"]],
   "tmu.groundstop": [["ground-stops"], ["departures"]],
   "tmu.program": [["tmu-programs"], ["departures"], ["flow"]],
+  "tmu.advisory": [["advisories"]],
   "flow.cfr": [["departures"], ["flow"]],
   "events.availability": [["event-availability"]],
   // Payload-free by design: each client refetches its own data and works out whether the change
@@ -54,6 +55,23 @@ function wsUrl(): string {
   return url.toString();
 }
 
+/** One socket lifecycle event, kept for diagnostics reports (#629). */
+export type RealtimeEvent = {at: string; event: "open" | "close" | "error" | "retry"; retry: number};
+
+/** How many recent events {@link realtimeHistory} keeps. */
+const HISTORY_EVENTS = 50;
+const history: RealtimeEvent[] = [];
+
+function record(event: RealtimeEvent["event"], retry: number) {
+  history.push({at: new Date().toISOString(), event, retry});
+  if (history.length > HISTORY_EVENTS) history.splice(0, history.length - HISTORY_EVENTS);
+}
+
+/** This window's recent realtime connection events, oldest first. */
+export function realtimeHistory(): RealtimeEvent[] {
+  return [...history];
+}
+
 /**
  * Connect the realtime socket and invalidate matching queries on each nudge. Auto-reconnects with
  * capped backoff. Returns a disposer that stops reconnecting and closes the socket.
@@ -68,6 +86,7 @@ export function connectRealtime(qc: QueryClient): () => void {
     if (closed || timer) return;
     const delay = Math.min(30_000, 1000 * 2 ** retry);
     retry += 1;
+    record("retry", retry);
     timer = setTimeout(() => {
       timer = null;
       void open();
@@ -101,6 +120,7 @@ export function connectRealtime(qc: QueryClient): () => void {
     }
     ws.onopen = () => {
       retry = 0;
+      record("open", retry);
       // Catch up on anything that changed while we were (re)connecting.
       ALL_KEYS.forEach((queryKey) => qc.invalidateQueries({ queryKey }));
     };
@@ -115,10 +135,14 @@ export function connectRealtime(qc: QueryClient): () => void {
       }
     };
     ws.onclose = () => {
+      record("close", retry);
       ws = null;
       schedule();
     };
-    ws.onerror = () => ws?.close();
+    ws.onerror = () => {
+      record("error", retry);
+      ws?.close();
+    };
   };
 
   void open();

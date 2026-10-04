@@ -64,6 +64,7 @@ const REQUIRED: Record<string, readonly string[]> = {
   "/admin/planning/facility-documents": ["facilities.docs.read"],
   "/admin/planning/airport-surface": ["events.plan.read"],
   "/admin/planning/aircraft-profiles": ["flow.aircraft_profiles.read"],
+  "/admin/planning/sector-maps": ["flow.monitor.read"],
   "/admin/historical": ["stats.data.read"],
   "/admin/historical/dashboard": ["stats.data.read"],
   "/admin/historical/replay": ["stats.data.read"],
@@ -72,6 +73,7 @@ const REQUIRED: Record<string, readonly string[]> = {
   "/admin/access": ["access.users.read"],
   "/admin/groups": ["access.groups.read"],
   "/admin/audit": ["audit.logs.read"],
+  "/admin/diagnostics": ["diagnostics.reports.read"],
   "/admin/jobs": ["system.jobs.read"],
   "/admin/api-keys": ["api_keys.key.read"],
   "/admin/service-accounts": ["service_accounts.read"],
@@ -152,6 +154,7 @@ describe("canOpenPath", () => {
     for (const page of [
       "/admin/access",
       "/admin/audit",
+      "/admin/diagnostics",
       "/admin/jobs",
       "/admin/api-keys",
       "/admin/service-accounts",
@@ -160,6 +163,7 @@ describe("canOpenPath", () => {
       expect(canOpenPath(planner, page)).toBe(false);
     }
     expect(canOpenPath(holding("audit.logs.read"), "/admin/audit")).toBe(true);
+    expect(canOpenPath(holding("diagnostics.reports.read"), "/admin/diagnostics")).toBe(true);
   });
 
   it("keeps the Admin page closed to users with no Admin-area link", () => {

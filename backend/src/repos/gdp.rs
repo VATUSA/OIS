@@ -5,14 +5,16 @@ use chrono::{DateTime, Utc};
 use sqlx::PgPool;
 
 use crate::{
+    auth::principal::Attribution,
     errors::ApiError,
     models::{AarStep, GdpBody},
 };
 
 const GDP_SELECT: &str = "select g.id, g.airport, g.aar, g.scope, g.start_time, g.end_time, \
     g.max_enroute_min, g.exempt_airborne, g.aar_steps, g.status, g.published_at, g.updated_at, \
-    u.display_name as updated_by \
-    from tmu.gdp g left join identity.users u on u.id = g.updated_by";
+    coalesce(u.display_name, a.display_name) as updated_by \
+    from tmu.gdp g left join identity.users u on u.id = g.updated_by \
+    left join access.actors a on a.id = g.updated_by_actor";
 
 pub async fn list_gdps(pool: &PgPool) -> Result<Vec<GdpBody>, ApiError> {
     sqlx::query_as::<_, GdpBody>(&format!(
@@ -48,13 +50,13 @@ pub async fn create_gdp(
     max_enroute_min: Option<i32>,
     exempt_airborne: bool,
     aar_steps: &[AarStep],
-    actor: &str,
+    by: &Attribution,
 ) -> Result<String, ApiError> {
     sqlx::query_scalar::<_, String>(
         "insert into tmu.gdp \
            (airport, aar, scope, start_time, end_time, max_enroute_min, exempt_airborne, \
-            aar_steps, created_by, updated_by) \
-         values ($1, $2, $3, $4, $5, $6, $7, $8, $9, $9) returning id",
+            aar_steps, created_by, updated_by, created_by_actor, updated_by_actor) \
+         values ($1, $2, $3, $4, $5, $6, $7, $8, $9, $9, $10, $10) returning id",
     )
     .bind(airport)
     .bind(aar)
@@ -64,7 +66,8 @@ pub async fn create_gdp(
     .bind(max_enroute_min)
     .bind(exempt_airborne)
     .bind(sqlx::types::Json(aar_steps))
-    .bind(actor)
+    .bind(&by.user_id)
+    .bind(&by.actor_id)
     .fetch_one(pool)
     .await
     .map_err(|_| ApiError::Internal)
@@ -83,12 +86,12 @@ pub async fn update_gdp(
     max_enroute_min: Option<i32>,
     exempt_airborne: bool,
     aar_steps: &[AarStep],
-    actor: &str,
+    by: &Attribution,
 ) -> Result<bool, ApiError> {
     let result = sqlx::query(
         "update tmu.gdp set \
             aar = $2, scope = $3, start_time = $4, end_time = $5, \
-            max_enroute_min = $6, exempt_airborne = $7, aar_steps = $8, updated_by = $9 \
+            max_enroute_min = $6, exempt_airborne = $7, aar_steps = $8, updated_by = $9, updated_by_actor = $10 \
          where id = $1 and status in ('draft', 'published')",
     )
     .bind(id)
@@ -99,7 +102,9 @@ pub async fn update_gdp(
     .bind(max_enroute_min)
     .bind(exempt_airborne)
     .bind(sqlx::types::Json(aar_steps))
-    .bind(actor)
+    .bind(&by.user_id)
+
+    .bind(&by.actor_id)
     .execute(pool)
     .await
     .map_err(|_| ApiError::Internal)?;
@@ -111,16 +116,18 @@ pub async fn update_gdp(
 /// Generic over the executor (the `cancel_tmi` shape) so the publish can run inside the caller's
 /// transaction: #508 generates the program's advisory in the same transaction, and an advisory must not
 /// exist for a program that did not publish. Pool callers pass `pool`, transactional ones `&mut *tx`.
-pub async fn publish_gdp<'e, E>(executor: E, id: &str, published_by: &str) -> Result<bool, ApiError>
+pub async fn publish_gdp<'e, E>(executor: E, id: &str, by: &Attribution) -> Result<bool, ApiError>
 where
     E: sqlx::Executor<'e, Database = sqlx::Postgres>,
 {
     let result = sqlx::query(
-        "update tmu.gdp set status = 'published', published_by = $2, published_at = now() \
+        "update tmu.gdp set status = 'published', published_by = $2, published_by_actor = $3, published_at = now() \
          where id = $1 and status = 'draft'",
     )
     .bind(id)
-    .bind(published_by)
+    .bind(&by.user_id)
+
+    .bind(&by.actor_id)
     .execute(executor)
     .await
     .map_err(|_| ApiError::Internal)?;

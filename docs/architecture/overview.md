@@ -57,8 +57,9 @@ The Discord bot does not use this — it uses the Rust `crates/ois-client` inste
 via `AppState::publish`) that reaches every backend replica: each nudge goes to the publishing process's
 sockets at once and to the other replicas through Postgres `LISTEN/NOTIFY` on `ois_realtime` (#649). Mutation handlers fan out small topic
 nudges — `flow.release`, `flow.fca`, `flow.cfr`, `tmu.gdp`, `tmu.tmi`, `tmu.groundstop`,
-`tmu.program` — to every client connected to `GET /api/v1/ws`, which then refetches the matching
-data via REST. REST stays the single source of truth; the socket carries only a "something changed"
+`tmu.program` — to every client connected to `GET /api/v1/ws` (users, and API keys / service
+accounts since #589, each optionally filtered to the topics it subscribed to), which then refetches
+the matching data via REST. REST stays the single source of truth; the socket carries only a "something changed"
 signal (no payloads), and if it drops the app degrades cleanly back to polling — every key it nudges
 also polls, at least every `SOCKET_FALLBACK_MS` (60 s). The frontend
 topic → React-Query invalidation map lives in `web/src/lib/realtime.ts`.

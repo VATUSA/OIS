@@ -6,7 +6,9 @@ every caller goes through the same authenticated, permission-checked surface.
 
 ## Shape
 
-- **Base**: `/api/v1`. Breaking changes get a new version prefix.
+- **Base**: `/api/v1`. Until product 1.0 it is malleable: breaking changes land on `v1` and nothing is
+  stable. The freeze, the supported surface and the deprecation rule are policy in `AGENTS.md`
+  § Versioning, so they aren't restated here.
 - **Resources** are nouns; verbs are HTTP methods. `GET` list/read, `POST` create,
   `PATCH`/`PUT` update, `DELETE` remove. Domain actions that aren't plain CRUD use a
   sub-path (`POST /events/{id}/review`, `POST /ace/requests/{id}/claim`).
@@ -71,9 +73,13 @@ models to drift. The spec is mounted (`router.rs` routes `/docs/api/v1/openapi.j
 ## Realtime
 
 `GET /api/v1/ws` upgrades to a websocket that carries topic nudges only — additive over
-REST, never a replacement for it. The `ois_session` cookie rides the upgrade GET, so the
-socket is authenticated like any REST route (401 if unauthenticated). Clients refetch via
-REST on each nudge; see [overview.md](overview.md#realtime).
+REST, never a replacement for it. The upgrade GET is authenticated like any REST route (401 if
+unauthenticated): the `ois_session` cookie, or a desktop token, API key or service account as
+`Authorization: Bearer` or — for a browser, which can set no other header — the subprotocol list
+`ois.v1, ois.bearer.<token>` (`auth/middleware.rs`). A client gets every topic until it sends
+`{"subscribe":[…]}`, which replaces its set (acked `{"subscribed":[…]}`; an unknown topic is refused
+with `{"error":"unknown_topic"}` and changes nothing). Clients refetch via REST on each nudge; see
+[overview.md](overview.md#realtime). Integrator-facing description: `docs-site/reference/api-keys.md`.
 
 ## Pagination
 

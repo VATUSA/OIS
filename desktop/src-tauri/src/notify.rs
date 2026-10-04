@@ -34,11 +34,18 @@ pub fn notify(app: AppHandle, title: String, body: String, route: String) -> Res
 #[cfg_attr(not(any(target_os = "macos", windows)), allow(dead_code))]
 fn on_click<R: Runtime>(app: &AppHandle<R>, route: &str) {
     if let Some(window) = app.get_webview_window("main") {
-        let _ = window.unminimize();
-        let _ = window.show();
-        let _ = window.set_focus();
+        let raised = window
+            .unminimize()
+            .and_then(|()| window.show())
+            .and_then(|()| window.set_focus());
+        if let Err(e) = raised {
+            log::warn!("notification click could not bring the main window forward: {e}");
+        }
     }
-    let _ = app.emit(CLICK_EVENT, route);
+    // The route is an in-app path, safe to log; without the event the click silently goes nowhere.
+    if let Err(e) = app.emit(CLICK_EVENT, route) {
+        log::error!("notification click for {route} was not delivered: {e}");
+    }
 }
 
 #[cfg(target_os = "macos")]
