@@ -16,6 +16,7 @@ pub mod reqlog;
 pub mod router;
 #[cfg(test)]
 pub(crate) mod scope_test_support;
+pub mod secrets;
 pub mod state;
 pub(crate) mod text;
 pub mod tmi;
@@ -123,9 +124,9 @@ pub async fn run() -> color_eyre::Result<()> {
         jobs::spawn_event_package_lifecycle(state.jobs.clone(), pool.clone(), state.events.clone());
         // ACE-claim reminder DMs at T-24h/T-6h before the event.
         jobs::spawn_ace_reminder_scheduler(state.jobs.clone(), pool.clone(), state.events.clone());
-        // VATUSA member sync: register the roster-change webhook and periodically reconcile.
-        feed::vatusa::spawn_register_webhooks(pool.clone());
-        feed::vatusa::spawn_reconcile(pool);
+        // VATUSA: register the division webhook, and pull the whole division daily (#605).
+        feed::vatusa::spawn_register_webhook(pool.clone());
+        feed::vatusa::spawn_division_pull(state.jobs.clone(), pool);
     }
 
     let app = router::build_router(state);
@@ -291,9 +292,10 @@ mod honolulu_migration_tests {
         .await
         .unwrap();
         // A real table, so the information_schema discovery is shown to reach the actual schema.
+        // `identity.vatusa_roles.facility` is free text with no FK, and unlike the per-facility
+        // `vatusa_webhooks` this test used to pick, it survives 0104's division-webhook rework.
         sqlx::query(
-            "insert into identity.vatusa_webhooks (facility, webhook_id, secret, url) \
-             values ('ZHN', 1, 's', 'https://example.invalid')",
+            "insert into identity.vatusa_roles (cid, facility, role) values (556556, 'ZHN', 'ATM')",
         )
         .execute(&pool)
         .await
@@ -319,10 +321,11 @@ mod honolulu_migration_tests {
             ],
             "the plain row moves, the colliding one stays beside its twin, other ids are untouched"
         );
-        let webhook: String = sqlx::query_scalar("select facility from identity.vatusa_webhooks")
-            .fetch_one(&pool)
-            .await
-            .unwrap();
-        assert_eq!(webhook, "HCF", "a real column, found by discovery");
+        let stored: String =
+            sqlx::query_scalar("select facility from identity.vatusa_roles where cid = 556556")
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+        assert_eq!(stored, "HCF", "a real column, found by discovery");
     }
 }

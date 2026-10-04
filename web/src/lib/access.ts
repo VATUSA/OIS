@@ -9,6 +9,15 @@ export type UpdateBody = components["schemas"]["UpdateUserAccessRequest"];
 export type UserMatch = components["schemas"]["UserSummary"];
 export type AdminUserRow = components["schemas"]["AdminUserRow"];
 
+/**
+ * One `scoped_roles` entry — `EC` for a national membership, `EC:ZDC` for one at a facility — split
+ * into its parts. Group names are uppercase letters and underscores, so the first `:` is the split.
+ */
+export function splitScopedRole(entry: string): {role: string; artcc: string | null} {
+  const at = entry.indexOf(":");
+  return at < 0 ? {role: entry, artcc: null} : {role: entry.slice(0, at), artcc: entry.slice(at + 1)};
+}
+
 /** A page of all OIS users (name/CID/rating + role names), filtered by `q`. Access-admin only. */
 export function useAllUsers(page: number, pageSize: number, q: string) {
   return useQuery({

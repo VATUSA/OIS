@@ -871,8 +871,8 @@ mod tests {
         .unwrap();
         let user = seed_user(&pool).await;
         sqlx::query(
-            "insert into access.user_permissions (user_id, permission_name, granted, artcc_id) \
-             values ($1, 'events.config.update', false, 'ZDC')",
+            "insert into access.user_permissions (user_id, permission_name, granted, artcc_id, source) \
+             values ($1, 'events.config.update', false, 'ZDC', 'manual')",
         )
         .bind(&user)
         .execute(&pool)
@@ -889,10 +889,15 @@ mod tests {
         .await
         .unwrap();
         sqlx::query(
-            "insert into access.user_permissions (user_id, permission_name, granted, artcc_id) \
-             select user_id, 'flow.surface_data.update', granted, artcc_id \
+            // Two deliberate differences from 0068's literal text, both from #547 adding `source`:
+            // the copied row inherits the provenance of the row it is derived from, and the conflict
+            // target is the current unique index (which now keys on source too). 0068 itself is
+            // unchanged and still correct — it runs before 0098, when neither existed.
+            "insert into access.user_permissions \
+                 (user_id, permission_name, granted, artcc_id, source) \
+             select user_id, 'flow.surface_data.update', granted, artcc_id, source \
              from access.user_permissions where permission_name = 'events.config.update' \
-             on conflict (user_id, permission_name, (coalesce(artcc_id, ''))) do nothing",
+             on conflict (user_id, permission_name, (coalesce(artcc_id, '')), source) do nothing",
         )
         .execute(&pool)
         .await

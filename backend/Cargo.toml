@@ -36,6 +36,9 @@ uuid.workspace = true
 sha2.workspace = true
 hmac.workspace = true
 hex.workspace = true
+# Encrypts the one credential OIS must read back (the VATUSA webhook secret, #605). RustCrypto, like
+# `sha2`/`hmac`; XChaCha20 for its 24-byte random nonce.
+chacha20poly1305 = "0.10"
 time = "0.3"
 
 thiserror.workspace = true

@@ -92,7 +92,14 @@ pub struct AdminUserRow {
     pub cid: i64,
     pub display_name: String,
     pub rating: Option<String>,
+    /// Bare role names, scope flattened away. Kept as-is so nothing parsing it breaks.
     pub roles: Vec<String>,
+    /// The same memberships *with* their scope — `EC` for national, `EC:ZDC` for a facility grant.
+    ///
+    /// Added rather than changing `roles`' format (#546): a national `EC` and an `EC@ZDC` used to
+    /// render identically, which actively misled, but silently reinterpreting a `Vec<String>` would
+    /// have broken any consumer without the schema type moving to warn them.
+    pub scoped_roles: Vec<String>,
 }
 
 /// A page of the access-admin user browser.
@@ -150,6 +157,24 @@ pub struct SelfAccessBody {
     pub role_names: Vec<String>,
     #[schema(value_type = Object)]
     pub permissions: Value,
+    /// The groups the caller holds, each with the permissions it grants (#550).
+    ///
+    /// This is what an API key is templated from now that presets are gone. It lists only the
+    /// caller's own groups, so it needs nothing beyond `access.self.read` — unlike the admin group
+    /// listing, which needs `access.groups.read` and so would have left most key creators with no bulk
+    /// path at all.
+    pub groups: Vec<HeldGroupBody>,
+}
+
+/// One group the caller holds, as a template for an API key's permissions (#550).
+///
+/// No scope: `role_permissions` carries none — scope lives on the membership — and a key is capped by
+/// its owner's live access when it is created, so expanding a template cannot grant more than its
+/// owner holds.
+#[derive(Debug, Serialize, ToSchema)]
+pub struct HeldGroupBody {
+    pub name: String,
+    pub permissions: Vec<String>,
 }
 
 /// A target user's editable access: direct permission grants + role assignments,
@@ -170,6 +195,96 @@ pub struct ScopeAccess {
     /// Direct permission grants at this scope, as the nested checkbox tree.
     #[schema(value_type = Object)]
     pub permissions: Value,
+}
+
+/// One group as the group editor lists it.
+#[derive(Debug, Serialize, ToSchema)]
+pub struct GroupBody {
+    pub name: String,
+    pub description: Option<String>,
+    /// Flat list — `role_permissions` carries no ARTCC scope; scope lives on the membership.
+    pub permissions: Vec<String>,
+    /// True for the groups code depends on, which cannot be edited or deleted here.
+    pub system: bool,
+    pub user_count: i64,
+    pub service_account_count: i64,
+}
+
+/// One holder of a group, at one scope. `artcc_id` null is national.
+#[derive(Debug, Serialize, ToSchema)]
+pub struct GroupMemberBody {
+    pub cid: i64,
+    pub display_name: String,
+    pub rating: Option<String>,
+    pub artcc_id: Option<String>,
+}
+
+/// A page of a group's holders.
+#[derive(Debug, Serialize, ToSchema)]
+pub struct GroupMemberPage {
+    pub items: Vec<GroupMemberBody>,
+    pub total: i64,
+    pub page: i64,
+    pub page_size: i64,
+}
+
+/// Add or remove one membership, at one scope.
+///
+/// `artcc_id` is required on **removal** as well as addition: a user can hold the same group
+/// nationally and at an ARTCC, so "remove EC from this user" is ambiguous without it.
+#[derive(Debug, Deserialize, ToSchema)]
+pub struct GroupMemberRequest {
+    pub cid: i64,
+    #[serde(default)]
+    pub artcc_id: Option<String>,
+    pub reason: String,
+}
+
+/// One VATUSA role → OIS group mapping (#548). A member holding `vatusa_role` — at `facility`, or at
+/// any facility when it is null — is granted `role_name`, scoped to where they hold the VATUSA role.
+#[derive(Debug, Serialize, ToSchema)]
+pub struct VatusaRoleMappingBody {
+    pub id: i64,
+    pub vatusa_role: String,
+    pub facility: Option<String>,
+    pub role_name: String,
+    pub created_at: DateTime<Utc>,
+}
+
+/// Every mapping, plus the VATUSA roles actually seen in synced members — the editor offers those
+/// rather than free text, so a role name that would never match can't be entered.
+#[derive(Debug, Serialize, ToSchema)]
+pub struct VatusaRoleMappingList {
+    pub mappings: Vec<VatusaRoleMappingBody>,
+    pub known_vatusa_roles: Vec<String>,
+}
+
+/// Add a mapping. Codes are trimmed and uppercased, as VATUSA roles are on ingest. `reason` is
+/// required and audited.
+#[derive(Debug, Deserialize, ToSchema)]
+pub struct CreateVatusaRoleMappingRequest {
+    pub vatusa_role: String,
+    #[serde(default)]
+    pub facility: Option<String>,
+    pub role_name: String,
+    pub reason: String,
+}
+
+/// Create a group. Its permission set is set by a follow-up `PUT`, which is also what runs the
+/// no-escalation gate over the contents.
+#[derive(Debug, Deserialize, ToSchema)]
+pub struct CreateGroupRequest {
+    pub name: String,
+    #[serde(default)]
+    pub description: Option<String>,
+    pub reason: String,
+}
+
+/// Replace a group's permission set. `reason` is required and audited, matching the user editor.
+#[derive(Debug, Deserialize, ToSchema)]
+pub struct UpdateGroupRequest {
+    pub permissions: Vec<String>,
+    pub reason: String,
 }
 
 /// The editor's SAVE payload. `reason` is required (audited). Each entry in `scopes`
