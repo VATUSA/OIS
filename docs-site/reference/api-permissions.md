@@ -172,6 +172,7 @@ always matches the running API.
 | `/api/v1/flow/idst` | GET | `flow.fca.read` |
 | `/api/v1/flow/monitor/{artcc}` | GET | `flow.monitor.read` |
 | `/api/v1/flow/monitor/{artcc}/consolidations` | GET | `flow.monitor.read` |
+| `/api/v1/flow/monitor/{artcc}/consolidations` | POST | `flow.monitor.update` |
 | `/api/v1/flow/monitor/{artcc}/consolidations/{sector_id}` | DELETE | `flow.monitor.update` |
 | `/api/v1/flow/monitor/{artcc}/consolidations/{sector_id}` | PUT | `flow.monitor.update` |
 | `/api/v1/flow/monitor/{artcc}/maps` | GET | `flow.monitor.read` |

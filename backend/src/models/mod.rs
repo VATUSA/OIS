@@ -3350,3 +3350,22 @@ pub struct SectorConsolidationsBody {
 pub struct ConsolidateSectorRequest {
     pub target_sector_id: String,
 }
+
+/// Consolidate many of an ARTCC's sectors into one at once (#713), all or nothing.
+#[derive(Debug, Deserialize, ToSchema)]
+pub struct BulkConsolidateRequest {
+    /// The sector everything is worked at.
+    pub target_sector_id: String,
+    pub mode: BulkConsolidateMode,
+}
+
+/// Which sectors a bulk consolidation moves.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, ToSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum BulkConsolidateMode {
+    /// Every other sector, and the target gets its own row back if it was worked elsewhere.
+    All,
+    /// Only sectors in no consolidation: neither worked elsewhere nor worked at by others. Refused if
+    /// the target is itself worked elsewhere.
+    ExceptConsolidated,
+}

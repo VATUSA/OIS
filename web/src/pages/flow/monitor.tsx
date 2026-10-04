@@ -33,6 +33,7 @@ import {
   moveRow,
   sliceBins,
   useConsolidate,
+  useConsolidateAll,
   useMonitorTable,
   useReleaseSector,
 } from "@/lib/monitor";
@@ -55,6 +56,7 @@ export function MonitorTable({artcc}: {artcc: string}) {
   const [menu, setMenu] = useState<RowMenu | null>(null);
   const consolidate = useConsolidate(artcc);
   const release = useReleaseSector(artcc);
+  const consolidateAll = useConsolidateAll(artcc);
 
   const editable = monitor.data?.editable ?? false;
   const allRows = useMemo(() => monitor.data?.rows ?? [], [monitor.data]);
@@ -215,6 +217,15 @@ export function MonitorTable({artcc}: {artcc: string}) {
                 Release {source}
               </DropdownMenuItem>
             ))}
+            <DropdownMenuSeparator />
+            <DropdownMenuItem onSelect={() => consolidateAll.mutate({target: menu.sector.sector_id, mode: "all"})}>
+              All into {menu.sector.sector_id}
+            </DropdownMenuItem>
+            <DropdownMenuItem
+              onSelect={() => consolidateAll.mutate({target: menu.sector.sector_id, mode: "except_consolidated"})}
+            >
+              All into {menu.sector.sector_id} except consolidated
+            </DropdownMenuItem>
           </DropdownMenuContent>
         )}
       </DropdownMenu>
