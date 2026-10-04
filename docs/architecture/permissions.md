@@ -41,7 +41,7 @@ never clean up after a demotion.
 | `source` | Written by |
 |---|---|
 | `manual` | an admin in the access editor; a group membership set by hand |
-| `vatusa` | the VATUSA sync, which may reconcile it away |
+| `vatusa` | the VATUSA sync, via `access.vatusa_role_mappings` — see [vatusa-sync](../features/vatusa-sync.md) |
 | `system` | OIS itself — the `SERVER_ADMIN` env reconciliation, and the `USER` baseline group |
 
 Two rules make it work:

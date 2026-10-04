@@ -15,8 +15,9 @@ use serde::Deserialize;
 use crate::{
     auth::{
         acl::{
-            fetch_user_access, is_server_admin, normalize_permission_tree,
-            permission_tree_from_names,
+            apply_server_admin_catalog, fetch_user_access, is_server_admin,
+            normalize_permission_tree, permission_tree_from_names,
+            user_access_body as acl_user_access_body,
         },
         context::CurrentUser,
         permissions::{
@@ -28,8 +29,8 @@ use crate::{
     errors::ApiError,
     models::{
         AccessCatalogBody, AdminUserPage, CreateGroupRequest, GroupBody, GroupMemberBody,
-        GroupMemberPage, GroupMemberRequest, HeldGroupBody, ScopeAccess, SelfAccessBody,
-        UpdateGroupRequest, UpdateUserAccessRequest, UserAccessBody,
+        GroupMemberPage, GroupMemberRequest, HeldGroupBody, SelfAccessBody, UpdateGroupRequest,
+        UpdateUserAccessRequest, UserAccessBody,
     },
     repos::{access as access_repo, audit as audit_repo, org as org_repo, users as user_repo},
     state::AppState,
@@ -165,7 +166,7 @@ pub async fn get_user_access(
         .ok_or(ApiError::NotFound)?;
     let grants = access_repo::fetch_user_direct_grants(pool, &target.id).await?;
     let roles = access_repo::fetch_user_role_grants(pool, &target.id).await?;
-    let mut body = build_user_access_body(&target.id, target.cid, grants, roles)?;
+    let mut body = acl_user_access_body(&target.id, target.cid, grants, roles)?;
     fill_server_admin_permissions(pool, &mut body).await?;
     Ok(Json(body))
 }
@@ -179,10 +180,7 @@ async fn fill_server_admin_permissions(
 ) -> Result<(), ApiError> {
     if body.server_admin {
         let all = access_repo::fetch_access_catalog_names(pool).await?;
-        let tree = permission_tree_from_names(&all)?;
-        if let Some(national) = body.scopes.iter_mut().find(|s| s.artcc_id.is_none()) {
-            national.permissions = tree;
-        }
+        apply_server_admin_catalog(body, &all)?;
     }
     Ok(())
 }
@@ -274,7 +272,7 @@ pub async fn update_user_access(
 
     let before_grants = access_repo::fetch_user_direct_grants(pool, &target_user_id).await?;
     let before_roles = access_repo::fetch_user_role_grants(pool, &target_user_id).await?;
-    let before_body = build_user_access_body(
+    let before_body = acl_user_access_body(
         &target_user_id,
         target.cid,
         before_grants.clone(),
@@ -328,7 +326,7 @@ pub async fn update_user_access(
     let after_grants = access_repo::fetch_user_direct_grants(pool, &target_user_id).await?;
     let after_roles = access_repo::fetch_user_role_grants(pool, &target_user_id).await?;
     let mut response =
-        build_user_access_body(&target_user_id, target.cid, after_grants, after_roles)?;
+        acl_user_access_body(&target_user_id, target.cid, after_grants, after_roles)?;
     fill_server_admin_permissions(pool, &mut response).await?;
 
     let actor_id = audit_repo::fetch_user_actor_id(pool, &user.id).await?;
@@ -460,46 +458,6 @@ async fn enforce_actor_scope(
     }
 
     Ok(())
-}
-
-/// Groups direct grants + role assignments into per-scope `ScopeAccess` (national first).
-fn build_user_access_body(
-    user_id: &str,
-    cid: i64,
-    grants: Vec<(Option<String>, String)>,
-    roles: Vec<(Option<String>, String)>,
-) -> Result<UserAccessBody, ApiError> {
-    let national_roles: Vec<String> = roles
-        .iter()
-        .filter(|(artcc, _)| artcc.is_none())
-        .map(|(_, role)| role.clone())
-        .collect();
-    let server_admin = is_server_admin(&national_roles);
-
-    let mut map: BTreeMap<Option<String>, (Vec<String>, Vec<String>)> = BTreeMap::new();
-    map.entry(None).or_default(); // national scope always present
-    for (artcc, role) in roles {
-        map.entry(artcc).or_default().0.push(role);
-    }
-    for (artcc, permission) in grants {
-        map.entry(artcc).or_default().1.push(permission);
-    }
-
-    let mut scopes = Vec::with_capacity(map.len());
-    for (artcc_id, (role_names, perm_names)) in map {
-        scopes.push(ScopeAccess {
-            artcc_id,
-            role_names,
-            permissions: permission_tree_from_names(&perm_names)?,
-        });
-    }
-
-    Ok(UserAccessBody {
-        id: user_id.to_string(),
-        cid,
-        server_admin,
-        scopes,
-    })
 }
 
 // ---- Group (role) management — VATUSA/OIS#545 ----
@@ -1935,7 +1893,7 @@ async fn change_membership(
     // Audited exactly as the user editor audits (#546 AC6): a `USER_ACCESS` entry keyed on the
     // holder, with the full access snapshot either side, so one query finds a person's access history
     // whichever editor made the change.
-    let before = build_user_access_body(
+    let before = acl_user_access_body(
         &target,
         payload.cid,
         access_repo::fetch_user_direct_grants(pool, &target).await?,
@@ -1956,7 +1914,7 @@ async fn change_membership(
     .await?;
     tx.commit().await.map_err(|_| ApiError::Internal)?;
 
-    let mut after = build_user_access_body(
+    let mut after = acl_user_access_body(
         &target,
         payload.cid,
         access_repo::fetch_user_direct_grants(pool, &target).await?,
