@@ -35,6 +35,8 @@ pub mod topic {
     pub const TMI: &str = "tmu.tmi";
     pub const GROUND_STOP: &str = "tmu.groundstop";
     pub const PROGRAM: &str = "tmu.program";
+    /// An advisory was created, edited, published, cancelled or deleted (#643).
+    pub const ADVISORY: &str = "tmu.advisory";
     pub const CFR: &str = "flow.cfr";
     pub const EVENT_AVAILABILITY: &str = "events.availability";
     /// Someone's access changed. Payload-free like every topic here, so each client refetches its

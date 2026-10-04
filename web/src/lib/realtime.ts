@@ -16,6 +16,7 @@ const TOPIC_KEYS: Record<string, string[][]> = {
   "tmu.tmi": [["tmis"]],
   "tmu.groundstop": [["ground-stops"], ["departures"]],
   "tmu.program": [["tmu-programs"], ["departures"], ["flow"]],
+  "tmu.advisory": [["advisories"]],
   "flow.cfr": [["departures"], ["flow"]],
   "events.availability": [["event-availability"]],
   // Payload-free by design: each client refetches its own data and works out whether the change
