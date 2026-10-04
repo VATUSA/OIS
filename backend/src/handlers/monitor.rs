@@ -129,13 +129,21 @@ pub async fn set_sector_map(
     }
     // Against the stored row, not this pod's cache: another replica may have written since our last
     // refresh, and a stale cache would turn a real change (14 → 10) into a silent no-op.
-    let current = repo::get(pool, &artcc, &sector_id)
-        .await?
-        .unwrap_or(DEFAULT_MAP);
-    if payload.map == current {
+    let stored = repo::get(pool, &artcc, &sector_id).await?;
+    // The default is the reset: drop the override rather than store a row holding the default, which
+    // would read as overridden forever and pin the sector if `DEFAULT_MAP` ever changed (#706). That
+    // includes a row already holding the default, written before this fix. With no row, the default
+    // is already the value, so nothing is written.
+    if payload.map == DEFAULT_MAP {
+        if stored.is_none() {
+            return Ok(StatusCode::NO_CONTENT);
+        }
+        repo::delete(pool, &artcc, &sector_id).await?;
+    } else if stored == Some(payload.map) {
         return Ok(StatusCode::NO_CONTENT);
+    } else {
+        repo::upsert(pool, &artcc, &sector_id, payload.map, principal.user_id()).await?;
     }
-    repo::upsert(pool, &artcc, &sector_id, payload.map, principal.user_id()).await?;
     state
         .sector_maps
         .store(Arc::new(repo::load_all(pool).await?));
@@ -382,6 +390,47 @@ mod tests {
         assert_eq!(stored(&pool).await, [("ZDC".into(), "24".into(), 14)]);
     }
 
+    /// #706: typing the default on an overridden sector removes the override, rather than storing a row
+    /// holding the default — which read as overridden forever and pinned the sector to today's default.
+    #[sqlx::test]
+    async fn resetting_to_the_default_removes_the_override(pool: PgPool) {
+        let zdc = tmu(&pool, "ZDC").await;
+        let state = state(pool.clone());
+        assert_eq!(put(&state, &zdc, "24", json!({"map": 14})).await, 204);
+        assert_eq!(put(&state, &zdc, "24", json!({"map": 10})).await, 204);
+
+        assert!(stored(&pool).await.is_empty(), "the override row is gone");
+        assert_eq!(
+            crate::feed::sectors::map_for(&state.sector_maps.load(), "ZDC", "24"),
+            10,
+            "the cache the Monitor reads follows the default again"
+        );
+        let (_, body) = send_json(
+            &state,
+            http::Method::GET,
+            "/api/v1/flow/monitor/ZDC/maps",
+            &zdc,
+        )
+        .await;
+        assert_eq!(body["sectors"][0]["map"], 10);
+        assert_eq!(body["sectors"][0]["overridden"], false);
+
+        // A row already holding the default (written before this fix) is cleaned the same way.
+        sqlx::query("insert into flow.sector_map (artcc, sector_id, map) values ('ZDC', '24', 10)")
+            .execute(&pool)
+            .await
+            .unwrap();
+        assert_eq!(put(&state, &zdc, "24", json!({"map": 10})).await, 204);
+        assert!(
+            stored(&pool).await.is_empty(),
+            "a legacy default row is removed too"
+        );
+
+        // And the default on a sector with no row is still a no-op.
+        assert_eq!(put(&state, &zdc, "25", json!({"map": 10})).await, 204);
+        assert!(stored(&pool).await.is_empty());
+    }
+
     /// AC3: a TMU at another ARTCC is refused, and nothing is written.
     #[sqlx::test]
     async fn a_tmu_at_another_artcc_is_refused(pool: PgPool) {
@@ -466,20 +515,8 @@ mod tests {
             .unwrap();
 
         assert_eq!(put(&state, &zdc, "24", json!({"map": 10})).await, 204);
-        assert_eq!(stored(&pool).await, [("ZDC".into(), "24".into(), 10)]);
-    }
-
-    /// Typing the default over an override is the reset — it is written like any other value.
-    #[sqlx::test]
-    async fn typing_the_default_resets_an_override(pool: PgPool) {
-        let zdc = tmu(&pool, "ZDC").await;
-        let state = state(pool.clone());
-        assert_eq!(put(&state, &zdc, "24", json!({"map": 14})).await, 204);
-        assert_eq!(put(&state, &zdc, "24", json!({"map": 10})).await, 204);
-        assert_eq!(
-            crate::feed::sectors::map_for(&state.sector_maps.load(), "ZDC", "24"),
-            10
-        );
+        // Reset, not dropped: a no-op would have left the 14 behind (#706: a reset removes the row).
+        assert!(stored(&pool).await.is_empty());
     }
 
     /// A sector that isn't in the ARTCC's dataset can't be given a MAP.
