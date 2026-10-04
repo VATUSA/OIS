@@ -120,6 +120,14 @@ OIS_OPENAPI_URL=http://127.0.0.1:3001/docs/api/v1/openapi.json \
 New handlers must be registered in **both** `router.rs` (the route) and `openapi.rs` (the path +
 any new schema), or they won't appear in the generated client.
 
+**A `///` doc comment on a `ToSchema` model or field is contract, not prose** (#591): utoipa emits it as the
+schema `description`, so editing it changes the OpenAPI document. Regenerate the client, or only CI's
+`client-drift` will notice. From 1.0, an edit on the supported surface (`docs/architecture/api-surface.md`)
+is a contract edit and gets a changelog entry like any other.
+
+**Record contract changes** in `docs-site/reference/api-changelog.md` (#591). Before 1.0 the entries are
+informational; nothing is stable.
+
 The one deliberate exception is **`GET /metrics`** (#382): Prometheus text exposition, not JSON the
 SPA consumes, so it is registered in `router.rs` only and there is **no client regen** for it.
 Adding another endpoint outside the spec needs the same kind of justification — "the generated
@@ -353,6 +361,10 @@ Three independent axes — they are not the same number:
   allowed on it (regen the typed client, move internal callers) rather than spinning up `/v2` for
   every early change, since only the internal `@ois/api-client` consumes it today. Freeze `v1` at
   product `1.0`.
+- **Stability starts at 1.0, and only for the supported surface** (#591). Before 1.0 nothing is stable,
+  and a change needs no deprecation. From 1.0, the operations in `docs/architecture/api-surface.md` are
+  retired only after at least **30 days** of `Deprecation` and `Sunset` headers on their responses
+  (`backend/src/deprecation.rs`) plus a changelog entry. Everything outside that list stays internal.
 - **Monorepo strategy** — one version for the whole deployed unit; backend, web, and docs always
   ship from the same commit under the same `VERSION`+sha tag. Internal, never-published
   crates/packages (`ois-core`, `ois-client`, `discord`, `packages/ui`, `packages/api-client`) stay
