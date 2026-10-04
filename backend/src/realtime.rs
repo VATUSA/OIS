@@ -322,6 +322,54 @@ async fn pump(mut socket: WebSocket, mut rx: broadcast::Receiver<WsEvent>) {
 
 #[cfg(test)]
 mod tests {
+    // ---- #693: every topic constant is subscribable ----------------------------------------------
+
+    /// The values of every `pub const …: &str` in a `pub mod topic { … }` block of Rust source.
+    fn topic_constants(source: &str) -> Vec<String> {
+        let start = source
+            .find("pub mod topic {")
+            .expect("a `pub mod topic` block");
+        let body = &source[start..];
+        let body = &body[..body.find("\n}").expect("the block closes")];
+        body.lines()
+            .filter_map(|line| {
+                let rest = line.trim().strip_prefix("pub const ")?;
+                let (_, value) = rest.split_once(": &str = \"")?;
+                Some(value.split('"').next()?.to_string())
+            })
+            .collect()
+    }
+
+    /// `ALL` is the subscribe allowlist, kept by hand beside the constants (#693). A topic missing from
+    /// it still compiles — every subscriber asking for it is just refused as `unknown_topic`.
+    #[test]
+    fn every_topic_constant_is_in_all() {
+        let declared = topic_constants(include_str!("realtime.rs"));
+        assert!(
+            declared.contains(&"flow.release".to_string())
+                && declared.contains(&"flow.runway".to_string()),
+            "the scan found the topic constants: {declared:?}"
+        );
+        let all: std::collections::BTreeSet<&str> = super::topic::ALL.iter().copied().collect();
+        assert_eq!(
+            all.len(),
+            super::topic::ALL.len(),
+            "ALL lists a topic twice"
+        );
+        let declared: std::collections::BTreeSet<&str> =
+            declared.iter().map(String::as_str).collect();
+        assert_eq!(
+            declared, all,
+            "every topic constant, and nothing else, is in ALL"
+        );
+    }
+
+    #[test]
+    fn the_topic_scan_sees_a_new_constant() {
+        let sample = "pub mod topic {\n    pub const A: &str = \"a.one\";\n    /// doc\n    pub const B: &str = \"b.two\";\n    pub const ALL: [&str; 1] = [A];\n}\n\nfn after() {}\n";
+        assert_eq!(topic_constants(sample), ["a.one", "b.two"]);
+    }
+
     use crate::state::AppState;
 
     #[tokio::test]
