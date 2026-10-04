@@ -4402,6 +4402,12 @@ export interface components {
             /** Format: date-time */
             cfr?: string | null;
             cfr_issued: boolean;
+            /**
+             * Format: int64
+             * @description The issued CFR's version, for `If-Match` on `POST`/`DELETE /tmu/cfr` (#585); null when no CFR
+             *     is issued for this callsign.
+             */
+            cfr_version?: number | null;
             /** Format: int64 */
             delay_min: number;
             /** @description Origin airport ICAO (a facility query spans several). */
@@ -4940,6 +4946,11 @@ export interface components {
              *     drawing the aircraft's full path across the FCA.
              */
             path: number[][];
+            /**
+             * Format: int64
+             * @description The release's version, for `If-Match` (#585); null when not released.
+             */
+            release_version?: number | null;
             /** @description True when this aircraft has a frozen (issued) CFR release. */
             released: boolean;
             /**
@@ -5643,6 +5654,11 @@ export interface components {
             fca_id: string;
             fca_name: string;
             released: boolean;
+            /**
+             * @description The display name of the service account or API key that issued this release, or null when a
+             *     person did (or it is not released) — so a controller can see a time came from a tool (#585).
+             */
+            released_by_machine?: string | null;
             /**
              * @description The predicted departure runway (#511), or null when nothing could predict one — no airport
              *     configuration, or no rule and no configured default. Null is a real answer: a wrong runway would
@@ -12335,7 +12351,12 @@ export interface operations {
     mark_release: {
         parameters: {
             query?: never;
-            header?: never;
+            header?: {
+                /** @description Replace only this release version (#585) */
+                "If-Match"?: string | null;
+                /** @description `*`: create only if the flight holds no release (#585) */
+                "If-None-Match"?: string | null;
+            };
             path: {
                 /** @description FCA id */
                 id: string;
@@ -12349,6 +12370,73 @@ export interface operations {
                 "application/json": components["schemas"]["ReleaseRequest"];
             };
         };
+        responses: {
+            /** @description Released; `ETag` is the new version */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["FcaFlight"][];
+                };
+            };
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description `held_by_person` / `held_by_other_machine`: a machine may not replace it */
+            409: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description The precondition failed; `ETag` is the current version */
+            412: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description A machine sent neither `If-Match` nor `If-None-Match` */
+            428: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+        };
+    };
+    clear_release: {
+        parameters: {
+            query?: never;
+            header?: {
+                /** @description Clear only this release version (#585) */
+                "If-Match"?: string | null;
+            };
+            path: {
+                /** @description FCA id */
+                id: string;
+                /** @description Aircraft callsign */
+                callsign: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
         responses: {
             200: {
                 headers: {
@@ -12376,37 +12464,22 @@ export interface operations {
                 };
                 content?: never;
             };
-        };
-    };
-    clear_release: {
-        parameters: {
-            query?: never;
-            header?: never;
-            path: {
-                /** @description FCA id */
-                id: string;
-                /** @description Aircraft callsign */
-                callsign: string;
-            };
-            cookie?: never;
-        };
-        requestBody?: never;
-        responses: {
-            200: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": components["schemas"]["FcaFlight"][];
-                };
-            };
-            401: {
+            /** @description `held_by_person` / `held_by_other_machine`: a machine may not clear it */
+            409: {
                 headers: {
                     [name: string]: unknown;
                 };
                 content?: never;
             };
-            404: {
+            /** @description The precondition failed; `ETag` is the current version */
+            412: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description A machine sent no `If-Match` */
+            428: {
                 headers: {
                     [name: string]: unknown;
                 };
@@ -12449,6 +12522,13 @@ export interface operations {
                 content?: never;
             };
             404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description `held_by_person` / `held_by_other_machine`: a machine may not trade it */
+            409: {
                 headers: {
                     [name: string]: unknown;
                 };
@@ -14988,7 +15068,12 @@ export interface operations {
     issue_cfr: {
         parameters: {
             query?: never;
-            header?: never;
+            header?: {
+                /** @description Re-issue only this CFR version (#585) */
+                "If-Match"?: string | null;
+                /** @description `*`: issue only if the flight holds no CFR (#585) */
+                "If-None-Match"?: string | null;
+            };
             path?: never;
             cookie?: never;
         };
@@ -14998,6 +15083,7 @@ export interface operations {
             };
         };
         responses: {
+            /** @description Issued; `ETag` is the new version */
             200: {
                 headers: {
                     [name: string]: unknown;
@@ -15018,12 +15104,36 @@ export interface operations {
                 };
                 content?: never;
             };
+            /** @description `held_by_person` / `held_by_other_machine`: a machine may not replace it */
+            409: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description The precondition failed; `ETag` is the current version */
+            412: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description A machine sent neither `If-Match` nor `If-None-Match` */
+            428: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
         };
     };
     release_cfr: {
         parameters: {
             query?: never;
-            header?: never;
+            header?: {
+                /** @description Release only this CFR version (#585) */
+                "If-Match"?: string | null;
+            };
             path: {
                 /** @description Flight callsign */
                 callsign: string;
@@ -15038,6 +15148,12 @@ export interface operations {
                 };
                 content?: never;
             };
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
             401: {
                 headers: {
                     [name: string]: unknown;
@@ -15045,6 +15161,27 @@ export interface operations {
                 content?: never;
             };
             404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description `held_by_person` / `held_by_other_machine`: a machine may not release it */
+            409: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description The precondition failed; `ETag` is the current version */
+            412: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description A machine sent no `If-Match` */
+            428: {
                 headers: {
                     [name: string]: unknown;
                 };

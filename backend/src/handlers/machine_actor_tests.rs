@@ -138,7 +138,8 @@ async fn call(
     call_with(state, method, uri, &[auth], body).await
 }
 
-/// [`call`] carrying several credentials at once — each a bearer (`Authorization`) or a cookie.
+/// [`call`] carrying several entries at once: a bearer (`Bearer …` → `Authorization`), a session
+/// (`ois_session=…` → `Cookie`), or any other header written `Name: value` — e.g. `If-None-Match: *`.
 async fn call_with(
     state: &AppState,
     method: http::Method,
@@ -149,13 +150,15 @@ async fn call_with(
     use tower::ServiceExt;
 
     let mut builder = http::Request::builder().method(method).uri(uri);
-    for credential in auth {
-        let header = if credential.starts_with("Bearer ") {
-            http::header::AUTHORIZATION
+    for entry in auth {
+        builder = if entry.starts_with("Bearer ") {
+            builder.header(http::header::AUTHORIZATION, *entry)
+        } else if entry.starts_with("ois_session=") {
+            builder.header(http::header::COOKIE, *entry)
         } else {
-            http::header::COOKIE
+            let (name, value) = entry.split_once(": ").expect("`Name: value`");
+            builder.header(name, value)
         };
-        builder = builder.header(header, *credential);
     }
     let request = match body {
         Some(b) => builder
@@ -204,6 +207,41 @@ async fn audited_actor(pool: &PgPool) -> Option<String> {
         .flatten()
 }
 
+/// A state whose feed holds one prefile, `TEST1` (KJFK→KDCA via RBV WHITE SIE), that crosses
+/// [`fca`] — so `mark_release` has a real crossing to release.
+async fn crossing_state(pool: PgPool) -> AppState {
+    crossing_state_of(pool, &["TEST1"]).await
+}
+
+/// [`crossing_state`] with one such prefile per callsign.
+async fn crossing_state_of(pool: PgPool, callsigns: &[&str]) -> AppState {
+    let state = test_state(pool, HashMap::new());
+    {
+        let mut feed = state.feed.write().await;
+        feed.airports = Arc::new(HashMap::from([
+            ("KJFK".to_string(), Airport::at(40.64, -73.78)),
+            ("KDCA".to_string(), Airport::at(38.85, -77.04)),
+        ]));
+        feed.snapshot = Some(Arc::new(crate::feed::Snapshot::of(VatsimData {
+            prefiles: callsigns
+                .iter()
+                .map(|callsign| Prefile {
+                    callsign: (*callsign).into(),
+                    flight_plan: Some(FlightPlan {
+                        departure: "KJFK".into(),
+                        arrival: "KDCA".into(),
+                        route: "RBV WHITE SIE".into(),
+                        ..Default::default()
+                    }),
+                    ..Default::default()
+                })
+                .collect(),
+            ..Default::default()
+        })));
+    }
+    state
+}
+
 /// A crossing FCA (the JFK→DCA corridor between WHITE and SIE) and its id.
 async fn fca(pool: &PgPool) -> String {
     sqlx::query_scalar(
@@ -225,6 +263,33 @@ async fn seed_release(pool: &PgPool, fca_id: &str, callsign: &str, cta: i64) {
     .bind(fca_id)
     .bind(callsign)
     .bind(cta)
+    .execute(pool)
+    .await
+    .unwrap();
+}
+
+/// A release `service_account` holds — written by it, so a machine acting on its own release is
+/// exercised rather than refused as a person's (#585).
+async fn seed_owned_release(
+    pool: &PgPool,
+    fca_id: &str,
+    callsign: &str,
+    cta: i64,
+    service_account: &str,
+) {
+    let actor =
+        crate::repos::audit::resolve_service_account_actor_id(pool, service_account, "vTBFM")
+            .await
+            .unwrap()
+            .unwrap();
+    sqlx::query(
+        "insert into flow.fca_release (fca_id, callsign, cta_ms, edct_ms, updated_by_actor) \
+         values ($1, $2, $3, $3, $4)",
+    )
+    .bind(fca_id)
+    .bind(callsign)
+    .bind(cta)
+    .bind(actor)
     .execute(pool)
     .await
     .unwrap();
@@ -255,11 +320,11 @@ async fn a_service_account_issues_a_cfr_attributed_to_itself(pool: PgPool) {
     let state = test_state(pool.clone(), HashMap::new());
     let (sa, auth) = service_account(&pool, "tmu.cfr.assign", None).await;
 
-    let (status, body) = call(
+    let (status, body) = call_with(
         &state,
         http::Method::POST,
         "/api/v1/tmu/cfr",
-        &auth,
+        &[&auth, "If-None-Match: *"],
         Some(issue_body()),
     )
     .await;
@@ -286,11 +351,11 @@ async fn an_api_key_issues_a_cfr_attributed_to_the_key(pool: PgPool) {
     let state = test_state(pool.clone(), HashMap::new());
     let (key, auth) = api_key(&pool, "tmu.cfr.assign").await;
 
-    let (status, body) = call(
+    let (status, body) = call_with(
         &state,
         http::Method::POST,
         "/api/v1/tmu/cfr",
-        &auth,
+        &[&auth, "If-None-Match: *"],
         Some(issue_body()),
     )
     .await;
@@ -306,17 +371,17 @@ async fn an_api_key_issues_a_cfr_attributed_to_the_key(pool: PgPool) {
     assert_eq!(audited_actor(&pool).await, Some(actor));
 }
 
-/// Regression pin: a path that never read `CurrentUser`, so it already worked for a machine.
+/// A machine releases the CFR it issued, at the version it was issued at (#585).
 #[sqlx::test]
 async fn a_service_account_releases_a_cfr(pool: PgPool) {
     let state = test_state(pool.clone(), HashMap::new());
     let (_, auth) = service_account(&pool, "tmu.cfr.assign", None).await;
     assert_eq!(
-        call(
+        call_with(
             &state,
             http::Method::POST,
             "/api/v1/tmu/cfr",
-            &auth,
+            &[&auth, "If-None-Match: *"],
             Some(issue_body())
         )
         .await
@@ -324,11 +389,11 @@ async fn a_service_account_releases_a_cfr(pool: PgPool) {
         http::StatusCode::OK
     );
 
-    let (status, _) = call(
+    let (status, _) = call_with(
         &state,
         http::Method::DELETE,
         "/api/v1/tmu/cfr/AAL1",
-        &auth,
+        &[&auth, "If-Match: \"1\""],
         None,
     )
     .await;
@@ -401,35 +466,15 @@ async fn a_request_carrying_a_session_and_a_service_account_is_the_users(pool: P
 /// AC6 for `mark_release`: a real crossing in the feed, so the write itself runs, not only the gate.
 #[sqlx::test]
 async fn a_service_account_marks_a_release_attributed_to_itself(pool: PgPool) {
-    let state = test_state(pool.clone(), HashMap::new());
-    {
-        let mut feed = state.feed.write().await;
-        feed.airports = Arc::new(HashMap::from([
-            ("KJFK".to_string(), Airport::at(40.64, -73.78)),
-            ("KDCA".to_string(), Airport::at(38.85, -77.04)),
-        ]));
-        feed.snapshot = Some(Arc::new(crate::feed::Snapshot::of(VatsimData {
-            prefiles: vec![Prefile {
-                callsign: "TEST1".into(),
-                flight_plan: Some(FlightPlan {
-                    departure: "KJFK".into(),
-                    arrival: "KDCA".into(),
-                    route: "RBV WHITE SIE".into(),
-                    ..Default::default()
-                }),
-                ..Default::default()
-            }],
-            ..Default::default()
-        })));
-    }
+    let state = crossing_state(pool.clone()).await;
     let fca_id = fca(&pool).await;
     let (sa, auth) = service_account(&pool, "flow.fca.update", None).await;
 
-    let (status, body) = call(
+    let (status, body) = call_with(
         &state,
         http::Method::POST,
         &format!("/api/v1/flow/fcas/{fca_id}/release/TEST1"),
-        &auth,
+        &[&auth, "If-None-Match: *"],
         Some(json!({})),
     )
     .await;
@@ -447,9 +492,9 @@ async fn a_service_account_marks_a_release_attributed_to_itself(pool: PgPool) {
 async fn a_service_account_swaps_releases_attributed_to_itself(pool: PgPool) {
     let state = test_state(pool.clone(), HashMap::new());
     let fca_id = fca(&pool).await;
-    seed_release(&pool, &fca_id, "AAL1", 1_000).await;
-    seed_release(&pool, &fca_id, "UAL2", 2_000).await;
     let (sa, auth) = service_account(&pool, "flow.fca.update", None).await;
+    seed_owned_release(&pool, &fca_id, "AAL1", 1_000, &sa).await;
+    seed_owned_release(&pool, &fca_id, "UAL2", 2_000, &sa).await;
 
     let (status, _) = call(
         &state,
@@ -471,19 +516,19 @@ async fn a_service_account_swaps_releases_attributed_to_itself(pool: PgPool) {
     }
 }
 
-/// Regression pin: clearing never read `CurrentUser`.
+/// A machine clears its own release, at the version it last saw (#585).
 #[sqlx::test]
 async fn a_service_account_clears_a_release(pool: PgPool) {
     let state = test_state(pool.clone(), HashMap::new());
     let fca_id = fca(&pool).await;
-    seed_release(&pool, &fca_id, "AAL1", 1_000).await;
-    let (_, auth) = service_account(&pool, "flow.fca.update", None).await;
+    let (sa, auth) = service_account(&pool, "flow.fca.update", None).await;
+    seed_owned_release(&pool, &fca_id, "AAL1", 1_000, &sa).await;
 
-    let (status, _) = call(
+    let (status, _) = call_with(
         &state,
         http::Method::DELETE,
         &format!("/api/v1/flow/fcas/{fca_id}/release/AAL1"),
-        &auth,
+        &[&auth, "If-Match: \"1\""],
         None,
     )
     .await;
@@ -558,4 +603,978 @@ async fn a_service_account_scope_honours_its_roles_artcc(pool: PgPool) {
         .await
         .unwrap();
     assert!(matches!(national, PermissionScope::National { .. }));
+}
+
+// ==== VATUSA/OIS#585: authority, idempotency and conflict for external release writers =============
+
+/// One request's status, `ETag` and body.
+async fn send_full(
+    state: &AppState,
+    method: http::Method,
+    uri: &str,
+    entries: &[&str],
+    body: Option<Value>,
+) -> (http::StatusCode, Option<String>, Value) {
+    use tower::ServiceExt;
+
+    let mut builder = http::Request::builder().method(method).uri(uri);
+    for entry in entries {
+        builder = if entry.starts_with("Bearer ") {
+            builder.header(http::header::AUTHORIZATION, *entry)
+        } else if entry.starts_with("ois_session=") {
+            builder.header(http::header::COOKIE, *entry)
+        } else {
+            let (name, value) = entry.split_once(": ").expect("`Name: value`");
+            builder.header(name, value)
+        };
+    }
+    let request = match body {
+        Some(b) => builder
+            .header(http::header::CONTENT_TYPE, "application/json")
+            .body(axum::body::Body::from(b.to_string())),
+        None => builder.body(axum::body::Body::empty()),
+    }
+    .unwrap();
+    let response = crate::router::build_router(state.clone())
+        .oneshot(request)
+        .await
+        .unwrap();
+    let status = response.status();
+    let etag = response
+        .headers()
+        .get(http::header::ETAG)
+        .map(|v| v.to_str().unwrap().to_string());
+    let bytes = axum::body::to_bytes(response.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    (
+        status,
+        etag,
+        serde_json::from_slice(&bytes).unwrap_or(Value::Null),
+    )
+}
+
+/// `(wheels_up, version, issued_by_actor)` for a CFR.
+async fn cfr_row(
+    pool: &PgPool,
+    callsign: &str,
+) -> Option<(chrono::DateTime<Utc>, i64, Option<String>)> {
+    sqlx::query_as(
+        "select wheels_up, version, issued_by_actor from tmu.issued_cfrs where callsign = $1",
+    )
+    .bind(callsign)
+    .fetch_optional(pool)
+    .await
+    .unwrap()
+}
+
+async fn audit_count(pool: &PgPool) -> i64 {
+    sqlx::query_scalar("select count(*) from access.audit_logs")
+        .fetch_one(pool)
+        .await
+        .unwrap()
+}
+
+/// A second service account, holding `permission`, under a distinct key.
+async fn other_service_account(pool: &PgPool, permission: &str) -> String {
+    sqlx::query("insert into access.role_permissions (role_name, permission_name) values ($1, $2) on conflict do nothing")
+        .bind(ROLE)
+        .bind(permission)
+        .execute(pool)
+        .await
+        .unwrap();
+    let id: String = sqlx::query_scalar(
+        "insert into access.service_accounts (key, name) values ('other', 'Other Tool') returning id",
+    )
+    .fetch_one(pool)
+    .await
+    .unwrap();
+    let token = format!("ois_sa_{}", uuid::Uuid::new_v4().simple());
+    sqlx::query("insert into access.service_account_credentials (service_account_id, secret_hash) values ($1, $2)")
+        .bind(&id)
+        .bind(sha256_hex(&token))
+        .execute(pool)
+        .await
+        .unwrap();
+    sqlx::query(
+        "insert into access.service_account_roles (service_account_id, role_name) values ($1, $2)",
+    )
+    .bind(&id)
+    .bind(ROLE)
+    .execute(pool)
+    .await
+    .unwrap();
+    format!("Bearer {token}")
+}
+
+const CFR: &str = "/api/v1/tmu/cfr";
+
+// ---- AC2: a retry cannot issue twice -------------------------------------------------------------
+
+#[sqlx::test]
+async fn a_retried_create_cannot_issue_a_cfr_twice(pool: PgPool) {
+    let state = test_state(pool.clone(), HashMap::new());
+    let (_, auth) = service_account(&pool, "tmu.cfr.assign", None).await;
+
+    let (status, etag, body) = send_full(
+        &state,
+        http::Method::POST,
+        CFR,
+        &[&auth, "If-None-Match: *"],
+        Some(issue_body()),
+    )
+    .await;
+    assert_eq!(status, http::StatusCode::OK, "{body}");
+    assert_eq!(etag.as_deref(), Some("\"1\""));
+    let first = cfr_row(&pool, "AAL1").await.unwrap();
+    let audits = audit_count(&pool).await;
+
+    // The same request again — a client that timed out and retried. A later ready time makes a
+    // re-issue observable: it would move `wheels_up`.
+    let mut retry = issue_body();
+    retry["ready_time"] = json!((Utc::now() + chrono::Duration::hours(2)).to_rfc3339());
+    let (status, etag, _) = send_full(
+        &state,
+        http::Method::POST,
+        CFR,
+        &[&auth, "If-None-Match: *"],
+        Some(retry),
+    )
+    .await;
+    assert_eq!(status, http::StatusCode::PRECONDITION_FAILED);
+    assert_eq!(
+        etag.as_deref(),
+        Some("\"1\""),
+        "the ETag says what is there"
+    );
+    assert_eq!(
+        cfr_row(&pool, "AAL1").await.unwrap(),
+        first,
+        "nothing was re-issued"
+    );
+    assert_eq!(
+        audit_count(&pool).await,
+        audits,
+        "and nothing was audited as written"
+    );
+}
+
+#[sqlx::test]
+async fn a_retried_create_cannot_mark_a_release_twice(pool: PgPool) {
+    let state = crossing_state(pool.clone()).await;
+    let fca_id = fca(&pool).await;
+    let (_, auth) = service_account(&pool, "flow.fca.update", None).await;
+    let uri = format!("/api/v1/flow/fcas/{fca_id}/release/TEST1");
+
+    let (status, etag, body) = send_full(
+        &state,
+        http::Method::POST,
+        &uri,
+        &[&auth, "If-None-Match: *"],
+        Some(json!({})),
+    )
+    .await;
+    assert_eq!(status, http::StatusCode::OK, "{body}");
+    assert_eq!(etag.as_deref(), Some("\"1\""));
+    let first: (i64, i64, i64) = sqlx::query_as(
+        "select cta_ms, edct_ms, version from flow.fca_release where callsign = 'TEST1'",
+    )
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+
+    let (status, etag, _) = send_full(
+        &state,
+        http::Method::POST,
+        &uri,
+        &[&auth, "If-None-Match: *"],
+        Some(json!({"ready": "2359"})),
+    )
+    .await;
+    assert_eq!(status, http::StatusCode::PRECONDITION_FAILED);
+    assert_eq!(etag.as_deref(), Some("\"1\""));
+    let after: (i64, i64, i64) = sqlx::query_as(
+        "select cta_ms, edct_ms, version from flow.fca_release where callsign = 'TEST1'",
+    )
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    assert_eq!(after, first);
+}
+
+// ---- AC3: a conflicting write is refused, distinguishably ----------------------------------------
+
+#[sqlx::test]
+async fn a_stale_if_match_is_refused_with_the_current_version(pool: PgPool) {
+    let state = test_state(pool.clone(), HashMap::new());
+    let (_, auth) = service_account(&pool, "tmu.cfr.assign", None).await;
+    send_full(
+        &state,
+        http::Method::POST,
+        CFR,
+        &[&auth, "If-None-Match: *"],
+        Some(issue_body()),
+    )
+    .await;
+
+    let (status, etag, _) = send_full(
+        &state,
+        http::Method::POST,
+        CFR,
+        &[&auth, "If-Match: \"1\""],
+        Some(issue_body()),
+    )
+    .await;
+    assert_eq!(
+        status,
+        http::StatusCode::OK,
+        "replacing the version it saw is fine"
+    );
+    assert_eq!(etag.as_deref(), Some("\"2\""));
+    let current = cfr_row(&pool, "AAL1").await.unwrap();
+
+    let (status, etag, body) = send_full(
+        &state,
+        http::Method::POST,
+        CFR,
+        &[&auth, "If-Match: \"1\""],
+        Some(issue_body()),
+    )
+    .await;
+    assert_eq!(status, http::StatusCode::PRECONDITION_FAILED);
+    assert_eq!(body["error"], "precondition_failed");
+    assert_eq!(etag.as_deref(), Some("\"2\""), "it lost to version 2");
+    assert_eq!(
+        cfr_row(&pool, "AAL1").await.unwrap(),
+        current,
+        "the newer one stands"
+    );
+}
+
+#[sqlx::test]
+async fn a_machine_may_not_replace_or_clear_a_persons_release(pool: PgPool) {
+    let state = crossing_state(pool.clone()).await;
+    let fca_id = fca(&pool).await;
+    seed_release(&pool, &fca_id, "TEST1", 1_000).await; // a person's (unattributed legacy rows count as people)
+    seed_release(&pool, &fca_id, "UAL2", 2_000).await;
+    let (_, auth) = service_account(&pool, "flow.fca.update", None).await;
+    let release = format!("/api/v1/flow/fcas/{fca_id}/release/TEST1");
+
+    for (method, uri, entries, body) in [
+        (
+            http::Method::POST,
+            release.clone(),
+            vec![auth.as_str(), "If-Match: \"1\""],
+            Some(json!({})),
+        ),
+        (
+            http::Method::DELETE,
+            release.clone(),
+            vec![auth.as_str(), "If-Match: \"1\""],
+            None,
+        ),
+        (
+            http::Method::POST,
+            format!("/api/v1/flow/fcas/{fca_id}/swap"),
+            vec![auth.as_str()],
+            Some(json!({"a": "TEST1", "b": "UAL2"})),
+        ),
+    ] {
+        let (status, _, body) = send_full(&state, method.clone(), &uri, &entries, body).await;
+        assert_eq!(status, http::StatusCode::CONFLICT, "{method} {uri}");
+        assert_eq!(body["error"], "held_by_person");
+    }
+    let row: (i64, i64) =
+        sqlx::query_as("select cta_ms, version from flow.fca_release where callsign = 'TEST1'")
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+    assert_eq!(row, (1_000, 1), "the person's release is untouched");
+}
+
+#[sqlx::test]
+async fn a_machine_may_not_replace_or_release_a_persons_cfr(pool: PgPool) {
+    let state = test_state(pool.clone(), HashMap::new());
+    let user = seed_user(&pool).await;
+    grant(&pool, &user, "tmu.cfr.assign", None).await;
+    let cookie = session_cookie(&pool, &user).await;
+    assert_eq!(
+        send_full(
+            &state,
+            http::Method::POST,
+            CFR,
+            &[&cookie],
+            Some(issue_body())
+        )
+        .await
+        .0,
+        http::StatusCode::OK
+    );
+    let (_, auth) = service_account(&pool, "tmu.cfr.assign", None).await;
+
+    let (status, _, body) = send_full(
+        &state,
+        http::Method::POST,
+        CFR,
+        &[&auth, "If-Match: \"1\""],
+        Some(issue_body()),
+    )
+    .await;
+    assert_eq!(
+        (status, body["error"].as_str()),
+        (http::StatusCode::CONFLICT, Some("held_by_person"))
+    );
+    let (status, _, body) = send_full(
+        &state,
+        http::Method::DELETE,
+        &format!("{CFR}/AAL1"),
+        &[&auth, "If-Match: \"1\""],
+        None,
+    )
+    .await;
+    assert_eq!(
+        (status, body["error"].as_str()),
+        (http::StatusCode::CONFLICT, Some("held_by_person"))
+    );
+    assert_eq!(cfr_row(&pool, "AAL1").await.unwrap().1, 1);
+}
+
+#[sqlx::test]
+async fn a_machine_may_not_touch_another_machines_cfr(pool: PgPool) {
+    let state = test_state(pool.clone(), HashMap::new());
+    let (_, mine) = service_account(&pool, "tmu.cfr.assign", None).await;
+    let theirs = other_service_account(&pool, "tmu.cfr.assign").await;
+    send_full(
+        &state,
+        http::Method::POST,
+        CFR,
+        &[&mine, "If-None-Match: *"],
+        Some(issue_body()),
+    )
+    .await;
+
+    let (status, _, body) = send_full(
+        &state,
+        http::Method::POST,
+        CFR,
+        &[&theirs, "If-Match: \"1\""],
+        Some(issue_body()),
+    )
+    .await;
+    assert_eq!(
+        (status, body["error"].as_str()),
+        (http::StatusCode::CONFLICT, Some("held_by_other_machine"))
+    );
+}
+
+#[sqlx::test]
+async fn a_machine_must_send_a_precondition(pool: PgPool) {
+    let state = crossing_state(pool.clone()).await;
+    let fca_id = fca(&pool).await;
+    let (_, auth) = service_account(&pool, "tmu.cfr.assign", None).await;
+    sqlx::query("insert into access.role_permissions (role_name, permission_name) values ($1, 'flow.fca.update')")
+        .bind(ROLE)
+        .execute(&pool)
+        .await
+        .unwrap();
+
+    let (status, _, body) = send_full(
+        &state,
+        http::Method::POST,
+        CFR,
+        &[&auth],
+        Some(issue_body()),
+    )
+    .await;
+    assert_eq!(
+        (status, body["error"].as_str()),
+        (
+            http::StatusCode::PRECONDITION_REQUIRED,
+            Some("precondition_required")
+        )
+    );
+    let (status, _, _) = send_full(
+        &state,
+        http::Method::POST,
+        &format!("/api/v1/flow/fcas/{fca_id}/release/TEST1"),
+        &[&auth],
+        Some(json!({})),
+    )
+    .await;
+    assert_eq!(status, http::StatusCode::PRECONDITION_REQUIRED);
+    assert!(cfr_row(&pool, "AAL1").await.is_none());
+}
+
+/// People keep today's behaviour: no precondition needed, and they override a machine's release.
+#[sqlx::test]
+async fn a_person_overrides_a_machines_cfr_without_a_precondition(pool: PgPool) {
+    let state = test_state(pool.clone(), HashMap::new());
+    let (_, auth) = service_account(&pool, "tmu.cfr.assign", None).await;
+    send_full(
+        &state,
+        http::Method::POST,
+        CFR,
+        &[&auth, "If-None-Match: *"],
+        Some(issue_body()),
+    )
+    .await;
+    let user = seed_user(&pool).await;
+    grant(&pool, &user, "tmu.cfr.assign", None).await;
+    let cookie = session_cookie(&pool, &user).await;
+
+    let (status, etag, body) = send_full(
+        &state,
+        http::Method::POST,
+        CFR,
+        &[&cookie],
+        Some(issue_body()),
+    )
+    .await;
+    assert_eq!(status, http::StatusCode::OK, "{body}");
+    assert_eq!(etag.as_deref(), Some("\"2\""));
+    let user_actor = actor_of(&pool, "user_id", &user).await;
+    assert_eq!(
+        cfr_row(&pool, "AAL1").await.unwrap().2,
+        user_actor,
+        "the person holds it now"
+    );
+}
+
+// ---- AC4: provenance where a controller looks ------------------------------------------------------
+
+#[sqlx::test]
+async fn idst_and_traffic_show_a_machine_release_and_its_version(pool: PgPool) {
+    let state = crossing_state(pool.clone()).await;
+    let fca_id = fca(&pool).await;
+    let (_, auth) = service_account(&pool, "flow.fca.update", None).await;
+    sqlx::query("insert into access.role_permissions (role_name, permission_name) values ($1, 'flow.fca.read')")
+        .bind(ROLE)
+        .execute(&pool)
+        .await
+        .unwrap();
+    let (status, _, _) = send_full(
+        &state,
+        http::Method::POST,
+        &format!("/api/v1/flow/fcas/{fca_id}/release/TEST1"),
+        &[&auth, "If-None-Match: *"],
+        Some(json!({})),
+    )
+    .await;
+    assert_eq!(status, http::StatusCode::OK);
+
+    let (status, _, idst) = send_full(
+        &state,
+        http::Method::GET,
+        "/api/v1/flow/idst?airports=KJFK",
+        &[&auth],
+        None,
+    )
+    .await;
+    assert_eq!(status, http::StatusCode::OK, "{idst}");
+    assert_eq!(idst["released"][0]["callsign"], "TEST1");
+    assert_eq!(idst["released"][0]["released_by_machine"], "vTBFM");
+
+    let (_, _, traffic) = send_full(
+        &state,
+        http::Method::GET,
+        &format!("/api/v1/flow/fcas/{fca_id}/traffic"),
+        &[&auth],
+        None,
+    )
+    .await;
+    assert_eq!(traffic[0]["release_version"], 1);
+}
+
+#[sqlx::test]
+async fn idst_names_no_machine_for_a_persons_release(pool: PgPool) {
+    let state = crossing_state(pool.clone()).await;
+    let fca_id = fca(&pool).await;
+    seed_release(
+        &pool,
+        &fca_id,
+        "TEST1",
+        Utc::now().timestamp_millis() + 600_000,
+    )
+    .await;
+    let user = seed_user(&pool).await;
+    grant(&pool, &user, "flow.fca.read", None).await;
+    let cookie = session_cookie(&pool, &user).await;
+
+    let (_, _, idst) = send_full(
+        &state,
+        http::Method::GET,
+        "/api/v1/flow/idst?airports=KJFK",
+        &[&cookie],
+        None,
+    )
+    .await;
+    assert_eq!(idst["released"][0]["callsign"], "TEST1");
+    assert_eq!(idst["released"][0]["released_by_machine"], Value::Null);
+}
+
+// ---- AC5: revocation mid-flight ---------------------------------------------------------------------
+
+/// A committed time stands: revoking the credential stops its *future* writes, not its releases.
+#[sqlx::test]
+async fn a_revoked_credentials_releases_stand(pool: PgPool) {
+    let state = crossing_state(pool.clone()).await;
+    let fca_id = fca(&pool).await;
+    let (sa, auth) = service_account(&pool, "flow.fca.update", None).await;
+    let uri = format!("/api/v1/flow/fcas/{fca_id}/release/TEST1");
+    assert_eq!(
+        send_full(
+            &state,
+            http::Method::POST,
+            &uri,
+            &[&auth, "If-None-Match: *"],
+            Some(json!({}))
+        )
+        .await
+        .0,
+        http::StatusCode::OK
+    );
+
+    sqlx::query("update access.service_account_credentials set revoked_at = now() where service_account_id = $1")
+        .bind(&sa)
+        .execute(&pool)
+        .await
+        .unwrap();
+
+    let frozen = crate::repos::flow::list_releases(&pool, &fca_id)
+        .await
+        .unwrap();
+    assert_eq!(
+        frozen.len(),
+        1,
+        "still a frozen release the metering engine spaces around"
+    );
+    assert_eq!(frozen[0].0, "TEST1");
+    let (status, _, _) = send_full(
+        &state,
+        http::Method::DELETE,
+        &uri,
+        &[&auth, "If-Match: \"1\""],
+        None,
+    )
+    .await;
+    assert_eq!(
+        status,
+        http::StatusCode::UNAUTHORIZED,
+        "but the revoked credential can no longer act"
+    );
+    assert_eq!(
+        crate::repos::flow::list_releases(&pool, &fca_id)
+            .await
+            .unwrap()
+            .len(),
+        1
+    );
+}
+
+/// A stale `If-Match` on a **clear** is refused too — a tool must not remove a release it has not
+/// seen the latest of.
+#[sqlx::test]
+async fn a_stale_if_match_cannot_release_a_cfr_or_clear_a_release(pool: PgPool) {
+    let state = test_state(pool.clone(), HashMap::new());
+    let (sa, auth) = service_account(&pool, "tmu.cfr.assign", None).await;
+    send_full(
+        &state,
+        http::Method::POST,
+        CFR,
+        &[&auth, "If-None-Match: *"],
+        Some(issue_body()),
+    )
+    .await;
+    send_full(
+        &state,
+        http::Method::POST,
+        CFR,
+        &[&auth, "If-Match: \"1\""],
+        Some(issue_body()),
+    )
+    .await; // → v2
+
+    let (status, etag, _) = send_full(
+        &state,
+        http::Method::DELETE,
+        &format!("{CFR}/AAL1"),
+        &[&auth, "If-Match: \"1\""],
+        None,
+    )
+    .await;
+    assert_eq!(status, http::StatusCode::PRECONDITION_FAILED);
+    assert_eq!(etag.as_deref(), Some("\"2\""));
+    assert!(
+        cfr_row(&pool, "AAL1").await.is_some(),
+        "the CFR is still issued"
+    );
+
+    sqlx::query("insert into access.role_permissions (role_name, permission_name) values ($1, 'flow.fca.update')")
+        .bind(ROLE)
+        .execute(&pool)
+        .await
+        .unwrap();
+    let fca_id = fca(&pool).await;
+    seed_owned_release(&pool, &fca_id, "AAL9", 1_000, &sa).await;
+    sqlx::query("update flow.fca_release set version = 2 where callsign = 'AAL9'")
+        .execute(&pool)
+        .await
+        .unwrap();
+    let uri = format!("/api/v1/flow/fcas/{fca_id}/release/AAL9");
+    let (status, etag, _) = send_full(
+        &state,
+        http::Method::DELETE,
+        &uri,
+        &[&auth, "If-Match: \"1\""],
+        None,
+    )
+    .await;
+    assert_eq!(status, http::StatusCode::PRECONDITION_FAILED);
+    assert_eq!(etag.as_deref(), Some("\"2\""));
+    assert!(
+        release_attribution(&pool, &fca_id, "AAL9").await.is_some(),
+        "the release still stands"
+    );
+}
+
+// ---- #585 review: the holder is part of every machine write, not a read before it --------------
+//
+// The handlers read the holder and refuse with 409 before writing, which gives the caller a precise
+// answer. But between that read and the write a person can take the row over, and versions restart
+// at 1 after a clear and re-mark, so a machine's `If-Match` can match a row it does not hold. These
+// drive the repo writes with exactly that stale state — a version that matches, on a row someone else
+// holds — and require the write itself to refuse.
+
+/// The attribution a service account writes with, and a person's for the same database.
+async fn machine_and_person(
+    pool: &PgPool,
+) -> (
+    crate::auth::principal::Attribution,
+    crate::auth::principal::Attribution,
+) {
+    let (sa, _) = service_account(pool, "flow.fca.update", None).await;
+    let machine = crate::auth::principal::Attribution {
+        user_id: None,
+        actor_id: crate::repos::audit::resolve_service_account_actor_id(pool, &sa, "vTBFM")
+            .await
+            .unwrap(),
+    };
+    let user = seed_user(pool).await;
+    let person = crate::auth::principal::Attribution {
+        actor_id: crate::repos::audit::resolve_user_actor_id(pool, &user, "Controller")
+            .await
+            .unwrap(),
+        user_id: Some(user),
+    };
+    (machine, person)
+}
+
+#[sqlx::test]
+async fn a_machine_conditional_write_never_lands_on_a_persons_release(pool: PgPool) {
+    use crate::repos::flow::{self as flow_repo, Expect};
+    let id = fca(&pool).await;
+    let (machine, person) = machine_and_person(&pool).await;
+    let v = flow_repo::upsert_release(&pool, &id, "AAL1", 1_000, 1_000, &person, None)
+        .await
+        .unwrap()
+        .expect("a person's write is unconditional");
+
+    // The version matches; the holder does not.
+    let written = flow_repo::upsert_release(
+        &pool,
+        &id,
+        "AAL1",
+        9_000,
+        9_000,
+        &machine,
+        Some(Expect::Version(v)),
+    )
+    .await
+    .unwrap();
+    assert_eq!(written, None, "refused in the write");
+    assert!(
+        !flow_repo::delete_release(&pool, &id, "AAL1", Some(v), &machine)
+            .await
+            .unwrap(),
+        "a machine's clear at the matching version does not remove a person's release"
+    );
+    assert_eq!(
+        release_attribution(&pool, &id, "AAL1").await,
+        Some((person.user_id.clone(), person.actor_id.clone())),
+        "still the person's, untouched"
+    );
+}
+
+#[sqlx::test]
+async fn a_machine_swap_never_takes_a_persons_release(pool: PgPool) {
+    use crate::repos::flow as flow_repo;
+    let id = fca(&pool).await;
+    let (machine, person) = machine_and_person(&pool).await;
+    flow_repo::upsert_release(
+        &pool,
+        &id,
+        "OWN1",
+        1_000,
+        1_000,
+        &machine,
+        Some(flow_repo::Expect::Absent),
+    )
+    .await
+    .unwrap()
+    .unwrap();
+    flow_repo::upsert_release(&pool, &id, "PER2", 2_000, 2_000, &person, None)
+        .await
+        .unwrap()
+        .unwrap();
+
+    assert!(
+        !flow_repo::swap_releases(&pool, &id, "OWN1", "PER2", &machine)
+            .await
+            .unwrap()
+    );
+    let cta: i64 = sqlx::query_scalar(
+        "select cta_ms from flow.fca_release where fca_id = $1 and callsign = 'PER2'",
+    )
+    .bind(&id)
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    assert_eq!(cta, 2_000, "the person's time is not traded away");
+    assert_eq!(
+        release_attribution(&pool, &id, "PER2").await,
+        Some((person.user_id.clone(), person.actor_id.clone()))
+    );
+
+    // The control: a person may swap them, and a machine may swap two it holds.
+    flow_repo::upsert_release(
+        &pool,
+        &id,
+        "OWN3",
+        3_000,
+        3_000,
+        &machine,
+        Some(flow_repo::Expect::Absent),
+    )
+    .await
+    .unwrap()
+    .unwrap();
+    assert!(
+        flow_repo::swap_releases(&pool, &id, "OWN1", "OWN3", &machine)
+            .await
+            .unwrap()
+    );
+    assert!(
+        flow_repo::swap_releases(&pool, &id, "OWN1", "PER2", &person)
+            .await
+            .unwrap()
+    );
+}
+
+#[sqlx::test]
+async fn a_machine_conditional_write_still_reaches_its_own_release(pool: PgPool) {
+    use crate::repos::flow::{self as flow_repo, Expect};
+    let id = fca(&pool).await;
+    let (machine, _) = machine_and_person(&pool).await;
+    let v = flow_repo::upsert_release(
+        &pool,
+        &id,
+        "OWN1",
+        1_000,
+        1_000,
+        &machine,
+        Some(Expect::Absent),
+    )
+    .await
+    .unwrap()
+    .unwrap();
+    let v2 = flow_repo::upsert_release(
+        &pool,
+        &id,
+        "OWN1",
+        2_000,
+        2_000,
+        &machine,
+        Some(Expect::Version(v)),
+    )
+    .await
+    .unwrap();
+    assert_eq!(v2, Some(v + 1));
+    assert!(
+        flow_repo::delete_release(&pool, &id, "OWN1", Some(v + 1), &machine)
+            .await
+            .unwrap()
+    );
+}
+
+#[sqlx::test]
+async fn a_machine_conditional_cfr_write_never_lands_on_a_persons_cfr(pool: PgPool) {
+    use crate::repos::flow::Expect;
+    use crate::repos::tmu as tmu_repo;
+    let (machine, person) = machine_and_person(&pool).await;
+    let at = Utc::now() + Duration::hours(1);
+    let v = tmu_repo::upsert_issued_cfr(&pool, "AAL1", "KDCA", at, &person, None)
+        .await
+        .unwrap()
+        .unwrap();
+
+    assert_eq!(
+        tmu_repo::upsert_issued_cfr(
+            &pool,
+            "AAL1",
+            "KDCA",
+            at + Duration::minutes(5),
+            &machine,
+            Some(Expect::Version(v))
+        )
+        .await
+        .unwrap(),
+        None
+    );
+    assert!(
+        !tmu_repo::delete_issued_cfr(&pool, "AAL1", Some(v), &machine)
+            .await
+            .unwrap()
+    );
+    assert_eq!(
+        cfr_attribution(&pool, "AAL1").await,
+        (person.user_id.clone(), person.actor_id.clone())
+    );
+
+    // Its own CFR it can replace and release.
+    let own =
+        tmu_repo::upsert_issued_cfr(&pool, "UAL2", "KDCA", at, &machine, Some(Expect::Absent))
+            .await
+            .unwrap()
+            .unwrap();
+    assert!(
+        tmu_repo::delete_issued_cfr(&pool, "UAL2", Some(own), &machine)
+            .await
+            .unwrap()
+    );
+}
+
+#[test]
+fn only_a_machine_attribution_names_an_owner_and_a_missing_actor_fails_closed() {
+    use crate::auth::principal::Attribution;
+    let person = Attribution {
+        user_id: Some("u".into()),
+        actor_id: Some("a".into()),
+    };
+    assert_eq!(person.machine_actor(), None);
+    let machine = Attribution {
+        user_id: None,
+        actor_id: Some("m".into()),
+    };
+    assert_eq!(machine.machine_actor(), Some("m"));
+    let unresolved = Attribution {
+        user_id: None,
+        actor_id: None,
+    };
+    assert_eq!(
+        unresolved.machine_actor(),
+        Some(""),
+        "matches no row rather than every row"
+    );
+}
+
+// ---- #585 QA: every read a writer takes a version from carries it -------------------------------
+
+/// A writer takes versions from whichever flight list it is handed, the clear response included: a
+/// released flight there carries its version, not null.
+#[sqlx::test]
+async fn the_clear_response_carries_the_remaining_releases_versions(pool: PgPool) {
+    let state = crossing_state_of(pool.clone(), &["TEST1", "TEST2"]).await;
+    let fca_id = fca(&pool).await;
+    let (_, auth) = service_account(&pool, "flow.fca.update", None).await;
+    let release = |callsign: &'static str, precondition: &'static str| {
+        let (state, auth, uri) = (
+            state.clone(),
+            auth.clone(),
+            format!("/api/v1/flow/fcas/{fca_id}/release/{callsign}"),
+        );
+        async move {
+            send_full(
+                &state,
+                http::Method::POST,
+                &uri,
+                &[&auth, precondition],
+                Some(json!({})),
+            )
+            .await
+            .0
+        }
+    };
+    assert_eq!(
+        release("TEST1", "If-None-Match: *").await,
+        http::StatusCode::OK
+    );
+    assert_eq!(
+        release("TEST1", "If-Match: \"1\"").await,
+        http::StatusCode::OK
+    );
+    assert_eq!(
+        release("TEST2", "If-None-Match: *").await,
+        http::StatusCode::OK
+    );
+
+    let (status, _, flights) = send_full(
+        &state,
+        http::Method::DELETE,
+        &format!("/api/v1/flow/fcas/{fca_id}/release/TEST2"),
+        &[&auth, "If-Match: \"1\""],
+        None,
+    )
+    .await;
+    assert_eq!(status, http::StatusCode::OK, "{flights}");
+    let test1 = flights
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|f| f["callsign"] == "TEST1")
+        .expect("TEST1 is still in the list");
+    assert_eq!(test1["released"], true);
+    assert_eq!(test1["release_version"], 2);
+}
+
+/// CFR writes need `If-Match`, so the departures list carries each issued CFR's version, rather than
+/// leaving a writer to provoke a 412 to learn it.
+#[sqlx::test]
+async fn the_departures_list_carries_an_issued_cfrs_version(pool: PgPool) {
+    let state = crossing_state(pool.clone()).await;
+    let (_, auth) = service_account(&pool, "tmu.cfr.assign", None).await;
+    sqlx::query("insert into access.role_permissions (role_name, permission_name) values ($1, 'tmu.program.read')")
+        .bind(ROLE)
+        .execute(&pool)
+        .await
+        .unwrap();
+    let mut body = issue_body();
+    body["callsign"] = json!("TEST1");
+    for precondition in ["If-None-Match: *", "If-Match: \"1\""] {
+        let (status, _, reply) = send_full(
+            &state,
+            http::Method::POST,
+            CFR,
+            &[&auth, precondition],
+            Some(body.clone()),
+        )
+        .await;
+        assert_eq!(status, http::StatusCode::OK, "{reply}");
+    }
+
+    let (status, _, list) = send_full(
+        &state,
+        http::Method::GET,
+        "/api/v1/tmu/departures/KJFK",
+        &[&auth],
+        None,
+    )
+    .await;
+    assert_eq!(status, http::StatusCode::OK, "{list}");
+    let test1 = list["departures"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|d| d["callsign"] == "TEST1")
+        .expect("TEST1 departs KJFK");
+    assert_eq!(test1["cfr_version"], 2);
 }

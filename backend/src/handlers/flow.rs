@@ -7,7 +7,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use axum::{
     Json,
     extract::{Extension, Path, Query, State},
-    http::StatusCode,
+    http::{HeaderMap, StatusCode},
 };
 use chrono::{DateTime, Duration, Utc};
 use serde::Deserialize;
@@ -34,6 +34,7 @@ use crate::{
         vatsim::VatsimData,
         winds::Winds,
     },
+    handlers::release_authority,
     jobs,
     models::{
         AircraftRoute, AirportGateBody, DataStatus, FcaBody, FcaFlight, FixPrediction,
@@ -1610,6 +1611,7 @@ fn fca_flight(
         seq: 0,
         edct: rel.and_then(|(_, e)| DateTime::from_timestamp_millis(*e)),
         released: rel.is_some(),
+        release_version: None,
         groundspeed: gs,
         altitude: alt,
         heading: hdg,
@@ -2027,6 +2029,17 @@ fn finalize(
     flights
 }
 
+/// Stamp each released flight with its release's version, so a tool can `If-Match` it (#585). Read
+/// beside the metering input, never from it: provenance cannot move a time.
+fn annotate_releases(
+    flights: &mut [FcaFlight],
+    holders: &HashMap<String, flow_repo::ReleaseHolder>,
+) {
+    for f in flights {
+        f.release_version = holders.get(&f.callsign).map(|h| h.version);
+    }
+}
+
 async fn load_releases(pool: &sqlx::PgPool, id: &str) -> Result<ReleaseMap, ApiError> {
     Ok(flow_repo::list_releases(pool, id)
         .await?
@@ -2116,10 +2129,11 @@ pub async fn fca_traffic(
         .await?
         .ok_or(ApiError::NotFound)?;
     let releases = load_releases(pool, &id).await?;
+    let holders = flow_repo::release_holders(pool, &id).await?;
     let now = Utc::now();
-    Ok(Json(
-        metered_flights(&state, fca, releases, now, q.debug).await?,
-    ))
+    let mut flights = metered_flights(&state, fca, releases, now, q.debug).await?;
+    annotate_releases(&mut flights, &holders);
+    Ok(Json(flights))
 }
 
 /// Scope for the IDST board — comma-separated airport, TRACON, and ARTCC codes.
@@ -2187,14 +2201,19 @@ pub async fn list_idst(
     // Gather each enabled FCA with its releases (async DB) first, then hand the whole per-FCA metering
     // loop to a blocking thread — it resolves every ground departure's route for every FCA, which is
     // heavy CPU that must stay off the async workers (see `metered_flights`).
-    let mut fca_releases: Vec<(FcaBody, ReleaseMap)> = Vec::new();
+    let mut fca_releases: Vec<(
+        FcaBody,
+        ReleaseMap,
+        HashMap<String, flow_repo::ReleaseHolder>,
+    )> = Vec::new();
     for fca in flow_repo::list_fcas(pool)
         .await?
         .into_iter()
         .filter(|f| f.enabled && f.points.0.len() >= 2)
     {
         let releases = load_releases(pool, &fca.id).await?;
-        fca_releases.push((fca, releases));
+        let holders = flow_repo::release_holders(pool, &fca.id).await?;
+        fca_releases.push((fca, releases, holders));
     }
     // Predicted runways, read with the rest of the DB work up front (#511). Derived by
     // `jobs::departure_runway_derive_once`, not here: the ladder's config rung needs a per-airport wind
@@ -2223,7 +2242,7 @@ pub async fn list_idst(
         let mut unscheduled: Vec<IdstFlight> = Vec::new();
         let mut released: Vec<IdstFlight> = Vec::new();
         // One row per (metering FCA, ground departure in scope).
-        for (fca, releases) in &fca_releases {
+        for (fca, releases, holders) in &fca_releases {
             let (flights, metas) = build_candidates(
                 fca,
                 &snap.data,
@@ -2264,6 +2283,11 @@ pub async fn list_idst(
                 let pick = predicted
                     .get(&(f.dep.to_ascii_uppercase(), f.callsign.clone()))
                     .cloned();
+                // Provenance for the controller (#585 AC4): a machine-issued release names it.
+                let released_by_machine = holders
+                    .get(&f.callsign)
+                    .and_then(|h| h.machine.as_ref())
+                    .map(|(_, name)| name.clone());
                 let item = IdstFlight {
                     callsign: f.callsign,
                     dep: f.dep,
@@ -2277,6 +2301,7 @@ pub async fn list_idst(
                     cross_time: f.cross_time,
                     edct,
                     released: f.released,
+                    released_by_machine,
                     runway: pick.as_ref().map(|(r, _)| r.clone()),
                     runway_source: pick.as_ref().map(|(_, s)| s.clone()),
                 };
@@ -2314,23 +2339,37 @@ pub async fn list_idst(
     tag = "flow",
     params(
         ("id" = String, Path, description = "FCA id"),
-        ("callsign" = String, Path, description = "Aircraft callsign")
+        ("callsign" = String, Path, description = "Aircraft callsign"),
+        ("If-Match" = Option<String>, Header, description = "Replace only this release version (#585)"),
+        ("If-None-Match" = Option<String>, Header, description = "`*`: create only if the flight holds no release (#585)")
     ),
     request_body = ReleaseRequest,
-    responses((status = 200, body = Vec<FcaFlight>), (status = 400), (status = 401), (status = 404))
+    responses(
+        (status = 200, body = Vec<FcaFlight>, description = "Released; `ETag` is the new version"),
+        (status = 400), (status = 401), (status = 404),
+        (status = 409, description = "`held_by_person` / `held_by_other_machine`: a machine may not replace it"),
+        (status = 412, description = "The precondition failed; `ETag` is the current version"),
+        (status = 428, description = "A machine sent neither `If-Match` nor `If-None-Match`")
+    )
 )]
 pub async fn mark_release(
     State(state): State<AppState>,
     _permission: RequirePermission<FlowFcaUpdate>,
     Actor(principal): Actor,
     Path((id, callsign)): Path<(String, String)>,
+    headers: HeaderMap,
     Json(payload): Json<ReleaseRequest>,
-) -> Result<Json<Vec<FcaFlight>>, ApiError> {
+) -> Result<impl axum::response::IntoResponse, ApiError> {
     let pool = state.db.as_ref().ok_or(ApiError::ServiceUnavailable)?;
     let fca = flow_repo::get_fca(pool, &id)
         .await?
         .ok_or(ApiError::NotFound)?;
     let callsign = callsign.to_ascii_uppercase();
+    // Who may write it, and on what condition, before any metering work (#585).
+    let expect = release_authority::precondition(&headers, &principal)?;
+    let by = principal.attribution(&state).await?;
+    let holder = flow_repo::release_holder(pool, &id, &callsign).await?;
+    release_authority::authorize(&principal, by.actor_id.as_deref(), holder.as_ref())?;
     let now = Utc::now();
     let now_ms = now.timestamp_millis();
     let releases = load_releases(pool, &id).await?;
@@ -2376,15 +2415,23 @@ pub async fn mark_release(
         None => rdy_slot(&fca, &metas, &metered, ti, order.is_some()),
     };
     let edct = cta - (eta_ms - now_ms);
-    let by = principal.attribution(&state).await?;
-    flow_repo::upsert_release(pool, &id, &callsign, cta, edct, &by).await?;
+    let Some(version) =
+        flow_repo::upsert_release(pool, &id, &callsign, cta, edct, &by, expect).await?
+    else {
+        let now = flow_repo::release_holder(pool, &id, &callsign).await?;
+        return Err(ApiError::PreconditionFailed {
+            etag: now.map(|h| h.version),
+        });
+    };
     state.publish(crate::realtime::topic::RELEASE);
 
     // Reflect the new release and re-meter without another snapshot read.
     metas[ti].frozen_ms = Some(cta);
     flights[ti].released = true;
     flights[ti].edct = DateTime::from_timestamp_millis(edct);
-    Ok(Json(finalize(&fca, flights, &metas)))
+    let mut flights = finalize(&fca, flights, &metas);
+    annotate_releases(&mut flights, &flow_repo::release_holders(pool, &id).await?);
+    Ok((release_authority::etag(version), Json(flights)))
 }
 
 #[utoipa::path(
@@ -2393,20 +2440,47 @@ pub async fn mark_release(
     tag = "flow",
     params(
         ("id" = String, Path, description = "FCA id"),
-        ("callsign" = String, Path, description = "Aircraft callsign")
+        ("callsign" = String, Path, description = "Aircraft callsign"),
+        ("If-Match" = Option<String>, Header, description = "Clear only this release version (#585)")
     ),
-    responses((status = 200, body = Vec<FcaFlight>), (status = 401), (status = 404))
+    responses(
+        (status = 200, body = Vec<FcaFlight>), (status = 400), (status = 401), (status = 404),
+        (status = 409, description = "`held_by_person` / `held_by_other_machine`: a machine may not clear it"),
+        (status = 412, description = "The precondition failed; `ETag` is the current version"),
+        (status = 428, description = "A machine sent no `If-Match`")
+    )
 )]
 pub async fn clear_release(
     State(state): State<AppState>,
     _permission: RequirePermission<FlowFcaUpdate>,
+    Actor(principal): Actor,
     Path((id, callsign)): Path<(String, String)>,
+    headers: HeaderMap,
 ) -> Result<Json<Vec<FcaFlight>>, ApiError> {
     let pool = state.db.as_ref().ok_or(ApiError::ServiceUnavailable)?;
     let fca = flow_repo::get_fca(pool, &id)
         .await?
         .ok_or(ApiError::NotFound)?;
-    flow_repo::delete_release(pool, &id, &callsign.to_ascii_uppercase()).await?;
+    let callsign = callsign.to_ascii_uppercase();
+    // A machine may clear only its own release, and only the version it last saw (#585). "Clear if
+    // absent" means nothing, so `If-None-Match` is refused rather than read as a no-op.
+    let version = match release_authority::precondition(&headers, &principal)? {
+        Some(flow_repo::Expect::Absent) => return Err(ApiError::BadRequest),
+        Some(flow_repo::Expect::Version(v)) => Some(v),
+        None => None,
+    };
+    let holder = flow_repo::release_holder(pool, &id, &callsign).await?;
+    let by = principal.attribution(&state).await?;
+    if holder.is_some() {
+        release_authority::authorize(&principal, by.actor_id.as_deref(), holder.as_ref())?;
+    }
+    // The read above gives the caller a precise refusal; the delete enforces it (#585 review).
+    let deleted = flow_repo::delete_release(pool, &id, &callsign, version, &by).await?;
+    if !deleted && version.is_some() {
+        return Err(ApiError::PreconditionFailed {
+            etag: holder.map(|h| h.version),
+        });
+    }
     state.publish(crate::realtime::topic::RELEASE);
     let releases = load_releases(pool, &id).await?;
     let now = Utc::now();
@@ -2436,7 +2510,11 @@ pub async fn clear_release(
     let Some((flights, metas)) = built else {
         return Ok(Json(Vec::new()));
     };
-    Ok(Json(finalize(&fca, flights, &metas)))
+    // The other flights' versions, as `mark_release` and the traffic list return them: a writer
+    // reading this list must not see a released flight with `release_version: null` (#585 QA).
+    let mut flights = finalize(&fca, flights, &metas);
+    annotate_releases(&mut flights, &flow_repo::release_holders(pool, &id).await?);
+    Ok(Json(flights))
 }
 
 /// Trade two flights' release times.
@@ -2462,7 +2540,10 @@ pub async fn clear_release(
     tag = "flow",
     params(("id" = String, Path, description = "FCA id")),
     request_body = SwapReleaseRequest,
-    responses((status = 200), (status = 400), (status = 401), (status = 404))
+    responses(
+        (status = 200), (status = 400), (status = 401), (status = 404),
+        (status = 409, description = "`held_by_person` / `held_by_other_machine`: a machine may not trade it"),
+    )
 )]
 pub async fn swap_releases(
     State(state): State<AppState>,
@@ -2479,10 +2560,24 @@ pub async fn swap_releases(
     if a.is_empty() || b.is_empty() || a == b {
         return Err(ApiError::BadRequest);
     }
+    // A swap changes both releases, so a machine needs authority over both (#585). It takes no
+    // precondition: it trades two current times rather than writing one the caller computed.
+    let by = principal.attribution(&state).await?;
+    for callsign in [&a, &b] {
+        let holder = flow_repo::release_holder(pool, &id, callsign).await?;
+        release_authority::authorize(&principal, by.actor_id.as_deref(), holder.as_ref())?;
+    }
     // `false` means at least one of them holds no release: there is no time to trade, and inventing
     // one is what this must not do.
-    let by = principal.attribution(&state).await?;
     if !flow_repo::swap_releases(pool, &id, &a, &b, &by).await? {
+        // For a machine the write also required it to hold both. If someone took one over between
+        // the check above and the write, say so rather than claiming there is no release (#585 review).
+        if by.machine_actor().is_some() {
+            for callsign in [&a, &b] {
+                let holder = flow_repo::release_holder(pool, &id, callsign).await?;
+                release_authority::authorize(&principal, by.actor_id.as_deref(), holder.as_ref())?;
+            }
+        }
         return Err(ApiError::NotFound);
     }
     state.publish(crate::realtime::topic::RELEASE);
@@ -4408,6 +4503,7 @@ mod release_swap_tests {
             1_000,
             900,
             &Attribution::user_only(&user),
+            None,
         )
         .await
         .unwrap();
@@ -4418,6 +4514,7 @@ mod release_swap_tests {
             2_000,
             1_900,
             &Attribution::user_only(&user),
+            None,
         )
         .await
         .unwrap();
@@ -4443,9 +4540,17 @@ mod release_swap_tests {
             ("UAL2", 2_000, 1_900),
             ("DAL3", 3_000, 2_900),
         ] {
-            flow_repo::upsert_release(&pool, &id, cs, cta, edct, &Attribution::user_only(&user))
-                .await
-                .unwrap();
+            flow_repo::upsert_release(
+                &pool,
+                &id,
+                cs,
+                cta,
+                edct,
+                &Attribution::user_only(&user),
+                None,
+            )
+            .await
+            .unwrap();
         }
 
         flow_repo::swap_releases(&pool, &id, "AAL1", "UAL2", &Attribution::user_only(&user))
@@ -4472,6 +4577,7 @@ mod release_swap_tests {
             1_000,
             900,
             &Attribution::user_only(&user),
+            None,
         )
         .await
         .unwrap();
@@ -4482,6 +4588,7 @@ mod release_swap_tests {
             2_000,
             1_900,
             &Attribution::user_only(&user),
+            None,
         )
         .await
         .unwrap();
@@ -4514,6 +4621,7 @@ mod release_swap_tests {
             1_000,
             900,
             &Attribution::user_only(&user),
+            None,
         )
         .await
         .unwrap();
@@ -4524,6 +4632,7 @@ mod release_swap_tests {
             2_000,
             1_900,
             &Attribution::user_only(&user),
+            None,
         )
         .await
         .unwrap();
@@ -4560,6 +4669,7 @@ mod release_swap_tests {
             1_000,
             900,
             &Attribution::user_only(&user),
+            None,
         )
         .await
         .unwrap();
@@ -4595,6 +4705,7 @@ mod release_swap_tests {
             1_000,
             900,
             &Attribution::user_only(&user),
+            None,
         )
         .await
         .unwrap();
@@ -4622,6 +4733,7 @@ mod release_swap_tests {
             1_000,
             900,
             &Attribution::user_only(&user),
+            None,
         )
         .await
         .unwrap();
@@ -4632,6 +4744,7 @@ mod release_swap_tests {
             2_000,
             1_900,
             &Attribution::user_only(&user),
+            None,
         )
         .await
         .unwrap();
@@ -4665,6 +4778,7 @@ mod release_swap_tests {
             1_000,
             900,
             &Attribution::user_only(&user),
+            None,
         )
         .await
         .unwrap();
