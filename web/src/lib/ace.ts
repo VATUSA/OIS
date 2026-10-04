@@ -24,7 +24,9 @@ export function useEventAce(eventId: number, status?: string) {
       return data;
     },
     enabled: Number.isFinite(eventId),
-    refetchInterval: 30_000,
+    // The realtime topic is the fast path (#645/#646); this poll is the fallback for a signed-out
+    // viewer, a dropped socket, or a second replica (#649), so it is relaxed from 30s, not removed.
+    refetchInterval: 60_000,
   });
 }
 

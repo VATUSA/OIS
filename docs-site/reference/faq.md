@@ -10,7 +10,7 @@ Yes — the [facility map](/map/facility-map) is public. Open it for any ARTCC t
 
 ## Can I use the OIS API from my own tool?
 
-Yes — mint an [API key](/reference/api-keys) (you'll need the `api_keys.key.create` permission) and send it as a bearer token. The key acts as you and can never exceed your own access. The API is described at `/docs/api/v1/openapi.json`.
+Yes — mint an [API key](/reference/api-keys) (you'll need the `api_keys.key.create` permission) and send it as a bearer token. The key acts as you and can never exceed your own access. See [Using the API](/reference/api) for the spec (`/docs/api/v1/openapi.json`), the interactive [Swagger UI](/reference/api#swagger-ui) (`/docs/swagger`), and which [permissions](/reference/api-permissions) each endpoint needs.
 
 ## Do I need to refresh to see the latest?
 
@@ -28,5 +28,13 @@ An **issued** release doesn't change on its own — see [Release times](/tmu/rel
 
 Yes — see [Custom boards](/dashboard/boards). You can pin the specific stats, tables, and charts you
 check every session, arrange them yourself, and optionally share the board as a read-only link.
+
+## The desktop app isn't working right. How do I report it?
+
+Open **Settings** and use **Send diagnostics…** in the Diagnostics card (it's also on the "Something
+went wrong" and "Can't reach OIS" screens). Add a note about what you were doing and send it: OIS
+staff get the app's recent logs, its version, your operating system and the page you were on. Sign-in
+tokens are removed before anything is sent, nothing is sent unless you choose to, and reports are
+deleted after 30 days.
 
 > More questions will be added here as they come up.

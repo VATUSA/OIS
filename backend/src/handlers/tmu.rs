@@ -2,7 +2,7 @@
 
 use axum::{
     Json,
-    extract::{Extension, Path, Query, State},
+    extract::{Path, Query, State},
     http::StatusCode,
 };
 use chrono::{DateTime, Utc};
@@ -10,14 +10,13 @@ use serde::Deserialize;
 
 use crate::{
     auth::{
-        context::{CurrentApiKey, CurrentUser},
         permissions::{
             TmuAdvCreate, TmuAdvPublish, TmuAdvRead, TmuAdvUpdate, TmuGroundStopCreate,
             TmuGroundStopDelete, TmuGroundStopPublish, TmuGroundStopRead, TmuProgramDelete,
             TmuProgramRead, TmuProgramUpdate, TmuTmiCreate, TmuTmiDelete, TmuTmiPublish,
             TmuTmiRead, TmuTmiUpdate,
         },
-        principal::Principal,
+        principal::{Actor, Principal},
         require_permission::RequirePermission,
     },
     errors::ApiError,
@@ -183,10 +182,10 @@ pub async fn list_tmis(
 pub async fn create_tmi(
     State(state): State<AppState>,
     _permission: RequirePermission<TmuTmiCreate>,
-    Extension(current_user): Extension<Option<CurrentUser>>,
+    Actor(principal): Actor,
     Json(mut payload): Json<CreateTmiRequest>,
 ) -> Result<Json<TmiBody>, ApiError> {
-    let user = current_user.as_ref().ok_or(ApiError::Unauthorized)?;
+    let by = principal.attribution(&state).await?;
     let pool = state.db.as_ref().ok_or(ApiError::ServiceUnavailable)?;
 
     payload.requesting = payload.requesting.trim().to_ascii_uppercase();
@@ -206,7 +205,7 @@ pub async fn create_tmi(
         return Err(ApiError::BadRequest);
     }
 
-    let id = tmu_repo::create_tmi(pool, &payload, &user.id).await?;
+    let id = tmu_repo::create_tmi(pool, &payload, &by).await?;
     let mut tmi = tmu_repo::get_tmi(pool, &id)
         .await?
         .ok_or(ApiError::Internal)?;
@@ -292,10 +291,10 @@ pub async fn update_tmi(
 pub async fn publish_tmi(
     State(state): State<AppState>,
     _permission: RequirePermission<TmuTmiPublish>,
-    Extension(current_user): Extension<Option<CurrentUser>>,
+    Actor(principal): Actor,
     Path(id): Path<String>,
 ) -> Result<Json<TmiBody>, ApiError> {
-    let user = current_user.as_ref().ok_or(ApiError::Unauthorized)?;
+    let by = principal.attribution(&state).await?;
     let pool = state.db.as_ref().ok_or(ApiError::ServiceUnavailable)?;
 
     // Resolve the target channel before the tx; no config just means "don't post" (skip enqueue).
@@ -303,7 +302,7 @@ pub async fn publish_tmi(
     // channel may be network-wide rather than per-facility (#194).
     let channel = integration_repo::channel_id(pool, NTML_CHANNEL, None).await?;
     let mut tx = pool.begin().await.map_err(|_| ApiError::Internal)?;
-    let mut tmi = tmu_repo::publish_tmi(&mut tx, &id, &user.id)
+    let mut tmi = tmu_repo::publish_tmi(&mut tx, &id, &by)
         .await?
         .ok_or(ApiError::Conflict)?; // not a draft (or absent)
     if let Some(channel_id) = channel {
@@ -478,17 +477,17 @@ pub async fn list_programs(
 pub async fn upsert_program(
     State(state): State<AppState>,
     _permission: RequirePermission<TmuProgramUpdate>,
-    Extension(current_user): Extension<Option<CurrentUser>>,
+    Actor(principal): Actor,
     Path(icao): Path<String>,
     Json(mut payload): Json<UpsertProgramRequest>,
 ) -> Result<Json<ProgramBody>, ApiError> {
-    let user = current_user.as_ref().ok_or(ApiError::Unauthorized)?;
+    let by = principal.attribution(&state).await?;
     let pool = state.db.as_ref().ok_or(ApiError::ServiceUnavailable)?;
 
     let icao = normalize_icao(&icao).ok_or(ApiError::BadRequest)?;
     let gates = normalize_program(&mut payload)?;
 
-    tmu_repo::upsert_program(pool, &icao, &payload, &gates, &user.id).await?;
+    tmu_repo::upsert_program(pool, &icao, &payload, &gates, &by).await?;
     let mut program = tmu_repo::get_program(pool, &icao)
         .await?
         .ok_or(ApiError::Internal)?;
@@ -580,10 +579,10 @@ pub async fn list_ground_stops(
 pub async fn create_ground_stop(
     State(state): State<AppState>,
     _permission: RequirePermission<TmuGroundStopCreate>,
-    Extension(current_user): Extension<Option<CurrentUser>>,
+    Actor(principal): Actor,
     Json(mut payload): Json<CreateGroundStopRequest>,
 ) -> Result<Json<GroundStopBody>, ApiError> {
-    let user = current_user.as_ref().ok_or(ApiError::Unauthorized)?;
+    let by = principal.attribution(&state).await?;
     let pool = state.db.as_ref().ok_or(ApiError::ServiceUnavailable)?;
 
     payload.airport = payload
@@ -598,8 +597,7 @@ pub async fn create_ground_stop(
     let scope = normalize_scope(payload.scope.as_deref());
     let until = normalize_until(payload.until.as_deref())?;
 
-    let id =
-        tmu_repo::create_ground_stop(pool, &payload, &scope, until.as_deref(), &user.id).await?;
+    let id = tmu_repo::create_ground_stop(pool, &payload, &scope, until.as_deref(), &by).await?;
     let mut gs = tmu_repo::get_ground_stop(pool, &id)
         .await?
         .ok_or(ApiError::Internal)?;
@@ -622,11 +620,11 @@ pub async fn create_ground_stop(
 pub async fn publish_ground_stop(
     State(state): State<AppState>,
     _permission: RequirePermission<TmuGroundStopPublish>,
-    Extension(current_user): Extension<Option<CurrentUser>>,
+    Actor(principal): Actor,
     Path(id): Path<String>,
     editorial: Option<Json<PublishGroundStopRequest>>,
 ) -> Result<Json<GroundStopBody>, ApiError> {
-    let user = current_user.as_ref().ok_or(ApiError::Unauthorized)?;
+    let by = principal.attribution(&state).await?;
     let pool = state.db.as_ref().ok_or(ApiError::ServiceUnavailable)?;
     let editorial = editorial.map(|Json(e)| e).unwrap_or_default();
     let now = Utc::now();
@@ -639,7 +637,7 @@ pub async fn publish_ground_stop(
     // a stop that did not publish, or the reverse. Simpler than the GDP path -- a ground stop has no
     // slot table, so there is no feed work to keep outside the transaction.
     let mut tx = pool.begin().await.map_err(|_| ApiError::Internal)?;
-    if !tmu_repo::publish_ground_stop(&mut *tx, &id, &user.id).await? {
+    if !tmu_repo::publish_ground_stop(&mut *tx, &id, &by).await? {
         return Err(ApiError::Conflict); // not a draft (or absent)
     }
     let mut gs = tmu_repo::get_ground_stop(&mut *tx, &id)
@@ -666,7 +664,7 @@ pub async fn publish_ground_stop(
     tmu_repo::create_advisory_tx(
         &mut tx,
         &req,
-        &user.id,
+        &by,
         Some(tmu_repo::AdvisoryProgram::GroundStop(&id)),
     )
     .await?;
@@ -1047,7 +1045,7 @@ mod tests {
                 valid_from: None,
                 valid_to: None,
             },
-            &author,
+            &crate::auth::principal::Attribution::user_only(&author),
         )
         .await
         .unwrap()
@@ -1424,7 +1422,7 @@ mod tests {
             },
             "ZHU ZME",
             until,
-            author,
+            &crate::auth::principal::Attribution::user_only(author),
         )
         .await
         .unwrap()
@@ -1465,7 +1463,7 @@ mod tests {
             },
             "ZAK",
             Some("2315"),
-            &user,
+            &crate::auth::principal::Attribution::user_only(&user),
         )
         .await
         .unwrap();
@@ -1873,7 +1871,7 @@ mod tests {
                 start_time: None,
                 stop_time: None,
             },
-            &author,
+            &crate::auth::principal::Attribution::user_only(&author),
         )
         .await
         .unwrap();
@@ -1927,7 +1925,7 @@ mod tests {
                 start_time: None,
                 stop_time: None,
             },
-            &author,
+            &crate::auth::principal::Attribution::user_only(&author),
         )
         .await
         .unwrap();
@@ -2097,12 +2095,10 @@ async fn advisory_facility(pool: &sqlx::PgPool, id: &str) -> Result<String, ApiE
 pub async fn create_advisory(
     State(state): State<AppState>,
     _permission: RequirePermission<TmuAdvCreate>,
-    Extension(current_user): Extension<Option<CurrentUser>>,
-    Extension(current_api_key): Extension<Option<CurrentApiKey>>,
+    Actor(principal): Actor,
     Json(payload): Json<CreateAdvisoryRequest>,
 ) -> Result<Json<AdvisoryBody>, ApiError> {
-    let user = current_user.as_ref().ok_or(ApiError::Unauthorized)?;
-    let principal = Principal::require(current_user.as_ref(), current_api_key.as_ref())?;
+    let by = principal.attribution(&state).await?;
     let pool = state.db.as_ref().ok_or(ApiError::ServiceUnavailable)?;
     // `body` is only the source of truth when nothing will derive it: for a structured reroute the
     // document is rendered in `repos::tmu::create_advisory`, so demanding one here forced the caller to
@@ -2127,7 +2123,7 @@ pub async fn create_advisory(
         &payload.facility.trim().to_ascii_uppercase(),
     )
     .await?;
-    let id = tmu_repo::create_advisory(pool, &payload, &user.id).await?;
+    let id = tmu_repo::create_advisory(pool, &payload, &by).await?;
     tmu_repo::get_advisory(pool, &id)
         .await?
         .map(Json)
@@ -2142,12 +2138,10 @@ pub async fn create_advisory(
 pub async fn update_advisory(
     State(state): State<AppState>,
     _permission: RequirePermission<TmuAdvUpdate>,
-    Extension(current_user): Extension<Option<CurrentUser>>,
-    Extension(current_api_key): Extension<Option<CurrentApiKey>>,
+    Actor(principal): Actor,
     Path(id): Path<String>,
     Json(payload): Json<UpdateAdvisoryRequest>,
 ) -> Result<Json<AdvisoryBody>, ApiError> {
-    let principal = Principal::require(current_user.as_ref(), current_api_key.as_ref())?;
     let pool = state.db.as_ref().ok_or(ApiError::ServiceUnavailable)?;
     let facility = advisory_facility(pool, &id).await?;
     require_advisory_scope(&state, &principal, "tmu.adv.update", &facility).await?;
@@ -2168,12 +2162,10 @@ pub async fn update_advisory(
 pub async fn publish_advisory(
     State(state): State<AppState>,
     _permission: RequirePermission<TmuAdvPublish>,
-    Extension(current_user): Extension<Option<CurrentUser>>,
-    Extension(current_api_key): Extension<Option<CurrentApiKey>>,
+    Actor(principal): Actor,
     Path(id): Path<String>,
 ) -> Result<Json<AdvisoryBody>, ApiError> {
-    let user = current_user.as_ref().ok_or(ApiError::Unauthorized)?;
-    let principal = Principal::require(current_user.as_ref(), current_api_key.as_ref())?;
+    let by = principal.attribution(&state).await?;
     let pool = state.db.as_ref().ok_or(ApiError::ServiceUnavailable)?;
     let facility = advisory_facility(pool, &id).await?;
     require_advisory_scope(&state, &principal, "tmu.adv.publish", &facility).await?;
@@ -2182,7 +2174,7 @@ pub async fn publish_advisory(
     // requesting and a providing ARTCC and so no single owner. An advisory has exactly one.
     let channel = integration_repo::channel_id(pool, ADV_CHANNEL, Some(&facility)).await?;
     let mut tx = pool.begin().await.map_err(|_| ApiError::Internal)?;
-    if !tmu_repo::publish_advisory(&mut tx, &id, &user.id).await? {
+    if !tmu_repo::publish_advisory(&mut tx, &id, &by).await? {
         return Err(ApiError::Conflict); // not a draft (or absent)
     }
     let adv = tmu_repo::get_advisory_tx(&mut tx, &id)
@@ -2215,11 +2207,9 @@ pub async fn publish_advisory(
 pub async fn cancel_advisory(
     State(state): State<AppState>,
     _permission: RequirePermission<TmuAdvPublish>,
-    Extension(current_user): Extension<Option<CurrentUser>>,
-    Extension(current_api_key): Extension<Option<CurrentApiKey>>,
+    Actor(principal): Actor,
     Path(id): Path<String>,
 ) -> Result<Json<AdvisoryBody>, ApiError> {
-    let principal = Principal::require(current_user.as_ref(), current_api_key.as_ref())?;
     let pool = state.db.as_ref().ok_or(ApiError::ServiceUnavailable)?;
     let facility = advisory_facility(pool, &id).await?;
     require_advisory_scope(&state, &principal, "tmu.adv.publish", &facility).await?;
@@ -2261,11 +2251,9 @@ pub async fn cancel_advisory(
 pub async fn delete_advisory(
     State(state): State<AppState>,
     _permission: RequirePermission<TmuAdvUpdate>,
-    Extension(current_user): Extension<Option<CurrentUser>>,
-    Extension(current_api_key): Extension<Option<CurrentApiKey>>,
+    Actor(principal): Actor,
     Path(id): Path<String>,
 ) -> Result<StatusCode, ApiError> {
-    let principal = Principal::require(current_user.as_ref(), current_api_key.as_ref())?;
     let pool = state.db.as_ref().ok_or(ApiError::ServiceUnavailable)?;
     let facility = advisory_facility(pool, &id).await?;
     require_advisory_scope(&state, &principal, "tmu.adv.update", &facility).await?;
