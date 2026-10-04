@@ -567,7 +567,7 @@ async fn a_service_account_scope_honours_its_roles_artcc(pool: PgPool) {
         .await
         .unwrap();
     assert!(
-        !matches!(scope, PermissionScope::National),
+        !matches!(scope, PermissionScope::National { .. }),
         "a ZDC role is not national"
     );
     assert!(scope.allows(Some("ZDC")));
@@ -594,7 +594,7 @@ async fn a_service_account_scope_honours_its_roles_artcc(pool: PgPool) {
         .permission_scope(&state, "flow.fca.update")
         .await
         .unwrap();
-    assert!(matches!(national, PermissionScope::National));
+    assert!(matches!(national, PermissionScope::National { .. }));
 }
 
 // ==== VATUSA/OIS#585: authority, idempotency and conflict for external release writers =============

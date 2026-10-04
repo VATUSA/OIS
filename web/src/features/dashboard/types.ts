@@ -11,6 +11,7 @@ export type ViewId =
   | "airport-summary"
   | "airport-aircraft"
   | "airport-ladder"
+  | "airport-tgui"
   | "airport-demand";
 
 export type StatMetricId =
@@ -40,7 +41,7 @@ export interface ViewWidget {
   view: ViewId;
   /** The airport this view is bound to (all Phase-1 views are per-airport). */
   icao: string;
-  /** Arrival-ladder filters (only meaningful when `view` is "airport-ladder"). */
+  /** Arrival-ladder filters (only meaningful when `view` is "airport-ladder" or "airport-tgui"). */
   filters?: LadderFilters;
 }
 
@@ -263,7 +264,10 @@ export function defaultCell(w: Widget): { w: number; h: number; minW: number; mi
       // The arrival ladder is a narrow strip of text — let it shrink far tighter than a table view.
       return w.view === "airport-ladder"
         ? { w: 4, h: 5, minW: 2, minH: 3 }
-        : { w: 6, h: 5, minW: 3, minH: 3 };
+        : w.view === "airport-tgui"
+          ? // Two rails per arrival gate — wider than the classic strip.
+            { w: 8, h: 6, minW: 4, minH: 4 }
+          : { w: 6, h: 5, minW: 3, minH: 3 };
     default:
       return { w: 6, h: 5, minW: 3, minH: 3 };
   }

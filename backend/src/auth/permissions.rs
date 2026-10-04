@@ -13,6 +13,8 @@ permission!(AccessSelfRead, ["access", "self"], Read);
 permission!(AccessCatalogRead, ["access", "catalog"], Read);
 permission!(AccessUsersRead, ["access", "users"], Read);
 permission!(AccessUsersUpdate, ["access", "users"], Update);
+permission!(AccessGroupsRead, ["access", "groups"], Read);
+permission!(AccessGroupsUpdate, ["access", "groups"], Update);
 
 // users directory
 permission!(UsersDirectoryRead, ["users", "directory"], Read);
@@ -112,7 +114,6 @@ permission!(
     Update
 );
 
-// stats — persistent network statistics + saved capture windows
 // tmu advisories (ADVZY documents) — the catalog strings and migration rows have existed since
 // 0008_tmu.sql; these are the markers that finally let a handler gate on them (#457).
 permission!(TmuAdvRead, ["tmu", "adv"], Read);

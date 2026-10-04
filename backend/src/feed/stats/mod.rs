@@ -492,9 +492,26 @@ mod tests {
         assert!(us("ZBW_CTR"));
         assert!(us("BOS_CTR"));
         assert!(us("ZAK_CTR"), "Oakland Oceanic is American with no polygon");
+        for cs in ["SF_CTR", "SFR_CTR", "SFRO_CTR"] {
+            assert!(
+                us(cs),
+                "San Francisco Oceanic is Oakland Oceanic (#580): {cs}"
+            );
+        }
         assert!(us("ZSU_CTR"), "San Juan is American with no polygon");
 
         assert!(!us("BDA_CTR"), "Bermuda is not a US controller");
         assert!(!us("EGLL_CTR"));
+    }
+
+    /// VATUSA/OIS#556: the Honolulu controller online as `HNL_02_CTR` was not counted as a US
+    /// controller at all, because `HNL` resolved to no ARTCC.
+    #[test]
+    fn a_honolulu_controller_counts_as_us() {
+        let iata = IataMap::new();
+        let airports = AirportDb::new();
+
+        assert!(is_us_controller("HNL_02_CTR", &iata, &airports));
+        assert!(is_us_controller("HCF_CTR", &iata, &airports));
     }
 }

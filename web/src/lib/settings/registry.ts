@@ -294,6 +294,21 @@ export const SETTINGS: SettingDef[] = [
     control: { kind: "toggle", default: true },
   },
   {
+    key: "ladder.style",
+    group: "Flow",
+    label: "Arrival ladder style",
+    description:
+      "How every arrival ladder is drawn — the FCA ladder, its pop-out, and the airport ladder. TGUI shows each flight twice: its ETA on the left rail and its scheduled time on the right, with the delay between them.",
+    control: {
+      kind: "select",
+      default: "classic",
+      options: [
+        { value: "classic", label: "Classic" },
+        { value: "tgui", label: "TGUI (ETA and STA rails)" },
+      ],
+    },
+  },
+  {
     key: "debug.enabled",
     group: "Advanced",
     label: "Debug mode",
