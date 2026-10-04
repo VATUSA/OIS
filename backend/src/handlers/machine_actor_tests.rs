@@ -1578,3 +1578,523 @@ async fn the_departures_list_carries_an_issued_cfrs_version(pool: PgPool) {
         .expect("TEST1 departs KJFK");
     assert_eq!(test1["cfr_version"], 2);
 }
+
+// ---- #607 PR 1: the TMU, flow and GDP writes ----
+//
+// Each of these went 401 for a service account before #607: the handler took `CurrentUser` (or
+// `Principal::require`, which admits a key but not a service account) and refused it on the line after
+// `RequirePermission` let it through.
+
+/// Add `permission` to the role the test service account holds, so one account can drive a sequence.
+async fn allow(pool: &PgPool, permission: &str) {
+    sqlx::query(
+        "insert into access.role_permissions (role_name, permission_name) values ($1, $2) \
+         on conflict do nothing",
+    )
+    .bind(ROLE)
+    .bind(permission)
+    .execute(pool)
+    .await
+    .unwrap();
+}
+
+/// `(user column, actor column)` of one attribution pair on one row.
+async fn attributed(
+    pool: &PgPool,
+    table: &str,
+    user_col: &str,
+    id_col: &str,
+    id: &str,
+) -> (Option<String>, Option<String>) {
+    sqlx::query_as(&format!(
+        "select {user_col}, {user_col}_actor from {table} where {id_col}::text = $1"
+    ))
+    .bind(id)
+    .fetch_one(pool)
+    .await
+    .unwrap()
+}
+
+/// A national service account holding every one of `permissions`. Returns its bearer.
+async fn machine(pool: &PgPool, permissions: &[&str]) -> String {
+    let (_, bearer) = service_account(pool, permissions[0], None).await;
+    for p in &permissions[1..] {
+        allow(pool, p).await;
+    }
+    bearer
+}
+
+/// The service account's audit actor — created on its first write, so look it up after one.
+async fn machine_actor(pool: &PgPool) -> String {
+    let id: String =
+        sqlx::query_scalar("select id from access.service_accounts where key = 'vtbfm'")
+            .fetch_one(pool)
+            .await
+            .unwrap();
+    actor_of(pool, "service_account_id", &id)
+        .await
+        .expect("the machine has an actor once it has written")
+}
+
+/// AC3, flow: a service account creates, edits and reorders an FCA, and creates, edits and deletes a
+/// route. Each row names the machine — never a person, never nobody — and reads back as "vTBFM".
+#[sqlx::test]
+async fn a_machine_drives_the_flow_writes(pool: PgPool) {
+    let auth = machine(
+        &pool,
+        &["flow.fca.update", "flow.route.update", "flow.route.delete"],
+    )
+    .await;
+    let state = test_state(pool.clone(), HashMap::new());
+    let fca = json!({ "name": "T607", "artcc": "ZDC",
+                      "points": [[38.0, -77.0], [39.0, -77.0], [39.0, -76.0]] });
+
+    let (status, body) = call(
+        &state,
+        http::Method::POST,
+        "/api/v1/flow/fcas",
+        &auth,
+        Some(fca.clone()),
+    )
+    .await;
+    assert_eq!(status, http::StatusCode::OK, "create_fca: {body}");
+    let id = body["id"].as_str().unwrap().to_string();
+    let actor = machine_actor(&pool).await;
+    assert_eq!(
+        attributed(&pool, "flow.fca", "created_by", "id", &id).await,
+        (None, Some(actor.clone()))
+    );
+    assert_eq!(body["updated_by"], "vTBFM", "the read names the machine");
+
+    let (status, _) = call(
+        &state,
+        http::Method::PUT,
+        &format!("/api/v1/flow/fcas/{id}"),
+        &auth,
+        Some(fca),
+    )
+    .await;
+    assert_eq!(status, http::StatusCode::OK, "update_fca");
+    let (status, _) = call(
+        &state,
+        http::Method::PUT,
+        &format!("/api/v1/flow/fcas/{id}/order"),
+        &auth,
+        Some(json!({ "order": ["AAL1"] })),
+    )
+    .await;
+    assert!(status.is_success(), "reorder_fca: {status}");
+    assert_eq!(
+        attributed(&pool, "flow.fca", "updated_by", "id", &id).await,
+        (None, Some(actor.clone()))
+    );
+
+    let route = json!({ "name": "R607", "route": "DCA J149 JFK", "artcc": "ZDC" });
+    let (status, body) = call(
+        &state,
+        http::Method::POST,
+        "/api/v1/flow/routes",
+        &auth,
+        Some(route.clone()),
+    )
+    .await;
+    assert_eq!(status, http::StatusCode::OK, "create_route: {body}");
+    let rid = body["id"].as_str().unwrap().to_string();
+    assert_eq!(
+        attributed(&pool, "flow.route", "created_by", "id", &rid).await,
+        (None, Some(actor.clone()))
+    );
+    let (status, _) = call(
+        &state,
+        http::Method::PUT,
+        &format!("/api/v1/flow/routes/{rid}"),
+        &auth,
+        Some(route),
+    )
+    .await;
+    assert_eq!(status, http::StatusCode::OK, "update_route");
+    assert_eq!(
+        attributed(&pool, "flow.route", "updated_by", "id", &rid).await,
+        (None, Some(actor))
+    );
+    let (status, _) = call(
+        &state,
+        http::Method::DELETE,
+        &format!("/api/v1/flow/routes/{rid}"),
+        &auth,
+        None,
+    )
+    .await;
+    assert!(status.is_success(), "delete_route: {status}");
+}
+
+/// AC3, TMU: a service account issues and publishes a TMI, sets a rate program, and creates and publishes
+/// a ground stop — whose generated advisory is attributed to the machine as well.
+#[sqlx::test]
+async fn a_machine_drives_the_tmu_writes(pool: PgPool) {
+    let auth = machine(
+        &pool,
+        &[
+            "tmu.tmi.create",
+            "tmu.tmi.publish",
+            "tmu.program.update",
+            "tmu.groundstop.create",
+            "tmu.groundstop.publish",
+        ],
+    )
+    .await;
+    let state = test_state(pool.clone(), HashMap::new());
+
+    let (status, body) = call(
+        &state,
+        http::Method::POST,
+        "/api/v1/tmu/tmis",
+        &auth,
+        Some(json!({ "requesting": "ZDC", "providing": "ZNY", "restriction": "20 MIT" })),
+    )
+    .await;
+    assert_eq!(status, http::StatusCode::OK, "create_tmi: {body}");
+    let tmi = body["id"].as_str().unwrap().to_string();
+    let actor = machine_actor(&pool).await;
+    assert_eq!(
+        attributed(&pool, "tmu.tmis", "created_by", "id", &tmi).await,
+        (None, Some(actor.clone()))
+    );
+    assert_eq!(body["author"], "vTBFM");
+    let (status, _) = call(
+        &state,
+        http::Method::POST,
+        &format!("/api/v1/tmu/tmis/{tmi}/publish"),
+        &auth,
+        None,
+    )
+    .await;
+    assert_eq!(status, http::StatusCode::OK, "publish_tmi");
+    assert_eq!(
+        attributed(&pool, "tmu.tmis", "published_by", "id", &tmi).await,
+        (None, Some(actor.clone()))
+    );
+
+    let (status, _) = call(
+        &state,
+        http::Method::PUT,
+        "/api/v1/tmu/programs/KDCA",
+        &auth,
+        Some(json!({ "aar": 30 })),
+    )
+    .await;
+    assert!(status.is_success(), "upsert_program: {status}");
+    assert_eq!(
+        attributed(&pool, "tmu.programs", "updated_by", "icao", "KDCA").await,
+        (None, Some(actor.clone()))
+    );
+
+    let (status, body) = call(
+        &state,
+        http::Method::POST,
+        "/api/v1/tmu/ground-stops",
+        &auth,
+        Some(json!({ "airport": "KDCA" })),
+    )
+    .await;
+    assert_eq!(status, http::StatusCode::OK, "create_ground_stop: {body}");
+    let gs = body["id"].as_str().unwrap().to_string();
+    assert_eq!(
+        attributed(&pool, "tmu.ground_stops", "created_by", "id", &gs).await,
+        (None, Some(actor.clone()))
+    );
+    let (status, body) = call(
+        &state,
+        http::Method::POST,
+        &format!("/api/v1/tmu/ground-stops/{gs}/publish"),
+        &auth,
+        None,
+    )
+    .await;
+    assert_eq!(status, http::StatusCode::OK, "publish_ground_stop: {body}");
+    assert_eq!(
+        attributed(&pool, "tmu.ground_stops", "published_by", "id", &gs).await,
+        (None, Some(actor.clone()))
+    );
+    let adv: String =
+        sqlx::query_scalar("select id from tmu.advisories where ground_stop_id::text = $1")
+            .bind(&gs)
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+    assert_eq!(
+        attributed(&pool, "tmu.advisories", "created_by", "id", &adv).await,
+        (None, Some(actor))
+    );
+}
+
+/// AC3, advisories: create, edit, publish, cancel, and delete a draft — all as a machine.
+#[sqlx::test]
+async fn a_machine_drives_the_advisory_writes(pool: PgPool) {
+    let auth = machine(
+        &pool,
+        &["tmu.adv.create", "tmu.adv.update", "tmu.adv.publish"],
+    )
+    .await;
+    let state = test_state(pool.clone(), HashMap::new());
+    let draft = json!({ "facility": "ZDC", "kind": "general", "body": "ADVZY 001 ZDC" });
+
+    let (status, body) = call(
+        &state,
+        http::Method::POST,
+        "/api/v1/tmu/advisories",
+        &auth,
+        Some(draft.clone()),
+    )
+    .await;
+    assert_eq!(status, http::StatusCode::OK, "create_advisory: {body}");
+    let adv = body["id"].as_str().unwrap().to_string();
+    let actor = machine_actor(&pool).await;
+    assert_eq!(
+        attributed(&pool, "tmu.advisories", "created_by", "id", &adv).await,
+        (None, Some(actor.clone()))
+    );
+    let (status, _) = call(
+        &state,
+        http::Method::PATCH,
+        &format!("/api/v1/tmu/advisories/{adv}"),
+        &auth,
+        Some(json!({ "body": "ADVZY 001 ZDC AMENDED" })),
+    )
+    .await;
+    assert_eq!(status, http::StatusCode::OK, "update_advisory");
+    let (status, _) = call(
+        &state,
+        http::Method::POST,
+        &format!("/api/v1/tmu/advisories/{adv}/publish"),
+        &auth,
+        None,
+    )
+    .await;
+    assert_eq!(status, http::StatusCode::OK, "publish_advisory");
+    assert_eq!(
+        attributed(&pool, "tmu.advisories", "published_by", "id", &adv).await,
+        (None, Some(actor))
+    );
+    let (status, _) = call(
+        &state,
+        http::Method::POST,
+        &format!("/api/v1/tmu/advisories/{adv}/cancel"),
+        &auth,
+        None,
+    )
+    .await;
+    assert!(status.is_success(), "cancel_advisory: {status}");
+
+    let (_, body) = call(
+        &state,
+        http::Method::POST,
+        "/api/v1/tmu/advisories",
+        &auth,
+        Some(draft),
+    )
+    .await;
+    let second = body["id"].as_str().unwrap().to_string();
+    let (status, _) = call(
+        &state,
+        http::Method::DELETE,
+        &format!("/api/v1/tmu/advisories/{second}"),
+        &auth,
+        None,
+    )
+    .await;
+    assert!(status.is_success(), "delete_advisory: {status}");
+}
+
+/// AC3, GDP: create, revise and publish — the published GDP's generated advisory names the machine too.
+#[sqlx::test]
+async fn a_machine_drives_the_gdp_writes(pool: PgPool) {
+    let auth = machine(&pool, &["tmu.gdp.create", "tmu.gdp.publish"]).await;
+    let state = test_state(pool.clone(), HashMap::new());
+    let now = Utc::now();
+    let (start, end) = (
+        (now + Duration::hours(1)).format("%H%M").to_string(),
+        (now + Duration::hours(3)).format("%H%M").to_string(),
+    );
+    let gdp = json!({ "airport": "KDCA", "aar": 30, "start_time": start, "end_time": end });
+
+    let (status, body) = call(
+        &state,
+        http::Method::POST,
+        "/api/v1/tmu/gdp",
+        &auth,
+        Some(gdp.clone()),
+    )
+    .await;
+    assert_eq!(status, http::StatusCode::OK, "create_gdp: {body}");
+    let id = body["id"].as_str().unwrap().to_string();
+    let actor = machine_actor(&pool).await;
+    assert_eq!(
+        attributed(&pool, "tmu.gdp", "created_by", "id", &id).await,
+        (None, Some(actor.clone()))
+    );
+    assert_eq!(body["updated_by"], "vTBFM");
+    let (status, body) = call(
+        &state,
+        http::Method::PUT,
+        &format!("/api/v1/tmu/gdp/{id}"),
+        &auth,
+        Some(gdp),
+    )
+    .await;
+    assert_eq!(status, http::StatusCode::OK, "revise_gdp: {body}");
+    assert_eq!(
+        attributed(&pool, "tmu.gdp", "updated_by", "id", &id).await,
+        (None, Some(actor.clone()))
+    );
+    let (status, body) = call(
+        &state,
+        http::Method::POST,
+        &format!("/api/v1/tmu/gdp/{id}/publish"),
+        &auth,
+        None,
+    )
+    .await;
+    assert_eq!(status, http::StatusCode::OK, "publish_gdp: {body}");
+    assert_eq!(
+        attributed(&pool, "tmu.gdp", "published_by", "id", &id).await,
+        (None, Some(actor.clone()))
+    );
+    let adv: String = sqlx::query_scalar("select id from tmu.advisories where gdp_id::text = $1")
+        .bind(&id)
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+    assert_eq!(
+        attributed(&pool, "tmu.advisories", "created_by", "id", &adv).await,
+        (None, Some(actor))
+    );
+}
+
+/// No regression for people: a signed-in user's write still fills **both** columns, so the legacy user
+/// column keeps working and the actor column is populated going forward.
+#[sqlx::test]
+async fn a_persons_write_still_names_them_in_both_columns(pool: PgPool) {
+    let user = seed_user(&pool).await;
+    grant(&pool, &user, "tmu.tmi.create", None).await;
+    let cookie = session_cookie(&pool, &user).await;
+    let state = test_state(pool.clone(), HashMap::new());
+
+    let (status, body) = call(
+        &state,
+        http::Method::POST,
+        "/api/v1/tmu/tmis",
+        &cookie,
+        Some(json!({ "requesting": "ZDC", "providing": "ZNY", "restriction": "20 MIT" })),
+    )
+    .await;
+    assert_eq!(status, http::StatusCode::OK, "{body}");
+    let (by, by_actor) = attributed(
+        &pool,
+        "tmu.tmis",
+        "created_by",
+        "id",
+        body["id"].as_str().unwrap(),
+    )
+    .await;
+    assert_eq!(by.as_deref(), Some(user.as_str()));
+    assert_eq!(by_actor, actor_of(&pool, "user_id", &user).await);
+}
+
+/// AC4: no widening. A ZDC-scoped service account is refused a route and an advisory at ZNY, exactly
+/// as a ZDC-scoped person is — the scope checks these handlers already ran now see the machine's roles.
+#[sqlx::test]
+async fn a_scoped_machine_is_refused_outside_its_artcc(pool: PgPool) {
+    let (_, auth) = service_account(&pool, "flow.route.update", Some("ZDC")).await;
+    allow(&pool, "tmu.adv.create").await;
+    let state = test_state(pool.clone(), HashMap::new());
+
+    let (status, _) = call(
+        &state,
+        http::Method::POST,
+        "/api/v1/flow/routes",
+        &auth,
+        Some(json!({ "name": "R", "route": "JFK J60 BOS", "artcc": "ZNY" })),
+    )
+    .await;
+    assert_eq!(
+        status,
+        http::StatusCode::FORBIDDEN,
+        "route outside the machine's ARTCC"
+    );
+    let (status, _) = call(
+        &state,
+        http::Method::POST,
+        "/api/v1/tmu/advisories",
+        &auth,
+        Some(json!({ "facility": "ZNY", "kind": "general", "body": "x" })),
+    )
+    .await;
+    assert_eq!(
+        status,
+        http::StatusCode::FORBIDDEN,
+        "advisory outside the machine's ARTCC"
+    );
+
+    let (status, _) = call(
+        &state,
+        http::Method::POST,
+        "/api/v1/flow/routes",
+        &auth,
+        Some(json!({ "name": "R", "route": "DCA J149 JFK", "artcc": "ZDC" })),
+    )
+    .await;
+    assert_eq!(
+        status,
+        http::StatusCode::OK,
+        "inside it, the same write goes through"
+    );
+}
+
+/// The stated behaviour change: a route written with an API key used to be recorded under the key's
+/// **owner**. It now names the **key** — #583's rule that a machine's write names the machine, never a
+/// person. The owner stays reachable through the key's actor.
+#[sqlx::test]
+async fn an_api_keys_route_names_the_key_not_its_owner(pool: PgPool) {
+    let (key, auth) = api_key(&pool, "flow.route.update").await;
+    let state = test_state(pool.clone(), HashMap::new());
+
+    let (status, body) = call(
+        &state,
+        http::Method::POST,
+        "/api/v1/flow/routes",
+        &auth,
+        Some(json!({ "name": "R", "route": "DCA J149 JFK" })),
+    )
+    .await;
+    assert_eq!(status, http::StatusCode::OK, "{body}");
+    let (by, by_actor) = attributed(
+        &pool,
+        "flow.route",
+        "created_by",
+        "id",
+        body["id"].as_str().unwrap(),
+    )
+    .await;
+    assert_eq!(by, None);
+    assert_eq!(by_actor, actor_of(&pool, "api_key_id", &key).await);
+}
+
+/// The bridge the event-package lifecycle job uses (it has no request, so no `Principal`): a person is
+/// attributed in both columns, exactly as `Principal::attribution` would; an unknown id is an error,
+/// never a silently anonymous write.
+#[sqlx::test]
+async fn the_lifecycle_jobs_attribution_names_the_person_in_both_columns(pool: PgPool) {
+    let user = seed_user(&pool).await;
+    let by = crate::auth::principal::Attribution::for_user_id(&pool, &user)
+        .await
+        .unwrap();
+    assert_eq!(by.user_id.as_deref(), Some(user.as_str()));
+    assert!(by.actor_id.is_some());
+    assert_eq!(by.actor_id, actor_of(&pool, "user_id", &user).await);
+    assert!(
+        crate::auth::principal::Attribution::for_user_id(&pool, "no-such-user")
+            .await
+            .is_err()
+    );
+}

@@ -46,6 +46,24 @@ impl Attribution {
             None => Some(self.actor_id.as_deref().unwrap_or("")),
         }
     }
+
+    /// A signed-in user's attribution, from their id alone — for writes that happen outside a request,
+    /// where there is no [`Principal`]: the event-package lifecycle job runs a package's TMIs and
+    /// advisories as the person who scheduled it. Resolves their actor exactly as
+    /// [`Principal::attribution`] does, so the row is attributed in both columns.
+    pub async fn for_user_id(pool: &sqlx::PgPool, user_id: &str) -> Result<Self, ApiError> {
+        let display_name: String =
+            sqlx::query_scalar("select display_name from identity.users where id = $1")
+                .bind(user_id)
+                .fetch_optional(pool)
+                .await
+                .map_err(|_| ApiError::Internal)?
+                .ok_or(ApiError::Internal)?;
+        Ok(Self {
+            user_id: Some(user_id.to_string()),
+            actor_id: audit_repo::resolve_user_actor_id(pool, user_id, &display_name).await?,
+        })
+    }
 }
 
 #[cfg(test)]

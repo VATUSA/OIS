@@ -64,3 +64,15 @@ checks, so the bot's callbacks are authorized by the same access model as everyt
 else. Management endpoints are implemented:
 `GET`/`POST /api/v1/admin/service-accounts` and
 `.../{id}/rotate` | `.../{id}/disable` | `.../{id}/roles`.
+
+**What a machine can write.** A handler a machine may drive takes the `Actor` extractor
+(`backend/src/auth/principal.rs`), which admits a session user, a user's API key, or a service account.
+Its write records `principal.attribution()`: the legacy `*_by` user column for a person, and a sibling
+`*_by_actor` column (a foreign key to `access.actors`) for **every** caller — so a machine's row names
+the machine, never a person and never nobody (an API key's owner stays reachable through its actor).
+Reads coalesce the two names. Scope is unchanged: a key is capped by its owner's live scope, and a
+service account is scoped by its roles' ARTCCs.
+
+Machine-capable today: the release path (#583) and the TMU, flow and GDP writes (#607). The rest still
+take `CurrentUser`; `backend/src/handlers/actor_ratchet_tests.rs` lists every one as `Pending` or
+`UserOnly("why")`, and is the source of truth — it fails if a new handler blocks machines unlisted.

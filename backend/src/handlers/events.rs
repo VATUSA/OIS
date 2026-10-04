@@ -1238,6 +1238,9 @@ pub(crate) async fn activate_package(
     // Both callers — the Activate handler and the auto-publish job — come through here, so this is the
     // one place an advisory item's issuer is checked for every path (#537 review).
     require_actor_may_issue_package(pool, actor, package_id).await?;
+    // The TMU writes below name the scheduling person in both attribution columns (#607). Resolved
+    // from the id because the auto-publish job has no request, so no `Principal`.
+    let by = crate::auth::principal::Attribution::for_user_id(pool, actor).await?;
     let event = events_repo::get(pool, event_id)
         .await?
         .ok_or(ApiError::NotFound)?;
@@ -1323,7 +1326,7 @@ pub(crate) async fn activate_package(
                     // planned programs auto-expire an hour after the event ends
                     active_until: Some(event.end_time),
                 };
-                tmu_repo::upsert_program(&mut *tx, &p.icao, &req, &[], actor).await?;
+                tmu_repo::upsert_program(&mut *tx, &p.icao, &req, &[], &by).await?;
                 // Programs are keyed by ICAO; that's the handle for later cleanup.
                 p.icao
             }
@@ -1338,8 +1341,8 @@ pub(crate) async fn activate_package(
                     stop_time: r.stop_time,
                 };
                 // Activation goes live: create then publish so the restriction is active.
-                let tmi_id = tmu_repo::create_tmi(&mut *tx, &req, actor).await?;
-                let tmi = tmu_repo::publish_tmi(&mut tx, &tmi_id, actor).await?;
+                let tmi_id = tmu_repo::create_tmi(&mut *tx, &req, &by).await?;
+                let tmi = tmu_repo::publish_tmi(&mut tx, &tmi_id, &by).await?;
                 if let (Some(tmi), Some(channel_id)) = (tmi, tmu_channel.clone()) {
                     let job = crate::handlers::tmu::tmi_publish_job(&channel_id, &tmi);
                     integration_repo::enqueue_job(
@@ -1361,9 +1364,9 @@ pub(crate) async fn activate_package(
                     until: g.until.clone(),
                 };
                 let gs_id =
-                    tmu_repo::create_ground_stop(&mut *tx, &req, &scope, g.until.as_deref(), actor)
+                    tmu_repo::create_ground_stop(&mut *tx, &req, &scope, g.until.as_deref(), &by)
                         .await?;
-                tmu_repo::publish_ground_stop(&mut *tx, &gs_id, actor).await?;
+                tmu_repo::publish_ground_stop(&mut *tx, &gs_id, &by).await?;
                 gs_id
             }
             Prepared::Advisory(a, channel) => {
@@ -1379,8 +1382,8 @@ pub(crate) async fn activate_package(
                 };
                 // Create, publish and enqueue together so an advisory is never live with nothing
                 // queued to announce it, or queued without being live.
-                let adv_id = tmu_repo::create_advisory_tx(&mut tx, &req, actor, None).await?;
-                if !tmu_repo::publish_advisory(&mut tx, &adv_id, actor).await? {
+                let adv_id = tmu_repo::create_advisory_tx(&mut tx, &req, &by, None).await?;
+                if !tmu_repo::publish_advisory(&mut tx, &adv_id, &by).await? {
                     // It was created in this transaction, so this cannot be "already published".
                     return Err(ApiError::Internal);
                 }
@@ -1641,7 +1644,10 @@ pub async fn create_event_fca(
     if events_repo::get(pool, id).await?.is_none() {
         return Err(ApiError::NotFound);
     }
-    flow_repo::create_event_fca(pool, id, &payload, &user.id).await?;
+    // The events handlers still take a session user until #607's events PR; attribute them the way a
+    // migrated handler does, so a person's write fills both columns.
+    let by = Principal::User(user.clone()).attribution(&state).await?;
+    flow_repo::create_event_fca(pool, id, &payload, &by).await?;
     Ok(Json(flow_repo::list_event_fcas(pool, id).await?))
 }
 
@@ -1669,7 +1675,8 @@ pub async fn update_event_fca(
         return Err(ApiError::BadRequest);
     }
     owned_event_fca(pool, id, &fca_id).await?;
-    flow_repo::update_fca(pool, &fca_id, &payload, &user.id).await?;
+    let by = Principal::User(user.clone()).attribution(&state).await?;
+    flow_repo::update_fca(pool, &fca_id, &payload, &by).await?;
     Ok(Json(flow_repo::list_event_fcas(pool, id).await?))
 }
 
