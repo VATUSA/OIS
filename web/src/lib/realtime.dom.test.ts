@@ -59,6 +59,16 @@ describe("connectRealtime (VATUSA/OIS#348 review)", () => {
     dispose();
   });
 
+  // #646: the live runway board and its saved presets are separate keys, so both must refetch.
+  it("refetches the runway board and its presets on a flow.runway nudge", async () => {
+    const dispose = connectRealtime(qc);
+    await flush();
+
+    FakeSocket.opened[0]?.onmessage?.({data: JSON.stringify({topic: "flow.runway"})});
+    expect(invalidated).toEqual([{queryKey: ["runway"]}, {queryKey: ["runway-configs"]}]);
+    dispose();
+  });
+
   it("refetches the user's own claims on an events.reminder nudge", async () => {
     const dispose = connectRealtime(qc);
     await flush();

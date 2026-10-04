@@ -36,6 +36,9 @@ pub mod topic {
     pub const GROUND_STOP: &str = "tmu.groundstop";
     pub const PROGRAM: &str = "tmu.program";
     pub const CFR: &str = "flow.cfr";
+    /// An airport's runway configuration — live or a saved preset — changed (#646). Low-frequency and
+    /// high-consequence: it changes what every arrival is sequenced against.
+    pub const RUNWAY: &str = "flow.runway";
     pub const EVENT_AVAILABILITY: &str = "events.availability";
     /// Someone's access changed. Payload-free like every topic here, so each client refetches its
     /// own `/me` and works out whether anything it holds actually grew — the socket is broadcast to

@@ -17,6 +17,8 @@ const TOPIC_KEYS: Record<string, string[][]> = {
   "tmu.groundstop": [["ground-stops"], ["departures"]],
   "tmu.program": [["tmu-programs"], ["departures"], ["flow"]],
   "flow.cfr": [["departures"], ["flow"]],
+  // Both: "runway" is not a prefix of "runway-configs", so a preset someone saves needs its own key.
+  "flow.runway": [["runway"], ["runway-configs"]],
   "events.availability": [["event-availability"]],
   // Payload-free by design: each client refetches its own data and works out whether the change
   // was about them. The socket is broadcast to every signed-in client, so it must not carry who.

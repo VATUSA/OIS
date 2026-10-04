@@ -273,6 +273,7 @@ pub async fn put_runway(
         body.custom_ends.as_ref(),
     )
     .await?;
+    state.publish(crate::realtime::topic::RUNWAY);
     Ok(Json(build_board(&state, &icao).await?))
 }
 
@@ -338,6 +339,7 @@ pub async fn save_config(
         &user.id,
     )
     .await?;
+    state.publish(crate::realtime::topic::RUNWAY);
     Ok(StatusCode::NO_CONTENT)
 }
 
@@ -359,8 +361,96 @@ pub async fn delete_config(
 ) -> Result<StatusCode, ApiError> {
     let pool = state.db.as_ref().ok_or(ApiError::ServiceUnavailable)?;
     if runway_repo::delete_saved(pool, &icao.to_ascii_uppercase(), name.trim()).await? {
+        // Only when something was removed: a miss changes nothing anyone is looking at.
+        state.publish(crate::realtime::topic::RUNWAY);
         Ok(StatusCode::NO_CONTENT)
     } else {
         Err(ApiError::NotFound)
+    }
+}
+
+/// #646: every runway write nudges the other clients, so a change arrives when it happens rather than
+/// on the next poll. Driven through the real router; the bus is subscribed before each call.
+#[cfg(test)]
+mod realtime_tests {
+    use sqlx::PgPool;
+
+    use crate::scope_test_support::{grant, seed_user, send, session_cookie, test_state};
+
+    /// The topics published since `rx` subscribed, without waiting.
+    fn drained(rx: &mut tokio::sync::broadcast::Receiver<crate::realtime::WsEvent>) -> Vec<String> {
+        std::iter::from_fn(|| rx.try_recv().ok().map(|e| e.topic)).collect()
+    }
+
+    #[sqlx::test]
+    async fn every_runway_write_nudges_and_a_read_does_not(pool: PgPool) {
+        let user = seed_user(&pool).await;
+        grant(&pool, &user, "flow.runway.update", None).await;
+        grant(&pool, &user, "flow.runway.read", None).await;
+        let cookie = session_cookie(&pool, &user).await;
+        let state = test_state(pool, std::collections::HashMap::new());
+        let runway = || vec!["flow.runway".to_string()];
+        let mut rx = state.events.subscribe();
+
+        let live = send(
+            &state,
+            http::Method::PUT,
+            "/api/v1/flow/runway/KDCA",
+            &cookie,
+            Some(serde_json::json!({})),
+        )
+        .await;
+        assert_eq!(live, http::StatusCode::OK, "put_runway");
+        assert_eq!(drained(&mut rx), runway(), "changing the live config");
+
+        let save = send(
+            &state,
+            http::Method::PUT,
+            "/api/v1/flow/runway/KDCA/configs/South%20flow",
+            &cookie,
+            Some(serde_json::json!({ "active_ends": ["19"] })),
+        )
+        .await;
+        assert_eq!(save, http::StatusCode::NO_CONTENT, "save_config");
+        assert_eq!(drained(&mut rx), runway(), "saving a preset");
+
+        let delete = send(
+            &state,
+            http::Method::DELETE,
+            "/api/v1/flow/runway/KDCA/configs/South%20flow",
+            &cookie,
+            None,
+        )
+        .await;
+        assert_eq!(delete, http::StatusCode::NO_CONTENT, "delete_config");
+        assert_eq!(drained(&mut rx), runway(), "deleting a preset");
+
+        let missing = send(
+            &state,
+            http::Method::DELETE,
+            "/api/v1/flow/runway/KDCA/configs/Nope",
+            &cookie,
+            None,
+        )
+        .await;
+        assert_eq!(missing, http::StatusCode::NOT_FOUND);
+        assert!(
+            drained(&mut rx).is_empty(),
+            "a delete that removed nothing changes nothing"
+        );
+
+        let read = send(
+            &state,
+            http::Method::GET,
+            "/api/v1/flow/runway/KDCA",
+            &cookie,
+            None,
+        )
+        .await;
+        assert_eq!(read, http::StatusCode::OK);
+        assert!(
+            drained(&mut rx).is_empty(),
+            "a read must not make every client refetch"
+        );
     }
 }

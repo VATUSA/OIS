@@ -13,7 +13,8 @@ export type SavedRunwayConfig = components["schemas"]["SavedRunwayConfig"];
 export type CustomEnd = components["schemas"]["CustomEnd"];
 export type RunwayConfigRequest = components["schemas"]["RunwayConfigRequest"];
 
-/** The shared runway-balancer board for an airport, refreshed every 15s. */
+/** The shared runway-balancer board for an airport. Changes arrive over the realtime socket
+ *  (`flow.runway`, #646); the poll is the fallback. */
 export function useRunway(icao: string | null) {
   return useQuery({
     queryKey: ["runway", icao],
@@ -25,7 +26,10 @@ export function useRunway(icao: string | null) {
       return data;
     },
     enabled: !!icao,
-    refetchInterval: 15_000,
+    // 60 s, not longer: prod runs two backend replicas and the realtime hub is in-process only
+    // (#649), so a save on one replica nudges only its own sockets. For clients on the other, this
+    // poll is still how a change arrives. Relax it further once the hub spans replicas.
+    refetchInterval: 60_000,
   });
 }
 
