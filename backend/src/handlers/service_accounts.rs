@@ -48,6 +48,28 @@ fn expiry_from(requested: Option<u32>, now: DateTime<Utc>) -> Result<DateTime<Ut
     Ok(now + Duration::days(i64::from(days)))
 }
 
+/// What a full replace of `current` with `requested` adds, and what it removes. Unchanged entries are
+/// in neither, so an admin can edit an account that also holds things beyond their own authority — and
+/// can't remove those things, any more than they could have granted them (#584, the #546 ruling).
+fn changes<T: Ord + Clone>(current: &[T], requested: &[T]) -> (Vec<T>, Vec<T>) {
+    let current: BTreeSet<&T> = current.iter().collect();
+    let requested: BTreeSet<&T> = requested.iter().collect();
+    let added = requested
+        .difference(&current)
+        .map(|t| (*t).clone())
+        .collect();
+    let removed = current
+        .difference(&requested)
+        .map(|t| (*t).clone())
+        .collect();
+    (added, removed)
+}
+
+/// Removing is checked like granting, except that a forbidden permission may always be removed.
+fn never_forbidden(_: &str) -> bool {
+    false
+}
+
 fn generate_token() -> String {
     format!(
         "ois_sa_{}{}",
@@ -227,19 +249,27 @@ pub async fn set_service_account_roles(
 
     // No escalation through a role: a role is granted nationally, so the admin must hold every
     // permission in it nationally. Without this, roles would bypass the per-permission cap below.
-    let role_grants: Vec<(String, Option<String>)> =
-        access_repo::fetch_role_permission_names(pool, &payload.role_names)
-            .await?
-            .into_iter()
-            .map(|name| (name, None))
-            .collect();
-    keys_repo::validate_grants(
-        pool,
-        &admin.id,
-        &role_grants,
-        keys_repo::is_forbidden_for_service_account,
-    )
-    .await?;
+    // Checked for the roles this replace adds **and** removes; roles left as they are pass through.
+    let current = sa_repo::get_service_account(pool, &id)
+        .await?
+        .ok_or(ApiError::NotFound)?
+        .roles;
+    let (added, removed) = changes(&current, &payload.role_names);
+    for (roles, forbidden) in [
+        (
+            added,
+            keys_repo::is_forbidden_for_service_account as fn(&str) -> bool,
+        ),
+        (removed, never_forbidden),
+    ] {
+        let role_grants: Vec<(String, Option<String>)> =
+            access_repo::fetch_role_permission_names(pool, &roles)
+                .await?
+                .into_iter()
+                .map(|name| (name, None))
+                .collect();
+        keys_repo::validate_grants(pool, &admin.id, &role_grants, forbidden).await?;
+    }
 
     sa_repo::set_roles(pool, &id, &payload.role_names).await?;
     let account = sa_repo::get_service_account(pool, &id)
@@ -295,13 +325,22 @@ pub async fn set_service_account_permissions(
         return Err(ApiError::BadRequest);
     }
     let grants = to_pairs(&payload.permissions);
+    let current: Vec<(String, Option<String>)> = sa_repo::get_service_account(pool, &id)
+        .await?
+        .ok_or(ApiError::NotFound)?
+        .permissions
+        .into_iter()
+        .map(|p| (p.permission, p.artcc_id))
+        .collect();
+    let (added, removed) = changes(&current, &grants);
     keys_repo::validate_grants(
         pool,
         &admin.id,
-        &grants,
+        &added,
         keys_repo::is_forbidden_for_service_account,
     )
     .await?;
+    keys_repo::validate_grants(pool, &admin.id, &removed, never_forbidden).await?;
 
     sa_repo::set_permissions(pool, &id, &grants).await?;
     let account = sa_repo::get_service_account(pool, &id)

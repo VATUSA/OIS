@@ -456,3 +456,149 @@ async fn a_credential_unused_for_30_days_is_reported_stale(pool: PgPool) {
     );
     assert!(get(idle).await.stale, "31 days unused is stale");
 }
+
+// --- Removal is gated like granting (the #546 ruling, applied here) ---
+
+async fn assign_role(pool: &PgPool, id: &str) {
+    sqlx::query(
+        "insert into access.service_account_roles (service_account_id, role_name) values ($1, $2)",
+    )
+    .bind(id)
+    .bind(ROLE)
+    .execute(pool)
+    .await
+    .unwrap();
+}
+
+async fn roles_of(pool: &PgPool, id: &str) -> Vec<String> {
+    sqlx::query_scalar(
+        "select role_name from access.service_account_roles where service_account_id = $1",
+    )
+    .bind(id)
+    .fetch_all(pool)
+    .await
+    .unwrap()
+}
+
+/// Both replaces used to delete everything and check only what they inserted, so a facility admin
+/// could switch off a national integration by sending an empty list.
+#[sqlx::test]
+async fn a_scoped_admin_cannot_strip_what_they_could_not_grant(pool: PgPool) {
+    let state = test_state(pool.clone(), HashMap::new());
+    let cookie = zdc_admin(&pool).await;
+    let id = account(&pool).await;
+    direct_grant(&pool, &id, FCA, Some("ZNY")).await;
+    direct_grant(&pool, &id, CFR, None).await;
+    role(&pool, &[CFR]).await;
+    assign_role(&pool, &id).await;
+
+    for (permissions, why) in [
+        (json!([]), "everything"),
+        (
+            json!([{"permission": CFR, "artcc_id": null}]),
+            "another facility's grant",
+        ),
+        (
+            json!([{"permission": FCA, "artcc_id": "ZNY"}]),
+            "a permission they don't hold",
+        ),
+    ] {
+        let status = send(
+            &state,
+            Method::PUT,
+            &format!("/api/v1/admin/service-accounts/{id}/permissions"),
+            &cookie,
+            Some(json!({"permissions": permissions})),
+        )
+        .await;
+        assert_eq!(status, 403, "removing {why} must be refused");
+    }
+    let status = send(
+        &state,
+        Method::PUT,
+        &format!("/api/v1/admin/service-accounts/{id}/roles"),
+        &cookie,
+        Some(json!({"role_names": []})),
+    )
+    .await;
+    assert_eq!(
+        status, 403,
+        "removing a role carrying what they lack must be refused"
+    );
+
+    assert_eq!(
+        grants_of(&pool, &id).await,
+        vec![
+            (FCA.to_string(), Some("ZNY".to_string())),
+            (CFR.to_string(), None)
+        ],
+        "nothing was removed"
+    );
+    assert_eq!(roles_of(&pool, &id).await, vec![ROLE.to_string()]);
+}
+
+/// The other side: grants beyond the admin pass through untouched, and what is within their authority
+/// they can still add and remove — the check is on what changes, not on the whole account.
+#[sqlx::test]
+async fn a_scoped_admin_edits_around_grants_beyond_them(pool: PgPool) {
+    let state = test_state(pool.clone(), HashMap::new());
+    let cookie = zdc_admin(&pool).await;
+    let id = account(&pool).await;
+    direct_grant(&pool, &id, FCA, Some("ZNY")).await;
+    role(&pool, &[CFR]).await;
+    assign_role(&pool, &id).await;
+    let uri = format!("/api/v1/admin/service-accounts/{id}/permissions");
+
+    let status = send(
+        &state,
+        Method::PUT,
+        &uri,
+        &cookie,
+        Some(json!({"permissions": [
+            {"permission": FCA, "artcc_id": "ZNY"},
+            {"permission": FCA, "artcc_id": "ZDC"}
+        ]})),
+    )
+    .await;
+    assert_eq!(
+        status, 200,
+        "adding within their authority, keeping ZNY as it was"
+    );
+    let mut held = grants_of(&pool, &id).await;
+    held.sort();
+    assert_eq!(
+        held,
+        vec![
+            (FCA.to_string(), Some("ZDC".to_string())),
+            (FCA.to_string(), Some("ZNY".to_string()))
+        ]
+    );
+
+    let status = send(
+        &state,
+        Method::PUT,
+        &uri,
+        &cookie,
+        Some(json!({"permissions": [{"permission": FCA, "artcc_id": "ZNY"}]})),
+    )
+    .await;
+    assert_eq!(status, 200, "removing what they could grant");
+    assert_eq!(
+        grants_of(&pool, &id).await,
+        vec![(FCA.to_string(), Some("ZNY".to_string()))]
+    );
+
+    let status = send(
+        &state,
+        Method::PUT,
+        &format!("/api/v1/admin/service-accounts/{id}/roles"),
+        &cookie,
+        Some(json!({"role_names": [ROLE]})),
+    )
+    .await;
+    assert_eq!(
+        status, 200,
+        "resubmitting a role they couldn't grant, unchanged, is a no-op"
+    );
+    assert_eq!(roles_of(&pool, &id).await, vec![ROLE.to_string()]);
+}
