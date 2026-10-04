@@ -2617,7 +2617,9 @@ pub async fn clear_release(
         (status = 200), (status = 400), (status = 401),
         (status = 403, description = "The FCA's ARTCC is outside the caller's scope"),
         (status = 404),
-        (status = 409, description = "`held_by_person` / `held_by_other_machine`: a machine may not trade it"),
+        (status = 409, description = "`held_by_person` / `held_by_other_machine`: a machine may not trade it. \
+            `departure_unknown` / `different_departure` / `runway_unassigned` / `different_runway`: the two \
+            flights must share a departure airport and an assigned departure runway (#56)"),
     )
 )]
 pub async fn swap_releases(
@@ -2646,6 +2648,7 @@ pub async fn swap_releases(
         let holder = flow_repo::release_holder(pool, &id, callsign).await?;
         release_authority::authorize(&principal, by.actor_id.as_deref(), holder.as_ref())?;
     }
+    same_departure_slot(&state, pool, &a, &b).await?;
     // `false` means at least one of them holds no release: there is no time to trade, and inventing
     // one is what this must not do.
     if !flow_repo::swap_releases(pool, &id, &a, &b, &by).await? {
@@ -2661,6 +2664,51 @@ pub async fn swap_releases(
     }
     state.publish(crate::realtime::topic::RELEASE);
     Ok(StatusCode::OK)
+}
+
+/// Two flights may trade release times only off the same airport and the same departure runway (#56):
+/// otherwise each would be handed a slot sequenced for a different runway. Runways are the ones IDST
+/// shows (#511's assignments). Anything that can't be shown to match is refused rather than guessed:
+/// a flight no longer in the feed has no known departure, and an airport with no SID, gate or config
+/// rule assigns no runway.
+async fn same_departure_slot(
+    state: &AppState,
+    pool: &sqlx::PgPool,
+    a: &str,
+    b: &str,
+) -> Result<(), ApiError> {
+    let (snapshot, _) = feed_view(state).await;
+    let departure = |callsign: &str| -> Option<String> {
+        let data = &snapshot.as_ref()?.data;
+        let plan = data
+            .pilots
+            .iter()
+            .find(|p| p.callsign.eq_ignore_ascii_case(callsign))
+            .and_then(|p| p.flight_plan.as_ref())
+            .or_else(|| {
+                data.prefiles
+                    .iter()
+                    .find(|p| p.callsign.eq_ignore_ascii_case(callsign))
+                    .and_then(|p| p.flight_plan.as_ref())
+            })?;
+        let dep = plan.departure.trim().to_ascii_uppercase();
+        (!dep.is_empty()).then_some(dep)
+    };
+    let (Some(dep_a), Some(dep_b)) = (departure(a), departure(b)) else {
+        return Err(ApiError::ConflictReason("departure_unknown"));
+    };
+    if dep_a != dep_b {
+        return Err(ApiError::ConflictReason("different_departure"));
+    }
+    let runway_a = departure_runway_repo::get(pool, &dep_a, a).await?;
+    let runway_b = departure_runway_repo::get(pool, &dep_b, b).await?;
+    let (Some(runway_a), Some(runway_b)) = (runway_a, runway_b) else {
+        return Err(ApiError::ConflictReason("runway_unassigned"));
+    };
+    if runway_a.runway != runway_b.runway {
+        return Err(ApiError::ConflictReason("different_runway"));
+    }
+    Ok(())
 }
 
 #[utoipa::path(
@@ -4945,6 +4993,189 @@ mod release_swap_tests {
             "case-insensitively the same flight"
         );
         assert_eq!(times(&pool, &id, "AAL1").await, Some((1_000, 900)));
+    }
+
+    // ---- #56: only flights off the same airport and the same runway may trade ----
+
+    /// `(callsign, departure)` prefiles in the feed, two released flights (AAL1 1000/900, UAL2
+    /// 2000/1900) and a user who may swap. Returns the state, the FCA and the user's cookie.
+    async fn swap_case(
+        pool: &PgPool,
+        flights: &[(&str, &str)],
+    ) -> (crate::state::AppState, String, String) {
+        use crate::feed::vatsim::{FlightPlan, Prefile, VatsimData};
+        let state = test_state(pool.clone(), HashMap::new());
+        state.feed.write().await.snapshot =
+            Some(std::sync::Arc::new(crate::feed::Snapshot::of(VatsimData {
+                prefiles: flights
+                    .iter()
+                    .map(|(callsign, dep)| Prefile {
+                        callsign: (*callsign).into(),
+                        flight_plan: Some(FlightPlan {
+                            departure: (*dep).into(),
+                            ..Default::default()
+                        }),
+                        ..Default::default()
+                    })
+                    .collect(),
+                ..Default::default()
+            })));
+        let user = seed_user(pool).await;
+        crate::scope_test_support::grant(pool, &user, "flow.fca.update", None).await;
+        let id = fca(pool).await;
+        for (callsign, cta, edct) in [("AAL1", 1_000, 900), ("UAL2", 2_000, 1_900)] {
+            flow_repo::upsert_release(
+                pool,
+                &id,
+                callsign,
+                cta,
+                edct,
+                &Attribution::user_only(&user),
+                None,
+            )
+            .await
+            .unwrap();
+        }
+        let cookie = session_cookie(pool, &user).await;
+        (state, id, cookie)
+    }
+
+    async fn runway(pool: &PgPool, icao: &str, callsign: &str, runway: &str) {
+        crate::repos::departure_runway::assign(
+            pool,
+            icao,
+            callsign,
+            runway,
+            crate::repos::departure_runway::RunwaySource::Config,
+            None,
+        )
+        .await
+        .unwrap();
+    }
+
+    /// POST the swap through the real router; the status and the error code, if any.
+    async fn swap(
+        state: &crate::state::AppState,
+        id: &str,
+        cookie: &str,
+    ) -> (http::StatusCode, Option<String>) {
+        use tower::ServiceExt;
+        let request = http::Request::builder()
+            .method(http::Method::POST)
+            .uri(format!("/api/v1/flow/fcas/{id}/swap"))
+            .header(http::header::COOKIE, cookie)
+            .header(http::header::CONTENT_TYPE, "application/json")
+            .body(axum::body::Body::from(r#"{"a":"AAL1","b":"UAL2"}"#))
+            .unwrap();
+        let response = crate::router::build_router(state.clone())
+            .oneshot(request)
+            .await
+            .unwrap();
+        let status = response.status();
+        let bytes = axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let code = serde_json::from_slice::<serde_json::Value>(&bytes)
+            .ok()
+            .and_then(|v| v["error"].as_str().map(str::to_string));
+        (status, code)
+    }
+
+    /// AC2: two departures off the same airport and runway trade their times, and it persists.
+    #[sqlx::test]
+    async fn the_same_airport_and_runway_swap(pool: PgPool) {
+        let (state, id, cookie) = swap_case(&pool, &[("AAL1", "KJFK"), ("UAL2", "KJFK")]).await;
+        runway(&pool, "KJFK", "AAL1", "31L").await;
+        runway(&pool, "KJFK", "UAL2", "31L").await;
+
+        assert_eq!(swap(&state, &id, &cookie).await.0, http::StatusCode::OK);
+        assert_eq!(times(&pool, &id, "AAL1").await, Some((2_000, 1_900)));
+        assert_eq!(times(&pool, &id, "UAL2").await, Some((1_000, 900)));
+    }
+
+    /// The common IDST release is an aircraft connected at the gate, which the feed lists under
+    /// `pilots`, not `prefiles`; its departure must be found there too, or every connected flight's
+    /// swap is refused as `departure_unknown` (#56 review).
+    #[sqlx::test]
+    async fn two_connected_departures_on_one_runway_swap(pool: PgPool) {
+        use crate::feed::vatsim::{FlightPlan, Pilot, VatsimData};
+        let (state, id, cookie) = swap_case(&pool, &[]).await;
+        state.feed.write().await.snapshot =
+            Some(std::sync::Arc::new(crate::feed::Snapshot::of(VatsimData {
+                pilots: ["AAL1", "UAL2"]
+                    .into_iter()
+                    .map(|callsign| Pilot {
+                        callsign: callsign.into(),
+                        flight_plan: Some(FlightPlan {
+                            departure: "KJFK".into(),
+                            ..Default::default()
+                        }),
+                        ..Default::default()
+                    })
+                    .collect(),
+                ..Default::default()
+            })));
+        runway(&pool, "KJFK", "AAL1", "31L").await;
+        runway(&pool, "KJFK", "UAL2", "31L").await;
+
+        assert_eq!(swap(&state, &id, &cookie).await.0, http::StatusCode::OK);
+        assert_eq!(times(&pool, &id, "AAL1").await, Some((2_000, 1_900)));
+        assert_eq!(times(&pool, &id, "UAL2").await, Some((1_000, 900)));
+    }
+
+    /// Each refusal names why, and writes nothing.
+    #[sqlx::test]
+    async fn a_swap_across_runways_or_airports_is_refused_and_writes_nothing(pool: PgPool) {
+        // (feed flights as callsign → departure, runway assignments as icao/callsign/runway, code)
+        type Flights = &'static [(&'static str, &'static str)];
+        type Runways = &'static [(&'static str, &'static str, &'static str)];
+        let cases: [(Flights, Runways, &str); 4] = [
+            (
+                &[("AAL1", "KJFK"), ("UAL2", "KJFK")],
+                &[("KJFK", "AAL1", "31L"), ("KJFK", "UAL2", "4L")],
+                "different_runway",
+            ),
+            (
+                &[("AAL1", "KJFK"), ("UAL2", "KLGA")],
+                &[("KJFK", "AAL1", "31L"), ("KLGA", "UAL2", "31L")],
+                "different_departure",
+            ),
+            (
+                &[("AAL1", "KJFK"), ("UAL2", "KJFK")],
+                &[("KJFK", "AAL1", "31L")],
+                "runway_unassigned",
+            ),
+            (
+                &[("AAL1", "KJFK")],
+                &[("KJFK", "AAL1", "31L"), ("KJFK", "UAL2", "31L")],
+                "departure_unknown",
+            ),
+        ];
+        for (flights, runways, expected) in cases {
+            let (state, id, cookie) = swap_case(&pool, flights).await;
+            for (icao, callsign, rwy) in runways {
+                runway(&pool, icao, callsign, rwy).await;
+            }
+            assert_eq!(
+                swap(&state, &id, &cookie).await,
+                (http::StatusCode::CONFLICT, Some(expected.to_string())),
+                "{expected}"
+            );
+            assert_eq!(
+                times(&pool, &id, "AAL1").await,
+                Some((1_000, 900)),
+                "{expected}"
+            );
+            assert_eq!(
+                times(&pool, &id, "UAL2").await,
+                Some((2_000, 1_900)),
+                "{expected}"
+            );
+            sqlx::query("delete from flow.departure_runway_assignment")
+                .execute(&pool)
+                .await
+                .unwrap();
+        }
     }
 }
 

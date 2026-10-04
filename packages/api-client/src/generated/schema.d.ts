@@ -14173,7 +14173,7 @@ export interface operations {
                 };
                 content?: never;
             };
-            /** @description `held_by_person` / `held_by_other_machine`: a machine may not trade it */
+            /** @description `held_by_person` / `held_by_other_machine`: a machine may not trade it. `departure_unknown` / `different_departure` / `runway_unassigned` / `different_runway`: the two flights must share a departure airport and an assigned departure runway (#56) */
             409: {
                 headers: {
                     [name: string]: unknown;

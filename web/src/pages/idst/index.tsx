@@ -10,6 +10,7 @@ import {
   FilterChip,
   Input,
   MetricCard,
+  Select,
   StatusPill,
 } from "@ois/ui";
 import {Clock, Plane, RefreshCw, Route, Navigation} from "lucide-react";
@@ -17,8 +18,8 @@ import {Clock, Plane, RefreshCw, Route, Navigation} from "lucide-react";
 import {usePageHeader} from "@/components/shell/page-meta";
 import {useMe} from "@/lib/auth";
 import {hasPermission} from "@/lib/permissions";
-import {useClearRelease, useMarkRelease} from "@/lib/fca";
-import {useIdst, useIdstScope, scopeIsEmpty, type IdstFlight, type IdstScope} from "@/lib/idst";
+import {useClearRelease, useMarkRelease, useSwapReleases} from "@/lib/fca";
+import {swapPartners, useIdst, useIdstScope, scopeIsEmpty, type IdstFlight, type IdstScope} from "@/lib/idst";
 import {FacilityCombobox, type FacilityPick} from "@/components/facility-combobox";
 
 const keyOf = (f: IdstFlight) => `${f.fca_id}:${f.callsign}`;
@@ -214,7 +215,57 @@ export function FlightTable({
   );
 }
 
-function SelectedPanel({ selected, canEdit }: { selected: IdstFlight | null; canEdit: boolean }) {
+/** Trade the selected release's times with another on its runway. */
+function SwapControl({ selected, released }: { selected: IdstFlight; released: IdstFlight[] }) {
+  const partners = swapPartners(selected, released);
+  const [partner, setPartner] = useState("");
+  const swap = useSwapReleases(selected.fca_id);
+  if (partners.length === 0) {
+    return (
+      <p className="text-xs text-ink-3">
+        {selected.runway
+          ? `No other release departs ${selected.dep} runway ${selected.runway} in this FCA to swap with.`
+          : "No departure runway is assigned, so this release can't be swapped."}
+      </p>
+    );
+  }
+  const chosen = partners.some((f) => f.callsign === partner) ? partner : "";
+  return (
+    <div className="flex gap-1.5">
+      <Select
+        aria-label="Swap times with"
+        value={chosen}
+        onChange={(e) => setPartner(e.target.value)}
+        wrapperClassName="flex-1"
+        className="font-mono"
+      >
+        <option value="">Swap with…</option>
+        {partners.map((f) => (
+          <option key={f.callsign} value={f.callsign}>
+            {f.callsign} · {hhmmZ(f.edct)}
+          </option>
+        ))}
+      </Select>
+      <Button
+        variant="outline"
+        disabled={!chosen || swap.isPending}
+        onClick={() => swap.mutate({ a: selected.callsign, b: chosen }, { onSuccess: () => setPartner("") })}
+      >
+        Swap
+      </Button>
+    </div>
+  );
+}
+
+function SelectedPanel({
+  selected,
+  released,
+  canEdit,
+}: {
+  selected: IdstFlight | null;
+  released: IdstFlight[];
+  canEdit: boolean;
+}) {
   const qc = useQueryClient();
   const [ready, setReady] = useState("");
   const mark = useMarkRelease(selected?.fca_id ?? "");
@@ -261,13 +312,16 @@ function SelectedPanel({ selected, canEdit }: { selected: IdstFlight | null; can
 
           {canEdit ? (
             selected.released ? (
-              <Button
-                variant="destructive"
-                onClick={() => clear.mutate(selected.callsign, { onSuccess: invalidate })}
-                disabled={clear.isPending}
-              >
-                Cancel release
-              </Button>
+              <div className="flex flex-col gap-2">
+                <SwapControl key={keyOf(selected)} selected={selected} released={released} />
+                <Button
+                  variant="destructive"
+                  onClick={() => clear.mutate(selected.callsign, { onSuccess: invalidate })}
+                  disabled={clear.isPending}
+                >
+                  Cancel release
+                </Button>
+              </div>
             ) : (
               <div className="flex flex-col gap-2">
                 <div className="flex gap-1.5">
@@ -360,7 +414,7 @@ export function IdstPage() {
             />
           </div>
         )}
-        <SelectedPanel selected={selected} canEdit={canEdit} />
+        <SelectedPanel selected={selected} released={released} canEdit={canEdit} />
       </div>
     </div>
   );
