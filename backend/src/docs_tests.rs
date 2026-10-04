@@ -409,7 +409,9 @@ async fn every_get_example_reaches_a_handler(pool: sqlx::PgPool) {
     use tower::ServiceExt;
 
     let owner = crate::scope_test_support::seed_user(&pool).await;
-    sqlx::query("insert into access.user_roles (user_id, role_name) values ($1, 'SERVER_ADMIN')")
+    sqlx::query(
+        "insert into access.user_roles (user_id, role_name, source) values ($1, 'SERVER_ADMIN', 'system')",
+    )
         .bind(&owner)
         .execute(&pool)
         .await

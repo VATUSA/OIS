@@ -26,6 +26,13 @@ always matches the running API.
 | `/api/v1/admin/api-keys/{id}` | DELETE | `api_keys.key.delete` |
 | `/api/v1/admin/api-keys/{id}/disable` | POST | `api_keys.key.delete` |
 | `/api/v1/admin/audit` | GET | `audit.logs.read` |
+| `/api/v1/admin/groups` | GET | `access.groups.read` |
+| `/api/v1/admin/groups` | POST | `access.groups.update` |
+| `/api/v1/admin/groups/{name}` | DELETE | `access.groups.update` |
+| `/api/v1/admin/groups/{name}` | PUT | `access.groups.update` |
+| `/api/v1/admin/groups/{name}/members` | DELETE | `access.groups.update` |
+| `/api/v1/admin/groups/{name}/members` | GET | `access.groups.read` |
+| `/api/v1/admin/groups/{name}/members` | POST | `access.groups.update` |
 | `/api/v1/admin/jobs` | GET | `system.jobs.read` |
 | `/api/v1/admin/jobs/{name}/run` | POST | `system.jobs.update` |
 | `/api/v1/admin/service-accounts` | GET | `service_accounts.read` |
@@ -38,6 +45,9 @@ always matches the running API.
 | `/api/v1/admin/users` | GET | `access.users.read` |
 | `/api/v1/admin/users/{cid}/access` | GET | `access.users.read` |
 | `/api/v1/admin/users/{cid}/access` | POST | `access.users.update` |
+| `/api/v1/admin/vatusa-role-mappings` | GET | `access.groups.read` |
+| `/api/v1/admin/vatusa-role-mappings` | POST | `access.groups.update` |
+| `/api/v1/admin/vatusa-role-mappings/{id}` | DELETE | `access.groups.update` |
 | `/api/v1/airport-configs` | GET | `events.plan.read` |
 | `/api/v1/airport-configs/{icao}` | GET | `events.plan.read` |
 | `/api/v1/airport-configs/{icao}` | POST | `events.config.update` |
@@ -188,6 +198,7 @@ always matches the running API.
 | `/api/v1/me/flight` | GET | — (no permission marker) |
 | `/api/v1/me/preferences/{namespace}` | GET | `auth.profile.read` |
 | `/api/v1/me/preferences/{namespace}` | PUT | `auth.profile.read` |
+| `/api/v1/public/airports/{icao}` | GET | — (no permission marker) |
 | `/api/v1/public/board` | GET | — (no permission marker) |
 | `/api/v1/public/desktop/download/{platform}` | GET | — (no permission marker) |
 | `/api/v1/public/flight/{callsign}` | GET | — (no permission marker) |

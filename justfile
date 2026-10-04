@@ -108,6 +108,10 @@ docs-permissions:
 dev: up
     @echo "start backend/web/bot in separate terminals: just backend | just web | just bot"
 
+# Fail on two migrations sharing a version — sqlx would apply both and half-migrate the DB (#569)
+check-migrations:
+    .github/scripts/check-migration-versions.sh
+
 # CI-equivalent local validation
-ci: fmt-check check test-rust
+ci: check-migrations fmt-check check test-rust
     pnpm lint && pnpm typecheck
