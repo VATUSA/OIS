@@ -538,9 +538,51 @@ use utoipa::OpenApi;
         (name = "diagnostics", description = "Desktop diagnostics reports (staff)"),
         (name = "service-accounts", description = "Machine client credentials"),
         (name = "api-keys", description = "User-owned API keys (personal access tokens)")
-    )
+    ),
+    modifiers(&RateLimited)
 )]
 pub struct ApiDoc;
+
+/// Every `/api/` operation can answer `429` once the caller's allowance is spent (`rate_limit`,
+/// #588). Added here rather than on each `#[utoipa::path]` so a new endpoint cannot leave it out.
+struct RateLimited;
+
+impl utoipa::Modify for RateLimited {
+    fn modify(&self, openapi: &mut utoipa::openapi::OpenApi) {
+        use utoipa::openapi::{ResponseBuilder, header::HeaderBuilder};
+
+        let retry_after = HeaderBuilder::new()
+            .description(Some("Seconds until the next request will be accepted."))
+            .build();
+        let response = ResponseBuilder::new()
+            .description(
+                "Rate limit exceeded: back off for `Retry-After` seconds. Every limited response \
+                 carries `RateLimit-Limit`, `RateLimit-Remaining` and `RateLimit-Reset`.",
+            )
+            .header("Retry-After", retry_after)
+            .build();
+        for (path, item) in openapi.paths.paths.iter_mut() {
+            if !path.starts_with("/api/") {
+                continue;
+            }
+            for operation in [
+                &mut item.get,
+                &mut item.put,
+                &mut item.post,
+                &mut item.delete,
+                &mut item.patch,
+            ]
+            .into_iter()
+            .flatten()
+            {
+                operation
+                    .responses
+                    .responses
+                    .insert("429".to_string(), response.clone().into());
+            }
+        }
+    }
+}
 
 /// A CI utility, not a real test: dumps the current OpenAPI document to a file so the
 /// client-drift check (`.github/workflows/ci.yml`'s `client-drift` job) can regenerate

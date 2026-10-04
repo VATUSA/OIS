@@ -113,6 +113,19 @@ pub struct FeedInner {
     pub taxi_sessions: HashMap<String, taxi::TaxiSession>,
     /// Completed taxi samples per airport (rolling 3h).
     pub taxi_samples: HashMap<String, Vec<taxi::TaxiSample>>,
+    /// `GET /flow/traffic`'s last response (#588). Behind its own `Arc` so the handler can take it and
+    /// drop the feed lock before building a fresh one.
+    pub traffic_cache: Arc<std::sync::Mutex<Option<TrafficCache>>>,
+}
+
+/// One serialised `/flow/traffic` body and the inputs it was built from. Every caller gets the same
+/// list until the poller swaps the snapshot or the exclusions change, so it is built once per change
+/// rather than once per request. Holding the `Arc`s keeps their addresses from being reused, so
+/// `Arc::ptr_eq` against them is a sound "unchanged" test.
+pub struct TrafficCache {
+    pub snapshot: Arc<Snapshot>,
+    pub exclusions: Arc<HashMap<String, std::collections::HashSet<String>>>,
+    pub body: axum::body::Bytes,
 }
 
 /// Shared, cheaply-cloneable handle to the feed state.

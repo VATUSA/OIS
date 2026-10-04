@@ -27,7 +27,9 @@ them if not).
    each one does. The same `docker-compose.yml` runs every environment; only `.env` differs.
 2. Point a reverse proxy (Caddy/nginx/Cloudflare) at the three bound ports
    (`API_PORT`/`WEB_PORT`/`DOCS_PORT`) — `docker-compose.yml`'s header comment has the exact
-   subdomain mapping.
+   subdomain mapping. Set `TRUSTED_PROXY_HOPS` to the number of proxies in that chain (default 2,
+   Cloudflare → Traefik; **1** behind a single Caddy/nginx), or rate limits and audit IPs key on the
+   proxy's address instead of the client's.
 
 ## Deploying to the test server (`next` images)
 

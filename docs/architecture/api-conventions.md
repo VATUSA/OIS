@@ -53,9 +53,36 @@ Uniform envelope, stable machine-readable codes:
 | 403 `forbidden` | authenticated but the action is refused (e.g. privilege guard) |
 | 404 `not_found` | target doesn't exist |
 | 409 `conflict` | concurrent/duplicate change |
+| 429 `too_many_requests` | the caller's rate limit is spent — see [Rate limits](#rate-limits) |
 | 503 `service_unavailable` | dependency (DB, external API) unavailable |
 
 OAuth has its own precise codes (`oauth_state_mismatch`, etc.) to aid debugging.
+
+## Rate limits
+
+Every `/api/` request is charged to one bucket (`backend/src/rate_limit.rs`), chosen by caller:
+
+| Caller | Keyed on | Default per minute | Env |
+| --- | --- | --- | --- |
+| API key (`ois_pat_`) / service account (`ois_sa_`) | the credential | 300 | `RATE_LIMIT_CREDENTIAL_PER_MIN` |
+| Signed-in user (web cookie or desktop token) | the user | 600 | `RATE_LIMIT_USER_PER_MIN` |
+| Unauthenticated | client IP | 120 | `RATE_LIMIT_ANON_PER_MIN` |
+
+A full minute's allowance is available as a burst and refills evenly. Every limited response carries
+`RateLimit-Limit`, `RateLimit-Remaining` and `RateLimit-Reset` (seconds until the full allowance is
+back); a refused one is `429 too_many_requests` with `Retry-After` (seconds until the next request is
+accepted). CORS exposes all four. `/health`, `/metrics` and `/docs` are not limited.
+
+- **Per process.** Buckets live in memory, so with N backend replicas a caller can reach N× its limit.
+- **Client IP** is read `TRUSTED_PROXY_HOPS` entries from the right of `X-Forwarded-For`, since anything
+  further left is client-supplied. The default, 2, matches production (Cloudflare → Traefik); a
+  deployment behind one proxy must set 1. The audit log and `api_keys.last_used_ip` use the
+  same address.
+- Credentials are resolved before the limiter runs, so an unrecognised token is charged to its IP.
+  Because a refused request has already been resolved, resolving must stay cheap: a credential's
+  `last_used_at` (and an API key's `last_used_ip`) is written **at most once a minute**, so a caller far
+  over its limit costs one indexed read per request and no writes. "Last used" is accurate to the
+  minute.
 
 ## Auditing
 

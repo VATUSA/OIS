@@ -305,15 +305,33 @@ pub async fn fetch_audit_logs(
         .collect())
 }
 
-/// Best-effort client IP from proxy headers (first `X-Forwarded-For` hop, else
-/// `X-Real-IP`). None in local dev without a proxy.
+/// Best-effort client IP from proxy headers. None in local dev without a proxy.
+///
+/// `X-Forwarded-For` is read from the **right**: each of our `TRUSTED_PROXY_HOPS` proxies appends the
+/// address it saw, so the client is that many entries from the end. The leftmost entry is whatever the
+/// client chose to send, so taking it (as this did before #588) let any caller pick its own IP — for
+/// the anonymous rate-limit bucket, the audit log and `api_keys.last_used_ip` alike.
 pub fn client_ip(headers: &HeaderMap) -> Option<String> {
-    if let Some(forwarded) = headers.get("x-forwarded-for").and_then(|v| v.to_str().ok())
-        && let Some(first) = forwarded.split(',').next()
-    {
-        let trimmed = first.trim();
-        if !trimmed.is_empty() {
-            return Some(trimmed.to_string());
+    static HOPS: std::sync::LazyLock<usize> =
+        std::sync::LazyLock::new(crate::config::trusted_proxy_hops);
+    client_ip_behind(headers, *HOPS)
+}
+
+fn client_ip_behind(headers: &HeaderMap, hops: usize) -> Option<String> {
+    if let Some(forwarded) = headers.get("x-forwarded-for").and_then(|v| v.to_str().ok()) {
+        let chain: Vec<&str> = forwarded
+            .split(',')
+            .map(str::trim)
+            .filter(|entry| !entry.is_empty())
+            .collect();
+        // A chain shorter than our proxy count can only have been appended by them — take its first.
+        let client = chain
+            .len()
+            .checked_sub(hops)
+            .and_then(|i| chain.get(i))
+            .or(chain.first());
+        if let Some(client) = client {
+            return Some((*client).to_string());
         }
     }
     headers
@@ -366,6 +384,43 @@ pub async fn prune_audit_logs(pool: &PgPool, before: DateTime<Utc>) -> Result<u6
 mod tests {
     use super::*;
     use chrono::Duration;
+
+    fn forwarded(xff: &str) -> HeaderMap {
+        let mut headers = HeaderMap::new();
+        headers.insert("x-forwarded-for", xff.parse().unwrap());
+        headers
+    }
+
+    /// #588: the client controls everything left of what our own proxies appended, so a forged
+    /// leading entry must not become the caller's IP — it keys the anonymous rate-limit bucket.
+    #[test]
+    fn client_ip_ignores_entries_the_client_forged() {
+        let spoofed = forwarded("6.6.6.6, 7.7.7.7, 203.0.113.9");
+        assert_eq!(
+            client_ip_behind(&spoofed, 1).as_deref(),
+            Some("203.0.113.9")
+        );
+        assert_eq!(client_ip_behind(&spoofed, 2).as_deref(), Some("7.7.7.7"));
+    }
+
+    #[test]
+    fn client_ip_with_a_chain_shorter_than_the_hops_takes_its_first_entry() {
+        assert_eq!(
+            client_ip_behind(&forwarded("203.0.113.9"), 2).as_deref(),
+            Some("203.0.113.9")
+        );
+    }
+
+    #[test]
+    fn client_ip_falls_back_to_x_real_ip() {
+        let mut headers = HeaderMap::new();
+        headers.insert("x-real-ip", " 198.51.100.4 ".parse().unwrap());
+        assert_eq!(
+            client_ip_behind(&headers, 1).as_deref(),
+            Some("198.51.100.4")
+        );
+        assert_eq!(client_ip_behind(&HeaderMap::new(), 1), None);
+    }
 
     async fn audit_row(pool: &PgPool, created_at: DateTime<Utc>) -> String {
         sqlx::query_scalar::<_, String>(

@@ -4,6 +4,7 @@ use http::{
     HeaderValue, Method,
     header::{self, HeaderName},
 };
+use std::num::NonZeroU32;
 use tower_http::cors::CorsLayer;
 
 pub fn env_flag_enabled(name: &str) -> bool {
@@ -117,6 +118,30 @@ pub fn ois_public_url() -> Option<String> {
     trimmed_env("OIS_PUBLIC_URL")
 }
 
+/// Requests per minute allowed to one rate-limit bucket (#588), read from `name`
+/// (`RATE_LIMIT_CREDENTIAL_PER_MIN`, `RATE_LIMIT_USER_PER_MIN`, `RATE_LIMIT_ANON_PER_MIN`). Unset,
+/// unparsable or zero falls back to `default` — a typo must not switch limiting off or lock everyone out.
+pub fn rate_limit_per_min(name: &str, default: u32) -> NonZeroU32 {
+    trimmed_env(name)
+        .and_then(|v| v.parse::<u32>().ok())
+        .and_then(NonZeroU32::new)
+        .or(NonZeroU32::new(default))
+        .unwrap_or(NonZeroU32::MIN)
+}
+
+/// How many reverse proxies we run in front of the backend (`TRUSTED_PROXY_HOPS`, minimum 1). Each
+/// appends one `X-Forwarded-For` entry, so the client's address is this many from the right; anything
+/// further left came from the client and can be forged (#588).
+///
+/// The default, 2, is production's Cloudflare → Traefik chain. A deployment behind a single proxy (the
+/// compose stack behind one Caddy/nginx) must set 1, or every caller is keyed on the proxy's address.
+pub fn trusted_proxy_hops() -> usize {
+    trimmed_env("TRUSTED_PROXY_HOPS")
+        .and_then(|v| v.parse::<usize>().ok())
+        .unwrap_or(2)
+        .max(1)
+}
+
 /// The key that encrypts stored secrets OIS must read back (today only the VATUSA webhook secret,
 /// #605): 32 bytes, base64-encoded, in `OIS_SECRET_KEY`. `None` when unset or malformed — callers
 /// treat that as "feature off" and log it, never panic, matching how `vatusa_api_key()` disables sync.
@@ -152,6 +177,14 @@ pub fn build_cors_layer() -> CorsLayer {
             header::AUTHORIZATION,
             header::CONTENT_TYPE,
             HeaderName::from_static("x-requested-with"),
+        ])
+        // The web app and desktop are cross-origin, so without this they could not read how much of
+        // their allowance is left or how long to back off after a 429 (#588).
+        .expose_headers([
+            header::RETRY_AFTER,
+            crate::rate_limit::LIMIT_HEADER,
+            crate::rate_limit::REMAINING_HEADER,
+            crate::rate_limit::RESET_HEADER,
         ]);
 
     let origins: Vec<HeaderValue> = configured_allowed_origins()

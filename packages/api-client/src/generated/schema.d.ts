@@ -7257,6 +7257,15 @@ export interface operations {
                 };
                 content?: never;
             };
+            /** @description Rate limit exceeded: back off for `Retry-After` seconds. Every limited response carries `RateLimit-Limit`, `RateLimit-Remaining` and `RateLimit-Reset`. */
+            429: {
+                headers: {
+                    /** @description Seconds until the next request will be accepted. */
+                    "Retry-After"?: string;
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
         };
     };
     get_self_access: {
@@ -7278,6 +7287,15 @@ export interface operations {
             };
             401: {
                 headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description Rate limit exceeded: back off for `Retry-After` seconds. Every limited response carries `RateLimit-Limit`, `RateLimit-Remaining` and `RateLimit-Reset`. */
+            429: {
+                headers: {
+                    /** @description Seconds until the next request will be accepted. */
+                    "Retry-After"?: string;
                     [name: string]: unknown;
                 };
                 content?: never;
@@ -7306,6 +7324,15 @@ export interface operations {
             };
             401: {
                 headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description Rate limit exceeded: back off for `Retry-After` seconds. Every limited response carries `RateLimit-Limit`, `RateLimit-Remaining` and `RateLimit-Reset`. */
+            429: {
+                headers: {
+                    /** @description Seconds until the next request will be accepted. */
+                    "Retry-After"?: string;
                     [name: string]: unknown;
                 };
                 content?: never;
@@ -7341,6 +7368,15 @@ export interface operations {
                 };
                 content?: never;
             };
+            /** @description Rate limit exceeded: back off for `Retry-After` seconds. Every limited response carries `RateLimit-Limit`, `RateLimit-Remaining` and `RateLimit-Reset`. */
+            429: {
+                headers: {
+                    /** @description Seconds until the next request will be accepted. */
+                    "Retry-After"?: string;
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
         };
     };
     admin_disable_key: {
@@ -7372,6 +7408,15 @@ export interface operations {
             };
             404: {
                 headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description Rate limit exceeded: back off for `Retry-After` seconds. Every limited response carries `RateLimit-Limit`, `RateLimit-Remaining` and `RateLimit-Reset`. */
+            429: {
+                headers: {
+                    /** @description Seconds until the next request will be accepted. */
+                    "Retry-After"?: string;
                     [name: string]: unknown;
                 };
                 content?: never;
@@ -7420,6 +7465,15 @@ export interface operations {
                 };
                 content?: never;
             };
+            /** @description Rate limit exceeded: back off for `Retry-After` seconds. Every limited response carries `RateLimit-Limit`, `RateLimit-Remaining` and `RateLimit-Reset`. */
+            429: {
+                headers: {
+                    /** @description Seconds until the next request will be accepted. */
+                    "Retry-After"?: string;
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
         };
     };
     list_reports: {
@@ -7446,6 +7500,15 @@ export interface operations {
             };
             401: {
                 headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description Rate limit exceeded: back off for `Retry-After` seconds. Every limited response carries `RateLimit-Limit`, `RateLimit-Remaining` and `RateLimit-Reset`. */
+            429: {
+                headers: {
+                    /** @description Seconds until the next request will be accepted. */
+                    "Retry-After"?: string;
                     [name: string]: unknown;
                 };
                 content?: never;
@@ -7484,6 +7547,15 @@ export interface operations {
                 };
                 content?: never;
             };
+            /** @description Rate limit exceeded: back off for `Retry-After` seconds. Every limited response carries `RateLimit-Limit`, `RateLimit-Remaining` and `RateLimit-Reset`. */
+            429: {
+                headers: {
+                    /** @description Seconds until the next request will be accepted. */
+                    "Retry-After"?: string;
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
         };
     };
     delete_report: {
@@ -7512,6 +7584,15 @@ export interface operations {
             };
             404: {
                 headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description Rate limit exceeded: back off for `Retry-After` seconds. Every limited response carries `RateLimit-Limit`, `RateLimit-Remaining` and `RateLimit-Reset`. */
+            429: {
+                headers: {
+                    /** @description Seconds until the next request will be accepted. */
+                    "Retry-After"?: string;
                     [name: string]: unknown;
                 };
                 content?: never;
@@ -7551,6 +7632,15 @@ export interface operations {
                 };
                 content?: never;
             };
+            /** @description Rate limit exceeded: back off for `Retry-After` seconds. Every limited response carries `RateLimit-Limit`, `RateLimit-Remaining` and `RateLimit-Reset`. */
+            429: {
+                headers: {
+                    /** @description Seconds until the next request will be accepted. */
+                    "Retry-After"?: string;
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
         };
     };
     list_groups: {
@@ -7572,6 +7662,15 @@ export interface operations {
             };
             401: {
                 headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description Rate limit exceeded: back off for `Retry-After` seconds. Every limited response carries `RateLimit-Limit`, `RateLimit-Remaining` and `RateLimit-Reset`. */
+            429: {
+                headers: {
+                    /** @description Seconds until the next request will be accepted. */
+                    "Retry-After"?: string;
                     [name: string]: unknown;
                 };
                 content?: never;
@@ -7619,6 +7718,15 @@ export interface operations {
             };
             409: {
                 headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description Rate limit exceeded: back off for `Retry-After` seconds. Every limited response carries `RateLimit-Limit`, `RateLimit-Remaining` and `RateLimit-Reset`. */
+            429: {
+                headers: {
+                    /** @description Seconds until the next request will be accepted. */
+                    "Retry-After"?: string;
                     [name: string]: unknown;
                 };
                 content?: never;
@@ -7673,6 +7781,15 @@ export interface operations {
                 };
                 content?: never;
             };
+            /** @description Rate limit exceeded: back off for `Retry-After` seconds. Every limited response carries `RateLimit-Limit`, `RateLimit-Remaining` and `RateLimit-Reset`. */
+            429: {
+                headers: {
+                    /** @description Seconds until the next request will be accepted. */
+                    "Retry-After"?: string;
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
         };
     };
     delete_group: {
@@ -7717,6 +7834,15 @@ export interface operations {
                 };
                 content?: never;
             };
+            /** @description Rate limit exceeded: back off for `Retry-After` seconds. Every limited response carries `RateLimit-Limit`, `RateLimit-Remaining` and `RateLimit-Reset`. */
+            429: {
+                headers: {
+                    /** @description Seconds until the next request will be accepted. */
+                    "Retry-After"?: string;
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
         };
     };
     list_group_members: {
@@ -7754,6 +7880,15 @@ export interface operations {
             };
             404: {
                 headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description Rate limit exceeded: back off for `Retry-After` seconds. Every limited response carries `RateLimit-Limit`, `RateLimit-Remaining` and `RateLimit-Reset`. */
+            429: {
+                headers: {
+                    /** @description Seconds until the next request will be accepted. */
+                    "Retry-After"?: string;
                     [name: string]: unknown;
                 };
                 content?: never;
@@ -7806,6 +7941,15 @@ export interface operations {
                 };
                 content?: never;
             };
+            /** @description Rate limit exceeded: back off for `Retry-After` seconds. Every limited response carries `RateLimit-Limit`, `RateLimit-Remaining` and `RateLimit-Reset`. */
+            429: {
+                headers: {
+                    /** @description Seconds until the next request will be accepted. */
+                    "Retry-After"?: string;
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
         };
     };
     remove_group_member: {
@@ -7854,6 +7998,15 @@ export interface operations {
                 };
                 content?: never;
             };
+            /** @description Rate limit exceeded: back off for `Retry-After` seconds. Every limited response carries `RateLimit-Limit`, `RateLimit-Remaining` and `RateLimit-Reset`. */
+            429: {
+                headers: {
+                    /** @description Seconds until the next request will be accepted. */
+                    "Retry-After"?: string;
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
         };
     };
     list_jobs: {
@@ -7875,6 +8028,15 @@ export interface operations {
             };
             401: {
                 headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description Rate limit exceeded: back off for `Retry-After` seconds. Every limited response carries `RateLimit-Limit`, `RateLimit-Remaining` and `RateLimit-Reset`. */
+            429: {
+                headers: {
+                    /** @description Seconds until the next request will be accepted. */
+                    "Retry-After"?: string;
                     [name: string]: unknown;
                 };
                 content?: never;
@@ -7911,6 +8073,15 @@ export interface operations {
                 };
                 content?: never;
             };
+            /** @description Rate limit exceeded: back off for `Retry-After` seconds. Every limited response carries `RateLimit-Limit`, `RateLimit-Remaining` and `RateLimit-Reset`. */
+            429: {
+                headers: {
+                    /** @description Seconds until the next request will be accepted. */
+                    "Retry-After"?: string;
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
         };
     };
     list_service_accounts: {
@@ -7932,6 +8103,15 @@ export interface operations {
             };
             401: {
                 headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description Rate limit exceeded: back off for `Retry-After` seconds. Every limited response carries `RateLimit-Limit`, `RateLimit-Remaining` and `RateLimit-Reset`. */
+            429: {
+                headers: {
+                    /** @description Seconds until the next request will be accepted. */
+                    "Retry-After"?: string;
                     [name: string]: unknown;
                 };
                 content?: never;
@@ -7972,6 +8152,15 @@ export interface operations {
                 };
                 content?: never;
             };
+            /** @description Rate limit exceeded: back off for `Retry-After` seconds. Every limited response carries `RateLimit-Limit`, `RateLimit-Remaining` and `RateLimit-Reset`. */
+            429: {
+                headers: {
+                    /** @description Seconds until the next request will be accepted. */
+                    "Retry-After"?: string;
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
         };
     };
     grantable_service_account_permissions: {
@@ -7998,6 +8187,15 @@ export interface operations {
                 };
                 content?: never;
             };
+            /** @description Rate limit exceeded: back off for `Retry-After` seconds. Every limited response carries `RateLimit-Limit`, `RateLimit-Remaining` and `RateLimit-Reset`. */
+            429: {
+                headers: {
+                    /** @description Seconds until the next request will be accepted. */
+                    "Retry-After"?: string;
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
         };
     };
     list_service_account_roles: {
@@ -8020,6 +8218,15 @@ export interface operations {
             };
             401: {
                 headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description Rate limit exceeded: back off for `Retry-After` seconds. Every limited response carries `RateLimit-Limit`, `RateLimit-Remaining` and `RateLimit-Reset`. */
+            429: {
+                headers: {
+                    /** @description Seconds until the next request will be accepted. */
+                    "Retry-After"?: string;
                     [name: string]: unknown;
                 };
                 content?: never;
@@ -8053,6 +8260,15 @@ export interface operations {
             };
             404: {
                 headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description Rate limit exceeded: back off for `Retry-After` seconds. Every limited response carries `RateLimit-Limit`, `RateLimit-Remaining` and `RateLimit-Reset`. */
+            429: {
+                headers: {
+                    /** @description Seconds until the next request will be accepted. */
+                    "Retry-After"?: string;
                     [name: string]: unknown;
                 };
                 content?: never;
@@ -8107,6 +8323,15 @@ export interface operations {
                 };
                 content?: never;
             };
+            /** @description Rate limit exceeded: back off for `Retry-After` seconds. Every limited response carries `RateLimit-Limit`, `RateLimit-Remaining` and `RateLimit-Reset`. */
+            429: {
+                headers: {
+                    /** @description Seconds until the next request will be accepted. */
+                    "Retry-After"?: string;
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
         };
     };
     set_service_account_roles: {
@@ -8153,6 +8378,15 @@ export interface operations {
             };
             404: {
                 headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description Rate limit exceeded: back off for `Retry-After` seconds. Every limited response carries `RateLimit-Limit`, `RateLimit-Remaining` and `RateLimit-Reset`. */
+            429: {
+                headers: {
+                    /** @description Seconds until the next request will be accepted. */
+                    "Retry-After"?: string;
                     [name: string]: unknown;
                 };
                 content?: never;
@@ -8209,6 +8443,15 @@ export interface operations {
                 };
                 content?: never;
             };
+            /** @description Rate limit exceeded: back off for `Retry-After` seconds. Every limited response carries `RateLimit-Limit`, `RateLimit-Remaining` and `RateLimit-Reset`. */
+            429: {
+                headers: {
+                    /** @description Seconds until the next request will be accepted. */
+                    "Retry-After"?: string;
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
         };
     };
     get_admin_summary: {
@@ -8230,6 +8473,15 @@ export interface operations {
             };
             401: {
                 headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description Rate limit exceeded: back off for `Retry-After` seconds. Every limited response carries `RateLimit-Limit`, `RateLimit-Remaining` and `RateLimit-Reset`. */
+            429: {
+                headers: {
+                    /** @description Seconds until the next request will be accepted. */
+                    "Retry-After"?: string;
                     [name: string]: unknown;
                 };
                 content?: never;
@@ -8266,6 +8518,15 @@ export interface operations {
                 };
                 content?: never;
             };
+            /** @description Rate limit exceeded: back off for `Retry-After` seconds. Every limited response carries `RateLimit-Limit`, `RateLimit-Remaining` and `RateLimit-Reset`. */
+            429: {
+                headers: {
+                    /** @description Seconds until the next request will be accepted. */
+                    "Retry-After"?: string;
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
         };
     };
     get_user_access: {
@@ -8296,6 +8557,15 @@ export interface operations {
             };
             404: {
                 headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description Rate limit exceeded: back off for `Retry-After` seconds. Every limited response carries `RateLimit-Limit`, `RateLimit-Remaining` and `RateLimit-Reset`. */
+            429: {
+                headers: {
+                    /** @description Seconds until the next request will be accepted. */
+                    "Retry-After"?: string;
                     [name: string]: unknown;
                 };
                 content?: never;
@@ -8350,6 +8620,15 @@ export interface operations {
                 };
                 content?: never;
             };
+            /** @description Rate limit exceeded: back off for `Retry-After` seconds. Every limited response carries `RateLimit-Limit`, `RateLimit-Remaining` and `RateLimit-Reset`. */
+            429: {
+                headers: {
+                    /** @description Seconds until the next request will be accepted. */
+                    "Retry-After"?: string;
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
         };
     };
     list_vatusa_role_mappings: {
@@ -8377,6 +8656,15 @@ export interface operations {
             };
             403: {
                 headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description Rate limit exceeded: back off for `Retry-After` seconds. Every limited response carries `RateLimit-Limit`, `RateLimit-Remaining` and `RateLimit-Reset`. */
+            429: {
+                headers: {
+                    /** @description Seconds until the next request will be accepted. */
+                    "Retry-After"?: string;
                     [name: string]: unknown;
                 };
                 content?: never;
@@ -8434,6 +8722,15 @@ export interface operations {
                 };
                 content?: never;
             };
+            /** @description Rate limit exceeded: back off for `Retry-After` seconds. Every limited response carries `RateLimit-Limit`, `RateLimit-Remaining` and `RateLimit-Reset`. */
+            429: {
+                headers: {
+                    /** @description Seconds until the next request will be accepted. */
+                    "Retry-After"?: string;
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
         };
     };
     delete_vatusa_role_mapping: {
@@ -8472,6 +8769,15 @@ export interface operations {
                 };
                 content?: never;
             };
+            /** @description Rate limit exceeded: back off for `Retry-After` seconds. Every limited response carries `RateLimit-Limit`, `RateLimit-Remaining` and `RateLimit-Reset`. */
+            429: {
+                headers: {
+                    /** @description Seconds until the next request will be accepted. */
+                    "Retry-After"?: string;
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
         };
     };
     list_all_airport_configs: {
@@ -8500,6 +8806,15 @@ export interface operations {
                 };
                 content?: never;
             };
+            /** @description Rate limit exceeded: back off for `Retry-After` seconds. Every limited response carries `RateLimit-Limit`, `RateLimit-Remaining` and `RateLimit-Reset`. */
+            429: {
+                headers: {
+                    /** @description Seconds until the next request will be accepted. */
+                    "Retry-After"?: string;
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
         };
     };
     list_airport_configs: {
@@ -8523,6 +8838,15 @@ export interface operations {
             };
             401: {
                 headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description Rate limit exceeded: back off for `Retry-After` seconds. Every limited response carries `RateLimit-Limit`, `RateLimit-Remaining` and `RateLimit-Reset`. */
+            429: {
+                headers: {
+                    /** @description Seconds until the next request will be accepted. */
+                    "Retry-After"?: string;
                     [name: string]: unknown;
                 };
                 content?: never;
@@ -8566,6 +8890,15 @@ export interface operations {
             };
             403: {
                 headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description Rate limit exceeded: back off for `Retry-After` seconds. Every limited response carries `RateLimit-Limit`, `RateLimit-Remaining` and `RateLimit-Reset`. */
+            429: {
+                headers: {
+                    /** @description Seconds until the next request will be accepted. */
+                    "Retry-After"?: string;
                     [name: string]: unknown;
                 };
                 content?: never;
@@ -8620,6 +8953,15 @@ export interface operations {
                 };
                 content?: never;
             };
+            /** @description Rate limit exceeded: back off for `Retry-After` seconds. Every limited response carries `RateLimit-Limit`, `RateLimit-Remaining` and `RateLimit-Reset`. */
+            429: {
+                headers: {
+                    /** @description Seconds until the next request will be accepted. */
+                    "Retry-After"?: string;
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
         };
     };
     delete_airport_config: {
@@ -8654,6 +8996,15 @@ export interface operations {
             };
             404: {
                 headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description Rate limit exceeded: back off for `Retry-After` seconds. Every limited response carries `RateLimit-Limit`, `RateLimit-Remaining` and `RateLimit-Reset`. */
+            429: {
+                headers: {
+                    /** @description Seconds until the next request will be accepted. */
+                    "Retry-After"?: string;
                     [name: string]: unknown;
                 };
                 content?: never;
@@ -8697,6 +9048,15 @@ export interface operations {
             };
             403: {
                 headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description Rate limit exceeded: back off for `Retry-After` seconds. Every limited response carries `RateLimit-Limit`, `RateLimit-Remaining` and `RateLimit-Reset`. */
+            429: {
+                headers: {
+                    /** @description Seconds until the next request will be accepted. */
+                    "Retry-After"?: string;
                     [name: string]: unknown;
                 };
                 content?: never;
@@ -8751,6 +9111,15 @@ export interface operations {
                 };
                 content?: never;
             };
+            /** @description Rate limit exceeded: back off for `Retry-After` seconds. Every limited response carries `RateLimit-Limit`, `RateLimit-Remaining` and `RateLimit-Reset`. */
+            429: {
+                headers: {
+                    /** @description Seconds until the next request will be accepted. */
+                    "Retry-After"?: string;
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
         };
     };
     delete_airport_gate: {
@@ -8785,6 +9154,15 @@ export interface operations {
             };
             404: {
                 headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description Rate limit exceeded: back off for `Retry-After` seconds. Every limited response carries `RateLimit-Limit`, `RateLimit-Remaining` and `RateLimit-Reset`. */
+            429: {
+                headers: {
+                    /** @description Seconds until the next request will be accepted. */
+                    "Retry-After"?: string;
                     [name: string]: unknown;
                 };
                 content?: never;
@@ -8828,6 +9206,15 @@ export interface operations {
             };
             403: {
                 headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description Rate limit exceeded: back off for `Retry-After` seconds. Every limited response carries `RateLimit-Limit`, `RateLimit-Remaining` and `RateLimit-Reset`. */
+            429: {
+                headers: {
+                    /** @description Seconds until the next request will be accepted. */
+                    "Retry-After"?: string;
                     [name: string]: unknown;
                 };
                 content?: never;
@@ -8882,6 +9269,15 @@ export interface operations {
                 };
                 content?: never;
             };
+            /** @description Rate limit exceeded: back off for `Retry-After` seconds. Every limited response carries `RateLimit-Limit`, `RateLimit-Remaining` and `RateLimit-Reset`. */
+            429: {
+                headers: {
+                    /** @description Seconds until the next request will be accepted. */
+                    "Retry-After"?: string;
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
         };
     };
     delete_airport_ramp_area: {
@@ -8916,6 +9312,15 @@ export interface operations {
             };
             404: {
                 headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description Rate limit exceeded: back off for `Retry-After` seconds. Every limited response carries `RateLimit-Limit`, `RateLimit-Remaining` and `RateLimit-Reset`. */
+            429: {
+                headers: {
+                    /** @description Seconds until the next request will be accepted. */
+                    "Retry-After"?: string;
                     [name: string]: unknown;
                 };
                 content?: never;
@@ -8959,6 +9364,15 @@ export interface operations {
             };
             403: {
                 headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description Rate limit exceeded: back off for `Retry-After` seconds. Every limited response carries `RateLimit-Limit`, `RateLimit-Remaining` and `RateLimit-Reset`. */
+            429: {
+                headers: {
+                    /** @description Seconds until the next request will be accepted. */
+                    "Retry-After"?: string;
                     [name: string]: unknown;
                 };
                 content?: never;
@@ -9013,6 +9427,15 @@ export interface operations {
                 };
                 content?: never;
             };
+            /** @description Rate limit exceeded: back off for `Retry-After` seconds. Every limited response carries `RateLimit-Limit`, `RateLimit-Remaining` and `RateLimit-Reset`. */
+            429: {
+                headers: {
+                    /** @description Seconds until the next request will be accepted. */
+                    "Retry-After"?: string;
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
         };
     };
     delete_airport_runway: {
@@ -9051,6 +9474,15 @@ export interface operations {
                 };
                 content?: never;
             };
+            /** @description Rate limit exceeded: back off for `Retry-After` seconds. Every limited response carries `RateLimit-Limit`, `RateLimit-Remaining` and `RateLimit-Reset`. */
+            429: {
+                headers: {
+                    /** @description Seconds until the next request will be accepted. */
+                    "Retry-After"?: string;
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
         };
     };
     get_airport_surface: {
@@ -9074,6 +9506,15 @@ export interface operations {
             };
             401: {
                 headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description Rate limit exceeded: back off for `Retry-After` seconds. Every limited response carries `RateLimit-Limit`, `RateLimit-Remaining` and `RateLimit-Reset`. */
+            429: {
+                headers: {
+                    /** @description Seconds until the next request will be accepted. */
+                    "Retry-After"?: string;
                     [name: string]: unknown;
                 };
                 content?: never;
@@ -9118,6 +9559,15 @@ export interface operations {
                 };
                 content?: never;
             };
+            /** @description Rate limit exceeded: back off for `Retry-After` seconds. Every limited response carries `RateLimit-Limit`, `RateLimit-Remaining` and `RateLimit-Reset`. */
+            429: {
+                headers: {
+                    /** @description Seconds until the next request will be accepted. */
+                    "Retry-After"?: string;
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
         };
     };
     create_airport_taxiway: {
@@ -9157,6 +9607,15 @@ export interface operations {
             };
             403: {
                 headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description Rate limit exceeded: back off for `Retry-After` seconds. Every limited response carries `RateLimit-Limit`, `RateLimit-Remaining` and `RateLimit-Reset`. */
+            429: {
+                headers: {
+                    /** @description Seconds until the next request will be accepted. */
+                    "Retry-After"?: string;
                     [name: string]: unknown;
                 };
                 content?: never;
@@ -9211,6 +9670,15 @@ export interface operations {
                 };
                 content?: never;
             };
+            /** @description Rate limit exceeded: back off for `Retry-After` seconds. Every limited response carries `RateLimit-Limit`, `RateLimit-Remaining` and `RateLimit-Reset`. */
+            429: {
+                headers: {
+                    /** @description Seconds until the next request will be accepted. */
+                    "Retry-After"?: string;
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
         };
     };
     delete_airport_taxiway: {
@@ -9249,6 +9717,15 @@ export interface operations {
                 };
                 content?: never;
             };
+            /** @description Rate limit exceeded: back off for `Retry-After` seconds. Every limited response carries `RateLimit-Limit`, `RateLimit-Remaining` and `RateLimit-Reset`. */
+            429: {
+                headers: {
+                    /** @description Seconds until the next request will be accepted. */
+                    "Retry-After"?: string;
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
         };
     };
     list_my_keys: {
@@ -9270,6 +9747,15 @@ export interface operations {
             };
             401: {
                 headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description Rate limit exceeded: back off for `Retry-After` seconds. Every limited response carries `RateLimit-Limit`, `RateLimit-Remaining` and `RateLimit-Reset`. */
+            429: {
+                headers: {
+                    /** @description Seconds until the next request will be accepted. */
+                    "Retry-After"?: string;
                     [name: string]: unknown;
                 };
                 content?: never;
@@ -9316,6 +9802,15 @@ export interface operations {
                 };
                 content?: never;
             };
+            /** @description Rate limit exceeded: back off for `Retry-After` seconds. Every limited response carries `RateLimit-Limit`, `RateLimit-Remaining` and `RateLimit-Reset`. */
+            429: {
+                headers: {
+                    /** @description Seconds until the next request will be accepted. */
+                    "Retry-After"?: string;
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
         };
     };
     grantable_permissions: {
@@ -9337,6 +9832,15 @@ export interface operations {
             };
             401: {
                 headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description Rate limit exceeded: back off for `Retry-After` seconds. Every limited response carries `RateLimit-Limit`, `RateLimit-Remaining` and `RateLimit-Reset`. */
+            429: {
+                headers: {
+                    /** @description Seconds until the next request will be accepted. */
+                    "Retry-After"?: string;
                     [name: string]: unknown;
                 };
                 content?: never;
@@ -9374,6 +9878,15 @@ export interface operations {
                 };
                 content?: never;
             };
+            /** @description Rate limit exceeded: back off for `Retry-After` seconds. Every limited response carries `RateLimit-Limit`, `RateLimit-Remaining` and `RateLimit-Reset`. */
+            429: {
+                headers: {
+                    /** @description Seconds until the next request will be accepted. */
+                    "Retry-After"?: string;
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
         };
     };
     delete_my_key: {
@@ -9401,6 +9914,15 @@ export interface operations {
             };
             404: {
                 headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description Rate limit exceeded: back off for `Retry-After` seconds. Every limited response carries `RateLimit-Limit`, `RateLimit-Remaining` and `RateLimit-Reset`. */
+            429: {
+                headers: {
+                    /** @description Seconds until the next request will be accepted. */
+                    "Retry-After"?: string;
                     [name: string]: unknown;
                 };
                 content?: never;
@@ -9441,6 +9963,15 @@ export interface operations {
                 };
                 content?: never;
             };
+            /** @description Rate limit exceeded: back off for `Retry-After` seconds. Every limited response carries `RateLimit-Limit`, `RateLimit-Remaining` and `RateLimit-Reset`. */
+            429: {
+                headers: {
+                    /** @description Seconds until the next request will be accepted. */
+                    "Retry-After"?: string;
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
         };
     };
     disable_my_key: {
@@ -9468,6 +9999,15 @@ export interface operations {
             };
             404: {
                 headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description Rate limit exceeded: back off for `Retry-After` seconds. Every limited response carries `RateLimit-Limit`, `RateLimit-Remaining` and `RateLimit-Reset`. */
+            429: {
+                headers: {
+                    /** @description Seconds until the next request will be accepted. */
+                    "Retry-After"?: string;
                     [name: string]: unknown;
                 };
                 content?: never;
@@ -9521,6 +10061,15 @@ export interface operations {
                 };
                 content?: never;
             };
+            /** @description Rate limit exceeded: back off for `Retry-After` seconds. Every limited response carries `RateLimit-Limit`, `RateLimit-Remaining` and `RateLimit-Reset`. */
+            429: {
+                headers: {
+                    /** @description Seconds until the next request will be accepted. */
+                    "Retry-After"?: string;
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
         };
     };
     rotate_key: {
@@ -9551,6 +10100,15 @@ export interface operations {
             };
             404: {
                 headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description Rate limit exceeded: back off for `Retry-After` seconds. Every limited response carries `RateLimit-Limit`, `RateLimit-Remaining` and `RateLimit-Reset`. */
+            429: {
+                headers: {
+                    /** @description Seconds until the next request will be accepted. */
+                    "Retry-After"?: string;
                     [name: string]: unknown;
                 };
                 content?: never;
@@ -9586,6 +10144,15 @@ export interface operations {
                 };
                 content?: never;
             };
+            /** @description Rate limit exceeded: back off for `Retry-After` seconds. Every limited response carries `RateLimit-Limit`, `RateLimit-Remaining` and `RateLimit-Reset`. */
+            429: {
+                headers: {
+                    /** @description Seconds until the next request will be accepted. */
+                    "Retry-After"?: string;
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
         };
     };
     desktop_refresh: {
@@ -9609,6 +10176,15 @@ export interface operations {
             /** @description Not a live desktop session */
             401: {
                 headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description Rate limit exceeded: back off for `Retry-After` seconds. Every limited response carries `RateLimit-Limit`, `RateLimit-Remaining` and `RateLimit-Reset`. */
+            429: {
+                headers: {
+                    /** @description Seconds until the next request will be accepted. */
+                    "Retry-After"?: string;
                     [name: string]: unknown;
                 };
                 content?: never;
@@ -9637,6 +10213,15 @@ export interface operations {
                 };
                 content?: never;
             };
+            /** @description Rate limit exceeded: back off for `Retry-After` seconds. Every limited response carries `RateLimit-Limit`, `RateLimit-Remaining` and `RateLimit-Reset`. */
+            429: {
+                headers: {
+                    /** @description Seconds until the next request will be accepted. */
+                    "Retry-After"?: string;
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
         };
     };
     vatsim_callback: {
@@ -9661,6 +10246,15 @@ export interface operations {
                 };
                 content?: never;
             };
+            /** @description Rate limit exceeded: back off for `Retry-After` seconds. Every limited response carries `RateLimit-Limit`, `RateLimit-Remaining` and `RateLimit-Reset`. */
+            429: {
+                headers: {
+                    /** @description Seconds until the next request will be accepted. */
+                    "Retry-After"?: string;
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
         };
     };
     vatsim_login: {
@@ -9678,6 +10272,15 @@ export interface operations {
             /** @description Redirect to VATSIM OAuth */
             307: {
                 headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description Rate limit exceeded: back off for `Retry-After` seconds. Every limited response carries `RateLimit-Limit`, `RateLimit-Remaining` and `RateLimit-Reset`. */
+            429: {
+                headers: {
+                    /** @description Seconds until the next request will be accepted. */
+                    "Retry-After"?: string;
                     [name: string]: unknown;
                 };
                 content?: never;
@@ -9707,6 +10310,15 @@ export interface operations {
             };
             401: {
                 headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description Rate limit exceeded: back off for `Retry-After` seconds. Every limited response carries `RateLimit-Limit`, `RateLimit-Remaining` and `RateLimit-Reset`. */
+            429: {
+                headers: {
+                    /** @description Seconds until the next request will be accepted. */
+                    "Retry-After"?: string;
                     [name: string]: unknown;
                 };
                 content?: never;
@@ -9746,6 +10358,15 @@ export interface operations {
                 };
                 content?: never;
             };
+            /** @description Rate limit exceeded: back off for `Retry-After` seconds. Every limited response carries `RateLimit-Limit`, `RateLimit-Remaining` and `RateLimit-Reset`. */
+            429: {
+                headers: {
+                    /** @description Seconds until the next request will be accepted. */
+                    "Retry-After"?: string;
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
         };
     };
     delete_collection: {
@@ -9777,6 +10398,15 @@ export interface operations {
                 };
                 content?: never;
             };
+            /** @description Rate limit exceeded: back off for `Retry-After` seconds. Every limited response carries `RateLimit-Limit`, `RateLimit-Remaining` and `RateLimit-Reset`. */
+            429: {
+                headers: {
+                    /** @description Seconds until the next request will be accepted. */
+                    "Retry-After"?: string;
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
         };
     };
     list_dashboards: {
@@ -9798,6 +10428,15 @@ export interface operations {
             };
             401: {
                 headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description Rate limit exceeded: back off for `Retry-After` seconds. Every limited response carries `RateLimit-Limit`, `RateLimit-Remaining` and `RateLimit-Reset`. */
+            429: {
+                headers: {
+                    /** @description Seconds until the next request will be accepted. */
+                    "Retry-After"?: string;
                     [name: string]: unknown;
                 };
                 content?: never;
@@ -9837,6 +10476,15 @@ export interface operations {
                 };
                 content?: never;
             };
+            /** @description Rate limit exceeded: back off for `Retry-After` seconds. Every limited response carries `RateLimit-Limit`, `RateLimit-Remaining` and `RateLimit-Reset`. */
+            429: {
+                headers: {
+                    /** @description Seconds until the next request will be accepted. */
+                    "Retry-After"?: string;
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
         };
     };
     get_shared_dashboard: {
@@ -9866,6 +10514,15 @@ export interface operations {
             };
             404: {
                 headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description Rate limit exceeded: back off for `Retry-After` seconds. Every limited response carries `RateLimit-Limit`, `RateLimit-Remaining` and `RateLimit-Reset`. */
+            429: {
+                headers: {
+                    /** @description Seconds until the next request will be accepted. */
+                    "Retry-After"?: string;
                     [name: string]: unknown;
                 };
                 content?: never;
@@ -9903,6 +10560,15 @@ export interface operations {
                 };
                 content?: never;
             };
+            /** @description Rate limit exceeded: back off for `Retry-After` seconds. Every limited response carries `RateLimit-Limit`, `RateLimit-Remaining` and `RateLimit-Reset`. */
+            429: {
+                headers: {
+                    /** @description Seconds until the next request will be accepted. */
+                    "Retry-After"?: string;
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
         };
     };
     get_dashboard: {
@@ -9932,6 +10598,15 @@ export interface operations {
             };
             404: {
                 headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description Rate limit exceeded: back off for `Retry-After` seconds. Every limited response carries `RateLimit-Limit`, `RateLimit-Remaining` and `RateLimit-Reset`. */
+            429: {
+                headers: {
+                    /** @description Seconds until the next request will be accepted. */
+                    "Retry-After"?: string;
                     [name: string]: unknown;
                 };
                 content?: never;
@@ -9979,6 +10654,15 @@ export interface operations {
                 };
                 content?: never;
             };
+            /** @description Rate limit exceeded: back off for `Retry-After` seconds. Every limited response carries `RateLimit-Limit`, `RateLimit-Remaining` and `RateLimit-Reset`. */
+            429: {
+                headers: {
+                    /** @description Seconds until the next request will be accepted. */
+                    "Retry-After"?: string;
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
         };
     };
     delete_dashboard: {
@@ -10006,6 +10690,15 @@ export interface operations {
             };
             404: {
                 headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description Rate limit exceeded: back off for `Retry-After` seconds. Every limited response carries `RateLimit-Limit`, `RateLimit-Remaining` and `RateLimit-Reset`. */
+            429: {
+                headers: {
+                    /** @description Seconds until the next request will be accepted. */
+                    "Retry-After"?: string;
                     [name: string]: unknown;
                 };
                 content?: never;
@@ -10043,6 +10736,15 @@ export interface operations {
                 };
                 content?: never;
             };
+            /** @description Rate limit exceeded: back off for `Retry-After` seconds. Every limited response carries `RateLimit-Limit`, `RateLimit-Remaining` and `RateLimit-Reset`. */
+            429: {
+                headers: {
+                    /** @description Seconds until the next request will be accepted. */
+                    "Retry-After"?: string;
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
         };
     };
     unshare_dashboard: {
@@ -10074,6 +10776,15 @@ export interface operations {
                 };
                 content?: never;
             };
+            /** @description Rate limit exceeded: back off for `Retry-After` seconds. Every limited response carries `RateLimit-Limit`, `RateLimit-Remaining` and `RateLimit-Reset`. */
+            429: {
+                headers: {
+                    /** @description Seconds until the next request will be accepted. */
+                    "Retry-After"?: string;
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
         };
     };
     list_events: {
@@ -10095,6 +10806,15 @@ export interface operations {
             };
             401: {
                 headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description Rate limit exceeded: back off for `Retry-After` seconds. Every limited response carries `RateLimit-Limit`, `RateLimit-Remaining` and `RateLimit-Reset`. */
+            429: {
+                headers: {
+                    /** @description Seconds until the next request will be accepted. */
+                    "Retry-After"?: string;
                     [name: string]: unknown;
                 };
                 content?: never;
@@ -10133,6 +10853,15 @@ export interface operations {
                 };
                 content?: never;
             };
+            /** @description Rate limit exceeded: back off for `Retry-After` seconds. Every limited response carries `RateLimit-Limit`, `RateLimit-Remaining` and `RateLimit-Reset`. */
+            429: {
+                headers: {
+                    /** @description Seconds until the next request will be accepted. */
+                    "Retry-After"?: string;
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
         };
     };
     list_requests: {
@@ -10159,6 +10888,15 @@ export interface operations {
             };
             401: {
                 headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description Rate limit exceeded: back off for `Retry-After` seconds. Every limited response carries `RateLimit-Limit`, `RateLimit-Remaining` and `RateLimit-Reset`. */
+            429: {
+                headers: {
+                    /** @description Seconds until the next request will be accepted. */
+                    "Retry-After"?: string;
                     [name: string]: unknown;
                 };
                 content?: never;
@@ -10206,6 +10944,15 @@ export interface operations {
                 };
                 content?: never;
             };
+            /** @description Rate limit exceeded: back off for `Retry-After` seconds. Every limited response carries `RateLimit-Limit`, `RateLimit-Remaining` and `RateLimit-Reset`. */
+            429: {
+                headers: {
+                    /** @description Seconds until the next request will be accepted. */
+                    "Retry-After"?: string;
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
         };
     };
     delete_request: {
@@ -10234,6 +10981,15 @@ export interface operations {
             };
             404: {
                 headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description Rate limit exceeded: back off for `Retry-After` seconds. Every limited response carries `RateLimit-Limit`, `RateLimit-Remaining` and `RateLimit-Reset`. */
+            429: {
+                headers: {
+                    /** @description Seconds until the next request will be accepted. */
+                    "Retry-After"?: string;
                     [name: string]: unknown;
                 };
                 content?: never;
@@ -10288,6 +11044,15 @@ export interface operations {
                 };
                 content?: never;
             };
+            /** @description Rate limit exceeded: back off for `Retry-After` seconds. Every limited response carries `RateLimit-Limit`, `RateLimit-Remaining` and `RateLimit-Reset`. */
+            429: {
+                headers: {
+                    /** @description Seconds until the next request will be accepted. */
+                    "Retry-After"?: string;
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
         };
     };
     release_claim: {
@@ -10318,6 +11083,15 @@ export interface operations {
             };
             404: {
                 headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description Rate limit exceeded: back off for `Retry-After` seconds. Every limited response carries `RateLimit-Limit`, `RateLimit-Remaining` and `RateLimit-Reset`. */
+            429: {
+                headers: {
+                    /** @description Seconds until the next request will be accepted. */
+                    "Retry-After"?: string;
                     [name: string]: unknown;
                 };
                 content?: never;
@@ -10372,6 +11146,15 @@ export interface operations {
                 };
                 content?: never;
             };
+            /** @description Rate limit exceeded: back off for `Retry-After` seconds. Every limited response carries `RateLimit-Limit`, `RateLimit-Remaining` and `RateLimit-Reset`. */
+            429: {
+                headers: {
+                    /** @description Seconds until the next request will be accepted. */
+                    "Retry-After"?: string;
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
         };
     };
     get_event_availability: {
@@ -10396,6 +11179,15 @@ export interface operations {
             };
             401: {
                 headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description Rate limit exceeded: back off for `Retry-After` seconds. Every limited response carries `RateLimit-Limit`, `RateLimit-Remaining` and `RateLimit-Reset`. */
+            429: {
+                headers: {
+                    /** @description Seconds until the next request will be accepted. */
+                    "Retry-After"?: string;
                     [name: string]: unknown;
                 };
                 content?: never;
@@ -10432,6 +11224,15 @@ export interface operations {
             /** @description No such event, or it has no banner */
             404: {
                 headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description Rate limit exceeded: back off for `Retry-After` seconds. Every limited response carries `RateLimit-Limit`, `RateLimit-Remaining` and `RateLimit-Reset`. */
+            429: {
+                headers: {
+                    /** @description Seconds until the next request will be accepted. */
+                    "Retry-After"?: string;
                     [name: string]: unknown;
                 };
                 content?: never;
@@ -10473,6 +11274,15 @@ export interface operations {
             };
             404: {
                 headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description Rate limit exceeded: back off for `Retry-After` seconds. Every limited response carries `RateLimit-Limit`, `RateLimit-Remaining` and `RateLimit-Reset`. */
+            429: {
+                headers: {
+                    /** @description Seconds until the next request will be accepted. */
+                    "Retry-After"?: string;
                     [name: string]: unknown;
                 };
                 content?: never;
@@ -10521,6 +11331,15 @@ export interface operations {
                 };
                 content?: never;
             };
+            /** @description Rate limit exceeded: back off for `Retry-After` seconds. Every limited response carries `RateLimit-Limit`, `RateLimit-Remaining` and `RateLimit-Reset`. */
+            429: {
+                headers: {
+                    /** @description Seconds until the next request will be accepted. */
+                    "Retry-After"?: string;
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
         };
     };
     get_event_dcc: {
@@ -10545,6 +11364,15 @@ export interface operations {
             };
             401: {
                 headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description Rate limit exceeded: back off for `Retry-After` seconds. Every limited response carries `RateLimit-Limit`, `RateLimit-Remaining` and `RateLimit-Reset`. */
+            429: {
+                headers: {
+                    /** @description Seconds until the next request will be accepted. */
+                    "Retry-After"?: string;
                     [name: string]: unknown;
                 };
                 content?: never;
@@ -10593,6 +11421,15 @@ export interface operations {
                 };
                 content?: never;
             };
+            /** @description Rate limit exceeded: back off for `Retry-After` seconds. Every limited response carries `RateLimit-Limit`, `RateLimit-Remaining` and `RateLimit-Reset`. */
+            429: {
+                headers: {
+                    /** @description Seconds until the next request will be accepted. */
+                    "Retry-After"?: string;
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
         };
     };
     get_event_debrief: {
@@ -10617,6 +11454,15 @@ export interface operations {
             };
             401: {
                 headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description Rate limit exceeded: back off for `Retry-After` seconds. Every limited response carries `RateLimit-Limit`, `RateLimit-Remaining` and `RateLimit-Reset`. */
+            429: {
+                headers: {
+                    /** @description Seconds until the next request will be accepted. */
+                    "Retry-After"?: string;
                     [name: string]: unknown;
                 };
                 content?: never;
@@ -10661,6 +11507,15 @@ export interface operations {
             };
             404: {
                 headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description Rate limit exceeded: back off for `Retry-After` seconds. Every limited response carries `RateLimit-Limit`, `RateLimit-Remaining` and `RateLimit-Reset`. */
+            429: {
+                headers: {
+                    /** @description Seconds until the next request will be accepted. */
+                    "Retry-After"?: string;
                     [name: string]: unknown;
                 };
                 content?: never;
@@ -10711,6 +11566,15 @@ export interface operations {
                 };
                 content?: never;
             };
+            /** @description Rate limit exceeded: back off for `Retry-After` seconds. Every limited response carries `RateLimit-Limit`, `RateLimit-Remaining` and `RateLimit-Reset`. */
+            429: {
+                headers: {
+                    /** @description Seconds until the next request will be accepted. */
+                    "Retry-After"?: string;
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
         };
     };
     list_event_facilities: {
@@ -10741,6 +11605,15 @@ export interface operations {
             };
             404: {
                 headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description Rate limit exceeded: back off for `Retry-After` seconds. Every limited response carries `RateLimit-Limit`, `RateLimit-Remaining` and `RateLimit-Reset`. */
+            429: {
+                headers: {
+                    /** @description Seconds until the next request will be accepted. */
+                    "Retry-After"?: string;
                     [name: string]: unknown;
                 };
                 content?: never;
@@ -10782,6 +11655,15 @@ export interface operations {
             };
             404: {
                 headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description Rate limit exceeded: back off for `Retry-After` seconds. Every limited response carries `RateLimit-Limit`, `RateLimit-Remaining` and `RateLimit-Reset`. */
+            429: {
+                headers: {
+                    /** @description Seconds until the next request will be accepted. */
+                    "Retry-After"?: string;
                     [name: string]: unknown;
                 };
                 content?: never;
@@ -10832,6 +11714,15 @@ export interface operations {
                 };
                 content?: never;
             };
+            /** @description Rate limit exceeded: back off for `Retry-After` seconds. Every limited response carries `RateLimit-Limit`, `RateLimit-Remaining` and `RateLimit-Reset`. */
+            429: {
+                headers: {
+                    /** @description Seconds until the next request will be accepted. */
+                    "Retry-After"?: string;
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
         };
     };
     delete_event_facility: {
@@ -10866,6 +11757,15 @@ export interface operations {
                 };
                 content?: never;
             };
+            /** @description Rate limit exceeded: back off for `Retry-After` seconds. Every limited response carries `RateLimit-Limit`, `RateLimit-Remaining` and `RateLimit-Reset`. */
+            429: {
+                headers: {
+                    /** @description Seconds until the next request will be accepted. */
+                    "Retry-After"?: string;
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
         };
     };
     list_event_fcas: {
@@ -10896,6 +11796,15 @@ export interface operations {
             };
             404: {
                 headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description Rate limit exceeded: back off for `Retry-After` seconds. Every limited response carries `RateLimit-Limit`, `RateLimit-Remaining` and `RateLimit-Reset`. */
+            429: {
+                headers: {
+                    /** @description Seconds until the next request will be accepted. */
+                    "Retry-After"?: string;
                     [name: string]: unknown;
                 };
                 content?: never;
@@ -10940,6 +11849,15 @@ export interface operations {
             };
             404: {
                 headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description Rate limit exceeded: back off for `Retry-After` seconds. Every limited response carries `RateLimit-Limit`, `RateLimit-Remaining` and `RateLimit-Reset`. */
+            429: {
+                headers: {
+                    /** @description Seconds until the next request will be accepted. */
+                    "Retry-After"?: string;
                     [name: string]: unknown;
                 };
                 content?: never;
@@ -10990,6 +11908,15 @@ export interface operations {
                 };
                 content?: never;
             };
+            /** @description Rate limit exceeded: back off for `Retry-After` seconds. Every limited response carries `RateLimit-Limit`, `RateLimit-Remaining` and `RateLimit-Reset`. */
+            429: {
+                headers: {
+                    /** @description Seconds until the next request will be accepted. */
+                    "Retry-After"?: string;
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
         };
     };
     delete_event_fca: {
@@ -11022,6 +11949,15 @@ export interface operations {
             };
             404: {
                 headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description Rate limit exceeded: back off for `Retry-After` seconds. Every limited response carries `RateLimit-Limit`, `RateLimit-Remaining` and `RateLimit-Reset`. */
+            429: {
+                headers: {
+                    /** @description Seconds until the next request will be accepted. */
+                    "Retry-After"?: string;
                     [name: string]: unknown;
                 };
                 content?: never;
@@ -11068,6 +12004,15 @@ export interface operations {
                 };
                 content?: never;
             };
+            /** @description Rate limit exceeded: back off for `Retry-After` seconds. Every limited response carries `RateLimit-Limit`, `RateLimit-Remaining` and `RateLimit-Reset`. */
+            429: {
+                headers: {
+                    /** @description Seconds until the next request will be accepted. */
+                    "Retry-After"?: string;
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
         };
     };
     set_event_fca_auto: {
@@ -11104,6 +12049,15 @@ export interface operations {
             };
             404: {
                 headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description Rate limit exceeded: back off for `Retry-After` seconds. Every limited response carries `RateLimit-Limit`, `RateLimit-Remaining` and `RateLimit-Reset`. */
+            429: {
+                headers: {
+                    /** @description Seconds until the next request will be accepted. */
+                    "Retry-After"?: string;
                     [name: string]: unknown;
                 };
                 content?: never;
@@ -11150,6 +12104,15 @@ export interface operations {
                 };
                 content?: never;
             };
+            /** @description Rate limit exceeded: back off for `Retry-After` seconds. Every limited response carries `RateLimit-Limit`, `RateLimit-Remaining` and `RateLimit-Reset`. */
+            429: {
+                headers: {
+                    /** @description Seconds until the next request will be accepted. */
+                    "Retry-After"?: string;
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
         };
     };
     list_event_packages: {
@@ -11174,6 +12137,15 @@ export interface operations {
             };
             401: {
                 headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description Rate limit exceeded: back off for `Retry-After` seconds. Every limited response carries `RateLimit-Limit`, `RateLimit-Remaining` and `RateLimit-Reset`. */
+            429: {
+                headers: {
+                    /** @description Seconds until the next request will be accepted. */
+                    "Retry-After"?: string;
                     [name: string]: unknown;
                 };
                 content?: never;
@@ -11222,6 +12194,15 @@ export interface operations {
                 };
                 content?: never;
             };
+            /** @description Rate limit exceeded: back off for `Retry-After` seconds. Every limited response carries `RateLimit-Limit`, `RateLimit-Remaining` and `RateLimit-Reset`. */
+            429: {
+                headers: {
+                    /** @description Seconds until the next request will be accepted. */
+                    "Retry-After"?: string;
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
         };
     };
     delete_event_package: {
@@ -11254,6 +12235,15 @@ export interface operations {
             };
             404: {
                 headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description Rate limit exceeded: back off for `Retry-After` seconds. Every limited response carries `RateLimit-Limit`, `RateLimit-Remaining` and `RateLimit-Reset`. */
+            429: {
+                headers: {
+                    /** @description Seconds until the next request will be accepted. */
+                    "Retry-After"?: string;
                     [name: string]: unknown;
                 };
                 content?: never;
@@ -11300,6 +12290,15 @@ export interface operations {
                 };
                 content?: never;
             };
+            /** @description Rate limit exceeded: back off for `Retry-After` seconds. Every limited response carries `RateLimit-Limit`, `RateLimit-Remaining` and `RateLimit-Reset`. */
+            429: {
+                headers: {
+                    /** @description Seconds until the next request will be accepted. */
+                    "Retry-After"?: string;
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
         };
     };
     set_event_package_auto: {
@@ -11336,6 +12335,15 @@ export interface operations {
             };
             404: {
                 headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description Rate limit exceeded: back off for `Retry-After` seconds. Every limited response carries `RateLimit-Limit`, `RateLimit-Remaining` and `RateLimit-Reset`. */
+            429: {
+                headers: {
+                    /** @description Seconds until the next request will be accepted. */
+                    "Retry-After"?: string;
                     [name: string]: unknown;
                 };
                 content?: never;
@@ -11378,6 +12386,15 @@ export interface operations {
             };
             409: {
                 headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description Rate limit exceeded: back off for `Retry-After` seconds. Every limited response carries `RateLimit-Limit`, `RateLimit-Remaining` and `RateLimit-Reset`. */
+            429: {
+                headers: {
+                    /** @description Seconds until the next request will be accepted. */
+                    "Retry-After"?: string;
                     [name: string]: unknown;
                 };
                 content?: never;
@@ -11434,6 +12451,15 @@ export interface operations {
                 };
                 content?: never;
             };
+            /** @description Rate limit exceeded: back off for `Retry-After` seconds. Every limited response carries `RateLimit-Limit`, `RateLimit-Remaining` and `RateLimit-Reset`. */
+            429: {
+                headers: {
+                    /** @description Seconds until the next request will be accepted. */
+                    "Retry-After"?: string;
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
         };
     };
     delete_event_package_item: {
@@ -11472,6 +12498,15 @@ export interface operations {
                 };
                 content?: never;
             };
+            /** @description Rate limit exceeded: back off for `Retry-After` seconds. Every limited response carries `RateLimit-Limit`, `RateLimit-Remaining` and `RateLimit-Reset`. */
+            429: {
+                headers: {
+                    /** @description Seconds until the next request will be accepted. */
+                    "Retry-After"?: string;
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
         };
     };
     list_event_rates: {
@@ -11496,6 +12531,15 @@ export interface operations {
             };
             401: {
                 headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description Rate limit exceeded: back off for `Retry-After` seconds. Every limited response carries `RateLimit-Limit`, `RateLimit-Remaining` and `RateLimit-Reset`. */
+            429: {
+                headers: {
+                    /** @description Seconds until the next request will be accepted. */
+                    "Retry-After"?: string;
                     [name: string]: unknown;
                 };
                 content?: never;
@@ -11552,6 +12596,15 @@ export interface operations {
                 };
                 content?: never;
             };
+            /** @description Rate limit exceeded: back off for `Retry-After` seconds. Every limited response carries `RateLimit-Limit`, `RateLimit-Remaining` and `RateLimit-Reset`. */
+            429: {
+                headers: {
+                    /** @description Seconds until the next request will be accepted. */
+                    "Retry-After"?: string;
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
         };
     };
     delete_event_rate: {
@@ -11592,6 +12645,15 @@ export interface operations {
                 };
                 content?: never;
             };
+            /** @description Rate limit exceeded: back off for `Retry-After` seconds. Every limited response carries `RateLimit-Limit`, `RateLimit-Remaining` and `RateLimit-Reset`. */
+            429: {
+                headers: {
+                    /** @description Seconds until the next request will be accepted. */
+                    "Retry-After"?: string;
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
         };
     };
     get_event_stats: {
@@ -11626,6 +12688,15 @@ export interface operations {
                 };
                 content?: never;
             };
+            /** @description Rate limit exceeded: back off for `Retry-After` seconds. Every limited response carries `RateLimit-Limit`, `RateLimit-Remaining` and `RateLimit-Reset`. */
+            429: {
+                headers: {
+                    /** @description Seconds until the next request will be accepted. */
+                    "Retry-After"?: string;
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
         };
     };
     list_facilities: {
@@ -11644,6 +12715,15 @@ export interface operations {
                 content: {
                     "application/json": components["schemas"]["FacilityBody"][];
                 };
+            };
+            /** @description Rate limit exceeded: back off for `Retry-After` seconds. Every limited response carries `RateLimit-Limit`, `RateLimit-Remaining` and `RateLimit-Reset`. */
+            429: {
+                headers: {
+                    /** @description Seconds until the next request will be accepted. */
+                    "Retry-After"?: string;
+                    [name: string]: unknown;
+                };
+                content?: never;
             };
         };
     };
@@ -11668,6 +12748,15 @@ export interface operations {
             };
             401: {
                 headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description Rate limit exceeded: back off for `Retry-After` seconds. Every limited response carries `RateLimit-Limit`, `RateLimit-Remaining` and `RateLimit-Reset`. */
+            429: {
+                headers: {
+                    /** @description Seconds until the next request will be accepted. */
+                    "Retry-After"?: string;
                     [name: string]: unknown;
                 };
                 content?: never;
@@ -11711,6 +12800,15 @@ export interface operations {
             };
             403: {
                 headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description Rate limit exceeded: back off for `Retry-After` seconds. Every limited response carries `RateLimit-Limit`, `RateLimit-Remaining` and `RateLimit-Reset`. */
+            429: {
+                headers: {
+                    /** @description Seconds until the next request will be accepted. */
+                    "Retry-After"?: string;
                     [name: string]: unknown;
                 };
                 content?: never;
@@ -11765,6 +12863,15 @@ export interface operations {
                 };
                 content?: never;
             };
+            /** @description Rate limit exceeded: back off for `Retry-After` seconds. Every limited response carries `RateLimit-Limit`, `RateLimit-Remaining` and `RateLimit-Reset`. */
+            429: {
+                headers: {
+                    /** @description Seconds until the next request will be accepted. */
+                    "Retry-After"?: string;
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
         };
     };
     delete_facility_document: {
@@ -11803,6 +12910,15 @@ export interface operations {
                 };
                 content?: never;
             };
+            /** @description Rate limit exceeded: back off for `Retry-After` seconds. Every limited response carries `RateLimit-Limit`, `RateLimit-Remaining` and `RateLimit-Reset`. */
+            429: {
+                headers: {
+                    /** @description Seconds until the next request will be accepted. */
+                    "Retry-After"?: string;
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
         };
     };
     get_facility: {
@@ -11831,6 +12947,15 @@ export interface operations {
                 };
                 content?: never;
             };
+            /** @description Rate limit exceeded: back off for `Retry-After` seconds. Every limited response carries `RateLimit-Limit`, `RateLimit-Remaining` and `RateLimit-Reset`. */
+            429: {
+                headers: {
+                    /** @description Seconds until the next request will be accepted. */
+                    "Retry-After"?: string;
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
         };
     };
     get_config: {
@@ -11854,6 +12979,15 @@ export interface operations {
             };
             400: {
                 headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description Rate limit exceeded: back off for `Retry-After` seconds. Every limited response carries `RateLimit-Limit`, `RateLimit-Remaining` and `RateLimit-Reset`. */
+            429: {
+                headers: {
+                    /** @description Seconds until the next request will be accepted. */
+                    "Retry-After"?: string;
                     [name: string]: unknown;
                 };
                 content?: never;
@@ -11901,6 +13035,15 @@ export interface operations {
                 };
                 content?: never;
             };
+            /** @description Rate limit exceeded: back off for `Retry-After` seconds. Every limited response carries `RateLimit-Limit`, `RateLimit-Remaining` and `RateLimit-Reset`. */
+            429: {
+                headers: {
+                    /** @description Seconds until the next request will be accepted. */
+                    "Retry-After"?: string;
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
         };
     };
     feed_status: {
@@ -11926,6 +13069,15 @@ export interface operations {
                 };
                 content?: never;
             };
+            /** @description Rate limit exceeded: back off for `Retry-After` seconds. Every limited response carries `RateLimit-Limit`, `RateLimit-Remaining` and `RateLimit-Reset`. */
+            429: {
+                headers: {
+                    /** @description Seconds until the next request will be accepted. */
+                    "Retry-After"?: string;
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
         };
     };
     list_profiles: {
@@ -11947,6 +13099,15 @@ export interface operations {
             };
             401: {
                 headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description Rate limit exceeded: back off for `Retry-After` seconds. Every limited response carries `RateLimit-Limit`, `RateLimit-Remaining` and `RateLimit-Reset`. */
+            429: {
+                headers: {
+                    /** @description Seconds until the next request will be accepted. */
+                    "Retry-After"?: string;
                     [name: string]: unknown;
                 };
                 content?: never;
@@ -11989,6 +13150,15 @@ export interface operations {
                 };
                 content?: never;
             };
+            /** @description Rate limit exceeded: back off for `Retry-After` seconds. Every limited response carries `RateLimit-Limit`, `RateLimit-Remaining` and `RateLimit-Reset`. */
+            429: {
+                headers: {
+                    /** @description Seconds until the next request will be accepted. */
+                    "Retry-After"?: string;
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
         };
     };
     delete_profile: {
@@ -12027,6 +13197,15 @@ export interface operations {
                 };
                 content?: never;
             };
+            /** @description Rate limit exceeded: back off for `Retry-After` seconds. Every limited response carries `RateLimit-Limit`, `RateLimit-Remaining` and `RateLimit-Reset`. */
+            429: {
+                headers: {
+                    /** @description Seconds until the next request will be accepted. */
+                    "Retry-After"?: string;
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
         };
     };
     aircraft_route: {
@@ -12061,6 +13240,15 @@ export interface operations {
                 };
                 content?: never;
             };
+            /** @description Rate limit exceeded: back off for `Retry-After` seconds. Every limited response carries `RateLimit-Limit`, `RateLimit-Remaining` and `RateLimit-Reset`. */
+            429: {
+                headers: {
+                    /** @description Seconds until the next request will be accepted. */
+                    "Retry-After"?: string;
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
         };
     };
     list_atc: {
@@ -12079,6 +13267,15 @@ export interface operations {
                 content: {
                     "application/json": components["schemas"]["AtcBoard"];
                 };
+            };
+            /** @description Rate limit exceeded: back off for `Retry-After` seconds. Every limited response carries `RateLimit-Limit`, `RateLimit-Remaining` and `RateLimit-Reset`. */
+            429: {
+                headers: {
+                    /** @description Seconds until the next request will be accepted. */
+                    "Retry-After"?: string;
+                    [name: string]: unknown;
+                };
+                content?: never;
             };
         };
     };
@@ -12103,6 +13300,15 @@ export interface operations {
             };
             401: {
                 headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description Rate limit exceeded: back off for `Retry-After` seconds. Every limited response carries `RateLimit-Limit`, `RateLimit-Remaining` and `RateLimit-Reset`. */
+            429: {
+                headers: {
+                    /** @description Seconds until the next request will be accepted. */
+                    "Retry-After"?: string;
                     [name: string]: unknown;
                 };
                 content?: never;
@@ -12138,6 +13344,15 @@ export interface operations {
                 };
                 content?: never;
             };
+            /** @description Rate limit exceeded: back off for `Retry-After` seconds. Every limited response carries `RateLimit-Limit`, `RateLimit-Remaining` and `RateLimit-Reset`. */
+            429: {
+                headers: {
+                    /** @description Seconds until the next request will be accepted. */
+                    "Retry-After"?: string;
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
         };
     };
     data_status: {
@@ -12163,6 +13378,15 @@ export interface operations {
                 };
                 content?: never;
             };
+            /** @description Rate limit exceeded: back off for `Retry-After` seconds. Every limited response carries `RateLimit-Limit`, `RateLimit-Remaining` and `RateLimit-Reset`. */
+            429: {
+                headers: {
+                    /** @description Seconds until the next request will be accepted. */
+                    "Retry-After"?: string;
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
         };
     };
     list_flow_facilities: {
@@ -12181,6 +13405,15 @@ export interface operations {
                 content: {
                     "application/json": components["schemas"]["FlowFacility"][];
                 };
+            };
+            /** @description Rate limit exceeded: back off for `Retry-After` seconds. Every limited response carries `RateLimit-Limit`, `RateLimit-Remaining` and `RateLimit-Reset`. */
+            429: {
+                headers: {
+                    /** @description Seconds until the next request will be accepted. */
+                    "Retry-After"?: string;
+                    [name: string]: unknown;
+                };
+                content?: never;
             };
         };
     };
@@ -12203,6 +13436,15 @@ export interface operations {
             };
             401: {
                 headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description Rate limit exceeded: back off for `Retry-After` seconds. Every limited response carries `RateLimit-Limit`, `RateLimit-Remaining` and `RateLimit-Reset`. */
+            429: {
+                headers: {
+                    /** @description Seconds until the next request will be accepted. */
+                    "Retry-After"?: string;
                     [name: string]: unknown;
                 };
                 content?: never;
@@ -12244,6 +13486,15 @@ export interface operations {
             };
             403: {
                 headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description Rate limit exceeded: back off for `Retry-After` seconds. Every limited response carries `RateLimit-Limit`, `RateLimit-Remaining` and `RateLimit-Reset`. */
+            429: {
+                headers: {
+                    /** @description Seconds until the next request will be accepted. */
+                    "Retry-After"?: string;
                     [name: string]: unknown;
                 };
                 content?: never;
@@ -12298,6 +13549,15 @@ export interface operations {
                 };
                 content?: never;
             };
+            /** @description Rate limit exceeded: back off for `Retry-After` seconds. Every limited response carries `RateLimit-Limit`, `RateLimit-Remaining` and `RateLimit-Reset`. */
+            429: {
+                headers: {
+                    /** @description Seconds until the next request will be accepted. */
+                    "Retry-After"?: string;
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
         };
     };
     delete_fca: {
@@ -12336,6 +13596,15 @@ export interface operations {
                 };
                 content?: never;
             };
+            /** @description Rate limit exceeded: back off for `Retry-After` seconds. Every limited response carries `RateLimit-Limit`, `RateLimit-Remaining` and `RateLimit-Reset`. */
+            429: {
+                headers: {
+                    /** @description Seconds until the next request will be accepted. */
+                    "Retry-After"?: string;
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
         };
     };
     list_flight_exclusions: {
@@ -12365,6 +13634,15 @@ export interface operations {
             };
             404: {
                 headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description Rate limit exceeded: back off for `Retry-After` seconds. Every limited response carries `RateLimit-Limit`, `RateLimit-Remaining` and `RateLimit-Reset`. */
+            429: {
+                headers: {
+                    /** @description Seconds until the next request will be accepted. */
+                    "Retry-After"?: string;
                     [name: string]: unknown;
                 };
                 content?: never;
@@ -12413,6 +13691,15 @@ export interface operations {
                 };
                 content?: never;
             };
+            /** @description Rate limit exceeded: back off for `Retry-After` seconds. Every limited response carries `RateLimit-Limit`, `RateLimit-Remaining` and `RateLimit-Reset`. */
+            429: {
+                headers: {
+                    /** @description Seconds until the next request will be accepted. */
+                    "Retry-After"?: string;
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
         };
     };
     restore_flight: {
@@ -12447,6 +13734,15 @@ export interface operations {
             };
             404: {
                 headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description Rate limit exceeded: back off for `Retry-After` seconds. Every limited response carries `RateLimit-Limit`, `RateLimit-Remaining` and `RateLimit-Reset`. */
+            429: {
+                headers: {
+                    /** @description Seconds until the next request will be accepted. */
+                    "Retry-After"?: string;
                     [name: string]: unknown;
                 };
                 content?: never;
@@ -12489,6 +13785,15 @@ export interface operations {
             };
             404: {
                 headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description Rate limit exceeded: back off for `Retry-After` seconds. Every limited response carries `RateLimit-Limit`, `RateLimit-Remaining` and `RateLimit-Reset`. */
+            429: {
+                headers: {
+                    /** @description Seconds until the next request will be accepted. */
+                    "Retry-After"?: string;
                     [name: string]: unknown;
                 };
                 content?: never;
@@ -12573,6 +13878,15 @@ export interface operations {
                 };
                 content?: never;
             };
+            /** @description Rate limit exceeded: back off for `Retry-After` seconds. Every limited response carries `RateLimit-Limit`, `RateLimit-Remaining` and `RateLimit-Reset`. */
+            429: {
+                headers: {
+                    /** @description Seconds until the next request will be accepted. */
+                    "Retry-After"?: string;
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
         };
     };
     clear_release: {
@@ -12646,6 +13960,15 @@ export interface operations {
                 };
                 content?: never;
             };
+            /** @description Rate limit exceeded: back off for `Retry-After` seconds. Every limited response carries `RateLimit-Limit`, `RateLimit-Remaining` and `RateLimit-Reset`. */
+            429: {
+                headers: {
+                    /** @description Seconds until the next request will be accepted. */
+                    "Retry-After"?: string;
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
         };
     };
     swap_releases: {
@@ -12702,6 +14025,15 @@ export interface operations {
                 };
                 content?: never;
             };
+            /** @description Rate limit exceeded: back off for `Retry-After` seconds. Every limited response carries `RateLimit-Limit`, `RateLimit-Remaining` and `RateLimit-Reset`. */
+            429: {
+                headers: {
+                    /** @description Seconds until the next request will be accepted. */
+                    "Retry-After"?: string;
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
         };
     };
     fca_traffic: {
@@ -12739,6 +14071,15 @@ export interface operations {
                 };
                 content?: never;
             };
+            /** @description Rate limit exceeded: back off for `Retry-After` seconds. Every limited response carries `RateLimit-Limit`, `RateLimit-Remaining` and `RateLimit-Reset`. */
+            429: {
+                headers: {
+                    /** @description Seconds until the next request will be accepted. */
+                    "Retry-After"?: string;
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
         };
     };
     list_idst: {
@@ -12771,6 +14112,15 @@ export interface operations {
                 };
                 content?: never;
             };
+            /** @description Rate limit exceeded: back off for `Retry-After` seconds. Every limited response carries `RateLimit-Limit`, `RateLimit-Remaining` and `RateLimit-Reset`. */
+            429: {
+                headers: {
+                    /** @description Seconds until the next request will be accepted. */
+                    "Retry-After"?: string;
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
         };
     };
     list_consolidations: {
@@ -12794,6 +14144,15 @@ export interface operations {
             };
             401: {
                 headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description Rate limit exceeded: back off for `Retry-After` seconds. Every limited response carries `RateLimit-Limit`, `RateLimit-Remaining` and `RateLimit-Reset`. */
+            429: {
+                headers: {
+                    /** @description Seconds until the next request will be accepted. */
+                    "Retry-After"?: string;
                     [name: string]: unknown;
                 };
                 content?: never;
@@ -12856,6 +14215,15 @@ export interface operations {
                 };
                 content?: never;
             };
+            /** @description Rate limit exceeded: back off for `Retry-After` seconds. Every limited response carries `RateLimit-Limit`, `RateLimit-Remaining` and `RateLimit-Reset`. */
+            429: {
+                headers: {
+                    /** @description Seconds until the next request will be accepted. */
+                    "Retry-After"?: string;
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
         };
     };
     release_sector: {
@@ -12889,6 +14257,15 @@ export interface operations {
                 };
                 content?: never;
             };
+            /** @description Rate limit exceeded: back off for `Retry-After` seconds. Every limited response carries `RateLimit-Limit`, `RateLimit-Remaining` and `RateLimit-Reset`. */
+            429: {
+                headers: {
+                    /** @description Seconds until the next request will be accepted. */
+                    "Retry-After"?: string;
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
         };
     };
     list_sector_maps: {
@@ -12912,6 +14289,15 @@ export interface operations {
             };
             401: {
                 headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description Rate limit exceeded: back off for `Retry-After` seconds. Every limited response carries `RateLimit-Limit`, `RateLimit-Remaining` and `RateLimit-Reset`. */
+            429: {
+                headers: {
+                    /** @description Seconds until the next request will be accepted. */
+                    "Retry-After"?: string;
                     [name: string]: unknown;
                 };
                 content?: never;
@@ -12967,6 +14353,15 @@ export interface operations {
                 };
                 content?: never;
             };
+            /** @description Rate limit exceeded: back off for `Retry-After` seconds. Every limited response carries `RateLimit-Limit`, `RateLimit-Remaining` and `RateLimit-Reset`. */
+            429: {
+                headers: {
+                    /** @description Seconds until the next request will be accepted. */
+                    "Retry-After"?: string;
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
         };
     };
     resolve_routes: {
@@ -12996,6 +14391,15 @@ export interface operations {
                 };
                 content?: never;
             };
+            /** @description Rate limit exceeded: back off for `Retry-After` seconds. Every limited response carries `RateLimit-Limit`, `RateLimit-Remaining` and `RateLimit-Reset`. */
+            429: {
+                headers: {
+                    /** @description Seconds until the next request will be accepted. */
+                    "Retry-After"?: string;
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
         };
     };
     route_coverage: {
@@ -13017,6 +14421,15 @@ export interface operations {
             };
             401: {
                 headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description Rate limit exceeded: back off for `Retry-After` seconds. Every limited response carries `RateLimit-Limit`, `RateLimit-Remaining` and `RateLimit-Reset`. */
+            429: {
+                headers: {
+                    /** @description Seconds until the next request will be accepted. */
+                    "Retry-After"?: string;
                     [name: string]: unknown;
                 };
                 content?: never;
@@ -13055,6 +14468,15 @@ export interface operations {
                 };
                 content?: never;
             };
+            /** @description Rate limit exceeded: back off for `Retry-After` seconds. Every limited response carries `RateLimit-Limit`, `RateLimit-Remaining` and `RateLimit-Reset`. */
+            429: {
+                headers: {
+                    /** @description Seconds until the next request will be accepted. */
+                    "Retry-After"?: string;
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
         };
     };
     create_route: {
@@ -13086,6 +14508,15 @@ export interface operations {
             };
             401: {
                 headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description Rate limit exceeded: back off for `Retry-After` seconds. Every limited response carries `RateLimit-Limit`, `RateLimit-Remaining` and `RateLimit-Reset`. */
+            429: {
+                headers: {
+                    /** @description Seconds until the next request will be accepted. */
+                    "Retry-After"?: string;
                     [name: string]: unknown;
                 };
                 content?: never;
@@ -13134,6 +14565,15 @@ export interface operations {
                 };
                 content?: never;
             };
+            /** @description Rate limit exceeded: back off for `Retry-After` seconds. Every limited response carries `RateLimit-Limit`, `RateLimit-Remaining` and `RateLimit-Reset`. */
+            429: {
+                headers: {
+                    /** @description Seconds until the next request will be accepted. */
+                    "Retry-After"?: string;
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
         };
     };
     delete_route: {
@@ -13166,6 +14606,15 @@ export interface operations {
                 };
                 content?: never;
             };
+            /** @description Rate limit exceeded: back off for `Retry-After` seconds. Every limited response carries `RateLimit-Limit`, `RateLimit-Remaining` and `RateLimit-Reset`. */
+            429: {
+                headers: {
+                    /** @description Seconds until the next request will be accepted. */
+                    "Retry-After"?: string;
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
         };
     };
     get_runway: {
@@ -13190,6 +14639,15 @@ export interface operations {
             };
             401: {
                 headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description Rate limit exceeded: back off for `Retry-After` seconds. Every limited response carries `RateLimit-Limit`, `RateLimit-Remaining` and `RateLimit-Reset`. */
+            429: {
+                headers: {
+                    /** @description Seconds until the next request will be accepted. */
+                    "Retry-After"?: string;
                     [name: string]: unknown;
                 };
                 content?: never;
@@ -13226,6 +14684,15 @@ export interface operations {
                 };
                 content?: never;
             };
+            /** @description Rate limit exceeded: back off for `Retry-After` seconds. Every limited response carries `RateLimit-Limit`, `RateLimit-Remaining` and `RateLimit-Reset`. */
+            429: {
+                headers: {
+                    /** @description Seconds until the next request will be accepted. */
+                    "Retry-After"?: string;
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
             503: {
                 headers: {
                     [name: string]: unknown;
@@ -13256,6 +14723,15 @@ export interface operations {
             };
             401: {
                 headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description Rate limit exceeded: back off for `Retry-After` seconds. Every limited response carries `RateLimit-Limit`, `RateLimit-Remaining` and `RateLimit-Reset`. */
+            429: {
+                headers: {
+                    /** @description Seconds until the next request will be accepted. */
+                    "Retry-After"?: string;
                     [name: string]: unknown;
                 };
                 content?: never;
@@ -13304,6 +14780,15 @@ export interface operations {
                 };
                 content?: never;
             };
+            /** @description Rate limit exceeded: back off for `Retry-After` seconds. Every limited response carries `RateLimit-Limit`, `RateLimit-Remaining` and `RateLimit-Reset`. */
+            429: {
+                headers: {
+                    /** @description Seconds until the next request will be accepted. */
+                    "Retry-After"?: string;
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
             503: {
                 headers: {
                     [name: string]: unknown;
@@ -13344,6 +14829,15 @@ export interface operations {
                 };
                 content?: never;
             };
+            /** @description Rate limit exceeded: back off for `Retry-After` seconds. Every limited response carries `RateLimit-Limit`, `RateLimit-Remaining` and `RateLimit-Reset`. */
+            429: {
+                headers: {
+                    /** @description Seconds until the next request will be accepted. */
+                    "Retry-After"?: string;
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
             503: {
                 headers: {
                     [name: string]: unknown;
@@ -13371,6 +14865,15 @@ export interface operations {
             };
             401: {
                 headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description Rate limit exceeded: back off for `Retry-After` seconds. Every limited response carries `RateLimit-Limit`, `RateLimit-Remaining` and `RateLimit-Reset`. */
+            429: {
+                headers: {
+                    /** @description Seconds until the next request will be accepted. */
+                    "Retry-After"?: string;
                     [name: string]: unknown;
                 };
                 content?: never;
@@ -13409,6 +14912,15 @@ export interface operations {
                 };
                 content?: never;
             };
+            /** @description Rate limit exceeded: back off for `Retry-After` seconds. Every limited response carries `RateLimit-Limit`, `RateLimit-Remaining` and `RateLimit-Reset`. */
+            429: {
+                headers: {
+                    /** @description Seconds until the next request will be accepted. */
+                    "Retry-After"?: string;
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
         };
     };
     validate_fixes: {
@@ -13433,6 +14945,15 @@ export interface operations {
             };
             401: {
                 headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description Rate limit exceeded: back off for `Retry-After` seconds. Every limited response carries `RateLimit-Limit`, `RateLimit-Remaining` and `RateLimit-Reset`. */
+            429: {
+                headers: {
+                    /** @description Seconds until the next request will be accepted. */
+                    "Retry-After"?: string;
                     [name: string]: unknown;
                 };
                 content?: never;
@@ -13466,6 +14987,15 @@ export interface operations {
                 };
                 content?: never;
             };
+            /** @description Rate limit exceeded: back off for `Retry-After` seconds. Every limited response carries `RateLimit-Limit`, `RateLimit-Remaining` and `RateLimit-Reset`. */
+            429: {
+                headers: {
+                    /** @description Seconds until the next request will be accepted. */
+                    "Retry-After"?: string;
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
         };
     };
     get_discord_config: {
@@ -13487,6 +15017,15 @@ export interface operations {
             };
             401: {
                 headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description Rate limit exceeded: back off for `Retry-After` seconds. Every limited response carries `RateLimit-Limit`, `RateLimit-Remaining` and `RateLimit-Reset`. */
+            429: {
+                headers: {
+                    /** @description Seconds until the next request will be accepted. */
+                    "Retry-After"?: string;
                     [name: string]: unknown;
                 };
                 content?: never;
@@ -13526,6 +15065,15 @@ export interface operations {
                 };
                 content?: never;
             };
+            /** @description Rate limit exceeded: back off for `Retry-After` seconds. Every limited response carries `RateLimit-Limit`, `RateLimit-Remaining` and `RateLimit-Reset`. */
+            429: {
+                headers: {
+                    /** @description Seconds until the next request will be accepted. */
+                    "Retry-After"?: string;
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
         };
     };
     discord_ace_info: {
@@ -13555,6 +15103,15 @@ export interface operations {
             };
             404: {
                 headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description Rate limit exceeded: back off for `Retry-After` seconds. Every limited response carries `RateLimit-Limit`, `RateLimit-Remaining` and `RateLimit-Reset`. */
+            429: {
+                headers: {
+                    /** @description Seconds until the next request will be accepted. */
+                    "Retry-After"?: string;
                     [name: string]: unknown;
                 };
                 content?: never;
@@ -13609,6 +15166,15 @@ export interface operations {
                 };
                 content?: never;
             };
+            /** @description Rate limit exceeded: back off for `Retry-After` seconds. Every limited response carries `RateLimit-Limit`, `RateLimit-Remaining` and `RateLimit-Reset`. */
+            429: {
+                headers: {
+                    /** @description Seconds until the next request will be accepted. */
+                    "Retry-After"?: string;
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
         };
     };
     discord_advisory_info: {
@@ -13638,6 +15204,15 @@ export interface operations {
             };
             404: {
                 headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description Rate limit exceeded: back off for `Retry-After` seconds. Every limited response carries `RateLimit-Limit`, `RateLimit-Remaining` and `RateLimit-Reset`. */
+            429: {
+                headers: {
+                    /** @description Seconds until the next request will be accepted. */
+                    "Retry-After"?: string;
                     [name: string]: unknown;
                 };
                 content?: never;
@@ -13679,6 +15254,15 @@ export interface operations {
                 };
                 content?: never;
             };
+            /** @description Rate limit exceeded: back off for `Retry-After` seconds. Every limited response carries `RateLimit-Limit`, `RateLimit-Remaining` and `RateLimit-Reset`. */
+            429: {
+                headers: {
+                    /** @description Seconds until the next request will be accepted. */
+                    "Retry-After"?: string;
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
         };
     };
     push_guild_snapshot: {
@@ -13706,6 +15290,15 @@ export interface operations {
                 };
                 content?: never;
             };
+            /** @description Rate limit exceeded: back off for `Retry-After` seconds. Every limited response carries `RateLimit-Limit`, `RateLimit-Remaining` and `RateLimit-Reset`. */
+            429: {
+                headers: {
+                    /** @description Seconds until the next request will be accepted. */
+                    "Retry-After"?: string;
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
         };
     };
     refresh_guild_snapshot: {
@@ -13725,6 +15318,15 @@ export interface operations {
             };
             401: {
                 headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description Rate limit exceeded: back off for `Retry-After` seconds. Every limited response carries `RateLimit-Limit`, `RateLimit-Remaining` and `RateLimit-Reset`. */
+            429: {
+                headers: {
+                    /** @description Seconds until the next request will be accepted. */
+                    "Retry-After"?: string;
                     [name: string]: unknown;
                 };
                 content?: never;
@@ -13750,6 +15352,15 @@ export interface operations {
             };
             401: {
                 headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description Rate limit exceeded: back off for `Retry-After` seconds. Every limited response carries `RateLimit-Limit`, `RateLimit-Remaining` and `RateLimit-Reset`. */
+            429: {
+                headers: {
+                    /** @description Seconds until the next request will be accepted. */
+                    "Retry-After"?: string;
                     [name: string]: unknown;
                 };
                 content?: never;
@@ -13789,6 +15400,15 @@ export interface operations {
                 };
                 content?: never;
             };
+            /** @description Rate limit exceeded: back off for `Retry-After` seconds. Every limited response carries `RateLimit-Limit`, `RateLimit-Remaining` and `RateLimit-Reset`. */
+            429: {
+                headers: {
+                    /** @description Seconds until the next request will be accepted. */
+                    "Retry-After"?: string;
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
         };
     };
     discord_tmi_info: {
@@ -13818,6 +15438,15 @@ export interface operations {
             };
             404: {
                 headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description Rate limit exceeded: back off for `Retry-After` seconds. Every limited response carries `RateLimit-Limit`, `RateLimit-Remaining` and `RateLimit-Reset`. */
+            429: {
+                headers: {
+                    /** @description Seconds until the next request will be accepted. */
+                    "Retry-After"?: string;
                     [name: string]: unknown;
                 };
                 content?: never;
@@ -13855,6 +15484,15 @@ export interface operations {
             /** @description Not a service account, or `consumer` names another consumer */
             403: {
                 headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description Rate limit exceeded: back off for `Retry-After` seconds. Every limited response carries `RateLimit-Limit`, `RateLimit-Remaining` and `RateLimit-Reset`. */
+            429: {
+                headers: {
+                    /** @description Seconds until the next request will be accepted. */
+                    "Retry-After"?: string;
                     [name: string]: unknown;
                 };
                 content?: never;
@@ -13904,6 +15542,15 @@ export interface operations {
                 };
                 content?: never;
             };
+            /** @description Rate limit exceeded: back off for `Retry-After` seconds. Every limited response carries `RateLimit-Limit`, `RateLimit-Remaining` and `RateLimit-Reset`. */
+            429: {
+                headers: {
+                    /** @description Seconds until the next request will be accepted. */
+                    "Retry-After"?: string;
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
         };
     };
     me: {
@@ -13925,6 +15572,15 @@ export interface operations {
             };
             401: {
                 headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description Rate limit exceeded: back off for `Retry-After` seconds. Every limited response carries `RateLimit-Limit`, `RateLimit-Remaining` and `RateLimit-Reset`. */
+            429: {
+                headers: {
+                    /** @description Seconds until the next request will be accepted. */
+                    "Retry-After"?: string;
                     [name: string]: unknown;
                 };
                 content?: never;
@@ -13960,6 +15616,15 @@ export interface operations {
                 };
                 content?: never;
             };
+            /** @description Rate limit exceeded: back off for `Retry-After` seconds. Every limited response carries `RateLimit-Limit`, `RateLimit-Remaining` and `RateLimit-Reset`. */
+            429: {
+                headers: {
+                    /** @description Seconds until the next request will be accepted. */
+                    "Retry-After"?: string;
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
         };
     };
     get_my_discord: {
@@ -13981,6 +15646,15 @@ export interface operations {
             };
             401: {
                 headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description Rate limit exceeded: back off for `Retry-After` seconds. Every limited response carries `RateLimit-Limit`, `RateLimit-Remaining` and `RateLimit-Reset`. */
+            429: {
+                headers: {
+                    /** @description Seconds until the next request will be accepted. */
+                    "Retry-After"?: string;
                     [name: string]: unknown;
                 };
                 content?: never;
@@ -14010,6 +15684,15 @@ export interface operations {
                 };
                 content?: never;
             };
+            /** @description Rate limit exceeded: back off for `Retry-After` seconds. Every limited response carries `RateLimit-Limit`, `RateLimit-Remaining` and `RateLimit-Reset`. */
+            429: {
+                headers: {
+                    /** @description Seconds until the next request will be accepted. */
+                    "Retry-After"?: string;
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
         };
     };
     get_preferences: {
@@ -14034,6 +15717,15 @@ export interface operations {
             };
             401: {
                 headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description Rate limit exceeded: back off for `Retry-After` seconds. Every limited response carries `RateLimit-Limit`, `RateLimit-Remaining` and `RateLimit-Reset`. */
+            429: {
+                headers: {
+                    /** @description Seconds until the next request will be accepted. */
+                    "Retry-After"?: string;
                     [name: string]: unknown;
                 };
                 content?: never;
@@ -14076,6 +15768,15 @@ export interface operations {
                 };
                 content?: never;
             };
+            /** @description Rate limit exceeded: back off for `Retry-After` seconds. Every limited response carries `RateLimit-Limit`, `RateLimit-Remaining` and `RateLimit-Reset`. */
+            429: {
+                headers: {
+                    /** @description Seconds until the next request will be accepted. */
+                    "Retry-After"?: string;
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
         };
     };
     get_airport: {
@@ -14101,6 +15802,15 @@ export interface operations {
             /** @description No such airport in the dataset */
             404: {
                 headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description Rate limit exceeded: back off for `Retry-After` seconds. Every limited response carries `RateLimit-Limit`, `RateLimit-Remaining` and `RateLimit-Reset`. */
+            429: {
+                headers: {
+                    /** @description Seconds until the next request will be accepted. */
+                    "Retry-After"?: string;
                     [name: string]: unknown;
                 };
                 content?: never;
@@ -14131,6 +15841,15 @@ export interface operations {
                     "application/json": components["schemas"]["PublicBoard"];
                 };
             };
+            /** @description Rate limit exceeded: back off for `Retry-After` seconds. Every limited response carries `RateLimit-Limit`, `RateLimit-Remaining` and `RateLimit-Reset`. */
+            429: {
+                headers: {
+                    /** @description Seconds until the next request will be accepted. */
+                    "Retry-After"?: string;
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
         };
     };
     download: {
@@ -14155,6 +15874,15 @@ export interface operations {
             /** @description Unknown platform */
             400: {
                 headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description Rate limit exceeded: back off for `Retry-After` seconds. Every limited response carries `RateLimit-Limit`, `RateLimit-Remaining` and `RateLimit-Reset`. */
+            429: {
+                headers: {
+                    /** @description Seconds until the next request will be accepted. */
+                    "Retry-After"?: string;
                     [name: string]: unknown;
                 };
                 content?: never;
@@ -14188,6 +15916,15 @@ export interface operations {
                     "application/json": components["schemas"]["FlightImpact"];
                 };
             };
+            /** @description Rate limit exceeded: back off for `Retry-After` seconds. Every limited response carries `RateLimit-Limit`, `RateLimit-Remaining` and `RateLimit-Reset`. */
+            429: {
+                headers: {
+                    /** @description Seconds until the next request will be accepted. */
+                    "Retry-After"?: string;
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
         };
     };
     airports_top: {
@@ -14216,6 +15953,15 @@ export interface operations {
                 };
                 content?: never;
             };
+            /** @description Rate limit exceeded: back off for `Retry-After` seconds. Every limited response carries `RateLimit-Limit`, `RateLimit-Remaining` and `RateLimit-Reset`. */
+            429: {
+                headers: {
+                    /** @description Seconds until the next request will be accepted. */
+                    "Retry-After"?: string;
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
         };
     };
     airport_stats: {
@@ -14240,6 +15986,15 @@ export interface operations {
             };
             401: {
                 headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description Rate limit exceeded: back off for `Retry-After` seconds. Every limited response carries `RateLimit-Limit`, `RateLimit-Remaining` and `RateLimit-Reset`. */
+            429: {
+                headers: {
+                    /** @description Seconds until the next request will be accepted. */
+                    "Retry-After"?: string;
                     [name: string]: unknown;
                 };
                 content?: never;
@@ -14277,6 +16032,15 @@ export interface operations {
                 };
                 content?: never;
             };
+            /** @description Rate limit exceeded: back off for `Retry-After` seconds. Every limited response carries `RateLimit-Limit`, `RateLimit-Remaining` and `RateLimit-Reset`. */
+            429: {
+                headers: {
+                    /** @description Seconds until the next request will be accepted. */
+                    "Retry-After"?: string;
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
         };
     };
     list_captures: {
@@ -14298,6 +16062,15 @@ export interface operations {
             };
             401: {
                 headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description Rate limit exceeded: back off for `Retry-After` seconds. Every limited response carries `RateLimit-Limit`, `RateLimit-Remaining` and `RateLimit-Reset`. */
+            429: {
+                headers: {
+                    /** @description Seconds until the next request will be accepted. */
+                    "Retry-After"?: string;
                     [name: string]: unknown;
                 };
                 content?: never;
@@ -14339,6 +16112,15 @@ export interface operations {
             };
             404: {
                 headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description Rate limit exceeded: back off for `Retry-After` seconds. Every limited response carries `RateLimit-Limit`, `RateLimit-Remaining` and `RateLimit-Reset`. */
+            429: {
+                headers: {
+                    /** @description Seconds until the next request will be accepted. */
+                    "Retry-After"?: string;
                     [name: string]: unknown;
                 };
                 content?: never;
@@ -14388,6 +16170,15 @@ export interface operations {
                 };
                 content?: never;
             };
+            /** @description Rate limit exceeded: back off for `Retry-After` seconds. Every limited response carries `RateLimit-Limit`, `RateLimit-Remaining` and `RateLimit-Reset`. */
+            429: {
+                headers: {
+                    /** @description Seconds until the next request will be accepted. */
+                    "Retry-After"?: string;
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
         };
     };
     capture_replay: {
@@ -14421,6 +16212,15 @@ export interface operations {
             };
             404: {
                 headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description Rate limit exceeded: back off for `Retry-After` seconds. Every limited response carries `RateLimit-Limit`, `RateLimit-Remaining` and `RateLimit-Reset`. */
+            429: {
+                headers: {
+                    /** @description Seconds until the next request will be accepted. */
+                    "Retry-After"?: string;
                     [name: string]: unknown;
                 };
                 content?: never;
@@ -14465,6 +16265,15 @@ export interface operations {
                 };
                 content?: never;
             };
+            /** @description Rate limit exceeded: back off for `Retry-After` seconds. Every limited response carries `RateLimit-Limit`, `RateLimit-Remaining` and `RateLimit-Reset`. */
+            429: {
+                headers: {
+                    /** @description Seconds until the next request will be accepted. */
+                    "Retry-After"?: string;
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
         };
     };
     flight_detail: {
@@ -14501,6 +16310,15 @@ export interface operations {
             };
             404: {
                 headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description Rate limit exceeded: back off for `Retry-After` seconds. Every limited response carries `RateLimit-Limit`, `RateLimit-Remaining` and `RateLimit-Reset`. */
+            429: {
+                headers: {
+                    /** @description Seconds until the next request will be accepted. */
+                    "Retry-After"?: string;
                     [name: string]: unknown;
                 };
                 content?: never;
@@ -14545,6 +16363,15 @@ export interface operations {
                 };
                 content?: never;
             };
+            /** @description Rate limit exceeded: back off for `Retry-After` seconds. Every limited response carries `RateLimit-Limit`, `RateLimit-Remaining` and `RateLimit-Reset`. */
+            429: {
+                headers: {
+                    /** @description Seconds until the next request will be accepted. */
+                    "Retry-After"?: string;
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
         };
     };
     hist_atc: {
@@ -14575,6 +16402,15 @@ export interface operations {
             };
             401: {
                 headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description Rate limit exceeded: back off for `Retry-After` seconds. Every limited response carries `RateLimit-Limit`, `RateLimit-Remaining` and `RateLimit-Reset`. */
+            429: {
+                headers: {
+                    /** @description Seconds until the next request will be accepted. */
+                    "Retry-After"?: string;
                     [name: string]: unknown;
                 };
                 content?: never;
@@ -14622,6 +16458,15 @@ export interface operations {
                 };
                 content?: never;
             };
+            /** @description Rate limit exceeded: back off for `Retry-After` seconds. Every limited response carries `RateLimit-Limit`, `RateLimit-Remaining` and `RateLimit-Reset`. */
+            429: {
+                headers: {
+                    /** @description Seconds until the next request will be accepted. */
+                    "Retry-After"?: string;
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
             503: {
                 headers: {
                     [name: string]: unknown;
@@ -14658,6 +16503,15 @@ export interface operations {
             };
             401: {
                 headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description Rate limit exceeded: back off for `Retry-After` seconds. Every limited response carries `RateLimit-Limit`, `RateLimit-Remaining` and `RateLimit-Reset`. */
+            429: {
+                headers: {
+                    /** @description Seconds until the next request will be accepted. */
+                    "Retry-After"?: string;
                     [name: string]: unknown;
                 };
                 content?: never;
@@ -14705,6 +16559,15 @@ export interface operations {
                 };
                 content?: never;
             };
+            /** @description Rate limit exceeded: back off for `Retry-After` seconds. Every limited response carries `RateLimit-Limit`, `RateLimit-Remaining` and `RateLimit-Reset`. */
+            429: {
+                headers: {
+                    /** @description Seconds until the next request will be accepted. */
+                    "Retry-After"?: string;
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
             503: {
                 headers: {
                     [name: string]: unknown;
@@ -14745,6 +16608,15 @@ export interface operations {
                 };
                 content?: never;
             };
+            /** @description Rate limit exceeded: back off for `Retry-After` seconds. Every limited response carries `RateLimit-Limit`, `RateLimit-Remaining` and `RateLimit-Reset`. */
+            429: {
+                headers: {
+                    /** @description Seconds until the next request will be accepted. */
+                    "Retry-After"?: string;
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
             503: {
                 headers: {
                     [name: string]: unknown;
@@ -14781,6 +16653,15 @@ export interface operations {
             };
             401: {
                 headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description Rate limit exceeded: back off for `Retry-After` seconds. Every limited response carries `RateLimit-Limit`, `RateLimit-Remaining` and `RateLimit-Reset`. */
+            429: {
+                headers: {
+                    /** @description Seconds until the next request will be accepted. */
+                    "Retry-After"?: string;
                     [name: string]: unknown;
                 };
                 content?: never;
@@ -14828,6 +16709,15 @@ export interface operations {
                 };
                 content?: never;
             };
+            /** @description Rate limit exceeded: back off for `Retry-After` seconds. Every limited response carries `RateLimit-Limit`, `RateLimit-Remaining` and `RateLimit-Reset`. */
+            429: {
+                headers: {
+                    /** @description Seconds until the next request will be accepted. */
+                    "Retry-After"?: string;
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
             503: {
                 headers: {
                     [name: string]: unknown;
@@ -14867,6 +16757,15 @@ export interface operations {
             };
             401: {
                 headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description Rate limit exceeded: back off for `Retry-After` seconds. Every limited response carries `RateLimit-Limit`, `RateLimit-Remaining` and `RateLimit-Reset`. */
+            429: {
+                headers: {
+                    /** @description Seconds until the next request will be accepted. */
+                    "Retry-After"?: string;
                     [name: string]: unknown;
                 };
                 content?: never;
@@ -14911,6 +16810,15 @@ export interface operations {
                 };
                 content?: never;
             };
+            /** @description Rate limit exceeded: back off for `Retry-After` seconds. Every limited response carries `RateLimit-Limit`, `RateLimit-Remaining` and `RateLimit-Reset`. */
+            429: {
+                headers: {
+                    /** @description Seconds until the next request will be accepted. */
+                    "Retry-After"?: string;
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
             503: {
                 headers: {
                     [name: string]: unknown;
@@ -14947,6 +16855,15 @@ export interface operations {
             };
             401: {
                 headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description Rate limit exceeded: back off for `Retry-After` seconds. Every limited response carries `RateLimit-Limit`, `RateLimit-Remaining` and `RateLimit-Reset`. */
+            429: {
+                headers: {
+                    /** @description Seconds until the next request will be accepted. */
+                    "Retry-After"?: string;
                     [name: string]: unknown;
                 };
                 content?: never;
@@ -14988,6 +16905,15 @@ export interface operations {
                 };
                 content?: never;
             };
+            /** @description Rate limit exceeded: back off for `Retry-After` seconds. Every limited response carries `RateLimit-Limit`, `RateLimit-Remaining` and `RateLimit-Reset`. */
+            429: {
+                headers: {
+                    /** @description Seconds until the next request will be accepted. */
+                    "Retry-After"?: string;
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
         };
     };
     network_history: {
@@ -15014,6 +16940,15 @@ export interface operations {
             };
             401: {
                 headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description Rate limit exceeded: back off for `Retry-After` seconds. Every limited response carries `RateLimit-Limit`, `RateLimit-Remaining` and `RateLimit-Reset`. */
+            429: {
+                headers: {
+                    /** @description Seconds until the next request will be accepted. */
+                    "Retry-After"?: string;
                     [name: string]: unknown;
                 };
                 content?: never;
@@ -15052,6 +16987,15 @@ export interface operations {
             };
             401: {
                 headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description Rate limit exceeded: back off for `Retry-After` seconds. Every limited response carries `RateLimit-Limit`, `RateLimit-Remaining` and `RateLimit-Reset`. */
+            429: {
+                headers: {
+                    /** @description Seconds until the next request will be accepted. */
+                    "Retry-After"?: string;
                     [name: string]: unknown;
                 };
                 content?: never;
@@ -15098,6 +17042,15 @@ export interface operations {
                 };
                 content?: never;
             };
+            /** @description Rate limit exceeded: back off for `Retry-After` seconds. Every limited response carries `RateLimit-Limit`, `RateLimit-Remaining` and `RateLimit-Reset`. */
+            429: {
+                headers: {
+                    /** @description Seconds until the next request will be accepted. */
+                    "Retry-After"?: string;
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
         };
     };
     storage_forecast: {
@@ -15119,6 +17072,15 @@ export interface operations {
             };
             401: {
                 headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description Rate limit exceeded: back off for `Retry-After` seconds. Every limited response carries `RateLimit-Limit`, `RateLimit-Remaining` and `RateLimit-Reset`. */
+            429: {
+                headers: {
+                    /** @description Seconds until the next request will be accepted. */
+                    "Retry-After"?: string;
                     [name: string]: unknown;
                 };
                 content?: never;
@@ -15175,6 +17137,15 @@ export interface operations {
                 };
                 content?: never;
             };
+            /** @description Rate limit exceeded: back off for `Retry-After` seconds. Every limited response carries `RateLimit-Limit`, `RateLimit-Remaining` and `RateLimit-Reset`. */
+            429: {
+                headers: {
+                    /** @description Seconds until the next request will be accepted. */
+                    "Retry-After"?: string;
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
         };
     };
     list_taxi_observations: {
@@ -15219,6 +17190,15 @@ export interface operations {
                 };
                 content?: never;
             };
+            /** @description Rate limit exceeded: back off for `Retry-After` seconds. Every limited response carries `RateLimit-Limit`, `RateLimit-Remaining` and `RateLimit-Reset`. */
+            429: {
+                headers: {
+                    /** @description Seconds until the next request will be accepted. */
+                    "Retry-After"?: string;
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
         };
     };
     list_advisories: {
@@ -15240,6 +17220,15 @@ export interface operations {
             };
             401: {
                 headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description Rate limit exceeded: back off for `Retry-After` seconds. Every limited response carries `RateLimit-Limit`, `RateLimit-Remaining` and `RateLimit-Reset`. */
+            429: {
+                headers: {
+                    /** @description Seconds until the next request will be accepted. */
+                    "Retry-After"?: string;
                     [name: string]: unknown;
                 };
                 content?: never;
@@ -15279,6 +17268,15 @@ export interface operations {
                 };
                 content?: never;
             };
+            /** @description Rate limit exceeded: back off for `Retry-After` seconds. Every limited response carries `RateLimit-Limit`, `RateLimit-Remaining` and `RateLimit-Reset`. */
+            429: {
+                headers: {
+                    /** @description Seconds until the next request will be accepted. */
+                    "Retry-After"?: string;
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
         };
     };
     get_advisory: {
@@ -15312,6 +17310,15 @@ export interface operations {
                 };
                 content?: never;
             };
+            /** @description Rate limit exceeded: back off for `Retry-After` seconds. Every limited response carries `RateLimit-Limit`, `RateLimit-Remaining` and `RateLimit-Reset`. */
+            429: {
+                headers: {
+                    /** @description Seconds until the next request will be accepted. */
+                    "Retry-After"?: string;
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
         };
     };
     delete_advisory: {
@@ -15339,6 +17346,15 @@ export interface operations {
             };
             409: {
                 headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description Rate limit exceeded: back off for `Retry-After` seconds. Every limited response carries `RateLimit-Limit`, `RateLimit-Remaining` and `RateLimit-Reset`. */
+            429: {
+                headers: {
+                    /** @description Seconds until the next request will be accepted. */
+                    "Retry-After"?: string;
                     [name: string]: unknown;
                 };
                 content?: never;
@@ -15380,6 +17396,15 @@ export interface operations {
                 };
                 content?: never;
             };
+            /** @description Rate limit exceeded: back off for `Retry-After` seconds. Every limited response carries `RateLimit-Limit`, `RateLimit-Remaining` and `RateLimit-Reset`. */
+            429: {
+                headers: {
+                    /** @description Seconds until the next request will be accepted. */
+                    "Retry-After"?: string;
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
         };
     };
     cancel_advisory: {
@@ -15413,6 +17438,15 @@ export interface operations {
                 };
                 content?: never;
             };
+            /** @description Rate limit exceeded: back off for `Retry-After` seconds. Every limited response carries `RateLimit-Limit`, `RateLimit-Remaining` and `RateLimit-Reset`. */
+            429: {
+                headers: {
+                    /** @description Seconds until the next request will be accepted. */
+                    "Retry-After"?: string;
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
         };
     };
     publish_advisory: {
@@ -15442,6 +17476,15 @@ export interface operations {
             };
             409: {
                 headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description Rate limit exceeded: back off for `Retry-After` seconds. Every limited response carries `RateLimit-Limit`, `RateLimit-Remaining` and `RateLimit-Reset`. */
+            429: {
+                headers: {
+                    /** @description Seconds until the next request will be accepted. */
+                    "Retry-After"?: string;
                     [name: string]: unknown;
                 };
                 content?: never;
@@ -15515,6 +17558,15 @@ export interface operations {
                 };
                 content?: never;
             };
+            /** @description Rate limit exceeded: back off for `Retry-After` seconds. Every limited response carries `RateLimit-Limit`, `RateLimit-Remaining` and `RateLimit-Reset`. */
+            429: {
+                headers: {
+                    /** @description Seconds until the next request will be accepted. */
+                    "Retry-After"?: string;
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
         };
     };
     release_cfr: {
@@ -15584,6 +17636,15 @@ export interface operations {
                 };
                 content?: never;
             };
+            /** @description Rate limit exceeded: back off for `Retry-After` seconds. Every limited response carries `RateLimit-Limit`, `RateLimit-Remaining` and `RateLimit-Reset`. */
+            429: {
+                headers: {
+                    /** @description Seconds until the next request will be accepted. */
+                    "Retry-After"?: string;
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
         };
     };
     airport_demand: {
@@ -15605,6 +17666,15 @@ export interface operations {
             };
             401: {
                 headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description Rate limit exceeded: back off for `Retry-After` seconds. Every limited response carries `RateLimit-Limit`, `RateLimit-Remaining` and `RateLimit-Reset`. */
+            429: {
+                headers: {
+                    /** @description Seconds until the next request will be accepted. */
+                    "Retry-After"?: string;
                     [name: string]: unknown;
                 };
                 content?: never;
@@ -15643,6 +17713,15 @@ export interface operations {
                 };
                 content?: never;
             };
+            /** @description Rate limit exceeded: back off for `Retry-After` seconds. Every limited response carries `RateLimit-Limit`, `RateLimit-Remaining` and `RateLimit-Reset`. */
+            429: {
+                headers: {
+                    /** @description Seconds until the next request will be accepted. */
+                    "Retry-After"?: string;
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
             503: {
                 headers: {
                     [name: string]: unknown;
@@ -15673,6 +17752,15 @@ export interface operations {
             };
             401: {
                 headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description Rate limit exceeded: back off for `Retry-After` seconds. Every limited response carries `RateLimit-Limit`, `RateLimit-Remaining` and `RateLimit-Reset`. */
+            429: {
+                headers: {
+                    /** @description Seconds until the next request will be accepted. */
+                    "Retry-After"?: string;
                     [name: string]: unknown;
                 };
                 content?: never;
@@ -15720,6 +17808,15 @@ export interface operations {
                 };
                 content?: never;
             };
+            /** @description Rate limit exceeded: back off for `Retry-After` seconds. Every limited response carries `RateLimit-Limit`, `RateLimit-Remaining` and `RateLimit-Reset`. */
+            429: {
+                headers: {
+                    /** @description Seconds until the next request will be accepted. */
+                    "Retry-After"?: string;
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
             503: {
                 headers: {
                     [name: string]: unknown;
@@ -15747,6 +17844,15 @@ export interface operations {
             };
             401: {
                 headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description Rate limit exceeded: back off for `Retry-After` seconds. Every limited response carries `RateLimit-Limit`, `RateLimit-Remaining` and `RateLimit-Reset`. */
+            429: {
+                headers: {
+                    /** @description Seconds until the next request will be accepted. */
+                    "Retry-After"?: string;
                     [name: string]: unknown;
                 };
                 content?: never;
@@ -15788,6 +17894,15 @@ export interface operations {
             };
             401: {
                 headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description Rate limit exceeded: back off for `Retry-After` seconds. Every limited response carries `RateLimit-Limit`, `RateLimit-Remaining` and `RateLimit-Reset`. */
+            429: {
+                headers: {
+                    /** @description Seconds until the next request will be accepted. */
+                    "Retry-After"?: string;
                     [name: string]: unknown;
                 };
                 content?: never;
@@ -15848,6 +17963,15 @@ export interface operations {
                 };
                 content?: never;
             };
+            /** @description Rate limit exceeded: back off for `Retry-After` seconds. Every limited response carries `RateLimit-Limit`, `RateLimit-Remaining` and `RateLimit-Reset`. */
+            429: {
+                headers: {
+                    /** @description Seconds until the next request will be accepted. */
+                    "Retry-After"?: string;
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
             503: {
                 headers: {
                     [name: string]: unknown;
@@ -15882,6 +18006,15 @@ export interface operations {
             };
             404: {
                 headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description Rate limit exceeded: back off for `Retry-After` seconds. Every limited response carries `RateLimit-Limit`, `RateLimit-Remaining` and `RateLimit-Reset`. */
+            429: {
+                headers: {
+                    /** @description Seconds until the next request will be accepted. */
+                    "Retry-After"?: string;
                     [name: string]: unknown;
                 };
                 content?: never;
@@ -15926,6 +18059,15 @@ export interface operations {
                 };
                 content?: never;
             };
+            /** @description Rate limit exceeded: back off for `Retry-After` seconds. Every limited response carries `RateLimit-Limit`, `RateLimit-Remaining` and `RateLimit-Reset`. */
+            429: {
+                headers: {
+                    /** @description Seconds until the next request will be accepted. */
+                    "Retry-After"?: string;
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
             503: {
                 headers: {
                     [name: string]: unknown;
@@ -15962,6 +18104,15 @@ export interface operations {
             };
             409: {
                 headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description Rate limit exceeded: back off for `Retry-After` seconds. Every limited response carries `RateLimit-Limit`, `RateLimit-Remaining` and `RateLimit-Reset`. */
+            429: {
+                headers: {
+                    /** @description Seconds until the next request will be accepted. */
+                    "Retry-After"?: string;
                     [name: string]: unknown;
                 };
                 content?: never;
@@ -16012,6 +18163,15 @@ export interface operations {
                 };
                 content?: never;
             };
+            /** @description Rate limit exceeded: back off for `Retry-After` seconds. Every limited response carries `RateLimit-Limit`, `RateLimit-Remaining` and `RateLimit-Reset`. */
+            429: {
+                headers: {
+                    /** @description Seconds until the next request will be accepted. */
+                    "Retry-After"?: string;
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
             503: {
                 headers: {
                     [name: string]: unknown;
@@ -16053,6 +18213,15 @@ export interface operations {
             };
             409: {
                 headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description Rate limit exceeded: back off for `Retry-After` seconds. Every limited response carries `RateLimit-Limit`, `RateLimit-Remaining` and `RateLimit-Reset`. */
+            429: {
+                headers: {
+                    /** @description Seconds until the next request will be accepted. */
+                    "Retry-After"?: string;
                     [name: string]: unknown;
                 };
                 content?: never;
@@ -16105,6 +18274,15 @@ export interface operations {
                 };
                 content?: never;
             };
+            /** @description Rate limit exceeded: back off for `Retry-After` seconds. Every limited response carries `RateLimit-Limit`, `RateLimit-Remaining` and `RateLimit-Reset`. */
+            429: {
+                headers: {
+                    /** @description Seconds until the next request will be accepted. */
+                    "Retry-After"?: string;
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
             503: {
                 headers: {
                     [name: string]: unknown;
@@ -16147,6 +18325,15 @@ export interface operations {
                 };
                 content?: never;
             };
+            /** @description Rate limit exceeded: back off for `Retry-After` seconds. Every limited response carries `RateLimit-Limit`, `RateLimit-Remaining` and `RateLimit-Reset`. */
+            429: {
+                headers: {
+                    /** @description Seconds until the next request will be accepted. */
+                    "Retry-After"?: string;
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
             503: {
                 headers: {
                     [name: string]: unknown;
@@ -16174,6 +18361,15 @@ export interface operations {
             };
             401: {
                 headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description Rate limit exceeded: back off for `Retry-After` seconds. Every limited response carries `RateLimit-Limit`, `RateLimit-Remaining` and `RateLimit-Reset`. */
+            429: {
+                headers: {
+                    /** @description Seconds until the next request will be accepted. */
+                    "Retry-After"?: string;
                     [name: string]: unknown;
                 };
                 content?: never;
@@ -16213,6 +18409,15 @@ export interface operations {
                 };
                 content?: never;
             };
+            /** @description Rate limit exceeded: back off for `Retry-After` seconds. Every limited response carries `RateLimit-Limit`, `RateLimit-Remaining` and `RateLimit-Reset`. */
+            429: {
+                headers: {
+                    /** @description Seconds until the next request will be accepted. */
+                    "Retry-After"?: string;
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
         };
     };
     delete_ground_stop: {
@@ -16241,6 +18446,15 @@ export interface operations {
             };
             404: {
                 headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description Rate limit exceeded: back off for `Retry-After` seconds. Every limited response carries `RateLimit-Limit`, `RateLimit-Remaining` and `RateLimit-Reset`. */
+            429: {
+                headers: {
+                    /** @description Seconds until the next request will be accepted. */
+                    "Retry-After"?: string;
                     [name: string]: unknown;
                 };
                 content?: never;
@@ -16275,6 +18489,15 @@ export interface operations {
             };
             409: {
                 headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description Rate limit exceeded: back off for `Retry-After` seconds. Every limited response carries `RateLimit-Limit`, `RateLimit-Remaining` and `RateLimit-Reset`. */
+            429: {
+                headers: {
+                    /** @description Seconds until the next request will be accepted. */
+                    "Retry-After"?: string;
                     [name: string]: unknown;
                 };
                 content?: never;
@@ -16318,6 +18541,15 @@ export interface operations {
                 };
                 content?: never;
             };
+            /** @description Rate limit exceeded: back off for `Retry-After` seconds. Every limited response carries `RateLimit-Limit`, `RateLimit-Remaining` and `RateLimit-Reset`. */
+            429: {
+                headers: {
+                    /** @description Seconds until the next request will be accepted. */
+                    "Retry-After"?: string;
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
         };
     };
     list_programs: {
@@ -16339,6 +18571,15 @@ export interface operations {
             };
             401: {
                 headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description Rate limit exceeded: back off for `Retry-After` seconds. Every limited response carries `RateLimit-Limit`, `RateLimit-Remaining` and `RateLimit-Reset`. */
+            429: {
+                headers: {
+                    /** @description Seconds until the next request will be accepted. */
+                    "Retry-After"?: string;
                     [name: string]: unknown;
                 };
                 content?: never;
@@ -16381,6 +18622,15 @@ export interface operations {
                 };
                 content?: never;
             };
+            /** @description Rate limit exceeded: back off for `Retry-After` seconds. Every limited response carries `RateLimit-Limit`, `RateLimit-Remaining` and `RateLimit-Reset`. */
+            429: {
+                headers: {
+                    /** @description Seconds until the next request will be accepted. */
+                    "Retry-After"?: string;
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
         };
     };
     delete_program: {
@@ -16413,6 +18663,15 @@ export interface operations {
                 };
                 content?: never;
             };
+            /** @description Rate limit exceeded: back off for `Retry-After` seconds. Every limited response carries `RateLimit-Limit`, `RateLimit-Remaining` and `RateLimit-Reset`. */
+            429: {
+                headers: {
+                    /** @description Seconds until the next request will be accepted. */
+                    "Retry-After"?: string;
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
         };
     };
     taxi_stats: {
@@ -16437,6 +18696,15 @@ export interface operations {
             };
             401: {
                 headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description Rate limit exceeded: back off for `Retry-After` seconds. Every limited response carries `RateLimit-Limit`, `RateLimit-Remaining` and `RateLimit-Reset`. */
+            429: {
+                headers: {
+                    /** @description Seconds until the next request will be accepted. */
+                    "Retry-After"?: string;
                     [name: string]: unknown;
                 };
                 content?: never;
@@ -16477,6 +18745,15 @@ export interface operations {
                 };
                 content?: never;
             };
+            /** @description Rate limit exceeded: back off for `Retry-After` seconds. Every limited response carries `RateLimit-Limit`, `RateLimit-Remaining` and `RateLimit-Reset`. */
+            429: {
+                headers: {
+                    /** @description Seconds until the next request will be accepted. */
+                    "Retry-After"?: string;
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
         };
     };
     create_tmi: {
@@ -16512,6 +18789,15 @@ export interface operations {
                 };
                 content?: never;
             };
+            /** @description Rate limit exceeded: back off for `Retry-After` seconds. Every limited response carries `RateLimit-Limit`, `RateLimit-Remaining` and `RateLimit-Reset`. */
+            429: {
+                headers: {
+                    /** @description Seconds until the next request will be accepted. */
+                    "Retry-After"?: string;
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
         };
     };
     delete_tmi: {
@@ -16540,6 +18826,15 @@ export interface operations {
             };
             404: {
                 headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description Rate limit exceeded: back off for `Retry-After` seconds. Every limited response carries `RateLimit-Limit`, `RateLimit-Remaining` and `RateLimit-Reset`. */
+            429: {
+                headers: {
+                    /** @description Seconds until the next request will be accepted. */
+                    "Retry-After"?: string;
                     [name: string]: unknown;
                 };
                 content?: never;
@@ -16588,6 +18883,15 @@ export interface operations {
                 };
                 content?: never;
             };
+            /** @description Rate limit exceeded: back off for `Retry-After` seconds. Every limited response carries `RateLimit-Limit`, `RateLimit-Remaining` and `RateLimit-Reset`. */
+            429: {
+                headers: {
+                    /** @description Seconds until the next request will be accepted. */
+                    "Retry-After"?: string;
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
         };
     };
     cancel_tmi: {
@@ -16618,6 +18922,15 @@ export interface operations {
             };
             409: {
                 headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description Rate limit exceeded: back off for `Retry-After` seconds. Every limited response carries `RateLimit-Limit`, `RateLimit-Remaining` and `RateLimit-Reset`. */
+            429: {
+                headers: {
+                    /** @description Seconds until the next request will be accepted. */
+                    "Retry-After"?: string;
                     [name: string]: unknown;
                 };
                 content?: never;
@@ -16656,6 +18969,15 @@ export interface operations {
                 };
                 content?: never;
             };
+            /** @description Rate limit exceeded: back off for `Retry-After` seconds. Every limited response carries `RateLimit-Limit`, `RateLimit-Remaining` and `RateLimit-Reset`. */
+            429: {
+                headers: {
+                    /** @description Seconds until the next request will be accepted. */
+                    "Retry-After"?: string;
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
         };
     };
     search_users: {
@@ -16682,6 +19004,15 @@ export interface operations {
             };
             401: {
                 headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description Rate limit exceeded: back off for `Retry-After` seconds. Every limited response carries `RateLimit-Limit`, `RateLimit-Remaining` and `RateLimit-Reset`. */
+            429: {
+                headers: {
+                    /** @description Seconds until the next request will be accepted. */
+                    "Retry-After"?: string;
                     [name: string]: unknown;
                 };
                 content?: never;

@@ -13,6 +13,7 @@ pub mod jobs;
 pub mod metrics;
 pub mod models;
 pub mod openapi;
+pub mod rate_limit;
 pub mod realtime;
 pub mod repos;
 pub mod reqlog;
@@ -158,7 +159,9 @@ pub async fn run() -> color_eyre::Result<()> {
         feed::vatusa::spawn_division_pull(state.jobs.clone(), pool, state.events.clone());
     }
 
-    let app = router::build_router(state);
+    let limits = std::sync::Arc::new(rate_limit::RateLimits::from_env());
+    rate_limit::spawn_cleanup(limits.clone());
+    let app = router::build_router_with_limits(state, limits);
 
     let addr: SocketAddr = std::env::var("BIND_ADDR")
         .unwrap_or_else(|_| "127.0.0.1:3000".to_string())
