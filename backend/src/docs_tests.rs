@@ -280,7 +280,7 @@ fn markdown_files(dir: &Path, out: &mut Vec<PathBuf>) {
 
 /// Every API request in a fenced code block: the method from `curl -X` (GET otherwise), and the path
 /// up to its query string. Prose and inline code are not examples; `/docs/api/v1/…` is the spec, not
-/// the API, and a `ws://`/`wss://` URL is the realtime socket, which is no OpenAPI operation.
+/// the API, and a path in [`NOT_OPENAPI`] is a real route that is deliberately no OpenAPI operation.
 fn examples_in(file: &Path) -> Vec<Example> {
     let src = std::fs::read_to_string(file).unwrap();
     let mut out = Vec::new();
@@ -299,7 +299,7 @@ fn examples_in(file: &Path) -> Vec<Example> {
                         .unwrap_or("GET")
                         .to_ascii_uppercase();
                     for (at, _) in command.match_indices("/api/v1/") {
-                        if command[..at].ends_with("/docs") || is_websocket_url(&command[..at]) {
+                        if command[..at].ends_with("/docs") {
                             continue;
                         }
                         let path: String = command[at..]
@@ -308,6 +308,9 @@ fn examples_in(file: &Path) -> Vec<Example> {
                                 !c.is_whitespace() && !matches!(c, '"' | '\'' | '?' | '\\')
                             })
                             .collect();
+                        if NOT_OPENAPI.iter().any(|(route, _)| *route == path) {
+                            continue;
+                        }
                         out.push(Example {
                             file: file.to_path_buf(),
                             method: method.clone(),
@@ -326,15 +329,13 @@ fn examples_in(file: &Path) -> Vec<Example> {
     out
 }
 
-/// Whether the URL ending at this point (everything before `/api/v1/…`) is a websocket one — the
-/// scheme of the last word, after any opening quote or bracket.
-fn is_websocket_url(before: &str) -> bool {
-    let url = before
-        .rsplit(|c: char| c.is_whitespace() || matches!(c, '"' | '\'' | '(' | '[' | '`'))
-        .next()
-        .unwrap_or("");
-    url.starts_with("ws://") || url.starts_with("wss://")
-}
+/// Real routes the docs may show that are deliberately not OpenAPI operations, each with why. Anything
+/// else under `/api/v1/` in a docs example must be a documented operation — including a websocket URL,
+/// so a mistyped socket path is still caught (#686).
+const NOT_OPENAPI: &[(&str, &str)] = &[(
+    "/api/v1/ws",
+    "the realtime socket: a websocket upgrade, deliberately not an OpenAPI operation (#589)",
+)];
 
 fn docs_examples(root: &Path) -> Vec<Example> {
     let mut files = Vec::new();
@@ -394,6 +395,26 @@ fn a_websocket_url_is_not_an_api_example() {
     std::fs::remove_dir_all(&dir).unwrap();
     let paths: Vec<_> = examples.iter().map(|e| e.path.as_str()).collect();
     assert_eq!(paths, ["/api/v1/flow/no-such-thing"]);
+}
+
+/// The exemption is the route, not the scheme: a websocket URL to any other path is an example like any
+/// other, so a mistyped socket path in the docs fails the guard instead of slipping through (#686).
+#[test]
+fn only_the_named_socket_route_is_exempt() {
+    let dir = std::env::temp_dir().join(format!(
+        "ois-docs-ws-typo-{}",
+        uuid::Uuid::new_v4().simple()
+    ));
+    std::fs::create_dir_all(&dir).unwrap();
+    std::fs::write(
+        dir.join("page.md"),
+        "```js\nnew WebSocket(\"wss://<your-ois-host>/api/v1/wss\", [\"ois.v1\"]);\n```\n",
+    )
+    .unwrap();
+    let examples = docs_examples(&dir);
+    std::fs::remove_dir_all(&dir).unwrap();
+    let paths: Vec<_> = examples.iter().map(|e| e.path.as_str()).collect();
+    assert_eq!(paths, ["/api/v1/wss"]);
 }
 
 /// The check itself works: a page with a made-up endpoint is caught. A throwaway directory, so no real
