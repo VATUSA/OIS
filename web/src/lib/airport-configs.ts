@@ -7,6 +7,29 @@ export type AirportConfig = components["schemas"]["AirportConfigBody"];
 export type UpsertAirportConfig = components["schemas"]["UpsertAirportConfigRequest"];
 export type AirportForecast = components["schemas"]["AirportForecastBody"];
 
+/**
+ * An airport's coordinates (#540).
+ *
+ * The positions were always in memory on the backend for ETA maths, but nothing returned them — so
+ * a map had no way to point itself at an arbitrary airport and the surface viewer fitted to
+ * whatever geometry happened to be loaded instead. `staleTime: Infinity` because an airport does
+ * not move: one fetch per ICAO per session is all this ever needs.
+ */
+export function useAirportPosition(icao: string | null) {
+  return useQuery({
+    queryKey: ["airport-position", icao],
+    enabled: !!icao,
+    staleTime: Infinity,
+    queryFn: async () => {
+      const { data, error } = await ois.GET("/api/v1/public/airports/{icao}", {
+        params: { path: { icao: icao! } },
+      });
+      if (error || !data) throw new Error("failed to load the airport position");
+      return data;
+    },
+  });
+}
+
 /** Reusable runway configs for an airport (default AAR/ADR + favored-wind rule). */
 export function useAirportConfigs(icao: string | null) {
   return useQuery({

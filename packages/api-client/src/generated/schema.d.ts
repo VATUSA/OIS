@@ -100,6 +100,54 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/v1/admin/groups": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get: operations["list_groups"];
+        put?: never;
+        post: operations["create_group"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/admin/groups/{name}": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put: operations["update_group"];
+        post?: never;
+        delete: operations["delete_group"];
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/admin/groups/{name}/members": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get: operations["list_group_members"];
+        put?: never;
+        post: operations["add_group_member"];
+        delete: operations["remove_group_member"];
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/v1/admin/jobs": {
         parameters: {
             query?: never;
@@ -259,6 +307,38 @@ export interface paths {
         put?: never;
         post: operations["update_user_access"];
         delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/admin/vatusa-role-mappings": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get: operations["list_vatusa_role_mappings"];
+        put?: never;
+        post: operations["create_vatusa_role_mapping"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/admin/vatusa-role-mappings/{id}": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        post?: never;
+        delete: operations["delete_vatusa_role_mapping"];
         options?: never;
         head?: never;
         patch?: never;
@@ -2182,6 +2262,35 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/v1/public/airports/{icao}": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * An airport's coordinates, for pointing a map at it.
+         * @description Public, under `/api/v1/public/`, for the same reason the desktop-download redirect is: these are
+         *     reference coordinates, the surface viewer needs no permission to open, and a GET with no
+         *     `RequirePermission` reads as an oversight anywhere else in `router.rs`.
+         *
+         *     One ICAO rather than the whole map. The caller needs the airport it is already showing, and
+         *     returning every entry to centre a map is the same mistake as shipping the 1.1 MB stand extract to
+         *     the browser.
+         *
+         *     `503` when the feed has not loaded the database yet — distinct from `404`, which means the
+         *     dataset genuinely has no such airport, so a client can tell "try again" from "wrong code".
+         */
+        get: operations["get_airport"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/v1/public/board": {
         parameters: {
             query?: never;
@@ -3370,7 +3479,16 @@ export interface components {
             cid: number;
             display_name: string;
             rating?: string | null;
+            /** @description Bare role names, scope flattened away. Kept as-is so nothing parsing it breaks. */
             roles: string[];
+            /**
+             * @description The same memberships *with* their scope — `EC` for national, `EC:ZDC` for a facility grant.
+             *
+             *     Added rather than changing `roles`' format (#546): a national `EC` and an `EC@ZDC` used to
+             *     render identically, which actively misled, but silently reinterpreting a `Vec<String>` would
+             *     have broken any consumer without the schema type moving to warn them.
+             */
+            scoped_roles: string[];
         };
         /**
          * @description One advisory. `number` is its identity within `facility` on `issued_day` — see
@@ -3620,6 +3738,20 @@ export interface components {
             source: string;
             /** Format: date-time */
             updated_at: string;
+        };
+        /** @description One airport's position. */
+        AirportPositionBody: {
+            /**
+             * Format: double
+             * @description Field elevation, feet MSL.
+             */
+            elevation_ft: number;
+            /** @description Uppercase ICAO, echoed so a caller can key a cache on the response alone. */
+            icao: string;
+            /** Format: double */
+            lat: number;
+            /** Format: double */
+            lon: number;
         };
         /**
          * @description An airport ramp or apron area. `rings` is an array of rings, each an array of `[lat, lon]`.
@@ -3983,6 +4115,15 @@ export interface components {
             scope?: string | null;
             until?: string | null;
         };
+        /**
+         * @description Create a group. Its permission set is set by a follow-up `PUT`, which is also what runs the
+         *     no-escalation gate over the contents.
+         */
+        CreateGroupRequest: {
+            description?: string | null;
+            name: string;
+            reason: string;
+        };
         CreatePackageRequest: {
             name: string;
         };
@@ -4003,6 +4144,16 @@ export interface components {
             /** Format: date-time */
             stop_time?: string | null;
             structured?: null | components["schemas"]["NtmlRestriction"];
+        };
+        /**
+         * @description Add a mapping. Codes are trimmed and uppercased, as VATUSA roles are on ingest. `reason` is
+         *     required and audited.
+         */
+        CreateVatusaRoleMappingRequest: {
+            facility?: string | null;
+            reason: string;
+            role_name: string;
+            vatusa_role: string;
         };
         /** @description A manually-added runway end (for fields the bundled dataset lacks). */
         CustomEnd: {
@@ -5264,6 +5415,60 @@ export interface components {
             /** @description Display name of whoever last touched the stop. */
             updated_by?: string | null;
         };
+        /** @description One group as the group editor lists it. */
+        GroupBody: {
+            description?: string | null;
+            name: string;
+            /** @description Flat list — `role_permissions` carries no ARTCC scope; scope lives on the membership. */
+            permissions: string[];
+            /** Format: int64 */
+            service_account_count: number;
+            /** @description True for the groups code depends on, which cannot be edited or deleted here. */
+            system: boolean;
+            /** Format: int64 */
+            user_count: number;
+        };
+        /** @description One holder of a group, at one scope. `artcc_id` null is national. */
+        GroupMemberBody: {
+            artcc_id?: string | null;
+            /** Format: int64 */
+            cid: number;
+            display_name: string;
+            rating?: string | null;
+        };
+        /** @description A page of a group's holders. */
+        GroupMemberPage: {
+            items: components["schemas"]["GroupMemberBody"][];
+            /** Format: int64 */
+            page: number;
+            /** Format: int64 */
+            page_size: number;
+            /** Format: int64 */
+            total: number;
+        };
+        /**
+         * @description Add or remove one membership, at one scope.
+         *
+         *     `artcc_id` is required on **removal** as well as addition: a user can hold the same group
+         *     nationally and at an ARTCC, so "remove EC from this user" is ambiguous without it.
+         */
+        GroupMemberRequest: {
+            artcc_id?: string | null;
+            /** Format: int64 */
+            cid: number;
+            reason: string;
+        };
+        /**
+         * @description One group the caller holds, as a template for an API key's permissions (#550).
+         *
+         *     No scope: `role_permissions` carries none — scope lives on the membership — and a key is capped by
+         *     its owner's live access when it is created, so expanding a template cannot grant more than its
+         *     owner holds.
+         */
+        HeldGroupBody: {
+            name: string;
+            permissions: string[];
+        };
         /**
          * @description One FCA-metered ground departure in the IDST console. One row per metering FCA — a flight metered
          *     by several FCAs appears once per FCA, each with its own release.
@@ -6033,6 +6238,15 @@ export interface components {
         };
         /** @description The acting user's own effective access (staff debug view). */
         SelfAccessBody: {
+            /**
+             * @description The groups the caller holds, each with the permissions it grants (#550).
+             *
+             *     This is what an API key is templated from now that presets are gone. It lists only the
+             *     caller's own groups, so it needs nothing beyond `access.self.read` — unlike the admin group
+             *     listing, which needs `access.groups.read` and so would have left most key creators with no bulk
+             *     path at all.
+             */
+            groups: components["schemas"]["HeldGroupBody"][];
             permissions: Record<string, never>;
             role_names: string[];
             server_admin: boolean;
@@ -6470,6 +6684,11 @@ export interface components {
             scope?: string | null;
             start_time: string;
         };
+        /** @description Replace a group's permission set. `reason` is required and audited, matching the user editor. */
+        UpdateGroupRequest: {
+            permissions: string[];
+            reason: string;
+        };
         UpdateTmiRequest: {
             providing?: string | null;
             requesting?: string | null;
@@ -6680,6 +6899,27 @@ export interface components {
             facility: string;
             role: string;
         };
+        /**
+         * @description One VATUSA role → OIS group mapping (#548). A member holding `vatusa_role` — at `facility`, or at
+         *     any facility when it is null — is granted `role_name`, scoped to where they hold the VATUSA role.
+         */
+        VatusaRoleMappingBody: {
+            /** Format: date-time */
+            created_at: string;
+            facility?: string | null;
+            /** Format: int64 */
+            id: number;
+            role_name: string;
+            vatusa_role: string;
+        };
+        /**
+         * @description Every mapping, plus the VATUSA roles actually seen in synced members — the editor offers those
+         *     rather than free text, so a role name that would never match can't be entered.
+         */
+        VatusaRoleMappingList: {
+            known_vatusa_roles: string[];
+            mappings: components["schemas"]["VatusaRoleMappingBody"][];
+        };
     };
     responses: never;
     parameters: never;
@@ -6870,6 +7110,309 @@ export interface operations {
                 };
             };
             401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+        };
+    };
+    list_groups: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["GroupBody"][];
+                };
+            };
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+        };
+    };
+    create_group: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["CreateGroupRequest"];
+            };
+        };
+        responses: {
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["GroupBody"];
+                };
+            };
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            409: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+        };
+    };
+    update_group: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /** @description Group name */
+                name: string;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["UpdateGroupRequest"];
+            };
+        };
+        responses: {
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["GroupBody"];
+                };
+            };
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+        };
+    };
+    delete_group: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /** @description Group name */
+                name: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            204: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            409: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+        };
+    };
+    list_group_members: {
+        parameters: {
+            query?: {
+                /** @description Name substring or CID prefix */
+                q?: string;
+                /** @description 1-based page */
+                page?: number;
+                /** @description Rows per page (default 25, max 100) */
+                page_size?: number;
+            };
+            header?: never;
+            path: {
+                /** @description Group name */
+                name: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["GroupMemberPage"];
+                };
+            };
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+        };
+    };
+    add_group_member: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /** @description Group name */
+                name: string;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["GroupMemberRequest"];
+            };
+        };
+        responses: {
+            204: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+        };
+    };
+    remove_group_member: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /** @description Group name */
+                name: string;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["GroupMemberRequest"];
+            };
+        };
+        responses: {
+            204: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            404: {
                 headers: {
                     [name: string]: unknown;
                 };
@@ -7249,6 +7792,128 @@ export interface operations {
                 };
             };
             400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+        };
+    };
+    list_vatusa_role_mappings: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["VatusaRoleMappingList"];
+                };
+            };
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+        };
+    };
+    create_vatusa_role_mapping: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["CreateVatusaRoleMappingRequest"];
+            };
+        };
+        responses: {
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["VatusaRoleMappingBody"];
+                };
+            };
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            409: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+        };
+    };
+    delete_vatusa_role_mapping: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /** @description Mapping id */
+                id: number;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            204: {
                 headers: {
                     [name: string]: unknown;
                 };
@@ -12493,6 +13158,42 @@ export interface operations {
                 content?: never;
             };
             401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+        };
+    };
+    get_airport: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /** @description ICAO identifier, case-insensitive */
+                icao: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["AirportPositionBody"];
+                };
+            };
+            /** @description No such airport in the dataset */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description The airport database has not loaded yet */
+            503: {
                 headers: {
                     [name: string]: unknown;
                 };
