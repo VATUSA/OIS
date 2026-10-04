@@ -21,7 +21,8 @@ surface, and its Discord touchpoints.
 | [aadc.md](aadc.md)                               | flow                 | built |
 | [taxi-insights.md](taxi-insights.md)             | stats, flow          | built |
 | [dashboard-boards.md](dashboard-boards.md)       | identity             | built |
-| [map-atc-display.md](map-atc-display.md)         | flow (map rendering) | built (rendering pipeline — no data model, permissions, API or Discord of its own) |
+| [map-atc-display.md](map-atc-display.md)         | flow (map rendering) | built (rendering pipeline — the overlay has no data model, permissions, API or Discord of its own; sector data is in monitor.md) |
+| [monitor.md](monitor.md)                         | flow                 | core built; live loads, page and map layer pending (#701, #601, #602) |
 | [diagnostics.md](diagnostics.md)                 | diagnostics          | built |
 
 Every spec above is built. The "diverged from original spec" ones have live migrations,
