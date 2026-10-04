@@ -1,11 +1,20 @@
 import {describe, expect, it} from "vitest";
 
-import {shouldSeed, unseenEntries, type ChangelogEntry} from "./changelog";
+import {
+  CHANGELOG,
+  changelogProblems,
+  panelSize,
+  shotColumns,
+  shouldSeed,
+  unseenEntries,
+  type ChangelogEntry,
+  type Screenshot,
+} from "./changelog";
 
 const entries: ChangelogEntry[] = [
-  { id: "c", date: "2026-03-01", title: "Third", highlights: [] },
-  { id: "b", date: "2026-02-01", title: "Second", highlights: [] },
-  { id: "a", date: "2026-01-01", title: "First", highlights: [] },
+  { id: "c", date: "2026-03-01", title: "Third", sections: [] },
+  { id: "b", date: "2026-02-01", title: "Second", sections: [] },
+  { id: "a", date: "2026-01-01", title: "First", sections: [] },
 ];
 
 describe("unseenEntries", () => {
@@ -46,4 +55,64 @@ describe("shouldSeed", () => {
   it("is false once lastSeenId is set", () => {
     expect(shouldSeed({ lastSeenId: "a" })).toBe(false);
   });
+});
+
+const shot = (n: number, alt = `Shot ${n}`): Screenshot => ({ src: `/assets/shot-${n}.png`, alt });
+const shots = (count: number) => Array.from({ length: count }, (_, i) => shot(i));
+const entry = (id: string, sectionShots: Screenshot[][]): ChangelogEntry => ({
+  id,
+  date: "2026-10-01",
+  title: id,
+  sections: sectionShots.map((s) => ({ highlights: ["x"], shots: s })),
+});
+
+describe("shotColumns (#665)", () => {
+  it.each([
+    [1, 1],
+    [2, 2],
+    [3, 2],
+    [4, 2],
+    [5, 3],
+    [8, 3],
+  ])("lays %i shots out in %i columns", (count, cols) => {
+    expect(shotColumns(count)).toBe(cols);
+  });
+});
+
+describe("panelSize (#665)", () => {
+  it("widens only when a shown entry has shots", () => {
+    expect(panelSize([entry("a", [[]])])).toBe("md");
+    expect(panelSize([entry("a", [[]]), entry("b", [[], shots(1)])])).toBe("xl");
+  });
+});
+
+describe("changelogProblems (#665)", () => {
+  it("passes the changelog that ships", () => {
+    expect(changelogProblems(CHANGELOG)).toEqual([]);
+  });
+
+  it("caps shots per entry, summed across sections", () => {
+    expect(changelogProblems([entry("a", [shots(8)])])).toEqual([]);
+    expect(changelogProblems([entry("a", [shots(9)])])).toHaveLength(1);
+    expect(changelogProblems([entry("a", [shots(5), shots(4)])])).toHaveLength(1);
+  });
+
+  it("allows shots only on the newest three entries", () => {
+    const four = ["a", "b", "c", "d"].map((id) => entry(id, [[]]));
+    four[2] = entry("c", [shots(1)]);
+    expect(changelogProblems(four)).toEqual([]);
+    four[3] = entry("d", [shots(1)]);
+    expect(changelogProblems(four)).toEqual(["d: only the newest 3 entries may carry shots"]);
+  });
+
+  it("requires alt text", () => {
+    expect(changelogProblems([entry("a", [[shot(1, "  ")]])])).toHaveLength(1);
+  });
+
+  it.each(["https://example.com/a.png", "http://example.com/a.png", "//cdn.example.com/a.png"])(
+    "rejects a remote src (%s)",
+    (src) => {
+      expect(changelogProblems([entry("a", [[{ src, alt: "x" }]])])).toHaveLength(1);
+    },
+  );
 });
