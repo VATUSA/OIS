@@ -129,6 +129,10 @@ permission!(StatsRead, ["stats", "data"], Read);
 permission!(StatsCaptureUpdate, ["stats", "capture"], Update);
 permission!(StatsCaptureDelete, ["stats", "capture"], Delete);
 
+// desktop diagnostics reports (#629): staff read them, and delete one on request.
+permission!(DiagnosticsReportsRead, ["diagnostics", "reports"], Read);
+permission!(DiagnosticsReportsDelete, ["diagnostics", "reports"], Delete);
+
 #[cfg(test)]
 mod sync_tests {
     use std::collections::HashSet;

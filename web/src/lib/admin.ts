@@ -1,4 +1,4 @@
-import {keepPreviousData, useQuery} from "@tanstack/react-query";
+import {keepPreviousData, useMutation, useQuery, useQueryClient} from "@tanstack/react-query";
 
 import type {components} from "@ois/api-client";
 
@@ -62,4 +62,62 @@ export function weekOverWeek(series: DailySeries, window = 7): { direction: "up"
   const direction = delta > 0 ? "up" : delta < 0 ? "down" : "flat";
   const pct = prior === 0 ? (recent === 0 ? 0 : 100) : Math.abs((delta / prior) * 100);
   return { direction, text: `${pct.toFixed(1)}% (${delta >= 0 ? "+" : ""}${delta})` };
+}
+
+// --- desktop diagnostics reports (#629) ---
+
+export type DiagnosticsReport = components["schemas"]["DiagnosticsReport"];
+
+export function useDiagnosticsReports(page = 1, pageSize = 50) {
+  return useQuery({
+    queryKey: ["diagnostics", page, pageSize],
+    queryFn: async () => {
+      const { data, error } = await ois.GET("/api/v1/admin/diagnostics", {
+        params: { query: { page, page_size: pageSize } },
+      });
+      if (error || !data) throw new Error("failed to load diagnostics reports");
+      return data;
+    },
+    placeholderData: keepPreviousData,
+  });
+}
+
+export function useDiagnosticsReport(id: string | null) {
+  return useQuery({
+    queryKey: ["diagnostics", "report", id],
+    enabled: id != null,
+    queryFn: async () => {
+      const { data, error } = await ois.GET("/api/v1/admin/diagnostics/{id}", {
+        params: { path: { id: id! } },
+      });
+      if (error || !data) throw new Error("failed to load the report");
+      return data;
+    },
+  });
+}
+
+export function useDeleteDiagnosticsReport() {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: async (id: string) => {
+      const { error } = await ois.DELETE("/api/v1/admin/diagnostics/{id}", { params: { path: { id } } });
+      if (error) throw new Error("failed to delete the report");
+    },
+    onSuccess: () => qc.invalidateQueries({ queryKey: ["diagnostics"] }),
+  });
+}
+
+/** Saves a report's gzipped logs as a file. */
+export async function downloadDiagnosticsLogs(id: string): Promise<void> {
+  const { data, error } = await ois.GET("/api/v1/admin/diagnostics/{id}/logs", {
+    params: { path: { id } },
+    parseAs: "blob",
+  });
+  if (error || !data) throw new Error("failed to download the logs");
+  const url = URL.createObjectURL(data as Blob);
+  const link = document.createElement("a");
+  link.href = url;
+  link.download = `ois-diagnostics-${id}.log.gz`;
+  link.click();
+  URL.revokeObjectURL(url);
 }

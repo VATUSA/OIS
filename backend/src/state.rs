@@ -18,6 +18,7 @@ use crate::feed::{
     taxi_estimate,
     tracon::TraconState,
     trajectory::ProfileTable,
+    vnas::VnasState,
     winds::Winds,
 };
 use crate::models::AirportGateBody;
@@ -38,6 +39,9 @@ pub struct AppState {
     /// SimAware TRACON boundaries for the ATC layer. Starts empty, refreshed daily
     /// (`feed::tracon::spawn_refresh`); behind `ArcSwap` for lock-free reads.
     pub tracons: TraconState,
+    /// vNAS ERAM sector identities (daily) and live sector staffing (every 30 s), from the single
+    /// poller `feed::vnas::spawn_refresh` (#595). Behind `ArcSwap`s for lock-free reads.
+    pub vnas: VnasState,
     /// Runway ends per US airport, for the Runway Balancer (immutable, compile-time bundled).
     pub runways: Arc<RunwayDb>,
     /// Winds aloft, for ETA correction. Starts empty (still air) and is hot-swapped by
@@ -85,6 +89,8 @@ pub struct AppState {
     pub data_refresh_in_flight: Arc<AtomicBool>,
     /// Per-airport METAR cache `(info, fetched_ms)` for the runway board (server-side fetch).
     pub metar_cache: Arc<Mutex<HashMap<String, (feed::metar::MetarInfo, i64)>>>,
+    /// Verified VATUSA webhook bodies seen recently, so a replayed delivery isn't acted on twice (#627).
+    pub webhook_replays: Arc<crate::handlers::webhooks::ReplayGuard>,
     /// Realtime push hub: mutation handlers publish a topic here; connected websockets fan it out to
     /// clients, which then refetch via REST (see `crate::realtime`).
     pub events: crate::realtime::Events,
@@ -115,6 +121,7 @@ impl AppState {
         let feed = feed::new_state();
         let facilities = feed::facilities::new_state();
         let tracons = feed::tracon::new_state();
+        let vnas = feed::vnas::new_state();
         let nav = Arc::new(ArcSwap::from_pointee(NavData::load()));
         let airspace = Arc::new(Boundaries::load());
         let runways = Arc::new(RunwayDb::load());
@@ -159,6 +166,7 @@ impl AppState {
                 feed,
                 facilities,
                 tracons,
+                vnas,
                 nav,
                 airspace,
                 runways,
@@ -174,6 +182,7 @@ impl AppState {
                 winds_refreshed,
                 data_refresh_in_flight,
                 metar_cache,
+                webhook_replays: Arc::default(),
                 events,
                 jobs,
                 metrics: crate::metrics::handle(),
@@ -186,6 +195,7 @@ impl AppState {
             feed,
             facilities,
             tracons,
+            vnas,
             nav,
             airspace,
             runways,
@@ -201,6 +211,7 @@ impl AppState {
             winds_refreshed,
             data_refresh_in_flight,
             metar_cache,
+            webhook_replays: Arc::default(),
             events,
             jobs,
             metrics: crate::metrics::handle(),
@@ -214,6 +225,7 @@ impl AppState {
             feed: feed::new_state(),
             facilities: feed::facilities::new_state(),
             tracons: feed::tracon::new_state(),
+            vnas: feed::vnas::new_state(),
             nav: Arc::new(ArcSwap::from_pointee(NavData::default())),
             airspace: Arc::new(Boundaries::load()),
             runways: Arc::new(RunwayDb::load()),
@@ -229,6 +241,7 @@ impl AppState {
             winds_refreshed: Arc::new(AtomicI64::new(0)),
             data_refresh_in_flight: Arc::new(AtomicBool::new(false)),
             metar_cache: Arc::new(Mutex::new(HashMap::new())),
+            webhook_replays: Arc::default(),
             events: broadcast::channel(256).0,
             jobs: Arc::new(crate::job_registry::JobRegistry::new()),
             metrics: crate::metrics::handle(),

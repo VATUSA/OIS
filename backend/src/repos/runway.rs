@@ -6,6 +6,7 @@ use std::collections::HashMap;
 use sqlx::PgPool;
 use sqlx::types::Json;
 
+use crate::auth::principal::Attribution;
 use crate::errors::ApiError;
 
 /// Stored runway configuration for one airport.
@@ -41,20 +42,22 @@ pub async fn upsert_config(
     star_rules: Option<&HashMap<String, String>>,
     overrides: Option<&HashMap<String, String>>,
     window_min: Option<i32>,
-    user_id: &str,
+    by: &Attribution,
     custom_ends: Option<&Vec<crate::feed::runway::CustomEnd>>,
 ) -> Result<(), ApiError> {
     sqlx::query(
         "insert into flow.runway_config \
-           (icao, active_ends, star_rules, overrides, window_min, updated_by, custom_ends) \
+           (icao, active_ends, star_rules, overrides, window_min, updated_by, custom_ends, \
+            updated_by_actor) \
          values ($1, coalesce($2, '{}'::text[]), coalesce($3, '{}'::jsonb), \
-                 coalesce($4, '{}'::jsonb), coalesce($5, 90), $6, coalesce($7, '[]'::jsonb)) \
+                 coalesce($4, '{}'::jsonb), coalesce($5, 90), $6, coalesce($7, '[]'::jsonb), $8) \
          on conflict (icao) do update set \
            active_ends = coalesce($2, flow.runway_config.active_ends), \
            star_rules = coalesce($3, flow.runway_config.star_rules), \
            overrides = coalesce($4, flow.runway_config.overrides), \
            window_min = coalesce($5, flow.runway_config.window_min), \
            updated_by = $6, \
+           updated_by_actor = $8, \
            custom_ends = coalesce($7, flow.runway_config.custom_ends)",
     )
     .bind(icao)
@@ -62,8 +65,9 @@ pub async fn upsert_config(
     .bind(star_rules.map(Json))
     .bind(overrides.map(Json))
     .bind(window_min)
-    .bind(user_id)
+    .bind(&by.user_id)
     .bind(custom_ends.map(Json))
+    .bind(&by.actor_id)
     .execute(pool)
     .await
     .map_err(|_| ApiError::Internal)?;
@@ -102,17 +106,19 @@ pub async fn upsert_saved(
     icao: &str,
     name: &str,
     payload: &SavedPayload,
-    user_id: &str,
+    by: &Attribution,
 ) -> Result<(), ApiError> {
     sqlx::query(
-        "insert into flow.runway_saved_config (icao, name, payload, updated_by) \
-         values ($1, $2, $3, $4) \
-         on conflict (icao, name) do update set payload = $3, updated_by = $4",
+        "insert into flow.runway_saved_config (icao, name, payload, updated_by, updated_by_actor) \
+         values ($1, $2, $3, $4, $5) \
+         on conflict (icao, name) do update set payload = $3, updated_by = $4, \
+             updated_by_actor = $5",
     )
     .bind(icao)
     .bind(name)
     .bind(Json(payload))
-    .bind(user_id)
+    .bind(&by.user_id)
+    .bind(&by.actor_id)
     .execute(pool)
     .await
     .map_err(|_| ApiError::Internal)?;

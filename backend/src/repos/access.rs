@@ -55,6 +55,73 @@ pub async fn find_current_user_by_session_token(
     .map_err(|_| ApiError::Internal)
 }
 
+/// The live credential behind an `access.actors` row, for work done later on a principal's behalf (the
+/// event-package lifecycle job, #607). Each lookup applies the same liveness rules as its bearer
+/// lookup, so a revoked key or a disabled service account resolves to `None` and nothing acts as it.
+pub async fn find_current_user_by_actor(
+    pool: &PgPool,
+    actor_id: &str,
+) -> Result<Option<CurrentUser>, ApiError> {
+    sqlx::query_as::<_, CurrentUser>(
+        r#"
+        -- `cid` is nullable (seeded users have none) but `CurrentUser.cid` is not; nothing acting
+        -- later reads it, and a decode error here would silently stop the package from publishing.
+        select u.id, coalesce(u.cid, 0) as cid, coalesce(u.email::text, '') as email,
+               u.display_name, u.rating, pr.primary_role
+        from access.actors a
+        join identity.users u on u.id = a.user_id
+        left join access.v_user_primary_role pr on pr.user_id = u.id
+        where a.id = $1 and a.actor_type = 'user'
+        "#,
+    )
+    .bind(actor_id)
+    .fetch_optional(pool)
+    .await
+    .map_err(|_| ApiError::Internal)
+}
+
+/// See [`find_current_user_by_actor`].
+pub async fn find_current_api_key_by_actor(
+    pool: &PgPool,
+    actor_id: &str,
+) -> Result<Option<CurrentApiKey>, ApiError> {
+    sqlx::query_as::<_, CurrentApiKey>(
+        r#"
+        select k.id, k.owner_user_id, k.prefix, k.name
+        from access.actors a
+        join access.api_keys k on k.id = a.api_key_id
+        join identity.users u on u.id = k.owner_user_id
+        where a.id = $1 and a.actor_type = 'api_key'
+          and k.status = 'active'
+          and k.revoked_at is null
+          and (k.expires_at is null or k.expires_at > now())
+        "#,
+    )
+    .bind(actor_id)
+    .fetch_optional(pool)
+    .await
+    .map_err(|_| ApiError::Internal)
+}
+
+/// See [`find_current_user_by_actor`].
+pub async fn find_current_service_account_by_actor(
+    pool: &PgPool,
+    actor_id: &str,
+) -> Result<Option<CurrentServiceAccount>, ApiError> {
+    sqlx::query_as::<_, CurrentServiceAccount>(
+        r#"
+        select sa.id, sa.key, sa.name
+        from access.actors a
+        join access.service_accounts sa on sa.id = a.service_account_id
+        where a.id = $1 and a.actor_type = 'service_account' and sa.status = 'active'
+        "#,
+    )
+    .bind(actor_id)
+    .fetch_optional(pool)
+    .await
+    .map_err(|_| ApiError::Internal)
+}
+
 pub async fn find_current_service_account_by_bearer_token(
     pool: &PgPool,
     bearer_token: &str,
@@ -182,26 +249,51 @@ pub async fn fetch_service_account_role_names(
     .map_err(|_| ApiError::Internal)
 }
 
-/// A service account's scope for `permission_name`, from its live roles (#583). National only for a
-/// role held with no ARTCC; otherwise the ARTCCs its roles name. The same "live" test as
-/// [`fetch_service_account_permission_names`], so the scope never covers a role the gate ignores.
+/// Every `(permission_name, artcc_id)` a service account holds right now: its live roles' permissions
+/// at the role's ARTCC, plus its direct grants (#584). The gate
+/// ([`fetch_service_account_permission_names`]) and the handler-side scope
+/// ([`service_account_permission_scope`]) both derive from this, so they cannot disagree.
+///
+/// A permission a service account may never hold (`api_keys.*`, `service_accounts.*`) is dropped
+/// here, however it arrived — a role assigned before #584 capped roles, or one widened later — so the
+/// denylist holds at request time, not only when a grant is written.
+pub async fn fetch_service_account_grants(
+    pool: &PgPool,
+    service_account_id: &str,
+) -> Result<Vec<(String, Option<String>)>, ApiError> {
+    let rows = sqlx::query_as::<_, (String, Option<String>)>(
+        "select rp.permission_name, sar.artcc_id
+         from access.service_account_roles sar
+         join access.role_permissions rp on rp.role_name = sar.role_name
+         where sar.service_account_id = $1 and (sar.ends_at is null or sar.ends_at > now())
+         union
+         select permission_name, artcc_id
+         from access.service_account_permissions
+         where service_account_id = $1",
+    )
+    .bind(service_account_id)
+    .fetch_all(pool)
+    .await
+    .map_err(|_| ApiError::Internal)?;
+    Ok(rows
+        .into_iter()
+        .filter(|(name, _)| !crate::repos::api_keys::is_forbidden_for_service_account(name))
+        .collect())
+}
+
+/// A service account's scope for `permission_name` (#583, #584). National only for a grant held with
+/// no ARTCC, by role or directly; otherwise the ARTCCs its grants name.
 pub async fn service_account_permission_scope(
     pool: &PgPool,
     service_account_id: &str,
     permission_name: &str,
 ) -> Result<PermissionScope, ApiError> {
-    let artccs: Vec<Option<String>> = sqlx::query_scalar(
-        "select distinct sar.artcc_id
-         from access.service_account_roles sar
-         join access.role_permissions rp on rp.role_name = sar.role_name
-         where sar.service_account_id = $1 and rp.permission_name = $2
-           and (sar.ends_at is null or sar.ends_at > now())",
-    )
-    .bind(service_account_id)
-    .bind(permission_name)
-    .fetch_all(pool)
-    .await
-    .map_err(|_| ApiError::Internal)?;
+    let artccs: Vec<Option<String>> = fetch_service_account_grants(pool, service_account_id)
+        .await?
+        .into_iter()
+        .filter(|(name, _)| name == permission_name)
+        .map(|(_, artcc)| artcc)
+        .collect();
     if artccs.iter().any(Option::is_none) {
         return Ok(PermissionScope::national());
     }
@@ -214,20 +306,13 @@ pub async fn fetch_service_account_permission_names(
     pool: &PgPool,
     service_account_id: &str,
 ) -> Result<Vec<String>, ApiError> {
-    sqlx::query_scalar::<_, String>(
-        r#"
-        select distinct rp.permission_name
-        from access.service_account_roles sar
-        join access.role_permissions rp on rp.role_name = sar.role_name
-        where sar.service_account_id = $1
-          and (sar.ends_at is null or sar.ends_at > now())
-        order by rp.permission_name
-        "#,
-    )
-    .bind(service_account_id)
-    .fetch_all(pool)
-    .await
-    .map_err(|_| ApiError::Internal)
+    let names: std::collections::BTreeSet<String> =
+        fetch_service_account_grants(pool, service_account_id)
+            .await?
+            .into_iter()
+            .map(|(name, _)| name)
+            .collect();
+    Ok(names.into_iter().collect())
 }
 
 pub fn permission_names_to_permissions(
@@ -299,9 +384,11 @@ pub const ASSIGNABLE_USER_ROLES: &[&str] = &[
 ];
 
 /// All permission names in the catalog (the assignable set for the editor).
-pub async fn fetch_access_catalog_names(pool: &PgPool) -> Result<Vec<String>, ApiError> {
+pub async fn fetch_access_catalog_names<'e>(
+    executor: impl sqlx::PgExecutor<'e>,
+) -> Result<Vec<String>, ApiError> {
     sqlx::query_scalar::<_, String>("select name from access.permissions order by name")
-        .fetch_all(pool)
+        .fetch_all(executor)
         .await
         .map_err(|_| ApiError::Internal)
 }
@@ -557,6 +644,21 @@ pub async fn fetch_service_account_assignable_roles(
         .collect())
 }
 
+/// The distinct permissions the given roles grant — what assigning them would hand over.
+pub async fn fetch_role_permission_names(
+    pool: &PgPool,
+    role_names: &[String],
+) -> Result<Vec<String>, ApiError> {
+    sqlx::query_scalar::<_, String>(
+        "select distinct permission_name from access.role_permissions \
+         where role_name = any($1) order by permission_name",
+    )
+    .bind(role_names)
+    .fetch_all(pool)
+    .await
+    .map_err(|_| ApiError::Internal)
+}
+
 /// A user's national (unscoped) direct permission grants — the set the national
 /// editor owns. Facility-scoped grants (artcc_id not null) are left untouched.
 pub async fn fetch_user_direct_permission_names(
@@ -706,8 +808,8 @@ pub async fn revoke_server_admin(
 
 /// All direct permission grants (granted = true), as `(artcc_id, permission_name)`.
 /// `artcc_id = None` is national. Ordered national-first then by name.
-pub async fn fetch_user_direct_grants(
-    pool: &PgPool,
+pub async fn fetch_user_direct_grants<'e>(
+    executor: impl sqlx::PgExecutor<'e>,
     user_id: &str,
 ) -> Result<Vec<(Option<String>, String)>, ApiError> {
     sqlx::query_as::<_, (Option<String>, String)>(
@@ -717,7 +819,7 @@ pub async fn fetch_user_direct_grants(
          order by artcc_id nulls first, permission_name",
     )
     .bind(user_id)
-    .fetch_all(pool)
+    .fetch_all(executor)
     .await
     .map_err(|_| ApiError::Internal)
 }
@@ -900,8 +1002,8 @@ pub async fn permission_scope(
 }
 
 /// All role grants, as `(artcc_id, role_name)`. `artcc_id = None` is national.
-pub async fn fetch_user_role_grants(
-    pool: &PgPool,
+pub async fn fetch_user_role_grants<'e>(
+    executor: impl sqlx::PgExecutor<'e>,
     user_id: &str,
 ) -> Result<Vec<(Option<String>, String)>, ApiError> {
     sqlx::query_as::<_, (Option<String>, String)>(
@@ -911,7 +1013,7 @@ pub async fn fetch_user_role_grants(
          where user_id = $1 order by artcc_id nulls first, role_name",
     )
     .bind(user_id)
-    .fetch_all(pool)
+    .fetch_all(executor)
     .await
     .map_err(|_| ApiError::Internal)
 }

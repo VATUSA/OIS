@@ -21,7 +21,18 @@ env:
   REGISTRY: ghcr.io
 
 jobs:
+  # The gate that guarantees a duplicate migration version never ships (#569). A PR's own check runs
+  # against the base as it was when the PR was pushed; if another PR merged since, the duplicate only
+  # exists here, on the pushed merge result. Gating the BUILD (not just the deploy) matters: a pod
+  # restart pulls `:next`, so an image containing a duplicate must never be tagged at all.
+  migrations:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - run: .github/scripts/check-migration-versions.sh
+
   build:
+    needs: migrations
     runs-on: ubuntu-latest
     strategy:
       fail-fast: false

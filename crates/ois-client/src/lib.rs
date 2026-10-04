@@ -171,13 +171,18 @@ impl OisClient {
         format!("{}{}", self.base_url, path)
     }
 
-    /// Lease up to `limit` pending outbound jobs (marks them in-progress). Needs `integration.jobs.update`.
-    pub async fn lease_jobs(&self, limit: u32) -> Result<Vec<OutboundJob>, ClientError> {
+    /// Lease up to `limit` of `consumer`'s pending outbound jobs (marks them in-progress). Needs
+    /// `integration.jobs.update`. The backend requires `consumer` and returns only that consumer's jobs.
+    pub async fn lease_jobs(
+        &self,
+        consumer: &str,
+        limit: u32,
+    ) -> Result<Vec<OutboundJob>, ClientError> {
         let resp = self
             .http
             .post(self.url("/api/v1/integration/jobs/lease"))
             .bearer_auth(&self.token)
-            .query(&[("limit", limit)])
+            .query(&lease_query(consumer, limit))
             .send()
             .await?;
         if !resp.status().is_success() {
@@ -189,6 +194,7 @@ impl OisClient {
     /// Acknowledge a leased job: success (with an optional result payload) or failure (with an error).
     pub async fn ack_job(
         &self,
+        consumer: &str,
         id: &str,
         success: bool,
         result: Option<Value>,
@@ -199,6 +205,7 @@ impl OisClient {
             .http
             .post(self.url(&format!("/api/v1/integration/jobs/{id}/ack")))
             .bearer_auth(&self.token)
+            .query(&ack_query(consumer))
             .json(&AckBody {
                 success,
                 result,
@@ -334,9 +341,41 @@ impl OisClient {
     }
 }
 
+/// The lease's query string. A function so its wire names can be pinned (#590): the backend 400s a
+/// lease without `consumer`, so a rename here stops the bot leasing anything.
+fn lease_query(consumer: &str, limit: u32) -> [(&'static str, String); 2] {
+    [
+        ("consumer", consumer.to_string()),
+        ("limit", limit.to_string()),
+    ]
+}
+
+/// The ack's query string: the backend applies an ack only to the named consumer's job (#590).
+fn ack_query(consumer: &str) -> [(&'static str, &str); 1] {
+    [("consumer", consumer)]
+}
+
 #[cfg(test)]
 mod tests {
-    use super::AckBody;
+    use super::{AckBody, ack_query, lease_query};
+
+    /// Pinned against `AckQuery` in `backend/src/handlers/integration.rs`, which requires `consumer`.
+    #[test]
+    fn an_ack_names_its_consumer_on_the_wire() {
+        assert_eq!(ack_query("discord"), [("consumer", "discord")]);
+    }
+
+    /// Pinned against `LeaseQuery` in `backend/src/handlers/integration.rs`, which requires `consumer`.
+    #[test]
+    fn a_lease_names_its_consumer_on_the_wire() {
+        assert_eq!(
+            lease_query("discord", 10),
+            [
+                ("consumer", "discord".to_string()),
+                ("limit", "10".to_string())
+            ]
+        );
+    }
 
     /// `AckBody` is hand-written, not generated, and the backend reads the lease token through
     /// `#[serde(default)]` so that an old bot keeps working across a deploy (VATUSA/OIS#472). Together

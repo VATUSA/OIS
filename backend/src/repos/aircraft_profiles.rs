@@ -7,6 +7,7 @@ use std::collections::HashMap;
 use sqlx::PgPool;
 
 use crate::{
+    auth::principal::Attribution,
     errors::ApiError,
     feed::trajectory::{AircraftProfile, ProfileTable},
     models::{AircraftProfileBody, UpsertAircraftProfileRequest},
@@ -16,8 +17,9 @@ const PROFILE_SELECT: &str = "select p.kind, p.key, p.name, \
     p.climb_ias_lo, p.climb_ias_hi, p.climb_mach, p.climb_fpm_lo, p.climb_fpm_hi, \
     p.cruise_tas, p.cruise_mach, p.service_ceiling_ft, \
     p.desc_mach, p.desc_ias_hi, p.desc_ias_lo, p.desc_fpm, \
-    p.updated_at, u.display_name as updated_by \
-    from flow.aircraft_profile p left join identity.users u on u.id = p.updated_by";
+    p.updated_at, coalesce(u.display_name, a.display_name) as updated_by \
+    from flow.aircraft_profile p left join identity.users u on u.id = p.updated_by \
+    left join access.actors a on a.id = p.updated_by_actor";
 
 /// The whole catalog, ordered default → wake → type for display.
 pub async fn list(pool: &PgPool) -> Result<Vec<AircraftProfileBody>, ApiError> {
@@ -51,14 +53,14 @@ pub async fn upsert(
     kind: &str,
     key: &str,
     req: &UpsertAircraftProfileRequest,
-    actor: &str,
+    by: &Attribution,
 ) -> Result<AircraftProfileBody, ApiError> {
     sqlx::query(
         "insert into flow.aircraft_profile \
          (kind, key, name, climb_ias_lo, climb_ias_hi, climb_mach, climb_fpm_lo, climb_fpm_hi, \
           cruise_tas, cruise_mach, service_ceiling_ft, desc_mach, desc_ias_hi, desc_ias_lo, \
-          desc_fpm, updated_by) \
-         values ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16) \
+          desc_fpm, updated_by, updated_by_actor) \
+         values ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17) \
          on conflict (kind, key) do update set \
           name = excluded.name, climb_ias_lo = excluded.climb_ias_lo, \
           climb_ias_hi = excluded.climb_ias_hi, climb_mach = excluded.climb_mach, \
@@ -66,7 +68,8 @@ pub async fn upsert(
           cruise_tas = excluded.cruise_tas, cruise_mach = excluded.cruise_mach, \
           service_ceiling_ft = excluded.service_ceiling_ft, desc_mach = excluded.desc_mach, \
           desc_ias_hi = excluded.desc_ias_hi, desc_ias_lo = excluded.desc_ias_lo, \
-          desc_fpm = excluded.desc_fpm, updated_by = excluded.updated_by, updated_at = now()",
+          desc_fpm = excluded.desc_fpm, updated_by = excluded.updated_by, \
+          updated_by_actor = excluded.updated_by_actor, updated_at = now()",
     )
     .bind(kind)
     .bind(key)
@@ -83,7 +86,8 @@ pub async fn upsert(
     .bind(req.desc_ias_hi)
     .bind(req.desc_ias_lo)
     .bind(req.desc_fpm)
-    .bind(actor)
+    .bind(&by.user_id)
+    .bind(&by.actor_id)
     .execute(pool)
     .await
     .map_err(|_| ApiError::Internal)?;
