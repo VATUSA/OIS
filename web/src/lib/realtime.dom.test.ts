@@ -1,5 +1,5 @@
 // @vitest-environment jsdom
-import type {QueryClient} from "@tanstack/react-query";
+import {QueryClient} from "@tanstack/react-query";
 import {afterEach, beforeEach, describe, expect, it, vi} from "vitest";
 
 const token = vi.hoisted(() => ({value: undefined as string | undefined}));
@@ -65,6 +65,26 @@ describe("connectRealtime (VATUSA/OIS#348 review)", () => {
 
     FakeSocket.opened[0]?.onmessage?.({data: JSON.stringify({topic: "events.reminder"})});
     expect(invalidated).toEqual([{queryKey: ["my-ace-claims"]}]);
+    dispose();
+  });
+
+  // #647 worried that `"flow.fca"`'s `["event-fcas"]` matched no hook. It does: event FCAs are keyed
+  // `fcaKey(eventId)` = `["event-fcas", eventId]`, and React Query invalidates by prefix by default, so
+  // publishing or archiving an event FCA refreshes that event's own list. Pinned against a real client,
+  // since a spy can't show which cached queries an invalidation actually reaches.
+  it("refreshes an event's own FCA list on a flow.fca nudge", async () => {
+    const real = new QueryClient();
+    real.setQueryData(["event-fcas", 7], [{id: "fca"}]);
+    real.setQueryData(["unrelated", 7], 1);
+    const dispose = connectRealtime(real);
+    await flush();
+    // Connecting alone must not have done it, or this test would pass without the nudge.
+    expect(real.getQueryState(["event-fcas", 7])?.isInvalidated).toBe(false);
+
+    FakeSocket.opened[0]?.onmessage?.({data: JSON.stringify({topic: "flow.fca"})});
+    await flush();
+    expect(real.getQueryState(["event-fcas", 7])?.isInvalidated).toBe(true);
+    expect(real.getQueryState(["unrelated", 7])?.isInvalidated).toBe(false);
     dispose();
   });
 });
