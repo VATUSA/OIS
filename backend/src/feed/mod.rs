@@ -180,18 +180,18 @@ fn should_mark_unhealthy(consecutive_failures: u32) -> bool {
     consecutive_failures >= MAX_CONSECUTIVE_FAILURES
 }
 
-/// One successful fetch: track staleness, install the snapshot, and — only if the source published
-/// new data — tell live clients (#648). Split out of [`poller`] so the tick is tested where it is
-/// wired, not just as a rule.
+/// One successful fetch: track staleness, install the snapshot, and report whether the source
+/// published new data, for [`apply_and_tick`] to announce (#648). It holds no realtime sender, so it
+/// can't tell clients anything before the snapshot it installs is in place. Split out of [`poller`]
+/// so the tick is tested where it is wired, not just as a rule.
 async fn apply_fetch(
     state: &FeedState,
-    events: &crate::realtime::Events,
     data: VatsimData,
     now: DateTime<Utc>,
     delay: Duration,
     last_source_ts: &mut Option<DateTime<Utc>>,
     consecutive_stale_polls: &mut u32,
-) {
+) -> bool {
     let pilots = data.pilots.len();
     let prefiles = data.prefiles.len();
     let source_timestamp = data.general.update_timestamp.clone();
@@ -238,10 +238,32 @@ async fn apply_fetch(
         data,
     }));
     drop(guard);
+    tick
+}
 
-    // After the snapshot is in place and the lock released, so a client refetching on the tick reads
-    // the new data. One in-process hub: a second replica would need #649 first.
-    if tick {
+/// Apply a successful fetch, then tell live clients if it was a new publish (#648). The tick is sent
+/// only once [`apply_fetch`] has returned, with the snapshot installed and the lock released, so a
+/// client refetching on it reads the new data. `apply_fetch` holds no sender, so it can't tick early
+/// (#648 review). One in-process hub: a second replica would need #649 first.
+async fn apply_and_tick(
+    state: &FeedState,
+    events: &crate::realtime::Events,
+    data: VatsimData,
+    now: DateTime<Utc>,
+    delay: Duration,
+    last_source_ts: &mut Option<DateTime<Utc>>,
+    consecutive_stale_polls: &mut u32,
+) {
+    if apply_fetch(
+        state,
+        data,
+        now,
+        delay,
+        last_source_ts,
+        consecutive_stale_polls,
+    )
+    .await
+    {
         let _ = events.send(crate::realtime::WsEvent {
             topic: crate::realtime::topic::FEED_TICK.to_string(),
         });
@@ -274,7 +296,7 @@ async fn poller(state: FeedState, events: crate::realtime::Events) {
         match vatsim::fetch(&client).await {
             Ok(data) => {
                 consecutive_failures = 0;
-                apply_fetch(
+                apply_and_tick(
                     &state,
                     &events,
                     data,
@@ -346,7 +368,7 @@ mod tests {
         let (events, mut rx) = tokio::sync::broadcast::channel(16);
         let (mut last, mut stale) = (None, 0u32);
 
-        apply_fetch(
+        apply_and_tick(
             &state,
             &events,
             fetched("2026-10-04T00:00:00Z"),
@@ -370,7 +392,7 @@ mod tests {
             "the snapshot a client refetches is already the new one"
         );
 
-        apply_fetch(
+        apply_and_tick(
             &state,
             &events,
             fetched("2026-10-04T00:00:00Z"),
@@ -385,7 +407,7 @@ mod tests {
             "a repeat of the same publish ticks nobody"
         );
 
-        apply_fetch(
+        apply_and_tick(
             &state,
             &events,
             fetched("not a timestamp"),
@@ -400,7 +422,7 @@ mod tests {
             "an unparseable timestamp ticks nobody"
         );
 
-        apply_fetch(
+        apply_and_tick(
             &state,
             &events,
             fetched("2026-10-04T00:00:15Z"),
@@ -412,6 +434,29 @@ mod tests {
         .await;
         assert!(rx.try_recv().is_ok(), "the next publish ticks again");
         assert!(rx.try_recv().is_err(), "exactly once");
+    }
+
+    /// The decision `apply_and_tick` acts on: a new publish reports true, a repeat false.
+    #[tokio::test]
+    async fn apply_fetch_reports_whether_the_source_published_new_data() {
+        let state = new_state();
+        let (mut last, mut stale) = (None, 0u32);
+        for (ts, new) in [
+            ("2026-10-04T00:00:00Z", true),
+            ("2026-10-04T00:00:00Z", false),
+            ("2026-10-04T00:00:15Z", true),
+        ] {
+            let ticked = apply_fetch(
+                &state,
+                fetched(ts),
+                Utc::now(),
+                Duration::ZERO,
+                &mut last,
+                &mut stale,
+            )
+            .await;
+            assert_eq!(ticked, new, "{ts}");
+        }
     }
 
     #[test]
