@@ -11,11 +11,11 @@ use crate::{
     auth::middleware::resolve_current_user,
     config::build_cors_layer,
     handlers::{
-        access, ace, admin, aircraft_profiles, airport_configs, airport_surface, api_keys, atc,
-        audit, auth, dashboards, docs, events, facilities, facility_documents, facility_map, feed,
-        flight_exclusions, flow, gdp, health, integration, jobs as jobs_handler,
-        metrics as metrics_handler, preferences, public, runway, service_accounts, stats,
-        taxi_insights, tmu, users, webhooks,
+        access, ace, admin, aircraft_profiles, airport_configs, airport_surface, airports,
+        api_keys, atc, audit, auth, dashboards, desktop, docs, events, facilities,
+        facility_documents, facility_map, feed, flight_exclusions, flow, gdp, health, integration,
+        jobs as jobs_handler, metrics as metrics_handler, preferences, public, runway,
+        service_accounts, stats, taxi_insights, tmu, users, webhooks,
     },
     openapi::ApiDoc,
     rate_limit::{self, RateLimits},
@@ -110,6 +110,17 @@ pub fn build_router_with_limits(state: AppState, limits: Arc<RateLimits>) -> Rou
         // Public advisories — read-only, no auth (active TMIs). The FCA overview
         // reuses the now-public GET /api/v1/flow/fcas via the shared map.
         .route("/api/v1/public/board", get(public::get_board))
+        // Airport coordinates (#540): the positions were always in memory for ETA maths but no
+        // route returned them, so anything needing to point a map at an arbitrary airport had
+        // nothing to ask. Public, like the other reference reads.
+        .route("/api/v1/public/airports/{icao}", get(airports::get_airport))
+        // Desktop installers (#534): resolves the current release asset server-side and redirects,
+        // so the browser never calls api.github.com — which the desktop CSP blocks and GitHub rate
+        // limits at 60/hr per IP. Public: you download the app before you can sign in.
+        .route(
+            "/api/v1/public/desktop/download/{platform}",
+            get(desktop::download),
+        )
         .route(
             "/api/v1/public/flight/{callsign}",
             get(flow::flight_advisory),
@@ -126,6 +137,21 @@ pub fn build_router_with_limits(state: AppState, limits: Arc<RateLimits>) -> Rou
         .route(
             "/api/v1/admin/users/{cid}/access",
             get(access::get_user_access).post(access::update_user_access),
+        )
+        // Group (role) management — #545
+        .route(
+            "/api/v1/admin/groups",
+            get(access::list_groups).post(access::create_group),
+        )
+        .route(
+            "/api/v1/admin/groups/{name}",
+            put(access::update_group).delete(access::delete_group),
+        )
+        .route(
+            "/api/v1/admin/groups/{name}/members",
+            get(access::list_group_members)
+                .post(access::add_group_member)
+                .delete(access::remove_group_member),
         )
         // TMU — Traffic Management Initiatives
         .route(

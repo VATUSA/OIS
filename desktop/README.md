@@ -126,7 +126,64 @@ publish an update the installed app would reject.
 | `OIS_DESKTOP_API_URL` | **Yes** | The production API origin the shipped app talks to, e.g. `https://api.example.org` (no path, no trailing slash). Added to the CSP `connect-src` as `https://` and `wss://`. The release fails without it. |
 
 Without the Apple/Windows certificates the build still succeeds, but the OS warns on first launch.
-Those are about *installing*; the updater signature above is what gates an update **applying**.
+The updater signature above is what gates an update **applying** — a different thing from OS signing.
+
+Unsigned on macOS used to cost more than a warning, and the history is worth keeping (#535).
+
+⚠️ Add each Apple env line in `.github/workflows/release.yml` **only once its secret is set**. A
+*present-but-blank* `APPLE_CERTIFICATE` makes the bundler attempt signing and fail on `security
+import`, which is what broke the v0.1.1 build.
+
+## Where the session token is stored
+
+**This is not the same place on every platform, and macOS is the odd one out.**
+
+| Platform | Store |
+| --- | --- |
+| macOS | `~/Library/Application Support/net.vatusa.ois/session`, mode `0600` |
+| Windows | Credential Manager, via `keyring` |
+| Linux | Secret Service, via `keyring` |
+
+### Why macOS does not use the keychain
+
+It used to, and it asked the user for their **login password** over and over:
+
+1. The token was stored with `keyring::Entry`, which on macOS writes to the **legacy login keychain**.
+2. macOS attaches a **per-item ACL** to that entry naming the application allowed to read it, and
+   identifies that application by its **code-signing identity**.
+3. An unsigned build has no stable identity — at best an ad-hoc signature, whose cdhash differs on
+   **every build**.
+4. So the app asking to read the token was not, as far as macOS was concerned, the app that wrote it.
+   It fell back to asking the user to authorise with their login password.
+5. And because `createUpdaterArtifacts: true` replaces the `.app` on every release, the identity
+   rotated for **existing** users too — never only a fresh-install problem.
+
+A Developer ID certificate fixes that by giving the app a stable identity. **We don't have one**, so
+the token goes somewhere with no ACL instead: a file. No ACL, no prompt, signed or not.
+
+Windows and Linux keep their credential stores. Neither behaves this way and neither prompts anybody,
+so moving them would trade real OS protection for nothing.
+
+### What protects the file
+
+**Its permissions, and nothing else.** `0600` means only the user's own account can read it. A process
+already running as that user can read it, which the keychain would have prevented — that is the real
+cost of this trade, and it is stated rather than dressed up. Encrypting the file would require a key
+that also lives on this disk, which is obfuscation, not a control.
+
+What bounds the exposure is that the token **rotates on every launch** (`web/src/lib/desktop-auth.ts`),
+so a copy lifted from disk has a short life.
+
+### Upgrading from a build that used the keychain
+
+The first read after updating finds no file, so it reads the keychain once, writes what it finds to the
+file, and deletes the keychain entry. **That is the last keychain prompt a user will ever see**, and
+only users upgrading get even that. If it is dismissed or fails, the result is "signed out" and signing
+in again writes the file — the keychain is not consulted a second time.
+
+The file is **truncated, not deleted**, on sign-out: its existence is what records that the migration
+already happened. Deleting it would send the next launch back through the keychain and reintroduce the
+prompt.
 
 ## Replacing the alert sounds
 

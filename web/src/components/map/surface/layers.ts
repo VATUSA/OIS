@@ -115,6 +115,65 @@ export function buildSurfaceLayers(
 }
 
 /**
+ * How many drag handles a selected shape may draw at once.
+ *
+ * Measured against the real dataset (`backend/data/faa_surface.json`, 24,583 rings) rather than
+ * guessed: the median ring is 15 vertices and the 99th percentile is 110, so only ~1.2% of shapes
+ * exceed 100 at all. A cap below that percentile leaves 98.8% of shapes byte-identical while fixing
+ * the tail — KDCA's main ramp is 352 vertices and the worst in the set (KSFB) is 1,920, which at one
+ * handle per vertex merge into a bead chain that hides the boundary they exist to let you edit
+ * (#538).
+ *
+ * 80 rather than 110 because the goal is a shape a human can work with, not merely a smaller number:
+ * it is a 4.4x reduction for KDCA and still more handles than anyone grabs in a session.
+ */
+const MAX_HANDLES = 80;
+
+/** One drag handle: where it sits, and which vertex of the *original* path it stands for. */
+export type VertexHandle = { pos: [number, number]; index: number };
+
+/**
+ * The handles to draw for `path`, capped at [`MAX_HANDLES`].
+ *
+ * Returns the whole path, in order, when it is already short enough — the common case by a wide
+ * margin, and one that must come back unchanged.
+ *
+ * # `index` is load-bearing, not decoration
+ *
+ * `SurfaceMap`'s vertex drag used to read deck's `info.index` — the position within the *layer's*
+ * data — and assign straight into `draft.points` at that index. That was only correct while the two
+ * arrays were 1:1. Decimating without carrying the original index would mean dragging a handle moved
+ * a different vertex of the ring, silently and invisibly: the shape would deform somewhere the user
+ * was not looking. So each handle names its own vertex, and the drag reads that.
+ *
+ * # Sampling
+ *
+ * Evenly spaced, with the first and last vertex always kept so a closed ring still reads as closed
+ * and the shape's extent does not appear to shrink. A ring whose detail is finer than the sample
+ * step loses handles, not geometry: `draft.points` is untouched, so the stored shape is exactly what
+ * was imported and the polygon renders from the full ring as before.
+ */
+export function handleVertices(path: [number, number][]): VertexHandle[] {
+  if (path.length <= MAX_HANDLES) return path.map((pos, index) => ({ pos, index }));
+
+  // Spaced so the first and last samples land exactly on the first and last vertex: with
+  // `step = (len-1)/(MAX-1)`, the final iteration rounds to `len-1` for every length above the cap
+  // (checked for 81..5000). An explicit clamp for the last index was here and was unreachable, so
+  // it is gone rather than left as a guard no test could reach.
+  const step = (path.length - 1) / (MAX_HANDLES - 1);
+  const handles: VertexHandle[] = [];
+  for (let i = 0; i < MAX_HANDLES; i += 1) {
+    const index = Math.round(i * step);
+    // `step > 1` whenever the cap applies, so this cannot repeat — kept because a future change to
+    // the cap or the spacing could make it possible, and a duplicated handle is invisible on screen
+    // but makes two handles fight for the same pick.
+    if (handles.length && handles[handles.length - 1].index === index) continue;
+    handles.push({ pos: path[index], index });
+  }
+  return handles;
+}
+
+/**
  * The in-progress draft: a point (gate), an open dashed polyline (a ramp/apron area or taxiway
  * still being drawn), or a filled ring (once closed) — plus a draggable handle per vertex,
  * mirroring `layers/draft.ts`'s FCA draft rendering extended to three shape kinds. `points` never
@@ -162,9 +221,11 @@ export function buildSurfaceDraftLayers(
   }
 
   layers.push(
-    new ScatterplotLayer<{ pos: [number, number] }>({
+    new ScatterplotLayer<VertexHandle>({
       id: "surface-draft-vertices",
-      data: path.map((pos) => ({ pos })),
+      // Capped, and each handle carries the index of the vertex it represents — see
+      // `handleVertices`. The drag in `SurfaceMap` reads that index, not deck's `info.index`.
+      data: handleVertices(path),
       pickable: true,
       getPosition: (d) => d.pos,
       getFillColor: kind === "gate" ? ([r, g, b, 255] as RGBA) : ([...palette.ink, 255] as RGBA),

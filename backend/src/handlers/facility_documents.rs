@@ -231,8 +231,8 @@ mod tests {
         assert!(zdc_scope.allows(Some("ZDC")));
         assert!(!zdc_scope.allows(Some("ZAU")));
 
-        assert!(PermissionScope::National.allows(Some("ZDC")));
-        assert!(PermissionScope::National.allows(Some("ZAU")));
+        assert!(PermissionScope::national().allows(Some("ZDC")));
+        assert!(PermissionScope::national().allows(Some("ZAU")));
 
         let empty_scope = PermissionScope::Facilities(HashSet::new());
         assert!(!empty_scope.allows(Some("ZDC")));

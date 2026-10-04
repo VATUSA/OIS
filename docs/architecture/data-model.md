@@ -48,15 +48,21 @@ Explicit, path-based permissions — nothing is implied by role name. See
   before/after snapshots (the access editor's "recorded on this controller's log"). `actors`
   now includes an `api_key` actor type, so a mutation made via a key is attributed to it.
 
-Effective permissions are computed by the `v_effective_user_permissions` view:
-role-derived ∪ SERVER_ADMIN (all permissions) ∪ direct grants, minus explicit denies.
+Effective permissions come from the `v_effective_user_permissions` view — role-derived ∪
+SERVER_ADMIN (all permissions) ∪ direct grants and denies, each **carrying its `artcc_id`** — composed
+by `repos::access::fetch_effective_permissions` into one scope per permission. A deny subtracts at its
+own scope; a national deny subtracts everywhere (#543).
 
 ### The ARTCC scope
 
 `artcc_id` is on the grant tables **from day one** (NULL = national). It lets a person
-be, say, an EC scoped to ZDC without being a national EC. The schema carries the scope
-now; per-domain enforcement (and a facility-scoped access editor) roll out as each
-domain is built. `org.facilities` will be the referenced ARTCC catalog.
+be, say, an EC scoped to ZDC without being a national EC. Scope lives on the *membership*
+(`user_roles.artcc_id`), not on the bundle — which is why `role_permissions` has no scope column and
+one `EC` role can be national for one person and ZDC-only for another.
+
+The resolver honours that scope (#543). What rolls out per domain is the *handler-side* check: the
+coarse `RequirePermission<P>` gate is scope-blind by design, so until a handler narrows it a scoped
+grant behaves as national. `org.facilities` is the referenced ARTCC catalog.
 
 ## Operational domains
 

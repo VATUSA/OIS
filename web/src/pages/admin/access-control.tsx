@@ -16,6 +16,7 @@ import {
   buildTree,
   flattenTree,
   type PermTree,
+  splitScopedRole,
   type UpdateBody,
   useAllUsers,
   useCatalog,
@@ -281,7 +282,9 @@ export function AdminAccessControl() {
         cell: (c) => <span className="text-ink-2">{c.getValue<string | null>() ?? "—"}</span>,
       },
       {
-        accessorKey: "roles",
+        // `scoped_roles`, not `roles`: the bare names flatten scope away, so a national EC and an EC
+        // at ZDC read identically — a different grant shown as the same one (#546).
+        accessorKey: "scoped_roles",
         header: "Roles",
         icon: ShieldCheck,
         enableSorting: false,
@@ -291,11 +294,15 @@ export function AdminAccessControl() {
             <span className="text-xs text-ink-3">—</span>
           ) : (
             <div className="flex flex-wrap gap-1">
-              {roles.map((r) => (
-                <StatusPill key={r} tone="neutral">
-                  {r}
-                </StatusPill>
-              ))}
+              {roles.map((entry) => {
+                const {role, artcc} = splitScopedRole(entry);
+                // Toned as the group page tones a member's scope: facility grants in brand.
+                return (
+                  <StatusPill key={entry} tone={artcc ? "brand" : "neutral"}>
+                    {role} · {artcc ?? "national"}
+                  </StatusPill>
+                );
+              })}
             </div>
           );
         },

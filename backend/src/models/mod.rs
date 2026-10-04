@@ -92,7 +92,14 @@ pub struct AdminUserRow {
     pub cid: i64,
     pub display_name: String,
     pub rating: Option<String>,
+    /// Bare role names, scope flattened away. Kept as-is so nothing parsing it breaks.
     pub roles: Vec<String>,
+    /// The same memberships *with* their scope — `EC` for national, `EC:ZDC` for a facility grant.
+    ///
+    /// Added rather than changing `roles`' format (#546): a national `EC` and an `EC@ZDC` used to
+    /// render identically, which actively misled, but silently reinterpreting a `Vec<String>` would
+    /// have broken any consumer without the schema type moving to warn them.
+    pub scoped_roles: Vec<String>,
 }
 
 /// A page of the access-admin user browser.
@@ -170,6 +177,66 @@ pub struct ScopeAccess {
     /// Direct permission grants at this scope, as the nested checkbox tree.
     #[schema(value_type = Object)]
     pub permissions: Value,
+}
+
+/// One group as the group editor lists it.
+#[derive(Debug, Serialize, ToSchema)]
+pub struct GroupBody {
+    pub name: String,
+    pub description: Option<String>,
+    /// Flat list — `role_permissions` carries no ARTCC scope; scope lives on the membership.
+    pub permissions: Vec<String>,
+    /// True for the groups code depends on, which cannot be edited or deleted here.
+    pub system: bool,
+    pub user_count: i64,
+    pub service_account_count: i64,
+}
+
+/// One holder of a group, at one scope. `artcc_id` null is national.
+#[derive(Debug, Serialize, ToSchema)]
+pub struct GroupMemberBody {
+    pub cid: i64,
+    pub display_name: String,
+    pub rating: Option<String>,
+    pub artcc_id: Option<String>,
+}
+
+/// A page of a group's holders.
+#[derive(Debug, Serialize, ToSchema)]
+pub struct GroupMemberPage {
+    pub items: Vec<GroupMemberBody>,
+    pub total: i64,
+    pub page: i64,
+    pub page_size: i64,
+}
+
+/// Add or remove one membership, at one scope.
+///
+/// `artcc_id` is required on **removal** as well as addition: a user can hold the same group
+/// nationally and at an ARTCC, so "remove EC from this user" is ambiguous without it.
+#[derive(Debug, Deserialize, ToSchema)]
+pub struct GroupMemberRequest {
+    pub cid: i64,
+    #[serde(default)]
+    pub artcc_id: Option<String>,
+    pub reason: String,
+}
+
+/// Create a group. Its permission set is set by a follow-up `PUT`, which is also what runs the
+/// no-escalation gate over the contents.
+#[derive(Debug, Deserialize, ToSchema)]
+pub struct CreateGroupRequest {
+    pub name: String,
+    #[serde(default)]
+    pub description: Option<String>,
+    pub reason: String,
+}
+
+/// Replace a group's permission set. `reason` is required and audited, matching the user editor.
+#[derive(Debug, Deserialize, ToSchema)]
+pub struct UpdateGroupRequest {
+    pub permissions: Vec<String>,
+    pub reason: String,
 }
 
 /// The editor's SAVE payload. `reason` is required (audited). Each entry in `scopes`
@@ -683,6 +750,14 @@ pub struct AdvisoryBody {
     pub structured: Option<sqlx::types::Json<Value>>,
     pub decoded: Option<String>,
     pub status: String,
+    /// The enforceable validity window (#537).
+    ///
+    /// Distinct from the period printed inside the document: this is set once at authoring from the
+    /// same input and is never re-derived by parsing the document text, which is why the rendered
+    /// period can stay verbatim `DDHHMM` as it always has. `None` for advisories authored before
+    /// #537 and for any kind with no window, and such an advisory is never auto-cancelled.
+    pub valid_from: Option<DateTime<Utc>>,
+    pub valid_to: Option<DateTime<Utc>>,
     pub published_at: Option<DateTime<Utc>>,
     pub created_at: DateTime<Utc>,
 }
@@ -763,6 +838,12 @@ pub struct CreateAdvisoryRequest {
     pub structured: Option<Value>,
     #[serde(default)]
     pub decoded: Option<String>,
+    /// The enforceable window (#537). Optional, so every existing caller is unaffected: an advisory
+    /// without one simply never auto-cancels, which is the behaviour before #537.
+    #[serde(default)]
+    pub valid_from: Option<DateTime<Utc>>,
+    #[serde(default)]
+    pub valid_to: Option<DateTime<Utc>>,
 }
 
 #[derive(Debug, Deserialize, ToSchema)]
@@ -1158,6 +1239,20 @@ pub struct AirportGateBody {
     /// X-Plane stand type (`gate` | `tie_down` | `misc` | `hangar`) for imported stands; `None` for
     /// hand-entered ones. Read-only: an operator adding a stand has no X-Plane type to declare.
     pub kind: Option<String>,
+    /// Stand heading, degrees true, normalised into `[0, 360)`. `None` for hand-entered stands and
+    /// for imported ones whose pack predates VATUSA/OIS#541. Read-only, like the rest of the X-Plane
+    /// detail below: these describe the source's data, not an operator's intent.
+    pub heading: Option<f64>,
+    /// ICAO aerodrome reference code letter (`A`..`F`) — the widest aircraft the stand takes.
+    pub size_code: Option<String>,
+    /// How the stand is operated, e.g. `airline`, `cargo`, `general_aviation`. Community-contributed
+    /// free text, so treat an unfamiliar value as information rather than an error.
+    pub operation_type: Option<String>,
+    /// Aircraft classes the stand accepts, e.g. `["heavy", "jets"]`. `None` where the source recorded
+    /// no restriction — which is not the same as accepting nothing.
+    pub aircraft_classes: Option<Vec<String>>,
+    /// Airline codes associated with the stand, e.g. `["aal", "dal"]`.
+    pub airline_codes: Option<Vec<String>>,
     pub updated_at: DateTime<Utc>,
     /// Whether the requesting user may edit this airport's surface data (per their ARTCC scope).
     #[sqlx(default)]
@@ -1339,7 +1434,7 @@ pub struct AirportForecastBody {
 #[derive(Debug, Serialize, ToSchema, sqlx::FromRow)]
 pub struct TmiPackageItemBody {
     pub id: String,
-    /// program | restriction | ground_stop
+    /// program | restriction | ground_stop | advisory
     pub kind: String,
     #[schema(value_type = Object)]
     pub payload: sqlx::types::Json<Value>,
