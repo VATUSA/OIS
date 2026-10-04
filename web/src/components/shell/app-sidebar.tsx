@@ -176,7 +176,7 @@ function Identity({ collapsed }: { collapsed: boolean }) {
 }
 
 /** Profile, settings, API keys and sign out — the signed-in user's own links. */
-function UserGroup() {
+export function UserGroup() {
   const { data: me } = useMe();
   const logout = useLogout();
   if (!me) return null;
@@ -187,10 +187,6 @@ function UserGroup() {
       </SidebarItem>
       <SidebarItem asChild icon={SettingsIcon} label="Settings">
         <Link to="/settings" />
-      </SidebarItem>
-      {/* Reopens the full changelog — once dismissed, the panel otherwise never shows again (#665). */}
-      <SidebarItem asChild icon={Sparkles} label="What's new">
-        <button type="button" onClick={openWhatsNew} />
       </SidebarItem>
       {hasPermission(me, "api_keys.key.create") && (
         <SidebarItem asChild icon={KeyRound} label="API keys">
@@ -205,6 +201,18 @@ function UserGroup() {
       */}
       <SidebarItem asChild icon={DownloadIcon} label="Desktop app">
         <Link to="/download" />
+      </SidebarItem>
+      {/*
+        Reopens the full changelog — once dismissed, the panel otherwise never shows again (#665). It
+        sits directly above Sign out (#680), and its gold hover is DESIGN.md's one named icon exception.
+      */}
+      <SidebarItem
+        asChild
+        icon={Sparkles}
+        label="What's new"
+        iconClassName="group-hover/item:text-warning motion-safe:group-hover/item:animate-sparkle"
+      >
+        <button type="button" onClick={openWhatsNew} />
       </SidebarItem>
       {/* Confirms in place like a delete: first click arms it, a second click signs out. */}
       <SidebarTooltip label="Sign out">

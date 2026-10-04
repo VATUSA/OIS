@@ -204,6 +204,9 @@ a **documented exception to non-negotiable #9**, under all of these conditions:
   150–220ms ease-out, no bounce.
 - **Icons** — one-weight line icons (~1.7px stroke, round caps), `currentColor` so they inherit the
   row's ink/accent. Never give an icon its own colour.
+  **One named exception (#680):** the sidebar's *What's new* Sparkles icon turns gold (`--warning`)
+  and twinkles (`animate-sparkle`, flat, no gradient; still for reduced motion) on hover. It is
+  not precedent — no other icon takes its own colour, and gold is not a second accent anywhere else.
 - **Screenshots** — framed like a card: `--card` mat, 1px `--line` hairline, `--r-md`, no shadow and
   no gradient scrim. Thumbnails share one box, `aspect-shot` (16:10), filled top-anchored
   (`object-cover object-top`) because a UI shot carries its signal at the top. Every thumbnail opens
