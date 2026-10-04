@@ -152,6 +152,7 @@ always matches the running API.
 | `/api/v1/flow/aircraft-profiles/{kind}/{key}` | DELETE | `flow.aircraft_profiles.update` |
 | `/api/v1/flow/aircraft-profiles/{kind}/{key}` | PUT | `flow.aircraft_profiles.update` |
 | `/api/v1/flow/aircraft/{callsign}/route` | GET | — (no permission marker) |
+| `/api/v1/flow/airspace/sectors` | GET | `flow.sectors.read` |
 | `/api/v1/flow/atc` | GET | — (no permission marker) |
 | `/api/v1/flow/counts` | GET | — (no permission marker) |
 | `/api/v1/flow/data-refresh` | POST | `flow.fca.update` |
@@ -170,6 +171,11 @@ always matches the running API.
 | `/api/v1/flow/fcas/{id}/swap` | POST | `flow.fca.update` |
 | `/api/v1/flow/fcas/{id}/traffic` | GET | — (no permission marker) |
 | `/api/v1/flow/idst` | GET | `flow.fca.read` |
+| `/api/v1/flow/monitor/{artcc}/consolidations` | GET | `flow.monitor.read` |
+| `/api/v1/flow/monitor/{artcc}/consolidations/{sector_id}` | DELETE | `flow.monitor.update` |
+| `/api/v1/flow/monitor/{artcc}/consolidations/{sector_id}` | PUT | `flow.monitor.update` |
+| `/api/v1/flow/monitor/{artcc}/maps` | GET | `flow.monitor.read` |
+| `/api/v1/flow/monitor/{artcc}/maps/{sector_id}` | PUT | `flow.monitor.update` |
 | `/api/v1/flow/resolve-routes` | POST | `stats.data.read` |
 | `/api/v1/flow/route-coverage` | GET | — (no permission marker) |
 | `/api/v1/flow/routes` | GET | — (no permission marker) |
