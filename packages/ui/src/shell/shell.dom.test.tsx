@@ -4,7 +4,9 @@ import {act} from "react";
 import {createRoot} from "react-dom/client";
 import {afterEach, beforeAll, describe, expect, it} from "vitest";
 
-import {Shell, ShellContent} from "./shell";
+import {Sparkles} from "lucide-react";
+
+import {Shell, ShellContent, SidebarItem} from "./shell";
 
 /**
  * The shell's own chrome and its top-bar seam (#402).
@@ -130,5 +132,25 @@ describe("Shell top bar", () => {
     expect(bar.className).toContain("h-11");
     expect(bar.className).toContain("px-3");
     expect(bar.className).not.toBe("p-0");
+  });
+});
+
+describe("SidebarItem (#680)", () => {
+  // A <button> centres its text by default, unlike the <a> every other item is; the item must not
+  // depend on which element it is handed.
+  it("left-aligns and fills the row whatever element it renders", () => {
+    const host = render(
+      <SidebarItem asChild icon={Sparkles} label="What's new">
+        <button type="button" />
+      </SidebarItem>,
+    );
+    const button = host.querySelector("button")!;
+    expect(button.className).toContain("text-left");
+    expect(button.className).toContain("w-full");
+  });
+
+  it("passes iconClassName to the icon", () => {
+    const host = render(<SidebarItem href="#" icon={Sparkles} label="x" iconClassName="custom-icon" />);
+    expect(host.querySelector("svg")!.getAttribute("class")).toContain("custom-icon");
   });
 });

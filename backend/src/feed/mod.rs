@@ -15,6 +15,8 @@ pub mod flow;
 pub mod forecast;
 pub mod gdp;
 pub mod metar;
+pub mod monitor;
+pub mod monitor_alert;
 pub mod nav;
 mod nav_dns;
 pub mod nav_source;
@@ -22,6 +24,7 @@ pub mod neighbors;
 pub mod predict;
 pub mod runway;
 pub mod runway_db;
+pub mod sectors;
 pub mod stats;
 pub mod taxi;
 pub mod taxi_estimate;
@@ -30,6 +33,7 @@ pub mod tracon;
 pub mod trajectory;
 pub mod vatsim;
 pub mod vatusa;
+pub mod vnas;
 pub mod winds;
 
 use std::collections::HashMap;
@@ -134,8 +138,10 @@ pub fn new_state() -> FeedState {
 /// Spawn the background poller. Safe to call once at startup; it phase-locks to the source's own
 /// refresh cadence (see `next_poll_delay`). The airport coordinate database is loaded separately
 /// by `jobs::spawn_airports_refresh` (#216), not by this poller.
-pub fn spawn_poller(state: FeedState) {
-    tokio::spawn(async move { poller(state).await });
+/// `events` is the realtime hub: the poller publishes [`realtime::topic::FEED_TICK`] once per
+/// upstream publish (#648), so live screens refetch on new data instead of on their own timers.
+pub fn spawn_poller(state: FeedState, events: crate::realtime::Events) {
+    tokio::spawn(async move { poller(state, events).await });
 }
 
 /// After a successful fetch with the source's `update_timestamp` (`None` before the first ever
@@ -177,13 +183,109 @@ fn is_stale_poll(parsed_ts: Option<DateTime<Utc>>, last_source_ts: Option<DateTi
     parsed_ts.is_none() || parsed_ts == last_source_ts
 }
 
+/// Whether a successful fetch is a new upstream publish, worth a [`crate::realtime::topic::FEED_TICK`]
+/// (#648). Exactly the complement of [`is_stale_poll`], judged against `last_source_ts` **before**
+/// it advances — so "new data" means the same thing to the tick as to the back-off logic, and a
+/// stale or unparseable timestamp ticks no client.
+fn ticks(parsed_ts: Option<DateTime<Utc>>, last_source_ts: Option<DateTime<Utc>>) -> bool {
+    !is_stale_poll(parsed_ts, last_source_ts)
+}
+
 /// Whether `consecutive_failures` should flip `healthy` false — a single transient error must not;
 /// only `MAX_CONSECUTIVE_FAILURES` in a row means the feed is actually behind.
 fn should_mark_unhealthy(consecutive_failures: u32) -> bool {
     consecutive_failures >= MAX_CONSECUTIVE_FAILURES
 }
 
-async fn poller(state: FeedState) {
+/// One successful fetch: track staleness, install the snapshot, and report whether the source
+/// published new data, for [`apply_and_tick`] to announce (#648). It holds no realtime sender, so it
+/// can't tell clients anything before the snapshot it installs is in place. Split out of [`poller`]
+/// so the tick is tested where it is wired, not just as a rule.
+async fn apply_fetch(
+    state: &FeedState,
+    data: VatsimData,
+    now: DateTime<Utc>,
+    delay: Duration,
+    last_source_ts: &mut Option<DateTime<Utc>>,
+    consecutive_stale_polls: &mut u32,
+) -> bool {
+    let pilots = data.pilots.len();
+    let prefiles = data.prefiles.len();
+    let source_timestamp = data.general.update_timestamp.clone();
+    let parsed_ts = DateTime::parse_from_rfc3339(&source_timestamp)
+        .map(|dt| dt.with_timezone(&Utc))
+        .ok();
+    let tick = ticks(parsed_ts, *last_source_ts);
+    *consecutive_stale_polls = if is_stale_poll(parsed_ts, *last_source_ts) {
+        *consecutive_stale_polls + 1
+    } else {
+        0
+    };
+    if *consecutive_stale_polls == MAX_CONSECUTIVE_STALE_POLLS {
+        tracing::warn!(
+            consecutive_stale_polls,
+            "feed: source timestamp hasn't advanced in a while, backing off"
+        );
+    }
+    tracing::debug!(
+        prior_poll_delay_secs = delay.as_secs(),
+        source_timestamp = %source_timestamp,
+        snapshot_age_secs = parsed_ts.map(|ts| (now - ts).num_seconds()),
+        "feed: poll succeeded"
+    );
+    *last_source_ts = parsed_ts.or(*last_source_ts);
+    let mut guard = state.write().await;
+    guard.status.healthy = true;
+    guard.status.last_ok = Some(now);
+    guard.status.source_timestamp = Some(source_timestamp.clone());
+    guard.status.last_error = None;
+    guard.status.pilots = pilots;
+    guard.status.prefiles = prefiles;
+    // Advance the taxi state machine before the data is moved into the snapshot.
+    let FeedInner {
+        taxi_sessions,
+        taxi_samples,
+        airports,
+        ..
+    } = &mut *guard;
+    taxi::process(taxi_sessions, taxi_samples, airports, &data, now);
+    guard.snapshot = Some(Arc::new(Snapshot {
+        fetched_at: now,
+        source_timestamp,
+        data,
+    }));
+    drop(guard);
+    tick
+}
+
+/// Apply a successful fetch, then tell live clients if it was a new publish (#648). The tick is sent
+/// only once [`apply_fetch`] has returned, with the snapshot installed and the lock released, so a
+/// client refetching on it reads the new data. `apply_fetch` holds no sender, so it can't tick early
+/// (#648 review). One in-process hub: a second replica would need #649 first.
+async fn apply_and_tick(
+    state: &FeedState,
+    events: &crate::realtime::Events,
+    data: VatsimData,
+    now: DateTime<Utc>,
+    delay: Duration,
+    last_source_ts: &mut Option<DateTime<Utc>>,
+    consecutive_stale_polls: &mut u32,
+) {
+    if apply_fetch(
+        state,
+        data,
+        now,
+        delay,
+        last_source_ts,
+        consecutive_stale_polls,
+    )
+    .await
+    {
+        events.publish_local(crate::realtime::topic::FEED_TICK);
+    }
+}
+
+async fn poller(state: FeedState, events: crate::realtime::Events) {
     let client = match reqwest::Client::builder()
         .user_agent("ois-backend/0.1 (+https://vatusa.net)")
         .timeout(Duration::from_secs(20))
@@ -209,51 +311,16 @@ async fn poller(state: FeedState) {
         match vatsim::fetch(&client).await {
             Ok(data) => {
                 consecutive_failures = 0;
-                let now = Utc::now();
-                let pilots = data.pilots.len();
-                let prefiles = data.prefiles.len();
-                let source_timestamp = data.general.update_timestamp.clone();
-                let parsed_ts = DateTime::parse_from_rfc3339(&source_timestamp)
-                    .map(|dt| dt.with_timezone(&Utc))
-                    .ok();
-                consecutive_stale_polls = if is_stale_poll(parsed_ts, last_source_ts) {
-                    consecutive_stale_polls + 1
-                } else {
-                    0
-                };
-                if consecutive_stale_polls == MAX_CONSECUTIVE_STALE_POLLS {
-                    tracing::warn!(
-                        consecutive_stale_polls,
-                        "feed: source timestamp hasn't advanced in a while, backing off"
-                    );
-                }
-                tracing::debug!(
-                    prior_poll_delay_secs = delay.as_secs(),
-                    source_timestamp = %source_timestamp,
-                    snapshot_age_secs = parsed_ts.map(|ts| (now - ts).num_seconds()),
-                    "feed: poll succeeded"
-                );
-                last_source_ts = parsed_ts.or(last_source_ts);
-                let mut guard = state.write().await;
-                guard.status.healthy = true;
-                guard.status.last_ok = Some(now);
-                guard.status.source_timestamp = Some(source_timestamp.clone());
-                guard.status.last_error = None;
-                guard.status.pilots = pilots;
-                guard.status.prefiles = prefiles;
-                // Advance the taxi state machine before the data is moved into the snapshot.
-                let FeedInner {
-                    taxi_sessions,
-                    taxi_samples,
-                    airports,
-                    ..
-                } = &mut *guard;
-                taxi::process(taxi_sessions, taxi_samples, airports, &data, now);
-                guard.snapshot = Some(Arc::new(Snapshot {
-                    fetched_at: now,
-                    source_timestamp,
+                apply_and_tick(
+                    &state,
+                    &events,
                     data,
-                }));
+                    Utc::now(),
+                    delay,
+                    &mut last_source_ts,
+                    &mut consecutive_stale_polls,
+                )
+                .await;
             }
             Err(e) => {
                 consecutive_failures += 1;
@@ -277,6 +344,190 @@ async fn poller(state: FeedState) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // ---- #648: the feed tells live clients when it has new data ------------------------------------
+
+    fn ts(s: &str) -> Option<DateTime<Utc>> {
+        Some(DateTime::parse_from_rfc3339(s).unwrap().with_timezone(&Utc))
+    }
+
+    #[test]
+    fn a_new_upstream_publish_ticks_and_nothing_else_does() {
+        let earlier = ts("2026-10-04T00:00:00Z");
+        let later = ts("2026-10-04T00:00:15Z");
+        assert!(ticks(later, earlier), "advanced");
+        assert!(ticks(earlier, None), "the very first fetch is new data");
+        assert!(!ticks(earlier, earlier), "unchanged is stale");
+        assert!(!ticks(None, earlier), "unparseable is stale");
+        assert!(!ticks(None, None), "unparseable first fetch is stale");
+        // An older timestamp is not `==` the last one, so it counts as new — as the back-off logic
+        // already treats it. The tick follows that rule rather than inventing a second one.
+        assert_eq!(ticks(earlier, later), !is_stale_poll(earlier, later));
+    }
+
+    fn fetched(update_timestamp: &str) -> VatsimData {
+        VatsimData {
+            general: vatsim::General {
+                update_timestamp: update_timestamp.to_string(),
+                ..Default::default()
+            },
+            ..Default::default()
+        }
+    }
+
+    /// The feed tick stays on the replica that raised it (#648): every replica polls and installs its
+    /// own snapshot, so a fanned-out tick would reach each client once per replica — some before their
+    /// own replica had the data. Two hubs on one database stand in for two replicas.
+    #[sqlx::test]
+    async fn a_feed_tick_does_not_cross_to_other_replicas(pool: sqlx::PgPool) {
+        use tokio::time::timeout;
+
+        let a = crate::realtime::Events::new(Some(pool.clone()));
+        let b = crate::realtime::Events::new(Some(pool.clone()));
+        a.start_listener().await.unwrap();
+        b.start_listener().await.unwrap();
+        let (mut on_a, mut on_b) = (a.subscribe(), b.subscribe());
+
+        let state = new_state();
+        let (mut last, mut stale) = (None, 0u32);
+        apply_and_tick(
+            &state,
+            &a,
+            fetched("2026-10-04T00:00:00Z"),
+            Utc::now(),
+            Duration::ZERO,
+            &mut last,
+            &mut stale,
+        )
+        .await;
+        assert_eq!(
+            on_a.try_recv().unwrap().topic,
+            crate::realtime::topic::FEED_TICK,
+            "this replica's own clients hear it"
+        );
+
+        // A fanned-out nudge sent after the tick: once B has it, a fanned-out tick would have arrived.
+        a.publish(crate::realtime::topic::RELEASE);
+        let mut heard = Vec::new();
+        loop {
+            let event = timeout(Duration::from_secs(10), on_b.recv())
+                .await
+                .expect("the other replica hears the marker")
+                .unwrap();
+            if event.topic == crate::realtime::topic::RELEASE {
+                break;
+            }
+            heard.push(event.topic);
+        }
+        tokio::time::sleep(Duration::from_millis(500)).await;
+        while let Ok(event) = on_b.try_recv() {
+            heard.push(event.topic);
+        }
+        assert!(
+            !heard.iter().any(|t| t == crate::realtime::topic::FEED_TICK),
+            "the other replica heard: {heard:?}"
+        );
+    }
+
+    /// Through the real success path: one tick per new publish, none for a repeat or a garbage
+    /// timestamp — and by the time a client hears the tick, the new snapshot is what it will read.
+    #[tokio::test]
+    async fn the_poller_publishes_one_tick_per_new_publish_after_installing_it() {
+        let state = new_state();
+        let events = crate::realtime::Events::new(None);
+        let mut rx = events.subscribe();
+        let (mut last, mut stale) = (None, 0u32);
+
+        apply_and_tick(
+            &state,
+            &events,
+            fetched("2026-10-04T00:00:00Z"),
+            Utc::now(),
+            Duration::ZERO,
+            &mut last,
+            &mut stale,
+        )
+        .await;
+        let tick = rx.try_recv().expect("the first publish ticks");
+        assert_eq!(tick.topic, crate::realtime::topic::FEED_TICK);
+        assert_eq!(
+            state
+                .read()
+                .await
+                .snapshot
+                .as_ref()
+                .unwrap()
+                .source_timestamp,
+            "2026-10-04T00:00:00Z",
+            "the snapshot a client refetches is already the new one"
+        );
+
+        apply_and_tick(
+            &state,
+            &events,
+            fetched("2026-10-04T00:00:00Z"),
+            Utc::now(),
+            Duration::ZERO,
+            &mut last,
+            &mut stale,
+        )
+        .await;
+        assert!(
+            rx.try_recv().is_err(),
+            "a repeat of the same publish ticks nobody"
+        );
+
+        apply_and_tick(
+            &state,
+            &events,
+            fetched("not a timestamp"),
+            Utc::now(),
+            Duration::ZERO,
+            &mut last,
+            &mut stale,
+        )
+        .await;
+        assert!(
+            rx.try_recv().is_err(),
+            "an unparseable timestamp ticks nobody"
+        );
+
+        apply_and_tick(
+            &state,
+            &events,
+            fetched("2026-10-04T00:00:15Z"),
+            Utc::now(),
+            Duration::ZERO,
+            &mut last,
+            &mut stale,
+        )
+        .await;
+        assert!(rx.try_recv().is_ok(), "the next publish ticks again");
+        assert!(rx.try_recv().is_err(), "exactly once");
+    }
+
+    /// The decision `apply_and_tick` acts on: a new publish reports true, a repeat false.
+    #[tokio::test]
+    async fn apply_fetch_reports_whether_the_source_published_new_data() {
+        let state = new_state();
+        let (mut last, mut stale) = (None, 0u32);
+        for (ts, new) in [
+            ("2026-10-04T00:00:00Z", true),
+            ("2026-10-04T00:00:00Z", false),
+            ("2026-10-04T00:00:15Z", true),
+        ] {
+            let ticked = apply_fetch(
+                &state,
+                fetched(ts),
+                Utc::now(),
+                Duration::ZERO,
+                &mut last,
+                &mut stale,
+            )
+            .await;
+            assert_eq!(ticked, new, "{ts}");
+        }
+    }
 
     #[test]
     fn first_tick_polls_immediately() {

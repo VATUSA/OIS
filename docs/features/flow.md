@@ -57,7 +57,7 @@ carry `updated_at` (via the shared `platform.touch_updated_at()` trigger) and re
 | --- | --- | --- |
 | `id` | text pk | `gen_random_uuid()` |
 | `name` | text | |
-| `color` | text | hex, default `#f59e0b` |
+| `color` | text | lowercase `#rrggbb`, ≥ 3:1 contrast on the dark ground; default `#efc14d` (Amber). A swatch stores the hex of the theme it was picked in (#698) |
 | `artcc` | text | owning facility (sidebar filter) |
 | `points` | jsonb | `[lat, lon]` vertices — an open polyline (≥ 2 pts) |
 | `dests` / `origins` / `fixes` | text[] | membership filters |
@@ -83,6 +83,9 @@ engine then treats it as a fixed constraint that unreleased ground traffic float
 | `callsign` | text | pk `(fca_id, callsign)` |
 | `cta_ms` | bigint | frozen metered crossing time, epoch ms |
 | `edct_ms` | bigint | release / wheels-up time, epoch ms |
+| `updated_by` | text | → `identity.users(id)`; set only when a person wrote it |
+| `updated_by_actor` | text | → `access.actors(id)`; who wrote it, person or machine *(0102, #583)* |
+| `version` | bigint | bumped by every write, for `If-Match` *(0105, #585)* — see "External release writers" |
 
 ### `flow.route` — shared reference routes *(migration 0028, reshaped 0029)*
 
@@ -208,7 +211,9 @@ releases for FCA crossings (a native port of vatflow's idst view).
 - **Response** — `IdstResponse { unscheduled, released, metered_count, as_of }`. Each
   `IdstFlight` is one `(metering FCA, ground departure in scope)` row: `callsign`, `dep`,
   `arr`, `aircraft_type`, `status` (`ground`/`proposed`), `fca_id`/`fca_name`, `seq`,
-  `delay_min`, `cross_time` (metered CTA), `edct`, `released`.
+  `delay_min`, `cross_time` (metered CTA), `edct`, `released`, and `released_by_machine` — the
+  tool's name when a service account or API key issued the release, null when a person did
+  (#585). The console shows it as "RLSD 1412z · via vTBFM".
 - **EDCTs** — for a released flight, `edct` is the frozen wheels-up from
   `flow.fca_release`. For an unreleased flight it is an **advisory** EDCT: the wheels-up
   that would hit the metered crossing, computed by backing the modeled transit
@@ -226,6 +231,78 @@ departure counts as a frozen CFR: the GDP-program CFR is preferred when present,
 otherwise the flight falls back to the FCA's release time and is marked metered.
 `POST`/`DELETE /api/v1/flow/fcas/{id}/release/{callsign}` publish the `flow.release`
 realtime topic (the additive `/api/v1/ws` push hub) so those views nudge-and-refetch.
+
+## External release writers *(#585)*
+
+OIS is the system of record for releases. A tool such as vTBFM writes releases through the same
+endpoints a controller uses, authenticated as a **service account** (`ois_sa_…`) or a user's
+**API key** (`ois_pat_…`) (#583). Its writes are proposals that OIS accepts or refuses; it never
+has to reconcile a second truth. The rules live in `handlers/release_authority.rs`.
+
+Covered: `POST`/`DELETE /flow/fcas/{id}/release/{callsign}`, `POST /flow/fcas/{id}/swap`, and
+`POST /tmu/cfr` / `DELETE /tmu/cfr/{callsign}` (CFRs have the same rules, versioned on
+`tmu.issued_cfrs.version`).
+
+### Authority
+
+| the release is held by | a person writes | a machine writes |
+| --- | --- | --- |
+| nobody | allowed | allowed |
+| a person | allowed | **409 `held_by_person`** |
+| this machine | allowed (a person overrides a tool) | allowed |
+| another machine | allowed | **409 `held_by_other_machine`** |
+
+"Held by" is whoever wrote it last (`updated_by_actor` / `issued_by_actor`). A row written before
+attribution existed counts as a person's. A swap changes both releases, so a machine needs
+authority over both.
+
+### Preconditions: no double issue, no silent overwrite
+
+Every release and CFR carries a `version`, returned as the `ETag` on a successful write and as
+`release_version` on each flight in `GET /flow/fcas/{id}/traffic`.
+
+- `If-None-Match: *`: write only if the flight holds **no** release.
+- `If-Match: "N"` (or `N`): replace or clear only **version N**.
+- A failed precondition is **412 `precondition_failed`**, with the current version in `ETag`.
+  Nothing is written.
+- **A machine must send one** of the two on every write except a swap; without it the write is
+  **428 `precondition_required`**. A person may omit them, which is how the web UI writes.
+- A weak tag (`W/"3"`), a list, or anything unparseable is 400, never a guess.
+
+A retried request therefore cannot issue a committed time twice:
+
+```
+POST /api/v1/flow/fcas/F1/release/AAL123     If-None-Match: *   → 200, ETag: "1"
+  (the response is lost; the tool retries)
+POST /api/v1/flow/fcas/F1/release/AAL123     If-None-Match: *   → 412, ETag: "1"
+  → the release exists at version 1: the first attempt landed; nothing was re-issued.
+
+POST /api/v1/flow/fcas/F1/release/AAL123     If-Match: "1"      → 200, ETag: "2"   (a new time)
+POST /api/v1/flow/fcas/F1/release/AAL123     If-Match: "1"      → 412, ETag: "2"   (stale)
+```
+
+### Revocation
+
+**A committed time stands.** When an integration's credential is revoked or its account disabled,
+the releases it already issued stay frozen and in force (a pilot may already hold them); only its
+*future* writes fail, with 401 at authentication. A person can clear them as usual.
+Deleting the key or account outright doesn't change that (#659): its actor outlives the credential,
+so the release keeps its "via …" provenance and is still a machine's. A replacement credential is a
+different machine, so it gets `409 held_by_other_machine` on those releases; a person can clear them.
+
+### Times
+
+- **Ready time on `POST …/release`** (`ReleaseRequest.ready`): `HHMM` or `HHMMz`, always **UTC**.
+  It resolves to the **nearest occurrence within ±12 hours of now**:
+  - `"1415"` at 13:02Z → 14:15Z today;
+  - `"0010"` at 23:50Z → 00:10Z **tomorrow**;
+  - `"2350"` at 00:10Z → 23:50Z **yesterday** (in the past, so it pins an already-due wheels-up).
+
+  Omit `ready` (or send empty) for RDY: the metered slot.
+- **CFR ready time** (`IssueCfrRequest.ready_time`): an RFC 3339 instant, e.g.
+  `"2026-10-03T14:15:00Z"`. No rollover rule is needed.
+- **Responses**: every time is RFC 3339 UTC (`cross_time`, `edct`, `wheels_up`). Storage in epoch
+  milliseconds (`cta_ms`, `edct_ms`) is internal and never on the wire.
 
 ## Facility map
 

@@ -1,7 +1,9 @@
 use std::sync::Arc;
 
 use axum::{
-    Router, middleware,
+    Router,
+    extract::DefaultBodyLimit,
+    middleware,
     routing::{delete, get, patch, post, put},
 };
 use utoipa::OpenApi;
@@ -12,9 +14,9 @@ use crate::{
     config::build_cors_layer,
     handlers::{
         access, ace, admin, aircraft_profiles, airport_configs, airport_surface, airports,
-        api_keys, atc, audit, auth, dashboards, desktop, docs, events, facilities,
+        api_keys, atc, audit, auth, dashboards, desktop, diagnostics, docs, events, facilities,
         facility_documents, facility_map, feed, flight_exclusions, flow, gdp, health, integration,
-        jobs as jobs_handler, metrics as metrics_handler, preferences, public, runway,
+        jobs as jobs_handler, metrics as metrics_handler, monitor, preferences, public, runway,
         service_accounts, stats, taxi_insights, tmu, users, webhooks,
     },
     openapi::ApiDoc,
@@ -134,6 +136,15 @@ pub fn build_router_with_limits(state: AppState, limits: Arc<RateLimits>) -> Rou
         .route(
             "/api/v1/admin/users/{cid}/access",
             get(access::get_user_access).post(access::update_user_access),
+        )
+        // A member's VATUSA side, and putting them back on VATUSA role sync — #549
+        .route(
+            "/api/v1/admin/users/{cid}/vatusa",
+            get(access::get_user_vatusa),
+        )
+        .route(
+            "/api/v1/admin/users/{cid}/vatusa/resync",
+            post(access::resync_user_vatusa),
         )
         // Group (role) management — #545
         .route(
@@ -487,6 +498,22 @@ pub fn build_router_with_limits(state: AppState, limits: Arc<RateLimits>) -> Rou
             "/api/v1/flow/fcas/{id}/exclusions/{callsign}",
             post(flight_exclusions::exclude_flight).delete(flight_exclusions::restore_flight),
         )
+        .route(
+            "/api/v1/flow/monitor/{artcc}/maps",
+            get(monitor::list_sector_maps),
+        )
+        .route(
+            "/api/v1/flow/monitor/{artcc}/maps/{sector_id}",
+            put(monitor::set_sector_map),
+        )
+        .route(
+            "/api/v1/flow/monitor/{artcc}/consolidations",
+            get(monitor::list_consolidations),
+        )
+        .route(
+            "/api/v1/flow/monitor/{artcc}/consolidations/{sector_id}",
+            put(monitor::consolidate_sector).delete(monitor::release_sector),
+        )
         // Shared named map routes (polylines)
         .route(
             "/api/v1/flow/routes",
@@ -630,6 +657,22 @@ pub fn build_router_with_limits(state: AppState, limits: Arc<RateLimits>) -> Rou
         .route("/api/v1/admin/summary", get(admin::get_admin_summary))
         // Audit log
         .route("/api/v1/admin/audit", get(audit::list_audit_logs))
+        // Desktop diagnostics reports (#629): the desktop's own upload, capped per route (`Multipart`
+        // has no implicit limit), and the staff view.
+        .route(
+            "/api/v1/diagnostics/reports",
+            post(diagnostics::upload_report)
+                .layer(DefaultBodyLimit::max(diagnostics::MAX_UPLOAD_BYTES)),
+        )
+        .route("/api/v1/admin/diagnostics", get(diagnostics::list_reports))
+        .route(
+            "/api/v1/admin/diagnostics/{id}",
+            get(diagnostics::get_report).delete(diagnostics::delete_report),
+        )
+        .route(
+            "/api/v1/admin/diagnostics/{id}/logs",
+            get(diagnostics::get_report_logs),
+        )
         // Background-tasks viewer (job status + manual trigger)
         .route("/api/v1/admin/jobs", get(jobs_handler::list_jobs))
         .route("/api/v1/admin/jobs/{name}/run", post(jobs_handler::run_job))
@@ -658,6 +701,14 @@ pub fn build_router_with_limits(state: AppState, limits: Arc<RateLimits>) -> Rou
         .route(
             "/api/v1/admin/service-accounts/{id}/rate-limit",
             put(service_accounts::set_service_account_rate_limit),
+        )
+        .route(
+            "/api/v1/admin/service-accounts/grantable-permissions",
+            get(service_accounts::grantable_service_account_permissions),
+        )
+        .route(
+            "/api/v1/admin/service-accounts/{id}/permissions",
+            put(service_accounts::set_service_account_permissions),
         )
         // Innermost app layer: records every successful mutation to the audit log. Added
         // before resolve_current_user so it runs *after* it inbound and sees CurrentUser.

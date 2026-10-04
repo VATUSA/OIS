@@ -6,6 +6,7 @@ use sqlx::{PgPool, Postgres};
 
 use serde_json::Value;
 
+use crate::auth::principal::Attribution;
 use crate::errors::ApiError;
 use crate::models::{
     AirportRateBody, DccRequestBody, EventBody, FacilitySupportBody, TmiPackageBody,
@@ -101,8 +102,9 @@ pub async fn prune(pool: &PgPool, cutoff: DateTime<Utc>) -> Result<u64, ApiError
 
 // --- DCC support ---
 
-const DCC_SELECT: &str = "select d.status, d.notes, d.updated_at, u.display_name as updated_by \
-    from events.dcc_request d left join identity.users u on u.id = d.updated_by";
+const DCC_SELECT: &str = "select d.status, d.notes, d.updated_at, coalesce(u.display_name, a.display_name) as updated_by \
+    from events.dcc_request d left join identity.users u on u.id = d.updated_by \
+    left join access.actors a on a.id = d.updated_by_actor";
 
 pub async fn get_dcc(pool: &PgPool, event_id: i64) -> Result<Option<DccRequestBody>, ApiError> {
     sqlx::query_as::<_, DccRequestBody>(&format!("{DCC_SELECT} where d.event_id = $1"))
@@ -117,20 +119,21 @@ pub async fn upsert_dcc(
     event_id: i64,
     status: &str,
     notes: &str,
-    actor: &str,
+    by: &Attribution,
 ) -> Result<(), ApiError> {
     sqlx::query(
-        "insert into events.dcc_request (event_id, status, notes, updated_by)
-         values ($1, $2, $3, $4)
+        "insert into events.dcc_request (event_id, status, notes, updated_by, updated_by_actor)
+         values ($1, $2, $3, $4, $5)
          on conflict (event_id) do update set
              status = excluded.status,
              notes = excluded.notes,
-             updated_by = excluded.updated_by",
+             updated_by = excluded.updated_by, updated_by_actor = excluded.updated_by_actor",
     )
     .bind(event_id)
     .bind(status)
     .bind(notes)
-    .bind(actor)
+    .bind(&by.user_id)
+    .bind(&by.actor_id)
     .execute(pool)
     .await
     .map_err(|_| ApiError::Internal)?;
@@ -140,8 +143,9 @@ pub async fn upsert_dcc(
 // --- facility support matrix ---
 
 const FS_SELECT: &str = "select f.facility, f.level, f.notes, f.updated_at, \
-    u.display_name as updated_by \
-    from events.facility_support f left join identity.users u on u.id = f.updated_by";
+    coalesce(u.display_name, a.display_name) as updated_by \
+    from events.facility_support f left join identity.users u on u.id = f.updated_by \
+    left join access.actors a on a.id = f.updated_by_actor";
 
 pub async fn list_facility_support(
     pool: &PgPool,
@@ -177,21 +181,22 @@ pub async fn upsert_facility_support(
     facility: &str,
     level: &str,
     notes: &str,
-    actor: &str,
+    by: &Attribution,
 ) -> Result<(), ApiError> {
     sqlx::query(
-        "insert into events.facility_support (event_id, facility, level, notes, updated_by)
-         values ($1, $2, $3, $4, $5)
+        "insert into events.facility_support (event_id, facility, level, notes, updated_by, updated_by_actor)
+         values ($1, $2, $3, $4, $5, $6)
          on conflict (event_id, facility) do update set
              level = excluded.level,
              notes = excluded.notes,
-             updated_by = excluded.updated_by",
+             updated_by = excluded.updated_by, updated_by_actor = excluded.updated_by_actor",
     )
     .bind(event_id)
     .bind(facility)
     .bind(level)
     .bind(notes)
-    .bind(actor)
+    .bind(&by.user_id)
+    .bind(&by.actor_id)
     .execute(pool)
     .await
     .map_err(|_| ApiError::Internal)?;
@@ -216,8 +221,9 @@ pub async fn delete_facility_support(
 // --- airport rates (AAR/ADR) ---
 
 const RATE_SELECT: &str = "select r.icao, r.aar, r.adr, r.artcc, r.config_id, r.source, \
-    r.updated_at, u.display_name as updated_by \
-    from events.airport_rate r left join identity.users u on u.id = r.updated_by";
+    r.updated_at, coalesce(u.display_name, a.display_name) as updated_by \
+    from events.airport_rate r left join identity.users u on u.id = r.updated_by \
+    left join access.actors a on a.id = r.updated_by_actor";
 
 pub async fn list_airport_rates(
     pool: &PgPool,
@@ -257,18 +263,18 @@ pub async fn upsert_airport_rate(
     artcc: &str,
     config_id: Option<&str>,
     source: &str,
-    actor: &str,
+    by: &Attribution,
 ) -> Result<(), ApiError> {
     sqlx::query(
-        "insert into events.airport_rate (event_id, icao, aar, adr, artcc, config_id, source, updated_by)
-         values ($1, $2, $3, $4, $5, $6, $7, $8)
+        "insert into events.airport_rate (event_id, icao, aar, adr, artcc, config_id, source, updated_by, updated_by_actor)
+         values ($1, $2, $3, $4, $5, $6, $7, $8, $9)
          on conflict (event_id, icao) do update set
              aar = excluded.aar,
              adr = excluded.adr,
              artcc = excluded.artcc,
              config_id = excluded.config_id,
              source = excluded.source,
-             updated_by = excluded.updated_by",
+             updated_by = excluded.updated_by, updated_by_actor = excluded.updated_by_actor",
     )
     .bind(event_id)
     .bind(icao)
@@ -277,7 +283,8 @@ pub async fn upsert_airport_rate(
     .bind(artcc)
     .bind(config_id)
     .bind(source)
-    .bind(actor)
+    .bind(&by.user_id)
+    .bind(&by.actor_id)
     .execute(pool)
     .await
     .map_err(|_| ApiError::Internal)?;
@@ -314,8 +321,9 @@ struct PackageRow {
 }
 
 const PACKAGE_SELECT: &str = "select p.id, p.name, p.status, p.auto_publish, p.activated_at, \
-    p.archived_at, p.updated_at, u.display_name as updated_by \
-    from events.tmi_package p left join identity.users u on u.id = p.updated_by";
+    p.archived_at, p.updated_at, coalesce(u.display_name, a.display_name) as updated_by \
+    from events.tmi_package p left join identity.users u on u.id = p.updated_by \
+    left join access.actors a on a.id = p.updated_by_actor";
 
 /// A package item plus the live-row reference recorded at activation (for deactivation cleanup).
 #[derive(sqlx::FromRow)]
@@ -385,15 +393,16 @@ pub async fn create_package(
     pool: &PgPool,
     event_id: i64,
     name: &str,
-    actor: &str,
+    by: &Attribution,
 ) -> Result<String, ApiError> {
     sqlx::query_scalar::<_, String>(
-        "insert into events.tmi_package (event_id, name, updated_by) \
-         values ($1, $2, $3) returning id",
+        "insert into events.tmi_package (event_id, name, updated_by, updated_by_actor) \
+         values ($1, $2, $3, $4) returning id",
     )
     .bind(event_id)
     .bind(name)
-    .bind(actor)
+    .bind(&by.user_id)
+    .bind(&by.actor_id)
     .fetch_one(pool)
     .await
     .map_err(|_| ApiError::Internal)
@@ -444,7 +453,7 @@ pub async fn delete_package_item(
 pub async fn mark_package_activated<'e, E>(
     executor: E,
     package_id: &str,
-    actor: &str,
+    by: &Attribution,
 ) -> Result<(), ApiError>
 where
     E: sqlx::Executor<'e, Database = Postgres>,
@@ -455,10 +464,11 @@ where
     // then updates nothing, and its `Conflict` rolls back every item it materialized (#537 review).
     let result = sqlx::query(
         "update events.tmi_package set status = 'activated', activated_at = now(), \
-         updated_by = $2 where id = $1 and status = 'draft'",
+         updated_by = $2, updated_by_actor = $3 where id = $1 and status = 'draft'",
     )
     .bind(package_id)
-    .bind(actor)
+    .bind(&by.user_id)
+    .bind(&by.actor_id)
     .execute(executor)
     .await
     .map_err(|_| ApiError::Internal)?;
@@ -506,15 +516,16 @@ pub async fn list_package_item_refs(
 pub async fn mark_package_archived(
     pool: &PgPool,
     package_id: &str,
-    actor: &str,
+    by: &Attribution,
 ) -> Result<(), ApiError> {
     let mut tx = pool.begin().await.map_err(|_| ApiError::Internal)?;
     sqlx::query(
         "update events.tmi_package set status = 'archived', archived_at = now(), \
-         updated_by = $2 where id = $1",
+         updated_by = $2, updated_by_actor = $3 where id = $1",
     )
     .bind(package_id)
-    .bind(actor)
+    .bind(&by.user_id)
+    .bind(&by.actor_id)
     .execute(&mut *tx)
     .await
     .map_err(|_| ApiError::Internal)?;
@@ -534,14 +545,15 @@ pub async fn set_package_auto(
     pool: &PgPool,
     package_id: &str,
     auto: bool,
-    actor: &str,
+    by: &Attribution,
 ) -> Result<bool, ApiError> {
     let r = sqlx::query(
-        "update events.tmi_package set auto_publish = $2, updated_by = $3 where id = $1",
+        "update events.tmi_package set auto_publish = $2, updated_by = $3, updated_by_actor = $4 where id = $1",
     )
     .bind(package_id)
     .bind(auto)
-    .bind(actor)
+    .bind(&by.user_id)
+    .bind(&by.actor_id)
     .execute(pool)
     .await
     .map_err(|_| ApiError::Internal)?;
@@ -549,15 +561,16 @@ pub async fn set_package_auto(
 }
 
 /// `(package_id, event_id, actor)` for a package the scheduler should act on. `actor` is the package's
-/// `updated_by` (the human who last touched it); rows with no attributable actor are skipped.
+/// `updated_by_actor` (the `access.actors` id of whoever last touched it: a person, a key or a service
+/// account); rows with no actor are skipped.
 pub type SchedulablePackage = (String, i64, String);
 
 /// Draft + auto packages whose event is within 30 min of starting (and hasn't ended) — auto-activate.
 pub async fn auto_due_packages(pool: &PgPool) -> Result<Vec<SchedulablePackage>, ApiError> {
     sqlx::query_as::<_, SchedulablePackage>(
-        "select p.id, p.event_id, p.updated_by from events.tmi_package p \
+        "select p.id, p.event_id, p.updated_by_actor from events.tmi_package p \
          join events.event e on e.id = p.event_id \
-         where p.status = 'draft' and p.auto_publish and p.updated_by is not null \
+         where p.status = 'draft' and p.auto_publish and p.updated_by_actor is not null \
            and now() >= e.start_time - interval '30 minutes' and now() < e.end_time",
     )
     .fetch_all(pool)
@@ -568,9 +581,9 @@ pub async fn auto_due_packages(pool: &PgPool) -> Result<Vec<SchedulablePackage>,
 /// Activated packages whose event has ended — auto-deactivate (cancel live rows) + archive.
 pub async fn ended_activated_packages(pool: &PgPool) -> Result<Vec<SchedulablePackage>, ApiError> {
     sqlx::query_as::<_, SchedulablePackage>(
-        "select p.id, p.event_id, p.updated_by from events.tmi_package p \
+        "select p.id, p.event_id, p.updated_by_actor from events.tmi_package p \
          join events.event e on e.id = p.event_id \
-         where p.status = 'activated' and p.updated_by is not null and now() >= e.end_time",
+         where p.status = 'activated' and p.updated_by_actor is not null and now() >= e.end_time",
     )
     .fetch_all(pool)
     .await
@@ -583,9 +596,10 @@ pub async fn get_debrief(
     event_id: i64,
 ) -> Result<Option<(String, Option<String>, DateTime<Utc>)>, ApiError> {
     sqlx::query_as::<_, (String, Option<String>, DateTime<Utc>)>(
-        "select d.notes, u.display_name, d.updated_at \
+        "select d.notes, coalesce(u.display_name, a.display_name), d.updated_at \
          from events.event_debrief d \
          left join identity.users u on u.id = d.updated_by \
+         left join access.actors a on a.id = d.updated_by_actor \
          where d.event_id = $1",
     )
     .bind(event_id)
@@ -599,17 +613,18 @@ pub async fn upsert_debrief(
     pool: &PgPool,
     event_id: i64,
     notes: &str,
-    user_id: &str,
+    by: &Attribution,
 ) -> Result<(), ApiError> {
     sqlx::query(
-        "insert into events.event_debrief (event_id, notes, updated_by, updated_at) \
-         values ($1, $2, $3, now()) \
+        "insert into events.event_debrief (event_id, notes, updated_by, updated_by_actor, updated_at) \
+         values ($1, $2, $3, $4, now()) \
          on conflict (event_id) do update \
-             set notes = excluded.notes, updated_by = excluded.updated_by, updated_at = now()",
+             set notes = excluded.notes, updated_by = excluded.updated_by, updated_by_actor = excluded.updated_by_actor, updated_at = now()",
     )
     .bind(event_id)
     .bind(notes)
-    .bind(user_id)
+    .bind(&by.user_id)
+    .bind(&by.actor_id)
     .execute(pool)
     .await
     .map_err(|_| ApiError::Internal)?;

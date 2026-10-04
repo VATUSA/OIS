@@ -46,9 +46,10 @@ headers. It should feel calm, precise, and obviously the same product on every s
 8. **Air in headers, density in tables.** Page headers and margins breathe; data tables are
    deliberately dense. Both are correct — don't pad a 500-row table like a marketing page.
 9. **Tokens only — never inline a value.** Every colour, radius, space, and font size comes from a
-   token. A hardcoded hex or px in a component is a bug; it's what makes a system drift. The sole
-   exception is a page that physically cannot load the stylesheet — see § "Standalone pages outside
-   the app", which lists every one and the conditions they must meet.
+   token. A hardcoded hex or px in a component is a bug; it's what makes a system drift. The
+   exceptions are a page that physically cannot load the stylesheet — see § "Standalone pages outside
+   the app", which lists every one and the conditions they must meet — and a colour a **user** chose
+   and saved, which is data rather than chrome (§ "User-chosen domain colour").
 
 ---
 
@@ -183,6 +184,26 @@ a **documented exception to non-negotiable #9**, under all of these conditions:
   only thing standing between the copy and silent drift. `--r-lg` comes from the token table above,
   which `globals.css` does not define, and the font stacks are system-fallback approximations.
 
+### User-chosen domain colour
+
+An FCA, a route and a facility-map rule each carry a colour a person picked so that theirs reads apart
+on a shared map. That colour is **data**, not chrome, so it may be any `#rrggbb` — on these conditions
+(#698):
+
+- **Offered from tokens first.** The picker is `ColorSwatches` (`@ois/ui`), fed the named palette in
+  `web/src/lib/palette.ts` (`--series-*` and `--ink-3`, each with its name). A custom pick is the
+  fallback, not the default.
+- **Validated on the server**, on every write path: lowercase `#rrggbb` only.
+- **Never invisible.** At least 3:1 contrast against the dark ground (`#08080a`). Every token swatch
+  clears it in both themes; black and near-black don't. `ColorSwatches` refuses a darker pick, and the
+  server refuses it too.
+- **One parser.** The map draws it through `hexToRgb`, and a list chip uses `swatchCss`, which is the
+  same parse, so a value can't look right in a list and grey on the map.
+- **A `style` colour is allowed only for such data** (a chip, a swatch), never for chrome.
+- **It is stored as a hex, so it drifts with theme.** A swatch picked in light mode stores the light
+  hex and shows that in dark mode too. That is known and accepted; storing a token name would fix it,
+  at the cost of an API change.
+
 ## Components (one each, tokens only)
 
 - **Nav item** — icon + label + right-aligned mono count. Active = `--panel-2` tile, icon shifts to
@@ -204,6 +225,16 @@ a **documented exception to non-negotiable #9**, under all of these conditions:
   150–220ms ease-out, no bounce.
 - **Icons** — one-weight line icons (~1.7px stroke, round caps), `currentColor` so they inherit the
   row's ink/accent. Never give an icon its own colour.
+  **One named exception (#680):** the sidebar's *What's new* Sparkles icon turns gold (`--warning`)
+  and twinkles (`animate-sparkle`, flat, no gradient; still for reduced motion) on hover. It is
+  not precedent — no other icon takes its own colour, and gold is not a second accent anywhere else.
+- **Screenshots** — framed like a card: `--card` mat, 1px `--line` hairline, `--r-md`, no shadow and
+  no gradient scrim. Thumbnails share one box, `aspect-shot` (16:10), filled top-anchored
+  (`object-cover object-top`) because a UI shot carries its signal at the top. Every thumbnail opens
+  full-size in a nested `Modal`; at three columns nothing in an OIS screenshot is legible. They're
+  bundled, imported from `web/src/assets/changelog/` so they're served from our own origin (the
+  desktop CSP allows no remote image, #429). Budget: 8 per changelog entry, only the newest 3
+  entries carry any, 300 KB per file and 1.5 MB in total (both enforced by tests, #665).
 
 ---
 
@@ -226,7 +257,7 @@ One approach: `@tanstack/charts`, wrapped by the chart components in `@ois/ui` (
 
 Report each miss as `file:line — rule → fix`.
 
-- [ ] No hex, `rgb()`, or Tailwind palette class (`emerald-500`, `zinc-…`) outside `globals.css`.
+- [ ] No hex, `rgb()`, or Tailwind palette class (`emerald-500`, `zinc-…`) outside `globals.css` — a saved user colour excepted (§ "User-chosen domain colour").
 - [ ] No gradient and no `shadow-*` at all — including on the shell.
 - [ ] No `font-medium` (500). Weights are 400 / 600 / 700.
 - [ ] Radii from the scale (`rounded-xs…xl`, `rounded-full` for pills); no arbitrary radius.
@@ -248,6 +279,10 @@ Dark-first is canonical. Because every component reads from tokens, a light them
 **token-swap only** — redefine the surface/ink tokens under `:root[data-theme="light"]`, keep accent
 and semantics working on the new ground, change **no component code**. Build against the tokens now and
 light mode stays cheap later.
+
+The one thing a token swap can't reach is a **screenshot**: it's pixels, so a dark-UI shot will sit
+on a light ground. The card mat and hairline frame soften that. Light/dark variants of each shot
+would double their weight and are deliberately not done (#665).
 
 ## Do / Don't
 

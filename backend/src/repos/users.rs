@@ -33,11 +33,12 @@ pub async fn list_users(
         "select u.cid, u.display_name, u.rating, \
             coalesce(array_agg(distinct ur.role_name) filter (where ur.role_name is not null), '{{}}') as roles, \
             coalesce(array_agg(distinct ur.role_name || coalesce(':' || ur.artcc_id, '')) \
-                filter (where ur.role_name is not null), '{{}}') as scoped_roles \
+                filter (where ur.role_name is not null), '{{}}') as scoped_roles, \
+            u.vatusa_roles_detached_at as vatusa_detached_at \
          from identity.users u \
          left join access.user_roles ur on ur.user_id = u.id \
          where {USER_FILTER} \
-         group by u.cid, u.display_name, u.rating \
+         group by u.cid, u.display_name, u.rating, u.vatusa_roles_detached_at \
          order by u.display_name asc \
          limit $2 offset $3"
     ))

@@ -7,6 +7,7 @@ use chrono::{DateTime, Utc};
 use serde_json::Value;
 use sqlx::{PgPool, Postgres, QueryBuilder, Transaction};
 
+use crate::auth::principal::Attribution;
 use crate::errors::ApiError;
 use crate::feed::winds::Winds;
 use crate::models::{
@@ -116,7 +117,15 @@ pub async fn upsert_members(
         qb.push(
             " on conflict (cid) do update set name = excluded.name, last_seen = excluded.last_seen",
         );
-        qb.build().execute(&mut **tx).await.map_err(db)?;
+        // Not persistent (#689): `push_values` makes the SQL text depend on the row count, which changes
+        // every tick, so a prepared statement here is never reused — and kept, each one is a new entry
+        // in this connection's statement cache, for every connection in the pool. sqlx's own note on
+        // `push_values` says to do exactly this. The same applies to every batch insert below.
+        qb.build()
+            .persistent(false)
+            .execute(&mut **tx)
+            .await
+            .map_err(db)?;
     }
     Ok(())
 }
@@ -169,7 +178,11 @@ pub async fn upsert_flights(
                 cruise_alt = excluded.cruise_alt,
                 revision_id = excluded.revision_id",
         );
-        qb.build().execute(&mut **tx).await.map_err(db)?;
+        qb.build()
+            .persistent(false)
+            .execute(&mut **tx)
+            .await
+            .map_err(db)?;
     }
     Ok(())
 }
@@ -207,7 +220,11 @@ pub async fn insert_flight_legs(pool: &PgPool, rows: &[FlightLegRow]) -> Result<
                 .push_bind(r.end)
                 .push_bind(r.duration_sec);
         });
-        qb.build().execute(pool).await.map_err(db)?;
+        qb.build()
+            .persistent(false)
+            .execute(pool)
+            .await
+            .map_err(db)?;
     }
     Ok(())
 }
@@ -255,7 +272,11 @@ pub async fn insert_taxi_observations(
                 .push_bind(r.taxi_sec)
                 .push_bind(r.observed_at);
         });
-        qb.build().execute(pool).await.map_err(db)?;
+        qb.build()
+            .persistent(false)
+            .execute(pool)
+            .await
+            .map_err(db)?;
     }
     Ok(())
 }
@@ -565,7 +586,11 @@ pub async fn insert_flight_plan_revisions(
                     is distinct from (last.route, last.departure, last.arrival)) \
              on conflict (session_id, effective_from) do nothing",
         );
-        qb.build().execute(&mut **tx).await.map_err(db)?;
+        qb.build()
+            .persistent(false)
+            .execute(&mut **tx)
+            .await
+            .map_err(db)?;
     }
     Ok(())
 }
@@ -608,7 +633,11 @@ pub async fn upsert_prefiles(
                 cruise_alt = excluded.cruise_alt
              where stats.flight.status = 'prefiled'",
         );
-        qb.build().execute(&mut **tx).await.map_err(db)?;
+        qb.build()
+            .persistent(false)
+            .execute(&mut **tx)
+            .await
+            .map_err(db)?;
     }
     Ok(())
 }
@@ -645,7 +674,11 @@ pub async fn upsert_controllers(
                 last_seen = excluded.last_seen,
                 atis_code = excluded.atis_code",
         );
-        qb.build().execute(&mut **tx).await.map_err(db)?;
+        qb.build()
+            .persistent(false)
+            .execute(&mut **tx)
+            .await
+            .map_err(db)?;
     }
     Ok(())
 }
@@ -671,7 +704,11 @@ pub async fn insert_positions(
                 .push_bind(&p.transponder)
                 .push_bind(p.qnh_mb);
         });
-        qb.build().execute(&mut **tx).await.map_err(db)?;
+        qb.build()
+            .persistent(false)
+            .execute(&mut **tx)
+            .await
+            .map_err(db)?;
     }
     Ok(())
 }
@@ -897,17 +934,18 @@ pub async fn save_capture_window(
     label: &str,
     start_time: DateTime<Utc>,
     end_time: DateTime<Utc>,
-    created_by: Option<&str>,
+    by: &Attribution,
 ) -> Result<String, ApiError> {
     sqlx::query_scalar::<_, String>(
-        "insert into stats.capture (event_id, label, start_time, end_time, status, relax_scope, created_by)
-         values ($1, $2, $3, $4, 'saved', false, $5) returning id",
+        "insert into stats.capture (event_id, label, start_time, end_time, status, relax_scope, created_by, created_by_actor)
+         values ($1, $2, $3, $4, 'saved', false, $5, $6) returning id",
     )
     .bind(event_id)
     .bind(label)
     .bind(start_time)
     .bind(end_time)
-    .bind(created_by)
+    .bind(&by.user_id)
+    .bind(&by.actor_id)
     .fetch_one(pool)
     .await
     .map_err(db)
@@ -1063,8 +1101,9 @@ pub async fn get_event_capture(
 ) -> Result<Option<EventCaptureRow>, ApiError> {
     sqlx::query_as::<_, EventCaptureRow>(
         "select ec.event_id, ec.enabled, ec.pre_minutes, ec.post_minutes, ec.updated_at, \
-            u.display_name as updated_by \
+            coalesce(u.display_name, a.display_name) as updated_by \
          from stats.event_capture ec left join identity.users u on u.id = ec.updated_by \
+         left join access.actors a on a.id = ec.updated_by_actor \
          where ec.event_id = $1",
     )
     .bind(event_id)
@@ -1079,22 +1118,23 @@ pub async fn upsert_event_capture(
     enabled: bool,
     pre_minutes: i32,
     post_minutes: i32,
-    actor: &str,
+    by: &Attribution,
 ) -> Result<(), ApiError> {
     sqlx::query(
-        "insert into stats.event_capture (event_id, enabled, pre_minutes, post_minutes, updated_by)
-         values ($1, $2, $3, $4, $5)
+        "insert into stats.event_capture (event_id, enabled, pre_minutes, post_minutes, updated_by, updated_by_actor)
+         values ($1, $2, $3, $4, $5, $6)
          on conflict (event_id) do update set
              enabled = excluded.enabled,
              pre_minutes = excluded.pre_minutes,
              post_minutes = excluded.post_minutes,
-             updated_by = excluded.updated_by",
+             updated_by = excluded.updated_by, updated_by_actor = excluded.updated_by_actor",
     )
     .bind(event_id)
     .bind(enabled)
     .bind(pre_minutes)
     .bind(post_minutes)
-    .bind(actor)
+    .bind(&by.user_id)
+    .bind(&by.actor_id)
     .execute(pool)
     .await
     .map_err(db)?;
@@ -1250,7 +1290,12 @@ pub async fn snapshot_event_movements(
          unique_pilots = excluded.unique_pilots, window_start = excluded.window_start, \
          window_end = excluded.window_end, captured_at = now()",
     );
-    let res = qb.build().execute(&mut *tx).await.map_err(db)?;
+    let res = qb
+        .build()
+        .persistent(false)
+        .execute(&mut *tx)
+        .await
+        .map_err(db)?;
     tx.commit().await.map_err(db)?;
     Ok(res.rows_affected())
 }
@@ -1854,6 +1899,178 @@ fn db(e: sqlx::Error) -> ApiError {
 mod tests {
     use super::*;
     use chrono::TimeZone;
+
+    // ---- #689: batch inserts don't grow the statement cache ----------------------------------------
+
+    /// Every stats batch writer, once, with `n` rows each — the shape a collector tick and the delay /
+    /// taxi / event jobs write in.
+    async fn write_every_batch(pool: &PgPool, n: usize, event_id: i64) {
+        let now = Utc::now();
+        let ids = 0..n as i64;
+        let mut tx = pool.begin().await.unwrap();
+        let members: Vec<(i32, String)> = ids
+            .clone()
+            .map(|i| (900_000 + i as i32, format!("M{i}")))
+            .collect();
+        upsert_members(&mut tx, &members, now).await.unwrap();
+        let flights: Vec<FlightRow> = ids
+            .clone()
+            .map(|i| FlightRow {
+                session_id: 7_000 + i,
+                cid: 900_000 + i as i32,
+                callsign: format!("TST{i}"),
+                server: None,
+                logon_time: now,
+                flight_rules: Some("I".into()),
+                departure: Some("KJFK".into()),
+                arrival: Some("KBOS".into()),
+                alternate: None,
+                aircraft_short: Some("B738".into()),
+                aircraft_faa: None,
+                cruise_tas: None,
+                cruise_alt: None,
+                deptime: None,
+                enroute_time: None,
+                route: None,
+                remarks: None,
+                revision_id: Some(n as i32),
+            })
+            .collect();
+        upsert_flights(&mut tx, &flights, now).await.unwrap();
+        insert_flight_plan_revisions(&mut tx, &flights, now)
+            .await
+            .unwrap();
+        let positions: Vec<PositionRow> = ids
+            .clone()
+            .map(|i| PositionRow {
+                session_id: 7_000 + i,
+                lat: 40.0,
+                lon: -73.0,
+                altitude: 1000,
+                groundspeed: 200,
+                heading: 90,
+                transponder: None,
+                qnh_mb: None,
+            })
+            .collect();
+        insert_positions(&mut tx, &positions, now).await.unwrap();
+        let prefiles: Vec<PrefileRow> = ids
+            .clone()
+            .map(|i| PrefileRow {
+                session_id: 8_000 + i,
+                cid: 900_000 + i as i32,
+                callsign: format!("PRE{i}"),
+                departure: None,
+                arrival: None,
+                alternate: None,
+                aircraft_short: None,
+                route: None,
+                remarks: None,
+                cruise_alt: None,
+                revision_id: None,
+            })
+            .collect();
+        upsert_prefiles(&mut tx, &prefiles, now).await.unwrap();
+        let controllers: Vec<ControllerRow> = ids
+            .clone()
+            .map(|i| ControllerRow {
+                session_id: 9_000 + i,
+                cid: 900_000 + i as i32,
+                callsign: format!("ZNY_{i}_CTR"),
+                frequency: None,
+                facility: None,
+                rating: None,
+                server: None,
+                visual_range: None,
+                atis_code: None,
+                logon_time: now,
+                is_atis: false,
+            })
+            .collect();
+        upsert_controllers(&mut tx, &controllers, now)
+            .await
+            .unwrap();
+        tx.commit().await.unwrap();
+
+        let legs: Vec<FlightLegRow> = ids
+            .clone()
+            .map(|i| FlightLegRow {
+                kind: "departure",
+                airport: "KJFK".into(),
+                callsign: format!("TST{i}"),
+                cid: 900_000 + i as i32,
+                aircraft: None,
+                runway: None,
+                procedure: None,
+                start: now,
+                end: now,
+                duration_sec: 60,
+            })
+            .collect();
+        insert_flight_legs(pool, &legs).await.unwrap();
+        let taxi: Vec<TaxiObservationRow> = ids
+            .clone()
+            .map(|_| TaxiObservationRow {
+                airport: "KJFK".into(),
+                gate_id: None,
+                aircraft: None,
+                runway: None,
+                pushback_sec: None,
+                startup_sec: None,
+                taxi_sec: 300,
+                observed_at: now,
+            })
+            .collect();
+        insert_taxi_observations(pool, &taxi).await.unwrap();
+        let movements: Vec<AirportBreakdown> = ids
+            .map(|i| AirportBreakdown {
+                icao: format!("K{i:03}"),
+                arrivals: 1,
+                departures: 1,
+                unique_pilots: 1,
+            })
+            .collect();
+        snapshot_event_movements(pool, event_id, now, now, &movements)
+            .await
+            .unwrap();
+    }
+
+    /// The leak in #689: a batch insert's SQL text depends on its row count, so a cached prepared
+    /// statement is a new cache entry every tick. Through a one-connection pool, so every statement
+    /// lands on the connection whose cache is read — and with *varying* row counts, since a fixed
+    /// count would pass even with the leak.
+    #[sqlx::test]
+    async fn batch_inserts_do_not_grow_the_statement_cache(pool: PgPool) {
+        use sqlx::Connection as _;
+        let event_id = 68_900_i64;
+        sqlx::query(
+            "insert into events.event (id, title, start_time, end_time) values ($1, 'Test', now(), now())",
+        )
+        .bind(event_id)
+        .execute(&pool)
+        .await
+        .unwrap();
+        let one = sqlx::postgres::PgPoolOptions::new()
+            .max_connections(1)
+            .connect_with((*pool.connect_options()).clone())
+            .await
+            .unwrap();
+
+        // Warm up: the fixed-SQL statements around the batches are cached once, legitimately.
+        write_every_batch(&one, 1, event_id).await;
+        let cached =
+            |pool: PgPool| async move { pool.acquire().await.unwrap().cached_statements_size() };
+        let baseline = cached(one.clone()).await;
+
+        for n in [2, 3, 5, 8] {
+            write_every_batch(&one, n, event_id).await;
+        }
+        assert_eq!(
+            cached(one.clone()).await,
+            baseline,
+            "a batch insert kept a prepared statement per row count"
+        );
+    }
 
     /// A movement is a detected wheels-up or touchdown, not a filed plan (#433). These fixtures are
     /// the four shapes that used to be counted and should not be, plus the one that should.

@@ -511,6 +511,7 @@ mod tests {
             "Flood",
             None,
             &crate::repos::access::sha256_hex(sa_token),
+            chrono::Utc::now() + chrono::Duration::days(30),
         )
         .await
         .unwrap();
@@ -570,6 +571,7 @@ mod tests {
             "Last used",
             None,
             &crate::repos::access::sha256_hex(sa_token),
+            chrono::Utc::now() + chrono::Duration::days(30),
         )
         .await
         .unwrap();

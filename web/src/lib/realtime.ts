@@ -1,3 +1,4 @@
+import {useSyncExternalStore} from "react";
 import type {QueryClient} from "@tanstack/react-query";
 
 import {API_BASE} from "./api";
@@ -9,20 +10,58 @@ import {getDesktopToken} from "./desktop-token";
  * waiting for their poll. Purely additive — if the socket never connects, polling still keeps
  * everything correct. Keep these topics in sync with `backend/src/realtime.rs` `topic`.
  */
-const TOPIC_KEYS: Record<string, string[][]> = {
+/** The feed ticks once per upstream VATSIM publish (#648). */
+const FEED_TICK = "feed.tick";
+
+/**
+ * Every query derived from the VATSIM feed, with the spacing it used to poll at. They refetch on
+ * {@link FEED_TICK} and — while the socket is live — stop polling on their own timers (see
+ * {@link pollUnlessLive}).
+ *
+ * A tick refetches a key only once its data is at least `minGapMs` old. The feed publishes about every
+ * 15s, so the 15s queries refetch on every tick, and a query that polled every 30s or 60s refetches
+ * on every second or fourth: never more often than it used to poll, and always right on a publish
+ * rather than up to a full interval after one (#648 AC3).
+ */
+const FEED_KEYS: { key: string[]; minGapMs: number }[] = [
+  { key: ["flow-traffic"], minGapMs: 0 },
+  { key: ["flow-atc"], minGapMs: 0 },
+  { key: ["taxi"], minGapMs: 0 },
+  { key: ["fca-counts"], minGapMs: 0 },
+  { key: ["flow"], minGapMs: 20_000 },
+  { key: ["aadc"], minGapMs: 20_000 },
+  { key: ["fca-traffic"], minGapMs: 30_000 },
+  { key: ["feed-status"], minGapMs: 30_000 },
+  { key: ["idst"], minGapMs: 30_000 },
+  { key: ["departures"], minGapMs: 60_000 },
+];
+
+export const TOPIC_KEYS: Record<string, string[][]> = {
+  [FEED_TICK]: FEED_KEYS.map(({ key }) => key),
   "flow.release": [["idst"], ["fca-traffic"], ["departures"]],
   "flow.fca": [["fcas"], ["fca-traffic"], ["fca-counts"], ["idst"], ["event-fcas"]],
   "tmu.gdp": [["gdps"], ["gdp-board"], ["departures"]],
   "tmu.tmi": [["tmis"]],
   "tmu.groundstop": [["ground-stops"], ["departures"]],
   "tmu.program": [["tmu-programs"], ["departures"], ["flow"]],
+  "tmu.advisory": [["advisories"]],
   "flow.cfr": [["departures"], ["flow"]],
   "events.availability": [["event-availability"]],
   // Payload-free by design: each client refetches its own data and works out whether the change
   // was about them. The socket is broadcast to every signed-in client, so it must not carry who.
   "access.granted": [["me"]],
   "events.reminder": [["my-ace-claims"]],
+  "events.ace": [["event-ace"], ["my-ace-claims"]],
+  "flow.runway": [["runway"], ["runway-configs"]],
 };
+
+/**
+ * How often a query the socket nudges polls anyway (#649). The socket is the fast path; this is what
+ * keeps "degrades cleanly to polling" true when a socket is down, a nudge is missed while a backend
+ * replica's listener reconnects, or a key has no other refresh. A minute, since the nudge normally
+ * gets there first.
+ */
+export const SOCKET_FALLBACK_MS = 60_000;
 
 /** The subprotocol the server selects for a desktop client; the token travels beside it. */
 const WS_PROTOCOL = "ois.v1";
@@ -38,12 +77,79 @@ const ALL_KEYS: string[][] = [
   ),
 ].map((s) => JSON.parse(s) as string[]);
 
+// ---- whether feed ticks are arriving (#648) ---------------------------------------------------------
+
+let live = false;
+const listeners = new Set<() => void>();
+
+function setLive(next: boolean) {
+  if (live === next) return;
+  live = next;
+  listeners.forEach((notify) => notify());
+}
+
+/**
+ * How long without a {@link FEED_TICK} before the socket is treated as gone (#648 review): about twice
+ * the feed's ~15 s cadence. A half-open socket — the network dropped and the browser hasn't noticed —
+ * can stay "open" for minutes with nothing arriving; without this, every feed screen would stop polling
+ * and freeze for that long. When the feed itself is quiet this only resumes polling, which is harmless.
+ */
+export const TICK_SILENCE_MS = 45_000;
+
+/**
+ * True while the realtime socket is open, the server has acknowledged a subscription that includes
+ * {@link FEED_TICK}, **and** a tick has arrived within {@link TICK_SILENCE_MS}. False when signed out
+ * (the socket only opens for signed-in users), while connecting, after a drop, and when ticks have gone
+ * quiet — exactly the times a feed-derived screen must still poll.
+ */
+export function useRealtimeLive(): boolean {
+  return useSyncExternalStore(
+    (notify) => {
+      listeners.add(notify);
+      return () => listeners.delete(notify);
+    },
+    isRealtimeLive,
+    () => false,
+  );
+}
+
+/** The current value of {@link useRealtimeLive}, outside React. */
+export function isRealtimeLive(): boolean {
+  return live;
+}
+
+/**
+ * A feed-derived query's `refetchInterval`: off while feed ticks are arriving, `ms` otherwise. The
+ * ticks replace the timer rather than adding to it. One backend replica is assumed: with several, a
+ * client would miss ticks from the others until the hub is shared (#649).
+ */
+export function pollUnlessLive(ms: number, isLive: boolean): number | false {
+  return isLive ? false : ms;
+}
+
 function wsUrl(): string {
   // API_BASE is a full http(s) URL, or "" for a same-origin deployment.
   const base = API_BASE || (typeof window !== "undefined" ? window.location.origin : "");
   const url = new URL("/api/v1/ws", base);
   url.protocol = url.protocol === "https:" ? "wss:" : "ws:";
   return url.toString();
+}
+
+/** One socket lifecycle event, kept for diagnostics reports (#629). */
+export type RealtimeEvent = {at: string; event: "open" | "close" | "error" | "retry"; retry: number};
+
+/** How many recent events {@link realtimeHistory} keeps. */
+const HISTORY_EVENTS = 50;
+const history: RealtimeEvent[] = [];
+
+function record(event: RealtimeEvent["event"], retry: number) {
+  history.push({at: new Date().toISOString(), event, retry});
+  if (history.length > HISTORY_EVENTS) history.splice(0, history.length - HISTORY_EVENTS);
+}
+
+/** This window's recent realtime connection events, oldest first. */
+export function realtimeHistory(): RealtimeEvent[] {
+  return [...history];
 }
 
 /**
@@ -56,10 +162,54 @@ export function connectRealtime(qc: QueryClient): () => void {
   let timer: ReturnType<typeof setTimeout> | null = null;
   let closed = false;
 
+  // Tick-silence watchdog (#648 review): live only while ticks keep arriving, not merely while the
+  // socket claims to be open.
+  let tickSubscribed = false;
+  let silence: ReturnType<typeof setTimeout> | null = null;
+  const quiet = () => {
+    if (silence) clearTimeout(silence);
+    silence = null;
+  };
+  const heard = () => {
+    quiet();
+    setLive(true);
+    silence = setTimeout(() => {
+      silence = null;
+      setLive(false);
+    }, TICK_SILENCE_MS);
+  };
+  const notLive = () => {
+    tickSubscribed = false;
+    quiet();
+    setLive(false);
+  };
+
+  // Subscribe narrowly (#589's Subscription, #648): every topic as before, plus the feed tick only
+  // while some feed-derived query is on screen — so a page without one receives no ~15s ticks.
+  const isFeedQuery = (key: readonly unknown[]) => FEED_KEYS.some(({ key: [prefix] }) => key[0] === prefix);
+  const wantsFeed = () =>
+    qc
+      .getQueryCache()
+      .getAll()
+      .some((q) => isFeedQuery(q.queryKey) && q.getObserversCount() > 0);
+  let sentFeed: boolean | null = null;
+  const sendSubscription = () => {
+    if (!ws || ws.readyState !== WebSocket.OPEN) return;
+    const feed = wantsFeed();
+    if (feed === sentFeed) return;
+    sentFeed = feed;
+    const topics = Object.keys(TOPIC_KEYS).filter((t) => t !== FEED_TICK || feed);
+    ws.send(JSON.stringify({ subscribe: topics }));
+  };
+  const stopWatchingCache = qc.getQueryCache().subscribe((event) => {
+    if (event.type === "observerAdded" || event.type === "observerRemoved") sendSubscription();
+  });
+
   const schedule = () => {
     if (closed || timer) return;
     const delay = Math.min(30_000, 1000 * 2 ** retry);
     retry += 1;
+    record("retry", retry);
     timer = setTimeout(() => {
       timer = null;
       void open();
@@ -93,13 +243,42 @@ export function connectRealtime(qc: QueryClient): () => void {
     }
     ws.onopen = () => {
       retry = 0;
+      sentFeed = null;
+      sendSubscription();
+      record("open", retry);
       // Catch up on anything that changed while we were (re)connecting.
       ALL_KEYS.forEach((queryKey) => qc.invalidateQueries({ queryKey }));
     };
     ws.onmessage = (e) => {
       try {
-        const { topic } = JSON.parse(e.data as string) as { topic?: string };
-        (topic ? TOPIC_KEYS[topic] : undefined)?.forEach((queryKey) =>
+        const frame = JSON.parse(e.data as string) as {
+          topic?: string;
+          subscribed?: string[];
+          error?: string;
+        };
+        // The server's answer to a subscribe frame: ticks are live only once it has accepted ours.
+        // An error (an older server without `feed.tick`) changes nothing there, so keep polling.
+        if (frame.subscribed) {
+          if (frame.subscribed.includes(FEED_TICK)) {
+            tickSubscribed = true;
+            heard();
+          } else {
+            notLive();
+          }
+        }
+        if (frame.error) notLive();
+        if (frame.topic === FEED_TICK) {
+          if (tickSubscribed) heard();
+          const now = Date.now();
+          FEED_KEYS.forEach(({ key, minGapMs }) =>
+            qc.invalidateQueries({
+              queryKey: key,
+              predicate: (q) => now - q.state.dataUpdatedAt >= minGapMs,
+            }),
+          );
+          return;
+        }
+        (frame.topic ? TOPIC_KEYS[frame.topic] : undefined)?.forEach((queryKey) =>
           qc.invalidateQueries({ queryKey }),
         );
       } catch {
@@ -107,15 +286,23 @@ export function connectRealtime(qc: QueryClient): () => void {
       }
     };
     ws.onclose = () => {
+      record("close", retry);
       ws = null;
+      notLive();
+      sentFeed = null;
       schedule();
     };
-    ws.onerror = () => ws?.close();
+    ws.onerror = () => {
+      record("error", retry);
+      ws?.close();
+    };
   };
 
   void open();
   return () => {
     closed = true;
+    stopWatchingCache();
+    notLive();
     if (timer) clearTimeout(timer);
     ws?.close();
   };

@@ -5,6 +5,7 @@
 use sqlx::{PgPool, types::Json};
 
 use crate::{
+    auth::principal::Attribution,
     errors::ApiError,
     models::{ColorRule, UpsertFacilityMapConfigRequest},
 };
@@ -29,19 +30,20 @@ pub async fn upsert(
     pool: &PgPool,
     facility_id: &str,
     req: &UpsertFacilityMapConfigRequest,
-    actor: &str,
+    by: &Attribution,
 ) -> Result<(), ApiError> {
     sqlx::query(
-        "insert into flow.facility_map_config (facility_id, rules, default_color, updated_by) \
-         values ($1, $2, $3, $4) \
+        "insert into flow.facility_map_config (facility_id, rules, default_color, updated_by, updated_by_actor) \
+         values ($1, $2, $3, $4, $5) \
          on conflict (facility_id) do update set \
              rules = excluded.rules, default_color = excluded.default_color, \
-             updated_by = excluded.updated_by",
+             updated_by = excluded.updated_by, updated_by_actor = excluded.updated_by_actor",
     )
     .bind(facility_id)
     .bind(Json(&req.rules))
     .bind(&req.default_color)
-    .bind(actor)
+    .bind(&by.user_id)
+    .bind(&by.actor_id)
     .execute(pool)
     .await
     .map_err(|_| ApiError::Internal)?;

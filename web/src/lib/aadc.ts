@@ -1,3 +1,4 @@
+import {pollUnlessLive, useRealtimeLive} from "@/lib/realtime";
 import {useQuery} from "@tanstack/react-query";
 import type {components} from "@ois/api-client";
 
@@ -18,6 +19,7 @@ export const AADC_DIMENSIONS: { value: AadcDimension; label: string }[] = [
 
 /** Bucketed arrival demand for an airport, refreshed on the same cadence as the live flow board. */
 export function useAadc(icao: string | null, bucketMin: AadcBucketMin) {
+  const live = useRealtimeLive();
   return useQuery({
     queryKey: ["aadc", icao, bucketMin],
     queryFn: async () => {
@@ -28,6 +30,7 @@ export function useAadc(icao: string | null, bucketMin: AadcBucketMin) {
       return data;
     },
     enabled: !!icao,
-    refetchInterval: 20_000,
+    // Off while feed ticks arrive (#648); the tick refetches this once per upstream publish.
+    refetchInterval: pollUnlessLive(20_000, live),
   });
 }
