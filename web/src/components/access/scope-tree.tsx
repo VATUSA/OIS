@@ -1,4 +1,4 @@
-import {useMemo, useState} from "react";
+import {type ReactNode, useMemo, useState} from "react";
 import {Input, StatusPill, cn} from "@ois/ui";
 import {ChevronDown, ChevronRight} from "lucide-react";
 
@@ -110,30 +110,38 @@ export function ScopeChips({
   );
 }
 
+/** One item in a [`PermissionTree`]: its name is the permission, grouped by its first `.`-segment. */
+export type TreeItem = { name: string };
+
 /**
- * Grouped, collapsible, searchable permission tree with a per-item scope control (National /
- * specific ARTCCs). Shared by the user access editor and the API-key permission picker so both
- * present and scope permissions identically. Items are grouped by their first `.`-segment (domain).
+ * The shell every permission editor shares: a filter, then the permissions grouped by domain (their
+ * first `.`-segment), each domain collapsed until opened, with a count of what it has selected. A
+ * filter opens every matching domain. What sits beside or under an item is the caller's — the access
+ * tab and API-key picker put a scope control there, the Groups page puts nothing (VATUSA/OIS#681).
  */
-export function PermissionScopeTree({
+export function PermissionTree<T extends TreeItem>({
   items,
-  facilities,
-  selection,
+  isSelected,
+  onToggle,
   disabled,
-  onChange,
+  renderNote,
+  renderBelow,
 }: {
-  items: ScopeItem[];
-  facilities: { id: string; name: string }[];
-  selection: ScopeSelection;
+  items: T[];
+  isSelected: (name: string) => boolean;
+  onToggle: (item: T, on: boolean) => void;
   disabled?: boolean;
-  onChange: (next: ScopeSelection) => void;
+  /** Shown beside an item's name. */
+  renderNote?: (item: T) => ReactNode;
+  /** Shown under a selected item. */
+  renderBelow?: (item: T) => ReactNode;
 }) {
   const [q, setQ] = useState("");
   const [open, setOpen] = useState<Set<string>>(() => new Set());
 
   const groups = useMemo(() => {
     const needle = q.trim().toLowerCase();
-    const byDomain = new Map<string, ScopeItem[]>();
+    const byDomain = new Map<string, T[]>();
     for (const it of items) {
       if (needle && !it.name.toLowerCase().includes(needle)) continue;
       const domain = it.name.split(".")[0];
@@ -143,18 +151,6 @@ export function PermissionScopeTree({
     }
     return [...byDomain.entries()].sort(([a], [b]) => a.localeCompare(b));
   }, [items, q]);
-
-  const toggle = (it: ScopeItem, on: boolean) => {
-    const next = new Map(selection);
-    if (on) next.set(it.name, defaultScope(it.bounds));
-    else next.delete(it.name);
-    onChange(next);
-  };
-  const setScope = (name: string, s: ScopeSel) => {
-    const next = new Map(selection);
-    next.set(name, s);
-    onChange(next);
-  };
 
   return (
     <div className="flex flex-col gap-2">
@@ -170,11 +166,12 @@ export function PermissionScopeTree({
         )}
         {groups.map(([domain, perms]) => {
           const isOpen = open.has(domain) || q.trim().length > 0;
-          const selectedCount = perms.filter((p) => selection.has(p.name)).length;
+          const selectedCount = perms.filter((p) => isSelected(p.name)).length;
           return (
             <div key={domain} className="border-b border-line-soft last:border-0">
               <button
                 type="button"
+                aria-expanded={isOpen}
                 onClick={() => {
                   const next = new Set(open);
                   if (next.has(domain)) next.delete(domain);
@@ -198,33 +195,21 @@ export function PermissionScopeTree({
               {isOpen && (
                 <div className="px-2 pb-2">
                   {perms.map((it) => {
-                    const sel = selection.get(it.name);
+                    const on = isSelected(it.name);
                     return (
                       <div key={it.name} className="py-1">
                         <label className="flex items-center gap-2 text-sm">
                           <input
                             type="checkbox"
                             disabled={disabled}
-                            checked={!!sel}
+                            checked={on}
                             className="size-3.5 accent-brand"
-                            onChange={(e) => toggle(it, e.target.checked)}
+                            onChange={(e) => onToggle(it, e.target.checked)}
                           />
                           <span className="font-mono text-xs">{it.name}</span>
-                          {!it.bounds.national && (
-                            <span className="text-xs text-ink-3">
-                              (facility-scoped)
-                            </span>
-                          )}
+                          {renderNote?.(it)}
                         </label>
-                        {sel && (
-                          <ScopeChips
-                            bounds={it.bounds}
-                            sel={sel}
-                            facilities={facilities}
-                            disabled={disabled}
-                            onChange={(s) => setScope(it.name, s)}
-                          />
-                        )}
+                        {on && renderBelow?.(it)}
                       </div>
                     );
                   })}
@@ -235,5 +220,59 @@ export function PermissionScopeTree({
         })}
       </div>
     </div>
+  );
+}
+
+/**
+ * Grouped, collapsible, searchable permission tree with a per-item scope control (National /
+ * specific ARTCCs). Shared by the user access editor and the API-key permission picker so both
+ * present and scope permissions identically. Items are grouped by their first `.`-segment (domain).
+ */
+export function PermissionScopeTree({
+  items,
+  facilities,
+  selection,
+  disabled,
+  onChange,
+}: {
+  items: ScopeItem[];
+  facilities: { id: string; name: string }[];
+  selection: ScopeSelection;
+  disabled?: boolean;
+  onChange: (next: ScopeSelection) => void;
+}) {
+  const toggle = (it: ScopeItem, on: boolean) => {
+    const next = new Map(selection);
+    if (on) next.set(it.name, defaultScope(it.bounds));
+    else next.delete(it.name);
+    onChange(next);
+  };
+  const setScope = (name: string, s: ScopeSel) => {
+    const next = new Map(selection);
+    next.set(name, s);
+    onChange(next);
+  };
+
+  return (
+    <PermissionTree
+      items={items}
+      isSelected={(name) => selection.has(name)}
+      onToggle={toggle}
+      disabled={disabled}
+      renderNote={(it) =>
+        !it.bounds.national && (
+          <span className="text-xs text-ink-3">(facility-scoped)</span>
+        )
+      }
+      renderBelow={(it) => (
+        <ScopeChips
+          bounds={it.bounds}
+          sel={selection.get(it.name)!}
+          facilities={facilities}
+          disabled={disabled}
+          onChange={(s) => setScope(it.name, s)}
+        />
+      )}
+    />
   );
 }
