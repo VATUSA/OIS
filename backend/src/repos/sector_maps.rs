@@ -29,6 +29,17 @@ pub async fn get(pool: &PgPool, artcc: &str, sector_id: &str) -> Result<Option<i
         .map_err(|_| ApiError::Internal)
 }
 
+/// Remove a sector's override, so it reads the default again (#706).
+pub async fn delete(pool: &PgPool, artcc: &str, sector_id: &str) -> Result<(), ApiError> {
+    sqlx::query("delete from flow.sector_map where artcc = $1 and sector_id = $2")
+        .bind(artcc)
+        .bind(sector_id)
+        .execute(pool)
+        .await
+        .map_err(|_| ApiError::Internal)?;
+    Ok(())
+}
+
 /// Set one sector's MAP. `map` must be positive (the table's check refuses anything else).
 pub async fn upsert(
     pool: &PgPool,
