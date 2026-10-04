@@ -520,10 +520,18 @@ mod tests {
             name: "EDITED".into(),
             rings: vec![vec![[38.85, -77.04], [38.86, -77.05], [38.85, -77.05]]],
         };
-        airport_surface::update_taxiway(&pool, &edited, "KDCA", &req, &actor)
-            .await
-            .unwrap()
-            .expect("the faa row is editable");
+        airport_surface::update_taxiway(
+            &pool,
+            &edited,
+            "KDCA",
+            &req,
+            &crate::auth::principal::Attribution::for_user_id(&pool, &actor)
+                .await
+                .unwrap(),
+        )
+        .await
+        .unwrap()
+        .expect("the faa row is editable");
         let deleted: String = sqlx::query_scalar(
             "select id from flow.airport_taxiway where icao = 'KDCA' and source = 'faa' \
              and id <> $1 limit 1",
@@ -920,10 +928,18 @@ mod tests {
             name: "EDITED".into(),
             rings: vec![vec![[38.85, -77.04], [38.86, -77.05], [38.85, -77.05]]],
         };
-        airport_surface::update_taxiway(&pool, &edited, "KDCA", &req, &actor)
-            .await
-            .unwrap()
-            .expect("the faa row is editable");
+        airport_surface::update_taxiway(
+            &pool,
+            &edited,
+            "KDCA",
+            &req,
+            &crate::auth::principal::Attribution::for_user_id(&pool, &actor)
+                .await
+                .unwrap(),
+        )
+        .await
+        .unwrap()
+        .expect("the faa row is editable");
 
         let summary = seed_for_icao(&pool, "KDCA").await.unwrap();
 

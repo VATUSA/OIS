@@ -10,12 +10,13 @@ use std::collections::{HashMap, HashSet};
 
 use sqlx::PgPool;
 
-use crate::{errors::ApiError, models::FlightExclusionBody};
+use crate::{auth::principal::Attribution, errors::ApiError, models::FlightExclusionBody};
 
 const EXCLUSION_SELECT: &str = "select e.id, e.callsign, e.artcc, e.reason, e.created_at, \
-     e.created_by, e.expires_at, u.display_name as created_by_name \
+     e.created_by, e.expires_at, coalesce(u.display_name, a.display_name) as created_by_name \
      from flow.manual_flight_exclusion e \
-     left join identity.users u on u.id = e.created_by";
+     left join identity.users u on u.id = e.created_by \
+     left join access.actors a on a.id = e.created_by_actor";
 
 /// The live exclusions for one ARTCC, newest first.
 pub async fn list_by_artcc(
@@ -57,14 +58,15 @@ pub async fn upsert(
     callsign: &str,
     reason: &str,
     ttl_hours: i64,
-    actor: &str,
+    by: &Attribution,
 ) -> Result<FlightExclusionBody, ApiError> {
     let id: String = sqlx::query_scalar(
-        "insert into flow.manual_flight_exclusion (callsign, artcc, reason, created_by, expires_at) \
-         values ($1, $2, $3, $4, now() + make_interval(hours => $5::int)) \
+        "insert into flow.manual_flight_exclusion (callsign, artcc, reason, created_by, expires_at, created_by_actor) \
+         values ($1, $2, $3, $4, now() + make_interval(hours => $5::int), $6) \
          on conflict (artcc, callsign) do update set \
              reason = excluded.reason, \
              created_by = excluded.created_by, \
+             created_by_actor = excluded.created_by_actor, \
              created_at = now(), \
              expires_at = excluded.expires_at \
          returning id",
@@ -72,8 +74,9 @@ pub async fn upsert(
     .bind(callsign)
     .bind(artcc)
     .bind(reason)
-    .bind(actor)
+    .bind(&by.user_id)
     .bind(ttl_hours)
+    .bind(&by.actor_id)
     .fetch_one(pool)
     .await
     .map_err(|_| ApiError::Internal)?;
@@ -127,12 +130,30 @@ mod tests {
     #[sqlx::test]
     async fn excluding_the_same_callsign_twice_refreshes_it(pool: sqlx::PgPool) {
         let user = seed_user(&pool).await;
-        let first = upsert(&pool, "ZDC", "BOGUS1", "teleporting", 2, &user)
-            .await
-            .unwrap();
-        let again = upsert(&pool, "ZDC", "BOGUS1", "still bad", 2, &user)
-            .await
-            .unwrap();
+        let first = upsert(
+            &pool,
+            "ZDC",
+            "BOGUS1",
+            "teleporting",
+            2,
+            &crate::auth::principal::Attribution::for_user_id(&pool, &user)
+                .await
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+        let again = upsert(
+            &pool,
+            "ZDC",
+            "BOGUS1",
+            "still bad",
+            2,
+            &crate::auth::principal::Attribution::for_user_id(&pool, &user)
+                .await
+                .unwrap(),
+        )
+        .await
+        .unwrap();
         assert_eq!(first.id, again.id, "the row is reused, not duplicated");
         assert_eq!(again.reason, "still bad");
         assert_eq!(list_by_artcc(&pool, "ZDC").await.unwrap().len(), 1);
@@ -143,8 +164,30 @@ mod tests {
     #[sqlx::test]
     async fn exclusions_are_scoped_to_their_artcc(pool: sqlx::PgPool) {
         let user = seed_user(&pool).await;
-        upsert(&pool, "ZDC", "BOGUS1", "", 2, &user).await.unwrap();
-        upsert(&pool, "ZNY", "BOGUS2", "", 2, &user).await.unwrap();
+        upsert(
+            &pool,
+            "ZDC",
+            "BOGUS1",
+            "",
+            2,
+            &crate::auth::principal::Attribution::for_user_id(&pool, &user)
+                .await
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+        upsert(
+            &pool,
+            "ZNY",
+            "BOGUS2",
+            "",
+            2,
+            &crate::auth::principal::Attribution::for_user_id(&pool, &user)
+                .await
+                .unwrap(),
+        )
+        .await
+        .unwrap();
 
         let zdc = list_by_artcc(&pool, "ZDC").await.unwrap();
         assert_eq!(zdc.len(), 1);
@@ -161,7 +204,18 @@ mod tests {
     #[sqlx::test]
     async fn an_expired_exclusion_stops_applying(pool: sqlx::PgPool) {
         let user = seed_user(&pool).await;
-        upsert(&pool, "ZDC", "STALE1", "", 0, &user).await.unwrap();
+        upsert(
+            &pool,
+            "ZDC",
+            "STALE1",
+            "",
+            0,
+            &crate::auth::principal::Attribution::for_user_id(&pool, &user)
+                .await
+                .unwrap(),
+        )
+        .await
+        .unwrap();
 
         assert!(
             list_by_artcc(&pool, "ZDC").await.unwrap().is_empty(),
@@ -182,10 +236,30 @@ mod tests {
     #[sqlx::test]
     async fn a_callsign_that_left_the_feed_is_cleared(pool: sqlx::PgPool) {
         let user = seed_user(&pool).await;
-        upsert(&pool, "ZDC", "GONE1", "", 2, &user).await.unwrap();
-        upsert(&pool, "ZDC", "STILLHERE", "", 2, &user)
-            .await
-            .unwrap();
+        upsert(
+            &pool,
+            "ZDC",
+            "GONE1",
+            "",
+            2,
+            &crate::auth::principal::Attribution::for_user_id(&pool, &user)
+                .await
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+        upsert(
+            &pool,
+            "ZDC",
+            "STILLHERE",
+            "",
+            2,
+            &crate::auth::principal::Attribution::for_user_id(&pool, &user)
+                .await
+                .unwrap(),
+        )
+        .await
+        .unwrap();
 
         let cleared = clear_departed(&pool, &["STILLHERE".to_string()])
             .await
@@ -200,7 +274,18 @@ mod tests {
     #[sqlx::test]
     async fn an_empty_feed_snapshot_clears_nothing(pool: sqlx::PgPool) {
         let user = seed_user(&pool).await;
-        upsert(&pool, "ZDC", "BOGUS1", "", 2, &user).await.unwrap();
+        upsert(
+            &pool,
+            "ZDC",
+            "BOGUS1",
+            "",
+            2,
+            &crate::auth::principal::Attribution::for_user_id(&pool, &user)
+                .await
+                .unwrap(),
+        )
+        .await
+        .unwrap();
 
         assert_eq!(clear_departed(&pool, &[]).await.unwrap(), 0);
         assert_eq!(list_by_artcc(&pool, "ZDC").await.unwrap().len(), 1);
@@ -210,7 +295,18 @@ mod tests {
     #[sqlx::test]
     async fn restoring_is_scoped_and_reports_a_miss(pool: sqlx::PgPool) {
         let user = seed_user(&pool).await;
-        upsert(&pool, "ZDC", "BOGUS1", "", 2, &user).await.unwrap();
+        upsert(
+            &pool,
+            "ZDC",
+            "BOGUS1",
+            "",
+            2,
+            &crate::auth::principal::Attribution::for_user_id(&pool, &user)
+                .await
+                .unwrap(),
+        )
+        .await
+        .unwrap();
 
         assert!(
             !delete(&pool, "ZNY", "BOGUS1").await.unwrap(),

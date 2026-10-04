@@ -55,6 +55,73 @@ pub async fn find_current_user_by_session_token(
     .map_err(|_| ApiError::Internal)
 }
 
+/// The live credential behind an `access.actors` row, for work done later on a principal's behalf (the
+/// event-package lifecycle job, #607). Each lookup applies the same liveness rules as its bearer
+/// lookup, so a revoked key or a disabled service account resolves to `None` and nothing acts as it.
+pub async fn find_current_user_by_actor(
+    pool: &PgPool,
+    actor_id: &str,
+) -> Result<Option<CurrentUser>, ApiError> {
+    sqlx::query_as::<_, CurrentUser>(
+        r#"
+        -- `cid` is nullable (seeded users have none) but `CurrentUser.cid` is not; nothing acting
+        -- later reads it, and a decode error here would silently stop the package from publishing.
+        select u.id, coalesce(u.cid, 0) as cid, coalesce(u.email::text, '') as email,
+               u.display_name, u.rating, pr.primary_role
+        from access.actors a
+        join identity.users u on u.id = a.user_id
+        left join access.v_user_primary_role pr on pr.user_id = u.id
+        where a.id = $1 and a.actor_type = 'user'
+        "#,
+    )
+    .bind(actor_id)
+    .fetch_optional(pool)
+    .await
+    .map_err(|_| ApiError::Internal)
+}
+
+/// See [`find_current_user_by_actor`].
+pub async fn find_current_api_key_by_actor(
+    pool: &PgPool,
+    actor_id: &str,
+) -> Result<Option<CurrentApiKey>, ApiError> {
+    sqlx::query_as::<_, CurrentApiKey>(
+        r#"
+        select k.id, k.owner_user_id, k.prefix, k.name
+        from access.actors a
+        join access.api_keys k on k.id = a.api_key_id
+        join identity.users u on u.id = k.owner_user_id
+        where a.id = $1 and a.actor_type = 'api_key'
+          and k.status = 'active'
+          and k.revoked_at is null
+          and (k.expires_at is null or k.expires_at > now())
+        "#,
+    )
+    .bind(actor_id)
+    .fetch_optional(pool)
+    .await
+    .map_err(|_| ApiError::Internal)
+}
+
+/// See [`find_current_user_by_actor`].
+pub async fn find_current_service_account_by_actor(
+    pool: &PgPool,
+    actor_id: &str,
+) -> Result<Option<CurrentServiceAccount>, ApiError> {
+    sqlx::query_as::<_, CurrentServiceAccount>(
+        r#"
+        select sa.id, sa.key, sa.name
+        from access.actors a
+        join access.service_accounts sa on sa.id = a.service_account_id
+        where a.id = $1 and a.actor_type = 'service_account' and sa.status = 'active'
+        "#,
+    )
+    .bind(actor_id)
+    .fetch_optional(pool)
+    .await
+    .map_err(|_| ApiError::Internal)
+}
+
 pub async fn find_current_service_account_by_bearer_token(
     pool: &PgPool,
     bearer_token: &str,
