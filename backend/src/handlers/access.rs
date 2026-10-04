@@ -1097,11 +1097,7 @@ async fn create_mapping(
         .map(str::to_ascii_uppercase);
     let role_name = payload.role_name.trim().to_ascii_uppercase();
     let reason = payload.reason.trim();
-    if reason.is_empty()
-        || vatusa_role.is_empty()
-        || vatusa_role.len() > 16
-        || !vatusa_role.chars().all(|c| c.is_ascii_alphanumeric())
-    {
+    if reason.is_empty() || !vatusa_repo::is_valid_vatusa_role(&vatusa_role) {
         return Err(ApiError::BadRequest);
     }
     // `ZHQ` is the division, which is not a facility row (it maps to a national grant).
@@ -2456,6 +2452,32 @@ mod mapping_tests {
             .unwrap()
     }
 
+    /// The role names VATUSA's division pull actually sends are long-form with underscores (#699): the
+    /// old rule (alphanumeric, at most 16) refused four of the five confirmed, so an admin couldn't map
+    /// them at all. Junk is still refused.
+    #[sqlx::test]
+    async fn a_long_form_vatusa_role_can_be_mapped(pool: PgPool) {
+        let actor = admin(&pool).await;
+        let state = test_state(pool.clone(), std::collections::HashMap::new());
+        for role in ["FACILITY_ACADEMY_EDITOR", "WEB_MAINTAINER", "INSTRUCTOR"] {
+            let created = create_mapping(
+                &state,
+                &actor,
+                &HeaderMap::new(),
+                request(role, None, "AEC"),
+            )
+            .await
+            .unwrap_or_else(|e| panic!("{role} refused: {e:?}"));
+            assert_eq!(created.vatusa_role, role);
+        }
+        for bad in ["EC-1", "EC 1", &"A".repeat(65)] {
+            assert!(matches!(
+                create_mapping(&state, &actor, &HeaderMap::new(), request(bad, None, "AEC")).await,
+                Err(ApiError::BadRequest)
+            ));
+        }
+    }
+
     /// AC5's "changing it re-reconciles": a new mapping reaches members who already synced, now — not
     /// at their next sync, which the AC8 gap can put days away — and the grant is audited naming the
     /// VATUSA role, beside the audit of the mapping itself.
@@ -2506,6 +2528,8 @@ mod mapping_tests {
     /// the same group at the same scope survives.
     #[sqlx::test]
     async fn deleting_a_mapping_is_gated_like_creating_one(pool: PgPool) {
+        // Counted from here: 0124 ships default mappings (#699).
+        let seeded = mapping_count(&pool).await;
         // A delete reconciles the group away from every member it reached, so it carries the same power
         // as creating the mapping and needs the same authority. The create side was pinned; this side
         // was not — removing `enforce_mapping_scope` from `delete_mapping` left the suite green (#548
@@ -2556,7 +2580,7 @@ mod mapping_tests {
         let refused = delete_mapping(&state, &actor(&scoped), &HeaderMap::new(), mapping.id).await;
         assert!(matches!(refused, Err(ApiError::Forbidden)), "{refused:?}");
         assert_eq!(
-            mapping_count(&pool).await,
+            mapping_count(&pool).await - seeded,
             1,
             "a refused delete must leave the mapping"
         );
@@ -2570,7 +2594,7 @@ mod mapping_tests {
         delete_mapping(&state, &admin, &HeaderMap::new(), mapping.id)
             .await
             .unwrap();
-        assert_eq!(mapping_count(&pool).await, 0);
+        assert_eq!(mapping_count(&pool).await - seeded, 0);
         assert_eq!(
             synced().await,
             0,
@@ -2620,6 +2644,8 @@ mod mapping_tests {
     /// Refused even to a server admin: no system group is VATUSA's to grant.
     #[sqlx::test]
     async fn a_mapping_to_a_system_group_is_refused(pool: PgPool) {
+        // Counted from here: 0124 ships default mappings (#699).
+        let seeded = mapping_count(&pool).await;
         let actor = admin(&pool).await;
         let state = test_state(pool.clone(), std::collections::HashMap::new());
 
@@ -2636,7 +2662,7 @@ mod mapping_tests {
                 "{group}: {result:?}"
             );
         }
-        assert_eq!(mapping_count(&pool).await, 0);
+        assert_eq!(mapping_count(&pool).await - seeded, 0);
     }
 
     /// A non-admin editor must hold everything the group grants — mapping a group is granting it.
