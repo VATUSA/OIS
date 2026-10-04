@@ -27,6 +27,8 @@ const CURRENT_USER_HANDLERS: &[(&str, &str, Intent)] = &[
     ("access", "delete_group", Pending),
     ("access", "add_group_member", Pending),
     ("access", "remove_group_member", Pending),
+    ("access", "create_vatusa_role_mapping", Pending),
+    ("access", "delete_vatusa_role_mapping", Pending),
     ("ace", "my_ace_claims", UserOnly("a controller's own ACE claims")),
     ("ace", "create_request", Pending),
     ("ace", "claim_request", UserOnly("a controller claims an ACE request for themselves")),

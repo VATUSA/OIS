@@ -144,6 +144,15 @@ pub fn build_router(state: AppState) -> Router {
                 .post(access::add_group_member)
                 .delete(access::remove_group_member),
         )
+        // VATUSA role → group mappings — #548
+        .route(
+            "/api/v1/admin/vatusa-role-mappings",
+            get(access::list_vatusa_role_mappings).post(access::create_vatusa_role_mapping),
+        )
+        .route(
+            "/api/v1/admin/vatusa-role-mappings/{id}",
+            delete(access::delete_vatusa_role_mapping),
+        )
         // TMU — Traffic Management Initiatives
         .route(
             "/api/v1/tmu/tmis",
