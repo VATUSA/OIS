@@ -907,4 +907,72 @@ mod tests {
         assert_eq!(applied, http::StatusCode::NO_CONTENT);
         assert_eq!(status_of(&pool, &id).await, "succeeded");
     }
+    // ---- #656 QA: the deploy renames the bot's account, never a guess ------------------------------
+
+    /// The migration exactly as it ships, so editing `0115` can't leave these green on a stale copy.
+    const BOT_RENAME: &str =
+        include_str!("../../migrations/0115_bot_account_is_the_discord_consumer.sql");
+
+    async fn rename(pool: &PgPool) {
+        sqlx::raw_sql(BOT_RENAME)
+            .execute(pool)
+            .await
+            .expect("0115 runs");
+    }
+
+    async fn keys(pool: &PgPool) -> Vec<String> {
+        sqlx::query_scalar("select key from access.service_accounts order by key")
+            .fetch_all(pool)
+            .await
+            .unwrap()
+    }
+
+    #[sqlx::test]
+    async fn the_one_bot_account_becomes_the_discord_consumer(pool: PgPool) {
+        account(&pool, "ois-discord-bot", true).await;
+        account(&pool, "vtbfm", false).await;
+        rename(&pool).await;
+        assert_eq!(keys(&pool).await, ["discord", "vtbfm"]);
+    }
+
+    /// Two candidates is a guess, so nothing changes, and the migration still runs.
+    #[sqlx::test]
+    async fn two_bot_accounts_are_left_alone(pool: PgPool) {
+        account(&pool, "bot-a", true).await;
+        account(&pool, "bot-b", true).await;
+        rename(&pool).await;
+        assert_eq!(keys(&pool).await, ["bot-a", "bot-b"]);
+    }
+
+    #[sqlx::test]
+    async fn an_existing_discord_key_is_left_alone(pool: PgPool) {
+        account(&pool, "discord", false).await;
+        account(&pool, "ois-discord-bot", true).await;
+        rename(&pool).await;
+        assert_eq!(keys(&pool).await, ["discord", "ois-discord-bot"]);
+    }
+
+    /// Only a live bot counts: a disabled account or an expired BOT grant is not a candidate, so the
+    /// one live bot is still renamed.
+    #[sqlx::test]
+    async fn a_disabled_or_expired_bot_is_not_a_candidate(pool: PgPool) {
+        account(&pool, "ois-discord-bot", true).await;
+        let (disabled, _) = account(&pool, "old-bot", true).await;
+        sqlx::query("update access.service_accounts set status = 'disabled' where id = $1")
+            .bind(&disabled)
+            .execute(&pool)
+            .await
+            .unwrap();
+        let (expired, _) = account(&pool, "lapsed-bot", true).await;
+        sqlx::query(
+            "update access.service_account_roles set ends_at = now() - interval '1 day' \
+             where service_account_id = $1",
+        )
+        .bind(&expired)
+        .execute(&pool)
+        .await
+        .unwrap();
+        rename(&pool).await;
+        assert_eq!(keys(&pool).await, ["discord", "lapsed-bot", "old-bot"]);
+    }
 }
